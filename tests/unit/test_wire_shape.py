@@ -58,7 +58,6 @@ from horsies import (
 from horsies.core.codec import wire_shape
 from horsies.core.codec.kwargs import (
     decode_subworkflow_kwargs,
-    encode_subworkflow_kwargs,
     fill_omitted_defaults,
     resolve_producer_kwarg_binding,
     resolve_hints_and_sig,
@@ -1394,8 +1393,6 @@ class TestBuildWithBoundary:
                 raise AssertionError('not built')
 
         with pytest.raises(Exception, match='do not resolve'):
-            encode_subworkflow_kwargs(Child, {'when': 'not a date'})
-        with pytest.raises(Exception, match='do not resolve'):
             decode_subworkflow_kwargs(Child, {'when': 'not a date'})
 
     def test_the_app_type_resolves_under_type_checking(self) -> None:
@@ -1410,7 +1407,7 @@ class TestBuildWithBoundary:
         with patch.dict(globals()):
             del globals()['WorkflowSpec']
             with pytest.raises(Exception, match='when'):
-                encode_subworkflow_kwargs(Child, {'when': 'not a date'})
+                decode_subworkflow_kwargs(Child, {'when': 'not a date'})
 
     def test_a_return_annotation_under_type_checking_passes(self) -> None:
         class Child(WorkflowDefinition[int]):

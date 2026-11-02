@@ -623,7 +623,7 @@ class TestEnqueueSubworkflowTask:
 
         # Create a child SubWorkflowNode with positional args
         child_sub_node = MagicMock(spec=SubWorkflowNode)
-        child_sub_node.wire_kwargs = None
+        child_sub_node.wire_kwargs = {}
         child_sub_node.name = 'child_sub'
         child_sub_node.args = ('positional',)
         child_sub_node.waits_for = []
@@ -689,7 +689,7 @@ class TestEnqueueSubworkflowTask:
 
         child_sub_node = MagicMock(spec=SubWorkflowNode)
 
-        child_sub_node.wire_kwargs = None
+        child_sub_node.wire_kwargs = {'k': 'v'}
         child_sub_node.name = 'child_sub'
         child_sub_node.args = ()
         child_sub_node.kwargs = {'k': 'v'}
@@ -715,8 +715,6 @@ class TestEnqueueSubworkflowTask:
         mock_wf_def.build_with.return_value = mock_spec
         mock_wf_def.name = 'TestWF'
         mock_wf_def._original_build_with = _plain_build_with
-        # encode_subworkflow_kwargs (now run before dumps_json) resolves the
-        # child's build_with off workflow_def; spec-mock doesn't expose it.
         child_sub_node.workflow_def = mock_wf_def
 
         # dumps_json returns Err for the child kwargs serialization
@@ -776,7 +774,7 @@ class TestEnqueueSubworkflowTask:
 
         # Regular TaskNode child (not SubWorkflowNode)
         child_task = MagicMock()
-        child_task.wire_kwargs = None
+        child_task.wire_kwargs = {}
         child_task.name = 'child_task'
         child_task.args = ('positional',)
         child_task.waits_for = []
@@ -846,7 +844,7 @@ class TestEnqueueSubworkflowTask:
 
         # Regular TaskNode with good_until set
         child_task = MagicMock()
-        child_task.wire_kwargs = None
+        child_task.wire_kwargs = {}
         child_task.name = 'child_task'
         child_task.args = ()
         child_task.kwargs = {}
@@ -921,7 +919,7 @@ class TestEnqueueSubworkflowTask:
 
         child_task = MagicMock()
 
-        child_task.wire_kwargs = None
+        child_task.wire_kwargs = {'data': 'value'}
         child_task.name = 'child_task'
         child_task.args = ()
         child_task.kwargs = {'data': 'value'}
@@ -996,7 +994,7 @@ class TestEnqueueSubworkflowTask:
     def _custom_child_task() -> MagicMock:
         """A no-deps subworkflow child TaskNode on the 'scraping' queue."""
         child_task = MagicMock()
-        child_task.wire_kwargs = None
+        child_task.wire_kwargs = {}
         child_task.name = 'scrape_child'
         child_task.args = ()
         child_task.kwargs = {}

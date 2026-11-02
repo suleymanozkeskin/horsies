@@ -2445,7 +2445,10 @@ class TestWorkflowStartErrors:
 
     async def test_start_broker_not_configured(self) -> None:
         """WorkflowSpec.start_async without broker returns Err(BROKER_NOT_CONFIGURED)."""
-        task_fn = lambda value: None  # noqa: E731
+        def task_fn(*, value: int) -> None:
+            _ = value
+
+        task_fn.task_name = 'no_broker_task'  # type: ignore[attr-defined]
         task_fn.task_queue_name = 'default'  # type: ignore[attr-defined]
         node = TaskNode(fn=task_fn, kwargs={'value': 1})
         node.queue = 'default'

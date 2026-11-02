@@ -16,7 +16,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from typing import Final
 
 
-from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.lifecycle.commands import AbandonNodesOfPausedWorkflows
 from horsies.core.lifecycle.outcomes import (
     AlreadyApplied,
@@ -26,16 +25,11 @@ from horsies.core.lifecycle.outcomes import (
     TaskAbsent,
 )
 from horsies.core.lifecycle.persistence import apply_batch_async
-from horsies.core.codec.kwargs import (
-    encode_kwargs,
-    encode_subworkflow_kwargs,
-    underlying_task_fn,
-)
 from horsies.core.codec.json_io import Json, dumps_json, loads_json, SerializationError, SerdeResult
 from horsies.core.codec.task_options import stored_max_retries
 from horsies.core.codec.typed import encode_task_error
-from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.models.tasks import OutcomeCode, TaskError
+from horsies.core.models.workflow.nodes import stored_kwargs
 from horsies.core.types.result import Ok, Err, is_err as _is_err
 from horsies.core.brokers.resources import EventLoopLimit
 from horsies.core.brokers.result_types import (
@@ -114,26 +108,6 @@ def _ser_or_raise(result: SerdeResult[str], context: str) -> str:
     if _is_err(result):
         raise SerializationError(f'Failed to serialize {context}: {result.err_value}')
     return result.ok_value
-
-
-def _encode_node_kwargs_or_raise(task: Any) -> dict[str, Any]:
-    """Encode a TaskNode's static kwargs through strict-serde phase 3.
-
-    Routes through `encode_kwargs(task.fn, task.kwargs)` so each kwarg is
-    encoded against its declared parameter type. Spec construction already
-    bound, encoded and decoded every kwarg, so an encode failure here is a
-    defect. It raises ``SerializationError`` with the node name; the start
-    transaction does not catch it.
-    """
-    if task.wire_kwargs is not None:
-        return dict(task.wire_kwargs)
-    underlying = underlying_task_fn(task.fn)
-    try:
-        return dict(encode_kwargs(underlying, task.kwargs))
-    except (StrictJsonError, ValueValidationError) as exc:
-        raise SerializationError(
-            f'Failed to encode kwargs for node {task.name}: {exc}',
-        ) from exc
 
 
 if TYPE_CHECKING:
@@ -522,13 +496,7 @@ async def start_workflow_async(
                             'name': node.name,
                             'args': _ser_or_raise(dumps_json([]), 'positional args'),  # kwargs-only: positional args not persisted
                             'kwargs': _ser_or_raise(
-                                dumps_json(
-                                    dict(node.wire_kwargs)
-                                    if node.wire_kwargs is not None
-                                    else encode_subworkflow_kwargs(
-                                        node.workflow_def, node.kwargs,
-                                    ),
-                                ),
+                                dumps_json(stored_kwargs(node)),
                                 f'kwargs for node {node.name}',
                             ),
                             'queue': 'default',  # SubWorkflowNode doesn't have queue
@@ -586,7 +554,7 @@ async def start_workflow_async(
                             f'task_options for node {task.name}',
                         )
 
-                    encoded_kwargs = _encode_node_kwargs_or_raise(task)
+                    encoded_kwargs = stored_kwargs(task)
                     resolved_queue = resolve_node_queue(task)
                     # Prevalidation refused priority=None for every TaskNode
                     # in spec.tasks, and the spec and its nodes are frozen.

@@ -70,9 +70,14 @@ before you upgrade.
   unknown key on read stays ignored, so old rows stay readable after a model
   change. The Deploying Code Changes page has a recipe for each model change.
 - **A workflow start stores what the spec proved.** A list or a dict in a
-  `JsonValue` kwarg of a node, or in a `build_with` with no annotations, failed at
-  start with `non-JSON-native value: tuple`. A `build_with` kwarg that cannot cross
-  is now refused when the spec is built.
+  `JsonValue` kwarg of a node failed at start with
+  `non-JSON-native value: tuple`. A start no longer encodes.
+- **A node binds to named, typed parameters.** Each key of `kwargs` and `args_from`
+  binds to one named, typed parameter of the target. `*args` and `**params` take
+  nothing from a node, in any form: `args_from` into `**params` skipped the wiring
+  check, and the child got a value with no declared type. A key that does not bind
+  is refused when the spec is built. For an open set of values, declare
+  `params: dict[str, JsonValue]`.
 - **`.send()` refuses a call that cannot run.** A missing required argument, and
   a task that requires a parameter only a workflow can fill.
 - **`@app.task` refuses each shape that cannot cross the wire.**

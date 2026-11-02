@@ -10,7 +10,7 @@ import pytest
 from pydantic import AfterValidator
 
 from horsies.core.codec.json_io import SerializationError, dumps_json
-from horsies.core.codec.kwargs import encode_kwargs
+from horsies.core.codec.kwargs import encode_kwargs_read_back
 from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.brokers.result_types import (
     BrokerEnqueueFailed,
@@ -2721,7 +2721,7 @@ class TestEnqueueScheduledTask:
 
         monkeypatch.setattr(_Deadline, 'passed', True)
         with pytest.raises(ValueValidationError, match='deadline has passed'):
-            encode_kwargs(_deadline_task, schedule.kwargs)
+            encode_kwargs_read_back(_deadline_task, schedule.kwargs)
 
         result = await scheduler._enqueue_scheduled_task(
             schedule,
@@ -2813,7 +2813,11 @@ class TestEnqueueScheduledTask:
             kwargs={'a': 1, 'b': 2, 'key': 'val'},
         )
         config = ScheduleConfig(schedules=[schedule])
-        task_mock = _make_task_mock(lambda a, b, key: None)
+
+        def scheduled(*, a: int, b: int, key: str) -> None:
+            _ = a, b, key
+
+        task_mock = _make_task_mock(scheduled)
         app = _make_app(schedule_config=config, tasks={'my_task': task_mock})
         scheduler = Scheduler(app)
         scheduler.broker = _make_broker_mock()

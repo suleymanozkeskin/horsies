@@ -25,11 +25,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies.core.codec.json_value import StrictJsonError, escape_lone_surrogates
 from horsies.core.codec.kwargs import (
     decode_subworkflow_kwargs,
-    encode_kwargs,
-    encode_subworkflow_kwargs,
     fill_build_with_defaults,
     subworkflow_target_ok_type,
-    underlying_task_fn,
 )
 from horsies.core.codec.json_io import (
     SerdeResult,
@@ -52,6 +49,7 @@ from horsies.core.codec.typed import (
     validate_task_result_envelope,
 )
 from horsies.core.codec.validation_errors import ValueValidationError
+from horsies.core.models.workflow.nodes import stored_kwargs
 from horsies.core.utils.fingerprint import enqueue_fingerprint
 from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.types.status import TASK_TERMINAL_STATES, TaskStatus
@@ -1072,9 +1070,7 @@ async def enqueue_subworkflow_task(
     raw_kwargs_dict: dict[str, Any] = (
         raw_kwargs if isinstance(raw_kwargs, dict) else {}
     )
-    # Typed decode against the child ``build_with`` signature. Annotated
-    # params decode via their declared type; opaque ``**params: Any``
-    # slots route through ``JsonValue`` (raw JSON-native shapes only).
+    # Typed decode against the child ``build_with`` signature.
     try:
         kwargs: dict[str, Any] = decode_subworkflow_kwargs(
             workflow_def, raw_kwargs_dict,
@@ -1301,23 +1297,8 @@ async def enqueue_subworkflow_task(
                     error_code=OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED,
                 )
                 return None
-            # Spec construction in build_with() encoded and decoded these
-            # kwargs, so a refusal here is a defect and raises.
-            try:
-                encoded_child_sub_kwargs = (
-                    dict(child_sub.wire_kwargs)
-                    if child_sub.wire_kwargs is not None
-                    else encode_subworkflow_kwargs(
-                        child_sub.workflow_def, child_sub.kwargs,
-                    )
-                )
-            except (StrictJsonError, ValueValidationError) as exc:
-                raise SerializationError(
-                    f'Failed to encode kwargs for child sub {child_sub.name}: '
-                    f'{exc}',
-                ) from exc
             child_kwargs_json = _ser_or_raise(
-                dumps_json(encoded_child_sub_kwargs),
+                dumps_json(stored_kwargs(child_sub)),
                 f'kwargs for child sub {child_sub.name}',
             )
             child_node_params.append({
@@ -1377,30 +1358,7 @@ async def enqueue_subworkflow_task(
             # defect, see _child_task_options_json.
             child_task_options_json = _child_task_options_json(child_task)
 
-            # Strict-serde: route child TaskNode kwargs through the typed
-            # codec so reserved-namespace keys (`__h_*` / `__horsies_*`)
-            # in user-data positions fail closed before storage. Without
-            # this, smuggled args_from envelopes in static kwargs would
-            # reach the worker via `child_runner.py`'s args_from path
-            # and bypass the typed decode there. Spec construction in
-            # build_with() encoded and decoded these kwargs, so a refusal
-            # here is a defect and raises.
-            try:
-                encoded_child_task_kwargs = (
-                    dict(child_task.wire_kwargs)
-                    if child_task.wire_kwargs is not None
-                    else dict(
-                        encode_kwargs(
-                            underlying_task_fn(child_task.fn),
-                            child_task.kwargs,
-                        ),
-                    )
-                )
-            except (StrictJsonError, ValueValidationError) as exc:
-                raise SerializationError(
-                    f'Failed to encode kwargs for child task {child_task.name}: '
-                    f'{exc}',
-                ) from exc
+            encoded_child_task_kwargs = stored_kwargs(child_task)
             child_kwargs_json = _ser_or_raise(
                 dumps_json(encoded_child_task_kwargs),
                 f'kwargs for child task {child_task.name}',
@@ -3722,7 +3680,6 @@ async def _handle_workflow_task_failure(
     Note: The failed task's result is already stored. Dependents will receive
     the TaskResult with is_err()=True if they have args_from pointing to this task.
     """
-    from horsies.core.models.tasks import TaskError
 
     if known_on_error is None:
         lock_result = await session.execute(

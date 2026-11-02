@@ -245,7 +245,7 @@ class _ParamRecordingSession:
 
 def _grandchild_node(index: int) -> MagicMock:
     node = MagicMock(spec=SubWorkflowNode)
-    node.wire_kwargs = None
+    node.wire_kwargs = {}
     node.name = f'child_sub_{index}'
     node.args = ()
     node.kwargs = {}
@@ -306,9 +306,6 @@ class TestChildStartSerialization:
             return_value=workflow_def,
         ), patch(
             'horsies.core.workflows.engine.validate_workflow_generic_output_match',
-        ), patch(
-            'horsies.core.workflows.engine.encode_subworkflow_kwargs',
-            return_value={},
         ), patch(
             'horsies.core.workflows.engine.fill_build_with_defaults',
             return_value={},

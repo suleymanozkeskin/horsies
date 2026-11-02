@@ -19,7 +19,6 @@ from horsies.core.models.tasks import (
     OperationalErrorCode,
 )
 from horsies.core.task_decorator import (
-    FromNodeMarker,
     create_task_wrapper,
     resolve_node_queue_and_priority,
 )
@@ -66,6 +65,12 @@ from horsies.core.utils.loop_runner import (
     in_running_event_loop,
 )
 from horsies.core.codec.json_io import loads_json
+from horsies.core.codec.json_value import StrictJsonError
+from horsies.core.codec.kwargs import (
+    decode_subworkflow_kwargs,
+    fill_build_with_defaults,
+)
+from horsies.core.models.workflow.nodes import stored_kwargs
 from horsies.core.codec.validation_errors import ValueValidationError, exception_text
 from horsies.core.types.result import is_err
 
@@ -2126,7 +2131,7 @@ class Horsies:
         tasks, cycles, node ids); any resulting ``HorsiesError`` is surfaced, so
         single- and multi-error failures are treated alike. Non-horsies
         exceptions from build_with are out of scope (user-code/environmental).
-        ``seen`` (by definition_key + kwargs signature) guards cycles; ``depth``
+        ``seen`` (by definition_key + wire kwargs) guards cycles; ``depth``
         is a backstop.
         """
         for node in getattr(spec, 'tasks', ()):
@@ -2142,10 +2147,7 @@ class Horsies:
             # Only expand when build_with's inputs are fully static. args_from
             # and from_node() markers are runtime injections (dependency
             # results) the engine merges in at enqueue, absent at check.
-            if node.args_from or any(
-                isinstance(value, FromNodeMarker)
-                for value in node.kwargs.values()
-            ):
+            if node.args_from:
                 continue
             try:
                 def_key = node.workflow_def._require_definition_key()
@@ -2158,17 +2160,36 @@ class Horsies:
             # the parameter-varying instance (a false negative). The kwargs
             # signature is a stable repr (workflow kwargs are serializable);
             # the depth cap still bounds genuinely-unbounded parameterizations.
-            try:
-                kwargs_sig = repr(sorted(
-                    (str(k), repr(v)) for k, v in node.kwargs.items()
-                ))
-            except Exception:
-                kwargs_sig = None  # unrepr-able: fall back to def-key dedup
-            node_key = (def_key, kwargs_sig)
+            wire = stored_kwargs(node)
+            node_key = (def_key, repr(sorted(wire.items())))
             if node_key in seen:
                 continue  # cycle (same definition AND same kwargs)
             try:
-                child_spec = node.workflow_def.build_with(self, **dict(node.kwargs))
+                # The engine's read of the same row: real containers and
+                # filled defaults, not the frozen snapshot on the node.
+                child_kwargs = fill_build_with_defaults(
+                    node.workflow_def,
+                    decode_subworkflow_kwargs(node.workflow_def, wire),
+                )
+            except (StrictJsonError, ValueValidationError) as exc:
+                # At run time this fails the parent node, so it is a finding.
+                errors.append(WorkflowValidationError(
+                    message='subworkflow kwargs do not fit build_with',
+                    code=ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
+                    notes=[f"node '{node.name}': {exc}"],
+                    help_text='fix the kwarg, or the default of the parameter',
+                ))
+                continue
+            except Exception as exc:
+                # No verdict on the value: a validator can need a service that
+                # is down at boot, so this must not stop the process.
+                self.logger.warning(
+                    f"check could not fill the defaults of node '{node.name}': "
+                    f'{type(exc).__name__}: {exception_text(exc)}',
+                )
+                continue
+            try:
+                child_spec = node.workflow_def.build_with(self, **child_kwargs)
             except MultipleValidationErrors as exc:
                 errors.extend(exc.report.errors)
                 continue

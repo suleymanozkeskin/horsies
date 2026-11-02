@@ -127,7 +127,7 @@ def check_task_signature(
         # Strict-serde rejects positional args at every producer; only
         # kwargs reach the wire. A positional-only param (`def f(x, /)`)
         # would register cleanly but could never be invoked through the
-        # queue, since `encode_kwargs` binds against named parameters
+        # queue, since `encode_kwargs_read_back` binds against named parameters
         # only. `**kwargs` defeats producer-side signature binding for
         # the same reason — every wire kwarg name must correspond to a
         # declared parameter, with no catch-all.
@@ -214,7 +214,7 @@ def check_build_with_signature(workflow_def: Any, *, workflow_name: str) -> None
     non-JSON parameter is valid there and this does not run on it.
 
     It checks types. `cls` and `app` are supplied by the engine, `*args` and
-    `**params` hold JSON-native values, and a parameter may be positional or
+    `**params` take nothing from a node, and a parameter may be positional or
     keyword, because the engine binds it by keyword.
 
     Args:

@@ -1781,8 +1781,7 @@ def create_task_wrapper(
                 exception=exc,
             ))
 
-        # Serialize kwargs — strict-serde phase 3 routes through encode_kwargs
-        # using the receiver's declared parameter types.
+        # Serialize kwargs against the receiver's declared parameter types.
         kwargs_json: str | None = None
         if kwargs_dict:
             try:

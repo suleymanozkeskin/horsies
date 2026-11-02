@@ -8,9 +8,10 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from horsies import JsonValue
 from horsies.core.models.tasks import TaskResult, TaskError
 from horsies.core.models.task_send_types import TaskSendError, TaskSendResult
-from horsies.core.task_decorator import TaskHandle, TaskFunction, NodeFactory, TaskSendOptions, TaskSendOptions, from_node
+from horsies.core.task_decorator import TaskHandle, TaskFunction, NodeFactory, TaskSendOptions, from_node
 from horsies.core.types.result import Ok
 from horsies.core.models.workflow import (
     NODE_ID_PATTERN,
@@ -49,9 +50,38 @@ def _definition_key(label: str) -> str:
 # =============================================================================
 
 
+def _open_target(
+    *,
+    payload: JsonValue = None,
+    url: str = '',
+    data: TaskResult[Any, TaskError] | None = None,
+    input: TaskResult[Any, TaskError] | None = None,
+) -> TaskResult[Any, TaskError]:
+    """The typed callable behind `MockTaskWrapper`: a node binds to its names."""
+    return TaskResult(ok=None)
+
+
+def _ctx_target(
+    *,
+    input: TaskResult[Any, TaskError] | None = None,
+    workflow_ctx: WorkflowContext | None = None,
+) -> TaskResult[Any, TaskError]:
+    return TaskResult(ok=None)
+
+
+def _params_target(
+    required: TaskResult[int, TaskError],
+    *,
+    flag: bool,
+) -> TaskResult[Any, TaskError]:
+    return TaskResult(ok=None)
+
+
 @dataclass
 class MockTaskWrapper(TaskFunction[Any, Any]):
     """Mock TaskWrapper for unit tests."""
+
+    _original_fn = staticmethod(_open_target)
 
     task_name: str
     task_queue_name: str | None = None
@@ -120,6 +150,8 @@ class MockTaskWrapper(TaskFunction[Any, Any]):
 @dataclass
 class MockTaskWrapperWithCtx(TaskFunction[Any, Any]):
     """Mock TaskWrapper that accepts workflow_ctx."""
+
+    _original_fn = staticmethod(_ctx_target)
 
     task_name: str
     task_queue_name: str | None = None
@@ -193,6 +225,8 @@ class MockTaskWrapperWithCtx(TaskFunction[Any, Any]):
 @dataclass
 class MockTaskWrapperWithParams(TaskFunction[Any, Any]):
     """Mock TaskWrapper with required parameters for signature validation."""
+
+    _original_fn = staticmethod(_params_target)
 
     task_name: str
     task_queue_name: str | None = None
@@ -1567,29 +1601,22 @@ class TestWorkflowSpecValidation:
 
         assert exc.value.code == ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
 
-    def test_kwargs_validation_skipped_for_kwargs_task(self) -> None:
-        """Tasks accepting **kwargs should skip key validation."""
+    def test_a_kwargs_catch_all_takes_nothing_from_a_node(self) -> None:
+        """A catch-all has no declared type, so no key binds to it."""
         fn_a = MockTaskWrapperWithKwargs(task_name='task_a')
         node_a = TaskNode(
             fn=fn_a,
             kwargs={'unknown': 1, 'another': 2},
         )
 
-        # Should not raise
-        WorkflowSpec(name='kwargs_task_ok', tasks=[node_a])
+        with pytest.raises(WorkflowValidationError) as exc:
+            WorkflowSpec(name='kwargs_task', tasks=[node_a])
+
+        assert exc.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
 
     def test_subworkflow_kwargs_rejected_for_untyped_build_with(self) -> None:
-        """Subworkflow build_with(**kwargs) rejects unknown kwargs at strict snapshot.
-
-        Strict-serde phase 7: ``_snapshot_kwargs_values`` binds
-        SubWorkflowNode kwargs against ``workflow_def._original_build_with``
-        (or ``build_with``) the same way it binds TaskNode kwargs against
-        ``node.fn``. A ``build_with(cls, app, **kwargs)`` has no declared
-        named parameters beyond ``app``/``cls`` (engine-supplied), so a
-        user-supplied kwarg like ``unknown=1`` fails strict binding —
-        the strict-serde contract is that every kwarg must hit a typed
-        named parameter on the subworkflow's entry.
-        """
+        """A key that reaches `**kwargs` of a build_with is an invalid key: each
+        kwarg must bind to a typed, named parameter."""
         fn_a = MockTaskWrapper(task_name='task_a')
 
         class ChildWorkflow(WorkflowDefinition[int]):
@@ -1612,7 +1639,7 @@ class TestWorkflowSpecValidation:
 
         with pytest.raises(WorkflowValidationError) as exc:
             WorkflowSpec(name='subworkflow_kwargs_ok', tasks=[child_node])
-        assert exc.value.code == ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert exc.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
 
     def test_subworkflow_cycle_detection_allows_same_name_distinct_definitions(self) -> None:
         """Same workflow name in distinct definitions is not a cycle."""

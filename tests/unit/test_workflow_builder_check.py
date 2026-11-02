@@ -2,23 +2,25 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 import types
-from typing import Any
+from typing import Annotated, Any
 from unittest import mock
 
 import pytest
+from pydantic import AfterValidator
 
 from horsies.core.app import Horsies, _BUILDER_ATTR, _NO_CHECK_ATTR
 from horsies.core.errors import (
     ConfigurationError,
     ErrorCode,
-    HorsiesError,
     WorkflowValidationError,
 )
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import CustomQueueConfig, QueueMode
+from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.workflow import (
     SubWorkflowNode,
     TaskNode,
@@ -789,6 +791,14 @@ class TestNodeBindingInCheck:
         assert errors[0].code == ErrorCode.TASK_INVALID_QUEUE
 
 
+def _refuse(value: int) -> int:
+    raise ValueError(f'refused {value}')
+
+
+def _broken(value: int) -> int:
+    raise KeyError(value)
+
+
 def _mock_fn(queue: str) -> Any:
     """A mock task fn carrying a queue name, for TaskNode binding tests."""
     return mock.MagicMock(task_name=f'task_{queue}', task_queue_name=queue)
@@ -851,6 +861,177 @@ class TestRecursiveSubworkflowBindingInCheck:
 
         assert app.check(live=False) == []
 
+    def test_a_child_gets_the_declared_types_from_static_kwargs(self) -> None:
+        """check() builds the child from the engine's read of the stored row, so
+        a list stays a list, a dict stays a dict, and a default is validated."""
+        app = _make_custom_app(('scraping', 30))
+        seen: list[tuple[object, object, object]] = []
+
+        def take(*, values: list[int], shape: dict[str, int]) -> None:
+            _ = values, shape
+
+        leaf_fn = _mock_fn('scraping')
+        leaf_fn._original_fn = take
+
+        class ChildContainers(WorkflowDefinition[Any]):
+            name = 'child_containers'
+            definition_key = 'child_containers.v1'
+
+            @classmethod
+            def build_with(
+                cls,
+                app: Horsies,
+                values: list[int],
+                shape: dict[str, int],
+                label: Annotated[str, AfterValidator(str.upper)] = 'a',
+            ) -> WorkflowSpec[Any]:
+                seen.append((values, shape, label))
+                leaf = TaskNode(
+                    fn=leaf_fn,
+                    node_id='leaf',
+                    kwargs={'values': values, 'shape': shape},
+                )
+                return WorkflowSpec(name=cls.name, tasks=[leaf], output=leaf)
+
+        @app.workflow_builder()
+        def parent_builder() -> WorkflowSpec[Any]:
+            sub = SubWorkflowNode(
+                workflow_def=ChildContainers,
+                kwargs={'values': [1, 2], 'shape': {'a': 1}},
+            )
+            return app.workflow(
+                'parent_containers', [sub], definition_key='parent_containers.v1',
+            )
+
+        assert app.check(live=False) == []
+        assert seen == [([1, 2], {'a': 1}, 'A')]
+        assert type(seen[0][0]) is list
+        assert type(seen[0][1]) is dict
+
+    def test_a_default_that_its_validator_refuses_is_a_finding(self) -> None:
+        """At run time this fails the parent node, so check reports it."""
+        app = _make_custom_app(('scraping', 30))
+
+        class Child(WorkflowDefinition[Any]):
+            name = 'child_refused_default'
+            definition_key = 'child_refused_default.v1'
+
+            @classmethod
+            def build_with(
+                cls,
+                app: Horsies,
+                *,
+                x: Annotated[int, AfterValidator(_refuse)] = 1,
+            ) -> WorkflowSpec[Any]:
+                raise AssertionError('the check must stop before the build')
+
+        @app.workflow_builder()
+        def parent_builder() -> WorkflowSpec[Any]:
+            sub = SubWorkflowNode(workflow_def=Child)
+            return app.workflow(
+                'parent_refused_default', [sub], definition_key='parent_refused_default.v1',
+            )
+
+        errors = app.check(live=False)
+
+        assert [error.code for error in errors] == [
+            ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
+        ]
+        assert 'do not fit build_with' in str(errors[0])
+
+    def test_a_validator_that_raises_on_a_default_does_not_stop_the_boot(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """An exception is no verdict on the value: a validator can need a service
+        that is down at boot. It does not stop the process, and it is not silent."""
+        app = _make_custom_app(('scraping', 30))
+
+        class Child(WorkflowDefinition[Any]):
+            name = 'child_broken_validator'
+            definition_key = 'child_broken_validator.v1'
+
+            @classmethod
+            def build_with(
+                cls,
+                app: Horsies,
+                *,
+                x: Annotated[int, AfterValidator(_broken)] = 1,
+            ) -> WorkflowSpec[Any]:
+                raise AssertionError('the check must stop before the build')
+
+        @app.workflow_builder()
+        def parent_builder() -> WorkflowSpec[Any]:
+            sub = SubWorkflowNode(workflow_def=Child)
+            return app.workflow(
+                'parent_broken_validator',
+                [sub],
+                definition_key='parent_broken_validator.v1',
+            )
+
+        with caplog.at_level(logging.WARNING):
+            assert app.check(live=False) == []
+
+        warned = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelno == logging.WARNING
+        ]
+        assert len(warned) == 1
+        assert 'child_broken_validator' in warned[0]
+        assert 'KeyError' in warned[0]
+
+    def test_a_build_that_raises_stays_out_of_scope(self) -> None:
+        """A failure in user code surfaces through the registered builder path, or
+        at run time. It is not a finding of this check."""
+        app = _make_custom_app(('scraping', 30))
+
+        class Child(WorkflowDefinition[Any]):
+            name = 'child_raises'
+            definition_key = 'child_raises.v1'
+
+            @classmethod
+            def build_with(cls, app: Horsies, *, x: int = 1) -> WorkflowSpec[Any]:
+                raise KeyError('user code')
+
+        @app.workflow_builder()
+        def parent_builder() -> WorkflowSpec[Any]:
+            sub = SubWorkflowNode(workflow_def=Child)
+            return app.workflow(
+                'parent_raises', [sub], definition_key='parent_raises.v1',
+            )
+
+        assert app.check(live=False) == []
+
+    def test_a_child_problem_is_found_for_each_set_of_static_kwargs(self) -> None:
+        """The cycle guard keys on the stored kwargs, so a second set is checked."""
+        app = _make_custom_app(('scraping', 30))
+        seen: list[int] = []
+
+        class Child(WorkflowDefinition[Any]):
+            name = 'child_each_kwarg'
+            definition_key = 'child_each_kwarg.v1'
+
+            @classmethod
+            def build_with(cls, app: Horsies, n: int) -> WorkflowSpec[Any]:
+                seen.append(n)
+                leaf = TaskNode(fn=_mock_fn('scraping'), node_id='leaf')
+                return WorkflowSpec(name=cls.name, tasks=[leaf], output=leaf)
+
+        @app.workflow_builder()
+        def parent_builder() -> WorkflowSpec[Any]:
+            first = SubWorkflowNode(workflow_def=Child, node_id='a', kwargs={'n': 1})
+            second = SubWorkflowNode(workflow_def=Child, node_id='b', kwargs={'n': 2})
+            same = SubWorkflowNode(workflow_def=Child, node_id='c', kwargs={'n': 1})
+            return app.workflow(
+                'parent_each_kwarg',
+                [first, second, same],
+                definition_key='parent_each_kwarg.v1',
+            )
+
+        assert app.check(live=False) == []
+        assert sorted(set(seen)) == [1, 2]
+
     def test_runtime_parameterized_subworkflow_skipped(self) -> None:
         """A runtime-parameterized (args_from) subworkflow is not expanded.
 
@@ -864,13 +1045,17 @@ class TestRecursiveSubworkflowBindingInCheck:
             definition_key = 'child_rt.v1'
 
             @classmethod
-            def build_with(cls, app: Horsies, **p: Any) -> WorkflowSpec[Any]:
+            def build_with(
+                cls, app: Horsies, v: TaskResult[int, TaskError],
+            ) -> WorkflowSpec[Any]:
                 bad = TaskNode(fn=_mock_fn('ghost'), node_id='bad')
                 return WorkflowSpec(name=cls.name, tasks=[bad], output=bad)
 
         @app.workflow_builder()
         def parent_builder() -> WorkflowSpec[Any]:
-            src = TaskNode(fn=_mock_fn('scraping'), node_id='src')
+            source_fn = _mock_fn('scraping')
+            source_fn.task_ok_type = int
+            src = TaskNode(fn=source_fn, node_id='src')
             sub = SubWorkflowNode(
                 workflow_def=ChildRuntime, args_from={'v': src}, waits_for=[src],
             )

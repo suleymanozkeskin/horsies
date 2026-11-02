@@ -21,7 +21,7 @@ import pytest
 from pydantic import BaseModel
 
 from horsies.core.codec.json_value import JsonValue, StrictJsonError
-from horsies.core.codec.kwargs import decode_kwargs, encode_kwargs
+from horsies.core.codec.kwargs import decode_kwargs, encode_kwargs_read_back
 from horsies.core.codec.typed import Json
 from horsies.core.models.tasks import TaskError, TaskResult
 
@@ -85,26 +85,26 @@ def _ingest_smuggle(
 
 class TestEncodeStrictBinding:
     def test_known_kwarg_encodes(self) -> None:
-        encoded = encode_kwargs(_task_a, {'value': 42})
+        encoded = encode_kwargs_read_back(_task_a, {'value': 42})
         assert encoded == {'value': 42}
 
     def test_unknown_kwarg_rejected(self) -> None:
         with pytest.raises(StrictJsonError, match="unknown kwarg 'valuee'"):
-            encode_kwargs(_task_a, {'value': 1, 'valuee': 2})
+            encode_kwargs_read_back(_task_a, {'value': 1, 'valuee': 2})
 
     def test_workflow_ctx_user_supplied_rejected(self) -> None:
         with pytest.raises(
             StrictJsonError,
             match="kwarg 'workflow_ctx' is engine-injected",
         ):
-            encode_kwargs(_task_with_ctx, {'value': 1, 'workflow_ctx': 'x'})
+            encode_kwargs_read_back(_task_with_ctx, {'value': 1, 'workflow_ctx': 'x'})
 
     def test_workflow_meta_user_supplied_rejected(self) -> None:
         with pytest.raises(
             StrictJsonError,
             match="kwarg 'workflow_meta' is engine-injected",
         ):
-            encode_kwargs(_task_a, {'value': 1, 'workflow_meta': 'x'})
+            encode_kwargs_read_back(_task_a, {'value': 1, 'workflow_meta': 'x'})
 
     def test_taskresult_typed_kwarg_user_supplied_rejected(self) -> None:
         # TaskResult-typed kwargs come from the engine's args_from path,
@@ -115,7 +115,7 @@ class TestEncodeStrictBinding:
             StrictJsonError,
             match="kwarg 'upstream_result' is TaskResult-typed",
         ):
-            encode_kwargs(_task_with_upstream, {'upstream_result': bogus})
+            encode_kwargs_read_back(_task_with_upstream, {'upstream_result': bogus})
 
 
 class TestDecodeStrictBinding:
@@ -196,32 +196,58 @@ class TestDecodeStrictBinding:
             )
 
 
-class TestNoHintsFallback:
-    """Lambdas / Mocks have no annotations to bind against; pass-through
-    keeps test scaffolding alive without weakening production strictness
-    (registered tasks pass `@app.task` validation which guarantees
-    every param is annotated)."""
+class TestNoHints:
+    """A callable with no annotations binds nothing, so each key is refused."""
 
-    def test_lambda_encode_pass_through(self) -> None:
+    def test_encode_refuses_a_key(self) -> None:
         def f(value):  # type: ignore[no-untyped-def]
             return value
 
-        encoded = encode_kwargs(f, {'value': 42, 'anything': 'goes'})
-        assert encoded == {'value': 42, 'anything': 'goes'}
+        with pytest.raises(StrictJsonError, match='no type annotation'):
+            encode_kwargs_read_back(f, {'value': 42})
 
-    def test_lambda_decode_pass_through(self) -> None:
+    def test_decode_refuses_a_key(self) -> None:
         def f(value):  # type: ignore[no-untyped-def]
             return value
 
-        decoded = decode_kwargs(f, {'value': 42, 'anything': 'goes'})
-        assert decoded == {'value': 42, 'anything': 'goes'}
+        with pytest.raises(StrictJsonError, match='no type annotation'):
+            decode_kwargs(f, {'value': 42})
+
+    def test_an_empty_call_needs_no_hints(self) -> None:
+        def f(*, value: 'NotDefinedHere' = 1) -> int:  # type: ignore[name-defined]  # noqa: F821
+            return value
+
+        assert encode_kwargs_read_back(f, {}) == {}
+        assert decode_kwargs(f, {}) == {}
+
+    def test_a_key_that_names_a_catch_all_does_not_bind(self) -> None:
+        def f(**params: int) -> None:
+            _ = params
+
+        resolved = resolve_hints_and_sig(f)
+        assert resolved is not None
+        hints, sig = resolved
+
+        binding = resolve_producer_kwarg_binding(f, 'params', hints, sig)
+
+        assert binding.kind == 'error'
+        assert "unknown kwarg 'params'" in (binding.error_message or '')
+
+    def test_hints_that_do_not_resolve_are_refused(self) -> None:
+        def f(*, value: 'NotDefinedHere') -> int:  # type: ignore[name-defined]  # noqa: F821
+            return value
+
+        with pytest.raises(StrictJsonError, match='do not resolve'):
+            encode_kwargs_read_back(f, {'value': 42})
+        with pytest.raises(StrictJsonError, match='do not resolve'):
+            decode_kwargs(f, {'value': 42})
 
 
 class TestWireRoundTripNestedJsonValue:
     """Integration-level smoke for the strict-serde wire contract.
 
     The broker is opaque storage — it round-trips bytes. The actual
-    serde surface is `encode_kwargs → dumps_json → loads_json →
+    serde surface is `encode_kwargs_read_back → dumps_json → loads_json →
     decode_kwargs`. Exercise that pipeline against a Pydantic model
     carrying nested `dict[str, JsonValue]` (the §3 raw-JSON-inside-
     Pydantic-field shape that motivated the recursive JsonValue
@@ -255,7 +281,7 @@ class TestWireRoundTripNestedJsonValue:
         )
 
         # Producer pipeline.
-        encoded = encode_kwargs(_ingest_round_trip, {'payload': payload})
+        encoded = encode_kwargs_read_back(_ingest_round_trip, {'payload': payload})
         dumped_r = dumps_json(encoded)
         assert is_ok(dumped_r)
         wire = dumped_r.ok_value
@@ -290,7 +316,7 @@ class TestWireRoundTripNestedJsonValue:
         before the value reaches the broker."""
         bad = _SmuggleEnvelope(metadata={'outer': {'__h_evil__': 1}})
         with pytest.raises(StrictJsonError, match='reserved key'):
-            encode_kwargs(_ingest_smuggle, {'payload': bad})
+            encode_kwargs_read_back(_ingest_smuggle, {'payload': bad})
 
 
 class TestLegacyHorsiesPrefixSmuggleClosed:
@@ -298,14 +324,14 @@ class TestLegacyHorsiesPrefixSmuggleClosed:
     value carrying `__h_taskresult_envelope__` would reach the worker
     args_from handler and route to legacy class-identity rehydration.
     `encode_value` rejects the legacy prefix at user positions; this
-    test confirms encode_kwargs propagates that rejection."""
+    test confirms encode_kwargs_read_back propagates that rejection."""
 
     def test_legacy_envelope_in_dict_kwarg_rejected(self) -> None:
         def task(payload: dict[str, object]) -> TaskResult[int, TaskError]:  # pyright: ignore[reportUnusedParameter]
             ...
 
         with pytest.raises(StrictJsonError, match='reserved key'):
-            encode_kwargs(
+            encode_kwargs_read_back(
                 task,
                 {'payload': {'__h_taskresult_envelope__': True, 'data': 'evil'}},
             )
@@ -319,9 +345,12 @@ from typing import Any  # noqa: E402
 from horsies.core.app import Horsies  # noqa: E402
 from horsies.core.codec.kwargs import (  # noqa: E402
     decode_subworkflow_kwargs,
-    encode_subworkflow_kwargs,
+    resolve_hints_and_sig,
+    resolve_producer_kwarg_binding,
 )
+from horsies.core.errors import ErrorCode, WorkflowValidationError  # noqa: E402
 from horsies.core.models.workflow import (  # noqa: E402
+    SubWorkflowNode,
     TaskNode,
     WorkflowDefinition,
     WorkflowSpec,
@@ -388,6 +417,47 @@ class _PureKwargsWorkflow(WorkflowDefinition[int]):
         raise NotImplementedError
 
 
+class _NamedAppWorkflow(WorkflowDefinition[int]):
+    """build_with(cls, horsies_app, *, x) — the name of the app slot is free."""
+
+    name = 'named_app_workflow'
+    definition_key = 'tests.unit.named_app.v1'
+
+    @classmethod
+    def build_with(  # pyright: ignore[reportUnusedParameter]
+        cls, horsies_app: Any, *, x: int,
+    ) -> WorkflowSpec[int]:
+        raise NotImplementedError
+
+
+class _BareParamsWorkflow(WorkflowDefinition[int]):
+    """build_with(cls, app, **params) — no annotation at all."""
+
+    name = 'bare_params_workflow'
+    definition_key = 'tests.unit.bare_params.v1'
+
+    @classmethod
+    def build_with(cls, app, **params):  # type: ignore[no-untyped-def]  # noqa: ANN001, ANN003, ANN206
+        raise NotImplementedError
+
+
+class _OpenBagWorkflow(WorkflowDefinition[int]):
+    """build_with(cls, app, params: dict[str, JsonValue]) — the named open bag."""
+
+    name = 'open_bag_workflow'
+    definition_key = 'tests.unit.open_bag.v1'
+
+    @classmethod
+    def build_with(  # pyright: ignore[reportUnusedParameter]
+        cls, app: Horsies, params: dict[str, JsonValue],
+    ) -> WorkflowSpec[int]:
+        raise NotImplementedError
+
+
+def _int_source() -> TaskResult[int, TaskError]:
+    return TaskResult(ok=1)
+
+
 class _TaskResultParamWorkflow(WorkflowDefinition[int]):
     """build_with(cls, app, *, dep_result: TaskResult[...]) — args_from-only."""
 
@@ -412,92 +482,120 @@ class _UnannotatedParamWorkflow(WorkflowDefinition[int]):
         raise NotImplementedError
 
 
-class TestEncodeSubworkflowKwargs:
-    """Strict-serde phase 6+: typed encode of `SubWorkflowNode.kwargs`
-    against the child `build_with` signature.
+def _node_wire(
+    workflow_def: type[WorkflowDefinition[int]],
+    kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    """The wire form that a spec keeps for one `SubWorkflowNode`."""
+    node: SubWorkflowNode[int] = SubWorkflowNode(
+        workflow_def=workflow_def, kwargs=kwargs,
+    )
+    wire = WorkflowSpec(name='wire', tasks=[node]).tasks[0].wire_kwargs
+    assert wire is not None
+    return dict(wire)
 
-    Closes the `to_jsonable` fallback hole; opaque `**params: Any`
-    catch-alls route through `JsonValue` so non-JSON-native shapes
-    (Pydantic models, dataclasses, bytes) raise at the producer side
-    instead of being silently smuggled onto the wire.
-    """
+
+class TestSubworkflowNodeKwargs:
+    """A spec binds each kwarg of a `SubWorkflowNode` to a named, typed parameter
+    of the child `build_with`, and keeps the form that it proved."""
 
     def test_typed_named_param_encodes(self) -> None:
-        result = encode_subworkflow_kwargs(
-            _TypedNamedParamWorkflow, {'value': 42},
-        )
-        assert result == {'value': 42}
+        assert _node_wire(_TypedNamedParamWorkflow, {'value': 42}) == {'value': 42}
 
     def test_typed_pydantic_param_round_trips_via_typeadapter(self) -> None:
         """Pydantic models survive encode via the typed path."""
         payload = _RoundTripEnvelope(
             stream_id='stream-1', metadata={'k': 'v'},
         )
-        result = encode_subworkflow_kwargs(
-            _TypedPydanticParamWorkflow, {'payload': payload},
-        )
+        result = _node_wire(_TypedPydanticParamWorkflow, {'payload': payload})
         # Encoded as a dict via the Pydantic annotation.
         assert isinstance(result['payload'], dict)
         payload_dict = cast('dict[str, Json]', result['payload'])
         assert payload_dict['stream_id'] == 'stream-1'
 
-    def test_unknown_kwarg_rejected_when_signature_has_no_var_keyword(
-        self,
-    ) -> None:
-        """No `**kwargs` catch-all → unknown kwarg fails closed."""
-        with pytest.raises(StrictJsonError, match="unknown kwarg 'other'"):
-            encode_subworkflow_kwargs(
-                _TypedNamedParamWorkflow, {'other': 1},
-            )
+    def test_unknown_kwarg_rejected(self) -> None:
+        with pytest.raises(WorkflowValidationError, match='other'):
+            _node_wire(_TypedNamedParamWorkflow, {'value': 1, 'other': 1})
 
     def test_taskresult_typed_kwarg_rejected(self) -> None:
         """TaskResult-typed params are args_from-only."""
-        with pytest.raises(StrictJsonError, match='TaskResult-typed'):
-            encode_subworkflow_kwargs(
-                _TaskResultParamWorkflow,
-                {'dep_result': TaskResult(ok=1)},
-            )
+        with pytest.raises(WorkflowValidationError, match='TaskResult'):
+            _node_wire(_TaskResultParamWorkflow, {'dep_result': TaskResult(ok=1)})
 
     def test_unannotated_param_rejected(self) -> None:
-        with pytest.raises(StrictJsonError, match='no type annotation'):
-            encode_subworkflow_kwargs(
-                _UnannotatedParamWorkflow, {'value': 1},
-            )
+        with pytest.raises(WorkflowValidationError, match='no type annotation'):
+            _node_wire(_UnannotatedParamWorkflow, {'value': 1})
 
-    def test_opaque_var_kw_accepts_json_native(self) -> None:
-        """`**params: Any` falls through `JsonValue` strict encode."""
-        result = encode_subworkflow_kwargs(
-            _OpaqueParamsWorkflow,
-            {'a': 1, 'b': 'two', 'c': [1, 2], 'd': {'nested': True}},
-        )
-        assert result == {
-            'a': 1, 'b': 'two', 'c': [1, 2], 'd': {'nested': True},
+    def test_a_list_goes_in_a_named_open_bag(self) -> None:
+        assert _node_wire(_OpenBagWorkflow, {'params': {'a': [1, 2]}}) == {
+            'params': {'a': [1, 2]},
         }
 
-    def test_opaque_var_kw_rejects_pydantic_model(self) -> None:
-        """No annotation → JsonValue fallback rejects Pydantic models.
+    @pytest.mark.parametrize(
+        'workflow_def',
+        [_OpaqueParamsWorkflow, _PureKwargsWorkflow, _BareParamsWorkflow],
+        ids=['args_and_params', 'pure_kwargs', 'bare_params'],
+    )
+    def test_a_catch_all_takes_no_kwarg(
+        self, workflow_def: type[WorkflowDefinition[int]],
+    ) -> None:
+        with pytest.raises(WorkflowValidationError) as caught:
+            _node_wire(workflow_def, {'a': 1})
 
-        This is the strictness invariant: smuggling typed payloads
-        through `**params: Any` is closed. Users must declare a real
-        annotation to encode typed values.
-        """
-        payload = _RoundTripEnvelope(stream_id='s', metadata={})
-        with pytest.raises(Exception):  # noqa: B017 - Pydantic ValidationError
-            encode_subworkflow_kwargs(
-                _OpaqueParamsWorkflow, {'data': payload},
-            )
+        assert caught.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
+        assert 'takes nothing from a node' in str(caught.value)
 
-    def test_pure_var_kw_accepts_json_native(self) -> None:
-        """Bare `**kwargs: Any` (no positional fixed params) also routes
-        through `JsonValue` fallback."""
-        result = encode_subworkflow_kwargs(
-            _PureKwargsWorkflow, {'anything': 'goes'},
+    @pytest.mark.parametrize(
+        'workflow_def',
+        [_OpaqueParamsWorkflow, _PureKwargsWorkflow, _BareParamsWorkflow],
+        ids=['args_and_params', 'pure_kwargs', 'bare_params'],
+    )
+    def test_a_catch_all_takes_no_args_from(
+        self, workflow_def: type[WorkflowDefinition[int]],
+    ) -> None:
+        source: TaskNode[int] = TaskNode(fn=_int_source)
+        node: SubWorkflowNode[int] = SubWorkflowNode(
+            workflow_def=workflow_def,
+            waits_for=[source],
+            args_from={'a': source},
         )
-        assert result == {'anything': 'goes'}
 
-    def test_empty_kwargs_passes(self) -> None:
-        assert encode_subworkflow_kwargs(_OpaqueParamsWorkflow, {}) == {}
-        assert encode_subworkflow_kwargs(_TypedNamedParamWorkflow, {}) == {}
+        with pytest.raises(WorkflowValidationError) as caught:
+            WorkflowSpec(name='wire', tasks=[source, node])
+
+        assert caught.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
+
+    def test_a_declared_catch_all_with_nothing_bound_is_valid(self) -> None:
+        assert _node_wire(_OpaqueParamsWorkflow, {}) == {}
+        assert _node_wire(_BareParamsWorkflow, {}) == {}
+
+    def test_the_app_slot_takes_no_kwarg_whatever_its_name(self) -> None:
+        assert _node_wire(_NamedAppWorkflow, {'x': 1}) == {'x': 1}
+
+        with pytest.raises(WorkflowValidationError) as caught:
+            _node_wire(_NamedAppWorkflow, {'horsies_app': 1, 'x': 1})
+
+        assert caught.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
+
+    def test_the_app_slot_takes_no_args_from_whatever_its_name(self) -> None:
+        source: TaskNode[int] = TaskNode(fn=_int_source)
+        node: SubWorkflowNode[int] = SubWorkflowNode(
+            workflow_def=_NamedAppWorkflow,
+            waits_for=[source],
+            args_from={'horsies_app': source},
+            kwargs={'x': 1},
+        )
+
+        with pytest.raises(WorkflowValidationError) as caught:
+            WorkflowSpec(name='wire', tasks=[source, node])
+
+        assert caught.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
+
+    def test_a_key_that_names_the_catch_all_is_refused(self) -> None:
+        with pytest.raises(WorkflowValidationError):
+            _node_wire(_OpaqueParamsWorkflow, {'args': [1]})
+        with pytest.raises(WorkflowValidationError):
+            _node_wire(_OpaqueParamsWorkflow, {'params': {'a': 1}})
 
 
 class TestDecodeSubworkflowKwargs:
@@ -532,14 +630,13 @@ class TestDecodeSubworkflowKwargs:
                 _TaskResultParamWorkflow, {'dep_result': {'ok': 1}},
             )
 
-    def test_opaque_var_kw_decodes_json_native_through(self) -> None:
-        result = decode_subworkflow_kwargs(
-            _OpaqueParamsWorkflow,
-            {'a': 1, 'b': 'two', 'c': [1, 2], 'd': {'nested': True}},
-        )
-        assert result == {
-            'a': 1, 'b': 'two', 'c': [1, 2], 'd': {'nested': True},
-        }
+    def test_a_stored_key_that_names_the_app_slot_is_refused(self) -> None:
+        with pytest.raises(StrictJsonError, match="unknown kwarg 'horsies_app'"):
+            decode_subworkflow_kwargs(_NamedAppWorkflow, {'horsies_app': 1, 'x': 1})
+
+    def test_a_stored_key_that_reaches_a_catch_all_is_refused(self) -> None:
+        with pytest.raises(StrictJsonError, match="unknown kwarg 'a'"):
+            decode_subworkflow_kwargs(_OpaqueParamsWorkflow, {'a': 1})
 
     def test_empty_kwargs_passes(self) -> None:
         assert decode_subworkflow_kwargs(_OpaqueParamsWorkflow, {}) == {}
@@ -550,9 +647,7 @@ class TestDecodeSubworkflowKwargs:
         original = _RoundTripEnvelope(
             stream_id='abc', metadata={'count': 3, 'tags': ['a', 'b']},
         )
-        encoded = encode_subworkflow_kwargs(
-            _TypedPydanticParamWorkflow, {'payload': original},
-        )
+        encoded = _node_wire(_TypedPydanticParamWorkflow, {'payload': original})
         decoded = decode_subworkflow_kwargs(
             _TypedPydanticParamWorkflow, encoded,
         )
@@ -560,54 +655,11 @@ class TestDecodeSubworkflowKwargs:
 
 
 class TestSubworkflowKwargsVarParamNameCollision:
-    """Regression: a static kwarg whose key happens to be the literal
-    VAR_POSITIONAL / VAR_KEYWORD param name must NOT pick up the
-    catch-all's ``Any`` annotation.
+    """A key that happens to name `*args` or `**params` must not pick up the `Any`
+    of the catch-all."""
 
-    Pre-fix the kwarg-name check used a bare ``key in sig.parameters``,
-    which is True for the names of ``*args`` and ``**params`` themselves.
-    Combined with ``hints.get(name)`` returning ``Any`` for those slots,
-    a kwarg like ``kwargs={'args': pydantic_model}`` would route through
-    ``encode_value(value, Any)`` — bypassing the strict ``JsonValue``
-    fallback the design promises for opaque ``**params: Any`` shapes.
-    """
-
-    def test_kwarg_literally_named_args_routes_to_jsonvalue_fallback(
-        self,
-    ) -> None:
-        """kwargs={'args': pydantic_model} must fail closed via JsonValue,
-        not pick up `*args: Any`'s annotation."""
-        payload = _RoundTripEnvelope(stream_id='s', metadata={})
-        with pytest.raises(Exception):  # noqa: B017 - JsonValue rejection
-            encode_subworkflow_kwargs(
-                _OpaqueParamsWorkflow, {'args': payload},
-            )
-
-    def test_kwarg_literally_named_params_routes_to_jsonvalue_fallback(
-        self,
-    ) -> None:
-        """kwargs={'params': pydantic_model} must fail closed via JsonValue,
-        not pick up `**params: Any`'s annotation."""
-        payload = _RoundTripEnvelope(stream_id='s', metadata={})
-        with pytest.raises(Exception):  # noqa: B017 - JsonValue rejection
-            encode_subworkflow_kwargs(
-                _OpaqueParamsWorkflow, {'params': payload},
-            )
-
-    def test_kwarg_literally_named_args_accepts_json_native(self) -> None:
-        """JSON-native values for kwarg `'args'` survive — but via the
-        JsonValue route, not the catch-all annotation."""
-        result = encode_subworkflow_kwargs(
-            _OpaqueParamsWorkflow,
-            {'args': [1, 2, 3], 'params': {'nested': True}},
-        )
-        assert result == {'args': [1, 2, 3], 'params': {'nested': True}}
-
-    def test_decode_kwarg_literally_named_args_routes_to_jsonvalue(self) -> None:
-        """Decode side mirrors encode: kwargs whose key matches a
-        VAR_POSITIONAL / VAR_KEYWORD name route through JsonValue."""
-        result = decode_subworkflow_kwargs(
-            _OpaqueParamsWorkflow,
-            {'args': [1, 2, 3], 'params': {'nested': True}},
-        )
-        assert result == {'args': [1, 2, 3], 'params': {'nested': True}}
+    def test_decode_refuses_the_names_of_the_catch_alls(self) -> None:
+        with pytest.raises(StrictJsonError, match="unknown kwarg 'args'"):
+            decode_subworkflow_kwargs(_OpaqueParamsWorkflow, {'args': [1, 2, 3]})
+        with pytest.raises(StrictJsonError, match="unknown kwarg 'params'"):
+            decode_subworkflow_kwargs(_OpaqueParamsWorkflow, {'params': {'a': 1}})

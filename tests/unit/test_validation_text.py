@@ -39,7 +39,7 @@ from horsies.core.brokers.postgres import (
 from horsies.core.brokers.result_types import BrokerErrorCode
 from horsies.core.codec.error_payload import MAX_EXCEPTION_CHAIN_LINKS, flatten_exception
 from horsies.core.codec.json_io import SerializationError
-from horsies.core.codec.kwargs import encode_subworkflow_kwargs
+from horsies.core.codec.kwargs import decode_subworkflow_kwargs
 from horsies.core.codec.typed import decode_value, encode_task_result, encode_value
 from horsies.core.codec.validation_errors import (
     INPUT_PLACEHOLDER,
@@ -62,9 +62,6 @@ from horsies.core.models.workflow import WorkflowDefinition, WorkflowSpec
 from horsies.core.task_decorator import create_task_wrapper
 from horsies.core.types.result import is_err
 from horsies.core.worker.health import HealthMixin
-from horsies.core.workflows.lifecycle import (
-    _encode_node_kwargs_or_raise,  # pyright: ignore[reportPrivateUsage]
-)
 
 pytestmark = pytest.mark.unit
 
@@ -482,22 +479,6 @@ class TestSendOptions:
         assert 'good_until must be timezone-aware' in err.message
 
 
-class TestWorkflowNodeKwargs:
-    def test_a_refused_node_kwarg_holds_no_input(self) -> None:
-        def node_fn(*, count: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=count)
-
-        node = SimpleNamespace(
-            fn=node_fn, kwargs={'count': MARKER}, name='node-a', wire_kwargs=None,
-        )
-
-        with pytest.raises(SerializationError) as caught:
-            _encode_node_kwargs_or_raise(node)
-
-        assert MARKER not in str(caught.value)
-        assert MARKER not in ''.join(traceback.format_exception(caught.value))
-
-
 class _TypedSubworkflow(WorkflowDefinition[int]):
     """build_with(cls, app, *, count: int) — typed kwarg-only."""
 
@@ -514,7 +495,7 @@ class _TypedSubworkflow(WorkflowDefinition[int]):
 class TestSubworkflowKwargs:
     def test_a_refused_subworkflow_kwarg_holds_no_input(self) -> None:
         with pytest.raises(ValueValidationError) as caught:
-            encode_subworkflow_kwargs(_TypedSubworkflow, {'count': MARKER})
+            decode_subworkflow_kwargs(_TypedSubworkflow, {'count': MARKER})
 
         assert MARKER not in str(caught.value)
 

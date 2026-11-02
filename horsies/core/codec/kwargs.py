@@ -46,7 +46,6 @@ from horsies.core.codec.typed import (
     Json,
     decode_value,
     encode_or_raise_on_refusal,
-    encode_value,
     validate_omitted_default,
 )
 from horsies.core.models.tasks import TaskResult
@@ -56,12 +55,11 @@ from horsies.core.types.result import Err, Ok, Result
 __all__ = [
     'KwargBinding',
     'MissingKwargs',
+    'build_with_engine_parameters',
     'decode_kwargs',
     'declared_taskresult_ok_type',
     'decode_subworkflow_kwargs',
-    'encode_kwargs',
     'encode_kwargs_read_back',
-    'encode_subworkflow_kwargs',
     'fill_build_with_defaults',
     'fill_omitted_defaults',
     'is_engine_filled',
@@ -135,13 +133,7 @@ def resolve_hints_and_sig(
     task_fn: Callable[..., Any],
 ) -> tuple[dict[str, Any], inspect.Signature] | None:
     """Resolve annotation hints and signature, or None if the callable
-    can't be introspected.
-
-    Returning None lets the caller decide between failing open or
-    closed. Production tasks pass `@app.task` strict-serde validation
-    before reaching here, so unresolvable hints are concentrated in
-    test scaffolding (Mock, lambda, forward refs without globalns)
-    where the contract is intentionally loose.
+    can't be introspected. A caller that has a kwarg to bind refuses None.
     """
     try:
         hints = get_type_hints(task_fn, include_extras=True)
@@ -157,6 +149,20 @@ def resolve_hints_and_sig(
 # Backwards-compatible alias for the previously private name. Kept until
 # the next sweep; new code should use ``resolve_hints_and_sig`` directly.
 _resolve_hints_and_sig = resolve_hints_and_sig
+
+
+def _hints_or_raise(
+    task_fn: Callable[..., Any],
+) -> tuple[dict[str, Any], inspect.Signature]:
+    """`resolve_hints_and_sig` for a caller that binds kwargs.
+
+    Raises:
+        StrictJsonError: the hints do not resolve, so no kwarg can be checked.
+    """
+    resolved = resolve_hints_and_sig(task_fn)
+    if resolved is None:
+        raise StrictJsonError(f'the hints of {_fn_name(task_fn)!r} do not resolve')
+    return resolved
 
 
 def _fn_name(task_fn: Callable[..., Any]) -> str:
@@ -198,7 +204,9 @@ def resolve_producer_kwarg_binding(
 
     - kwarg name shadows an engine-injected param
       (``workflow_ctx`` / ``workflow_meta``).
-    - kwarg name not declared on the callable's signature.
+    - kwarg name not declared on the callable's signature, or the name of its
+      ``*args`` or ``**params``: a catch-all has no declared type, so it takes
+      nothing from a producer.
     - kwarg name declared but missing a type annotation.
     - kwarg name annotated as ``TaskResult`` — engine populates via
       ``args_from``, producer must not supply.
@@ -214,12 +222,13 @@ def resolve_producer_kwarg_binding(
                 f'time)'
             ),
         )
-    if key not in sig.parameters:
+    parameter = sig.parameters.get(key)
+    if parameter is None or not _is_addressable_named_param(parameter):
         return KwargBinding(
             kind='error',
             error_message=(
                 f'unknown kwarg {key!r} for task {_fn_name(task_fn)!r}; '
-                f'declared params are {sorted(sig.parameters)}'
+                f'declared params are {sorted(_named_parameters(sig))}'
             ),
         )
     annot = hints.get(key)
@@ -243,11 +252,13 @@ def resolve_producer_kwarg_binding(
     return KwargBinding(kind='encode', annotation=annot)
 
 
-def encode_kwargs(
+def encode_kwargs_read_back(
     task_fn: Callable[..., Any],
     kwargs: Mapping[str, Any],
 ) -> dict[str, Json]:
-    """Encode user kwargs against the receiver's declared types.
+    """Encode kwargs that enter the system, and prove each one reads back.
+
+    For `.send()` and schedules. A workflow stores the form that its spec proved.
 
     Binds strictly: every key must match a declared parameter name on
     `task_fn`. Engine-injected names (`workflow_ctx` / `workflow_meta`)
@@ -267,57 +278,21 @@ def encode_kwargs(
             engine-injected name, user-supplied TaskResult-typed kwarg,
             or kwarg without a type annotation.
         ValueValidationError: when a value doesn't satisfy its
-            declared type.
+            declared type, or when the worker could not read it back.
     """
-    return _encode_each(task_fn, kwargs, encode_value)
-
-
-def encode_kwargs_read_back(
-    task_fn: Callable[..., Any],
-    kwargs: Mapping[str, Any],
-) -> dict[str, Json]:
-    """Encode kwargs that enter the system, and prove each one reads back.
-
-    For `.send()` and schedules. A workflow calls `encode_kwargs` at start, with
-    values that its spec already proved.
-
-    Raises:
-        StrictJsonError: as `encode_kwargs`.
-        ValueValidationError: as `encode_kwargs`, or when the worker could not read
-            a value back.
-    """
-    return _encode_each(task_fn, kwargs, encode_or_raise_on_refusal)
-
-
-def _encode_each(
-    task_fn: Callable[..., Any],
-    kwargs: Mapping[str, Any],
-    encode: Callable[..., Json],
-) -> dict[str, Json]:
-    """The binding loop of both entry points."""
-    resolved = resolve_hints_and_sig(task_fn)
-    if resolved is None:
-        # Mock / unresolvable forward refs — production tasks pass
-        # `@app.task` strict-serde validation before reaching here, so
-        # this only fires for test scaffolding. Pass through and let
-        # downstream `dumps_json` fail loudly on non-JSON values.
-        return cast('dict[str, Json]', dict(kwargs))
-    hints, sig = resolved
-    if not hints:
-        # Callable with no annotations at all (typically a lambda used
-        # as a test mock). Production tasks pass strict-serde validation
-        # at registration which guarantees every param is annotated, so
-        # an entirely-unannotated callable can't be a real registered
-        # task. Pass through.
-        return cast('dict[str, Json]', dict(kwargs))
+    if not kwargs:
+        return {}
+    hints, sig = _hints_or_raise(task_fn)
     encoded: dict[str, Json] = {}
     for key, value in kwargs.items():
         binding = resolve_producer_kwarg_binding(task_fn, key, hints, sig)
         if binding.kind == 'error':
             # Single source of truth via the shared resolver — keeps
-            # encode_kwargs and snapshot validation from drifting.
+            # this function and snapshot validation from drifting.
             raise StrictJsonError(binding.error_message or '')
-        encoded[key] = encode(value, binding.annotation, location=(key,))
+        encoded[key] = encode_or_raise_on_refusal(
+            value, binding.annotation, location=(key,),
+        )
     return encoded
 
 
@@ -503,15 +478,9 @@ def decode_kwargs(
         ValueValidationError: when a raw value doesn't satisfy its
             declared type.
     """
-    resolved = resolve_hints_and_sig(task_fn)
-    if resolved is None:
-        return dict(raw_kwargs)
-    hints, sig = resolved
-    if not hints:
-        # Test-scaffolding mirror of `encode_kwargs`'s no-hints
-        # fallback: lambdas / Mocks have no annotations to bind against;
-        # pass through.
-        return dict(raw_kwargs)
+    if not raw_kwargs:
+        return {}
+    hints, sig = _hints_or_raise(task_fn)
     decoded: dict[str, Any] = {}
     for key, raw_value in raw_kwargs.items():
         if any(key.startswith(p) for p in _TRANSPORT_KEY_PREFIXES):
@@ -646,14 +615,6 @@ def _workflow_def_name(workflow_def: Any) -> str:
     return getattr(workflow_def, 'name', None) or workflow_def.__name__
 
 
-def _signature_accepts_var_keyword(sig: inspect.Signature) -> bool:
-    """Return True iff the signature declares ``**kwargs``-style catch-all."""
-    return any(
-        param.kind == inspect.Parameter.VAR_KEYWORD
-        for param in sig.parameters.values()
-    )
-
-
 _ADDRESSABLE_PARAM_KINDS: frozenset[int] = frozenset({
     inspect.Parameter.POSITIONAL_OR_KEYWORD.value,
     inspect.Parameter.KEYWORD_ONLY.value,
@@ -662,23 +623,32 @@ _ADDRESSABLE_PARAM_KINDS: frozenset[int] = frozenset({
 
 ``VAR_POSITIONAL`` (``*args``) and ``VAR_KEYWORD`` (``**params``) param
 *names* show up in ``sig.parameters`` too, but they are NOT addressable
-by name — they only describe the catch-all slot. A static kwarg whose
-key happens to be ``"args"`` or ``"params"`` against
-``build_with(cls, app, *args: Any, **params: Any)`` must fall through
-to the ``JsonValue`` fallback, not pick up the catch-all's ``Any``
-annotation (which would bypass the strict-encode contract).
+by name — they only describe the catch-all slot. A key that names one is
+refused like any unknown key.
 """
 
 
 def _is_addressable_named_param(param: inspect.Parameter) -> bool:
-    """Return True iff `param` is a normal named parameter (not *args/**kwargs).
-
-    Static ``SubWorkflowNode.kwargs`` keys can only bind to
-    positional-or-keyword and keyword-only params. VAR_POSITIONAL /
-    VAR_KEYWORD names match the catch-all slot, not an addressable
-    parameter — they must route through the opaque-kwargs fallback.
-    """
+    """Return True iff `param` is a normal named parameter (not *args/**kwargs)."""
     return param.kind.value in _ADDRESSABLE_PARAM_KINDS
+
+
+def build_with_engine_parameters(sig: inspect.Signature) -> set[str]:
+    """The parameters of a `build_with` that the engine fills.
+
+    `WorkflowDefinition` always calls the function as `original_fn(klass, app, ...)`,
+    so the first two parameters are the engine's, and their names are free. A key
+    that names one would give the app two values at run time.
+    """
+    return set(list(sig.parameters)[:2])
+
+
+def _named_parameters(sig: inspect.Signature) -> list[str]:
+    return [
+        name
+        for name, param in sig.parameters.items()
+        if _is_addressable_named_param(param)
+    ]
 
 
 def _build_with_hints_or_raise(
@@ -701,79 +671,14 @@ def _build_with_hints_or_raise(
             assert_never(unreachable)
 
 
-def encode_subworkflow_kwargs(
-    workflow_def: Any,
-    kwargs: Mapping[str, Any],
-) -> dict[str, Json]:
-    """Encode ``SubWorkflowNode.kwargs`` against the child ``build_with`` signature.
-
-    For each kwarg, the binding resolves against the child workflow's
-    unwrapped ``build_with`` callable:
-
-    - Annotated, non-``TaskResult`` parameter → ``encode_value(value, annotation)``.
-    - ``TaskResult[...]`` parameter → rejected. Those slots are
-      engine-populated via ``args_from`` and must not appear in static
-      ``SubWorkflowNode.kwargs``.
-    - Unknown key, no ``**kwargs`` catch-all → rejected.
-    - Annotated parameter with missing annotation → rejected.
-    - Unknown key with opaque ``**params: Any`` catch-all → strict
-      ``JsonValue`` fallback. Raw JSON-native values pass through;
-      Pydantic models / dataclasses / bytes raise, surfacing the missing
-      type declaration as an error instead of silently smuggling a
-      ``to_jsonable`` dump onto the wire.
-
-    Raises:
-        StrictJsonError: on unknown / TaskResult-typed / unannotated kwargs,
-            or non-JSON-native values supplied to an opaque ``**params``.
-        ValueValidationError: when a typed value doesn't satisfy its
-            declared annotation.
-    """
-    from horsies.core.codec.json_value import JsonValue
-
-    hints, sig = _build_with_hints_or_raise(workflow_def)
-    accepts_var_kw = _signature_accepts_var_keyword(sig)
-    encoded: dict[str, Json] = {}
-    for key, value in kwargs.items():
-        param = sig.parameters.get(key)
-        if param is not None and _is_addressable_named_param(param):
-            annot = hints.get(key)
-            if annot is None:
-                raise StrictJsonError(
-                    f'kwarg {key!r} has no type annotation on build_with '
-                    f'for workflow {_workflow_def_name(workflow_def)!r}',
-                )
-            if get_origin(annot) is TaskResult:
-                raise StrictJsonError(
-                    f'kwarg {key!r} is TaskResult-typed; the workflow '
-                    f'engine populates it via args_from. SubWorkflowNode '
-                    f'must not supply a static value',
-                )
-            encoded[key] = encode_value(value, annot, location=(key,))
-            continue
-        if accepts_var_kw:
-            # Opaque ``**params: Any`` catch-all — JSON-native only.
-            # This also catches static kwargs whose key happens to be
-            # the VAR_POSITIONAL / VAR_KEYWORD param name itself.
-            encoded[key] = encode_value(value, JsonValue, location=(key,))
-            continue
-        raise StrictJsonError(
-            f'unknown kwarg {key!r} for build_with of '
-            f'{_workflow_def_name(workflow_def)!r}; declared params are '
-            f'{sorted(sig.parameters)}',
-        )
-    return encoded
-
-
 def decode_subworkflow_kwargs(
     workflow_def: Any,
     raw_kwargs: Mapping[str, Json],
 ) -> dict[str, Any]:
     """Decode raw wire kwargs against the child ``build_with`` signature.
 
-    Symmetric to ``encode_subworkflow_kwargs``. Annotated parameters get
-    typed decode; opaque ``**params: Any`` slots fall through ``JsonValue``
-    (raw JSON-native shapes pass through; non-native shapes never make
-    it past encode in the first place, so decode is closed by construction).
+    A workflow spec encodes these kwargs, with the same binding rule. A key that
+    no named parameter takes is refused, also in a row from an earlier version.
 
     ``TaskResult``-typed parameters are merged in-process by the engine
     after this function returns (the engine attaches live ``TaskResult``
@@ -781,18 +686,20 @@ def decode_subworkflow_kwargs(
 
     Raises:
         StrictJsonError: on unknown / TaskResult-typed / unannotated
-            wire kwargs, or non-JSON-native values under opaque ``**params``.
+            wire kwargs.
         ValueValidationError: when a wire value doesn't satisfy its
             declared annotation.
     """
-    from horsies.core.codec.json_value import JsonValue
-
     hints, sig = _build_with_hints_or_raise(workflow_def)
-    accepts_var_kw = _signature_accepts_var_keyword(sig)
+    engine_parameters = build_with_engine_parameters(sig)
     decoded: dict[str, Any] = {}
     for key, raw_value in raw_kwargs.items():
         param = sig.parameters.get(key)
-        if param is not None and _is_addressable_named_param(param):
+        if (
+            param is not None
+            and key not in engine_parameters
+            and _is_addressable_named_param(param)
+        ):
             annot = hints.get(key)
             if annot is None:
                 raise StrictJsonError(
@@ -807,12 +714,9 @@ def decode_subworkflow_kwargs(
                 )
             decoded[key] = decode_value(raw_value, annot, location=(key,))
             continue
-        if accepts_var_kw:
-            decoded[key] = decode_value(raw_value, JsonValue, location=(key,))
-            continue
         raise StrictJsonError(
             f'unknown kwarg {key!r} on the wire for build_with of '
             f'{_workflow_def_name(workflow_def)!r}; declared params are '
-            f'{sorted(sig.parameters)}',
+            f'{sorted(set(_named_parameters(sig)) - engine_parameters)}',
         )
     return decoded

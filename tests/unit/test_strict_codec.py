@@ -43,7 +43,7 @@ from horsies.core.codec.json_value import (
     MAX_TYPED_JSON_DEPTH,
     StrictJsonError,
 )
-from horsies.core.codec.kwargs import encode_kwargs, encode_kwargs_read_back
+from horsies.core.codec.kwargs import encode_kwargs_read_back
 from horsies.core.codec.typed import (
     EncodeRefused,
     FieldsLost,
@@ -579,15 +579,6 @@ class TestEntryPoints:
         assert encode_kwargs_read_back(task, {'order': Note(n=1)}) == {
             'order': {'n': 1, 'note': 'default'},
         }
-
-    def test_encode_kwargs_runs_no_read_back(self) -> None:
-        def task(*, order: Note) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=order.n)
-
-        with patch('horsies.core.codec.typed.decode_value') as decode:
-            assert encode_kwargs(task, {'order': Note(n=1)})
-
-        decode.assert_not_called()
 
     def test_a_returned_result_is_proved_at_the_wire(self) -> None:
         with pytest.raises(ValueValidationError, match='secret'):

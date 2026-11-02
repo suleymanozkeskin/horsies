@@ -21,10 +21,8 @@ from typing import (
 )
 
 
-from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import (
-    decode_subworkflow_kwargs,
-    encode_subworkflow_kwargs,
+    build_with_engine_parameters,
     resolve_build_with_hints,
     resolve_hints_and_sig,
     resolve_producer_kwarg_binding,
@@ -36,7 +34,6 @@ from horsies.core.codec.typed import (
     ReadBackRefused,
     encode_and_read_back,
 )
-from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.errors import (
     ErrorCode,
     SourceLocation,
@@ -171,34 +168,15 @@ def _kwargs_target_hints(
             assert_never(unreachable)
 
 
-def _wire_of_untyped_target(
-    node: TaskNode[Any] | SubWorkflowNode[Any],
-    report: ValidationReport,
-) -> dict[str, Any] | None:
-    """Encode the kwargs of a `build_with` that declares no hints, and read them back.
+def _default_build_with() -> Callable[..., Any]:
+    """The `build_with` of `WorkflowDefinition`, which takes no runtime params."""
+    from .definition import WorkflowDefinition
 
-    The encoder treats an opaque `**params` as `JsonValue`. It runs here because
-    strict input does not accept the frozen containers that a start would see. The
-    read runs here because it has a lower depth limit than the encoder.
-
-    Returns:
-        The wire form. None for a `TaskNode`, whose callable has no hints only in
-        test scaffolding, and for a refusal, which goes in `report`.
-    """
-    if not isinstance(node, SubWorkflowNode):
-        return None
-    try:
-        wire = encode_subworkflow_kwargs(node.workflow_def, node.kwargs)
-        _ = decode_subworkflow_kwargs(node.workflow_def, wire)
-    except (StrictJsonError, ValueValidationError) as error:
-        report.add(WorkflowValidationError(
-            message='TaskNode/SubWorkflowNode kwarg value failed strict encode',
-            code=ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
-            notes=[f"node '{node.name}' kwargs", f'codec error: {error}'],
-            help_text='declare the types of the parameters of build_with',
-        ))
-        return None
-    return wire
+    return getattr(
+        WorkflowDefinition.build_with,
+        '__func__',
+        WorkflowDefinition.build_with,
+    )
 
 
 def _build_with_type_hints(node: SubWorkflowNode[Any]) -> dict[str, Any]:
@@ -548,30 +526,23 @@ class WorkflowSpec(Generic[OutT]):
         semantics/codes.
         """
         report = ValidationReport('workflow')
-        snapshotted_by_index: list[tuple[int, dict[str, Any], dict[str, Any] | None]] = []
+        snapshotted_by_index: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
 
         for i, node in enumerate(self.tasks):
             if node.wire_kwargs is not None:
                 # A node from an earlier spec: its kwargs are proved and frozen.
                 continue
+            if not node.kwargs:
+                snapshotted_by_index.append((i, {}, {}))
+                continue
             task_fn = _kwargs_target_callable(node)
             resolved = _kwargs_target_hints(node, task_fn)
-            if resolved is None or not resolved[0]:
-                # Test scaffolding (Mocks, lambdas, unresolvable forward
-                # refs). Production callables pass strict-serde
-                # validation at @app.task registration / WorkflowDefinition
-                # construction, so unresolved hints here are a known
-                # test-only case. Deep-copy values for by-value isolation
-                # since there's no type info to bind a strict round-trip
-                # against — preserves the legacy snapshot's caller/spec
-                # detachment guarantee.
-                snapshotted_by_index.append((
-                    i,
-                    {
-                        key: copy_module.deepcopy(value)
-                        for key, value in node.kwargs.items()
-                    },
-                    _wire_of_untyped_target(node, report),
+            if resolved is None:
+                report.add(WorkflowValidationError(
+                    message='TaskNode/SubWorkflowNode target has no readable hints',
+                    code=ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
+                    notes=[f"node '{node.name}' has kwargs"],
+                    help_text='declare the types of the parameters of its callable',
                 ))
                 continue
             hints, sig = resolved
@@ -1093,16 +1064,9 @@ class WorkflowSpec(Generic[OutT]):
         runtime parameters and just forwards to build(app), which is a silent
         data-loss foot-gun when users pass kwargs/args_from.
         """
-        # Deferred import to avoid circular dependency with definition.py
-        from .definition import WorkflowDefinition
-
         errors: list[WorkflowValidationError] = []
 
-        default_build_with = getattr(
-            WorkflowDefinition.build_with,
-            '__func__',
-            WorkflowDefinition.build_with,
-        )
+        default_build_with = _default_build_with()
         for node in self.tasks:
             if not isinstance(node, SubWorkflowNode):
                 continue
@@ -1172,7 +1136,6 @@ class WorkflowSpec(Generic[OutT]):
             # Get the function to inspect (TaskNode vs SubWorkflowNode)
             if isinstance(node, TaskNode):
                 fn = node.fn
-                exclude_names: set[str] = set()
             else:
                 # SubWorkflowNode - validate against build_with signature
                 fn = getattr(
@@ -1180,15 +1143,18 @@ class WorkflowSpec(Generic[OutT]):
                     '_original_build_with',
                     node.workflow_def.build_with,
                 )
-                exclude_names = {'app', 'cls'}
+                if fn is _default_build_with():
+                    continue  # Covered by WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH.
 
             sig = _get_signature(fn)
             if sig is None:
                 continue  # Can't validate (uninspectable)
 
-            if _signature_accepts_kwargs(sig):
-                continue  # Accepts **kwargs, any key is valid
-
+            exclude_names = (
+                build_with_engine_parameters(sig)
+                if isinstance(node, SubWorkflowNode)
+                else set[str]()
+            )
             valid_names = _valid_kwarg_names(sig, exclude=exclude_names)
 
             invalid_kwargs = set(node.kwargs.keys()) - valid_names
@@ -1206,13 +1172,18 @@ class WorkflowSpec(Generic[OutT]):
                     f"node '{node.name}' has unknown args_from keys: {sorted(invalid_args_from)}"
                 )
             notes.append(f"valid parameters: {sorted(valid_names)}")
+            if _signature_accepts_kwargs(sig):
+                notes.append(
+                    'a catch-all parameter has no declared type, '
+                    'so it takes nothing from a node',
+                )
 
             errors.append(
                 WorkflowValidationError(
                     message='invalid kwarg key(s) for callable signature',
                     code=ErrorCode.WORKFLOW_INVALID_KWARG_KEY,
                     notes=notes,
-                    help_text='check for typos in kwarg or args_from keys',
+                    help_text='each key must name a declared parameter',
                 )
             )
         return errors
@@ -1268,25 +1239,27 @@ class WorkflowSpec(Generic[OutT]):
             # Get the function to inspect (TaskNode vs SubWorkflowNode)
             if isinstance(node, TaskNode):
                 fn = node.fn
-                exclude_names: set[str] = set()
             else:
                 fn = getattr(
                     node.workflow_def,
                     '_original_build_with',
                     node.workflow_def.build_with,
                 )
-                exclude_names = {'app', 'cls'}
 
             sig = _get_signature(fn)
             if sig is None:
                 continue
 
+            exclude_names = (
+                build_with_engine_parameters(sig)
+                if isinstance(node, SubWorkflowNode)
+                else set[str]()
+            )
             hints = (
                 _build_with_type_hints(node)
                 if isinstance(node, SubWorkflowNode)
                 else _resolved_type_hints(fn)
             )
-            accepts_kwargs = _signature_accepts_kwargs(sig)
 
             for kwarg_name, source_node in node.args_from.items():
                 if kwarg_name in exclude_names:
@@ -1298,9 +1271,6 @@ class WorkflowSpec(Generic[OutT]):
 
                 param = sig.parameters.get(kwarg_name)
                 if param is None:
-                    if accepts_kwargs:
-                        # No parameter-level annotation available for **kwargs.
-                        continue
                     continue  # Covered by WORKFLOW_INVALID_KWARG_KEY.
 
                 annotation = hints.get(kwarg_name)

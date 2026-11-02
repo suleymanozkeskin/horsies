@@ -68,6 +68,12 @@ class TaskNode(Generic[OkT_co]):
     Workflow nodes are kwargs-only; this field is not accepted in constructors.
     """
     kwargs: Mapping[str, Any] = field(default_factory=lambda: {})
+    """
+    - The values as given
+    - A spec replaces them with a frozen snapshot for inspection, where a list is a
+      tuple and a dict is a mappingproxy. It does not fit the declared types, so code
+      that uses the values reads `wire_kwargs`
+    """
     waits_for: Sequence[TaskNode[Any] | SubWorkflowNode[Any]] = field(
         default_factory=lambda: [],
     )
@@ -157,7 +163,7 @@ class TaskNode(Generic[OkT_co]):
     - Set by WorkflowSpec, which proved that a reader gets these values back
     - The start paths store this form. `kwargs` holds frozen containers, which
       strict validation does not accept
-    - None only for a node of test scaffolding, whose callable has no hints
+    - None until a spec takes the node
     """
 
     _frozen: bool = field(default=False, init=False, repr=False, compare=False)
@@ -240,6 +246,9 @@ class SubWorkflowNode(Generic[OkT_co]):
     """
     - Keyword arguments passed to workflow_def.build_with(app, **kwargs)
     - Use with args_from to inject upstream results as parameters
+    - A spec replaces them with a frozen snapshot for inspection, where a list is a
+      tuple and a dict is a mappingproxy. It does not fit the declared types, so code
+      that uses the values reads `wire_kwargs`
     """
 
     waits_for: Sequence[TaskNode[Any] | SubWorkflowNode[Any]] = field(
@@ -314,7 +323,7 @@ class SubWorkflowNode(Generic[OkT_co]):
     - Set by WorkflowSpec, which proved that a reader gets these values back
     - The start paths store this form. `kwargs` holds frozen containers, which
       strict validation does not accept
-    - None only for a node of test scaffolding, whose callable has no hints
+    - None until a spec takes the node
     """
 
     _frozen: bool = field(default=False, init=False, repr=False, compare=False)
@@ -357,6 +366,18 @@ AnyNode = TaskNode[Any] | SubWorkflowNode[Any]
 """
 Type alias for any node type
 """
+
+
+def stored_kwargs(node: AnyNode) -> dict[str, Any]:
+    """The kwargs that a workflow start writes: the form that `WorkflowSpec` proved.
+
+    A start reads its nodes from a spec, and a spec sets the form on each node, so a
+    node without it is a defect.
+    """
+    assert node.wire_kwargs is not None, (
+        f'node {node.name!r} did not pass through a WorkflowSpec'
+    )
+    return dict(node.wire_kwargs)
 
 
 # =============================================================================
