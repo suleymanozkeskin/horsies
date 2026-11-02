@@ -189,7 +189,7 @@ def _wire_of_untyped_target(
         return None
     try:
         wire = encode_subworkflow_kwargs(node.workflow_def, node.kwargs)
-        decode_subworkflow_kwargs(node.workflow_def, wire)
+        _ = decode_subworkflow_kwargs(node.workflow_def, wire)
     except (StrictJsonError, ValueValidationError) as error:
         report.add(WorkflowValidationError(
             message='TaskNode/SubWorkflowNode kwarg value failed strict encode',
