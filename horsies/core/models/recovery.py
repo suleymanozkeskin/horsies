@@ -164,8 +164,9 @@ class RecoveryConfig(BaseModel):
             'persistent error before the workflow fails with '
             'WORKFLOW_RECOVERY_LIMIT_REACHED. A connection, lock or timeout '
             'error does not count, so a database outage cannot fail a '
-            'workflow. At the default check interval, 25 passes give 750 '
-            'seconds to deploy a fix. The count is stored, so a worker '
+            'workflow. At the default check interval, the default limit is '
+            'reached 24 intervals after the first pass, which is 720 seconds. '
+            'The count is stored, so a worker '
             'restart keeps it, and it has no reset (3-1000).'
         ),
     )
