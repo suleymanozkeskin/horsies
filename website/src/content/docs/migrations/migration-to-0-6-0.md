@@ -27,7 +27,7 @@ Do not run a rolling upgrade from 0.5.x to 0.6.0. Stop every process, upgrade al
 The reasons:
 
 - A 0.5.5 broker checks the schema version once, at its first use. A 0.5.5 process that already runs does not stop on a v52 database, so it continues to write beside 0.6.0.
-- A 0.5.5 process raises `Unknown built-in task code` when it reads a result that 0.6.0 stored with `WORKFLOW_OUTPUT_SKIPPED` or `WORKFLOW_RECOVERY_LIMIT_REACHED`.
+- A 0.5.5 process cannot decode a result that 0.6.0 stored with `WORKFLOW_OUTPUT_SKIPPED` or `WORKFLOW_RECOVERY_LIMIT_REACHED`. The read fails with `Unknown built-in task code`.
 - 0.6.0 cannot decode an error that a 0.5.5 process stores without an error code.
 
 ## Schema step
