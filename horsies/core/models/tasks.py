@@ -16,13 +16,22 @@ from typing import (
     Union,
     overload,
 )
-from pydantic import BaseModel, ConfigDict, field_validator, field_serializer, model_validator, Field
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SkipValidation,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 from pydantic.types import PositiveInt
 from enum import Enum
 
 if TYPE_CHECKING:
     from horsies.core.models.workflow import SubWorkflowSummary
 
+from horsies.core.types.json_value import JsonValue
 from horsies.core.types.status import TaskStatus, TaskAttemptOutcome
 from horsies.core.exception_mapper import validate_error_code_string
 
@@ -200,12 +209,9 @@ class TaskError(BaseModel):
 
     exception: BaseException | FlattenedException | None = None
     error_code: BuiltInTaskCode | str
-    # Boundary note: values must be JSON-native (str/int/float/bool/
-    # None/list/dict). This internal field bypasses the strict JsonValue
-    # fence, so non-native values are silently coerced by pydantic's
-    # mode='json' dump on the wire (tuple/set → list, Decimal → str) and
-    # do not round-trip type-faithfully.
-    data: Optional[Any] = None
+    # No check runs at construction: a TaskError is built inside `except` blocks,
+    # and that build must not raise. `reportable_error` checks `data` at the wire.
+    data: SkipValidation[JsonValue] = None
     message: str | None = None
 
     @field_validator('error_code', mode='before')

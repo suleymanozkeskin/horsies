@@ -23,6 +23,7 @@ from typing import (
 
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import (
+    encode_subworkflow_kwargs,
     resolve_build_with_hints,
     resolve_hints_and_sig,
     resolve_producer_kwarg_binding,
@@ -167,6 +168,33 @@ def _kwargs_target_hints(
             return None
         case _ as unreachable:
             assert_never(unreachable)
+
+
+def _wire_of_untyped_target(
+    node: TaskNode[Any] | SubWorkflowNode[Any],
+    report: ValidationReport,
+) -> dict[str, Any] | None:
+    """Encode the kwargs of a `build_with` that declares no hints.
+
+    The encoder treats an opaque `**params` as `JsonValue`. It runs here because
+    strict input does not accept the frozen containers that a start would see.
+
+    Returns:
+        The wire form. None for a `TaskNode`, whose callable has no hints only in
+        test scaffolding, and for a refusal, which goes in `report`.
+    """
+    if not isinstance(node, SubWorkflowNode):
+        return None
+    try:
+        return encode_subworkflow_kwargs(node.workflow_def, node.kwargs)
+    except (StrictJsonError, ValueValidationError) as error:
+        report.add(WorkflowValidationError(
+            message='TaskNode/SubWorkflowNode kwarg value failed strict encode',
+            code=ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
+            notes=[f"node '{node.name}' kwargs", f'codec error: {error}'],
+            help_text='declare the types of the parameters of build_with',
+        ))
+        return None
 
 
 def _build_with_type_hints(node: SubWorkflowNode[Any]) -> dict[str, Any]:
@@ -516,9 +544,12 @@ class WorkflowSpec(Generic[OutT]):
         semantics/codes.
         """
         report = ValidationReport('workflow')
-        snapshotted_by_index: list[tuple[int, dict[str, Any]]] = []
+        snapshotted_by_index: list[tuple[int, dict[str, Any], dict[str, Any] | None]] = []
 
         for i, node in enumerate(self.tasks):
+            if node.wire_kwargs is not None:
+                # A node from an earlier spec: its kwargs are proved and frozen.
+                continue
             task_fn = _kwargs_target_callable(node)
             resolved = _kwargs_target_hints(node, task_fn)
             if resolved is None or not resolved[0]:
@@ -536,10 +567,12 @@ class WorkflowSpec(Generic[OutT]):
                         key: copy_module.deepcopy(value)
                         for key, value in node.kwargs.items()
                     },
+                    _wire_of_untyped_target(node, report),
                 ))
                 continue
             hints, sig = resolved
             snapshotted: dict[str, Any] = {}
+            wire: dict[str, Any] = {}
             for key, value in node.kwargs.items():
                 binding = resolve_producer_kwarg_binding(
                     task_fn, key, hints, sig,
@@ -566,6 +599,7 @@ class WorkflowSpec(Generic[OutT]):
                 match encode_and_read_back(value, binding.annotation):
                     case Ok(ok_value=read_back):
                         decoded = read_back.decoded
+                        wire[key] = read_back.encoded
                     case Err(err_value=EncodeRefused(cause=cause)):
                         report.add(WorkflowValidationError(
                             message=(
@@ -612,12 +646,13 @@ class WorkflowSpec(Generic[OutT]):
                     case _ as unreachable:
                         assert_never(unreachable)
                 snapshotted[key] = decoded
-            snapshotted_by_index.append((i, snapshotted))
+            snapshotted_by_index.append((i, snapshotted, wire))
 
         raise_collected(report)
 
-        for i, snapshotted in snapshotted_by_index:
+        for i, snapshotted, wire in snapshotted_by_index:
             self.tasks[i].kwargs = snapshotted
+            self.tasks[i].wire_kwargs = wire
 
     def _freeze_graph(self) -> None:
         """Freeze all nodes and containers in-place after validation.

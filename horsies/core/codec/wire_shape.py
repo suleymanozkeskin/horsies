@@ -46,7 +46,7 @@ from pydantic.errors import PydanticSchemaGenerationError, PydanticUndefinedAnno
 from pydantic_core import SchemaValidator, core_schema
 
 from horsies.core.codec.json_value import StrictJsonError
-from horsies.core.codec.typed import check_json_value_positions
+from horsies.core.codec.typed import SCHEMA_VALUE_KEYS, check_json_value_positions
 from horsies.core.codec.validation_errors import ValueValidationError
 
 
@@ -58,18 +58,6 @@ __all__ = [
     'verify_shape_rules',
 ]
 
-
-_VALUE_KEYS: Final = frozenset({
-    'serialization',
-    'default',
-    'metadata',
-    'expected',
-    'computed_fields',
-})
-"""Schema keys that hold user data or a schema of what is written, not of what is
-read. A default of `{'type': 'json'}` is a value, not a node. This is a deny list on
-purpose: a new value key gives a loud false refusal, and a new structural key
-missing from an allow list would give a silent miss."""
 
 _USER_FUNCTION_NODES: Final = frozenset({
     'function-before',
@@ -313,7 +301,7 @@ def _walk(schema: Mapping[str, Any], internal_types: frozenset[type]) -> _Schema
         if refusal is not None:
             refusals.append(refusal)
         children: list[object] = [
-            value for key, value in node.items() if key not in _VALUE_KEYS
+            value for key, value in node.items() if key not in SCHEMA_VALUE_KEYS
         ]
         stack.extend((child, config) for child in children)
     return _SchemaFacts(tuple(refusals), tuple(defaults))
@@ -344,7 +332,7 @@ def _type_only(node: object) -> object:
         inner = cast('_Node', _type_only(source['schema']))
         return {**inner, 'ref': source['ref']} if 'ref' in source else inner
     return {
-        key: value if key in _VALUE_KEYS else _type_only(value)
+        key: value if key in SCHEMA_VALUE_KEYS else _type_only(value)
         for key, value in source.items()
     }
 

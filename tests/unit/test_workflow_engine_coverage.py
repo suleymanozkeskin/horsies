@@ -623,6 +623,7 @@ class TestEnqueueSubworkflowTask:
 
         # Create a child SubWorkflowNode with positional args
         child_sub_node = MagicMock(spec=SubWorkflowNode)
+        child_sub_node.wire_kwargs = None
         child_sub_node.name = 'child_sub'
         child_sub_node.args = ('positional',)
         child_sub_node.waits_for = []
@@ -687,6 +688,8 @@ class TestEnqueueSubworkflowTask:
         from horsies.core.models.workflow import SubWorkflowNode
 
         child_sub_node = MagicMock(spec=SubWorkflowNode)
+
+        child_sub_node.wire_kwargs = None
         child_sub_node.name = 'child_sub'
         child_sub_node.args = ()
         child_sub_node.kwargs = {'k': 'v'}
@@ -773,6 +776,7 @@ class TestEnqueueSubworkflowTask:
 
         # Regular TaskNode child (not SubWorkflowNode)
         child_task = MagicMock()
+        child_task.wire_kwargs = None
         child_task.name = 'child_task'
         child_task.args = ('positional',)
         child_task.waits_for = []
@@ -842,6 +846,7 @@ class TestEnqueueSubworkflowTask:
 
         # Regular TaskNode with good_until set
         child_task = MagicMock()
+        child_task.wire_kwargs = None
         child_task.name = 'child_task'
         child_task.args = ()
         child_task.kwargs = {}
@@ -915,6 +920,8 @@ class TestEnqueueSubworkflowTask:
         broker.app = MagicMock()
 
         child_task = MagicMock()
+
+        child_task.wire_kwargs = None
         child_task.name = 'child_task'
         child_task.args = ()
         child_task.kwargs = {'data': 'value'}
@@ -989,6 +996,7 @@ class TestEnqueueSubworkflowTask:
     def _custom_child_task() -> MagicMock:
         """A no-deps subworkflow child TaskNode on the 'scraping' queue."""
         child_task = MagicMock()
+        child_task.wire_kwargs = None
         child_task.name = 'scrape_child'
         child_task.args = ()
         child_task.kwargs = {}

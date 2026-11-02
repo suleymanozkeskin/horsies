@@ -46,6 +46,7 @@ logger = get_logger('codec')
 
 
 __all__ = [
+    'SCHEMA_VALUE_KEYS',
     'Json',
     'TypeAnnotation',
     'EncodeRefused',
@@ -402,13 +403,17 @@ def encode_or_raise_on_refusal(
 
 _holds_record_cache: dict[Any, bool] = {}
 
-_SCHEMA_VALUE_KEYS: Final = frozenset({
+SCHEMA_VALUE_KEYS: Final = frozenset({
     'serialization',
     'default',
     'metadata',
     'expected',
     'computed_fields',
 })
+"""Schema keys that hold user data or a schema of what is written, not of what is
+read. A default of `{'type': 'json'}` is a value, not a node. This is a deny list on
+purpose: a new value key gives a loud false refusal, and a new structural key
+missing from an allow list would give a silent miss."""
 
 
 def _holds_record(expected_type: TypeAnnotation) -> bool:
@@ -446,7 +451,7 @@ def _schema_holds_record(expected_type: TypeAnnotation) -> bool:
         if node.get('type') in ('model', 'dataclass'):
             return True
         stack.extend(
-            value for key, value in node.items() if key not in _SCHEMA_VALUE_KEYS
+            value for key, value in node.items() if key not in SCHEMA_VALUE_KEYS
         )
     return False
 
@@ -687,7 +692,6 @@ def _validate_input(
     revalidates.
 
     A validator can write a lone surrogate in its error text, for example
-
     when it echoes the value. Pydantic then cannot build the error text and
     raises `UnicodeEncodeError`: `validate_python` does for the text of a
     `ValueError` or an `AssertionError`, and `ValidationError.errors()` does
@@ -900,11 +904,17 @@ def reportable_error(
         origin: Who built it.
 
     Returns:
-        An error that encodes and reads back. Only an `error_code` that is itself
-        missing cannot be kept, and then this raises and the caller's serialization
-        path stands.
+        An error that encodes and reads back.
+
+    Raises:
+        ValueValidationError: `error_code` is missing, or it is not a str or a
+            built-in code. The code is the one field that cannot be repaired, so
+            the caller's serialization path stands.
     """
-    escaped = _with_escaped_text(err)
+    try:
+        escaped = _with_escaped_text(err)
+    except Exception:
+        escaped = err
     cause = _report_refusal(escaped)
     if cause is None:
         return escaped
@@ -914,26 +924,54 @@ def reportable_error(
         cause,
         extra={'refusal_origin': origin},
     )
-    refused_data: dict[str, Json] = {'data_refused': cause}
-    without_data = escaped.model_copy(update={'data': refused_data})
+    without_data = escaped.model_copy(update={'data': {'data_refused': cause}})
     if _report_refusal(without_data) is None:
         return without_data
     if isinstance(without_data, SubWorkflowError):
         repaired = _repaired_subworkflow_error(without_data)
         if repaired is not None:
             return repaired
-    plain = TaskError(
-        error_code=escaped.error_code,
-        message=escaped.message,
-        exception=escaped.exception,
-        data=refused_data,
+    return _checked_plain_error(escaped, cause)
+
+
+def _checked_plain_error(err: TaskError, cause: str) -> TaskError:
+    """Build a plain `TaskError` from the fields of `err` that can cross the wire.
+
+    Assignment after construction and `model_construct` run no check, so any field
+    can hold any value here. The code stays. The exception goes first, then the
+    message.
+
+    Raises:
+        ValueValidationError: the code cannot be kept.
+    """
+    code: object = getattr(err, 'error_code', None)
+    message: object = getattr(err, 'message', None)
+    exception: object = getattr(err, 'exception', None)
+    text = message if isinstance(message, str) else None
+    payloads: tuple[dict[str, object], ...] = (
+        {'message': text, 'exception': exception},
+        {'message': text},
+        {},
     )
-    assert _report_refusal(plain) is None, 'a plain TaskError with escaped text encodes'
-    return plain
+    for payload in payloads:
+        try:
+            plain = TaskError.model_validate({
+                'error_code': code,
+                'data': {'data_refused': cause},
+                **payload,
+            })
+        except ValidationError:
+            continue
+        if _report_refusal(plain) is None:
+            return plain
+    raise ValueValidationError(
+        f'a TaskError holds an error_code of type {type(code).__name__}, '
+        f'which cannot cross the wire',
+    )
 
 
 def _code_text(err: TaskError) -> str:
-    return escape_lone_surrogates(str(err.error_code))
+    return escape_lone_surrogates(str(getattr(err, 'error_code', None)))
 
 
 def _with_escaped_text(err: TaskError) -> TaskError:
@@ -944,7 +982,7 @@ def _with_escaped_text(err: TaskError) -> TaskError:
     update: dict[str, Any] = {}
     if type(code) is str:
         update['error_code'] = escape_lone_surrogates(code)
-    if err.message is not None:
+    if isinstance(err.message, str):
         update['message'] = escape_lone_surrogates(err.message)
     exception = err.exception
     if isinstance(exception, BaseException):
@@ -958,7 +996,7 @@ def _with_escaped_text(err: TaskError) -> TaskError:
                 'repr': 'exception text unavailable',
                 'traceback': '',
             }
-    if exception is not None:
+    if isinstance(exception, dict):
         update['exception'] = {
             name: escape_lone_surrogates(value) if isinstance(value, str) else value
             for name, value in exception.items()
