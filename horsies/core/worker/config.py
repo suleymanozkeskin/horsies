@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
@@ -106,10 +107,19 @@ class WorkerConfig:
     # baseline guard, which fails loudly when the threshold is below the
     # measured baseline.
     max_memory_per_child_mb: Optional[int] = None
+    # Seconds that a stopping worker waits for running tasks. At this deadline
+    # it kills the children that still run a task, and each of those tasks
+    # takes the crash path. Set it below the supervisor's stop window.
+    drain_timeout_s: float = 300.0
 
     def __post_init__(self) -> None:
         if self.processes < 1:
             raise ValueError(f'processes must be >= 1; got {self.processes}')
+        if not math.isfinite(self.drain_timeout_s) or self.drain_timeout_s <= 0:
+            raise ValueError(
+                'drain_timeout_s must be a finite number of seconds above 0; '
+                f'got {self.drain_timeout_s}'
+            )
         if self.max_tasks_per_child < 0:
             raise ValueError(
                 'max_tasks_per_child must be >= 1, or 0 to disable recycling; '

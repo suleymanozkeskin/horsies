@@ -13,6 +13,7 @@ import asyncio
 import importlib
 import ipaddress
 import logging
+import math
 import os
 import random
 import signal
@@ -188,6 +189,16 @@ def _max_tasks_per_child(value: str) -> int:
     parsed = int(value)
     if parsed < 0:
         raise argparse.ArgumentTypeError(f'must be >= 1, or 0 to disable, got {parsed}')
+    return parsed
+
+
+def _drain_timeout_s(value: str) -> float:
+    """argparse type: drain_timeout_s, finite seconds above 0."""
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError(
+            f'must be a finite number of seconds above 0, got {parsed}',
+        )
     return parsed
 
 
@@ -539,6 +550,7 @@ def worker_command(args: argparse.Namespace) -> None:
         max_claim_per_worker=args.max_claim_per_worker,
         max_tasks_per_child=args.max_tasks_per_child,
         max_memory_per_child_mb=args.max_memory_per_child_mb,
+        drain_timeout_s=args.drain_timeout,
         recovery_config=app.config.recovery,
         retention_config=app.config.retention,
         resilience_config=app.config.resilience,
@@ -1143,6 +1155,17 @@ Examples:
                 'Recycle a child after its own RSS reaches N MB (per-child). '
                 'Disabled by default. The worker refuses to start if N is '
                 'below the child baseline.'
+            ),
+        )
+        worker_parser.add_argument(
+            '--drain-timeout',
+            type=_drain_timeout_s,
+            default=300.0,
+            help=(
+                'Seconds to wait for running tasks at shutdown. At this '
+                'deadline the worker kills their children, and each task takes '
+                'the crash path. Set it below the stop window of your '
+                'supervisor. Default: 300'
             ),
         )
 
