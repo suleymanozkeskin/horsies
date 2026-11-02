@@ -1423,6 +1423,35 @@ class TestBuildWithBoundary:
 
         WorkflowSpec(name='parent', tasks=[SubWorkflowNode(workflow_def=Child)])
 
+    def test_a_decorator_from_another_module_is_followed(self) -> None:
+        decorators = types.ModuleType('wire_shape_decorators')
+        exec(
+            'import functools\n'
+            'def keep(fn):\n'
+            '    @functools.wraps(fn)\n'
+            '    def wrapper(*args, **kwargs):\n'
+            '        return fn(*args, **kwargs)\n'
+            '    return wrapper\n',
+            decorators.__dict__,
+        )
+        source = types.ModuleType('wire_shape_child')
+        source.__dict__['keep'] = decorators.keep
+        exec(
+            'from __future__ import annotations\n'
+            'from typing import Any\n'
+            '@keep\n'
+            'def build_with(cls, app: Any, *, value: int = 1) -> Any:\n'
+            '    raise AssertionError\n',
+            source.__dict__,
+        )
+
+        class Child(WorkflowDefinition[int]):
+            name = 'decorated_child'
+            definition_key = 'tests.wire_shape.decorated'
+            build_with = classmethod(source.build_with)
+
+        WorkflowSpec(name='parent', tasks=[SubWorkflowNode(workflow_def=Child)])
+
     def test_the_app_parameter_can_have_any_name(self) -> None:
         class Child(WorkflowDefinition[int]):
             name = 'renamed_app_child'
@@ -1434,17 +1463,16 @@ class TestBuildWithBoundary:
 
         WorkflowSpec(name='parent', tasks=[SubWorkflowNode(workflow_def=Child)])
 
-    def test_a_static_build_with_skips_only_its_app(self) -> None:
+    def test_the_first_parameter_can_have_any_name(self) -> None:
         class Child(WorkflowDefinition[int]):
-            name = 'static_child'
-            definition_key = 'tests.wire_shape.static'
+            name = 'renamed_cls_child'
+            definition_key = 'tests.wire_shape.renamed_cls'
 
-            @staticmethod
-            def build_with(app: Any, x: Any = None) -> Any:  # type: ignore[override]
+            @classmethod
+            def build_with(klass, app: Any, *, value: int = 1) -> Any:
                 raise AssertionError('not built')
 
-        with pytest.raises(WorkflowValidationError):
-            WorkflowSpec(name='parent', tasks=[SubWorkflowNode(workflow_def=Child)])
+        WorkflowSpec(name='parent', tasks=[SubWorkflowNode(workflow_def=Child)])
 
     def test_the_boot_check_finds_a_class_level_node(self) -> None:
         class Child(WorkflowDefinition[int]):

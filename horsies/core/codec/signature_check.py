@@ -236,10 +236,10 @@ def check_build_with_signature(workflow_def: Any, *, workflow_name: str) -> None
                 subject='subworkflow',
             ))
         case Ok(ok_value=(hints, sig)):
-            names = [name for name in sig.parameters if name != 'cls']
-            # The engine passes the app as the first argument, and the name of
-            # that parameter is free.
-            for name in names[1:]:
+            # `WorkflowDefinition` always calls the function as
+            # `original_fn(klass, app, ...)`, so the first two parameters are
+            # the engine's, and their names are free.
+            for name in list(sig.parameters)[2:]:
                 parameter = sig.parameters[name]
                 if parameter.kind in (
                     inspect.Parameter.VAR_POSITIONAL,
