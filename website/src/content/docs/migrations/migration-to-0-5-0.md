@@ -1,7 +1,7 @@
 ---
 title: Migrating to 0.5.0 and 0.5.2
 summary: The task-history live/history split (schema v34) — two upgrade paths, the offline cutover stages, and what each path keeps. Also the OFFLINE schema v35 upgrade 0.5.2 requires of an existing 0.5.0 or 0.5.1 database.
-related: [../internals/database-schema, ../monitoring/action-semantics, ../configuration/retention-config]
+related: [../internals/database-schema, ../monitoring/action-semantics, ../configuration/retention-config, migration-to-0-6-0]
 tags: [migration, task-history, 0.5.0, 0.5.1, 0.5.2, schema-v35, breaking-changes, cutover]
 ---
 
