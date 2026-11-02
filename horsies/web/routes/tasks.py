@@ -39,7 +39,12 @@ from horsies.monitoring import (
     task_facets,
     task_stats,
 )
-from horsies.web.task_stats_cache import TaskStatsCache, TaskStatsScope
+from horsies.web.read_cache import (
+    TaskBreakdownScope,
+    TaskFacetsScope,
+    TaskReadCaches,
+    TaskStatsScope,
+)
 from horsies.web.routes._common import (
     parse_error_categories,
     parse_group_by,
@@ -80,12 +85,12 @@ def task_not_found_text(reason: TaskAbsenceReason) -> str:
 def build_router(
     broker: PostgresBroker,
     *,
-    stats_cache: TaskStatsCache,
+    caches: TaskReadCaches,
 ) -> APIRouter:
     """Build the ``/tasks`` router bound to one broker.
 
-    ``/stats`` answers through ``stats_cache``, so a status count is at
-    most the cache's TTL old.
+    ``/stats``, ``/facets`` and ``/breakdown`` answer through ``caches``, so
+    their counts are at most the cache's TTL old.
     """
     router = APIRouter(prefix='/tasks', tags=['tasks'])
 
@@ -114,7 +119,7 @@ def build_router(
             error_categories=tuple(categories),
             retried_only=retried_only,
         )
-        result = await stats_cache.get(
+        result = await caches.stats.get(
             scope,
             lambda: task_stats(
                 broker,
@@ -140,12 +145,25 @@ def build_router(
         retried_only: bool = Query(default=False),
     ) -> Facets:
         """Distinct filter values with counts, scoped only by the coarse filters."""
-        result = await task_facets(
-            broker,
-            window=_window_or_400(since, until),
-            statuses=parse_statuses(task_status),
-            error_categories=parse_error_categories(error_category),
+        window = _window_or_400(since, until)
+        statuses = parse_statuses(task_status)
+        categories = parse_error_categories(error_category)
+        scope = TaskFacetsScope(
+            since=since,
+            until=until,
+            statuses=tuple(statuses),
+            error_categories=tuple(categories),
             retried_only=retried_only,
+        )
+        result = await caches.facets.get(
+            scope,
+            lambda: task_facets(
+                broker,
+                window=window,
+                statuses=statuses,
+                error_categories=categories,
+                retried_only=retried_only,
+            ),
         )
         if is_err(result):
             raise query_failed('Task facets', result.err_value)
@@ -166,18 +184,38 @@ def build_router(
         limit: int = Query(default=50, ge=1, le=MAX_BREAKDOWN_LIMIT),
     ) -> Breakdown:
         """Per-group status pivot with a rollup TOTAL row."""
-        result = await task_breakdown(
-            broker,
-            window=_window_or_400(since, until),
-            group_by=parse_group_by(group_by),
-            statuses=parse_statuses(task_status),
-            task_names=task_name,
-            queues=queue,
-            workers=worker,
-            error_codes=error_code,
-            error_categories=parse_error_categories(error_category),
+        window = _window_or_400(since, until)
+        parsed_group_by = parse_group_by(group_by)
+        statuses = parse_statuses(task_status)
+        categories = parse_error_categories(error_category)
+        scope = TaskBreakdownScope(
+            since=since,
+            until=until,
+            group_by=parsed_group_by,
+            statuses=tuple(statuses),
+            task_names=tuple(task_name),
+            queues=tuple(queue),
+            workers=tuple(worker),
+            error_codes=tuple(error_code),
+            error_categories=tuple(categories),
             retried_only=retried_only,
-            limit=BreakdownLimit(value=limit),
+            limit=limit,
+        )
+        result = await caches.breakdown.get(
+            scope,
+            lambda: task_breakdown(
+                broker,
+                window=window,
+                group_by=parsed_group_by,
+                statuses=statuses,
+                task_names=task_name,
+                queues=queue,
+                workers=worker,
+                error_codes=error_code,
+                error_categories=categories,
+                retried_only=retried_only,
+                limit=BreakdownLimit(value=limit),
+            ),
         )
         if is_err(result):
             raise query_failed('Task breakdown', result.err_value)

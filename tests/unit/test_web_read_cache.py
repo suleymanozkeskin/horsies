@@ -1,4 +1,4 @@
-"""The shared TTL cache behind ``/api/tasks/stats``."""
+"""The shared TTL cache behind the polled task reads."""
 
 from __future__ import annotations
 
@@ -7,9 +7,22 @@ import asyncio
 import pytest
 
 from horsies.core.types.result import Err, Ok
-from horsies.monitoring import MonitoringResult, StatusCount
+from horsies.core.types.status import TaskStatus
+from horsies.monitoring import (
+    ErrorCategory,
+    Facets,
+    FacetValue,
+    MonitoringResult,
+    StatusCount,
+)
 from horsies.monitoring.errors import MonitoringQueryDbOperationFailed
-from horsies.web.task_stats_cache import TaskStatsCache, TaskStatsScope
+from horsies.web.read_cache import (
+    ReadCache,
+    TaskBreakdownScope,
+    TaskFacetsScope,
+    TaskReadCaches,
+    TaskStatsScope,
+)
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
@@ -49,10 +62,11 @@ def _scope(task_name: str = 'a') -> TaskStatsScope:
     )
 
 
-def _cache(clock: FakeClock, max_scopes: int = 256) -> TaskStatsCache:
-    return TaskStatsCache(
-        ttl_seconds=TTL_SECONDS, max_scopes=max_scopes, clock=clock,
-    )
+def _cache(
+    clock: FakeClock,
+    max_scopes: int = 256,
+) -> ReadCache[TaskStatsScope, list[StatusCount]]:
+    return ReadCache(ttl_seconds=TTL_SECONDS, max_scopes=max_scopes, clock=clock)
 
 
 async def test_a_hit_within_the_ttl_does_not_load() -> None:
@@ -175,4 +189,80 @@ async def test_non_positive_settings_are_rejected(
     ttl_seconds: float, max_scopes: int,
 ) -> None:
     with pytest.raises(ValueError):
-        TaskStatsCache(ttl_seconds=ttl_seconds, max_scopes=max_scopes)
+        ReadCache(ttl_seconds=ttl_seconds, max_scopes=max_scopes)
+
+
+def _facets() -> Facets:
+    return Facets(
+        workers=[FacetValue(value='w', count=1)],
+        task_names=[],
+        queues=[],
+        error_codes=[],
+        error_category_totals={'domain': 1},
+    )
+
+
+async def test_a_nested_answer_is_a_copy_for_each_caller() -> None:
+    """A caller that changes its answer leaves the cached one as it was."""
+    cache: ReadCache[str, Facets] = ReadCache(clock=FakeClock())
+
+    async def load() -> MonitoringResult[Facets]:
+        return Ok(_facets())
+
+    first = await cache.get('scope', load)
+    first.ok_value.workers[0].count = 99
+    first.ok_value.error_category_totals['domain'] = 99
+    second = await cache.get('scope', load)
+    second.ok_value.workers.clear()
+    third = await cache.get('scope', load)
+
+    assert third.ok_value == _facets()
+
+
+async def test_each_read_has_its_own_cache() -> None:
+    caches = TaskReadCaches()
+
+    assert caches.stats is not caches.facets
+    assert caches.facets is not caches.breakdown
+
+
+def test_a_facets_scope_holds_each_parameter_of_the_read() -> None:
+    base = TaskFacetsScope(
+        since=None, until=None, statuses=(), error_categories=(), retried_only=False,
+    )
+
+    assert base != TaskFacetsScope(
+        since=None,
+        until=None,
+        statuses=(TaskStatus.FAILED,),
+        error_categories=(),
+        retried_only=False,
+    )
+    assert base != TaskFacetsScope(
+        since=None,
+        until=None,
+        statuses=(),
+        error_categories=(ErrorCategory.DOMAIN,),
+        retried_only=False,
+    )
+
+
+def test_a_breakdown_scope_holds_group_by_and_limit() -> None:
+    def scope(group_by: str, limit: int) -> TaskBreakdownScope:
+        return TaskBreakdownScope(
+            since=None,
+            until=None,
+            group_by=group_by,
+            statuses=(),
+            task_names=(),
+            queues=(),
+            workers=(),
+            error_codes=(),
+            error_categories=(),
+            retried_only=False,
+            limit=limit,
+        )
+
+    assert scope('worker', 50) == scope('worker', 50)
+    assert scope('worker', 50) != scope('queue', 50)
+    assert scope('worker', 50) != scope('worker', 10)
