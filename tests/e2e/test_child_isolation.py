@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import sys
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -23,7 +24,6 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.task_decorator import TaskHandle
 from horsies.core.types.result import is_err
 from horsies.core.worker.config import ChildPreload
-from horsies.core.worker.preload import PreloadUnsupported, preload_support
 
 from tests.broker_resources_support import current_resources
 from tests.e2e.helpers.assertions import unwrap_send
@@ -53,11 +53,8 @@ _start_path = _StartPath()
 )
 def start_path(request: pytest.FixtureRequest) -> Iterator[None]:
     """Run every test here on each way a child can start. Preload needs Linux."""
-    if request.param is not ChildPreload.NONE and isinstance(
-        preload_support(),
-        PreloadUnsupported,
-    ):
-        pytest.skip('this host cannot run the preload parent')
+    if request.param is not ChildPreload.NONE and sys.platform != 'linux':
+        pytest.skip('preload is Linux only')
     _start_path.mode = request.param
     yield
     _start_path.mode = ChildPreload.NONE

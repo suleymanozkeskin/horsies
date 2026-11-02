@@ -37,6 +37,7 @@ from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
 from horsies.core.worker.config import ChildPreload
 from horsies.core.worker.preload import (
     ChildProcess,
+    PreloadNotLinux,
     PreloadParent,
     PreloadRefused,
     PreloadStartFailed,
@@ -861,7 +862,9 @@ class SlotPool:
 
         Only the app mode can refuse: the user chose it, so a failure there is
         reported. In the library mode a failure costs child start time, so
-        children use ``exec`` and the worker continues.
+        children use ``exec`` and the worker continues. A Linux host that
+        cannot run the parent logs a warning, because children then start
+        slower and use more memory. Other platforms use ``exec`` by design.
         """
         mode = self._config.child_preload
         if mode is ChildPreload.NONE:
@@ -869,9 +872,18 @@ class SlotPool:
         match preload_support():
             case PreloadSupported():
                 pass
-            case PreloadUnsupported(reason=reason):
+            case PreloadNotLinux(platform=platform):
                 if mode is ChildPreload.APP:
-                    logger.warning('App preload needs Linux: %s. Using exec.', reason)
+                    logger.warning(
+                        'App preload needs Linux, this is %s. Using exec.',
+                        platform,
+                    )
+                return None
+            case PreloadUnsupported(reason=reason):
+                logger.warning(
+                    'Child preload cannot run on this host: %s. Using exec.',
+                    reason,
+                )
                 return None
             case _ as unreachable:
                 assert_never(unreachable)

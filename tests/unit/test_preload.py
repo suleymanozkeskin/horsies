@@ -6,7 +6,10 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
+import errno
+import logging
 import os
+import select
 import subprocess
 import sys
 import textwrap
@@ -31,6 +34,7 @@ from horsies.core.worker.child_protocol import (
 from horsies.core.worker.config import ChildPreload
 from horsies.core.worker.preload import (
     PreloadDown,
+    PreloadNotLinux,
     PreloadParent,
     PreloadRefused,
     PreloadStartFailed,
@@ -58,10 +62,13 @@ SCRIPTED_PRELOAD = str(FIXTURES / 'scripted_preload.py')
 SLOW_PRELOAD = str(FIXTURES / 'never_ready_preload.py')
 OUTCOME_TIMEOUT_S = 30.0
 PR_GET_CHILD_SUBREAPER = 37
+NO_SUCH_PID = 2**30
 
+# The skip reads the platform and never preload_support(): a Linux host that
+# cannot run the preload parent must fail these tests, not skip them.
 linux_only = pytest.mark.skipif(
-    isinstance(preload_support(), PreloadUnsupported),
-    reason='this host cannot run the preload parent',
+    sys.platform != 'linux',
+    reason='preload is Linux only',
 )
 
 
@@ -173,7 +180,52 @@ class TestArguments:
 class TestSupport:
     def test_other_platforms_use_exec(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(preload.sys, 'platform', 'darwin')
-        assert isinstance(preload_support(), PreloadUnsupported)
+        assert preload_support() == PreloadNotLinux('darwin')
+
+    def test_a_pidfd_needs_linux(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(preload.sys, 'platform', 'darwin')
+        with pytest.raises(OSError) as caught:
+            preload._open_pidfd(os.getpid())
+        assert caught.value.errno == errno.ENOSYS
+
+    @linux_only
+    def test_a_python_with_no_pidfd_open_stays_supported(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delattr(preload.os, 'pidfd_open', raising=False)
+        assert preload_support() == PreloadSupported()
+
+    @linux_only
+    def test_the_kernel_call_reports_a_process_exit(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delattr(preload.os, 'pidfd_open', raising=False)
+        process = subprocess.Popen(
+            [sys.executable, '-c', 'import time; time.sleep(30)'],
+        )
+        descriptor = preload._open_pidfd(process.pid)
+        try:
+            assert not os.get_inheritable(descriptor)
+            assert select.select([descriptor], [], [], 0)[0] == []
+            process.kill()
+            readable = select.select([descriptor], [], [], OUTCOME_TIMEOUT_S)[0]
+            assert readable == [descriptor]
+        finally:
+            os.close(descriptor)
+            process.kill()
+            process.wait()
+
+    @linux_only
+    def test_the_kernel_call_reports_a_missing_process(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delattr(preload.os, 'pidfd_open', raising=False)
+        with pytest.raises(OSError) as caught:
+            preload._open_pidfd(NO_SUCH_PID)
+        assert caught.value.errno == errno.ESRCH
 
     @linux_only
     def test_a_kernel_with_no_pidfd_uses_exec(
@@ -637,6 +689,43 @@ class TestStartFailure:
             case other:
                 raise AssertionError(other)
         await pool.stop(0)
+
+
+@pytest.mark.asyncio(loop_scope='function')
+class TestFallbackLog:
+    async def test_a_linux_host_that_cannot_preload_warns(
+        self,
+        started_pools: list[SlotPool],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        monkeypatch.setattr(
+            slots,
+            'preload_support',
+            lambda: PreloadUnsupported('no pidfd'),
+        )
+        with caplog.at_level(logging.WARNING):
+            pool = await _started(started_pools, _config())
+        assert 'no pidfd' in caplog.text
+        assert pool._preload is None
+
+    @pytest.mark.parametrize('mode', [ChildPreload.LIBRARY, ChildPreload.APP])
+    async def test_other_platforms_warn_only_when_the_user_chose_preload(
+        self,
+        mode: ChildPreload,
+        started_pools: list[SlotPool],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        monkeypatch.setattr(
+            slots,
+            'preload_support',
+            lambda: PreloadNotLinux('darwin'),
+        )
+        with caplog.at_level(logging.WARNING):
+            pool = await _started(started_pools, _config(mode=mode))
+        assert ('needs Linux' in caplog.text) is (mode is ChildPreload.APP)
+        assert pool._preload is None
 
 
 APP_HEAD = """

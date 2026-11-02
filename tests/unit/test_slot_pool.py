@@ -28,7 +28,6 @@ import pytest_asyncio
 
 from horsies.core.types.result import Err, Ok
 from horsies.core.worker.config import ChildPreload
-from horsies.core.worker.preload import PreloadUnsupported, preload_support
 from horsies.core.worker.child_protocol import (
     InitFrame,
     ResultFrame,
@@ -96,11 +95,8 @@ _start_path = _StartPath()
 )
 def start_path(request: pytest.FixtureRequest) -> Iterator[None]:
     """Run every test here on both start paths. ``preload`` needs Linux."""
-    if request.param is ChildPreload.LIBRARY and isinstance(
-        preload_support(),
-        PreloadUnsupported,
-    ):
-        pytest.skip('this host cannot run the preload parent')
+    if request.param is ChildPreload.LIBRARY and sys.platform != 'linux':
+        pytest.skip('preload is Linux only')
     _start_path.mode = request.param
     yield
     _start_path.mode = ChildPreload.NONE
