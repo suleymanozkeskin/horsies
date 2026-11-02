@@ -91,7 +91,7 @@ TASK_TERMINAL_STATES  # frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, Task
 
 ### CLAIMED → RUNNING
 
-- Task dispatched to worker's process pool
+- Task dispatched to one of the worker's child processes
 - Child process sets `status=RUNNING`, `started_at=NOW()`
 - Heartbeat thread begins sending runner heartbeats
 - Non-workflow tasks skip workflow-status preflight work; workflow tasks update
@@ -110,7 +110,7 @@ TASK_TERMINAL_STATES  # frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, Task
 
 - Task returns `TaskResult(err=TaskError(...))` **or**
 - Task raises unhandled exception **or**
-- Worker process crashes (detected via missing heartbeats)
+- A child process died (the worker sees it at once), or the worker died (detected via missing heartbeats)
 - Sets `failed_at=NOW()`, stores error in `result`
 - Worker/process failures synthesize a `TaskResult(err=TaskError(...))` where
   possible so downstream workflow completion and capacity notifications still run

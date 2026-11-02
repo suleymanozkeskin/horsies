@@ -28,7 +28,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - @app.task("name", queue_name="q", retry_policy=...) -> decorator (CUSTOM mode)
 - @app.task("name", exception_mapper={ValueError: "VALIDATION_ERROR"}) -> per-task exception mapping
 - @app.task("name", default_unhandled_error_code="MY_ERROR") -> override default error code
-- app.workflow(name, tasks, on_error, output, success_policy) -> WorkflowSpec
+- app.workflow(name, tasks, on_error, output, success_policy, *, definition_key) -> WorkflowSpec (definition_key is required; a WorkflowDefinition class supplies it)
 - @app.workflow_builder(cases=[...]) -> decorator; registers a WorkflowSpec builder for `horsies check` validation
 - app.discover_tasks(["myapp.tasks", "myapp.workflows"]) -> register modules for import
 - app.expand_module_globs(["src/**/*_tasks.py"]) -> list[str] (resolve glob patterns)
@@ -44,7 +44,10 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - cluster_wide_cap: int | None (max RUNNING tasks across cluster)
 - prefetch_buffer: int (0 = hard cap, >0 = soft cap with lease)
 - claim_lease_ms: int | None (required when prefetch_buffer > 0)
+- max_claim_renew_age_ms: int
+- payload: PayloadPolicy
 - recovery: RecoveryConfig
+- retention: RetentionConfig
 - resilience: WorkerResilienceConfig
 - schedule: ScheduleConfig | None
 - exception_mapper: ExceptionMapper (global {ExceptionClass: "ERROR_CODE"})
@@ -53,11 +56,22 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Every config model (AppConfig, its nested configs, ScheduleConfig and the schedule patterns) refuses unknown keys: ValidationError type extra_forbidden
 
 ### PostgresConfig
-- database_url: str (must start with "postgresql+psycopg://")
+- database_url: SecretStr (must start with "postgresql+psycopg://")
 - session_database_url: str | None (direct/session-capable URL for schema setup and LISTEN/NOTIFY)
 - pgbouncer_transaction_mode: bool (default False; disables prepared statements for transaction-pooled PgBouncer)
-- pool_size: int (default 30)
-- max_overflow: int (default 30)
+- pool_size: int (default 5)
+- max_overflow: int (default 10)
+- worker_pool_size: int | None (default 3; None inherits pool_size)
+- worker_max_overflow: int | None (default 2; None inherits max_overflow)
+- worker_child_pool_min_size: int (default 0)
+- worker_child_pool_max_size: int (default 2)
+- worker_child_pool_check: bool (default True)
+- tcp_keepalives: bool (default True)
+- tcp_keepalives_idle: int (default 30)
+- tcp_keepalives_interval: int (default 10)
+- tcp_keepalives_count: int (default 3)
+- tcp_user_timeout_ms: int (default 30000; 0 uses the operating system default)
+- retain_rerun_input_default: bool (default False)
 - pool_timeout: int (default 30)
 - pool_recycle: int (default 1800)
 - pool_pre_ping: bool (default True)
@@ -130,7 +144,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
   get_worker_state_async(worker_id) -> BrokerResult[WorkerStateSnapshot | None],
   get_worker_state_history_async(worker_id, limit=None) -> BrokerResult[list[WorkerStateSnapshot]]
 - get_worker_stats was removed in 0.1.4; use list_worker_states_async (typed, includes idle workers)
-- Note: get_result_async still returns TaskResult[T, TaskError] (task execution result, not broker infra)
+- Note: app.get_result_async / app.get_result return BrokerResult[TaskResult[Any, TaskError]]: unwrap the outer Result first
 
 ### Result[T, E] (vendored Ok/Err type)
 - from horsies import Result, Ok, Err, is_ok, is_err
@@ -140,7 +154,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 ### @app.task Decorator
 - Decorated function must return TaskResult[T, TaskError]
 - Decorated function must be sync (def); an async def function raises HRS-106 at definition time
-- Options: task_name, queue_name, retry_policy, exception_mapper, default_unhandled_error_code
+- Options: task_name, queue_name, retry_policy, exception_mapper, default_unhandled_error_code, timeout_ms
 - good_until is NOT accepted at definition time (raises HRS-102) — use .with_options(good_until=...) at send time
 - Returns TaskFunction[P, T]
 
@@ -149,7 +163,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - .send(*args, **kwargs) -> TaskSendResult[TaskHandle[T]] (enqueue for background execution)
 - .send_async(*args, **kwargs) -> TaskSendResult[TaskHandle[T]] (async enqueue)
 - .schedule(delay_seconds, *args, **kwargs) -> TaskSendResult[TaskHandle[T]] (delayed enqueue)
-- .with_options(*, good_until=None) -> TaskSendOptions[P, T] (per-send options builder)
+- .with_options(*, good_until=None, idempotency_key=None, retention_class_key=<unset>) -> TaskSendOptions[P, T] (per-send options builder)
 - .retry_send(error: TaskSendRetryable) -> TaskSendResult[TaskHandle[T]] (retry failed send with stored payload)
 - .retry_send_async(error: TaskSendRetryable) -> TaskSendResult[TaskHandle[T]] (async retry)
 - .retry_schedule(error: TaskSendRetryable) -> TaskSendResult[TaskHandle[T]] (retry failed schedule with stored payload)
@@ -157,7 +171,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - .task_name -> str
 
 ### TaskSendOptions[P, T] (per-send options)
-- Returned by task.with_options(good_until=deadline)
+- Returned by task.with_options(good_until=None, idempotency_key=None, retention_class_key=<unset>)
 - .send(*args, **kwargs) -> TaskSendResult[TaskHandle[T]]
 - .send_async(*args, **kwargs) -> TaskSendResult[TaskHandle[T]]
 - .schedule(delay, *args, **kwargs) -> TaskSendResult[TaskHandle[T]]
@@ -392,11 +406,10 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Per-task: @app.task("name", exception_mapper={TimeoutError: "TIMEOUT"})
 
 ### RetryPolicy
-- RetryPolicy.fixed([60, 120, 300], auto_retry_for=["ERROR_CODE", ...])
-- RetryPolicy.exponential(base_seconds=1, max_retries=3, auto_retry_for=["ERROR_CODE", ...])
+- RetryPolicy.fixed(intervals, *, auto_retry_for, jitter) e.g. RetryPolicy.fixed([60, 120, 300], auto_retry_for=["ERROR_CODE", ...]); the length of intervals is the retry count
+- RetryPolicy.exponential(base_seconds, *, max_retries, auto_retry_for, jitter, max_delay_seconds=None)
 - auto_retry_for: required list of error codes that trigger retries
-- jitter: bool (default True, +-25% randomization)
-- Fixed: intervals length must equal max_retries
+- jitter: bool (default True, adds a random 0-25% to each delay; never shortens)
 - Exponential: exactly one base interval, delay = base * 2^(attempt-1)
 
 ### RecoveryConfig
@@ -407,11 +420,29 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - check_interval_ms: int (default 30_000, range 1s-10min)
 - runner_heartbeat_interval_ms: int (default 30_000, range 1s-2min)
 - claimer_heartbeat_interval_ms: int (default 30_000, range 1s-2min)
-- heartbeat_retention_hours: int | None (default 24, range 1-8760, None disables pruning)
-- worker_state_retention_hours: int | None (default 168 / 7 days, range 1-8760, None disables pruning)
-- terminal_record_retention_hours: int | None (default 720 / 30 days, range 1-43800, None disables pruning)
+- auto_terminate_orphaned_workflow_tasks: bool (default True)
+- finalizing_stale_threshold_ms: int (default 300_000, range 1s-2hr)
+- crashed_worker_recovery_grace_ms: int (default 10_000, range 0-1hr; 0 disables)
+- orphan_task_audit_interval_ms: int (default 60_000, range 1s-24hr)
+- worker_state_snapshot_interval_ms: int (default 30_000, range 1s-5min)
+- phase2_quarantine_after_attempts: int (default 25, range 3-1000)
+- workflow_recovery_failure_limit: int (default 25, range 3-1000; reaper passes in which the recovery of a workflow may raise a persistent error before the workflow fails with WORKFLOW_RECOVERY_LIMIT_REACHED)
 - Constraint: stale thresholds must be >= 2x heartbeat intervals
-- Reaper prunes heartbeats, worker_states, and terminal task/workflow rows hourly based on retention settings
+- Retention fields are not on RecoveryConfig; setting heartbeat_retention_hours (removed in 0.5.0) or a retention field here fails at construction
+
+### RetentionConfig
+- Reached as AppConfig.retention
+- paused_workflow_auto_cancel_after: timedelta | None (default None)
+- worker_state_retention_hours: int | None (default 168 / 7 days, range 1-8760, None disables pruning)
+- terminal_record_retention_hours: int | None (default 720 / 30 days, range 1-43800, None disables pruning; applies to terminal workflow rows)
+- history_leaf_horizon_days: int (default 3, range 2-14)
+- heartbeat_leaf_horizon_hours: int (default 6, range 2-48)
+- partition_maintenance_interval_s: int (default 900, range 60-3600)
+- retention_sweep_interval_s: int (default 300, range 30s-24h)
+- retention_delete_batch_size: int (default 500, range 50-10000)
+- retention_classes: tuple[RetentionClassConfig, ...] (default ())
+- queue_retention: dict[str, timedelta | None] (default {})
+- Terminal task records are removed by partition drop, not by row delete
 
 ### WorkerResilienceConfig
 - db_retry_initial_ms: int (default 500, range 100ms-60s)
@@ -464,11 +495,12 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - name: str (unique schedule identifier)
 - task_name: str (registered task name)
 - pattern: SchedulePattern
-- args: tuple, kwargs: dict (task arguments)
+- kwargs: dict (task keyword arguments; schedules are kwargs-only)
 - queue_name: str | None
 - enabled: bool (default True)
 - timezone: str (default "UTC")
 - catch_up_missed: bool (default False)
+- max_catch_up_runs: int (default 100, 1-10000)
 
 #### ScheduleConfig
 - enabled: bool (default True)
@@ -483,9 +515,12 @@ making web request, local will cost you less tokens and greater knowledgebase at
   - Phase 1: Config validation (implicit at AppConfig construction)
   - Phase 2: Task module imports — imports each module, collects import/definition errors
   - Phase 3: Workflow validation — triggered during imports (WorkflowSpec DAG construction)
-  - Phase 4: Workflow builders — executes @app.workflow_builder functions, validates returned specs, detects undecorated builders (HRS-030)
-  - Phase 5: Runtime policy safety — validates retry/exception-mapper policy metadata
-  - Phase 6 (--live only): Broker connectivity — async SELECT 1 against PostgreSQL
+  - Phase 3.1: WorkflowDefinition class validation — imported definitions must declare definition_key
+  - Phase 3.2: Workflow builders — executes @app.workflow_builder functions under send suppression and validates returned specs
+  - Phase 3.3: Undecorated builder detection (HRS-030)
+  - Phase 3.5: Runtime policy safety — validates retry/exception-mapper policy metadata
+  - Phase 3.6: Schedule validation — validates timezone, task registration, queue, and the kwargs wire contract of each enabled schedule; skipped for the worker role
+  - Phase 4 (--live only): Broker connectivity — async SELECT 1 against PostgreSQL
 - Guarantee model:
   - Strong: @app.workflow_builder decorated functions are fully executed and validated for exercised builder cases
   - Best-effort: undecorated builder detection (HRS-030) is heuristic — only scans directly discovered modules
@@ -624,14 +659,16 @@ Registry (HRS-300-HRS-399):
 
 ### Terminal State Constants
 - TASK_TERMINAL_STATES: frozenset[TaskStatus] = {COMPLETED, FAILED, CANCELLED, EXPIRED}
-- WORKFLOW_TERMINAL_STATES: frozenset[WorkflowStatus] = {COMPLETED, FAILED, CANCELLED}
+- WORKFLOW_TERMINAL_STATES: frozenset[WorkflowStatus] = {COMPLETED, FAILED, CANCELLED, EXPIRED}
 - WORKFLOW_TASK_TERMINAL_STATES: frozenset[WorkflowTaskStatus] = {COMPLETED, FAILED, SKIPPED}
 
 ### CLI Commands
-- `horsies worker <module> [--processes N] [--loglevel LEVEL] [--max-claim-batch N] [--max-claim-per-worker N] [--max-tasks-per-child N] [--max-memory-per-child-mb N]`
-  - `--max-tasks-per-child N` — recycle each child process after N tasks (default 100; `>= 2`, or `0` to disable; forces the `spawn` start method)
-  - `--max-memory-per-child-mb N` — recycle a child after its own RSS reaches N MB (default off; positive int; CPython-only; forces `spawn`; the worker refuses to start if N is at or below the warmed child baseline)
+- `horsies worker <module> [--processes N] [--loglevel LEVEL] [--max-claim-batch N] [--max-claim-per-worker N] [--max-tasks-per-child N] [--max-memory-per-child-mb N] [--drain-timeout SECONDS] [--child-preload library|app|none]`
+  - `--max-tasks-per-child N` — recycle each child process after N tasks (default 100; `>= 1`, or `0` to disable)
+  - `--max-memory-per-child-mb N` — recycle a child after its own RSS reaches N MB (default off; positive int; the worker refuses to start if N is at or below the warmed child baseline)
   - When both are set, a child is recycled when either limit is reached
+  - `--drain-timeout SECONDS` — seconds to wait for running tasks at shutdown (default 300; finite, `> 0`); then the worker kills their children
+  - `--child-preload MODE` — what a Linux worker imports once before it forks children (default `library`). `library`: library code. `app`: library and app, so children share module state; the worker refuses to start if the import leaves a Python thread or a socket. `none`: every child starts with `exec`. Other platforms always use `exec`
 - `horsies scheduler <module> [--loglevel LEVEL]`
 - `horsies check <module> [--live] [--loglevel LEVEL]`
 - `horsies web <module> [--host HOST] [--port PORT] [--auth none|trusted-header] [--trusted-header HEADER] [--enable-actions] [--loglevel LEVEL]` — serve the monitoring web UI (requires the `horsies[web]` extra)
@@ -645,7 +682,7 @@ Registry (HRS-300-HRS-399):
 - Module format: `myapp.config:app` (dotted:attr) or `app/config.py:app` (file:attr)
 - Auto-discovery: if module has exactly one Horsies instance, `:name` can be omitted
 - Exit codes: 0 = success, 1 = error, 2 = bad invocation (argument error)
-- Signals: SIGTERM/SIGINT for graceful shutdown (workers wait for running tasks)
+- Signals: SIGTERM/SIGINT for graceful shutdown (workers wait up to --drain-timeout seconds (default 300) for running tasks, then kill their children)
 - Both worker and scheduler run app.check() at startup; fail with ValidationReport if errors
 
 ## Docs Sitemap
@@ -693,7 +730,7 @@ Each entry: Title -- summary -> URL
 - Retention Config -- record lifetime, retention classes, per-queue retention, partition upkeep -> /horsies/configuration/retention-config/
 
 ### Workers
-- Worker Architecture -- process pool model -> /horsies/workers/worker-architecture/
+- Worker Architecture -- worker-owned child processes -> /horsies/workers/worker-architecture/
 - Concurrency -- worker/queue/cluster limits -> /horsies/workers/concurrency/
 - Heartbeats & Recovery -- crash detection -> /horsies/workers/heartbeats-recovery/
 - Child-Process Hooks -- per-child-process setup with @app.on_child_process_start -> /horsies/workers/child-process-hooks/
@@ -729,13 +766,13 @@ Each entry: Title -- summary -> URL
 
 ### Internals
 - Database Schema -- PostgreSQL tables -> /horsies/internals/database-schema/
-- Operational Indexes -- opt-in DDL for history queries the shipped schema does not index -> /horsies/internals/operational-indexes/
 - Performance -- measured per-statement latencies of the hot path -> /horsies/internals/performance/
 - Serialization -- JSON codec for args/results -> /horsies/internals/serialization/
 
 ### Migrations
 - Migrating to 0.1.2 -- strict-serde breaking changes from 0.1.1 -> /horsies/migrations/migration-to-0-1-2/
 - Migrating to 0.5.0 and 0.5.2 -- live/history split (schema v34), offline cutover, offline schema v35 upgrade -> /horsies/migrations/migration-to-0-5-0/
+- Migrating to 0.6.0 -- stop-all upgrade rule, schema v52, new settings and flags, required code changes -> /horsies/migrations/migration-to-0-6-0/
 
 ### Changelog
 - Changelog -- notable changes per release -> /horsies/changelog/
@@ -773,11 +810,11 @@ WorkflowDefinition, class-based workflow, build, build_with -> /horsies/concepts
 ExceptionMapper, exception_mapper, error code mapping -> /horsies/tasks/error-handling/
 good_until, task expiry, deadline, with_options, TaskSendOptions -> /horsies/tasks/sending-tasks/
 schedule, delay, TaskFunction.schedule, resend_on_transient_err -> /horsies/tasks/sending-tasks/
-worker, process pool, claim, execute -> /horsies/workers/worker-architecture/
+worker, child process, claim, execute -> /horsies/workers/worker-architecture/
 concurrency, max_concurrency, cluster_wide_cap, prefetch -> /horsies/workers/concurrency/
 heartbeat, crash, stale, worker recovery -> /horsies/workers/heartbeats-recovery/
 syce, dashboard, TUI, monitor -> /horsies/monitoring/syce-overview/
-get_queue_stats, get_worker_states, broker methods -> /horsies/monitoring/broker-methods/
+list_worker_states, get_worker_state, broker methods -> /horsies/monitoring/broker-methods/
 TaskInfo, retry_count, next_retry_at, task metadata -> /horsies/monitoring/broker-methods/
 BrokerResult, BrokerOperationError, BrokerErrorCode, retryable, Ok, Err, Result -> /horsies/monitoring/broker-methods/
 ScheduleConfig, TaskSchedule, IntervalSchedule, DailySchedule -> /horsies/scheduling/schedule-config/
@@ -810,10 +847,10 @@ atomic enqueue, send after commit, transaction, topology, separate database, ide
 deploy, rolling deploy, rename task, remove task, rename parameter, in-flight rows, WORKER_SERIALIZATION_ERROR, WORKER_RESOLUTION_ERROR, SUBWORKFLOW_LOAD_FAILED, RESULT_DESERIALIZATION_ERROR, definition_key -> /horsies/operations/deploying-code-changes/
 testing, pytest, unit test, direct call, WorkflowContext.from_serialized, HORSIES_SUPPRESS_SENDS, TaskSendSuppressed, SEND_SUPPRESSED -> /horsies/operations/testing/
 PgBouncer, transaction pooling, pgbouncer_transaction_mode -> /horsies/troubleshooting/pgbouncer/
-operational indexes, history queries, opt-in DDL -> /horsies/internals/operational-indexes/
 performance, latency, hot path, statement cost -> /horsies/internals/performance/
 migration 0.1.2, strict serde, upgrade from 0.1.1 -> /horsies/migrations/migration-to-0-1-2/
 migration 0.5.0, live/history split, offline cutover, schema v35 -> /horsies/migrations/migration-to-0-5-0/
+migration 0.6.0, upgrade from 0.5.x, schema v52, stop all processes -> /horsies/migrations/migration-to-0-6-0/
 start once, idempotent start, deterministic workflow_id, uuid5, WORKFLOW_ID_CONFLICT, WorkflowStartIdConflict -> /horsies/guides/start-workflow-once/
 FastAPI, lifespan, ASGI, async framework, close_async, ASYNC_CONTEXT, EVENT_LOOP_LIMIT -> /horsies/guides/async-frameworks/
 dynamic fan-out, runtime-built child, build_with, args_from, SubWorkflowNode -> /horsies/concepts/workflows/subworkflows/

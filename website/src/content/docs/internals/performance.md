@@ -1,7 +1,7 @@
 ---
 title: Performance
 summary: Measured per-statement latencies of the hot path under a real workload shape, and what governs them.
-related: [../../questions-and-answers, database-schema, operational-indexes]
+related: [../../questions-and-answers, database-schema]
 tags: [internals, performance, latency, postgres]
 ---
 
@@ -16,7 +16,6 @@ across the top 20 by execution count.
 | Cap-serialization advisory lock | 902,184 | 0 ms | 0 ms |
 | NOTIFY dispatch triggers | 260,248 | 0 ms | 0 ms |
 | Claim function (`horsies_claim`) | 150,417 | 1 ms | 2 ms |
-| Attempt-history retention delete | 37,478 | 0 ms | 1 ms |
 | Heartbeat insert | 36,765 | 0 ms | 1 ms |
 | Finalize fence update | 35,923 | 0 ms | 1 ms |
 | Task enqueue insert | 31,412 | 1 ms | 2 ms |
@@ -48,3 +47,16 @@ Results scale with the Postgres instance: a PlanetScale Postgres and a
 Heroku Postgres will not perform the same, and a transaction-pooled
 connection path taxes every round trip. Deployment guidance:
 [Throughput expectations](../../questions-and-answers#throughput-expectations-and-comparisons).
+
+## Worker Start Paths
+
+Drain throughput in tasks/s from first progress, median of 3 alternating runs. Conditions: 10,000 no-op tasks, 8 children, a 6 vCPU Linux VM, Postgres 18 on tmpfs. 36 runs, 0 failed tasks. No disk write cost is included, so compare the columns, not the absolute values.
+
+| Claim mode | `max_tasks_per_child` | `--child-preload=none` | `library` | `app` |
+| ---------- | --------------------- | ---------------------- | --------- | ----- |
+| Hard cap | 0 | 819 | 853 | 855 |
+| Hard cap | 100 (default) | 437 | 803 | 785 |
+| Prefetch 8 | 0 | 1,121 | 1,189 | 1,150 |
+| Prefetch 8 | 100 (default) | 484 | 1,032 | 1,058 |
+
+A recycle replaces one child, so its cost shows in the `max_tasks_per_child=100` rows.

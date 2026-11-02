@@ -2,16 +2,16 @@
 title: Child-Process Hooks
 summary: Per-child-process initialization with @app.on_child_process_start, for app-owned engine disposal and worker-specific pool policy.
 related: [worker-architecture, ../configuration/app-config]
-tags: [workers, hooks, connections, pooling, fork, spawn]
+tags: [workers, hooks, connections, pooling]
 ---
 
 `@app.on_child_process_start` registers a sync function that runs once in every worker child process: after task-module imports (so app engines exist) and before the child opens horsies' own connection pool. It is the supported seam for application-owned per-child setup — the equivalent of Celery's `worker_process_init` signal and Dramatiq's `after_process_boot` middleware.
 
 ## Why and When
 
-A horsies worker runs task code in N child processes. Application code commonly holds its own module-level SQLAlchemy engine, separate from horsies' broker. SQLAlchemy's `QueuePool` has no idle eviction, so each child retains its pool's connections for the life of the process: the app-owned connection floor plateaus at one pool per child and never drains. On fork, children additionally inherit the parent's engine state, which SQLAlchemy requires disposing inside the child.
+A horsies worker runs task code in N child processes. Application code commonly holds its own module-level SQLAlchemy engine, separate from horsies' broker. SQLAlchemy's `QueuePool` has no idle eviction, so each child retains its pool's connections for the life of the process: the app-owned connection floor plateaus at one pool per child and never drains.
 
-Use the hook to set a worker-specific pool policy (e.g. a warm pool for web traffic, `NullPool` or a tiny pool in worker children) and to dispose inherited engines. Without it, neither is reliably possible: under fork the engine is built in the parent and inherited, so module-level construction never re-runs in the child.
+Use the hook to set a worker-specific pool policy (e.g. a warm pool for web traffic, `NullPool` or a tiny pool in worker children). The hook runs in the child, so the child can build its own engine with a policy that differs from the web process.
 
 ## How To
 
@@ -45,11 +45,13 @@ from app.databases import postgres
 @app.on_child_process_start
 def reset_db_for_child() -> None:  # idempotent, sync
     if postgres._app_engine is not None:
-        postgres._app_engine.dispose(close=False)  # fork-safety: drop inherited FDs
+        postgres._app_engine.dispose()  # close connections opened during import
     postgres._app_engine = postgres._build_engine(worker_child=True)
 ```
 
-Hooks run in registration order and fire on every child start, including executor restarts — bodies must be idempotent. Register hooks in the app module or a discovered task module; a module the child never imports cannot fire its hooks under spawn.
+Hooks run in registration order and fire on every child start, including replacement children — bodies must be idempotent. Register hooks in the app module or a discovered task module; a module the child never imports cannot fire its hooks.
+
+With `--child-preload=app`, your app module runs once, in the preload parent, before any child exists. Hooks still run in every child, so build per-child engines in the hook, and do not open a connection at import: the worker refuses to start if the import leaves a socket. Build clients of native libraries, such as gRPC, in the hook too: the guard does not see their threads.
 
 ### Pool policy
 

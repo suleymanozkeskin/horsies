@@ -1,7 +1,7 @@
 ---
 title: Architecture
 summary: System design, components, and data flow.
-related: [task-lifecycle, ../../workers/worker-architecture, ../../internals/postgres-broker]
+related: [task-lifecycle, ../../workers/worker-architecture]
 tags: [concepts, architecture, design]
 ---
 
@@ -16,7 +16,7 @@ The system consists of four main components:
 
 1. **Producer**: Application code that sends tasks via `.send()` or `.send_async()`
 2. **PostgreSQL Broker**: Stores tasks, results, and coordinates via LISTEN/NOTIFY
-3. **Worker**: Claims and executes tasks in a process pool
+3. **Worker**: Claims tasks and executes them in child processes
 4. **Scheduler**: (Optional) Enqueues tasks on a schedule
 
 ## Component Relationships
@@ -50,13 +50,14 @@ Unlike Celery (which typically uses Redis or RabbitMQ), horsies uses PostgreSQL 
 - **Coordination**: Advisory locks prevent race conditions
 - **State tracking**: Heartbeats and worker states are database tables
 
-### Process Pool Execution
+### Child Process Execution
 
-Workers use Python's `ProcessPoolExecutor` rather than threads:
+Workers run tasks in child processes that they own, rather than threads:
 
 - Each task runs in an isolated child process
 - GIL contention is avoided for CPU-bound tasks
-- Crashed tasks don't take down the worker
+- A crashed or timed-out task takes down only its own child
+- On Linux, children fork from a preload parent, so they start in milliseconds and share memory
 - Child processes send their own heartbeats
 
 ### Type-Safe Results
@@ -121,7 +122,7 @@ unavailable.
 
 1. Worker receives NOTIFY and wakes
 2. Worker claims task atomically
-3. Task dispatched to child process in the pool
+3. Task dispatched to the child process of a free slot
 4. Child process executes task function
 5. Result stored in database, status updated to `COMPLETED` or `FAILED`
 

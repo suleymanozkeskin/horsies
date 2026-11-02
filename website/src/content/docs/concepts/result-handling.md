@@ -50,11 +50,11 @@ match divide.send(a=10, b=2):
 
 ## TaskError Structure
 
-`TaskError` is a Pydantic model with optional fields:
+`TaskError` is a Pydantic model. `error_code` is required. The other fields are optional. A key that the model does not declare is refused.
 
 | Field | Type | Purpose |
 |-------|------|---------|
-| `error_code` | `str` or `BuiltInTaskCode` | Identifies the error type |
+| `error_code` | `str` or `BuiltInTaskCode` (required) | Identifies the error type |
 | `message` | `str` | Human-readable description |
 | `data` | `Any` | Additional context (dict, list, etc.) |
 | `exception` | `BaseException` or `FlattenedException` | Live exception in-process; flattened on the wire to `type`, `module`, `message`, `repr`, and `traceback` |
@@ -79,7 +79,7 @@ When the library itself encounters an error (not your task code), it uses one of
 | ---- | ---- |
 | `UNHANDLED_EXCEPTION` | Task raised an uncaught exception |
 | `TASK_EXCEPTION` | Task returned `None` instead of a `TaskResult`, or the worker caught an exception outside the task wrapper (for example `KeyboardInterrupt`) |
-| `WORKER_CRASHED` | Worker process died (detected via heartbeat) |
+| `WORKER_CRASHED` | A child process died (the worker sees it at once), or the worker died (detected via missing heartbeats) |
 | `BROKER_ERROR` | Broker failed while retrieving the result |
 | `WORKER_RESOLUTION_ERROR` | Worker couldn't find the task in registry |
 | `WORKER_SERIALIZATION_ERROR` | Result couldn't be serialized |

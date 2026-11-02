@@ -32,6 +32,7 @@ app = Horsies(config)
 | `payload` | `PayloadPolicy` | defaults | Payload-size guardrail (warn/reject thresholds) |
 | `recovery` | `RecoveryConfig` | defaults | Crash recovery settings |
 | `resilience` | `WorkerResilienceConfig` | defaults | Worker retry/backoff and notify polling |
+| `retention` | `RetentionConfig` | defaults | Record lifetime and partition coverage; see [Retention Config](retention-config) |
 | `schedule` | `ScheduleConfig` | `None` | Scheduled task configuration |
 | `exception_mapper` | `ExceptionMapper` | `ExceptionMapper()` | Maps exceptions to `TaskError` codes |
 | `default_unhandled_error_code` | `str` | `"UNHANDLED_EXCEPTION"` | Error code for uncaught exceptions |
@@ -225,6 +226,7 @@ See [Scheduler Overview](../../scheduling/scheduler-overview) for details.
 - CUSTOM mode requires non-empty `custom_queues`
 - DEFAULT mode must not have `custom_queues`
 - Queue names must be unique
+- Each queue name must be non-empty, must have no leading or trailing whitespace, and must be at most 100 characters (`ConfigurationError` `HRS-200`)
 - `cluster_wide_cap` must be positive if set
 - `prefetch_buffer` must be non-negative
 - `claim_lease_ms` is required when `prefetch_buffer > 0`

@@ -41,7 +41,7 @@ Every guarantee horsies makes is a Postgres primitive:
 - **Recovery**: all state is rows and timestamps; the reaper reconstructs and repairs after a worker dies mid-flight — nothing in-flight exists only in a broker's memory.
 - **Workflows**: fan-in resolution, completion checks, subworkflow cascades, and orphan self-heal are multi-row transitions under a documented lock order.
 - **Dispatch**: LISTEN/NOTIFY push — no polling loop between enqueue and execution.
-- **Inspection**: task history is plain tables — SQL, `EXPLAIN`, your existing backups. See [operational indexes](../internals/operational-indexes) for query-shape guidance.
+- **Inspection**: task history is plain tables — SQL, `EXPLAIN`, your existing backups. See [Database Schema](../internals/database-schema) for the tables.
 
 A message broker can approximate the first three with visibility timeouts and acks; it cannot express them as invariants. That is the reason for the Postgres requirement, operating one less service is absolutely not a selling point. In fact, we strongly recommend running a dedicated Postgres instance for your worker.
 
@@ -131,6 +131,14 @@ Yes — and read the version number as an API-contract statement, not an engine-
 - Failure-path-first testing: crash recovery, claim fencing, cancel/completion races, rolling-upgrade behavior, and query-plan pinning (`EXPLAIN ANALYZE` assertions on the hot-path statements).
 - The claim/finalize semantics are cross-validated against an independent Rust reimplementation of the engine.
 - A codebase with ~300 task definitions and recurring schedules, migrated off Celery, runs its full background workload on horsies.
+
+## What happens to other tasks when one task crashes or hangs?
+
+Nothing. Each task runs in its own child process, and the worker talks to each child over its own socket. A crash, an out-of-memory kill, or a timeout kill ends that child only. The other tasks finish, and the slot gets a new child. See [Failure Isolation](../workers/worker-architecture#failure-isolation).
+
+## How much memory does a worker use?
+
+It depends on your app. On Linux, a preload parent imports code once and forks each child, so children share those pages. With 4 children, the whole worker at start measured 159 MiB on a small app and 342 MiB on an app with pandas, against 290 MiB and 445 MiB with `--child-preload=none`. With `--child-preload=app`, the pandas app measured 212 MiB. See [Preload Parent](../workers/worker-architecture#preload-parent).
 
 ## Throughput expectations and comparisons
 

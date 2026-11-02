@@ -1,7 +1,7 @@
 ---
 title: Database Schema
-summary: PostgreSQL tables for live tasks, the task-history archive, heartbeats, worker states, and schedules (schema v35).
-related: [postgres-broker, operational-indexes, ../../configuration/broker-config, ../../migrations/migration-to-0-5-0]
+summary: PostgreSQL tables for live tasks, the task-history archive, heartbeats, worker states, and schedules (schema v52).
+related: [../../configuration/broker-config, ../../migrations/migration-to-0-5-0]
 tags: [internals, database, schema, PostgreSQL, task-history]
 ---
 
@@ -89,6 +89,23 @@ its recovery evidence preserved. The pending row's locator is tied to
 its workflow node with `ON DELETE CASCADE` — deleting a workflow removes
 its unconsumed evidence.
 
+`horsies_workflow_recovery_failures` holds the count of the workflow recovery
+limit: one row for each workflow whose recovery raised a persistent error. It
+has no foreign key. The retention pass deletes a row after its workflow is
+gone. See
+[Workflow recovery limit](../../configuration/recovery-config#workflow-recovery-limit).
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `workflow_id` | `uuid` | Primary key; the workflow that failed recovery |
+| `failed_passes` | `integer` | Count of failed passes, at least 1 |
+| `last_pass_id` | `uuid` | The last pass that counted |
+| `first_failed_at` | `timestamptz` | First failed pass |
+| `last_failed_at` | `timestamptz` | Last failed pass |
+| `last_case` | `varchar(64)` | Recovery case of the last failure |
+| `last_task_index` | `integer` | Task index of the last failure, when the failure names one |
+| `last_exception_type` | `varchar(255)` | Exception type of the last failure |
+
 ## horsies_task_attempts
 
 Per-attempt execution history **for live tasks**. One row per finished
@@ -144,7 +161,7 @@ Worker monitoring snapshots (timeseries). Each worker inserts one row per
 | `tasks_running` | INT | Current running count |
 | `tasks_claimed` | INT | Current claimed count |
 | `memory_usage_mb` | FLOAT | Parent worker process resident memory |
-| `children_memory_mb` | FLOAT | Summed resident memory of executor child processes |
+| `children_memory_mb` | FLOAT | Summed resident memory of the worker's child processes |
 | `cpu_percent` | FLOAT | CPU usage |
 | `memory_percent` | FLOAT | Memory usage percentage |
 | `max_claim_batch` | INT | Max tasks claimed per batch |
@@ -194,7 +211,7 @@ credentials accordingly.
 
 Tables are created by the broker's first initialization and evolved by
 the versioned migration chain (`horsies_schema_version` records the installed
-version; the current development schema is v35). The exact version and the
+version; the current schema is v52). The exact version and the
 `task_history_v1_validated_v1` row in `horsies_cutover_state` are both required
 after an offline upgrade; the integer watermark and the legacy
 `task_history_v1` row do not attest stage-6 validation. Creation is protected
@@ -216,7 +233,7 @@ coverage cron.
 Workflow-record deletes run in batches of `retention_delete_batch_size`
 rows (default 500), one transaction per batch; deleting a workflow also
 removes its unconsumed progression evidence (the cascade above). See
-[Recovery Config](../../configuration/recovery-config#retention-cleanup).
+[Retention Config](../../configuration/retention-config#row-delete-sweep).
 
 The partition-drop mechanism's cost character, measured with the
 mechanism as the only variable (the delete arm reproducing the

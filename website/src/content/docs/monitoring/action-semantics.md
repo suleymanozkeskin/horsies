@@ -1,13 +1,13 @@
 ---
 title: Action Semantics
-summary: Exactly what task cancel, task rerun, and workflow pause, resume, and cancel do to the rows and the processes behind them.
+summary: Exactly what task cancel, the `rerun_task` function, and workflow pause, resume, and cancel do to the rows and the processes behind them.
 related: [web-ui-overview, web-ui-deployment, ../concepts/task-lifecycle, ../concepts/workflows/workflow-api]
 tags: [monitoring, actions, cancel, rerun, pause, resume, workflow]
 ---
 
-Five actions are available from the monitoring API and the web UI: cancel and
-rerun a task, and pause, resume, and cancel a workflow run. Each acts on
-database rows. Two of them leave a process running afterwards, and this page
+Four actions are available from the web UI: task cancel, and workflow pause,
+resume and cancel. Each acts on database rows. Task rerun is the Python function
+`rerun_task`. The web UI has no rerun action. Two of them leave a process running afterwards, and this page
 states which and why.
 
 Every action is a compare-and-swap against the row's current status. Two

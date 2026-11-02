@@ -47,6 +47,8 @@ result = await handle.get_async()
 ```
 `get_async()` waits for broker notifications (LISTEN/NOTIFY) with a polling fallback if notifications are lost.
 
+Sync `get()` and `info()` called on a thread that runs an event loop return `ASYNC_CONTEXT` and do nothing. Use `get_async()` and `info_async()` there.
+
 ### Timeouts
 
 Specify maximum wait time in milliseconds:

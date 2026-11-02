@@ -1,7 +1,7 @@
 ---
 title: Workflows and Subworkflows
 summary: Defining, composing, and running workflows with SubWorkflowNode.
-related: [workflow-semantics, result-handling]
+related: [workflow-semantics, ../../concepts/result-handling]
 tags: [concepts, workflows, subworkflows, composition]
 ---
 
@@ -841,7 +841,7 @@ result = await handle.resume_async()
 
 When a parent workflow pauses:
 - Parent enters PAUSED state
-- Running child workflows receive pause signal
+- Every RUNNING child workflow, at any depth, moves to PAUSED
 - No new child workflows start
 
 When parent resumes:

@@ -106,10 +106,10 @@ error changes stored data. HTTP is the status of the web read routes.
 
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
-task_stats(broker, *, task_names, queues, workers, error_codes, error_categories, retried_only)
-task_facets(broker, *, statuses, retried_only)          # + error_categories scoping of the code list
-task_breakdown(broker, *, group_by, ..., limit)         # limit: BreakdownLimit; group_by: 'worker' | 'task_name' | 'queue'
-list_tasks(broker, *, statuses, ..., sort_by, sort_dir, page)  # page: TaskPage
+task_stats(broker, *, window, task_names, queues, workers, error_codes, error_categories, retried_only)
+task_facets(broker, *, window, statuses, retried_only)          # + error_categories scoping of the code list
+task_breakdown(broker, *, window, group_by, ..., limit)         # limit: BreakdownLimit; group_by: 'worker' | 'task_name' | 'queue'
+list_tasks(broker, *, window, statuses, ..., sort_by, sort_dir, page)  # page: TaskPage
 get_task_detail(broker, task_id)                        # Ok(TaskDetailNotFound) when absent
 list_workflow_names(broker)
 list_workflow_runs(broker, *, name, status, limit)      # limit: WorkflowRunsLimit
@@ -153,7 +153,7 @@ READ snapshot, so the live read and the history read see the same rows.
 | `NOT_CLASSIFIED` | The id is not a UUIDv7, no attached history partition has a birth, or the database has no staged history read |
 
 List and aggregate reads are **window-scoped** and take a `HistoryWindow`
-(`resolve_monitoring_window(since=..., until=...)` builds one): the default
+(`resolve_monitoring_window(since=..., until=...)`, from `horsies.monitoring.history_window`, builds one): the default
 is the last 24 hours (`MONITORING_WINDOW_DEFAULT`), the maximum span is 30
 days (`MONITORING_WINDOW_MAX`), and a request over the maximum is refused
 with the bound named — never silently clamped. Bounds must be
@@ -244,7 +244,12 @@ from horsies.monitoring import (
     WorkflowRunSummary, WorkflowNodeInfo, WorkflowEdge, WorkflowRunDetail,
     WorkflowTaskDetail, WorkerStateInfo, WorkerPingInfo, LivenessReport,
     ScheduleStateInfo, WorkerHistoryPoint,
+    # Page, limit and absence types
+    TaskPage, BreakdownLimit, WorkflowRunsLimit,
+    TaskDetailNotFound, TaskAbsenceReason, PageRefused,
 )
+
+from horsies.monitoring.history_window import resolve_monitoring_window
 
 from horsies.web import (  # requires horsies[web]
     create_monitoring_app, MonitoringUIConfig,

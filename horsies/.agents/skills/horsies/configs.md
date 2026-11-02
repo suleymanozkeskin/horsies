@@ -377,7 +377,7 @@ config = AppConfig(
 
 | Field | Type | Default | Range | Description |
 |---|---|---|---|---|
-| `name` | `str` | required | — | Unique queue name |
+| `name` | `str` | required | — | Unique queue name; non-empty, no leading or trailing whitespace, at most 100 characters (HRS-200) |
 | `priority` | `int` | `1` | 1–100 | 1 = highest, 100 = lowest |
 | `max_concurrency` | `int \| None` | `5` | `>= 0` | Max simultaneous RUNNING tasks for this queue. `None` = uncapped (omitted from the worker's per-queue counting entirely); `0` = pause claiming; negative rejected |
 
@@ -779,9 +779,11 @@ Phases are fail-fast: errors in phase N stop later phases.
 | 1 — Config | `AppConfig` Pydantic validators (implicit — already validated at construction) | HRS-200–HRS-209, HRS-213, HRS-215, HRS-216 |
 | 2 — Imports | Import each discovered module | ImportError, HRS-210 |
 | 3 — Workflows | `WorkflowSpec` DAG validation during imports | HRS-001–HRS-031, HRS-033–HRS-035 |
-| 3.1 — Builders | Execute `@app.workflow_builder` functions | HRS-027–HRS-030 |
-| 3.2 — Undecorated | Scan for functions returning WorkflowSpec without decorator | HRS-030 |
+| 3.1 — Definitions | Validate imported `WorkflowDefinition` classes (each declares `definition_key`) | HRS-016 |
+| 3.2 — Builders | Execute `@app.workflow_builder` functions | HRS-027–HRS-030 |
+| 3.3 — Undecorated | Scan for functions returning WorkflowSpec without decorator | HRS-030 |
 | 3.5 — Policies | Re-validate exception_mapper after imports | HRS-209 |
+| 3.6 — Schedules | Validate timezone, task registration, queue and kwargs wire contract of each enabled schedule (not run for workers) | — |
 | 4 — Broker | `SELECT 1` against PostgreSQL (`--live` only) | HRS-211, Connection error |
 
 **Guarantee model:**

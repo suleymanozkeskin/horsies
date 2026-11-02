@@ -117,7 +117,7 @@ Each method has a sync variant with the same name minus the `_async` suffix (it 
 | `timeout_seconds` | `float` | `2.0` | Collection window; must be positive |
 | `min_responses` | `int \| None` | `None` | Return as soon as this many distinct workers reply. `None` waits the full window. Must be `>= 1` when set |
 
-**Returns:** `Ok(list[WorkerPong])` — one entry per responding (distinct) worker, possibly empty. Each `WorkerPong` has `worker_id`, `hostname`, `pid`, `round_trip_ms`. `Err` with code `WORKER_PING_FAILED` on non-positive `timeout_seconds`, `min_responses < 1`, or reply-channel failure.
+**Returns:** `Ok(list[WorkerPong])` — one entry per responding (distinct) worker, possibly empty. Each `WorkerPong` has `worker_id`, `hostname`, `pid`, `round_trip_ms`. `Err` with code `INVALID_INPUT` on non-positive `timeout_seconds` or `min_responses < 1`; `Err` with code `WORKER_PING_FAILED` on reply-channel failure.
 
 ### `list_worker_states_async() -> BrokerResult[list[WorkerStateSnapshot]]`
 
@@ -136,7 +136,7 @@ Snapshot timeseries for one worker, newest first.
 | `worker_id` | `str` | — | Worker instance id |
 | `limit` | `int \| None` | `None` | Max rows; `None` returns all retained rows. Must be positive when set |
 
-**Returns:** `Ok(list[WorkerStateSnapshot])`; `Err(MONITORING_QUERY_FAILED)` on failure or non-positive `limit`.
+**Returns:** `Ok(list[WorkerStateSnapshot])`; `Err(INVALID_INPUT)` on non-positive `limit`; `Err(MONITORING_QUERY_FAILED)` on query failure.
 
 ### `WorkerStateSnapshot` fields
 
@@ -146,7 +146,7 @@ Snapshot timeseries for one worker, newest first.
 | `snapshot_at` | `datetime` | When the snapshot was taken |
 | `hostname` | `str` | Worker host |
 | `pid` | `int` | Worker process id |
-| `processes` | `int` | Process pool size |
+| `processes` | `int` | Child process count |
 | `max_claim_batch` | `int` | Claim batch size |
 | `max_claim_per_worker` | `int` | Per-worker claim cap |
 | `cluster_wide_cap` | `int \| None` | Cluster-wide concurrency cap, if set |
@@ -159,12 +159,12 @@ Snapshot timeseries for one worker, newest first.
 | `memory_usage_mb` | `float \| None` | Parent worker process resident memory (psutil) |
 | `memory_percent` | `float \| None` | Memory percent (psutil) |
 | `cpu_percent` | `float \| None` | CPU percent (psutil) |
-| `children_memory_mb` | `float \| None` | Summed resident memory of the executor child processes |
+| `children_memory_mb` | `float \| None` | Summed resident memory of the worker's child processes |
 | `worker_started_at` | `datetime` | Worker process start time |
 
 ### Embedded health payloads
 
-`recovery_config` carries three operational payloads beside the
+`recovery_config` carries four operational payloads beside the
 configuration snapshot, refreshed with each snapshot:
 
 - `partition_coverage` — the last coverage-ensure outcome: `state`
@@ -189,9 +189,12 @@ configuration snapshot, refreshed with each snapshot:
   `over_failure_limit` counts the `RUNNING` workflows at or over the limit:
   a live node holds such a workflow, and so does a limit write that fails.
 
-`memory_usage_mb` is the **parent** process only. Task code runs in the executor
+`memory_usage_mb` is the **parent** process only. Task code runs in the worker's
 children, so per-child memory growth is invisible there; `children_memory_mb`
 captures it. The platform memory quota (e.g. Heroku R14) is measured against the
-whole process tree, so use `memory_usage_mb + children_memory_mb` to track the
-footprint that quota enforces. To bound it, see
+whole process tree. `children_memory_mb` sums RSS, so with a
+[preload parent](../workers/worker-architecture#preload-parent) it counts each
+shared page once per child, and it reads above real use. Use it to see one child
+grow, and read the container or cgroup total for the footprint that the quota
+enforces. To bound it, see
 [`--max-tasks-per-child`](../workers/concurrency).
