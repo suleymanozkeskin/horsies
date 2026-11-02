@@ -23,7 +23,7 @@ Each execution attempt is also recorded in `horsies_task_attempts` with per-atte
 | ----- | ---- | ----------- |
 | `error_code` | `BuiltInTaskCode \| str` | Required. Library or domain error code |
 | `message` | `str \| None` | Human-readable description |
-| `data` | `Any \| None` | Additional context (task_id, etc.) |
+| `data` | `JsonInput` on write, `JsonValue` on read | Additional context (task_id, etc.) |
 | `exception` | `BaseException \| FlattenedException \| None` | Live exception in-process; flattened to a `FlattenedException` TypedDict (`type`, `module`, `message`, `repr`, `traceback`) when serialized to the wire |
 
 `error_code` must not be null: `auto_retry_for` and outcome routing read it. `TaskError` refuses a key that it does not declare, at construction and at decode. `SubWorkflowError` adds `sub_workflow_id` and `sub_workflow_summary`, and it refuses any other key. A stored error with an unknown key, or without `error_code`, is stored data that does not parse: see [decode-error surfaces](../../internals/serialization#decoding-consumer-side).
@@ -40,7 +40,7 @@ Errors from task execution, broker, and worker internals.
 | Code | Description | Auto-Retry? |
 | ---- | ----------- | ----------- |
 | `UNHANDLED_EXCEPTION` | Uncaught exception in task code, wrapped to `UNHANDLED_EXCEPTION` by library  | Yes, if in `auto_retry_for` |
-| `TASK_EXCEPTION` | Task returned `None` instead of a `TaskResult`, or the worker caught an exception outside the task wrapper (for example `KeyboardInterrupt`). A raised exception in task code gives `UNHANDLED_EXCEPTION` | Yes, if in `auto_retry_for` |
+| `TASK_EXCEPTION` | The worker caught an exception outside the task wrapper, or a validator raised on a default | Yes, if in `auto_retry_for` |
 | `WORKER_CRASHED` | Worker process died during execution | Yes, if in `auto_retry_for` |
 | `BROKER_ERROR` | Database or broker failure during operation | No |
 | `WORKER_RESOLUTION_ERROR` | Failed to resolve task by name | No |
@@ -57,9 +57,11 @@ Errors from type/schema validation and structural contracts.
 <!-- members: ContractCode -->
 | Code | Description | Auto-Retry? |
 | ---- | ----------- | ----------- |
-| `RETURN_TYPE_MISMATCH` | Task return type doesn't match declaration | No |
+| `RETURN_TYPE_MISMATCH` | The task returned a value that does not fit its declared type, or something that is not a `TaskResult`, including `None` | Yes, if in `auto_retry_for` |
 | `NO_TYPE_AVAILABLE` | A successful result could not be decoded because the caller does not have the task's or workflow's declared success type locally registered | No |
 | `WORKFLOW_CTX_MISSING_ID` | Workflow context is missing required ID | No |
+
+A return that is not a `TaskResult` has `variant` `'not_a_task_result'`, an empty `validation_errors` and a count of 0. It no longer goes through `exception_mapper` or `default_unhandled_error_code`, so it is not retried unless a policy lists `RETURN_TYPE_MISMATCH`.
 
 `RETURN_TYPE_MISMATCH` does not store the returned value. `message` names the variant, the actual type, the expected type and the failing fields. `data` holds `variant`, `expected_type`, `actual_type`, `validation_errors` (at most 10 entries, each with `loc`, `msg` and `type`) and `validation_error_count`. `exception` is `None`. A validator whose error text holds a lone surrogate gives one `validation_errors` entry of type `lone_surrogate`, because pydantic cannot build that text.
 

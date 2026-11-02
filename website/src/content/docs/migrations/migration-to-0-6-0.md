@@ -14,6 +14,8 @@ For an operator, 0.6.0 changes four things:
 - A workflow whose recovery raises on every reaper pass now fails after `workflow_recovery_failure_limit` passes.
 - Schema v52 adds one empty table.
 
+For a developer, the type contract is strict at every boundary. See topic 13.
+
 Many error types, return values and codes changed. See [Required code changes](#required-code-changes).
 
 ## Upgrade rule
@@ -81,6 +83,8 @@ See [Worker Architecture](/horsies/workers/worker-architecture/) for the process
 
 Each topic below lists what to change and how to find it. The [changelog](/horsies/changelog/) has the full text of each change.
 
+Run `horsies check` first. The type contract refuses more shapes at definition, so a task or a model can stop registering. See topic 13.
+
 1. **Worker process model.**
    - Rename `ExecutorRestartFailedError` to `ChildStartFailedError`. There is no alias. `WarmupIncompleteError` and `MemoryRecycleUnsupportedError` are removed, and the worker no longer raises them.
    - Set libraries that read a setting at import, such as `PSYCOPG_IMPL`, in the process environment, not in a `.env` file that your app loads.
@@ -136,3 +140,11 @@ Each topic below lists what to change and how to find it. The [changelog](/horsi
     - A `WorkflowDefinition` sets options with `config = WorkflowDefinitionConfig(...)`. A nested `class Meta` raises `HRS-033`.
     - The agent skill files are in `horsies/.agents/skills/horsies/`. Install them with `horsies skills install --target DIR`.
     - `horsies get-docs` downloads the docs of the release tag. Pass `--ref main` for the `main` branch.
+13. **Strict type contract.**
+    - Run `horsies check`. A task or a model that uses a refused shape no longer registers, so a worker does not start until it changes. The list is in [Shapes Refused at Definition](/horsies/internals/serialization/#shapes-refused-at-definition): `Field(exclude=True)`, `exclude_if`, `extra='allow'`, `PlainValidator`, `WrapValidator`, `SkipValidation`, a schema hook, `Json[T]`, an alias whose written key does not read back, `Literal` with a plain `Enum`, a default that does not hold its type (`n: int = None`).
+    - A conversion is refused at `.send()`, in a schedule and on a return: `"7"` for an `int`, a str for a `datetime`, `Enum`, `UUID` or `Decimal`. Pass the value of the declared type. Schedule kwargs hold Python values, so write the real value there too.
+    - `.send()` refuses a missing required argument and an unknown key at any depth. A subclass with fields that the declared type lacks is refused.
+    - Each `build_with` that a `SubWorkflowNode` targets follows the task rules: `Any` and bare `dict` parameters are refused, and its hints must resolve. `WorkflowDefinition[Any]` cannot feed `args_from` or be an output.
+    - A return that is not a `TaskResult`, including `None`, gives `RETURN_TYPE_MISMATCH`, not `UNHANDLED_EXCEPTION` or `TASK_EXCEPTION`. A policy with `auto_retry_for=['TASK_EXCEPTION']` no longer retries a forgotten `return`.
+    - `TaskError.data` must be JSON-native. A `Decimal`, a `datetime` or a tuple becomes `{'data_refused': <cause>}`. Convert with `str()`, `.isoformat()` or `list()`.
+    - Stored rows are read strictly. A result that an earlier version stored with a value outside a return constraint, with a serializer that changes the JSON type, or deeper than 200 levels, reads as `RESULT_DESERIALIZATION_ERROR` until retention removes it (30 days by default). A queued task of that shape fails with `WORKER_SERIALIZATION_ERROR`. Before the upgrade, drain the queues of a task with such a type.

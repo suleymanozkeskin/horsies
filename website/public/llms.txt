@@ -97,7 +97,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 ### TaskError
 - error_code: str | BuiltInTaskCode (required, not null)
 - message: str | None
-- data: Any | None
+- data: takes JsonInput, gives JsonValue. No check runs at construction. A value that cannot cross the wire becomes {'data_refused': <cause>}, and the code stays
 - exception: dict[str, Any] | BaseException | None
 - Unknown keys are refused, at construction and at decode
 

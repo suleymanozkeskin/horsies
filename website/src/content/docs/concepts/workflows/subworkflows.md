@@ -260,6 +260,17 @@ class AggregationWorkflow(WorkflowDefinition[Summary]):
 
 ---
 
+
+## `build_with` Parameters
+
+The kwargs of a `SubWorkflowNode` are stored and read back, so each `build_with` that a node targets follows the rules of a task signature: `Any` and bare `dict` parameters are refused, and so is each shape in [Shapes Refused at Definition](/horsies/internals/serialization/#shapes-refused-at-definition). The first two parameters are the class and the app, and their names are free. `*args` and `**params` are not checked by type, and `**params` holds JSON-native values only.
+
+The hints must resolve. `Horsies` and `WorkflowSpec` may stay under `TYPE_CHECKING`. A return annotation is not read. Any other name that a parameter uses must import at run time.
+
+A `**params` with no annotation takes JSON-native values only, and the value is checked when the spec is built. A `**params` with an annotation takes no kwargs from a node, so name each parameter. A named parameter with no annotation is refused when the spec is built.
+
+An `args_from` value is held to the type that the parameter declares, so a constraint or a validator on it runs. A top-level `build_with` crosses no wire and is not checked.
+
 ## 6. Subworkflows: Composing Workflows
 
 A **SubWorkflowNode** runs an entire workflow as a single node in the parent DAG.

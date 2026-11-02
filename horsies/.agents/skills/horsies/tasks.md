@@ -68,9 +68,19 @@ TaskResult(err=TaskError(...))    # failure
 
 **`.ok` vs `.ok_value`**: `.ok` is safe (returns `None` on wrong side). `.ok_value` raises. Always guard with `is_ok()` / `is_err()` before using `_value` forms.
 
+### Strict values
+
+Every boundary validates in strict mode: `"7"`, `7.0` and `True` are refused for an `int`, and a str is refused for a `datetime`, `Enum`, `UUID` or `Decimal`. `.send()`, schedules, workflow definitions and task results read a value back before it is stored. An unknown key is refused at any depth at send, and ignored on read. A subclass with fields that the declared type lacks is refused.
+
+`@app.task` and each `SubWorkflowNode` refuse `Field(exclude=True)`, `exclude_if`, `extra='allow'`, `PlainValidator`, `WrapValidator`, `SkipValidation`, a schema hook, `Json[T]`, `Literal` with a plain `Enum`, an alias whose written key does not read back, and a default that does not hold its type. Use `AfterValidator` or `BeforeValidator`.
+
+`TaskError.data` must be JSON-native. It takes `JsonInput`, so a `list[str]` fits, and it gives `JsonValue`, an exact `list` or `dict`. A bad value becomes `{'data_refused': <cause>}`, and the code and message stay. A `TaskError` subclass with extra fields does not cross the wire: use `data`, and match on `error_code`.
+
+Changing a model that a task takes or returns: see `SKILL.md`, Deployment facts.
+
 ### Runtime return-type validation
 
-The task wrapper validates the returned value against declared `T` using Pydantic's `TypeAdapter`. A mismatch produces `TaskResult(err=TaskError(error_code=ContractCode.RETURN_TYPE_MISMATCH))` — does not raise. The error stores the actual type and the failing fields (`data`: `variant`, `expected_type`, `actual_type`, `validation_errors`, `validation_error_count`), not the returned value. Returning `None` instead of `TaskResult` produces `TASK_EXCEPTION`.
+The task wrapper validates the returned value against declared `T` using Pydantic's `TypeAdapter` in strict mode. A mismatch produces `TaskResult(err=TaskError(error_code=ContractCode.RETURN_TYPE_MISMATCH))` — does not raise. The error stores the actual type and the failing fields (`data`: `variant`, `expected_type`, `actual_type`, `validation_errors`, `validation_error_count`), not the returned value. Returning `None` instead of `TaskResult` produces `TASK_EXCEPTION`.
 
 ## `TaskError`
 
@@ -79,7 +89,7 @@ The task wrapper validates the returned value against declared `T` using Pydanti
 class TaskError(BaseModel):
     error_code: BuiltInTaskCode | str
     message: str | None = None
-    data: Any | None = None
+    data: JsonValue = None  # takes JsonInput
     exception: dict[str, Any] | BaseException | None = None
 ```
 
@@ -124,7 +134,7 @@ Infra-level failures during task execution, brokering, or worker processing:
 
 <!-- members: OperationalErrorCode -->
 - `UNHANDLED_EXCEPTION` — uncaught exception wrapped by library
-- `TASK_EXCEPTION` — task returned `None` instead of `TaskResult`, or the worker caught an exception outside the task wrapper (for example `KeyboardInterrupt`). A raised exception in task code gives `UNHANDLED_EXCEPTION`, not `TASK_EXCEPTION`
+- `TASK_EXCEPTION` — the worker caught an exception outside the task wrapper, or a validator raised on a default
 - `WORKER_CRASHED` — worker process died during execution
 - `BROKER_ERROR` — DB/broker failure during result retrieval
 - `WORKER_RESOLUTION_ERROR` — task name not found in registry
@@ -139,7 +149,7 @@ Infra-level failures during task execution, brokering, or worker processing:
 Violations of the declared API contract between task author and library:
 
 <!-- members: ContractCode -->
-- `RETURN_TYPE_MISMATCH` — returned value doesn't match declared type
+- `RETURN_TYPE_MISMATCH` — returned value doesn't fit the declared type, or is not a `TaskResult`, including `None`
 - `WORKFLOW_CTX_MISSING_ID` — workflow context missing required ID
 - `NO_TYPE_AVAILABLE` — a typed decode needs the success type, but the task or workflow is not registered locally (for example a handle built from an id)
 

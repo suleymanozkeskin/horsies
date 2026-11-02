@@ -1,8 +1,8 @@
 ---
 title: Deploying Code Changes
-summary: What happens to stored task rows and workflows when task signatures, task names or return types change, and the order of a safe deploy.
+summary: What happens to stored task rows and workflows when task signatures, task names, return types or models change, and the order of a safe deploy.
 related: [../workers/worker-architecture, ../tasks/errors, ../internals/serialization, ../concepts/workflows/subworkflows, ../concepts/workflows/workflow-api]
-tags: [operations, deploy, rolling-deploy, rename, WORKER_SERIALIZATION_ERROR, WORKER_RESOLUTION_ERROR, SUBWORKFLOW_LOAD_FAILED, RESULT_DESERIALIZATION_ERROR]
+tags: [operations, deploy, rolling-deploy, rename, model-change, AliasChoices, WORKER_SERIALIZATION_ERROR, WORKER_RESOLUTION_ERROR, SUBWORKFLOW_LOAD_FAILED, RESULT_DESERIALIZATION_ERROR]
 ---
 
 # Deploying Code Changes
@@ -16,6 +16,7 @@ Read this page before a deploy that changes any of these:
 - a task name
 - a task parameter (added, removed, renamed or retyped)
 - the return type of a task
+- a field of a model or dataclass that a task takes or returns (added, removed, renamed or retyped)
 - a workflow definition or a `build_with` signature
 
 Rows that exist before the deploy are not changed by it. They run with the code that is loaded when they are claimed.
@@ -42,6 +43,17 @@ Rows that exist before the deploy are not changed by it. They run with the code 
 | The kwargs of a subworkflow node do not fit the current `build_with` signature | `WORKER_SERIALIZATION_ERROR` | The subworkflow node ends `FAILED` |
 | The return type of an upstream task changed, and a stored result does not fit | `RESULT_DESERIALIZATION_ERROR` | A `TaskResult` with this error replaces the stored result where it is read: downstream nodes, `WorkflowContext` and handles |
 | An upstream task name was removed or renamed | `RESULT_DESERIALIZATION_ERROR` | Same place. The error data has `stage: 'source_not_registered'` |
+
+| Change to a model field after the data was stored | Result on read |
+| -------------------------------------------------- | -------------- |
+| A required field was added | Error. Field missing |
+| A field changed type, and the stored value does not fit | Error |
+| A field was added with a default | Reads. The default is filled in |
+| A field was removed | Reads. The stored value is ignored |
+| A field was renamed, and the new name has a default | Reads. **The stored value is lost, with no error** |
+| A field was renamed, and the new name is required | Error. Field missing |
+
+The error is `RESULT_DESERIALIZATION_ERROR` when a result is read, and `WORKER_SERIALIZATION_ERROR` when a queued task is decoded. A stored value is read strictly: an int reads as a float, a float does not read as an int, and a str does not read as an int.
 
 An old worker follows the same rules. During a rolling deploy, a new producer can send a row that an old worker claims. An added kwarg that the old signature does not declare gives `WORKER_SERIALIZATION_ERROR` on the old worker.
 
@@ -114,6 +126,61 @@ A scheduled task (see [Schedule Config](../scheduling/schedule-config)) sends by
 
 A task result that a workflow reads later is decoded with the type that the code declares at read time. Keep the new type able to decode the old stored shape, or wait until no workflow holds a stored result of the old shape. Add new fields with defaults.
 
+### Change a Model
+
+Stored results and queued tasks hold the fields of the model at the time they were written. Code that reads them uses the model of the current deploy. Results stay for the retention period, which is 30 days by default.
+
+Unknown keys are refused when a value is sent. They are ignored when stored data is read, so that old rows stay readable after a normal model change.
+
+#### Add a Field
+
+Give the field a default. Deploy all workers, then the producers.
+
+```python
+from pydantic import BaseModel
+
+
+class Car(BaseModel):
+    model: str
+    km: int
+    colour: str = 'unknown'
+```
+
+A required field fails every old row. Make it required only after no old row remains.
+
+#### Rename a Field
+
+Accept both names on read with `AliasChoices`. New rows are written under the new name, and old rows still read.
+
+```python
+from pydantic import AliasChoices, BaseModel, Field
+
+
+class Car(BaseModel):
+    model: str
+    km: int
+    registration_year: int = Field(
+        validation_alias=AliasChoices('registration_year', 'register_year'),
+    )
+```
+
+1. Add the alias. Deploy all workers, then the producers.
+2. Wait until no live row and no result that you still read holds the old name (see [Check for Remaining Rows](#check-for-remaining-rows)).
+3. Remove the old name from `AliasChoices`.
+
+The new name must be in `AliasChoices`, or `@app.task` refuses the model.
+
+#### Remove a Field
+
+1. Give the field a default. Deploy all workers, then the producers.
+2. Remove the field.
+
+Old rows that hold the field still read. The stored value is ignored.
+
+#### Change the Type of a Field
+
+Add a new field with the new type and a default, move the code to it, and remove the old field after no old row remains. An in-place change fails every old row that does not fit the new type.
+
 ### Change a Workflow Definition
 
 A started workflow keeps its stored DAG. Changing the class does not change a running workflow.
@@ -153,6 +220,10 @@ On SIGTERM or SIGINT a worker stops new claims and waits for running tasks. See 
 A recycled child loads your app from disk, unless the worker runs `--child-preload=app`. With that mode, a recycled child keeps the code that the preload parent imported, so new code needs a worker restart.
 
 ## Things to Avoid
+
+**Don't rename a model field and give the new name a default, with no alias.** Old rows read with no error, and the stored value is replaced by the default.
+
+**Don't add a required model field in one step.** Each old row fails.
 
 **Don't add a required parameter in one step.** Old rows have no value for it, and each one fails with `UNHANDLED_EXCEPTION`.
 
