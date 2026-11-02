@@ -267,6 +267,8 @@ The kwargs of a `SubWorkflowNode` are stored and read back, so each `build_with`
 
 The hints must resolve. `Horsies` and `WorkflowSpec` may stay under `TYPE_CHECKING`. A return annotation is not read. Any other name that a parameter uses must import at run time.
 
+A `**params` with no annotation takes JSON-native values only, and the value is checked when the spec is built. A named parameter with no annotation is refused when the spec is built.
+
 An `args_from` value is held to the type that the parameter declares, so a constraint or a validator on it runs. A top-level `build_with` crosses no wire and is not checked.
 
 ## 6. Subworkflows: Composing Workflows

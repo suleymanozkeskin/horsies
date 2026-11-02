@@ -18,7 +18,7 @@ Two consequences:
 
 | Module | Purpose |
 |--------|---------|
-| `horsies.core.codec.json_value` | `JsonValue` PEP 695 alias; `StrictJsonError`; strict JSON-native validators |
+| `horsies.core.codec.json_value` | `StrictJsonError`; strict JSON-native validators; re-exports `JsonValue` from `horsies.core.types.json_value` |
 | `horsies.core.codec.json_io` | `dumps_json` / `loads_json` — the strict JSON-native stringification boundary (no class tags). `loads_json_bytes` is the same parse for stored UTF-8 payloads, and an empty payload is an error. `dumps_canonical_json` is the one canonical form for stored or hashed text. A unit test keeps every other JSON parse out of the library |
 | `horsies.core.codec.error_payload` | `flatten_exception`; `serialize_error_payload` for library-emitted error payloads |
 | `horsies.core.codec.task_options` | `serialize_task_options` — `TaskOptions` → persisted JSON |

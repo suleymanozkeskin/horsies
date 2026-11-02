@@ -69,6 +69,10 @@ before you upgrade.
   send, and a subclass with fields that the declared type lacks is refused. An
   unknown key on read stays ignored, so old rows stay readable after a model
   change. The Deploying Code Changes page has a recipe for each model change.
+- **A workflow start stores what the spec proved.** A list or a dict in a
+  `JsonValue` kwarg of a node, or in a `build_with` with no annotations, failed at
+  start with `non-JSON-native value: tuple`. A `build_with` kwarg that cannot cross
+  is now refused when the spec is built.
 - **`.send()` refuses a call that cannot run.** A missing required argument, and
   a task that requires a parameter only a workflow can fill.
 - **`@app.task` refuses each shape that cannot cross the wire.**
