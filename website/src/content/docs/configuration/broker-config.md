@@ -20,8 +20,8 @@ broker = PostgresConfig(
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `database_url` | `str` | required | SQLAlchemy connection URL |
-| `session_database_url` | `str \| None` | `None` | Direct/session-capable URL for schema setup and LISTEN/NOTIFY |
+| `database_url` | `SecretStr` | required | SQLAlchemy connection URL |
+| `session_database_url` | `SecretStr \| None` | `None` | Direct/session-capable URL for schema setup and LISTEN/NOTIFY |
 | `pgbouncer_transaction_mode` | `bool` | `False` | Disable prepared statements for transaction-pooled PgBouncer |
 | `pool_size` | `int` | 5 | Connection pool size (raise for high-throughput producers) |
 | `max_overflow` | `int` | 10 | Additional connections beyond pool_size |
@@ -37,6 +37,7 @@ broker = PostgresConfig(
 | `tcp_keepalives_interval` | `int` | 10 | Seconds between keepalive probes (libpq `keepalives_interval`) |
 | `tcp_keepalives_count` | `int` | 3 | Unacknowledged probes before the connection is dropped (libpq `keepalives_count`) |
 | `tcp_user_timeout_ms` | `int` | 30000 | Milliseconds that sent data may stay unacknowledged before the connection is closed (libpq `tcp_user_timeout`); `0` uses the operating system default; see [Remote PostgreSQL](remote-postgres) |
+| `retain_rerun_input_default` | `bool` | `False` | App-level default for rerun-input retention at enqueue; a per-task value overrides it |
 | `echo` | `bool` | `False` | Echo SQL statements to logs. Bound values are not shown |
 | `pool_recycle` | `int` | 1800 | Recycle connections after N seconds |
 

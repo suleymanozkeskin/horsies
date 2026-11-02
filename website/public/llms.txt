@@ -729,7 +729,6 @@ Each entry: Title -- summary -> URL
 
 ### Internals
 - Database Schema -- PostgreSQL tables -> /horsies/internals/database-schema/
-- Operational Indexes -- opt-in DDL for history queries the shipped schema does not index -> /horsies/internals/operational-indexes/
 - Performance -- measured per-statement latencies of the hot path -> /horsies/internals/performance/
 - Serialization -- JSON codec for args/results -> /horsies/internals/serialization/
 
@@ -810,7 +809,6 @@ atomic enqueue, send after commit, transaction, topology, separate database, ide
 deploy, rolling deploy, rename task, remove task, rename parameter, in-flight rows, WORKER_SERIALIZATION_ERROR, WORKER_RESOLUTION_ERROR, SUBWORKFLOW_LOAD_FAILED, RESULT_DESERIALIZATION_ERROR, definition_key -> /horsies/operations/deploying-code-changes/
 testing, pytest, unit test, direct call, WorkflowContext.from_serialized, HORSIES_SUPPRESS_SENDS, TaskSendSuppressed, SEND_SUPPRESSED -> /horsies/operations/testing/
 PgBouncer, transaction pooling, pgbouncer_transaction_mode -> /horsies/troubleshooting/pgbouncer/
-operational indexes, history queries, opt-in DDL -> /horsies/internals/operational-indexes/
 performance, latency, hot path, statement cost -> /horsies/internals/performance/
 migration 0.1.2, strict serde, upgrade from 0.1.1 -> /horsies/migrations/migration-to-0-1-2/
 migration 0.5.0, live/history split, offline cutover, schema v35 -> /horsies/migrations/migration-to-0-5-0/

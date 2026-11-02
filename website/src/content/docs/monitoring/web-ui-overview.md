@@ -128,7 +128,7 @@ retrying. The server never fabricates events.
 
 ## Actions
 
-Actions are off by default. When a deployment enables them, five are available:
+Actions are off by default. When a deployment enables them, four are available:
 
 | Entity | Actions |
 |---|---|

@@ -117,7 +117,7 @@ Each method has a sync variant with the same name minus the `_async` suffix (it 
 | `timeout_seconds` | `float` | `2.0` | Collection window; must be positive |
 | `min_responses` | `int \| None` | `None` | Return as soon as this many distinct workers reply. `None` waits the full window. Must be `>= 1` when set |
 
-**Returns:** `Ok(list[WorkerPong])` — one entry per responding (distinct) worker, possibly empty. Each `WorkerPong` has `worker_id`, `hostname`, `pid`, `round_trip_ms`. `Err` with code `WORKER_PING_FAILED` on non-positive `timeout_seconds`, `min_responses < 1`, or reply-channel failure.
+**Returns:** `Ok(list[WorkerPong])` — one entry per responding (distinct) worker, possibly empty. Each `WorkerPong` has `worker_id`, `hostname`, `pid`, `round_trip_ms`. `Err` with code `INVALID_INPUT` on non-positive `timeout_seconds` or `min_responses < 1`; `Err` with code `WORKER_PING_FAILED` on reply-channel failure.
 
 ### `list_worker_states_async() -> BrokerResult[list[WorkerStateSnapshot]]`
 
@@ -136,7 +136,7 @@ Snapshot timeseries for one worker, newest first.
 | `worker_id` | `str` | — | Worker instance id |
 | `limit` | `int \| None` | `None` | Max rows; `None` returns all retained rows. Must be positive when set |
 
-**Returns:** `Ok(list[WorkerStateSnapshot])`; `Err(MONITORING_QUERY_FAILED)` on failure or non-positive `limit`.
+**Returns:** `Ok(list[WorkerStateSnapshot])`; `Err(INVALID_INPUT)` on non-positive `limit`; `Err(MONITORING_QUERY_FAILED)` on query failure.
 
 ### `WorkerStateSnapshot` fields
 
@@ -164,7 +164,7 @@ Snapshot timeseries for one worker, newest first.
 
 ### Embedded health payloads
 
-`recovery_config` carries three operational payloads beside the
+`recovery_config` carries four operational payloads beside the
 configuration snapshot, refreshed with each snapshot:
 
 - `partition_coverage` — the last coverage-ensure outcome: `state`

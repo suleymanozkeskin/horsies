@@ -158,7 +158,6 @@ export default defineConfig({
 					label: 'Internals',
 					items: [
 						{ label: 'Database Schema', slug: 'internals/database-schema' },
-						{ label: 'Operational Indexes', slug: 'internals/operational-indexes' },
 						{ label: 'Performance', slug: 'internals/performance' },
 						{ label: 'Serialization', slug: 'internals/serialization' },
 					],

@@ -15,7 +15,7 @@ rows. Task and workflow identity columns are `uuid` (task ids UUIDv7).
 Manual in-place retry is removed; re-execution is a new task minted
 through the rerun API. Schema v34.
 
-Current unreleased builds use schema v35. Schema v35 retains the 0.5.0
+Schema v35 shipped in 0.5.2. Later releases use a higher schema version (52 in 0.6.0). Schema v35 retains the 0.5.0
 cutover stages and adds a durable completion marker plus bounded RANGE leaves
 for the `forever` class. The v34 statements below describe the released
 0.5.0/0.5.1 database shape; the v35 notes state the current behavior.
