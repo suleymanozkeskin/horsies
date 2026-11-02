@@ -4,7 +4,7 @@
     uv run python -m showcase.acme.scenarios rush
 
 Steady mode runs below capacity on purpose. This one runs well above it: the
-arrival rate is roughly ten times what twelve executor children can absorb, so
+arrival rate is roughly ten times what twelve worker children can absorb, so
 the per-queue caps start to bite and the backlog becomes visible.
 
 Watch the queue pivot while it drains. `payments` is priority 1 and capped at

@@ -232,12 +232,10 @@ class TestChildInitializer:
     @patch('horsies.core.worker.child_runner._locate_app')
     @patch('horsies.core.worker.child_runner.import_module')
     @patch('horsies.core.worker.child_runner.import_by_path')
-    @patch('horsies.core.worker.child_runner.signal.signal')
     @patch('horsies.core.logging.configure_logging')
     def test_happy_path(
         self,
         mock_set_level: MagicMock,
-        mock_signal: MagicMock,
         mock_import_path: MagicMock,
         mock_import_module: MagicMock,
         mock_locate_app: MagicMock,
@@ -257,7 +255,6 @@ class TestChildInitializer:
             database_url='postgresql://localhost/test',
         )
 
-        mock_signal.assert_called_once()
         mock_set_level.assert_called_once_with(20)
         mock_locate_app.assert_called_once_with('mymod:app')
         mock_set_current.assert_called_once_with(mocks['app'])
@@ -274,12 +271,10 @@ class TestChildInitializer:
     @patch('horsies.core.worker.child_runner.set_current_app')
     @patch('horsies.core.worker.child_runner._locate_app')
     @patch('horsies.core.worker.child_runner.import_by_path')
-    @patch('horsies.core.worker.child_runner.signal.signal')
     @patch('horsies.core.logging.configure_logging')
     def test_child_pool_bounds_are_forwarded(
         self,
         mock_set_level: MagicMock,
-        mock_signal: MagicMock,
         mock_import_path: MagicMock,
         mock_locate_app: MagicMock,
         mock_set_current: MagicMock,
@@ -314,12 +309,10 @@ class TestChildInitializer:
     @patch('horsies.core.worker.child_runner.set_current_app')
     @patch('horsies.core.worker.child_runner._locate_app')
     @patch('horsies.core.worker.child_runner.import_by_path')
-    @patch('horsies.core.worker.child_runner.signal.signal')
     @patch('horsies.core.logging.configure_logging')
     def test_child_initializer_discards_inherited_broker(
         self,
         mock_set_level: MagicMock,
-        mock_signal: MagicMock,
         mock_import_path: MagicMock,
         mock_locate_app: MagicMock,
         mock_set_current: MagicMock,
@@ -350,12 +343,10 @@ class TestChildInitializer:
     @patch('horsies.core.worker.child_runner.set_current_app')
     @patch('horsies.core.worker.child_runner._locate_app')
     @patch('horsies.core.worker.child_runner.import_by_path')
-    @patch('horsies.core.worker.child_runner.signal.signal')
     @patch('horsies.core.logging.configure_logging')
     def test_suppress_sends_failure_propagates(
         self,
         mock_set_level: MagicMock,
-        mock_signal: MagicMock,
         mock_import_path: MagicMock,
         mock_locate_app: MagicMock,
         mock_set_current: MagicMock,
@@ -380,12 +371,10 @@ class TestChildInitializer:
     @patch('horsies.core.worker.child_runner.set_current_app')
     @patch('horsies.core.worker.child_runner._locate_app')
     @patch('horsies.core.worker.child_runner.import_by_path')
-    @patch('horsies.core.worker.child_runner.signal.signal')
     @patch('horsies.core.logging.configure_logging')
     def test_discovered_task_modules_failure_propagates(
         self,
         mock_set_level: MagicMock,
-        mock_signal: MagicMock,
         mock_import_path: MagicMock,
         mock_locate_app: MagicMock,
         mock_set_current: MagicMock,
@@ -410,12 +399,10 @@ class TestChildInitializer:
     @patch('horsies.core.worker.child_runner.set_current_app')
     @patch('horsies.core.worker.child_runner._locate_app')
     @patch('horsies.core.worker.child_runner.import_by_path')
-    @patch('horsies.core.worker.child_runner.signal.signal')
     @patch('horsies.core.logging.configure_logging')
     def test_keys_list_failure_propagates(
         self,
         mock_set_level: MagicMock,
-        mock_signal: MagicMock,
         mock_import_path: MagicMock,
         mock_locate_app: MagicMock,
         mock_set_current: MagicMock,
@@ -440,14 +427,12 @@ class TestChildInitializer:
     @patch('horsies.core.worker.child_runner._locate_app')
     @patch('horsies.core.worker.child_runner.import_by_path')
     @patch('horsies.core.worker.child_runner.import_module')
-    @patch('horsies.core.worker.child_runner.signal.signal')
     @patch('horsies.core.logging.configure_logging')
     @patch('horsies.core.worker.child_runner.os.path.samefile', return_value=False)
     def test_file_path_import_uses_import_by_path(
         self,
         mock_samefile: MagicMock,
         mock_set_level: MagicMock,
-        mock_signal: MagicMock,
         mock_import_module: MagicMock,
         mock_import_path: MagicMock,
         mock_locate_app: MagicMock,
@@ -476,14 +461,12 @@ class TestChildInitializer:
     @patch('horsies.core.worker.child_runner._locate_app')
     @patch('horsies.core.worker.child_runner.import_by_path')
     @patch('horsies.core.worker.child_runner.import_module')
-    @patch('horsies.core.worker.child_runner.signal.signal')
     @patch('horsies.core.logging.configure_logging')
     @patch('horsies.core.worker.child_runner.os.path.samefile', return_value=True)
     def test_file_path_import_skips_app_module(
         self,
         mock_samefile: MagicMock,
         mock_set_level: MagicMock,
-        mock_signal: MagicMock,
         mock_import_module: MagicMock,
         mock_import_path: MagicMock,
         mock_locate_app: MagicMock,

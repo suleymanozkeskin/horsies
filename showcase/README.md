@@ -148,12 +148,16 @@ between the confirmation and the apology. It completes; the workflow still
 fails, because `OnError.FAIL` accounts for the failure regardless of the
 handler. A COMPLETED node underneath a FAILED one is the point.
 
-## Idempotency, and why the ripple heals
+## Idempotency, and what a crash costs
 
-A `timeout_ms` kill SIGKILLs the child process, which breaks the worker's
-executor pool. Every task in flight on that worker is reported `WORKER_CRASHED`
-and comes back through its own retry policy. That is honest behaviour, not a
-defect, and the showcase leans into it: every task that writes checks for its
+A `timeout_ms` kill SIGKILLs the child of that task, with the subprocesses in its
+session. The task fails with `TASK_TIMEOUT`, and the other tasks on the worker
+continue. A crash costs the same one task: it is reported `WORKER_CRASHED` and
+comes back through its own retry policy. The worker starts a new child in that
+slot.
+
+A task can still run twice, because a child can die after its work and before
+its result, so the showcase leans into it: every task that writes checks for its
 own earlier work first.
 
 An authorization that already exists is reported, not charged again. A line
@@ -162,14 +166,11 @@ exists under the same authorization is reported as a replay — under a
 *different* authorization it is refused with `PAYMENT_ALREADY_CAPTURED`, which
 is the unique constraint on `(order_id, kind)` doing its job.
 
-Watch `/workers` when it happens: a pool restart, a burst of `WORKER_CRASHED`
-attempts, and every one of them recovering.
+Watch `/workers` when it happens: one child restarts, and the others keep their
+tasks.
 
-**The production lesson, stated plainly.** A pool break takes innocent
-siblings. One task exceeding its `timeout_ms` is enough to kill every task that
-happened to be running on that worker at that moment — they did nothing wrong,
-and they are reported `WORKER_CRASHED` regardless. Two things follow, and they
-are not optional in a real deployment:
+**The production lesson, stated plainly.** A crash is contained, not free. Two
+things follow, and they are not optional in a real deployment:
 
 - **Tasks must be replay-safe.** A task that can be killed mid-write and re-run
   must check for its own earlier work before doing it again. Every writing task
@@ -178,12 +179,17 @@ are not optional in a real deployment:
 - **Retry the crash, not the cause.** `WORKER_CRASHED` belongs in
   `auto_retry_for`; the error that caused the kill does not. `generate_invoice`
   omits `TASK_TIMEOUT` on purpose — its stall is a stable property of the order,
-  so a retry would stall again, break the pool again, and take another set of
-  innocent siblings with it.
+  so a retry would stall again and cost another child.
 
-In a 10-minute steady run, two invoice timeouts broke the pool twice and
-produced 13 `WORKER_CRASHED` attempts. All 13 recovered; the two timed-out
-invoices stayed failed, which is correct.
+**A dead worker holds its queue slots for a while.** After a `kill -9` of the
+worker, its `RUNNING` rows count against each queue's `max_concurrency` until the
+reaper clears them, about 5 minutes with the default
+`running_stale_threshold_ms`. A new worker has free children during that time, but
+a queue at its limit waits. Lower the threshold if that matters to you.
+
+Conditions → result: 12 children, every scenario, and one `kill -9` of the worker.
+About 1,000 tasks ran, 7 of them lost their child, and every row reached a final
+state. The same run on the shared process pool lost 37 tasks to 7 pool restarts.
 
 ## Infrastructure failures are typed too
 
@@ -242,7 +248,7 @@ is a thing to look at in the dashboard, not a claim to take on trust.
 | `exception_mapper`, global | `apply_promotions` raises `KeyError` | reported as `DATA_CORRUPTION` |
 | **Unhandled exception, unmapped** | `apply_promotions` bundle-pricing `ZeroDivisionError` | `UNHANDLED_EXCEPTION` with the exception as data |
 | `default_unhandled_error_code` | `compute_loyalty_points` `AttributeError` | `LOYALTY_ENGINE_BUG` — the team's own code |
-| `timeout_ms` | `generate_invoice`, 8 s | `TASK_TIMEOUT`, pool restart, siblings recovering |
+| `timeout_ms` | `generate_invoice`, 8 s | `TASK_TIMEOUT`, one child restarts, other tasks continue |
 | `good_until` / EXPIRED | `flash-sale` sends 80 price updates with a 45 s deadline onto a 2-slot queue | ~48 of them EXPIRED, which is not FAILED |
 | Domain error codes | `CARD_DECLINED`, `INSUFFICIENT_STOCK`, `DAMAGED_ITEM`, and the rest | the error-code facet |
 | Class-based `WorkflowDefinition` + `build_with` | `order_fulfillment`, per order | a DAG whose shape follows the order's lines |
@@ -265,7 +271,7 @@ is a thing to look at in the dashboard, not a claim to take on trust.
 | Disabled schedules | 3 of the 31 | what a disabled schedule looks like |
 | `WorkflowMeta` | `pick_pack` | workflow id and node index in the result |
 | Crash recovery | `chaos`: `flaky_export` calls `os._exit(1)` | `WORKER_CRASHED` attempts, then recovery |
-| Worker health | 12 executor children, 10 s snapshots | CPU and memory history |
+| Worker health | 12 worker children, 10 s snapshots | CPU and memory history |
 | `resend_on_transient_err` | `AppConfig` | infra retry, distinct from `RetryPolicy` |
 
 ## Layout

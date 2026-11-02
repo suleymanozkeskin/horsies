@@ -1,7 +1,7 @@
 """Task finalization: persist terminal state, workflow phase, retries.
 
-FinalizeMixin owns the two-phase finalize pipeline: await the child
-future (with optional timeout), persist the terminal row + attempt
+FinalizeMixin owns the two-phase finalize pipeline: await the slot
+outcome (with optional timeout), persist the terminal row + attempt
 history (phase 1), run the workflow completion phase (phase 2), and the
 bounded retry machinery for failures in any stage. Worker-internal
 mixin: the ``TYPE_CHECKING`` block declares the slice of ``Worker`` it
@@ -13,7 +13,6 @@ relies on.
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal, Optional, assert_never, cast
@@ -75,6 +74,14 @@ from horsies.core.models.tasks import (
     TaskResult,
 )
 from horsies.core.types.result import Err, Ok, Result, is_err
+from horsies.core.worker.slots import (
+    Assigned,
+    ChildLost,
+    NotDispatched,
+    SlotHandle,
+    SlotOutcome,
+    TaskFinished,
+)
 from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.worker.runtime import (
     _FINALIZE_FUTURE_MAX_RETRIES,
@@ -99,7 +106,6 @@ from horsies.core.worker.sql import (
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine
-    from concurrent.futures import ProcessPoolExecutor
 
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -190,19 +196,19 @@ class FinalizeMixin:
         _finalize_retry_attempts: dict[tuple[str, str], int]
 
         # Cross-concern methods provided by sibling mixins / Worker.
-        async def _handle_broken_pool(
-            self,
-            task_id: str,
-            exc: BaseException,
-            failed_executor: ProcessPoolExecutor,
-            claimed_at: Optional[datetime] = None,
-        ) -> None: ...
         async def _handle_task_timeout(
             self,
+            handle: SlotHandle,
             task_id: str,
             timeout_ms: int,
             claimed_at: Optional[datetime] = None,
         ) -> None: ...
+        async def _requeue_claimed_task(
+            self,
+            task_id: str,
+            reason: str,
+            claimed_at: Optional[datetime] = None,
+        ) -> _RequeueOutcome: ...
         async def _recover_worker_future_failure(
             self,
             task_id: str,
@@ -227,93 +233,122 @@ class FinalizeMixin:
             service: bool = False,
         ) -> asyncio.Task[Any]: ...
 
+    async def _await_slot_outcome(
+        self,
+        handle: SlotHandle,
+        task_id: str,
+        timeout_ms: Optional[int],
+        claimed_at: Optional[datetime],
+    ) -> SlotOutcome:
+        """Wait for the outcome. The timeout starts when a child gets the task.
+
+        Time waiting for a free slot does not count: ``timeout_ms`` bounds
+        execution. Never raises for a task; a timeout goes through
+        ``_handle_task_timeout``, and the slot still reports what happened.
+        """
+        assigned = await asyncio.shield(handle.assigned)
+        match assigned:
+            case NotDispatched():
+                return assigned
+            case Assigned():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
+        if timeout_ms is None:
+            return await asyncio.shield(handle.outcome)
+        try:
+            # shield: wait_for must not cancel the outcome. The child keeps
+            # running regardless, and the outcome is awaited again below.
+            return await asyncio.wait_for(
+                asyncio.shield(handle.outcome),
+                timeout=timeout_ms / 1000.0,
+            )
+        except asyncio.TimeoutError:
+            await self._handle_task_timeout(
+                handle,
+                task_id,
+                timeout_ms,
+                claimed_at=claimed_at,
+            )
+            # A kill ends the child, and the slot then reports it. A complete
+            # result that beat the kill still arrives here, and the fences in
+            # the persist path refuse it if the row has moved on.
+            return await asyncio.shield(handle.outcome)
+
     async def _finalize_after(
         self,
-        fut: 'asyncio.Future[tuple[bool, str, Optional[str]]]',
+        handle: SlotHandle,
         task_id: str,
         queue_name: str = 'default',
         is_workflow_task: bool = True,
         timeout_ms: Optional[int] = None,
         *,
-        executor: ProcessPoolExecutor,
         task_name: str,
         claimed_at: Optional[datetime] = None,
     ) -> Result[None, _FinalizeError]:
-        try:
-            if timeout_ms is not None:
-                try:
-                    # shield: wait_for must not cancel the executor future —
-                    # the child keeps running regardless, and the original
-                    # future is awaited again below after the kill.
-                    ok, result_json_str, failed_reason = await asyncio.wait_for(
-                        asyncio.shield(fut),
-                        timeout=timeout_ms / 1000.0,
-                    )
-                except asyncio.TimeoutError:
-                    await self._handle_task_timeout(
+        outcome = await self._await_slot_outcome(
+            handle,
+            task_id,
+            timeout_ms,
+            claimed_at,
+        )
+        match outcome:
+            case TaskFinished():
+                ok = outcome.ok
+                result_json_str = outcome.result_json
+                failed_reason = outcome.failed_reason
+            case NotDispatched(cause=cause):
+                requeued = await self._requeue_claimed_task(
+                    task_id,
+                    cause.value,
+                    claimed_at=claimed_at,
+                )
+                if requeued is _RequeueOutcome.DB_ERROR:
+                    logger.critical(
+                        'Requeue DB_ERROR: task %s may remain orphaned CLAIMED '
+                        '(worker=%s, reason=%s)',
                         task_id,
-                        timeout_ms,
-                        claimed_at=claimed_at,
+                        self.worker_instance_id,
+                        cause.value,
                     )
-                    # The SIGKILL breaks the shared process pool; awaiting
-                    # the original future routes into the BrokenProcessPool
-                    # branch below, which restarts the executor (sibling
-                    # tasks recover through their own finalizers).
-                    ok, result_json_str, failed_reason = await fut
-            else:
-                ok, result_json_str, failed_reason = await fut
-        except asyncio.CancelledError:
-            raise
-        except BrokenProcessPool as exc:
-            await self._handle_broken_pool(
-                task_id,
-                exc,
-                executor,
-                claimed_at=claimed_at,
-            )
-            # By this point _handle_broken_pool has already recovered the
-            # task (requeue per its retry policy) and replaced the executor;
-            # the message states that so the log line cannot be read as a
-            # lost task.
-            return Err(
-                self._make_finalize_error(
-                    task_id=task_id,
-                    stage=_FINALIZE_STAGE_FUTURE,
-                    message=(
-                        f'Broken process pool during finalize; task already '
-                        f'recovered per its retry policy and the pool '
-                        f'replaced: {exc}'
-                    ),
-                    retryable=False,
-                    data={
-                        'exception_type': type(exc).__name__,
-                        'claimed_at': claimed_at,
-                    },
+                    return Err(
+                        self._make_finalize_error(
+                            task_id=task_id,
+                            stage=_FINALIZE_STAGE_FUTURE,
+                            message=f'Requeue failed: {cause.value}',
+                            retryable=True,
+                            data={
+                                'requeue_outcome': requeued.value,
+                                'claimed_at': claimed_at,
+                            },
+                        )
+                    )
+                return Ok(None)
+            case ChildLost():
+                reason = f'Worker child lost: {outcome.describe()}'
+                requeue_outcome = await self._recover_worker_future_failure(
+                    task_id,
+                    reason,
+                    claimed_at=claimed_at,
                 )
-            )
-        except Exception as exc:
-            requeue_outcome = await self._recover_worker_future_failure(
-                task_id,
-                f'Worker future failed before result: {exc}',
-                claimed_at=claimed_at,
-            )
-            return Err(
-                self._make_finalize_error(
-                    task_id=task_id,
-                    stage=_FINALIZE_STAGE_FUTURE,
-                    message=f'Worker future failed before result: {exc}',
-                    # Retryability is keyed on the recovery DB failure, not
-                    # the child-future exception: a non-connection future
-                    # error whose requeue hit a transient DB blip must still
-                    # retry the recovery instead of waiting on the reaper.
-                    retryable=requeue_outcome is _RequeueOutcome.DB_ERROR,
-                    data={
-                        'exception_type': type(exc).__name__,
-                        'requeue_outcome': requeue_outcome.value,
-                        'claimed_at': claimed_at,
-                    },
+                return Err(
+                    self._make_finalize_error(
+                        task_id=task_id,
+                        stage=_FINALIZE_STAGE_FUTURE,
+                        message=reason,
+                        # Retryability is keyed on the recovery DB failure: a
+                        # requeue that hit a transient DB blip must retry the
+                        # recovery instead of waiting on the reaper.
+                        retryable=requeue_outcome is _RequeueOutcome.DB_ERROR,
+                        data={
+                            'loss_cause': outcome.cause.value,
+                            'requeue_outcome': requeue_outcome.value,
+                            'claimed_at': claimed_at,
+                        },
+                    )
                 )
-            )
+            case _ as unreachable:
+                assert_never(unreachable)
         now = datetime.now(timezone.utc)
 
         # Warn-only: results are never rejected over size (the work is

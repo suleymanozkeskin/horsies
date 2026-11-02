@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 import time
-from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime, timedelta, timezone
-from multiprocessing.synchronize import Barrier
+from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -50,15 +50,34 @@ from horsies.core.worker.worker import (
     _RequeueOutcome,
     _RetryError,
     ChildHookFailedError,
-    ExecutorRestartFailedError,
-    WarmupIncompleteError,
+    ChildStartFailedError,
     MemoryBaselineExceedsThresholdError,
-    _EXECUTOR_WARMUP_ATTEMPTS,
     ServiceLoopDiedError,
 )
 from horsies.core.models.recovery import OrphanTaskAuditReport, RecoveryConfig
 from horsies.core.models.tasks import OperationalErrorCode
-from horsies.core.worker.runtime import WarmablePool
+from horsies.core.worker.child_protocol import (
+    RssMb,
+    RssUnreadable,
+    RunFrame,
+    encode_parent_frame,
+)
+from horsies.core.worker.slots import (
+    BootAttemptsExhausted,
+    ChildBaseline,
+    ChildHookFailed,
+    ChildLost,
+    KilledBySignal,
+    LossCause,
+    NotDispatched,
+    NothingToKill,
+    NotRunCause,
+    PoolStopped,
+    SlotHandle,
+    SlotOutcome,
+    SpawnFailed,
+    TaskFinished,
+)
 from tests.broker_resources_support import (
     attach_loop_limit,
     attach_resources,
@@ -85,12 +104,43 @@ def _orphan_task_audit_report(cancelled: int = 0) -> OrphanTaskAuditReport:
 # ---------------------------------------------------------------------------
 
 
-def _warmable(executor: Any) -> WarmablePool:
-    """A pool around a mock executor, with a mock warmup barrier."""
-    return WarmablePool(
-        executor=executor,
-        warmup_barrier=cast('Barrier', MagicMock()),
+def _run_frame(task_id: str = 'task-1') -> RunFrame:
+    return RunFrame(
+        task_id=task_id,
+        task_name='helper_task',
+        args_json=None,
+        kwargs_json=None,
+        worker_id='worker-1',
+        runner_heartbeat_interval_ms=30_000,
+        is_workflow_task=False,
+        timeout_ms=None,
+        claimed_at=None,
     )
+
+
+def _finished_handle(outcome: SlotOutcome) -> SlotHandle:
+    """A handle whose slot work is already over."""
+    handle = SlotHandle(_run_frame(), asyncio.get_running_loop())
+    handle.finish(outcome)
+    return handle
+
+
+def _stub_slot_start(worker: Worker, note: Any = None) -> None:
+    """Replace the child start, leaving a pool for the failure watch."""
+
+    async def _start() -> None:
+        worker._slots = MagicMock()
+        if note is not None:
+            note()
+
+    worker._start_slots = AsyncMock(side_effect=_start)  # type: ignore[method-assign]
+
+
+_LOST = ChildLost(
+    cause=LossCause.CHILD_DIED,
+    child_exit=KilledBySignal(9),
+    partial_frame=False,
+)
 
 
 def _make_worker(
@@ -1102,15 +1152,15 @@ class TestFinalizeResultPayloadWarn:
             return_value=Err(MagicMock()),
         )
 
-        fut: asyncio.Future[tuple[bool, str, str | None]] = asyncio.Future()
-        fut.set_result((True, '{"big": "' + 'x' * 1024 + '"}', None))
+        handle = _finished_handle(
+            TaskFinished(True, '{"big": "' + 'x' * 1024 + '"}', None, RssUnreadable()),
+        )
 
         with caplog.at_level(logging.WARNING):
             await worker._finalize_after(
-                fut,
+                handle,
                 'task-w',
                 task_name='big_result_task',
-                executor=MagicMock(),
             )
 
         guard_records = [
@@ -1122,236 +1172,513 @@ class TestFinalizeResultPayloadWarn:
 
 
 @pytest.mark.unit
-class TestFinalizeAfterRequeueOutcome:
-    """Tests for the except-Exception branch in _finalize_after that uses
-    _requeue_claimed_task and builds _FinalizeError with requeue_outcome."""
+class TestFinalizeAfterSlotOutcome:
+    """_finalize_after turns each slot outcome into its recovery path."""
 
     @pytest.mark.asyncio
-    async def test_future_transient_error_requeue_success_not_retryable(self) -> None:
-        """Transient connection error + REQUEUED → retryable=False.
-
-        The task is safely back in the queue, so finalize should NOT retry.
-        """
+    @pytest.mark.parametrize(
+        ('requeue_outcome', 'retryable'),
+        [
+            (_RequeueOutcome.REQUEUED, False),
+            (_RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED, False),
+            (_RequeueOutcome.TERMINAL_REPLAYED, False),
+            (_RequeueOutcome.DB_ERROR, True),
+        ],
+    )
+    async def test_lost_child_is_recovered_and_retried_only_on_a_db_error(
+        self,
+        requeue_outcome: _RequeueOutcome,
+        retryable: bool,
+    ) -> None:
         worker = _make_worker()
+        worker._recover_worker_future_failure = AsyncMock(  # type: ignore[method-assign]
+            return_value=requeue_outcome,
+        )
 
+        result = await worker._finalize_after(
+            _finished_handle(_LOST),
+            'task-10',
+            task_name='helper_task',
+        )
+
+        assert isinstance(result, Err)
+        err: _FinalizeError = result.err_value
+        assert err.retryable is retryable
+        assert err.data is not None
+        assert err.data['requeue_outcome'] == requeue_outcome.value
+
+    @pytest.mark.asyncio
+    async def test_lost_child_reason_names_the_exit(self) -> None:
+        worker = _make_worker()
         worker._recover_worker_future_failure = AsyncMock(  # type: ignore[method-assign]
             return_value=_RequeueOutcome.REQUEUED,
         )
 
-        # Future that raises a retryable connection error
-        fut: asyncio.Future[tuple[bool, str, str | None]] = asyncio.Future()
-        fut.set_exception(OperationalError('connection reset'))
+        claimed_at = datetime(2026, 11, 1, tzinfo=timezone.utc)
 
-        result = await worker._finalize_after(
-            fut,
-            'task-10',
+        await worker._finalize_after(
+            _finished_handle(_LOST),
+            'task-11',
             task_name='helper_task',
-            executor=MagicMock(),
+            claimed_at=claimed_at,
         )
 
-        assert isinstance(result, Err)
-        err: _FinalizeError = result.err_value
-        assert err.retryable is False
-        assert err.data is not None
-        assert err.data['requeue_outcome'] == 'REQUEUED'
+        await_args = worker._recover_worker_future_failure.await_args
+        assert 'signal 9 (SIGKILL)' in await_args.args[1]
+        assert await_args.kwargs['claimed_at'] == claimed_at
 
     @pytest.mark.asyncio
-    async def test_future_transient_error_requeue_db_error_retryable(self) -> None:
-        """Transient connection error + DB_ERROR → retryable=True.
-
-        The task is NOT safely requeued, so finalize should retry.
-        """
+    async def test_task_that_never_reached_a_child_is_requeued(self) -> None:
         worker = _make_worker()
+        worker._requeue_claimed_task = AsyncMock(  # type: ignore[method-assign]
+            return_value=_RequeueOutcome.REQUEUED,
+        )
+        worker._recover_worker_future_failure = AsyncMock()  # type: ignore[method-assign]
 
-        worker._recover_worker_future_failure = AsyncMock(  # type: ignore[method-assign]
+        claimed_at = datetime(2026, 11, 1, tzinfo=timezone.utc)
+
+        result = await worker._finalize_after(
+            _finished_handle(NotDispatched(NotRunCause.POOL_STOPPING)),
+            'task-12',
+            task_name='helper_task',
+            claimed_at=claimed_at,
+        )
+
+        assert isinstance(result, Ok)
+        worker._requeue_claimed_task.assert_awaited_once_with(
+            'task-12',
+            NotRunCause.POOL_STOPPING.value,
+            claimed_at=claimed_at,
+        )
+        worker._recover_worker_future_failure.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_requeue_is_retried(self) -> None:
+        """The row is still CLAIMED, so the outcome must not read as done."""
+        worker = _make_worker()
+        worker._requeue_claimed_task = AsyncMock(  # type: ignore[method-assign]
             return_value=_RequeueOutcome.DB_ERROR,
         )
 
-        fut: asyncio.Future[tuple[bool, str, str | None]] = asyncio.Future()
-        fut.set_exception(OperationalError('original connection error'))
-
         result = await worker._finalize_after(
-            fut,
-            'task-11',
-            task_name='helper_task',
-            executor=MagicMock(),
-        )
-
-        assert isinstance(result, Err)
-        err: _FinalizeError = result.err_value
-        assert err.retryable is True
-        assert err.data is not None
-        assert err.data['requeue_outcome'] == 'DB_ERROR'
-
-    @pytest.mark.asyncio
-    async def test_future_transient_error_requeue_not_owner_not_retryable(self) -> None:
-        """Transient connection error + NOT_OWNER_OR_NOT_CLAIMED → retryable=False.
-
-        The DB update succeeded and this worker no longer owns an in-flight row.
-        """
-        worker = _make_worker()
-
-        worker._recover_worker_future_failure = AsyncMock(  # type: ignore[method-assign]
-            return_value=_RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED,
-        )
-
-        fut: asyncio.Future[tuple[bool, str, str | None]] = asyncio.Future()
-        fut.set_exception(OperationalError('transient'))
-
-        result = await worker._finalize_after(
-            fut,
-            'task-12',
-            task_name='helper_task',
-            executor=MagicMock(),
-        )
-
-        assert isinstance(result, Err)
-        err: _FinalizeError = result.err_value
-        assert err.retryable is False
-        assert err.data is not None
-        assert err.data['requeue_outcome'] == 'NOT_OWNER_OR_NOT_CLAIMED'
-
-    @pytest.mark.asyncio
-    async def test_future_non_retryable_error_always_not_retryable(self) -> None:
-        """Non-retryable future exception → retryable=False regardless of requeue outcome."""
-        worker = _make_worker()
-
-        worker._recover_worker_future_failure = AsyncMock(  # type: ignore[method-assign]
-            return_value=_RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED,
-        )
-
-        fut: asyncio.Future[tuple[bool, str, str | None]] = asyncio.Future()
-        fut.set_exception(ValueError('bad data'))
-
-        result = await worker._finalize_after(
-            fut,
+            _finished_handle(NotDispatched(NotRunCause.POOL_STOPPING)),
             'task-13',
             task_name='helper_task',
-            executor=MagicMock(),
         )
 
         assert isinstance(result, Err)
-        err: _FinalizeError = result.err_value
-        assert err.retryable is False
-        assert err.data is not None
-        assert err.data['requeue_outcome'] == 'NOT_OWNER_OR_NOT_CLAIMED'
+        assert result.err_value.retryable is True
+
+    @pytest.mark.asyncio
+    async def test_finished_task_goes_to_persist(self) -> None:
+        worker = _make_worker()
+        worker._persist_task_terminal_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=Err(MagicMock()),
+        )
+
+        await worker._finalize_after(
+            _finished_handle(TaskFinished(True, '{}', None, RssUnreadable())),
+            'task-13',
+            task_name='helper_task',
+        )
+
+        kwargs = worker._persist_task_terminal_state.await_args.kwargs
+        assert (kwargs['ok'], kwargs['result_json_str'], kwargs['failed_reason']) == (
+            True,
+            '{}',
+            None,
+        )
 
 
-# ---------------------------------------------------------------------------
-# 12. _handle_broken_pool / _dispatch_one: requeue DB error containment
-# ---------------------------------------------------------------------------
+@pytest.mark.unit
+class TestAwaitSlotOutcome:
+    """The timeout bounds execution: it starts when a child gets the task."""
+
+    @pytest.mark.asyncio
+    async def test_timeout_does_not_run_while_the_task_waits_for_a_slot(self) -> None:
+        worker = _make_worker()
+        worker._handle_task_timeout = AsyncMock()  # type: ignore[method-assign]
+        handle = SlotHandle(_run_frame(), asyncio.get_running_loop())
+
+        waiter = asyncio.ensure_future(
+            worker._await_slot_outcome(handle, 'task-1', 1, None),
+        )
+        await asyncio.sleep(0.05)
+
+        worker._handle_task_timeout.assert_not_awaited()
+        handle.finish(NotDispatched(NotRunCause.POOL_STOPPING))
+        assert await waiter == NotDispatched(NotRunCause.POOL_STOPPING)
+
+    @pytest.mark.asyncio
+    async def test_timeout_handler_runs_then_the_slot_decides(self) -> None:
+        worker = _make_worker()
+        handle = SlotHandle(_run_frame(), asyncio.get_running_loop())
+        handle.bind_child(MagicMock())
+
+        async def _timeout_handler(*_args: Any, **_kwargs: Any) -> None:
+            handle.finish(_LOST)
+
+        worker._handle_task_timeout = AsyncMock(  # type: ignore[method-assign]
+            side_effect=_timeout_handler,
+        )
+
+        outcome = await worker._await_slot_outcome(handle, 'task-1', 1, None)
+
+        worker._handle_task_timeout.assert_awaited_once()
+        assert outcome == _LOST
+
+    @pytest.mark.asyncio
+    async def test_a_result_inside_the_limit_needs_no_timeout_handler(self) -> None:
+        worker = _make_worker()
+        worker._handle_task_timeout = AsyncMock()  # type: ignore[method-assign]
+        done = TaskFinished(True, '{}', None, RssUnreadable())
+
+        outcome = await worker._await_slot_outcome(
+            _finished_handle(done),
+            'task-1',
+            1000,
+            None,
+        )
+
+        assert outcome == done
+        worker._handle_task_timeout.assert_not_awaited()
 
 
 @pytest.mark.unit
 class TestRequeueDbErrorContainment:
-    """Fire-and-forget call sites must not propagate DB errors and must log CRITICAL."""
+    """A task that never reached a child must not raise, and must log CRITICAL."""
 
     @pytest.mark.asyncio
-    async def test_handle_broken_pool_db_error_logs_critical(
+    async def test_requeue_db_error_logs_critical(
         self,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """_handle_broken_pool logs CRITICAL on DB_ERROR and still restarts executor."""
         worker = _make_worker()
-
-        worker._recover_worker_future_failure = AsyncMock(  # type: ignore[method-assign]
+        worker._requeue_claimed_task = AsyncMock(  # type: ignore[method-assign]
             return_value=_RequeueOutcome.DB_ERROR,
         )
-        worker._restart_executor = AsyncMock()  # type: ignore[method-assign]
 
         with caplog.at_level(logging.CRITICAL, logger='horsies.worker'):
-            await worker._handle_broken_pool(
+            await worker._finalize_after(
+                _finished_handle(NotDispatched(NotRunCause.QUEUE_FULL)),
                 'task-20',
-                BrokenProcessPool('pool died'),
-                MagicMock(),
+                task_name='helper_task',
             )
 
-        worker._restart_executor.assert_awaited_once()
         critical_messages = [r for r in caplog.records if r.levelno == logging.CRITICAL]
         assert len(critical_messages) == 1
         assert 'task-20' in critical_messages[0].message
         assert 'DB_ERROR' in critical_messages[0].message
 
     @pytest.mark.asyncio
-    async def test_dispatch_one_executor_unavailable_db_error_logs_critical(
+    async def test_requeue_success_logs_no_critical(
         self,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """_dispatch_one (executor unavailable path) logs CRITICAL on DB_ERROR."""
         worker = _make_worker()
-        worker._executor = None
-
-        # _ensure_executor keeps executor as None (simulating create failure
-        # already handled elsewhere)
-        worker._ensure_executor = AsyncMock()  # type: ignore[method-assign]
-
-        worker._recover_worker_future_failure = AsyncMock(  # type: ignore[method-assign]
-            return_value=_RequeueOutcome.DB_ERROR,
-        )
-
-        with caplog.at_level(logging.CRITICAL, logger='horsies.worker'):
-            await worker._dispatch_one('task-21', 'my_app.add', '[]', '{}')
-
-        critical_messages = [r for r in caplog.records if r.levelno == logging.CRITICAL]
-        assert len(critical_messages) == 1
-        assert 'task-21' in critical_messages[0].message
-        assert 'DB_ERROR' in critical_messages[0].message
-
-    @pytest.mark.asyncio
-    async def test_dispatch_one_submit_exception_db_error_logs_critical(
-        self,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """_dispatch_one (run_in_executor exception path) logs CRITICAL on DB_ERROR."""
-        worker = _make_worker()
-        worker._executor = MagicMock()
-
-        # Make run_in_executor raise a non-BrokenProcessPool exception synchronously
-        loop = asyncio.get_running_loop()
-        original_run = loop.run_in_executor
-
-        def _patched_run(executor: Any, fn: Any, *args: Any) -> Any:
-            raise RuntimeError('submit failed')
-
-        loop.run_in_executor = _patched_run  # type: ignore[assignment]
-
-        worker._recover_worker_future_failure = AsyncMock(  # type: ignore[method-assign]
-            return_value=_RequeueOutcome.DB_ERROR,
-        )
-
-        try:
-            with caplog.at_level(logging.CRITICAL, logger='horsies.worker'):
-                await worker._dispatch_one('task-22', 'my_app.add', '[]', '{}')
-        finally:
-            loop.run_in_executor = original_run  # type: ignore[assignment]
-
-        critical_messages = [r for r in caplog.records if r.levelno == logging.CRITICAL]
-        assert len(critical_messages) == 1
-        assert 'task-22' in critical_messages[0].message
-        assert 'DB_ERROR' in critical_messages[0].message
-
-    @pytest.mark.asyncio
-    async def test_handle_broken_pool_requeue_success_no_critical(
-        self,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """No CRITICAL log when requeue succeeds in _handle_broken_pool."""
-        worker = _make_worker()
-
-        worker._recover_worker_future_failure = AsyncMock(  # type: ignore[method-assign]
+        worker._requeue_claimed_task = AsyncMock(  # type: ignore[method-assign]
             return_value=_RequeueOutcome.REQUEUED,
         )
-        worker._restart_executor = AsyncMock()  # type: ignore[method-assign]
 
         with caplog.at_level(logging.CRITICAL, logger='horsies.worker'):
-            await worker._handle_broken_pool(
+            await worker._finalize_after(
+                _finished_handle(NotDispatched(NotRunCause.POOL_STOPPING)),
                 'task-23',
-                BrokenProcessPool('pool died'),
-                MagicMock(),
+                task_name='helper_task',
             )
 
-        critical_messages = [r for r in caplog.records if r.levelno == logging.CRITICAL]
-        assert len(critical_messages) == 0
+        assert [r for r in caplog.records if r.levelno == logging.CRITICAL] == []
+
+
+@pytest.mark.unit
+class TestDispatchOne:
+    """_dispatch_one hands the row to the pool and arms one finalizer."""
+
+    @pytest.mark.asyncio
+    async def test_frame_carries_the_claim_fields(self) -> None:
+        worker = _make_worker()
+        worker._slots = MagicMock()
+        worker._spawn_background = MagicMock(  # type: ignore[method-assign]
+            side_effect=lambda coro, **_kwargs: coro.close(),
+        )
+        claimed_at = datetime(2026, 11, 1, tzinfo=timezone.utc)
+
+        await worker._dispatch_one(
+            'task-30',
+            'app.add',
+            '[1]',
+            '{}',
+            'default',
+            True,
+            timeout_ms=1000,
+            claimed_at=claimed_at,
+        )
+
+        frame = worker._slots.submit.call_args.args[0]
+        assert frame == RunFrame(
+            task_id='task-30',
+            task_name='app.add',
+            args_json='[1]',
+            kwargs_json='{}',
+            worker_id=worker.worker_instance_id,
+            runner_heartbeat_interval_ms=30_000,
+            is_workflow_task=True,
+            timeout_ms=1000,
+            claimed_at=claimed_at,
+        )
+        assert worker._spawn_background.call_args.kwargs['finalizer'] is True
+
+    @pytest.mark.asyncio
+    async def test_finalizer_gets_the_handle_and_the_claim_fields(self) -> None:
+        worker = _make_worker()
+        worker._slots = MagicMock()
+        worker._spawn_background = MagicMock()  # type: ignore[method-assign]
+        worker._finalize_after = MagicMock()  # type: ignore[method-assign]
+        claimed_at = datetime(2026, 11, 1, tzinfo=timezone.utc)
+
+        await worker._dispatch_one(
+            'task-31',
+            'app.add',
+            None,
+            None,
+            'other',
+            False,
+            timeout_ms=1000,
+            claimed_at=claimed_at,
+        )
+
+        worker._finalize_after.assert_called_once_with(
+            worker._slots.submit.return_value,
+            'task-31',
+            'other',
+            False,
+            timeout_ms=1000,
+            task_name='app.add',
+            claimed_at=claimed_at,
+        )
+
+
+@pytest.mark.unit
+class TestSlotPoolSetup:
+    def test_config_carries_what_a_child_needs(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        worker = _make_worker()
+        worker.cfg.app_locator = 'app.module:app'
+        worker.cfg.processes = 3
+        worker.cfg.max_tasks_per_child = 7
+        worker.cfg.max_memory_per_child_mb = 300
+        monkeypatch.setattr(sys, 'path', ['', '/srv/app'])
+
+        config = worker._slot_pool_config()
+
+        monkeypatch.undo()
+        assert config.slots == 3
+        assert config.max_tasks_per_child == 7
+        assert config.max_memory_per_child_mb == 300
+        assert config.init.app_locator == 'app.module:app'
+        assert config.init.database_url == 'postgresql://u:p@localhost/db'
+        assert config.init.parent_sys_path == (os.getcwd(), '/srv/app')
+
+    def test_a_path_object_on_sys_path_reaches_the_child(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Python skips such an entry, so it must not stop the worker."""
+        worker = _make_worker()
+        monkeypatch.setattr(sys, 'path', [Path('/srv/app'), 7, 'bad\udcff', '/srv/lib'])
+
+        config = worker._slot_pool_config()
+
+        monkeypatch.undo()
+        assert config.init.parent_sys_path == ('/srv/app', '/srv/lib')
+        assert encode_parent_frame(config.init).head
+
+    def test_argv_that_is_not_utf8_can_be_framed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        worker = _make_worker()
+        monkeypatch.setattr(sys, 'argv', ['horsies', 'bad\udcff'])
+
+        config = worker._slot_pool_config()
+
+        monkeypatch.undo()
+        assert encode_parent_frame(config.init).head
+
+    def test_pending_limit_covers_the_claim_budget(self) -> None:
+        worker = _make_worker()
+        worker.cfg.processes = 2
+        worker.cfg.prefetch_buffer = 3
+        assert worker._pending_task_limit() == 10
+        worker.cfg.max_claim_per_worker = 8
+        assert worker._pending_task_limit() == 16
+
+    @pytest.mark.asyncio
+    async def test_main_module_locator_is_refused(self) -> None:
+        worker = _make_worker()
+        worker.cfg.app_locator = '__main__:app'
+
+        with pytest.raises(ChildStartFailedError, match='__main__'):
+            await worker._start_slots()
+
+        assert worker._slots is None
+
+    @pytest.mark.asyncio
+    async def test_hook_failure_raises_the_hook_error(self) -> None:
+        worker = _make_worker()
+        pool = MagicMock()
+        pool.start = AsyncMock(return_value=Err(ChildHookFailed()))
+
+        with patch('horsies.core.worker.worker.SlotPool', return_value=pool):
+            with pytest.raises(ChildHookFailedError):
+                await worker._start_slots()
+
+    @pytest.mark.asyncio
+    async def test_a_stop_during_the_start_is_no_failure(self) -> None:
+        worker = _make_worker()
+        pool = MagicMock()
+        pool.start = AsyncMock(return_value=Err(PoolStopped()))
+
+        with patch('horsies.core.worker.worker.SlotPool', return_value=pool):
+            await worker._start_slots()
+
+    @pytest.mark.asyncio
+    async def test_a_stop_during_the_start_opens_no_database_work(self) -> None:
+        worker = _make_worker()
+        worker._preload_modules_main = MagicMock()  # type: ignore[method-assign]
+        worker._start_slots = AsyncMock(  # type: ignore[method-assign]
+            side_effect=worker._stop.set,
+        )
+        worker.listener.start = AsyncMock()
+
+        await worker.start()
+
+        worker.listener.start.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_start_failure_raises_and_keeps_the_pool_for_cleanup(self) -> None:
+        worker = _make_worker()
+        pool = MagicMock()
+        pool.start = AsyncMock(return_value=Err(SpawnFailed('no such file')))
+
+        with patch('horsies.core.worker.worker.SlotPool', return_value=pool):
+            with pytest.raises(ChildStartFailedError, match='no such file'):
+                await worker._start_slots()
+
+        assert worker._slots is pool
+
+
+@pytest.mark.unit
+class TestStopDuringStart:
+    @pytest.mark.asyncio
+    async def test_a_start_that_ends_stopped_still_stops_the_children(self) -> None:
+        worker = _make_worker()
+        worker._start_with_resilience_config = AsyncMock(  # type: ignore[method-assign]
+            side_effect=worker._stop.set,
+        )
+        worker.stop = AsyncMock()  # type: ignore[method-assign]
+
+        await worker.run_forever()
+
+        worker.stop.assert_awaited_once_with()
+
+
+@pytest.mark.unit
+class TestSlotFailureLoop:
+    @pytest.mark.asyncio
+    async def test_hook_failure_stops_gracefully(self) -> None:
+        worker = _make_worker()
+        pool = MagicMock()
+        pool.wait_failed = AsyncMock(return_value=ChildHookFailed())
+
+        await worker._slot_failure_loop(pool)
+
+        assert worker._stop.is_set()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        'failure',
+        [SpawnFailed('x'), BootAttemptsExhausted(3, 'exit code 1')],
+    )
+    async def test_other_failures_are_fatal(self, failure: Any) -> None:
+        worker = _make_worker()
+        pool = MagicMock()
+        pool.wait_failed = AsyncMock(return_value=failure)
+
+        with pytest.raises(ChildStartFailedError):
+            await worker._slot_failure_loop(pool)
+
+
+@pytest.mark.unit
+class TestMemoryBaselineGuard:
+    def _worker(self, threshold: int | None) -> Worker:
+        worker = _make_worker()
+        worker.cfg.max_memory_per_child_mb = threshold
+        return worker
+
+    def test_no_threshold_skips_the_guard(self) -> None:
+        self._worker(None)._check_memory_baseline((ChildBaseline(1, RssMb(9999.0)),))
+
+    def test_baseline_at_the_threshold_is_refused(self) -> None:
+        with pytest.raises(MemoryBaselineExceedsThresholdError, match='100MB'):
+            self._worker(100)._check_memory_baseline(
+                (ChildBaseline(1, RssMb(50.0)), ChildBaseline(2, RssMb(100.0))),
+            )
+
+    def test_baseline_below_the_threshold_passes(self) -> None:
+        self._worker(100)._check_memory_baseline((ChildBaseline(1, RssMb(10.0)),))
+
+    def test_unreadable_rss_warns_and_passes(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        with caplog.at_level(logging.WARNING, logger='horsies.worker'):
+            self._worker(100)._check_memory_baseline(
+                (ChildBaseline(1, RssUnreadable()),),
+            )
+        assert 'unreadable' in caplog.text
+
+
+@pytest.mark.unit
+class TestTimedOutChildKill:
+    @pytest.mark.asyncio
+    async def test_the_child_that_holds_the_task_is_killed(self) -> None:
+        worker = _make_worker()
+        handle = SlotHandle(_run_frame(), asyncio.get_running_loop())
+        child = MagicMock()
+        handle.bind_child(child)
+
+        worker._kill_timed_out_child(handle, 'task-1', 1000)
+
+        child.kill_for_caller.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_a_database_error_at_the_timeout_still_kills_the_child(self) -> None:
+        """The slot is held until the child exits, so the kill cannot wait on the row."""
+        worker = _make_worker()
+        worker.sf = MagicMock(side_effect=OperationalError('db down'))
+        handle = SlotHandle(_run_frame(), asyncio.get_running_loop())
+        child = MagicMock()
+        handle.bind_child(child)
+
+        await worker._handle_task_timeout(handle, 'task-1', 1000)
+
+        child.kill_for_caller.assert_called_once_with()
+
+    def test_a_child_that_no_longer_holds_the_task_is_not_killed(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        worker = _make_worker()
+        handle = MagicMock()
+        handle.kill.return_value = NothingToKill()
+
+        with caplog.at_level(logging.WARNING, logger='horsies.worker'):
+            worker._kill_timed_out_child(handle, 'task-1', 1000)
+
+        assert 'no longer holds it' in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -2371,570 +2698,18 @@ class TestSleepWithStop:
 
 
 @pytest.mark.unit
-class TestRestartExecutor:
-    """Tests for Worker._restart_executor (force-replace semantics)."""
-
-    # --- U-4d ---
-
-    @pytest.mark.asyncio
-    async def test_stop_set_is_noop(self) -> None:
-        """When stop is set, _restart_executor does nothing."""
-        worker = _make_worker()
-        worker._stop.set()
-        worker._create_executor = MagicMock()  # type: ignore[assignment]
-
-        await worker._restart_executor('test reason', failed_executor=MagicMock())
-
-        worker._create_executor.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_stale_executor_is_not_restarted_when_current_is_none(self) -> None:
-        """A request for an executor that is no longer current is a no-op.
-
-        With ``self._executor is None`` (a restart already tore the pool
-        down), a late handler for the old pool must not create anything —
-        ensure-an-executor-exists is _ensure_executor's job.
-        """
-        worker = _make_worker()
-        worker._executor = None
-        worker._create_executor = MagicMock()  # type: ignore[assignment]
-
-        await worker._restart_executor('late handler', failed_executor=MagicMock())
-
-        worker._create_executor.assert_not_called()
-
-    # --- U-4f ---
-
-    @pytest.mark.asyncio
-    async def test_executor_exists_shuts_down_and_recreates(self) -> None:
-        """The failed executor is shut down, then a new one is created."""
-        worker = _make_worker()
-        old_executor = MagicMock()
-        new_executor = MagicMock()
-        worker._executor = old_executor
-        worker._create_executor = MagicMock(return_value=_warmable(new_executor))  # type: ignore[assignment]
-        worker._warm_executor = AsyncMock()  # type: ignore[assignment]
-
-        await worker._restart_executor('broken pool', failed_executor=old_executor)
-
-        old_executor.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
-        worker._create_executor.assert_called_once_with(
-            avoid_parent_fd_inheritance=False
-        )
-        worker._warm_executor.assert_awaited_once()
-        assert worker._executor is new_executor
-
-    @pytest.mark.asyncio
-    async def test_replacement_uses_spawn_safe_context_after_parent_db_opens(
-        self,
-    ) -> None:
-        """Replacement executors avoid inheriting parent DB sockets after startup."""
-        worker = _make_worker()
-        worker._parent_db_sockets_open = True
-        old_executor = MagicMock()
-        worker._executor = old_executor
-        mock_executor = MagicMock()
-        worker._create_executor = MagicMock(return_value=_warmable(mock_executor))  # type: ignore[assignment]
-        worker._warm_executor = AsyncMock()  # type: ignore[assignment]
-
-        await worker._restart_executor('broken pool', failed_executor=old_executor)
-
-        worker._create_executor.assert_called_once_with(
-            avoid_parent_fd_inheritance=True
-        )
-        worker._warm_executor.assert_awaited_once()
-        assert worker._executor is mock_executor
-
-    # --- U-4g ---
-
-    @pytest.mark.asyncio
-    async def test_shutdown_error_still_creates_new(self) -> None:
-        """When shutdown raises, still creates a new executor."""
-        worker = _make_worker()
-        old_executor = MagicMock()
-        old_executor.shutdown.side_effect = RuntimeError('shutdown boom')
-        new_executor = MagicMock()
-        worker._executor = old_executor
-        worker._create_executor = MagicMock(return_value=_warmable(new_executor))  # type: ignore[assignment]
-        worker._warm_executor = AsyncMock()  # type: ignore[assignment]
-
-        await worker._restart_executor('broken pool', failed_executor=old_executor)
-
-        assert worker._executor is new_executor
-
-    @pytest.mark.asyncio
-    async def test_concurrent_restarts_share_one_replacement(self) -> None:
-        """Concurrent restart requests should not create orphaned replacement executors."""
-        worker = _make_worker()
-        old_executor = MagicMock()
-        worker._executor = old_executor
-        replacements = [MagicMock(name=f'executor-{idx}') for idx in range(12)]
-        worker._create_executor = MagicMock(  # type: ignore[assignment]
-            side_effect=[_warmable(pool) for pool in replacements],
-        )  # type: ignore[assignment]
-        worker._warm_executor = AsyncMock()  # type: ignore[assignment]
-
-        await asyncio.gather(
-            *(
-                worker._restart_executor(
-                    f'broken pool {idx}',
-                    failed_executor=old_executor,
-                )
-                for idx in range(12)
-            )
-        )
-
-        old_executor.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
-        worker._create_executor.assert_called_once()
-        worker._warm_executor.assert_awaited_once()
-        assert worker._executor is replacements[0]
-
-    @pytest.mark.asyncio
-    async def test_stale_restart_request_does_not_replace_current_executor(
-        self,
-    ) -> None:
-        """A late handler for an old broken executor should not restart its replacement."""
-        worker = _make_worker()
-        old_executor = MagicMock()
-        worker._executor = old_executor
-        first_replacement = MagicMock(name='first-replacement')
-        second_replacement = MagicMock(name='second-replacement')
-        worker._create_executor = MagicMock(  # type: ignore[assignment]
-            side_effect=[
-                _warmable(first_replacement),
-                _warmable(second_replacement),
-            ]
-        )
-        worker._warm_executor = AsyncMock()  # type: ignore[assignment]
-
-        await worker._restart_executor(
-            'first broken pool', failed_executor=old_executor
-        )
-        await worker._restart_executor('late broken pool', failed_executor=old_executor)
-
-        old_executor.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
-        worker._create_executor.assert_called_once()
-        worker._warm_executor.assert_awaited_once()
-        assert worker._executor is first_replacement
-
-    @pytest.mark.asyncio
-    async def test_create_failure_raises_typed_fatal_error(self) -> None:
-        """OS-level pool creation failure surfaces as ExecutorRestartFailedError.
-
-        No retry: resource exhaustion (fd/semaphore) is a host condition a
-        retry cannot fix.
-        """
-        worker = _make_worker()
-        old_executor = MagicMock()
-        worker._executor = old_executor
-        worker._create_executor = MagicMock(  # type: ignore[assignment]
-            side_effect=OSError(24, 'Too many open files'),
-        )
-
-        with pytest.raises(ExecutorRestartFailedError) as excinfo:
-            await worker._restart_executor('broken pool', failed_executor=old_executor)
-
-        assert isinstance(excinfo.value.__cause__, OSError)
-        assert 'broken pool' in str(excinfo.value)
-        worker._create_executor.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_generic_warm_failure_raises_typed_fatal_without_retry(self) -> None:
-        """A warmup failure that is not kill-shaped stays immediately fatal.
-
-        Only WarmupIncompleteError / BrokenProcessPool enter the retry arm;
-        a bare RuntimeError must not.
-        """
-        worker = _make_worker()
-        old_executor = MagicMock()
-        worker._executor = old_executor
-        worker._create_executor = MagicMock(return_value=MagicMock())  # type: ignore[assignment]
-        worker._warm_executor = AsyncMock(  # type: ignore[assignment]
-            side_effect=RuntimeError('unexpected warmup failure'),
-        )
-
-        with pytest.raises(ExecutorRestartFailedError):
-            await worker._restart_executor('broken pool', failed_executor=old_executor)
-
-        old_executor.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
-        worker._create_executor.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_hook_failure_stops_worker_instead_of_raising(self) -> None:
-        """ChildHookFailedError keeps its stop path; no fatal raise, no retry."""
-        worker = _make_worker()
-        old_executor = MagicMock()
-        worker._executor = old_executor
-        worker._create_warmed_executor = AsyncMock(  # type: ignore[method-assign]
-            side_effect=ChildHookFailedError('hook failed'),
-        )
-        worker._stop_for_child_hook_failure = MagicMock()  # type: ignore[method-assign]
-
-        await worker._restart_executor('broken pool', failed_executor=old_executor)
-
-        worker._stop_for_child_hook_failure.assert_called_once()
-        worker._create_warmed_executor.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_dispatch_one_propagates_fatal_restart_error(self) -> None:
-        """_dispatch_one must not swallow the process-fatal ensure failure."""
-        worker = _make_worker()
-        worker._executor = None
-        worker._ensure_executor = AsyncMock(  # type: ignore[method-assign]
-            side_effect=ExecutorRestartFailedError('executor restart failed: boom'),
-        )
-
-        with pytest.raises(ExecutorRestartFailedError):
-            await worker._dispatch_one('task-1', 'some_task', None, None)
-
-    @pytest.mark.asyncio
-    async def test_finalize_path_fatal_restart_error_escapes_unfolded(self) -> None:
-        """The fatal error escapes _finalize_after instead of folding to Err.
-
-        Pins the documented mechanism: _handle_broken_pool is awaited inside
-        the BrokenProcessPool except handler, so its raise bypasses
-        _finalize_after's sibling except arms and lands in the background
-        finalizer task, where _spawn_background's done-callback captures it
-        as process-fatal and stops the worker (see
-        TestBackgroundFatalCapture).
-        """
-        worker = _make_worker()
-        worker._recover_worker_future_failure = AsyncMock(  # type: ignore[method-assign]
-            return_value=_RequeueOutcome.REQUEUED,
-        )
-        worker._restart_executor = AsyncMock(  # type: ignore[method-assign]
-            side_effect=ExecutorRestartFailedError(
-                'executor restart failed: pool died',
-            ),
-        )
-        fut: asyncio.Future[tuple[bool, str, str | None]] = (
-            asyncio.get_running_loop().create_future()
-        )
-        fut.set_exception(BrokenProcessPool('pool died'))
-
-        with pytest.raises(ExecutorRestartFailedError):
-            await worker._finalize_after(
-                fut,
-                'task-1',
-                task_name='helper_task',
-                executor=MagicMock(),
-            )
-
-
-@pytest.mark.unit
-class TestEnsureExecutor:
-    """Tests for Worker._ensure_executor (create-if-missing semantics)."""
-
-    @pytest.mark.asyncio
-    async def test_creates_when_missing(self) -> None:
-        """With no executor published, creates, warms, and publishes one."""
-        worker = _make_worker()
-        worker._executor = None
-        mock_executor = MagicMock()
-        worker._create_executor = MagicMock(return_value=_warmable(mock_executor))  # type: ignore[assignment]
-        worker._warm_executor = AsyncMock()  # type: ignore[assignment]
-
-        await worker._ensure_executor('Executor missing before dispatch')
-
-        worker._create_executor.assert_called_once_with(
-            avoid_parent_fd_inheritance=False
-        )
-        worker._warm_executor.assert_awaited_once()
-        assert worker._executor is mock_executor
-
-    @pytest.mark.asyncio
-    async def test_uses_spawn_safe_context_after_parent_db_opens(self) -> None:
-        """Ensure-created executors avoid inheriting parent DB sockets."""
-        worker = _make_worker()
-        worker._parent_db_sockets_open = True
-        worker._executor = None
-        worker._create_executor = MagicMock(return_value=MagicMock())  # type: ignore[assignment]
-        worker._warm_executor = AsyncMock()  # type: ignore[assignment]
-
-        await worker._ensure_executor('Executor missing before dispatch')
-
-        worker._create_executor.assert_called_once_with(
-            avoid_parent_fd_inheritance=True
-        )
-
-    @pytest.mark.asyncio
-    async def test_noop_when_executor_present(self) -> None:
-        """An existing pool is never torn down or replaced.
-
-        Regression: the dispatch-path 'Executor missing before dispatch'
-        request used to fall into _restart_executor's force-replace branch
-        after waiting on the restart lock, destroying the healthy pool a
-        background restart had just built.
-        """
-        worker = _make_worker()
-        existing = MagicMock()
-        worker._executor = existing
-        worker._create_executor = MagicMock()  # type: ignore[assignment]
-
-        await worker._ensure_executor('Executor missing before dispatch')
-
-        worker._create_executor.assert_not_called()
-        existing.shutdown.assert_not_called()
-        assert worker._executor is existing
-
-    @pytest.mark.asyncio
-    async def test_stop_set_is_noop(self) -> None:
-        """When stop is set, _ensure_executor does nothing."""
-        worker = _make_worker()
-        worker._stop.set()
-        worker._executor = None
-        worker._create_executor = MagicMock()  # type: ignore[assignment]
-
-        await worker._ensure_executor('Executor missing before dispatch')
-
-        worker._create_executor.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_create_failure_raises_typed_fatal_error(self) -> None:
-        """Creation failure surfaces as ExecutorRestartFailedError."""
-        worker = _make_worker()
-        worker._executor = None
-        worker._create_executor = MagicMock(  # type: ignore[assignment]
-            side_effect=OSError(24, 'Too many open files'),
-        )
-
-        with pytest.raises(ExecutorRestartFailedError):
-            await worker._ensure_executor('Executor missing before dispatch')
-
-
-@pytest.mark.unit
-class TestExecutorPublicationOrder:
-    """_create_warmed_executor publishes only a fully-warm pool.
-
-    Regression for the B1 crash-loop: the pool used to be published before
-    warmup, so dispatch fed real tasks onto the warming pool and a timeout
-    kill could break it mid-warmup, turning a routine pool replacement into
-    a process-fatal restart failure.
-    """
-
-    @pytest.mark.asyncio
-    async def test_unpublished_while_warming(self) -> None:
-        """self._executor stays None until warmup completes."""
-        worker = _make_worker()
-        worker._executor = None
-        worker._create_executor = MagicMock(return_value=MagicMock())  # type: ignore[assignment]
-        entered = asyncio.Event()
-        gate = asyncio.Event()
-
-        async def _warm(_executor: Any) -> None:
-            entered.set()
-            await gate.wait()
-
-        worker._warm_executor = AsyncMock(side_effect=_warm)  # type: ignore[assignment]
-
-        create_task = asyncio.create_task(worker._create_warmed_executor())
-        await entered.wait()
-        assert worker._executor is None
-        gate.set()
-        await create_task
-        assert worker._executor is not None
-
-    @pytest.mark.asyncio
-    async def test_stays_unpublished_on_warm_failure(self) -> None:
-        """A failed warmup never publishes; the pool is torn down."""
-        worker = _make_worker()
-        worker._executor = None
-        created = MagicMock()
-        barrier = MagicMock()
-        worker._create_executor = MagicMock(  # type: ignore[assignment]
-            return_value=WarmablePool(executor=created, warmup_barrier=barrier),
-        )
-        worker._warm_executor = AsyncMock(  # type: ignore[assignment]
-            side_effect=WarmupIncompleteError(
-                'worker child warmup started 5/6 process(es)'
-            ),
-        )
-
-        with pytest.raises(WarmupIncompleteError):
-            await worker._create_warmed_executor()
-
-        assert worker._executor is None
-        barrier.abort.assert_called_once_with()
-        created.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
-
-    @pytest.mark.asyncio
-    async def test_stop_during_warm_discards_pool(self) -> None:
-        """stop() during warmup: the pool is shut down, never published.
-
-        stop()'s executor-shutdown pass sees None while warmup runs, so
-        publishing afterwards would leak a live pool past shutdown.
-        """
-        worker = _make_worker()
-        worker._executor = None
-        created = MagicMock()
-        worker._create_executor = MagicMock(return_value=_warmable(created))  # type: ignore[assignment]
-
-        async def _warm(_executor: Any) -> None:
-            worker._stop.set()
-
-        worker._warm_executor = AsyncMock(side_effect=_warm)  # type: ignore[assignment]
-
-        await worker._create_warmed_executor()
-
-        assert worker._executor is None
-        created.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
-
-    @pytest.mark.asyncio
-    async def test_cancel_during_warm_tears_down_pool(self) -> None:
-        """Cancellation (start timeout) tears the unpublished pool down.
-
-        Regression: with late publication, _cleanup_after_failed_start sees
-        None and cannot tear the pool down — the cancel arm must do it, or
-        the half-warmed children leak and the resilience retry stacks a
-        second pool on top.
-        """
-        worker = _make_worker()
-        worker._executor = None
-        created = MagicMock()
-        barrier = MagicMock()
-        worker._create_executor = MagicMock(  # type: ignore[assignment]
-            return_value=WarmablePool(executor=created, warmup_barrier=barrier),
-        )
-        worker._warm_executor = AsyncMock(  # type: ignore[assignment]
-            side_effect=asyncio.CancelledError(),
-        )
-
-        with pytest.raises(asyncio.CancelledError):
-            await worker._create_warmed_executor()
-
-        assert worker._executor is None
-        barrier.abort.assert_called_once_with()
-        created.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
-
-
-@pytest.mark.unit
-class TestWarmupRetry:
-    """Bounded retry of kill-shaped warmup failures in the restart path."""
-
-    @pytest.mark.asyncio
-    async def test_warmup_incomplete_retries_then_succeeds(self) -> None:
-        """WarmupIncompleteError retries the create+warm cycle and recovers."""
-        worker = _make_worker()
-        old_executor = MagicMock()
-        worker._executor = old_executor
-        replacements = [MagicMock(name='first'), MagicMock(name='second')]
-        worker._create_executor = MagicMock(  # type: ignore[assignment]
-            side_effect=[_warmable(pool) for pool in replacements],
-        )  # type: ignore[assignment]
-        worker._warm_executor = AsyncMock(  # type: ignore[assignment]
-            side_effect=[
-                WarmupIncompleteError('worker child warmup started 5/6 process(es)'),
-                None,
-            ],
-        )
-        worker._sleep_with_stop = AsyncMock()  # type: ignore[method-assign]
-
-        await worker._restart_executor('broken pool', failed_executor=old_executor)
-
-        assert worker._executor is replacements[1]
-        assert worker._create_executor.call_count == 2
-        replacements[0].shutdown.assert_called_once_with(wait=True, cancel_futures=True)
-        worker._sleep_with_stop.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_broken_pool_during_warm_retries_then_succeeds(self) -> None:
-        """BrokenProcessPool during warmup (child killed mid-warm) retries."""
-        worker = _make_worker()
-        old_executor = MagicMock()
-        worker._executor = old_executor
-        replacements = [MagicMock(name='first'), MagicMock(name='second')]
-        worker._create_executor = MagicMock(  # type: ignore[assignment]
-            side_effect=[_warmable(pool) for pool in replacements],
-        )  # type: ignore[assignment]
-        worker._warm_executor = AsyncMock(  # type: ignore[assignment]
-            side_effect=[BrokenProcessPool('child SIGKILLed during warmup'), None],
-        )
-        worker._sleep_with_stop = AsyncMock()  # type: ignore[method-assign]
-
-        await worker._restart_executor('broken pool', failed_executor=old_executor)
-
-        assert worker._executor is replacements[1]
-        assert worker._create_executor.call_count == 2
-
-    @pytest.mark.asyncio
-    async def test_retry_budget_exhausted_raises_typed_fatal(self) -> None:
-        """Persistent warmup shortfall still fails closed after the budget."""
-        worker = _make_worker()
-        old_executor = MagicMock()
-        worker._executor = old_executor
-        worker._create_executor = MagicMock(  # type: ignore[assignment]
-            side_effect=[MagicMock() for _ in range(_EXECUTOR_WARMUP_ATTEMPTS)],
-        )
-        worker._warm_executor = AsyncMock(  # type: ignore[assignment]
-            side_effect=WarmupIncompleteError(
-                'worker child warmup started 0/6 process(es)'
-            ),
-        )
-        worker._sleep_with_stop = AsyncMock()  # type: ignore[method-assign]
-
-        with pytest.raises(ExecutorRestartFailedError) as excinfo:
-            await worker._restart_executor('broken pool', failed_executor=old_executor)
-
-        assert isinstance(excinfo.value.__cause__, WarmupIncompleteError)
-        assert worker._create_executor.call_count == _EXECUTOR_WARMUP_ATTEMPTS
-        assert worker._executor is None
-
-    @pytest.mark.asyncio
-    async def test_memory_baseline_failure_fatal_immediately(self) -> None:
-        """MemoryBaselineExceedsThresholdError is misconfiguration: no retry."""
-        worker = _make_worker()
-        old_executor = MagicMock()
-        worker._executor = old_executor
-        worker._create_executor = MagicMock(return_value=MagicMock())  # type: ignore[assignment]
-        worker._warm_executor = AsyncMock(  # type: ignore[assignment]
-            side_effect=MemoryBaselineExceedsThresholdError('baseline 900MB >= 512MB'),
-        )
-        worker._sleep_with_stop = AsyncMock()  # type: ignore[method-assign]
-
-        with pytest.raises(ExecutorRestartFailedError) as excinfo:
-            await worker._restart_executor('broken pool', failed_executor=old_executor)
-
-        assert isinstance(excinfo.value.__cause__, MemoryBaselineExceedsThresholdError)
-        worker._create_executor.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_stop_between_retries_aborts_without_raise(self) -> None:
-        """A stop requested mid-retry ends the loop quietly."""
-        worker = _make_worker()
-        old_executor = MagicMock()
-        worker._executor = old_executor
-        worker._create_executor = MagicMock(return_value=MagicMock())  # type: ignore[assignment]
-        worker._warm_executor = AsyncMock(  # type: ignore[assignment]
-            side_effect=WarmupIncompleteError(
-                'worker child warmup started 1/6 process(es)'
-            ),
-        )
-
-        async def _sleep_sets_stop(_delay: float) -> None:
-            worker._stop.set()
-
-        worker._sleep_with_stop = AsyncMock(side_effect=_sleep_sets_stop)  # type: ignore[method-assign]
-
-        await worker._restart_executor('broken pool', failed_executor=old_executor)
-
-        assert worker._executor is None
-        worker._create_executor.assert_called_once()
-
-
-@pytest.mark.unit
 class TestBackgroundFatalCapture:
-    """ExecutorRestartFailedError from a background task crashes the worker.
+    """ChildStartFailedError from a background task crashes the worker.
 
-    Pins the zombie-window fix: before this, the done-callback only logged
-    the error and the executorless worker kept running until the next
-    claim pass happened to retry the restart.
+    Pins the zombie-window fix: a done-callback that only logs would leave a
+    worker running that cannot start a child.
     """
 
     @pytest.mark.asyncio
     async def test_on_done_captures_fatal_error_and_stops(self) -> None:
         """The done-callback stores the fatal error and sets stop."""
         worker = _make_worker()
-        fatal = ExecutorRestartFailedError('executor restart failed: boom')
+        fatal = ChildStartFailedError('worker child start failed: boom')
 
         async def _doomed() -> None:
             raise fatal
@@ -2968,7 +2743,7 @@ class TestBackgroundFatalCapture:
         worker = _make_worker()
         worker._start_with_resilience_config = AsyncMock()  # type: ignore[method-assign]
         worker.stop = AsyncMock(side_effect=worker._stop.set)  # type: ignore[method-assign]
-        fatal = ExecutorRestartFailedError('executor restart failed: boom')
+        fatal = ChildStartFailedError('worker child start failed: boom')
 
         async def _claim_pass_spawning_doomed_finalizer() -> None:
             async def _doomed() -> None:
@@ -2984,7 +2759,7 @@ class TestBackgroundFatalCapture:
 
         # Bounded so a regression (fatal swallowed -> loop spins forever)
         # fails fast instead of hanging the suite.
-        with pytest.raises(ExecutorRestartFailedError) as excinfo:
+        with pytest.raises(ChildStartFailedError) as excinfo:
             await asyncio.wait_for(worker.run_forever(), timeout=10.0)
 
         assert excinfo.value is fatal
@@ -2994,11 +2769,11 @@ class TestBackgroundFatalCapture:
         """The early stop-is-set return path also re-raises a captured fatal."""
         worker = _make_worker()
         worker._start_with_resilience_config = AsyncMock()  # type: ignore[method-assign]
-        fatal = ExecutorRestartFailedError('executor restart failed: boom')
+        fatal = ChildStartFailedError('worker child start failed: boom')
         worker._fatal_background_error = fatal
         worker._stop.set()
 
-        with pytest.raises(ExecutorRestartFailedError):
+        with pytest.raises(ChildStartFailedError):
             await worker.run_forever()
 
 
@@ -3159,18 +2934,19 @@ class TestCleanupAfterFailedStart:
     # --- U-4h ---
 
     @pytest.mark.asyncio
-    async def test_cleans_listener_and_executor(self) -> None:
-        """Closes listener and shuts down executor."""
+    async def test_cleans_listener_and_slot_pool(self) -> None:
+        """Closes the listener and stops the pool, so a retry finds no child."""
         worker = _make_worker()
         worker.listener = AsyncMock()
-        mock_executor = MagicMock()
-        worker._executor = mock_executor
+        pool = MagicMock()
+        pool.stop = AsyncMock()
+        worker._slots = pool
 
         await worker._cleanup_after_failed_start()
 
         worker.listener.close.assert_awaited_once()
-        mock_executor.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
-        assert worker._executor is None
+        pool.stop.assert_awaited_once_with(0)
+        assert worker._slots is None
 
     # --- U-4i ---
 
@@ -3183,31 +2959,11 @@ class TestCleanupAfterFailedStart:
         worker = _make_worker()
         worker.listener = AsyncMock()
         worker.listener.close.side_effect = RuntimeError('listener boom')
-        worker._executor = None
 
         with caplog.at_level(logging.ERROR, logger='horsies.worker'):
             await worker._cleanup_after_failed_start()
 
         assert 'listener' in caplog.text.lower()
-
-    # --- U-4j ---
-
-    @pytest.mark.asyncio
-    async def test_executor_shutdown_error_logged(
-        self,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """Executor shutdown error is logged, does not propagate."""
-        worker = _make_worker()
-        worker.listener = AsyncMock()
-        mock_executor = MagicMock()
-        mock_executor.shutdown.side_effect = RuntimeError('executor boom')
-        worker._executor = mock_executor
-
-        with caplog.at_level(logging.ERROR, logger='horsies.worker'):
-            await worker._cleanup_after_failed_start()
-
-        assert 'executor' in caplog.text.lower()
 
 
 @pytest.mark.unit
@@ -3405,14 +3161,7 @@ class TestStartupRegistersEveryClassItRuns:
         attach_resources(worker.broker, fake_resources())
         worker.broker.validate_worker_database_paths = AsyncMock()
         worker._preload_modules_main = MagicMock()  # type: ignore[assignment]
-        worker._create_executor = MagicMock(  # type: ignore[assignment]
-            side_effect=lambda **_kwargs: MagicMock()
-        )
-
-        async def _warm(_executor: Any) -> None:
-            return None
-
-        worker._warm_executor = AsyncMock(side_effect=_warm)  # type: ignore[assignment]
+        _stub_slot_start(worker)
         worker.listener.start = AsyncMock(return_value=Ok(None))
         worker.listener.listen_many = AsyncMock(return_value=Ok(None))
         worker.listener.listen = AsyncMock(return_value=Ok(asyncio.Queue()))
@@ -3459,8 +3208,7 @@ class TestWorkerStartupCoverageOutcome:
         attach_resources(worker.broker, fake_resources())
         worker.broker.validate_worker_database_paths = AsyncMock()
         worker._preload_modules_main = MagicMock()  # type: ignore[assignment]
-        worker._create_executor = MagicMock(return_value=MagicMock())  # type: ignore[assignment]
-        worker._warm_executor = AsyncMock()  # type: ignore[assignment]
+        _stub_slot_start(worker)
         worker.listener.start = AsyncMock(return_value=Ok(None))
         worker.listener.listen_many = AsyncMock(
             return_value=Ok([asyncio.Queue(), asyncio.Queue()])
@@ -3476,6 +3224,50 @@ class TestWorkerStartupCoverageOutcome:
         await worker.start()
 
         worker.listener.start.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_start_arms_the_slot_failure_watch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without this service loop, a slot that cannot restart goes unseen."""
+        from horsies.core.history.maintenance import coverage as coverage_module
+
+        worker = _make_worker()
+        monkeypatch.setattr(
+            coverage_module,
+            'ensure_startup_coverage_in_database',
+            AsyncMock(
+                return_value=coverage_module.CoverageEnsureFailed(
+                    stage='ensure_leaf_coverage',
+                    class_key='custom_7d',
+                    refusal='current class leaf is missing',
+                    heartbeat_covered_now=True,
+                    absent_leaves=(),
+                ),
+            ),
+        )
+        worker.broker = MagicMock()
+        attach_resources(worker.broker, fake_resources())
+        worker.broker.validate_worker_database_paths = AsyncMock()
+        worker._preload_modules_main = MagicMock()  # type: ignore[assignment]
+        _stub_slot_start(worker)
+        worker.listener.start = AsyncMock(return_value=Ok(None))
+        worker.listener.listen_many = AsyncMock(
+            return_value=Ok([asyncio.Queue(), asyncio.Queue()])
+        )
+        worker.listener.listen = AsyncMock(return_value=Ok(asyncio.Queue()))
+        spawned: list[tuple[str, bool]] = []
+
+        def _record(coro: Any, **kwargs: Any) -> MagicMock:
+            spawned.append((coro.cr_code.co_name, kwargs.get('service', False)))
+            coro.close()
+            return MagicMock()
+
+        worker._spawn_background = MagicMock(side_effect=_record)  # type: ignore[method-assign]
+
+        await worker.start()
+
+        assert ('_slot_failure_loop', True) in spawned
 
 
 class TestWorkerStartConnectionOrdering:
@@ -3520,19 +3312,12 @@ class TestWorkerStartConnectionOrdering:
         )
 
         worker._preload_modules_main = MagicMock()  # type: ignore[assignment]
-        worker._create_executor = MagicMock(  # type: ignore[assignment]
-            side_effect=lambda **_kwargs: events.append('create-executor')
-            or MagicMock()
-        )
-
-        async def _warm(_executor: Any) -> None:
-            events.append('warm-executor')
+        _stub_slot_start(worker, lambda: events.append('start-slots'))
 
         async def _listener_start():
             events.append('listener-start')
             return Ok(None)
 
-        worker._warm_executor = AsyncMock(side_effect=_warm)  # type: ignore[assignment]
         worker.listener.start = AsyncMock(side_effect=_listener_start)
         worker.listener.listen_many = AsyncMock(
             return_value=Ok([asyncio.Queue(), asyncio.Queue()])
@@ -3548,8 +3333,7 @@ class TestWorkerStartConnectionOrdering:
         await worker.start()
 
         assert events == [
-            'create-executor',
-            'warm-executor',
+            'start-slots',
             'database-paths',
             'coverage-ensure',
             'listener-start',
@@ -4247,17 +4031,27 @@ class TestWorkerConfigRecycleValidation:
         worker = _make_worker()
         assert worker.cfg.max_tasks_per_child == 100
 
-    def test_one_and_negative_rejected(self) -> None:
+    def test_negative_rejected(self) -> None:
         from horsies.core.worker.config import WorkerConfig
 
-        for bad in (1, -1):
-            with pytest.raises(ValueError, match='must be >= 2'):
-                WorkerConfig(
-                    dsn='postgresql+psycopg://u:p@localhost/db',
-                    psycopg_dsn='postgresql://u:p@localhost/db',
-                    queues=['default'],
-                    max_tasks_per_child=bad,
-                )
+        with pytest.raises(ValueError, match='must be >= 1'):
+            WorkerConfig(
+                dsn='postgresql+psycopg://u:p@localhost/db',
+                psycopg_dsn='postgresql://u:p@localhost/db',
+                queues=['default'],
+                max_tasks_per_child=-1,
+            )
+
+    def test_no_children_rejected(self) -> None:
+        from horsies.core.worker.config import WorkerConfig
+
+        with pytest.raises(ValueError, match='processes'):
+            WorkerConfig(
+                dsn='postgresql+psycopg://u:p@localhost/db',
+                psycopg_dsn='postgresql://u:p@localhost/db',
+                queues=['default'],
+                processes=0,
+            )
 
     def test_zero_disables_allowed(self) -> None:
         from horsies.core.worker.config import WorkerConfig
@@ -4270,64 +4064,16 @@ class TestWorkerConfigRecycleValidation:
         )
         assert cfg.max_tasks_per_child == 0
 
-    def test_two_or_more_accepted(self) -> None:
+    def test_one_or_more_accepted(self) -> None:
         from horsies.core.worker.config import WorkerConfig
 
         cfg = WorkerConfig(
             dsn='postgresql+psycopg://u:p@localhost/db',
             psycopg_dsn='postgresql://u:p@localhost/db',
             queues=['default'],
-            max_tasks_per_child=2,
+            max_tasks_per_child=1,
         )
-        assert cfg.max_tasks_per_child == 2
-
-
-@pytest.mark.unit
-class TestCreateExecutorRecycle:
-    """Tests for Worker._create_executor recycle wiring."""
-
-    def test_the_barrier_has_one_party_per_child(self) -> None:
-        worker = _make_worker()
-        worker.cfg.processes = 3
-        pool = worker._create_executor()
-        try:
-            assert pool.warmup_barrier.parties == 3
-        finally:
-            pool.executor.shutdown(wait=False)
-
-    def test_default_recycles_and_forces_spawn(self) -> None:
-        """Default config (100): budget passed through, spawn forced."""
-        worker = _make_worker()
-        executor = worker._create_executor().executor
-        try:
-            assert executor._max_tasks_per_child == 100
-            assert executor._mp_context.get_start_method() == 'spawn'
-        finally:
-            executor.shutdown(wait=False)
-
-    def test_zero_disables_recycle(self) -> None:
-        """max_tasks_per_child=0: executor created without a per-child budget."""
-        worker = _make_worker()
-        worker.cfg.max_tasks_per_child = 0
-        executor = worker._create_executor().executor
-        try:
-            assert executor._max_tasks_per_child is None
-        finally:
-            executor.shutdown(wait=False)
-
-    def test_explicit_value_sets_budget_and_forces_spawn(self) -> None:
-        """An explicit value passes through and forces spawn even without
-        avoid_parent_fd_inheritance (fork is incompatible)."""
-        worker = _make_worker()
-        worker.cfg.max_tasks_per_child = 5
-        executor = worker._create_executor(
-            avoid_parent_fd_inheritance=False,
-        ).executor
-        try:
-            assert executor._max_tasks_per_child == 5
-            assert executor._mp_context.get_start_method() == 'spawn'
-        finally:
-            executor.shutdown(wait=False)
+        assert cfg.max_tasks_per_child == 1
 
 
 @pytest.mark.unit

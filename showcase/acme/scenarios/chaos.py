@@ -35,10 +35,9 @@ def run() -> int:
 
     heading(f'{tuning.CHAOS_EXPORT_COUNT} exports, about half of which kill their child')
     bullet(
-        f'spaced {tuning.CHAOS_EXPORT_SPACING_SECONDS} s apart — a self-killing task '
-        'breaks the whole executor pool,'
+        f'spaced {tuning.CHAOS_EXPORT_SPACING_SECONDS} s apart, so each crash is easy to watch;'
     )
-    bullet('  and a second one landing during the restart would stop the worker outright')
+    bullet('  a self-killing task ends only its own child, and the slot gets a new one')
     say()
 
     crashing = 0

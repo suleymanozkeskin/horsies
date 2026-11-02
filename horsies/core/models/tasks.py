@@ -623,14 +623,13 @@ class TaskOptions(BaseModel):
         good_until: Task expiry deadline (task skipped if not claimed by this time)
         retry_policy: Retry timing and backoff configuration (includes auto_retry_for)
         timeout_ms: Execution time limit. Measured by the worker parent from
-            dispatch to the child process (child setup overhead, typically
-            milliseconds, counts toward it). On expiry the task fails with
-            OutcomeCode.TASK_TIMEOUT and the child process is killed; retry
-            only happens when 'TASK_TIMEOUT' is listed in auto_retry_for.
-            Killing a child breaks the shared process pool — sibling
-            in-flight tasks on the same worker are requeued/retried through
-            crash recovery — so timeouts are for exceptional hangs, not
-            routine control flow.
+            the moment a child takes the task (time waiting for a free child
+            does not count). On expiry the task fails with
+            OutcomeCode.TASK_TIMEOUT and the child process is killed with the
+            subprocesses in its session; retry only happens when
+            'TASK_TIMEOUT' is listed in auto_retry_for. Other tasks on the
+            worker continue. The worker must start a new child, so timeouts
+            are for exceptional hangs, not routine control flow.
     """
 
     model_config = ConfigDict(extra='forbid')

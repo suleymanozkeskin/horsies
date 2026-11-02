@@ -26,7 +26,7 @@ def my_task(*, ...) -> TaskResult[T, TaskError]: ...
 | `retry_policy` | `RetryPolicy \| None` | `None` | See RetryPolicy section. |
 | `exception_mapper` | `dict[type[BaseException], str] \| None` | `None` | Per-task exception-to-error-code mapping. See ExceptionMapper section. |
 | `default_unhandled_error_code` | `str \| None` | `None` | Override global default for unmapped exceptions. Must be `UPPER_SNAKE_CASE`. |
-| `timeout_ms` | `int \| None` | `None` | Execution time limit in ms (>= 1000), measured from dispatch. On expiry the child process is SIGKILLed and the task fails with `TASK_TIMEOUT`; retry is opt-in via `auto_retry_for`. The kill breaks the worker's process pool and interrupts every other task on that worker: a task that has not started returns to PENDING; a started task fails with `WORKER_CRASHED` and is retried only if `WORKER_CRASHED` is in its `auto_retry_for`, otherwise it is marked FAILED. A deadline that fires before user code starts requeues the task instead. |
+| `timeout_ms` | `int \| None` | `None` | Execution time limit in ms (>= 1000), measured from the moment a child takes the task; time waiting for a free child does not count. On expiry the child and the subprocesses in its session are SIGKILLed and the task fails with `TASK_TIMEOUT`; retry is opt-in via `auto_retry_for`. A deadline that fires before user code starts requeues the task instead. Other tasks on the worker continue. Use it as a hang backstop, not as routine control flow. |
 
 `good_until` is **not** accepted at definition time — it is a per-send concern. Passing it raises `HRS-102`. Use `.with_options(good_until=...)` at send time instead. For workflow nodes, use `.node(good_until=...)`.
 
@@ -723,42 +723,6 @@ async def report() -> None:
     handle = (await my_task.send_async(value="test")).unwrap()
     result = await handle.get_async(timeout_ms=5000)
 ```
-
-### `timeout_ms` fails other started tasks on the same worker → `WORKER_CRASHED`
-
-A timeout SIGKILLs the child process. All children of a worker share one process pool, so the kill breaks the pool. The worker then recovers every task that was in the pool, not only the timed-out one.
-
-| Task state at the kill | Result |
-|---|---|
-| Timed-out task | Fails with `TASK_TIMEOUT` (retry only if `TASK_TIMEOUT` is in `auto_retry_for`) |
-| Other task, user code not started | Returns to PENDING |
-| Other task, user code started | Fails with `WORKER_CRASHED`; retried only if `WORKER_CRASHED` is in its `auto_retry_for`, otherwise FAILED |
-
-<!-- check: skip partial -- uses a name before the page defines it -->
-```python
-from horsies import OperationalErrorCode, OutcomeCode, RetryPolicy
-
-# A task that is safe to run again: survives a sibling's timeout.
-@app.task(
-    "resize_image",
-    retry_policy=RetryPolicy.fixed(
-        [30, 120],
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
-    ),
-)
-def resize_image(*, image_id: str) -> TaskResult[str, TaskError]: ...
-
-# The task with the timeout. Size it as a hang backstop, not as routine control flow.
-@app.task(
-    "render_report",
-    timeout_ms=600_000,
-    retry_policy=RetryPolicy.fixed([60], auto_retry_for=[OutcomeCode.TASK_TIMEOUT]),
-)
-def render_report(*, report_id: str) -> TaskResult[str, TaskError]: ...
-```
-
-- A retry runs the task from the start. Add `WORKER_CRASHED` only to tasks that are safe to run again.
-- A child that reaches `max_memory_per_child_mb` is replaced alone and does not break the pool.
 
 ### `WAIT_TIMEOUT` is not a terminal failure
 

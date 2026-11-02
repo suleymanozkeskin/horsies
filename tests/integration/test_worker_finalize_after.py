@@ -1,7 +1,7 @@
 """Integration tests for Worker._finalize_after().
 
 Covers the orchestration logic that:
-1. Awaits the child-process future
+1. Awaits the slot outcome
 2. Runs phase-1 (persist terminal state)
 3. Runs phase-2 (workflow advancement + NOTIFY)
 4. Propagates errors and clears retry attempts
@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from concurrent.futures.process import BrokenProcessPool
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -37,6 +36,14 @@ from horsies.core.models.workflow import TaskNode
 from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.current import set_current_app
+from horsies.core.worker.runtime import _RequeueOutcome
+from horsies.core.worker.slots import (
+    ChildLost,
+    KilledBySignal,
+    LossCause,
+    NotDispatched,
+    NotRunCause,
+)
 from horsies.core.worker.worker import (
     Worker,
     _FinalizeError,
@@ -55,6 +62,7 @@ from tests.integration.conftest import (
     start_ok,
 )
 from tests.broker_resources_support import listener_of
+from tests.fixtures.slots.handles import finished_handle, task_finished_handle
 
 pytestmark = [pytest.mark.integration]
 
@@ -193,26 +201,11 @@ async def _get_task_status(session: AsyncSession, task_id: str) -> str:
     return str(row[0])
 
 
-def _make_resolved_future(
-    ok: bool,
-    result_json: str,
-    failed_reason: str | None,
-) -> asyncio.Future[tuple[bool, str, str | None]]:
-    """Create an already-resolved Future with the given (ok, json, reason) tuple."""
-    loop = asyncio.get_running_loop()
-    fut: asyncio.Future[tuple[bool, str, str | None]] = loop.create_future()
-    fut.set_result((ok, result_json, failed_reason))
-    return fut
-
-
-def _make_failed_future(
-    exc: BaseException,
-) -> asyncio.Future[tuple[bool, str, str | None]]:
-    """Create a Future that raises the given exception on await."""
-    loop = asyncio.get_running_loop()
-    fut: asyncio.Future[tuple[bool, str, str | None]] = loop.create_future()
-    fut.set_exception(exc)
-    return fut
+_LOST = ChildLost(
+    cause=LossCause.CHILD_DIED,
+    child_exit=KilledBySignal(9),
+    partial_frame=False,
+)
 
 
 def _serialize_ok(value: object) -> str:
@@ -254,14 +247,14 @@ async def test_happy_path_success_completes_and_clears(
     task_id = await _insert_running_task(session)
     worker = _make_worker(engine)
     result_json = _serialize_ok('hello')
-    fut = _make_resolved_future(ok=True, result_json=result_json, failed_reason=None)
+    handle = task_finished_handle(ok=True, result_json=result_json, failed_reason=None)
 
     # Seed retry attempts so we can verify they get cleared
     worker._finalize_retry_attempts[(task_id, _FINALIZE_STAGE_PHASE1)] = 2
     worker._finalize_retry_attempts[(task_id, _FINALIZE_STAGE_PHASE2)] = 1
 
     result = await worker._finalize_after(
-        fut, task_id, task_name='finalize_after_test', executor=MagicMock(),
+        handle, task_id, task_name='finalize_after_test',
     )
 
     assert is_ok(result)
@@ -286,13 +279,13 @@ async def test_phase1_skip_returns_ok_none(
     """CLAIM_LOST → phase-1 returns Ok(None) → _finalize_after returns Ok(None)."""
     task_id = await _insert_running_task(session)
     worker = _make_worker(engine)
-    fut = _make_resolved_future(ok=False, result_json='', failed_reason='CLAIM_LOST')
+    handle = task_finished_handle(ok=False, result_json='', failed_reason='CLAIM_LOST')
 
     # Seed phase-1 retry attempts to verify they get cleared on skip
     worker._finalize_retry_attempts[(task_id, _FINALIZE_STAGE_PHASE1)] = 1
 
     result = await worker._finalize_after(
-        fut, task_id, task_name='finalize_after_test', executor=MagicMock(),
+        handle, task_id, task_name='finalize_after_test',
     )
 
     assert is_ok(result)
@@ -316,7 +309,7 @@ async def test_phase1_err_propagated_with_finalize_context(
     task_id = await _insert_running_task(session)
     worker = _make_worker(engine)
     result_json = _serialize_ok('value')
-    fut = _make_resolved_future(ok=True, result_json=result_json, failed_reason=None)
+    handle = task_finished_handle(ok=True, result_json=result_json, failed_reason=None)
 
     # Inject phase-1 failure
     expected_err = _make_finalize_error(task_id, _FINALIZE_STAGE_PHASE1)
@@ -329,7 +322,7 @@ async def test_phase1_err_propagated_with_finalize_context(
     )
 
     result = await worker._finalize_after(
-        fut, task_id, task_name='finalize_after_test', executor=MagicMock(),
+        handle, task_id, task_name='finalize_after_test',
     )
 
     assert is_err(result)
@@ -360,7 +353,7 @@ async def test_phase2_err_propagated_but_db_stays_terminal(
     task_id = await _insert_running_task(session)
     worker = _make_worker(engine)
     result_json = _serialize_ok('durable-value')
-    fut = _make_resolved_future(ok=True, result_json=result_json, failed_reason=None)
+    handle = task_finished_handle(ok=True, result_json=result_json, failed_reason=None)
 
     # Let phase-1 run against real DB, but inject phase-2 failure
     phase2_err = _make_finalize_error(task_id, _FINALIZE_STAGE_PHASE2)
@@ -369,7 +362,7 @@ async def test_phase2_err_propagated_but_db_stays_terminal(
     )
 
     result = await worker._finalize_after(
-        fut, task_id, task_name='finalize_after_test', executor=MagicMock(),
+        handle, task_id, task_name='finalize_after_test',
     )
 
     assert is_err(result)
@@ -384,44 +377,63 @@ async def test_phase2_err_propagated_but_db_stays_terminal(
 
 
 @pytest.mark.asyncio(loop_scope='function')
-async def test_broken_process_pool_returns_err(
+async def test_child_lost_returns_err(
     engine: AsyncEngine,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """BrokenProcessPool → _handle_broken_pool called, Err returned."""
+    """ChildLost → crash recovery runs, Err carries the child's exit."""
     task_id = await _insert_running_task(session)
     worker = _make_worker(engine)
-    fut = _make_failed_future(BrokenProcessPool('pool is dead'))
-
-    # Mock _handle_broken_pool to avoid executor restart side-effects
-    worker._handle_broken_pool = AsyncMock()  # type: ignore[method-assign]
+    worker._recover_worker_future_failure = AsyncMock(  # type: ignore[method-assign]
+        return_value=_RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED,
+    )
 
     result = await worker._finalize_after(
-        fut, task_id, task_name='finalize_after_test', executor=MagicMock(),
+        finished_handle(_LOST), task_id, task_name='finalize_after_test',
     )
 
     assert is_err(result)
     err = result.err_value
     assert err.stage == _FINALIZE_STAGE_FUTURE
     assert err.retryable is False
-    assert 'Broken process pool' in err.message
-    worker._handle_broken_pool.assert_awaited_once()
+    assert 'signal 9 (SIGKILL)' in err.message
+    worker._recover_worker_future_failure.assert_awaited_once()
 
 
 @pytest.mark.asyncio(loop_scope='function')
-async def test_broken_process_pool_marks_non_retryable_running_task_failed(
+async def test_child_lost_with_recovery_db_error_stays_retryable(
     engine: AsyncEngine,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """BrokenProcessPool treats owned RUNNING tasks as possible execution."""
+    """A database failure during recovery must retry the recovery."""
+    task_id = await _insert_running_task(session)
     worker = _make_worker(engine)
-    worker._restart_executor = AsyncMock()  # type: ignore[method-assign]
+    worker._recover_worker_future_failure = AsyncMock(  # type: ignore[method-assign]
+        return_value=_RequeueOutcome.DB_ERROR,
+    )
+
+    result = await worker._finalize_after(
+        finished_handle(_LOST), task_id, task_name='finalize_after_test',
+    )
+
+    assert is_err(result)
+    assert result.err_value.retryable is True
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_child_lost_marks_non_retryable_running_task_failed(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """A lost child treats an owned RUNNING task as possible execution."""
+    worker = _make_worker(engine)
     task_id = await _insert_owned_running_task(session, worker.worker_instance_id)
 
-    await worker._handle_broken_pool(
-        task_id, BrokenProcessPool('pool is dead'), MagicMock(),
+    await worker._finalize_after(
+        finished_handle(_LOST), task_id, task_name='finalize_after_owned_test',
     )
 
     row = (
@@ -449,38 +461,35 @@ async def test_broken_process_pool_marks_non_retryable_running_task_failed(
     assert row.worker_pid == 1234
     assert row.worker_process_name == 'stale-process'
     assert row.error_code == 'WORKER_CRASHED'
-    worker._restart_executor.assert_awaited_once()
-
-
-# ---------------------------------------------------------------------------
-# Test 6: Generic future exception → requeue attempted, Err returned
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio(loop_scope='function')
-async def test_generic_future_exception_requeues_and_returns_err(
+async def test_not_dispatched_returns_the_claimed_row_to_pending(
     engine: AsyncEngine,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """RuntimeError from future → crash recovery helper called, Err returned."""
-    task_id = await _insert_running_task(session)
+    """A task that never reached a child does not cost an attempt."""
     worker = _make_worker(engine)
-    fut = _make_failed_future(RuntimeError('child process exploded'))
-
-    worker._recover_worker_future_failure = AsyncMock(  # type: ignore[method-assign]
-        return_value=MagicMock(value='NOT_OWNER_OR_NOT_CLAIMED'),
+    task_id = await _insert_owned_running_task(session, worker.worker_instance_id)
+    await session.execute(
+        text("""
+            UPDATE horsies_tasks
+            SET status = 'CLAIMED', claimed = TRUE, started_at = NULL
+            WHERE id = CAST(:id AS uuid)
+        """),
+        {'id': task_id},
     )
+    await session.commit()
 
     result = await worker._finalize_after(
-        fut, task_id, task_name='finalize_after_test', executor=MagicMock(),
+        finished_handle(NotDispatched(NotRunCause.POOL_STOPPING)),
+        task_id,
+        task_name='finalize_after_owned_test',
     )
 
-    assert is_err(result)
-    err = result.err_value
-    assert err.stage == _FINALIZE_STAGE_FUTURE
-    assert 'child process exploded' in err.message
-    worker._recover_worker_future_failure.assert_awaited_once()
+    assert result == Ok(None)
+    assert await _get_task_status(session, task_id) == 'PENDING'
 
 
 # ---------------------------------------------------------------------------
@@ -497,7 +506,7 @@ async def test_phase1_ok_none_clears_only_phase1_attempts(
     """Skip path clears phase-1 attempts but leaves phase-2 attempts intact."""
     task_id = await _insert_running_task(session)
     worker = _make_worker(engine)
-    fut = _make_resolved_future(
+    handle = task_finished_handle(
         ok=False, result_json='', failed_reason='OWNERSHIP_UNCONFIRMED',
     )
 
@@ -506,7 +515,7 @@ async def test_phase1_ok_none_clears_only_phase1_attempts(
     worker._finalize_retry_attempts[(task_id, _FINALIZE_STAGE_PHASE2)] = 2
 
     result = await worker._finalize_after(
-        fut, task_id, task_name='finalize_after_test', executor=MagicMock(),
+        handle, task_id, task_name='finalize_after_test',
     )
 
     assert is_ok(result)
@@ -604,15 +613,14 @@ async def test_task_expired_workflow_task_advances_workflow_without_reaper(
     worker = _make_worker(engine)
     worker._app = app
     worker.broker = broker
-    fut = _make_resolved_future(wire[0], wire[1], wire[2])
+    slot_handle = task_finished_handle(wire[0], wire[1], wire[2])
 
     result = await worker._finalize_after(
-        fut,
+        slot_handle,
         task_id,
         is_workflow_task=True,
         task_name=task_name,
         claimed_at=claimed_at,
-        executor=MagicMock(),
     )
 
     assert is_ok(result)
@@ -643,7 +651,7 @@ async def test_task_expired_plain_task_skips_finalization(
     no phase 2, no persisted-result load."""
     task_id = await _insert_running_task(session)
     worker = _make_worker(engine)
-    fut = _make_resolved_future(
+    handle = task_finished_handle(
         ok=False, result_json='', failed_reason='TASK_EXPIRED',
     )
     worker._finalize_workflow_phase = AsyncMock(  # type: ignore[method-assign]
@@ -652,11 +660,10 @@ async def test_task_expired_plain_task_skips_finalization(
     worker._load_persisted_task_result = AsyncMock()  # type: ignore[method-assign]
 
     result = await worker._finalize_after(
-        fut,
+        handle,
         task_id,
         is_workflow_task=False,
         task_name='finalize_after_test',
-        executor=MagicMock(),
     )
 
     assert is_ok(result)
@@ -676,7 +683,7 @@ async def test_task_expired_workflow_task_loader_error_propagates(
     returns that finalize error (phase-2 stage) instead of skipping."""
     task_id = await _insert_running_task(session)
     worker = _make_worker(engine)
-    fut = _make_resolved_future(
+    handle = task_finished_handle(
         ok=False, result_json='', failed_reason='TASK_EXPIRED',
     )
     loader_err = _make_finalize_error(task_id, _FINALIZE_STAGE_PHASE2)
@@ -688,11 +695,10 @@ async def test_task_expired_workflow_task_loader_error_propagates(
     )
 
     result = await worker._finalize_after(
-        fut,
+        handle,
         task_id,
         is_workflow_task=True,
         task_name='finalize_after_test',
-        executor=MagicMock(),
     )
 
     assert is_err(result)
@@ -716,14 +722,14 @@ async def test_full_success_clears_both_retry_stages(
     task_id = await _insert_running_task(session)
     worker = _make_worker(engine)
     result_json = _serialize_ok(42)
-    fut = _make_resolved_future(ok=True, result_json=result_json, failed_reason=None)
+    handle = task_finished_handle(ok=True, result_json=result_json, failed_reason=None)
 
     # Seed both stages
     worker._finalize_retry_attempts[(task_id, _FINALIZE_STAGE_PHASE1)] = 1
     worker._finalize_retry_attempts[(task_id, _FINALIZE_STAGE_PHASE2)] = 1
 
     result = await worker._finalize_after(
-        fut, task_id, task_name='finalize_after_test', executor=MagicMock(),
+        handle, task_id, task_name='finalize_after_test',
     )
 
     assert is_ok(result)

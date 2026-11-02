@@ -121,10 +121,9 @@ COURIER_MAX_RETRIES: Final[int] = 3
 SUPPLIER_RETRY_INTERVALS_SECONDS: Final[list[int]] = [10, 30, 60]
 
 CRASH_RETRY_INTERVALS_SECONDS: Final[list[int]] = [3, 10]
-"""Backoff for tasks re-run after a worker crash. A `timeout_ms` kill breaks
-the executor pool, so every task in flight on that worker is reported
-WORKER_CRASHED; each of them is idempotent on replay and comes back through
-this policy."""
+"""Backoff for tasks re-run after a worker crash. A task that loses its child
+is reported WORKER_CRASHED; each task is idempotent on replay and comes back
+through this policy."""
 
 # --- Work envelopes -----------------------------------------------------
 # 2-6 s per node: long enough that RUNNING is catchable in the dashboard.
@@ -233,18 +232,11 @@ demo, so the id is what the crash draw hashes."""
 
 CHAOS_EXPORT_SPACING_SECONDS: Final[int] = 30
 CHAOS_EXPORT_RETRY_INTERVALS_SECONDS: Final[list[int]] = [30, 60]
-"""Chaos is spaced out on purpose, and this is not cosmetic.
+"""Chaos is spaced out so that each crash is easy to watch on the dashboard.
 
-A child that kills itself breaks the executor pool, and the worker replaces the
-whole pool — twelve children, which takes a few seconds to warm. If another
-self-killing task is dispatched *during* that warmup, the restart itself fails
-and the worker stops fail-closed rather than running without an executor. That
-is correct behaviour, and it is also how a chaos demo accidentally takes down
-the thing it is meant to demonstrate recovering.
-
-Spacing the sends by 30 s, and backing the retries off by 30 s and 60 s rather
-than the 3 s and 10 s the ordinary crash policy uses, keeps at most one
-self-kill in flight, so every restart completes and every crash is recovered."""
+A child that kills itself costs only its own task, and the worker starts a new
+child in that slot. The spacing and the longer retry backoff are for the viewer:
+the worker does not need them."""
 
 # --- Notifications ------------------------------------------------------
 

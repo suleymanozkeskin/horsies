@@ -163,8 +163,8 @@ def _parse_locator(locator: str) -> tuple[str, str | None]:
 def _positive_int(value: str) -> int:
     """argparse type: integer >= 1.
 
-    ProcessPoolExecutor raises a raw ValueError on max_workers=0; reject
-    at the CLI boundary with a usage error instead.
+    A worker needs at least one child; reject at the CLI boundary with a
+    usage error.
     """
     parsed = int(value)
     if parsed < 1:
@@ -181,15 +181,13 @@ def _non_negative_int(value: str) -> int:
 
 
 def _max_tasks_per_child(value: str) -> int:
-    """argparse type: max_tasks_per_child, integer >= 2 or 0 to disable.
+    """argparse type: max_tasks_per_child, integer >= 1 or 0 to disable.
 
-    Child warmup consumes one executor call from the budget, so 1 would
-    exhaust a child before it runs a real task; reject at the CLI boundary.
     0 disables recycling (children live for the worker's lifetime).
     """
     parsed = int(value)
-    if parsed != 0 and parsed < 2:
-        raise argparse.ArgumentTypeError(f'must be >= 2, or 0 to disable, got {parsed}')
+    if parsed < 0:
+        raise argparse.ArgumentTypeError(f'must be >= 1, or 0 to disable, got {parsed}')
     return parsed
 
 
@@ -197,7 +195,7 @@ def _max_memory_per_child_mb(value: str) -> int:
     """argparse type: max_memory_per_child_mb, positive integer in MB.
 
     No fixed lower floor is enforced here — a constant cannot know a
-    deployment's warmed child baseline. The real floor is checked at worker
+    deployment's child baseline. The real floor is checked at worker
     startup by the baseline guard, which fails loudly when the threshold is
     below the measured baseline. Reject only non-positive values.
     """
@@ -1133,8 +1131,8 @@ Examples:
             default=100,
             help=(
                 'Recycle each child process after it completes N tasks '
-                '(>=2, per-child and staggered); forces the spawn start '
-                'method. 0 disables recycling. Default: 100'
+                '(>=1, per-child and staggered). 0 disables recycling. '
+                'Default: 100'
             ),
         )
         worker_parser.add_argument(
@@ -1142,10 +1140,9 @@ Examples:
             type=_max_memory_per_child_mb,
             default=None,
             help=(
-                'Recycle a child after its own RSS reaches N MB (per-child, '
-                'CPython-only, forces the spawn start method). Disabled by '
-                'default. The worker refuses to start if N is below the '
-                'warmed child baseline.'
+                'Recycle a child after its own RSS reaches N MB (per-child). '
+                'Disabled by default. The worker refuses to start if N is '
+                'below the child baseline.'
             ),
         )
 

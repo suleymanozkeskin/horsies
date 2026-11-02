@@ -2,10 +2,9 @@
 """Order validation, warehouse work, and invoice rendering.
 
 `generate_invoice` carries `timeout_ms`. A stuck render is SIGKILLed at the
-deadline and fails with `TASK_TIMEOUT`; that kill breaks the worker's executor
-pool, so sibling tasks in flight report `WORKER_CRASHED` and come back through
-their own retry policies. Every task that writes is idempotent on replay, which
-is what makes that ripple heal instead of corrupting an order.
+deadline and fails with `TASK_TIMEOUT`; the kill ends only that task's child.
+Every task that writes is idempotent on replay, so a task that dies after its
+work and runs again cannot corrupt an order.
 """
 
 from __future__ import annotations

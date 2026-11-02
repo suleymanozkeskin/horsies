@@ -91,38 +91,29 @@ class WorkerConfig:
     # staggered: each child has its own counter, so children rotate
     # independently, never in lockstep.
     #   100 (default): recycle after 100 tasks.
-    #   0: disabled — children live for the worker's lifetime (uses 'fork'
-    #      on Linux).
-    #   >= 2: recycle after N tasks.
-    # Any positive value forces the 'spawn' start method (the stdlib value is
-    # incompatible with 'fork'), including at initial startup, so children
-    # re-import the app instead of fork-cloning the parent. Child warmup
-    # (_warm_executor) consumes one executor call, so a child's first
-    # generation runs one warmup + (max_tasks_per_child - 1) real tasks; 1
-    # would exhaust a child on warmup before any task, hence the >= 2 floor.
+    #   0: disabled — children live for the worker's lifetime.
+    #   >= 1: recycle after N tasks.
     max_tasks_per_child: int = 100
     # Recycle a child after its own RSS reaches this many MB (bounds retained
-    # memory for leak/fragmentation-prone workloads). The child checks its own
-    # RSS after each real task and, when at or above the threshold, exits
-    # cleanly via the stdlib exit_pid recycle marker; the pool manager replaces
-    # only that child. This is a retention guardrail, not a hard peak-memory
-    # sandbox: a task may exceed the threshold while it is still running.
+    # memory for leak/fragmentation-prone workloads). The child reports its
+    # RSS with each result, and the parent replaces it. This is a retention
+    # guardrail, not a hard peak-memory sandbox: a task may exceed the
+    # threshold while it is still running.
     #   None (default): disabled.
     #   > 0: recycle threshold in MB.
     # There is no fixed lower floor here — a constant cannot know a deployment's
-    # warmed child baseline. The real floor is enforced at startup by the
+    # booted child baseline. The real floor is enforced at startup by the
     # baseline guard, which fails loudly when the threshold is below the
-    # measured warmed baseline. Any value forces the 'spawn' start method and
-    # requires CPython (the feature is built on private ProcessPoolExecutor
-    # internals).
+    # measured baseline.
     max_memory_per_child_mb: Optional[int] = None
 
     def __post_init__(self) -> None:
-        if self.max_tasks_per_child != 0 and self.max_tasks_per_child < 2:
+        if self.processes < 1:
+            raise ValueError(f'processes must be >= 1; got {self.processes}')
+        if self.max_tasks_per_child < 0:
             raise ValueError(
-                'max_tasks_per_child must be >= 2 (child warmup consumes one '
-                'executor call), or 0 to disable recycling; got '
-                f'{self.max_tasks_per_child}'
+                'max_tasks_per_child must be >= 1, or 0 to disable recycling; '
+                f'got {self.max_tasks_per_child}'
             )
         if (
             self.max_memory_per_child_mb is not None
@@ -130,7 +121,7 @@ class WorkerConfig:
         ):
             raise ValueError(
                 'max_memory_per_child_mb must be a positive integer (the real '
-                'floor is the warmed child baseline, enforced at startup), or '
+                'floor is the child baseline, enforced at startup), or '
                 f'None to disable; got {self.max_memory_per_child_mb}'
             )
         # PgBouncer transaction pooling cannot carry prepared statements; the

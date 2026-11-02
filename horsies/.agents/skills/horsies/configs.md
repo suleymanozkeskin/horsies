@@ -84,8 +84,8 @@ broker = app.get_broker()
 names = app.list_tasks()  # list[str]
 
 # Per-child-process hook: sync zero-arg fn, runs once in every worker child
-# (after task imports, before horsies' own child pool). Use for disposing
-# fork-inherited app engines + rebinding worker-specific pool policy.
+# (after task imports, before horsies' own child pool). Use for rebinding
+# app-owned engines to a worker-specific pool policy.
 @app.on_child_process_start
 def reset_db_for_child() -> None: ...
 
@@ -93,8 +93,8 @@ hooks = app.get_child_process_start_hooks()  # list[ChildProcessStartHook]
 ```
 
 `on_child_process_start` rules: deduped by function identity; async functions
-rejected (`HRS-214`); hooks fire on every child start including executor
-restarts, so bodies must be idempotent. Fail-closed: a raising or hung hook
+rejected (`HRS-214`); hooks fire on every child start including replacement
+children, so bodies must be idempotent. Fail-closed: a raising or hung hook
 (10s budget) exits the child with a dedicated code and the worker STOPS with
 the hook named — it does not restart-loop. Engine rebind requires indirection
 (task code reads via a `get_engine()` accessor; `Engine.poolclass` is fixed at
@@ -185,7 +185,7 @@ waits for the result.
 
 Worker processes use a separate connection profile by default. The worker
 coordinator uses `worker_pool_size + worker_max_overflow`; each child process
-creates its own post-fork psycopg pool bounded by
+creates its own psycopg pool bounded by
 `worker_child_pool_min_size..worker_child_pool_max_size`. Direct Postgres
 budget for one worker is approximately:
 
@@ -196,18 +196,15 @@ worker_pool_size + worker_max_overflow
   + task-code database connections
 ```
 
-Child processes are warmed before the parent opens long-lived database sockets,
-but child DB connections are lazy by default (`worker_child_pool_min_size=0`).
-Replacement executors created after startup use a non-inheriting process start
-method so live parent database sockets are not forked into new children.
+Child DB connections are lazy by default (`worker_child_pool_min_size=0`). A child
+is a new interpreter started with `exec`, so it inherits no parent database
+socket.
 
 ### Child process recycling
 
-Two knobs recycle executor children to bound memory. Both force the `spawn`
-start method (the stdlib count budget and the memory feature are incompatible
-with `fork`), so children re-import the app — higher baseline RSS and slower
-child startup on Linux. Recycling is per-child and staggered: each child has its
-own counter/threshold and is replaced individually, never in lockstep.
+Two knobs recycle worker children to bound memory. Recycling is per-child and
+staggered: each child has its own counter/threshold and is replaced
+individually, never in lockstep.
 
 **Count — `WorkerConfig.max_tasks_per_child`** (CLI `--max-tasks-per-child`,
 default `100`): recycle each child after N tasks, returning retained memory
@@ -217,19 +214,15 @@ default `100`): recycle each child after N tasks, returning retained memory
   high-throughput / connection-constrained apps (each recycle rebuilds the
   child DB pool), lower for memory-heavy tasks. Size against
   `children_memory_mb` (below).
-- `0`: disabled — children live for the worker's lifetime, uses `fork` on Linux
-  (unless memory recycling is on).
-- `>= 2` required (`1` rejected: warmup consumes one executor call).
+- `0`: disabled — children live for the worker's lifetime.
+- `1`: each task runs in a new child.
 
 **Memory — `WorkerConfig.max_memory_per_child_mb`** (CLI
 `--max-memory-per-child-mb`, default off/`None`): recycle a child once its own
-RSS is at or above N MB after a real task finishes. The child samples RSS and
-exits cleanly via the stdlib `exit_pid` marker; the pool replaces only that
-child (clean replacement path, never `BrokenProcessPool`).
+RSS is at or above N MB after a real task finishes. The child reports its RSS
+with each result; the worker stops only that child and starts a new one in its
+slot.
 
-- **CPython-only** — built on private `ProcessPoolExecutor` internals, asserted
-  at startup; the worker refuses to start on other implementations or untested
-  CPython minors.
 - Retention guardrail, **not** a mid-task sandbox: the check is post-task, so a
   task can still exceed the threshold (or OOM) while running.
 - Startup **baseline guard**: each child samples its settled baseline RSS (after
@@ -739,11 +732,11 @@ horsies worker <module> [--processes N] [--loglevel LEVEL] [--max-claim-batch N]
 | `--loglevel` | `INFO` | Log level |
 | `--max-claim-batch` | `0` | Max tasks per queue per claim pass; 0 = auto |
 | `--max-claim-per-worker` | `0` | Max claimed per worker; 0 = auto |
-| `--max-tasks-per-child` | `100` | Recycle a child after N tasks (`>= 2`, or `0` to disable); forces `spawn`. See [Child process recycling](#child-process-recycling) |
-| `--max-memory-per-child-mb` | _(off)_ | Recycle a child once its RSS reaches N MB (CPython-only, forces `spawn`); fails startup if N is at/below the warmed baseline. See [Child process recycling](#child-process-recycling) |
+| `--max-tasks-per-child` | `100` | Recycle a child after N tasks (`>= 1`, or `0` to disable). See [Child process recycling](#child-process-recycling) |
+| `--max-memory-per-child-mb` | _(off)_ | Recycle a child once its RSS reaches N MB; fails startup if N is at/below the warmed baseline. See [Child process recycling](#child-process-recycling) |
 
 Startup: logging → import app → `app.check()` → schema init with retry → start processes.
-SIGTERM/SIGINT: graceful shutdown, waits for running tasks.
+SIGTERM/SIGINT: graceful shutdown: stops claims, returns tasks that wait for a child to PENDING, waits up to 300 s for running tasks, then kills their children. On systemd set `KillMode=mixed`; in Docker use the exec form of `CMD`.
 
 ### `horsies scheduler`
 
