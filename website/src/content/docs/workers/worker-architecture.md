@@ -203,7 +203,7 @@ The worker stays the real parent of each child, so exit codes, kills, and parent
 
 If the preload parent dies, running children continue, and new children start with `exec`. The worker replaces it after 5 seconds, up to 5 times. In `ps`, a forked child shows the command line of the preload parent.
 
-Other platforms have no preload parent, and every child starts with `exec`. Linux also falls back to `exec` if the kernel has no `pidfd_open` (below 5.3) or blocks `prctl`.
+Other platforms have no preload parent, and every child starts with `exec`. Linux also falls back to `exec` and logs a warning if the kernel has no `pidfd_open` (below 5.3) or blocks `prctl`.
 
 ### Choosing a Mode
 

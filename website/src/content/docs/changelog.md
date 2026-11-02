@@ -57,6 +57,9 @@ before you upgrade.
     setting. It takes a `ChildPreload` from `horsies.core.worker.config`.
   - With `app`, the worker refuses to start if the import leaves a Python
     thread or a socket. Off Linux, `app` logs a warning and uses `exec`.
+  - A Linux host that cannot run the preload parent logs a warning and uses
+    `exec`: a kernel below 5.3, or a blocked `prctl`. A Python build with no
+    `os.pidfd_open` keeps preload, because the worker calls the syscall.
   - Horsies' libraries load before your app. A setting that a library reads at
     import, such as `PSYCOPG_IMPL`, must be in the process environment, not in
     a `.env` file that your app loads. A monkeypatch that must run before
