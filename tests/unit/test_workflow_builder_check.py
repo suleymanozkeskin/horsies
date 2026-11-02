@@ -790,6 +790,14 @@ class TestNodeBindingInCheck:
         assert errors[0].code == ErrorCode.TASK_INVALID_QUEUE
 
 
+def _refuse(value: int) -> int:
+    raise ValueError(f'refused {value}')
+
+
+def _broken(value: int) -> int:
+    raise KeyError(value)
+
+
 def _mock_fn(queue: str) -> Any:
     """A mock task fn carrying a queue name, for TaskNode binding tests."""
     return mock.MagicMock(task_name=f'task_{queue}', task_queue_name=queue)
@@ -898,6 +906,92 @@ class TestRecursiveSubworkflowBindingInCheck:
         assert seen == [([1, 2], {'a': 1}, 'A')]
         assert type(seen[0][0]) is list
         assert type(seen[0][1]) is dict
+
+    def test_a_default_that_its_validator_refuses_is_a_finding(self) -> None:
+        """At run time this fails the parent node, so check reports it."""
+        app = _make_custom_app(('scraping', 30))
+
+        class Child(WorkflowDefinition[Any]):
+            name = 'child_refused_default'
+            definition_key = 'child_refused_default.v1'
+
+            @classmethod
+            def build_with(
+                cls,
+                app: Horsies,
+                *,
+                x: Annotated[int, AfterValidator(_refuse)] = 1,
+            ) -> WorkflowSpec[Any]:
+                raise AssertionError('the check must stop before the build')
+
+        @app.workflow_builder()
+        def parent_builder() -> WorkflowSpec[Any]:
+            sub = SubWorkflowNode(workflow_def=Child)
+            return app.workflow(
+                'parent_refused_default', [sub], definition_key='parent_refused_default.v1',
+            )
+
+        errors = app.check(live=False)
+
+        assert [error.code for error in errors] == [
+            ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
+        ]
+        assert 'do not fit build_with' in str(errors[0])
+
+    def test_a_validator_defect_on_a_default_is_reported_as_a_defect(self) -> None:
+        """A validator refuses with `ValueError`. Any other exception is a bug, so
+        it is not a contract finding, and it does not pass in silence."""
+        app = _make_custom_app(('scraping', 30))
+
+        class Child(WorkflowDefinition[Any]):
+            name = 'child_broken_validator'
+            definition_key = 'child_broken_validator.v1'
+
+            @classmethod
+            def build_with(
+                cls,
+                app: Horsies,
+                *,
+                x: Annotated[int, AfterValidator(_broken)] = 1,
+            ) -> WorkflowSpec[Any]:
+                raise AssertionError('the check must stop before the build')
+
+        @app.workflow_builder()
+        def parent_builder() -> WorkflowSpec[Any]:
+            sub = SubWorkflowNode(workflow_def=Child)
+            return app.workflow(
+                'parent_broken_validator',
+                [sub],
+                definition_key='parent_broken_validator.v1',
+            )
+
+        errors = app.check(live=False)
+
+        assert [error.code for error in errors] == [
+            ErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION,
+        ]
+
+    def test_a_build_that_raises_stays_out_of_scope(self) -> None:
+        """A failure in user code surfaces through the registered builder path, or
+        at run time. It is not a finding of this check."""
+        app = _make_custom_app(('scraping', 30))
+
+        class Child(WorkflowDefinition[Any]):
+            name = 'child_raises'
+            definition_key = 'child_raises.v1'
+
+            @classmethod
+            def build_with(cls, app: Horsies, *, x: int = 1) -> WorkflowSpec[Any]:
+                raise KeyError('user code')
+
+        @app.workflow_builder()
+        def parent_builder() -> WorkflowSpec[Any]:
+            sub = SubWorkflowNode(workflow_def=Child)
+            return app.workflow(
+                'parent_raises', [sub], definition_key='parent_raises.v1',
+            )
+
+        assert app.check(live=False) == []
 
     def test_a_child_problem_is_found_for_each_set_of_static_kwargs(self) -> None:
         """The cycle guard keys on the stored kwargs, so a second set is checked."""

@@ -65,6 +65,7 @@ from horsies.core.utils.loop_runner import (
     in_running_event_loop,
 )
 from horsies.core.codec.json_io import loads_json
+from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import (
     decode_subworkflow_kwargs,
     fill_build_with_defaults,
@@ -2170,6 +2171,16 @@ class Horsies:
                     node.workflow_def,
                     decode_subworkflow_kwargs(node.workflow_def, wire),
                 )
+            except (StrictJsonError, ValueValidationError) as exc:
+                # At run time this fails the parent node, so it is a finding.
+                errors.append(WorkflowValidationError(
+                    message='subworkflow kwargs do not fit build_with',
+                    code=ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
+                    notes=[f"node '{node.name}': {exc}"],
+                    help_text='fix the kwarg, or the default of the parameter',
+                ))
+                continue
+            try:
                 child_spec = node.workflow_def.build_with(self, **child_kwargs)
             except MultipleValidationErrors as exc:
                 errors.extend(exc.report.errors)
