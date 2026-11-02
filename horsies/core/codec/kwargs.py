@@ -55,6 +55,7 @@ from horsies.core.types.result import Err, Ok, Result
 __all__ = [
     'KwargBinding',
     'MissingKwargs',
+    'build_with_engine_parameters',
     'decode_kwargs',
     'declared_taskresult_ok_type',
     'decode_subworkflow_kwargs',
@@ -632,6 +633,16 @@ def _is_addressable_named_param(param: inspect.Parameter) -> bool:
     return param.kind.value in _ADDRESSABLE_PARAM_KINDS
 
 
+def build_with_engine_parameters(sig: inspect.Signature) -> set[str]:
+    """The parameters of a `build_with` that the engine fills.
+
+    `WorkflowDefinition` always calls the function as `original_fn(klass, app, ...)`,
+    so the first two parameters are the engine's, and their names are free. A key
+    that names one would give the app two values at run time.
+    """
+    return set(list(sig.parameters)[:2])
+
+
 def _named_parameters(sig: inspect.Signature) -> list[str]:
     return [
         name
@@ -680,10 +691,15 @@ def decode_subworkflow_kwargs(
             declared annotation.
     """
     hints, sig = _build_with_hints_or_raise(workflow_def)
+    engine_parameters = build_with_engine_parameters(sig)
     decoded: dict[str, Any] = {}
     for key, raw_value in raw_kwargs.items():
         param = sig.parameters.get(key)
-        if param is not None and _is_addressable_named_param(param):
+        if (
+            param is not None
+            and key not in engine_parameters
+            and _is_addressable_named_param(param)
+        ):
             annot = hints.get(key)
             if annot is None:
                 raise StrictJsonError(
@@ -701,6 +717,6 @@ def decode_subworkflow_kwargs(
         raise StrictJsonError(
             f'unknown kwarg {key!r} on the wire for build_with of '
             f'{_workflow_def_name(workflow_def)!r}; declared params are '
-            f'{sorted(_named_parameters(sig))}',
+            f'{sorted(set(_named_parameters(sig)) - engine_parameters)}',
         )
     return decoded

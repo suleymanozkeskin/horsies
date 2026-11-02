@@ -417,6 +417,19 @@ class _PureKwargsWorkflow(WorkflowDefinition[int]):
         raise NotImplementedError
 
 
+class _NamedAppWorkflow(WorkflowDefinition[int]):
+    """build_with(cls, horsies_app, *, x) — the name of the app slot is free."""
+
+    name = 'named_app_workflow'
+    definition_key = 'tests.unit.named_app.v1'
+
+    @classmethod
+    def build_with(  # pyright: ignore[reportUnusedParameter]
+        cls, horsies_app: Any, *, x: int,
+    ) -> WorkflowSpec[int]:
+        raise NotImplementedError
+
+
 class _BareParamsWorkflow(WorkflowDefinition[int]):
     """build_with(cls, app, **params) — no annotation at all."""
 
@@ -556,6 +569,28 @@ class TestSubworkflowNodeKwargs:
         assert _node_wire(_OpaqueParamsWorkflow, {}) == {}
         assert _node_wire(_BareParamsWorkflow, {}) == {}
 
+    def test_the_app_slot_takes_no_kwarg_whatever_its_name(self) -> None:
+        assert _node_wire(_NamedAppWorkflow, {'x': 1}) == {'x': 1}
+
+        with pytest.raises(WorkflowValidationError) as caught:
+            _node_wire(_NamedAppWorkflow, {'horsies_app': 1, 'x': 1})
+
+        assert caught.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
+
+    def test_the_app_slot_takes_no_args_from_whatever_its_name(self) -> None:
+        source: TaskNode[int] = TaskNode(fn=_int_source)
+        node: SubWorkflowNode[int] = SubWorkflowNode(
+            workflow_def=_NamedAppWorkflow,
+            waits_for=[source],
+            args_from={'horsies_app': source},
+            kwargs={'x': 1},
+        )
+
+        with pytest.raises(WorkflowValidationError) as caught:
+            WorkflowSpec(name='wire', tasks=[source, node])
+
+        assert caught.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
+
     def test_a_key_that_names_the_catch_all_is_refused(self) -> None:
         with pytest.raises(WorkflowValidationError):
             _node_wire(_OpaqueParamsWorkflow, {'args': [1]})
@@ -594,6 +629,10 @@ class TestDecodeSubworkflowKwargs:
             decode_subworkflow_kwargs(
                 _TaskResultParamWorkflow, {'dep_result': {'ok': 1}},
             )
+
+    def test_a_stored_key_that_names_the_app_slot_is_refused(self) -> None:
+        with pytest.raises(StrictJsonError, match="unknown kwarg 'horsies_app'"):
+            decode_subworkflow_kwargs(_NamedAppWorkflow, {'horsies_app': 1, 'x': 1})
 
     def test_a_stored_key_that_reaches_a_catch_all_is_refused(self) -> None:
         with pytest.raises(StrictJsonError, match="unknown kwarg 'a'"):

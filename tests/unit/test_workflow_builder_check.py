@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import sys
 import types
-from typing import Any
+from typing import Annotated, Any
 from unittest import mock
 
 import pytest
+from pydantic import AfterValidator
 
 from horsies.core.app import Horsies, _BUILDER_ATTR, _NO_CHECK_ATTR
 from horsies.core.errors import (
@@ -850,6 +851,82 @@ class TestRecursiveSubworkflowBindingInCheck:
             )
 
         assert app.check(live=False) == []
+
+    def test_a_child_gets_the_declared_types_from_static_kwargs(self) -> None:
+        """check() builds the child from the engine's read of the stored row, so
+        a list stays a list, a dict stays a dict, and a default is validated."""
+        app = _make_custom_app(('scraping', 30))
+        seen: list[tuple[object, object, object]] = []
+
+        def take(*, values: list[int], shape: dict[str, int]) -> None:
+            _ = values, shape
+
+        leaf_fn = _mock_fn('scraping')
+        leaf_fn._original_fn = take
+
+        class ChildContainers(WorkflowDefinition[Any]):
+            name = 'child_containers'
+            definition_key = 'child_containers.v1'
+
+            @classmethod
+            def build_with(
+                cls,
+                app: Horsies,
+                values: list[int],
+                shape: dict[str, int],
+                label: Annotated[str, AfterValidator(str.upper)] = 'a',
+            ) -> WorkflowSpec[Any]:
+                seen.append((values, shape, label))
+                leaf = TaskNode(
+                    fn=leaf_fn,
+                    node_id='leaf',
+                    kwargs={'values': values, 'shape': shape},
+                )
+                return WorkflowSpec(name=cls.name, tasks=[leaf], output=leaf)
+
+        @app.workflow_builder()
+        def parent_builder() -> WorkflowSpec[Any]:
+            sub = SubWorkflowNode(
+                workflow_def=ChildContainers,
+                kwargs={'values': [1, 2], 'shape': {'a': 1}},
+            )
+            return app.workflow(
+                'parent_containers', [sub], definition_key='parent_containers.v1',
+            )
+
+        assert app.check(live=False) == []
+        assert seen == [([1, 2], {'a': 1}, 'A')]
+        assert type(seen[0][0]) is list
+        assert type(seen[0][1]) is dict
+
+    def test_a_child_problem_is_found_for_each_set_of_static_kwargs(self) -> None:
+        """The cycle guard keys on the stored kwargs, so a second set is checked."""
+        app = _make_custom_app(('scraping', 30))
+        seen: list[int] = []
+
+        class Child(WorkflowDefinition[Any]):
+            name = 'child_each_kwarg'
+            definition_key = 'child_each_kwarg.v1'
+
+            @classmethod
+            def build_with(cls, app: Horsies, n: int) -> WorkflowSpec[Any]:
+                seen.append(n)
+                leaf = TaskNode(fn=_mock_fn('scraping'), node_id='leaf')
+                return WorkflowSpec(name=cls.name, tasks=[leaf], output=leaf)
+
+        @app.workflow_builder()
+        def parent_builder() -> WorkflowSpec[Any]:
+            first = SubWorkflowNode(workflow_def=Child, node_id='a', kwargs={'n': 1})
+            second = SubWorkflowNode(workflow_def=Child, node_id='b', kwargs={'n': 2})
+            same = SubWorkflowNode(workflow_def=Child, node_id='c', kwargs={'n': 1})
+            return app.workflow(
+                'parent_each_kwarg',
+                [first, second, same],
+                definition_key='parent_each_kwarg.v1',
+            )
+
+        assert app.check(live=False) == []
+        assert sorted(set(seen)) == [1, 2]
 
     def test_runtime_parameterized_subworkflow_skipped(self) -> None:
         """A runtime-parameterized (args_from) subworkflow is not expanded.

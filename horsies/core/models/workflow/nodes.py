@@ -68,6 +68,12 @@ class TaskNode(Generic[OkT_co]):
     Workflow nodes are kwargs-only; this field is not accepted in constructors.
     """
     kwargs: Mapping[str, Any] = field(default_factory=lambda: {})
+    """
+    - The values as given
+    - A spec replaces them with a frozen snapshot for inspection, where a list is a
+      tuple and a dict is a mappingproxy. It does not fit the declared types, so code
+      that uses the values reads `wire_kwargs`
+    """
     waits_for: Sequence[TaskNode[Any] | SubWorkflowNode[Any]] = field(
         default_factory=lambda: [],
     )
@@ -240,6 +246,9 @@ class SubWorkflowNode(Generic[OkT_co]):
     """
     - Keyword arguments passed to workflow_def.build_with(app, **kwargs)
     - Use with args_from to inject upstream results as parameters
+    - A spec replaces them with a frozen snapshot for inspection, where a list is a
+      tuple and a dict is a mappingproxy. It does not fit the declared types, so code
+      that uses the values reads `wire_kwargs`
     """
 
     waits_for: Sequence[TaskNode[Any] | SubWorkflowNode[Any]] = field(

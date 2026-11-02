@@ -1358,12 +1358,6 @@ async def enqueue_subworkflow_task(
             # defect, see _child_task_options_json.
             child_task_options_json = _child_task_options_json(child_task)
 
-            # Strict-serde: route child TaskNode kwargs through the typed
-            # codec so reserved-namespace keys (`__h_*` / `__horsies_*`)
-            # in user-data positions fail closed before storage. Without
-            # this, smuggled args_from envelopes in static kwargs would
-            # reach the worker via `child_runner.py`'s args_from path
-            # and bypass the typed decode there. Spec construction in
             encoded_child_task_kwargs = stored_kwargs(child_task)
             child_kwargs_json = _ser_or_raise(
                 dumps_json(encoded_child_task_kwargs),

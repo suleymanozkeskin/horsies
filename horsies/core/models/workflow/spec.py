@@ -22,6 +22,7 @@ from typing import (
 
 
 from horsies.core.codec.kwargs import (
+    build_with_engine_parameters,
     resolve_build_with_hints,
     resolve_hints_and_sig,
     resolve_producer_kwarg_binding,
@@ -1063,8 +1064,6 @@ class WorkflowSpec(Generic[OutT]):
         runtime parameters and just forwards to build(app), which is a silent
         data-loss foot-gun when users pass kwargs/args_from.
         """
-        # Deferred import to avoid circular dependency with definition.py
-
         errors: list[WorkflowValidationError] = []
 
         default_build_with = _default_build_with()
@@ -1137,7 +1136,6 @@ class WorkflowSpec(Generic[OutT]):
             # Get the function to inspect (TaskNode vs SubWorkflowNode)
             if isinstance(node, TaskNode):
                 fn = node.fn
-                exclude_names: set[str] = set()
             else:
                 # SubWorkflowNode - validate against build_with signature
                 fn = getattr(
@@ -1145,7 +1143,6 @@ class WorkflowSpec(Generic[OutT]):
                     '_original_build_with',
                     node.workflow_def.build_with,
                 )
-                exclude_names = {'app', 'cls'}
                 if fn is _default_build_with():
                     continue  # Covered by WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH.
 
@@ -1153,6 +1150,11 @@ class WorkflowSpec(Generic[OutT]):
             if sig is None:
                 continue  # Can't validate (uninspectable)
 
+            exclude_names = (
+                build_with_engine_parameters(sig)
+                if isinstance(node, SubWorkflowNode)
+                else set[str]()
+            )
             valid_names = _valid_kwarg_names(sig, exclude=exclude_names)
 
             invalid_kwargs = set(node.kwargs.keys()) - valid_names
@@ -1237,19 +1239,22 @@ class WorkflowSpec(Generic[OutT]):
             # Get the function to inspect (TaskNode vs SubWorkflowNode)
             if isinstance(node, TaskNode):
                 fn = node.fn
-                exclude_names: set[str] = set()
             else:
                 fn = getattr(
                     node.workflow_def,
                     '_original_build_with',
                     node.workflow_def.build_with,
                 )
-                exclude_names = {'app', 'cls'}
 
             sig = _get_signature(fn)
             if sig is None:
                 continue
 
+            exclude_names = (
+                build_with_engine_parameters(sig)
+                if isinstance(node, SubWorkflowNode)
+                else set[str]()
+            )
             hints = (
                 _build_with_type_hints(node)
                 if isinstance(node, SubWorkflowNode)
