@@ -165,7 +165,7 @@ class RecoveryConfig(BaseModel):
             'WORKFLOW_RECOVERY_LIMIT_REACHED. A connection, lock or timeout '
             'error does not count, so a database outage cannot fail a '
             'workflow. At the default check interval, the default limit is '
-            'reached 24 intervals after the first pass, which is 720 seconds. '
+            'reached 24 intervals after the first pass, about 720 seconds. '
             'The count is stored, so a worker '
             'restart keeps it, and it has no reset (3-1000).'
         ),

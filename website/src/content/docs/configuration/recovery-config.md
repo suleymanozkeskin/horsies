@@ -116,7 +116,7 @@ that repeats would repeat on every pass, and the workflow would stay `RUNNING`.
 A workflow fails closed after `workflow_recovery_failure_limit` reaper passes in
 which its recovery raised a persistent error (default 25, bounds 3–1,000). At
 the default `check_interval_ms` and the default limit, the limit is reached 24
-intervals after the first pass, which is 720 seconds.
+intervals after the first pass, which is about 720 seconds.
 
 - **A transient raise does not count.** A connection, lock, deadlock or timeout
   error clears by itself, so a database outage cannot fail a workflow. The rule

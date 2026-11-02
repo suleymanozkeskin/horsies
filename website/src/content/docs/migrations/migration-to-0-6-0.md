@@ -26,7 +26,7 @@ Do not run a rolling upgrade from 0.5.x to 0.6.0. Stop every process, upgrade al
 
 The reasons:
 
-- A 0.5.5 process does not refuse a v52 database. The schema step ends early when the stored version is at or above the version of the process.
+- A 0.5.5 broker checks the schema version once, at its first use. A 0.5.5 process that already runs does not stop on a v52 database, so it continues to write beside 0.6.0.
 - A 0.5.5 process raises `Unknown built-in task code` when it reads a result that 0.6.0 stored with `WORKFLOW_OUTPUT_SKIPPED` or `WORKFLOW_RECOVERY_LIMIT_REACHED`.
 - 0.6.0 cannot decode an error that a 0.5.5 process stores without an error code.
 
@@ -43,9 +43,11 @@ Any process that uses a `PostgresBroker` applies the migration the first time it
 - The first `get_task_info` or `get_raw_result` read.
 - `ensure_schema_initialized()` on the broker.
 
-`horsies web` does not apply the migration. Until another process applies it, `/api/meta` reports `schema_state: MISMATCH` and the web actions are off. The reaper broker of a worker does not apply it either.
+`horsies web` does not apply the migration. Until another process applies it, `/api/meta` reports `schema_state: MISMATCH` and the web actions are off. A broker built with `run_schema_migrations=False` or `assume_initialized=True` does not apply it either.
 
 The migration is safe to run from many processes at once. A PostgreSQL advisory lock guards the DDL. See [Database Schema](/horsies/internals/database-schema/).
+
+After v52 is applied, a 0.5.5 `horsies worker` or `horsies scheduler` refuses to start on that database, with `database schema v52 is newer than this build supports (v51)`. Decide your rollback before you upgrade.
 
 ## New settings and flags
 
@@ -55,7 +57,7 @@ The migration is safe to run from many processes at once. A PostgreSQL advisory 
 | `--drain-timeout SECONDS` | `300` (finite, `> 0`) | `horsies worker` | [Graceful Shutdown](/horsies/workers/worker-architecture/#graceful-shutdown) |
 | `--child-preload MODE` | `library` (`library`, `app`, `none`) | `horsies worker` | [Preload Parent](/horsies/workers/worker-architecture/#preload-parent) |
 
-At the default `check_interval_ms` and the default limit, the recovery limit is reached 24 intervals after the first pass, which is 720 seconds. A workflow that is in a failing state when you upgrade reaches the limit and fails. Set a higher `workflow_recovery_failure_limit` to get more time for a fix.
+At the default `check_interval_ms` and the default limit, the recovery limit is reached 24 intervals after the first pass, which is about 720 seconds. A workflow that is in a failing state when you upgrade reaches the limit and fails. Set a higher `workflow_recovery_failure_limit` to get more time for a fix.
 
 Set `--drain-timeout` below the stop window of your supervisor. See [CLI Reference](/horsies/cli/).
 
