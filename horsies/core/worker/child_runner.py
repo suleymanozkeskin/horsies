@@ -797,27 +797,41 @@ def _confirm_ownership_and_set_running(
                         AND w.status IN ('PAUSED', 'CANCELLED')
                   )
             """
+            # The first runner heartbeat is part of the transition: the row can
+            # never be observed RUNNING without heartbeat coverage, a transition
+            # that does not apply inserts no beat, and the heartbeat thread
+            # skips its immediate beat.
             sql = (
                 """
-                UPDATE horsies_tasks
-                SET status = 'RUNNING',
-                    claimed = FALSE,
-                    claim_expires_at = NULL,
-                    started_at = NOW(),
-                    worker_pid = %s,
-                    worker_hostname = %s,
-                    worker_process_name = %s,
-                    updated_at = NOW()
-                WHERE id = %s
-                  AND status = 'CLAIMED'
-                  AND claimed_by_worker_id = %s
-                  AND (%s::timestamptz IS NULL OR claimed_at = %s::timestamptz)
-                  AND (claim_expires_at IS NULL OR claim_expires_at > now())
-                  AND (good_until IS NULL OR good_until > now())
+                WITH started AS (
+                    UPDATE horsies_tasks
+                    SET status = 'RUNNING',
+                        claimed = FALSE,
+                        claim_expires_at = NULL,
+                        started_at = NOW(),
+                        worker_pid = %s,
+                        worker_hostname = %s,
+                        worker_process_name = %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                      AND status = 'CLAIMED'
+                      AND claimed_by_worker_id = %s
+                      AND (%s::timestamptz IS NULL OR claimed_at = %s::timestamptz)
+                      AND (claim_expires_at IS NULL OR claim_expires_at > now())
+                      AND (good_until IS NULL OR good_until > now())
                 """
                 + (workflow_guard_sql if is_workflow_task else '')
                 + """
-                RETURNING id
+                    RETURNING id
+                ),
+                first_beat AS (
+                    INSERT INTO horsies_heartbeats (
+                        task_id, sender_id, role, sent_at, hostname, pid
+                    )
+                    SELECT id, %s, 'runner', NOW(), %s, %s
+                    FROM started
+                )
+                SELECT id FROM started
                 """
             )
             # The claimed_at pair is the claim-generation fence (C10): the
@@ -836,6 +850,11 @@ def _confirm_ownership_and_set_running(
             ]
             if is_workflow_task:
                 params.append(task_id)
+            params += [
+                worker_id + f':{os.getpid()}',
+                socket.gethostname(),
+                os.getpid(),
+            ]
             cursor.execute(
                 sql,
                 tuple(params),
@@ -920,23 +939,6 @@ def _confirm_ownership_and_set_running(
                         f'Failed to update workflow_tasks to RUNNING for task {task_id}'
                     )
                     return (False, '', 'WORKFLOW_CHECK_FAILED')
-
-            # First runner heartbeat rides the RUNNING transition: the row
-            # can never be observed RUNNING without heartbeat coverage, and
-            # the heartbeat thread skips its immediate beat (one fewer
-            # round trip per task on remote links).
-            cursor.execute(
-                """
-                INSERT INTO horsies_heartbeats (task_id, sender_id, role, sent_at, hostname, pid)
-                VALUES (%s, %s, 'runner', NOW(), %s, %s)
-                """,
-                (
-                    task_id,
-                    worker_id + f':{os.getpid()}',
-                    socket.gethostname(),
-                    os.getpid(),
-                ),
-            )
 
             conn.commit()
         return None
