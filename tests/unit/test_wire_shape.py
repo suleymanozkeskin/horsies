@@ -624,6 +624,62 @@ class TestValidShapes:
         assert _rules(annotation) == set()
 
 
+class _Shared(BaseModel):
+    n: int = 1
+
+    @model_validator(mode='after')
+    def check(self) -> _Shared:
+        return self
+
+
+class _SharedRecursive(BaseModel):
+    n: int = 1
+    child: Optional['_SharedRecursive'] = None
+
+    @model_validator(mode='after')
+    def check(self) -> _SharedRecursive:
+        return self
+
+
+class _SharedTwice(BaseModel):
+    first: _Shared
+    second: _Shared
+
+
+class _SharedOptional(BaseModel):
+    first: Optional[_Shared] = None
+    second: Optional[_Shared] = None
+
+
+@pydantic_dataclasses.dataclass
+class _RecursiveDataclass:
+    n: int = 1
+    child: Optional['_RecursiveDataclass'] = None
+
+    @model_validator(mode='after')
+    def check(self) -> _RecursiveDataclass:
+        return self
+
+
+@pytest.mark.unit
+class TestAfterValidatorOnASharedModel:
+    @pytest.mark.parametrize(
+        'annotation',
+        [_SharedRecursive, _SharedTwice, _SharedOptional, _RecursiveDataclass],
+    )
+    def test_it_registers(self, annotation: object) -> None:
+        assert _rules(annotation) == set()
+        assert _signature_refuses(annotation) is False
+
+    def test_a_wrong_default_beside_it_is_refused(self) -> None:
+        class Holder(BaseModel):
+            first: _Shared
+            second: _Shared
+            n: int = 'x'  # type: ignore[assignment]
+
+        assert ShapeRule.INVALID_DEFAULT in _rules(Holder)
+
+
 @pytest.mark.unit
 class TestFieldDefaults:
     def test_a_wrong_type_is_refused(self) -> None:
@@ -1001,6 +1057,16 @@ class TestNestedTaskResult:
     def test_a_wrong_error_type_is_refused(self) -> None:
         assert _signature_refuses(TaskResult[int, str]) is True
 
+    def test_a_slot_default_other_than_none_is_refused(self) -> None:
+        def task(
+            *,
+            x: TaskResult[int, TaskError] | None = 'not none',  # type: ignore[assignment]
+        ) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=1)
+
+        with pytest.raises(SignatureValidationError, match='must be None'):
+            check_task_signature(task, task_name='task')
+
     @pytest.mark.parametrize(
         'annotation',
         [
@@ -1346,6 +1412,40 @@ class TestBuildWithBoundary:
             with pytest.raises(Exception, match='when'):
                 encode_subworkflow_kwargs(Child, {'when': 'not a date'})
 
+    def test_a_return_annotation_under_type_checking_passes(self) -> None:
+        class Child(WorkflowDefinition[int]):
+            name = 'return_only_child'
+            definition_key = 'tests.wire_shape.return_only'
+
+            @classmethod
+            def build_with(cls, app: Any, *, value: int = 1) -> 'NotDefinedHere':  # type: ignore[name-defined]  # noqa: F821
+                raise AssertionError('not built')
+
+        WorkflowSpec(name='parent', tasks=[SubWorkflowNode(workflow_def=Child)])
+
+    def test_the_app_parameter_can_have_any_name(self) -> None:
+        class Child(WorkflowDefinition[int]):
+            name = 'renamed_app_child'
+            definition_key = 'tests.wire_shape.renamed_app'
+
+            @classmethod
+            def build_with(cls, horsies_app: Any, *, value: int = 1) -> Any:
+                raise AssertionError('not built')
+
+        WorkflowSpec(name='parent', tasks=[SubWorkflowNode(workflow_def=Child)])
+
+    def test_a_static_build_with_skips_only_its_app(self) -> None:
+        class Child(WorkflowDefinition[int]):
+            name = 'static_child'
+            definition_key = 'tests.wire_shape.static'
+
+            @staticmethod
+            def build_with(app: Any, x: Any = None) -> Any:  # type: ignore[override]
+                raise AssertionError('not built')
+
+        with pytest.raises(WorkflowValidationError):
+            WorkflowSpec(name='parent', tasks=[SubWorkflowNode(workflow_def=Child)])
+
     def test_the_boot_check_finds_a_class_level_node(self) -> None:
         class Child(WorkflowDefinition[int]):
             name = 'boot_child'
@@ -1409,6 +1509,33 @@ class TestDefinitionOfAny:
         with pytest.raises(WorkflowValidationError) as refused:
             WorkflowSpec(name='parent', tasks=[node], output=node)
 
+        assert refused.value.code is ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
+
+    def test_annotated_any_cannot_feed_args_from_or_be_an_output(self) -> None:
+        class Child(WorkflowDefinition[Annotated[Any, 'note']]):
+            name = 'annotated_any'
+            definition_key = 'tests.wire_shape.annotated_any'
+
+            @classmethod
+            def build_with(cls, app: Any, *args: Any, **params: Any) -> Any:
+                raise AssertionError('not built')
+
+        app = _real_app()
+
+        @app.task('annotated_any_target')
+        def target(*, value: TaskResult[int, TaskError]) -> TaskResult[int, TaskError]:
+            return value
+
+        source = SubWorkflowNode(workflow_def=Child)
+        node = TaskNode(fn=target, waits_for=[source], args_from={'value': source})
+
+        with pytest.raises(WorkflowValidationError) as refused:
+            WorkflowSpec(name='parent', tasks=[source, node])
+        assert refused.value.code is ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
+
+        output = SubWorkflowNode(workflow_def=Child)
+        with pytest.raises(WorkflowValidationError) as refused:
+            WorkflowSpec(name='parent', tasks=[output], output=output)
         assert refused.value.code is ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
 
     def test_it_can_run_with_no_consumer(self) -> None:

@@ -1284,7 +1284,10 @@ class WorkflowSpec(Generic[OutT]):
                     )
                     continue
 
-                if isinstance(source_node, SubWorkflowNode) and source_ok is Any:
+                if (
+                    isinstance(source_node, SubWorkflowNode)
+                    and _without_annotated(source_ok) is Any
+                ):
                     errors.append(
                         WorkflowValidationError(
                             message='args_from source declares no output type',
@@ -1417,7 +1420,7 @@ class WorkflowSpec(Generic[OutT]):
             )
         elif (
             isinstance(self.output, SubWorkflowNode)
-            and _resolve_source_node_ok_type(self.output) is Any
+            and _without_annotated(_resolve_source_node_ok_type(self.output)) is Any
         ):
             errors.append(
                 WorkflowValidationError(

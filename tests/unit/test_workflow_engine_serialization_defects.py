@@ -570,7 +570,7 @@ class TestSpecConstructionRefusesALoneSurrogate:
             f'{subject} holds a lone surrogate' in ' '.join(raised.value.notes)
         )
 
-    def test_a_subworkflow_node_kwarg_is_hrs_031(self) -> None:
+    def test_an_any_or_bytes_build_with_parameter_is_hrs_031(self) -> None:
         app = _real_app()
 
         class ChildWorkflow(WorkflowDefinition[int]):
@@ -672,7 +672,7 @@ class TestDictKeyWithoutAJsonForm:
         ],
         ids=['enum-list-value', 'frozenset'],
     )
-    def test_a_subworkflow_node_kwarg_is_hrs_031(
+    def test_an_any_or_bytes_build_with_parameter_is_hrs_031(
         self,
         value: dict[Any, int],
         type_name: str,
@@ -736,7 +736,7 @@ class TestValueThatHoldsItself:
             raised.value.notes,
         )
 
-    def test_a_subworkflow_node_kwarg_is_hrs_031(self) -> None:
+    def test_an_any_or_bytes_build_with_parameter_is_hrs_031(self) -> None:
         """Registration does not check a `build_with()` parameter, so `Any`
         is possible there."""
         app = _real_app()
@@ -820,7 +820,7 @@ class TestBytesThatAreNotUtf8:
     """Registration refuses `bytes` in a task signature, so `.send()` and a
     schedule cannot reach this. It does not check a `build_with()` parameter."""
 
-    def test_a_subworkflow_node_kwarg_is_hrs_031(self) -> None:
+    def test_an_any_or_bytes_build_with_parameter_is_hrs_031(self) -> None:
         """Before, the raw `UnicodeDecodeError` left `app.workflow()`."""
         app = _real_app()
 

@@ -339,7 +339,10 @@ def _type_only(node: object) -> object:
             replaced['ref'] = source['ref']
         return replaced
     if kind in _USER_FUNCTION_NODES:
-        return _type_only(source['schema'])
+        # An after validator holds the ref of a shared or recursive model on this
+        # node, so the ref must stay or a reference points at nothing.
+        inner = cast('_Node', _type_only(source['schema']))
+        return {**inner, 'ref': source['ref']} if 'ref' in source else inner
     return {
         key: value if key in _VALUE_KEYS else _type_only(value)
         for key, value in source.items()
@@ -539,10 +542,28 @@ def _known_shapes() -> tuple[tuple[ShapeRule, object], ...]:
     class DictDefault(BaseModel):
         inner: Plain = cast('Plain', {'number': 1})
 
+    @dataclasses.dataclass
+    class ExcludedDataclass:
+        note: str = Field(default='d', exclude=True)
+
+    class Shared(BaseModel):
+        number: int = 0
+
+        @model_validator(mode='after')
+        def check(self) -> Shared:
+            return self
+
+    class SharedDefault(BaseModel):
+        first: Shared
+        second: Shared
+        number: int = cast('int', 'x')
+
     return (
         (ShapeRule.EXCLUDED_FIELD, Excluded),
         (ShapeRule.EXCLUDED_FIELD, ExcludedIf),
         (ShapeRule.EXCLUDED_FIELD, ExcludedBehindValidator),
+        (ShapeRule.EXCLUDED_FIELD, ExcludedDataclass),
+        (ShapeRule.INVALID_DEFAULT, SharedDefault),
         (ShapeRule.UNREADABLE_KEY, Aliased),
         (ShapeRule.EXTRA_ALLOW, Open),
         (ShapeRule.EXTRA_ALLOW, DeferredOpen),

@@ -236,8 +236,10 @@ def check_build_with_signature(workflow_def: Any, *, workflow_name: str) -> None
                 subject='subworkflow',
             ))
         case Ok(ok_value=(hints, sig)):
-            names = list(sig.parameters)[2:]
-            for name in names:
+            names = [name for name in sig.parameters if name != 'cls']
+            # The engine passes the app as the first argument, and the name of
+            # that parameter is free.
+            for name in names[1:]:
                 parameter = sig.parameters[name]
                 if parameter.kind in (
                     inspect.Parameter.VAR_POSITIONAL,
@@ -270,6 +272,12 @@ def _check_parameter(name: str, annot: object, default: object) -> None:
         ok_type = get_args(slot)[0]
         _classify(ok_type, json_value_allowed_position=True)
         _reject_wire_shape(ok_type)
+        if default is not inspect.Parameter.empty and default is not None:
+            raise _RejectedError(_Rejection(
+                banned=f'default of type {type(default).__name__}',
+                reason='only the engine fills this parameter, so its default must be None',
+                fix='remove the default, or write `= None`',
+            ))
         return
     _classify(annot, json_value_allowed_position=True)
     if is_engine_filled(name, annot):
@@ -863,9 +871,8 @@ def _walk_dataclass_fields(
         # A name with a leading `_` is a real wire field in a dataclass. `fields`
         # leaves out `ClassVar` and `KW_ONLY`, and also `InitVar`, which the walk
         # must keep: an `InitVar` does not cross the wire.
-        if field_name not in wire_fields and not isinstance(
-            field_type, dataclasses.InitVar,
-        ):
+        is_init_var = isinstance(field_type, dataclasses.InitVar)
+        if field_name not in wire_fields and not is_init_var:
             continue
         try:
             _classify(

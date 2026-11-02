@@ -578,9 +578,20 @@ def resolve_build_with_hints(
     from horsies.core.models.workflow.spec import WorkflowSpec
 
     build_with = _resolve_build_with(workflow_def)
+
+    def parameters() -> None: ...
+
+    # The return annotation crosses no wire, so a name that only it uses, such
+    # as a `WorkflowSpec[Report]` under `TYPE_CHECKING`, must not refuse.
+    parameters.__annotations__ = {
+        name: annotation
+        for name, annotation in getattr(build_with, '__annotations__', {}).items()
+        if name != 'return'
+    }
     try:
         hints = get_type_hints(
-            build_with,
+            parameters,
+            globalns=getattr(build_with, '__globals__', {}),
             localns={'Horsies': Horsies, 'WorkflowSpec': WorkflowSpec},
             include_extras=True,
         )
