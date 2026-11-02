@@ -150,6 +150,16 @@ class TaskNode(Generic[OkT_co]):
     Cleared automatically when node_id is set externally via __setattr__.
     """
 
+    wire_kwargs: Mapping[str, Any] | None = field(
+        default=None, init=False, repr=False, compare=False,
+    )
+    """
+    - Set by WorkflowSpec, which proved that a reader gets these values back
+    - The start paths store this form. `kwargs` holds frozen containers, which
+      strict validation does not accept
+    - None only for a node of test scaffolding, whose callable has no hints
+    """
+
     _frozen: bool = field(default=False, init=False, repr=False, compare=False)
     """Set by WorkflowSpec._freeze_graph() to make this node immutable."""
 
@@ -295,6 +305,16 @@ class SubWorkflowNode(Generic[OkT_co]):
     Used by _isolate_inputs to distinguish stale auto-derived values from
     user-provided explicit node_ids on node reuse across specs.
     Cleared automatically when node_id is set externally via __setattr__.
+    """
+
+    wire_kwargs: Mapping[str, Any] | None = field(
+        default=None, init=False, repr=False, compare=False,
+    )
+    """
+    - Set by WorkflowSpec, which proved that a reader gets these values back
+    - The start paths store this form. `kwargs` holds frozen containers, which
+      strict validation does not accept
+    - None only for a node of test scaffolding, whose callable has no hints
     """
 
     _frozen: bool = field(default=False, init=False, repr=False, compare=False)

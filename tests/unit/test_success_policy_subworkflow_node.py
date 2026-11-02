@@ -245,6 +245,7 @@ class _ParamRecordingSession:
 
 def _grandchild_node(index: int) -> MagicMock:
     node = MagicMock(spec=SubWorkflowNode)
+    node.wire_kwargs = None
     node.name = f'child_sub_{index}'
     node.args = ()
     node.kwargs = {}

@@ -14,7 +14,7 @@ import decimal
 import enum
 import json
 import uuid
-from typing import Annotated, Any, Literal, Optional
+from typing import Annotated, Any, Literal, Optional, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -624,6 +624,11 @@ class _WithObject(TaskError):
     holds: object = None
 
 
+class _RaisingDict(dict[str, str]):
+    def items(self) -> Any:
+        raise RuntimeError('a dict that cannot be read')
+
+
 class _Evil(ValueError):
     def __str__(self) -> str:
         raise RuntimeError('no')
@@ -713,6 +718,8 @@ class TestReportableError:
         read = _stored(TaskError(error_code='RATE_LIMITED', exception=_Evil()))
 
         assert read.error_code == 'RATE_LIMITED'
+        assert isinstance(read.exception, dict)
+        assert read.exception['message'] == 'exception text unavailable'
 
     @pytest.mark.parametrize(
         'err',
@@ -858,6 +865,114 @@ class TestReportableError:
 
         record = next(item for item in caplog.records if item.name == 'horsies.codec')
         assert record.refusal_origin == 'library'  # type: ignore[attr-defined]
+
+    @pytest.mark.parametrize(
+        ('field', 'bad'),
+        [
+            ('message', 5),
+            ('exception', 5),
+            ('exception', {'type': 1}),
+            ('exception', {'type': 'V', 'module': 'm', 'message': 1, 'repr': 'r', 'traceback': ''}),
+        ],
+        ids=['message_int', 'exception_int', 'exception_bad_dict', 'exception_bad_field'],
+    )
+    def test_a_field_assigned_after_construction_keeps_the_code(
+        self, field: str, bad: object,
+    ) -> None:
+        err = TaskError(error_code='RATE_LIMITED', data={'a': 1})
+        setattr(err, field, bad)
+
+        kept = _stored(reportable_error(err, 'task'))
+
+        assert kept.error_code == 'RATE_LIMITED'
+        assert isinstance(kept.data, dict) and 'data_refused' in kept.data
+
+    def test_an_int_message_does_not_stop_the_escape_of_the_exception(self) -> None:
+        err = TaskError(
+            error_code='RATE_LIMITED',
+            exception={
+                'type': 'ValueError',
+                'module': 'builtins',
+                'message': 'bad \ud800',
+                'repr': 'r',
+                'traceback': '',
+            },
+        )
+        err.message = 5  # pyright: ignore[reportAttributeAccessIssue]
+
+        kept = _stored(reportable_error(err, 'task'))
+
+        assert isinstance(kept.exception, dict)
+        assert kept.exception['message'] == 'bad \\ud800'
+
+    def test_an_int_exception_does_not_stop_the_escape_of_the_message(self) -> None:
+        err = TaskError(error_code='RATE_LIMITED', message='bad \ud800')
+        err.exception = 5  # pyright: ignore[reportAttributeAccessIssue]
+
+        kept = _stored(reportable_error(err, 'task'))
+
+        assert kept.message == 'bad \\ud800'
+
+    def test_a_subclass_that_widens_data_is_held_to_json(self) -> None:
+        class WideData(TaskError):
+            data: Any = None
+
+        kept = _stored(
+            reportable_error(WideData(error_code='RATE_LIMITED', data=(1, 2)), 'task'),
+        )
+
+        assert isinstance(kept.data, dict) and 'data_refused' in kept.data
+
+    def test_a_good_message_stays_when_the_exception_is_dropped(self) -> None:
+        err = TaskError(error_code='RATE_LIMITED', message='slow down')
+        err.exception = 5  # pyright: ignore[reportAttributeAccessIssue]
+
+        kept = _stored(reportable_error(err, 'task'))
+
+        assert kept.message == 'slow down'
+        assert kept.exception is None
+
+    def test_a_good_exception_stays_when_the_data_is_bad(self) -> None:
+        err = TaskError(
+            error_code='RATE_LIMITED',
+            exception=ValueError('boom'),
+            data=cast('Any', object()),
+        )
+        err.message = 5  # pyright: ignore[reportAttributeAccessIssue]
+
+        kept = _stored(reportable_error(err, 'task'))
+
+        assert isinstance(kept.exception, dict)
+        assert kept.message is None
+
+    def test_a_built_in_code_stays_when_a_field_is_bad(self) -> None:
+        err = TaskError(error_code=OperationalErrorCode.BROKER_ERROR)
+        err.message = 5  # pyright: ignore[reportAttributeAccessIssue]
+
+        assert _stored(reportable_error(err, 'task')).error_code is OperationalErrorCode.BROKER_ERROR
+
+    def test_a_lone_surrogate_with_a_damaged_exception_keeps_the_code(self) -> None:
+        err = TaskError(error_code='RATE_LIMITED', message='bad \ud800')
+        err.exception = _RaisingDict({'type': 'V'})  # pyright: ignore[reportAttributeAccessIssue]
+
+        kept = _stored(reportable_error(err, 'task'))
+
+        assert kept.error_code == 'RATE_LIMITED'
+        assert kept.message is None
+
+    @pytest.mark.parametrize('code', [5, True, None, 'BROKER_ERROR'])
+    def test_a_code_that_cannot_be_kept_is_a_catalog_error(self, code: object) -> None:
+        err = TaskError(error_code='RATE_LIMITED')
+        err.error_code = cast('Any', code)
+
+        with pytest.raises(ValueValidationError, match='error_code'):
+            reportable_error(err, 'task')
+
+    def test_a_missing_code_is_a_catalog_error(self) -> None:
+        err = TaskError.model_construct(message='no code')
+
+        with pytest.raises(ValueValidationError, match='NoneType'):
+            reportable_error(err, 'task')
 
     def test_a_good_error_logs_nothing(self, caplog: pytest.LogCaptureFixture) -> None:
         with caplog.at_level('ERROR', logger='horsies.codec'):

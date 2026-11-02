@@ -31,6 +31,8 @@ import math
 from itertools import chain
 from typing import Final, NoReturn, cast
 
+from horsies.core.types.json_value import JsonValue
+
 
 __all__ = [
     'JSON_TEXT_TOO_DEEP',
@@ -44,17 +46,6 @@ __all__ = [
     '_reject_lone_surrogate',
     'escape_lone_surrogates',
 ]
-
-
-type JsonValue = (
-    None
-    | bool
-    | int
-    | float
-    | str
-    | list['JsonValue']
-    | dict[str, 'JsonValue']
-)
 
 
 type _JsonContainer = list[JsonValue] | dict[str, JsonValue]

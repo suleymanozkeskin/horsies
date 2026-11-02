@@ -1269,9 +1269,9 @@ class TestSubworkflowIntegration:
         SubWorkflowNode. Spec construction in `build_with()` already encoded
         and decoded them, so a refusal there is a defect: the child start
         raises `SerializationError` before it writes a row, and the caller's
-        transaction rolls back. The test patches the engine's
-        `encode_subworkflow_kwargs` to refuse, because spec construction
-        already refuses every value that this encode refuses.
+        transaction rolls back. The test clears the wire form of the nested node
+        and patches the engine's `encode_subworkflow_kwargs` to refuse, because
+        spec construction already refuses every value that this encode refuses.
 
         After the rollback, no child workflow row exists, the parent node is
         not FAILED, and the completion of the upstream node is not kept.
@@ -1317,13 +1317,15 @@ class TestSubworkflowIntegration:
                     workflow_def=NestedSubGrandchildWorkflow,
                     waits_for=[node_first],
                 )
-                return app.workflow(
+                spec = app.workflow(
                     name=cls.name,
                     tasks=[node_first, node_nested_sub],
                     output=node_nested_sub,
                     on_error=OnError.FAIL,
                     definition_key=cls.definition_key,
                 )
+                object.__setattr__(spec.tasks[1], 'wire_kwargs', None)
+                return spec
 
         register_workflow_definition(NestedSubGrandchildWorkflow)
 

@@ -125,6 +125,8 @@ def _encode_node_kwargs_or_raise(task: Any) -> dict[str, Any]:
     defect. It raises ``SerializationError`` with the node name; the start
     transaction does not catch it.
     """
+    if task.wire_kwargs is not None:
+        return dict(task.wire_kwargs)
     underlying = underlying_task_fn(task.fn)
     try:
         return dict(encode_kwargs(underlying, task.kwargs))
@@ -521,7 +523,9 @@ async def start_workflow_async(
                             'args': _ser_or_raise(dumps_json([]), 'positional args'),  # kwargs-only: positional args not persisted
                             'kwargs': _ser_or_raise(
                                 dumps_json(
-                                    encode_subworkflow_kwargs(
+                                    dict(node.wire_kwargs)
+                                    if node.wire_kwargs is not None
+                                    else encode_subworkflow_kwargs(
                                         node.workflow_def, node.kwargs,
                                     ),
                                 ),

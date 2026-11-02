@@ -350,6 +350,7 @@ class TestTaskFailureErrorPayload:
 def _child_task_node() -> MagicMock:
     """A child TaskNode with no dependencies and no task options."""
     child_task = MagicMock()
+    child_task.wire_kwargs = None
     child_task.name = 'child_task'
     child_task.args = ()
     child_task.kwargs = {'value': 1}
@@ -373,6 +374,7 @@ def _child_task_node() -> MagicMock:
 def _child_sub_node() -> MagicMock:
     """A child SubWorkflowNode with no dependencies."""
     child_sub = MagicMock(spec=SubWorkflowNode)
+    child_sub.wire_kwargs = None
     child_sub.name = 'child_sub'
     child_sub.args = ()
     child_sub.kwargs = {'value': 1}
