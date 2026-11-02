@@ -2813,7 +2813,11 @@ class TestEnqueueScheduledTask:
             kwargs={'a': 1, 'b': 2, 'key': 'val'},
         )
         config = ScheduleConfig(schedules=[schedule])
-        task_mock = _make_task_mock(lambda a, b, key: None)
+
+        def scheduled(*, a: int, b: int, key: str) -> None:
+            _ = a, b, key
+
+        task_mock = _make_task_mock(scheduled)
         app = _make_app(schedule_config=config, tasks={'my_task': task_mock})
         scheduler = Scheduler(app)
         scheduler.broker = _make_broker_mock()

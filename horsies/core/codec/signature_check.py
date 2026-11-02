@@ -214,7 +214,7 @@ def check_build_with_signature(workflow_def: Any, *, workflow_name: str) -> None
     non-JSON parameter is valid there and this does not run on it.
 
     It checks types. `cls` and `app` are supplied by the engine, `*args` and
-    `**params` hold JSON-native values, and a parameter may be positional or
+    `**params` take nothing from a node, and a parameter may be positional or
     keyword, because the engine binds it by keyword.
 
     Args:

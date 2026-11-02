@@ -25,7 +25,6 @@ from horsies.core.models.workflow import (
     WorkflowSpec,
     WorkflowContext,
     WorkflowDefinition,
-    OnError,
     SuccessPolicy,
     SuccessCase,
 )
@@ -127,9 +126,36 @@ class MockFnWithCtx(TaskFunction[Any, Any]):
         return NodeFactory(fn=self, **kwargs)  # type: ignore[arg-type]
 
 
+def _target_a(
+    *,
+    url: str = '',
+    data: JsonValue = None,
+    payload: SnapshotPayload | None = None,
+) -> TaskResult[Any, TaskError]:
+    return TaskResult(ok=None)
+
+
+def _target_b(
+    *,
+    data: TaskResult[Any, TaskError] | None = None,
+) -> TaskResult[Any, TaskError]:
+    return TaskResult(ok=None)
+
+
+def _target_c(
+    *,
+    data: TaskResult[Any, TaskError] | None = None,
+    workflow_ctx: WorkflowContext | None = None,
+) -> TaskResult[Any, TaskError]:
+    return TaskResult(ok=None)
+
+
 fn_a = MockFn(task_name='task_a')
+fn_a._original_fn = _target_a  # type: ignore[attr-defined]
 fn_b = MockFn(task_name='task_b')
+fn_b._original_fn = _target_b  # type: ignore[attr-defined]
 fn_c = MockFnWithCtx(task_name='task_c')
+fn_c._original_fn = _target_c  # type: ignore[attr-defined]
 
 
 def _jsonvalue_payload_task(payload: JsonValue) -> TaskResult[None, TaskError]:
@@ -415,9 +441,9 @@ class TestPreConstructionMutability:
 
     def test_can_set_kwargs_before_construction(self) -> None:
         a = TaskNode(fn=fn_a)
-        a.kwargs = {'key': 'val'}
+        a.kwargs = {'url': 'val'}
         spec = WorkflowSpec(name='wf', tasks=[a])
-        assert spec.tasks[0].kwargs['key'] == 'val'
+        assert spec.tasks[0].kwargs['url'] == 'val'
 
 
 # ===========================================================================

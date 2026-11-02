@@ -23,12 +23,10 @@ from horsies.core.types.result import Ok
 from horsies.core.errors import MultipleValidationErrors
 from horsies.core.models.workflow import (
     TaskNode,
-    SubWorkflowNode,
     WorkflowSpec,
     WorkflowContext,
     WorkflowDefinition,
     WorkflowValidationError,
-    OnError,
     SuccessPolicy,
     SuccessCase,
 )
@@ -125,9 +123,20 @@ class MockFnWithCtx(TaskFunction[Any, Any]):
         return NodeFactory(fn=self, **kwargs)  # type: ignore[arg-type]
 
 
+def _target(
+    *,
+    url: str = '',
+    data: TaskResult[Any, TaskError] | None = None,
+) -> TaskResult[Any, TaskError]:
+    return TaskResult(ok=None)
+
+
 fn_a = MockFn(task_name='task_a')
+fn_a._original_fn = _target  # type: ignore[attr-defined]
 fn_b = MockFn(task_name='task_b')
+fn_b._original_fn = _target  # type: ignore[attr-defined]
 fn_c = MockFn(task_name='task_c')
+fn_c._original_fn = _target  # type: ignore[attr-defined]
 fn_ctx = MockFnWithCtx(task_name='task_ctx')
 
 

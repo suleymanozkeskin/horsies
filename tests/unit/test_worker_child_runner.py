@@ -16,18 +16,16 @@ from __future__ import annotations
 import json
 import logging
 import threading
-import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Generator
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 from pydantic import BaseModel, SecretStr, field_validator
 from pydantic_core import PydanticCustomError
 
 from horsies.core.app import Horsies
-from horsies.core.codec.error_payload import FALLBACK_ERROR_JSON
 from horsies.core.codec.json_io import SerializationError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
@@ -37,7 +35,7 @@ from horsies.core.models.tasks import (
     TaskError,
     TaskResult,
 )
-from horsies.core.types.result import Err, Ok
+from horsies.core.types.result import Err
 from horsies.core.worker.child_runner import (
     _debug_imports_log,
     _get_workflow_status_for_task,
@@ -823,6 +821,10 @@ def _run_entry_defaults() -> dict[str, Any]:
         'master_worker_id': 'w-1',
         'runner_heartbeat_interval_ms': 100,
     }
+
+
+def _takes_upstream(*, upstream: TaskResult[str, TaskError]) -> TaskResult[str, TaskError]:
+    return TaskResult(ok=upstream.unwrap())
 
 
 class _EchoingModel(BaseModel):
@@ -2128,6 +2130,7 @@ class TestRunTaskEntryWorkflowHappyPaths:
         # Consumer task whose kwarg gets injected. Real type for its
         # own return-encoding too.
         mock_task = MagicMock()
+        mock_task._original_fn = _takes_upstream
         mock_task.task_ok_type = str
         mock_task.return_value = TaskResult(ok='processed')
 
@@ -2381,6 +2384,7 @@ class TestRunTaskEntryStoredErrorRefusal:
         source_task = MagicMock()
         source_task.task_ok_type = str
         mock_task = MagicMock()
+        mock_task._original_fn = _takes_upstream
         mock_task.task_ok_type = str
 
         def _task_lookup(name: str) -> Any:

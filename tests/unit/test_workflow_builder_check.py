@@ -13,12 +13,12 @@ from horsies.core.app import Horsies, _BUILDER_ATTR, _NO_CHECK_ATTR
 from horsies.core.errors import (
     ConfigurationError,
     ErrorCode,
-    HorsiesError,
     WorkflowValidationError,
 )
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import CustomQueueConfig, QueueMode
+from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.workflow import (
     SubWorkflowNode,
     TaskNode,
@@ -864,13 +864,17 @@ class TestRecursiveSubworkflowBindingInCheck:
             definition_key = 'child_rt.v1'
 
             @classmethod
-            def build_with(cls, app: Horsies, **p: Any) -> WorkflowSpec[Any]:
+            def build_with(
+                cls, app: Horsies, v: TaskResult[int, TaskError],
+            ) -> WorkflowSpec[Any]:
                 bad = TaskNode(fn=_mock_fn('ghost'), node_id='bad')
                 return WorkflowSpec(name=cls.name, tasks=[bad], output=bad)
 
         @app.workflow_builder()
         def parent_builder() -> WorkflowSpec[Any]:
-            src = TaskNode(fn=_mock_fn('scraping'), node_id='src')
+            source_fn = _mock_fn('scraping')
+            source_fn.task_ok_type = int
+            src = TaskNode(fn=source_fn, node_id='src')
             sub = SubWorkflowNode(
                 workflow_def=ChildRuntime, args_from={'v': src}, waits_for=[src],
             )

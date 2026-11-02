@@ -9,7 +9,6 @@ import pytest
 from pydantic import BaseModel
 
 from horsies import AppConfig, Horsies, JsonValue, PostgresConfig, TaskError, TaskResult
-from horsies.core.codec.json_value import MAX_TYPED_JSON_DEPTH
 from horsies.core.errors import ErrorCode, WorkflowValidationError
 from horsies.core.models.workflow import (
     SubWorkflowNode,
@@ -151,18 +150,38 @@ class TestWireForm:
         with pytest.raises(AssertionError, match='did not pass through a WorkflowSpec'):
             stored_kwargs(node)
 
-    def test_a_task_node_with_no_hints_keeps_its_values(self) -> None:
-        """Only test scaffolding has such a node."""
+    def test_a_task_node_with_no_hints_takes_no_kwarg(self) -> None:
         def scaffold(value):  # type: ignore[no-untyped-def]  # noqa: ANN001, ANN202
             return value
 
-        values = [1, 2]
-        node = TaskNode(fn=scaffold, kwargs={'value': values})
-        spec = WorkflowSpec(name='s', tasks=[node])
+        scaffold.task_name = 'scaffold'  # type: ignore[attr-defined]
+        node = TaskNode(fn=scaffold, kwargs={'value': [1, 2]})
 
-        values.append(3)
+        with pytest.raises(WorkflowValidationError) as caught:
+            WorkflowSpec(name='s', tasks=[node])
 
-        assert stored_kwargs(spec.tasks[0]) == {'value': [1, 2]}
+        assert caught.value.code == ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+
+    def test_a_target_with_hints_that_do_not_resolve_takes_no_kwarg(self) -> None:
+        def scaffold(*, value: 'NotDefinedHere') -> None:  # type: ignore[name-defined]  # noqa: F821
+            _ = value
+
+        scaffold.task_name = 'scaffold'  # type: ignore[attr-defined]
+        node = TaskNode(fn=scaffold, kwargs={'value': 1})
+
+        with pytest.raises(WorkflowValidationError, match='no readable hints') as caught:
+            WorkflowSpec(name='s', tasks=[node])
+
+        assert caught.value.code == ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+
+    def test_a_node_with_no_kwargs_has_an_empty_form(self) -> None:
+        def scaffold(*, value=None):  # type: ignore[no-untyped-def]  # noqa: ANN001, ANN202
+            return value
+
+        scaffold.task_name = 'scaffold'  # type: ignore[attr-defined]
+        spec = WorkflowSpec(name='s', tasks=[TaskNode(fn=scaffold)])
+
+        assert stored_kwargs(spec.tasks[0]) == {}
 
     def test_the_wire_form_stays_out_of_the_repr_and_the_compare(self) -> None:
         app = _app()
@@ -178,43 +197,17 @@ class TestWireForm:
 
 @pytest.mark.unit
 class TestBuildWithWithoutHints:
-    def test_opaque_params_store_a_container(self) -> None:
+    def test_opaque_params_take_no_kwarg(self) -> None:
         app = _app()
         node = SubWorkflowNode(
             workflow_def=_child('opaque_params', _with_opaque_params),
-            kwargs={'values': [1, 2], 'shape': {'a': [1]}},
-        )
-        spec = app.workflow(name='o', tasks=[node], definition_key='d.o')
-
-        assert spec.tasks[0].wire_kwargs == {'values': [1, 2], 'shape': {'a': [1]}}
-
-    def test_a_value_that_is_not_json_is_refused_at_the_spec(self) -> None:
-        app = _app()
-        node = SubWorkflowNode(
-            workflow_def=_child('opaque_params_object', _with_opaque_params),
-            kwargs={'values': object()},
+            kwargs={'values': [1, 2]},
         )
 
         with pytest.raises(WorkflowValidationError) as caught:
-            app.workflow(name='r', tasks=[node], definition_key='d.r')
+            app.workflow(name='o', tasks=[node], definition_key='d.o')
 
-        assert caught.value.code == ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
-
-    def test_a_value_deeper_than_the_read_limit_is_refused_at_the_spec(self) -> None:
-        """The encoder allows this depth, and the read of a worker does not."""
-        deep: list[object] = []
-        for _ in range(MAX_TYPED_JSON_DEPTH + 50):
-            deep = [deep]
-        node = SubWorkflowNode(
-            workflow_def=_child('opaque_params_deep', _with_opaque_params),
-            kwargs={'values': deep},
-        )
-
-        with pytest.raises(WorkflowValidationError) as caught:
-            app = _app()
-            app.workflow(name='d', tasks=[node], definition_key='d.d')
-
-        assert caught.value.code == ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert caught.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
 
     def test_a_named_parameter_with_no_hint_is_refused_at_the_spec(self) -> None:
         app = _app()

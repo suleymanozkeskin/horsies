@@ -1070,9 +1070,7 @@ async def enqueue_subworkflow_task(
     raw_kwargs_dict: dict[str, Any] = (
         raw_kwargs if isinstance(raw_kwargs, dict) else {}
     )
-    # Typed decode against the child ``build_with`` signature. Annotated
-    # params decode via their declared type; opaque ``**params: Any``
-    # slots route through ``JsonValue`` (raw JSON-native shapes only).
+    # Typed decode against the child ``build_with`` signature.
     try:
         kwargs: dict[str, Any] = decode_subworkflow_kwargs(
             workflow_def, raw_kwargs_dict,

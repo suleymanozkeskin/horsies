@@ -39,7 +39,7 @@ from horsies.core.brokers.postgres import (
 from horsies.core.brokers.result_types import BrokerErrorCode
 from horsies.core.codec.error_payload import MAX_EXCEPTION_CHAIN_LINKS, flatten_exception
 from horsies.core.codec.json_io import SerializationError
-from horsies.core.codec.kwargs import encode_subworkflow_kwargs
+from horsies.core.codec.kwargs import decode_subworkflow_kwargs
 from horsies.core.codec.typed import decode_value, encode_task_result, encode_value
 from horsies.core.codec.validation_errors import (
     INPUT_PLACEHOLDER,
@@ -495,7 +495,7 @@ class _TypedSubworkflow(WorkflowDefinition[int]):
 class TestSubworkflowKwargs:
     def test_a_refused_subworkflow_kwarg_holds_no_input(self) -> None:
         with pytest.raises(ValueValidationError) as caught:
-            encode_subworkflow_kwargs(_TypedSubworkflow, {'count': MARKER})
+            decode_subworkflow_kwargs(_TypedSubworkflow, {'count': MARKER})
 
         assert MARKER not in str(caught.value)
 
