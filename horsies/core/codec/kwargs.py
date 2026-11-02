@@ -29,10 +29,12 @@ from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from types import UnionType
 from typing import (
+    Annotated,
     Any,
     Callable,
     Literal,
     Union,
+    assert_never,
     cast,
     get_args,
     get_origin,
@@ -40,8 +42,14 @@ from typing import (
 )
 
 from horsies.core.codec.json_value import StrictJsonError
-from horsies.core.codec.typed import Json, decode_value, encode_value
+from horsies.core.codec.typed import (
+    Json,
+    decode_value,
+    encode_value,
+    validate_omitted_default,
+)
 from horsies.core.models.tasks import TaskResult
+from horsies.core.types.result import Err, Ok, Result
 
 
 __all__ = [
@@ -52,7 +60,11 @@ __all__ = [
     'decode_subworkflow_kwargs',
     'encode_kwargs',
     'encode_subworkflow_kwargs',
+    'fill_build_with_defaults',
+    'fill_omitted_defaults',
+    'is_engine_filled',
     'missing_required_kwargs',
+    'resolve_build_with_hints',
     'resolve_hints_and_sig',
     'resolve_producer_kwarg_binding',
     'subworkflow_target_ok_type',
@@ -217,7 +229,7 @@ def resolve_producer_kwarg_binding(
                 f'{_fn_name(task_fn)!r}'
             ),
         )
-    if get_origin(annot) is TaskResult:
+    if _annotates_taskresult(annot):
         return KwargBinding(
             kind='error',
             error_message=(
@@ -328,14 +340,88 @@ def missing_required_kwargs(
         and name not in supplied
     ]
     workflow_only = tuple(
-        name
-        for name in missing
-        if name in _INJECTED_PARAM_NAMES or _annotates_taskresult(hints.get(name))
+        name for name in missing if is_engine_filled(name, hints.get(name))
     )
     return MissingKwargs(
         producer=tuple(name for name in missing if name not in workflow_only),
         workflow_only=workflow_only,
     )
+
+
+def is_engine_filled(name: str, annot: object) -> bool:
+    """Whether the engine fills this parameter: an injected name or an `args_from` slot."""
+    return name in _INJECTED_PARAM_NAMES or _annotates_taskresult(annot)
+
+
+def fill_omitted_defaults(
+    target_fn: Callable[..., Any],
+    kwargs: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return `kwargs` with each omitted parameter set to its validated default.
+
+    An omitted parameter crosses no wire, so no decode runs its validators.
+    Without this the function gets the raw default, not its declared type.
+
+    Call this after the engine keys are gone, right before the call: a parameter
+    that the engine fills is not omitted. Engine-injected names and `args_from`
+    slots are skipped, and so is a parameter with no type hint, such as the `cls`
+    and `app` of a `build_with`.
+
+    A callable whose hints do not resolve returns unchanged, as in
+    `encode_kwargs`.
+
+    Args:
+        target_fn: The task function or the `build_with`.
+        kwargs: The decoded kwargs.
+
+    Returns:
+        A new dict with the validated defaults added.
+
+    Raises:
+        StrictJsonError: on a lone surrogate in the text of a validator.
+        ValueValidationError: when a default does not hold its declared type,
+            or a validator refuses it. The text holds no input value.
+    """
+    resolved = resolve_hints_and_sig(target_fn)
+    if resolved is None or not resolved[0]:
+        return dict(kwargs)
+    hints, sig = resolved
+    return _with_validated_defaults(hints, sig, kwargs)
+
+
+def fill_build_with_defaults(
+    workflow_def: Any,
+    kwargs: Mapping[str, Any],
+) -> dict[str, Any]:
+    """`fill_omitted_defaults` for a child `build_with`.
+
+    Raises:
+        StrictJsonError: the hints do not resolve, or a validator wrote a lone
+            surrogate in its text.
+        ValueValidationError: when a default does not hold its declared type.
+    """
+    hints, sig = _build_with_hints_or_raise(workflow_def)
+    return _with_validated_defaults(hints, sig, kwargs)
+
+
+def _with_validated_defaults(
+    hints: Mapping[str, Any],
+    sig: inspect.Signature,
+    kwargs: Mapping[str, Any],
+) -> dict[str, Any]:
+    filled = dict(kwargs)
+    for name, parameter in sig.parameters.items():
+        if name in filled or parameter.default is inspect.Parameter.empty:
+            continue
+        annot = hints.get(name)
+        if annot is None or is_engine_filled(name, annot):
+            continue
+        filled[name] = validate_omitted_default(
+            parameter.default,
+            annot,
+            location=(name,),
+        )
+    return filled
 
 
 def _annotates_taskresult(annot: Any) -> bool:
@@ -351,6 +437,8 @@ def _annotates_taskresult(annot: Any) -> bool:
     name a single Ok type and an ambiguous union has none, while this only
     decides that the slot carries an engine envelope rather than user data.
     """
+    if get_origin(annot) is Annotated:
+        return _annotates_taskresult(get_args(annot)[0])
     if get_origin(annot) is TaskResult:
         return True
     if get_origin(annot) in (Union, UnionType):
@@ -438,21 +526,67 @@ def declared_taskresult_ok_type(
         parameter is not a `TaskResult` slot, or `T` is a TypeVar: then
         nothing further can be checked on the value.
     """
+    resolved = resolve_hints_and_sig(target_fn)
+    if resolved is None:
+        return None
+    hints, _ = resolved
+    return _slot_ok_type(hints.get(key))
+
+
+def _slot_ok_type(annot: object) -> Any | None:
+    """The `T` of a `TaskResult[T, TaskError]` slot, through `Annotated`."""
     from horsies.core.models.workflow.typing_utils import (
         _extract_taskresult_ok_type,
         _normalize_resolved_ok_type,
     )
 
-    resolved = resolve_hints_and_sig(target_fn)
-    if resolved is None:
-        return None
-    hints, _ = resolved
-    return _normalize_resolved_ok_type(_extract_taskresult_ok_type(hints.get(key)))
+    if get_origin(annot) is Annotated:
+        annot = get_args(annot)[0]
+    return _normalize_resolved_ok_type(_extract_taskresult_ok_type(annot))
 
 
 def subworkflow_target_ok_type(workflow_def: Any, key: str) -> Any | None:
     """`declared_taskresult_ok_type` for a parameter of a child `build_with`."""
-    return declared_taskresult_ok_type(_resolve_build_with(workflow_def), key)
+    match resolve_build_with_hints(workflow_def):
+        case Ok(ok_value=(hints, _)):
+            return _slot_ok_type(hints.get(key))
+        case Err():
+            return None
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def resolve_build_with_hints(
+    workflow_def: Any,
+) -> Result[tuple[dict[str, Any], inspect.Signature], str]:
+    """Resolve the hints and the signature of a child `build_with`.
+
+    A `build_with` often imports `Horsies` under `TYPE_CHECKING`, so both names
+    that the library passes to it are given here. Any other name must resolve in
+    the module of the `build_with`.
+
+    A `SubWorkflowNode` crosses the wire, so a caller must refuse an Err: without
+    hints no kwarg could be checked.
+
+    Args:
+        workflow_def: The child `WorkflowDefinition` class.
+
+    Returns:
+        Ok with the hints and the signature, or Err with the cause.
+    """
+    from horsies.core.app import Horsies
+    from horsies.core.models.workflow.spec import WorkflowSpec
+
+    build_with = _resolve_build_with(workflow_def)
+    try:
+        hints = get_type_hints(
+            build_with,
+            localns={'Horsies': Horsies, 'WorkflowSpec': WorkflowSpec},
+            include_extras=True,
+        )
+        return Ok((hints, inspect.signature(build_with)))
+    except (TypeError, ValueError, NameError) as error:
+        return Err(str(error))
 
 
 def _resolve_build_with(workflow_def: Any) -> Callable[..., Any]:
@@ -507,6 +641,26 @@ def _is_addressable_named_param(param: inspect.Parameter) -> bool:
     return param.kind.value in _ADDRESSABLE_PARAM_KINDS
 
 
+def _build_with_hints_or_raise(
+    workflow_def: Any,
+) -> tuple[dict[str, Any], inspect.Signature]:
+    """`resolve_build_with_hints` for the wire paths, which must not guess.
+
+    Raises:
+        StrictJsonError: the hints do not resolve, so no kwarg can be checked.
+    """
+    match resolve_build_with_hints(workflow_def):
+        case Ok(ok_value=resolved):
+            return resolved
+        case Err(err_value=cause):
+            raise StrictJsonError(
+                f'build_with hints of {_workflow_def_name(workflow_def)!r} do not '
+                f'resolve: {cause}',
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def encode_subworkflow_kwargs(
     workflow_def: Any,
     kwargs: Mapping[str, Any],
@@ -536,13 +690,7 @@ def encode_subworkflow_kwargs(
     """
     from horsies.core.codec.json_value import JsonValue
 
-    build_with = _resolve_build_with(workflow_def)
-    resolved = resolve_hints_and_sig(build_with)
-    if resolved is None:
-        # ``inspect.signature`` failed — test scaffolding only; treat
-        # every value as ``JsonValue`` (strict).
-        return {k: encode_value(v, JsonValue, location=(k,)) for k, v in kwargs.items()}
-    hints, sig = resolved
+    hints, sig = _build_with_hints_or_raise(workflow_def)
     accepts_var_kw = _signature_accepts_var_keyword(sig)
     encoded: dict[str, Json] = {}
     for key, value in kwargs.items():
@@ -599,11 +747,7 @@ def decode_subworkflow_kwargs(
     """
     from horsies.core.codec.json_value import JsonValue
 
-    build_with = _resolve_build_with(workflow_def)
-    resolved = resolve_hints_and_sig(build_with)
-    if resolved is None:
-        return {k: decode_value(v, JsonValue, location=(k,)) for k, v in raw_kwargs.items()}
-    hints, sig = resolved
+    hints, sig = _build_with_hints_or_raise(workflow_def)
     accepts_var_kw = _signature_accepts_var_keyword(sig)
     decoded: dict[str, Any] = {}
     for key, raw_value in raw_kwargs.items():

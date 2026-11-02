@@ -45,6 +45,11 @@ from horsies.core.workflows.sql import (
 )
 from tests.broker_resources_support import attach_resources, fake_resources
 
+
+def _plain_build_with(cls: Any, app: Any, *args: Any, **params: Any) -> Any:
+    """A real function for the hints of a mock `workflow_def`."""
+    raise AssertionError('the mock build_with runs, not this')
+
 pytestmark = [pytest.mark.unit]
 
 DATABASE_URL = 'postgresql+psycopg://u:p@localhost:5432/db'
@@ -253,6 +258,7 @@ def _grandchild_node(index: int) -> MagicMock:
     node.min_success = None
     node.workflow_def = MagicMock()
     node.workflow_def.name = 'GrandchildWorkflow'
+    node.workflow_def._original_build_with = _plain_build_with
     return node
 
 
@@ -274,7 +280,7 @@ class TestChildStartSerialization:
         workflow_def = MagicMock()
         workflow_def.build_with.return_value = child_spec
         workflow_def.name = 'ChildWorkflow'
-        workflow_def._original_build_with = workflow_def.build_with  # pyright: ignore[reportPrivateUsage]
+        workflow_def._original_build_with = _plain_build_with  # pyright: ignore[reportPrivateUsage]
         parent_row = SimpleNamespace(
             id='wt-1',
             sub_workflow_name='child_wf',
@@ -301,6 +307,9 @@ class TestChildStartSerialization:
             'horsies.core.workflows.engine.validate_workflow_generic_output_match',
         ), patch(
             'horsies.core.workflows.engine.encode_subworkflow_kwargs',
+            return_value={},
+        ), patch(
+            'horsies.core.workflows.engine.fill_build_with_defaults',
             return_value={},
         ), patch(
             'horsies.core.workflows.engine._fail_enqueued_task', new=AsyncMock(),

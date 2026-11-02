@@ -62,6 +62,11 @@ from horsies.core.workflows.sql import (
 )
 
 
+def _plain_build_with(cls: Any, app: Any, *args: Any, **params: Any) -> Any:
+    """A real function for the hints of a mock `workflow_def`."""
+    raise AssertionError('the mock build_with runs, not this')
+
+
 # ── Helpers ──────────────────────────────────────────────────────────
 
 
@@ -640,7 +645,7 @@ class TestEnqueueSubworkflowTask:
         mock_wf_def.build_with.return_value = mock_spec
         mock_wf_def.name = 'TestWF'
         # Ensure it's not the default build_with
-        mock_wf_def._original_build_with = mock_wf_def.build_with
+        mock_wf_def._original_build_with = _plain_build_with
 
         with patch(
             'horsies.core.workflows.registry.get_subworkflow_node',
@@ -706,7 +711,7 @@ class TestEnqueueSubworkflowTask:
         mock_wf_def = MagicMock()
         mock_wf_def.build_with.return_value = mock_spec
         mock_wf_def.name = 'TestWF'
-        mock_wf_def._original_build_with = mock_wf_def.build_with
+        mock_wf_def._original_build_with = _plain_build_with
         # encode_subworkflow_kwargs (now run before dumps_json) resolves the
         # child's build_with off workflow_def; spec-mock doesn't expose it.
         child_sub_node.workflow_def = mock_wf_def
@@ -789,7 +794,7 @@ class TestEnqueueSubworkflowTask:
         mock_wf_def = MagicMock()
         mock_wf_def.build_with.return_value = mock_spec
         mock_wf_def.name = 'TestWF'
-        mock_wf_def._original_build_with = mock_wf_def.build_with
+        mock_wf_def._original_build_with = _plain_build_with
 
         with patch(
             'horsies.core.workflows.registry.get_subworkflow_node',
@@ -870,7 +875,7 @@ class TestEnqueueSubworkflowTask:
         mock_wf_def = MagicMock()
         mock_wf_def.build_with.return_value = mock_spec
         mock_wf_def.name = 'TestWF'
-        mock_wf_def._original_build_with = mock_wf_def.build_with
+        mock_wf_def._original_build_with = _plain_build_with
 
         with patch(
             'horsies.core.workflows.registry.get_subworkflow_node',
@@ -940,7 +945,7 @@ class TestEnqueueSubworkflowTask:
         mock_wf_def = MagicMock()
         mock_wf_def.build_with.return_value = mock_spec
         mock_wf_def.name = 'TestWF'
-        mock_wf_def._original_build_with = mock_wf_def.build_with
+        mock_wf_def._original_build_with = _plain_build_with
 
         original_dumps = engine.dumps_json
 
@@ -1027,7 +1032,7 @@ class TestEnqueueSubworkflowTask:
         mock_wf_def = MagicMock()
         mock_wf_def.build_with.return_value = mock_spec
         mock_wf_def.name = 'TestWF'
-        mock_wf_def._original_build_with = mock_wf_def.build_with
+        mock_wf_def._original_build_with = _plain_build_with
         return mock_wf_def
 
     @pytest.mark.asyncio

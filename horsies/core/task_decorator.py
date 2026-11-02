@@ -29,7 +29,11 @@ from types import MappingProxyType
 from datetime import datetime, timezone
 from pydantic import TypeAdapter, ValidationError
 from horsies.core.codec.json_value import StrictJsonError, escape_lone_surrogates
-from horsies.core.codec.kwargs import encode_kwargs, missing_required_kwargs
+from horsies.core.codec.kwargs import (
+    encode_kwargs,
+    fill_omitted_defaults,
+    missing_required_kwargs,
+)
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.codec.payload_guard import (
     PayloadOverLimit,
@@ -1765,6 +1769,13 @@ def create_task_wrapper(
                     f'{list(missing.producer)}; nothing was enqueued.'
                 ),
                 exception=NoCause(),
+            ))
+        try:
+            _ = fill_omitted_defaults(fn, kwargs_dict)
+        except (StrictJsonError, ValueValidationError) as exc:
+            return Err(TaskSendValidationFailed(
+                message=f'A default of {task_name!r} does not fit its type: {exc}',
+                exception=exc,
             ))
 
         # Serialize kwargs — strict-serde phase 3 routes through encode_kwargs

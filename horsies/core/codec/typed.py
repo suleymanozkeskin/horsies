@@ -41,6 +41,7 @@ __all__ = [
     'Json',
     'TypeAnnotation',
     'ValueValidationError',
+    'check_json_value_positions',
     'conform_to_target',
     'decode_task_error',
     'decode_task_result',
@@ -49,6 +50,7 @@ __all__ = [
     'encode_task_result',
     'encode_value',
     'lone_surrogate_text',
+    'validate_omitted_default',
     'validate_task_result_envelope',
 ]
 
@@ -266,6 +268,39 @@ def encode_value(
     return dumped_json
 
 
+def check_json_value_positions(
+    value: object,
+    expected_type: TypeAnnotation,
+) -> None:
+    """Run the JsonValue fence on `value` at each JsonValue position of its type.
+
+    Raises:
+        StrictJsonError: when a JsonValue position holds a value that is not
+            JSON-native.
+    """
+    _apply_json_value_fence(value, expected_type)
+
+
+def validate_omitted_default(
+    default: object,
+    expected_type: TypeAnnotation,
+    *,
+    location: tuple[str, ...] = (),
+) -> object:
+    """Validate the default of an omitted parameter and return the result.
+
+    An omitted parameter crosses no wire, so no decode runs its validators.
+    This gives the function the value that the declared type gives, and a list
+    or a dict default becomes a fresh copy.
+
+    Raises:
+        StrictJsonError: on a lone surrogate in the text of a validator.
+        ValueValidationError: when the default does not hold the declared type,
+            or a validator refuses it. The text holds no input value.
+    """
+    return _validate_strict(_get_adapter(expected_type), default, location)
+
+
 def conform_to_target(
     result: TaskResult[Any, TaskError],
     target_ok_type: TypeAnnotation,
@@ -371,16 +406,20 @@ def _validate(
     raise failure
 
 
-def _validate_strict(adapter: TypeAdapter[Any], value: object) -> object:
+def _validate_strict(
+    adapter: TypeAdapter[Any],
+    value: object,
+    location: tuple[str, ...] = (),
+) -> object:
     """`adapter.validate_python(value, strict=True)` with the refusals of `_validate`."""
     failure: StrictJsonError | ValueValidationError
     try:
         try:
             return adapter.validate_python(value, strict=True)
         except ValidationError as error:
-            failure = ValueValidationError(validation_summary(error, ()))
+            failure = ValueValidationError(validation_summary(error, location))
     except UnicodeEncodeError:
-        failure = StrictJsonError(lone_surrogate_text('a validation error', ()))
+        failure = StrictJsonError(lone_surrogate_text('a validation error', location))
     raise failure
 
 

@@ -24,6 +24,7 @@ from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import (
     declared_taskresult_ok_type,
     decode_kwargs,
+    fill_omitted_defaults,
     underlying_task_fn,
 )
 from horsies.core.codec.json_io import (
@@ -1375,6 +1376,17 @@ def _run_task_entry(
                         task_name=str(meta_dict.get('task_name', '')),
                     )
             # If task doesn't declare workflow_meta, silently skip injection.
+
+        try:
+            kwargs = fill_omitted_defaults(underlying_fn, kwargs)
+        except (StrictJsonError, ValueValidationError) as exc:
+            return _serialization_error_response(
+                task_name,
+                SerializationError(
+                    f'A default of {task_name!r} does not fit its declared type: '
+                    f'{exc}',
+                ),
+            )
 
         out = task(*args, **kwargs)  # __call__ returns TaskResult
         logger.info(f'Task execution completed: {task_name} ({task_id})')
