@@ -24,6 +24,7 @@ schema check it does not mean to measure, and would do it once per block.
 
 from __future__ import annotations
 
+import re
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -456,13 +457,16 @@ def running_transition_columns(child_runner_source: str) -> frozenset[str]:
     product change to the transition then breaks the pin instead of silently
     leaving the harness establishing a different precondition.
     """
-    anchor = child_runner_source.find("UPDATE horsies_tasks\n                SET status = 'RUNNING'")
-    if anchor < 0:
+    transition = re.search(
+        r"UPDATE horsies_tasks\s+SET status = 'RUNNING'", child_runner_source,
+    )
+    if transition is None:
         raise MeasurementError(
             'no CLAIMED -> RUNNING transition found in the child runner '
             'source; the product moved it, and the setup this harness writes '
             'can no longer be checked against it'
         )
+    anchor = transition.start()
     body = child_runner_source[anchor : child_runner_source.index('WHERE', anchor)]
     columns: set[str] = set()
     for line in body.splitlines():
