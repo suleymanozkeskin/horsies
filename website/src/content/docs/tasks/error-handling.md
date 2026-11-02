@@ -186,6 +186,7 @@ spec = app.workflow(
     tasks=[fetch, parse, save],
     output=save,
     on_error=OnError.FAIL,
+    definition_key="myapp.product_ingest.v1",
 )
 match spec.start():
     case Ok(handle):

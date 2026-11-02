@@ -19,8 +19,8 @@ pages appears in it at least once, under load, with the dashboard open.
 
 Read the quick-start pages to learn the API. Run the showcase to see the
 behaviour the API produces — retries accumulating attempt history, a workflow
-pausing for a human decision, a timeout killing a child process and its siblings
-recovering, a task crashing and arriving in the dashboard as a data structure
+pausing for a human decision, a timeout killing the child process of one task while other tasks
+continue, a task crashing and arriving in the dashboard as a data structure
 rather than a stack trace.
 
 It is also the reference for how the patterns fit together in one codebase:
@@ -111,7 +111,7 @@ RetentionConfig(
 ```
 
 The defaults exist because they are the right starting point. See
-[Recovery Configuration](/configuration/recovery-config/).
+[Recovery Configuration](/horsies/configuration/recovery-config/).
 
 **Do not model failure rates on the showcase's.** Roughly one order in five hits
 a payment-provider outage and one in thirty stalls its invoice render, because a
@@ -122,9 +122,9 @@ a problem.
 
 | Path | Contents |
 |---|---|
-| `showcase/acme/app.py` | Queue configuration, recovery tuning, 31 schedules, global exception mapper |
+| `showcase/acme/app.py` | Queue configuration, recovery tuning, 32 schedules, global exception mapper |
 | `showcase/acme/tuning.py` | Every rate and duration the showcase uses |
-| `showcase/acme/tasks/` | 35 tasks across eight modules |
+| `showcase/acme/tasks/` | 36 tasks across eight modules |
 | `showcase/acme/workflows/` | 12 workflow definitions |
 | `showcase/acme/scenarios/` | The eight runnable scenarios |
 | `showcase/README.md` | Capability-to-code table and the full walkthrough |

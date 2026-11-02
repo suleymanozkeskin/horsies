@@ -841,7 +841,7 @@ result = await handle.resume_async()
 
 When a parent workflow pauses:
 - Parent enters PAUSED state
-- Running child workflows receive pause signal
+- Every RUNNING child workflow, at any depth, moves to PAUSED
 - No new child workflows start
 
 When parent resumes:

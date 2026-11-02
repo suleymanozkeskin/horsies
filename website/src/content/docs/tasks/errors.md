@@ -58,7 +58,7 @@ Errors from type/schema validation and structural contracts.
 | Code | Description | Auto-Retry? |
 | ---- | ----------- | ----------- |
 | `RETURN_TYPE_MISMATCH` | Task return type doesn't match declaration | No |
-| `NO_TYPE_AVAILABLE` | Outputless workflow per-node decode: terminal task name not in the local registry, so no `task_ok_type` to decode with | No |
+| `NO_TYPE_AVAILABLE` | A successful result could not be decoded because the caller does not have the task's or workflow's declared success type locally registered | No |
 | `WORKFLOW_CTX_MISSING_ID` | Workflow context is missing required ID | No |
 
 `RETURN_TYPE_MISMATCH` does not store the returned value. `message` names the variant, the actual type, the expected type and the failing fields. `data` holds `variant`, `expected_type`, `actual_type`, `validation_errors` (at most 10 entries, each with `loc`, `msg` and `type`) and `validation_error_count`. `exception` is `None`. A validator whose error text holds a lone surrogate gives one `validation_errors` entry of type `lone_surrogate`, because pydantic cannot build that text.

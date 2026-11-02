@@ -188,6 +188,8 @@ match handle.resume():
 | `.result` | `TaskResult[Any, TaskError] \| None` | Task result if stored (COMPLETED/FAILED; SKIPPED often None) |
 | `.started_at` | `datetime \| None` | When execution started |
 | `.completed_at` | `datetime \| None` | When execution completed |
+| `.sub_workflow_id` | `str \| None` | Child workflow id when the node is a subworkflow node; `None` otherwise |
+| `.sub_workflow_summary` | `SubWorkflowSummary[Any] \| None` | Summary of the child workflow when the node is a subworkflow node; `None` otherwise |
 
 ### TaskFunction.node()
 

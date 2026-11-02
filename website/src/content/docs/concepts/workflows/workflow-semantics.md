@@ -81,7 +81,7 @@ WorkflowTaskStatus.SKIPPED.is_terminal  # True
 WorkflowTaskStatus.ENQUEUED.is_terminal # False
 
 # Frozensets for use in queries or filters
-WORKFLOW_TERMINAL_STATES       # frozenset({COMPLETED, FAILED, CANCELLED})
+WORKFLOW_TERMINAL_STATES       # frozenset({COMPLETED, FAILED, CANCELLED, EXPIRED})
 WORKFLOW_TASK_TERMINAL_STATES  # frozenset({COMPLETED, FAILED, SKIPPED})
 ```
 
@@ -507,7 +507,7 @@ A ──┼→ C ─┼→ E
 - If B fails: D still runs (receives B's error, C's success)
 - D can implement recovery logic
 - Workflow: FAILED (but D produced a result)
-  > **Note:** `handle.get()` will return the workflow-level failure. To access D's result in this scenario, use `handle.results()["D#3"]` (where 3 is D's task index) or inspect the specific task.
+  > **Note:** `handle.get()` will return the workflow-level failure. To access D's result in this scenario, use `handle.result_for(node_d)`, or match `handle.results()` to `Ok(results)` and read `results['<node_id of D>']`.
 
 ### Multi-Branch with Nested Convergence
 
@@ -611,6 +611,7 @@ workflow = app.workflow(
     "my_workflow",
     tasks=[task_a, task_b, cleanup_task],
     success_policy=policy,
+    definition_key="myapp.my_workflow.v1",
 )
 ```
 
@@ -649,6 +650,7 @@ spec = app.workflow(
     name="ship_package",
     tasks=[pickup, deliver_recipient, deliver_neighbor, deliver_locker, notify],
     success_policy=policy,
+    definition_key="myapp.ship_package.v1",
 )
 ```
 
@@ -762,6 +764,7 @@ workflow = app.workflow(
     "critical_pipeline",
     tasks=[TaskNode(fn=review_step, node_id="review")],
     on_error=OnError.PAUSE,  # Stop for manual review on failure
+    definition_key="myapp.critical_pipeline.v1",
 )
 ```
 
@@ -774,6 +777,7 @@ workflow = app.workflow(
     "pipeline",
     tasks=[a, b, c, final],
     output=final,  # workflow.get() returns final's result
+    definition_key="myapp.pipeline.v1",
 )
 ```
 
@@ -788,7 +792,12 @@ This ensures no result collisions when the same task function is used multiple t
 fetch_a = TaskNode(fn=fetch_data, kwargs={'url': "url_a"})  # index 0
 fetch_b = TaskNode(fn=fetch_data, kwargs={'url': "url_b"})  # index 1
 
-spec = WorkflowSpec(name="parallel_fetch", tasks=[fetch_a, fetch_b], broker=broker)
+spec = WorkflowSpec(
+    name="parallel_fetch",
+    tasks=[fetch_a, fetch_b],
+    broker=broker,
+    definition_key="myapp.parallel_fetch.v1",
+)
 
 # start_async() returns Ok(handle) or Err(WorkflowStartError)
 match await spec.start_async():
@@ -938,7 +947,11 @@ function converts spaces to underscores and removes invalid characters:
 from horsies import slugify
 
 # Workflow name with spaces
-spec = app.workflow(name="My Data Pipeline", tasks=[a, b])
+spec = app.workflow(
+    name="My Data Pipeline",
+    tasks=[a, b],
+    definition_key="myapp.my_data_pipeline.v1",
+)
 # Auto-generated node_ids: "My_Data_Pipeline:0", "My_Data_Pipeline:1"
 
 # Manual slugify for custom use

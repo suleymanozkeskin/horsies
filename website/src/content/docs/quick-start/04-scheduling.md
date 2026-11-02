@@ -5,7 +5,7 @@ related: [03-defining-workflows]
 tags: [quickstart, scheduling]
 ---
 
-For full scheduler documentation, see [Scheduler Overview](/scheduling/scheduler-overview/).
+For full scheduler documentation, see [Scheduler Overview](/horsies/scheduling/scheduler-overview/).
 
 ## Scheduled Tasks
 
