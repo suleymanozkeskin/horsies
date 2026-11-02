@@ -105,7 +105,7 @@ Distinct decode-error surfaces:
 Values flowing through a task signature must classify as **one** of:
 
 - A JSON primitive (`None`, `bool`, `int`, `float`, `str`).
-- `datetime.datetime` / `date` / `time`, `uuid.UUID`, `decimal.Decimal` (Pydantic coerces these to/from JSON strings via the declared type).
+- `datetime.datetime` / `date` / `time`, `uuid.UUID`, `decimal.Decimal`. These are written as JSON strings and read from them. A str at input is refused.
   Datetime caveats: a `ZoneInfo`-aware datetime decodes with a **fixed-offset** timezone
   (same instant, zone semantics lost — DST arithmetic on the consumer differs), and
   **naive** datetimes round-trip naive (ambiguous across workers in different timezones —

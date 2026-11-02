@@ -80,7 +80,7 @@ Changing a model that a task takes or returns: see `SKILL.md`, Deployment facts.
 
 ### Runtime return-type validation
 
-The task wrapper validates the returned value against declared `T` using Pydantic's `TypeAdapter`. A mismatch produces `TaskResult(err=TaskError(error_code=ContractCode.RETURN_TYPE_MISMATCH))` — does not raise. The error stores the actual type and the failing fields (`data`: `variant`, `expected_type`, `actual_type`, `validation_errors`, `validation_error_count`), not the returned value. Returning `None` instead of `TaskResult` produces `TASK_EXCEPTION`.
+The task wrapper validates the returned value against declared `T` using Pydantic's `TypeAdapter` in strict mode. A mismatch produces `TaskResult(err=TaskError(error_code=ContractCode.RETURN_TYPE_MISMATCH))` — does not raise. The error stores the actual type and the failing fields (`data`: `variant`, `expected_type`, `actual_type`, `validation_errors`, `validation_error_count`), not the returned value. Returning `None` instead of `TaskResult` produces `TASK_EXCEPTION`.
 
 ## `TaskError`
 

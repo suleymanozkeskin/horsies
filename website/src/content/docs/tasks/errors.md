@@ -57,7 +57,7 @@ Errors from type/schema validation and structural contracts.
 <!-- members: ContractCode -->
 | Code | Description | Auto-Retry? |
 | ---- | ----------- | ----------- |
-| `RETURN_TYPE_MISMATCH` | The task returned a value that does not fit its declared type, or something that is not a `TaskResult`, including `None` | No |
+| `RETURN_TYPE_MISMATCH` | The task returned a value that does not fit its declared type, or something that is not a `TaskResult`, including `None` | Yes, if in `auto_retry_for` |
 | `NO_TYPE_AVAILABLE` | A successful result could not be decoded because the caller does not have the task's or workflow's declared success type locally registered | No |
 | `WORKFLOW_CTX_MISSING_ID` | Workflow context is missing required ID | No |
 
