@@ -32,7 +32,7 @@ The reasons:
 
 ## Schema step
 
-The schema goes from v51 to v52. The change is one new table, `horsies_workflow_recovery_failures`. The table is empty, so the migration takes no lock on an existing table. There is no data step.
+The schema goes from v51 to v52. The change is one new table, `horsies_workflow_recovery_failures`. The table starts empty. There is no data step.
 
 Any process that uses a `PostgresBroker` applies the migration the first time it calls an entry point that initializes the schema:
 
@@ -43,7 +43,7 @@ Any process that uses a `PostgresBroker` applies the migration the first time it
 - The first `get_task_info` or `get_raw_result` read.
 - `ensure_schema_initialized()` on the broker.
 
-`horsies web` does not apply the migration. The reaper broker of a worker does not apply it either.
+`horsies web` does not apply the migration. Until another process applies it, `/api/meta` reports `schema_state: MISMATCH` and the web actions are off. The reaper broker of a worker does not apply it either.
 
 The migration is safe to run from many processes at once. A PostgreSQL advisory lock guards the DDL. See [Database Schema](/horsies/internals/database-schema/).
 
@@ -69,6 +69,7 @@ Set `--drain-timeout` below the stop window of your supervisor. See [CLI Referen
   - `--max-memory-per-child-mb` is at or below the warmed child baseline.
   - A child fails to start three times, or the operating system refuses to start a process.
   - A child hook fails.
+- **New code on a running worker.** A recycled child is a new fork of the preload parent, so it keeps the library code that the parent imported. With `--child-preload=app` it also keeps your app code. To load new code, restart the worker.
 - **Process names.** On Linux, a forked child shows the command line of the preload parent in `ps`. A monitor that counts `multiprocessing-fork` processes needs a change.
 - **Memory.** `children_memory_mb` counts shared pages once for each child. It reads above real use. Read the container or cgroup total.
 
@@ -79,7 +80,7 @@ See [Worker Architecture](/horsies/workers/worker-architecture/) for the process
 Each topic below lists what to change and how to find it. The [changelog](/horsies/changelog/) has the full text of each change.
 
 1. **Worker process model.**
-   - Rename `ExecutorRestartFailedError` to `ChildStartFailedError`. There is no alias.
+   - Rename `ExecutorRestartFailedError` to `ChildStartFailedError`. There is no alias. `WarmupIncompleteError` and `MemoryRecycleUnsupportedError` are removed, and the worker no longer raises them.
    - Set libraries that read a setting at import, such as `PSYCOPG_IMPL`, in the process environment, not in a `.env` file that your app loads.
    - Find uses of `multiprocessing.parent_process()` in task code. It returns `None` in a child.
 2. **Workflow recovery limit.**
@@ -103,12 +104,13 @@ Each topic below lists what to change and how to find it. The [changelog](/horsi
    - Add cases for `WORKFLOW_ID_CONFLICT` and `LOOP_RUNNER_FAILED`. Remove `WorkflowStartErrorCode.INTERNAL_FAILED`.
    - `retry_start()` takes `WorkflowStartRetryable` only.
    - A task node with a `priority` outside 1-100 raises `HRS-034`. A naive `good_until` raises `HRS-035`. Run `horsies check`.
-   - Add the two `ErrorCode` members to each exhaustive `match` on `ErrorCode`.
+   - Add `WORKFLOW_INVALID_PRIORITY`, `WORKFLOW_NAIVE_GOOD_UNTIL`, `WORKFLOW_INVALID_DEFINITION_CONFIG`, `TASK_ASYNC_FUNCTION_NOT_SUPPORTED` and `CHECK_LIVE_ASYNC_CONTEXT` to each exhaustive `match` on `ErrorCode`.
 7. **Workflow handle and result reads.**
    - `HandleOperationError` is a union of frozen variants. Remove `HandleErrorCode.INTERNAL_FAILED`. Add cases for `STORED_DATA_INVALID` and `RESUME_RECOVERY_FAILED`.
    - `results()` and `tasks()` return `HandleWorkflowNotFound` for an unknown workflow id.
    - `get()` returns `WORKFLOW_NOT_FOUND` when retention removed the row, and `RESULT_DESERIALIZATION_ERROR` for stored data that does not parse.
    - `get()` returns `WORKFLOW_OUTPUT_SKIPPED` for a completed workflow whose output node is skipped. Code that read this state through `RESULT_DESERIALIZATION_ERROR` must match the new code.
+   - Add a `WORKFLOW_OUTPUT_SKIPPED` case to each exhaustive `match` on `OutcomeCode`. The code string is reserved: an `exception_mapper` or `default_unhandled_error_code` with that value fails `horsies check` with `HRS-212`.
 8. **Subworkflow node outcome.**
    - A `SubWorkflowNode` is `FAILED` when its child is `COMPLETED` with an err output, or with a stored result that does not parse.
    - A dependent with `allow_failed_deps=False` is now `SKIPPED`. Keep the node out of the success cases of the parent, or set `allow_failed_deps=True` on the dependent.
@@ -119,7 +121,7 @@ Each topic below lists what to change and how to find it. The [changelog](/horsi
 10. **`TaskError` contract and retired codes.**
     - `TaskError` requires `error_code` and refuses a key that it does not declare. Find `TaskError(message=...)` calls without a code.
     - A stored error without a code does not decode. No migration rewrites old rows.
-    - `ContractCode.PYDANTIC_HYDRATION_ERROR` and `ErrorCode.WORKFLOW_EXCESS_POSITIONAL_ARGS` are removed. Use `RESULT_DESERIALIZATION_ERROR`, `INVALID_JSON_PAYLOAD` or `RETURN_TYPE_MISMATCH`, and `WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED`.
+    - `ContractCode.PYDANTIC_HYDRATION_ERROR` and `ErrorCode.WORKFLOW_EXCESS_POSITIONAL_ARGS` are removed. Use `RESULT_DESERIALIZATION_ERROR`, `INVALID_JSON_PAYLOAD` or `RETURN_TYPE_MISMATCH`, and `WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED`. `ErrorCode.WORKFLOW_SUBWORKFLOW_BUILD_WITH_BINDING` is removed too: no code raised it, so remove its case.
 11. **Monitoring, task actions and rerun.**
     - `MonitoringQueryError` and `TaskActionError` are unions of frozen variants. Add cases for `HISTORY_CONTRACT_VIOLATION` and `STORED_DATA_INVALID`.
     - `get_task_detail` returns `TaskDetailNotFound`, not `Ok(None)`, for an absent task. Replace `detail is None` checks.
