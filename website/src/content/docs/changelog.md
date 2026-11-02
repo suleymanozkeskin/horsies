@@ -167,6 +167,20 @@ before you upgrade.
 
 #### Definitions, config and tooling
 
+- **Each startup error names a fix.** Twenty refusals had no `help_text`, and
+  now each has one: an empty `WorkflowSpec`, a blank `node_id`, the four
+  `join` and `min_success` refusals, the `WorkflowDefinition` class checks,
+  a repeated `definition_key`, a cached spec from `build_with()`, a kwarg that
+  does not read back or that loses a field, `node.key()` with no `node_id`, a
+  failed broker start, and a refused signature. A test walks the source, so a
+  new error site with no `help_text` fails.
+- **A refused signature reports its parts.** `TaskDefinitionError` for a
+  refused `@app.task` signature holds the banned type in `message`, the reason
+  in `notes`, and the fix with the docs link in `help_text`. A refused
+  `build_with` reports the same parts. `str()` of a
+  `SignatureValidationError` does not change, and its new `detail` attribute
+  (`SignatureRefusal`) holds the parts. Its constructor now takes a
+  `SignatureRefusal`, not a string.
 - **Breaking: `CustomQueueConfig` refuses a queue name that is empty, has
   whitespace at the start or the end, or is longer than 100 characters (the
   length of the database `queue_name` column).** The config raises

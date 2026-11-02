@@ -647,7 +647,12 @@ class Horsies:
                     WorkflowValidationError(
                         message='subworkflow build_with cannot cross the wire',
                         code=ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
-                        notes=[f"node '{name}'", str(refusal)],
+                        notes=[
+                            f"node '{name}'",
+                            refusal.detail.headline,
+                            refusal.detail.reason,
+                        ],
+                        help_text=refusal.detail.help_text,
                     ),
                 )
         return errors
@@ -1089,6 +1094,7 @@ class Horsies:
                 message=f'Failed to initialize broker: {e}',
                 code=ErrorCode.BROKER_INIT_FAILED,
                 notes=[str(e)],
+                help_text='check database_url in PostgresConfig; the note holds the cause',
             ) from e
 
     # ─── Strict-serde phase 6b: app-level result APIs ──────────────

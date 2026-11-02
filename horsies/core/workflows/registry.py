@@ -128,6 +128,7 @@ def register_workflow_definition(
                 f"'{existing.__qualname__}'"
             ),
             code=ErrorCode.WORKFLOW_DUPLICATE_DEFINITION_KEY,
+            help_text='give each WorkflowDefinition its own definition_key',
         )
     _workflow_defs_by_key[definition_key] = workflow_def
 

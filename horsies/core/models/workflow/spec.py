@@ -327,6 +327,7 @@ class WorkflowSpec(Generic[OutT]):
             raise WorkflowValidationError(
                 'WorkflowSpec has no tasks',
                 code=ErrorCode.WORKFLOW_NO_NODES,
+                help_text='add at least one TaskNode or SubWorkflowNode to tasks',
             )
 
         originals = self._isolate_inputs()
@@ -603,6 +604,10 @@ class WorkflowSpec(Generic[OutT]):
                                 f"node '{node.name}' kwargs[{key!r}]",
                                 f'codec error: {cause}',
                             ],
+                            help_text=(
+                                'pass a value that decodes back to its declared '
+                                'type; a value built past validation does not'
+                            ),
                         ))
                         continue
                     case Err(err_value=FieldsLost(detail=detail)):
@@ -616,6 +621,10 @@ class WorkflowSpec(Generic[OutT]):
                                 f"node '{node.name}' kwargs[{key!r}]",
                                 detail,
                             ],
+                            help_text=(
+                                'pass an instance of the declared type, or '
+                                'declare the field on that type'
+                            ),
                         ))
                         continue
                     case _ as unreachable:
@@ -718,6 +727,7 @@ class WorkflowSpec(Generic[OutT]):
                         WorkflowValidationError(
                             message='TaskNode index is not set before assigning node_id',
                             code=ErrorCode.WORKFLOW_INVALID_NODE_ID,
+                            help_text='please report this bug',
                         )
                     )
                     continue
@@ -730,6 +740,7 @@ class WorkflowSpec(Generic[OutT]):
                     WorkflowValidationError(
                         message='TaskNode node_id must be a non-empty string',
                         code=ErrorCode.WORKFLOW_INVALID_NODE_ID,
+                        help_text='set node_id to a non-empty string, or omit it to use a generated id',
                     )
                 )
                 continue
@@ -1212,7 +1223,12 @@ class WorkflowSpec(Generic[OutT]):
                     WorkflowValidationError(
                         message='subworkflow build_with cannot cross the wire',
                         code=ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
-                        notes=[f"node '{node.name}'", str(refusal)],
+                        notes=[
+                            f"node '{node.name}'",
+                            refusal.detail.headline,
+                            refusal.detail.reason,
+                        ],
+                        help_text=refusal.detail.help_text,
                     )
                 )
         return errors
@@ -1532,6 +1548,7 @@ class WorkflowSpec(Generic[OutT]):
                         WorkflowValidationError(
                             f"Task '{task.name}' has join='quorum' but min_success is not set",
                             code=ErrorCode.WORKFLOW_INVALID_JOIN,
+                            help_text='set min_success to the number of dependencies that must succeed',
                         )
                     )
                 elif task.min_success < 1:
@@ -1539,6 +1556,7 @@ class WorkflowSpec(Generic[OutT]):
                         WorkflowValidationError(
                             f"Task '{task.name}' min_success must be >= 1, got {task.min_success}",
                             code=ErrorCode.WORKFLOW_INVALID_JOIN,
+                            help_text='set min_success to 1 or more',
                         )
                     )
                 else:
@@ -1549,6 +1567,7 @@ class WorkflowSpec(Generic[OutT]):
                                 f"Task '{task.name}' min_success ({task.min_success}) exceeds "
                                 f'dependency count ({dep_count})',
                                 code=ErrorCode.WORKFLOW_INVALID_JOIN,
+                                help_text='set min_success to at most the number of nodes in waits_for',
                             )
                         )
             elif task.join in ('all', 'any'):
@@ -1558,6 +1577,7 @@ class WorkflowSpec(Generic[OutT]):
                             f"Task '{task.name}' has min_success set but join='{task.join}' "
                             "(min_success is only used with join='quorum')",
                             code=ErrorCode.WORKFLOW_INVALID_JOIN,
+                            help_text="remove min_success, or use join='quorum'",
                         )
                     )
 

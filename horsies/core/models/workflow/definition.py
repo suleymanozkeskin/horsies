@@ -198,6 +198,7 @@ class WorkflowDefinitionMeta(type):
                     f"not constructed during this call. "
                     f"build_with() must return a fresh WorkflowSpec per call — "
                     f"cached or prebuilt spec reuse is not supported.",
+                    help_text='build a new WorkflowSpec inside build_with() on each call',
                 )
             validate_workflow_generic_output_match(klass, spec)
             return spec
@@ -287,6 +288,7 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
             raise WorkflowValidationError(
                 f"WorkflowDefinition '{cls.__name__}' must define a 'name' class attribute",
                 code=ErrorCode.WORKFLOW_NO_NAME,
+                help_text="add a class attribute, for example name = 'my_workflow'",
             )
 
         # Get collected nodes from metaclass
@@ -295,6 +297,10 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
             raise WorkflowValidationError(
                 f"WorkflowDefinition '{cls.__name__}' has no TaskNode attributes",
                 code=ErrorCode.WORKFLOW_NO_NODES,
+                help_text=(
+                    'declare a TaskNode or SubWorkflowNode as a class attribute, '
+                    'or override build_with()'
+                ),
             )
         definition_key = cls._require_definition_key()
 
@@ -417,5 +423,9 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
                     "'definition_key' class attribute"
                 ),
                 code=ErrorCode.WORKFLOW_NO_DEFINITION_KEY,
+                help_text=(
+                    'add a class attribute, for example '
+                    "definition_key = 'myapp.my_workflow.v1'"
+                ),
             )
         return definition_key
