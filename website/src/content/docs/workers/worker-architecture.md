@@ -371,6 +371,7 @@ horsies worker myapp.instance:app --processes=8
 
 **Don't build a client at import with `--child-preload=app`.** The client exists before the fork, and a client with native threads, such as gRPC, can hang in a child.
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 # Wrong: this runs once, in the preload parent
 client = firestore.Client()

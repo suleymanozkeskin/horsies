@@ -41,7 +41,7 @@ Every guarantee horsies makes is a Postgres primitive:
 - **Recovery**: all state is rows and timestamps; the reaper reconstructs and repairs after a worker dies mid-flight — nothing in-flight exists only in a broker's memory.
 - **Workflows**: fan-in resolution, completion checks, subworkflow cascades, and orphan self-heal are multi-row transitions under a documented lock order.
 - **Dispatch**: LISTEN/NOTIFY push — no polling loop between enqueue and execution.
-- **Inspection**: task history is plain tables — SQL, `EXPLAIN`, your existing backups. See [operational indexes](../internals/operational-indexes) for query-shape guidance.
+- **Inspection**: task history is plain tables — SQL, `EXPLAIN`, your existing backups. See [Database Schema](../internals/database-schema) for the tables.
 
 A message broker can approximate the first three with visibility timeouts and acks; it cannot express them as invariants. That is the reason for the Postgres requirement, operating one less service is absolutely not a selling point. In fact, we strongly recommend running a dedicated Postgres instance for your worker.
 

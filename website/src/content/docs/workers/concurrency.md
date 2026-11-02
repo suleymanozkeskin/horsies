@@ -43,7 +43,7 @@ horsies worker myapp.instance:app --processes=8
 
 - Limits concurrent task execution on this worker
 - Each process handles one task at a time
-- Default: CPU count
+- Default: 1
 
 ## Process Recycling: --max-tasks-per-child
 

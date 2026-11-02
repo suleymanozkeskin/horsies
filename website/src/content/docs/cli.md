@@ -150,7 +150,7 @@ Pass either `app_path` or `--database-url`, not both. With `--database-url` the 
 | `--port N` | 8600 | Bind port |
 | `--auth MODE` | none | `none` (loopback hosts only) or `trusted-header` |
 | `--trusted-header NAME` | X-Forwarded-User | Identity header that the proxy sets |
-| `--enable-actions` | false | Allow cancel, retry, pause, and resume (default is view-only) |
+| `--enable-actions` | false | Allow task cancel, and workflow pause, resume and cancel (default is view-only) |
 | `--loglevel LEVEL` | INFO | DEBUG, INFO, WARNING, ERROR, CRITICAL |
 
 **Examples:**
@@ -316,6 +316,7 @@ Workers wait up to `--drain-timeout` seconds for running tasks. See [Graceful Sh
 | ---- | ------- |
 | 0 | Clean shutdown |
 | 1 | Error (check logs) |
+| 2 | Invalid `horsies web` arguments, or an argparse error |
 
 ## Environment Variables
 

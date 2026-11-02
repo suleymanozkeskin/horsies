@@ -1,7 +1,7 @@
 ---
 title: Autovacuum Tuning
 summary: Per-table autovacuum settings for the high-churn horsies tables, and the queries that verify vacuum keeps up.
-related: [../internals/database-schema, ../internals/operational-indexes]
+related: [../internals/database-schema]
 tags: [operations, autovacuum, postgres, maintenance]
 ---
 
@@ -24,12 +24,11 @@ to roughly 20% of its row count before vacuum starts.
 
 - Every task row is rewritten several times between enqueue and terminal
   state — claim, start, finalize each produce a dead tuple under MVCC.
-- Retention deletes remove terminal rows in bulk on a fixed cadence, leaving
-  dead tuples proportional to throughput, not to table size.
+- A terminal task row leaves `horsies_tasks` when its record moves to the
+  history archive, which leaves a dead tuple per finished task.
 
-With 30 days of retained history (`terminal_record_retention_hours`
-default), the live row count is dominated by finished tasks that never
-change. A 1M-row table waits for ~200k dead tuples before vacuum runs; in
+Dead tuples are proportional to throughput, not to table size. A 1M-row
+table waits for ~200k dead tuples before vacuum runs; in
 the meantime the dead tuples sit in exactly the pages and indexes the claim
 path reads, and index-only scans fall back to heap fetches as the visibility
 map goes stale.

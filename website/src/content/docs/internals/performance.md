@@ -1,7 +1,7 @@
 ---
 title: Performance
 summary: Measured per-statement latencies of the hot path under a real workload shape, and what governs them.
-related: [../../questions-and-answers, database-schema, operational-indexes]
+related: [../../questions-and-answers, database-schema]
 tags: [internals, performance, latency, postgres]
 ---
 
@@ -16,7 +16,6 @@ across the top 20 by execution count.
 | Cap-serialization advisory lock | 902,184 | 0 ms | 0 ms |
 | NOTIFY dispatch triggers | 260,248 | 0 ms | 0 ms |
 | Claim function (`horsies_claim`) | 150,417 | 1 ms | 2 ms |
-| Attempt-history retention delete | 37,478 | 0 ms | 1 ms |
 | Heartbeat insert | 36,765 | 0 ms | 1 ms |
 | Finalize fence update | 35,923 | 0 ms | 1 ms |
 | Task enqueue insert | 31,412 | 1 ms | 2 ms |

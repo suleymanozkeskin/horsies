@@ -27,13 +27,15 @@ client-side convention:
   multi-row transitions under a documented lock order.
 - **Dispatch**: LISTEN/NOTIFY push — no polling.
 - **Inspection**: history is plain tables — SQL, `EXPLAIN`, your
-  existing backups; Syce reads the same rows.
+  existing backups; Syce shows live tasks.
 
 Measured hot-path latencies: [performance](https://suleymanozkeskin.github.io/horsies/internals/performance/).
 
 ## Monitoring
 
-Horsies includes **Syce**, a terminal-based UI for monitoring your cluster in real-time.
+Horsies includes a web UI (`horsies[web]`) for monitoring workers, task history and workflows: [**Web UI Overview**](https://suleymanozkeskin.github.io/horsies/monitoring/web-ui-overview/).
+
+Horsies also includes **Syce**, a terminal-based UI for monitoring your cluster in real-time. Syce shows live tasks (`PENDING`, `CLAIMED`, `RUNNING`).
 
 ![Syce Dashboard](https://suleymanozkeskin.github.io/horsies/images/syce/dashboard.png)
 

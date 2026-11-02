@@ -1,7 +1,7 @@
 ---
 title: Architecture
 summary: System design, components, and data flow.
-related: [task-lifecycle, ../../workers/worker-architecture, ../../internals/postgres-broker]
+related: [task-lifecycle, ../../workers/worker-architecture]
 tags: [concepts, architecture, design]
 ---
 
@@ -122,7 +122,7 @@ unavailable.
 
 1. Worker receives NOTIFY and wakes
 2. Worker claims task atomically
-3. Task dispatched to child process in the pool
+3. Task dispatched to the child process of a free slot
 4. Child process executes task function
 5. Result stored in database, status updated to `COMPLETED` or `FAILED`
 

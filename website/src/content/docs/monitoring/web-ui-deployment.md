@@ -138,7 +138,7 @@ app-path form where that matters.
 | `--port PORT` | `8600` | Bind port |
 | `--auth MODE` | `none` | `none` or `trusted-header` |
 | `--trusted-header NAME` | `X-Forwarded-User` | Header carrying the proxy-verified identity |
-| `--enable-actions` | off | Permit the five mutating endpoints |
+| `--enable-actions` | off | Permit the four mutating endpoints |
 
 ### Bind rules
 

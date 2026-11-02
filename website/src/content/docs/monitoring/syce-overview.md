@@ -7,6 +7,8 @@ tags: [monitoring, syce, tui, dashboard]
 
 Syce is a real-time terminal UI (TUI) for monitoring Horsies workers, tasks, and workflows. Built in Rust with [ratatui](https://ratatui.rs), it connects directly to the Horsies PostgreSQL database and renders live cluster state in the terminal.
 
+Syce reads only `horsies_tasks`. That table holds live tasks only: `PENDING`, `CLAIMED` and `RUNNING`. Syce does not show terminal task history. The [web UI](web-ui-overview) and `horsies.monitoring` read the history.
+
 ## Installation
 
 ### From crates.io
@@ -87,7 +89,7 @@ Cluster-level overview:
 ![Syce Dashboard](/horsies/images/syce/dashboard.png)
 
 - **Cluster Capacity** — Active workers, total capacity, utilization percentage, running tasks
-- **Task Status Distribution** — Breakdown by status (Pending, Claimed, Running, Completed, Failed)
+- **Task Status Distribution** — Breakdown of live tasks by status (Pending, Claimed, Running)
 - **Workflow Summary** — Workflow counts by status
 - **Utilization Trend** — Braille line chart of cluster utilization over the past hour
 - **Active Alerts** — Overloaded workers and stale claim warnings
@@ -109,7 +111,7 @@ Task distribution and inspection:
 ![Syce Tasks Tab](/horsies/images/syce/tasks.png)
 
 - Aggregated task breakdown by worker
-- Status filters (Pending, Claimed, Running, Completed, Failed)
+- Status filters (Pending, Claimed, Running)
 - Expand a worker row to see individual task IDs
 - Task detail modal with full JSON payload
 - Copy task data to clipboard
@@ -171,8 +173,6 @@ Operational health:
 | `p` | Toggle Pending |
 | `c` | Toggle Claimed |
 | `u` | Toggle Running |
-| `o` | Toggle Completed |
-| `f` | Toggle Failed |
 | `a` | Select all statuses |
 | `n` | Clear all statuses |
 
@@ -196,6 +196,6 @@ Syce reads from the same PostgreSQL tables Horsies workers write to:
 | Table | Purpose |
 |-------|---------|
 | `horsies_worker_states` | Worker state snapshots (captured every `worker_state_snapshot_interval_ms`, default 30s) |
-| `horsies_tasks` | Task records with status, arguments, results |
+| `horsies_tasks` | Live task records (`PENDING`, `CLAIMED`, `RUNNING`) with status and arguments |
 | `horsies_heartbeats` | Task liveness heartbeats |
 | `horsies_workflows` | Workflow definitions and status |
