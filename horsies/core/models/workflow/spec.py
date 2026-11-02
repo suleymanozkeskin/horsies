@@ -28,7 +28,12 @@ from horsies.core.codec.kwargs import (
     resolve_producer_kwarg_binding,
     underlying_task_fn,
 )
-from horsies.core.codec.typed import decode_value, encode_value
+from horsies.core.codec.typed import (
+    EncodeRefused,
+    FieldsLost,
+    ReadBackRefused,
+    encode_and_read_back,
+)
 from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.errors import (
     ErrorCode,
@@ -558,40 +563,54 @@ class WorkflowSpec(Generic[OutT]):
                         ),
                     ))
                     continue
-                try:
-                    encoded = encode_value(value, binding.annotation)
-                except (StrictJsonError, ValueValidationError) as exc:
-                    report.add(WorkflowValidationError(
-                        message=(
-                            'TaskNode/SubWorkflowNode kwarg value failed '
-                            'strict encode'
-                        ),
-                        code=ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
-                        notes=[
-                            f"node '{node.name}' kwargs[{key!r}]",
-                            f'codec error: {exc}',
-                        ],
-                        help_text=(
-                            'ensure the value matches its declared '
-                            'parameter type'
-                        ),
-                    ))
-                    continue
-                try:
-                    decoded = decode_value(encoded, binding.annotation)
-                except (StrictJsonError, ValueValidationError) as exc:
-                    report.add(WorkflowValidationError(
-                        message=(
-                            'TaskNode/SubWorkflowNode kwarg value failed '
-                            'strict decode after encode'
-                        ),
-                        code=ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
-                        notes=[
-                            f"node '{node.name}' kwargs[{key!r}]",
-                            f'codec error: {exc}',
-                        ],
-                    ))
-                    continue
+                match encode_and_read_back(value, binding.annotation):
+                    case Ok(ok_value=read_back):
+                        decoded = read_back.decoded
+                    case Err(err_value=EncodeRefused(cause=cause)):
+                        report.add(WorkflowValidationError(
+                            message=(
+                                'TaskNode/SubWorkflowNode kwarg value failed '
+                                'strict encode'
+                            ),
+                            code=ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
+                            notes=[
+                                f"node '{node.name}' kwargs[{key!r}]",
+                                f'codec error: {cause}',
+                            ],
+                            help_text=(
+                                'ensure the value matches its declared '
+                                'parameter type'
+                            ),
+                        ))
+                        continue
+                    case Err(err_value=ReadBackRefused(cause=cause)):
+                        report.add(WorkflowValidationError(
+                            message=(
+                                'TaskNode/SubWorkflowNode kwarg value failed '
+                                'strict decode after encode'
+                            ),
+                            code=ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
+                            notes=[
+                                f"node '{node.name}' kwargs[{key!r}]",
+                                f'codec error: {cause}',
+                            ],
+                        ))
+                        continue
+                    case Err(err_value=FieldsLost(detail=detail)):
+                        report.add(WorkflowValidationError(
+                            message=(
+                                'TaskNode/SubWorkflowNode kwarg value loses data '
+                                'on the wire'
+                            ),
+                            code=ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
+                            notes=[
+                                f"node '{node.name}' kwargs[{key!r}]",
+                                detail,
+                            ],
+                        ))
+                        continue
+                    case _ as unreachable:
+                        assert_never(unreachable)
                 snapshotted[key] = decoded
             snapshotted_by_index.append((i, snapshotted))
 

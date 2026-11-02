@@ -89,6 +89,7 @@ markers = [
     "integration: integration tests requiring a live database",
     "pgbouncer: tests requiring the local PgBouncer fixture stack",
     "flaky: timing-sensitive tests that may fail under load",
+    "allow_library_data_refusal: the test builds a bad TaskError on purpose and passes it through a library path",
 ]
 
 [tool.pyright]

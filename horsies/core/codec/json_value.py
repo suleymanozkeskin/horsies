@@ -73,6 +73,14 @@ depth parameter, so this bound fails closed before Python's recursion limit.
   the caller.
 """
 
+MAX_TYPED_JSON_DEPTH: Final = 200
+"""The deepest nesting of a value that crosses the wire under a declared type.
+
+A typed value is read in strict JSON mode, and pydantic's JSON parser stops at this
+depth. `MAX_JSON_DEPTH` stays higher, because the engine puts envelopes around a
+value. This is one named value, so the docs, the refusal text and the test agree.
+"""
+
 JSON_TEXT_TOO_DEEP: Final = f'JSON text is nested deeper than {MAX_JSON_DEPTH} levels'
 """The refusal for a parsed text. It holds no input value."""
 

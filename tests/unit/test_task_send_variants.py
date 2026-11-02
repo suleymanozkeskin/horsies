@@ -188,7 +188,7 @@ class TestValidationFailedCause:
         assert isinstance(err.exception, ValueValidationError)
         assert err.exception.__context__ is None
         assert err.exception.__cause__ is None
-        assert '[int_parsing]' in err.message
+        assert '[int_type]' in err.message
         assert marker not in err.message
         assert marker not in str(err.exception)
         app.get_broker.assert_not_called()

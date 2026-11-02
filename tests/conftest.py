@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -18,3 +20,30 @@ def pytest_configure(config: pytest.Config) -> None:
         'markers', 'integration: Integration tests (requires database)'
     )
     config.addinivalue_line('markers', 'slow: Long-running tests')
+
+
+class _LibraryRefusals(logging.Handler):
+    """Collects the refusals of `TaskError.data` that came from a library path."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.ERROR)
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if getattr(record, 'refusal_origin', None) == 'library':
+            self.messages.append(record.getMessage())
+
+
+@pytest.fixture(autouse=True)
+def no_library_data_refusal(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Fail a test in which library code builds a `TaskError.data` that is refused.
+
+    The code survives such a value, so nothing else would show the defect.
+    """
+    handler = _LibraryRefusals()
+    codec_logger = logging.getLogger('horsies.codec')
+    codec_logger.addHandler(handler)
+    yield
+    codec_logger.removeHandler(handler)
+    if request.node.get_closest_marker('allow_library_data_refusal') is None:
+        assert handler.messages == []

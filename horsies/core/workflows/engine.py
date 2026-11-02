@@ -48,6 +48,7 @@ from horsies.core.codec.typed import (
     encode_task_error,
     encode_task_result,
     encode_value,
+    reportable_error,
     validate_task_result_envelope,
 )
 from horsies.core.codec.validation_errors import ValueValidationError
@@ -3261,7 +3262,7 @@ async def get_workflow_failure_error(
                 # `sub_workflow_summary`) survive the round-trip.
                 # `encode_value(err, TaskError)` would silently downcast.
                 return _ser_or_raise(
-                    dumps_json(encode_value(err_tr.err, type(err_tr.err))),
+                    dumps_json(encode_task_error(reportable_error(err_tr.err))),
                     f'first task error of workflow {workflow_id}',
                 )
         return None
@@ -3299,7 +3300,7 @@ async def get_workflow_failure_error(
                 # `sub_workflow_summary`) survive the round-trip.
                 # `encode_value(err, TaskError)` would silently downcast.
                 return _ser_or_raise(
-                    dumps_json(encode_value(err_tr.err, type(err_tr.err))),
+                    dumps_json(encode_task_error(reportable_error(err_tr.err))),
                     f'first task error of workflow {workflow_id}',
                 )
 

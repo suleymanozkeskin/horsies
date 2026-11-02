@@ -36,7 +36,7 @@ from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.codec.typed import (
     conform_to_target,
     decode_task_result,
-    encode_task_result,
+    encode_returned_result,
 )
 from horsies.core.codec.validation_errors import ValueValidationError, exception_text
 
@@ -1410,7 +1410,7 @@ def _run_task_entry(
             f'task wrapper of {task_name!r} returned {type(out).__name__}'
         )
         try:
-            envelope = encode_task_result(out, ok_type)
+            envelope = encode_returned_result(out, ok_type)
         except (StrictJsonError, ValueValidationError) as exc:
             return _serialization_error_response(
                 task_name,

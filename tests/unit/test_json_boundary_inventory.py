@@ -248,7 +248,10 @@ class TestRuntimeInventory:
             for use in _runtime_uses()
             if use.name != 'dumps'
         )
-        assert parsing == Counter({(_CODEC_MODULE, 'loads_json', 'loads'): 1})
+        assert parsing == Counter({
+            (_CODEC_MODULE, 'loads_json', 'loads'): 1,
+            ('horsies/core/codec/typed.py', '_validate_wire', 'validate_json'): 1,
+        })
 
     def test_json_dumps_sites_are_frozen(self) -> None:
         dumps = Counter(

@@ -19,37 +19,54 @@ import re
 import types
 from collections import deque
 from collections.abc import Iterable
-from typing import Any, Final, Literal, Union, cast, get_args, get_origin
+from dataclasses import dataclass
+from typing import Any, Final, Literal, Union, assert_never, cast, get_args, get_origin
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
-from pydantic_core import PydanticSerializationError
+from pydantic_core import PydanticSerializationError, to_json
 
+from horsies.core.codec.json_io import dumps_json
 from horsies.core.codec.json_value import (
+    MAX_JSON_DEPTH,
+    MAX_TYPED_JSON_DEPTH,
     JsonValue,
     StrictJsonError,
     _validate_json_native,
+    escape_lone_surrogates,
 )
 from horsies.core.codec.validation_errors import (
     ValueValidationError,
     validation_summary,
 )
+from horsies.core.logging import get_logger
 from horsies.core.models.tasks import SubWorkflowError, TaskError, TaskResult
 from horsies.core.types.result import Err, Ok, Result
+
+logger = get_logger('codec')
 
 
 __all__ = [
     'Json',
     'TypeAnnotation',
+    'EncodeRefused',
+    'FieldsLost',
+    'ReadBack',
+    'ReadBackRefused',
+    'ReadBackRefusal',
     'ValueValidationError',
     'check_json_value_positions',
     'conform_to_target',
     'decode_task_error',
     'decode_task_result',
     'decode_value',
+    'encode_and_read_back',
+    'encode_or_raise_on_refusal',
+    'encode_returned_result',
     'encode_task_error',
     'encode_task_result',
     'encode_value',
     'lone_surrogate_text',
+    'reportable_error',
     'validate_omitted_default',
     'validate_task_result_envelope',
 ]
@@ -249,9 +266,19 @@ def encode_value(
             or pydantic cannot serialize the validated value. The text holds
             no input value.
     """
+    _, dumped_json = _validated_and_dumped(value, expected_type, location)
+    return dumped_json
+
+
+def _validated_and_dumped(
+    value: object,
+    expected_type: TypeAnnotation,
+    location: tuple[str, ...],
+) -> tuple[object, Json]:
+    """The steps of `encode_value`. Returns the validated value and its wire form."""
     _apply_json_value_fence(value, expected_type)
     adapter = _get_adapter(expected_type)
-    validated = _validate(adapter, value, location)
+    validated = _validate_input(adapter, value, location)
     dumped_json = cast(Json, _dump(adapter, validated, 'json', location))
     if _scan_wire_json(dumped_json, location):
         _ = _scan_wire_json(
@@ -265,7 +292,229 @@ def encode_value(
         _scan_task_error_user_fields(dumped_json)
     else:
         _scan_reserved_keys(dumped_json)
-    return dumped_json
+    return validated, dumped_json
+
+
+@dataclass(frozen=True, slots=True)
+class ReadBack:
+    """A value that crossed the wire form and came back.
+
+    Attributes:
+        encoded: The wire form.
+        decoded: The value that a reader gets.
+    """
+
+    encoded: Json
+    decoded: object
+
+
+@dataclass(frozen=True, slots=True)
+class EncodeRefused:
+    """The value does not encode under its declared type."""
+
+    cause: StrictJsonError | ValueValidationError
+
+
+@dataclass(frozen=True, slots=True)
+class ReadBackRefused:
+    """The value encodes, and a reader cannot decode the result."""
+
+    cause: StrictJsonError | ValueValidationError
+
+
+@dataclass(frozen=True, slots=True)
+class FieldsLost:
+    """The value holds data that the declared type does not carry.
+
+    Attributes:
+        detail: The class and the field. It holds no value.
+    """
+
+    detail: str
+
+
+type ReadBackRefusal = EncodeRefused | ReadBackRefused | FieldsLost
+
+
+def encode_and_read_back(
+    value: object,
+    expected_type: TypeAnnotation,
+    *,
+    location: tuple[str, ...] = (),
+) -> Result[ReadBack, ReadBackRefusal]:
+    """Encode a value and prove that a reader gets it back.
+
+    It decodes with `decode_value`, the decode that the worker uses, so a pass
+    proves that the worker can read the value. Then it compares the value with
+    the read-back, to find data that the declared type does not carry.
+
+    Args:
+        value: The value at a boundary.
+        expected_type: The declared type.
+        location: Written in front of each failing location in the refusal text.
+
+    Returns:
+        Ok with both forms, or Err with the refusal. The text holds no input
+        value.
+    """
+    try:
+        validated, encoded = _validated_and_dumped(value, expected_type, location)
+    except (StrictJsonError, ValueValidationError) as refusal:
+        return Err(EncodeRefused(refusal))
+    try:
+        decoded = decode_value(encoded, expected_type, location=location)
+    except (StrictJsonError, ValueValidationError) as refusal:
+        return Err(ReadBackRefused(refusal))
+    if _holds_record(expected_type):
+        lost = _lost_field(validated, decoded, 0)
+        if lost is not None:
+            return Err(FieldsLost(_with_location(lost, location)))
+    return Ok(ReadBack(encoded=encoded, decoded=decoded))
+
+
+def encode_or_raise_on_refusal(
+    value: object,
+    expected_type: TypeAnnotation,
+    *,
+    location: tuple[str, ...] = (),
+) -> Json:
+    """`encode_and_read_back` for a caller that catches the codec errors.
+
+    Raises:
+        StrictJsonError: as `encode_value`.
+        ValueValidationError: as `encode_value`, or when a reader cannot get the
+            value back.
+    """
+    match encode_and_read_back(value, expected_type, location=location):
+        case Ok(ok_value=read_back):
+            return read_back.encoded
+        case Err(err_value=refusal):
+            match refusal:
+                case EncodeRefused(cause=cause) | ReadBackRefused(cause=cause):
+                    raise cause
+                case FieldsLost(detail=detail):
+                    raise ValueValidationError(detail)
+                case _ as unreachable:
+                    assert_never(unreachable)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+_holds_record_cache: dict[Any, bool] = {}
+
+_SCHEMA_VALUE_KEYS: Final = frozenset({
+    'serialization',
+    'default',
+    'metadata',
+    'expected',
+    'computed_fields',
+})
+
+
+def _holds_record(expected_type: TypeAnnotation) -> bool:
+    """Whether a value of this type can hold a model or a dataclass.
+
+    The lost-fields walk costs about 3 times the decode on plain data, where it
+    can find nothing. Strict input refuses a record at any other position, so the
+    skip is safe. It reads the core schema once per type.
+    """
+    try:
+        cached = _holds_record_cache.get(expected_type)
+    except TypeError:
+        return _schema_holds_record(expected_type)
+    if cached is None:
+        cached = _schema_holds_record(expected_type)
+        _holds_record_cache[expected_type] = cached
+    return cached
+
+
+def _schema_holds_record(expected_type: TypeAnnotation) -> bool:
+    schema: object = TypeAdapter(list[expected_type]).core_schema
+    seen: set[int] = set()
+    stack: list[object] = [schema]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, (list, tuple)):
+            stack.extend(cast('list[object]', item))
+            continue
+        if not isinstance(item, dict):
+            continue
+        node = cast('dict[str, object]', item)
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if node.get('type') in ('model', 'dataclass'):
+            return True
+        stack.extend(
+            value for key, value in node.items() if key not in _SCHEMA_VALUE_KEYS
+        )
+    return False
+
+
+def _is_record(value: object) -> bool:
+    return isinstance(value, BaseModel) or (
+        dataclasses.is_dataclass(value) and not isinstance(value, type)
+    )
+
+
+def _field_names(record: object) -> set[str]:
+    """The declared fields of a record, plus the keys of `extra='allow'`."""
+    if isinstance(record, BaseModel):
+        return set(type(record).model_fields) | set(record.model_extra or ())
+    return {
+        field.name
+        for field in dataclasses.fields(cast('type[Any]', type(record)))
+    }
+
+
+def _lost_field(held: object, read: object, depth: int) -> str | None:
+    """Walk a value and its read-back together. Return what the read-back lost.
+
+    The read-back holds the declared class at every position, so this reads no
+    annotation, and unions, generics and deep trees need no code. A model also
+    finds a field that did not come from the wire and whose value changed: that is
+    an excluded field, or a serializer that drops a field.
+
+    `read` was built from a JSON value, so the walk ends. The bound states that.
+
+    Returns:
+        The class and the field that lost data, or None.
+    """
+    assert depth <= MAX_JSON_DEPTH, 'read-back nested deeper than the JSON bound'
+    if _is_record(held) and _is_record(read):
+        extra = _field_names(held) - _field_names(read)
+        if extra:
+            return (
+                f'{type(held).__name__} holds fields that the declared type '
+                f'{type(read).__name__} does not carry: {sorted(extra)}'
+            )
+        if isinstance(read, BaseModel):
+            for name in set(type(read).model_fields) - read.model_fields_set:
+                if getattr(held, name, None) != getattr(read, name):
+                    return f'{type(read).__name__}.{name} is not written, so a reader loses it'
+        for name in _field_names(read):
+            if hasattr(held, name):
+                lost = _lost_field(getattr(held, name), getattr(read, name), depth + 1)
+                if lost is not None:
+                    return lost
+        return None
+    if isinstance(held, (list, tuple)) and isinstance(read, (list, tuple)):
+        for held_item, read_item in zip(
+            cast('list[object]', held), cast('list[object]', read),
+        ):
+            lost = _lost_field(held_item, read_item, depth + 1)
+            if lost is not None:
+                return lost
+        return None
+    if isinstance(held, dict) and isinstance(read, dict):
+        held_dict = cast('dict[object, object]', held)
+        read_dict = cast('dict[object, object]', read)
+        for key, held_item in held_dict.items():
+            if key in read_dict:
+                lost = _lost_field(held_item, read_dict[key], depth + 1)
+                if lost is not None:
+                    return lost
+    return None
 
 
 def check_json_value_positions(
@@ -372,17 +621,73 @@ def decode_value(
     else:
         _scan_reserved_keys(json_value)
     adapter = _get_adapter(expected_type)
-    return _validate(adapter, json_value, location)
+    return _validate_wire(adapter, json_value, location)
 
 
-def _validate(
+def _validate_wire(
+    adapter: TypeAdapter[Any],
+    value: Json,
+    location: tuple[str, ...],
+) -> object:
+    """Read a wire value in strict mode.
+
+    JSON strict mode reads a datetime from its string and refuses `"7"` for an
+    int. Python strict mode refuses both, so the value goes through its text.
+
+    A value too deep for pydantic's dump goes to `dumps_json`, which names the
+    cause.
+
+    Raises:
+        StrictJsonError: on a lone surrogate.
+        ValueValidationError: the value does not satisfy the type, or it is
+            nested deeper than `MAX_TYPED_JSON_DEPTH`. The text holds no input
+            value.
+    """
+    try:
+        text = to_json(value)
+    except PydanticSerializationError:
+        text = None
+    if text is None:
+        match dumps_json(value):
+            case Err(err_value=error):
+                raise StrictJsonError(_with_location(str(error), location))
+            case Ok(ok_value=written):
+                text = written
+            case _ as unreachable:
+                assert_never(unreachable)
+    failure: StrictJsonError | ValueValidationError
+    try:
+        try:
+            return adapter.validate_json(text, strict=True)
+        except ValidationError as error:
+            failure = ValueValidationError(
+                _with_location(
+                    f'value is nested deeper than {MAX_TYPED_JSON_DEPTH} levels',
+                    location,
+                )
+                if error.errors()[0]['type'] == 'json_invalid'
+                else validation_summary(error, location),
+            )
+    except UnicodeEncodeError:
+        failure = StrictJsonError(
+            lone_surrogate_text('a validation error', location),
+        )
+    raise failure
+
+
+def _validate_input(
     adapter: TypeAdapter[Any],
     value: object,
     location: tuple[str, ...],
 ) -> object:
-    """`adapter.validate_python(value)`; a refusal raises `ValueValidationError`.
+    """`adapter.validate_python(value, strict=True, extra='forbid')`.
+
+    Strict refuses a conversion such as `"7"` for an int. `extra='forbid'` refuses
+    an unknown key at any depth, and a subclass field when the declared model
+    revalidates.
 
     A validator can write a lone surrogate in its error text, for example
+
     when it echoes the value. Pydantic then cannot build the error text and
     raises `UnicodeEncodeError`: `validate_python` does for the text of a
     `ValueError` or an `AssertionError`, and `ValidationError.errors()` does
@@ -396,7 +701,7 @@ def _validate(
     failure: StrictJsonError | ValueValidationError
     try:
         try:
-            return adapter.validate_python(value)
+            return adapter.validate_python(value, strict=True, extra='forbid')
         except ValidationError as error:
             failure = ValueValidationError(validation_summary(error, location))
     except UnicodeEncodeError:
@@ -489,6 +794,7 @@ def _dump(
 def encode_task_result(
     result: TaskResult[Any, TaskError],
     ok_type: TypeAnnotation,
+    origin: Literal['task', 'library'] = 'library',
 ) -> dict[str, Json]:
     """Encode a `TaskResult[OkT, TaskError]` into the wire envelope.
 
@@ -535,13 +841,7 @@ def encode_task_result(
             its declared shape.
     """
     if result.is_err():
-        err = result.err_value
-        if isinstance(err.exception, BaseException):
-            from horsies.core.codec.error_payload import flatten_exception
-            err = err.model_copy(
-                update={'exception': flatten_exception(err.exception)},
-            )
-        encoded_err = encode_task_error(err)
+        encoded_err = encode_task_error(reportable_error(result.err_value, origin))
         return {
             _TASK_RESULT_ENVELOPE_KEY: True,
             'ok': None,
@@ -553,6 +853,163 @@ def encode_task_result(
         'ok': encoded_ok,
         'err': None,
     }
+
+
+def encode_returned_result(
+    result: TaskResult[Any, TaskError],
+    ok_type: TypeAnnotation,
+) -> dict[str, Json]:
+    """Encode the return of a task body, and prove the ok value reads back.
+
+    `encode_task_result` serves every other write, of a value that the library
+    built or read. This one is the boundary for a value that task code built.
+
+    Raises:
+        StrictJsonError: as `encode_value`.
+        ValueValidationError: as `encode_value`, or when a reader cannot get the
+            value back.
+    """
+    if result.is_err():
+        return encode_task_result(result, ok_type, origin='task')
+    return {
+        _TASK_RESULT_ENVELOPE_KEY: True,
+        'ok': encode_or_raise_on_refusal(result.ok_value, ok_type),
+        'err': None,
+    }
+
+
+def reportable_error(
+    err: TaskError,
+    origin: Literal['task', 'library'] = 'library',
+) -> TaskError:
+    """Return an error that crosses the wire, with its code and message kept.
+
+    An error is the report of a failure, and `auto_retry_for` and outcome routing
+    read its code. So this function is total: a bad `data` or a bad subclass field
+    never costs the code.
+
+    Order: the error as it is; with `data` replaced; for a `SubWorkflowError`,
+    with its summary repaired, so that `case SubWorkflowError()` still matches;
+    and last a plain `TaskError`.
+
+    A refusal logs at ERROR with subject and cause. A value from a library path
+    is a defect, so the record carries `origin`, and a test fixture fails on it.
+
+    Args:
+        err: The error as built.
+        origin: Who built it.
+
+    Returns:
+        An error that encodes and reads back. Only an `error_code` that is itself
+        missing cannot be kept, and then this raises and the caller's serialization
+        path stands.
+    """
+    escaped = _with_escaped_text(err)
+    cause = _report_refusal(escaped)
+    if cause is None:
+        return escaped
+    logger.error(
+        'data of a TaskError with code %s cannot cross the wire: %s',
+        _code_text(escaped),
+        cause,
+        extra={'refusal_origin': origin},
+    )
+    refused_data: dict[str, Json] = {'data_refused': cause}
+    without_data = escaped.model_copy(update={'data': refused_data})
+    if _report_refusal(without_data) is None:
+        return without_data
+    if isinstance(without_data, SubWorkflowError):
+        repaired = _repaired_subworkflow_error(without_data)
+        if repaired is not None:
+            return repaired
+    plain = TaskError(
+        error_code=escaped.error_code,
+        message=escaped.message,
+        exception=escaped.exception,
+        data=refused_data,
+    )
+    assert _report_refusal(plain) is None, 'a plain TaskError with escaped text encodes'
+    return plain
+
+
+def _code_text(err: TaskError) -> str:
+    return escape_lone_surrogates(str(err.error_code))
+
+
+def _with_escaped_text(err: TaskError) -> TaskError:
+    """Flatten the exception and escape the free text of an error."""
+    from horsies.core.codec.error_payload import flatten_exception
+
+    code = err.error_code
+    update: dict[str, Any] = {}
+    if type(code) is str:
+        update['error_code'] = escape_lone_surrogates(code)
+    if err.message is not None:
+        update['message'] = escape_lone_surrogates(err.message)
+    exception = err.exception
+    if isinstance(exception, BaseException):
+        try:
+            exception = flatten_exception(exception)
+        except Exception:
+            exception = {
+                'type': type(exception).__name__,
+                'module': type(exception).__module__,
+                'message': 'exception text unavailable',
+                'repr': 'exception text unavailable',
+                'traceback': '',
+            }
+    if exception is not None:
+        update['exception'] = {
+            name: escape_lone_surrogates(value) if isinstance(value, str) else value
+            for name, value in exception.items()
+        }
+    return err.model_copy(update=update)
+
+
+def _report_refusal(err: TaskError) -> str | None:
+    """Run the path of a stored error. Return the cause of a refusal, or None.
+
+    This catches `Exception`, against the usual rule, on purpose. This code reports
+    a failure, the object comes from task code, and a raise here costs the code. A
+    model built with `model_construct` can raise anything. The cause names a type,
+    never a value.
+    """
+    try:
+        _validate_json_native(err.data)
+        wire = encode_task_error(err)
+        match dumps_json(wire):
+            case Err():
+                return 'SerializationError'
+            case Ok():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
+        decode_task_error(wire)
+    except Exception as error:
+        return type(error).__name__
+    return None
+
+
+def _repaired_subworkflow_error(err: SubWorkflowError) -> TaskError | None:
+    """Keep the class of a `SubWorkflowError`, and drop only what cannot cross.
+
+    It runs under a guard: a dataclass does not check its fields, so task code can
+    put anything in the summary.
+    """
+    try:
+        summary = err.sub_workflow_summary
+        text = summary.error_summary
+        repaired = err.model_copy(update={
+            'sub_workflow_id': escape_lone_surrogates(err.sub_workflow_id),
+            'sub_workflow_summary': dataclasses.replace(
+                summary,
+                output=None,
+                error_summary=None if text is None else escape_lone_surrogates(text),
+            ),
+        })
+    except Exception:
+        return None
+    return repaired if _report_refusal(repaired) is None else None
 
 
 def encode_task_error(err: TaskError) -> Json:

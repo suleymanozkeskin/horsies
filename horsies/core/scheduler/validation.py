@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import (
-    encode_kwargs,
+    encode_kwargs_read_back,
     fill_omitted_defaults,
     underlying_task_fn,
 )
@@ -201,7 +201,7 @@ def _encode_schedule_kwargs(
         _ = fill_omitted_defaults(task_fn, schedule.kwargs)
         if not schedule.kwargs:
             return Ok(None)
-        encoded = encode_kwargs(task_fn, schedule.kwargs)
+        encoded = encode_kwargs_read_back(task_fn, schedule.kwargs)
     except (StrictJsonError, ValueValidationError) as exc:
         return Err(ConfigurationError(
             message=f"schedule '{schedule.name}' kwargs are not encodable for task '{schedule.task_name}'",

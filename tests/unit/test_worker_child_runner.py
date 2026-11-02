@@ -940,22 +940,6 @@ def _registered_tasks() -> dict[str, Any]:
 _LONE_SURROGATE_RETURNS: list[tuple[Any, Any]] = [
     (str, TaskResult(ok=f'text{chr(0xd800)}')),
     (dict[str, int], TaskResult(ok={f'key{chr(0xd800)}': 1})),
-    (
-        str,
-        TaskResult(
-            err=TaskError(error_code='MY_ERROR', message=f'text{chr(0xd800)}'),
-        ),
-    ),
-    (
-        str,
-        TaskResult(
-            err=TaskError(
-                error_code='MY_ERROR',
-                message='m',
-                data={f'key{chr(0xd800)}': 1},
-            ),
-        ),
-    ),
 ]
 
 
@@ -1196,7 +1180,7 @@ class TestRunTaskEntryErrorPaths:
         ('ok_type', 'returned'),
         _LONE_SURROGATE_RETURNS,
         ids=[
-            'ok-string', 'ok-key', 'error-message', 'error-data-key',
+            'ok-string', 'ok-key',
         ],
     )
     def test_a_lone_surrogate_in_a_return_value_ends_the_task(
@@ -1278,7 +1262,24 @@ class TestRunTaskEntryErrorPaths:
         assert 'a validation error holds a lone surrogate' in parsed['err']['message']
         assert parsed['err']['exception'] is None
 
-    @pytest.mark.parametrize('form', ['returned-model', 'error-data'])
+    def test_error_data_that_holds_itself_keeps_the_code(
+        self,
+        _run_entry_defaults: dict[str, Any],
+    ) -> None:
+        patches = _make_run_task_patches()
+        mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
+        mock_app.tasks.__getitem__ = MagicMock(
+            return_value=_registered_tasks()['error-data'],
+        )
+
+        with _apply_patches(patches):
+            _, payload, _ = _run_task_entry(**_run_entry_defaults)
+
+        err = _parse_task_result(payload)['err']
+        assert err['error_code'] == 'MY_ERROR'
+        assert 'data_refused' in err['data']
+
+    @pytest.mark.parametrize('form', ['returned-model'])
     def test_a_value_that_holds_itself_ends_the_task(
         self,
         _run_entry_defaults: dict[str, Any],
@@ -1302,7 +1303,24 @@ class TestRunTaskEntryErrorPaths:
         }
         assert 'Circular reference detected (id repeated)' in parsed['err']['message']
 
-    @pytest.mark.parametrize('form', ['deep-returned-model', 'deep-error-data'])
+    def test_error_data_that_is_too_deep_keeps_the_code(
+        self,
+        _run_entry_defaults: dict[str, Any],
+    ) -> None:
+        patches = _make_run_task_patches()
+        mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
+        mock_app.tasks.__getitem__ = MagicMock(
+            return_value=_registered_tasks()['deep-error-data'],
+        )
+
+        with _apply_patches(patches):
+            _, payload, _ = _run_task_entry(**_run_entry_defaults)
+
+        err = _parse_task_result(payload)['err']
+        assert err['error_code'] == 'MY_ERROR'
+        assert 'data_refused' in err['data']
+
+    @pytest.mark.parametrize('form', ['deep-returned-model'])
     def test_a_value_that_is_too_deep_ends_the_task(
         self,
         _run_entry_defaults: dict[str, Any],
@@ -1327,7 +1345,7 @@ class TestRunTaskEntryErrorPaths:
             in parsed['err']['message']
         )
 
-    def test_bytes_that_are_not_utf8_in_error_data_end_the_task(
+    def test_bytes_that_are_not_utf8_in_error_data_keep_the_code(
         self,
         _run_entry_defaults: dict[str, Any],
     ) -> None:
@@ -1344,11 +1362,9 @@ class TestRunTaskEntryErrorPaths:
 
         assert ok is True
         parsed = _parse_task_result(payload)
-        assert parsed['err']['error_code'] == {
-            '__builtin_task_code__': 'WORKER_SERIALIZATION_ERROR',
-        }
-        assert 'bytes that are not UTF-8' in parsed['err']['message']
-        assert '0xff' not in parsed['err']['message']
+        assert parsed['err']['error_code'] == 'MY_ERROR'
+        assert 'data_refused' in parsed['err']['data']
+        assert '0xff' not in payload
 
     def test_a_validator_text_with_a_lone_surrogate_fails_the_kwargs_decode(
         self,
@@ -1397,17 +1413,14 @@ class TestRunTaskEntryErrorPaths:
 
         assert ok is True
         parsed = _parse_task_result(payload)
-        assert parsed['err']['error_code'] == {
-            '__builtin_task_code__': 'WORKER_SERIALIZATION_ERROR',
-        }
-        assert '`frozenset` not valid as object key' in parsed['err']['message']
+        assert parsed['err']['error_code'] == 'MY_ERROR'
+        assert 'data_refused' in parsed['err']['data']
 
-    def test_a_lone_surrogate_in_a_raised_exception_ends_the_task(
+    def test_a_lone_surrogate_in_a_raised_exception_keeps_the_code(
         self,
         _run_entry_defaults: dict[str, Any],
     ) -> None:
-        """An exception text from the task cannot be encoded either, so the
-        task ends with the fixed fallback payload."""
+        """An error reports a failure, so its text is escaped and not refused."""
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
@@ -1419,7 +1432,11 @@ class TestRunTaskEntryErrorPaths:
             ok, payload, _ = _run_task_entry(**_run_entry_defaults)
 
         assert ok is True
-        assert payload == FALLBACK_ERROR_JSON
+        _ = payload.encode('utf-8')
+        err = _parse_task_result(payload)['err']
+        assert err['error_code'] == {
+            '__builtin_task_code__': OperationalErrorCode.TASK_EXCEPTION.value,
+        }
 
     def test_unserializable_value_surfaces_as_serialization_error(
         self,

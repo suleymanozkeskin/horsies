@@ -39,6 +39,7 @@ from pydantic_core import PydanticCustomError
 from horsies.core.codec.json_io import dumps_json, loads_json
 from horsies.core.codec.json_value import (
     MAX_JSON_DEPTH,
+    MAX_TYPED_JSON_DEPTH,
     JsonValue,
     StrictJsonError,
 )
@@ -718,14 +719,10 @@ class TestEncodeValueRefusesALoneSurrogate:
             (_Labelled(name='n', labels={LONE_SURROGATE_TEXT: 1}), _Labelled),
             ([{LONE_SURROGATE_TEXT: 1}], list[dict[str, int]]),
             (({LONE_SURROGATE_TEXT: 1},), tuple[dict[str, int], ...]),
-            (
-                collections.deque([{LONE_SURROGATE_TEXT: 1}]),
-                collections.deque[dict[str, int]],
-            ),
         ],
         ids=[
             'nested-dict', 'json-value', 'nested-json-value', 'json-value-slot',
-            'model-field', 'in-list', 'in-tuple', 'in-deque',
+            'model-field', 'in-list', 'in-tuple',
         ],
     )
     def test_a_key_that_the_dump_replaces_is_refused(
@@ -1200,7 +1197,7 @@ class TestDepthBoundAndTheLimitOfTheDump:
     levels_of_the_envelopes: ClassVar[int] = 16
 
     def test_the_deepest_result_passes_the_boundary_in_its_envelope(self) -> None:
-        value = _nested_list(self.deepest_accepted_value)
+        value = _nested_list(MAX_TYPED_JSON_DEPTH)
         envelope = encode_task_result(TaskResult(ok=value), Any)
 
         text = dumps_json(envelope)
@@ -1458,10 +1455,11 @@ class TestEncodeValidation:
         with pytest.raises(ValueValidationError):
             encode_value(cast(object, {'name': 'Alice'}), _User)
 
-    def test_harmless_coercion_preserved(self) -> None:
-        # Lax validation keeps the boundary coercions the wire already
-        # round-trips: numeric-string to int, int to float.
-        assert encode_value('5', int) == 5
+    def test_a_conversion_is_refused(self) -> None:
+        with pytest.raises(ValueValidationError):
+            encode_value('5', int)
+
+    def test_an_int_for_a_float_is_valid(self) -> None:
         assert encode_value(5, float) == 5.0
 
     def test_task_error_instance_unaffected(self) -> None:
