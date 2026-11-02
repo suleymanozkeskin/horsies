@@ -46,6 +46,8 @@ PRELOAD_FORK_TIMEOUT_S: Final = 5.0
 PRELOAD_STOP_TIMEOUT_S: Final = 5.0
 ORPHAN_SWEEP_LIMIT: Final = 64
 _PR_SET_CHILD_SUBREAPER: Final = 36
+# 434 in the x86_64 table and in asm-generic/unistd.h, which arm64 uses.
+_SYS_PIDFD_OPEN: Final = 434
 
 
 class ChildProcess(Protocol):
@@ -66,8 +68,15 @@ class PreloadSupported:
 
 
 @dataclass(frozen=True, slots=True)
+class PreloadNotLinux:
+    """This platform has no preload parent, so ``exec`` is the normal path."""
+
+    platform: str
+
+
+@dataclass(frozen=True, slots=True)
 class PreloadUnsupported:
-    """This host cannot run the preload parent. Children use ``exec``."""
+    """This Linux host cannot run the preload parent. Children use ``exec``."""
 
     reason: str
 
@@ -104,10 +113,22 @@ def _set_subreaper(enabled: bool) -> bool:
 
 
 def _open_pidfd(pid: int) -> int:
-    """Open a pidfd. Raises ``OSError`` when the kernel has none."""
-    if sys.platform == 'linux' and hasattr(os, 'pidfd_open'):
+    """Open a pidfd. Raises ``OSError`` when the kernel has none.
+
+    A CPython built against old kernel headers has no ``os.pidfd_open``, even
+    on a kernel that has the call. Such a build calls the kernel directly.
+    """
+    if sys.platform != 'linux':
+        raise OSError(errno.ENOSYS, 'pidfd_open needs Linux')
+    if hasattr(os, 'pidfd_open'):
         return os.pidfd_open(pid)
-    raise OSError(errno.ENOSYS, 'this Python has no pidfd_open')
+    syscall = ctypes.CDLL(None, use_errno=True).syscall
+    syscall.restype = ctypes.c_long
+    syscall.argtypes = (ctypes.c_long, ctypes.c_int, ctypes.c_uint)
+    descriptor: int = syscall(_SYS_PIDFD_OPEN, pid, 0)
+    if descriptor < 0:
+        raise OSError(ctypes.get_errno(), f'pidfd_open of pid {pid} failed')
+    return descriptor
 
 
 def _next_exited_child() -> int | None:
@@ -121,10 +142,10 @@ def _next_exited_child() -> int | None:
     return None if found is None else found.si_pid
 
 
-def preload_support() -> PreloadSupported | PreloadUnsupported:
+def preload_support() -> PreloadSupported | PreloadNotLinux | PreloadUnsupported:
     """Check what the preload parent needs: Linux, a pidfd, and the subreaper flag."""
     if sys.platform != 'linux':
-        return PreloadUnsupported(f'platform {sys.platform} is not Linux')
+        return PreloadNotLinux(sys.platform)
     try:
         os.close(_open_pidfd(os.getpid()))
     except OSError as exc:

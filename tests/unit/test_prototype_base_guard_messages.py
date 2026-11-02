@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 
+from horsies.core.schemas.migrations import SCHEMA_VERSION
 from tests.task_history_prototypes import schema
 
 
@@ -67,3 +68,14 @@ class TestRefusalMessagesTrackTheConstant:
 
         assert assignment is not None
         assert assignment.group(1).strip().isdigit()
+
+    def test_the_constant_equals_the_schema_version(self) -> None:
+        # A mismatch fails every prototype test at install, so equality is
+        # already the invariant. Pull request CI runs only the unit tests,
+        # and without this test a missed move shows only in a full suite.
+        assignment = re.search(
+            r'_EXPECTED_BASE_SCHEMA_VERSION\s*=\s*(\d+)', _guard_source()
+        )
+
+        assert assignment is not None
+        assert int(assignment.group(1)) == SCHEMA_VERSION
