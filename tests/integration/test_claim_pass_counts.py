@@ -186,9 +186,9 @@ class TestClaimPassCounts:
 
         event.listen(current_resources(broker).engine.sync_engine, 'before_cursor_execute', _count)
         try:
-            claimed = await probe._claim_and_dispatch_all()
+            claim_pass = await probe._claim_and_dispatch_all()
         finally:
             event.remove(current_resources(broker).engine.sync_engine, 'before_cursor_execute', _count)
 
-        assert claimed is False
+        assert claim_pass.claimed == 0
         assert counter['n'] == 1, f'empty capped pass ran {counter["n"]} statements'

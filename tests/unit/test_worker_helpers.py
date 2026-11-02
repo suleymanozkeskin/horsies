@@ -26,6 +26,7 @@ from horsies.core.worker.finalize import (
 )
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.models.retention import RetentionConfig
+from horsies.core.worker.claiming import ClaimPass
 from horsies.core.worker.sql import DELETE_ORPHANED_RECOVERY_FAILURES_SQL
 from horsies.core.worker.worker import (
     Worker,
@@ -141,6 +142,10 @@ _LOST = ChildLost(
     child_exit=KilledBySignal(9),
     partial_frame=False,
 )
+
+
+_NO_CLAIM = ClaimPass(claimed=0, dropped=0)
+_ONE_CLAIM = ClaimPass(claimed=1, dropped=0)
 
 
 def _make_worker(
@@ -2745,12 +2750,13 @@ class TestBackgroundFatalCapture:
         worker.stop = AsyncMock(side_effect=worker._stop.set)  # type: ignore[method-assign]
         fatal = ChildStartFailedError('worker child start failed: boom')
 
-        async def _claim_pass_spawning_doomed_finalizer() -> None:
+        async def _claim_pass_spawning_doomed_finalizer() -> ClaimPass:
             async def _doomed() -> None:
                 raise fatal
 
             worker._spawn_background(_doomed(), name='doomed-finalizer')
             await asyncio.sleep(0.01)
+            return _NO_CLAIM
 
         worker._claim_and_dispatch_all = (  # type: ignore[method-assign]
             AsyncMock(side_effect=_claim_pass_spawning_doomed_finalizer)
@@ -2879,7 +2885,7 @@ class TestCapacityReleaseWake:
         worker.stop = AsyncMock(side_effect=worker._stop.set)  # type: ignore[method-assign]
         passes = 0
 
-        async def _claim_pass() -> None:
+        async def _claim_pass() -> ClaimPass:
             nonlocal passes
             passes += 1
             match passes:
@@ -2889,6 +2895,7 @@ class TestCapacityReleaseWake:
                     worker._stop.set()
                 case _:
                     raise AssertionError(f'unexpected claim pass {passes}')
+            return _NO_CLAIM
 
         worker._claim_and_dispatch_all = AsyncMock(side_effect=_claim_pass)  # type: ignore[method-assign]
 
@@ -2912,11 +2919,12 @@ class TestCapacityReleaseWake:
         worker.stop = AsyncMock(side_effect=worker._stop.set)  # type: ignore[method-assign]
         passes = 0
 
-        async def _claim_pass() -> None:
+        async def _claim_pass() -> ClaimPass:
             nonlocal passes
             passes += 1
             if passes == 1:
                 await _finish_finalizer(worker, 'ok')
+            return _NO_CLAIM
 
         worker._claim_and_dispatch_all = AsyncMock(side_effect=_claim_pass)  # type: ignore[method-assign]
         loop = asyncio.create_task(worker.run_forever())
@@ -2938,10 +2946,10 @@ class TestCapacityReleaseWake:
         worker.stop = AsyncMock(side_effect=worker._stop.set)  # type: ignore[method-assign]
         passes = 0
 
-        async def _claim_pass() -> bool:
+        async def _claim_pass() -> ClaimPass:
             nonlocal passes
             passes += 1
-            return False
+            return _NO_CLAIM
 
         worker._claim_and_dispatch_all = AsyncMock(side_effect=_claim_pass)  # type: ignore[method-assign]
         loop = asyncio.create_task(worker.run_forever())
@@ -2969,10 +2977,10 @@ class TestCapacityReleaseWake:
         worker.stop = AsyncMock(side_effect=worker._stop.set)  # type: ignore[method-assign]
         passes = 0
 
-        async def _claim_pass() -> bool:
+        async def _claim_pass() -> ClaimPass:
             nonlocal passes
             passes += 1
-            return passes < 3
+            return _ONE_CLAIM if passes < 3 else _NO_CLAIM
 
         worker._claim_and_dispatch_all = AsyncMock(side_effect=_claim_pass)  # type: ignore[method-assign]
         loop = asyncio.create_task(worker.run_forever())
@@ -2995,10 +3003,10 @@ class TestCapacityReleaseWake:
         worker.stop = AsyncMock(side_effect=worker._stop.set)  # type: ignore[method-assign]
         passes = 0
 
-        async def _claim_pass() -> bool:
+        async def _claim_pass() -> ClaimPass:
             nonlocal passes
             passes += 1
-            return True
+            return _ONE_CLAIM
 
         worker._claim_and_dispatch_all = AsyncMock(side_effect=_claim_pass)  # type: ignore[method-assign]
         loop = asyncio.create_task(worker.run_forever())
@@ -3007,6 +3015,124 @@ class TestCapacityReleaseWake:
         await asyncio.wait_for(loop, timeout=_WAKE_TIMEOUT_S)
 
         assert passes == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('max_claim_batch', [0, 1], ids=['no_cap', 'capped'])
+    @pytest.mark.parametrize(
+        'first_pass',
+        [ClaimPass(claimed=1, dropped=1), ClaimPass(claimed=3, dropped=1)],
+        ids=['all_dropped', 'partly_dropped'],
+    )
+    async def test_a_pass_that_dropped_a_row_runs_again_with_no_wait(
+        self,
+        first_pass: ClaimPass,
+        max_claim_batch: int,
+    ) -> None:
+        """A dropped row used budget and frees no slot, so no wake follows, and
+        the NOTIFY of the work behind it is already consumed."""
+        worker = _make_worker()
+        worker.cfg.max_claim_batch = max_claim_batch
+        worker._queues = [asyncio.Queue()]
+        worker._resilience = WorkerResilienceConfig(
+            notify_poll_interval_ms=_LONG_POLL_MS,
+        )
+        worker._start_with_resilience_config = AsyncMock()  # type: ignore[method-assign]
+        worker.stop = AsyncMock(side_effect=worker._stop.set)  # type: ignore[method-assign]
+        passes = 0
+
+        async def _claim_pass() -> ClaimPass:
+            nonlocal passes
+            passes += 1
+            return first_pass if passes == 1 else _NO_CLAIM
+
+        worker._claim_and_dispatch_all = AsyncMock(side_effect=_claim_pass)  # type: ignore[method-assign]
+        loop = asyncio.create_task(worker.run_forever())
+        await asyncio.sleep(0.05)
+        worker._stop.set()
+        await asyncio.wait_for(loop, timeout=_WAKE_TIMEOUT_S)
+
+        assert passes == 2
+
+
+@pytest.mark.unit
+class TestClaimPass:
+    @pytest.mark.parametrize(
+        ('claim_pass', 'limited', 'expected'),
+        [
+            (ClaimPass(claimed=0, dropped=0), False, False),
+            (ClaimPass(claimed=0, dropped=0), True, False),
+            (ClaimPass(claimed=3, dropped=0), False, False),
+            (ClaimPass(claimed=3, dropped=0), True, True),
+            (ClaimPass(claimed=3, dropped=1), False, True),
+            (ClaimPass(claimed=3, dropped=3), False, True),
+            (ClaimPass(claimed=3, dropped=3), True, True),
+        ],
+    )
+    def test_it_states_when_work_can_remain_unannounced(
+        self,
+        claim_pass: ClaimPass,
+        limited: bool,
+        expected: bool,
+    ) -> None:
+        assert claim_pass.left_unannounced_work(limited=limited) is expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ('kept', 'expected'),
+        [
+            (3, ClaimPass(claimed=3, dropped=0)),
+            (1, ClaimPass(claimed=3, dropped=2)),
+            (0, ClaimPass(claimed=3, dropped=3)),
+        ],
+        ids=['none_dropped', 'partly_dropped', 'all_dropped'],
+    )
+    async def test_the_pass_counts_what_it_claimed_and_dropped(
+        self,
+        kept: int,
+        expected: ClaimPass,
+    ) -> None:
+        worker = _make_worker()
+        rows = [
+            ('id-1', 'task', '[]', '{}', 'default', True, None, None),
+            ('id-2', 'task', '[]', '{}', 'default', True, None, None),
+            ('id-3', 'task', '[]', '{}', 'default', True, None, None),
+        ]
+        result = MagicMock()
+        result.keys.return_value = [
+            'id', 'task_name', 'args', 'kwargs', 'queue_name',
+            'is_workflow_task', 'task_options', 'claimed_at',
+        ]
+        result.fetchall.return_value = rows
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=result)
+        factory = MagicMock()
+        factory.return_value.__aenter__ = AsyncMock(return_value=session)
+        factory.return_value.__aexit__ = AsyncMock(return_value=False)
+        worker.sf = factory
+
+        async def _keep(claimed: list[dict[str, object]]) -> list[dict[str, object]]:
+            return claimed[:kept]
+
+        worker._filter_nonrunnable_workflow_tasks = AsyncMock(side_effect=_keep)  # type: ignore[method-assign]
+        worker._dispatch_one = AsyncMock()  # type: ignore[method-assign]
+
+        assert await worker._claim_and_dispatch_all() == expected
+        assert worker._dispatch_one.await_count == kept
+
+    @pytest.mark.asyncio
+    async def test_an_empty_pass_reports_nothing(self) -> None:
+        worker = _make_worker()
+        result = MagicMock()
+        result.keys.return_value = []
+        result.fetchall.return_value = []
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=result)
+        factory = MagicMock()
+        factory.return_value.__aenter__ = AsyncMock(return_value=session)
+        factory.return_value.__aexit__ = AsyncMock(return_value=False)
+        worker.sf = factory
+
+        assert await worker._claim_and_dispatch_all() == _NO_CLAIM
 
 
 @pytest.mark.unit
@@ -4368,12 +4494,12 @@ class TestRunForever:
 
         call_count = 0
 
-        async def _fake_claim_and_dispatch() -> bool:
+        async def _fake_claim_and_dispatch() -> ClaimPass:
             nonlocal call_count
             call_count += 1
             if call_count >= 2:
                 worker._stop.set()
-            return False
+            return _NO_CLAIM
 
         async def _fake_wait(poll_interval_ms: int) -> None:
             return
@@ -4406,14 +4532,14 @@ class TestRunForever:
 
         call_count = 0
 
-        async def _fake_claim_and_dispatch() -> bool:
+        async def _fake_claim_and_dispatch() -> ClaimPass:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
                 raise OperationalError('connection lost')
             # Second pass: stop
             worker._stop.set()
-            return False
+            return _NO_CLAIM
 
         async def _fake_wait(poll_interval_ms: int) -> None:
             return
@@ -4445,7 +4571,7 @@ class TestRunForever:
         async def _fake_start() -> None:
             return
 
-        async def _fake_claim_and_dispatch() -> bool:
+        async def _fake_claim_and_dispatch() -> ClaimPass:
             raise ValueError('non-retryable')
 
         async def _fake_stop(**kwargs: object) -> None:
@@ -4472,10 +4598,10 @@ class TestRunForever:
         async def _fake_start() -> None:
             worker._stop.set()
 
-        async def _fake_claim_and_dispatch() -> bool:
+        async def _fake_claim_and_dispatch() -> ClaimPass:
             nonlocal loop_entered
             loop_entered = True
-            return False
+            return _NO_CLAIM
 
         async def _fake_stop(**kwargs: object) -> None:
             return

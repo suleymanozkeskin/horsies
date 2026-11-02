@@ -889,11 +889,11 @@ class Worker(
                     # release during the pass leaves the wake set, so the next
                     # wait returns at once.
                     self._capacity_released.clear()
-                    claimed = await self._claim_and_dispatch_all()
+                    claim_pass = await self._claim_and_dispatch_all()
 
-                    # A pass under max_claim_batch can stop with free slots and
-                    # ready work, and no NOTIFY announces that work.
-                    if not (claimed and self.cfg.max_claim_batch > 0):
+                    if not claim_pass.left_unannounced_work(
+                        limited=self.cfg.max_claim_batch > 0,
+                    ):
                         # Wait for a NOTIFY from any queue or a local capacity
                         # release (coalesce bursts).
                         await self._wait_for_any_notify(
