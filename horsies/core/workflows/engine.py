@@ -1135,15 +1135,14 @@ async def enqueue_subworkflow_task(
                     return None
                 dep_result = all_dep_results.get(dep_index)
                 if dep_result is not None:
-                    # Strict-serde phase 7: subworkflow ``build_with`` runs
-                    # in-process — no DB/worker boundary to cross. Pass the
-                    # typed ``TaskResult`` instance straight through;
-                    # ``build_with`` signatures bind against
-                    # ``TaskResult[T, TaskError]`` per the SubWorkflowNode
-                    # ``args_from`` contract (see SubWorkflowNode docstring).
-                    # The wire ``__h_taskresult_envelope__`` form is reserved
-                    # for the worker-bound TaskNode ``args_from`` path that
-                    # crosses the broker.
+                    # Subworkflow ``build_with`` runs in-process, so there is
+                    # no DB or worker boundary to cross. It gets a typed
+                    # ``TaskResult``, held to the type that its parameter
+                    # declares, per the SubWorkflowNode ``args_from`` contract
+                    # (see SubWorkflowNode docstring). The wire
+                    # ``__h_taskresult_envelope__`` form is reserved for the
+                    # worker-bound TaskNode ``args_from`` path that crosses the
+                    # broker.
                     target_ok_type = subworkflow_target_ok_type(
                         workflow_def, kwarg_name,
                     )
