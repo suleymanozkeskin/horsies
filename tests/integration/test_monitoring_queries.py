@@ -502,6 +502,44 @@ class TestTaskFacets:
             f'DOMAIN_{name}' for name in expected
         ]
 
+    async def test_the_result_stays_bounded_with_many_distinct_codes(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        """An error code is a free string: the rows must not follow the codes."""
+        distinct_codes = 1_000
+        await insert_rows(
+            session,
+            *[
+                make_task(
+                    task_name='many_codes_task',
+                    status=TaskStatus.FAILED,
+                    error_code=f'DOMAIN_{index}',
+                )
+                for index in range(distinct_codes)
+            ],
+        )
+        sql, params = queries_module.facets_statement(
+            window=_test_window(),
+            statuses=[],
+            retried_only=False,
+        )
+
+        rows = (await session.execute(text(sql), params)).all()
+        result = await task_facets(
+            broker,
+            window=_test_window(),
+            statuses=[],
+            error_categories=[],
+            retried_only=False,
+        )
+
+        assert len([row for row in rows if row.facet == 'error_code']) == 30
+        assert is_ok(result)
+        assert len(result.ok_value.error_codes) == 30
+        assert result.ok_value.error_category_totals == {
+            ErrorCategory.DOMAIN.value: distinct_codes,
+        }
+
     async def test_a_live_and_a_history_row_sum_before_the_rank(
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:

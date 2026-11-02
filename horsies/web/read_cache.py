@@ -28,6 +28,7 @@ from horsies.monitoring import (
     Facets,
     MonitoringResult,
     StatusCount,
+    TaskGroupBy,
 )
 
 READ_TTL_SECONDS: Final = 10.0
@@ -73,7 +74,7 @@ class TaskBreakdownScope:
 
     since: datetime | None
     until: datetime | None
-    group_by: str
+    group_by: TaskGroupBy
     statuses: tuple[TaskStatus, ...]
     task_names: tuple[str, ...]
     queues: tuple[str, ...]
@@ -130,7 +131,8 @@ class ReadCache[Scope: Hashable, Value]:
             pending = asyncio.create_task(self._load(scope, load))
             self._loads[scope] = pending
         # A cancelled caller leaves the shared load running for the others.
-        return await asyncio.shield(pending)
+        result = await asyncio.shield(pending)
+        return Ok(copy.deepcopy(result.ok_value)) if is_ok(result) else result
 
     async def _load(
         self,
@@ -140,7 +142,7 @@ class ReadCache[Scope: Hashable, Value]:
         try:
             result = await load()
             if is_ok(result):
-                self._store(scope, copy.deepcopy(result.ok_value))
+                self._store(scope, result.ok_value)
             return result
         finally:
             del self._loads[scope]

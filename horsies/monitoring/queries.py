@@ -728,19 +728,32 @@ def facets_statement(
 
     One ``GROUPING SETS`` per side counts all four columns in one pass, and
     the sides sum per facet. The rank runs here, after the sum, so that ties
-    follow the database collation. The three dropdown facets are capped here.
-    The error code facet keeps every code in rank order: the category totals
-    need all of them, and the caller filters and caps that list.
+    follow the database collation.
+
+    An error code is a free string, so a window can hold as many codes as rows.
+    The category of each code and the exact total of each category come from
+    here, and only the top codes of each category are returned, so the result
+    stays bounded and any category selection can fill its list from it.
 
     Returns:
         The SQL and its parameters. Rows hold ``facet``, ``facet_value`` and
-        ``facet_count``, ordered by ``facet`` and rank.
+        ``facet_count``, ordered by ``facet`` and overall rank. A row of the
+        ``error_code`` facet also holds ``category`` and ``category_total``.
     """
     parameters: dict[str, object] = {
         'window_lower': window.lower,
         'window_upper': window.upper,
         'facet_limit': _FACET_VALUE_CAP,
+        'error_limit': _ERROR_FACET_CAP,
     }
+    category_arms: list[str] = []
+    for category, codes in _CATEGORY_TO_CODES.items():
+        parameter = f'category_{category.value.lower()}_codes'
+        parameters[parameter] = list(codes)
+        category_arms.append(
+            f"WHEN facet_value = ANY(CAST(:{parameter} AS text[])) "
+            f"THEN '{category.value}'"
+        )
     common: list[str] = []
     if statuses:
         common.append('status = ANY(CAST(:status_filter AS text[]))')
@@ -804,12 +817,29 @@ def facets_statement(
                    row_number() OVER (
                        PARTITION BY facet
                        ORDER BY facet_count DESC, facet_value
-                   ) AS facet_rank
+                   ) AS facet_rank,
+                   CASE WHEN facet = 'error_code' THEN
+                       CASE {' '.join(category_arms)}
+                            ELSE '{ErrorCategory.DOMAIN.value}'
+                       END
+                   END AS category
             FROM combined
+        ), scoped AS (
+            SELECT facet, facet_value, facet_count, facet_rank, category,
+                   row_number() OVER (
+                       PARTITION BY facet, category ORDER BY facet_rank
+                   ) AS category_rank,
+                   sum(facet_count) OVER (
+                       PARTITION BY facet, category
+                   ) AS category_total
+            FROM ranked
         )
-        SELECT facet, facet_value, facet_count
-        FROM ranked
-        WHERE facet = 'error_code' OR facet_rank <= :facet_limit
+        SELECT facet, facet_value, facet_count, category, category_total
+        FROM scoped
+        WHERE CASE facet
+                  WHEN 'error_code' THEN category_rank <= :error_limit
+                  ELSE facet_rank <= :facet_limit
+              END
         ORDER BY facet, facet_rank
     """
     return sql, parameters
@@ -947,22 +977,19 @@ async def task_facets(
         'worker': [],
         'task_name': [],
         'queue_name': [],
-        'error_code': [],
     }
-    for row in rows:
-        ranked[row.facet].append((str(row.facet_value), int(row.facet_count)))
-
-    selected = set(error_categories)
+    selected = {category.value for category in error_categories}
     category_totals: dict[str, int] = {}
     error_facets: list[ErrorFacet] = []
-    for value, count in ranked['error_code']:
-        # The value is non-empty here, so a code always has a family. A code
-        # outside the built-in families is a user-defined domain error.
-        category = categorize_error_code(value) or ErrorCategory.DOMAIN
-        category_totals[category.value] = category_totals.get(category.value, 0) + count
-        if (not selected or category in selected) and len(error_facets) < _ERROR_FACET_CAP:
+    for row in rows:
+        value, count = str(row.facet_value), int(row.facet_count)
+        if row.facet != 'error_code':
+            ranked[row.facet].append((value, count))
+            continue
+        category_totals[row.category] = int(row.category_total)
+        if (not selected or row.category in selected) and len(error_facets) < _ERROR_FACET_CAP:
             error_facets.append(
-                ErrorFacet(value=value, count=count, category=category.value),
+                ErrorFacet(value=value, count=count, category=row.category),
             )
 
     return Ok(

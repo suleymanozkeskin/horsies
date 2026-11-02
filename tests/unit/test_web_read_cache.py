@@ -226,6 +226,26 @@ async def test_each_read_has_its_own_cache() -> None:
     assert caches.facets is not caches.breakdown
 
 
+async def test_concurrent_callers_of_one_load_each_get_a_copy() -> None:
+    cache: ReadCache[str, Facets] = ReadCache(clock=FakeClock())
+    release = asyncio.Event()
+
+    async def load() -> MonitoringResult[Facets]:
+        await release.wait()
+        return Ok(_facets())
+
+    first = asyncio.create_task(cache.get('scope', load))
+    second = asyncio.create_task(cache.get('scope', load))
+    await asyncio.sleep(0)
+    release.set()
+    first_result, second_result = await asyncio.gather(first, second)
+
+    first_result.ok_value.workers.clear()
+
+    assert second_result.ok_value == _facets()
+    assert (await cache.get('scope', load)).ok_value == _facets()
+
+
 def test_a_facets_scope_holds_each_parameter_of_the_read() -> None:
     base = TaskFacetsScope(
         since=None, until=None, statuses=(), error_categories=(), retried_only=False,
