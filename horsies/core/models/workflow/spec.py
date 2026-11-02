@@ -23,6 +23,7 @@ from typing import (
 
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import (
+    decode_subworkflow_kwargs,
     encode_subworkflow_kwargs,
     resolve_build_with_hints,
     resolve_hints_and_sig,
@@ -174,10 +175,11 @@ def _wire_of_untyped_target(
     node: TaskNode[Any] | SubWorkflowNode[Any],
     report: ValidationReport,
 ) -> dict[str, Any] | None:
-    """Encode the kwargs of a `build_with` that declares no hints.
+    """Encode the kwargs of a `build_with` that declares no hints, and read them back.
 
     The encoder treats an opaque `**params` as `JsonValue`. It runs here because
-    strict input does not accept the frozen containers that a start would see.
+    strict input does not accept the frozen containers that a start would see. The
+    read runs here because it has a lower depth limit than the encoder.
 
     Returns:
         The wire form. None for a `TaskNode`, whose callable has no hints only in
@@ -186,7 +188,8 @@ def _wire_of_untyped_target(
     if not isinstance(node, SubWorkflowNode):
         return None
     try:
-        return encode_subworkflow_kwargs(node.workflow_def, node.kwargs)
+        wire = encode_subworkflow_kwargs(node.workflow_def, node.kwargs)
+        decode_subworkflow_kwargs(node.workflow_def, wire)
     except (StrictJsonError, ValueValidationError) as error:
         report.add(WorkflowValidationError(
             message='TaskNode/SubWorkflowNode kwarg value failed strict encode',
@@ -195,6 +198,7 @@ def _wire_of_untyped_target(
             help_text='declare the types of the parameters of build_with',
         ))
         return None
+    return wire
 
 
 def _build_with_type_hints(node: SubWorkflowNode[Any]) -> dict[str, Any]:

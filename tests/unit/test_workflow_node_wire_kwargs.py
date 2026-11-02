@@ -10,6 +10,7 @@ import pytest
 from pydantic import BaseModel
 
 from horsies import AppConfig, Horsies, JsonValue, PostgresConfig, TaskError, TaskResult
+from horsies.core.codec.json_value import MAX_TYPED_JSON_DEPTH
 from horsies.core.errors import ErrorCode, WorkflowValidationError
 from horsies.core.models.workflow import (
     SubWorkflowNode,
@@ -190,6 +191,22 @@ class TestBuildWithWithoutHints:
 
         with pytest.raises(WorkflowValidationError) as caught:
             app.workflow(name='r', tasks=[node], definition_key='d.r')
+
+        assert caught.value.code == ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+
+    def test_a_value_deeper_than_the_read_limit_is_refused_at_the_spec(self) -> None:
+        """The encoder allows this depth, and the read of a worker does not."""
+        deep: list[object] = []
+        for _ in range(MAX_TYPED_JSON_DEPTH + 50):
+            deep = [deep]
+        node = SubWorkflowNode(
+            workflow_def=_child('opaque_params_deep', _with_opaque_params),
+            kwargs={'values': deep},
+        )
+
+        with pytest.raises(WorkflowValidationError) as caught:
+            app = _app()
+            app.workflow(name='d', tasks=[node], definition_key='d.d')
 
         assert caught.value.code == ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
 
