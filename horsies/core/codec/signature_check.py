@@ -127,7 +127,7 @@ def check_task_signature(
         # Strict-serde rejects positional args at every producer; only
         # kwargs reach the wire. A positional-only param (`def f(x, /)`)
         # would register cleanly but could never be invoked through the
-        # queue, since `encode_kwargs` binds against named parameters
+        # queue, since `encode_kwargs_read_back` binds against named parameters
         # only. `**kwargs` defeats producer-side signature binding for
         # the same reason — every wire kwarg name must correspond to a
         # declared parameter, with no catch-all.

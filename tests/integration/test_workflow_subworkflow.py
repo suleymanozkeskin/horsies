@@ -15,7 +15,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.json_io import SerializationError, dumps_json, loads_json
-from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.typed import (
     decode_task_result,
     encode_task_error,
@@ -1257,21 +1256,20 @@ class TestSubworkflowIntegration:
         finally:
             unregister_workflow_definition(LaterNodePrepFailureChildWorkflow.definition_key)
 
-    async def test_nested_subworkflow_kwargs_encode_refusal_raises_and_rolls_back(
+    async def test_nested_subworkflow_kwargs_write_failure_raises_and_rolls_back(
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A SubWorkflowNode-branch kwargs encode refusal raises; nothing is kept.
+        """A SubWorkflowNode-branch kwargs write failure raises; nothing is kept.
 
         The SubWorkflowNode branch of the prepare loop in
-        `enqueue_subworkflow_task` encodes the kwargs of each nested
-        SubWorkflowNode. Spec construction in `build_with()` already encoded
-        and decoded them, so a refusal there is a defect: the child start
-        raises `SerializationError` before it writes a row, and the caller's
-        transaction rolls back. The test clears the wire form of the nested node
-        and patches the engine's `encode_subworkflow_kwargs` to refuse, because
-        spec construction already refuses every value that this encode refuses.
+        `enqueue_subworkflow_task` writes the kwargs of each nested
+        SubWorkflowNode. Spec construction in `build_with()` already proved
+        them, so a failure there is a defect: the child start raises
+        `SerializationError` before it writes a row, and the caller's
+        transaction rolls back. The test puts an object in the wire form of the
+        nested node, because spec construction refuses every value that cannot
+        be written.
 
         After the rollback, no child workflow row exists, the parent node is
         not FAILED, and the completion of the upstream node is not kept.
@@ -1324,22 +1322,10 @@ class TestSubworkflowIntegration:
                     on_error=OnError.FAIL,
                     definition_key=cls.definition_key,
                 )
-                object.__setattr__(spec.tasks[1], 'wire_kwargs', None)
+                object.__setattr__(spec.tasks[1], 'wire_kwargs', {'value': object()})
                 return spec
 
         register_workflow_definition(NestedSubGrandchildWorkflow)
-
-        import horsies.core.workflows.engine as engine_mod
-
-        def _refuse_subworkflow_kwargs(
-            workflow_def: Any, kwargs: dict[str, Any],
-        ) -> dict[str, Any]:
-            _ = workflow_def, kwargs
-            raise StrictJsonError('forced encode refusal')
-
-        monkeypatch.setattr(
-            engine_mod, 'encode_subworkflow_kwargs', _refuse_subworkflow_kwargs,
-        )
 
         node_a: TaskNode[int] = TaskNode(fn=parent_task, kwargs={'value': 1})
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
@@ -1358,7 +1344,7 @@ class TestSubworkflowIntegration:
         try:
             with pytest.raises(
                 SerializationError,
-                match='Failed to encode kwargs for child sub .*forced encode refusal',
+                match='Failed to serialize kwargs for child sub',
             ):
                 await self._complete_task(
                     session, broker, handle.workflow_id, 0, TaskResult(ok=1),
@@ -1983,7 +1969,6 @@ class TestSubworkflowRecovery:
     ) -> None:
         """Recovery handles READY subworkflow that was never started."""
         session, broker, app = setup
-        from horsies.core.workflows.recovery import recover_stuck_workflows
 
         parent_task = make_simple_task(app, 'recovery_parent_task')
 

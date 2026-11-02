@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import dataclasses
 from typing import Any
-from unittest.mock import patch
 
 import pytest
 from pydantic import BaseModel
@@ -16,10 +15,9 @@ from horsies.core.models.workflow import (
     SubWorkflowNode,
     TaskNode,
     WorkflowDefinition,
+    WorkflowSpec,
 )
-from horsies.core.workflows.lifecycle import (
-    _encode_node_kwargs_or_raise,  # pyright: ignore[reportPrivateUsage]
-)
+from horsies.core.models.workflow.nodes import stored_kwargs
 
 
 class _Item(BaseModel):
@@ -104,7 +102,7 @@ class TestWireForm:
         node = TaskNode(fn=_task(app, label, annotation), kwargs={'value': value})
         spec = app.workflow(name=label, tasks=[node], definition_key=f'd.{label}')
 
-        assert _encode_node_kwargs_or_raise(spec.tasks[0]) == {'value': wire}
+        assert stored_kwargs(spec.tasks[0]) == {'value': wire}
 
     @pytest.mark.parametrize(
         ('label', 'annotation', 'value', 'wire'),
@@ -123,18 +121,6 @@ class TestWireForm:
 
         assert spec.tasks[0].wire_kwargs == {'value': wire}
 
-    def test_a_start_does_not_encode_again(self) -> None:
-        app = _app()
-        task = _task(app, 'no_second_encode', list[int])
-        node = TaskNode(fn=task, kwargs={'value': [1]})
-        spec = app.workflow(name='n', tasks=[node], definition_key='d.n')
-
-        with patch(
-            'horsies.core.workflows.lifecycle.encode_kwargs',
-            side_effect=AssertionError('a start must not encode'),
-        ):
-            assert _encode_node_kwargs_or_raise(spec.tasks[0]) == {'value': [1]}
-
     def test_a_node_of_an_earlier_spec_keeps_its_wire_form(self) -> None:
         app = _app()
         node = TaskNode(fn=_task(app, 'reused', list[int]), kwargs={'value': [1, 2]})
@@ -146,7 +132,7 @@ class TestWireForm:
         )
 
         assert second.tasks[0].kwargs['value'] == (1, 2)
-        assert _encode_node_kwargs_or_raise(second.tasks[0]) == {'value': [1, 2]}
+        assert stored_kwargs(second.tasks[0]) == {'value': [1, 2]}
 
     def test_a_later_change_to_the_source_does_not_reach_the_wire(self) -> None:
         app = _app()
@@ -156,7 +142,27 @@ class TestWireForm:
 
         values.append(3)
 
-        assert _encode_node_kwargs_or_raise(spec.tasks[0]) == {'value': [1, 2]}
+        assert stored_kwargs(spec.tasks[0]) == {'value': [1, 2]}
+
+    def test_a_node_that_no_spec_took_is_a_defect(self) -> None:
+        app = _app()
+        node = TaskNode(fn=_task(app, 'no_spec', list[int]), kwargs={'value': [1]})
+
+        with pytest.raises(AssertionError, match='did not pass through a WorkflowSpec'):
+            stored_kwargs(node)
+
+    def test_a_task_node_with_no_hints_keeps_its_values(self) -> None:
+        """Only test scaffolding has such a node."""
+        def scaffold(value):  # type: ignore[no-untyped-def]  # noqa: ANN001, ANN202
+            return value
+
+        values = [1, 2]
+        node = TaskNode(fn=scaffold, kwargs={'value': values})
+        spec = WorkflowSpec(name='s', tasks=[node])
+
+        values.append(3)
+
+        assert stored_kwargs(spec.tasks[0]) == {'value': [1, 2]}
 
     def test_the_wire_form_stays_out_of_the_repr_and_the_compare(self) -> None:
         app = _app()

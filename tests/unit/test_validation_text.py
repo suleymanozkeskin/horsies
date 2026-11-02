@@ -62,9 +62,6 @@ from horsies.core.models.workflow import WorkflowDefinition, WorkflowSpec
 from horsies.core.task_decorator import create_task_wrapper
 from horsies.core.types.result import is_err
 from horsies.core.worker.health import HealthMixin
-from horsies.core.workflows.lifecycle import (
-    _encode_node_kwargs_or_raise,  # pyright: ignore[reportPrivateUsage]
-)
 
 pytestmark = pytest.mark.unit
 
@@ -480,22 +477,6 @@ class TestSendOptions:
         assert '2031' not in err.message
         assert '2031' not in str(err.exception)
         assert 'good_until must be timezone-aware' in err.message
-
-
-class TestWorkflowNodeKwargs:
-    def test_a_refused_node_kwarg_holds_no_input(self) -> None:
-        def node_fn(*, count: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=count)
-
-        node = SimpleNamespace(
-            fn=node_fn, kwargs={'count': MARKER}, name='node-a', wire_kwargs=None,
-        )
-
-        with pytest.raises(SerializationError) as caught:
-            _encode_node_kwargs_or_raise(node)
-
-        assert MARKER not in str(caught.value)
-        assert MARKER not in ''.join(traceback.format_exception(caught.value))
 
 
 class _TypedSubworkflow(WorkflowDefinition[int]):

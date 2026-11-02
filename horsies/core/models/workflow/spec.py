@@ -173,20 +173,25 @@ def _kwargs_target_hints(
 
 def _wire_of_untyped_target(
     node: TaskNode[Any] | SubWorkflowNode[Any],
+    copied: dict[str, Any],
     report: ValidationReport,
-) -> dict[str, Any] | None:
-    """Encode the kwargs of a `build_with` that declares no hints, and read them back.
+) -> dict[str, Any]:
+    """The wire form of a node whose target declares no hints.
 
-    The encoder treats an opaque `**params` as `JsonValue`. It runs here because
-    strict input does not accept the frozen containers that a start would see. The
-    read runs here because it has a lower depth limit than the encoder.
+    A `build_with` is encoded and read back here. The encoder treats an opaque
+    `**params` as `JsonValue`. It runs before the freeze, because strict input does
+    not accept frozen containers. The read has a lower depth limit than the encoder.
 
-    Returns:
-        The wire form. None for a `TaskNode`, whose callable has no hints only in
-        test scaffolding, and for a refusal, which goes in `report`.
+    A `TaskNode` has no hints only in test scaffolding: there is no type to encode
+    against, so its form is the copy of its values.
+
+    Args:
+        node: The node, before the freeze.
+        copied: A copy of its kwargs.
+        report: Takes a refusal. The spec then raises, and the form is not used.
     """
     if not isinstance(node, SubWorkflowNode):
-        return None
+        return copied
     try:
         wire = encode_subworkflow_kwargs(node.workflow_def, node.kwargs)
         _ = decode_subworkflow_kwargs(node.workflow_def, wire)
@@ -197,7 +202,7 @@ def _wire_of_untyped_target(
             notes=[f"node '{node.name}' kwargs", f'codec error: {error}'],
             help_text='declare the types of the parameters of build_with',
         ))
-        return None
+        return copied
     return wire
 
 
@@ -548,7 +553,7 @@ class WorkflowSpec(Generic[OutT]):
         semantics/codes.
         """
         report = ValidationReport('workflow')
-        snapshotted_by_index: list[tuple[int, dict[str, Any], dict[str, Any] | None]] = []
+        snapshotted_by_index: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
 
         for i, node in enumerate(self.tasks):
             if node.wire_kwargs is not None:
@@ -565,13 +570,14 @@ class WorkflowSpec(Generic[OutT]):
                 # since there's no type info to bind a strict round-trip
                 # against — preserves the legacy snapshot's caller/spec
                 # detachment guarantee.
+                copied = {
+                    key: copy_module.deepcopy(value)
+                    for key, value in node.kwargs.items()
+                }
                 snapshotted_by_index.append((
                     i,
-                    {
-                        key: copy_module.deepcopy(value)
-                        for key, value in node.kwargs.items()
-                    },
-                    _wire_of_untyped_target(node, report),
+                    copied,
+                    _wire_of_untyped_target(node, copied, report),
                 ))
                 continue
             hints, sig = resolved

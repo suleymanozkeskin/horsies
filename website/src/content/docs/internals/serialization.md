@@ -23,7 +23,7 @@ Two consequences:
 | `horsies.core.codec.error_payload` | `flatten_exception`; `serialize_error_payload` for library-emitted error payloads |
 | `horsies.core.codec.task_options` | `serialize_task_options` — `TaskOptions` → persisted JSON |
 | `horsies.core.codec.signature_check` | `validate_task_signature` — rejects banned types at decorator time |
-| `horsies.core.codec.kwargs` | `encode_kwargs(task_fn, kwargs)` / `decode_kwargs(...)` for producer/consumer kwarg binding |
+| `horsies.core.codec.kwargs` | `encode_kwargs_read_back(task_fn, kwargs)` / `decode_kwargs(...)` for producer/consumer kwarg binding |
 | `horsies.core.codec.typed` | `encode_value` / `decode_value` / `encode_task_result` / `decode_task_result` / `decode_task_error` / `validate_task_result_envelope` |
 
 Re-exports: `from horsies import JsonValue, StrictJsonError`.

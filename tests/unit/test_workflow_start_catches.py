@@ -234,7 +234,7 @@ class TestTransactionSerializationError:
         defect = SerializationError(DEFECT_MARKER)
 
         with patch(
-            'horsies.core.workflows.lifecycle._encode_node_kwargs_or_raise',
+            'horsies.core.workflows.lifecycle.stored_kwargs',
             side_effect=defect,
         ):
             with pytest.raises(SerializationError) as exc_info:

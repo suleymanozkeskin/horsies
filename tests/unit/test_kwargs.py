@@ -21,7 +21,7 @@ import pytest
 from pydantic import BaseModel
 
 from horsies.core.codec.json_value import JsonValue, StrictJsonError
-from horsies.core.codec.kwargs import decode_kwargs, encode_kwargs
+from horsies.core.codec.kwargs import decode_kwargs, encode_kwargs_read_back
 from horsies.core.codec.typed import Json
 from horsies.core.models.tasks import TaskError, TaskResult
 
@@ -85,26 +85,26 @@ def _ingest_smuggle(
 
 class TestEncodeStrictBinding:
     def test_known_kwarg_encodes(self) -> None:
-        encoded = encode_kwargs(_task_a, {'value': 42})
+        encoded = encode_kwargs_read_back(_task_a, {'value': 42})
         assert encoded == {'value': 42}
 
     def test_unknown_kwarg_rejected(self) -> None:
         with pytest.raises(StrictJsonError, match="unknown kwarg 'valuee'"):
-            encode_kwargs(_task_a, {'value': 1, 'valuee': 2})
+            encode_kwargs_read_back(_task_a, {'value': 1, 'valuee': 2})
 
     def test_workflow_ctx_user_supplied_rejected(self) -> None:
         with pytest.raises(
             StrictJsonError,
             match="kwarg 'workflow_ctx' is engine-injected",
         ):
-            encode_kwargs(_task_with_ctx, {'value': 1, 'workflow_ctx': 'x'})
+            encode_kwargs_read_back(_task_with_ctx, {'value': 1, 'workflow_ctx': 'x'})
 
     def test_workflow_meta_user_supplied_rejected(self) -> None:
         with pytest.raises(
             StrictJsonError,
             match="kwarg 'workflow_meta' is engine-injected",
         ):
-            encode_kwargs(_task_a, {'value': 1, 'workflow_meta': 'x'})
+            encode_kwargs_read_back(_task_a, {'value': 1, 'workflow_meta': 'x'})
 
     def test_taskresult_typed_kwarg_user_supplied_rejected(self) -> None:
         # TaskResult-typed kwargs come from the engine's args_from path,
@@ -115,7 +115,7 @@ class TestEncodeStrictBinding:
             StrictJsonError,
             match="kwarg 'upstream_result' is TaskResult-typed",
         ):
-            encode_kwargs(_task_with_upstream, {'upstream_result': bogus})
+            encode_kwargs_read_back(_task_with_upstream, {'upstream_result': bogus})
 
 
 class TestDecodeStrictBinding:
@@ -206,7 +206,7 @@ class TestNoHintsFallback:
         def f(value):  # type: ignore[no-untyped-def]
             return value
 
-        encoded = encode_kwargs(f, {'value': 42, 'anything': 'goes'})
+        encoded = encode_kwargs_read_back(f, {'value': 42, 'anything': 'goes'})
         assert encoded == {'value': 42, 'anything': 'goes'}
 
     def test_lambda_decode_pass_through(self) -> None:
@@ -221,7 +221,7 @@ class TestWireRoundTripNestedJsonValue:
     """Integration-level smoke for the strict-serde wire contract.
 
     The broker is opaque storage — it round-trips bytes. The actual
-    serde surface is `encode_kwargs → dumps_json → loads_json →
+    serde surface is `encode_kwargs_read_back → dumps_json → loads_json →
     decode_kwargs`. Exercise that pipeline against a Pydantic model
     carrying nested `dict[str, JsonValue]` (the §3 raw-JSON-inside-
     Pydantic-field shape that motivated the recursive JsonValue
@@ -255,7 +255,7 @@ class TestWireRoundTripNestedJsonValue:
         )
 
         # Producer pipeline.
-        encoded = encode_kwargs(_ingest_round_trip, {'payload': payload})
+        encoded = encode_kwargs_read_back(_ingest_round_trip, {'payload': payload})
         dumped_r = dumps_json(encoded)
         assert is_ok(dumped_r)
         wire = dumped_r.ok_value
@@ -290,7 +290,7 @@ class TestWireRoundTripNestedJsonValue:
         before the value reaches the broker."""
         bad = _SmuggleEnvelope(metadata={'outer': {'__h_evil__': 1}})
         with pytest.raises(StrictJsonError, match='reserved key'):
-            encode_kwargs(_ingest_smuggle, {'payload': bad})
+            encode_kwargs_read_back(_ingest_smuggle, {'payload': bad})
 
 
 class TestLegacyHorsiesPrefixSmuggleClosed:
@@ -298,14 +298,14 @@ class TestLegacyHorsiesPrefixSmuggleClosed:
     value carrying `__h_taskresult_envelope__` would reach the worker
     args_from handler and route to legacy class-identity rehydration.
     `encode_value` rejects the legacy prefix at user positions; this
-    test confirms encode_kwargs propagates that rejection."""
+    test confirms encode_kwargs_read_back propagates that rejection."""
 
     def test_legacy_envelope_in_dict_kwarg_rejected(self) -> None:
         def task(payload: dict[str, object]) -> TaskResult[int, TaskError]:  # pyright: ignore[reportUnusedParameter]
             ...
 
         with pytest.raises(StrictJsonError, match='reserved key'):
-            encode_kwargs(
+            encode_kwargs_read_back(
                 task,
                 {'payload': {'__h_taskresult_envelope__': True, 'data': 'evil'}},
             )

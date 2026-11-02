@@ -59,7 +59,6 @@ __all__ = [
     'decode_kwargs',
     'declared_taskresult_ok_type',
     'decode_subworkflow_kwargs',
-    'encode_kwargs',
     'encode_kwargs_read_back',
     'encode_subworkflow_kwargs',
     'fill_build_with_defaults',
@@ -243,11 +242,13 @@ def resolve_producer_kwarg_binding(
     return KwargBinding(kind='encode', annotation=annot)
 
 
-def encode_kwargs(
+def encode_kwargs_read_back(
     task_fn: Callable[..., Any],
     kwargs: Mapping[str, Any],
 ) -> dict[str, Json]:
-    """Encode user kwargs against the receiver's declared types.
+    """Encode kwargs that enter the system, and prove each one reads back.
+
+    For `.send()` and schedules. A workflow stores the form that its spec proved.
 
     Binds strictly: every key must match a declared parameter name on
     `task_fn`. Engine-injected names (`workflow_ctx` / `workflow_meta`)
@@ -267,34 +268,8 @@ def encode_kwargs(
             engine-injected name, user-supplied TaskResult-typed kwarg,
             or kwarg without a type annotation.
         ValueValidationError: when a value doesn't satisfy its
-            declared type.
+            declared type, or when the worker could not read it back.
     """
-    return _encode_each(task_fn, kwargs, encode_value)
-
-
-def encode_kwargs_read_back(
-    task_fn: Callable[..., Any],
-    kwargs: Mapping[str, Any],
-) -> dict[str, Json]:
-    """Encode kwargs that enter the system, and prove each one reads back.
-
-    For `.send()` and schedules. A workflow calls `encode_kwargs` at start, with
-    values that its spec already proved.
-
-    Raises:
-        StrictJsonError: as `encode_kwargs`.
-        ValueValidationError: as `encode_kwargs`, or when the worker could not read
-            a value back.
-    """
-    return _encode_each(task_fn, kwargs, encode_or_raise_on_refusal)
-
-
-def _encode_each(
-    task_fn: Callable[..., Any],
-    kwargs: Mapping[str, Any],
-    encode: Callable[..., Json],
-) -> dict[str, Json]:
-    """The binding loop of both entry points."""
     resolved = resolve_hints_and_sig(task_fn)
     if resolved is None:
         # Mock / unresolvable forward refs — production tasks pass
@@ -315,9 +290,11 @@ def _encode_each(
         binding = resolve_producer_kwarg_binding(task_fn, key, hints, sig)
         if binding.kind == 'error':
             # Single source of truth via the shared resolver — keeps
-            # encode_kwargs and snapshot validation from drifting.
+            # this function and snapshot validation from drifting.
             raise StrictJsonError(binding.error_message or '')
-        encoded[key] = encode(value, binding.annotation, location=(key,))
+        encoded[key] = encode_or_raise_on_refusal(
+            value, binding.annotation, location=(key,),
+        )
     return encoded
 
 

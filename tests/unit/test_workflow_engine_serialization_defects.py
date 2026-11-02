@@ -30,7 +30,7 @@ from pydantic import BaseModel, SecretStr, field_validator
 from horsies.core.app import Horsies
 from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.codec.json_io import SerializationError
-from horsies.core.codec.json_value import JsonValue, StrictJsonError
+from horsies.core.codec.json_value import JsonValue
 from horsies.core.errors import ErrorCode, WorkflowValidationError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
@@ -350,7 +350,7 @@ class TestTaskFailureErrorPayload:
 def _child_task_node() -> MagicMock:
     """A child TaskNode with no dependencies and no task options."""
     child_task = MagicMock()
-    child_task.wire_kwargs = None
+    child_task.wire_kwargs = {'value': 1}
     child_task.name = 'child_task'
     child_task.args = ()
     child_task.kwargs = {'value': 1}
@@ -374,7 +374,7 @@ def _child_task_node() -> MagicMock:
 def _child_sub_node() -> MagicMock:
     """A child SubWorkflowNode with no dependencies."""
     child_sub = MagicMock(spec=SubWorkflowNode)
-    child_sub.wire_kwargs = None
+    child_sub.wire_kwargs = {'value': 1}
     child_sub.name = 'child_sub'
     child_sub.args = ()
     child_sub.kwargs = {'value': 1}
@@ -440,44 +440,34 @@ def _parent_node_row() -> SimpleNamespace:
     )
 
 
-class TestChildStartKwargsEncode:
+class TestChildStartKwargsWrite:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ('make_node', 'encoder', 'subject'),
+        ('make_node', 'subject'),
         [
-            (
-                _child_task_node,
-                'horsies.core.workflows.engine.encode_kwargs',
-                'child task child_task',
-            ),
-            (
-                _child_sub_node,
-                'horsies.core.workflows.engine.encode_subworkflow_kwargs',
-                'child sub child_sub',
-            ),
+            (_child_task_node, 'child task child_task'),
+            (_child_sub_node, 'child sub child_sub'),
         ],
         ids=['child-task', 'child-sub'],
     )
-    async def test_an_encode_refusal_raises_before_any_insert(
+    async def test_a_value_that_cannot_be_written_raises_before_any_insert(
         self,
         make_node: Callable[[], MagicMock],
-        encoder: str,
         subject: str,
     ) -> None:
         recorder = _RecordingSession(
             {ENQUEUE_SUBWORKFLOW_TASK_SQL: _parent_node_row()},
         )
-        refusal = StrictJsonError('reserved key __h_x__')
+        node = make_node()
+        node.wire_kwargs = {'value': object()}
         fail_mock = AsyncMock()
 
-        with patch(encoder, side_effect=refusal):
-            with pytest.raises(SerializationError) as raised:
-                await _start_child(make_node(), recorder, fail_mock)
+        with pytest.raises(
+            SerializationError,
+            match=f'Failed to serialize kwargs for {subject}',
+        ):
+            await _start_child(node, recorder, fail_mock)
 
-        assert str(raised.value) == (
-            f'Failed to encode kwargs for {subject}: reserved key __h_x__'
-        )
-        assert raised.value.__cause__ is refusal
         assert INSERT_CHILD_WORKFLOW_SQL not in recorder.executed
         assert INSERT_WORKFLOW_TASKS_BULK_SQL not in recorder.executed
         fail_mock.assert_not_awaited()
@@ -487,10 +477,10 @@ class TestChildStartKwargsEncode:
         'make_node', [_child_task_node, _child_sub_node],
         ids=['child-task', 'child-sub'],
     )
-    async def test_kwargs_that_encode_reach_the_insert(
+    async def test_the_wire_form_reaches_the_insert(
         self, make_node: Callable[[], MagicMock],
     ) -> None:
-        # Control for the test above: the same harness without a refusal.
+        # Control for the test above: the same harness with a value that writes.
         # A SubWorkflowNode root starts its own child after the INSERT; the
         # second ENQUEUE_SUBWORKFLOW_TASK_SQL returns no row, so it stops.
         recorder = _RecordingSession(
@@ -498,14 +488,7 @@ class TestChildStartKwargsEncode:
         )
         fail_mock = AsyncMock()
 
-        with patch(
-            'horsies.core.workflows.engine.encode_kwargs',
-            return_value={'value': 1},
-        ), patch(
-            'horsies.core.workflows.engine.encode_subworkflow_kwargs',
-            return_value={'value': 1},
-        ):
-            await _start_child(make_node(), recorder, fail_mock)
+        await _start_child(make_node(), recorder, fail_mock)
 
         assert INSERT_CHILD_WORKFLOW_SQL in recorder.executed
         assert INSERT_WORKFLOW_TASKS_BULK_SQL in recorder.executed

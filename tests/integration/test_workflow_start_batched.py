@@ -173,17 +173,17 @@ class TestBatchedStartShape:
         from horsies.core.workflows import lifecycle as lifecycle_mod
 
         spec = _fanout_spec(app, 2)
-        real_encode = lifecycle_mod._encode_node_kwargs_or_raise
+        real_stored_kwargs = lifecycle_mod.stored_kwargs
         calls = {'n': 0}
 
         def _flaky_encode(task: Any) -> Any:
             calls['n'] += 1
             if calls['n'] == 2:
                 raise SerializationError('forced encode failure (node 2)')
-            return real_encode(task)
+            return real_stored_kwargs(task)
 
         monkeypatch.setattr(
-            lifecycle_mod, '_encode_node_kwargs_or_raise', _flaky_encode,
+            lifecycle_mod, 'stored_kwargs', _flaky_encode,
         )
 
         with pytest.raises(SerializationError, match='node 2'):
