@@ -48,6 +48,7 @@ from horsies.core.errors import (
     SourceLocation,
     ValidationReport,
     raise_collected,
+    WorkflowValidationError,
 )
 import inspect
 import os
@@ -613,7 +614,37 @@ class Horsies:
                         workflow_def._require_definition_key()
                     except HorsiesError as exc:
                         errors.append(exc)
+                    errors.extend(self._check_subworkflow_targets(workflow_def))
 
+        return errors
+
+    @staticmethod
+    def _check_subworkflow_targets(workflow_def: type[Any]) -> list[HorsiesError]:
+        """Hold each `SubWorkflowNode` of a definition to the task signature rules.
+
+        A definition builds its spec when it starts, so this runs the check at
+        boot, before a run can reach it.
+        """
+        from horsies.core.codec.signature_check import (
+            SignatureValidationError,
+            check_build_with_signature,
+        )
+        from horsies.core.models.workflow.nodes import SubWorkflowNode
+
+        errors: list[HorsiesError] = []
+        for name, value in vars(workflow_def).items():
+            if not isinstance(value, SubWorkflowNode):
+                continue
+            try:
+                check_build_with_signature(value.workflow_def, workflow_name=name)
+            except SignatureValidationError as refusal:
+                errors.append(
+                    WorkflowValidationError(
+                        message='subworkflow build_with cannot cross the wire',
+                        code=ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
+                        notes=[f"node '{name}'", str(refusal)],
+                    ),
+                )
         return errors
 
     def _check_runtime_policy_safety(self) -> list[HorsiesError]:

@@ -21,11 +21,13 @@ import pathlib
 import types
 import uuid
 from typing import (
+    Annotated,
     Any,
     Callable,
     Literal,
     TypeVar,
     Union,
+    assert_never,
     cast,
     get_args,
     get_origin,
@@ -37,22 +39,31 @@ from pydantic import BaseModel
 from pydantic.fields import FieldInfo
 
 from horsies.core.codec.json_value import JsonValue
+from horsies.core.codec.kwargs import is_engine_filled, resolve_build_with_hints
+from horsies.core.codec.wire_shape import (
+    parameter_default_refusal,
+    shape_refusals,
+)
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.workflow.context import (
     SubWorkflowSummary,
     WorkflowContext,
     WorkflowMeta,
 )
+from horsies.core.types.result import Err, Ok
 
 
 __all__ = [
     'INTERNAL_CODEC_TYPES',
     'SignatureValidationError',
+    'check_build_with_signature',
     'check_task_signature',
 ]
 
 
 _DOCS_URL = 'https://suleymanozkeskin.github.io/horsies/internals/serialization/'
+
+_SCHEMA_HOOK = '__get_pydantic_core_schema__'
 
 INTERNAL_CODEC_TYPES: frozenset[type] = frozenset({
     TaskError,
@@ -177,7 +188,7 @@ def check_task_signature(
             ))
 
         try:
-            _classify(annot, json_value_allowed_position=True)
+            _check_parameter(param_name, annot, param.default)
         except _RejectedError as err:
             raise SignatureValidationError(_format_error(
                 task_name=task_name,
@@ -193,6 +204,161 @@ def check_task_signature(
         # `create_task_wrapper`) covers this.
         return
     _validate_return_annotation(return_hint, task_name=task_name)
+
+
+def check_build_with_signature(workflow_def: Any, *, workflow_name: str) -> None:
+    """Hold the `build_with` of a `SubWorkflowNode` target to the task rules.
+
+    The kwargs of a `SubWorkflowNode` are stored and read back, so they cross the
+    wire like task kwargs. A top-level `build_with` crosses no wire, so a
+    non-JSON parameter is valid there and this does not run on it.
+
+    It checks types. `cls` and `app` are supplied by the engine, `*args` and
+    `**params` hold JSON-native values, and a parameter may be positional or
+    keyword, because the engine binds it by keyword.
+
+    Args:
+        workflow_def: The child `WorkflowDefinition` class.
+        workflow_name: The name for the refusal text.
+
+    Raises:
+        SignatureValidationError: a parameter uses a banned type, or the hints do
+            not resolve.
+    """
+    match resolve_build_with_hints(workflow_def):
+        case Err(err_value=cause):
+            raise SignatureValidationError(_format_error(
+                task_name=workflow_name,
+                position='build_with signature',
+                banned='a name that does not resolve',
+                reason=f'its hints do not resolve, so no kwarg can be checked: {cause}',
+                fix='import the name at run time, not under TYPE_CHECKING',
+                subject='subworkflow',
+            ))
+        case Ok(ok_value=(hints, sig)):
+            # `WorkflowDefinition` always calls the function as
+            # `original_fn(klass, app, ...)`, so the first two parameters are
+            # the engine's, and their names are free.
+            for name in list(sig.parameters)[2:]:
+                parameter = sig.parameters[name]
+                if parameter.kind in (
+                    inspect.Parameter.VAR_POSITIONAL,
+                    inspect.Parameter.VAR_KEYWORD,
+                ):
+                    continue
+                annot = hints.get(name)
+                if annot is None:
+                    continue
+                try:
+                    _check_parameter(name, annot, parameter.default)
+                except _RejectedError as err:
+                    raise SignatureValidationError(_format_error(
+                        task_name=workflow_name,
+                        position=f"build_with parameter '{name}'",
+                        banned=err.rejection.banned,
+                        reason=err.rejection.reason,
+                        fix=err.rejection.fix,
+                        subject='subworkflow',
+                    )) from None
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _check_parameter(name: str, annot: object, default: object) -> None:
+    """Apply the allow-list, the wire shape and the default rule to one parameter."""
+    slot = _taskresult_slot(annot)
+    if slot is not None:
+        _check_taskresult_args(slot)
+        ok_type = get_args(slot)[0]
+        _classify(ok_type, json_value_allowed_position=True)
+        _reject_wire_shape(ok_type)
+        if default is not inspect.Parameter.empty and default is not None:
+            raise _RejectedError(_Rejection(
+                banned=f'default of type {type(default).__name__}',
+                reason='only the engine fills this parameter, so its default must be None',
+                fix='remove the default, or write `= None`',
+            ))
+        return
+    _classify(annot, json_value_allowed_position=True)
+    if is_engine_filled(name, annot):
+        return
+    _reject_wire_shape(annot)
+    if default is inspect.Parameter.empty:
+        return
+    refusal = parameter_default_refusal(annot, default)
+    if refusal is not None:
+        raise _RejectedError(_Rejection(
+            banned=refusal.subject,
+            reason=refusal.reason,
+            fix=refusal.fix,
+        ))
+
+
+def _taskresult_slot(annot: object) -> object | None:
+    """Return the `TaskResult[T, E]` of an `args_from` slot, or None.
+
+    A slot is `TaskResult[T, E]` or `TaskResult[T, E] | None`, also in `Annotated`.
+    Pydantic has no schema for `TaskResult`, so it fits nowhere else.
+    """
+    if get_origin(annot) is Annotated:
+        annot = get_args(annot)[0]
+    if get_origin(annot) is TaskResult:
+        return annot
+    if get_origin(annot) is Union or get_origin(annot) is types.UnionType:
+        members = [item for item in get_args(annot) if item is not type(None)]
+        if len(members) == 1 and get_origin(members[0]) is TaskResult:
+            return cast(object, members[0])
+    return None
+
+
+def _check_taskresult_args(slot: object) -> None:
+    args = get_args(slot)
+    if len(args) != 2:
+        raise _RejectedError(_Rejection(
+            banned=repr(slot),
+            reason='TaskResult must have exactly 2 type parameters',
+            fix='use TaskResult[YourType, TaskError]',
+        ))
+    if args[1] is not TaskError:
+        raise _RejectedError(_Rejection(
+            banned=f'TaskResult[..., {args[1]!r}]',
+            reason=f'TaskResult error parameter must be TaskError, got {args[1]!r}',
+            fix='use TaskResult[YourType, TaskError]',
+        ))
+
+
+def _reject_wire_shape(annot: object) -> None:
+    """Raise on the first refusal of the definition check."""
+    refusals = shape_refusals(annot, internal_types=INTERNAL_CODEC_TYPES)
+    if refusals:
+        first = refusals[0]
+        raise _RejectedError(_Rejection(
+            banned=first.subject,
+            reason=first.reason,
+            fix=first.fix,
+        ))
+
+
+def _reject_schema_hook(item: object) -> None:
+    """Refuse an object that writes its own core schema.
+
+    A hook replaces the node of the type, so no schema rule can see what it does:
+    it could accept a str as an int. This reads the hook as pydantic reads it, on
+    the object, and judges the owner. A hook from pydantic is a known form.
+    """
+    hook = getattr(item, _SCHEMA_HOOK, None)
+    if hook is None:
+        return
+    module = getattr(hook, '__module__', None) or getattr(
+        getattr(hook, '__func__', None), '__module__', '',
+    )
+    if str(module).split('.')[0] == 'pydantic':
+        return
+    raise _RejectedError(_Rejection(
+        banned=f'{_SCHEMA_HOOK} of {getattr(item, "__name__", type(item).__name__)}',
+        reason='a schema hook replaces the check of the declared type',
+        fix='use a type from the allow list, or AfterValidator and BeforeValidator',
+    ))
 
 
 def _validate_return_annotation(
@@ -230,6 +396,7 @@ def _validate_return_annotation(
         ))
     try:
         _classify(ok_type, json_value_allowed_position=True)
+        _reject_wire_shape(ok_type)
     except _RejectedError as err:
         raise SignatureValidationError(_format_error(
             task_name=task_name,
@@ -264,6 +431,8 @@ def _classify(
             to break recursive-model cycles (e.g. `class Node: child: Node`)
             instead of blowing the Python stack at @app.task time.
     """
+    _reject_schema_hook(annot)
+
     if annot is JsonValue:
         if not json_value_allowed_position:
             raise _RejectedError(_Rejection(
@@ -425,28 +594,21 @@ def _classify(
     origin = get_origin(annot)
     args = get_args(annot)
 
-    # TaskResult[OkT, TaskError] anywhere (kwarg or return).
+    # `_check_parameter` and `_validate_return_annotation` take a whole
+    # TaskResult. Below that, pydantic has no schema for it.
     if origin is TaskResult:
-        if len(args) != 2:
-            raise _RejectedError(_Rejection(
-                banned=repr(cast(object, annot)),
-                reason='TaskResult must have exactly 2 type parameters',
-                fix='use TaskResult[YourType, TaskError]',
-            ))
-        ok_t, err_t = args
-        if err_t is not TaskError:
-            raise _RejectedError(_Rejection(
-                banned=f'TaskResult[..., {err_t!r}]',
-                reason=f'TaskResult error parameter must be TaskError, got {err_t!r}',
-                fix='use TaskResult[YourType, TaskError]',
-            ))
-        _classify(ok_t, json_value_allowed_position=True, visited=visited)
-        return
+        raise _RejectedError(_Rejection(
+            banned=repr(cast(object, annot)),
+            reason='TaskResult fits only as a whole parameter, or with `| None`',
+            fix='declare the parameter as TaskResult[YourType, TaskError]',
+        ))
 
     # Annotated[T, meta...]
     if origin is not None and hasattr(cast(object, annot), '__metadata__'):
         underlying = args[0]
         metadata = args[1:]
+        for item in metadata:
+            _reject_schema_hook(item)
         underlying_origin = get_origin(underlying)
         if underlying_origin is Union or underlying_origin is types.UnionType:
             discriminator = _find_discriminator(metadata)
@@ -672,6 +834,8 @@ def _walk_model_fields(
         if field_type is None:
             continue
         try:
+            for item in field_info.metadata:
+                _reject_schema_hook(item)
             _classify(
                 field_type,
                 json_value_allowed_position=True,
@@ -701,9 +865,14 @@ def _walk_dataclass_fields(
     if dc in visited:
         return
     next_visited = visited | {dc}
-    hints = get_type_hints(dc, include_extras=True)
+    hints: dict[str, object] = get_type_hints(dc, include_extras=True)
+    wire_fields = {field.name for field in dataclasses.fields(dc)}
     for field_name, field_type in hints.items():
-        if field_name.startswith('_'):
+        # A name with a leading `_` is a real wire field in a dataclass. `fields`
+        # leaves out `ClassVar` and `KW_ONLY`, and also `InitVar`, which the walk
+        # must keep: an `InitVar` does not cross the wire.
+        is_init_var = isinstance(field_type, dataclasses.InitVar)
+        if field_name not in wire_fields and not is_init_var:
             continue
         try:
             _classify(
@@ -741,10 +910,11 @@ def _format_error(
     banned: str,
     reason: str,
     fix: str,
+    subject: str = 'task',
 ) -> str:
     """Render the structured error per design-doc §2 'Error message shape'."""
     return (
-        f"task '{task_name}' {position} uses banned type `{banned}`.\n"
+        f"{subject} '{task_name}' {position} uses banned type `{banned}`.\n"
         f'        {reason}\n'
         f'        Fix: {fix}\n'
         f'        See: {_DOCS_URL}'

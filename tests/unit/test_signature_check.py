@@ -67,6 +67,10 @@ class _Order:
     total: float
 
 
+class _Text(str, enum.Enum):
+    A = 'a'
+
+
 class _Color(enum.Enum):
     RED = 'red'
     GREEN = 'green'
@@ -283,9 +287,14 @@ class TestAllowedOptionalAnnotatedLiteral:
         def f(*, x: Literal[1, 2, 3]) -> TaskResult[int, TaskError]: ...
         _check(f)
 
-    def test_literal_with_enum(self) -> None:
-        def f(*, x: Literal[_Color.RED, _Color.GREEN]) -> TaskResult[int, TaskError]: ...
+    def test_literal_with_a_str_enum(self) -> None:
+        def f(*, x: Literal[_Text.A]) -> TaskResult[int, TaskError]: ...
         _check(f)
+
+    def test_literal_with_a_plain_enum_is_refused(self) -> None:
+        def f(*, x: Literal[_Color.RED, _Color.GREEN]) -> TaskResult[int, TaskError]: ...
+        with pytest.raises(SignatureValidationError, match='Literal'):
+            _check(f)
 
 
 # ---------------------------------------------------------------------------

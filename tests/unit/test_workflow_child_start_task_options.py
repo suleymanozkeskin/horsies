@@ -42,6 +42,11 @@ from horsies.core.workflows.sql import (
     INSERT_WORKFLOW_TASKS_BULK_SQL,
 )
 
+
+def _plain_build_with(cls: Any, app: Any, *args: Any, **params: Any) -> Any:
+    """A real function for the hints of a mock `workflow_def`."""
+    raise AssertionError('the mock build_with runs, not this')
+
 pytestmark = [pytest.mark.unit]
 
 UNPARSEABLE_OPTIONS = '{not-json'
@@ -131,7 +136,7 @@ class _ChildStart:
         workflow_def = MagicMock()
         workflow_def.build_with.return_value = child_spec
         workflow_def.name = 'ChildWorkflow'
-        workflow_def._original_build_with = workflow_def.build_with
+        workflow_def._original_build_with = _plain_build_with
 
         with patch(
             'horsies.core.workflows.registry.get_subworkflow_node',

@@ -71,6 +71,11 @@ from horsies.core.workflows.sql import (
     UPDATE_PARENT_NODE_RESULT_SQL,
 )
 
+
+def _plain_build_with(cls: Any, app: Any, *args: Any, **params: Any) -> Any:
+    """A real function for the hints of a mock `workflow_def`."""
+    raise AssertionError('the mock build_with runs, not this')
+
 pytestmark = [pytest.mark.unit]
 
 DUMPS_JSON = 'horsies.core.workflows.engine.dumps_json'
@@ -381,6 +386,7 @@ def _child_sub_node() -> MagicMock:
     child_sub.min_success = None
     child_sub.workflow_def = MagicMock()
     child_sub.workflow_def.name = 'GrandchildWorkflow'
+    child_sub.workflow_def._original_build_with = _plain_build_with
     return child_sub
 
 
@@ -403,7 +409,7 @@ async def _start_child(
     workflow_def = MagicMock()
     workflow_def.build_with.return_value = child_spec
     workflow_def.name = 'ChildWorkflow'
-    workflow_def._original_build_with = workflow_def.build_with
+    workflow_def._original_build_with = _plain_build_with
 
     with patch(
         'horsies.core.workflows.engine._load_workflow_def_from_key',
@@ -564,7 +570,7 @@ class TestSpecConstructionRefusesALoneSurrogate:
             f'{subject} holds a lone surrogate' in ' '.join(raised.value.notes)
         )
 
-    def test_a_subworkflow_node_kwarg_is_hrs_031(self) -> None:
+    def test_an_any_or_bytes_build_with_parameter_is_hrs_031(self) -> None:
         app = _real_app()
 
         class ChildWorkflow(WorkflowDefinition[int]):
@@ -666,7 +672,7 @@ class TestDictKeyWithoutAJsonForm:
         ],
         ids=['enum-list-value', 'frozenset'],
     )
-    def test_a_subworkflow_node_kwarg_is_hrs_031(
+    def test_an_any_or_bytes_build_with_parameter_is_hrs_031(
         self,
         value: dict[Any, int],
         type_name: str,
@@ -693,10 +699,10 @@ class TestDictKeyWithoutAJsonForm:
                 definition_key=_key('no_json_key'),
             )
 
+        # A `build_with` parameter cannot be `Any` any more, so the allow-list
+        # refuses this before the dump can.
         assert raised.value.code is ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
-        assert f'`{type_name}` not valid as object key' in ' '.join(
-            raised.value.notes,
-        )
+        assert 'banned type `Any`' in ' '.join(raised.value.notes)
 
 
 class _Linked(BaseModel):
@@ -730,7 +736,7 @@ class TestValueThatHoldsItself:
             raised.value.notes,
         )
 
-    def test_a_subworkflow_node_kwarg_is_hrs_031(self) -> None:
+    def test_an_any_or_bytes_build_with_parameter_is_hrs_031(self) -> None:
         """Registration does not check a `build_with()` parameter, so `Any`
         is possible there."""
         app = _real_app()
@@ -758,9 +764,7 @@ class TestValueThatHoldsItself:
             )
 
         assert raised.value.code is ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
-        assert 'Circular reference detected (id repeated)' in ' '.join(
-            raised.value.notes,
-        )
+        assert 'banned type `Any`' in ' '.join(raised.value.notes)
 
 
 class TestValueThatIsTooDeep:
@@ -816,7 +820,7 @@ class TestBytesThatAreNotUtf8:
     """Registration refuses `bytes` in a task signature, so `.send()` and a
     schedule cannot reach this. It does not check a `build_with()` parameter."""
 
-    def test_a_subworkflow_node_kwarg_is_hrs_031(self) -> None:
+    def test_an_any_or_bytes_build_with_parameter_is_hrs_031(self) -> None:
         """Before, the raw `UnicodeDecodeError` left `app.workflow()`."""
         app = _real_app()
 
@@ -840,7 +844,7 @@ class TestBytesThatAreNotUtf8:
             )
 
         assert raised.value.code is ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
-        assert 'bytes that are not UTF-8' in ' '.join(raised.value.notes)
+        assert 'banned type `bytes`' in ' '.join(raised.value.notes)
 
 
 class TestChildStartOfALoneSurrogate:
@@ -904,6 +908,7 @@ class TestChildStartOfALoneSurrogate:
         })
         workflow_def = MagicMock()
         workflow_def.name = 'ChildWorkflow'
+        workflow_def._original_build_with = _plain_build_with
         workflow_def.build_with.side_effect = ValueError(
             f'cannot open {LONE_SURROGATE_TEXT}',
         )

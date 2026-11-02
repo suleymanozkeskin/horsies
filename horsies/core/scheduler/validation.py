@@ -21,7 +21,11 @@ from zoneinfo import ZoneInfo
 
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.codec.json_value import StrictJsonError
-from horsies.core.codec.kwargs import encode_kwargs, underlying_task_fn
+from horsies.core.codec.kwargs import (
+    encode_kwargs,
+    fill_omitted_defaults,
+    underlying_task_fn,
+)
 from horsies.core.codec.payload_guard import (
     PayloadOverLimit,
     PayloadWithinLimit,
@@ -192,10 +196,11 @@ def _encode_schedule_kwargs(
     Ok(None) means the schedule has no kwargs. The task is registered: the
     definition checks run first.
     """
-    if not schedule.kwargs:
-        return Ok(None)
     task_fn = underlying_task_fn(app.tasks[schedule.task_name])
     try:
+        _ = fill_omitted_defaults(task_fn, schedule.kwargs)
+        if not schedule.kwargs:
+            return Ok(None)
         encoded = encode_kwargs(task_fn, schedule.kwargs)
     except (StrictJsonError, ValueValidationError) as exc:
         return Err(ConfigurationError(

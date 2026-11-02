@@ -27,6 +27,7 @@ from horsies.core.codec.kwargs import (
     decode_subworkflow_kwargs,
     encode_kwargs,
     encode_subworkflow_kwargs,
+    fill_build_with_defaults,
     subworkflow_target_ok_type,
     underlying_task_fn,
 )
@@ -1200,6 +1201,7 @@ async def enqueue_subworkflow_task(
                 'but uses default build_with(); override build_with(app, ...) to accept them'
             )
 
+        kwargs = fill_build_with_defaults(workflow_def, kwargs)
         child_spec = workflow_def.build_with(broker.app, *task_args, **kwargs)
 
         # Validate that build_with override didn't produce a type mismatch

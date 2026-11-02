@@ -23,6 +23,7 @@ from typing import (
 
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import (
+    resolve_build_with_hints,
     resolve_hints_and_sig,
     resolve_producer_kwarg_binding,
     underlying_task_fn,
@@ -36,7 +37,7 @@ from horsies.core.errors import (
     WorkflowValidationError,
     raise_collected,
 )
-from horsies.core.types.result import is_err
+from horsies.core.types.result import Err, Ok, is_err
 from horsies.core.utils.loop_runner import (
     async_context_message,
     in_running_event_loop,
@@ -61,6 +62,7 @@ from .typing_utils import (
     _extract_taskresult_ok_type,
     _resolve_source_node_ok_type,
     _is_ok_type_compatible,
+    _without_annotated,
     _format_type_name,
 )
 
@@ -140,6 +142,38 @@ if TYPE_CHECKING:
         WorkflowStartRetryable,
         WorkflowStartValidationFailed,
     )
+
+
+def _kwargs_target_hints(
+    node: TaskNode[Any] | SubWorkflowNode[Any],
+    task_fn: Callable[..., Any],
+) -> tuple[dict[str, Any], inspect.Signature] | None:
+    """The hints that `node.kwargs` bind against.
+
+    A `build_with` resolves with the names the library passes to it. Hints that
+    do not resolve were refused by `_collect_subworkflow_target_errors`.
+    """
+    if not isinstance(node, SubWorkflowNode):
+        return resolve_hints_and_sig(task_fn)
+    match resolve_build_with_hints(node.workflow_def):
+        case Ok(ok_value=resolved):
+            return resolved
+        case Err():
+            return None
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _build_with_type_hints(node: SubWorkflowNode[Any]) -> dict[str, Any]:
+    """The hints of a `build_with`, with `Annotated` removed: the wiring check
+    compares types only."""
+    match resolve_build_with_hints(node.workflow_def):
+        case Ok(ok_value=(hints, _)):
+            return {name: _without_annotated(hint) for name, hint in hints.items()}
+        case Err():
+            return {}
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _kwargs_target_callable(
@@ -315,6 +349,8 @@ class WorkflowSpec(Generic[OutT]):
             report.add(error)
         for error in self._collect_invalid_kwargs_errors():
             report.add(error)
+        for error in self._collect_subworkflow_target_errors():
+            report.add(error)
         for error in self._collect_args_from_type_errors():
             report.add(error)
         for error in self._collect_missing_required_param_errors():
@@ -479,7 +515,7 @@ class WorkflowSpec(Generic[OutT]):
 
         for i, node in enumerate(self.tasks):
             task_fn = _kwargs_target_callable(node)
-            resolved = resolve_hints_and_sig(task_fn)
+            resolved = _kwargs_target_hints(node, task_fn)
             if resolved is None or not resolved[0]:
                 # Test scaffolding (Mocks, lambdas, unresolvable forward
                 # refs). Production callables pass strict-serde
@@ -1123,6 +1159,35 @@ class WorkflowSpec(Generic[OutT]):
             )
         return errors
 
+    def _collect_subworkflow_target_errors(self) -> list[WorkflowValidationError]:
+        """Hold each `SubWorkflowNode` target to the rules of a task signature.
+
+        Its kwargs are stored and read back, so they cross the wire.
+        """
+        from horsies.core.codec.signature_check import (
+            SignatureValidationError,
+            check_build_with_signature,
+        )
+
+        errors: list[WorkflowValidationError] = []
+        for node in self.tasks:
+            if not isinstance(node, SubWorkflowNode):
+                continue
+            try:
+                check_build_with_signature(
+                    node.workflow_def,
+                    workflow_name=node.name,
+                )
+            except SignatureValidationError as refusal:
+                errors.append(
+                    WorkflowValidationError(
+                        message='subworkflow build_with cannot cross the wire',
+                        code=ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
+                        notes=[f"node '{node.name}'", str(refusal)],
+                    )
+                )
+        return errors
+
     def _collect_args_from_type_errors(self) -> list[WorkflowValidationError]:
         """
         Validate args_from source result types against callable parameter annotations.
@@ -1158,7 +1223,11 @@ class WorkflowSpec(Generic[OutT]):
             if sig is None:
                 continue
 
-            hints = _resolved_type_hints(fn)
+            hints = (
+                _build_with_type_hints(node)
+                if isinstance(node, SubWorkflowNode)
+                else _resolved_type_hints(fn)
+            )
             accepts_kwargs = _signature_accepts_kwargs(sig)
 
             for kwarg_name, source_node in node.args_from.items():
@@ -1211,6 +1280,23 @@ class WorkflowSpec(Generic[OutT]):
                                 "ensure source task returns TaskResult[ConcreteType, TaskError] "
                                 'or source subworkflow subclasses WorkflowDefinition[ConcreteType]'
                             ),
+                        )
+                    )
+                    continue
+
+                if (
+                    isinstance(source_node, SubWorkflowNode)
+                    and _without_annotated(source_ok) is Any
+                ):
+                    errors.append(
+                        WorkflowValidationError(
+                            message='args_from source declares no output type',
+                            code=ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH,
+                            notes=[
+                                f"node '{node.name}' args_from['{kwarg_name}'] references source '{source_node.name}'",
+                                'source subworkflow subclasses WorkflowDefinition[Any]',
+                            ],
+                            help_text='subclass WorkflowDefinition[ConcreteType], so the value can be decoded and checked',
                         )
                     )
                     continue
@@ -1330,6 +1416,21 @@ class WorkflowSpec(Generic[OutT]):
                         f"workflow tasks: {[t.name for t in self.tasks]}",
                     ],
                     help_text='add the output task to the tasks list, or change output to a task already in the workflow',
+                )
+            )
+        elif (
+            isinstance(self.output, SubWorkflowNode)
+            and _without_annotated(_resolve_source_node_ok_type(self.output)) is Any
+        ):
+            errors.append(
+                WorkflowValidationError(
+                    f"Output node '{self.output.name}' declares no output type",
+                    code=ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH,
+                    notes=[
+                        f"output node: '{self.output.name}'",
+                        'its child subclasses WorkflowDefinition[Any]',
+                    ],
+                    help_text='subclass WorkflowDefinition[ConcreteType], so the output can be decoded',
                 )
             )
         return errors
