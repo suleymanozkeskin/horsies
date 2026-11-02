@@ -74,7 +74,7 @@ Every boundary validates in strict mode: `"7"`, `7.0` and `True` are refused for
 
 `@app.task` and each `SubWorkflowNode` refuse `Field(exclude=True)`, `exclude_if`, `extra='allow'`, `PlainValidator`, `WrapValidator`, `SkipValidation`, a schema hook, `Json[T]`, `Literal` with a plain `Enum`, an alias whose written key does not read back, and a default that does not hold its type. Use `AfterValidator` or `BeforeValidator`.
 
-`TaskError.data` must be JSON-native. A bad value becomes `{'data_refused': <cause>}`, and the code and message stay. A `TaskError` subclass with extra fields does not cross the wire: use `data`, and match on `error_code`.
+`TaskError.data` must be JSON-native. It takes `JsonInput`, so a `list[str]` fits, and it gives `JsonValue`, an exact `list` or `dict`. A bad value becomes `{'data_refused': <cause>}`, and the code and message stay. A `TaskError` subclass with extra fields does not cross the wire: use `data`, and match on `error_code`.
 
 Changing a model that a task takes or returns: see `SKILL.md`, Deployment facts.
 
@@ -89,7 +89,7 @@ The task wrapper validates the returned value against declared `T` using Pydanti
 class TaskError(BaseModel):
     error_code: BuiltInTaskCode | str
     message: str | None = None
-    data: Any | None = None
+    data: JsonValue = None  # takes JsonInput
     exception: dict[str, Any] | BaseException | None = None
 ```
 

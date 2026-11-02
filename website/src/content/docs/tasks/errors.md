@@ -23,7 +23,7 @@ Each execution attempt is also recorded in `horsies_task_attempts` with per-atte
 | ----- | ---- | ----------- |
 | `error_code` | `BuiltInTaskCode \| str` | Required. Library or domain error code |
 | `message` | `str \| None` | Human-readable description |
-| `data` | `Any \| None` | Additional context (task_id, etc.) |
+| `data` | `JsonInput` on write, `JsonValue` on read | Additional context (task_id, etc.) |
 | `exception` | `BaseException \| FlattenedException \| None` | Live exception in-process; flattened to a `FlattenedException` TypedDict (`type`, `module`, `message`, `repr`, `traceback`) when serialized to the wire |
 
 `error_code` must not be null: `auto_retry_for` and outcome routing read it. `TaskError` refuses a key that it does not declare, at construction and at decode. `SubWorkflowError` adds `sub_workflow_id` and `sub_workflow_summary`, and it refuses any other key. A stored error with an unknown key, or without `error_code`, is stored data that does not parse: see [decode-error surfaces](../../internals/serialization#decoding-consumer-side).

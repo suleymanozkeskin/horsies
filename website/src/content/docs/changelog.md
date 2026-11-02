@@ -102,9 +102,12 @@ before you upgrade.
   `TASK_EXCEPTION` for a returned `None`: that code now means an exception outside
   the task body. A policy with `auto_retry_for=['TASK_EXCEPTION']` no longer retries
   a forgotten `return`.
-- **An error keeps its code.** `TaskError.data` is typed as `JsonValue`, so pyright
-  flags a `list[str]` or `dict[str, int]` variable there: write `list(ids)` or
-  `dict(counts)`. A value that
+- **`JsonInput` is what a JSON position accepts.** `JsonValue` stays what a reader
+  gets: an exact `list` or `dict`. A `list[str]` fits `JsonInput`, and a tuple does
+  not. At run time `JsonInput` is `JsonValue`. `JsonList` and `JsonDict` are the
+  protocols behind it. All three are exported from `horsies`.
+- **An error keeps its code.** `TaskError.data` takes `JsonInput` and gives
+  `JsonValue`. A value that
   cannot cross becomes `{'data_refused': <cause>}`, and a lone surrogate in the text
   is escaped. The code stays, so `auto_retry_for` and routing still match. A
   `SubWorkflowError` keeps its class. A `TaskError` subclass with extra fields comes
