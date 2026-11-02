@@ -99,7 +99,11 @@ async def _enqueued_kwargs(
         )
     ).fetchone()
     assert row is not None
-    return _stored(row[0])
+    stored = _stored(row[0])
+    assert isinstance(stored, dict)
+    return {
+        key: value for key, value in stored.items() if key != '__h_workflow_meta__'
+    }
 
 
 class _GrandchildWorkflow(WorkflowDefinition[int]):
