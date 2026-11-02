@@ -2180,6 +2180,14 @@ class Horsies:
                     help_text='fix the kwarg, or the default of the parameter',
                 ))
                 continue
+            except Exception as exc:
+                # No verdict on the value: a validator can need a service that
+                # is down at boot, so this must not stop the process.
+                self.logger.warning(
+                    f"check could not fill the defaults of node '{node.name}': "
+                    f'{type(exc).__name__}: {exception_text(exc)}',
+                )
+                continue
             try:
                 child_spec = node.workflow_def.build_with(self, **child_kwargs)
             except MultipleValidationErrors as exc:

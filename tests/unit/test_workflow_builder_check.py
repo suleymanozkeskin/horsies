@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 import types
 from typing import Annotated, Any
@@ -938,9 +939,12 @@ class TestRecursiveSubworkflowBindingInCheck:
         ]
         assert 'do not fit build_with' in str(errors[0])
 
-    def test_a_validator_defect_on_a_default_is_reported_as_a_defect(self) -> None:
-        """A validator refuses with `ValueError`. Any other exception is a bug, so
-        it is not a contract finding, and it does not pass in silence."""
+    def test_a_validator_that_raises_on_a_default_does_not_stop_the_boot(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """An exception is no verdict on the value: a validator can need a service
+        that is down at boot. It does not stop the process, and it is not silent."""
         app = _make_custom_app(('scraping', 30))
 
         class Child(WorkflowDefinition[Any]):
@@ -965,11 +969,17 @@ class TestRecursiveSubworkflowBindingInCheck:
                 definition_key='parent_broken_validator.v1',
             )
 
-        errors = app.check(live=False)
+        with caplog.at_level(logging.WARNING):
+            assert app.check(live=False) == []
 
-        assert [error.code for error in errors] == [
-            ErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION,
+        warned = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelno == logging.WARNING
         ]
+        assert len(warned) == 1
+        assert 'child_broken_validator' in warned[0]
+        assert 'KeyError' in warned[0]
 
     def test_a_build_that_raises_stays_out_of_scope(self) -> None:
         """A failure in user code surfaces through the registered builder path, or
