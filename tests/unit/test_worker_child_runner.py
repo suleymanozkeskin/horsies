@@ -2051,11 +2051,10 @@ class TestWorkflowTaskRunningSyncFailureAborts:
         assert "status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')" in sql_blob
 
     def test_first_heartbeat_rides_running_transaction(self) -> None:
-        """The initial runner heartbeat is inserted before the RUNNING commit.
+        """The first runner heartbeat is part of the RUNNING statement.
 
-        Regression pin for the WAN statement-budget work: a row must never
-        be observable as RUNNING without heartbeat coverage, and the
-        heartbeat must not cost a separate transaction.
+        A row must never be observable as RUNNING without heartbeat coverage,
+        and the heartbeat must not cost a round trip of its own.
         """
         from horsies.core.worker.child_runner import (
             _confirm_ownership_and_set_running,
@@ -2078,9 +2077,9 @@ class TestWorkflowTaskRunningSyncFailureAborts:
             q for q in cursor.queries if 'horsies_heartbeats' in q[0]
         ]
         assert len(heartbeat_queries) == 1
-        _, params = heartbeat_queries[0]
-        assert params[0] == 'task-1'
-        assert params[1].startswith('worker-A:')
+        sql, params = heartbeat_queries[0]
+        assert "SET status = 'RUNNING'" in sql
+        assert params[-3].startswith('worker-A:')
         assert conn.commits == 1
 
 
