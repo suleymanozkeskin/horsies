@@ -28,7 +28,15 @@ from pydantic import (
     model_serializer,
 )
 
-from horsies import AppConfig, Horsies, PostgresConfig, TaskError, TaskResult
+from horsies import (
+    AppConfig,
+    Horsies,
+    JsonInput,
+    JsonValue,
+    PostgresConfig,
+    TaskError,
+    TaskResult,
+)
 from horsies.core.codec.json_io import SerializationError, dumps_json, loads_json
 from horsies.core.codec.json_value import (
     MAX_JSON_DEPTH,
@@ -975,6 +983,36 @@ class TestReportableError:
         wire = encode_task_error(TaskError(error_code='X', data={'a': [1]}))
 
         assert decode_task_error(wire).data == {'a': [1]}
+
+
+@pytest.mark.unit
+class TestJsonInput:
+    """`tests/typing/json_input_pin.py` pins the static side."""
+
+    def test_it_is_json_value_at_run_time(self) -> None:
+        assert JsonInput is JsonValue
+
+    def test_the_field_is_json_value_at_run_time(self) -> None:
+        field = TaskError.model_fields['data']
+
+        assert field.annotation is JsonValue
+        assert field.default is None
+        assert 'data' not in vars(TaskError)
+
+    def test_a_task_parameter_takes_the_checks_of_json_value(self) -> None:
+        def pass_on(*, payload: JsonInput) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=1)
+
+        app = Horsies(
+            AppConfig(
+                broker=PostgresConfig(database_url='postgresql+psycopg://u:p@localhost/x'),
+            ),
+        )
+        _ = app.task(task_name='json_input_parameter')(pass_on)
+
+        assert encode_kwargs_read_back(pass_on, {'payload': ['a']}) == {'payload': ['a']}
+        with pytest.raises(StrictJsonError, match='tuple'):
+            encode_kwargs_read_back(pass_on, {'payload': (1, 2)})
 
 
 @pytest.mark.unit

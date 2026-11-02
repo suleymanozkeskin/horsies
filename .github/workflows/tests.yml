@@ -63,7 +63,7 @@ jobs:
         run: uv sync --dev --upgrade-package pydantic --upgrade-package pydantic-core
 
       - name: Run the type contract tests
-        run: uv run --no-sync pytest tests/unit/test_wire_shape.py tests/unit/test_signature_check.py tests/unit/test_type_contract_send_return.py -v --tb=short
+        run: uv run --no-sync pytest tests/unit/test_wire_shape.py tests/unit/test_strict_codec.py tests/unit/test_workflow_node_wire_kwargs.py tests/unit/test_signature_check.py tests/unit/test_type_contract_send_return.py -v --tb=short
 
   showcase:
     runs-on: ubuntu-latest

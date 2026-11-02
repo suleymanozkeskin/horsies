@@ -1,6 +1,8 @@
 {
   "extends": "./pyproject.toml",
   "include": [
+    "tests/typing/json_input_pin.py",
+    "horsies/core/types/json_value.py",
     "tests/typing/retry_variant_pin.py",
     "tests/typing/task_function_attributes_pin.py",
     "tests/typing/async_task_refused_pin.py",

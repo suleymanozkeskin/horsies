@@ -12,13 +12,14 @@ Strict-serde. The wire carries values plus one envelope marker. It does **not** 
 Two consequences:
 
 - Tasks must declare every parameter and return type. Banned types (`Any`, `object`, bare `dict`/`list`/`tuple`, `TypeVar`, bare `BaseModel`, `TypedDict`, `bytes`, `set`/`frozenset`, `Callable`, and `pathlib.PurePath` subclasses) are rejected at `@app.task` registration.
-- `JsonValue` is the only untyped fence. Use it at task boundary positions or inside `BaseModel`/`@dataclass` fields when the payload is genuinely raw JSON.
+- `JsonValue` is the only untyped fence. Use it at task boundary positions or inside `BaseModel`/`@dataclass` fields when the payload is genuinely raw JSON. `JsonInput` holds the same values, for a position that only accepts them. See [`JsonInput`](#jsoninput).
 
 ## Codec Layout
 
 | Module | Purpose |
 |--------|---------|
-| `horsies.core.codec.json_value` | `StrictJsonError`; strict JSON-native validators; re-exports `JsonValue` from `horsies.core.types.json_value` |
+| `horsies.core.types.json_value` | `JsonValue` PEP 695 alias; `JsonInput`, `JsonList`, `JsonDict` |
+| `horsies.core.codec.json_value` | `StrictJsonError`; strict JSON-native validators; re-exports `JsonValue` |
 | `horsies.core.codec.json_io` | `dumps_json` / `loads_json` — the strict JSON-native stringification boundary (no class tags). `loads_json_bytes` is the same parse for stored UTF-8 payloads, and an empty payload is an error. `dumps_canonical_json` is the one canonical form for stored or hashed text. A unit test keeps every other JSON parse out of the library |
 | `horsies.core.codec.error_payload` | `flatten_exception`; `serialize_error_payload` for library-emitted error payloads |
 | `horsies.core.codec.task_options` | `serialize_task_options` — `TaskOptions` → persisted JSON |
@@ -26,7 +27,7 @@ Two consequences:
 | `horsies.core.codec.kwargs` | `encode_kwargs_read_back(task_fn, kwargs)` / `decode_kwargs(...)` for producer/consumer kwarg binding |
 | `horsies.core.codec.typed` | `encode_value` / `decode_value` / `encode_task_result` / `decode_task_result` / `decode_task_error` / `validate_task_result_envelope` |
 
-Re-exports: `from horsies import JsonValue, StrictJsonError`.
+Re-exports: `from horsies import JsonDict, JsonInput, JsonList, JsonValue, StrictJsonError`.
 
 ## Wire Envelope
 
@@ -110,7 +111,7 @@ Values flowing through a task signature must classify as **one** of:
   (same instant, zone semantics lost — DST arithmetic on the consumer differs), and
   **naive** datetimes round-trip naive (ambiguous across workers in different timezones —
   prefer UTC-aware values).
-- `JsonValue` (at boundary positions only).
+- `JsonValue` or `JsonInput` (at boundary positions only).
 - An `Enum` subclass.
 - A concrete `BaseModel` subclass (not bare `BaseModel`).
 - A `@dataclass`.
@@ -217,7 +218,7 @@ A self-check runs each rule once per process. The rules read core schema keys th
 An error is the report of a failure, and `auto_retry_for` and outcome routing read its code. So an error always encodes, and its code and message stay.
 
 - A lone surrogate in the code, the message or the exception text is escaped.
-- `TaskError.data` must be JSON-native. A value that is not, or that a reader cannot read, is replaced with `{'data_refused': <cause>}`. The cause names a type, never the value. Pyright flags most of these at the call.
+- `TaskError.data` must be JSON-native. A value that is not, or that a reader cannot read, is replaced with `{'data_refused': <cause>}`. The cause names a type, never the value. A writer gives `JsonInput`, and a reader gets `JsonValue`, so pyright flags these at the call and takes a `list[str]`.
 - A `SubWorkflowError` keeps its class, its id, its status and its counts. If its output cannot cross, the output is `None`.
 - A `TaskError` subclass with extra fields does not cross the wire, and comes back as a plain `TaskError`. Put the values in `data`, and match on `error_code`.
 
@@ -327,7 +328,33 @@ type JsonValue = (
 )
 ```
 
-PEP 695 type alias. Re-exported as `horsies.JsonValue`.
+PEP 695 type alias. Re-exported as `horsies.JsonValue`. This is what a reader gets: an exact `list` or `dict`, so a match over them is exhaustive.
+
+### `JsonInput`
+
+A type checker does not accept a `list[str]` for a `list[JsonValue]`, because a `list` is mutable and the receiver could add an `int` to it. `JsonInput` is what a position accepts. It holds the same values as `JsonValue`, and a `list[str]` or a `dict[str, int]` fits it. It exists only for a type checker: at run time `JsonInput` is `JsonValue`, and every check of `JsonValue` applies.
+
+| Value | Type checker | Run time |
+|---|---|---|
+| A `list` or `dict` of JSON values, at any depth, with `str` keys | Accepted | Accepted |
+| A subclass of `dict`, such as `OrderedDict` or `Counter` | Accepted | Accepted, read as a `dict` |
+| A tuple, `bytes`, a deque or a set | Flagged | Refused |
+| A `Mapping` that is not a `dict`, such as `mappingproxy`, `UserDict` or `ChainMap` | Flagged | Refused |
+| `dict[int, str]`, `list[Decimal]`, or any other bad value inside a container | Flagged | Refused |
+
+`JsonList` and `JsonDict` are the protocols behind it, and they appear in hover text and in errors. `JsonList` has `pop` with an index, because only a `list` has that form. `JsonDict` has `__reversed__` and `popitem`, because only a `dict` has both.
+
+`TaskError.data` takes `JsonInput` and gives `JsonValue`, and so does a subclass of `TaskError`.
+
+A task parameter has one annotation, which serves `.send()` and the task body. A return type has one too. Choose by what the task does with the value:
+
+| Annotation | Use it when | Result |
+|---|---|---|
+| A concrete type | The shape is known | The best choice: `.send()` and the body both get the exact type |
+| `JsonValue` | The task reads the value | An exact read. Pyright flags a `list[str]` variable at `.send()` |
+| `JsonInput` | The task passes the value on | `.send()` takes a `list[str]`. A read in the body gives partly unknown types in strict mode |
+
+Pyright flags an open `TypedDict` as `JsonInput`, because it can hold keys that it does not declare. Pass a `dict`, or use a model. Pyright also flags a `TaskError` that is passed to a user's read-only `Protocol` with a `data` property. mypy accepts that form.
 
 ### `StrictJsonError`
 
