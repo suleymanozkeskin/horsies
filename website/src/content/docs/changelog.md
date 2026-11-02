@@ -1008,6 +1008,14 @@ before you upgrade.
 
 ### Changed
 
+- **`/api/tasks/facets` scans the window once.** A poll ran four group-bys and four
+  category counts over the history window. It is now one statement. On 1.4M history
+  rows, one poll over the default 24 hours falls from 44,363 buffers to 4,920, and
+  from 79–381 ms to 37–48 ms. The answer does not change.
+- **Open dashboards share `/api/tasks/facets` and `/api/tasks/breakdown`.** Both
+  answer through a 10-second cache per scope, as the status cards do. One load
+  serves every concurrent request, and each count is at most 10 seconds old.
+
 - **Worker children on Linux start in milliseconds and share memory.** A
   preload parent imports code once, and each child is a fork of it. Each pair
   below compares `--child-preload=none` of this release with the default
