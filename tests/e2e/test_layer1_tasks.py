@@ -816,12 +816,12 @@ def test_wait_timeout(broker: PostgresBroker, app: Horsies) -> None:
 
 @pytest.mark.e2e
 def test_return_none_from_task() -> None:
-    """L1.7.5: Task returning None instead of TaskResult produces TASK_EXCEPTION."""
+    """L1.7.5: Task returning None instead of TaskResult gives RETURN_TYPE_MISMATCH."""
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
         result = unwrap_send(basic_tasks.return_none_task.send()).get(timeout_ms=5000)
-        assert_err(result, expected_code=OperationalErrorCode.TASK_EXCEPTION)
+        assert_err(result, expected_code=ContractCode.RETURN_TYPE_MISMATCH)
         assert result.err is not None
         assert 'None' in (result.err.message or '')
 

@@ -25,7 +25,7 @@ parameter.
 from __future__ import annotations
 
 import inspect
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from types import UnionType
 from typing import (
@@ -46,12 +46,16 @@ from horsies.core.models.tasks import TaskResult
 
 __all__ = [
     'KwargBinding',
+    'MissingKwargs',
     'decode_kwargs',
+    'declared_taskresult_ok_type',
     'decode_subworkflow_kwargs',
     'encode_kwargs',
     'encode_subworkflow_kwargs',
+    'missing_required_kwargs',
     'resolve_hints_and_sig',
     'resolve_producer_kwarg_binding',
+    'subworkflow_target_ok_type',
     'underlying_task_fn',
 ]
 
@@ -277,6 +281,63 @@ def encode_kwargs(
     return encoded
 
 
+@dataclass(frozen=True, slots=True)
+class MissingKwargs:
+    """The required parameters that a direct send does not supply.
+
+    Attributes:
+        producer: Parameters that the caller of `.send()` must supply.
+        workflow_only: Parameters that only a workflow can fill: an
+            engine-injected name or an `args_from` slot.
+    """
+
+    producer: tuple[str, ...]
+    workflow_only: tuple[str, ...]
+
+
+def missing_required_kwargs(
+    task_fn: Callable[..., Any],
+    supplied: Collection[str],
+) -> MissingKwargs:
+    """List the required parameters of `task_fn` that `supplied` does not hold.
+
+    For a direct send only. A workflow path supplies part of the kwargs and
+    the engine fills the rest, so it does not call this.
+
+    A callable with no type hints passes, the same as in `encode_kwargs`:
+    `@app.task` guarantees hints on a real task.
+
+    Args:
+        task_fn: The task callable.
+        supplied: The names of the kwargs that the caller gave.
+
+    Returns:
+        The missing names, split by who can supply them. Both tuples are
+        empty when nothing is missing.
+    """
+    resolved = resolve_hints_and_sig(task_fn)
+    if resolved is None or not resolved[0]:
+        return MissingKwargs(producer=(), workflow_only=())
+    hints, sig = resolved
+    missing = [
+        name
+        for name, parameter in sig.parameters.items()
+        if parameter.default is inspect.Parameter.empty
+        and parameter.kind
+        in (inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        and name not in supplied
+    ]
+    workflow_only = tuple(
+        name
+        for name in missing
+        if name in _INJECTED_PARAM_NAMES or _annotates_taskresult(hints.get(name))
+    )
+    return MissingKwargs(
+        producer=tuple(name for name in missing if name not in workflow_only),
+        workflow_only=workflow_only,
+    )
+
+
 def _annotates_taskresult(annot: Any) -> bool:
     """Whether a parameter annotation marks an ``args_from`` slot.
 
@@ -358,6 +419,40 @@ def decode_kwargs(
             continue
         decoded[key] = decode_value(raw_value, annot, location=(key,))
     return decoded
+
+
+def declared_taskresult_ok_type(
+    target_fn: Callable[..., Any],
+    key: str,
+) -> Any | None:
+    """Return the `T` of a parameter declared `TaskResult[T, TaskError]`.
+
+    Reads the hints with `Annotated` kept, so a constraint on `T` stays.
+
+    Args:
+        target_fn: The receiver: a task function or a `build_with`.
+        key: The parameter name.
+
+    Returns:
+        The declared ok type, or None when the hints do not resolve, the
+        parameter is not a `TaskResult` slot, or `T` is a TypeVar: then
+        nothing further can be checked on the value.
+    """
+    from horsies.core.models.workflow.typing_utils import (
+        _extract_taskresult_ok_type,
+        _normalize_resolved_ok_type,
+    )
+
+    resolved = resolve_hints_and_sig(target_fn)
+    if resolved is None:
+        return None
+    hints, _ = resolved
+    return _normalize_resolved_ok_type(_extract_taskresult_ok_type(hints.get(key)))
+
+
+def subworkflow_target_ok_type(workflow_def: Any, key: str) -> Any | None:
+    """`declared_taskresult_ok_type` for a parameter of a child `build_with`."""
+    return declared_taskresult_ok_type(_resolve_build_with(workflow_def), key)
 
 
 def _resolve_build_with(workflow_def: Any) -> Callable[..., Any]:

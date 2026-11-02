@@ -21,7 +21,11 @@ from psycopg.rows import namedtuple_row
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.json_value import StrictJsonError
-from horsies.core.codec.kwargs import decode_kwargs, underlying_task_fn
+from horsies.core.codec.kwargs import (
+    declared_taskresult_ok_type,
+    decode_kwargs,
+    underlying_task_fn,
+)
 from horsies.core.codec.json_io import (
     loads_json,
     dumps_json,
@@ -29,6 +33,7 @@ from horsies.core.codec.json_io import (
 )
 from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.codec.typed import (
+    conform_to_target,
     decode_task_result,
     encode_task_result,
 )
@@ -62,7 +67,7 @@ from horsies.core.lifecycle.outcomes import (
     TaskAbsent,
 )
 from horsies.core.lifecycle.persistence import apply_sync
-from horsies.core.types.result import is_err
+from horsies.core.types.result import Err, Ok, is_err
 
 
 @dataclass(frozen=True, slots=True)
@@ -1197,7 +1202,7 @@ def _run_task_entry(
                     ),
                 )
             try:
-                kwargs[key] = decode_task_result(inner, source_ok_type)
+                decoded_result = decode_task_result(inner, source_ok_type)
             except (StrictJsonError, ValueValidationError) as exc:
                 return _serialization_error_response(
                     task_name,
@@ -1206,6 +1211,23 @@ def _run_task_entry(
                         f'(source task {source_task_name!r}): {exc}'
                     ),
                 )
+            target_ok_type = declared_taskresult_ok_type(underlying_fn, key)
+            if target_ok_type is None or target_ok_type == source_ok_type:
+                kwargs[key] = decoded_result
+                continue
+            match conform_to_target(decoded_result, target_ok_type):
+                case Ok(ok_value=conformed):
+                    kwargs[key] = conformed
+                case Err(err_value=refusal):
+                    return _serialization_error_response(
+                        task_name,
+                        SerializationError(
+                            f'kwarg {key!r} does not fit its declared type '
+                            f'(source task {source_task_name!r}): {refusal}'
+                        ),
+                    )
+                case _ as unreachable:
+                    assert_never(unreachable)
 
         # Handle workflow injection payloads (workflow_ctx / workflow_meta).
         workflow_ctx_data = kwargs.pop(_ENGINE_KEY_WORKFLOW_CTX, None)
@@ -1372,42 +1394,17 @@ def _run_task_entry(
                 ),
             )
 
-        if isinstance(out, TaskResult):
-            try:
-                envelope = encode_task_result(out, ok_type)
-            except (StrictJsonError, ValueValidationError) as exc:
-                return _serialization_error_response(
-                    task_name,
-                    SerializationError(
-                        f'encode_task_result failed for {task_name!r}: '
-                        f'{exc}'
-                    ),
-                )
-            ser = dumps_json(envelope)
-            if is_err(ser):
-                return _serialization_error_response(task_name, ser.err_value)
-            return (True, ser.ok_value, None)
-
-        if out is None:
-            tr: TaskResult[Any, TaskError] = TaskResult(
-                err=TaskError(
-                    error_code=OperationalErrorCode.TASK_EXCEPTION,
-                    message=f'Task {task_name} returned None instead of TaskResult or value',
-                    data={'task_name': task_name},
-                ),
-            )
-            return (True, serialize_error_payload(tr), 'Task returned None')
-
-        # Plain value → wrap into success
-        wrapped: TaskResult[Any, TaskError] = TaskResult(ok=out)
+        assert isinstance(out, TaskResult), (
+            f'task wrapper of {task_name!r} returned {type(out).__name__}'
+        )
         try:
-            envelope = encode_task_result(wrapped, ok_type)
+            envelope = encode_task_result(out, ok_type)
         except (StrictJsonError, ValueValidationError) as exc:
             return _serialization_error_response(
                 task_name,
                 SerializationError(
-                    f'encode_task_result failed for {task_name!r} '
-                    f'(plain-value wrap): {exc}'
+                    f'encode_task_result failed for {task_name!r}: '
+                    f'{exc}'
                 ),
             )
         ser = dumps_json(envelope)

@@ -950,7 +950,13 @@ class TestIsOkTypeCompatible:
         assert _is_ok_type_compatible(str, str) is True
 
     def test_subclass_compatible(self) -> None:
-        assert _is_ok_type_compatible(bool, int) is True
+        class Number(int):
+            pass
+
+        assert _is_ok_type_compatible(Number, int) is True
+
+    def test_bool_is_not_compatible_with_int(self) -> None:
+        assert _is_ok_type_compatible(bool, int) is False
 
     def test_not_subclass_incompatible(self) -> None:
         assert _is_ok_type_compatible(str, int) is False
@@ -965,9 +971,15 @@ class TestIsOkTypeCompatible:
         assert _is_ok_type_compatible(float, expected) is False
 
     def test_source_union_all_match(self) -> None:
-        # int and bool are both subclasses of int
-        source = Union[int, bool]
+        class Number(int):
+            pass
+
+        source = Union[int, Number]
         assert _is_ok_type_compatible(source, int) is True
+
+    def test_source_union_with_bool_is_false(self) -> None:
+        source = Union[int, bool]
+        assert _is_ok_type_compatible(source, int) is False
 
     def test_source_union_partial_match_is_false(self) -> None:
         source = Union[int, str]
@@ -1002,7 +1014,7 @@ class TestIsOkTypeCompatible:
 
     def test_pipe_syntax_union_source(self) -> None:
         source = int | bool
-        assert _is_ok_type_compatible(source, int) is True
+        assert _is_ok_type_compatible(source, int) is False
 
     def test_both_any(self) -> None:
         assert _is_ok_type_compatible(Any, Any) is True

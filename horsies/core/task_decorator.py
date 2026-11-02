@@ -28,8 +28,8 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from datetime import datetime, timezone
 from pydantic import TypeAdapter, ValidationError
-from horsies.core.codec.json_value import StrictJsonError
-from horsies.core.codec.kwargs import encode_kwargs
+from horsies.core.codec.json_value import StrictJsonError, escape_lone_surrogates
+from horsies.core.codec.kwargs import encode_kwargs, missing_required_kwargs
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.codec.payload_guard import (
     PayloadOverLimit,
@@ -1129,6 +1129,20 @@ def _map_broker_err(
             assert_never(unreachable)
 
 
+def _returned_type_name(returned: object) -> str:
+    """The type of a wrong return, for the refusal text.
+
+    A copy of `TaskResult` from a second import path gets its module, so that
+    the text does not read 'returned TaskResult, expected TaskResult'.
+    """
+    if returned is None:
+        return 'None'
+    returned_type = type(returned)
+    if returned_type.__name__ == TaskResult.__name__:
+        return f'{returned_type.__module__}.{returned_type.__qualname__}'
+    return returned_type.__name__
+
+
 def create_task_wrapper(
     fn: Callable[P, TaskResult[T, TaskError]],
     app: 'Horsies',
@@ -1174,7 +1188,21 @@ def create_task_wrapper(
             help_text='define the task with `def`; async task support is not available',
         )
 
-    hints = get_type_hints(fn)
+    # A generator function returns a generator, so the body never runs and
+    # every run would fail.
+    if inspect.isgeneratorfunction(fn):
+        raise TaskDefinitionError(
+            message='task function must not be a generator',
+            code=ErrorCode.TASK_INVALID_RETURN_TYPE,
+            location=fn_location,
+            notes=[
+                f"function '{fn.__name__}' uses `yield`",
+                'a task returns one TaskResult',
+            ],
+            help_text='collect the items and return them in one TaskResult',
+        )
+
+    hints = get_type_hints(fn, include_extras=True)
 
     # Validate that return type is TaskResult[*, TaskError]
     return_hint = hints.get('return')
@@ -1264,22 +1292,47 @@ def create_task_wrapper(
             )
         )
 
+    def not_a_task_result(returned: object) -> TaskResult[T, TaskError]:
+        """The refusal of a return that is not a `TaskResult`.
+
+        The text and the data name types, never the value. A returned
+        `TaskError` also names its code, because the reader otherwise sees
+        only the type.
+        """
+        actual_type = _returned_type_name(returned)
+        code_text = (
+            f' with error_code {escape_lone_surrogates(str(returned.error_code))!r}'
+            if isinstance(returned, TaskError)
+            else ''
+        )
+        return TaskResult(
+            err=TaskError(
+                error_code=ContractCode.RETURN_TYPE_MISMATCH,
+                message=(
+                    f'Task {fn.__name__} returned {actual_type}{code_text} '
+                    f'but must return TaskResult[{ok_type}, {err_type}]'
+                ),
+                data={
+                    'variant': 'not_a_task_result',
+                    'expected_type': f'TaskResult[{ok_type}, {err_type}]',
+                    'actual_type': actual_type,
+                    'validation_errors': [],
+                    'validation_error_count': 0,
+                },
+            )
+        )
+
     # Create a wrapper function that preserves the exact signature
     def wrapped_function(
         *args: P.args,
         **kwargs: P.kwargs,
     ) -> TaskResult[T, TaskError]:
         try:
-            result = fn(*args, **kwargs)
+            returned: object = fn(*args, **kwargs)
 
-            if result is None:
-                return TaskResult(
-                    err=TaskError(
-                        error_code=OperationalErrorCode.TASK_EXCEPTION,
-                        message=f'Task {fn.__name__} returned None instead of TaskResult',
-                        data={'task_name': task_name},
-                    )
-                )
+            if not isinstance(returned, TaskResult):
+                return not_a_task_result(returned)
+            result = cast('TaskResult[T, TaskError]', returned)
 
             # Runtime type validation: validate result against declared types
             try:
@@ -1694,6 +1747,25 @@ def create_task_wrapper(
                 exception=NoCause(),
             ))
         args_json: str | None = None
+
+        missing = missing_required_kwargs(fn, kwargs_dict)
+        if missing.workflow_only:
+            return Err(TaskSendValidationFailed(
+                message=(
+                    f'Task {task_name!r} requires {list(missing.workflow_only)}, '
+                    f'which only a workflow can fill. Run it as a workflow node, '
+                    f'or give these parameters a default.'
+                ),
+                exception=NoCause(),
+            ))
+        if missing.producer:
+            return Err(TaskSendValidationFailed(
+                message=(
+                    f'Task {task_name!r} is missing required kwargs '
+                    f'{list(missing.producer)}; nothing was enqueued.'
+                ),
+                exception=NoCause(),
+            ))
 
         # Serialize kwargs — strict-serde phase 3 routes through encode_kwargs
         # using the receiver's declared parameter types.
