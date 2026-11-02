@@ -319,6 +319,30 @@ def _child_initializer(
             not raise — _run_child_start_hooks exits the child with
             CHILD_HOOK_FAILURE_EXIT_CODE (fail-closed).
     """
+    app = import_app_for_child(app_locator, imports, sys_path_roots, loglevel)
+    finish_child_start(
+        app,
+        database_url,
+        connect_kwargs,
+        child_pool_min_size,
+        child_pool_max_size,
+        child_pool_check,
+    )
+
+
+def import_app_for_child(
+    app_locator: str,
+    imports: Sequence[str],
+    sys_path_roots: Sequence[str],
+    loglevel: int,
+) -> Horsies:
+    """Locate the app and import its task modules. Opens no connection.
+
+    A preload parent runs this before it forks, so children share the result.
+
+    Raises:
+        Exception: any import failure propagates to the caller.
+    """
     # Configure logging for this child process before any logging
     from horsies.core.logging import configure_logging
 
@@ -366,7 +390,23 @@ def _child_initializer(
 
     keys = app.tasks.keys_list()
     _debug_imports_log(f'[child {os.getpid()}] registered_tasks={keys}')
+    return app
 
+
+def finish_child_start(
+    app: Horsies,
+    database_url: str,
+    connect_kwargs: Mapping[str, object] | None,
+    child_pool_min_size: int,
+    child_pool_max_size: int,
+    child_pool_check: bool,
+) -> None:
+    """Run the per-child steps. Each child runs these itself, after any fork.
+
+    Raises:
+        Exception: a pool setup failure propagates to the caller. A failing
+            hook exits the child with CHILD_HOOK_FAILURE_EXIT_CODE.
+    """
     # App-owned per-child setup (engine disposal / pool policy) runs after
     # task imports so app engines exist, and before horsies opens its own
     # child pool so a failing hook aborts cleanly.

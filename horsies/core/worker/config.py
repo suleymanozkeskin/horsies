@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import os
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import TYPE_CHECKING, Optional
 
 from horsies.core.defaults import MAX_CLAIM_RENEW_AGE_MS
@@ -25,6 +26,20 @@ def _default_str_int_dict() -> dict[str, int]:
 
 def _default_connect_kwargs() -> dict[str, object]:
     return {}
+
+
+class ChildPreload(str, Enum):
+    """What a preload parent imports before it forks children. Linux only.
+
+    Elsewhere, and when a preload parent is down, children start with ``exec``.
+    """
+
+    # Library code only. Each child imports the app itself.
+    LIBRARY = 'library'
+    # Library and app. Children share module state from the app's import.
+    APP = 'app'
+    # No preload parent. Every child starts with ``exec``.
+    NONE = 'none'
 
 
 @dataclass
@@ -111,6 +126,7 @@ class WorkerConfig:
     # it kills the children that still run a task, and each of those tasks
     # takes the crash path. Set it below the supervisor's stop window.
     drain_timeout_s: float = 300.0
+    child_preload: ChildPreload = ChildPreload.LIBRARY
 
     def __post_init__(self) -> None:
         if self.processes < 1:
