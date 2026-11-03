@@ -1008,6 +1008,13 @@ before you upgrade.
 
 ### Changed
 
+- **`/api/tasks/facets` scans the window once.** A poll ran four group-bys and four
+  category counts over the history window. It is now one statement. On 1.4M history
+  rows, one poll over the default 24 hours falls from 46,750 buffers to 5,187, and
+  from 90–108 ms to 16–17 ms. The answer does not change.
+- **Open dashboards share `/api/tasks/facets` and `/api/tasks/breakdown`.** Both
+  answer through a 10-second cache per scope, as the status cards do. One load
+  serves every concurrent request, and each count is at most 10 seconds old.
 - **A worker claims once per wake.** The main loop ran two claim passes for each
   wake. With 8 children and 20 tasks/s, `horsies_claim` calls for 400 tasks fall
   from 1,524–1,602 to 799–807, and the start lag does not change. A stop no longer

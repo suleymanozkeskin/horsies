@@ -444,6 +444,127 @@ class TestTaskFacets:
         }
         assert {f.value: f.count for f in facets.queues} == {'default': 1, 'fast': 2}
 
+    async def test_a_poll_runs_one_statement_for_both_sides(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        await insert_rows(session, make_task(task_name='alpha_task'))
+        statements: list[str] = []
+
+        def _record(_conn: Any, _cursor: Any, statement: str, *_rest: Any) -> None:
+            statements.append(statement)
+
+        engine = current_resources(broker).engine.sync_engine
+        event.listen(engine, 'before_cursor_execute', _record)
+        try:
+            result = await task_facets(
+                broker,
+                window=_test_window(),
+                statuses=[],
+                error_categories=[],
+                retried_only=False,
+            )
+        finally:
+            event.remove(engine, 'before_cursor_execute', _record)
+
+        assert is_ok(result)
+        assert len([s for s in statements if 'GROUPING SETS' in s]) == 1
+        assert len(statements) == 1
+
+    async def test_ties_follow_the_database_collation(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        names = ['b_task', 'B_task', 'a_task', 'A_task', '_task', 'Z_task']
+        await insert_rows(
+            session,
+            *[make_task(task_name=name, error_code=f'DOMAIN_{name}') for name in names],
+        )
+        expected = (
+            await session.execute(
+                text(
+                    'SELECT name FROM unnest(CAST(:names AS text[])) AS name '
+                    'ORDER BY name'
+                ),
+                {'names': names},
+            )
+        ).scalars().all()
+
+        result = await task_facets(
+            broker,
+            window=_test_window(),
+            statuses=[],
+            error_categories=[],
+            retried_only=False,
+        )
+
+        assert is_ok(result)
+        assert [f.value for f in result.ok_value.task_names] == list(expected)
+        assert [f.value for f in result.ok_value.error_codes] == [
+            f'DOMAIN_{name}' for name in expected
+        ]
+
+    async def test_the_result_stays_bounded_with_many_distinct_codes(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        """An error code is a free string: the rows must not follow the codes."""
+        distinct_codes = 1_000
+        await insert_rows(
+            session,
+            *[
+                make_task(
+                    task_name='many_codes_task',
+                    status=TaskStatus.FAILED,
+                    error_code=f'DOMAIN_{index}',
+                )
+                for index in range(distinct_codes)
+            ],
+        )
+        sql, params = queries_module.facets_statement(
+            window=_test_window(),
+            statuses=[],
+            retried_only=False,
+        )
+
+        rows = (await session.execute(text(sql), params)).all()
+        result = await task_facets(
+            broker,
+            window=_test_window(),
+            statuses=[],
+            error_categories=[],
+            retried_only=False,
+        )
+
+        assert len([row for row in rows if row.facet == 'error_code']) == 30
+        assert is_ok(result)
+        assert len(result.ok_value.error_codes) == 30
+        assert result.ok_value.error_category_totals == {
+            ErrorCategory.DOMAIN.value: distinct_codes,
+        }
+
+    async def test_a_live_and_a_history_row_sum_before_the_rank(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        """The sum decides the rank: neither side alone would put it first."""
+        await insert_rows(
+            session,
+            make_task(task_name='split_task', status=TaskStatus.RUNNING),
+            make_task(task_name='split_task', status=TaskStatus.COMPLETED),
+            make_task(task_name='other_task', status=TaskStatus.COMPLETED),
+        )
+
+        result = await task_facets(
+            broker,
+            window=_test_window(),
+            statuses=[],
+            error_categories=[],
+            retried_only=False,
+        )
+
+        assert is_ok(result)
+        assert [(f.value, f.count) for f in result.ok_value.task_names] == [
+            ('split_task', 2),
+            ('other_task', 1),
+        ]
+
     async def test_unclaimed_tasks_are_absent_from_the_worker_facet(
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:

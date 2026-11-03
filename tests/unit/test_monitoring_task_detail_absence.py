@@ -193,7 +193,7 @@ class TestOneSnapshot:
 
 
 def _read_task_route() -> Any:
-    router = tasks_routes.build_router(MagicMock(), stats_cache=MagicMock())
+    router = tasks_routes.build_router(MagicMock(), caches=MagicMock())
     for route in router.routes:
         if getattr(route, 'path', None) == '/tasks/{task_id}':
             return getattr(route, 'endpoint')
