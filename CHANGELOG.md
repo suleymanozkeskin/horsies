@@ -267,6 +267,19 @@ before you upgrade.
   `v{installed version}`, not the `main` branch.** A development version
   (for example `0.5.6.dev0` or `0.5.5+local`) has no tag, and the command
   exits with code 1. Pass `--ref main` to download the `main` branch docs.
+- **Breaking: `timeout_ms` has an upper bound.** `TaskOptions.timeout_ms`
+  takes 1000 to `MAX_TASK_TIMEOUT_MS` (4,294,967,295 ms, about 49.7 days), the
+  limit of the Rust port's `u32` field. `@app.task` refuses a larger value with
+  `HRS-102` (`TASK_INVALID_OPTIONS`). Before, no upper bound applied, and above
+  about 1.8e308 ms the worker raised `OverflowError` in the parent's wait and
+  in the child's heartbeat thread. A queued row whose stored timeout is not an
+  int from 1000 to that bound, or whose stored options do not parse, fails with
+  `WORKER_SERIALIZATION_ERROR` when a worker claims it. The child sets the row
+  `RUNNING` and fails it before it resolves the task, so no user code runs. A
+  value outside the bounds retries if `WORKER_SERIALIZATION_ERROR` is in
+  `auto_retry_for`, and each retry fails the same way. Options that do not
+  parse do not retry, because the retry policy is in them. Before, such a row
+  ran with no timeout.
 
 #### Send, enqueue and broker errors
 
@@ -852,6 +865,18 @@ before you upgrade.
   `COMPLETED` or `FAILED` node that does not parse keeps
   `RESULT_DESERIALIZATION_ERROR`, and so does a stored entry of a workflow that
   already completed.
+- **Breaking: result waits refuse a `timeout_ms` that no wait can use.**
+  `TaskHandle.get()` / `get_async()` and `WorkflowHandle.get()` / `get_async()`
+  return the new `RetrievalCode.INVALID_INPUT`, not cached.
+  `PostgresBroker.get_raw_result_record()` / `_async()` and
+  `Horsies.get_result()` / `get_raw_result()` and their `_async` forms return
+  `BrokerInvalidInput` (`INVALID_INPUT`). Each refuses before any read: a
+  negative value, a bool, a value that is not an int, or a value above
+  `MAX_TASK_TIMEOUT_MS`. `0` still checks once with no wait. Before, a negative
+  value worked like `0`, and a value above the float range raised
+  `OverflowError` from `WorkflowHandle.get_async()` and came back as
+  `BROKER_ERROR` from `TaskHandle.get()`. Add an `INVALID_INPUT` case to each
+  exhaustive `match` on `RetrievalCode`.
 
 #### Workflow recovery limit
 
