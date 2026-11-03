@@ -112,6 +112,7 @@ Run `horsies check` first. The type contract refuses more shapes at definition, 
    - A task node with a `priority` outside 1-100 raises `HRS-034`. A naive `good_until` raises `HRS-035`. Run `horsies check`.
    - Add `WORKFLOW_INVALID_PRIORITY`, `WORKFLOW_NAIVE_GOOD_UNTIL`, `WORKFLOW_INVALID_DEFINITION_CONFIG`, `TASK_ASYNC_FUNCTION_NOT_SUPPORTED` and `CHECK_LIVE_ASYNC_CONTEXT` to each exhaustive `match` on `ErrorCode`.
 7. **Workflow handle and result reads.**
+   - Add an `INVALID_INPUT` case to each exhaustive `match` on `RetrievalCode`. A `get()` with a negative `timeout_ms`, a bool, a value that is not an int, or a value above `MAX_TASK_TIMEOUT_MS` returns it. A negative value no longer works like `0`.
    - `HandleOperationError` is a union of frozen variants. Remove `HandleErrorCode.INTERNAL_FAILED`. Add cases for `STORED_DATA_INVALID` and `RESUME_RECOVERY_FAILED`.
    - `results()` and `tasks()` return `HandleWorkflowNotFound` for an unknown workflow id.
    - `get()` returns `WORKFLOW_NOT_FOUND` when retention removed the row, and `RESULT_DESERIALIZATION_ERROR` for stored data that does not parse.
@@ -140,6 +141,7 @@ Run `horsies check` first. The type contract refuses more shapes at definition, 
     - A `WorkflowDefinition` sets options with `config = WorkflowDefinitionConfig(...)`. A nested `class Meta` raises `HRS-033`.
     - The agent skill files are in `horsies/.agents/skills/horsies/`. Install them with `horsies skills install --target DIR`.
     - `horsies get-docs` downloads the docs of the release tag. Pass `--ref main` for the `main` branch.
+    - `timeout_ms` takes 1000 to `MAX_TASK_TIMEOUT_MS` (4,294,967,295 ms, about 49.7 days). `@app.task` refuses a larger value with `HRS-102`. A queued row from an earlier version with a larger stored value fails with `WORKER_SERIALIZATION_ERROR` when a worker claims it. Before the upgrade, drain the queues of a task with such a timeout.
 13. **Strict type contract.**
     - Run `horsies check`. A task or a model that uses a refused shape no longer registers, so a worker does not start until it changes. The list is in [Shapes Refused at Definition](/horsies/internals/serialization/#shapes-refused-at-definition): `Field(exclude=True)`, `exclude_if`, `extra='allow'`, `PlainValidator`, `WrapValidator`, `SkipValidation`, a schema hook, `Json[T]`, an alias whose written key does not read back, `Literal` with a plain `Enum`, a default that does not hold its type (`n: int = None`).
     - A conversion is refused at `.send()`, in a schedule and on a return: `"7"` for an `int`, a str for a `datetime`, `Enum`, `UUID` or `Decimal`. Pass the value of the declared type. Schedule kwargs hold Python values, so write the real value there too.

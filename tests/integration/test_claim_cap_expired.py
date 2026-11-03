@@ -16,6 +16,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.worker.stored_timeout import NoTimeout, StoredTimeout
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.sql import (
     CLAIM_SQL,
@@ -338,10 +339,10 @@ class TestReclaimUnderCap:
             kwargs_json: str | None,
             queue_name: str = 'default',
             is_workflow_task: bool = True,
-            timeout_ms: int | None = None,
+            timeout: StoredTimeout = NoTimeout(),
             claimed_at: datetime | None = None,
         ) -> None:
-            _ = (task_name, args_json, kwargs_json, queue_name, is_workflow_task, claimed_at)
+            _ = (task_name, args_json, kwargs_json, queue_name, is_workflow_task, timeout, claimed_at)
             dispatched_ids.append(task_id)
 
         worker._dispatch_one = AsyncMock(side_effect=_fake_dispatch)  # type: ignore[method-assign]

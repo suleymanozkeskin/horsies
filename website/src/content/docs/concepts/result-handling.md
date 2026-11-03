@@ -111,6 +111,7 @@ Returned by `handle.get()` for issues retrieving results:
 | `RESULT_NOT_READY` | Result not yet available; task is still running |
 | `EVENT_LOOP_LIMIT` | The broker serves its limit of open event loops and this is a new one; not cached, clears when one of those loops closes |
 | `ASYNC_CONTEXT` | Sync `get()` / `result_for()` was called on a thread that runs an event loop; nothing ran; not cached. Call `await handle.get_async()` / `result_for_async()` |
+| `INVALID_INPUT` | An argument of `get()` / `get_async()` was refused before any read, for example a `timeout_ms` that is negative, not an int, or above `MAX_TASK_TIMEOUT_MS`; not cached |
 
 ### OutcomeCode
 

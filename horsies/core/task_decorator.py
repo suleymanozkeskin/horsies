@@ -73,6 +73,7 @@ from horsies.core.utils.loop_runner import (
 )
 from horsies.core.history.identity.uuid7 import mint_task_id
 from horsies.core.utils.fingerprint import enqueue_fingerprint
+from horsies.core.utils.wait_timeout import wait_timeout_seconds
 
 from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import is_err, Ok, Err, Result
@@ -649,7 +650,19 @@ class TaskHandle(Generic[T]):
         Returns:
             TaskResult[T, TaskError] - always returns TaskResult, never raises for task/retrieval errors.
             Check result.is_err() and result.err.error_code for error handling.
+            A timeout_ms that is not None or an int from 0 to MAX_TASK_TIMEOUT_MS
+            returns ``RetrievalCode.INVALID_INPUT`` (not cached) before any read.
         """
+        match wait_timeout_seconds(timeout_ms):
+            case Err(err_value=refused):
+                return self._error_result(
+                    error_code=RetrievalCode.INVALID_INPUT,
+                    message=f'TaskHandle.get() for task {self.task_id}: {refused.message}',
+                    data={'task_id': self.task_id},
+                    cache=False,
+                )
+            case Ok():
+                pass
         if self._result_fetched:
             match self._cached_result:
                 case None:
@@ -702,7 +715,19 @@ class TaskHandle(Generic[T]):
         Returns:
             TaskResult[T, TaskError] - always returns TaskResult, never raises for task/retrieval errors.
             Check result.is_err() and result.err.error_code for error handling.
+            A timeout_ms that is not None or an int from 0 to MAX_TASK_TIMEOUT_MS
+            returns ``RetrievalCode.INVALID_INPUT`` (not cached) before any read.
         """
+        match wait_timeout_seconds(timeout_ms):
+            case Err(err_value=refused):
+                return self._error_result(
+                    error_code=RetrievalCode.INVALID_INPUT,
+                    message=f'TaskHandle.get_async() for task {self.task_id}: {refused.message}',
+                    data={'task_id': self.task_id},
+                    cache=False,
+                )
+            case Ok():
+                pass
         if self._result_fetched:
             match self._cached_result:
                 case None:

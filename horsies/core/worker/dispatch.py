@@ -39,6 +39,7 @@ from horsies.core.types.result import Result, is_err
 from horsies.core.worker.child_protocol import RunFrame
 from horsies.core.worker.runtime import _FinalizeError, _RequeueOutcome, _RetryError
 from horsies.core.worker.slots import KillSent, NothingToKill, SlotHandle, SlotPool
+from horsies.core.worker.stored_timeout import NoTimeout, StoredTimeout
 from horsies.core.worker.sql import (
     SELECT_WORKER_OWNED_IN_FLIGHT_FOR_UPDATE_SQL,
     UNCLAIM_CLAIMED_TASK_SQL,
@@ -74,7 +75,7 @@ class DispatchMixin:
             task_id: str,
             queue_name: str = 'default',
             is_workflow_task: bool = True,
-            timeout_ms: Optional[int] = None,
+            timeout: StoredTimeout = NoTimeout(),
             *,
             task_name: str,
             claimed_at: Optional[datetime] = None,
@@ -384,7 +385,7 @@ class DispatchMixin:
         kwargs_json: Optional[str],
         queue_name: str = 'default',
         is_workflow_task: bool = True,
-        timeout_ms: Optional[int] = None,
+        timeout: StoredTimeout = NoTimeout(),
         claimed_at: Optional[datetime] = None,
     ) -> None:
         """Submit to the slot pool and spawn the finalizer.
@@ -396,6 +397,10 @@ class DispatchMixin:
         (the claim statement's RETURNING); it fences the child's ownership
         confirm and every parent-side finalize/recovery statement so a
         stale dispatch cannot touch a re-claimed row (C10).
+
+        ``timeout`` is the stored timeout as the claim read it. A refusal is
+        sent to the child, which sets the row RUNNING and fails the task with
+        WORKER_SERIALIZATION_ERROR before it resolves the task.
         """
         slots = self._slots
         assert slots is not None, 'dispatch before the slot pool started'
@@ -416,7 +421,7 @@ class DispatchMixin:
                 worker_id=self.worker_instance_id,
                 runner_heartbeat_interval_ms=runner_heartbeat_interval_ms,
                 is_workflow_task=is_workflow_task,
-                timeout_ms=timeout_ms,
+                timeout=timeout,
                 claimed_at=claimed_at,
             ),
         )
@@ -428,7 +433,7 @@ class DispatchMixin:
                 task_id,
                 queue_name,
                 is_workflow_task,
-                timeout_ms=timeout_ms,
+                timeout=timeout,
                 task_name=task_name,
                 claimed_at=claimed_at,
             ),

@@ -40,6 +40,14 @@ from horsies.core.worker.child_protocol import (
     encode_preload_frame,
     parse_header,
 )
+from horsies.core.models.tasks import MAX_TASK_TIMEOUT_MS, MIN_TASK_TIMEOUT_MS
+from horsies.core.worker.stored_timeout import (
+    NoTimeout,
+    OptionsUnreadable,
+    StoredTimeout,
+    TaskTimeout,
+    TimeoutValueInvalid,
+)
 
 
 def _split(encoded: EncodedFrame) -> tuple[bytes, bytes]:
@@ -79,7 +87,7 @@ def _run_frame(**changes: object) -> RunFrame:
         worker_id='worker-1',
         runner_heartbeat_interval_ms=30_000,
         is_workflow_task=True,
-        timeout_ms=1000,
+        timeout=TaskTimeout(ms=1000),
         claimed_at=datetime(2026, 11, 1, 12, 30, 15, 250, tzinfo=timezone.utc),
     )
     return dataclasses.replace(frame, **changes)  # type: ignore[arg-type]
@@ -114,7 +122,22 @@ class TestParentFrames:
         assert decode_parent_frame(meta, body) == Ok(frame)
 
     def test_run_frame_without_claim_or_timeout(self) -> None:
-        frame = _run_frame(claimed_at=None, timeout_ms=None)
+        frame = _run_frame(claimed_at=None, timeout=NoTimeout())
+        meta, body = _split(encode_parent_frame(frame))
+        assert decode_parent_frame(meta, body) == Ok(frame)
+
+    @pytest.mark.parametrize(
+        'timeout',
+        [
+            NoTimeout(),
+            TaskTimeout(ms=MIN_TASK_TIMEOUT_MS),
+            TaskTimeout(ms=MAX_TASK_TIMEOUT_MS),
+            OptionsUnreadable(reason='stored task_options do not parse'),
+            TimeoutValueInvalid(reason='stored timeout_ms is a bool, not an int'),
+        ],
+    )
+    def test_each_stored_timeout_form_round_trips(self, timeout: StoredTimeout) -> None:
+        frame = _run_frame(timeout=timeout)
         meta, body = _split(encode_parent_frame(frame))
         assert decode_parent_frame(meta, body) == Ok(frame)
 
@@ -245,7 +268,15 @@ class TestMalformedMetadata:
             ('worker_id', None),
             ('runner_heartbeat_interval_ms', '1'),
             ('is_workflow_task', 1),
-            ('timeout_ms', 'x'),
+            ('timeout', 'x'),
+            ('timeout', None),
+            ('timeout', {'kind': 'ms', 'ms': MIN_TASK_TIMEOUT_MS - 1}),
+            ('timeout', {'kind': 'ms', 'ms': MAX_TASK_TIMEOUT_MS + 1}),
+            ('timeout', {'kind': 'ms', 'ms': True}),
+            ('timeout', {'kind': 'ms', 'ms': 1500.0}),
+            ('timeout', {'kind': 'value_invalid'}),
+            ('timeout', {'kind': 'options_unreadable', 'reason': 5}),
+            ('timeout', {'kind': 'later'}),
             ('claimed_at', 'not a date'),
             ('claimed_at', 5),
         ],

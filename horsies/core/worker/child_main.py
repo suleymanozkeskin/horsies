@@ -329,7 +329,7 @@ def run_child_task(frame: RunFrame, init: InitFrame) -> WireResult:
         frame.worker_id,
         frame.runner_heartbeat_interval_ms,
         frame.is_workflow_task,
-        frame.timeout_ms,
+        frame.timeout,
         frame.claimed_at,
     )
 

@@ -44,7 +44,7 @@ Errors from task execution, broker, and worker internals.
 | `WORKER_CRASHED` | Worker process died during execution | Yes, if in `auto_retry_for` |
 | `BROKER_ERROR` | Database or broker failure during operation | No |
 | `WORKER_RESOLUTION_ERROR` | Failed to resolve task by name | No |
-| `WORKER_SERIALIZATION_ERROR` | Failed to serialize/deserialize task data | No |
+| `WORKER_SERIALIZATION_ERROR` | Failed to serialize/deserialize task data: the stored arguments, or a stored timeout that the worker cannot use. No user code ran. A stored-data cause does not clear on a retry | Yes, if in `auto_retry_for` |
 | `RESULT_DESERIALIZATION_ERROR` | A stored result or a stored workflow error is corrupt or could not be deserialized | No |
 | `WORKFLOW_ENQUEUE_FAILED` | Workflow node failed after READY->ENQUEUED transition during enqueue/build | No |
 | `SUBWORKFLOW_LOAD_FAILED` | Subworkflow definition could not be loaded | No |
@@ -79,6 +79,7 @@ Errors from `handle.get()` / `get_async()`. These indicate issues retrieving the
 | `RESULT_NOT_READY` | Result not yet available; task is still running | No |
 | `EVENT_LOOP_LIMIT` | The broker serves its limit of open event loops (5) and this is a new one; not cached, clears when one of those loops closes | No |
 | `ASYNC_CONTEXT` | Sync `get()` / `result_for()` was called on a thread that runs an event loop; nothing ran; not cached. Call `await handle.get_async()` / `result_for_async()` | No |
+| `INVALID_INPUT` | An argument of `get()` / `get_async()` was refused before any read, for example a `timeout_ms` that is negative, not an int, or above `MAX_TASK_TIMEOUT_MS` (4,294,967,295 ms); not cached | No |
 
 #### OutcomeCode
 

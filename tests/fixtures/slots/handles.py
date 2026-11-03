@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 
 from horsies.core.worker.child_protocol import RssUnreadable, RunFrame
+from horsies.core.worker.stored_timeout import NoTimeout
 from horsies.core.worker.slots import SlotHandle, SlotOutcome, TaskFinished
 
 
@@ -17,7 +18,7 @@ def _run_frame(task_id: str) -> RunFrame:
         worker_id='worker-1',
         runner_heartbeat_interval_ms=30_000,
         is_workflow_task=False,
-        timeout_ms=None,
+        timeout=NoTimeout(),
         claimed_at=None,
     )
 

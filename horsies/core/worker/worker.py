@@ -150,7 +150,6 @@ from horsies.core.worker.runtime import (  # noqa: F401,E402
     _RequeueOutcome as _RequeueOutcome,
     _ReaperPassState as _ReaperPassState,
     _collect_psutil_metrics as _collect_psutil_metrics,
-    _parse_timeout_ms as _parse_timeout_ms,
 )
 
 

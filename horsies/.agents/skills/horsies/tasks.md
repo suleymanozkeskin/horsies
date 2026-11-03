@@ -26,7 +26,7 @@ def my_task(*, ...) -> TaskResult[T, TaskError]: ...
 | `retry_policy` | `RetryPolicy \| None` | `None` | See RetryPolicy section. |
 | `exception_mapper` | `dict[type[BaseException], str] \| None` | `None` | Per-task exception-to-error-code mapping. See ExceptionMapper section. |
 | `default_unhandled_error_code` | `str \| None` | `None` | Override global default for unmapped exceptions. Must be `UPPER_SNAKE_CASE`. |
-| `timeout_ms` | `int \| None` | `None` | Execution time limit in ms (>= 1000), measured from the moment a child takes the task; time waiting for a free child does not count. On expiry the child and the subprocesses in its session are SIGKILLed and the task fails with `TASK_TIMEOUT`; retry is opt-in via `auto_retry_for`. A deadline that fires before user code starts requeues the task instead. Other tasks on the worker continue. Use it as a hang backstop, not as routine control flow. |
+| `timeout_ms` | `int \| None` | `None` | Execution time limit in ms, from 1000 to `MAX_TASK_TIMEOUT_MS` (4,294,967,295, about 49.7 days, the Rust port's `u32` limit), measured from the moment a child takes the task; time waiting for a free child does not count. On expiry the child and the subprocesses in its session are SIGKILLed and the task fails with `TASK_TIMEOUT`; retry is opt-in via `auto_retry_for`. A deadline that fires before user code starts requeues the task instead. Other tasks on the worker continue. Use it as a hang backstop, not as routine control flow. |
 
 `good_until` is **not** accepted at definition time — it is a per-send concern. Passing it raises `HRS-102`. Use `.with_options(good_until=...)` at send time instead. For workflow nodes, use `.node(good_until=...)`.
 
@@ -165,6 +165,7 @@ Results from `handle.get()` / `handle.result_for()` when data is not (yet) avail
 - `RESULT_NOT_READY` — result not ready yet
 - `EVENT_LOOP_LIMIT` — the broker serves its limit of open event loops and this is a new one; not cached, clears when one of those loops closes
 - `ASYNC_CONTEXT` — sync `get()` / `result_for()` called on a thread that runs an event loop; nothing ran, not cached — call `get_async()` / `result_for_async()`
+- `INVALID_INPUT` — an argument of `get()` / `get_async()` was refused before any read: `timeout_ms` must be None or an int from 0 to `MAX_TASK_TIMEOUT_MS` (4,294,967,295 ms); not cached
 
 ### `OutcomeCode`
 

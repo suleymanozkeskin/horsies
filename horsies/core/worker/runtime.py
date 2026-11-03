@@ -13,10 +13,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Optional
 
-from horsies.core.codec.json_io import loads_json
 from horsies.core.logging import get_logger
 from horsies.core.models.tasks import BuiltInTaskCode
-from horsies.core.types.result import is_err
 
 logger = get_logger('worker')
 
@@ -43,7 +41,6 @@ __all__ = [
     '_ReaperPassState',
     '_collect_psutil_metrics',
     '_read_current_rss_mb',
-    '_parse_timeout_ms',
     'MemoryBaselineExceedsThresholdError',
 ]
 
@@ -137,38 +134,6 @@ class _ReaperPassState:
     next_orphan_task_audit_at: float = 0.0
     next_retention_cleanup_at: float = 0.0
     next_partition_maintenance_at: float = 0.0
-
-
-def _parse_timeout_ms(task_options_json: Any, task_id: str) -> int | None:
-    """Extract timeout_ms from a stored task_options JSON string.
-
-    Total: any malformed payload yields None (no timeout) with a warning —
-    a corrupt row must not block dispatch.
-    """
-    if not task_options_json or not isinstance(task_options_json, str):
-        return None
-    parsed = loads_json(task_options_json)
-    if is_err(parsed):
-        logger.warning(
-            'Task %s task_options unparseable while reading timeout_ms: %s',
-            task_id,
-            parsed.err_value,
-        )
-        return None
-    options = parsed.ok_value
-    if not isinstance(options, dict):
-        return None
-    raw = options.get('timeout_ms')
-    if raw is None:
-        return None
-    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
-        logger.warning(
-            'Task %s has invalid timeout_ms %r; ignoring',
-            task_id,
-            raw,
-        )
-        return None
-    return raw
 
 
 # Per-child latch so a broken RSS reader logs once, not once per task.

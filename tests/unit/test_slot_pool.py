@@ -35,6 +35,7 @@ from horsies.core.worker.child_protocol import (
     RunFrame,
     encode_child_frame,
 )
+from horsies.core.worker.stored_timeout import NoTimeout
 from horsies.core.worker import slots
 from horsies.core.worker.slots import (
     CHILD_BOOT_ATTEMPTS,
@@ -153,7 +154,7 @@ def _frame(task_name: str, argument: str | None = None) -> RunFrame:
         worker_id='worker-1',
         runner_heartbeat_interval_ms=30_000,
         is_workflow_task=False,
-        timeout_ms=None,
+        timeout=NoTimeout(),
         claimed_at=None,
     )
 

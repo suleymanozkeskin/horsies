@@ -29,6 +29,7 @@ from horsies.core.utils.loop_runner import (
     in_running_event_loop,
 )
 from horsies.core.utils.db import is_retryable_connection_error
+from horsies.core.utils.wait_timeout import wait_timeout_seconds
 from horsies.core.brokers.listener import PostgresListener
 from horsies.core.brokers.resources import (
     BrokerResources,
@@ -926,13 +927,33 @@ class WorkflowHandle(Generic[OutT]):
     async def get_async(
         self, timeout_ms: int | None = None,
     ) -> TaskResult[OutT, TaskError]:
-        """Async version of get()."""
+        """Async version of get().
+
+        A timeout_ms that is not None or an int from 0 to MAX_TASK_TIMEOUT_MS
+        returns ``RetrievalCode.INVALID_INPUT`` before any read.
+        """
 
         start = time.monotonic()
         # timeout_ms=0 means "0ms budget": return the result if already
         # available, else WAIT_TIMEOUT immediately. Only None disables the
         # timeout. Matches PostgresBroker.get_result_async.
-        timeout_sec = timeout_ms / 1000 if timeout_ms is not None else None
+        match wait_timeout_seconds(timeout_ms):
+            case Err(err_value=refused):
+                return cast(
+                    'TaskResult[OutT, TaskError]',
+                    TaskResult(
+                        err=TaskError(
+                            error_code=RetrievalCode.INVALID_INPUT,
+                            message=(
+                                f'WorkflowHandle.get() for workflow '
+                                f'{self.workflow_id}: {refused.message}'
+                            ),
+                            data={'workflow_id': self.workflow_id},
+                        ),
+                    ),
+                )
+            case Ok(ok_value=timeout_sec):
+                pass
 
         match await self.broker.select_resources():
             case Err(loop_limit):

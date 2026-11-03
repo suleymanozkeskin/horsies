@@ -98,6 +98,13 @@ from horsies.core.worker.runtime import (
     _RequeueOutcome,
     _RetryError,
 )
+from horsies.core.worker.stored_timeout import (
+    NoTimeout,
+    OptionsUnreadable,
+    StoredTimeout,
+    TaskTimeout,
+    TimeoutValueInvalid,
+)
 from horsies.core.worker.sql import (
     NOTIFY_TASK_QUEUE_SQL,
     SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
@@ -237,14 +244,16 @@ class FinalizeMixin:
         self,
         handle: SlotHandle,
         task_id: str,
-        timeout_ms: Optional[int],
+        timeout: StoredTimeout,
         claimed_at: Optional[datetime],
     ) -> SlotOutcome:
         """Wait for the outcome. The timeout starts when a child gets the task.
 
-        Time waiting for a free slot does not count: ``timeout_ms`` bounds
-        execution. Never raises for a task; a timeout goes through
-        ``_handle_task_timeout``, and the slot still reports what happened.
+        Time waiting for a free slot does not count: a ``TaskTimeout`` bounds
+        execution. A refused stored timeout has no deadline: the child fails
+        the task at once, before it resolves the task. Never raises for a
+        task; a timeout goes through ``_handle_task_timeout``, and the slot
+        still reports what happened.
         """
         assigned = await asyncio.shield(handle.assigned)
         match assigned:
@@ -254,8 +263,13 @@ class FinalizeMixin:
                 pass
             case _ as unreachable:
                 assert_never(unreachable)
-        if timeout_ms is None:
-            return await asyncio.shield(handle.outcome)
+        match timeout:
+            case TaskTimeout(ms=timeout_ms):
+                pass
+            case NoTimeout() | OptionsUnreadable() | TimeoutValueInvalid():
+                return await asyncio.shield(handle.outcome)
+            case _ as unreachable:
+                assert_never(unreachable)
         try:
             # shield: wait_for must not cancel the outcome. The child keeps
             # running regardless, and the outcome is awaited again below.
@@ -281,7 +295,7 @@ class FinalizeMixin:
         task_id: str,
         queue_name: str = 'default',
         is_workflow_task: bool = True,
-        timeout_ms: Optional[int] = None,
+        timeout: StoredTimeout = NoTimeout(),
         *,
         task_name: str,
         claimed_at: Optional[datetime] = None,
@@ -289,7 +303,7 @@ class FinalizeMixin:
         outcome = await self._await_slot_outcome(
             handle,
             task_id,
-            timeout_ms,
+            timeout,
             claimed_at,
         )
         match outcome:

@@ -63,6 +63,13 @@ from horsies.core.worker.child_protocol import (
     RunFrame,
     encode_parent_frame,
 )
+from horsies.core.worker.stored_timeout import (
+    NoTimeout,
+    OptionsUnreadable,
+    StoredTimeout,
+    TaskTimeout,
+    TimeoutValueInvalid,
+)
 from horsies.core.worker.slots import (
     BootAttemptsExhausted,
     ChildBaseline,
@@ -114,7 +121,7 @@ def _run_frame(task_id: str = 'task-1') -> RunFrame:
         worker_id='worker-1',
         runner_heartbeat_interval_ms=30_000,
         is_workflow_task=False,
-        timeout_ms=None,
+        timeout=NoTimeout(),
         claimed_at=None,
     )
 
@@ -1306,7 +1313,7 @@ class TestAwaitSlotOutcome:
         handle = SlotHandle(_run_frame(), asyncio.get_running_loop())
 
         waiter = asyncio.ensure_future(
-            worker._await_slot_outcome(handle, 'task-1', 1, None),
+            worker._await_slot_outcome(handle, 'task-1', TaskTimeout(ms=1), None),
         )
         await asyncio.sleep(0.05)
 
@@ -1327,7 +1334,9 @@ class TestAwaitSlotOutcome:
             side_effect=_timeout_handler,
         )
 
-        outcome = await worker._await_slot_outcome(handle, 'task-1', 1, None)
+        outcome = await worker._await_slot_outcome(
+            handle, 'task-1', TaskTimeout(ms=1), None,
+        )
 
         worker._handle_task_timeout.assert_awaited_once()
         assert outcome == _LOST
@@ -1341,11 +1350,39 @@ class TestAwaitSlotOutcome:
         outcome = await worker._await_slot_outcome(
             _finished_handle(done),
             'task-1',
-            1000,
+            TaskTimeout(ms=1000),
             None,
         )
 
         assert outcome == done
+        worker._handle_task_timeout.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        'timeout',
+        [
+            NoTimeout(),
+            OptionsUnreadable(reason='stored task_options do not parse'),
+            TimeoutValueInvalid(reason='stored timeout_ms is above the limit'),
+        ],
+    )
+    async def test_no_deadline_without_a_usable_timeout(
+        self,
+        timeout: StoredTimeout,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        worker = _make_worker()
+        worker._handle_task_timeout = AsyncMock()  # type: ignore[method-assign]
+        wait_for = AsyncMock()
+        monkeypatch.setattr(asyncio, 'wait_for', wait_for)
+        done = TaskFinished(True, '{}', None, RssUnreadable())
+
+        outcome = await worker._await_slot_outcome(
+            _finished_handle(done), 'task-1', timeout, None,
+        )
+
+        assert outcome == done
+        wait_for.assert_not_called()
         worker._handle_task_timeout.assert_not_awaited()
 
 
@@ -1415,7 +1452,7 @@ class TestDispatchOne:
             '{}',
             'default',
             True,
-            timeout_ms=1000,
+            timeout=TaskTimeout(ms=1000),
             claimed_at=claimed_at,
         )
 
@@ -1428,7 +1465,7 @@ class TestDispatchOne:
             worker_id=worker.worker_instance_id,
             runner_heartbeat_interval_ms=30_000,
             is_workflow_task=True,
-            timeout_ms=1000,
+            timeout=TaskTimeout(ms=1000),
             claimed_at=claimed_at,
         )
         assert worker._spawn_background.call_args.kwargs['finalizer'] is True
@@ -1448,7 +1485,7 @@ class TestDispatchOne:
             None,
             'other',
             False,
-            timeout_ms=1000,
+            timeout=TaskTimeout(ms=1000),
             claimed_at=claimed_at,
         )
 
@@ -1457,7 +1494,7 @@ class TestDispatchOne:
             'task-31',
             'other',
             False,
-            timeout_ms=1000,
+            timeout=TaskTimeout(ms=1000),
             task_name='app.add',
             claimed_at=claimed_at,
         )

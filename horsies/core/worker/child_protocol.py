@@ -17,7 +17,15 @@ from datetime import datetime
 from typing import Any, Final, TypeAlias, assert_never, cast
 
 from horsies.core.codec.json_io import dumps_json, loads_json_bytes
+from horsies.core.models.tasks import MAX_TASK_TIMEOUT_MS, MIN_TASK_TIMEOUT_MS
 from horsies.core.types.result import Err, Ok, Result
+from horsies.core.worker.stored_timeout import (
+    NoTimeout,
+    OptionsUnreadable,
+    StoredTimeout,
+    TaskTimeout,
+    TimeoutValueInvalid,
+)
 
 FRAME_HEADER: Final = struct.Struct('>IQ')
 
@@ -62,7 +70,7 @@ class RunFrame:
     worker_id: str
     runner_heartbeat_interval_ms: int
     is_workflow_task: bool
-    timeout_ms: int | None
+    timeout: StoredTimeout
     claimed_at: datetime | None
 
 
@@ -244,7 +252,7 @@ def _encode_run_frame(frame: RunFrame) -> EncodedFrame:
             'worker_id': frame.worker_id,
             'runner_heartbeat_interval_ms': frame.runner_heartbeat_interval_ms,
             'is_workflow_task': frame.is_workflow_task,
-            'timeout_ms': frame.timeout_ms,
+            'timeout': _encode_timeout(frame.timeout),
             'claimed_at': (
                 None if frame.claimed_at is None else frame.claimed_at.isoformat()
             ),
@@ -329,6 +337,45 @@ def _optional_whole(meta: Mapping[str, Any], key: str) -> int | None:
     return _whole(meta, key)
 
 
+def _encode_timeout(timeout: StoredTimeout) -> dict[str, object]:
+    match timeout:
+        case NoTimeout():
+            return {'kind': 'none'}
+        case TaskTimeout(ms=ms):
+            return {'kind': 'ms', 'ms': ms}
+        case OptionsUnreadable(reason=reason):
+            return {'kind': 'options_unreadable', 'reason': reason}
+        case TimeoutValueInvalid(reason=reason):
+            return {'kind': 'value_invalid', 'reason': reason}
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _decode_timeout(meta: Mapping[str, Any]) -> StoredTimeout:
+    value = meta.get('timeout')
+    if not isinstance(value, dict):
+        raise _BadField('timeout')
+    timeout = cast('Mapping[str, Any]', value)
+    match timeout.get('kind'):
+        case 'none':
+            return NoTimeout()
+        case 'ms':
+            ms = timeout.get('ms')
+            if (
+                not isinstance(ms, int)
+                or isinstance(ms, bool)
+                or not MIN_TASK_TIMEOUT_MS <= ms <= MAX_TASK_TIMEOUT_MS
+            ):
+                raise _BadField('timeout.ms')
+            return TaskTimeout(ms=ms)
+        case 'options_unreadable':
+            return OptionsUnreadable(reason=_text(timeout, 'reason'))
+        case 'value_invalid':
+            return TimeoutValueInvalid(reason=_text(timeout, 'reason'))
+        case _:
+            raise _BadField('timeout.kind')
+
+
 def _flag(meta: Mapping[str, Any], key: str) -> bool:
     value = meta.get(key)
     if not isinstance(value, bool):
@@ -400,7 +447,7 @@ def _decode_run(meta: Mapping[str, Any], body: bytes) -> RunFrame:
         worker_id=_text(meta, 'worker_id'),
         runner_heartbeat_interval_ms=_whole(meta, 'runner_heartbeat_interval_ms'),
         is_workflow_task=_flag(meta, 'is_workflow_task'),
-        timeout_ms=_optional_whole(meta, 'timeout_ms'),
+        timeout=_decode_timeout(meta),
         claimed_at=None if claimed_at is None else datetime.fromisoformat(claimed_at),
     )
 

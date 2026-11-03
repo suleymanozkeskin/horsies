@@ -33,7 +33,7 @@ Uses PostgreSQL `LISTEN/NOTIFY` with a 1-second polling fallback.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `task_id` | `str` | — | Task ID to retrieve result for |
-| `timeout_ms` | `int \| None` | `None` | Max wait time in milliseconds; `None` waits indefinitely |
+| `timeout_ms` | `int \| None` | `None` | Max wait time in milliseconds, from 0 to `MAX_TASK_TIMEOUT_MS` (4,294,967,295); `None` waits indefinitely. Any other value returns `Err(BrokerInvalidInput)` (`INVALID_INPUT`) before any read |
 
 **Returns:** `BrokerResult[RawResultRecord | None]` — `Ok(None)` if no task row exists for that ID; `Err(BrokerOperationError)` on infrastructure failure. The `RawResultRecord` carries `task_id`, `task_name`, `status`, and `raw_result` (the decoded JSON envelope, or `None` for cancelled tasks, non-terminal timeout snapshots, or terminal rows with no payload).
 
