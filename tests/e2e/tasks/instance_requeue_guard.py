@@ -82,6 +82,7 @@ def requeue_guard_task(*, token: str) -> TaskResult[str, TaskError]:
 # ---------------------------------------------------------------------------
 
 if os.environ.get('INJECT_REQUEUE_DB_ERROR') == '1':
+    from horsies.core.worker.stored_timeout import NoTimeout, StoredTimeout
     from horsies.core.worker.worker import Worker, _RequeueOutcome
     from typing import Optional
     from datetime import datetime
@@ -96,7 +97,7 @@ if os.environ.get('INJECT_REQUEUE_DB_ERROR') == '1':
         kwargs_json: Optional[str],
         queue_name: str = 'default',  # noqa: ARG001
         is_workflow_task: bool = True,  # noqa: ARG001
-        timeout_ms: Optional[int] = None,  # noqa: ARG001
+        timeout: StoredTimeout = NoTimeout(),  # noqa: ARG001
         claimed_at: Optional[datetime] = None,  # noqa: ARG001
     ) -> None:
         # Simulate: no child takes the task → requeue → DB_ERROR

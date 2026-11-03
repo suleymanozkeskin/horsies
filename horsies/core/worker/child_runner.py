@@ -48,10 +48,20 @@ _ENGINE_KEY_WORKFLOW_CTX = '__h_workflow_ctx__'
 _ENGINE_KEY_WORKFLOW_META = '__h_workflow_meta__'
 _ENGINE_KEY_TASKRESULT_ENVELOPE = '__h_taskresult_envelope__'
 from horsies.core.models.tasks import (
+    MAX_TASK_TIMEOUT_MS,
+    MIN_TASK_TIMEOUT_MS,
     TaskResult,
     TaskError,
     OperationalErrorCode,
     OutcomeCode,
+)
+from horsies.core.worker.stored_timeout import (
+    NoTimeout,
+    OptionsUnreadable,
+    StoredTimeout,
+    TaskTimeout,
+    TimeoutRefusal,
+    TimeoutValueInvalid,
 )
 from horsies.core.lifecycle.commands import (
     AbandonOwnedNode,
@@ -103,6 +113,38 @@ def _serialization_error_response(
         ),
     )
     return (True, serialize_error_payload(tr), f'SerializationError: {error}')
+
+
+def _stored_timeout_refusal_response(
+    task_name: str,
+    refusal: TimeoutRefusal,
+) -> tuple[bool, str, str | None]:
+    """Build a WORKER_SERIALIZATION_ERROR response for a stored timeout.
+
+    The row is RUNNING when this runs, so the normal persist path fails the
+    task. `data` names the stored field that the worker cannot use.
+    """
+    match refusal:
+        case OptionsUnreadable(reason=reason):
+            data: dict[str, str | int] = {'task_name': task_name, 'field': 'task_options'}
+        case TimeoutValueInvalid(reason=reason):
+            data = {
+                'task_name': task_name,
+                'field': 'timeout_ms',
+                'min_ms': MIN_TASK_TIMEOUT_MS,
+                'max_ms': MAX_TASK_TIMEOUT_MS,
+            }
+        case _ as unreachable:
+            assert_never(unreachable)
+    logger.error(f'Stored timeout refused for task {task_name}: {reason}')
+    tr: TaskResult[None, TaskError] = TaskResult(
+        err=TaskError(
+            error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+            message=reason,
+            data=data,
+        ),
+    )
+    return (True, serialize_error_payload(tr), f'StoredTimeoutRefused: {reason}')
 
 
 from horsies.core.errors import ConfigurationError, ErrorCode
@@ -1032,7 +1074,7 @@ def _run_task_entry(
     master_worker_id: str,
     runner_heartbeat_interval_ms: int = 30_000,
     is_workflow_task: bool = True,
-    timeout_ms: Optional[int] = None,
+    timeout: StoredTimeout = NoTimeout(),
     claimed_at: Optional[datetime] = None,
 ) -> Tuple[bool, str, Optional[str]]:
     """
@@ -1069,6 +1111,14 @@ def _run_task_entry(
     if ownership_result is not None:
         return ownership_result
 
+    match timeout:
+        case TaskTimeout(ms=deadline_ms):
+            pass
+        case NoTimeout() | OptionsUnreadable() | TimeoutValueInvalid():
+            deadline_ms = None
+        case _ as unreachable:
+            assert_never(unreachable)
+
     # Start heartbeat monitoring in separate thread
     heartbeat_stop_event = threading.Event()
     _start_heartbeat_thread(
@@ -1077,10 +1127,20 @@ def _run_task_entry(
         heartbeat_stop_event,
         master_worker_id,
         runner_heartbeat_interval_ms,
-        timeout_ms,
+        deadline_ms,
     )
 
     try:
+        # A stored timeout that the worker cannot use fails the task before
+        # it resolves the task, so no user code runs.
+        match timeout:
+            case OptionsUnreadable() | TimeoutValueInvalid():
+                return _stored_timeout_refusal_response(task_name, timeout)
+            case NoTimeout() | TaskTimeout():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
+
         # Resolve from TaskRegistry
         try:
             app = get_current_app()

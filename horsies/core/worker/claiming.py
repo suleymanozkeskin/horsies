@@ -31,7 +31,11 @@ from horsies.core.lifecycle.outcomes import (
 )
 from horsies.core.lifecycle.persistence import apply_batch_async
 from horsies.core.logging import get_logger
-from horsies.core.worker.runtime import _parse_timeout_ms
+from horsies.core.worker.stored_timeout import (
+    NoTimeout,
+    StoredTimeout,
+    read_stored_timeout,
+)
 from horsies.core.worker.sql import (
     CLAIM_SQL,
     COUNT_CLAIMED_FOR_WORKER_SQL,
@@ -146,7 +150,7 @@ class ClaimMixin:
             kwargs_json: Optional[str],
             queue_name: str = 'default',
             is_workflow_task: bool = True,
-            timeout_ms: Optional[int] = None,
+            timeout: StoredTimeout = NoTimeout(),
             claimed_at: Optional[datetime] = None,
         ) -> None: ...
 
@@ -232,7 +236,7 @@ class ClaimMixin:
                 row['kwargs'],
                 row.get('queue_name') or 'default',
                 bool(row.get('is_workflow_task', False)),
-                timeout_ms=_parse_timeout_ms(row.get('task_options'), row['id']),
+                timeout=read_stored_timeout(row.get('task_options')),
                 claimed_at=row.get('claimed_at'),
             )
         return ClaimPass(

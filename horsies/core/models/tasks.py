@@ -99,6 +99,10 @@ class RetrievalCode(str, Enum):
     # call site cannot wait for the value. Never cached: the ``*_async``
     # form, or a sync call from a thread without a running loop, reads it.
     ASYNC_CONTEXT = 'ASYNC_CONTEXT'
+    # An argument of the get call was refused before anything ran, for
+    # example a timeout_ms outside 0 to MAX_TASK_TIMEOUT_MS. Never cached:
+    # a call with a valid argument reads the value.
+    INVALID_INPUT = 'INVALID_INPUT'
 
 
 class OutcomeCode(str, Enum):
@@ -519,6 +523,16 @@ class TaskInfo:
 MAX_RETRY_ATTEMPTS: Final = 20
 """The largest `RetryPolicy.max_retries`."""
 
+MIN_TASK_TIMEOUT_MS: Final = 1000
+"""The smallest `TaskOptions.timeout_ms`."""
+
+MAX_TASK_TIMEOUT_MS: Final = 2**32 - 1
+"""The largest `TaskOptions.timeout_ms`, and the largest wait of a result get.
+
+About 49.7 days. It is the limit of the Rust port's `u32` field, so both
+libraries accept the same declarations.
+"""
+
 
 class RetryPolicy(BaseModel):
     """
@@ -659,7 +673,8 @@ class TaskOptions(BaseModel):
             subprocesses in its session; retry only happens when
             'TASK_TIMEOUT' is listed in auto_retry_for. Other tasks on the
             worker continue. The worker must start a new child, so timeouts
-            are for exceptional hangs, not routine control flow.
+            are for exceptional hangs, not routine control flow. The value
+            is from MIN_TASK_TIMEOUT_MS to MAX_TASK_TIMEOUT_MS.
     """
 
     model_config = ConfigDict(extra='forbid')
@@ -669,7 +684,12 @@ class TaskOptions(BaseModel):
     good_until: Optional[datetime.datetime] = None
     retry_policy: Optional[RetryPolicy] = None
     timeout_ms: Annotated[
-        int, Field(ge=1000, description='Execution time limit in milliseconds (>= 1s)')
+        int,
+        Field(
+            ge=MIN_TASK_TIMEOUT_MS,
+            le=MAX_TASK_TIMEOUT_MS,
+            description='Execution time limit in milliseconds (1 s to about 49.7 days)',
+        ),
     ] | None = None
 
     @field_validator('good_until')

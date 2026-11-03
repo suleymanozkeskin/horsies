@@ -119,6 +119,7 @@ from horsies.core.utils.loop_runner import (
     in_running_event_loop,
 )
 from horsies.core.utils.url import to_psycopg_url
+from horsies.core.utils.wait_timeout import wait_timeout_seconds
 
 if TYPE_CHECKING:
     from horsies.core.app import Horsies
@@ -2964,8 +2965,18 @@ class PostgresBroker:
         - ``Err(BrokerOperationError(INVALID_JSON_PAYLOAD, ...))``:
           stored JSON failed strict parse (malformed, non-finite
           float, non-object envelope).
+        - ``Err(BrokerInvalidInput)``: ``timeout_ms`` is not None or an int
+          from 0 to ``MAX_TASK_TIMEOUT_MS``. Nothing ran.
         - ``Err(...)`` with other codes for DB / listener failures.
         """
+        match wait_timeout_seconds(timeout_ms):
+            case Err(err_value=refused):
+                return Err(BrokerInvalidInput(
+                    message=f'raw result fetch of task {task_id}: {refused.message}',
+                    exception=NoCause(),
+                ))
+            case Ok(ok_value=timeout_seconds):
+                pass
         match await self.select_resources():
             case Err(loop_limit):
                 return _loop_limit_err('raw result fetch', loop_limit)
@@ -2975,10 +2986,6 @@ class PostgresBroker:
             await self._ensure_initialized(resources)
 
             start_time = asyncio.get_event_loop().time()
-
-            timeout_seconds: Optional[float] = None
-            if timeout_ms is not None:
-                timeout_seconds = timeout_ms / 1000.0
 
             # Quick path: row may already be terminal.
             async with resources.session_factory() as session:

@@ -30,12 +30,22 @@ from horsies.core.codec.json_io import SerializationError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import (
+    MAX_TASK_TIMEOUT_MS,
+    MIN_TASK_TIMEOUT_MS,
     OperationalErrorCode,
     OutcomeCode,
     TaskError,
     TaskResult,
 )
 from horsies.core.types.result import Err
+from horsies.core.worker.stored_timeout import (
+    NoTimeout,
+    OptionsUnreadable,
+    StoredTimeout,
+    TaskTimeout,
+    TimeoutRefusal,
+    TimeoutValueInvalid,
+)
 from horsies.core.worker.child_runner import (
     _debug_imports_log,
     _get_workflow_status_for_task,
@@ -2478,3 +2488,89 @@ def _apply_patches(patches: dict[str, Any]) -> Generator[None, None, None]:
     finally:
         for p in reversed(stack):
             p.stop()
+
+
+_REFUSALS: list[tuple[TimeoutRefusal, str]] = [
+    (OptionsUnreadable(reason='stored task_options do not parse'), 'task_options'),
+    (
+        TimeoutValueInvalid(reason='stored timeout_ms is above the limit'),
+        'timeout_ms',
+    ),
+]
+
+
+@pytest.mark.unit
+class TestRunTaskEntryStoredTimeout:
+    """A stored timeout reaches the child as `StoredTimeout`."""
+
+    @pytest.mark.parametrize(('refusal', 'field'), _REFUSALS)
+    def test_a_refusal_fails_the_task_after_running_and_before_resolve(
+        self,
+        _run_entry_defaults: dict[str, Any],
+        refusal: TimeoutRefusal,
+        field: str,
+    ) -> None:
+        patches = _make_run_task_patches()
+        confirm = patches[
+            'horsies.core.worker.child_runner._confirm_ownership_and_set_running'
+        ]
+        app_lookup = patches['horsies.core.worker.child_runner.get_current_app']
+
+        with _apply_patches(patches):
+            ok, payload, reason = _run_task_entry(
+                **_run_entry_defaults, timeout=refusal,
+            )
+
+        assert ok is True
+        assert reason == f'StoredTimeoutRefused: {refusal.reason}'
+        confirm.assert_called_once()
+        app_lookup.assert_not_called()
+        err = _parse_task_result(payload)['err']
+        assert err['error_code'] == {
+            '__builtin_task_code__': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
+        }
+        assert err['message'] == refusal.reason
+        assert err['data']['field'] == field
+
+    def test_a_bad_value_names_the_bounds(
+        self,
+        _run_entry_defaults: dict[str, Any],
+    ) -> None:
+        patches = _make_run_task_patches()
+
+        with _apply_patches(patches):
+            _, payload, _ = _run_task_entry(
+                **_run_entry_defaults,
+                timeout=TimeoutValueInvalid(reason='stored timeout_ms is a bool'),
+            )
+
+        data = _parse_task_result(payload)['err']['data']
+        assert data == {
+            'task_name': 'my_task',
+            'field': 'timeout_ms',
+            'min_ms': MIN_TASK_TIMEOUT_MS,
+            'max_ms': MAX_TASK_TIMEOUT_MS,
+        }
+
+    @pytest.mark.parametrize(
+        ('timeout', 'deadline_ms'),
+        [
+            (NoTimeout(), None),
+            (TaskTimeout(ms=5_000), 5_000),
+            (OptionsUnreadable(reason='stored task_options do not parse'), None),
+            (TimeoutValueInvalid(reason='stored timeout_ms is a bool'), None),
+        ],
+    )
+    def test_only_a_task_timeout_gives_the_heartbeat_a_deadline(
+        self,
+        _run_entry_defaults: dict[str, Any],
+        timeout: StoredTimeout,
+        deadline_ms: int | None,
+    ) -> None:
+        patches = _make_run_task_patches()
+        heartbeat = patches['horsies.core.worker.child_runner._start_heartbeat_thread']
+
+        with _apply_patches(patches):
+            _run_task_entry(**_run_entry_defaults, timeout=timeout)
+
+        assert heartbeat.call_args.args[-1] == deadline_ms

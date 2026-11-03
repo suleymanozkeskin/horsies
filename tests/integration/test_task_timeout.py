@@ -22,7 +22,8 @@ from horsies.core.models.tasks import OutcomeCode, TaskOptions
 from horsies.core.types.result import Ok, is_ok
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.slots import SlotHandle
-from horsies.core.worker.worker import Worker, _parse_timeout_ms
+from horsies.core.worker.stored_timeout import NoTimeout, TaskTimeout, read_stored_timeout
+from horsies.core.worker.worker import Worker
 from tests.fixtures.slots.handles import unbound_handle
 from tests.integration.conftest import compute_test_enqueue_sha
 from tests.integration.history_seeding import read_attempts
@@ -265,11 +266,12 @@ async def test_timeout_retries_when_opted_in(
     child.kill_for_caller.assert_called_once_with()
 
 class TestTimeoutWireRoundTrip:
-    """serialize_task_options must carry timeout_ms to the claim-side parser.
+    """serialize_task_options must carry timeout_ms to the claim-side reader.
 
     Regression: the serializer originally emitted only retry_policy and
     good_until, silently dropping timeout_ms before it reached the DB —
-    decorator-declared timeouts never fired.
+    decorator-declared timeouts never fired. Each stored form of the reader
+    is tested in tests/unit/test_stored_timeout.py.
     """
 
     def test_timeout_round_trips(self) -> None:
@@ -277,32 +279,9 @@ class TestTimeoutWireRoundTrip:
             TaskOptions(task_name='t', timeout_ms=5_000),
         )
         assert is_ok(serialized)
-        assert _parse_timeout_ms(serialized.ok_value, 't') == 5_000
+        assert read_stored_timeout(serialized.ok_value) == TaskTimeout(ms=5_000)
 
-    def test_absent_timeout_round_trips_as_none(self) -> None:
+    def test_absent_timeout_round_trips_as_no_timeout(self) -> None:
         serialized = serialize_task_options(TaskOptions(task_name='t'))
         assert is_ok(serialized)
-        assert _parse_timeout_ms(serialized.ok_value, 't') is None
-
-
-class TestParseTimeoutMs:
-    def test_valid(self) -> None:
-        assert _parse_timeout_ms(json.dumps({'timeout_ms': 5000}), 't') == 5000
-
-    def test_absent(self) -> None:
-        assert _parse_timeout_ms(json.dumps({'retry_policy': {}}), 't') is None
-
-    def test_none_input(self) -> None:
-        assert _parse_timeout_ms(None, 't') is None
-
-    def test_corrupt_json(self) -> None:
-        assert _parse_timeout_ms('{not json', 't') is None
-
-    def test_non_dict(self) -> None:
-        assert _parse_timeout_ms('[1,2]', 't') is None
-
-    def test_bool_rejected(self) -> None:
-        assert _parse_timeout_ms(json.dumps({'timeout_ms': True}), 't') is None
-
-    def test_negative_rejected(self) -> None:
-        assert _parse_timeout_ms(json.dumps({'timeout_ms': -5}), 't') is None
+        assert read_stored_timeout(serialized.ok_value) == NoTimeout()

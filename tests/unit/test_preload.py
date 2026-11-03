@@ -31,6 +31,7 @@ from horsies.core.worker.child_protocol import (
     PreloadReadyFrame,
     RunFrame,
 )
+from horsies.core.worker.stored_timeout import NoTimeout
 from horsies.core.worker.config import ChildPreload
 from horsies.core.worker.preload import (
     PreloadDown,
@@ -121,7 +122,7 @@ def _frame(task_name: str, argument: str | None = None) -> RunFrame:
         worker_id='worker-1',
         runner_heartbeat_interval_ms=30_000,
         is_workflow_task=False,
-        timeout_ms=None,
+        timeout=NoTimeout(),
         claimed_at=None,
     )
 
