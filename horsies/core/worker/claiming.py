@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Optional, assert_never
 
@@ -100,6 +101,33 @@ def _resumed_before_abandon_task_ids(
     return task_ids
 
 
+@dataclass(frozen=True, slots=True)
+class ClaimPass:
+    """What one claim pass did.
+
+    ``claimed`` counts the rows that the claim statement took. ``dropped`` counts
+    the rows of those that the post-claim guard gave up: they used claim budget
+    and hold no slot.
+    """
+
+    claimed: int
+    dropped: int
+
+    def left_unannounced_work(self, *, limited: bool) -> bool:
+        """Whether ready work can remain that no wake would announce.
+
+        A dropped row used budget that ready work could have had, and it frees
+        no slot, so no capacity release follows. A pass under ``max_claim_batch``
+        can stop with free slots. In both cases the NOTIFY of that work was
+        already consumed. A dropped row cannot be claimed again until a resume,
+        so a loop on this ends.
+
+        Args:
+            limited: Whether ``max_claim_batch`` caps the pass.
+        """
+        return self.dropped > 0 or (limited and self.claimed > 0)
+
+
 class ClaimMixin:
     """Budgeted claim pass, queue caps, lease math, advisory claim mutex."""
 
@@ -122,14 +150,13 @@ class ClaimMixin:
             claimed_at: Optional[datetime] = None,
         ) -> None: ...
 
-    async def _claim_and_dispatch_all(self) -> bool:
+    async def _claim_and_dispatch_all(self) -> ClaimPass:
         """
         Claim tasks subject to:
           - max_claim_per_worker guard (prevents over-claiming)
           - queue priorities (CUSTOM mode)
           - per-queue max_concurrency (CUSTOM mode)
           - worker global concurrency (processes)
-        Returns True if anything was claimed.
 
         Raises:
             Exception: DB errors propagate to the main loop, which
@@ -192,12 +219,12 @@ class ClaimMixin:
             await s.commit()
 
         if not claimed_rows:
-            return False
+            return ClaimPass(claimed=0, dropped=0)
 
         # Post-claim guard: filter out tasks for non-runnable workflow states.
-        claimed_rows = await self._filter_nonrunnable_workflow_tasks(claimed_rows)
+        dispatchable_rows = await self._filter_nonrunnable_workflow_tasks(claimed_rows)
 
-        for row in claimed_rows:
+        for row in dispatchable_rows:
             await self._dispatch_one(
                 row['id'],
                 row['task_name'],
@@ -208,7 +235,10 @@ class ClaimMixin:
                 timeout_ms=_parse_timeout_ms(row.get('task_options'), row['id']),
                 claimed_at=row.get('claimed_at'),
             )
-        return len(claimed_rows) > 0
+        return ClaimPass(
+            claimed=len(claimed_rows),
+            dropped=len(claimed_rows) - len(dispatchable_rows),
+        )
 
     async def _filter_nonrunnable_workflow_tasks(
         self, rows: list[dict[str, Any]]

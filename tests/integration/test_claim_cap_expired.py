@@ -346,8 +346,8 @@ class TestReclaimUnderCap:
 
         worker._dispatch_one = AsyncMock(side_effect=_fake_dispatch)  # type: ignore[method-assign]
 
-        claimed_any = await worker._claim_and_dispatch_all()
-        assert claimed_any is True
+        claim_pass = await worker._claim_and_dispatch_all()
+        assert claim_pass.claimed > 0
         assert pending_task_id in dispatched_ids, (
             f'Expected pending task {pending_task_id} to be claimed and dispatched, '
             f'got dispatched={dispatched_ids}'
