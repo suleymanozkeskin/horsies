@@ -36,6 +36,7 @@ from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.current import set_current_app
 from horsies.core.worker.stored_timeout import (
     NoTimeout,
+    OptionsUnreadable,
     StoredTimeout,
     TimeoutValueInvalid,
 )
@@ -130,6 +131,15 @@ async def _store_timeout(session: AsyncSession, task_id: str, timeout_ms: int) -
     await session.execute(
         text('UPDATE horsies_tasks SET task_options = :opts WHERE id = :id'),
         {'opts': json.dumps(options), 'id': task_id},
+    )
+    await session.commit()
+
+
+async def _store_options_text(session: AsyncSession, task_id: str, text_value: str) -> None:
+    """Replace the row's stored options with text that does not parse."""
+    await session.execute(
+        text('UPDATE horsies_tasks SET task_options = :opts WHERE id = :id'),
+        {'opts': text_value, 'id': task_id},
     )
     await session.commit()
 
@@ -248,6 +258,7 @@ async def test_a_refused_timeout_retries_until_max_retries_when_asked(
         retry_policy=RetryPolicy.fixed(
             [1, 1],
             auto_retry_for=[OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value],
+            jitter=False,
         ),
     )
     def stored_timeout_retried(*, value: int) -> TaskResult[int, TaskError]:
@@ -274,3 +285,48 @@ async def test_a_refused_timeout_retries_until_max_retries_when_asked(
         (False, OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value),
     ]
     assert len(seen) == 3
+
+
+async def test_unreadable_options_fail_in_one_claim_and_do_not_retry(
+    session: AsyncSession,
+    broker: PostgresBroker,
+    app: Horsies,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """The retry policy is in the options, so options that do not parse cannot retry."""
+    called: list[int] = []
+
+    @app.task(
+        task_name='stored_options_unreadable',
+        retry_policy=RetryPolicy.fixed(
+            [1, 1],
+            auto_retry_for=[OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value],
+            jitter=False,
+        ),
+    )
+    def stored_options_unreadable(*, value: int) -> TaskResult[int, TaskError]:
+        called.append(value)
+        return TaskResult(ok=value)
+
+    task_id = (await stored_options_unreadable.send_async(value=1)).unwrap().task_id
+    await _store_options_text(session, task_id, '{')
+    set_current_app(app)
+    worker = _make_worker(broker, app)
+    seen: list[StoredTimeout] = []
+    _run_in_process(worker, broker, seen)
+
+    first: ClaimPass = await worker._claim_and_dispatch_all()
+
+    assert first.claimed == 1
+    assert len(seen) == 1 and isinstance(seen[0], OptionsUnreadable)
+    assert called == []
+    assert (await _task_row(session, task_id)).status == 'FAILED'
+    attempts = await _attempts(session, task_id)
+    assert [(a.outcome, a.will_retry, a.error_code) for a in attempts] == [
+        ('FAILED', False, OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value),
+    ]
+
+    second: ClaimPass = await worker._claim_and_dispatch_all()
+
+    assert second.claimed == 0
+    assert len(seen) == 1

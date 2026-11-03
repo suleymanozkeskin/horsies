@@ -55,7 +55,10 @@ def read_stored_timeout(task_options: object) -> StoredTimeout:
 
     `task_options` is the column value as the claim returns it: text, or None
     when the row has no options. An empty text means no options, as the
-    enqueue reader treats it. Does no I/O and logs nothing.
+    enqueue reader treats it. A stored int with more than 4300 digits makes the
+    whole text fail to parse, so it reads as `OptionsUnreadable`, not as
+    `TimeoutValueInvalid`; the task fails the same way. Does no I/O and logs
+    nothing.
     """
     match task_options:
         case None | '':
