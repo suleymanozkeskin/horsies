@@ -24,7 +24,7 @@ from horsies.web.read_cache import (
     TaskStatsScope,
 )
 
-pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
+pytestmark = [pytest.mark.unit]
 
 TTL_SECONDS = 10.0
 
@@ -69,6 +69,7 @@ def _cache(
     return ReadCache(ttl_seconds=TTL_SECONDS, max_scopes=max_scopes, clock=clock)
 
 
+@pytest.mark.asyncio
 async def test_a_hit_within_the_ttl_does_not_load() -> None:
     clock = FakeClock()
     cache = _cache(clock)
@@ -80,6 +81,7 @@ async def test_a_hit_within_the_ttl_does_not_load() -> None:
     assert first == second
 
 
+@pytest.mark.asyncio
 async def test_an_expired_entry_loads_again() -> None:
     clock = FakeClock()
     cache = _cache(clock)
@@ -90,6 +92,7 @@ async def test_an_expired_entry_loads_again() -> None:
     assert load.calls == 2
 
 
+@pytest.mark.asyncio
 async def test_scopes_are_cached_separately() -> None:
     clock = FakeClock()
     cache = _cache(clock)
@@ -100,6 +103,7 @@ async def test_scopes_are_cached_separately() -> None:
     assert (load_a.calls, load_b.calls) == (1, 1)
 
 
+@pytest.mark.asyncio
 async def test_a_failed_load_is_returned_and_not_cached() -> None:
     clock = FakeClock()
     cache = _cache(clock)
@@ -123,6 +127,7 @@ async def test_a_failed_load_is_returned_and_not_cached() -> None:
     assert len(cache) == 0
 
 
+@pytest.mark.asyncio
 async def test_concurrent_misses_share_one_load() -> None:
     clock = FakeClock()
     cache = _cache(clock)
@@ -143,6 +148,7 @@ async def test_concurrent_misses_share_one_load() -> None:
     assert all(result == results[0] for result in results)
 
 
+@pytest.mark.asyncio
 async def test_a_cancelled_caller_leaves_the_shared_load_running() -> None:
     clock = FakeClock()
     cache = _cache(clock)
@@ -166,6 +172,7 @@ async def test_a_cancelled_caller_leaves_the_shared_load_running() -> None:
     assert len(cache) == 1
 
 
+@pytest.mark.asyncio
 async def test_the_bound_evicts_the_entry_that_expires_first() -> None:
     clock = FakeClock()
     cache = _cache(clock, max_scopes=2)
@@ -185,6 +192,7 @@ async def test_the_bound_evicts_the_entry_that_expires_first() -> None:
 @pytest.mark.parametrize(
     ('ttl_seconds', 'max_scopes'), [(0.0, 1), (1.0, 0)], ids=['ttl', 'bound'],
 )
+@pytest.mark.asyncio
 async def test_non_positive_settings_are_rejected(
     ttl_seconds: float, max_scopes: int,
 ) -> None:
@@ -202,6 +210,7 @@ def _facets() -> Facets:
     )
 
 
+@pytest.mark.asyncio
 async def test_a_nested_answer_is_a_copy_for_each_caller() -> None:
     """A caller that changes its answer leaves the cached one as it was."""
     cache: ReadCache[str, Facets] = ReadCache(clock=FakeClock())
@@ -219,6 +228,7 @@ async def test_a_nested_answer_is_a_copy_for_each_caller() -> None:
     assert third.ok_value == _facets()
 
 
+@pytest.mark.asyncio
 async def test_each_read_has_its_own_cache() -> None:
     caches = TaskReadCaches()
 
@@ -226,6 +236,7 @@ async def test_each_read_has_its_own_cache() -> None:
     assert caches.facets is not caches.breakdown
 
 
+@pytest.mark.asyncio
 async def test_concurrent_callers_of_one_load_each_get_a_copy() -> None:
     cache: ReadCache[str, Facets] = ReadCache(clock=FakeClock())
     release = asyncio.Event()

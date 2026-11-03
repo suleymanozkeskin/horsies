@@ -127,7 +127,7 @@ Deploy workers only when you need more capacity, not when you want to have separ
 
 Yes — and read the version number as an API-contract statement, not an engine-maturity statement. Pre-1.0 means breaking API changes may still land in minor releases, each documented in the [changelog](../changelog). It does not describe the engine's correctness discipline:
 
-- 3,200+ test functions across unit, integration (real Postgres), e2e (real worker processes), and PgBouncer contract suites.
+- 6,500+ test functions across unit, integration (real Postgres), e2e (real worker processes), and PgBouncer contract suites.
 - Failure-path-first testing: crash recovery, claim fencing, cancel/completion races, rolling-upgrade behavior, and query-plan pinning (`EXPLAIN ANALYZE` assertions on the hot-path statements).
 - The claim/finalize semantics are cross-validated against an independent Rust reimplementation of the engine.
 - A codebase with ~300 task definitions and recurring schedules, migrated off Celery, runs its full background workload on horsies.

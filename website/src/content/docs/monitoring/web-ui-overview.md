@@ -115,11 +115,12 @@ On reconnect the client invalidates every event-covered query once — and the
 timer-driven aggregates once as well, because an arbitrary number of changes
 were missed while it was down.
 
-Stats, facets, and the grouping breakdown aggregate over `horsies_tasks`;
-unfiltered, each facet dimension is an index-only scan (schema v16), so cost
-is bounded by index size rather than heap size. Retention bounds the table,
-the cadences above are deliberately spaced, and each open dashboard
-multiplies the load. The task list's `total` is a planner estimate on the
+Stats, facets, and the grouping breakdown count every live row in
+`horsies_tasks`, and the finished rows in `horsies_task_history` inside the
+selected window. Facets read each table in one scan. Each of the three answers
+through a cache in the web process, one entry per set of filters and window.
+One load serves every open dashboard with the same filters, and an answer is
+kept for 10 seconds after its load ends. The task list's `total` is a planner estimate on the
 unfiltered view and exact under any active filter.
 
 If the server's listener fails and cannot reconnect, the stream emits a
