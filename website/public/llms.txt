@@ -374,7 +374,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Parameterized builders: requires cases= kwarg dicts covering each required parameter
 - Builders run under send suppression (no tasks enqueued); returned WorkflowSpec is fully validated
 - HRS-027: parameterized builder missing cases=
-- HRS-029: builder raised exception or returned non-WorkflowSpec
+- HRS-029: builder raised exception or returned non-WorkflowSpec, or build_with() returned a spec that this call did not build
 - HRS-030: function returns WorkflowSpec but lacks @app.workflow_builder
 
 ### start_workflow / start_workflow_async
