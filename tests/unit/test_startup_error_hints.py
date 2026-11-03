@@ -2,8 +2,8 @@
 
 `horsies check` reports a problem the way a compiler does, so an AI coding
 agent or a person can act on it. The first class pins that each site that
-builds a startup error gives `help_text`. The second class triggers the
-sites and reads the report.
+builds a startup error gives a code and `help_text`. The second class
+triggers the sites and reads the report.
 """
 
 from __future__ import annotations
@@ -52,6 +52,12 @@ _ERROR_BUILDERS = frozenset(
 )
 """The classes and helpers that build a startup error."""
 
+_HELPERS_FILE = Path('core/errors.py')
+"""The one file that the walk skips. Other files named errors.py stay in it."""
+
+_NOT_BUILT_AT_A_SITE = frozenset({'MultipleValidationErrors'})
+"""Wraps errors that are built elsewhere, so it adds no message of its own."""
+
 _SITES_FLOOR = 180
 """A scan that finds fewer sites has lost them, and would pass on nothing."""
 
@@ -64,6 +70,7 @@ class _Site:
 
     where: str
     line: int
+    gives_code: bool
     gives_help: bool
 
 
@@ -77,12 +84,17 @@ def _called_name(call: ast.Call) -> str | None:
             return None
 
 
-def _gives_help(call: ast.Call) -> bool:
+def _gives(call: ast.Call, argument: str) -> bool:
+    """Whether the call passes the argument with a value that a report shows.
+
+    A literal None or an empty string prints nothing, because the report
+    tests truthiness.
+    """
     for keyword in call.keywords:
         match keyword:
-            case ast.keyword(arg='help_text', value=ast.Constant(value=None)):
+            case ast.keyword(arg=name, value=ast.Constant(value=None | '')) if name == argument:
                 return False
-            case ast.keyword(arg='help_text'):
+            case ast.keyword(arg=name) if name == argument:
                 return True
             case _:
                 continue
@@ -92,7 +104,12 @@ def _gives_help(call: ast.Call) -> bool:
 def _sites_in(source: str, *, where: str) -> list[_Site]:
     """Walk the syntax tree, so that no spelling of a call hides a site."""
     return [
-        _Site(where=where, line=node.lineno, gives_help=_gives_help(node))
+        _Site(
+            where=where,
+            line=node.lineno,
+            gives_code=_gives(node, 'code'),
+            gives_help=_gives(node, 'help_text'),
+        )
         for node in ast.walk(ast.parse(source))
         if isinstance(node, ast.Call) and _called_name(node) in _ERROR_BUILDERS
     ]
@@ -102,14 +119,15 @@ def _library_sites() -> list[_Site]:
     root = Path(horsies.__file__).parent
     sites: list[_Site] = []
     for path in sorted(root.rglob('*.py')):
-        if path.name == 'errors.py':
-            continue  # It defines the helpers, and they forward `help_text`.
-        sites.extend(_sites_in(path.read_text(), where=str(path.relative_to(root))))
+        where = path.relative_to(root)
+        if where == _HELPERS_FILE:
+            continue  # The helpers forward `code` and `help_text`.
+        sites.extend(_sites_in(path.read_text(), where=str(where)))
     return sites
 
 
 @pytest.mark.unit
-class TestEverySiteGivesHelp:
+class TestEverySiteGivesACodeAndHelp:
     def test_the_scan_finds_a_site_with_no_help(self) -> None:
         sites = _sites_in(
             "raise WorkflowValidationError('positional', code=ErrorCode.X)",
@@ -118,6 +136,14 @@ class TestEverySiteGivesHelp:
 
         assert [site.gives_help for site in sites] == [False]
 
+    def test_the_scan_finds_a_site_with_no_code(self) -> None:
+        sites = _sites_in(
+            "raise WorkflowValidationError('positional', help_text='fix')",
+            where='known',
+        )
+
+        assert [site.gives_code for site in sites] == [False]
+
     def test_the_scan_refuses_an_explicit_none(self) -> None:
         sites = _sites_in(
             "raise ConfigurationError(message='m', help_text=None)",
@@ -125,6 +151,23 @@ class TestEverySiteGivesHelp:
         )
 
         assert [site.gives_help for site in sites] == [False]
+
+    def test_the_scan_refuses_an_empty_string(self) -> None:
+        sites = _sites_in(
+            "raise ConfigurationError(message='m', help_text='')",
+            where='known',
+        )
+
+        assert [site.gives_help for site in sites] == [False]
+
+    def test_the_scan_knows_each_error_class(self) -> None:
+        library_classes = {
+            subclass.__name__
+            for subclass in HorsiesError.__subclasses__()
+            if subclass.__module__.startswith('horsies.')
+        }
+
+        assert library_classes - _ERROR_BUILDERS - _NOT_BUILT_AT_A_SITE == set()
 
     def test_the_scan_reads_a_call_through_a_module(self) -> None:
         sites = _sites_in(
@@ -142,6 +185,15 @@ class TestEverySiteGivesHelp:
             f'{site.where}:{site.line}'
             for site in _library_sites()
             if not site.gives_help
+        ]
+
+        assert missing == []
+
+    def test_each_site_in_the_library_gives_a_code(self) -> None:
+        missing = [
+            f'{site.where}:{site.line}'
+            for site in _library_sites()
+            if not site.gives_code
         ]
 
         assert missing == []
@@ -194,6 +246,20 @@ def _quorum(*, min_success: int | None, join: Any = 'quorum') -> None:
         min_success=min_success,
     )
     WorkflowSpec(name='hints_join', tasks=[first, second])
+
+
+def _quorum_with_no_dependencies(*, min_success: int | None) -> None:
+    WorkflowSpec(
+        name='hints_join_empty',
+        tasks=[
+            TaskNode(
+                fn=_one,
+                node_id='only',
+                join='quorum',
+                min_success=min_success,
+            ),
+        ],
+    )
 
 
 def _no_tasks() -> None:
@@ -326,24 +392,37 @@ def _broker_that_fails() -> None:
         (
             lambda: _quorum(min_success=5),
             ErrorCode.WORKFLOW_INVALID_JOIN,
-            'at most the number of nodes in waits_for',
+            'at most their number',
+        ),
+        (
+            lambda: _quorum_with_no_dependencies(min_success=1),
+            ErrorCode.WORKFLOW_INVALID_JOIN,
+            'add nodes to waits_for',
         ),
         (
             lambda: _quorum(min_success=1, join='all'),
             ErrorCode.WORKFLOW_INVALID_JOIN,
             "use join='quorum'",
         ),
-        (_task_key, None, 'set node_id on the node'),
-        (_subworkflow_key, None, 'set node_id on the node'),
+        (_task_key, ErrorCode.WORKFLOW_INVALID_NODE_ID, 'set node_id on the node'),
+        (
+            _subworkflow_key,
+            ErrorCode.WORKFLOW_INVALID_NODE_ID,
+            'set node_id on the node',
+        ),
         (_no_name, ErrorCode.WORKFLOW_NO_NAME, "name = 'my_workflow'"),
-        (_no_nodes, ErrorCode.WORKFLOW_NO_NODES, 'override build_with()'),
+        (_no_nodes, ErrorCode.WORKFLOW_NO_NODES, 'in place of build()'),
         (_no_definition_key, ErrorCode.WORKFLOW_NO_DEFINITION_KEY, 'definition_key ='),
         (
             _duplicate_definition_key,
             ErrorCode.WORKFLOW_DUPLICATE_DEFINITION_KEY,
             'its own definition_key',
         ),
-        (_cached_spec, None, 'new WorkflowSpec inside build_with()'),
+        (
+            _cached_spec,
+            ErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION,
+            'new WorkflowSpec inside build_with()',
+        ),
         (
             _value_built_past_validation,
             ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
@@ -363,6 +442,7 @@ def _broker_that_fails() -> None:
         'quorum_without_min_success',
         'min_success_below_one',
         'min_success_above_dependencies',
+        'min_success_with_no_dependencies',
         'min_success_without_quorum',
         'task_node_key',
         'subworkflow_node_key',
@@ -378,7 +458,7 @@ def _broker_that_fails() -> None:
 )
 def test_the_report_names_the_fix(
     trigger: Callable[[], None],
-    code: ErrorCode | None,
+    code: ErrorCode,
     hint: str,
 ) -> None:
     with pytest.raises(HorsiesError) as refused:

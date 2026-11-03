@@ -198,6 +198,7 @@ class WorkflowDefinitionMeta(type):
                     f"not constructed during this call. "
                     f"build_with() must return a fresh WorkflowSpec per call — "
                     f"cached or prebuilt spec reuse is not supported.",
+                    code=ErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION,
                     help_text='build a new WorkflowSpec inside build_with() on each call',
                 )
             validate_workflow_generic_output_match(klass, spec)
@@ -299,7 +300,7 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
                 code=ErrorCode.WORKFLOW_NO_NODES,
                 help_text=(
                     'declare a TaskNode or SubWorkflowNode as a class attribute, '
-                    'or override build_with()'
+                    'or override build_with() and call it in place of build()'
                 ),
             )
         definition_key = cls._require_definition_key()

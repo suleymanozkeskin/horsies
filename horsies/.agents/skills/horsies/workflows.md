@@ -640,7 +640,7 @@ node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
 |---|---|---|
 | HRS-001 | `WORKFLOW_NO_NAME` | Missing `name` |
 | HRS-002 | `WORKFLOW_NO_NODES` | WorkflowSpec has no tasks |
-| HRS-003 | `WORKFLOW_INVALID_NODE_ID` | Empty, >128 chars, or invalid chars |
+| HRS-003 | `WORKFLOW_INVALID_NODE_ID` | Empty, >128 chars, or invalid chars, or `key()` on a node with no `node_id` |
 | HRS-004 | `WORKFLOW_DUPLICATE_NODE_ID` | Duplicate `node_id` |
 | HRS-005 | `WORKFLOW_NO_ROOT_TASKS` | All tasks have deps |
 | HRS-006 | `WORKFLOW_INVALID_DEPENDENCY` | `waits_for` references node not in task list |
@@ -665,7 +665,7 @@ node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
 | HRS-026 | `WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED` | Non-empty positional args |
 | HRS-027 | `WORKFLOW_CHECK_CASES_REQUIRED` | Builder needs cases= |
 | HRS-028 | `WORKFLOW_CHECK_CASE_INVALID` | Invalid case kwarg dict |
-| HRS-029 | `WORKFLOW_CHECK_BUILDER_EXCEPTION` | Builder raised, returned wrong type, or signature not introspectable |
+| HRS-029 | `WORKFLOW_CHECK_BUILDER_EXCEPTION` | Builder raised, returned wrong type, or signature not introspectable, or `build_with()` returned a spec that this call did not build |
 | HRS-030 | `WORKFLOW_CHECK_UNDECORATED_BUILDER` | Returns WorkflowSpec without decorator |
 | HRS-031 | `WORKFLOW_KWARGS_NOT_SERIALIZABLE` | kwargs value fails serialization, also a lone surrogate in a string or a dict key |
 | HRS-032 | `WORKFLOW_INVALID_ID` | supplied `workflow_id` is not a UUID |

@@ -12,7 +12,7 @@ from typing import (
     Literal,
 )
 
-from horsies.core.errors import WorkflowValidationError
+from horsies.core.errors import ErrorCode, WorkflowValidationError
 
 from .enums import (
     OkT_co,
@@ -198,6 +198,7 @@ class TaskNode(Generic[OkT_co]):
             raise WorkflowValidationError(
                 'TaskNode node_id is not set. Ensure WorkflowSpec assigns node_id '
                 'or provide an explicit node_id.',
+                code=ErrorCode.WORKFLOW_INVALID_NODE_ID,
                 help_text='set node_id on the node, or read its key after a WorkflowSpec holds it',
             )
         return NodeKey(self.node_id)
@@ -359,6 +360,7 @@ class SubWorkflowNode(Generic[OkT_co]):
             raise WorkflowValidationError(
                 'SubWorkflowNode node_id is not set. Ensure WorkflowSpec assigns node_id '
                 'or provide an explicit node_id.',
+                code=ErrorCode.WORKFLOW_INVALID_NODE_ID,
                 help_text='set node_id on the node, or read its key after a WorkflowSpec holds it',
             )
         return NodeKey(self.node_id)

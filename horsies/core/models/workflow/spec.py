@@ -1567,7 +1567,7 @@ class WorkflowSpec(Generic[OutT]):
                                 f"Task '{task.name}' min_success ({task.min_success}) exceeds "
                                 f'dependency count ({dep_count})',
                                 code=ErrorCode.WORKFLOW_INVALID_JOIN,
-                                help_text='set min_success to at most the number of nodes in waits_for',
+                                help_text='add nodes to waits_for, or set min_success to at most their number',
                             )
                         )
             elif task.join in ('all', 'any'):

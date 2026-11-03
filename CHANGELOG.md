@@ -169,7 +169,11 @@ before you upgrade.
   a repeated `definition_key`, a cached spec from `build_with()`, a kwarg that
   does not read back or that loses a field, `node.key()` with no `node_id`, a
   failed broker start, and a refused signature. A test walks the source, so a
-  new error site with no `help_text` fails.
+  new error site with no `help_text` or no code fails.
+- **Three startup errors now have a code.** `node.key()` with no `node_id`
+  raises `HRS-003` (`WORKFLOW_INVALID_NODE_ID`). `build_with()` that returns a
+  spec it did not build in this call raises `HRS-029`
+  (`WORKFLOW_CHECK_BUILDER_EXCEPTION`). Their `code` was `None`.
 - **A refused signature reports its parts.** `TaskDefinitionError` for a
   refused `@app.task` signature holds the banned type in `message`, the reason
   in `notes`, and the fix with the docs link in `help_text`. A refused

@@ -474,7 +474,7 @@ The full list of reserved strings is available at runtime via `BUILTIN_CODE_REGI
 | ---- | ---- | ----------- |
 | HRS-001 | `WORKFLOW_NO_NAME` | Workflow has no name |
 | HRS-002 | `WORKFLOW_NO_NODES` | Workflow has no nodes |
-| HRS-003 | `WORKFLOW_INVALID_NODE_ID` | Invalid node ID reference |
+| HRS-003 | `WORKFLOW_INVALID_NODE_ID` | Invalid node ID reference, or `key()` on a node with no `node_id` |
 | HRS-004 | `WORKFLOW_DUPLICATE_NODE_ID` | Duplicate node ID |
 | HRS-005 | `WORKFLOW_NO_ROOT_TASKS` | No root tasks in workflow |
 | HRS-006 | `WORKFLOW_INVALID_DEPENDENCY` | Invalid dependency reference |
@@ -499,7 +499,7 @@ The full list of reserved strings is available at runtime via `BUILTIN_CODE_REGI
 | HRS-026 | `WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED` | Positional args are not supported for workflow nodes |
 | HRS-027 | `WORKFLOW_CHECK_CASES_REQUIRED` | Parameterized workflow builder missing test cases |
 | HRS-028 | `WORKFLOW_CHECK_CASE_INVALID` | Workflow builder test case is invalid |
-| HRS-029 | `WORKFLOW_CHECK_BUILDER_EXCEPTION` | Workflow builder raised an exception or returned non-WorkflowSpec |
+| HRS-029 | `WORKFLOW_CHECK_BUILDER_EXCEPTION` | Workflow builder raised an exception or returned non-WorkflowSpec, or `build_with()` returned a spec that this call did not build |
 | HRS-030 | `WORKFLOW_CHECK_UNDECORATED_BUILDER` | Function returns WorkflowSpec but lacks @app.workflow_builder |
 | HRS-031 | `WORKFLOW_KWARGS_NOT_SERIALIZABLE` | kwargs value fails JSON serialization, also a lone surrogate in a string or a dict key |
 | HRS-032 | `WORKFLOW_INVALID_ID` | supplied `workflow_id` is not a UUID |
