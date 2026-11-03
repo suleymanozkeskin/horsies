@@ -130,6 +130,36 @@ async def _assert_error(broker: PostgresBroker, task_id: str, code: str) -> None
     assert (row.status, row.error_code) == ('FAILED', code)
 
 
+_TASK_TIMES_SQL = text("""
+    SELECT id::text AS id, status, error_code, claimed_at, started_at,
+           NULL::timestamptz AS terminal_at
+    FROM horsies_tasks WHERE id = ANY(CAST(:ids AS uuid[]))
+    UNION ALL
+    SELECT task_id::text, status, error_code, claimed_at, started_at, terminal_at
+    FROM horsies_task_history WHERE task_id = ANY(CAST(:ids AS uuid[]))
+""")
+
+
+def _seconds(start: Any, end: Any) -> str:
+    if start is None or end is None:
+        return '-'
+    return f'{(end - start).total_seconds():.3f}s'
+
+
+async def _task_times(broker: PostgresBroker, task_ids: list[str]) -> str:
+    """One line per task: status, code, claim to RUNNING, RUNNING to terminal."""
+    async with current_resources(broker).session_factory() as session:
+        rows = (await session.execute(_TASK_TIMES_SQL, {'ids': task_ids})).all()
+    order = {task_id: index for index, task_id in enumerate(task_ids)}
+    lines = [
+        f'task {order.get(row.id, -1) + 1} {row.id[:8]} {row.status} {row.error_code} '
+        f'claim->running={_seconds(row.claimed_at, row.started_at)} '
+        f'running->terminal={_seconds(row.started_at, row.terminal_at)}'
+        for row in sorted(rows, key=lambda row: order.get(row.id, -1))
+    ]
+    return '\n'.join(lines)
+
+
 async def _wait_all(broker: PostgresBroker, task_ids: list[str], status: str) -> None:
     session_factory = current_resources(broker).session_factory
     for task_id in task_ids:
@@ -266,11 +296,12 @@ async def test_timeout_does_not_count_the_wait_for_a_slot(
             unwrap_send(await prefetch.timeout_2s.send_async(seconds=1.5))
             for _ in range(3)
         ]
-        await _wait_all(
-            isolation_prefetch_broker,
-            [handle.task_id for handle in handles],
-            'COMPLETED',
-        )
+        task_ids = [handle.task_id for handle in handles]
+        try:
+            await _wait_all(isolation_prefetch_broker, task_ids, 'COMPLETED')
+        except TimeoutError as error:
+            times = await _task_times(isolation_prefetch_broker, task_ids)
+            raise AssertionError(f'{error}\n{times}') from error
 
 
 @pytest.mark.e2e
