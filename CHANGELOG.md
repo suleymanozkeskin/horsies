@@ -8,6 +8,8 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-03
+
 0.6.0 moves task execution to child processes that the worker owns, closes the
 error types of the public API, and makes the JSON boundary strict. Read the
 [0.6.0 migration page](https://suleymanozkeskin.github.io/horsies/migrations/migration-to-0-6-0/)
