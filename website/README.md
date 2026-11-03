@@ -6,7 +6,7 @@ Documentation site for [Horsies](https://github.com/suleymanozkeskin/horsies), b
 
 ```
 bun install
-bun dev
+bun run dev
 ```
 
 The dev server runs at `localhost:4321`.
@@ -15,16 +15,24 @@ The dev server runs at `localhost:4321`.
 
 Documentation pages live in `src/content/docs/` as `.md` or `.mdx` files. Each file maps to a route based on its path.
 
-| Directory | Content |
+| Path | Content |
 | :--- | :--- |
-| `quick-start/` | Getting started, configuration, producing tasks, workflows, scheduling |
+| `index.mdx` | Landing page |
+| `quick-start/` | Getting started, configuration, producing tasks, workflows, scheduling, workflow patterns, the showcase |
 | `concepts/` | Architecture, task lifecycle, result handling, queue modes, workflows |
-| `tasks/` | Defining tasks, sending, error handling, results, retry policy |
-| `configuration/` | App, broker, and recovery configuration |
-| `workers/` | Worker architecture, concurrency, heartbeats, recovery |
+| `tasks/` | Defining tasks, sending, errors and error handling, results, retry policy |
+| `configuration/` | App, broker, recovery, retention, and remote Postgres configuration |
+| `workers/` | Worker architecture, concurrency, heartbeats and recovery, child process hooks |
 | `scheduling/` | Scheduler overview, patterns, configuration |
-| `cli/` | CLI reference |
-| `internals/` | PostgreSQL broker, LISTEN/NOTIFY, database schema, serialization |
+| `monitoring/` | Web UI, Syce, broker methods, action semantics, worker health |
+| `operations/` | Deploying code changes, testing, atomic enqueue and topology, autovacuum tuning |
+| `guides/` | Async frameworks, starting a workflow once |
+| `migrations/` | Upgrade guide for each release that needs one |
+| `troubleshooting/` | PgBouncer |
+| `internals/` | Database schema, serialization, performance |
+| `cli.md` | CLI reference |
+| `questions-and-answers.md` | Questions and answers |
+| `changelog.md` | Changelog |
 
 ## Adding Pages
 
@@ -33,7 +41,7 @@ Create a new `.md` file in the appropriate `src/content/docs/` subdirectory. Sta
 ## Build
 
 ```
-bun build
+bun run build
 ```
 
 Output goes to `./dist/`.

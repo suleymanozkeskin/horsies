@@ -257,7 +257,7 @@ When a task fails with `on_error=OnError.PAUSE`:
 1. **Immediate status change**: Workflow status becomes `PAUSED`
 2. **New enqueues blocked**: No new tasks will transition from PENDING → READY or READY → ENQUEUED
 3. **Running tasks may complete**: Tasks already running will finish (cooperative, no force-kill)
-4. **Already-enqueued tasks**: Tasks may still be claimed briefly, but paused workflows are filtered post-claim and those tasks are unclaimed (they do not execute until resume)
+4. **Already-enqueued tasks**: A worker may still claim one briefly. The check after the claim finds the paused workflow and abandons that claim, as described below, so the task does not execute until resume
 5. **Resume required**: Workflow remains PAUSED until an explicit resume operation
 
 **Pause has two paths per node, and they differ:**
@@ -287,7 +287,7 @@ behavior without declaring the rule.
 **What PAUSE allows:**
 
 - Already-running tasks complete normally
-- Tasks already claimed/started before PAUSE will finish (cooperative stop)
+- Tasks that started before PAUSE finish (cooperative stop). A task that is claimed but not started does not run: its claim is abandoned, as described above
 
 ### Resume
 
