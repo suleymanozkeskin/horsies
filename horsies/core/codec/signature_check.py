@@ -55,6 +55,7 @@ from horsies.core.types.result import Err, Ok
 
 __all__ = [
     'INTERNAL_CODEC_TYPES',
+    'SignatureRefusal',
     'SignatureValidationError',
     'check_build_with_signature',
     'check_task_signature',
@@ -72,12 +73,44 @@ INTERNAL_CODEC_TYPES: frozenset[type] = frozenset({
     SubWorkflowSummary,
 })
 
+@dataclasses.dataclass(frozen=True)
+class SignatureRefusal:
+    """One refused position, split for the report that shows it.
+
+    Attributes:
+        headline: The subject, the position and the banned type.
+        reason: Why the type is refused.
+        fix: What to use instead.
+    """
+
+    headline: str
+    reason: str
+    fix: str
+
+    @property
+    def help_text(self) -> str:
+        """The fix and the page that lists each refused shape."""
+        return f'{self.fix}\nsee {_DOCS_URL}'
+
+
 class SignatureValidationError(Exception):
     """Raised when a task signature contains a banned type.
 
     Message shape (one error per offending position) names: task, position,
     banned type, why, the documented fix, and a docs URL.
+
+    Attributes:
+        detail: The same parts, for a caller that reports them separately.
     """
+
+    def __init__(self, detail: SignatureRefusal) -> None:
+        super().__init__(
+            f'{detail.headline}\n'
+            f'        {detail.reason}\n'
+            f'        Fix: {detail.fix}\n'
+            f'        See: {_DOCS_URL}',
+        )
+        self.detail = detail
 
 
 @dataclasses.dataclass(frozen=True)
@@ -132,7 +165,7 @@ def check_task_signature(
         # the same reason — every wire kwarg name must correspond to a
         # declared parameter, with no catch-all.
         if param.kind is inspect.Parameter.VAR_POSITIONAL:
-            raise SignatureValidationError(_format_error(
+            raise SignatureValidationError(_refusal(
                 task_name=task_name,
                 position=f"parameter '*{param_name}'",
                 banned='*args (VAR_POSITIONAL)',
@@ -140,7 +173,7 @@ def check_task_signature(
                 fix='accept named kwargs only: `def f(items: list[T]) -> ...`',
             ))
         if param.kind is inspect.Parameter.VAR_KEYWORD:
-            raise SignatureValidationError(_format_error(
+            raise SignatureValidationError(_refusal(
                 task_name=task_name,
                 position=f"parameter '**{param_name}'",
                 banned='**kwargs (VAR_KEYWORD)',
@@ -148,7 +181,7 @@ def check_task_signature(
                 fix='declare each accepted kwarg as a named parameter',
             ))
         if param.kind is inspect.Parameter.POSITIONAL_ONLY:
-            raise SignatureValidationError(_format_error(
+            raise SignatureValidationError(_refusal(
                 task_name=task_name,
                 position=f"parameter '{param_name}' (positional-only)",
                 banned='positional-only parameter (`def f(x, /)`)',
@@ -156,7 +189,7 @@ def check_task_signature(
                 fix='remove the `/` from the signature so the parameter is keyword-bindable',
             ))
         if param.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD:
-            raise SignatureValidationError(_format_error(
+            raise SignatureValidationError(_refusal(
                 task_name=task_name,
                 position=f"parameter '{param_name}'",
                 banned='positionally-bindable parameter',
@@ -175,7 +208,7 @@ def check_task_signature(
             # error code does not exist (errors.py defines TASK_NO_RETURN_TYPE
             # only). Without this gate, untyped params (incl. `*args` /
             # `**kwargs`) silently passed the strict validator.
-            raise SignatureValidationError(_format_error(
+            raise SignatureValidationError(_refusal(
                 task_name=task_name,
                 position=f"parameter '{param_name}'",
                 banned='<no annotation>',
@@ -190,7 +223,7 @@ def check_task_signature(
         try:
             _check_parameter(param_name, annot, param.default)
         except _RejectedError as err:
-            raise SignatureValidationError(_format_error(
+            raise SignatureValidationError(_refusal(
                 task_name=task_name,
                 position=f"parameter '{param_name}'",
                 banned=err.rejection.banned,
@@ -227,7 +260,7 @@ def check_build_with_signature(workflow_def: Any, *, workflow_name: str) -> None
     """
     match resolve_build_with_hints(workflow_def):
         case Err(err_value=cause):
-            raise SignatureValidationError(_format_error(
+            raise SignatureValidationError(_refusal(
                 task_name=workflow_name,
                 position='build_with signature',
                 banned='a name that does not resolve',
@@ -252,7 +285,7 @@ def check_build_with_signature(workflow_def: Any, *, workflow_name: str) -> None
                 try:
                     _check_parameter(name, annot, parameter.default)
                 except _RejectedError as err:
-                    raise SignatureValidationError(_format_error(
+                    raise SignatureValidationError(_refusal(
                         task_name=workflow_name,
                         position=f"build_with parameter '{name}'",
                         banned=err.rejection.banned,
@@ -369,7 +402,7 @@ def _validate_return_annotation(
     """Return must be `TaskResult[OkT, TaskError]`. ErrT enforced; OkT walked."""
     origin = get_origin(annot)
     if origin is not TaskResult:
-        raise SignatureValidationError(_format_error(
+        raise SignatureValidationError(_refusal(
             task_name=task_name,
             position='return type',
             banned=repr(annot),
@@ -378,7 +411,7 @@ def _validate_return_annotation(
         ))
     args = get_args(annot)
     if len(args) != 2:
-        raise SignatureValidationError(_format_error(
+        raise SignatureValidationError(_refusal(
             task_name=task_name,
             position='return type',
             banned=repr(annot),
@@ -387,7 +420,7 @@ def _validate_return_annotation(
         ))
     ok_type, err_type = args
     if err_type is not TaskError:
-        raise SignatureValidationError(_format_error(
+        raise SignatureValidationError(_refusal(
             task_name=task_name,
             position='return type',
             banned=f'TaskResult[..., {err_type!r}]',
@@ -398,7 +431,7 @@ def _validate_return_annotation(
         _classify(ok_type, json_value_allowed_position=True)
         _reject_wire_shape(ok_type)
     except _RejectedError as err:
-        raise SignatureValidationError(_format_error(
+        raise SignatureValidationError(_refusal(
             task_name=task_name,
             position='return TaskResult ok slot',
             banned=err.rejection.banned,
@@ -903,7 +936,7 @@ def _find_discriminator(metadata: tuple[object, ...]) -> str | None:
     return None
 
 
-def _format_error(
+def _refusal(
     *,
     task_name: str,
     position: str,
@@ -911,11 +944,10 @@ def _format_error(
     reason: str,
     fix: str,
     subject: str = 'task',
-) -> str:
-    """Render the structured error per design-doc §2 'Error message shape'."""
-    return (
-        f"{subject} '{task_name}' {position} uses banned type `{banned}`.\n"
-        f'        {reason}\n'
-        f'        Fix: {fix}\n'
-        f'        See: {_DOCS_URL}'
+) -> SignatureRefusal:
+    """Build the refusal of one position."""
+    return SignatureRefusal(
+        headline=f"{subject} '{task_name}' {position} uses banned type `{banned}`.",
+        reason=reason,
+        fix=fix,
     )

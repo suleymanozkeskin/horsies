@@ -1258,9 +1258,11 @@ def create_task_wrapper(
         check_task_signature(fn, task_name=task_name)
     except SignatureValidationError as exc:
         raise TaskDefinitionError(
-            message=str(exc),
+            message=exc.detail.headline,
             code=ErrorCode.TASK_STRICT_SIGNATURE_VIOLATION,
             location=fn_location,
+            notes=[exc.detail.reason],
+            help_text=exc.detail.help_text,
         ) from exc
 
     ok_type_adapter: TypeAdapter[Any] = TypeAdapter(ok_type)
