@@ -29,6 +29,7 @@ from horsies.core.models.tasks import (
     TaskError,
     TaskResult,
 )
+from horsies.core.history.archive.attempts import AttemptRecord
 from horsies.core.models.workflow import TaskNode
 from horsies.core.types.result import is_ok
 from horsies.core.worker.claiming import ClaimPass
@@ -43,6 +44,7 @@ from horsies.core.worker.stored_timeout import (
 from horsies.core.worker.worker import Worker, _initialize_worker_pool, _run_task_entry
 from tests.broker_resources_support import current_resources, listener_of
 from tests.fixtures.slots.handles import task_finished_handle
+from tests.integration.history_seeding import read_attempts
 from tests.integration.conftest import (
     get_task_status as get_workflow_task_status,
     get_workflow_status,
@@ -158,18 +160,10 @@ async def _task_row(session: AsyncSession, task_id: str) -> Any:
     return row
 
 
-async def _attempts(session: AsyncSession, task_id: str) -> list[Any]:
-    return list(
-        (
-            await session.execute(
-                text(
-                    'SELECT attempt, outcome, will_retry, error_code '
-                    'FROM horsies_task_attempts WHERE task_id = :id ORDER BY attempt'
-                ),
-                {'id': task_id},
-            )
-        ).fetchall()
-    )
+async def _attempts(session: AsyncSession, task_id: str) -> tuple[AttemptRecord, ...]:
+    """Every attempt of the task: the live rows, or the history snapshot once
+    the terminal move has purged them."""
+    return await read_attempts(session, task_id)
 
 
 async def test_a_refused_timeout_fails_in_one_claim_and_is_not_claimed_again(
