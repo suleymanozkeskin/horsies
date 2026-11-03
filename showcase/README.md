@@ -240,7 +240,7 @@ is a thing to look at in the dashboard, not a claim to take on trust.
 
 | Capability | Where it lives | What you see |
 |---|---|---|
-| `@app.task` + `TaskResult` both branches | all 35 tasks | tasks across all 7 statuses |
+| `@app.task` + `TaskResult` both branches | all 36 tasks | tasks across all 7 statuses |
 | Custom queues, priority, `max_concurrency` | 4 queues; `marketing_blast` floods `notifications` (cap 3) | a deep backlog on one queue while `payments` stays clear |
 | `RetryPolicy.exponential` + attempt history | `authorize_payment` | attempt cards, per-try errors, `?retried=true` |
 | `RetryPolicy.fixed` | `sync_supplier_feed` on `SUPPLIER_TIMEOUT` | a scheduled task that sometimes retries |
@@ -278,7 +278,7 @@ is a thing to look at in the dashboard, not a claim to take on trust.
 
 ```
 showcase/acme/
-  app.py         queues, recovery tuning, 31 schedules, the global exception mapper
+  app.py         queues, recovery tuning, 32 schedules, the global exception mapper
   settings.py    database URL resolution
   tuning.py      every rate and duration
   domain.py      error codes, entities, task payloads
