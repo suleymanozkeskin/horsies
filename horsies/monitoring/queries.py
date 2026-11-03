@@ -87,7 +87,6 @@ from horsies.core.history.reads.detail import (
     staged_detail_published,
 )
 from horsies.core.history.reads.pages import (
-    HistoryFacet,
     HistoryPageQuery,
     HistoryWindow,
     history_page_statement,
@@ -719,93 +718,129 @@ def facet_statement(
     )
 
 
-def combined_facet_statement(
+def facets_statement(
     *,
     window: HistoryWindow,
-    facet: HistoryFacet,
     statuses: list[TaskStatus],
-    error_categories: list[ErrorCategory],
     retried_only: bool,
-    limit: int,
 ) -> tuple[str, dict[str, object]]:
-    """Globally rank one facet after summing live and history counts."""
-    match facet:
-        case HistoryFacet.WORKER:
-            live_column = 'claimed_by_worker_id'
-            history_column = 'last_claimed_worker_id'
-        case HistoryFacet.TASK_NAME:
-            live_column = history_column = 'task_name'
-        case HistoryFacet.QUEUE_NAME:
-            live_column = history_column = 'queue_name'
-        case HistoryFacet.ERROR_CODE:
-            live_column = history_column = 'error_code'
-        case _:
-            raise ValueError(f'unsupported combined facet {facet!r}')
+    """Every facet of ``task_facets`` in one scan of each side.
 
+    One ``GROUPING SETS`` per side counts all four columns in one pass, and
+    the sides sum per facet. The rank runs here, after the sum, so that ties
+    follow the database collation.
+
+    An error code is a free string, so a window can hold as many codes as rows.
+    The category of each code and the exact total of each category come from
+    here, and only the top codes of each category are returned, so the result
+    stays bounded and any category selection can fill its list from it.
+
+    Returns:
+        The SQL and its parameters. Rows hold ``facet``, ``facet_value`` and
+        ``facet_count``, ordered by ``facet`` and overall rank. A row of the
+        ``error_code`` facet also holds ``category`` and ``category_total``.
+    """
     parameters: dict[str, object] = {
         'window_lower': window.lower,
         'window_upper': window.upper,
-        'facet_limit': limit,
+        'facet_limit': _FACET_VALUE_CAP,
+        'error_limit': _ERROR_FACET_CAP,
     }
+    category_arms: list[str] = []
+    for category, codes in _CATEGORY_TO_CODES.items():
+        parameter = f'category_{category.value.lower()}_codes'
+        parameters[parameter] = list(codes)
+        category_arms.append(
+            f"WHEN facet_value = ANY(CAST(:{parameter} AS text[])) "
+            f"THEN '{category.value}'"
+        )
     common: list[str] = []
     if statuses:
         common.append('status = ANY(CAST(:status_filter AS text[]))')
         parameters['status_filter'] = [status.value for status in statuses]
     if retried_only:
         common.append('retry_count > 0')
-    if facet is HistoryFacet.ERROR_CODE and error_categories:
-        category_arms: list[str] = []
-        for index, category in enumerate(error_categories):
-            if category is ErrorCategory.DOMAIN:
-                category_arms.append(
-                    "(error_code IS NOT NULL AND error_code <> '' "
-                    'AND error_code <> ALL('
-                    'CAST(:builtin_code_filter AS text[])))'
-                )
-                parameters['builtin_code_filter'] = list(_BUILTIN_CODES)
-            else:
-                parameter = f'category_{index}_filter'
-                category_arms.append(
-                    f'error_code = ANY(CAST(:{parameter} AS text[]))'
-                )
-                parameters[parameter] = list(_CATEGORY_TO_CODES[category])
-        common.append('(' + ' OR '.join(category_arms) + ')')
 
-    live_conditions = [*common, f'{live_column} IS NOT NULL']
-    history_conditions = [
-        'retention_anchor_at >= :window_lower',
-        'retention_anchor_at < :window_upper',
-        *common,
-        f'{history_column} IS NOT NULL',
-    ]
-    if facet is HistoryFacet.ERROR_CODE:
-        live_conditions.append("error_code <> ''")
-        history_conditions.append("error_code <> ''")
-
-    sql = f"""
-        WITH live_facet AS (
-            SELECT {live_column} AS facet_value, count(*) AS facet_count
-            FROM horsies_tasks
-            WHERE {' AND '.join(live_conditions)}
-            GROUP BY {live_column}
-        ), history_facet AS (
-            SELECT {history_column} AS facet_value, count(*) AS facet_count
-            FROM horsies_task_history
-            WHERE {' AND '.join(history_conditions)}
-            GROUP BY {history_column}
-        ), combined AS (
-            SELECT facet_value, sum(facet_count) AS facet_count
+    def side(worker_column: str, conditions: list[str], table: str) -> str:
+        columns = f'{worker_column}, task_name, queue_name, error_code'
+        # The inner group can run in parallel, and GROUPING SETS cannot, so the
+        # sets read its small result, not the rows. GROUPING() sets a bit for
+        # each column that is not in the row's set.
+        return f"""
+            SELECT CASE GROUPING({columns})
+                       WHEN 7 THEN 'worker'
+                       WHEN 11 THEN 'task_name'
+                       WHEN 13 THEN 'queue_name'
+                       WHEN 14 THEN 'error_code'
+                   END AS facet,
+                   CASE GROUPING({columns})
+                       WHEN 7 THEN {worker_column}::text
+                       WHEN 11 THEN task_name::text
+                       WHEN 13 THEN queue_name::text
+                       WHEN 14 THEN error_code::text
+                   END AS facet_value,
+                   sum(group_count) AS facet_count
             FROM (
-                SELECT facet_value, facet_count FROM live_facet
-                UNION ALL
-                SELECT facet_value, facet_count FROM history_facet
-            ) AS lifecycle_facets
-            GROUP BY facet_value
+                SELECT {columns}, count(*) AS group_count
+                FROM {table}
+                WHERE {' AND '.join(conditions) or 'TRUE'}
+                GROUP BY {columns}
+            ) AS side_groups
+            GROUP BY GROUPING SETS (
+                ({worker_column}), (task_name), (queue_name), (error_code)
+            )
+        """
+
+    live = side('claimed_by_worker_id', common, 'horsies_tasks')
+    history = side(
+        'last_claimed_worker_id',
+        [
+            'retention_anchor_at >= :window_lower',
+            'retention_anchor_at < :window_upper',
+            *common,
+        ],
+        'horsies_task_history',
+    )
+    sql = f"""
+        WITH lifecycle_facets AS (
+            {live}
+            UNION ALL
+            {history}
+        ), combined AS (
+            SELECT facet, facet_value, sum(facet_count) AS facet_count
+            FROM lifecycle_facets
+            WHERE facet_value IS NOT NULL
+              AND (facet <> 'error_code' OR facet_value <> '')
+            GROUP BY facet, facet_value
+        ), ranked AS (
+            SELECT facet, facet_value, facet_count,
+                   row_number() OVER (
+                       PARTITION BY facet
+                       ORDER BY facet_count DESC, facet_value
+                   ) AS facet_rank,
+                   CASE WHEN facet = 'error_code' THEN
+                       CASE {' '.join(category_arms)}
+                            ELSE '{ErrorCategory.DOMAIN.value}'
+                       END
+                   END AS category
+            FROM combined
+        ), scoped AS (
+            SELECT facet, facet_value, facet_count, facet_rank, category,
+                   row_number() OVER (
+                       PARTITION BY facet, category ORDER BY facet_rank
+                   ) AS category_rank,
+                   sum(facet_count) OVER (
+                       PARTITION BY facet, category
+                   ) AS category_total
+            FROM ranked
         )
-        SELECT facet_value, facet_count
-        FROM combined
-        ORDER BY facet_count DESC, facet_value
-        LIMIT :facet_limit
+        SELECT facet, facet_value, facet_count, category, category_total
+        FROM scoped
+        WHERE CASE facet
+                  WHEN 'error_code' THEN category_rank <= :error_limit
+                  ELSE facet_rank <= :facet_limit
+              END
+        ORDER BY facet, facet_rank
     """
     return sql, parameters
 
@@ -921,121 +956,47 @@ async def task_facets(
     taxonomy strip offers as its own options, and a control that hid the
     families you have not picked could not express a second selection.
     """
-    scope = _scope_conditions(
-        statuses=statuses,
-        task_names=[],
-        queues=[],
-        workers=[],
-        error_codes=[],
-        error_categories=[],
-        retried_only=retried_only,
-    )
-    # Error codes are not capped in SQL: every distinct code is needed for an
-    # accurate live-side per-category rollup. The combined dropdown query is
-    # independently and globally capped after summing both lifecycle sides.
-    error_count = func.count().label('n')
-    errors_stmt = (
-        select(TaskModel.error_code, error_count)
-        .where(*scope, TaskModel.error_code.is_not(None), TaskModel.error_code != '')
-        .group_by(TaskModel.error_code)
-        .order_by(error_count.desc())
-    )
-
     match await broker.select_resources():
         case Err(loop_limit):
             return _loop_limit_err('task facets query', loop_limit)
         case Ok(resources):
             pass
 
+    sql, params = facets_statement(
+        window=window,
+        statuses=statuses,
+        retried_only=retried_only,
+    )
     try:
         async with resources.session_factory() as session:
-            live_error_rows = (await session.execute(errors_stmt)).tuples().all()
-            combined_facets: dict[HistoryFacet, list[tuple[str, int]]] = {}
-            for facet in (
-                HistoryFacet.WORKER,
-                HistoryFacet.TASK_NAME,
-                HistoryFacet.QUEUE_NAME,
-                HistoryFacet.ERROR_CODE,
-            ):
-                sql, params = combined_facet_statement(
-                    window=window,
-                    facet=facet,
-                    statuses=statuses,
-                    error_categories=(
-                        error_categories
-                        if facet is HistoryFacet.ERROR_CODE
-                        else []
-                    ),
-                    retried_only=retried_only,
-                    limit=(
-                        _ERROR_FACET_CAP
-                        if facet is HistoryFacet.ERROR_CODE
-                        else _FACET_VALUE_CAP
-                    ),
-                )
-                combined_facets[facet] = [
-                    (str(row.facet_value), int(row.facet_count))
-                    for row in (
-                        await session.execute(text(sql), params)
-                    ).all()
-                ]
-            history_category_totals: dict[str, int] = {}
-            for category in ErrorCategory:
-                category_sql, category_params = history_count_statement(
-                    window,
-                    _history_scope(
-                        statuses=statuses,
-                        task_names=[],
-                        queues=[],
-                        workers=[],
-                        error_codes=[],
-                        error_categories=[category],
-                        retried_only=retried_only,
-                    ),
-                )
-                category_count = int(
-                    (
-                        await session.execute(
-                            text(category_sql), category_params
-                        )
-                    ).scalar_one()
-                )
-                if category_count:
-                    history_category_totals[category.value] = category_count
+            rows = (await session.execute(text(sql), params)).all()
     except SQLAlchemyError as exc:
         return _db_err('task facets query', exc)
 
-    worker_rows = combined_facets[HistoryFacet.WORKER]
-    name_rows = combined_facets[HistoryFacet.TASK_NAME]
-    queue_rows = combined_facets[HistoryFacet.QUEUE_NAME]
-    error_rows = combined_facets[HistoryFacet.ERROR_CODE]
-
-    # error_code is non-null and non-empty here, so categorization never
-    # returns None; DOMAIN is the fallback for user-defined codes.
-    error_facets = [
-        ErrorFacet(
-            value=value,
-            count=count,
-            category=(categorize_error_code(value) or ErrorCategory.DOMAIN).value,
-        )
-        for value, count in error_rows
-    ]
-    category_totals: dict[str, int] = dict(history_category_totals)
-    for value, count in live_error_rows:
-        if value is None:
+    ranked: dict[str, list[tuple[str, int]]] = {
+        'worker': [],
+        'task_name': [],
+        'queue_name': [],
+    }
+    selected = {category.value for category in error_categories}
+    category_totals: dict[str, int] = {}
+    error_facets: list[ErrorFacet] = []
+    for row in rows:
+        value, count = str(row.facet_value), int(row.facet_count)
+        if row.facet != 'error_code':
+            ranked[row.facet].append((value, count))
             continue
-        category = (
-            categorize_error_code(value) or ErrorCategory.DOMAIN
-        ).value
-        category_totals[category] = (
-            category_totals.get(category, 0) + count
-        )
+        category_totals[row.category] = int(row.category_total)
+        if (not selected or row.category in selected) and len(error_facets) < _ERROR_FACET_CAP:
+            error_facets.append(
+                ErrorFacet(value=value, count=count, category=row.category),
+            )
 
     return Ok(
         Facets(
-            workers=_facet_values(worker_rows),
-            task_names=_facet_values(name_rows),
-            queues=_facet_values(queue_rows),
+            workers=_facet_values(ranked['worker']),
+            task_names=_facet_values(ranked['task_name']),
+            queues=_facet_values(ranked['queue_name']),
             error_codes=error_facets,
             error_category_totals=category_totals,
         )

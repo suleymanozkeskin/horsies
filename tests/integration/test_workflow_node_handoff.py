@@ -151,6 +151,68 @@ async def _arrange(
     return task_id, claimed_at
 
 
+async def _beat_count(session: AsyncSession, task_id: str) -> int:
+    count = await session.scalar(
+        text("""
+            SELECT COUNT(*) FROM horsies_heartbeats
+            WHERE task_id = :task_id AND role = 'runner'
+        """),
+        {'task_id': task_id},
+    )
+    assert isinstance(count, int)
+    return count
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_a_start_writes_one_runner_beat(
+    session: AsyncSession,
+    broker: PostgresBroker,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """The first runner heartbeat is part of the transition."""
+    task_id, claimed_at = await _arrange(session, broker, 'ENQUEUED')
+
+    result = _confirm_ownership_and_set_running(task_id, WORKER_ID, True, claimed_at)
+
+    assert result is None
+    assert await _task_status(session, task_id) == 'RUNNING'
+    assert await _beat_count(session, task_id) == 1
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_a_start_that_does_not_apply_writes_no_beat(
+    session: AsyncSession,
+    broker: PostgresBroker,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """A stale claim generation changes nothing, so no orphan beat exists."""
+    task_id, claimed_at = await _arrange(session, broker, 'ENQUEUED')
+
+    result = _confirm_ownership_and_set_running(
+        task_id, WORKER_ID, True, claimed_at + timedelta(seconds=1),
+    )
+
+    assert result == (False, '', 'CLAIM_LOST')
+    assert await _task_status(session, task_id) == 'CLAIMED'
+    assert await _beat_count(session, task_id) == 0
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_a_failed_workflow_check_keeps_no_beat(
+    session: AsyncSession,
+    broker: PostgresBroker,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """The rollback of the workflow check removes the beat with the transition."""
+    task_id, claimed_at = await _arrange(session, broker, 'COMPLETED')
+
+    result = _confirm_ownership_and_set_running(task_id, WORKER_ID, True, claimed_at)
+
+    assert result == WORKFLOW_CHECK_FAILED
+    assert await _task_status(session, task_id) == 'CLAIMED'
+    assert await _beat_count(session, task_id) == 0
+
+
 @pytest.mark.asyncio(loop_scope='function')
 async def test_running_node_keeps_its_tuple_and_first_start(
     session: AsyncSession,

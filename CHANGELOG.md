@@ -1022,6 +1022,21 @@ before you upgrade.
 
 ### Changed
 
+- **`/api/tasks/facets` scans the window once.** A poll ran four group-bys and four
+  category counts over the history window. It is now one statement. On 1.4M history
+  rows, one poll over the default 24 hours falls from 46,750 buffers to 5,187, and
+  from 90–108 ms to 16–17 ms. The answer does not change.
+- **Open dashboards share `/api/tasks/facets` and `/api/tasks/breakdown`.** Both
+  answer through a 10-second cache per scope, as the status cards do. One load
+  serves every concurrent request, and each count is at most 10 seconds old.
+- **A worker claims once per wake.** The main loop ran two claim passes for each
+  wake. With 8 children and 20 tasks/s, `horsies_claim` calls for 400 tasks fall
+  from 1,524–1,602 to 799–807, and the start lag does not change. A stop no longer
+  runs one more claim. With `--max-claim-batch`, a pass that claims runs the next
+  pass with no wait, because no `NOTIFY` announces work that a limited pass leaves.
+- **The first runner heartbeat is part of the RUNNING statement.** Each task start
+  costs one round trip fewer. A start that does not apply writes no beat.
+
 - **Worker children on Linux start in milliseconds and share memory.** A
   preload parent imports code once, and each child is a fork of it. Each pair
   below compares `--child-preload=none` of this release with the default

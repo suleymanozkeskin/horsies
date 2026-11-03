@@ -325,7 +325,8 @@ config = AppConfig(
 Limits claims per queue per claiming pass. The default is `0`, which means
 the worker claims up to the available local/global capacity for that queue.
 Set a positive value only when you want an explicit fairness cap per queue per
-pass.
+pass. A pass under this cap that claims runs the next pass at once, because no
+`NOTIFY` announces work that the pass left.
 
 ```bash
 horsies worker myapp.instance:app --max-claim-batch=4
