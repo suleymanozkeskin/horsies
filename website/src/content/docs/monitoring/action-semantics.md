@@ -102,7 +102,7 @@ outcome = await rerun_task(
     connection,
     RerunTask(source_task_id=task_id, deadline=None),
     RerunEnqueuePolicy(
-        retention_class_key='standard_30d',
+        retention=timedelta(days=30),
         retain_rerun_input=True,
         reservation_window=timedelta(hours=24),
     ),

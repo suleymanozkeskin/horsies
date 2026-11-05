@@ -866,9 +866,8 @@ async def ensure_partition_coverage(
     # One class must not cost the others their coverage, and "the others"
     # includes heartbeats. Classes are served in key order, so an
     # unbounded failure denied leaves to every class sorting after it --
-    # and every queue-derived key begins `q_`, which sorts before
-    # `standard_30d`, so the feature guarantees the adverse ordering
-    # rather than leaving it to chance.
+    # and registries written before 0.6.1 hold `q_` keys, which sort
+    # before every `standard_` key.
     #
     # Each class runs inside a SAVEPOINT. A Python-level error needs only
     # the try/except, but a DATABASE error aborts the enclosing

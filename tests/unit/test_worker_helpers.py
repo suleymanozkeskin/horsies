@@ -3349,8 +3349,8 @@ class TestStartupRegistersEveryClassItRuns:
 
     The reaper's periodic pass and the worker's startup pass both
     register classes, and only one of them was reading both sources. A
-    queue-derived class the send path stamps but startup never registers
-    has no partition to land in, and the window is not bounded by one
+    period class the send path stamps but startup never registers has no
+    partition to land in, and the window is not bounded by one
     tick: the periodic pass sits behind the cluster-wide maintenance
     gate, which can deny.
 
@@ -3361,25 +3361,18 @@ class TestStartupRegistersEveryClassItRuns:
     """
 
     @pytest.mark.asyncio
-    async def test_a_queue_derived_class_reaches_startup_registration(
+    async def test_every_period_class_reaches_startup_registration(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from datetime import timedelta
 
         from horsies.core.history.maintenance import coverage as coverage_module
-        from horsies.core.models.retention import (
-            RetentionClassConfig,
-            RetentionConfig,
-        )
+        from horsies.core.models.retention import RetentionConfig
 
         worker = _make_worker()
         worker.cfg.retention_config = RetentionConfig(
             queue_retention={'default': timedelta(days=7)},
-            retention_classes=(
-                RetentionClassConfig(
-                    key='audit_1y', duration=timedelta(days=365)
-                ),
-            ),
+            retention_periods=(timedelta(days=365),),
         )
         captured: dict[str, Any] = {}
 
@@ -3415,13 +3408,13 @@ class TestStartupRegistersEveryClassItRuns:
         await worker.start()
 
         registered = dict(captured['declared_classes'] or ())
-        assert 'q_default_7d' in registered, (
+        assert 'standard_7d' in registered, (
             'startup did not register the class a mapped queue stamps; a '
             f'task sent on it has no partition to land in. got: {sorted(registered)}'
         )
-        assert registered['q_default_7d'] == timedelta(days=7)
-        assert 'audit_1y' in registered, (
-            'declared classes must still reach startup registration'
+        assert registered['standard_7d'] == timedelta(days=7)
+        assert registered.get('standard_365d') == timedelta(days=365), (
+            'listed periods must reach startup registration'
         )
 
 

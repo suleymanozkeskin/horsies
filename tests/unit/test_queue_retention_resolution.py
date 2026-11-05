@@ -1,10 +1,10 @@
 """What retention class a send stamps, given a queue mapping.
 
 Precedence is explicit-argument, then the queue's mapping, then the
-30-day default. The middle rung is the new one and the top rung is why
-absence had to become its own value: `standard_30d` passed by hand and
-the parameter omitted are the same string, and they must resolve
-differently once a queue is mapped.
+30-day default. The top rung is why absence had to become its own value:
+30 days passed by hand and the parameter omitted would be the same value,
+and they must resolve differently once a queue is mapped. A class is its
+period, so a queue mapped to 7 days stamps `standard_7d`.
 
 The stamped key is read off the broker call because that is what the
 enqueue actually writes; asserting on a resolver's return value would
@@ -22,17 +22,14 @@ import pytest
 
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.tasks import TaskError, TaskResult
-from horsies.core.models.retention import (
-    RetentionClassConfig,
-    RetentionConfig,
-)
+from horsies.core.models.retention import RetentionConfig
 from horsies.core.task_decorator import create_task_wrapper
 from horsies.core.types.result import Ok
 
 pytestmark = [pytest.mark.unit]
 
 MAPPED_QUEUE = 'emails'
-DERIVED_KEY = 'q_emails_7d'
+PERIOD_KEY = 'standard_7d'
 
 
 def good_fn(*, x: int) -> TaskResult[int, TaskError]:
@@ -100,10 +97,10 @@ def test_an_unmapped_queue_stamps_the_default() -> None:
     assert key == 'standard_30d'
 
 
-def test_a_mapped_queue_stamps_its_derived_class() -> None:
+def test_a_mapped_queue_stamps_its_period_class() -> None:
     key = _stamped_key(_make_app(_MAPPED))
 
-    assert key == DERIVED_KEY
+    assert key == PERIOD_KEY
 
 
 def test_a_queue_mapped_to_none_stamps_forever() -> None:
@@ -115,60 +112,79 @@ def test_a_queue_mapped_to_none_stamps_forever() -> None:
 def test_an_explicit_default_beats_the_mapping() -> None:
     """The distinction the sentinel exists to carry.
 
-    Naming the default class is a choice, and a choice outranks the
+    Choosing the default period is a choice, and a choice outranks the
     queue's mapping. Before absence became its own value this send was
     indistinguishable from one that said nothing.
     """
-    key = _stamped_key(_make_app(_MAPPED), retention_class_key='standard_30d')
+    key = _stamped_key(_make_app(_MAPPED), retention=timedelta(days=30))
 
     assert key == 'standard_30d', (
-        'an explicitly named class must beat the queue mapping; the '
+        'an explicitly chosen period must beat the queue mapping; the '
         'mapping is a default for sends that express no preference'
     )
 
 
 def test_an_explicit_none_beats_the_mapping() -> None:
-    key = _stamped_key(_make_app(_MAPPED), retention_class_key=None)
+    key = _stamped_key(_make_app(_MAPPED), retention=None)
 
     assert key is None
 
 
-def test_an_explicit_declared_class_beats_the_mapping() -> None:
+def test_an_explicit_listed_period_beats_the_mapping() -> None:
     config = RetentionConfig(
-        retention_classes=(
-            RetentionClassConfig(key='audit_1y', duration=timedelta(days=365)),
-        ),
+        retention_periods=(timedelta(days=365),),
         queue_retention={MAPPED_QUEUE: timedelta(days=7)},
     )
 
-    key = _stamped_key(_make_app(config), retention_class_key='audit_1y')
+    key = _stamped_key(_make_app(config), retention=timedelta(days=365))
 
-    assert key == 'audit_1y'
-
-
-def test_a_derived_class_may_be_named_explicitly() -> None:
-    """A queue's own class is a valid target by name.
-
-    Send-time validation refuses keys this process does not know, and a
-    class the mapping creates is one it knows.
-    """
-    key = _stamped_key(_make_app(_MAPPED), retention_class_key=DERIVED_KEY)
-
-    assert key == DERIVED_KEY
+    assert key == 'standard_365d'
 
 
-def test_an_unknown_class_is_still_refused() -> None:
-    """Widening the known set must not have opened it."""
+def test_a_mapped_period_may_be_chosen_explicitly() -> None:
+    """A mapped period is one this process registers, so a send may name it."""
+    key = _stamped_key(_make_app(_MAPPED), retention=timedelta(days=7))
+
+    assert key == PERIOD_KEY
+
+
+@pytest.mark.parametrize(
+    'period',
+    [
+        pytest.param(timedelta(days=9), id='not-registered'),
+        pytest.param(timedelta(hours=36), id='fractional-day'),
+        pytest.param(timedelta(days=1826), id='above-maximum'),
+        pytest.param(PERIOD_KEY, id='a-class-key-string'),
+        pytest.param(7, id='an-int'),
+    ],
+)
+def test_a_period_this_process_cannot_stamp_is_refused(period: object) -> None:
+    """A wrong type is refused like a wrong period, never raised."""
     broker = MagicMock()
     broker.enqueue.return_value = Ok('task-abc')
     app = _make_app(_MAPPED)
     app.get_broker.return_value = broker
     wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-    result = wrapper.with_options(retention_class_key='q_other_9d').send(x=1)
+    result = wrapper.with_options(retention=period).send(x=1)  # pyright: ignore[reportArgumentType]
 
-    assert result.is_err(), 'an unmapped derived key is not a known class'
+    assert result.is_err(), result
     assert not broker.enqueue.called, 'the refusal must precede the enqueue'
+
+
+def test_an_unlisted_period_is_refused_with_the_allowed_periods() -> None:
+    """The refusal names what this process can stamp."""
+    broker = MagicMock()
+    broker.enqueue.return_value = Ok('task-abc')
+    app = _make_app(_MAPPED)
+    app.get_broker.return_value = broker
+    wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+    result = wrapper.with_options(retention=timedelta(days=9)).send(x=1)
+
+    assert result.is_err(), result
+    assert '7 days, 30 days' in result.err_value.message, result.err_value.message
+    assert 'retention_periods' in result.err_value.message
 
 
 def test_the_mapping_is_read_per_send_not_at_decoration() -> None:
@@ -182,7 +198,7 @@ def test_the_mapping_is_read_per_send_not_at_decoration() -> None:
 
     app.config.retention = _MAPPED
 
-    assert _stamped_key(app) == DERIVED_KEY
+    assert _stamped_key(app) == PERIOD_KEY
 
 
 def test_json_task_options_do_not_carry_the_class() -> None:
@@ -217,7 +233,7 @@ def test_json_task_options_do_not_carry_the_class() -> None:
 class TestEveryPathResolvesAlike:
     def test_a_mapped_queue_resolves(self, path: str) -> None:
         assert _stamp(_make_app(_MAPPED), path)['retention_class_key'] == (
-            DERIVED_KEY
+            PERIOD_KEY
         )
 
     def test_an_unmapped_queue_takes_the_default(self, path: str) -> None:
@@ -232,24 +248,24 @@ class TestEveryPathResolvesAlike:
         discarded and the record dropped on the default schedule.
         """
         stamped = _stamp(
-            _make_app(_MAPPED), path, retention_class_key=None
+            _make_app(_MAPPED), path, retention=None
         )['retention_class_key']
 
         assert stamped is None
 
     def test_an_explicit_default_beats_the_mapping(self, path: str) -> None:
         stamped = _stamp(
-            _make_app(_MAPPED), path, retention_class_key='standard_30d'
+            _make_app(_MAPPED), path, retention=timedelta(days=30)
         )['retention_class_key']
 
         assert stamped == 'standard_30d'
 
-    def test_an_explicit_derived_key_is_honored(self, path: str) -> None:
+    def test_an_explicit_mapped_period_is_honored(self, path: str) -> None:
         stamped = _stamp(
-            _make_app(_MAPPED), path, retention_class_key=DERIVED_KEY
+            _make_app(_MAPPED), path, retention=timedelta(days=7)
         )['retention_class_key']
 
-        assert stamped == DERIVED_KEY
+        assert stamped == PERIOD_KEY
 
     def test_a_queue_mapped_to_none_resolves_to_forever(
         self, path: str
@@ -258,7 +274,7 @@ class TestEveryPathResolvesAlike:
 
         assert _stamp(app, path)['retention_class_key'] is None
 
-    def test_an_unknown_class_is_refused_before_the_enqueue(
+    def test_an_unlisted_period_is_refused_before_the_enqueue(
         self, path: str
     ) -> None:
         broker = MagicMock()
@@ -266,7 +282,7 @@ class TestEveryPathResolvesAlike:
         app = _make_app(_MAPPED)
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
-        options = wrapper.with_options(retention_class_key='q_other_9d')
+        options = wrapper.with_options(retention=timedelta(days=9))
 
         result = (
             options.send(x=1) if path == 'send' else options.schedule(60, x=1)
@@ -282,3 +298,16 @@ class TestEveryPathResolvesAlike:
         stamped = _stamp(_make_app(_MAPPED), path, idempotency_key='k1')
 
         assert stamped['idempotency_key'] == 'k1'
+
+
+def test_a_class_key_string_is_refused_with_the_replacement() -> None:
+    """The 0.6.0 argument was a key string; the refusal names the new form."""
+    app = _make_app(_MAPPED)
+    app.get_broker.return_value = MagicMock()
+    wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+    result = wrapper.with_options(retention='standard_7d').send(x=1)  # pyright: ignore[reportArgumentType]
+
+    assert result.is_err(), result
+    assert 'not str' in result.err_value.message, result.err_value.message
+    assert 'timedelta(days=7)' in result.err_value.message

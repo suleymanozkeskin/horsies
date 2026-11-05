@@ -1,9 +1,10 @@
-"""App instance declaring a retention class, for the assembly e2e.
+"""App instance listing a retention period, for the assembly e2e.
 
-The declaration is the whole point: a real worker booted from this module
-must register `E2E_CLASS_KEY` before anything else can be asserted, and
-it can only do that if every link from `AppConfig.retention` through the
-CLI, `WorkerConfig`, the reaper loop and its pass reaches the registrar.
+The listed period is the whole point: a real worker booted from this
+module must register `E2E_CLASS_KEY` before anything else can be asserted,
+and it can only do that if every link from `AppConfig.retention` through
+the CLI, `WorkerConfig`, the reaper loop and its pass reaches the
+registrar.
 """
 
 from __future__ import annotations
@@ -17,14 +18,15 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
 from horsies.core.models.recovery import RecoveryConfig
-from horsies.core.models.retention import RetentionClassConfig, RetentionConfig
+from horsies.core.history.periods import period_class_key
+from horsies.core.models.retention import RetentionConfig
 
 from tests.e2e.helpers.env import e2e_database_url
 
 DB_URL = e2e_database_url('HORSES_E2E_DB_URL')
 
-E2E_CLASS_KEY = 'e2e_declared_5d'
 E2E_CLASS_DURATION = timedelta(days=5)
+E2E_CLASS_KEY = period_class_key(E2E_CLASS_DURATION.days)
 
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
@@ -38,11 +40,7 @@ config = AppConfig(
         # The floor, so the first maintenance tick lands promptly and the
         # test needs no clock manipulation.
         partition_maintenance_interval_s=60,
-        retention_classes=(
-            RetentionClassConfig(
-                key=E2E_CLASS_KEY, duration=E2E_CLASS_DURATION
-            ),
-        ),
+        retention_periods=(E2E_CLASS_DURATION,),
     ),
 )
 

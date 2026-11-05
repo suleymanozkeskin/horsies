@@ -1,10 +1,11 @@
-"""retention_class_key through the public send surface, end to end.
+"""retention through the public send surface, end to end.
 
-The adopter contract under test: a send that names no class lands in the
-immutable 30-day default class; explicit ``None`` lands in forever; an
-unknown class is refused at the send call with the class named, never as
-a partition-routing failure later; and a terminalized row relocates into
-the history partition of the class its enqueue declared.
+The adopter contract under test: a send that names no period lands in the
+immutable 30-day default class; explicit ``None`` lands in forever; a
+period this process does not register is refused at the send call with
+the period named, never as a partition-routing failure later; and a
+terminalized row relocates into the history partition of the class its
+enqueue stamped.
 
 The app's broker is the real migrated test broker — the public path runs
 unmocked from ``with_options`` through the enqueue INSERT. Terminal
@@ -33,10 +34,8 @@ from horsies.core.history.maintenance.coverage import (
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.recovery import RecoveryConfig
-from horsies.core.models.retention import (
-    RetentionClassConfig,
-    RetentionConfig,
-)
+from horsies.core.history.periods import period_class_key
+from horsies.core.models.retention import RetentionConfig
 from horsies.core.models.task_send_types import TaskSendValidationFailed
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.types.result import is_err, is_ok
@@ -76,15 +75,16 @@ def _test_app(broker: PostgresBroker) -> Horsies:
 
 
 _DECLARING_APP: Horsies | None = None
-DECLARED_KEY = 'it_declared_90d'
+DECLARED_PERIOD = timedelta(days=90)
+DECLARED_KEY = period_class_key(DECLARED_PERIOD.days)
 
 
 def _declaring_app(broker: PostgresBroker) -> Horsies:
-    """An app whose config declares one extra retention class.
+    """An app whose config lists one extra retention period.
 
     Separate from `_test_app` because the send validator reads the
-    declared set from config: an app that declares nothing must keep
-    refusing the key, which is the per-process contract under test.
+    listed periods from config: an app that lists nothing must keep
+    refusing the period, which is the per-process contract under test.
     """
     global _DECLARING_APP
     if _DECLARING_APP is None:
@@ -92,13 +92,7 @@ def _declaring_app(broker: PostgresBroker) -> Horsies:
             broker=PostgresConfig(
                 database_url='postgresql+psycopg://u:p@localhost/db',
             ),
-            retention=RetentionConfig(
-                retention_classes=(
-                    RetentionClassConfig(
-                        key=DECLARED_KEY, duration=timedelta(days=90)
-                    ),
-                )
-            ),
+            retention=RetentionConfig(retention_periods=(DECLARED_PERIOD,)),
         )
         _DECLARING_APP = Horsies(cfg)
 
@@ -206,14 +200,14 @@ class TestRetentionClassAtEnqueue:
         task: Any = app.tasks['retention_enqueue_test']
 
         result = await task.with_options(
-            retention_class_key=None
+            retention=None
         ).send_async(x=2)
 
         assert is_ok(result)
         row_class = await _row_class(broker, result.ok_value.task_id)
         assert row_class == FOREVER_CLASS_KEY
 
-    async def test_unknown_class_is_refused_at_send_with_no_row(
+    async def test_an_unregistered_period_is_refused_at_send_with_no_row(
         self, broker: PostgresBroker
     ) -> None:
         app = _test_app(broker)
@@ -226,12 +220,12 @@ class TestRetentionClassAtEnqueue:
             ).scalar_one()
 
         result = await task.with_options(
-            retention_class_key='no_such_class'
+            retention=timedelta(days=9)
         ).send_async(x=3)
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendValidationFailed)
-        assert 'no_such_class' in result.err_value.message
+        assert 'Retention of 9 days' in result.err_value.message
         async with current_resources(broker).engine.connect() as connection:
             after = (
                 await connection.execute(
@@ -243,12 +237,12 @@ class TestRetentionClassAtEnqueue:
     async def test_forever_row_terminalizes_into_the_forever_partition(
         self, broker: PostgresBroker
     ) -> None:
-        """The declared class is the routing fact at terminalization."""
+        """The stamped class is the routing fact at terminalization."""
         app = _test_app(broker)
         task: Any = app.tasks['retention_enqueue_test']
 
         result = await task.with_options(
-            retention_class_key=None
+            retention=None
         ).send_async(x=4)
         assert is_ok(result)
         task_id = result.ok_value.task_id
@@ -273,62 +267,62 @@ class TestRetentionClassAtEnqueue:
         assert history_class == DEFAULT_RETENTION_CLASS_KEY
         assert DEFAULT_RETENTION_CLASS_KEY in partition_name
 
-    async def test_a_declared_class_is_accepted_at_send(
+    async def test_a_listed_period_is_accepted_at_send(
         self, broker: PostgresBroker
     ) -> None:
-        """The validator's set is config-derived, so a declaration lands."""
+        """The validator's set is config-derived, so a listed period lands."""
         app = _declaring_app(broker)
         task: Any = app.tasks['retention_declared_test']
 
         result = await task.with_options(
-            retention_class_key=DECLARED_KEY
+            retention=DECLARED_PERIOD
         ).send_async(x=7)
 
         assert not is_err(result), getattr(result, 'err_value', None)
         assert await _row_class(broker, result.ok_value.task_id) == DECLARED_KEY
 
-    async def test_an_undeclared_class_is_still_refused(
+    async def test_an_unlisted_period_is_still_refused(
         self, broker: PostgresBroker
     ) -> None:
-        """Declaring one class does not open the door to every key."""
+        """Listing one period does not open the door to every period."""
         app = _declaring_app(broker)
         task: Any = app.tasks['retention_declared_test']
 
         result = await task.with_options(
-            retention_class_key='it_not_declared'
+            retention=timedelta(days=91)
         ).send_async(x=8)
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendValidationFailed)
-        assert 'it_not_declared' in result.err_value.message
-        assert DECLARED_KEY in result.err_value.message, (
-            'the refusal should name what this deployment does declare'
+        assert 'Retention of 91 days' in result.err_value.message
+        assert '90 days' in result.err_value.message, (
+            'the refusal should name what this deployment does register'
         )
 
-    async def test_a_process_that_omits_the_class_refuses_it(
+    async def test_a_process_that_omits_the_period_refuses_it(
         self, broker: PostgresBroker
     ) -> None:
         """The per-process contract, stated as a test.
 
         The set is process-static by design — no database lookup on the
-        send path — so an app whose config omits a class refuses it even
-        though another app in this same database declares and uses it.
+        send path — so an app whose config omits a period refuses it even
+        though another app in this same database lists and uses it.
         """
         declaring = _declaring_app(broker)
         declared_task: Any = declaring.tasks['retention_declared_test']
         accepted = await declared_task.with_options(
-            retention_class_key=DECLARED_KEY
+            retention=DECLARED_PERIOD
         ).send_async(x=9)
         assert not is_err(accepted)
 
         plain = _test_app(broker)
         plain_task: Any = plain.tasks['retention_enqueue_test']
         refused = await plain_task.with_options(
-            retention_class_key=DECLARED_KEY
+            retention=DECLARED_PERIOD
         ).send_async(x=9)
 
         assert is_err(refused), (
-            'a process that does not declare the class must refuse it, '
+            'a process that does not list the period must refuse it, '
             'even though the same database already holds rows in it'
         )
         assert isinstance(refused.err_value, TaskSendValidationFailed)

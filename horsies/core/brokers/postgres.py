@@ -94,8 +94,11 @@ from horsies.core.models.health import (
     WorkerStateSnapshot,
 )
 from horsies.core.history.errors import HistoryContractError
+from horsies.core.history.periods import RetentionClassKey
 from horsies.core.history.ddl.classes import (
     DEFAULT_RETENTION_CLASS_KEY,
+    describe_period_key_collision,
+    find_period_key_collisions,
     resolve_retention_class_key,
 )
 from horsies.core.history.maintenance.database import (
@@ -1443,8 +1446,16 @@ class PostgresBroker:
         # inspect an absent, old, incomplete-cutover, or future schema and
         # report its status without mutating it. Compatibility enforcement is
         # owned by their schema-status probe; fleet brokers enforce it below.
-        if not self.run_schema_migrations:
-            return
+        # The period-key check is read-only, and a broker that runs no
+        # migrations still sends, so every broker runs it.
+        if self.run_schema_migrations:
+            await self._run_fleet_schema_init(engine, stored_version)
+        await self._refuse_period_key_collisions(engine)
+
+    async def _run_fleet_schema_init(
+        self, engine: AsyncEngine, stored_version: int,
+    ) -> None:
+        """Migrate the schema, and refuse a newer schema or an open cutover."""
         if stored_version < SCHEMA_VERSION:
             await self._run_schema_migrations_with_retry(engine)
         elif stored_version > SCHEMA_VERSION:
@@ -1458,6 +1469,44 @@ class PostgresBroker:
                     'schema migrations are current but the offline task-history '
                     'cutover is incomplete; run the documented cutover stages '
                     'through tighten and validation before starting this fleet'
+                )
+
+    async def _refuse_period_key_collisions(self, engine: AsyncEngine) -> None:
+        """Refuse a broker whose periods' keys hold another duration.
+
+        A class key is a function of its period, so this process stamps
+        ``standard_{n}d`` for a period of n days. A registry row written by a
+        named declaration before 0.6.1 can hold that key with another
+        duration; rows stamped into it would be deleted on that duration.
+        The query is read-only and covers only the keys this process
+        stamps. A broker with no app, or an app with no mapped or listed
+        period, opens no connection.
+
+        Raises:
+            RuntimeError: a period's key is registered with another
+                duration. The text names each key and both durations.
+        """
+        match self._app:
+            case None:
+                return
+            case app:
+                period_classes = app.config.retention.registrable_classes()
+        match period_classes:
+            case ():
+                return
+            case _:
+                pass
+        async with engine.connect() as conn:
+            collisions = await find_period_key_collisions(conn, period_classes)
+        match collisions:
+            case ():
+                return
+            case _:
+                raise RuntimeError(
+                    '; '.join(
+                        describe_period_key_collision(collision)
+                        for collision in collisions
+                    )
                 )
 
     async def _run_schema_migrations_with_retry(self, engine: AsyncEngine) -> None:
@@ -2339,7 +2388,7 @@ class PostgresBroker:
         enqueue_delay_seconds: Optional[int] = None,
         good_until: Optional[datetime] = None,
         task_options: Optional[str] = None,
-        retention_class_key: str | None = DEFAULT_RETENTION_CLASS_KEY,
+        retention_class_key: RetentionClassKey | None = DEFAULT_RETENTION_CLASS_KEY,
         retain_rerun_input: Optional[bool] = None,
         idempotency_key: Optional[str] = None,
     ) -> Result[str, BrokerEnqueueError]:
@@ -4041,7 +4090,7 @@ class PostgresBroker:
         good_until: Optional[datetime] = None,
         task_options: Optional[str] = None,
         idempotency_key: Optional[str] = None,
-        retention_class_key: str | None = DEFAULT_RETENTION_CLASS_KEY,
+        retention_class_key: RetentionClassKey | None = DEFAULT_RETENTION_CLASS_KEY,
         retain_rerun_input: Optional[bool] = None,
     ) -> Result[str, BrokerEnqueueError | BrokerSyncCallError]:
         """Synchronous task submission (runs enqueue_async in background loop).
