@@ -6,7 +6,7 @@ import asyncio
 import inspect
 import json
 from functools import wraps
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -1809,9 +1809,9 @@ class TestCreateTaskWrapperSend:
 
 @pytest.mark.unit
 class TestSendRetentionClass:
-    """retention_class_key at the send surface: omitted → the immutable
-    30-day default class, explicit ``None`` → forever, unknown → refused
-    before the broker is touched."""
+    """retention at the send surface: omitted → the immutable 30-day
+    default class, explicit ``None`` → forever, a period this process does
+    not register → refused before the broker is touched."""
 
     @staticmethod
     def _wrapper_and_broker() -> tuple[Any, MagicMock]:
@@ -1842,7 +1842,7 @@ class TestSendRetentionClass:
         distinct from the omitted-parameter default."""
         wrapper, broker = self._wrapper_and_broker()
 
-        result = wrapper.with_options(retention_class_key=None).send(x=1)
+        result = wrapper.with_options(retention=None).send(x=1)
 
         assert is_ok(result)
         assert (
@@ -1853,7 +1853,7 @@ class TestSendRetentionClass:
         wrapper, broker = self._wrapper_and_broker()
 
         result = wrapper.with_options(
-            retention_class_key='standard_30d'
+            retention=timedelta(days=30)
         ).send(x=1)
 
         assert is_ok(result)
@@ -1862,25 +1862,25 @@ class TestSendRetentionClass:
             == 'standard_30d'
         )
 
-    def test_unknown_class_fails_before_the_broker(self) -> None:
-        """A typo is refused at the send call, naming the class — never a
-        partition-routing failure at terminalization."""
+    def test_unregistered_period_fails_before_the_broker(self) -> None:
+        """A period no class is registered for is refused at the send call,
+        naming it — never a partition-routing failure at terminalization."""
         wrapper, broker = self._wrapper_and_broker()
 
         result = wrapper.with_options(
-            retention_class_key='no_such_class'
+            retention=timedelta(days=9)
         ).send(x=1)
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendValidationFailed)
-        assert 'no_such_class' in result.err_value.message
+        assert 'Retention of 9 days' in result.err_value.message
         broker.enqueue.assert_not_called()
 
     def test_async_send_mirrors_the_sync_semantics(self) -> None:
         wrapper, broker = self._wrapper_and_broker()
 
         result = asyncio.run(
-            wrapper.with_options(retention_class_key=None).send_async(x=1)
+            wrapper.with_options(retention=None).send_async(x=1)
         )
 
         assert is_ok(result)
@@ -1889,12 +1889,12 @@ class TestSendRetentionClass:
             is None
         )
 
-    def test_async_unknown_class_fails_before_the_broker(self) -> None:
+    def test_async_unregistered_period_fails_before_the_broker(self) -> None:
         wrapper, broker = self._wrapper_and_broker()
 
         result = asyncio.run(
             wrapper.with_options(
-                retention_class_key='no_such_class'
+                retention=timedelta(days=9)
             ).send_async(x=1)
         )
 

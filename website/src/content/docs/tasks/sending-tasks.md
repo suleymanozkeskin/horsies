@@ -88,45 +88,42 @@ send gets, highest precedence first: what the send asks for, then the
 queue's [`queue_retention`](../../configuration/retention-config#retention-per-queue)
 mapping if it has one, then the immutable 30-day default. Omitting the
 argument therefore takes the queue's mapping where one exists — and
-naming `standard_30d` explicitly is a choice that overrides it.
+choosing 30 days explicitly is a choice that overrides it.
 
-Pass `retention_class_key=None` to keep the record forever:
+Pass `retention=None` to keep the record forever:
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
-match await audit_task.with_options(retention_class_key=None).send_async(entry=entry):
+match await audit_task.with_options(retention=None).send_async(entry=entry):
     case Ok(handle):
         print(f"Audit task {handle.task_id}: terminal record kept forever")
     case Err(err):
         print(f"Send failed: {err.code}")
 ```
 
-Forever is reached by `None`, not by the word: `retention_class_key='forever'`
-is refused, because the accepted values are the ones this process knows.
+### Send With a Listed Retention Period
 
-### Send Into a Declared Retention Class
-
-Beyond the 30-day default and forever, a deployment can declare its own
-finite classes in
-[`AppConfig.retention.retention_classes`](../../configuration/retention-config#declaring-your-own)
-and send into them by key:
+Beyond the 30-day default, the mapped periods and forever, a deployment
+can list finite periods in
+[`AppConfig.retention.retention_periods`](../../configuration/retention-config#periods-a-send-chooses)
+and send with them:
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
-match await audit_task.with_options(retention_class_key='audit_1y').send_async(entry=entry):
+match await audit_task.with_options(retention=timedelta(days=365)).send_async(entry=entry):
     case Ok(handle):
         print(f"Audit task {handle.task_id}: kept a year")
     case Err(err):
-        print(f"Send failed: {err.code}")  # VALIDATION_FAILED if undeclared
+        print(f"Send failed: {err.code}")  # VALIDATION_FAILED if not listed
 ```
 
-An unknown class is refused at the send call with `VALIDATION_FAILED`,
-naming the class and listing what this deployment accepts — nothing is
-written. The check reads this process's config, so declare a class in every
-process that sends into it.
+A period this process does not register is refused at the send call with
+`VALIDATION_FAILED`, naming the period and listing the periods this
+deployment accepts — nothing is written. A fractional day is refused the
+same way. The check reads this process's config, so list a period in
+every process that sends with it.
 
-The class is fixed at enqueue. An unknown class name fails the send with
-`Err(VALIDATION_FAILED)` naming the class — nothing is written.
+The class is fixed at enqueue.
 
 ### Delay Execution
 
@@ -323,7 +320,7 @@ Same `delay` validation as `.schedule()`.
 
 **Returns:** `TaskSendResult[TaskHandle[T]]`
 
-### `.with_options(*, good_until=None, idempotency_key=None, retention_class_key=<unset>) -> TaskSendOptions[P, T]`
+### `.with_options(*, good_until=None, idempotency_key=None, retention=<unset>) -> TaskSendOptions[P, T]`
 
 Return a per-send options builder. The returned object exposes `.send()`, `.send_async()`, `.schedule()`, and `.schedule_async()` with the overridden options applied.
 
@@ -331,22 +328,22 @@ Return a per-send options builder. The returned object exposes `.send()`, `.send
 | --------- | ---- | ----------- |
 | `good_until` | `datetime \| None` | Task expiry deadline (must be timezone-aware) |
 | `idempotency_key` | `str \| None` | Caller-supplied enqueue-deduplication key, scoped per task name |
-| `retention_class_key` | `str \| None` | Terminal-record retention: omit to take the queue's mapping (else the 30-day default), `None` for forever |
+| `retention` | `timedelta \| None` | Terminal-record retention: omit to take the queue's mapping (else the 30-day default), a period in whole days, or `None` for forever |
 
 **Returns:** `TaskSendOptions[P, T]` — a builder with `.send()`, `.send_async()`, `.schedule()`, and `.schedule_async()`.
 
 Passing `good_until=None` explicitly clears any internally inherited deadline.
 
-`retention_class_key` accepts `None` (keep the terminal record forever),
-`'standard_30d'` (the immutable 30-day default), any class declared in
-`AppConfig.retention.retention_classes`, and any class derived from
-`AppConfig.retention.queue_retention` (`q_<queue>_<duration>`). Any other
-string returns `Err(VALIDATION_FAILED)` at the send call, naming the class,
-before anything is written.
+`retention` accepts `None` (keep the terminal record forever), or a
+period in whole days that this process registers: 30 days (the default),
+a period in `AppConfig.retention.queue_retention`, or a period in
+`AppConfig.retention.retention_periods`. Any other period, and a
+fractional day, returns `Err(VALIDATION_FAILED)` at the send call before
+anything is written.
 
-Naming `'standard_30d'` is **not** the same as omitting the parameter.
-Omitting it takes the queue's mapping where one exists; naming the default
-class overrides that mapping for this send.
+Choosing 30 days is **not** the same as omitting the parameter. Omitting
+it takes the queue's mapping where one exists; choosing 30 days overrides
+that mapping for this send.
 
 The precedence is the same on `.schedule()` and `.schedule_async()` as on
 `.send()`, and the same for a `TaskSchedule` cron fire and a workflow

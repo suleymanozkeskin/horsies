@@ -19,7 +19,7 @@ this release it no longer lives on `RecoveryConfig`.
 <!-- check: skip elided -- broker=... stands for the broker config shown on other pages -->
 ```python
 from datetime import timedelta
-from horsies import AppConfig, RetentionConfig, RetentionClassConfig
+from horsies import AppConfig, RetentionConfig
 
 AppConfig(
     broker=...,
@@ -29,9 +29,7 @@ AppConfig(
             'audit': None,
         },
         terminal_record_retention_hours=24 * 90,
-        retention_classes=(
-            RetentionClassConfig(key='audit_1y', duration=timedelta(days=365)),
-        ),
+        retention_periods=(timedelta(days=365),),
     ),
 )
 ```
@@ -53,20 +51,50 @@ retention=RetentionConfig(
 )
 ```
 
-A queue with no entry is unchanged: its tasks take the immutable 30-day
-class. Nothing about existing deployments moves until a queue is named.
+A queue with no entry is unchanged: its tasks take the 30-day default
+class.
+
+A period is **whole days, from 1 to 1825** (five years). The config
+refuses any other value when it loads: a fractional day such as
+`timedelta(hours=36)`, zero, or more than 1825 days. History partitions
+are daily, so a finer period would only make another set of partitions
+with the same behaviour. It is refused, never rounded.
+
+Any configured queue name can be mapped, whatever its length or its
+characters.
+
+### A class is its period
+
+A retention class is identified by its period, and its key is
+`standard_<days>d`:
+
+| Period | Class key |
+|---|---|
+| 7 days | `standard_7d` |
+| 30 days (the default) | `standard_30d` |
+| 365 days | `standard_365d` |
+
+Queues mapped to the same period share one class:
+`{'emails': timedelta(days=7), 'alerts': timedelta(days=7)}` stamps
+`standard_7d` for both. You see the key in monitoring, in the
+`retention_class_key` column, and in partition names
+(`horsies_task_history_standard_7d_...`).
+
+The key is a function of the period, so a key always means one duration.
+Two processes cannot disagree about it, and a changed period cannot
+change a class that already holds rows.
 
 ### Which class a send gets
 
 Highest precedence first:
 
-1. **What the send asks for** — `with_options(retention_class_key=...)`.
-   Naming `standard_30d` explicitly is a choice and beats the mapping.
+1. **What the send asks for** — `with_options(retention=...)`. Choosing
+   30 days explicitly is a choice and beats the mapping.
 2. **The queue's mapping**, if it has one.
-3. **`standard_30d`**, the immutable 30-day default.
+3. **`standard_30d`**, the 30-day default.
 
 Omitting the argument therefore means "the queue's mapping if there is
-one" — not `standard_30d` unconditionally.
+one" — not 30 days unconditionally.
 
 The same precedence applies wherever a task is enqueued: `.send()`,
 `.send_async()`, `.schedule()`, `.schedule_async()`, a `TaskSchedule`
@@ -81,72 +109,36 @@ every case.
 await send_email.send_async(to=...)
 
 # Same queue, this one send opted back to 30 days
-await send_email.with_options(retention_class_key='standard_30d').send_async(to=...)
+await send_email.with_options(retention=timedelta(days=30)).send_async(to=...)
 ```
+
+An explicit finite period must be one this process registers: the
+default, a mapped period, or one in `retention_periods`. Any other period
+is refused at the send call, before anything is written. `None` keeps the
+record forever.
 
 ### Editing a mapping
 
-The duration is part of the class the mapping derives, so changing a
-number **mints a new class** rather than redefining one:
+A changed period is another class:
 
 | Time | `queue_retention['emails']` | New sends land in | Older records |
 |---|---|---|---|
-| Monday | `timedelta(days=7)` | `q_emails_7d` | — |
-| Friday | `timedelta(days=14)` | `q_emails_14d` | still in `q_emails_7d`, dropped on their 7-day promise |
+| Monday | `timedelta(days=7)` | `standard_7d` | — |
+| Friday | `timedelta(days=14)` | `standard_14d` | still in `standard_7d`, dropped on their 7-day promise |
 
-Both classes exist, each holding the records it was created for. This is
-deliberate: a class has exactly one duration, so rewriting it in place
-would silently restate a promise already made to records sitting in its
-partitions. Records enqueued under the old mapping age out under the old
-mapping.
+The class is decided **when the task is sent** and recorded on the row. A
+retry replays the class its original send chose, so editing the map
+governs later sends and never reaches a task already in flight.
 
-The same follows for the resolution point — the class is decided **when
-the task is sent** and recorded on the row. A retry replays the class its
-original send chose, so editing the map governs later sends and never
-reaches a task already in flight.
+### What each class costs
 
-### You will see the derived keys
-
-The mapping is the interface; the derived class is its visible artifact.
-Keys appear as `q_<queue>_<duration>` — `q_emails_7d`, `q_reports_90d`,
-`q_ingest_36h` — in monitoring surfaces, in the `retention_class_key`
-column, and as partition names (`horsies_task_history_q_emails_7d_...`).
-A key like `q_emails_7d` means "sent on the `emails` queue while it was
-mapped to 7 days". You can also name one explicitly at a send.
-
-`q_` is reserved: a class declared in `retention_classes` may not use the
-prefix, since durations there come from the mapping instead.
-
-### What each mapping costs
-
-A mapping keys on the queue *and* its duration, so two queues mapped to
-the same duration mint two independent classes — `{'a': 7d, 'b': 7d}`
-gives `q_a_7d` and `q_b_7d`, not one shared class. That is deliberate:
-a class has one duration, and merging them would tie two queues whose
-mappings can later diverge.
-
-Each class carries its own parent relation, `history_leaf_horizon_days
-+ 1` daily leaves, and two indexes per leaf, all maintained on every
-pass. Ten mapped queues is roughly forty extra leaves and eighty extra
-indexes at the default horizon. Map the queues whose retention actually
-differs, rather than every queue.
-
-### Length: roughly 13 characters of queue name
-
-A class key is spliced into the relations the class owns, and the longest
-of those is a per-leaf index name:
-
-```
-horsies_task_history_q_emails_7d_2026_08_11_enqueued_idx
-```
-
-PostgreSQL caps an identifier at 63 bytes and **truncates rather than
-refuses** past it, so the budget is enforced where you can act on it — at
-configuration, which refuses an over-long key and states the arithmetic.
-The bound is **18 characters for a class key**. After `q_`, the separator
-and a duration like `7d`, that leaves roughly **13 characters for a mapped
-queue name**. The same bound applies to keys declared by hand in
-`retention_classes`.
+Each class has its own parent table, one daily table for each day it
+keeps plus the days kept ahead (`history_leaf_horizon_days`), and two
+indexes on each daily table. All of them are created ahead and checked on
+every maintenance pass. At the default horizon of 3 days, a 7-day class
+keeps about 11 daily tables, a 365-day class about 369, and a 1825-day
+class about 1,830. Queues with one period share them, so the cost grows
+with the number of distinct periods, not with the number of queues.
 
 ### Migrating from `queue_terminal_record_retention_hours`
 
@@ -167,7 +159,7 @@ delete:
 
 | Category | Mechanism | Setting |
 |---|---|---|
-| Terminal **task** records | **Partition drop** — records live in `horsies_task_history`, partitioned by the retention class assigned at enqueue; a partition past its class's window is dropped whole | `queue_retention` per queue, or `retention_class_key` per send |
+| Terminal **task** records | **Partition drop** — records live in `horsies_task_history`, partitioned by the retention class assigned at enqueue; a partition past its class's window is dropped whole | `queue_retention` per queue, or `retention` per send |
 | Heartbeats | **Partition drop** — hourly partitions drop whole | `heartbeat_leaf_horizon_hours` (coverage, not the window) |
 | Terminal **workflow** records | **Row delete** in batches | `terminal_record_retention_hours` |
 | Worker states | **Row delete**, same sweep | `worker_state_retention_hours` |
@@ -186,39 +178,44 @@ the queue's `queue_retention` mapping, then the immutable 30-day class.
 An explicit `None` keeps the record forever. See
 [Sending Tasks](../../tasks/sending-tasks#keep-a-terminal-record-forever).
 
-### Declaring your own
+### Periods a send chooses
 
-A deployment can declare additional finite classes. Declaring a class
-does not create it — the maintenance owner registers every declared
-class at startup and on each pass, exactly as it registers the classes
-the library ships, which keeps partition DDL out of application code.
+A send can choose a finite period that no queue maps. List it in
+`retention_periods`, so that the maintenance owner registers its class:
 
 ```python
 RetentionConfig(
-    retention_classes=(
-        RetentionClassConfig(key='audit_1y', duration=timedelta(days=365)),
-        RetentionClassConfig(key='transient_2d', duration=timedelta(days=2)),
-    )
+    retention_periods=(timedelta(days=365), timedelta(days=2)),
 )
 ```
 
-Declarations are checked where you write them: a key must be a usable
-identifier, must not be one the library owns (`standard_30d`, `forever`,
-`heartbeats`), must not repeat, and its duration must be positive. Every
-problem in a config is reported together. Re-declaring an existing key
-with a *different* duration is refused at startup and named — classes
-are immutable, because rows already carry the old window.
+A listed period follows the same rule as a mapped one: whole days from 1
+to 1825. A period listed twice is refused.
 
-**`duration` is a minimum.** History partitions span one day and drop
-only once the whole day is past the duration, so a row survives between
-`duration` and `duration + 1 day`. Sub-day durations never under-retain
-but cannot expire faster than daily granularity allows.
+**A period is a minimum.** History partitions span one day and drop only
+once the whole day is past the period, so a row survives between the
+period and the period plus one day.
 
-**Validation is per-process.** The acceptable class keys come from this
-process's config, so the send-time check costs no database round trip.
-A process whose config omits a class refuses it even if another
-deployment registered that class in the same database — declare a class
-in every process that sends into it.
+**Validation is per-process.** The periods a send may choose come from
+this process's config, so the send-time check costs no database round
+trip. A process whose config omits a period refuses it, even if another
+process registered its class in the same database. The worker fleet's
+config must contain every period that producers send: the maintenance
+owner registers the classes of its own config, and a task whose class is
+not registered has no partition to move into when it finishes.
+
+### Classes from earlier versions
+
+Classes made before 0.6.1 stay registered: the `q_<queue>_<duration>`
+classes of `queue_retention`, and the classes declared by name in the
+removed `retention_classes`. Their rows are deleted on their own
+durations, and new sends never stamp them. Nothing needs to be removed.
+
+A class declared by name before 0.6.1 can hold a key of the form
+`standard_<n>d` with another duration, for example `standard_14d` with
+7 days. A process that maps or lists 14 days then refuses to initialize
+its broker, and the error names the key and both durations. Choose
+another number of days for that period.
 
 ## Partition coverage
 

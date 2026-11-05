@@ -2732,6 +2732,43 @@ class TestEnqueueScheduledTask:
         enqueue_kwargs = scheduler.broker.enqueue_async.await_args.kwargs
         assert enqueue_kwargs['kwargs_json'] == dumps_json({'deadline': 'soon'}).ok_value
 
+    async def test_a_fired_slot_stamps_the_class_of_the_queue_period(self) -> None:
+        """A cron fire resolves through the queue mapping, like a send."""
+        from datetime import timedelta
+
+        from horsies.core.models.retention import RetentionConfig
+
+        schedule = TaskSchedule(
+            name='s',
+            task_name='my_task',
+            pattern=IntervalSchedule(seconds=5),
+        )
+        config = ScheduleConfig(schedules=[schedule])
+
+        def no_kwargs_fn() -> None:
+            return None
+
+        app = _make_app(
+            schedule_config=config,
+            tasks={'my_task': _make_task_mock(no_kwargs_fn)},
+        )
+        app.config.retention = RetentionConfig(
+            queue_retention={'default': timedelta(days=7)},
+        )
+        scheduler = Scheduler(app)
+        scheduler.broker = _make_broker_mock()
+        scheduler.broker.enqueue_async = AsyncMock(return_value=Ok('task-1'))
+        scheduler._validate_schedules()
+
+        result = await scheduler._enqueue_scheduled_task(
+            schedule,
+            slot_time=_utc(2025, 6, 1, 12, 0, 0),
+        )
+
+        assert result == Ok('task-1')
+        enqueue_kwargs = scheduler.broker.enqueue_async.await_args.kwargs
+        assert enqueue_kwargs['retention_class_key'] == 'standard_7d'
+
     async def test_the_fingerprint_covers_the_text_boot_encoded(self) -> None:
         schedule = TaskSchedule(
             name='s',

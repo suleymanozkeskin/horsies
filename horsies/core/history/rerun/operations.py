@@ -32,7 +32,10 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from horsies.core.codec.json_io import dumps_canonical_json
 
+from ..ddl.tables import FOREVER_CLASS_KEY
 from ..errors import HistoryContractError
+from ..periods import parse_retention_period, period_class_key
+from horsies.core.types.result import Err, Ok
 from ..identity.fingerprint import EnqueueCommandV1
 from ..names import RETENTION_CLASSES
 from ..identity.keys import (
@@ -83,16 +86,36 @@ class RerunTask:
 @dataclass(frozen=True, slots=True)
 class RerunEnqueuePolicy:
     """The NEW request's enqueue-time policy snapshot, supplied by the
-    caller because policy lives in configuration, not in this module."""
+    caller because policy lives in configuration, not in this module.
 
-    retention_class_key: str
+    ``retention`` is a finite period in whole days, or ``None`` to keep the
+    record forever. The class is the one the period stands for.
+    """
+
+    retention: timedelta | None
     retain_rerun_input: bool
     reservation_window: timedelta
 
     def __post_init__(self) -> None:
-        if not self.retention_class_key:
-            raise ValueError('retention class key must be non-empty')
+        match self.retention:
+            case None:
+                pass
+            case period:
+                match parse_retention_period(period):
+                    case Err(err_value=reason):
+                        raise ValueError(f'rerun retention: {reason}')
+                    case Ok():
+                        pass
         validate_reservation_window(self.reservation_window)
+
+    @property
+    def retention_class_key(self) -> str:
+        """The class key the new request is stamped with."""
+        match self.retention:
+            case None:
+                return FOREVER_CLASS_KEY
+            case period:
+                return period_class_key(period.days)
 
 
 class NotEligibleReason(Enum):
@@ -219,9 +242,10 @@ async def rerun_task(
         # partition-routing error. A caller precondition raises before
         # any read or write.
         raise ValueError(
-            f'unknown retention class {policy.retention_class_key!r}: '
-            'the new request would have no history partition; register '
-            'the class before rerunning into it'
+            f'retention class {policy.retention_class_key!r} is not '
+            'registered: the new request would have no history partition. '
+            'Add the period to the maintenance owner\'s queue_retention or '
+            'retention_periods, and rerun after its next pass'
         )
     try:
         detail = await read_task_detail(

@@ -7,14 +7,15 @@ row plus its RANGE parent attached under the LIST hierarchy — verifies an
 identical existing registration, or refuses with the conflicting facts.
 Changing a duration means registering a new class key.
 
-Class keys come from the caller: key-derivation policy (how a configured
-duration names its class) belongs to the configuration layer, not to DDL.
-The key must be usable inside a relation name, which is stricter than the
-column bound and enforced here.
+Class keys come from the caller. A finite class key is a function of its
+period (`horsies.core.history.periods`), so a key always means one
+duration. The key must be usable inside a relation name, which is stricter
+than the column bound and enforced here.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -151,3 +152,74 @@ async def register_finite_retention_class(
         )
     )
     return ClassRegistered(class_key=class_key, finite_parent_name=parent_name)
+
+
+@dataclass(frozen=True, slots=True)
+class PeriodKeyCollision:
+    """A period's class key is registered with another duration.
+
+    Only a class declared by name before 0.6.1 can hold such a row: a key
+    like ``standard_14d`` declared with 7 days. Stamping rows into it would
+    delete them on the registered duration.
+    """
+
+    class_key: str
+    period: timedelta
+    registered_duration: timedelta | None
+
+
+async def find_period_key_collisions(
+    connection: AsyncConnection,
+    period_classes: Sequence[tuple[str, timedelta]],
+) -> tuple[PeriodKeyCollision, ...]:
+    """The period classes whose registry row has another duration.
+
+    Read-only: one query in the caller's transaction; it does not commit.
+    A key with no row does not collide, because registration creates it
+    with the period. A database without the registry table has no row.
+    """
+    match period_classes:
+        case ():
+            return ()
+        case _:
+            pass
+    registry_present = (
+        await connection.execute(
+            text('SELECT to_regclass(:relation) IS NOT NULL'),
+            {'relation': RETENTION_CLASSES},
+        )
+    ).scalar_one()
+    match bool(registry_present):
+        case False:
+            return ()
+        case True:
+            pass
+    expected = dict(period_classes)
+    rows = (
+        await connection.execute(
+            text(
+                f'SELECT class_key, duration FROM {RETENTION_CLASSES} '
+                'WHERE class_key = ANY(:keys) ORDER BY class_key'
+            ),
+            {'keys': list(expected)},
+        )
+    ).all()
+    return tuple(
+        PeriodKeyCollision(
+            class_key=row.class_key,
+            period=expected[row.class_key],
+            registered_duration=row.duration,
+        )
+        for row in rows
+        if row.duration != expected[row.class_key]
+    )
+
+
+def describe_period_key_collision(collision: PeriodKeyCollision) -> str:
+    """One line that names the key, both durations and the fix."""
+    return (
+        f'retention class {collision.class_key!r} is registered with '
+        f'duration {collision.registered_duration}, but the key stands for '
+        f'{collision.period.days} days; a class declared by name before '
+        '0.6.1 holds the key. Choose another number of days for this period'
+    )

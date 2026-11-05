@@ -417,13 +417,15 @@ def terminalization_schema_fixture(  # type: ignore[no-untyped-def]
 async def prepare_move_storage(
     connection: AsyncConnection,
     class_key: str,
+    *,
+    duration_days: int = 30,
 ) -> None:
     """Register a class and publish coverage for terminalization tests."""
     from horsies.core.history.commands import EnsureLeafCoverage
     from horsies.core.history.partitions.manager import ensure_leaf_coverage
     from horsies.core.history.reads.publisher import StagedLoaderPublisher
 
-    await register_class(connection, class_key)
+    await register_class(connection, class_key, duration_days=duration_days)
     outcomes = await ensure_leaf_coverage(
         connection,
         EnsureLeafCoverage(class_key=class_key, horizon_days=2),

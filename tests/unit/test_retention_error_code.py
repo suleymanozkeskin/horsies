@@ -42,10 +42,7 @@ from horsies.core.models import retention as retention_module
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from pydantic import SecretStr
-from horsies.core.models.retention import (
-    RetentionClassConfig,
-    RetentionConfig,
-)
+from horsies.core.models.retention import RetentionConfig
 
 pytestmark = [pytest.mark.unit]
 
@@ -135,90 +132,33 @@ class TestEveryRefusalCarriesTheCode:
         [
             pytest.param(
                 lambda: RetentionConfig(
-                    queue_retention={'not a queue': timedelta(days=1)}
-                ),
-                id='queue-name-not-an-identifier',
-            ),
-            pytest.param(
-                lambda: RetentionConfig(
                     queue_retention={'emails': timedelta(0)}
                 ),
-                id='queue-maps-non-positive',
+                id='queue-maps-zero',
             ),
             pytest.param(
                 lambda: RetentionConfig(
-                    queue_retention={'emails': timedelta(milliseconds=1500)}
+                    queue_retention={'emails': timedelta(hours=36)}
                 ),
-                id='queue-maps-fractional-seconds',
+                id='queue-maps-fractional-day',
             ),
             pytest.param(
                 lambda: RetentionConfig(
-                    queue_retention={'a' * 40: timedelta(days=1)}
+                    queue_retention={'emails': timedelta(days=1826)}
                 ),
-                id='derived-key-too-long',
+                id='queue-maps-above-maximum',
             ),
             pytest.param(
                 lambda: RetentionConfig(
-                    retention_classes=(
-                        RetentionClassConfig(
-                            key='standard_30d', duration=timedelta(days=1)
-                        ),
-                    )
+                    retention_periods=(timedelta(hours=12),)
                 ),
-                id='declared-key-reserved',
+                id='listed-period-fractional-day',
             ),
             pytest.param(
                 lambda: RetentionConfig(
-                    retention_classes=(
-                        RetentionClassConfig(
-                            key='q_emails_7d', duration=timedelta(days=1)
-                        ),
-                    )
+                    retention_periods=(timedelta(days=90), timedelta(days=90))
                 ),
-                id='declared-key-uses-queue-prefix',
-            ),
-            pytest.param(
-                lambda: RetentionConfig(
-                    retention_classes=(
-                        RetentionClassConfig(
-                            key='not-an-identifier', duration=timedelta(days=1)
-                        ),
-                    )
-                ),
-                id='declared-key-not-an-identifier',
-            ),
-            pytest.param(
-                lambda: RetentionConfig(
-                    retention_classes=(
-                        RetentionClassConfig(
-                            key='a' * 40, duration=timedelta(days=1)
-                        ),
-                    )
-                ),
-                id='declared-key-too-long',
-            ),
-            pytest.param(
-                lambda: RetentionConfig(
-                    retention_classes=(
-                        RetentionClassConfig(
-                            key='audit_1y', duration=timedelta(days=365)
-                        ),
-                        RetentionClassConfig(
-                            key='audit_1y', duration=timedelta(days=365)
-                        ),
-                    )
-                ),
-                id='declared-key-twice',
-            ),
-            pytest.param(
-                lambda: RetentionConfig(
-                    retention_classes=(
-                        RetentionClassConfig(
-                            key='audit_1y', duration=timedelta(0)
-                        ),
-                    )
-                ),
-                id='declared-duration-non-positive',
+                id='listed-period-twice',
             ),
         ],
     )
@@ -240,11 +180,9 @@ class TestEveryRefusalCarriesTheCode:
         many unrelated config codes — so this is the only thing pinning
         it, and it asserts the MESSAGE as well as the code.
 
-        The message assertion is not decoration. The first version of
-        this case used a queue name long enough that the derived class
-        key blew the 18-character limit, so `RetentionConfig` refused
-        first and the case passed while never reaching the cross-check
-        at all — green against a deliberately reverted code.
+        The message assertion is not decoration: a case that
+        `RetentionConfig` refuses first would pass without ever reaching
+        the cross-check.
         """
         codes = _raised_codes(
             lambda: AppConfig(
