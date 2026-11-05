@@ -42,9 +42,11 @@ from ..commands import (
 )
 from ..ddl.classes import (
     ClassAlreadyRegistered,
+    ClassConflict,
     ClassRegistered,
     DEFAULT_RETENTION_CLASS_KEY,
     DEFAULT_RETENTION_DURATION,
+    describe_class_conflict,
     finite_class_parent_name,
     register_finite_retention_class,
 )
@@ -797,9 +799,16 @@ async def ensure_partition_coverage(
     rest, and heartbeat leaves gate worker startup, so stopping early
     turned one poisoned class row into a fleet that cannot restart.
 
-    Failures at the steps BEFORE the per-class loop — heartbeat class
-    registration, default class registration, declared registration —
-    still stop the pass, because nothing after them can be correct.
+    A declared class whose registry row disagrees with the declaration
+    (``ClassConflict``) is contained the same way. Its registration is
+    refused and nothing in the registry changes. Its leaves are still
+    created from the registry under the registered duration, because rows
+    already sent into it need them. The pass reports every conflict at
+    the end, under the stage ``register_declared_class``.
+
+    Failures of the library-owned registrations — the heartbeat class
+    and the default class — still stop the pass, because nothing after
+    them can be correct.
     """
     heartbeat_registration = await register_heartbeat_class(
         connection, horizon=timedelta(hours=heartbeat_horizon_hours)
@@ -840,26 +849,7 @@ async def ensure_partition_coverage(
                 absent_leaves=(),
             )
 
-    for declared_key, declared_duration in declared_classes:
-        declared_registration = await register_finite_retention_class(
-            connection,
-            class_key=declared_key,
-            duration=declared_duration,
-        )
-        match declared_registration:
-            case ClassRegistered() | ClassAlreadyRegistered():
-                pass
-            case _:
-                # ClassConflict lands here: classes are immutable, so a
-                # redeclaration with a different duration is refused and
-                # named rather than silently ignored or applied.
-                return CoverageEnsureFailed(
-                    stage='register_declared_class',
-                    class_key=declared_key,
-                    refusal=repr(declared_registration),
-                    heartbeat_covered_now=await heartbeat_coverage_present(connection),
-                    absent_leaves=(),
-                )
+    conflicts = await _register_declared_classes(connection, declared_classes)
 
     publisher = StagedLoaderPublisher()
     created_history = 0
@@ -880,7 +870,9 @@ async def ensure_partition_coverage(
     #
     # Refusals are RETURNED rather than raised, so they are collected
     # here too. Both kinds name their class; neither stops the loop.
-    failures: list[str] = []
+    # Declared conflicts open the list: they are reported with the leaf
+    # failures, after every class has been served.
+    failures: list[str] = [_conflict_line(conflict) for conflict in conflicts]
     for class_key in await _history_class_keys(connection):
         try:
             # The savepoint contains DATABASE ERRORS -- the
@@ -983,7 +975,7 @@ async def ensure_partition_coverage(
         # health surface carries the whole picture rather than whichever
         # key sorted first.
         return CoverageEnsureFailed(
-            stage='ensure_leaf_coverage',
+            stage=_contained_stage(conflicts),
             class_key=failures[0].split(':', 1)[0],
             refusal=(f'{len(failures)} class(es) failed: ' + '; '.join(failures)),
             heartbeat_covered_now=(await heartbeat_coverage_present(connection)),
@@ -1088,24 +1080,41 @@ async def _repair_partition_coverage(
     heartbeat_horizon_hours: int,
     declared_classes: Sequence[tuple[str, timedelta]],
 ) -> CoverageOutcome:
-    """Repair one damaged probe while an optional outer gate is held."""
+    """Repair one damaged probe while an optional outer gate is held.
 
+    A declared class that conflicts with the registry is left out of the
+    expected registrations for the rest of the pass, so the other classes
+    and the heartbeats are repaired. Its leaves still come from the
+    registry. The pass then reports the conflict.
+    """
+
+    conflicts: tuple[ClassConflict, ...] = ()
+    servable_classes = tuple(declared_classes)
     if not probe.registration_healthy:
         async with database.begin() as connection:
-            registration_failure = await _register_required_classes(
+            registration = await _register_required_classes(
                 connection,
                 heartbeat_horizon_hours=heartbeat_horizon_hours,
                 declared_classes=declared_classes,
                 heartbeat_covered_now=probe.heartbeat_covered_now,
             )
-        if registration_failure is not None:
-            return registration_failure
+        match registration:
+            case CoverageEnsureFailed():
+                return registration
+            case _RegisteredWithConflicts(conflicts=conflicts):
+                pass
+        conflicted_keys = {conflict.class_key for conflict in conflicts}
+        servable_classes = tuple(
+            (class_key, duration)
+            for class_key, duration in declared_classes
+            if class_key not in conflicted_keys
+        )
         async with database.begin() as connection:
             probe = await _probe_complete_coverage(
                 connection,
                 history_horizon_days=history_horizon_days,
                 heartbeat_horizon_hours=heartbeat_horizon_hours,
-                declared_classes=declared_classes,
+                declared_classes=servable_classes,
             )
         if not probe.registration_healthy:
             return CoverageEnsureFailed(
@@ -1163,7 +1172,7 @@ async def _repair_partition_coverage(
             connection,
             history_horizon_days=history_horizon_days,
             heartbeat_horizon_hours=heartbeat_horizon_hours,
-            declared_classes=declared_classes,
+            declared_classes=servable_classes,
         )
         if not final_probe.publication_healthy:
             publisher = StagedLoaderPublisher()
@@ -1173,29 +1182,97 @@ async def _repair_partition_coverage(
                 connection,
                 history_horizon_days=history_horizon_days,
                 heartbeat_horizon_hours=heartbeat_horizon_hours,
-                declared_classes=declared_classes,
+                declared_classes=servable_classes,
             )
 
-    if final_probe.healthy:
-        ensured = _coverage_ensured_from_probe(final_probe)
-        return CoverageEnsured(
-            created_history_leaves=created_history,
-            created_heartbeat_leaves=created_heartbeats,
-            republished=republished,
-            heartbeat_covered_now=ensured.heartbeat_covered_now,
-            history_covered_through=ensured.history_covered_through,
-            heartbeats_covered_through=ensured.heartbeats_covered_through,
-            absent_leaves=ensured.absent_leaves,
-        )
+    conflict_lines = [_conflict_line(conflict) for conflict in conflicts]
+    match final_probe.healthy, conflicts:
+        case True, ():
+            ensured = _coverage_ensured_from_probe(final_probe)
+            return CoverageEnsured(
+                created_history_leaves=created_history,
+                created_heartbeat_leaves=created_heartbeats,
+                republished=republished,
+                heartbeat_covered_now=ensured.heartbeat_covered_now,
+                history_covered_through=ensured.history_covered_through,
+                heartbeats_covered_through=ensured.heartbeats_covered_through,
+                absent_leaves=ensured.absent_leaves,
+            )
+        case True, _:
+            detail = conflict_lines
+        case False, _:
+            detail = conflict_lines + (
+                failures or [_unresolved_coverage_detail(final_probe)]
+            )
 
-    detail = failures or [_unresolved_coverage_detail(final_probe)]
     return CoverageEnsureFailed(
-        stage='ensure_leaf_coverage',
-        class_key=_first_damaged_class_key(final_probe),
+        stage=_contained_stage(conflicts),
+        class_key=_first_failed_class_key(conflicts, final_probe),
         refusal='; '.join(detail),
         heartbeat_covered_now=final_probe.heartbeat_covered_now,
         absent_leaves=final_probe.absent_leaves,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class _RegisteredWithConflicts:
+    """The library classes are registered; these declared classes conflict.
+
+    Empty ``conflicts`` means every declared class is registered as declared.
+    """
+
+    conflicts: tuple[ClassConflict, ...]
+
+
+async def _register_declared_classes(
+    connection: AsyncConnection,
+    declared_classes: Sequence[tuple[str, timedelta]],
+) -> tuple[ClassConflict, ...]:
+    """Register each declared class, and return the ones that conflict.
+
+    A conflict changes nothing and does not stop the other classes.
+    Classes are immutable, so a declaration with a different duration is
+    refused and named, never applied. It runs in the caller's
+    transaction and does not commit.
+    """
+    conflicts: list[ClassConflict] = []
+    for class_key, duration in declared_classes:
+        registration = await register_finite_retention_class(
+            connection,
+            class_key=class_key,
+            duration=duration,
+        )
+        match registration:
+            case ClassRegistered() | ClassAlreadyRegistered():
+                pass
+            case ClassConflict():
+                conflicts.append(registration)
+    return tuple(conflicts)
+
+
+def _conflict_line(conflict: ClassConflict) -> str:
+    """A failure line that starts with the key, like the leaf failure lines."""
+    return f'{conflict.class_key}: {describe_class_conflict(conflict)}'
+
+
+def _contained_stage(conflicts: Sequence[ClassConflict]) -> str:
+    """The stage of a pass that served every class and then failed."""
+    match conflicts:
+        case ():
+            return 'ensure_leaf_coverage'
+        case _:
+            return 'register_declared_class'
+
+
+def _first_failed_class_key(
+    conflicts: Sequence[ClassConflict],
+    probe: _CoverageProbe,
+) -> str | None:
+    match conflicts:
+        case (first, *_):
+            return first.class_key
+        case _:
+            return _first_damaged_class_key(probe)
 
 
 async def _register_required_classes(
@@ -1204,7 +1281,11 @@ async def _register_required_classes(
     heartbeat_horizon_hours: int,
     declared_classes: Sequence[tuple[str, timedelta]],
     heartbeat_covered_now: bool,
-) -> CoverageEnsureFailed | None:
+) -> CoverageEnsureFailed | _RegisteredWithConflicts:
+    """Register the library classes, then the declared ones.
+
+    A library-class failure stops the pass. A declared conflict does not.
+    """
     heartbeat_registration = await register_heartbeat_class(
         connection, horizon=timedelta(hours=heartbeat_horizon_hours)
     )
@@ -1224,32 +1305,25 @@ async def _register_required_classes(
                 absent_leaves=(),
             )
 
-    registrations = (
-        (DEFAULT_RETENTION_CLASS_KEY, DEFAULT_RETENTION_DURATION),
-        *declared_classes,
+    default_registration = await register_finite_retention_class(
+        connection,
+        class_key=DEFAULT_RETENTION_CLASS_KEY,
+        duration=DEFAULT_RETENTION_DURATION,
     )
-    for class_key, duration in registrations:
-        registration = await register_finite_retention_class(
-            connection,
-            class_key=class_key,
-            duration=duration,
-        )
-        match registration:
-            case ClassRegistered() | ClassAlreadyRegistered():
-                pass
-            case _:
-                return CoverageEnsureFailed(
-                    stage=(
-                        'register_default_class'
-                        if class_key == DEFAULT_RETENTION_CLASS_KEY
-                        else 'register_declared_class'
-                    ),
-                    class_key=class_key,
-                    refusal=repr(registration),
-                    heartbeat_covered_now=heartbeat_covered_now,
-                    absent_leaves=(),
-                )
-    return None
+    match default_registration:
+        case ClassRegistered() | ClassAlreadyRegistered():
+            pass
+        case ClassConflict():
+            return CoverageEnsureFailed(
+                stage='register_default_class',
+                class_key=DEFAULT_RETENTION_CLASS_KEY,
+                refusal=repr(default_registration),
+                heartbeat_covered_now=heartbeat_covered_now,
+                absent_leaves=(),
+            )
+    return _RegisteredWithConflicts(
+        conflicts=await _register_declared_classes(connection, declared_classes),
+    )
 
 
 async def _create_history_leaf(

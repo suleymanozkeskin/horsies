@@ -450,10 +450,11 @@ class Horsies:
         Phase 3.6: Schedule validation — skipped for the worker role, which
             never acts on schedules. Validates timezone, task registration,
             queue, and the kwargs wire contract for each enabled schedule.
-        Phase 4 (if live): Broker connectivity — async SELECT 1.
+        Phase 4 (if live): Broker connectivity — async SELECT 1 — and the
+            declared retention classes against the registered ones.
 
         Args:
-            live: If True, also check broker connectivity (Phase 4).
+            live: If True, also run Phase 4.
 
         Returns:
             List of all HorsiesError instances found across phases.
@@ -952,6 +953,9 @@ class Horsies:
     def _check_broker_connectivity(self) -> list[HorsiesError]:
         """Check broker connectivity using isolated connections.
 
+        Then compare the declared retention classes with the registry: a
+        conflict is one HRS-216 error each.
+
         Uses a short-lived async engine/session to avoid mutating the app's
         long-lived broker/session pool inside an ephemeral asyncio.run loop.
         On a thread that runs an event loop, ``asyncio.run`` cannot start, so
@@ -1028,7 +1032,7 @@ class Horsies:
                         help_text='use a direct/session-capable Postgres URL for session_database_url',
                     ) from exc
 
-            async def _test_all_connections() -> None:
+            async def _test_all_connections() -> list[HorsiesError]:
                 await _test_connection(
                     self.config.broker.database_url.get_secret_value(),
                     connect_args=self.config.broker.pooled_connect_args,
@@ -1039,8 +1043,9 @@ class Horsies:
                     )
                 if self.config.broker.pgbouncer_transaction_mode:
                     await _run_listener_probe()
+                return await self._declared_class_conflict_errors(base_engine_cfg)
 
-            asyncio.run(_test_all_connections())
+            errors.extend(asyncio.run(_test_all_connections()))
         except HorsiesError as exc:
             errors.append(exc)
         except Exception as exc:
@@ -1055,6 +1060,74 @@ class Horsies:
                 )
             )
         return errors
+
+    async def _declared_class_conflict_errors(
+        self,
+        base_engine_cfg: dict[str, Any],
+    ) -> list[HorsiesError]:
+        """One HRS-216 error per declared class that the registry disagrees with.
+
+        Read-only, on a short-lived engine. An app that declares no class
+        opens no engine. A database without the registry table has no
+        registered class, so nothing can conflict. Does the
+        same comparison that refuses a fleet broker at initialization, so
+        a check before a deploy finds what every process would refuse.
+        """
+        from sqlalchemy import text
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        from horsies.core.history.ddl.classes import (
+            describe_class_conflict,
+            find_declared_class_conflicts,
+        )
+        from horsies.core.history.names import RETENTION_CLASSES
+
+        declared = self.config.retention.registrable_classes()
+        match declared:
+            case ():
+                return []
+            case _:
+                pass
+        engine_cfg = dict(base_engine_cfg)
+        engine_cfg['connect_args'] = self.config.broker.pooled_connect_args
+        engine = create_async_engine(
+            self.config.broker.database_url.get_secret_value(), **engine_cfg
+        )
+        try:
+            async with engine.connect() as connection:
+                registry_present = (
+                    await connection.execute(
+                        text('SELECT to_regclass(:relation) IS NOT NULL'),
+                        {'relation': RETENTION_CLASSES},
+                    )
+                ).scalar_one()
+                match bool(registry_present):
+                    case False:
+                        return []
+                    case True:
+                        conflicts = await find_declared_class_conflicts(
+                            connection, declared,
+                        )
+        finally:
+            await engine.dispose()
+        return [
+            _no_location(
+                ConfigurationError(
+                    message=describe_class_conflict(conflict),
+                    code=ErrorCode.CONFIG_INVALID_RETENTION,
+                    notes=[
+                        'a registered retention class never changes its duration',
+                        'every worker, scheduler and producer with this '
+                        'configuration refuses to start',
+                    ],
+                    help_text=(
+                        'declare a new key with the new duration and send to '
+                        'it; the old class keeps its rows until they expire'
+                    ),
+                )
+            )
+            for conflict in conflicts
+        ]
 
     def list_tasks(self) -> list[str]:
         """List tasks registered with this app"""

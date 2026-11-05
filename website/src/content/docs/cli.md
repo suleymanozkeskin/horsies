@@ -111,7 +111,7 @@ horsies check <module> [OPTIONS]
 | Option | Default | Description |
 | ------ | ------- | ----------- |
 | `--loglevel LEVEL` | WARNING | DEBUG, INFO, WARNING, ERROR, CRITICAL |
-| `--live` | false | Also test broker connectivity (SELECT 1) |
+| `--live` | false | Also test broker connectivity (SELECT 1), and compare each declared retention class with its registered duration (HRS-216 on a conflict) |
 
 **Examples:**
 

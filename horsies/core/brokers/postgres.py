@@ -7,6 +7,7 @@ from typing import Any, Final, Optional, TYPE_CHECKING, assert_never, cast
 from datetime import datetime, timedelta, timezone
 import psycopg
 from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
     AsyncEngine,
     AsyncSession,
     create_async_engine,
@@ -96,6 +97,8 @@ from horsies.core.models.health import (
 from horsies.core.history.errors import HistoryContractError
 from horsies.core.history.ddl.classes import (
     DEFAULT_RETENTION_CLASS_KEY,
+    describe_class_conflict,
+    find_declared_class_conflicts,
     resolve_retention_class_key,
 )
 from horsies.core.history.maintenance.database import (
@@ -1458,6 +1461,41 @@ class PostgresBroker:
                     'schema migrations are current but the offline task-history '
                     'cutover is incomplete; run the documented cutover stages '
                     'through tighten and validation before starting this fleet'
+                )
+            await self._refuse_declared_class_conflicts(conn)
+
+    async def _refuse_declared_class_conflicts(self, conn: AsyncConnection) -> None:
+        """Refuse a fleet broker whose declared classes disagree with the registry.
+
+        A class never changes its duration. A process whose configuration
+        declares another duration for a registered key would send rows that
+        age out on the registered duration, while its configuration states
+        the declared one. The comparison is read-only and does not commit.
+        A broker with no app declares nothing, so it compares nothing.
+
+        Raises:
+            RuntimeError: one or more declared classes conflict. The text
+                names each key, its registered duration and the declared one.
+        """
+        match self._app:
+            case None:
+                return
+            case app:
+                declared = app.config.retention.registrable_classes()
+        conflicts = await find_declared_class_conflicts(conn, declared)
+        match conflicts:
+            case ():
+                return
+            case _:
+                raise RuntimeError(
+                    'the retention configuration conflicts with the registered '
+                    'retention classes: '
+                    + '; '.join(
+                        describe_class_conflict(conflict) for conflict in conflicts
+                    )
+                    + '. A class never changes its duration: declare a new key '
+                    'with the new duration and send to it. The old class keeps '
+                    'its rows until they expire.'
                 )
 
     async def _run_schema_migrations_with_retry(self, engine: AsyncEngine) -> None:

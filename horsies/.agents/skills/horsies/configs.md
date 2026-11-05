@@ -487,7 +487,7 @@ Setting any of these on `RecoveryConfig` fails at construction naming
 | `partition_maintenance_interval_s` | `int` | `900` | 60–3600 | Seconds between partition-maintenance passes (coverage ensure + pruning of expired partitions; no separate pruning knob exists) |
 | `retention_sweep_interval_s` | `int` | `300` (5 min) | 30s–24h | Seconds between retention sweep passes |
 | `retention_delete_batch_size` | `int` | `500` | 50–10000 | Rows per workflow-retention DELETE batch; each batch commits independently |
-| `retention_classes` | `tuple[RetentionClassConfig, ...]` | `()` | keys: safe identifiers, not library-owned, no repeats; durations positive | Additional finite retention classes this deployment declares (key + duration); the maintenance owner registers each at startup and every pass, and tasks are sent into one via `with_options(retention_class_key=...)`. Classes are immutable: re-declaring a key with a different duration is refused at startup. `duration` is a minimum — leaves span one day, so a row survives between `duration` and `duration + 1 day` |
+| `retention_classes` | `tuple[RetentionClassConfig, ...]` | `()` | keys: safe identifiers, not library-owned, no repeats; durations positive | Additional finite retention classes this deployment declares (key + duration); the maintenance owner registers each at startup and every pass, and tasks are sent into one via `with_options(retention_class_key=...)`. A registered class never changes its duration: a key declared with another duration makes every worker, scheduler and producer refuse to initialize its broker, `horsies check --live` reports HRS-216, and the maintenance pass keeps serving the class under its registered duration and reports the conflict. To change a duration, declare a new key. `duration` is a minimum — leaves span one day, so a row survives between `duration` and `duration + 1 day` |
 | `queue_retention` | `dict[str, timedelta \| None]` | `{}` | see [`queue_retention`](#queue_retention) | Per-queue retention class; see [`queue_retention`](#queue_retention) |
 
 ### `queue_retention`
@@ -784,7 +784,7 @@ Phases are fail-fast: errors in phase N stop later phases.
 | 3.3 — Undecorated | Scan for functions returning WorkflowSpec without decorator | HRS-030 |
 | 3.5 — Policies | Re-validate exception_mapper after imports | HRS-209 |
 | 3.6 — Schedules | Validate timezone, task registration, queue and kwargs wire contract of each enabled schedule (not run for workers) | — |
-| 4 — Broker | `SELECT 1` against PostgreSQL (`--live` only) | HRS-211, Connection error |
+| 4 — Broker | `SELECT 1` against PostgreSQL, then each declared retention class against its registered duration (`--live` only) | HRS-211, HRS-216, Connection error |
 
 **Guarantee model:**
 - **Strong:** `@app.workflow_builder` functions are fully executed and validated.
@@ -839,7 +839,7 @@ Requires `app.config.schedule` to be set and enabled. Same startup sequence as w
 horsies check <module> [--live] [--loglevel LEVEL]
 ```
 
-`--live` adds Phase 4 (broker connectivity). Default `--loglevel` is `WARNING`.
+`--live` adds Phase 4 (broker connectivity and the registered retention classes). Default `--loglevel` is `WARNING`.
 
 ### `horsies web`
 

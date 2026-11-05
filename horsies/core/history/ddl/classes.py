@@ -15,8 +15,10 @@ column bound and enforced here.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
+from typing import Final
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -69,11 +71,25 @@ class ClassConflict:
     """The key exists with different facts; classes are immutable."""
 
     class_key: str
+    declared_duration: timedelta
     existing_duration: timedelta | None
     existing_partition_interval: timedelta | None
 
 
+@dataclass(frozen=True, slots=True)
+class ClassNotRegistered:
+    """No registry row has the key; registration creates it."""
+
+    class_key: str
+
+
 type ClassRegistration = ClassRegistered | ClassAlreadyRegistered | ClassConflict
+type RegistrationComparison = (
+    ClassNotRegistered | ClassAlreadyRegistered | ClassConflict
+)
+
+FINITE_PARTITION_INTERVAL: Final = timedelta(days=1)
+"""The only partition interval a finite class has."""
 
 
 def finite_class_parent_name(class_key: str) -> str:
@@ -86,6 +102,82 @@ def finite_class_parent_name(class_key: str) -> str:
     return name
 
 
+def compare_registration(
+    existing: RetentionClassRow | None,
+    *,
+    class_key: str,
+    duration: timedelta,
+) -> RegistrationComparison:
+    """How one declared finite class stands against its registry row.
+
+    Pure: the caller reads the row. The interval and the parent name are
+    compared with the duration, because a finite class always has the
+    daily interval and the parent named from its key. A row that differs
+    in any of the three is a conflict.
+    """
+    match existing:
+        case None:
+            return ClassNotRegistered(class_key=class_key)
+        case RetentionClassRow(
+            duration=existing_duration,
+            partition_interval=existing_interval,
+            finite_parent_name=existing_parent,
+        ) if (
+            existing_duration == duration
+            and existing_interval == FINITE_PARTITION_INTERVAL
+            and existing_parent == finite_class_parent_name(class_key)
+        ):
+            return ClassAlreadyRegistered(class_key=class_key)
+        case RetentionClassRow():
+            return ClassConflict(
+                class_key=class_key,
+                declared_duration=duration,
+                existing_duration=existing.duration,
+                existing_partition_interval=existing.partition_interval,
+            )
+
+
+def describe_class_conflict(conflict: ClassConflict) -> str:
+    """One line that names the key, the registered facts and the declaration."""
+    match conflict.existing_duration:
+        case None:
+            registered = 'with no duration (forever)'
+        case existing_duration:
+            registered = f'with duration {existing_duration}'
+    match conflict.existing_partition_interval:
+        case interval if interval == FINITE_PARTITION_INTERVAL:
+            pass
+        case interval:
+            registered += f' and partition interval {interval}'
+    return (
+        f'retention class {conflict.class_key!r} is registered {registered}; '
+        f'this configuration declares duration {conflict.declared_duration}'
+    )
+
+
+async def find_declared_class_conflicts(
+    connection: AsyncConnection,
+    declared: Sequence[tuple[str, timedelta]],
+) -> tuple[ClassConflict, ...]:
+    """The declared classes whose registry row disagrees with the declaration.
+
+    Read-only: one registry read for each declared key, in the caller's
+    transaction. It does not commit and does not register anything. A key
+    with no row is not a conflict, because registration creates the row.
+    """
+    conflicts: list[ClassConflict] = []
+    for class_key, duration in declared:
+        existing = await read_retention_class(connection, class_key)
+        match compare_registration(
+            existing, class_key=class_key, duration=duration,
+        ):
+            case ClassConflict() as conflict:
+                conflicts.append(conflict)
+            case ClassNotRegistered() | ClassAlreadyRegistered():
+                pass
+    return tuple(conflicts)
+
+
 async def register_finite_retention_class(
     connection: AsyncConnection,
     *,
@@ -96,29 +188,19 @@ async def register_finite_retention_class(
     """Create or verify one finite class inside the caller's transaction."""
     if duration <= timedelta(0):
         raise ValueError('retention duration must be positive')
-    if partition_interval != timedelta(days=1):
+    if partition_interval != FINITE_PARTITION_INTERVAL:
         raise ValueError('finite classes use daily partition intervals')
     parent_name = finite_class_parent_name(class_key)
 
     existing = await read_retention_class(connection, class_key)
-    match existing:
-        case RetentionClassRow(
-            duration=existing_duration,
-            partition_interval=existing_interval,
-            finite_parent_name=existing_parent,
-        ) if (
-            existing_duration == duration
-            and existing_interval == partition_interval
-            and existing_parent == parent_name
-        ):
-            return ClassAlreadyRegistered(class_key=class_key)
-        case RetentionClassRow():
-            return ClassConflict(
-                class_key=class_key,
-                existing_duration=existing.duration,
-                existing_partition_interval=existing.partition_interval,
-            )
-        case None:
+    match compare_registration(
+        existing, class_key=class_key, duration=duration,
+    ):
+        case ClassAlreadyRegistered() as already_registered:
+            return already_registered
+        case ClassConflict() as conflict:
+            return conflict
+        case ClassNotRegistered():
             pass
 
     await connection.execute(

@@ -12,6 +12,24 @@ there is no migration contract between pre-1.0 versions.
 
 ## Unreleased
 
+### Fixed
+
+- A declared retention class whose duration differs from its registered
+  duration no longer stops partition maintenance. The pass stopped at the
+  conflict, so no class and no heartbeat got new partitions: once the
+  heartbeat horizon passed, worker starts were refused, and once the history
+  horizon passed, finished tasks had no partition to move into. The pass now
+  serves every class, keeps the conflicting class under its registered
+  duration, and reports the conflict under the stage
+  `register_declared_class`.
+- A broker that runs schema migrations now refuses to initialize when a
+  declared class conflicts with its registered duration. The error names the
+  key and both durations, and it is not retryable: workers and schedulers
+  exit, and every send fails with it. Producers had kept sending into the
+  class, whose rows aged out on the registered duration while the config
+  stated another.
+- `horsies check --live` reports each such conflict as HRS-216.
+
 ## 0.6.0 — 2026-11-03
 
 0.6.0 moves task execution to child processes that the worker owns, closes the

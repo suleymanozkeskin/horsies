@@ -205,9 +205,23 @@ RetentionConfig(
 Declarations are checked where you write them: a key must be a usable
 identifier, must not be one the library owns (`standard_30d`, `forever`,
 `heartbeats`), must not repeat, and its duration must be positive. Every
-problem in a config is reported together. Re-declaring an existing key
-with a *different* duration is refused at startup and named — classes
-are immutable, because rows already carry the old window.
+problem in a config is reported together.
+
+**A registered class never changes its duration**, because rows already
+carry its window. A key declared with a different duration from the one
+it was registered with is refused in three places:
+
+- Every worker, scheduler and producer with that config refuses to
+  initialize its broker. The error names the key and both durations, and
+  every send fails with it.
+- `horsies check --live` reports it as HRS-216.
+- The maintenance pass leaves the registry unchanged. It keeps serving
+  that class under its registered duration, serves every other class as
+  usual, and reports the conflict.
+
+To change a duration, declare a new key with the new duration and send
+to it. The old class keeps its rows until they expire. Put the duration
+in the key name (`audit_1y`), so that a new duration is a new key.
 
 **`duration` is a minimum.** History partitions span one day and drop
 only once the whole day is past the duration, so a row survives between

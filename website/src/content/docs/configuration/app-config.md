@@ -266,7 +266,7 @@ def check(self, *, live: bool = False) -> list[HorsiesError]
 | 3.2 Workflow builders | Executes `@app.workflow_builder` functions, validates returned specs | Errors stop progression to Phases 3.3-6 |
 | 3.3 Undecorated builders | Detects top-level functions returning `WorkflowSpec` without `@app.workflow_builder` | Errors stop progression to Phases 5-6 |
 | 5. Runtime policy safety | Validates retry/exception-mapper policy metadata after imports | Errors stop progression to Phase 6 |
-| 6. Broker (if `live=True`) | Connects to PostgreSQL and runs `SELECT 1` | Only runs if Phases 2-5 pass |
+| 6. Broker (if `live=True`) | Connects to PostgreSQL, runs `SELECT 1`, and compares each declared retention class with its registered duration (HRS-216 on a conflict) | Only runs if Phases 2-5 pass |
 
 **Returns** an empty list when all validations pass, or a list of `HorsiesError` instances with Rust-style formatting.
 
