@@ -8,10 +8,13 @@ Main components:
 - calculate_next_run: Next run time calculation
 
 Example usage:
-    from horsies.core.scheduler import Scheduler
 
-    scheduler = Scheduler(app)
-    await scheduler.run_forever()
+```python
+from horsies.core.scheduler import Scheduler
+
+scheduler = Scheduler(app)
+await scheduler.run_forever()
+```
 """
 
 from horsies.core.scheduler.service import Scheduler

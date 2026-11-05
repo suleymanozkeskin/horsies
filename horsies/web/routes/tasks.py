@@ -13,8 +13,8 @@ from typing import Literal, assert_never
 
 from fastapi import APIRouter, HTTPException, Query, status
 
-from horsies.core.history.reads.pages import HistoryWindow
 from horsies.monitoring.history_window import (
+    MonitoringWindow,
     WindowRefused,
     resolve_monitoring_window,
 )
@@ -56,16 +56,17 @@ from horsies.web.routes._common import (
 
 def _window_or_400(
     since: datetime | None, until: datetime | None
-) -> HistoryWindow:
+) -> MonitoringWindow:
     """Resolve the terminal-history window; a refusal is a 400 that
     names the bound, never a clamp."""
-    resolved = resolve_monitoring_window(since=since, until=until)
-    if isinstance(resolved, WindowRefused):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=resolved.reason,
-        )
-    return resolved
+    match resolve_monitoring_window(since=since, until=until):
+        case WindowRefused(reason=reason):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=reason,
+            )
+        case MonitoringWindow() as window:
+            return window
 
 
 def task_not_found_text(reason: TaskAbsenceReason) -> str:

@@ -24,14 +24,17 @@ from tests.docs_examples.extract import (
     UnparsableBlock,
     describe_error,
     extract_all,
+    find_modules,
     find_pages,
     read_blocks,
+    read_module_blocks,
     render_page_files,
 )
 
 pytestmark = pytest.mark.unit
 
 PAGE = Path('docs/page.md')
+MODULE = Path('horsies/module.py')
 MDX_PAGE = Path('docs/page.mdx')
 
 
@@ -221,6 +224,47 @@ class TestFindPages:
         (docs / 'cli.md').write_text('text')
 
         assert find_pages(tmp_path) == (Path('website/src/content/docs/cli.md'),)
+
+
+class TestModuleDocstrings:
+    def test_a_fence_in_a_module_docstring_has_its_file_line(self) -> None:
+        source = '# path comment\n"""Title.\n\n```python\nx = 1\n```\n"""\n'
+
+        assert read_module_blocks(MODULE, source) == Ok(
+            (Block(page=MODULE, line=4, mode=BlockMode.CHAINED, code='x = 1'),)
+        )
+
+    def test_an_error_in_a_module_docstring_has_its_file_line(self) -> None:
+        source = '# path comment\n"""Title.\n\n```python\nx = ???\n```\n"""\n'
+
+        match read_module_blocks(MODULE, source):
+            case Err((UnparsableBlock(page=page, line=line),)):
+                assert (page, line) == (MODULE, 4)
+            case other:
+                pytest.fail(f'expected one unparsable block, got {other!r}')
+
+    @pytest.mark.parametrize(
+        'source',
+        [
+            pytest.param('x = 1\n', id='no-docstring'),
+            pytest.param('', id='empty-module'),
+            pytest.param('x = 1\n"""Not a docstring."""\n', id='string-after-code'),
+        ],
+    )
+    def test_a_module_without_a_docstring_has_no_block(self, source: str) -> None:
+        assert read_module_blocks(MODULE, source) == Ok(())
+
+    def test_extract_all_writes_a_module_docstring_block(self, tmp_path: Path) -> None:
+        package = tmp_path / 'horsies'
+        package.mkdir()
+        (package / 'module.py').write_text('"""Title.\n\n```python\nx = 1\n```\n"""\n')
+        output = tmp_path / 'out'
+
+        errors = extract_all(tmp_path, output)
+
+        assert errors == ()
+        assert find_modules(tmp_path) == (Path('horsies/module.py'),)
+        assert [path.name for path in output.glob('*.py')] == ['horsies_module.py']
 
 
 class TestRealDocs:

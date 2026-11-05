@@ -25,14 +25,14 @@ from typing import Any, AsyncGenerator
 import pytest
 import pytest_asyncio
 
-from horsies.core.history.reads.pages import HistoryWindow
+from horsies.monitoring import MonitoringWindow
 from tests.broker_resources_support import current_resources
 
 
-def _test_window() -> HistoryWindow:
+def _test_window() -> MonitoringWindow:
     """A window wide enough that every seeded row falls inside it."""
     now = datetime.now(timezone.utc)
-    return HistoryWindow(lower=now - timedelta(days=29), upper=now + timedelta(hours=1))
+    return MonitoringWindow(lower=now - timedelta(days=29), upper=now + timedelta(hours=1))
 from pydantic import SecretStr
 from sqlalchemy import event, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -519,7 +519,7 @@ class TestTaskFacets:
             ],
         )
         sql, params = queries_module.facets_statement(
-            window=_test_window(),
+            window=_test_window().history,
             statuses=[],
             retried_only=False,
         )
