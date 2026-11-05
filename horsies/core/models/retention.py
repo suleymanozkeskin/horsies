@@ -19,7 +19,7 @@ from typing import Annotated, Self
 
 from datetime import timedelta
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from horsies.core.errors import (
     ConfigurationError,
@@ -68,6 +68,22 @@ def resolve_queue_retention_class(
             return DEFAULT_RETENTION_CLASS_KEY
 
 
+def _validated_days(period: timedelta) -> RetentionDays:
+    """The days of a period that the config validator accepted.
+
+    The readers derive the days from the public fields on every call, so
+    the fields stay the only copy of the configuration. A period that fails
+    here was changed after validation, which is a defect.
+    """
+    match parse_retention_period(period):
+        case Ok(ok_value=days):
+            return days
+        case Err(err_value=refused):
+            raise AssertionError(
+                f'retention period changed after validation: {refused.reason}'
+            )
+
+
 def _period_error(subject: str, refused: PeriodRefused) -> ConfigurationError:
     """The refusal of a period that is not whole days within the bounds."""
     return ConfigurationError(
@@ -89,14 +105,6 @@ class RetentionConfig(BaseModel):
 
     model_config = ConfigDict(extra='forbid')
 
-    # The periods as parsed once by `validate_retention_periods`. Every
-    # reader below uses these, so no later code decodes a timedelta again.
-    _queue_periods: dict[str, RetentionDays | None] = PrivateAttr(
-        default_factory=dict,
-    )
-    _listed_periods: frozenset[RetentionDays] = PrivateAttr(
-        default=frozenset(),
-    )
 
     worker_state_retention_hours: Annotated[
         int | None, Field(ge=1, le=24 * 365),
@@ -238,12 +246,9 @@ class RetentionConfig(BaseModel):
         library, so it is not repeated here. Queues mapped to None
         contribute nothing: forever is a class the library owns.
         """
-        mapped = {
-            days for days in self._queue_periods.values() if days is not None
-        }
         return tuple(
             (period_class_key(days), timedelta(days=days))
-            for days in sorted(mapped | self._listed_periods)
+            for days in sorted(self._mapped_days() | self._listed_days())
             if days != DEFAULT_RETENTION_DAYS
         )
 
@@ -253,10 +258,11 @@ class RetentionConfig(BaseModel):
         The default period, every mapped period, and ``retention_periods``:
         the periods whose classes this process's maintenance owner registers.
         """
-        mapped = frozenset(
-            days for days in self._queue_periods.values() if days is not None
+        return (
+            self._mapped_days()
+            | self._listed_days()
+            | {DEFAULT_RETENTION_DAYS}
         )
-        return mapped | self._listed_periods | {DEFAULT_RETENTION_DAYS}
 
     def queue_class(self, queue_name: str) -> RetentionClassKey | None:
         """The class a send on this queue stamps when it chooses none.
@@ -264,36 +270,50 @@ class RetentionConfig(BaseModel):
         The mapped period's class, None for a queue mapped to forever, or
         the default class for an unmapped queue.
         """
-        match queue_name in self._queue_periods:
+        match queue_name in self.queue_retention:
             case False:
                 return DEFAULT_RETENTION_CLASS_KEY
             case True:
                 pass
-        match self._queue_periods[queue_name]:
+        match self.queue_retention[queue_name]:
             case None:
                 return None
-            case days:
-                return period_class_key(days)
+            case period:
+                return period_class_key(_validated_days(period))
+
+    def _mapped_days(self) -> frozenset[RetentionDays]:
+        """The days of every finite mapped period, read from the field."""
+        return frozenset(
+            _validated_days(period)
+            for period in self.queue_retention.values()
+            if period is not None
+        )
+
+    def _listed_days(self) -> frozenset[RetentionDays]:
+        """The days of every listed period, read from the field."""
+        return frozenset(
+            _validated_days(period) for period in self.retention_periods
+        )
 
     @model_validator(mode='after')
     def validate_retention_periods(self) -> Self:
-        """Parse each mapped and listed period once, and refuse the bad ones.
+        """Refuse a mapped or listed period that is not whole days in bounds.
 
         A queue name is only a lookup key, so any configured queue name can
         be mapped (`AppConfig` checks that it is configured). Every problem
-        is collected and reported together. The parsed periods are kept for
-        the readers above.
+        is collected and reported together. Nothing is cached: the readers
+        derive the days from the fields, so an edit to a field is what the
+        next send stamps.
         """
         report = ValidationReport('retention')
-        queue_periods: dict[str, RetentionDays | None] = {}
         for queue_name, period in self.queue_retention.items():
             match period:
                 case None:
-                    queue_periods[queue_name] = None
+                    pass
                 case finite:
                     match parse_retention_period(finite):
-                        case Ok(ok_value=days):
-                            queue_periods[queue_name] = days
+                        case Ok():
+                            pass
                         case Err(err_value=refused):
                             report.add(_period_error(
                                 f'queue {queue_name!r} maps to {finite}', refused,
@@ -317,6 +337,4 @@ class RetentionConfig(BaseModel):
                 case Ok(ok_value=days):
                     listed.add(days)
         raise_collected(report)
-        self._queue_periods = queue_periods
-        self._listed_periods = frozenset(listed)
         return self

@@ -196,6 +196,49 @@ class TestRegistrableClasses:
         assert config.sendable_periods() == frozenset({7, 365, 30})
 
 
+class TestTheFieldIsTheOnlyCopy:
+    """An edit to a field after validation is what the next send stamps.
+
+    `RetentionConfig` is not frozen, its mapping is mutable, and
+    `model_copy(update=...)` runs no validator. A second, parsed copy of
+    the periods would keep stamping the old class while the field states
+    the new period, and rows would be deleted on the old one.
+    """
+
+    @staticmethod
+    def _mapped(days: int) -> RetentionConfig:
+        return RetentionConfig(queue_retention={'emails': timedelta(days=days)})
+
+    def test_an_item_edit_is_followed(self) -> None:
+        config = self._mapped(7)
+        config.queue_retention['emails'] = timedelta(days=365)
+        assert resolve_queue_retention_class(config, 'emails') == 'standard_365d'
+        assert config.registrable_classes() == (
+            ('standard_365d', timedelta(days=365)),
+        )
+
+    def test_a_field_assignment_is_followed(self) -> None:
+        config = self._mapped(7)
+        config.queue_retention = {'emails': timedelta(days=365)}
+        assert resolve_queue_retention_class(config, 'emails') == 'standard_365d'
+        assert config.registrable_classes() == (
+            ('standard_365d', timedelta(days=365)),
+        )
+
+    def test_a_copy_with_an_update_is_followed(self) -> None:
+        copied = self._mapped(7).model_copy(
+            update={'queue_retention': {'emails': timedelta(days=90)}},
+        )
+        assert resolve_queue_retention_class(copied, 'emails') == 'standard_90d'
+        assert copied.sendable_periods() == frozenset({90, 30})
+
+    def test_an_invalid_edit_after_validation_is_a_defect(self) -> None:
+        config = self._mapped(7)
+        config.queue_retention['emails'] = timedelta(hours=36)
+        with pytest.raises(AssertionError, match='changed after validation'):
+            resolve_queue_retention_class(config, 'emails')
+
+
 class TestResolveQueueRetentionClass:
     @pytest.mark.parametrize(
         ('retention', 'queue', 'key'),

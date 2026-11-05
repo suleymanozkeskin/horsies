@@ -28,13 +28,17 @@ PERIOD_CLASS_PREFIX: Final = 'standard_'
 """30 days gives ``standard_30d``, the key of the default class."""
 
 RetentionDays = NewType('RetentionDays', int)
-"""Whole days within the bounds. ``parse_retention_period`` builds it."""
+"""Whole days within the bounds. ``parse_retention_period`` builds it.
+
+A NewType is a static marker: anyone can call ``RetentionDays(n)``, and
+pyright makes the convention hold for typed callers."""
 
 RetentionClassKey = NewType('RetentionClassKey', str)
 """The key of a finite period class. ``period_class_key`` builds it.
 
-The enqueue paths take this type, so a key that no period stands for is a
-type error at the call site, not a row that has no partition later."""
+The enqueue paths take this type, so a raw string key is a type error at
+a typed call site, not a row that has no partition later. Like
+``RetentionDays``, it is static only: ``RetentionClassKey('x')`` runs."""
 
 
 @dataclass(frozen=True, slots=True)
