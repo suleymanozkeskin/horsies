@@ -7,7 +7,6 @@ from typing import Any, Final, Optional, TYPE_CHECKING, assert_never, cast
 from datetime import datetime, timedelta, timezone
 import psycopg
 from sqlalchemy.ext.asyncio import (
-    AsyncConnection,
     AsyncEngine,
     AsyncSession,
     create_async_engine,
@@ -1446,8 +1445,16 @@ class PostgresBroker:
         # inspect an absent, old, incomplete-cutover, or future schema and
         # report its status without mutating it. Compatibility enforcement is
         # owned by their schema-status probe; fleet brokers enforce it below.
-        if not self.run_schema_migrations:
-            return
+        # The declared-class comparison is read-only, and a broker that does
+        # not run migrations still sends, so every broker runs it.
+        if self.run_schema_migrations:
+            await self._run_fleet_schema_init(engine, stored_version)
+        await self._refuse_declared_class_conflicts(engine)
+
+    async def _run_fleet_schema_init(
+        self, engine: AsyncEngine, stored_version: int,
+    ) -> None:
+        """Migrate the schema, and refuse a newer schema or an open cutover."""
         if stored_version < SCHEMA_VERSION:
             await self._run_schema_migrations_with_retry(engine)
         elif stored_version > SCHEMA_VERSION:
@@ -1462,16 +1469,16 @@ class PostgresBroker:
                     'cutover is incomplete; run the documented cutover stages '
                     'through tighten and validation before starting this fleet'
                 )
-            await self._refuse_declared_class_conflicts(conn)
 
-    async def _refuse_declared_class_conflicts(self, conn: AsyncConnection) -> None:
-        """Refuse a fleet broker whose declared classes disagree with the registry.
+    async def _refuse_declared_class_conflicts(self, engine: AsyncEngine) -> None:
+        """Refuse a broker whose declared classes disagree with the registry.
 
-        A class never changes its duration. A process whose configuration
+        A registered class never changes. A process whose configuration
         declares another duration for a registered key would send rows that
         age out on the registered duration, while its configuration states
         the declared one. The comparison is read-only and does not commit.
-        A broker with no app declares nothing, so it compares nothing.
+        A broker with no app, an app that declares no class, or a database
+        without the registry table compares nothing.
 
         Raises:
             RuntimeError: one or more declared classes conflict. The text
@@ -1482,7 +1489,13 @@ class PostgresBroker:
                 return
             case app:
                 declared = app.config.retention.registrable_classes()
-        conflicts = await find_declared_class_conflicts(conn, declared)
+        match declared:
+            case ():
+                return
+            case _:
+                pass
+        async with engine.connect() as conn:
+            conflicts = await find_declared_class_conflicts(conn, declared)
         match conflicts:
             case ():
                 return
@@ -1493,7 +1506,7 @@ class PostgresBroker:
                     + '; '.join(
                         describe_class_conflict(conflict) for conflict in conflicts
                     )
-                    + '. A class never changes its duration: declare a new key '
+                    + '. A registered class never changes: declare a new key '
                     'with the new duration and send to it. The old class keeps '
                     'its rows until they expire.'
                 )

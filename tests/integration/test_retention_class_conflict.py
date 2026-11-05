@@ -4,10 +4,11 @@ A registered class never changes its duration. Each test registers a
 class for 7 days, then declares the same key for 14 days, and checks one
 consequence:
 
-- the coverage pass still serves every other class and reports the
-  conflict, through both entry points;
-- a fleet broker refuses to initialize, and a matching or unregistered
-  declaration does not;
+- the coverage pass still registers and serves every other class, and
+  reports the conflict in its own field, through both entry points;
+- a leaf failure in the same pass keeps the stage and the class key;
+- a broker refuses to initialize, also when it runs no migrations, and a
+  matching or unregistered declaration does not;
 - ``check(live=True)`` reports HRS-216.
 
 Coverage is idempotent, so a pass proves it served a class only when the
@@ -32,6 +33,7 @@ from horsies.core.brokers.result_types import BrokerErrorCode
 from horsies.core.errors import ErrorCode
 from horsies.core.history.ddl.classes import (
     ClassRegistered,
+    finite_class_parent_name,
     register_finite_retention_class,
 )
 from horsies.core.history.maintenance.coverage import (
@@ -41,6 +43,7 @@ from horsies.core.history.maintenance.coverage import (
     maintain_partition_coverage,
 )
 from horsies.core.history.names import LEAF_CATALOG, RETENTION_CLASSES
+from horsies.core.history.partitions.catalog import daily_leaf_name, database_now
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
@@ -163,13 +166,17 @@ async def test_a_declared_conflict_does_not_stop_the_other_classes(
     broker: PostgresBroker,
     entry_point: EntryPoint,
 ) -> None:
+    """The survivor is declared AFTER the conflict and is not registered yet.
+
+    So the pass proves two things: it registers the classes declared after
+    a conflict, and it makes their leaves.
+    """
     engine = current_resources(broker).engine
     await _forget(engine, _CONFLICT_KEY)
     await _forget(engine, _SURVIVOR_KEY)
     await _register(engine, _CONFLICT_KEY, _REGISTERED)
-    await _register(engine, _SURVIVOR_KEY, _REGISTERED)
     owed = _HORIZON_DAYS + 1
-    assert await _leaf_count(engine, _SURVIVOR_KEY) == 0
+    assert await _registered_duration(engine, _SURVIVOR_KEY) is None
     try:
         outcome = await _run_pass(
             broker,
@@ -180,10 +187,17 @@ async def test_a_declared_conflict_does_not_stop_the_other_classes(
         assert isinstance(outcome, CoverageEnsureFailed), outcome
         assert outcome.stage == 'register_declared_class', outcome
         assert outcome.class_key == _CONFLICT_KEY, outcome
+        assert [
+            (conflict.class_key, conflict.existing_duration, conflict.declared_duration)
+            for conflict in outcome.declared_conflicts
+        ] == [(_CONFLICT_KEY, _REGISTERED, _DECLARED)], outcome
         assert '7 days' in outcome.refusal and '14 days' in outcome.refusal, (
             f'the report must name both durations: {outcome.refusal}'
         )
         assert outcome.heartbeat_covered_now, outcome
+        assert await _registered_duration(engine, _SURVIVOR_KEY) == _REGISTERED, (
+            'the conflict stopped the registration of the classes after it'
+        )
         assert await _leaf_count(engine, _SURVIVOR_KEY) == owed, (
             'the conflict still stops the pass before the classes after it'
         )
@@ -198,26 +212,83 @@ async def test_a_declared_conflict_does_not_stop_the_other_classes(
         await _forget(engine, _SURVIVOR_KEY)
 
 
+_SQUATTED_KEY = 'm_squatted_class'
+
+
+async def _plant_squatted_class(engine: AsyncEngine) -> str:
+    """A registered class whose leaf for today has its name already taken.
+
+    Leaf creation RETURNS a refusal for it, so the pass has a leaf failure
+    in the same pass as the conflict. Returns the squatter's name.
+    """
+    await _register(engine, _SQUATTED_KEY, _REGISTERED)
+    async with engine.begin() as connection:
+        now = await database_now(connection)
+        squatter = daily_leaf_name(
+            finite_class_parent_name(_SQUATTED_KEY),
+            now.replace(hour=0, minute=0, second=0, microsecond=0),
+        )
+        await connection.execute(text(f'CREATE TABLE IF NOT EXISTS {squatter} (x int)'))
+    return squatter
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize('entry_point', ['one_transaction', 'maintenance_database'])
+async def test_a_leaf_failure_keeps_its_stage_beside_a_conflict(
+    broker: PostgresBroker,
+    entry_point: EntryPoint,
+) -> None:
+    """Two failures, two fields: a reader that branches on the stage sees both."""
+    engine = current_resources(broker).engine
+    await _forget(engine, _CONFLICT_KEY)
+    await _forget(engine, _SQUATTED_KEY)
+    await _register(engine, _CONFLICT_KEY, _REGISTERED)
+    squatter = await _plant_squatted_class(engine)
+    try:
+        outcome = await _run_pass(broker, entry_point, ((_CONFLICT_KEY, _DECLARED),))
+
+        assert isinstance(outcome, CoverageEnsureFailed), outcome
+        assert outcome.stage == 'ensure_leaf_coverage', outcome
+        assert outcome.class_key == _SQUATTED_KEY, outcome
+        assert [conflict.class_key for conflict in outcome.declared_conflicts] == [
+            _CONFLICT_KEY
+        ], outcome
+    finally:
+        async with engine.begin() as connection:
+            await connection.execute(text(f'DROP TABLE IF EXISTS {squatter}'))
+        await _forget(engine, _SQUATTED_KEY)
+        await _forget(engine, _CONFLICT_KEY)
+
+
 @pytest.mark.integration
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ('declared_key', 'declared_duration', 'refused'),
+    ('declared_key', 'declared_duration', 'run_schema_migrations', 'refused'),
     [
-        pytest.param(_CONFLICT_KEY, _DECLARED, True, id='different-duration'),
-        pytest.param(_CONFLICT_KEY, _REGISTERED, False, id='same-duration'),
-        pytest.param('a_never_registered', _DECLARED, False, id='not-registered'),
+        pytest.param(_CONFLICT_KEY, _DECLARED, True, True, id='different-duration'),
+        pytest.param(
+            _CONFLICT_KEY, _DECLARED, False, True, id='read-only-different-duration',
+        ),
+        pytest.param(_CONFLICT_KEY, _REGISTERED, True, False, id='same-duration'),
+        pytest.param('a_never_registered', _DECLARED, True, False, id='not-registered'),
     ],
 )
-async def test_a_fleet_broker_refuses_a_conflicting_declaration(
+async def test_a_broker_refuses_a_conflicting_declaration(
     broker: PostgresBroker,
     declared_key: str,
     declared_duration: timedelta,
+    run_schema_migrations: bool,
     refused: bool,
 ) -> None:
+    """A broker that runs no migrations still sends, so it compares too."""
     engine = current_resources(broker).engine
     await _forget(engine, _CONFLICT_KEY)
     await _register(engine, _CONFLICT_KEY, _REGISTERED)
-    fleet = PostgresBroker(PostgresConfig(database_url=SecretStr(DB_URL)))
+    fleet = PostgresBroker(
+        PostgresConfig(database_url=SecretStr(DB_URL)),
+        run_schema_migrations=run_schema_migrations,
+    )
     fleet.app = _app_declaring(declared_key, declared_duration)
     try:
         initialized = await fleet.ensure_schema_initialized()

@@ -22,12 +22,14 @@ there is no migration contract between pre-1.0 versions.
   serves every class, keeps the conflicting class under its registered
   duration, and reports the conflict under the stage
   `register_declared_class`.
-- A broker that runs schema migrations now refuses to initialize when a
-  declared class conflicts with its registered duration. The error names the
-  key and both durations, and it is not retryable: workers and schedulers
-  exit, and every send fails with it. Producers had kept sending into the
-  class, whose rows aged out on the registered duration while the config
-  stated another.
+- A broker now refuses to initialize when its app declares a class that
+  conflicts with the registered class, also when the broker runs no schema
+  migrations. The error names the key and both durations, and it is not
+  retryable: workers and schedulers exit, and every send fails with it.
+  Producers had kept sending into the class, whose rows aged out on the
+  registered duration while the config stated another. The coverage health
+  record lists the conflicts under `declared_conflicts`, apart from the
+  stage of any other failure.
 - `horsies check --live` reports each such conflict as HRS-216.
 
 ## 0.6.0 — 2026-11-03

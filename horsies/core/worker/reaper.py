@@ -486,6 +486,9 @@ class ReaperMixin:
         # it; a refusal is reported verbatim and never retried into
         # silence — the next pass tries again.
         if now_monotonic >= state.next_partition_maintenance_at:
+            from horsies.core.history.ddl.classes import (
+                describe_class_conflict,
+            )
             from horsies.core.history.maintenance.coverage import (
                 CoverageEnsureFailed,
                 CoverageEnsured,
@@ -543,6 +546,10 @@ class ReaperMixin:
                                 coverage.heartbeat_covered_now
                             ),
                             'absent_leaves': list(coverage.absent_leaves),
+                            'declared_conflicts': [
+                                describe_class_conflict(conflict)
+                                for conflict in coverage.declared_conflicts
+                            ],
                         }
                     case CoverageEnsured(
                         created_history_leaves=created_history,

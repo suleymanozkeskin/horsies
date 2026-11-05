@@ -64,6 +64,7 @@ def test_a_different_duration_is_a_conflict_that_names_both() -> None:
         declared_duration=timedelta(days=14),
         existing_duration=_SEVEN_DAYS,
         existing_partition_interval=FINITE_PARTITION_INTERVAL,
+        existing_parent_name=finite_class_parent_name(_KEY),
     )
 
 
@@ -93,6 +94,7 @@ def test_the_description_names_the_key_and_both_durations() -> None:
             declared_duration=timedelta(days=14),
             existing_duration=_SEVEN_DAYS,
             existing_partition_interval=FINITE_PARTITION_INTERVAL,
+            existing_parent_name=finite_class_parent_name(_KEY),
         )
     )
     assert description == (
@@ -108,10 +110,29 @@ def test_the_description_names_a_non_daily_interval_and_a_forever_row() -> None:
             declared_duration=_SEVEN_DAYS,
             existing_duration=None,
             existing_partition_interval=timedelta(hours=1),
+            existing_parent_name=finite_class_parent_name(_KEY),
         )
     )
     assert description == (
-        "retention class 'xml_7d' is registered with no duration (forever) "
-        'and partition interval 1:00:00; '
+        "retention class 'xml_7d' is registered with no duration (forever), "
+        'partition interval 1:00:00; '
+        'this configuration declares duration 7 days, 0:00:00'
+    )
+
+
+def test_the_description_names_a_parent_that_differs() -> None:
+    """A conflict on the parent alone has equal durations; the text says why."""
+    description = describe_class_conflict(
+        ClassConflict(
+            class_key=_KEY,
+            declared_duration=_SEVEN_DAYS,
+            existing_duration=_SEVEN_DAYS,
+            existing_partition_interval=FINITE_PARTITION_INTERVAL,
+            existing_parent_name='horsies_task_history_other',
+        )
+    )
+    assert description == (
+        "retention class 'xml_7d' is registered with duration 7 days, 0:00:00, "
+        "parent relation 'horsies_task_history_other'; "
         'this configuration declares duration 7 days, 0:00:00'
     )

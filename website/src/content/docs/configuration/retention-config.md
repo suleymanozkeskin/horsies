@@ -212,8 +212,11 @@ carry its window. A key declared with a different duration from the one
 it was registered with is refused in three places:
 
 - Every worker, scheduler and producer with that config refuses to
-  initialize its broker. The error names the key and both durations, and
-  every send fails with it.
+  initialize its broker, also one that runs no schema migrations. The
+  error names the key and both durations, and every send fails with it.
+  `horsies web` started from the app module refuses too. To read the
+  deployment while the conflict stands, run
+  `horsies web --database-url ...`, which declares no class.
 - `horsies check --live` reports it as HRS-216.
 - The maintenance pass leaves the registry unchanged. It keeps serving
   that class under its registered duration, serves every other class as

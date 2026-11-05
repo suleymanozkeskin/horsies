@@ -560,13 +560,21 @@ class CoverageEnsureFailed:
     a vanished leaf must not be swallowed because some unrelated class
     also failed in the same pass. Empty means none were OBSERVED by this
     pass — the stages that run before republication stop early and never
-    reach the check, and they say so through `stage`."""
+    reach the check, and they say so through `stage`.
+
+    `declared_conflicts` holds every declared class whose registry row
+    disagrees with its declaration, in its own field, so `stage` and
+    `class_key` keep naming any other failure of the same pass. When a
+    conflict is the only failure, `stage` is `register_declared_class`.
+    Empty means none were OBSERVED: a pass that stops before the declared
+    registrations never compares them."""
 
     stage: str
     class_key: str | None
     refusal: str
     heartbeat_covered_now: bool
     absent_leaves: tuple[str, ...]
+    declared_conflicts: tuple[ClassConflict, ...] = ()
 
 
 type CoverageOutcome = CoverageEnsured | CoverageEnsureFailed
@@ -870,9 +878,7 @@ async def ensure_partition_coverage(
     #
     # Refusals are RETURNED rather than raised, so they are collected
     # here too. Both kinds name their class; neither stops the loop.
-    # Declared conflicts open the list: they are reported with the leaf
-    # failures, after every class has been served.
-    failures: list[str] = [_conflict_line(conflict) for conflict in conflicts]
+    failures: list[str] = []
     for class_key in await _history_class_keys(connection):
         try:
             # The savepoint contains DATABASE ERRORS -- the
@@ -968,19 +974,33 @@ async def ensure_partition_coverage(
         republished = True
         absent_leaves = republication.absent_leaves
 
-    if failures:
-        # Reported only after heartbeat coverage and republication have
-        # run: those serve every class, and a failure in one class is no
-        # reason to withhold them. Every failed class is named, so the
-        # health surface carries the whole picture rather than whichever
-        # key sorted first.
-        return CoverageEnsureFailed(
-            stage=_contained_stage(conflicts),
-            class_key=failures[0].split(':', 1)[0],
-            refusal=(f'{len(failures)} class(es) failed: ' + '; '.join(failures)),
-            heartbeat_covered_now=(await heartbeat_coverage_present(connection)),
-            absent_leaves=absent_leaves,
-        )
+    # Reported only after heartbeat coverage and republication have run:
+    # those serve every class, and a failure in one class is no reason to
+    # withhold them. Every failed class is named, so the health surface
+    # carries the whole picture rather than whichever key sorted first.
+    match failures, conflicts:
+        case [first_failure, *_], _:
+            return CoverageEnsureFailed(
+                stage='ensure_leaf_coverage',
+                class_key=first_failure.split(':', 1)[0],
+                refusal=(
+                    f'{len(failures)} class(es) failed: ' + '; '.join(failures)
+                ),
+                heartbeat_covered_now=(await heartbeat_coverage_present(connection)),
+                absent_leaves=absent_leaves,
+                declared_conflicts=conflicts,
+            )
+        case [], [first_conflict, *_]:
+            return CoverageEnsureFailed(
+                stage='register_declared_class',
+                class_key=first_conflict.class_key,
+                refusal=_conflicts_refusal(conflicts),
+                heartbeat_covered_now=(await heartbeat_coverage_present(connection)),
+                absent_leaves=absent_leaves,
+                declared_conflicts=conflicts,
+            )
+        case _:
+            pass
 
     now = await database_now(connection)
     day_lower = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -1117,12 +1137,16 @@ async def _repair_partition_coverage(
                 declared_classes=servable_classes,
             )
         if not probe.registration_healthy:
+            # A registry row of the wrong shape stops all repair, as it did
+            # before conflicts were contained. The conflicts are still
+            # reported with it.
             return CoverageEnsureFailed(
                 stage='verify_registration',
                 class_key=None,
                 refusal='registered retention class shape is not conformant',
                 heartbeat_covered_now=probe.heartbeat_covered_now,
                 absent_leaves=probe.absent_leaves,
+                declared_conflicts=conflicts,
             )
 
     created_history = 0
@@ -1185,7 +1209,6 @@ async def _repair_partition_coverage(
                 declared_classes=servable_classes,
             )
 
-    conflict_lines = [_conflict_line(conflict) for conflict in conflicts]
     match final_probe.healthy, conflicts:
         case True, ():
             ensured = _coverage_ensured_from_probe(final_probe)
@@ -1198,20 +1221,25 @@ async def _repair_partition_coverage(
                 heartbeats_covered_through=ensured.heartbeats_covered_through,
                 absent_leaves=ensured.absent_leaves,
             )
-        case True, _:
-            detail = conflict_lines
-        case False, _:
-            detail = conflict_lines + (
-                failures or [_unresolved_coverage_detail(final_probe)]
+        case True, (first_conflict, *_):
+            return CoverageEnsureFailed(
+                stage='register_declared_class',
+                class_key=first_conflict.class_key,
+                refusal=_conflicts_refusal(conflicts),
+                heartbeat_covered_now=final_probe.heartbeat_covered_now,
+                absent_leaves=final_probe.absent_leaves,
+                declared_conflicts=conflicts,
             )
-
-    return CoverageEnsureFailed(
-        stage=_contained_stage(conflicts),
-        class_key=_first_failed_class_key(conflicts, final_probe),
-        refusal='; '.join(detail),
-        heartbeat_covered_now=final_probe.heartbeat_covered_now,
-        absent_leaves=final_probe.absent_leaves,
-    )
+        case _:
+            detail = failures or [_unresolved_coverage_detail(final_probe)]
+            return CoverageEnsureFailed(
+                stage='ensure_leaf_coverage',
+                class_key=_first_damaged_class_key(final_probe),
+                refusal='; '.join(detail),
+                heartbeat_covered_now=final_probe.heartbeat_covered_now,
+                absent_leaves=final_probe.absent_leaves,
+                declared_conflicts=conflicts,
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1250,29 +1278,12 @@ async def _register_declared_classes(
     return tuple(conflicts)
 
 
-def _conflict_line(conflict: ClassConflict) -> str:
-    """A failure line that starts with the key, like the leaf failure lines."""
-    return f'{conflict.class_key}: {describe_class_conflict(conflict)}'
-
-
-def _contained_stage(conflicts: Sequence[ClassConflict]) -> str:
-    """The stage of a pass that served every class and then failed."""
-    match conflicts:
-        case ():
-            return 'ensure_leaf_coverage'
-        case _:
-            return 'register_declared_class'
-
-
-def _first_failed_class_key(
-    conflicts: Sequence[ClassConflict],
-    probe: _CoverageProbe,
-) -> str | None:
-    match conflicts:
-        case (first, *_):
-            return first.class_key
-        case _:
-            return _first_damaged_class_key(probe)
+def _conflicts_refusal(conflicts: Sequence[ClassConflict]) -> str:
+    """The refusal text of a pass whose only failure is declared conflicts."""
+    return (
+        f'{len(conflicts)} declared class(es) conflict with the registry: '
+        + '; '.join(describe_class_conflict(conflict) for conflict in conflicts)
+    )
 
 
 async def _register_required_classes(

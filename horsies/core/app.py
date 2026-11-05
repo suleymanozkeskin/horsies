@@ -1073,14 +1073,12 @@ class Horsies:
         same comparison that refuses a fleet broker at initialization, so
         a check before a deploy finds what every process would refuse.
         """
-        from sqlalchemy import text
         from sqlalchemy.ext.asyncio import create_async_engine
 
         from horsies.core.history.ddl.classes import (
             describe_class_conflict,
             find_declared_class_conflicts,
         )
-        from horsies.core.history.names import RETENTION_CLASSES
 
         declared = self.config.retention.registrable_classes()
         match declared:
@@ -1095,19 +1093,9 @@ class Horsies:
         )
         try:
             async with engine.connect() as connection:
-                registry_present = (
-                    await connection.execute(
-                        text('SELECT to_regclass(:relation) IS NOT NULL'),
-                        {'relation': RETENTION_CLASSES},
-                    )
-                ).scalar_one()
-                match bool(registry_present):
-                    case False:
-                        return []
-                    case True:
-                        conflicts = await find_declared_class_conflicts(
-                            connection, declared,
-                        )
+                conflicts = await find_declared_class_conflicts(
+                    connection, declared,
+                )
         finally:
             await engine.dispose()
         return [

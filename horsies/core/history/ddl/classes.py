@@ -74,6 +74,7 @@ class ClassConflict:
     declared_duration: timedelta
     existing_duration: timedelta | None
     existing_partition_interval: timedelta | None
+    existing_parent_name: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,6 +135,7 @@ def compare_registration(
                 declared_duration=duration,
                 existing_duration=existing.duration,
                 existing_partition_interval=existing.partition_interval,
+                existing_parent_name=existing.finite_parent_name,
             )
 
 
@@ -148,7 +150,12 @@ def describe_class_conflict(conflict: ClassConflict) -> str:
         case interval if interval == FINITE_PARTITION_INTERVAL:
             pass
         case interval:
-            registered += f' and partition interval {interval}'
+            registered += f', partition interval {interval}'
+    match conflict.existing_parent_name:
+        case parent if parent == finite_class_parent_name(conflict.class_key):
+            pass
+        case parent:
+            registered += f', parent relation {parent!r}'
     return (
         f'retention class {conflict.class_key!r} is registered {registered}; '
         f'this configuration declares duration {conflict.declared_duration}'
@@ -164,7 +171,24 @@ async def find_declared_class_conflicts(
     Read-only: one registry read for each declared key, in the caller's
     transaction. It does not commit and does not register anything. A key
     with no row is not a conflict, because registration creates the row.
+    A database without the registry table has no row, so nothing conflicts.
     """
+    match declared:
+        case ():
+            return ()
+        case _:
+            pass
+    registry_present = (
+        await connection.execute(
+            text('SELECT to_regclass(:relation) IS NOT NULL'),
+            {'relation': RETENTION_CLASSES},
+        )
+    ).scalar_one()
+    match bool(registry_present):
+        case False:
+            return ()
+        case True:
+            pass
     conflicts: list[ClassConflict] = []
     for class_key, duration in declared:
         existing = await read_retention_class(connection, class_key)
