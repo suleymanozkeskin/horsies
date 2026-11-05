@@ -154,16 +154,19 @@ def test_a_mapped_period_may_be_chosen_explicitly() -> None:
         pytest.param(timedelta(days=9), id='not-registered'),
         pytest.param(timedelta(hours=36), id='fractional-day'),
         pytest.param(timedelta(days=1826), id='above-maximum'),
+        pytest.param(PERIOD_KEY, id='a-class-key-string'),
+        pytest.param(7, id='an-int'),
     ],
 )
-def test_a_period_this_process_cannot_stamp_is_refused(period: timedelta) -> None:
+def test_a_period_this_process_cannot_stamp_is_refused(period: object) -> None:
+    """A wrong type is refused like a wrong period, never raised."""
     broker = MagicMock()
     broker.enqueue.return_value = Ok('task-abc')
     app = _make_app(_MAPPED)
     app.get_broker.return_value = broker
     wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-    result = wrapper.with_options(retention=period).send(x=1)
+    result = wrapper.with_options(retention=period).send(x=1)  # pyright: ignore[reportArgumentType]
 
     assert result.is_err(), result
     assert not broker.enqueue.called, 'the refusal must precede the enqueue'
@@ -295,3 +298,16 @@ class TestEveryPathResolvesAlike:
         stamped = _stamp(_make_app(_MAPPED), path, idempotency_key='k1')
 
         assert stamped['idempotency_key'] == 'k1'
+
+
+def test_a_class_key_string_is_refused_with_the_replacement() -> None:
+    """The 0.6.0 argument was a key string; the refusal names the new form."""
+    app = _make_app(_MAPPED)
+    app.get_broker.return_value = MagicMock()
+    wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+    result = wrapper.with_options(retention='standard_7d').send(x=1)  # pyright: ignore[reportArgumentType]
+
+    assert result.is_err(), result
+    assert 'not str' in result.err_value.message, result.err_value.message
+    assert 'timedelta(days=7)' in result.err_value.message

@@ -62,6 +62,8 @@ from horsies.core.codec.validation_errors import (
     without_validation_input,
 )
 from horsies.core.history.periods import (
+    RetentionClassKey,
+    RetentionDays,
     parse_retention_period,
     period_class_key,
 )
@@ -178,6 +180,21 @@ _UNSET_RETENTION: Final[_UnsetRetention] = _UnsetRetention()
 # A retention argument as callers may express it: a finite period, explicit
 # None for forever, or absence.
 type RetentionChoice = timedelta | None | _UnsetRetention
+
+
+@dataclass(frozen=True, slots=True)
+class _FromQueueMapping:
+    """No explicit choice: the queue's mapping, or the default, decides."""
+
+
+@dataclass(frozen=True, slots=True)
+class _ExplicitClass:
+    """The send chose its class. ``key`` None is the explicit forever."""
+
+    key: RetentionClassKey | None
+
+
+type _RetentionStamp = _FromQueueMapping | _ExplicitClass
 
 # Internal retry constants for resend_on_transient_err.
 # 1 initial attempt + _SEND_RETRY_COUNT retries = 4 total broker calls.
@@ -1902,9 +1919,10 @@ def create_task_wrapper(
         # derives is generated from configuration that was already
         # checked, and validating it against the declared set would
         # refuse the very classes the mapping exists to create.
-        retention_check = _validate_retention_choice(retention)
-        if is_err(retention_check):
-            return retention_check
+        stamp_parse = _parse_retention_choice(retention)
+        if is_err(stamp_parse):
+            return stamp_parse
+        stamp = stamp_parse.ok_value
 
         prep = _prepare_send(
             args,
@@ -1920,9 +1938,7 @@ def create_task_wrapper(
             )
         payload = dataclasses.replace(
             payload,
-            retention_class_key=_resolve_retention_choice(
-                retention, payload.queue_name
-            ),
+            retention_class_key=_stamped_class(stamp, payload.queue_name),
         )
         return _do_send(task_id, payload)
 
@@ -1942,9 +1958,10 @@ def create_task_wrapper(
         # derives is generated from configuration that was already
         # checked, and validating it against the declared set would
         # refuse the very classes the mapping exists to create.
-        retention_check = _validate_retention_choice(retention)
-        if is_err(retention_check):
-            return retention_check
+        stamp_parse = _parse_retention_choice(retention)
+        if is_err(stamp_parse):
+            return stamp_parse
+        stamp = stamp_parse.ok_value
 
         prep = _prepare_send(
             args,
@@ -1960,16 +1977,14 @@ def create_task_wrapper(
             )
         payload = dataclasses.replace(
             payload,
-            retention_class_key=_resolve_retention_choice(
-                retention, payload.queue_name
-            ),
+            retention_class_key=_stamped_class(stamp, payload.queue_name),
         )
         return await _do_send_async(task_id, payload)
 
-    def _resolve_retention_choice(
-        choice: RetentionChoice, queue_name: str
-    ) -> str | None:
-        """The class key to stamp, given what the caller asked for.
+    def _stamped_class(
+        stamp: _RetentionStamp, queue_name: str
+    ) -> RetentionClassKey | None:
+        """The class key to stamp, given the parsed choice.
 
         Precedence, highest first: an explicit argument at the send call
         (including an explicit `None` for forever and an explicit 30
@@ -1980,17 +1995,15 @@ def create_task_wrapper(
         the payload. The payload is the replay envelope, so a retry
         carries the class the original send chose — editing the mapping
         governs later sends and never restates the promise already made
-        to a task in flight. The caller has validated an explicit period.
+        to a task in flight.
         """
-        match choice:
-            case _UnsetRetention():
+        match stamp:
+            case _FromQueueMapping():
                 return _queue_retention_class(queue_name)
-            case None:
-                return None
-            case timedelta() as period:
-                return period_class_key(period.days)
+            case _ExplicitClass(key=key):
+                return key
 
-    def _queue_retention_class(queue_name: str) -> str | None:
+    def _queue_retention_class(queue_name: str) -> RetentionClassKey | None:
         """This queue's mapped class, read from the app at send time.
 
         Read through `app` rather than captured at decoration, because a
@@ -2001,55 +2014,76 @@ def create_task_wrapper(
             getattr(app.config, 'retention', None), queue_name
         )
 
-    def _validate_retention_choice(
-        choice: RetentionChoice,
-    ) -> Result[None, TaskSendValidationFailed]:
-        """Refuse an explicit period this process cannot stamp.
+    def _parse_retention_choice(
+        choice: object,
+    ) -> Result[_RetentionStamp, TaskSendValidationFailed]:
+        """Parse the send's retention argument into the class it stamps.
 
         Accepted: the parameter omitted (the queue mapping or the 30-day
-        default), explicit ``None`` (forever), or a period of
+        default decides), explicit ``None`` (forever), or a period of
         ``AppConfig.retention.sendable_periods()``: the default, a mapped
-        period, or one in ``retention_periods``.
+        period, or one in ``retention_periods``. Any other value is
+        refused, including the class-key strings that 0.6.0 accepted.
 
-        The set is process-static, so the check costs no database round
-        trip on the send path. It is a per-process contract on purpose: the
-        maintenance owner registers the classes of its own config's
-        periods, so a period outside that set would have no partition when
-        the task finishes. Failing closed here names the problem at the
-        send call.
+        Typed as ``object``: this is the send boundary, and a caller can
+        pass any value at run time. The set of periods is process-static,
+        so the check costs no database round trip. It is a per-process
+        contract on purpose: the maintenance owner registers the classes
+        of its own config's periods, so a period outside that set would
+        have no partition when the task finishes.
         """
         match choice:
-            case _UnsetRetention() | None:
-                return Ok(None)
+            case _UnsetRetention():
+                return Ok(_FromQueueMapping())
+            case None:
+                return Ok(_ExplicitClass(key=None))
             case timedelta() as period:
-                pass
-        match parse_retention_period(period):
-            case Err(err_value=reason):
-                return Err(TaskSendValidationFailed(
-                    message=f'Invalid retention for {task_name}: {reason}.',
-                    exception=NoCause(),
-                ))
-            case Ok():
-                pass
-        allowed = _sendable_periods()
-        match period in allowed:
-            case True:
-                return Ok(None)
-            case False:
-                listed = ', '.join(f'{allowed_period.days} days' for allowed_period in sorted(allowed))
+                return _parse_explicit_period(period)
+            case other:
                 return Err(TaskSendValidationFailed(
                     message=(
-                        f'Retention of {period.days} days for {task_name} is '
-                        f'not a period this deployment registers. Valid '
-                        f'values: omit it for the queue mapping or the 30-day '
-                        f'default, pass None to keep the record forever, or '
-                        f'choose one of: {listed}. Add the period to '
+                        f'Invalid retention for {task_name}: retention takes '
+                        f'a timedelta of whole days or None, not '
+                        f'{type(other).__name__}. The class keys of 0.6.0 '
+                        f'were removed: pass the period, for example '
+                        f'timedelta(days=7).'
+                    ),
+                    exception=NoCause(),
+                ))
+
+    def _parse_explicit_period(
+        period: timedelta,
+    ) -> Result[_RetentionStamp, TaskSendValidationFailed]:
+        """The class of an explicit finite period, if this process registers it."""
+        match parse_retention_period(period):
+            case Err(err_value=refused):
+                return Err(TaskSendValidationFailed(
+                    message=f'Invalid retention for {task_name}: {refused.reason}.',
+                    exception=NoCause(),
+                ))
+            case Ok(ok_value=days):
+                pass
+        allowed = _sendable_periods()
+        match days in allowed:
+            case True:
+                return Ok(_ExplicitClass(key=period_class_key(days)))
+            case False:
+                listed = ', '.join(
+                    f'{allowed_days} days' for allowed_days in sorted(allowed)
+                )
+                return Err(TaskSendValidationFailed(
+                    message=(
+                        f'Retention of {days} days for {task_name} is not a '
+                        f'period this deployment registers. Valid values: '
+                        f'omit it for the queue mapping or the 30-day default, '
+                        f'pass None to keep the record forever, or choose one '
+                        f'of: {listed}. Add the period to '
                         f'AppConfig.retention.retention_periods to send with it.'
                     ),
                     exception=NoCause(),
                 ))
 
-    def _sendable_periods() -> frozenset[timedelta]:
+    def _sendable_periods() -> frozenset[RetentionDays]:
         """The finite periods this process may stamp, read at send time.
 
         Read through ``app`` rather than captured at decoration, because
@@ -2108,9 +2142,10 @@ def create_task_wrapper(
         # Same rule as the immediate paths: an explicitly named class is
         # checked before anything is written, a derived one is not,
         # because it comes from configuration already validated.
-        retention_check = _validate_retention_choice(retention)
-        if is_err(retention_check):
-            return retention_check
+        stamp_parse = _parse_retention_choice(retention)
+        if is_err(stamp_parse):
+            return stamp_parse
+        stamp = stamp_parse.ok_value
 
         prep = _prepare_send(
             args,
@@ -2127,9 +2162,7 @@ def create_task_wrapper(
             )
         payload = dataclasses.replace(
             payload,
-            retention_class_key=_resolve_retention_choice(
-                retention, payload.queue_name
-            ),
+            retention_class_key=_stamped_class(stamp, payload.queue_name),
         )
         return _do_schedule(task_id, payload)
 
@@ -2155,9 +2188,10 @@ def create_task_wrapper(
         # Same rule as the immediate paths: an explicitly named class is
         # checked before anything is written, a derived one is not,
         # because it comes from configuration already validated.
-        retention_check = _validate_retention_choice(retention)
-        if is_err(retention_check):
-            return retention_check
+        stamp_parse = _parse_retention_choice(retention)
+        if is_err(stamp_parse):
+            return stamp_parse
+        stamp = stamp_parse.ok_value
 
         prep = _prepare_send(
             args,
@@ -2174,9 +2208,7 @@ def create_task_wrapper(
             )
         payload = dataclasses.replace(
             payload,
-            retention_class_key=_resolve_retention_choice(
-                retention, payload.queue_name
-            ),
+            retention_class_key=_stamped_class(stamp, payload.queue_name),
         )
         return await _do_schedule_async(task_id, payload)
 

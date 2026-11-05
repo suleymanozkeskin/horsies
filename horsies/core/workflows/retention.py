@@ -14,10 +14,13 @@ from __future__ import annotations
 
 from typing import Any
 
+from horsies.core.history.periods import RetentionClassKey
 from horsies.core.models.retention import resolve_queue_retention_class
 
 
-def queue_retention_class(broker: Any, queue_name: str) -> str | None:
+def queue_retention_class(
+    broker: Any, queue_name: str,
+) -> RetentionClassKey | None:
     """The retention class a workflow backing task's queue resolves to.
 
     `broker` may be absent on paths that build parameters without one;

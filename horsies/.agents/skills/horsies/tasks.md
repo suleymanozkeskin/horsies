@@ -294,8 +294,9 @@ runs on. `.schedule*()` also carries `idempotency_key`.
 A retention class is its period: the key is `standard_<days>d`
 (`standard_7d`, `standard_30d`). Valid values are `None` and a whole-day
 period this process registers: 30 days, a period in `queue_retention`, or
-a period in `AppConfig.retention.retention_periods`. Any other period, and
-a fractional day, returns `Err(VALIDATION_FAILED)` at the send call before
+a period in `AppConfig.retention.retention_periods`. Any other period, a
+fractional day, and a value that is not a `timedelta` (such as a 0.6.0
+class key string) return `Err(VALIDATION_FAILED)` at the send call before
 anything is written. The class is snapshotted on the row at enqueue and
 decides which history partition the record moves to when the task
 terminalizes — so a later edit to `queue_retention` governs later sends

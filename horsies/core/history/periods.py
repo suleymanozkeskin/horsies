@@ -11,8 +11,9 @@ differ by less than a day would be two classes with the same behaviour.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import timedelta
-from typing import Final
+from typing import Final, NewType
 
 from horsies.core.types.result import Err, Ok, Result
 
@@ -26,8 +27,26 @@ indexes."""
 PERIOD_CLASS_PREFIX: Final = 'standard_'
 """30 days gives ``standard_30d``, the key of the default class."""
 
+RetentionDays = NewType('RetentionDays', int)
+"""Whole days within the bounds. ``parse_retention_period`` builds it."""
 
-def parse_retention_period(period: timedelta) -> Result[int, str]:
+RetentionClassKey = NewType('RetentionClassKey', str)
+"""The key of a finite period class. ``period_class_key`` builds it.
+
+The enqueue paths take this type, so a key that no period stands for is a
+type error at the call site, not a row that has no partition later."""
+
+
+@dataclass(frozen=True, slots=True)
+class PeriodRefused:
+    """A finite period outside the rule; ``reason`` names the rule it breaks."""
+
+    reason: str
+
+
+def parse_retention_period(
+    period: timedelta,
+) -> Result[RetentionDays, PeriodRefused]:
     """The number of days of a finite period, or why it is not one.
 
     Refuses a period that is not whole days, and one outside
@@ -38,26 +57,30 @@ def parse_retention_period(period: timedelta) -> Result[int, str]:
         case 0, 0:
             pass
         case _:
-            return Err(
+            return Err(PeriodRefused(
                 f'{period} is not a whole number of days; history '
                 'partitions are daily, so a retention period is whole days'
-            )
+            ))
     match period.days:
         case days if days < MIN_RETENTION_DAYS:
-            return Err(f'{period} is shorter than {MIN_RETENTION_DAYS} day')
+            return Err(PeriodRefused(
+                f'{period} is shorter than {MIN_RETENTION_DAYS} day'
+            ))
         case days if days > MAX_RETENTION_DAYS:
-            return Err(f'{period} is longer than {MAX_RETENTION_DAYS} days')
+            return Err(PeriodRefused(
+                f'{period} is longer than {MAX_RETENTION_DAYS} days'
+            ))
         case days:
-            return Ok(days)
+            return Ok(RetentionDays(days))
 
 
-def period_class_key(days: int) -> str:
+def period_class_key(days: RetentionDays) -> RetentionClassKey:
     """The class key of a finite period of ``days`` whole days.
 
-    The caller passes a value that ``parse_retention_period`` accepted; a
-    value out of bounds is a defect.
+    ``days`` comes from ``parse_retention_period``; a value out of bounds is
+    a defect.
     """
     assert MIN_RETENTION_DAYS <= days <= MAX_RETENTION_DAYS, (
         f'retention period of {days} days is out of bounds'
     )
-    return f'{PERIOD_CLASS_PREFIX}{days}d'
+    return RetentionClassKey(f'{PERIOD_CLASS_PREFIX}{days}d')

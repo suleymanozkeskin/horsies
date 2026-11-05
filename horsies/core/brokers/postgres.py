@@ -94,6 +94,7 @@ from horsies.core.models.health import (
     WorkerStateSnapshot,
 )
 from horsies.core.history.errors import HistoryContractError
+from horsies.core.history.periods import RetentionClassKey
 from horsies.core.history.ddl.classes import (
     DEFAULT_RETENTION_CLASS_KEY,
     describe_period_key_collision,
@@ -2387,7 +2388,7 @@ class PostgresBroker:
         enqueue_delay_seconds: Optional[int] = None,
         good_until: Optional[datetime] = None,
         task_options: Optional[str] = None,
-        retention_class_key: str | None = DEFAULT_RETENTION_CLASS_KEY,
+        retention_class_key: RetentionClassKey | None = DEFAULT_RETENTION_CLASS_KEY,
         retain_rerun_input: Optional[bool] = None,
         idempotency_key: Optional[str] = None,
     ) -> Result[str, BrokerEnqueueError]:
@@ -4089,7 +4090,7 @@ class PostgresBroker:
         good_until: Optional[datetime] = None,
         task_options: Optional[str] = None,
         idempotency_key: Optional[str] = None,
-        retention_class_key: str | None = DEFAULT_RETENTION_CLASS_KEY,
+        retention_class_key: RetentionClassKey | None = DEFAULT_RETENTION_CLASS_KEY,
         retain_rerun_input: Optional[bool] = None,
     ) -> Result[str, BrokerEnqueueError | BrokerSyncCallError]:
         """Synchronous task submission (runs enqueue_async in background loop).

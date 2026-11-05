@@ -18,6 +18,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
+from typing import Final
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -25,27 +26,32 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from ..commands import is_safe_identifier
 from ..names import RETENTION_CLASSES, TASK_HISTORY_PARENT
 from ..partitions.catalog import RetentionClassRow, read_retention_class
+from ..periods import RetentionClassKey, RetentionDays, period_class_key
 from .tables import FOREVER_CLASS_KEY
 
-DEFAULT_RETENTION_CLASS_KEY = 'standard_30d'
-"""The class every enqueue stamps unless the caller says otherwise.
+DEFAULT_RETENTION_DAYS: Final = RetentionDays(30)
+"""The default period."""
+
+DEFAULT_RETENTION_CLASS_KEY: Final = period_class_key(DEFAULT_RETENTION_DAYS)
+"""The class every enqueue stamps unless the caller says otherwise:
+``standard_30d``.
 
 The ratified resolution: the default is an immutable 30-day finite
 class; forever is chosen only by an EXPLICIT ``None``. A forever
 default would exempt every unconfigured task from retention — the
 unpurgeable-rows hole this program exists to close."""
 
-DEFAULT_RETENTION_DURATION = timedelta(days=30)
+DEFAULT_RETENTION_DURATION: Final = timedelta(days=DEFAULT_RETENTION_DAYS)
 """The default class's immutable duration."""
 
 
-def resolve_retention_class_key(requested: str | None) -> str:
+def resolve_retention_class_key(requested: RetentionClassKey | None) -> str:
     """The stamped class key for one enqueue.
 
-    ``None`` is the explicit forever choice; any string names a class
-    verbatim. The absent-argument default lives at the enqueue
-    signatures as ``DEFAULT_RETENTION_CLASS_KEY``, so absence and
-    explicit forever cannot be confused.
+    ``None`` is the explicit forever choice; a period class key is stamped
+    as it is. The absent-argument default lives at the enqueue signatures
+    as ``DEFAULT_RETENTION_CLASS_KEY``, so absence and explicit forever
+    cannot be confused.
     """
     return FOREVER_CLASS_KEY if requested is None else requested
 
@@ -170,7 +176,7 @@ class PeriodKeyCollision:
 
 async def find_period_key_collisions(
     connection: AsyncConnection,
-    period_classes: Sequence[tuple[str, timedelta]],
+    period_classes: Sequence[tuple[RetentionClassKey, timedelta]],
 ) -> tuple[PeriodKeyCollision, ...]:
     """The period classes whose registry row has another duration.
 

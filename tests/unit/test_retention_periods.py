@@ -21,6 +21,8 @@ from horsies.core.history.names import MAX_RETENTION_CLASS_KEY_LENGTH
 from horsies.core.history.periods import (
     MAX_RETENTION_DAYS,
     MIN_RETENTION_DAYS,
+    PeriodRefused,
+    RetentionDays,
     parse_retention_period,
     period_class_key,
 )
@@ -61,7 +63,7 @@ class TestParseRetentionPeriod:
         self, period: timedelta, reason: str,
     ) -> None:
         match parse_retention_period(period):
-            case Err(err_value=text):
+            case Err(err_value=PeriodRefused(reason=text)):
                 assert reason in text, text
             case Ok() as accepted:
                 pytest.fail(f'{period} was accepted: {accepted!r}')
@@ -70,22 +72,21 @@ class TestParseRetentionPeriod:
 class TestPeriodClassKey:
     def test_the_default_period_gives_the_default_key(self) -> None:
         """The default class continues: no default row moves to a new class."""
-        assert period_class_key(DEFAULT_RETENTION_DURATION.days) == (
-            DEFAULT_RETENTION_CLASS_KEY
-        )
+        assert DEFAULT_RETENTION_CLASS_KEY == 'standard_30d'
+        assert DEFAULT_RETENTION_DURATION == timedelta(days=30)
 
     def test_a_period_names_its_class(self) -> None:
-        assert period_class_key(7) == 'standard_7d'
+        assert period_class_key(RetentionDays(7)) == 'standard_7d'
 
     def test_the_longest_key_fits_the_relation_name_budget(self) -> None:
-        assert len(period_class_key(MAX_RETENTION_DAYS)) <= (
+        assert len(period_class_key(RetentionDays(MAX_RETENTION_DAYS))) <= (
             MAX_RETENTION_CLASS_KEY_LENGTH
         )
 
     @pytest.mark.parametrize('days', [0, MAX_RETENTION_DAYS + 1])
     def test_a_period_out_of_bounds_is_a_defect(self, days: int) -> None:
         with pytest.raises(AssertionError):
-            period_class_key(days)
+            period_class_key(RetentionDays(days))
 
 
 class TestQueueRetention:
@@ -141,11 +142,18 @@ class TestRetentionPeriods:
         config = RetentionConfig(retention_periods=(timedelta(days=365),))
         assert config.retention_periods == (timedelta(days=365),)
 
-    def test_a_repeated_period_is_refused(self) -> None:
+    @pytest.mark.parametrize(
+        'periods',
+        [
+            pytest.param((timedelta(days=90), timedelta(days=90)), id='same-value'),
+            pytest.param((timedelta(days=2), timedelta(hours=48)), id='same-days'),
+        ],
+    )
+    def test_a_repeated_period_is_refused(
+        self, periods: tuple[timedelta, ...],
+    ) -> None:
         with pytest.raises(ConfigurationError) as caught:
-            RetentionConfig(
-                retention_periods=(timedelta(days=90), timedelta(days=90)),
-            )
+            RetentionConfig(retention_periods=periods)
         assert 'listed twice' in str(caught.value)
 
     def test_the_removed_named_classes_are_refused_with_the_replacement(
@@ -185,9 +193,7 @@ class TestRegistrableClasses:
             retention_periods=(timedelta(days=365),),
         )
 
-        assert config.sendable_periods() == frozenset(
-            {timedelta(days=7), timedelta(days=365), DEFAULT_RETENTION_DURATION}
-        )
+        assert config.sendable_periods() == frozenset({7, 365, 30})
 
 
 class TestResolveQueueRetentionClass:

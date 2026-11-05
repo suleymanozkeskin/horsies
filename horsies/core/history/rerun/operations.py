@@ -21,7 +21,7 @@ contract rather than aliasing its rerun.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from hashlib import sha256
@@ -95,27 +95,21 @@ class RerunEnqueuePolicy:
     retention: timedelta | None
     retain_rerun_input: bool
     reservation_window: timedelta
+    retention_class_key: str = field(init=False)
+    """The class key the new request is stamped with, from ``retention``."""
 
     def __post_init__(self) -> None:
         match self.retention:
             case None:
-                pass
+                class_key = FOREVER_CLASS_KEY
             case period:
                 match parse_retention_period(period):
-                    case Err(err_value=reason):
-                        raise ValueError(f'rerun retention: {reason}')
-                    case Ok():
-                        pass
+                    case Err(err_value=refused):
+                        raise ValueError(f'rerun retention: {refused.reason}')
+                    case Ok(ok_value=days):
+                        class_key = period_class_key(days)
         validate_reservation_window(self.reservation_window)
-
-    @property
-    def retention_class_key(self) -> str:
-        """The class key the new request is stamped with."""
-        match self.retention:
-            case None:
-                return FOREVER_CLASS_KEY
-            case period:
-                return period_class_key(period.days)
+        object.__setattr__(self, 'retention_class_key', class_key)
 
 
 class NotEligibleReason(Enum):

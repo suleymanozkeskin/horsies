@@ -337,9 +337,10 @@ Passing `good_until=None` explicitly clears any internally inherited deadline.
 `retention` accepts `None` (keep the terminal record forever), or a
 period in whole days that this process registers: 30 days (the default),
 a period in `AppConfig.retention.queue_retention`, or a period in
-`AppConfig.retention.retention_periods`. Any other period, and a
-fractional day, returns `Err(VALIDATION_FAILED)` at the send call before
-anything is written.
+`AppConfig.retention.retention_periods`. Any other period, a fractional
+day, and a value that is not a `timedelta` (such as a 0.6.0 class key
+string) return `Err(VALIDATION_FAILED)` at the send call before anything
+is written.
 
 Choosing 30 days is **not** the same as omitting the parameter. Omitting
 it takes the queue's mapping where one exists; choosing 30 days overrides

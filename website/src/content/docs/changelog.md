@@ -30,9 +30,14 @@ there is no migration contract between pre-1.0 versions.
     periods that sends choose explicitly in `RetentionConfig.retention_periods`.
   - `with_options(retention=...)` replaces `with_options(retention_class_key=...)`:
     a whole-day `timedelta` that this process registers, or `None` for
-    forever.
+    forever. Any other value, such as a class key string, returns
+    `VALIDATION_FAILED` at the send call.
   - `RerunEnqueuePolicy` takes `retention: timedelta | None` in place of
     `retention_class_key`.
+  - `PostgresBroker.enqueue` and `enqueue_async` take
+    `retention_class_key: RetentionClassKey | None`; a key comes from
+    `horsies.core.history.periods.period_class_key`, so a raw string is a
+    type error.
 - A broker refuses to initialize when the key of one of its periods is
   registered with another duration. Only a class declared by name before
   0.6.1 can hold such a key, for example `standard_14d` declared with 7
@@ -55,6 +60,8 @@ there is no migration contract between pre-1.0 versions.
   a mapped queue or with an explicit 0.6.0 class key, is refused as a
   payload mismatch for the rest of its reservation window: the stamped class
   is part of the stored request fingerprint.
+- A rerun can no longer target a class from an earlier version (`q_*` or a
+  declared name): `RerunEnqueuePolicy` takes a period.
 - The schema does not change.
 
 ## 0.6.0 — 2026-11-03
