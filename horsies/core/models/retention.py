@@ -346,8 +346,8 @@ class RetentionConfig(BaseModel):
                             'retention class and its relation names',
                         ],
                         help_text=(
-                            'use lowercase letters, digits and underscores, '
-                            'starting with a lowercase letter'
+                            'use letters, digits and underscores, '
+                            'starting with a letter or underscore'
                         ),
                     )
                 )
@@ -460,8 +460,8 @@ class RetentionConfig(BaseModel):
                             'name for the class partition',
                         ],
                         help_text=(
-                            'use lowercase letters, digits and underscores, '
-                            'starting with a lowercase letter'
+                            'use letters, digits and underscores, starting '
+                            'with a letter or underscore'
                         ),
                     )
                 )

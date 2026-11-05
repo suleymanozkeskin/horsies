@@ -28,10 +28,6 @@ and there is no migration contract between pre-1.0 versions.
   `limit=` to `list_tasks`, which takes `page: TaskPage`, and imported
   `HistoryWindow` from an internal module. The docs check now type-checks
   the python blocks of module docstrings too.
-- The help text for a retention class key or a mapped queue name that is
-  not an identifier said "starting with a letter or underscore". The check
-  takes a lowercase letter first, then lowercase letters, digits and
-  underscores.
 
 ## [0.6.0] - 2026-11-03
 
