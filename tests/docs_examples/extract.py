@@ -4,6 +4,9 @@ The docs pyright check type-checks the examples that the docs show. This
 module reads every page, applies the block markers, and writes one file per
 page. Pyright then runs over the written files (``pyrightconfig.docs.json``).
 
+The module docstrings of the library are read as pages too: a python fence
+in a module docstring follows the same rules as a fence on a page.
+
 Markers. A marker is a comment on the line directly above the opening fence,
 in the style of the ``members`` markers: ``<!-- check: skip KIND -- reason -->``
 in ``.md`` and ``{/* check: skip KIND -- reason */}`` in ``.mdx``.
@@ -33,7 +36,7 @@ from __future__ import annotations
 import ast
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import Final, assert_never
@@ -46,6 +49,8 @@ DOC_ROOTS: Final = (
     Path('horsies') / '.agents' / 'skills',
 )
 PAGE_SUFFIXES: Final = frozenset({'.md', '.mdx'})
+# Packages whose module docstrings are read as pages.
+MODULE_ROOTS: Final = (Path('horsies'),)
 # The changelog shows past versions and has a twin file in the repo root.
 HISTORY_PAGES: Final = frozenset({'changelog.md'})
 PRELUDE_IMPORT: Final = 'from prelude import *  # noqa: F403\n'
@@ -318,6 +323,75 @@ def find_pages(repo_root: Path) -> tuple[Path, ...]:
     return tuple(found)
 
 
+def find_modules(repo_root: Path) -> tuple[Path, ...]:
+    """Return the repo-relative paths of every library module."""
+    found: list[Path] = []
+    for root in MODULE_ROOTS:
+        found.extend(
+            path.relative_to(repo_root) for path in sorted((repo_root / root).rglob('*.py'))
+        )
+    return tuple(found)
+
+
+@dataclass(frozen=True, slots=True)
+class ModuleDocstring:
+    """The raw module docstring of one source file, and the file line it starts on."""
+
+    text: str
+    first_line: int
+
+
+@dataclass(frozen=True, slots=True)
+class NoModuleDocstring:
+    """The module has no docstring, so it has no block."""
+
+
+def read_module_docstring(source: str) -> ModuleDocstring | NoModuleDocstring:
+    """Return the module docstring as written, without the cleandoc changes.
+
+    The text is kept raw so that line N of the text is line
+    ``first_line + N - 1`` of the file. A module that does not parse is a
+    defect of the library, so the SyntaxError is not caught.
+    """
+    tree = ast.parse(source)
+    match tree.body:
+        case [ast.Expr(value=ast.Constant(value=str() as text)) as node, *_]:
+            return ModuleDocstring(text=text, first_line=node.lineno)
+        case _:
+            return NoModuleDocstring()
+
+
+def read_module_blocks(
+    module: Path, source: str
+) -> Result[tuple[Block, ...], tuple[ExtractError, ...]]:
+    """Return the python blocks of one module docstring, with file line numbers."""
+    match read_module_docstring(source):
+        case NoModuleDocstring():
+            return Ok(())
+        case ModuleDocstring(text=text, first_line=first_line):
+            pass
+    offset = first_line - 1
+    match read_blocks(module, text):
+        case Err(errors):
+            return Err(tuple(replace(error, line=error.line + offset) for error in errors))
+        case Ok(blocks):
+            return Ok(tuple(replace(block, line=block.line + offset) for block in blocks))
+
+
+def read_all_blocks(
+    repo_root: Path,
+) -> tuple[Result[tuple[Block, ...], tuple[ExtractError, ...]], ...]:
+    """Read every page and every module docstring, in a fixed order."""
+    pages = tuple(
+        read_blocks(page, (repo_root / page).read_text()) for page in find_pages(repo_root)
+    )
+    modules = tuple(
+        read_module_blocks(module, (repo_root / module).read_text())
+        for module in find_modules(repo_root)
+    )
+    return pages + modules
+
+
 def extract_all(repo_root: Path, output_dir: Path) -> tuple[ExtractError, ...]:
     """Write the checkable files of every page to ``output_dir``. Return all errors.
 
@@ -328,8 +402,8 @@ def extract_all(repo_root: Path, output_dir: Path) -> tuple[ExtractError, ...]:
     output_dir.mkdir(parents=True, exist_ok=True)
     for stale in output_dir.glob('*.py'):
         stale.unlink()
-    for page in find_pages(repo_root):
-        match read_blocks(page, (repo_root / page).read_text()):
+    for read in read_all_blocks(repo_root):
+        match read:
             case Err(page_errors):
                 errors.extend(page_errors)
             case Ok(blocks):
@@ -341,8 +415,8 @@ def extract_all(repo_root: Path, output_dir: Path) -> tuple[ExtractError, ...]:
 def count_modes(repo_root: Path) -> dict[BlockMode, int]:
     """Count the blocks of every page by mode. A page with errors adds nothing."""
     counts = {mode: 0 for mode in BlockMode}
-    for page in find_pages(repo_root):
-        match read_blocks(page, (repo_root / page).read_text()):
+    for read in read_all_blocks(repo_root):
+        match read:
             case Ok(blocks):
                 for block in blocks:
                     counts[block.mode] += 1

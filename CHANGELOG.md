@@ -8,6 +8,31 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking: the windowed monitoring reads take a `MonitoringWindow`.**
+  `list_tasks`, `task_stats`, `task_facets` and `task_breakdown` take
+  `window: MonitoringWindow`, not `HistoryWindow`. Only
+  `resolve_monitoring_window(since=..., until=...)` builds one, and it
+  returns `MonitoringWindow | WindowRefused`. So a window longer than
+  `MONITORING_WINDOW_MAX` (30 days) cannot reach a read, which a directly
+  built `HistoryWindow` could. A direct `MonitoringWindow` with other bounds
+  raises `AssertionError`.
+- `horsies.monitoring` exports `MonitoringWindow`, `WindowRefused`,
+  `resolve_monitoring_window`, `MONITORING_WINDOW_DEFAULT` and
+  `MONITORING_WINDOW_MAX`.
+
+### Fixed
+
+- The `horsies.monitoring` module docstring example passed `offset=` and
+  `limit=` to `list_tasks`, which takes `page: TaskPage`, and imported
+  `HistoryWindow` from an internal module. The docs check now type-checks
+  the python blocks of module docstrings too.
+- The help text for a retention class key or a mapped queue name that is
+  not an identifier said "starting with a letter or underscore". The check
+  takes a lowercase letter first, then lowercase letters, digits and
+  underscores.
+
 ## [0.6.0] - 2026-11-03
 
 0.6.0 moves task execution to child processes that the worker owns, closes the

@@ -4,11 +4,16 @@ Requires the ``web`` extra::
 
     pip install 'horsies[web]'
 
-Mount it under an application that already authenticates its callers::
+Mount it under an application that already authenticates its callers:
 
-    from horsies.web import AllowAll, create_monitoring_app
+```python
+from fastapi import FastAPI
 
-    host_app.mount('/monitoring', create_monitoring_app(app, auth_policy=AllowAll()))
+from horsies.web import AllowAll, create_monitoring_app
+
+host_app = FastAPI()  # your application, which authenticates its callers
+host_app.mount('/monitoring', create_monitoring_app(app, auth_policy=AllowAll()))
+```
 
 Or serve it standalone with ``horsies web``.
 

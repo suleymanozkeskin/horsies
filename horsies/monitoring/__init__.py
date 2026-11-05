@@ -7,19 +7,43 @@ variant: a database failure, the event loop limit, or history data that
 does not decode. A missing row is ``Ok(None)``; ``get_task_detail`` returns
 ``Ok(TaskDetailNotFound)`` with a ``TaskAbsenceReason``.
 
+The list and aggregate reads take a ``MonitoringWindow``, which only
+``resolve_monitoring_window`` builds. It holds at most
+``MONITORING_WINDOW_MAX`` of terminal history.
+
 The response models are the wire contract for the monitoring UI and are
 unstable pre-1.0.
 
-    from datetime import datetime, timedelta, timezone
+```python
+from horsies import Err, Ok, TaskStatus
+from horsies.core.brokers.postgres import PostgresBroker
+from horsies.monitoring import (
+    MonitoringResult,
+    MonitoringWindow,
+    TaskListPage,
+    TaskPage,
+    WindowRefused,
+    list_tasks,
+    resolve_monitoring_window,
+)
 
-    from horsies import TaskStatus
-    from horsies.core.history.reads.pages import HistoryWindow
-    from horsies.monitoring import list_tasks
 
-    now = datetime.now(timezone.utc)
-    page = await list_tasks(
+async def failed_in_the_last_day(
+    broker: PostgresBroker,
+) -> MonitoringResult[TaskListPage]:
+    match resolve_monitoring_window(since=None, until=None):
+        case MonitoringWindow() as window:
+            pass
+        case WindowRefused(reason=reason):
+            raise AssertionError(f'the default window is servable: {reason}')
+    match TaskPage.parse(0, 50):
+        case Ok(ok_value=page):
+            pass
+        case Err(err_value=refused):
+            raise AssertionError(f'offset 0, limit 50 is in bounds: {refused.reason}')
+    return await list_tasks(
         broker,
-        window=HistoryWindow(lower=now - timedelta(hours=24), upper=now),
+        window=window,
         statuses=[TaskStatus.FAILED],
         task_names=[],
         queues=[],
@@ -29,9 +53,9 @@ unstable pre-1.0.
         retried_only=False,
         sort_by='enqueued_at',
         sort_dir='desc',
-        offset=0,
-        limit=50,
+        page=page,
     )
+```
 """
 
 from horsies.monitoring.errors import (
@@ -79,6 +103,13 @@ from horsies.monitoring.task_actions import (
     TaskActionWorkflowTask,
     TaskCancelled,
     cancel_task,
+)
+from horsies.monitoring.history_window import (
+    MONITORING_WINDOW_DEFAULT,
+    MONITORING_WINDOW_MAX,
+    MonitoringWindow,
+    WindowRefused,
+    resolve_monitoring_window,
 )
 from horsies.monitoring.pages import (
     MAX_BREAKDOWN_LIMIT,
@@ -140,6 +171,12 @@ __all__ = [
     'SortDirection',
     'TaskPage',
     'WorkflowRunsLimit',
+    # History window
+    'MONITORING_WINDOW_DEFAULT',
+    'MONITORING_WINDOW_MAX',
+    'MonitoringWindow',
+    'WindowRefused',
+    'resolve_monitoring_window',
     'TaskGroupBy',
     'TaskSortField',
     # Queries

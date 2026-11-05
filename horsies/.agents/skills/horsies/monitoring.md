@@ -152,12 +152,15 @@ READ snapshot, so the live read and the history read see the same rows.
 | `WITHIN_RETAINED_HISTORY` | Retained history covers the id's birth and has no row: the task did not exist, or its history partition was removed out of band |
 | `NOT_CLASSIFIED` | The id is not a UUIDv7, no attached history partition has a birth, or the database has no staged history read |
 
-List and aggregate reads are **window-scoped** and take a `HistoryWindow`
-(`resolve_monitoring_window(since=..., until=...)`, from `horsies.monitoring.history_window`, builds one): the default
+List and aggregate reads are **window-scoped** and take a
+`MonitoringWindow`. Only `resolve_monitoring_window(since=..., until=...)`
+builds one, and it returns `MonitoringWindow | WindowRefused`: the default
 is the last 24 hours (`MONITORING_WINDOW_DEFAULT`), the maximum span is 30
 days (`MONITORING_WINDOW_MAX`), and a request over the maximum is refused
 with the bound named — never silently clamped. Bounds must be
-timezone-aware and increasing.
+timezone-aware and increasing. The window carries the bound, so a read
+never checks it again; building a `MonitoringWindow` directly with other
+bounds is a defect and raises `AssertionError`.
 
 `TaskListPage.total` follows a stated contract: **exact when any filter is
 active, a planner estimate on the unfiltered view.** Do not present an
@@ -247,9 +250,10 @@ from horsies.monitoring import (
     # Page, limit and absence types
     TaskPage, BreakdownLimit, WorkflowRunsLimit,
     TaskDetailNotFound, TaskAbsenceReason, PageRefused,
+    # History window
+    MonitoringWindow, WindowRefused, resolve_monitoring_window,
+    MONITORING_WINDOW_DEFAULT, MONITORING_WINDOW_MAX,
 )
-
-from horsies.monitoring.history_window import resolve_monitoring_window
 
 from horsies.web import (  # requires horsies[web]
     create_monitoring_app, MonitoringUIConfig,

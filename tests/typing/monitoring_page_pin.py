@@ -1,4 +1,5 @@
-"""Type pin: a monitoring read takes a page value, not plain integers.
+"""Type pin: a monitoring read takes a page value, not plain integers, and a
+``MonitoringWindow``, not the unbounded ``HistoryWindow``.
 
 pyright checks this file through ``pyrightconfig.clean.json``. pytest does not
 collect it (no ``test_`` prefix), and nothing calls its functions. Each line
@@ -13,6 +14,7 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.history.reads.pages import HistoryWindow
 from horsies.monitoring import (
     BreakdownLimit,
+    MonitoringWindow,
     TaskPage,
     WorkflowRunsLimit,
     list_tasks,
@@ -31,7 +33,7 @@ async def a_plain_integer_is_not_a_limit(broker: PostgresBroker) -> None:
 
 
 async def one_read_refuses_the_limit_of_another(
-    broker: PostgresBroker, window: HistoryWindow,
+    broker: PostgresBroker, window: MonitoringWindow,
 ) -> None:
     await list_workflow_runs(
         broker,
@@ -55,7 +57,7 @@ async def one_read_refuses_the_limit_of_another(
 
 
 async def a_plain_integer_is_not_a_page(
-    broker: PostgresBroker, window: HistoryWindow,
+    broker: PostgresBroker, window: MonitoringWindow,
 ) -> None:
     await list_tasks(
         broker,
@@ -74,11 +76,30 @@ async def a_plain_integer_is_not_a_page(
 
 
 async def a_page_value_is_accepted(
-    broker: PostgresBroker, window: HistoryWindow,
+    broker: PostgresBroker, window: MonitoringWindow,
 ) -> None:
     await list_tasks(
         broker,
         window=window,
+        statuses=[],
+        task_names=[],
+        queues=[],
+        workers=[],
+        error_codes=[],
+        error_categories=[],
+        retried_only=False,
+        sort_by='enqueued_at',
+        sort_dir='desc',
+        page=TaskPage(offset=0, limit=50),
+    )
+
+
+async def a_history_window_is_not_a_monitoring_window(
+    broker: PostgresBroker, unbounded: HistoryWindow,
+) -> None:
+    await list_tasks(
+        broker,
+        window=unbounded,  # pyright: ignore[reportArgumentType]
         statuses=[],
         task_names=[],
         queues=[],

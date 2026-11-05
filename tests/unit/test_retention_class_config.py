@@ -63,6 +63,22 @@ class TestDeclaredRetentionClasses:
                 )
             )
 
+    @pytest.mark.parametrize('unsafe', ['_leading_underscore', 'Capital'])
+    def test_the_identifier_help_states_the_rule_the_check_applies(
+        self, unsafe: str,
+    ) -> None:
+        """The check takes a lowercase letter first and lowercase after it."""
+        with pytest.raises(ConfigurationError) as caught:
+            RetentionConfig(
+                retention_classes=(
+                    RetentionClassConfig(key=unsafe, duration=timedelta(days=5)),
+                )
+            )
+        assert caught.value.help_text == (
+            'use lowercase letters, digits and underscores, '
+            'starting with a lowercase letter'
+        )
+
     def test_a_key_at_the_budget_is_accepted(self) -> None:
         """The bound is a limit, not a margin: the last legal key passes."""
         key = 'k' * MAX_RETENTION_CLASS_KEY_LENGTH
