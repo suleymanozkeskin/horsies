@@ -8,6 +8,11 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-08
+
+0.6.1 identifies a retention class by its period and makes the windowed
+monitoring reads take a bounded window type. The schema does not change.
+
 ### Changed
 
 - **Breaking: a retention class is identified by its period.** The class
@@ -77,6 +82,10 @@ and there is no migration contract between pre-1.0 versions.
 - A rerun can no longer target a class from an earlier version (`q_*` or a
   declared name): `RerunEnqueuePolicy` takes a period.
 - The schema does not change.
+- Upgrade the workers before the processes that only send. A 0.6.1 send on
+  a mapped queue stamps a `standard_<days>d` class, and a 0.6.0 worker does
+  not register that class. Until a 0.6.1 worker registers it, such a row
+  finds no history partition when the task finishes.
 
 ## [0.6.0] - 2026-11-03
 
