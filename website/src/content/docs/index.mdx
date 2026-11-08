@@ -7,7 +7,18 @@ head:
 ---
 
 import { CardGrid, LinkCard } from '@astrojs/starlight/components';
+import { Image } from 'astro:assets';
 import FeatureCard from '../../components/FeatureCard.astro';
+import tasksDark from '../../assets/screenshots/web-ui-tasks-dark.png';
+import tasksLight from '../../assets/screenshots/web-ui-tasks-light.png';
+import workflowDark from '../../assets/screenshots/web-ui-workflow-dark.png';
+import workflowLight from '../../assets/screenshots/web-ui-workflow-light.png';
+import workersDark from '../../assets/screenshots/web-ui-workers-dark.png';
+import workersLight from '../../assets/screenshots/web-ui-workers-light.png';
+import errorDark from '../../assets/screenshots/web-ui-error-dark.png';
+import errorLight from '../../assets/screenshots/web-ui-error-light.png';
+import subworkflowDark from '../../assets/screenshots/web-ui-subworkflow-dark.png';
+import subworkflowLight from '../../assets/screenshots/web-ui-subworkflow-light.png';
 
 <div class="hero-video">
   <video autoplay loop muted playsinline>
@@ -17,27 +28,61 @@ import FeatureCard from '../../components/FeatureCard.astro';
 
 **PostgreSQL-backed background task queue and workflow engine for Python.**
 
-> **AI agents:** see [`llms.txt`](/horsies/llms.txt) for a complete sitemap and keyword index of these docs.
-> Agent guidance ships with the package as one skill folder, `horsies/.agents/skills/horsies/` (`SKILL.md`, `tasks.md`, `workflows.md`, `configs.md`, `monitoring.md`). Copy it with `horsies skills install --target DIR`.
+Most businesses need durable, observable systems with strong execution guarantees. Traditional queues do not give you that out of the box. You end up writing tedious state machines around them, and your execution state gets mixed into your business logic, because your execution layer was never durable.
+
+Horsies lets you declare your conditional business logic as tasks and workflows, without managing execution state on top of it.
 
 <CardGrid>
   <LinkCard title="Get Started" href="/horsies/quick-start/getting-started/" description="Install Horsies and run your first task" />
-  <LinkCard title="Workflow API" href="/horsies/concepts/workflows/workflow-api/" description="WorkflowSpec and WorkflowHandle signatures" />
+  <LinkCard title="Concepts" href="/horsies/concepts/architecture/" description="How workers, the broker and workflows fit together" />
+  <LinkCard title="Web UI" href="/horsies/monitoring/web-ui-overview/" description="Live state, history and errors of your tasks and workflows" />
   <LinkCard title="View on GitHub" href="https://github.com/suleymanozkeskin/horsies" description="Source code and contributions" />
-  <LinkCard title="Questions & Answers" href="/horsies/questions-and-answers/" description="Design trade-offs, scaling, and common questions" />
 </CardGrid>
 
-## Features
+## What you get
 
 <CardGrid stagger>
-  <FeatureCard title="Transactional Broker" icon="/horsies/icons/postgresql.svg" description="Claims, retries, and workflow state are rows under real locks, correctness from transactions." />
-  <FeatureCard title="Type-safe Tasks" icon="/horsies/icons/shield-check.svg" description="Tasks return typed results TaskResult[T, TaskError], allowing you to treat errors as values." />
-  <FeatureCard title="Real-time Dispatch" icon="/horsies/icons/zap.svg" description="PostgreSQL LISTEN/NOTIFY for instant task delivery — no polling." />
-  <FeatureCard title="Workflow Engine" icon="/horsies/icons/network.svg" description="DAG based workflow definitions for orchestrating complex task pipelines." />
-  <FeatureCard title="Scheduled Tasks" icon="/horsies/icons/clock.svg" description="Type-safe, human-readable schedule patterns with cron support." />
-  <FeatureCard title="Multi-queue Support" icon="/horsies/icons/layers.svg" description="Priority-based queues with per-queue concurrency limits." />
-  <FeatureCard title="Syce Monitoring" icon="/horsies/icons/terminal.svg" description="TUI dashboard for monitoring workers, tasks, and workflows." />
+  <FeatureCard title="The signature is the contract" icon="/horsies/icons/shield-check.svg" href="/horsies/tasks/defining-tasks/" description="The function signature is the contract, and every value is held to it for its whole life. A wrong value is refused when you send it, before anything is stored." />
+  <FeatureCard title="One way to fail" icon="/horsies/icons/circle-alert.svg" href="/horsies/tasks/error-handling/" description="Every task returns its value or a TaskError with a code. Retries follow those codes, so you decide which failures are worth another attempt." />
+  <FeatureCard title="No unclear state" icon="/horsies/icons/postgresql.svg" href="/horsies/workers/heartbeats-recovery/" description="Nothing lives in memory. Work is claimed and leased with an identity, so even a crash is traceable: you can see which worker held the task, when, and what happened to it." />
+  <FeatureCard title="A process per task" icon="/horsies/icons/cpu.svg" href="/horsies/workers/worker-architecture/" description="Each running task has a child process to itself, so a segfault, an out-of-memory kill or a timeout ends that task and no other." />
+  <FeatureCard title="Workflows" icon="/horsies/icons/network.svg" href="/horsies/concepts/workflows/workflow-api/" description="A workflow is a graph of tasks: each node says what it waits for and what happens if that fails, and the workflow says what counts as success. A whole workflow can be one node in another." />
+  <FeatureCard title="Monitoring comes with it" icon="/horsies/icons/activity.svg" href="/horsies/monitoring/web-ui-overview/" description="The web UI reads the same records your workers write, so there is no agent or exporter to set up. You get the live state and the history of your tasks, queues, workflows, schedules and workers." />
+  <FeatureCard title="No invalid boot" icon="/horsies/icons/circle-check.svg" href="/horsies/cli/" description="You cannot boot an invalid configuration. horsies check runs the same validation in CI, with no worker and no database." />
+  <FeatureCard title="Many schedulers, one fire" icon="/horsies/icons/clock.svg" href="/horsies/scheduling/scheduler-overview/" description="Run as many schedulers as you want for high availability, without worrying about double fires." />
 </CardGrid>
+
+## The web UI
+
+<figure>
+  <Image src={tasksDark} alt="The tasks view of the Horsies web UI: status counts, error codes by category, filters and live task rows" width={1600} class="light:sl-hidden" />
+  <Image src={tasksLight} alt="The tasks view of the Horsies web UI: status counts, error codes by category, filters and live task rows" width={1600} class="dark:sl-hidden" />
+  <figcaption>The live state and the history of your tasks, with errors grouped by their code families.</figcaption>
+</figure>
+
+<figure>
+  <Image src={errorDark} alt="The failed tasks with their error codes, and one task opened to its UNHANDLED_EXCEPTION error and attempt history" width={1600} class="light:sl-hidden" />
+  <Image src={errorLight} alt="The failed tasks with their error codes, and one task opened to its UNHANDLED_EXCEPTION error and attempt history" width={1600} class="dark:sl-hidden" />
+  <figcaption>A task opens down to each attempt: which worker ran it, when, and what came back.</figcaption>
+</figure>
+
+<figure>
+  <Image src={workflowDark} alt="A completed order_fulfillment workflow run shown as its graph of ten nodes" width={1600} class="light:sl-hidden" />
+  <Image src={workflowLight} alt="A completed order_fulfillment workflow run shown as its graph of ten nodes" width={1600} class="dark:sl-hidden" />
+  <figcaption>A workflow run opens as its graph.</figcaption>
+</figure>
+
+<figure>
+  <Image src={subworkflowDark} alt="The shipping node of the workflow run opened as its child workflow of three nodes, next to the parent graph" width={1600} class="light:sl-hidden" />
+  <Image src={subworkflowLight} alt="The shipping node of the workflow run opened as its child workflow of three nodes, next to the parent graph" width={1600} class="dark:sl-hidden" />
+  <figcaption>A child workflow opens inside its parent run.</figcaption>
+</figure>
+
+<figure>
+  <Image src={workersDark} alt="The workers view of the Horsies web UI: database health, a worker card, schedules, and load and CPU charts over time" width={1600} class="light:sl-hidden" />
+  <Image src={workersLight} alt="The workers view of the Horsies web UI: database health, a worker card, schedules, and load and CPU charts over time" width={1600} class="dark:sl-hidden" />
+  <figcaption>Your workers and schedules, with the load on each worker over time.</figcaption>
+</figure>
 
 ## Quick Example
 
@@ -64,3 +109,7 @@ match add_numbers.send(a=5, b=3):
     case Err(send_err):
         print(f"Send failed: {send_err.code} - {send_err.message}")
 ```
+
+## For AI agents
+
+[`llms.txt`](/horsies/llms.txt) lists every page of these docs with keywords. The package ships a skill folder for coding agents; copy it with `horsies skills install --target DIR`.
