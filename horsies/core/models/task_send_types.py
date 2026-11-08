@@ -18,6 +18,7 @@ from enum import Enum
 from typing import ClassVar
 
 from horsies.core.history.ddl.classes import DEFAULT_RETENTION_CLASS_KEY
+from horsies.core.history.periods import RetentionClassKey
 from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import Result
 
@@ -103,7 +104,7 @@ class TaskSendPayload:
     # so the field defaults to the immutable 30-day class rather than to
     # ``None`` — a payload that never had the field set must not read as
     # a forever request on replay.
-    retention_class_key: str | None = DEFAULT_RETENTION_CLASS_KEY
+    retention_class_key: RetentionClassKey | None = DEFAULT_RETENTION_CLASS_KEY
 
 
 @dataclass(slots=True, frozen=True)

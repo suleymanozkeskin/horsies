@@ -58,7 +58,7 @@ async def test_the_reason_is_the_staged_classification(
         _connection(),
         RerunTask(source_task_id=SOURCE_ID, deadline=None),
         RerunEnqueuePolicy(
-            retention_class_key='standard_30d',
+            retention=timedelta(days=30),
             retain_rerun_input=True,
             reservation_window=timedelta(hours=24),
         ),

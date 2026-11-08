@@ -104,10 +104,7 @@ from .core.models.schedule import (
 )
 from .core.models.payload import PayloadPolicy
 from .core.models.recovery import RecoveryConfig
-from .core.models.retention import (
-    RetentionClassConfig,
-    RetentionConfig,
-)
+from .core.models.retention import RetentionConfig
 from .core.models.resilience import WorkerResilienceConfig
 from .core.types.status import TaskStatus, TaskAttemptOutcome, TASK_TERMINAL_STATES
 from .core.errors import ErrorCode, ValidationReport, MultipleValidationErrors
@@ -289,7 +286,6 @@ __all__ = [
     'PayloadPolicy',
     # Recovery
     'RecoveryConfig',
-    'RetentionClassConfig',
     'RetentionChoice',
     'RetentionConfig',
     'WorkerResilienceConfig',

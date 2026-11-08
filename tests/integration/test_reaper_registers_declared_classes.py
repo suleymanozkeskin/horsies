@@ -1,4 +1,4 @@
-"""The maintenance pass registers the classes config declares.
+"""The maintenance pass registers the period classes config lists.
 
 `ensure_partition_coverage` accepting `declared_classes` proves the
 registrar works when called with them. It cannot prove the reaper passes
@@ -22,16 +22,14 @@ from sqlalchemy import text
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.recovery import RecoveryConfig
-from horsies.core.models.retention import (
-    RetentionClassConfig,
-    RetentionConfig,
-)
+from horsies.core.history.periods import period_class_key
+from horsies.core.models.retention import RetentionConfig
 from horsies.core.worker.runtime import _ReaperPassState
 from horsies.core.worker.worker import Worker, WorkerConfig
 from tests.broker_resources_support import current_resources
 
-DECLARED_KEY = 'it_reaper_declared'
 DECLARED_DURATION = timedelta(days=11)
+DECLARED_KEY = period_class_key(DECLARED_DURATION.days)
 
 
 def _reaper_worker(broker: PostgresBroker) -> Worker:
@@ -56,12 +54,8 @@ def _maintenance_state() -> _ReaperPassState:
     )
 
 
-def _config_declaring(key: str, duration: timedelta) -> RetentionConfig:
-    return RetentionConfig(
-        retention_classes=(
-            RetentionClassConfig(key=key, duration=duration),
-        )
-    )
+def _config_listing(duration: timedelta) -> RetentionConfig:
+    return RetentionConfig(retention_periods=(duration,))
 
 
 async def _registered_duration(
@@ -133,7 +127,7 @@ class TestReaperRegistersDeclaredClasses:
                 broker,
                 current_resources(broker),
                 RecoveryConfig(),
-                _config_declaring(DECLARED_KEY, DECLARED_DURATION),
+                _config_listing(DECLARED_DURATION),
                 _maintenance_state(),
             )
 
@@ -180,9 +174,7 @@ class TestReaperRegistersDeclaredClasses:
         await _forget_class(broker, DECLARED_KEY)
         try:
             worker = _reaper_worker(broker)
-            worker.cfg.retention_config = _config_declaring(
-                DECLARED_KEY, DECLARED_DURATION
-            )
+            worker.cfg.retention_config = _config_listing(DECLARED_DURATION)
             # Read it back the way the loop does, then drive the pass
             # with exactly that value.
             carried = worker.cfg.retention_config

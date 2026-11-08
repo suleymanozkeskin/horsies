@@ -1,8 +1,8 @@
 """App instance mapping a queue to a retention duration.
 
 The mapping is the subject: a worker booted from this module must route
-a task sent on the mapped queue into the class the mapping derives, and
-that can only happen if the derived class reaches the registrar and the
+a task sent on the mapped queue into the class of the mapped period, and
+that can only happen if the period's class reaches the registrar and the
 resolved key reaches the enqueue.
 
 Maintenance intervals sit at their floors so a booted worker's first
@@ -29,7 +29,7 @@ DB_URL = e2e_database_url('HORSES_E2E_DB_URL')
 
 MAPPED_QUEUE = 'default'
 MAPPED_DURATION = timedelta(days=7)
-DERIVED_CLASS_KEY = 'q_default_7d'
+PERIOD_CLASS_KEY = 'standard_7d'
 
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,

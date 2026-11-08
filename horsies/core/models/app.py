@@ -273,8 +273,8 @@ class AppConfig(BaseModel):
                     code=ErrorCode.CONFIG_INVALID_RETENTION,
                     notes=[
                         f'configured queues: {sorted(configured_queues)}',
-                        'an unmatched mapping builds a retention class '
-                        'nothing ever routes into',
+                        'an unmatched mapping registers a retention class '
+                        'that no queue routes into',
                     ],
                     help_text=(
                         'correct the queue name, or remove the mapping'
@@ -384,8 +384,8 @@ class AppConfig(BaseModel):
             f'{self.retention.terminal_record_retention_hours}'
         )
         lines.append(
-            f'    declared_classes: '
-            f'{[c.key for c in self.retention.retention_classes]}'
+            f'    period_classes: '
+            f'{[key for key, _ in self.retention.registrable_classes()]}'
         )
 
         # Resilience config
