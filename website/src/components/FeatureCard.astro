@@ -3,18 +3,20 @@ interface Props {
 	title: string;
 	icon: string;
 	description: string;
+	href?: string;
 }
 
-const { title, icon, description } = Astro.props;
+const { title, icon, description, href } = Astro.props;
+const Element = href ? 'a' : 'div';
 ---
 
-<div class="feature-card">
+<Element class:list={['feature-card', { 'feature-card-link': href }]} href={href}>
 	<div class="feature-card-header">
 		<img src={icon} alt="" class="feature-card-icon" />
 		<h3 class="feature-card-title">{title}</h3>
 	</div>
 	<p class="feature-card-description">{description}</p>
-</div>
+</Element>
 
 <style>
 	.feature-card {
@@ -30,6 +32,12 @@ const { title, icon, description } = Astro.props;
 
 	.feature-card:hover {
 		border-color: var(--horsie-gold);
+	}
+
+	.feature-card-link {
+		display: block;
+		color: inherit;
+		text-decoration: none;
 	}
 
 	.feature-card-header {
