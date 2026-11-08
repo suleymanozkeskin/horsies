@@ -10,15 +10,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from horsies.core.history.reads.pages import HistoryWindow
 from horsies.core.types.result import Ok, is_ok
 from horsies.core.types.status import TaskStatus
-from horsies.monitoring import ErrorCategory, task_facets
+from horsies.monitoring import ErrorCategory, MonitoringWindow, task_facets
 from horsies.monitoring.queries import facets_statement
 
 pytestmark = pytest.mark.unit
 
-_WINDOW = HistoryWindow(
+_WINDOW = MonitoringWindow(
     datetime(2026, 1, 1, tzinfo=UTC),
     datetime(2026, 1, 1, tzinfo=UTC) + timedelta(days=1),
 )
@@ -182,7 +181,7 @@ async def test_no_rows_give_empty_facets() -> None:
 def test_the_statement_bounds_the_code_list_per_category() -> None:
     """An error code is a free string, so the rows must not follow the codes."""
     sql, params = facets_statement(
-        window=_WINDOW,
+        window=_WINDOW.history,
         statuses=[TaskStatus.FAILED],
         retried_only=True,
     )
@@ -195,7 +194,7 @@ def test_the_statement_bounds_the_code_list_per_category() -> None:
 
 
 def test_the_statement_names_each_built_in_family() -> None:
-    sql, params = facets_statement(window=_WINDOW, statuses=[], retried_only=False)
+    sql, params = facets_statement(window=_WINDOW.history, statuses=[], retried_only=False)
 
     for category in ErrorCategory:
         assert f"'{category.value}'" in sql
@@ -204,7 +203,7 @@ def test_the_statement_names_each_built_in_family() -> None:
 
 
 def test_the_statement_scopes_only_the_history_side_by_the_window() -> None:
-    sql, _ = facets_statement(window=_WINDOW, statuses=[], retried_only=False)
+    sql, _ = facets_statement(window=_WINDOW.history, statuses=[], retried_only=False)
 
     assert sql.count('retention_anchor_at') == 2
     assert 'WHERE TRUE' in sql

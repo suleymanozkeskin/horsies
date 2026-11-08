@@ -19,7 +19,7 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from horsies.core.brokers.resources import EventLoopLimit
 from horsies.core.history.errors import HistoryContractError
-from horsies.core.history.reads.pages import HistoryWindow
+from horsies.monitoring.history_window import MonitoringWindow
 from horsies.core.types.result import is_err
 from horsies.monitoring import queries as queries_module
 from horsies.monitoring.errors import (
@@ -216,7 +216,7 @@ class TestHistoryContractViolation:
 
         result = await list_tasks(
             broker,
-            window=HistoryWindow(lower=upper - timedelta(days=1), upper=upper),
+            window=MonitoringWindow(lower=upper - timedelta(days=1), upper=upper),
             statuses=[],
             task_names=[],
             queues=[],

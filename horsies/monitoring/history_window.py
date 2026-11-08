@@ -23,6 +23,37 @@ MONITORING_WINDOW_MAX: Final = timedelta(days=30)
 
 
 @dataclass(frozen=True, slots=True)
+class MonitoringWindow:
+    """The terminal-history window that every monitoring read takes.
+
+    ``resolve_monitoring_window`` builds it: bounds timezone-aware,
+    increasing, and at most ``MONITORING_WINDOW_MAX`` apart. The type
+    carries that bound, so no read checks it again. A direct build with
+    other bounds is a defect, and the constructor asserts it.
+    """
+
+    lower: datetime
+    upper: datetime
+
+    def __post_init__(self) -> None:
+        assert self.lower.tzinfo is not None and self.upper.tzinfo is not None, (
+            'monitoring window bounds must be timezone-aware'
+        )
+        assert self.lower < self.upper, (
+            f'monitoring window must be increasing: {self.lower} >= {self.upper}'
+        )
+        assert self.upper - self.lower <= MONITORING_WINDOW_MAX, (
+            f'monitoring window {self.upper - self.lower} exceeds '
+            f'{MONITORING_WINDOW_MAX}'
+        )
+
+    @property
+    def history(self) -> HistoryWindow:
+        """The same bounds as the history-read window."""
+        return HistoryWindow(lower=self.lower, upper=self.upper)
+
+
+@dataclass(frozen=True, slots=True)
 class WindowRefused:
     """The requested window is not servable; the reason names why."""
 
@@ -34,7 +65,7 @@ def resolve_monitoring_window(
     since: datetime | None,
     until: datetime | None,
     now: datetime | None = None,
-) -> HistoryWindow | WindowRefused:
+) -> MonitoringWindow | WindowRefused:
     """Resolve the terminal-history window for one monitoring request.
 
     Absent bounds take the default: the last
@@ -61,4 +92,4 @@ def resolve_monitoring_window(
                 f'the window exceeds the {maximum_days}-day maximum'
             )
         )
-    return HistoryWindow(lower=lower, upper=upper)
+    return MonitoringWindow(lower=lower, upper=upper)

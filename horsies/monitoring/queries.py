@@ -96,6 +96,7 @@ from horsies.core.models.workflow_pg import WorkflowModel, WorkflowTaskModel
 from horsies.core.types.result import Err, Ok
 from horsies.core.types.status import TaskStatus
 from horsies.core.utils.db import is_retryable_connection_error
+from horsies.monitoring.history_window import MonitoringWindow
 from horsies.monitoring.errors import (
     MonitoringQueryDbOperationFailed,
     MonitoringQueryEventLoopLimit,
@@ -865,7 +866,7 @@ def _facet_values(rows: Sequence[tuple[str | None, int]]) -> list[FacetValue]:
 async def task_stats(
     broker: PostgresBroker,
     *,
-    window: HistoryWindow,
+    window: MonitoringWindow,
     task_names: list[str],
     queues: list[str],
     workers: list[str],
@@ -895,7 +896,7 @@ async def task_stats(
         select(TaskModel.status, func.count()).where(*scope).group_by(TaskModel.status)
     )
     history_sql, history_params = history_scoped_status_counts_statement(
-        window,
+        window.history,
         _history_scope(
             statuses=[],
             task_names=task_names,
@@ -938,7 +939,7 @@ async def task_stats(
 async def task_facets(
     broker: PostgresBroker,
     *,
-    window: HistoryWindow,
+    window: MonitoringWindow,
     statuses: list[TaskStatus],
     error_categories: list[ErrorCategory],
     retried_only: bool,
@@ -963,7 +964,7 @@ async def task_facets(
             pass
 
     sql, params = facets_statement(
-        window=window,
+        window=window.history,
         statuses=statuses,
         retried_only=retried_only,
     )
@@ -1006,7 +1007,7 @@ async def task_facets(
 async def task_breakdown(
     broker: PostgresBroker,
     *,
-    window: HistoryWindow,
+    window: MonitoringWindow,
     group_by: TaskGroupBy,
     statuses: list[TaskStatus],
     task_names: list[str],
@@ -1066,7 +1067,7 @@ async def task_breakdown(
         'queue': 'queue_name',
     }[group_by]
     history_sql, history_params = history_breakdown_statement(
-        window,
+        window.history,
         _history_scope(
             statuses=statuses,
             task_names=task_names,
@@ -1275,7 +1276,7 @@ async def _estimated_history_total(
 async def list_tasks(
     broker: PostgresBroker,
     *,
-    window: HistoryWindow,
+    window: MonitoringWindow,
     statuses: list[TaskStatus],
     task_names: list[str],
     queues: list[str],
@@ -1326,7 +1327,7 @@ async def list_tasks(
     )
     page_sql, page_params = history_page_statement(
         HistoryPageQuery(
-            window=window,
+            window=window.history,
             limit=reach,
             offset=0,
             scope=history_scope,
@@ -1336,7 +1337,7 @@ async def list_tasks(
         )
     )
     count_sql, count_params = history_count_statement(
-        window, history_scope
+        window.history, history_scope
     )
 
     match await broker.select_resources():
@@ -1356,7 +1357,7 @@ async def list_tasks(
                 case []:
                     live_total = await _estimated_task_total(session)
                     history_total = await _estimated_history_total(
-                        session, window, history_scope
+                        session, window.history, history_scope
                     )
                 case _:
                     count_stmt = (
