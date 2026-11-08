@@ -163,7 +163,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - .send(*args, **kwargs) -> TaskSendResult[TaskHandle[T]] (enqueue for background execution)
 - .send_async(*args, **kwargs) -> TaskSendResult[TaskHandle[T]] (async enqueue)
 - .schedule(delay_seconds, *args, **kwargs) -> TaskSendResult[TaskHandle[T]] (delayed enqueue)
-- .with_options(*, good_until=None, idempotency_key=None, retention_class_key=<unset>) -> TaskSendOptions[P, T] (per-send options builder)
+- .with_options(*, good_until=None, idempotency_key=None, retention=<unset>) -> TaskSendOptions[P, T] (per-send options builder; retention: timedelta in whole days, or None for forever)
 - .retry_send(error: TaskSendRetryable) -> TaskSendResult[TaskHandle[T]] (retry failed send with stored payload)
 - .retry_send_async(error: TaskSendRetryable) -> TaskSendResult[TaskHandle[T]] (async retry)
 - .retry_schedule(error: TaskSendRetryable) -> TaskSendResult[TaskHandle[T]] (retry failed schedule with stored payload)
@@ -171,7 +171,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - .task_name -> str
 
 ### TaskSendOptions[P, T] (per-send options)
-- Returned by task.with_options(good_until=None, idempotency_key=None, retention_class_key=<unset>)
+- Returned by task.with_options(good_until=None, idempotency_key=None, retention=<unset>)
 - .send(*args, **kwargs) -> TaskSendResult[TaskHandle[T]]
 - .send_async(*args, **kwargs) -> TaskSendResult[TaskHandle[T]]
 - .schedule(delay, *args, **kwargs) -> TaskSendResult[TaskHandle[T]]
@@ -440,8 +440,8 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - partition_maintenance_interval_s: int (default 900, range 60-3600)
 - retention_sweep_interval_s: int (default 300, range 30s-24h)
 - retention_delete_batch_size: int (default 500, range 50-10000)
-- retention_classes: tuple[RetentionClassConfig, ...] (default ())
-- queue_retention: dict[str, timedelta | None] (default {})
+- retention_periods: tuple[timedelta, ...] (default (); whole days 1-1825; periods a send may choose explicitly)
+- queue_retention: dict[str, timedelta | None] (default {}; whole days 1-1825, or None for forever; the class key is standard_<days>d)
 - Terminal task records are removed by partition drop, not by row delete
 
 ### WorkerResilienceConfig

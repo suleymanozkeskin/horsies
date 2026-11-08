@@ -1,4 +1,4 @@
-"""A mapped queue routes a real task into its derived partition.
+"""A mapped queue routes a real task into the partition of its period.
 
 The unit tests assert the key a send stamps; they build the app
 themselves and never terminalize anything. This boots a worker through
@@ -7,14 +7,14 @@ completed record actually landed in.
 
 The partition comes from `tableoid`, which is the routing fact itself
 rather than an inference from the class column: a record can carry the
-right class key and still sit in the wrong relation if the derived class
+right class key and still sit in the wrong relation if the period's class
 was never registered.
 
 The send is not gated on the class existing: waiting for it would make
 the test measure whichever registration path happened to run first.
 
 What this proves is the routing outcome — a task sent on a mapped queue
-ends up in that queue's derived partition, through a real worker and a
+ends up in the partition of that queue's period, through a real worker and a
 real terminalization. It does NOT prove which path registered the class.
 Startup registration and the periodic maintenance pass both create it,
 and nothing here separates them, so a claim about startup specifically
@@ -32,7 +32,7 @@ from sqlalchemy import create_engine, text
 from tests.e2e.helpers.retention import forget_retention_class
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.tasks.instance_queue_retention import (
-    DERIVED_CLASS_KEY,
+    PERIOD_CLASS_KEY,
     mapped_task,
 )
 
@@ -64,16 +64,16 @@ def _history_partition(task_id: str) -> str | None:
         engine.dispose()
 
 
-def _forget_derived_class() -> None:
-    """Drop the derived class, its leaves, and the readers naming them."""
-    forget_retention_class(DB_URL, DERIVED_CLASS_KEY)
+def _forget_period_class() -> None:
+    """Drop the period class, its leaves, and the readers naming them."""
+    forget_retention_class(DB_URL, PERIOD_CLASS_KEY)
 
 
-def test_a_mapped_queue_lands_the_record_in_its_derived_partition() -> None:
-    _forget_derived_class()
+def test_a_mapped_queue_lands_the_record_in_its_period_partition() -> None:
+    _forget_period_class()
     try:
         # No readiness gate on the class being registered. Startup
-        # coverage registers queue-derived classes, so a booted worker
+        # coverage registers the mapped periods' classes, so a booted worker
         # has the partition before it can claim anything — and the send
         # below races that startup deliberately. A gate here would wait
         # for the very condition under test and pass whether or not
@@ -94,9 +94,9 @@ def test_a_mapped_queue_lands_the_record_in_its_derived_partition() -> None:
         assert partition is not None, (
             'the task never reached history; routing cannot be judged'
         )
-        assert DERIVED_CLASS_KEY in partition, (
+        assert PERIOD_CLASS_KEY in partition, (
             f'the record landed in {partition!r}, not in a leaf of the '
-            f'class the queue mapping derives ({DERIVED_CLASS_KEY!r})'
+            f'class of the mapped period ({PERIOD_CLASS_KEY!r})'
         )
     finally:
-        _forget_derived_class()
+        _forget_period_class()

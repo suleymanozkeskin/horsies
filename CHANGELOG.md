@@ -8,6 +8,58 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking: a retention class is identified by its period.** The class
+  key is `standard_<days>d`, so a key always means one duration, and two
+  processes cannot disagree about it. Queues mapped to one period share one
+  class: one parent, one daily partition for each retained day, and their
+  indexes, where each mapped queue had its own set. The default class keeps
+  its key, `standard_30d`.
+  - `queue_retention` keeps `dict[str, timedelta | None]`. A period is whole
+    days from 1 to 1825; a fractional day, zero, or more than 1825 days is
+    refused at load. Any configured queue name can be mapped: the queue name
+    is no longer part of the class key, so the 18-character key limit and
+    the identifier rule do not apply to it.
+  - `retention_classes` and `RetentionClassConfig` are removed, and a config
+    that sets `retention_classes` is refused at load. List the finite
+    periods that sends choose explicitly in `RetentionConfig.retention_periods`.
+  - `with_options(retention=...)` replaces `with_options(retention_class_key=...)`:
+    a whole-day `timedelta` that this process registers, or `None` for
+    forever. Any other value, such as a class key string, returns
+    `VALIDATION_FAILED` at the send call.
+  - `RerunEnqueuePolicy` takes `retention: timedelta | None` in place of
+    `retention_class_key`.
+  - `PostgresBroker.enqueue` and `enqueue_async` take
+    `retention_class_key: RetentionClassKey | None`; a key comes from
+    `horsies.core.history.periods.period_class_key`, so a raw string is a
+    type error.
+- A broker refuses to initialize when the key of one of its periods is
+  registered with another duration. Only a class declared by name before
+  0.6.1 can hold such a key, for example `standard_14d` declared with 7
+  days. The error names the key and both durations, and it is not
+  retryable.
+
+### Upgrade notes
+
+- Replace `retention_classes=(RetentionClassConfig(key=..., duration=d),)`
+  with `retention_periods=(d,)`, and `with_options(retention_class_key='<key>')`
+  with `with_options(retention=d)`. `with_options(retention_class_key=None)`
+  becomes `with_options(retention=None)`.
+- Make each period whole days. Sub-day periods such as
+  `timedelta(hours=36)` are refused.
+- Classes from earlier versions stay registered: `q_<queue>_<duration>` and
+  named declarations. Their rows are deleted on their own durations, and new
+  sends never stamp them. Remove nothing from the database. A class that no
+  send stamps keeps about (days + 4) empty daily partitions.
+- A keyed send whose first attempt ran on 0.6.0, resent after the upgrade on
+  a mapped queue or with an explicit 0.6.0 class key, is refused as a
+  payload mismatch for the rest of its reservation window: the stamped class
+  is part of the stored request fingerprint.
+- A rerun can no longer target a class from an earlier version (`q_*` or a
+  declared name): `RerunEnqueuePolicy` takes a period.
+- The schema does not change.
+
 ## [0.6.0] - 2026-11-03
 
 0.6.0 moves task execution to child processes that the worker owns, closes the

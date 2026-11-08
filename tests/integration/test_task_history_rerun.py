@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.history.errors import HistoryContractError
+from horsies.core.history.periods import period_class_key
 from horsies.core.history.identity.keys import ScopedIdempotencyKey
 from horsies.core.history.reads.detail import TaskAbsenceReason
 from horsies.core.history.identity.reservations import (
@@ -53,7 +54,6 @@ from horsies.core.types.status import TaskStatus
 
 from tests.broker_resources_support import current_resources
 from tests.integration.history_seeding import (
-    HISTORY_SEED_CLASS_KEY,
     route_rows,
     stored_history_status,
 )
@@ -71,8 +71,13 @@ from tests.integration.test_monitoring_queries import make_task
 pytestmark = [pytest.mark.integration]
 
 UTC = timezone.utc
-CLASS_KEY = 'it_rerun'
-SECOND_CLASS = 'it_rerun_b'
+# A rerun policy names a period, so its classes are period classes, each
+# registered with the period its key stands for.
+CLASS_DAYS = 11
+CLASS_KEY = period_class_key(CLASS_DAYS)
+SECOND_DAYS = 12
+SECOND_CLASS = period_class_key(SECOND_DAYS)
+NEVER_REGISTERED_DAYS = 13
 WORKER = 'worker-rerun-1'
 INPUT_PAYLOAD = encode_input_envelope_v1(
     args=[1, 'x'], kwargs={'k': 'v'}, options={'timeout_ms': 5}
@@ -85,11 +90,11 @@ terminalization_schema = terminalization_schema_fixture(
 
 def policy(
     *,
-    class_key: str = CLASS_KEY,
+    days: int = CLASS_DAYS,
     retain: bool = True,
 ) -> RerunEnqueuePolicy:
     return RerunEnqueuePolicy(
-        retention_class_key=class_key,
+        retention=timedelta(days=days),
         retain_rerun_input=retain,
         reservation_window=timedelta(hours=24),
     )
@@ -160,7 +165,7 @@ class TestRerunEndToEnd:
     ) -> None:
         deadline = datetime.now(UTC) + timedelta(hours=2)
         async with terminalization_schema.engine.begin() as connection:
-            await prepare_move_storage(connection, CLASS_KEY)
+            await prepare_move_storage(connection, CLASS_KEY, duration_days=CLASS_DAYS)
             source = await seed_failed_source(connection)
             before = await history_row_bytes(connection, source)
 
@@ -208,7 +213,7 @@ class TestRerunEndToEnd:
         self, terminalization_schema: HistorySchema
     ) -> None:
         async with terminalization_schema.engine.begin() as connection:
-            await prepare_move_storage(connection, CLASS_KEY)
+            await prepare_move_storage(connection, CLASS_KEY, duration_days=CLASS_DAYS)
             source = await seed_failed_source(connection)
             first = await rerun_task(
                 connection,
@@ -249,13 +254,13 @@ class TestRerunEndToEnd:
         self, terminalization_schema: HistorySchema
     ) -> None:
         async with terminalization_schema.engine.begin() as connection:
-            await prepare_move_storage(connection, CLASS_KEY)
-            await prepare_move_storage(connection, SECOND_CLASS)
+            await prepare_move_storage(connection, CLASS_KEY, duration_days=CLASS_DAYS)
+            await prepare_move_storage(connection, SECOND_CLASS, duration_days=SECOND_DAYS)
             source = await seed_failed_source(connection)
             outcome = await rerun_task(
                 connection,
                 RerunTask(source_task_id=source, deadline=None),
-                policy(class_key=SECOND_CLASS),
+                policy(days=SECOND_DAYS),
             )
             assert isinstance(outcome, RerunEnqueued)
             row = await live_row(connection, outcome.new_task_id)
@@ -268,18 +273,18 @@ class TestRerunEndToEnd:
         """A typo'd class must cost a refused call, not a new task that
         runs to completion and then has no history partition to land in."""
         async with terminalization_schema.engine.begin() as connection:
-            await prepare_move_storage(connection, CLASS_KEY)
+            await prepare_move_storage(connection, CLASS_KEY, duration_days=CLASS_DAYS)
             source = await seed_failed_source(connection)
             before = (
                 await connection.execute(
                     text('SELECT count(*) FROM horsies_tasks')
                 )
             ).scalar_one()
-            with pytest.raises(ValueError, match='unknown retention class'):
+            with pytest.raises(ValueError, match='is not registered'):
                 await rerun_task(
                     connection,
                     RerunTask(source_task_id=source, deadline=None),
-                    policy(class_key='it_never_registered'),
+                    policy(days=NEVER_REGISTERED_DAYS),
                 )
             after = (
                 await connection.execute(
@@ -293,7 +298,7 @@ class TestRerunEndToEnd:
         self, terminalization_schema: HistorySchema
     ) -> None:
         async with terminalization_schema.engine.begin() as connection:
-            await prepare_move_storage(connection, CLASS_KEY)
+            await prepare_move_storage(connection, CLASS_KEY, duration_days=CLASS_DAYS)
             source = await seed_failed_source(connection)
             outcome = await rerun_task(
                 connection,
@@ -316,7 +321,7 @@ class TestTypedRefusals:
         self, terminalization_schema: HistorySchema
     ) -> None:
         async with terminalization_schema.engine.begin() as connection:
-            await prepare_move_storage(connection, CLASS_KEY)
+            await prepare_move_storage(connection, CLASS_KEY, duration_days=CLASS_DAYS)
             live = await insert_live_task(
                 connection, class_key=CLASS_KEY, worker=WORKER
             )
@@ -332,7 +337,7 @@ class TestTypedRefusals:
         self, terminalization_schema: HistorySchema
     ) -> None:
         async with terminalization_schema.engine.begin() as connection:
-            await prepare_move_storage(connection, CLASS_KEY)
+            await prepare_move_storage(connection, CLASS_KEY, duration_days=CLASS_DAYS)
             ghost = str(uuid4())
             outcome = await rerun_task(
                 connection,
@@ -348,7 +353,7 @@ class TestTypedRefusals:
         self, terminalization_schema: HistorySchema
     ) -> None:
         async with terminalization_schema.engine.begin() as connection:
-            await prepare_move_storage(connection, CLASS_KEY)
+            await prepare_move_storage(connection, CLASS_KEY, duration_days=CLASS_DAYS)
             task_id = await insert_live_task(
                 connection, class_key=CLASS_KEY, worker=WORKER
             )
@@ -382,7 +387,7 @@ class TestTypedRefusals:
         self, terminalization_schema: HistorySchema
     ) -> None:
         async with terminalization_schema.engine.begin() as connection:
-            await prepare_move_storage(connection, CLASS_KEY)
+            await prepare_move_storage(connection, CLASS_KEY, duration_days=CLASS_DAYS)
             task_id = await insert_live_task(
                 connection,
                 class_key=CLASS_KEY,
@@ -420,7 +425,7 @@ class TestTypedRefusals:
         self, terminalization_schema: HistorySchema
     ) -> None:
         async with terminalization_schema.engine.begin() as connection:
-            await prepare_move_storage(connection, CLASS_KEY)
+            await prepare_move_storage(connection, CLASS_KEY, duration_days=CLASS_DAYS)
             source = await insert_live_task(
                 connection,
                 class_key=CLASS_KEY,
@@ -451,7 +456,7 @@ class TestTypedRefusals:
         self, terminalization_schema: HistorySchema
     ) -> None:
         async with terminalization_schema.engine.begin() as connection:
-            await prepare_move_storage(connection, CLASS_KEY)
+            await prepare_move_storage(connection, CLASS_KEY, duration_days=CLASS_DAYS)
             source = await seed_failed_source(connection)
             await connection.execute(
                 text(
@@ -494,7 +499,7 @@ class TestTypedRefusals:
         detail: str,
     ) -> None:
         async with terminalization_schema.engine.begin() as connection:
-            await prepare_move_storage(connection, CLASS_KEY)
+            await prepare_move_storage(connection, CLASS_KEY, duration_days=CLASS_DAYS)
             source = await seed_failed_source(
                 connection, prepared_inline=payload
             )
@@ -517,7 +522,7 @@ class TestKeyedRerun:
         self, terminalization_schema: HistorySchema
     ) -> None:
         async with terminalization_schema.engine.begin() as connection:
-            await prepare_move_storage(connection, CLASS_KEY)
+            await prepare_move_storage(connection, CLASS_KEY, duration_days=CLASS_DAYS)
             source = await seed_failed_source(connection)
             first = await rerun_task(
                 connection,
@@ -560,7 +565,7 @@ class TestKeyedRerun:
         own reservation cannot alias its rerun — the conflict is the
         contract working."""
         async with terminalization_schema.engine.begin() as connection:
-            await prepare_move_storage(connection, CLASS_KEY)
+            await prepare_move_storage(connection, CLASS_KEY, duration_days=CLASS_DAYS)
             source = await seed_failed_source(connection)
             scoped = ScopedIdempotencyKey(
                 task_name='it.move', key='original-key'
@@ -621,7 +626,7 @@ class TestStoredSourceDoesNotDecode:
                     connection,
                     RerunTask(source_task_id=source.id, deadline=None),
                     RerunEnqueuePolicy(
-                        retention_class_key=HISTORY_SEED_CLASS_KEY,
+                        retention=timedelta(days=30),
                         retain_rerun_input=True,
                         reservation_window=timedelta(hours=24),
                     ),

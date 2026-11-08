@@ -7,7 +7,7 @@ and environment variables.
 
 Root configuration passed to `Horsies(config=AppConfig(...))`.
 Pydantic `BaseModel`, frozen after construction.
-Every config model (`AppConfig`, `PostgresConfig`, `RecoveryConfig`, `PayloadPolicy`, `CustomQueueConfig`, `RetentionConfig`, `RetentionClassConfig`, `WorkerResilienceConfig`, `ScheduleConfig`, `TaskSchedule` and the schedule patterns) refuses unknown keys: a misspelled field raises `ValidationError` with the type `extra_forbidden`.
+Every config model (`AppConfig`, `PostgresConfig`, `RecoveryConfig`, `PayloadPolicy`, `CustomQueueConfig`, `RetentionConfig`, `WorkerResilienceConfig`, `ScheduleConfig`, `TaskSchedule` and the schedule patterns) refuses unknown keys: a misspelled field raises `ValidationError` with the type `extra_forbidden`.
 
 ```python
 from pydantic import SecretStr
@@ -487,8 +487,8 @@ Setting any of these on `RecoveryConfig` fails at construction naming
 | `partition_maintenance_interval_s` | `int` | `900` | 60–3600 | Seconds between partition-maintenance passes (coverage ensure + pruning of expired partitions; no separate pruning knob exists) |
 | `retention_sweep_interval_s` | `int` | `300` (5 min) | 30s–24h | Seconds between retention sweep passes |
 | `retention_delete_batch_size` | `int` | `500` | 50–10000 | Rows per workflow-retention DELETE batch; each batch commits independently |
-| `retention_classes` | `tuple[RetentionClassConfig, ...]` | `()` | keys: safe identifiers, not library-owned, no repeats; durations positive | Additional finite retention classes this deployment declares (key + duration); the maintenance owner registers each at startup and every pass, and tasks are sent into one via `with_options(retention_class_key=...)`. Classes are immutable: re-declaring a key with a different duration is refused at startup. `duration` is a minimum — leaves span one day, so a row survives between `duration` and `duration + 1 day` |
-| `queue_retention` | `dict[str, timedelta \| None]` | `{}` | see [`queue_retention`](#queue_retention) | Per-queue retention class; see [`queue_retention`](#queue_retention) |
+| `retention_periods` | `tuple[timedelta, ...]` | `()` | whole days 1–1825; no repeats | Finite periods a send may choose with `with_options(retention=...)` besides the 30-day default and the mapped periods; the maintenance owner registers the class of each at startup and every pass. A period is a minimum — leaves span one day, so a row survives between the period and the period plus one day |
+| `queue_retention` | `dict[str, timedelta \| None]` | `{}` | whole days 1–1825, or None; see [`queue_retention`](#queue_retention) | Per-queue retention period; see [`queue_retention`](#queue_retention) |
 
 ### `queue_retention`
 
@@ -520,7 +520,7 @@ config = AppConfig(
     ),
     retention=RetentionConfig(
         queue_retention={
-            "emails": timedelta(days=7),  # derives class q_emails_7d
+            "emails": timedelta(days=7),  # class standard_7d
             "audit": None,  # keeps records forever
         },
     ),
@@ -530,21 +530,25 @@ config = AppConfig(
 Rules (HRS-216 when a rule fails):
 
 - Each key must be a configured queue: a `custom_queues` name in `CUSTOM`
-  mode, or `"default"` in `DEFAULT` mode.
-- Queue names must be safe identifiers. Durations must be positive and
-  whole seconds.
-- A mapping derives the class `q_<queue>_<duration>`. The duration uses
-  the largest exact unit: `7d`, `36h`, `90m`, `45s`. The derived class is
-  registered with the declared `retention_classes`.
-- The duration is IN the key. A changed duration mints a NEW class.
-  Records enqueued under the old mapping age out under the old class.
-- `q_` is reserved. A `retention_classes` key cannot use the prefix.
+  mode, or `"default"` in `DEFAULT` mode. Any configured name works,
+  whatever its length or its characters.
+- A period is whole days from 1 to 1825, or `None`. A fractional day
+  (`timedelta(hours=36)`), zero, or more than 1825 days is refused, never
+  rounded.
+- A retention class is its period. The key is `standard_<days>d`:
+  `standard_7d`, `standard_30d` (the default), `standard_365d`. Queues
+  with one period share one class.
+- A changed period is another class. Records enqueued under the old
+  mapping age out under the old class.
 - The class is resolved at the send and snapshotted on the row. An
-  explicit `retention_class_key` (including `standard_30d`) beats the
+  explicit `retention` (including `timedelta(days=30)`) beats the
   mapping. A send without it takes the mapping.
-- The derived key has a limit of 18 characters, because it is spliced
-  into relation names. This leaves roughly 13 characters of queue name.
-  Configuration refuses a longer one with the arithmetic.
+- `retention_classes` was removed in 0.6.1 and is refused at load. Classes
+  from earlier versions (`q_<queue>_<duration>`, names declared in
+  `retention_classes`) stay registered and drain on their own durations.
+- A broker refuses to start when the key of one of its periods is held by
+  a class declared by name before 0.6.1 with another duration, and names
+  the key and both durations.
 
 
 ## WorkerResilienceConfig

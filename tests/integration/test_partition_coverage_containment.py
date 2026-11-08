@@ -184,9 +184,8 @@ async def test_coverage_contains_the_failure_and_keeps_going(
         await _forget_owned_class(broker, _RAISE_SURVIVOR_KEY)
 
 
-# A key that sorts BEFORE the default class, as every queue-derived key
-# does: `q_` < `standard_30d` in byte order. The ordering is no longer
-# incidental — the feature guarantees the adverse case.
+# A key that sorts BEFORE the default class, as the `q_` keys of
+# registries written before 0.6.1 do: `q_` < `standard_` in byte order.
 _REFUSING_KEY = 'q_broken_7d'
 
 

@@ -12,6 +12,7 @@ from ..history.ddl.classes import (
     resolve_retention_class_key,
 )
 from ..history.identity.fingerprint import EnqueueCommandV1
+from ..history.periods import RetentionClassKey
 
 # -- SQL constants for start_workflow_async --
 
@@ -144,7 +145,7 @@ def workflow_task_enqueue_stamp(
     kwargs_json: str | None,
     good_until: datetime | None,
     task_options_json: str | None,
-    retention_class_key: str | None = DEFAULT_RETENTION_CLASS_KEY,
+    retention_class_key: RetentionClassKey | None = DEFAULT_RETENTION_CLASS_KEY,
 ) -> dict[str, Any]:
     """Enqueue-time facts for one workflow backing task.
 

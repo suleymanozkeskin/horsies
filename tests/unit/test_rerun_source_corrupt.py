@@ -38,7 +38,7 @@ def _connection_with_a_registered_class() -> AsyncMock:
 
 def _policy() -> RerunEnqueuePolicy:
     return RerunEnqueuePolicy(
-        retention_class_key='standard',
+        retention=timedelta(days=30),
         retain_rerun_input=True,
         reservation_window=timedelta(hours=24),
     )
