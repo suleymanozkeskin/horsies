@@ -17,6 +17,8 @@ from horsies.core.types.result import Err, Ok
 from horsies.core.utils.loop_runner import in_running_event_loop
 from horsies.core.worker import task_loop as task_loop_module
 from horsies.core.worker.task_loop import (
+    ExecutorShutDown,
+    ExecutorThreadsLeft,
     LoopClosed,
     LoopCreateFailed,
     LoopNotCreated,
@@ -205,21 +207,21 @@ class TestLoopCreateFailure:
 
 class TestClose:
     def test_close_before_any_run_creates_no_loop(self, task_loop: TaskLoop) -> None:
-        task_loop.close()
-        assert task_loop.state == LoopClosed()
+        assert task_loop.close() == ExecutorShutDown()
+        assert task_loop.state == LoopClosed(ExecutorShutDown())
 
     def test_close_closes_the_loop(self, task_loop: TaskLoop) -> None:
         task_loop.run(_value(1)).unwrap()
         loop = _open_loop(task_loop)
-        task_loop.close()
+        assert task_loop.close() == ExecutorShutDown()
         assert loop.is_closed()
-        assert task_loop.state == LoopClosed()
+        assert task_loop.state == LoopClosed(ExecutorShutDown())
 
     def test_a_second_close_does_nothing(self, task_loop: TaskLoop) -> None:
         task_loop.run(_value(1)).unwrap()
-        task_loop.close()
-        task_loop.close()
-        assert task_loop.state == LoopClosed()
+        assert task_loop.close() == ExecutorShutDown()
+        assert task_loop.close() == ExecutorShutDown()
+        assert task_loop.state == LoopClosed(ExecutorShutDown())
 
     def test_close_cancels_a_task_left_on_the_loop(self, task_loop: TaskLoop) -> None:
         cleaned: list[str] = []
@@ -338,10 +340,13 @@ class TestClose:
         started = time.monotonic()
         try:
             with caplog.at_level(logging.WARNING, logger='horsies.worker'):
-                task_loop.close()
+                executor = task_loop.close()
             elapsed = time.monotonic() - started
+            second = task_loop.close()
         finally:
             release.set()
         assert elapsed < 10 * SHORT_CLOSE_TIMEOUT_S
+        assert executor == ExecutorThreadsLeft()
+        assert second == ExecutorThreadsLeft()
         assert loop.is_closed()
         assert 'default executor of the task loop did not shut down' in caplog.text

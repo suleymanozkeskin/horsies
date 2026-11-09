@@ -15,7 +15,7 @@ import sys
 import textwrap
 from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
-from typing import cast
+from typing import NoReturn, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import psutil
@@ -865,9 +865,14 @@ class TestChildSteps:
 
             return note
 
+        def serve_then_exit(*_args: object) -> NoReturn:
+            """``serve`` ends the process after a stop frame."""
+            steps.append('serve')
+            raise SystemExit(0)
+
         monkeypatch.setattr(preload_main.os, 'setsid', record('setsid'))
         monkeypatch.setattr(preload_main, '_wait_for_reparent', record('reparent'))
-        monkeypatch.setattr(preload_main, 'serve', record('serve'))
+        monkeypatch.setattr(preload_main, 'serve', serve_then_exit)
         monkeypatch.setattr(preload_main.socket, 'socket', MagicMock())
 
         with pytest.raises(SystemExit) as stopped:

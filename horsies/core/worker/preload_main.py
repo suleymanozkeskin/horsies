@@ -169,11 +169,10 @@ def _run_child(
     boot: BootFn,
     run_task: RunTaskFn,
 ) -> NoReturn:
-    """Become a worker child. Exits 0 after a stop frame, so ``atexit`` runs."""
+    """Become a worker child. After a stop frame, ``serve`` ends the process."""
     os.setsid()
     _wait_for_reparent(worker_pid)
     serve(socket.socket(fileno=child_fd), worker_pid, boot, run_task)
-    sys.exit(0)
 
 
 def _run_middle(

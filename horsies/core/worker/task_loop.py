@@ -15,6 +15,7 @@ import asyncio
 import time
 from collections.abc import Coroutine, Set
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Final, TypeVar, assert_never
 
 from horsies.core.logging import get_logger
@@ -44,11 +45,38 @@ class LoopOpen:
 
 
 @dataclass(frozen=True, slots=True)
+class ExecutorShutDown:
+    """The default executor of the loop shut down, or the loop had none."""
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutorThreadsLeft:
+    """The default executor did not shut down by the close deadline.
+
+    Its threads can still run work that a task started with
+    ``asyncio.to_thread()`` or ``loop.run_in_executor(None, ...)``. A normal
+    interpreter exit joins those threads, and nothing bounds that wait.
+    """
+
+
+type ExecutorAfterClose = ExecutorShutDown | ExecutorThreadsLeft
+
+
+@dataclass(frozen=True, slots=True)
 class LoopClosed:
     """The process stops. No task runs after this state."""
 
+    executor: ExecutorAfterClose
+
 
 type LoopState = LoopNotCreated | LoopOpen | LoopClosed
+
+
+class _CloseStep(Enum):
+    """How one step of the loop close ended."""
+
+    ENDED = 'ended'
+    PAST_DEADLINE = 'past_deadline'
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,23 +149,28 @@ class TaskLoop:
                 assert_never(unreachable)
         return Ok(loop.run_until_complete(coroutine))
 
-    def close(self) -> None:
+    def close(self) -> ExecutorAfterClose:
         """Cancel the tasks left on the loop, then close the loop.
 
         Waits at most ``LOOP_CLOSE_TIMEOUT_S`` in total, and logs what did
         not end in that time. Closes the loop also when a step fails.
-        A second call does nothing.
+        Returns whether threads of the default executor can still run, which
+        decides how the process can exit. A second call changes nothing and
+        returns the answer of the first.
         """
         match self._state:
             case LoopNotCreated():
-                self._state = LoopClosed()
+                self._state = LoopClosed(ExecutorShutDown())
             case LoopOpen(loop=loop):
-                self._state = LoopClosed()
-                _close_loop(loop)
+                # A step that raises still leaves the loop closed. Until the
+                # executor step ends, its threads can still run.
+                self._state = LoopClosed(ExecutorThreadsLeft())
+                self._state = LoopClosed(_close_loop(loop))
             case LoopClosed():
                 pass
             case _ as unreachable:
                 assert_never(unreachable)
+        return self._state.executor
 
 
 def _new_loop() -> Result[asyncio.AbstractEventLoop, LoopCreateFailed]:
@@ -154,15 +187,25 @@ def _seconds_left(deadline: float) -> float:
     return max(0.0, deadline - time.monotonic())
 
 
-def _close_loop(loop: asyncio.AbstractEventLoop) -> None:
+def _close_loop(loop: asyncio.AbstractEventLoop) -> ExecutorAfterClose:
     """Close the loop the way ``asyncio.run`` does, within one deadline."""
     deadline = time.monotonic() + LOOP_CLOSE_TIMEOUT_S
     try:
         _cancel_leftover_tasks(loop, deadline)
         _run_until(loop, loop.shutdown_asyncgens(), deadline, 'async generators')
-        _run_until(loop, loop.shutdown_default_executor(), deadline, 'default executor')
+        executor_step = _run_until(
+            loop,
+            loop.shutdown_default_executor(),
+            deadline,
+            'default executor',
+        )
     finally:
         loop.close()
+    match executor_step:
+        case _CloseStep.ENDED:
+            return ExecutorShutDown()
+        case _CloseStep.PAST_DEADLINE:
+            return ExecutorThreadsLeft()
 
 
 def _run_until(
@@ -170,7 +213,7 @@ def _run_until(
     step: Coroutine[Any, Any, None],
     deadline: float,
     what: str,
-) -> None:
+) -> _CloseStep:
     """Run one close step until ``deadline``. A step past it is cancelled and logged."""
     try:
         loop.run_until_complete(asyncio.wait_for(step, _seconds_left(deadline)))
@@ -180,6 +223,8 @@ def _run_until(
             what,
             LOOP_CLOSE_TIMEOUT_S,
         )
+        return _CloseStep.PAST_DEADLINE
+    return _CloseStep.ENDED
 
 
 def _cancel_leftover_tasks(loop: asyncio.AbstractEventLoop, deadline: float) -> None:

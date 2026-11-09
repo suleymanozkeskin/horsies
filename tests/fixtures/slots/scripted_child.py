@@ -33,6 +33,7 @@ from horsies.core.worker.child_protocol import (
 )
 from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
 from horsies.core.utils.loop_runner import in_running_event_loop
+from horsies.core.worker import task_loop as task_loop_module
 from horsies.core.worker.task_loop import TaskLoop
 
 _sock: socket.socket
@@ -79,6 +80,9 @@ def _boot(init: InitFrame) -> None:
                 raise RuntimeError('scripted replacement boot failure')
         case 'parent_identity':
             return
+        case 'close_timeout':
+            # A short close deadline keeps a test of the close bound fast.
+            setattr(task_loop_module, 'LOOP_CLOSE_TIMEOUT_S', float(argument))
         case _:
             raise AssertionError(mode)
 
@@ -120,6 +124,15 @@ async def _leave_pending(path: str) -> str:
     return str(os.getpid())
 
 
+async def _thread_outlives_wait(seconds: float) -> str:
+    """Stop waiting for an executor thread that keeps running."""
+    try:
+        await asyncio.wait_for(asyncio.to_thread(time.sleep, seconds), 0.05)
+    except TimeoutError:
+        return str(os.getpid())
+    raise AssertionError('the executor thread ended within the wait')
+
+
 def _no_running_loop() -> str:
     """Report a running loop, then run one with ``asyncio.run``."""
     return f'{in_running_event_loop()}|{asyncio.run(asyncio.sleep(0, "ran"))}'
@@ -141,6 +154,8 @@ def _run(frame: RunFrame, init: InitFrame, task_loop: TaskLoop) -> WireResult:
             return True, _no_running_loop(), None
         case 'leave_pending':
             return True, task_loop.run(_leave_pending(argument)).unwrap(), None
+        case 'thread_outlives_wait':
+            return True, task_loop.run(_thread_outlives_wait(float(argument))).unwrap(), None
         case 'pid':
             return _pid_result()
         case 'freeze_count':
@@ -252,7 +267,6 @@ def main() -> None:
     global _sock
     _sock = socket.socket(fileno=int(sys.argv[1]))
     serve(_sock, int(sys.argv[2]), _boot, _run)
-    sys.exit(0)
 
 
 if __name__ == '__main__':

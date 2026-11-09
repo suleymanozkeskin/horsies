@@ -47,6 +47,7 @@ The loop runs only while an async task runs:
 
 - A `def` task runs with no running event loop, so it can call `asyncio.run()`.
 - A coroutine that a task starts and does not await continues only while a later async task runs in the same child. When the worker stops the child, for example to recycle it, the child cancels that coroutine.
+- A thread that `asyncio.to_thread()` starts can outlive its task, for example when a timeout ends the wait for it. When the worker stops the child, the child does not wait for that thread past the 5-second close: it exits, and its `atexit` handlers do not run.
 
 In an async task, send with `.send_async()` or `.schedule_async()`. The sync `.send()` and `.schedule()` refuse a running event loop: they return `Err(TaskSendAsyncContext)` and enqueue nothing. See [Sending Tasks](sending-tasks).
 

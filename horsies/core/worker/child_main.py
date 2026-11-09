@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ctypes
 import gc
+import logging
 import multiprocessing
 import os
 import queue
@@ -48,13 +49,21 @@ from horsies.core.worker.child_protocol import (
     parse_header,
 )
 from horsies.core.worker.runtime import _read_current_rss_mb
-from horsies.core.worker.task_loop import TaskLoop
+from horsies.core.worker.task_loop import (
+    ExecutorAfterClose,
+    ExecutorShutDown,
+    ExecutorThreadsLeft,
+    TaskLoop,
+)
 
 logger = get_logger('worker')
 
 PARENT_GONE_EXIT_CODE: Final = 71
 BAD_PARENT_FRAME_EXIT_CODE: Final = 72
 BAD_ARGUMENTS_EXIT_CODE: Final = 73
+# After a stop frame, when threads of the task loop's executor still run:
+# the child leaves without waiting for them, so ``atexit`` handlers do not run.
+STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE: Final = 74
 INIT_FRAME_TIMEOUT_S: Final = 30.0
 # Metadata holds this text as JSON, and one character takes at most 12 bytes
 # there, so the reason stays well under ``MAX_META_BYTES``.
@@ -249,16 +258,45 @@ def _run_or_exit(
         os._exit(1)
 
 
+def exit_after_stop(executor: ExecutorAfterClose) -> NoReturn:
+    """End the process after a stop frame and the task loop close.
+
+    ``ExecutorShutDown``: ``sys.exit(0)``, so ``atexit`` handlers run.
+
+    ``ExecutorThreadsLeft``: a normal exit would join the executor threads
+    that still run, with no bound, until the parent kills the process group
+    after ``CHILD_STOP_TIMEOUT_S``. That kill also ends the background
+    processes that a retired child keeps. So the child flushes its log
+    handlers and its output, and leaves with ``os._exit`` and
+    ``STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE``. ``atexit`` handlers do not
+    run.
+    """
+    match executor:
+        case ExecutorShutDown():
+            sys.exit(0)
+        case ExecutorThreadsLeft():
+            logger.warning(
+                'Threads of the task loop executor still run after the stop; '
+                'the child exits without waiting for them',
+            )
+            logging.shutdown()
+            flush_output()
+            os._exit(STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def serve(
     sock: socket.socket,
     parent_pid: int,
     boot: BootFn,
     run_task: RunTaskFn,
-) -> None:
-    """Run the child until the parent sends a stop frame.
+) -> NoReturn:
+    """Run the child until the parent sends a stop frame, then end the process.
 
     Every task of the child gets the same ``TaskLoop``. The stop frame closes
-    it, bounded by ``LOOP_CLOSE_TIMEOUT_S``, before this returns.
+    it, bounded by ``LOOP_CLOSE_TIMEOUT_S``, and ``exit_after_stop`` ends the
+    process.
 
     Failure exits: an exception from ``boot`` propagates, so the child exits
     non-zero before it reports ready. A parent that is gone or that sends a
@@ -298,8 +336,7 @@ def serve(
                     ),
                 )
             case StopFrame():
-                task_loop.close()
-                return
+                exit_after_stop(task_loop.close())
             case _ as unreachable:
                 assert_never(unreachable)
 
@@ -355,14 +392,13 @@ def parse_arguments(argv: Sequence[str]) -> tuple[int, int] | None:
 
 
 def main(argv: Sequence[str]) -> NoReturn:
-    """Program entry. Exits 0 after a stop frame, so ``atexit`` handlers run."""
+    """Program entry. After a stop frame, ``serve`` ends the process."""
     parsed = parse_arguments(argv)
     if parsed is None:
         sys.stderr.write(f'child_main: bad arguments: {list(argv)!r}\n')
         sys.exit(BAD_ARGUMENTS_EXIT_CODE)
     fd, parent_pid = parsed
     serve(socket.socket(fileno=fd), parent_pid, boot_app, run_child_task)
-    sys.exit(0)
 
 
 if __name__ == '__main__':

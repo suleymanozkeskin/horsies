@@ -32,6 +32,9 @@ there is no migration contract between pre-1.0 versions.
     a generator function is.
   - When the worker stops a child, the child cancels the coroutines left on
     its loop and closes the loop. This takes at most 5 seconds.
+  - A thread of `asyncio.to_thread()` that still runs after that time does
+    not hold the child: the child exits without waiting for it, and its
+    `atexit` handlers do not run.
 
 ### Changed
 

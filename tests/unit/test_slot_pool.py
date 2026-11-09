@@ -27,6 +27,7 @@ import pytest
 import pytest_asyncio
 
 from horsies.core.types.result import Err, Ok
+from horsies.core.worker.child_main import STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE
 from horsies.core.worker.config import ChildPreload
 from horsies.core.worker.child_protocol import (
     InitFrame,
@@ -490,6 +491,36 @@ class TestTaskRuns:
         await _result_json(pool.submit(_frame('leave_pending', str(marker))))
         await _until(marker.exists)
         assert marker.read_text(encoding='ascii') == 'cancelled'
+
+    async def test_a_stop_with_executor_threads_left_ends_the_process(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        """An executor thread that outlives the close does not hold the exit.
+
+        Without the bound the child waits for the thread at exit, and the
+        parent kills it only after ``CHILD_STOP_TIMEOUT_S``.
+        """
+        pool = await pool_factory(
+            _config(max_tasks_per_child=1, init=_init('close_timeout:0.2')),
+        )
+        pid = int(await _result_json(pool.submit(_frame('thread_outlives_wait', '60'))))
+        child = pool._slots[0].child
+        assert child is not None and child.pid == pid
+        await _until(lambda: child.has_exited, timeout_s=slots.CHILD_STOP_TIMEOUT_S / 2)
+        assert child._current_exit() == ExitedWith(STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE)
+
+    async def test_a_stop_with_no_executor_threads_exits_normally(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        """With nothing left to wait for, the child exits 0 and runs ``atexit``."""
+        pool = await pool_factory(_config(max_tasks_per_child=1))
+        assert await _result_json(pool.submit(_frame('loop_count'))) == '1'
+        child = pool._slots[0].child
+        assert child is not None
+        await _until(lambda: child.has_exited, timeout_s=slots.CHILD_STOP_TIMEOUT_S / 2)
+        assert child._current_exit() == ExitedWith(0)
 
     async def test_child_program_restores_parent_argv_and_keeps_asserts(
         self,
