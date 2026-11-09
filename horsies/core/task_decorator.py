@@ -22,9 +22,10 @@ from typing import (
     Any,
     assert_never,
     cast,
+    overload,
 )
 from abc import abstractmethod
-from collections.abc import Mapping
+from collections.abc import Coroutine, Mapping
 from types import MappingProxyType
 from datetime import datetime, timedelta, timezone
 from pydantic import TypeAdapter, ValidationError
@@ -906,7 +907,7 @@ class NodeFactory(Generic[P, T]):
         # Type checker validates 'value' against my_task's signature
     """
 
-    _fn: 'TaskFunction[P, T]'
+    _fn: 'TaskFunction[P, T] | AsyncTaskFunction[P, T]'
     _waits_for: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] | None
     _workflow_ctx_from: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] | None
     _args_from: dict[str, 'TaskNode[Any] | SubWorkflowNode[Any]'] | None
@@ -920,7 +921,7 @@ class NodeFactory(Generic[P, T]):
 
     def __init__(
         self,
-        fn: 'TaskFunction[P, T]',
+        fn: 'TaskFunction[P, T] | AsyncTaskFunction[P, T]',
         *,
         waits_for: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] | None,
         workflow_ctx_from: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] | None,
@@ -1015,25 +1016,16 @@ class NodeFactory(Generic[P, T]):
         )
 
 
-class TaskFunction(Protocol[P, T]):
-    """
-    A TaskFunction is a function that gets a @task decorator applied to it.
-    Protocol extends the simple function signature to include the send and send_async methods,
-    thus being able to be called with or without the @task decorator.
+class _TaskFunctionMembers(Protocol[P, T]):
+    """The members that a `def` task and an `async def` task share.
 
-    The generic parameter T represents the success type in TaskResult[T, TaskError].
+    `TaskFunction` and `AsyncTaskFunction` add the direct call. The generic
+    parameter T represents the success type in TaskResult[T, TaskError].
     """
 
     task_name: str
     task_queue_name: str | None
     task_options_json: str | None
-
-    @abstractmethod
-    def __call__(
-        self,
-        *args: P.args,
-        **kwargs: P.kwargs,
-    ) -> TaskResult[T, TaskError]: ...
 
     @abstractmethod
     def send(
@@ -1113,6 +1105,60 @@ class TaskFunction(Protocol[P, T]):
         good_until: datetime | None = None,
         node_id: str | None = None,
     ) -> 'NodeFactory[P, T]': ...
+
+
+class TaskFunction(_TaskFunctionMembers[P, T], Protocol[P, T]):
+    """
+    A TaskFunction is a `def` function that gets a @task decorator applied to it.
+    Protocol extends the simple function signature to include the send and send_async methods,
+    thus being able to be called with or without the @task decorator.
+
+    The generic parameter T represents the success type in TaskResult[T, TaskError].
+    """
+
+    @abstractmethod
+    def __call__(
+        self,
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> TaskResult[T, TaskError]: ...
+
+
+class AsyncTaskFunction(_TaskFunctionMembers[P, T], Protocol[P, T]):
+    """An `async def` function that gets a @task decorator applied to it.
+
+    A direct call returns a coroutine. Await it to get the `TaskResult`.
+    The send methods and `node()` are the same as on `TaskFunction`.
+    """
+
+    @abstractmethod
+    def __call__(
+        self,
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> Coroutine[Any, Any, TaskResult[T, TaskError]]: ...
+
+
+class TaskDecorator(Protocol):
+    """What `app.task(task_name, **options)` returns.
+
+    It registers one task function: a `def` function gives a
+    `TaskFunction`, and an `async def` function gives an `AsyncTaskFunction`.
+    """
+
+    @overload
+    def __call__(
+        self,
+        fn: Callable[P, Coroutine[Any, Any, TaskResult[T, TaskError]]],
+        /,
+    ) -> AsyncTaskFunction[P, T]: ...
+
+    @overload
+    def __call__(
+        self,
+        fn: Callable[P, TaskResult[T, TaskError]],
+        /,
+    ) -> TaskFunction[P, T]: ...
 
 
 class TaskSendOptions(Protocol[P, T]):
@@ -1232,6 +1278,111 @@ def _returned_type_name(returned: object) -> str:
     return returned_type.__name__
 
 
+@dataclass(frozen=True, slots=True)
+class _SyncTaskBody(Generic[P, T]):
+    """A task function defined with `def`."""
+
+    fn: Callable[P, TaskResult[T, TaskError]]
+
+
+@dataclass(frozen=True, slots=True)
+class _AsyncTaskBody(Generic[P, T]):
+    """A task function defined with `async def`."""
+
+    fn: Callable[P, Coroutine[Any, Any, TaskResult[T, TaskError]]]
+
+
+def _task_body(
+    fn: Callable[P, TaskResult[T, TaskError]]
+    | Callable[P, Coroutine[Any, Any, TaskResult[T, TaskError]]],
+) -> _SyncTaskBody[P, T] | _AsyncTaskBody[P, T]:
+    """Sort a task function by the way it is called.
+
+    `create_task_wrapper` refuses generator and async generator functions
+    before this, so a function that is not a coroutine function is a `def`
+    function that returns its result.
+    """
+    if inspect.iscoroutinefunction(fn):
+        return _AsyncTaskBody(
+            cast('Callable[P, Coroutine[Any, Any, TaskResult[T, TaskError]]]', fn),
+        )
+    return _SyncTaskBody(cast('Callable[P, TaskResult[T, TaskError]]', fn))
+
+
+def _sync_task_call(
+    body: Callable[P, TaskResult[T, TaskError]],
+    checked_result: Callable[[object], TaskResult[T, TaskError]],
+    exception_result: Callable[[BaseException], TaskResult[T, TaskError]],
+) -> Callable[P, TaskResult[T, TaskError]]:
+    """The direct call of a `def` task: run the body, then check its return.
+
+    An exception from the body or from the check becomes an error result.
+    `KeyboardInterrupt` propagates, for worker shutdown.
+    """
+
+    def call(*args: P.args, **kwargs: P.kwargs) -> TaskResult[T, TaskError]:
+        try:
+            return checked_result(body(*args, **kwargs))
+        except KeyboardInterrupt:
+            raise
+        except BaseException as exc:
+            return exception_result(exc)
+
+    return call
+
+
+def _async_task_call(
+    body: Callable[P, Coroutine[Any, Any, TaskResult[T, TaskError]]],
+    checked_result: Callable[[object], TaskResult[T, TaskError]],
+    exception_result: Callable[[BaseException], TaskResult[T, TaskError]],
+) -> Callable[P, Coroutine[Any, Any, TaskResult[T, TaskError]]]:
+    """The direct call of an `async def` task: a coroutine that awaits the
+    body, then checks its return.
+
+    Exceptions become error results as in `_sync_task_call`. A
+    `CancelledError` propagates when the asyncio task that awaits this
+    coroutine has a cancel request, so a timeout or a task group around the
+    call works. A `CancelledError` with no cancel request, for example from
+    an inner task that was cancelled, becomes an error result.
+    """
+
+    async def call(*args: P.args, **kwargs: P.kwargs) -> TaskResult[T, TaskError]:
+        try:
+            return checked_result(await body(*args, **kwargs))
+        except KeyboardInterrupt:
+            raise
+        except asyncio.CancelledError as exc:
+            if _cancel_requested():
+                raise
+            return exception_result(exc)
+        except BaseException as exc:
+            return exception_result(exc)
+
+    return call
+
+
+def _cancel_requested() -> bool:
+    """True when the current asyncio task has a cancel request."""
+    match asyncio.current_task():
+        case None:
+            return False
+        case task:
+            return task.cancelling() > 0
+
+
+@overload
+def create_task_wrapper(
+    fn: Callable[P, Coroutine[Any, Any, TaskResult[T, TaskError]]],
+    app: 'Horsies',
+    task_name: str,
+    task_options: Optional['TaskOptions'] = None,
+    *,
+    exception_mapper: ExceptionMapper | None = None,
+    default_unhandled_error_code: str | None = None,
+) -> 'AsyncTaskFunction[P, T]': ...
+
+
+@overload
 def create_task_wrapper(
     fn: Callable[P, TaskResult[T, TaskError]],
     app: 'Horsies',
@@ -1240,10 +1391,25 @@ def create_task_wrapper(
     *,
     exception_mapper: ExceptionMapper | None = None,
     default_unhandled_error_code: str | None = None,
-) -> 'TaskFunction[P, T]':
+) -> 'TaskFunction[P, T]': ...
+
+
+def create_task_wrapper(
+    fn: Callable[P, TaskResult[T, TaskError]]
+    | Callable[P, Coroutine[Any, Any, TaskResult[T, TaskError]]],
+    app: 'Horsies',
+    task_name: str,
+    task_options: Optional['TaskOptions'] = None,
+    *,
+    exception_mapper: ExceptionMapper | None = None,
+    default_unhandled_error_code: str | None = None,
+) -> 'TaskFunction[P, T] | AsyncTaskFunction[P, T]':
     """
     Create a task wrapper for a specific app instance.
     Called by app.task() decorator.
+
+    A `def` function gives a `TaskFunction`. An `async def` function gives
+    an `AsyncTaskFunction`, whose direct call returns a coroutine.
     """
 
     fn_location = SourceLocation.from_function(fn)
@@ -1263,18 +1429,18 @@ def create_task_wrapper(
             help_text='remove inner decorators and apply @app.task() directly to the raw function',
         )
 
-    # The worker calls the task function synchronously. An async function
-    # returns a coroutine or an async generator, so every run would fail.
-    if inspect.iscoroutinefunction(fn) or inspect.isasyncgenfunction(fn):
+    # An async generator function returns an async generator, so the body
+    # never runs and every run would fail.
+    if inspect.isasyncgenfunction(fn):
         raise TaskDefinitionError(
-            message='task function must be a sync function',
-            code=ErrorCode.TASK_ASYNC_FUNCTION_NOT_SUPPORTED,
+            message='task function must not be an async generator',
+            code=ErrorCode.TASK_INVALID_RETURN_TYPE,
             location=fn_location,
             notes=[
-                f"function '{fn.__name__}' is defined with `async def`",
-                'async task functions are not supported',
+                f"function '{fn.__name__}' is defined with `async def` and uses `yield`",
+                'a task returns one TaskResult',
             ],
-            help_text='define the task with `def`; async task support is not available',
+            help_text='collect the items and return them in one TaskResult',
         )
 
     # A generator function returns a generator, so the body never runs and
@@ -1413,97 +1579,98 @@ def create_task_wrapper(
             )
         )
 
-    # Create a wrapper function that preserves the exact signature
-    def wrapped_function(
-        *args: P.args,
-        **kwargs: P.kwargs,
-    ) -> TaskResult[T, TaskError]:
+    def checked_result(returned: object) -> TaskResult[T, TaskError]:
+        """Check one return of the task body against the declared types.
+
+        A return that is not a `TaskResult`, or that does not fit the types,
+        becomes a RETURN_TYPE_MISMATCH result. A `def` task and an
+        `async def` task share this check.
+        """
+        if not isinstance(returned, TaskResult):
+            return not_a_task_result(returned)
+        result = cast('TaskResult[T, TaskError]', returned)
+
+        # Runtime type validation: validate result against declared types
         try:
-            returned: object = fn(*args, **kwargs)
-
-            if not isinstance(returned, TaskResult):
-                return not_a_task_result(returned)
-            result = cast('TaskResult[T, TaskError]', returned)
-
-            # Runtime type validation: validate result against declared types
             try:
-                try:
-                    if result.is_ok():
-                        # Validate the ok value against T. A validator can
-                        # transform it, so return the validated value: an
-                        # in-process caller then sees the value that a wire
-                        # consumer decodes.
-                        validated_ok = ok_type_adapter.validate_python(
-                            result.ok,
-                            strict=True,
-                            extra='forbid',
-                        )
-                        if validated_ok is not result.ok:
-                            result = TaskResult(ok=validated_ok)
-                    else:
-                        # Validate err value against E
-                        err_type_adapter.validate_python(result.err)
-                except ValidationError as ve:
-                    # Type validation failed - return error result.
-                    return return_type_mismatch(
-                        result,
-                        validation_summary(ve),
-                        validation_error_entries(ve),
-                        ve.error_count(),
+                if result.is_ok():
+                    # Validate the ok value against T. A validator can
+                    # transform it, so return the validated value: an
+                    # in-process caller then sees the value that a wire
+                    # consumer decodes.
+                    validated_ok = ok_type_adapter.validate_python(
+                        result.ok,
+                        strict=True,
+                        extra='forbid',
                     )
-            except UnicodeEncodeError:
-                # A validator wrote a lone surrogate in its error text, so
-                # pydantic cannot build that text: validate_python raises
-                # this for a ValueError, and ValidationError.errors() for the
-                # context of a PydanticCustomError. It is the same refusal.
-                # The task body is outside this try, so its own
-                # UnicodeEncodeError is an unhandled exception.
-                text = lone_surrogate_text('a validation error', ())
+                    if validated_ok is not result.ok:
+                        result = TaskResult(ok=validated_ok)
+                else:
+                    # Validate err value against E
+                    err_type_adapter.validate_python(result.err)
+            except ValidationError as ve:
+                # Type validation failed - return error result.
                 return return_type_mismatch(
                     result,
-                    text,
-                    [{'loc': [], 'msg': text, 'type': 'lone_surrogate'}],
-                    1,
+                    validation_summary(ve),
+                    validation_error_entries(ve),
+                    ve.error_count(),
                 )
+        except UnicodeEncodeError:
+            # A validator wrote a lone surrogate in its error text, so
+            # pydantic cannot build that text: validate_python raises
+            # this for a ValueError, and ValidationError.errors() for the
+            # context of a PydanticCustomError. It is the same refusal.
+            # The task body is outside this try, so its own
+            # UnicodeEncodeError is an unhandled exception.
+            text = lone_surrogate_text('a validation error', ())
+            return return_type_mismatch(
+                result,
+                text,
+                [{'loc': [], 'msg': text, 'type': 'lone_surrogate'}],
+                1,
+            )
 
-            return result
+        return result
 
-        except KeyboardInterrupt:
-            # Allow KeyboardInterrupt to propagate for graceful worker shutdown
-            raise
-        except WorkflowContextMissingIdError as e:
-            error_result: TaskResult[T, TaskError] = TaskResult(
-                err=TaskError(
-                    exception=e,
-                    error_code=ContractCode.WORKFLOW_CTX_MISSING_ID,
-                    message=str(e),
-                    data={'task_name': task_name},
+    def exception_result(exc: BaseException) -> TaskResult[T, TaskError]:
+        """The error result of an exception from the task body or its check.
+
+        A `def` task and an `async def` task share this mapping: the
+        exception mappers decide the code, as `resolve_exception_error_code`
+        states.
+        """
+        match exc:
+            case WorkflowContextMissingIdError():
+                return TaskResult(
+                    err=TaskError(
+                        exception=exc,
+                        error_code=ContractCode.WORKFLOW_CTX_MISSING_ID,
+                        message=str(exc),
+                        data={'task_name': task_name},
+                    )
                 )
-            )
-            return error_result
-        except BaseException as e:
-            # Catch SystemExit, GeneratorExit, Exception, etc.
-            error_code = resolve_exception_error_code(
-                exc=e,
-                task_mapper=exception_mapper,
-                global_mapper=app.config.exception_mapper,
-                task_default=default_unhandled_error_code,
-                global_default=app.config.default_unhandled_error_code,
-            )
-            from horsies.core.models.tasks import BUILTIN_CODE_REGISTRY
-
-            resolved_code: BuiltInTaskCode | str = BUILTIN_CODE_REGISTRY.get(
-                error_code, error_code,
-            )
-            error_result: TaskResult[T, TaskError] = TaskResult(
-                err=TaskError(
-                    exception=e,
-                    error_code=resolved_code,
-                    message=f'Unhandled exception in task {fn.__name__}: {type(e).__name__}: {exception_text(e)}',
-                    data={'exception_type': type(e).__name__},
+            case _:
+                error_code = resolve_exception_error_code(
+                    exc=exc,
+                    task_mapper=exception_mapper,
+                    global_mapper=app.config.exception_mapper,
+                    task_default=default_unhandled_error_code,
+                    global_default=app.config.default_unhandled_error_code,
                 )
-            )
-            return error_result
+                from horsies.core.models.tasks import BUILTIN_CODE_REGISTRY
+
+                resolved_code: BuiltInTaskCode | str = BUILTIN_CODE_REGISTRY.get(
+                    error_code, error_code,
+                )
+                return TaskResult(
+                    err=TaskError(
+                        exception=exc,
+                        error_code=resolved_code,
+                        message=f'Unhandled exception in task {fn.__name__}: {type(exc).__name__}: {exception_text(exc)}',
+                        data={'exception_type': type(exc).__name__},
+                    )
+                )
 
     # Pre-serialize task_options once so the send/send_async/schedule closures
     # below can reuse the JSON string instead of re-serializing on every call.
@@ -2451,7 +2618,11 @@ def create_task_wrapper(
         return await _do_schedule_async(task_id, payload)
 
     class TaskFunctionImpl:
-        def __init__(self) -> None:
+        """The members that both kinds share. A subclass adds `__call__`."""
+
+        def __init__(self, call: Callable[..., object]) -> None:
+            # `__getattr__` reads `_call`, so it is set first.
+            self._call = call
             self.__name__ = fn.__name__
             self.__doc__ = fn.__doc__
             self.__annotations__ = fn.__annotations__
@@ -2476,13 +2647,6 @@ def create_task_wrapper(
                 MappingProxyType(exception_mapper) if exception_mapper is not None else None
             )
             self.default_unhandled_error_code: str | None = default_unhandled_error_code
-
-        def __call__(
-            self,
-            *args: P.args,
-            **kwargs: P.kwargs,
-        ) -> TaskResult[T, TaskError]:
-            return wrapped_function(*args, **kwargs)
 
         def send(
             self,
@@ -2581,8 +2745,32 @@ def create_task_wrapper(
 
         # Copy metadata
         def __getattr__(self, name: str) -> Any:
-            return getattr(wrapped_function, name)
+            return getattr(self._call, name)
 
-    task_func = TaskFunctionImpl()
+    match _task_body(fn):
+        case _SyncTaskBody(fn=sync_body):
+            sync_call = _sync_task_call(sync_body, checked_result, exception_result)
 
-    return task_func
+            class SyncTaskFunctionImpl(TaskFunctionImpl):
+                def __call__(
+                    self,
+                    *args: P.args,
+                    **kwargs: P.kwargs,
+                ) -> TaskResult[T, TaskError]:
+                    return sync_call(*args, **kwargs)
+
+            return SyncTaskFunctionImpl(sync_call)
+        case _AsyncTaskBody(fn=async_body):
+            async_call = _async_task_call(async_body, checked_result, exception_result)
+
+            class AsyncTaskFunctionImpl(TaskFunctionImpl):
+                def __call__(
+                    self,
+                    *args: P.args,
+                    **kwargs: P.kwargs,
+                ) -> Coroutine[Any, Any, TaskResult[T, TaskError]]:
+                    return async_call(*args, **kwargs)
+
+            return AsyncTaskFunctionImpl(async_call)
+        case _ as unreachable:
+            assert_never(unreachable)

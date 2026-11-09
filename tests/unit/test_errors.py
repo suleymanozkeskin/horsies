@@ -861,3 +861,16 @@ class TestFindUserFrame:
         with mock.patch('horsies.core.errors.inspect.currentframe', return_value=None):
             result = _find_user_frame()
         assert result is None
+
+
+# =============================================================================
+# Retired codes
+# =============================================================================
+
+
+class TestRetiredErrorCodes:
+    """A retired number is not used again, so old logs keep one meaning."""
+
+    @pytest.mark.parametrize('number', ['HRS-023', 'HRS-106'])
+    def test_no_member_takes_a_retired_number(self, number: str) -> None:
+        assert number not in {code.value for code in ErrorCode}

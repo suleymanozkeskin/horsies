@@ -526,7 +526,6 @@ The full list of reserved strings is available at runtime via `BUILTIN_CODE_REGI
 | HRS-103 | `TASK_INVALID_QUEUE` | Invalid queue specification |
 | HRS-104 | `TASK_PREDECORATED_NOT_SUPPORTED` | Task function is pre-decorated: it has a `__wrapped__` chain. Apply `@app.task()` to the raw function |
 | HRS-105 | `TASK_STRICT_SIGNATURE_VIOLATION` | Task signature fails the strict check: a parameter that is not keyword-only (`*args`, `**kwargs`, positional), a type that is not allowed (for example `Any`, a bare container, `set`, `bytes`), or a return type that is not `TaskResult[OkT, TaskError]` |
-| HRS-106 | `TASK_ASYNC_FUNCTION_NOT_SUPPORTED` | Task function is defined with `async def`; task functions must be sync |
 
 ### Configuration (HRS-200-HRS-299)
 

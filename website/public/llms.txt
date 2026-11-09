@@ -581,7 +581,6 @@ Task definition (HRS-100-HRS-199):
 - HRS-103 TASK_INVALID_QUEUE
 - HRS-104 TASK_PREDECORATED_NOT_SUPPORTED (the task function is pre-decorated: it has a __wrapped__ chain)
 - HRS-105 TASK_STRICT_SIGNATURE_VIOLATION
-- HRS-106 TASK_ASYNC_FUNCTION_NOT_SUPPORTED
 Config/broker (HRS-200-HRS-299):
 <!-- members: ErrorCode part -->
 - HRS-200 CONFIG_INVALID_QUEUE_MODE
