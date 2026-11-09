@@ -624,6 +624,14 @@ TaskError]` with `ok=None` when the child completes. The terminal-results map
 returned by a top-level outputless `app.workflow(...).get()` is not exposed as
 a nested subworkflow output.
 
+### 6.6 Limits
+
+- A child workflow has at most depth 32. A top-level workflow has depth 0, and a child workflow has the depth of its parent plus 1.
+  - A `SubWorkflowNode` whose child would have depth 33 does not start its child. The node goes `FAILED` with `SUBWORKFLOW_DEPTH_LIMIT_REACHED`, and the `on_error` policy of its workflow applies.
+  - `horsies check` reports `HRS-036` for such a nesting when it can build the child specs, that is, along `SubWorkflowNode`s without `args_from`.
+- A `WorkflowSpec` holds at most 10,000 nodes. A spec with more nodes raises `HRS-038` when it is built. In `build_with()`, that raise fails the `SubWorkflowNode` with `WORKFLOW_ENQUEUE_FAILED`. To run more nodes, split them into `SubWorkflowNode`s: each child workflow has its own limit.
+- A definition that includes itself with the same kwargs never stops nesting, because `build_with()` builds the same spec from the same arguments. `horsies check` reports `HRS-037` for it. Change the kwargs at each level, and end the nesting with a condition on them.
+
 ---
 
 ## 7. Error Handling

@@ -634,7 +634,7 @@ def process(*, data: TaskResult[int, TaskError]) -> TaskResult[str, TaskError]:
 node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
 ```
 
-## Validation Errors (HRS-001–HRS-035)
+## Validation Errors (HRS-001–HRS-038)
 
 <!-- members: ErrorCode subset -->
 | Code | Name | Trigger |
@@ -673,10 +673,15 @@ node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
 | HRS-033 | `WORKFLOW_INVALID_DEFINITION_CONFIG` | `WorkflowDefinition` class defines `Meta`, or its `config` is not a `WorkflowDefinitionConfig` (raised at class creation) |
 | HRS-034 | `WORKFLOW_INVALID_PRIORITY` | A `TaskNode` `priority` is outside 1–100 |
 | HRS-035 | `WORKFLOW_NAIVE_GOOD_UNTIL` | A `TaskNode` `good_until` is a naive `datetime` (no `tzinfo`) |
+| HRS-036 | `WORKFLOW_SUBWORKFLOW_DEPTH_LIMIT` | `horsies check`: a subworkflow nesting would start a child workflow deeper than 32 |
+| HRS-037 | `WORKFLOW_SUBWORKFLOW_SELF_NESTING` | `horsies check`: a subworkflow includes itself with the same kwargs, so its nesting never ends |
+| HRS-038 | `WORKFLOW_TOO_MANY_NODES` | A `WorkflowSpec` has more than 10,000 nodes (raised when the spec is built) |
 
 ## Known Constraints
 
 - The DAG of a workflow is fixed when it starts. A `SubWorkflowNode` builds its child DAG from upstream results when the node becomes ready (`build_with()` with `args_from`).
+- A child workflow has at most depth 32 (a top-level workflow has depth 0). A deeper child is not started: its `SubWorkflowNode` fails with `SUBWORKFLOW_DEPTH_LIMIT_REACHED`, and `on_error` applies.
+- A `WorkflowSpec` holds at most 10,000 nodes; more raises HRS-038 when the spec is built. Split larger work into `SubWorkflowNode`s.
 - `workflow_ctx_from` scope is per-task, does not propagate downstream.
 - `retry_start()` is best-effort idempotent by `workflow_id` only (no payload verification).
 - WorkflowSpec and all nodes are frozen after construction. Reusing node objects across specs is safe (they are copied internally).

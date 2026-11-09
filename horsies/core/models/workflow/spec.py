@@ -49,6 +49,7 @@ from horsies.core.utils.loop_runner import (
 )
 
 from .enums import OutT, OnError
+from .limits import MAX_WORKFLOW_NODES
 from .nodes import (
     TaskNode,
     SubWorkflowNode,
@@ -329,6 +330,12 @@ class WorkflowSpec(Generic[OutT]):
                 'WorkflowSpec has no tasks',
                 code=ErrorCode.WORKFLOW_NO_NODES,
                 help_text='add at least one TaskNode or SubWorkflowNode to tasks',
+            )
+        if len(self.tasks) > MAX_WORKFLOW_NODES:
+            raise WorkflowValidationError(
+                f'WorkflowSpec has {len(self.tasks)} nodes, more than the limit of {MAX_WORKFLOW_NODES}',
+                code=ErrorCode.WORKFLOW_TOO_MANY_NODES,
+                help_text='split the nodes into SubWorkflowNodes; each child workflow has its own limit',
             )
 
         originals = self._isolate_inputs()

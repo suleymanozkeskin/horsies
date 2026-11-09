@@ -14,6 +14,7 @@ import pytest
 
 from horsies.core.codec.json_io import SerializationError
 from horsies.core.models.tasks import OperationalErrorCode, TaskError, TaskResult
+from horsies.core.models.workflow.limits import MAX_SUBWORKFLOW_DEPTH
 from horsies.core.types.result import Err, Ok
 from horsies.core.workflows import engine
 from horsies.core.workflows.engine import (
@@ -396,6 +397,59 @@ class TestEnqueueSubworkflowTask:
             parent_depth=0, root_workflow_id='root-wf',
         )
         assert result is None
+
+    @pytest.mark.asyncio
+    async def test_a_child_past_the_depth_limit_fails_the_node_and_loads_nothing(
+        self,
+    ) -> None:
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=_one_result(self._base_row()))
+        fail = AsyncMock()
+        load = MagicMock()
+
+        with patch(
+            'horsies.core.workflows.engine._fail_enqueued_task', new=fail,
+        ), patch(
+            'horsies.core.workflows.engine._load_workflow_def_from_key', new=load,
+        ):
+            result = await enqueue_subworkflow_task(
+                session, MagicMock(), 'wf-1', 0, {},
+                parent_depth=MAX_SUBWORKFLOW_DEPTH, root_workflow_id='root-wf',
+            )
+
+        assert result is None
+        load.assert_not_called()
+        fail.assert_awaited_once()
+        assert fail.await_args is not None
+        assert (
+            fail.await_args.kwargs['error_code']
+            is OperationalErrorCode.SUBWORKFLOW_DEPTH_LIMIT_REACHED
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_child_at_the_depth_limit_goes_on_to_load_its_definition(
+        self,
+    ) -> None:
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=_one_result(self._base_row()))
+        fail = AsyncMock()
+        load = MagicMock(return_value=None)
+
+        with patch(
+            'horsies.core.workflows.engine._fail_enqueued_task', new=fail,
+        ), patch(
+            'horsies.core.workflows.engine._load_workflow_def_from_key', new=load,
+        ), patch(
+            'horsies.core.workflows.engine._fail_subworkflow_load', new=AsyncMock(),
+        ):
+            result = await enqueue_subworkflow_task(
+                session, MagicMock(), 'wf-1', 0, {},
+                parent_depth=MAX_SUBWORKFLOW_DEPTH - 1, root_workflow_id='root-wf',
+            )
+
+        assert result is None
+        load.assert_called_once()
+        fail.assert_not_awaited()
 
     # The old test_workflow_name_not_found_fails case is structurally
     # unreachable now: the parent name rides the ENQUEUE CAS RETURNING,

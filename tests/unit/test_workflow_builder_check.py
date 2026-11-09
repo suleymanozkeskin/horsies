@@ -1066,7 +1066,8 @@ class TestRecursiveSubworkflowBindingInCheck:
         assert app.check(live=False) == []
 
     def test_self_referential_subworkflow_terminates(self) -> None:
-        """A subworkflow that references itself does not recurse infinitely."""
+        """A subworkflow that references itself with the same kwargs ends the
+        walk, and check reports it: at run time its nesting never ends."""
         app = _make_custom_app(('scraping', 30))
 
         class Recur(WorkflowDefinition[Any]):
@@ -1089,8 +1090,11 @@ class TestRecursiveSubworkflowBindingInCheck:
                 definition_key='parent_recur.v1',
             )
 
-        # Cycle guard: returns without hanging or RecursionError.
-        assert app.check(live=False) == []
+        # Cycle guard: returns without hanging or RecursionError, with HRS-037.
+        errors = app.check(live=False)
+        assert [error.code for error in errors] == [
+            ErrorCode.WORKFLOW_SUBWORKFLOW_SELF_NESTING
+        ]
 
     def test_param_varying_self_reference_invalid_queue_caught(self) -> None:
         """A definition self-referencing with DIFFERENT kwargs is not deduped away.

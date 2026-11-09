@@ -70,6 +70,7 @@ from horsies.core.codec.kwargs import (
     decode_subworkflow_kwargs,
     fill_build_with_defaults,
 )
+from horsies.core.models.workflow.limits import MAX_SUBWORKFLOW_DEPTH
 from horsies.core.models.workflow.nodes import stored_kwargs
 from horsies.core.codec.validation_errors import ValueValidationError, exception_text
 from horsies.core.types.result import is_err
@@ -96,10 +97,6 @@ ChildProcessStartHook = Callable[[], None]
 
 # Sentinel attribute name stamped on functions decorated with @app.workflow_builder
 _BUILDER_ATTR = '__horsies_workflow_builder__'
-
-# Recursion backstop for check-time static subworkflow expansion (cycles are
-# guarded by definition_key; this caps pathological nesting depth).
-_CHECK_MAX_SUBWORKFLOW_DEPTH = 32
 
 # Attribute name for opt-out of undecorated builder detection
 _NO_CHECK_ATTR = '__horsies_no_check__'
@@ -2137,8 +2134,11 @@ class Horsies:
         tasks, cycles, node ids); any resulting ``HorsiesError`` is surfaced, so
         single- and multi-error failures are treated alike. Non-horsies
         exceptions from build_with are out of scope (user-code/environmental).
-        ``seen`` (by definition_key + wire kwargs) guards cycles; ``depth``
-        is a backstop.
+        ``seen`` holds the (definition_key, wire kwargs) pairs on the path
+        from the root. A node whose pair is already on the path includes itself
+        with the same kwargs, so its nesting never ends: HRS-037. ``depth`` is
+        the depth of ``spec``; a node whose child would pass
+        ``MAX_SUBWORKFLOW_DEPTH``, the bound the engine applies, is HRS-036.
         """
         for node in getattr(spec, 'tasks', ()):
             if not isinstance(node, SubWorkflowNode):
@@ -2148,7 +2148,19 @@ class Horsies:
                     errors.append(exc)
                 continue
 
-            if depth >= _CHECK_MAX_SUBWORKFLOW_DEPTH:
+            if depth >= MAX_SUBWORKFLOW_DEPTH:
+                errors.append(WorkflowValidationError(
+                    message='subworkflow nesting passes the depth limit',
+                    code=ErrorCode.WORKFLOW_SUBWORKFLOW_DEPTH_LIMIT,
+                    notes=[
+                        f"node '{node.name}': its child workflow would have depth "
+                        f'{depth + 1}; the limit is {MAX_SUBWORKFLOW_DEPTH}',
+                    ],
+                    help_text=(
+                        'nest fewer levels; at run time this node fails with '
+                        'SUBWORKFLOW_DEPTH_LIMIT_REACHED'
+                    ),
+                ))
                 continue
             # Only expand when build_with's inputs are fully static. args_from
             # and from_node() markers are runtime injections (dependency
@@ -2165,11 +2177,22 @@ class Horsies:
             # binding must still be validated. Deduping by key alone would skip
             # the parameter-varying instance (a false negative). The kwargs
             # signature is a stable repr (workflow kwargs are serializable);
-            # the depth cap still bounds genuinely-unbounded parameterizations.
+            # the depth bound still ends a nesting whose kwargs change forever.
             wire = stored_kwargs(node)
             node_key = (def_key, repr(sorted(wire.items())))
             if node_key in seen:
-                continue  # cycle (same definition AND same kwargs)
+                # build_with() builds from its arguments only, so the same
+                # definition with the same kwargs expands the same way forever.
+                errors.append(WorkflowValidationError(
+                    message='a subworkflow includes itself with the same kwargs',
+                    code=ErrorCode.WORKFLOW_SUBWORKFLOW_SELF_NESTING,
+                    notes=[
+                        f"node '{node.name}': definition '{def_key}' with these "
+                        'kwargs is already on the path from the root',
+                    ],
+                    help_text='change the kwargs at each level, so that the nesting ends',
+                ))
+                continue
             try:
                 # The engine's read of the same row: real containers and
                 # filled defaults, not the frozen snapshot on the node.

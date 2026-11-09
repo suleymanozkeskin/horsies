@@ -549,6 +549,8 @@ To create nodes from runtime data, use a `SubWorkflowNode`. Its `build_with()` r
 | Quorum join (N of M succeed) | Yes | `join="quorum"` with `min_success` |
 | Partial success workflow | Yes | Via `success_policy` with success cases |
 | Dynamic task generation | Yes, through subworkflows | `build_with()` builds the child DAG when the node becomes ready |
+| Nested subworkflows | Yes, to depth 32 | A deeper child fails its `SubWorkflowNode` with `SUBWORKFLOW_DEPTH_LIMIT_REACHED` |
+| Nodes per workflow | Up to 10,000 | Split more nodes into `SubWorkflowNode`s; each child workflow has its own limit |
 
 ## Retry Policies in Workflows
 
