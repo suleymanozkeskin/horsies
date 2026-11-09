@@ -39,5 +39,6 @@ app.discover_tasks(
         'tests.e2e.tasks.basic',
         'tests.e2e.tasks.retry',
         'tests.e2e.tasks.workflows',
+        'tests.e2e.tasks.async_tasks',
     ]
 )
