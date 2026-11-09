@@ -45,6 +45,7 @@ from horsies.core.process_role import ProcessRole
 from horsies.core.types.result import Err, Ok, is_ok
 from horsies.core.utils.loop_runner import in_running_event_loop
 from horsies.core.worker import child_runner
+from horsies.core.worker.child_protocol import LoopHoldsNoTask
 from horsies.core.worker.task_loop import (
     LoopCreateRefused,
     LoopNotCreated,
@@ -460,6 +461,48 @@ class TestResultWaitsInsideAnAsyncTask:
 
 
 CALLER_THREAD_TIMEOUT_S = 10.0
+
+
+class TestTheSendPathLeavesNoLoopTask:
+    def test_send_async_in_an_async_task_leaves_no_task_on_the_loop(
+        self,
+        task_loop: TaskLoop,
+    ) -> None:
+        """A child whose loop holds tasks after an async task is retired, so
+        the send path of horsies must leave none. Up to ``enqueue_async``,
+        which the test replaces, the send runs its real code."""
+        app = Horsies(
+            AppConfig(broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL))),
+        )
+        broker = app.get_broker()
+        enqueued: list[str] = []
+
+        async def enqueue_async(*_args: object, task_id: str, **_kwargs: object) -> Ok[str]:
+            enqueued.append(task_id)
+            return Ok(task_id)
+
+        @app.task('async_sent_from_a_task')
+        async def sent() -> TaskResult[int, TaskError]:
+            return TaskResult(ok=1)
+
+        @app.task('async_sends')
+        async def sends() -> TaskResult[str, TaskError]:
+            match await sent.send_async():
+                case Ok(handle):
+                    return TaskResult(ok=handle.task_id)
+                case Err(send_err):
+                    return TaskResult(
+                        err=TaskError(error_code='SEND_FAILED', message=str(send_err)),
+                    )
+
+        try:
+            with patch.object(broker, 'enqueue_async', enqueue_async):
+                wire = _runner(app, task_loop)(sends.task_name)
+        finally:
+            broker._loop_runner.stop()
+
+        assert _result(wire, str).ok_value == enqueued[0]
+        assert task_loop.report() == LoopHoldsNoTask()
 
 
 class TestTheTaskLoopIsNotACallerLoop:
