@@ -91,6 +91,7 @@ A `WorkflowSpec(...)` built directly has `broker=None` and no bound queue or pri
 
 Requirements:
 - Must return a **fresh** `WorkflowSpec` per call (not cached).
+- Must build the `WorkflowSpec` from its arguments only: no network, database or file-system calls, and no sleep. Put that work in an upstream `TaskNode`, and pass its result to `build_with()` through `args_from`.
 - `definition_key` is auto-populated via ContextVar when returning a `WorkflowSpec` from `build_with()`; manual setting is unnecessary.
 
 ### `@app.workflow_builder` decorator
@@ -675,7 +676,7 @@ node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
 
 ## Known Constraints
 
-- DAG is **static at submission time**. No runtime-defined nodes.
+- The DAG of a workflow is fixed when it starts. A `SubWorkflowNode` builds its child DAG from upstream results when the node becomes ready (`build_with()` with `args_from`).
 - `workflow_ctx_from` scope is per-task, does not propagate downstream.
 - `retry_start()` is best-effort idempotent by `workflow_id` only (no payload verification).
 - WorkflowSpec and all nodes are frozen after construction. Reusing node objects across specs is safe (they are copied internally).

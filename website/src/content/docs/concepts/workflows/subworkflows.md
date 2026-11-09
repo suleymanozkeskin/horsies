@@ -356,6 +356,8 @@ class DataProcessor(WorkflowDefinition[ProcessedData]):
         )
 ```
 
+`build_with()` must build the `WorkflowSpec` from its arguments only. Do not call the network, a database or the file system in `build_with()`, and do not sleep in it. Put that work in an upstream `TaskNode`, and pass its result to `build_with()` through `args_from`.
+
 :::note[Queue and priority binding]
 A `build_with()` that returns a `WorkflowSpec(...)` directly does not run the
 queue/priority binding that `app.workflow()` applies. A `TaskNode` left without
