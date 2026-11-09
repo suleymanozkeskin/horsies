@@ -106,6 +106,10 @@ class RetrievalCode(str, Enum):
     # example a timeout_ms outside 0 to MAX_TASK_TIMEOUT_MS. Never cached:
     # a call with a valid argument reads the value.
     INVALID_INPUT = 'INVALID_INPUT'
+    # A result wait was called in a process that runs task bodies, so it
+    # returns at once and waits for nothing. Never cached: a task composes
+    # with other tasks through a workflow, not through a wait.
+    WAIT_INSIDE_TASK = 'WAIT_INSIDE_TASK'
 
 
 class OutcomeCode(str, Enum):

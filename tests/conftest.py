@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 from dotenv import load_dotenv
 
+from horsies.core import process_role as process_role_module
+
 # Load test environment before any test module imports
 load_dotenv(dotenv_path=Path(__file__).parent.parent / '.env.test')
 
@@ -32,6 +34,17 @@ class _LibraryRefusals(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         if getattr(record, 'refusal_origin', None) == 'library':
             self.messages.append(record.getMessage())
+
+
+@pytest.fixture(autouse=True)
+def restore_process_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give the process role back after each test.
+
+    A test that runs the worker child start in this process marks the process
+    as one that runs task bodies, and result waits then fail closed. Later
+    tests in the same process must see the role from before.
+    """
+    monkeypatch.setattr(process_role_module, '_role', process_role_module.process_role())
 
 
 @pytest.fixture(autouse=True)

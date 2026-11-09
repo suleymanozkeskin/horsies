@@ -113,6 +113,7 @@ Returned by `handle.get()` for issues retrieving results:
 | `EVENT_LOOP_LIMIT` | The broker serves its limit of open event loops and this is a new one; not cached, clears when one of those loops closes |
 | `ASYNC_CONTEXT` | Sync `get()` / `result_for()` was called on a thread that runs an event loop; nothing ran; not cached. Call `await handle.get_async()` / `result_for_async()` |
 | `INVALID_INPUT` | An argument of `get()` / `get_async()` was refused before any read, for example a `timeout_ms` that is negative, not an int, or above `MAX_TASK_TIMEOUT_MS`; not cached |
+| `WAIT_INSIDE_TASK` | A result wait was called inside a worker child, where task bodies run; it waited for nothing; not cached. Compose the tasks with a workflow: see [Waiting for a Result Inside a Task](#waiting-for-a-result-inside-a-task) |
 
 ### OutcomeCode
 
@@ -130,6 +131,35 @@ Returned by `handle.get()` for issues retrieving results:
 | `SUBWORKFLOW_FAILED` | Subworkflow failed |
 | `WORKFLOW_SUCCESS_CASE_NOT_MET` | Workflow success condition was not satisfied |
 | `WORKFLOW_OUTPUT_SKIPPED` | A `COMPLETED` workflow has no output: its output node, or a terminal node of an outputless workflow, is SKIPPED, and a success case does not require that node |
+
+## Waiting for a Result Inside a Task
+
+A task does not wait for the result of another task. In a worker child, these calls return `RetrievalCode.WAIT_INSIDE_TASK` at once and wait for nothing:
+
+- `TaskHandle.get()` and `TaskHandle.get_async()` on a handle from `send()` or `send_async()`
+- `app.get_result()` and `app.get_result_async()`
+- `WorkflowHandle.get()` and `WorkflowHandle.get_async()`
+
+The rule covers the whole child process: the task body, the threads that it starts, and the `on_child_process_start` hooks. A handle that already holds its result returns that result, because it does not wait.
+
+These calls do not wait, so they work in a task:
+
+- `send()` and `send_async()`
+- starting a workflow
+- `TaskHandle.info()`
+- `workflow_ctx.result_for()`
+
+A task that waits keeps its child while it waits. When enough tasks wait for other tasks, no child is free for the tasks that they wait for, and nothing moves until timeouts end the waits. A loop in a task that polls `info()` and sleeps holds its child the same way; it is outside this contract.
+
+A workflow node that waits for its dependencies is only a row, and the worker starts it when they finish. Compose the steps as a workflow:
+
+| The task… | Workflow form |
+| --------- | ------------- |
+| sends a, waits, then sends b with the result of a | `TaskNode`s with `waits_for` and `args_from` |
+| sends several tasks, then combines their results | fan-out, then a fan-in node |
+| gets the number of tasks from a result | a `SubWorkflowNode`: `build_with()` runs when the node is ready, with the upstream results ([Dynamic Fan-Out with `args_from`](/horsies/concepts/workflows/subworkflows/#dynamic-fan-out-with-args_from)) |
+| chooses the next step from a result | `build_with()` chooses the nodes |
+| has steps that can fail | `allow_failed_deps`, `join="any"` or `join="quorum"`, `success_policy` |
 
 ## Domain Errors vs Library Errors
 

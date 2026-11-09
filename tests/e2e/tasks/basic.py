@@ -8,7 +8,13 @@ from typing import Any, cast
 from pydantic import BaseModel
 
 from horsies.core.codec.json_value import JsonValue
-from horsies.core.models.tasks import TaskResult, TaskError, OperationalErrorCode
+from horsies.core.models.tasks import (
+    OperationalErrorCode,
+    RetrievalCode,
+    TaskError,
+    TaskResult,
+)
+from horsies.core.types.result import is_err, is_ok
 
 from tests.e2e.tasks.instance import app
 
@@ -236,3 +242,27 @@ def idempotent_task(*, token: str) -> TaskResult[str, TaskError]:
                 error_code='DOUBLE_EXECUTION', message=f'Token {token} already executed'
             )
         )
+
+
+@app.task(task_name='e2e_wait_inside_task')
+def wait_inside_task() -> TaskResult[dict[str, bool], TaskError]:
+    """Send a task, then try the result waits that a task cannot make."""
+    sent = simple_task.send(x=1)
+    if is_err(sent):
+        return TaskResult(
+            err=TaskError(error_code='E2E_SEND_FAILED', message=str(sent.err_value)),
+        )
+    handle = sent.ok_value
+    waited = handle.get(timeout_ms=1000)
+    read = app.get_result(handle.task_id, 1000)
+    info = handle.info()
+    return TaskResult(
+        ok={
+            'get_refused': waited.is_err()
+            and waited.unwrap_err().error_code is RetrievalCode.WAIT_INSIDE_TASK,
+            'app_get_result_refused': is_ok(read)
+            and read.ok_value.is_err()
+            and read.ok_value.unwrap_err().error_code is RetrievalCode.WAIT_INSIDE_TASK,
+            'info_read': is_ok(info),
+        },
+    )

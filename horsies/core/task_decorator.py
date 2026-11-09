@@ -42,6 +42,11 @@ from horsies.core.codec.payload_guard import (
     warn_if_payload_large,
 )
 from horsies.core.codec.task_options import serialize_task_options
+from horsies.core.process_role import (
+    ProcessRole,
+    process_role,
+    wait_inside_task_message,
+)
 from horsies.core.codec.typed import (
     Json,
     TypeAnnotation,
@@ -660,6 +665,8 @@ class TaskHandle(Generic[T]):
         Get the task result (blocking).
 
         A broker-backed handle without its result returns
+        ``RetrievalCode.WAIT_INSIDE_TASK`` (not cached) in a process that runs
+        task bodies, at once; compose tasks with a workflow there. It returns
         ``RetrievalCode.ASYNC_CONTEXT`` (not cached) on a thread that runs an
         event loop; use ``get_async()`` there.
 
@@ -694,6 +701,15 @@ class TaskHandle(Generic[T]):
                     return result
 
         if self._broker_mode and self._app:
+            if process_role() is ProcessRole.RUNS_TASK_BODIES:
+                return self._error_result(
+                    error_code=RetrievalCode.WAIT_INSIDE_TASK,
+                    message=wait_inside_task_message(
+                        f'TaskHandle.get() for task {self.task_id}',
+                    ),
+                    data={'task_id': self.task_id},
+                    cache=False,
+                )
             if in_running_event_loop():
                 return self._error_result(
                     error_code=RetrievalCode.ASYNC_CONTEXT,
@@ -728,6 +744,10 @@ class TaskHandle(Generic[T]):
         """
         Get the task result asynchronously.
 
+        A broker-backed handle without its result returns
+        ``RetrievalCode.WAIT_INSIDE_TASK`` (not cached) in a process that runs
+        task bodies, at once; compose tasks with a workflow there.
+
         Args:
             timeout_ms: Maximum time to wait for result (milliseconds)
 
@@ -759,6 +779,15 @@ class TaskHandle(Generic[T]):
                     return result
 
         if self._broker_mode and self._app:
+            if process_role() is ProcessRole.RUNS_TASK_BODIES:
+                return self._error_result(
+                    error_code=RetrievalCode.WAIT_INSIDE_TASK,
+                    message=wait_inside_task_message(
+                        f'TaskHandle.get_async() for task {self.task_id}',
+                    ),
+                    data={'task_id': self.task_id},
+                    cache=False,
+                )
             broker = self._app.get_broker()
             broker_result = await broker.get_raw_result_record_async(
                 self.task_id, timeout_ms,

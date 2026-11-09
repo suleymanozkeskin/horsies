@@ -81,6 +81,7 @@ Errors from `handle.get()` / `get_async()`. These indicate issues retrieving the
 | `EVENT_LOOP_LIMIT` | The broker serves its limit of open event loops (5) and this is a new one; not cached, clears when one of those loops closes | No |
 | `ASYNC_CONTEXT` | Sync `get()` / `result_for()` was called on a thread that runs an event loop; nothing ran; not cached. Call `await handle.get_async()` / `result_for_async()` | No |
 | `INVALID_INPUT` | An argument of `get()` / `get_async()` was refused before any read, for example a `timeout_ms` that is negative, not an int, or above `MAX_TASK_TIMEOUT_MS` (4,294,967,295 ms); not cached | No |
+| `WAIT_INSIDE_TASK` | A result wait was called inside a worker child, where task bodies run; it waited for nothing; not cached. Compose the tasks with a workflow: see [Waiting for a Result Inside a Task](/horsies/concepts/result-handling/#waiting-for-a-result-inside-a-task) | No |
 
 #### OutcomeCode
 

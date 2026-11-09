@@ -149,6 +149,7 @@ def _stored_timeout_refusal_response(
 
 from horsies.core.errors import ConfigurationError, ErrorCode
 from horsies.core.logging import get_logger
+from horsies.core.process_role import mark_process_runs_task_bodies
 from horsies.core.worker.current import get_current_app, set_current_app
 from horsies.core.worker.child_pool import (
     _get_worker_pool,
@@ -455,6 +456,9 @@ def finish_child_start(
         Exception: a pool setup failure propagates to the caller. A failing
             hook exits the child with CHILD_HOOK_FAILURE_EXIT_CODE.
     """
+    # Every thread and event loop of this process serves task bodies from
+    # here on, so result waits fail closed in it, also in the start hooks.
+    mark_process_runs_task_bodies()
     # App-owned per-child setup (engine disposal / pool policy) runs after
     # task imports so app engines exist, and before horsies opens its own
     # child pool so a failing hook aborts cleanly.

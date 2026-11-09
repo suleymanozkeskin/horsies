@@ -10,6 +10,20 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **Breaking: a result wait inside a task returns
+  `RetrievalCode.WAIT_INSIDE_TASK` at once.** In a worker child,
+  `TaskHandle.get()` and `get_async()` on a sent task, `app.get_result()` and
+  `get_result_async()`, and `WorkflowHandle.get()` and `get_async()` return the
+  new code and wait for nothing. This covers the threads that a task starts
+  and the `on_child_process_start` hooks. Before, such a wait kept its child:
+  when enough tasks waited for other tasks, no child was free for those tasks,
+  and nothing moved until timeouts ended the waits. `send()`, starting a
+  workflow, `TaskHandle.info()` and `workflow_ctx.result_for()` still work.
+  Compose the steps as a workflow; the result-handling page lists the forms.
+- **An exhaustive `match` on `RetrievalCode` needs a `WAIT_INSIDE_TASK`
+  case.** The code string is reserved: an `exception_mapper` or
+  `default_unhandled_error_code` with that value fails `horsies check` with
+  `HRS-212`.
 - **Breaking: a child workflow has at most depth 32.** A top-level workflow
   has depth 0, and a child workflow has the depth of its parent plus 1. A
   `SubWorkflowNode` whose child would have depth 33 does not start its child:
