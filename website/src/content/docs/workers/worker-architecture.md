@@ -122,7 +122,7 @@ In child process:
 1. Resolve task from registry by name
 2. Deserialize arguments
 3. Start heartbeat thread
-4. Call task function. An `async def` task runs on the event loop of the child. The child keeps one loop until it stops, and the loop runs only while an async task runs
+4. Call task function. An `async def` task runs on the event loop of the child. The child keeps one loop until it stops, and the loop runs only while an async task runs. The result reports the asyncio tasks that are still on the loop after the task, and the worker retires a child that reports any
 5. Serialize result
 6. Stop heartbeat thread
 

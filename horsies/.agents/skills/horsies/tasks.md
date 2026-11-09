@@ -47,7 +47,8 @@ Returns `TaskFunction[P, T]` for a `def` function, and `AsyncTaskFunction[P, T]`
 - A worker child runs one task at a time, `def` or `async def`. The same RUNNING update, heartbeats, `timeout_ms` kill, recovery and retry policy apply.
 - Each child keeps one event loop until the child stops. An `async def` task runs on it, so an async client that a module keeps stays open across the tasks of one child.
 - The loop runs only while an `async def` task runs. A `def` task runs with no running event loop and can call `asyncio.run()`.
-- A coroutine that a task starts and does not await continues only while a later async task runs in the same child. When the worker stops the child, the child cancels it.
+- An `async def` task must await the work that it starts. When it ends and asyncio tasks that it started (`asyncio.create_task()`) are still on the loop, the worker replaces the child after that task, and the next task runs in a new child. The old child cancels that work when it stops, within 5 seconds. A client that keeps its own background tasks on the loop (a keepalive, a consumer) causes a replacement after each async task.
+- A thread of `asyncio.to_thread()` that outlives its task does not cause a replacement. At the stop, the child does not wait for it past the 5-second close: it exits, and `atexit` handlers do not run.
 - In an `async def` task, send with `.send_async()` / `.schedule_async()`. The sync `.send()` / `.schedule()` return `Err(TaskSendAsyncContext)` there and enqueue nothing.
 - An exception, a wrong return, and the exception mappers give the same `TaskResult` as in a `def` task.
 

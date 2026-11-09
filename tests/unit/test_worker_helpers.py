@@ -58,6 +58,7 @@ from horsies.core.worker.worker import (
 from horsies.core.models.recovery import OrphanTaskAuditReport, RecoveryConfig
 from horsies.core.models.tasks import OperationalErrorCode
 from horsies.core.worker.child_protocol import (
+    LoopHoldsNoTask,
     RssMb,
     RssUnreadable,
     RunFrame,
@@ -1165,7 +1166,7 @@ class TestFinalizeResultPayloadWarn:
         )
 
         handle = _finished_handle(
-            TaskFinished(True, '{"big": "' + 'x' * 1024 + '"}', None, RssUnreadable()),
+            TaskFinished(True, '{"big": "' + 'x' * 1024 + '"}', None, RssUnreadable(), LoopHoldsNoTask()),
         )
 
         with caplog.at_level(logging.WARNING):
@@ -1289,7 +1290,7 @@ class TestFinalizeAfterSlotOutcome:
         )
 
         await worker._finalize_after(
-            _finished_handle(TaskFinished(True, '{}', None, RssUnreadable())),
+            _finished_handle(TaskFinished(True, '{}', None, RssUnreadable(), LoopHoldsNoTask())),
             'task-13',
             task_name='helper_task',
         )
@@ -1345,7 +1346,7 @@ class TestAwaitSlotOutcome:
     async def test_a_result_inside_the_limit_needs_no_timeout_handler(self) -> None:
         worker = _make_worker()
         worker._handle_task_timeout = AsyncMock()  # type: ignore[method-assign]
-        done = TaskFinished(True, '{}', None, RssUnreadable())
+        done = TaskFinished(True, '{}', None, RssUnreadable(), LoopHoldsNoTask())
 
         outcome = await worker._await_slot_outcome(
             _finished_handle(done),
@@ -1375,7 +1376,7 @@ class TestAwaitSlotOutcome:
         worker._handle_task_timeout = AsyncMock()  # type: ignore[method-assign]
         wait_for = AsyncMock()
         monkeypatch.setattr(asyncio, 'wait_for', wait_for)
-        done = TaskFinished(True, '{}', None, RssUnreadable())
+        done = TaskFinished(True, '{}', None, RssUnreadable(), LoopHoldsNoTask())
 
         outcome = await worker._await_slot_outcome(
             _finished_handle(done), 'task-1', timeout, None,

@@ -27,10 +27,16 @@ import pytest
 import pytest_asyncio
 
 from horsies.core.types.result import Err, Ok
-from horsies.core.worker.child_main import STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE
+from horsies.core.worker.child_main import (
+    BAD_PARENT_FRAME_EXIT_CODE,
+    STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE,
+)
 from horsies.core.worker.config import ChildPreload
 from horsies.core.worker.child_protocol import (
     InitFrame,
+    LoopHoldsNoTask,
+    LoopHoldsTasks,
+    ReadyFrame,
     ResultFrame,
     RssUnreadable,
     RunFrame,
@@ -290,7 +296,7 @@ class TestFrameProtocol:
             offset += size
 
     def _result_bytes(self, body: str) -> bytes:
-        encoded = encode_child_frame(ResultFrame('t', True, body, None, RssUnreadable()))
+        encoded = encode_child_frame(ResultFrame('t', True, body, None, RssUnreadable(), LoopHoldsNoTask()))
         return encoded.head + encoded.body
 
     @pytest.mark.parametrize('chunk', [1, 2, 7, 1 << 20])
@@ -491,6 +497,66 @@ class TestTaskRuns:
         await _result_json(pool.submit(_frame('leave_pending', str(marker))))
         await _until(marker.exists)
         assert marker.read_text(encoding='ascii') == 'cancelled'
+
+    async def test_a_task_that_leaves_loop_tasks_retires_its_child(
+        self,
+        pool_factory: PoolFactory,
+        tmp_path: Path,
+    ) -> None:
+        """The leftover is cancelled, and the next task runs in a new child."""
+        marker = tmp_path / 'cancelled'
+        pool = await pool_factory()
+        match await _outcome(pool.submit(_frame('leave_pending', str(marker)))):
+            case TaskFinished(result_json=first_pid, loop_tasks=loop_tasks):
+                assert loop_tasks == LoopHoldsTasks(count=1)
+            case other:
+                raise AssertionError(other)
+        await _until(marker.exists)
+        assert marker.read_text(encoding='ascii') == 'cancelled'
+        assert await _result_json(pool.submit(_frame('pid'))) != first_pid
+
+    async def test_a_task_that_leaves_no_loop_task_keeps_its_child(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        pool = await pool_factory()
+        match await _outcome(pool.submit(_frame('async_pid'))):
+            case TaskFinished(result_json=first_pid, loop_tasks=loop_tasks):
+                assert loop_tasks == LoopHoldsNoTask()
+            case other:
+                raise AssertionError(other)
+        assert await _result_json(pool.submit(_frame('pid'))) == first_pid
+
+    async def test_a_run_frame_beside_loop_tasks_ends_the_child(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The child refuses to run a task beside work of an earlier task.
+
+        The pool never sends that frame, so this drives one child directly.
+        """
+        config = _config()
+        match await Child.start(config, config.init):
+            case Ok(child):
+                pass
+            case Err(failed):
+                raise AssertionError(failed)
+        try:
+            assert isinstance(await child.await_frame(OUTCOME_TIMEOUT_S), ReadyFrame)
+            child.send(_frame('leave_pending', str(tmp_path / 'cancelled')))
+            match await child.await_frame(OUTCOME_TIMEOUT_S):
+                case ResultFrame(loop_tasks=LoopHoldsTasks(count=1)):
+                    pass
+                case other:
+                    raise AssertionError(other)
+            child.send(_frame('echo', 'x'))
+            match await child.await_frame(OUTCOME_TIMEOUT_S):
+                case ChildLost(child_exit=child_exit):
+                    assert child_exit == ExitedWith(BAD_PARENT_FRAME_EXIT_CODE)
+                case other:
+                    raise AssertionError(other)
+        finally:
+            await child.dispose_lost()
 
     async def test_a_stop_with_executor_threads_left_ends_the_process(
         self,
@@ -704,7 +770,7 @@ class TestVerdicts:
 
     async def test_complete_frame_still_unread_wins_over_the_death(self) -> None:
         """Only the drain can find this frame: the transport has not read it yet."""
-        encoded = encode_child_frame(ResultFrame('t', True, 'kept', None, RssUnreadable()))
+        encoded = encode_child_frame(ResultFrame('t', True, 'kept', None, RssUnreadable(), LoopHoldsNoTask()))
         child = await self._dead_child_with(encoded.head + encoded.body)
         match await child.await_frame(None):
             case ResultFrame(result_json='kept'):
@@ -714,7 +780,7 @@ class TestVerdicts:
         await child.dispose()
 
     async def test_half_a_frame_still_unread_is_reported_partial(self) -> None:
-        encoded = encode_child_frame(ResultFrame('t', True, 'lost', None, RssUnreadable()))
+        encoded = encode_child_frame(ResultFrame('t', True, 'lost', None, RssUnreadable(), LoopHoldsNoTask()))
         child = await self._dead_child_with(encoded.head[:-1])
         match await child.await_frame(None):
             case ChildLost(partial_frame=True, child_exit=KilledBySignal(9)):

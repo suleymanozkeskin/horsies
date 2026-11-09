@@ -22,6 +22,8 @@ from horsies.core.worker.child_protocol import (
     ForkFailedFrame,
     FrameOverBound,
     InitFrame,
+    LoopHoldsNoTask,
+    LoopHoldsTasks,
     MalformedFrame,
     PreloadFrame,
     PreloadReadyFrame,
@@ -168,18 +170,24 @@ class TestChildFrames:
     @pytest.mark.parametrize('failed_reason', [None, 'WORKFLOW_STOPPED', ''])
     @pytest.mark.parametrize('ok', [True, False])
     @pytest.mark.parametrize('result_json', ['', '{"é":1}'])
+    @pytest.mark.parametrize(
+        'loop_tasks',
+        [LoopHoldsNoTask(), LoopHoldsTasks(count=3)],
+        ids=['no-loop-task', 'loop-tasks'],
+    )
     def test_result_frame_round_trip(
         self,
         ok: bool,
         failed_reason: str | None,
         result_json: str,
+        loop_tasks: LoopHoldsNoTask | LoopHoldsTasks,
     ) -> None:
-        frame = ResultFrame('task-1', ok, result_json, failed_reason, RssMb(3.0))
+        frame = ResultFrame('task-1', ok, result_json, failed_reason, RssMb(3.0), loop_tasks)
         meta, body = _split(encode_child_frame(frame))
         assert decode_child_frame(meta, body) == Ok(frame)
 
     def test_invalid_utf8_body_is_malformed(self) -> None:
-        frame = ResultFrame('task-1', True, 'x', None, RssUnreadable())
+        frame = ResultFrame('task-1', True, 'x', None, RssUnreadable(), LoopHoldsNoTask())
         meta, _ = _split(encode_child_frame(frame))
         assert isinstance(decode_child_frame(meta, b'\xff'), Err)
 
@@ -319,10 +327,16 @@ class TestMalformedMetadata:
             ('failed_reason', 1),
             ('rss_mb', 'x'),
             ('rss_mb', True),
+            ('loop_tasks', None),
+            ('loop_tasks', {'kind': 'unknown'}),
+            ('loop_tasks', {'kind': 'held'}),
+            ('loop_tasks', {'kind': 'held', 'count': 0}),
+            ('loop_tasks', {'kind': 'held', 'count': True}),
+            ('loop_tasks', {'kind': 'held', 'count': '2'}),
         ],
     )
     def test_every_result_field_is_checked(self, key: str, value: object) -> None:
-        frame = ResultFrame('task-1', True, 'x', None, RssMb(1.0))
+        frame = ResultFrame('task-1', True, 'x', None, RssMb(1.0), LoopHoldsNoTask())
         meta, body = _split(encode_child_frame(frame))
         fields = json.loads(meta)
         fields[key] = value
@@ -352,6 +366,12 @@ class TestFieldCoverage:
         wire = set(json.loads(_split(encode_parent_frame(_init_frame()))[0]))
         assert names == wire - {'kind'}
 
+    def test_result_frame_fields(self) -> None:
+        names = {field.name for field in dataclasses.fields(ResultFrame)}
+        frame = ResultFrame('t', True, 'x', None, RssMb(1.0), LoopHoldsTasks(count=1))
+        wire = set(json.loads(_split(encode_child_frame(frame))[0]))
+        assert names - {'result_json', 'rss'} == wire - {'kind', 'rss_mb'}
+
 
 class TestInitFrameRepr:
     def test_the_database_password_stays_out_of_the_repr(self) -> None:
@@ -362,13 +382,13 @@ class TestFailureReasonText:
     def test_a_long_reason_is_cut_and_framed(self) -> None:
         wire = _bounded_result(_run_frame(), (True, 'kept', '\x00' * (2 << 20)))
         assert wire[:2] == (True, 'kept')
-        frame = ResultFrame('task-1', wire[0], wire[1], wire[2], RssUnreadable())
+        frame = ResultFrame('task-1', wire[0], wire[1], wire[2], RssUnreadable(), LoopHoldsNoTask())
         meta, body = _split(encode_child_frame(frame))
         assert decode_child_frame(meta, body) == Ok(frame)
 
     def test_lone_surrogate_in_a_reason_can_be_framed(self) -> None:
         wire = _bounded_result(_run_frame(), (False, '', 'bad \ud800 text'))
-        frame = ResultFrame('task-1', wire[0], wire[1], wire[2], RssUnreadable())
+        frame = ResultFrame('task-1', wire[0], wire[1], wire[2], RssUnreadable(), LoopHoldsNoTask())
         meta, body = _split(encode_child_frame(frame))
         assert decode_child_frame(meta, body) == Ok(frame)
 

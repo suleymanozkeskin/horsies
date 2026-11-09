@@ -7,6 +7,10 @@ bound to this loop, so a later async task in the same child can use it.
 The loop runs only while an async task runs. Between tasks the loop is stopped
 and not closed. A sync task runs on the same thread with no running event
 loop, so it can call ``asyncio.run()`` and the sync send methods.
+
+A task must await the work that it starts. ``tasks_left`` counts what is still
+on the loop after a task, and the worker replaces a child that reports any, so
+no later task shares the loop with that work.
 """
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ from typing import Any, Final, TypeVar, assert_never
 from horsies.core.logging import get_logger
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.utils.loop_runner import in_running_event_loop
+from horsies.core.worker.child_protocol import LoopHoldsNoTask, LoopHoldsTasks, LoopTasks
 
 logger = get_logger('worker')
 
@@ -116,8 +121,8 @@ class TaskLoop:
         Creates the loop on the first call. The coroutine runs in a copy of
         the caller's context. The value of the coroutine comes back in
         ``Ok``, and its exception propagates unchanged. Tasks that the
-        coroutine starts and does not await stay on the stopped loop, and
-        they continue in a later call.
+        coroutine starts and does not await stay on the stopped loop:
+        ``tasks_left`` counts them.
 
         ``Err(LoopCreateFailed)``: the loop could not be created. The
         coroutine is closed unrun, the state stays ``LoopNotCreated``, and
@@ -148,6 +153,25 @@ class TaskLoop:
             case _ as unreachable:
                 assert_never(unreachable)
         return Ok(loop.run_until_complete(coroutine))
+
+    def tasks_left(self) -> LoopTasks:
+        """Count the tasks on the loop that are not done. Reads only.
+
+        Call it between runs, on the thread that runs them. A call after
+        ``close`` is a defect in the caller: ``AssertionError``.
+        """
+        match self._state:
+            case LoopNotCreated():
+                return LoopHoldsNoTask()
+            case LoopOpen(loop=loop):
+                count = len(asyncio.all_tasks(loop))
+                if count == 0:
+                    return LoopHoldsNoTask()
+                return LoopHoldsTasks(count=count)
+            case LoopClosed():
+                raise AssertionError('TaskLoop.tasks_left was called after close')
+            case _ as unreachable:
+                assert_never(unreachable)
 
     def close(self) -> ExecutorAfterClose:
         """Cancel the tasks left on the loop, then close the loop.

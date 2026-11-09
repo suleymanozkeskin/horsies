@@ -156,6 +156,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Decorated function must return TaskResult[T, TaskError]
 - Decorated function is def or async def; a function that yields raises HRS-101 at definition time
 - An async def task runs on the one event loop that its worker child keeps; the loop runs only while an async task runs; in an async task, send with send_async (the sync send returns TaskSendAsyncContext in a running loop)
+- An async def task must await the work it starts: asyncio tasks of it still on the loop when it ends make the worker replace the child after that task, and the child cancels them when it stops (within 5 s); a client that keeps its own background tasks on the loop causes a replacement after each async task; an asyncio.to_thread() thread is not a task and does not cause one
 - Options: task_name, queue_name, retry_policy, exception_mapper, default_unhandled_error_code, timeout_ms
 - good_until is NOT accepted at definition time (raises HRS-102) — use .with_options(good_until=...) at send time
 - Returns TaskFunction[P, T] for a def function, AsyncTaskFunction[P, T] for an async def function

@@ -43,11 +43,13 @@ async def fetch_price(*, symbol: str) -> TaskResult[float, TaskError]:
 
 A worker child runs one task at a time, `def` or `async def`. Each child keeps one event loop until the child stops, and an async task runs on that loop. An async client that a module keeps stays open across the tasks of one child.
 
-The loop runs only while an async task runs:
+The loop runs only while an async task runs. A `def` task runs with no running event loop, so it can call `asyncio.run()`.
 
-- A `def` task runs with no running event loop, so it can call `asyncio.run()`.
-- A coroutine that a task starts and does not await continues only while a later async task runs in the same child. When the worker stops the child, for example to recycle it, the child cancels that coroutine.
-- A thread that `asyncio.to_thread()` starts can outlive its task, for example when a timeout ends the wait for it. When the worker stops the child, the child does not wait for that thread past the 5-second close: it exits, and its `atexit` handlers do not run.
+An async task must await the work that it starts:
+
+- When an async task ends and asyncio tasks that it started, for example with `asyncio.create_task()`, are still on the loop, the worker replaces the child after that task. The next task runs in a new child, so no task shares the loop with that work. When the old child stops, it cancels that work, within 5 seconds.
+- A client that keeps its own background tasks on the loop, for example a keepalive or a consumer task, causes a child replacement after each async task.
+- A thread that `asyncio.to_thread()` starts can outlive its task, for example when a timeout ends the wait for it. The thread is not an asyncio task, so it does not cause a replacement. When the worker stops the child, the child does not wait for that thread past the 5-second close: it exits, and its `atexit` handlers do not run.
 
 In an async task, send with `.send_async()` or `.schedule_async()`. The sync `.send()` and `.schedule()` refuse a running event loop: they return `Err(TaskSendAsyncContext)` and enqueue nothing. See [Sending Tasks](sending-tasks).
 

@@ -50,6 +50,9 @@ from horsies.core.worker.child_protocol import (
     ChildFrame,
     FrameOverBound,
     InitFrame,
+    LoopHoldsNoTask,
+    LoopHoldsTasks,
+    LoopTasks,
     MalformedFrame,
     ParentFrame,
     ReadyFrame,
@@ -140,12 +143,16 @@ class LossCause(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class TaskFinished:
-    """The child reported a result. ``ok`` has the ``_run_task_entry`` meaning."""
+    """The child reported a result. ``ok`` has the ``_run_task_entry`` meaning.
+
+    ``rss`` and ``loop_tasks`` decide whether the child takes another task.
+    """
 
     ok: bool
     result_json: str
     failed_reason: str | None
     rss: RssReading
+    loop_tasks: LoopTasks
 
 
 @dataclass(frozen=True, slots=True)
@@ -1158,7 +1165,18 @@ class SlotPool:
             outcome = await self._run_task(slot, child, handle)
             tasks_done += 1
             match outcome:
-                case TaskFinished(rss=rss):
+                case TaskFinished(loop_tasks=LoopHoldsTasks(count=count)):
+                    # No later task may share the loop with this work. The
+                    # stop frame makes the child cancel it.
+                    slot.defects = 0
+                    logger.warning(
+                        'Retiring child pid=%s: task %s left %d task(s) on its event loop',
+                        child.pid,
+                        handle.frame.task_id,
+                        count,
+                    )
+                    break
+                case TaskFinished(rss=rss, loop_tasks=LoopHoldsNoTask()):
                     slot.defects = 0
                     reason = self._recycle_reason(tasks_done, rss)
                     if reason is not None:
@@ -1225,6 +1243,7 @@ class SlotPool:
                     answer.result_json,
                     answer.failed_reason,
                     answer.rss,
+                    answer.loop_tasks,
                 )
             case ResultFrame() | ReadyFrame():
                 outcome = await child.discard_violating_child()

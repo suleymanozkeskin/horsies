@@ -25,6 +25,7 @@ from horsies.core.worker.child_main import WireResult, _send_child_frame, serve
 from horsies.core.worker.child_protocol import (
     FRAME_HEADER,
     InitFrame,
+    LoopHoldsNoTask,
     ResultFrame,
     RssUnreadable,
     RunFrame,
@@ -124,6 +125,12 @@ async def _leave_pending(path: str) -> str:
     return str(os.getpid())
 
 
+async def _async_pid() -> str:
+    """Await all the work it starts, so the loop holds nothing after it."""
+    await asyncio.get_running_loop().create_task(asyncio.sleep(0))
+    return str(os.getpid())
+
+
 async def _thread_outlives_wait(seconds: float) -> str:
     """Stop waiting for an executor thread that keeps running."""
     try:
@@ -152,6 +159,8 @@ def _run(frame: RunFrame, init: InitFrame, task_loop: TaskLoop) -> WireResult:
             return True, task_loop.run(_loops_seen()).unwrap(), None
         case 'no_running_loop':
             return True, _no_running_loop(), None
+        case 'async_pid':
+            return True, task_loop.run(_async_pid()).unwrap(), None
         case 'leave_pending':
             return True, task_loop.run(_leave_pending(argument)).unwrap(), None
         case 'thread_outlives_wait':
@@ -187,7 +196,7 @@ def _run(frame: RunFrame, init: InitFrame, task_loop: TaskLoop) -> WireResult:
         case 'exit_after_result':
             _send_child_frame(
                 _sock,
-                ResultFrame(frame.task_id, True, 'complete', None, RssUnreadable()),
+                ResultFrame(frame.task_id, True, 'complete', None, RssUnreadable(), LoopHoldsNoTask()),
             )
             os._exit(1)
         case 'die_mid_frame':
@@ -219,7 +228,7 @@ def _run(frame: RunFrame, init: InitFrame, task_loop: TaskLoop) -> WireResult:
         case 'wrong_task_id':
             _send_child_frame(
                 _sock,
-                ResultFrame('another-task', True, '', None, RssUnreadable()),
+                ResultFrame('another-task', True, '', None, RssUnreadable(), LoopHoldsNoTask()),
             )
             time.sleep(3600)
             return _pid_result()
@@ -239,7 +248,7 @@ def _run(frame: RunFrame, init: InitFrame, task_loop: TaskLoop) -> WireResult:
                 os._exit(0)
             _send_child_frame(
                 _sock,
-                ResultFrame(frame.task_id, True, 'complete', None, RssUnreadable()),
+                ResultFrame(frame.task_id, True, 'complete', None, RssUnreadable(), LoopHoldsNoTask()),
             )
             os.kill(os.getpid(), signal.SIGKILL)
             return _pid_result()

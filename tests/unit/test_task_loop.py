@@ -15,6 +15,7 @@ import pytest
 
 from horsies.core.types.result import Err, Ok
 from horsies.core.utils.loop_runner import in_running_event_loop
+from horsies.core.worker.child_protocol import LoopHoldsNoTask, LoopHoldsTasks
 from horsies.core.worker import task_loop as task_loop_module
 from horsies.core.worker.task_loop import (
     ExecutorShutDown,
@@ -203,6 +204,34 @@ class TestLoopCreateFailure:
         assert task_loop.run(_value(2)).unwrap() == 2
         assert calls == ['new_event_loop', 'new_event_loop']
         assert isinstance(task_loop.state, LoopOpen)
+
+
+class TestTasksLeft:
+    def test_no_loop_holds_no_task(self, task_loop: TaskLoop) -> None:
+        assert task_loop.tasks_left() == LoopHoldsNoTask()
+
+    def test_a_run_that_awaits_its_work_leaves_no_task(self, task_loop: TaskLoop) -> None:
+        async def awaits_its_task() -> None:
+            await asyncio.get_running_loop().create_task(asyncio.sleep(0))
+
+        task_loop.run(awaits_its_task()).unwrap()
+        assert task_loop.tasks_left() == LoopHoldsNoTask()
+
+    def test_tasks_that_a_run_did_not_await_are_counted(self, task_loop: TaskLoop) -> None:
+        kept: list[asyncio.Task[bool]] = []
+
+        async def leaves_two() -> None:
+            loop = asyncio.get_running_loop()
+            kept.extend(loop.create_task(asyncio.Event().wait()) for _ in range(2))
+            await asyncio.sleep(0)
+
+        task_loop.run(leaves_two()).unwrap()
+        assert task_loop.tasks_left() == LoopHoldsTasks(count=2)
+
+    def test_a_call_after_close_is_a_defect(self, task_loop: TaskLoop) -> None:
+        task_loop.close()
+        with pytest.raises(AssertionError, match='after close'):
+            task_loop.tasks_left()
 
 
 class TestClose:

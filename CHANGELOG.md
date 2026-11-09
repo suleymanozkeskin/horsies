@@ -26,8 +26,13 @@ and there is no migration contract between pre-1.0 versions.
   - `TaskNode.fn`, `.node()` and the task registry take both kinds.
   - An `async def` function that uses `yield` is refused with `HRS-101`, as
     a generator function is.
-  - When the worker stops a child, the child cancels the coroutines left on
-    its loop and closes the loop. This takes at most 5 seconds.
+  - A task must await the work that it starts. When an async task ends and
+    asyncio tasks that it started are still on the loop, the worker replaces
+    the child after that task, so no later task shares the loop with that
+    work. When the old child stops, it cancels that work and closes the
+    loop. This takes at most 5 seconds. A client that keeps its own
+    background tasks on the loop causes a child replacement after each async
+    task.
   - A thread of `asyncio.to_thread()` that still runs after that time does
     not hold the child: the child exits without waiting for it, and its
     `atexit` handlers do not run.
