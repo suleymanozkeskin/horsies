@@ -18,7 +18,7 @@ import warnings
 from collections.abc import Callable, Iterator
 from enum import Enum
 from contextlib import ExitStack
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -285,6 +285,18 @@ def _no_descriptors() -> asyncio.AbstractEventLoop:
     raise OSError(errno.EMFILE, 'Too many open files')
 
 
+async def _plain_async_function() -> TaskResult[int, TaskError]:
+    """Not decorated, so it is no task function and has no task kind."""
+    return TaskResult(ok=1)
+
+
+class _AttributeReadRaises:
+    """A registry entry whose attribute read raises."""
+
+    def __getattr__(self, name: str) -> object:
+        raise RuntimeError(f'reading {name} fails')
+
+
 class TestTheLoopIsCreatedBeforeRunning:
     def test_a_refused_loop_returns_the_task_before_running(
         self,
@@ -313,6 +325,59 @@ class TestTheLoopIsCreatedBeforeRunning:
         set_running.assert_not_called()
         assert ran == []
         assert isinstance(task_loop.state, LoopCreateRefused)
+
+    def test_a_loop_policy_that_raises_is_a_refusal_before_running(
+        self,
+        task_loop: TaskLoop,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A non-OS failure of loop creation takes the same counted path."""
+        app = _app()
+        set_running = MagicMock(return_value=None)
+
+        @app.task('async_policy_refused')
+        async def policy_refused() -> TaskResult[int, TaskError]:
+            return TaskResult(ok=1)
+
+        def policy_refuses() -> asyncio.AbstractEventLoop:
+            raise RuntimeError('the event loop policy refuses')
+
+        monkeypatch.setattr(asyncio, 'new_event_loop', policy_refuses)
+
+        wire = _runner(app, task_loop, set_running)(policy_refused.task_name)
+
+        assert wire == (False, '', 'TASK_LOOP_UNAVAILABLE')
+        set_running.assert_not_called()
+        match task_loop.state:
+            case LoopCreateRefused(failed=failed):
+                assert failed.error_name == 'RuntimeError'
+            case other:
+                raise AssertionError(other)
+
+    @pytest.mark.parametrize(
+        'entry',
+        [_plain_async_function, _AttributeReadRaises()],
+        ids=['plain-function', 'attribute-read-raises'],
+    )
+    def test_an_entry_that_is_not_a_task_function_fails_resolution(
+        self,
+        task_loop: TaskLoop,
+        entry: object,
+    ) -> None:
+        """Nothing escapes before RUNNING: the resolution step after it
+        reports the entry, bounded like any task failure."""
+        app = _app()
+        cast(Any, app.tasks)['not_a_task_function'] = entry
+        set_running = MagicMock(return_value=None)
+
+        ok, payload, reason = _runner(app, task_loop, set_running)('not_a_task_function')
+
+        set_running.assert_called_once()
+        assert ok is True
+        assert reason is not None
+        error = decode_task_result(loads_json(payload).unwrap(), int).unwrap_err()
+        assert error.error_code is OperationalErrorCode.WORKER_RESOLUTION_ERROR
+        assert isinstance(task_loop.state, LoopNotCreated)
 
     def test_an_async_task_finds_its_loop_open_at_the_running_update(
         self,

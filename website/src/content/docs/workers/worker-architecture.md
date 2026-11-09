@@ -119,7 +119,7 @@ Key features:
 
 In child process:
 
-1. For an `async def` task, create the event loop of the child, before the RUNNING update. When the operating system refuses it, the task returns to the queue unrun, with no attempt used, and the worker retires the child. When a second child cannot create its loop before any child has opened one, the worker also stops with a non-zero exit
+1. For an `async def` task, create the event loop of the child, before the RUNNING update. When it cannot be created, the task returns to the queue unrun, with no attempt used, and the worker retires the child. When a second child cannot create its loop before any child has opened one, the worker also stops with a non-zero exit
 2. Resolve task from registry by name
 3. Deserialize arguments
 4. Start heartbeat thread

@@ -31,11 +31,12 @@ there is no migration contract between pre-1.0 versions.
   - An `async def` function that uses `yield` is refused with `HRS-101`, as
     a generator function is.
   - A child creates its event loop before it marks its first async task
-    RUNNING. When the OS refuses the loop, for example with EMFILE, the task
-    returns to the queue unrun and uses no attempt and no retry, and the
-    worker replaces the child. The worker stops with a non-zero exit, so its
-    supervisor restarts it, when a second child cannot create its loop before
-    any child has opened one: the cause is then the process environment.
+    RUNNING. When the loop cannot be created, for example with EMFILE or an
+    event loop policy that raises, the task returns to the queue unrun and
+    uses no attempt and no retry, and the worker replaces the child. The
+    worker stops with a non-zero exit, so its supervisor restarts it, when a
+    second child cannot create its loop before any child has opened one: the
+    cause is then the process environment.
   - The task loop of a worker child does not count against the broker's
     limit of 5 open caller loops (`EVENT_LOOP_LIMIT`), as the broker's sync
     runner loop does not. An async task that calls the broker gives the task

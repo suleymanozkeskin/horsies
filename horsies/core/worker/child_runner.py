@@ -1074,26 +1074,53 @@ def _mark_task_finalizing(
 
 @dataclass(frozen=True, slots=True)
 class _BodyKindUnknown:
-    """The registry lookup before the RUNNING update failed.
+    """The registry read before the RUNNING update gave no task kind.
 
-    The task then takes the resolution path after the RUNNING update, which
-    reports the failure as before.
+    The lookup failed, or the entry is not a task function: an object put in
+    with ``app.tasks[name] = obj`` has no ``task_body_kind``. The task then
+    takes the resolution step after the RUNNING update, which reports either
+    case as ``WORKER_RESOLUTION_ERROR``.
     """
 
 
 def _registered_body_kind(task_name: str) -> TaskBodyKind | _BodyKindUnknown:
-    """How the registered task was defined. Reads the in-memory registry only."""
+    """How the registered task was defined. Reads the in-memory registry only.
+
+    Raises no ``Exception``: it runs before the containment try of
+    ``_run_task_entry``.
+    """
     try:
-        task = get_current_app().tasks[task_name]
+        kind = getattr(get_current_app().tasks[task_name], 'task_body_kind', None)
     except Exception:
         return _BodyKindUnknown()
-    match getattr(task, 'task_body_kind', None):
-        case TaskBodyKind() as kind:
+    match kind:
+        case TaskBodyKind():
             return kind
-        case other:
-            raise AssertionError(
-                f'registered task {task_name!r} has no TaskBodyKind: {other!r}',
-            )
+        case _:
+            return _BodyKindUnknown()
+
+
+def _resolution_failure(
+    task_name: str,
+    task_id: str,
+    heartbeat_stop_event: threading.Event,
+    message: str,
+    reason: str,
+) -> Tuple[bool, str, Optional[str]]:
+    """The wire tuple of a task the worker cannot resolve: WORKER_RESOLUTION_ERROR.
+
+    Stops the heartbeat thread, because no task code runs.
+    """
+    tr: TaskResult[Any, TaskError] = TaskResult(
+        err=TaskError(
+            error_code=OperationalErrorCode.WORKER_RESOLUTION_ERROR,
+            message=message,
+            data={'task_name': task_name},
+        )
+    )
+    heartbeat_stop_event.set()
+    logger.debug(f'Heartbeat stop signal sent for task {task_id} (resolution failed)')
+    return (True, serialize_error_payload(tr), reason)
 
 
 def _open_task_loop_before_running(
@@ -1180,9 +1207,14 @@ def _run_task_entry(
 
     This is the child's containment seam: the execution body is wrapped in
     ``except BaseException`` and folds everything into the wire tuple. The
-    pre-try steps (preflight, ownership confirm) return wire tuples
-    themselves; only ``_start_heartbeat_thread`` can escape (see its
-    docstring) and is recovered by the parent as a future failure.
+    steps before that try return wire tuples themselves: the task loop open
+    of an ``async def`` task, the preflight and the ownership confirm. The
+    task loop open turns an ``Exception`` from loop creation into
+    ``LoopCreateFailed`` and leaves a registry entry with no task kind to
+    the resolution step, so it adds no escape. ``_start_heartbeat_thread``
+    can escape (see its docstring), and so can a ``BaseException`` that is
+    not an ``Exception``, such as ``KeyboardInterrupt``; the parent
+    recovers either as a lost child.
     """
     logger.info(f'Starting task execution: {task_name} ({task_id})')
 
@@ -1240,21 +1272,34 @@ def _run_task_entry(
         try:
             app = get_current_app()
             task = app.tasks[task_name]  # may raise NotRegistered
+            body_kind = getattr(task, 'task_body_kind', None)
         except Exception as e:
             logger.error(f'Failed to resolve task {task_name}: {e}')
-            tr: TaskResult[Any, TaskError] = TaskResult(
-                err=TaskError(
-                    error_code=OperationalErrorCode.WORKER_RESOLUTION_ERROR,
-                    message=f'Failed to resolve {task_name}: {type(e).__name__}: {e}',
-                    data={'task_name': task_name},
+            return _resolution_failure(
+                task_name,
+                task_id,
+                heartbeat_stop_event,
+                f'Failed to resolve {task_name}: {type(e).__name__}: {e}',
+                f'{type(e).__name__}: {e}',
+            )
+        match body_kind:
+            case TaskBodyKind():
+                pass
+            case _:
+                # Only the decorator makes a task function. An object put in
+                # the registry by hand cannot be run as a task.
+                not_a_task = (
+                    'the registry entry is not a task function: its '
+                    f'task_body_kind is {body_kind!r}'
                 )
-            )
-            # Stop heartbeat thread since task failed to resolve
-            heartbeat_stop_event.set()
-            logger.debug(
-                f'Heartbeat stop signal sent for task {task_id} (resolution failed)'
-            )
-            return (True, serialize_error_payload(tr), f'{type(e).__name__}: {e}')
+                logger.error(f'Failed to resolve task {task_name}: {not_a_task}')
+                return _resolution_failure(
+                    task_name,
+                    task_id,
+                    heartbeat_stop_event,
+                    f'Failed to resolve {task_name}: {not_a_task}',
+                    not_a_task,
+                )
 
         # Deserialize task arguments. Strict-serde: positional args are
         # rejected at every producer; the wire shape for args is always

@@ -138,6 +138,43 @@ class TestOpen:
         assert inspect.getcoroutinestate(coroutine) == inspect.CORO_CLOSED
         assert new_task_loop.close() == ExecutorShutDown()
 
+    @pytest.mark.parametrize(
+        'error',
+        [RuntimeError('the event loop policy refuses'), MemoryError('no memory')],
+        ids=['policy', 'memory'],
+    )
+    def test_an_exception_of_the_runtime_is_a_refusal(
+        self,
+        new_task_loop: TaskLoop,
+        monkeypatch: pytest.MonkeyPatch,
+        error: Exception,
+    ) -> None:
+        """Not only the OS: an event loop policy can raise too. The child
+        then takes the counted refusal path, not a crash."""
+
+        def refuses() -> asyncio.AbstractEventLoop:
+            raise error
+
+        monkeypatch.setattr(asyncio, 'new_event_loop', refuses)
+        failed = LoopCreateFailed(error_name=type(error).__name__, detail=str(error))
+
+        assert new_task_loop.open() == Err(failed)
+        assert new_task_loop.state == LoopCreateRefused(failed)
+
+    def test_keyboard_interrupt_from_the_creation_is_not_caught(
+        self,
+        new_task_loop: TaskLoop,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def interrupted() -> asyncio.AbstractEventLoop:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(asyncio, 'new_event_loop', interrupted)
+
+        with pytest.raises(KeyboardInterrupt):
+            new_task_loop.open()
+        assert new_task_loop.state == LoopNotCreated()
+
     def test_open_after_close_is_a_defect(self, new_task_loop: TaskLoop) -> None:
         new_task_loop.close()
         with pytest.raises(AssertionError, match='after close'):

@@ -51,10 +51,11 @@ R = TypeVar('R')
 
 @dataclass(frozen=True, slots=True)
 class LoopCreateFailed:
-    """The OS refused a resource that a new event loop needs.
+    """The runtime refused a new event loop.
 
     ``asyncio.new_event_loop()`` opens a selector and a socket pair, so a
-    process at its file descriptor limit (EMFILE) gets this. No task code ran.
+    process at its file descriptor limit (EMFILE) gets this, and so does an
+    event loop policy that raises. No task code ran.
     Retry condition: the worker replaces the child, and a new child tries
     again; it succeeds once the process has descriptors free.
     """
@@ -264,14 +265,23 @@ def _opening(state_before_task: LoopState) -> LoopOpening:
 
 
 def _new_loop() -> Result[asyncio.AbstractEventLoop, LoopCreateFailed]:
-    """Create an event loop. An ``OSError`` of the OS becomes ``LoopCreateFailed``.
+    """Create an event loop. An ``Exception`` from the creation becomes
+    ``LoopCreateFailed``, with its type and message.
+
+    ``asyncio.new_event_loop()`` runs the runtime the child depends on: the
+    event loop policy, which user code can set, and the OS, which can refuse
+    a selector or a socket pair (EMFILE) or memory. A failure there is a
+    failure of that runtime, not a horsies defect, so it takes the counted
+    refusal path: the task returns to the queue and the child is retired.
+    ``KeyboardInterrupt`` and ``SystemExit`` are not ``Exception`` and stay
+    uncaught.
 
     A created loop is registered as a task loop, so a broker does not count
     it against its limit of caller loops.
     """
     try:
         loop = asyncio.new_event_loop()
-    except OSError as exc:
+    except Exception as exc:
         failed = LoopCreateFailed(error_name=type(exc).__name__, detail=str(exc))
         logger.error('%s', failed.describe())
         return Err(failed)
