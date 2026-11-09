@@ -2744,9 +2744,19 @@ def create_task_wrapper(
                 node_id=node_id,
             )
 
-        # Copy metadata
         def __getattr__(self, name: str) -> Any:
-            return getattr(self._call, name)
+            """Read other attributes from the call function.
+
+            An instance that `copy` builds has no `_call` until its state is
+            set. `self._call` would then call this method again, so `_call`
+            is read from the instance dict.
+            """
+            instance_fields = vars(self)
+            if '_call' not in instance_fields:
+                raise AttributeError(
+                    f'{type(self).__name__!r} object has no attribute {name!r}',
+                )
+            return getattr(instance_fields['_call'], name)
 
     match _task_body(fn):
         case _SyncTaskBody(fn=sync_body):

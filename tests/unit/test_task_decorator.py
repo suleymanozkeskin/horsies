@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import inspect
 import json
 from functools import wraps
@@ -1629,6 +1630,52 @@ class TestCreateTaskWrapperIntrospection:
 
         assert wrapper.__wrapped__ is my_task
         assert inspect.unwrap(wrapper) is my_task
+
+    @pytest.mark.parametrize('copier', [copy.copy, copy.deepcopy], ids=['copy', 'deepcopy'])
+    def test_a_copy_of_a_def_task_calls_the_same_function(
+        self,
+        copier: Callable[[Any], Any],
+    ) -> None:
+        def add_one(*, x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x + 1)
+
+        wrapper = create_task_wrapper(add_one, _make_app(), 'test.add_one')
+
+        copied = copier(wrapper)
+
+        assert copied is not wrapper
+        assert copied.task_name == 'test.add_one'
+        assert copied(x=1).ok_value == 2
+
+    @pytest.mark.parametrize('copier', [copy.copy, copy.deepcopy], ids=['copy', 'deepcopy'])
+    def test_a_copy_of_an_async_task_calls_the_same_function(
+        self,
+        copier: Callable[[Any], Any],
+    ) -> None:
+        async def add_one(*, x: int) -> TaskResult[int, TaskError]:
+            await asyncio.sleep(0)
+            return TaskResult(ok=x + 1)
+
+        wrapper = create_task_wrapper(add_one, _make_app(), 'test.add_one_async')
+
+        copied = copier(wrapper)
+
+        assert copied is not wrapper
+        assert copied.task_name == 'test.add_one_async'
+        assert asyncio.run(copied(x=1)).ok_value == 2
+
+    def test_an_instance_with_no_state_has_no_delegated_attribute(self) -> None:
+        """`copy` builds an instance with no state, then asks it for
+        `__setstate__`. The answer is AttributeError, which `hasattr` reads
+        as False, not a RecursionError, which `hasattr` lets through."""
+
+        def add_one(*, x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x + 1)
+
+        wrapper = create_task_wrapper(add_one, _make_app(), 'test.add_one')
+        bare = object.__new__(type(wrapper))
+
+        assert not hasattr(bare, '__setstate__')
 
 
 # =============================================================================
