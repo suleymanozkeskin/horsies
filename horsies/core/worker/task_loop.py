@@ -25,6 +25,7 @@ from typing import Any, Final, TypeVar, assert_never
 from horsies.core.logging import get_logger
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.utils.loop_runner import in_running_event_loop
+from horsies.core.utils.task_loop_registry import register_task_loop, unregister_task_loop
 from horsies.core.worker.child_protocol import LoopHoldsNoTask, LoopHoldsTasks, LoopTasks
 
 logger = get_logger('worker')
@@ -189,7 +190,10 @@ class TaskLoop:
                 # A step that raises still leaves the loop closed. Until the
                 # executor step ends, its threads can still run.
                 self._state = LoopClosed(ExecutorThreadsLeft())
-                self._state = LoopClosed(_close_loop(loop))
+                try:
+                    self._state = LoopClosed(_close_loop(loop))
+                finally:
+                    unregister_task_loop(loop)
             case LoopClosed():
                 pass
             case _ as unreachable:
@@ -198,13 +202,19 @@ class TaskLoop:
 
 
 def _new_loop() -> Result[asyncio.AbstractEventLoop, LoopCreateFailed]:
-    """Create an event loop. An ``OSError`` of the OS becomes ``LoopCreateFailed``."""
+    """Create an event loop. An ``OSError`` of the OS becomes ``LoopCreateFailed``.
+
+    A created loop is registered as a task loop, so a broker does not count
+    it against its limit of caller loops.
+    """
     try:
-        return Ok(asyncio.new_event_loop())
+        loop = asyncio.new_event_loop()
     except OSError as exc:
         failed = LoopCreateFailed(error_name=type(exc).__name__, detail=str(exc))
         logger.error('%s', failed.describe())
         return Err(failed)
+    register_task_loop(loop)
+    return Ok(loop)
 
 
 def _seconds_left(deadline: float) -> float:

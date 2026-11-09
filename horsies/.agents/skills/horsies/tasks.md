@@ -460,7 +460,7 @@ Validation failure text never contains the refused value: each failure is `<loc>
 | `PAYLOAD_MISMATCH` | Refused | The task id exists, and the command or the idempotency key differs from the original send — the payload was altered between send and retry |
 | `IDEMPOTENCY_KEY_CONFLICT` | Accepted | The idempotency key is reserved by another task with a different command; nothing was enqueued. `owner_task_id` names the owner task. A retry after the reservation ends is accepted |
 | `PAYLOAD_TOO_LARGE` | Refused | Serialized kwargs exceeded `payload.reject_bytes` (off by default); nothing was enqueued — shrink the payload (pass a reference to external storage) or raise the limit |
-| `EVENT_LOOP_LIMIT` | Refused | The broker serves its limit of open event loops (5, plus its sync runner loop) and this send ran on a new one; nothing was enqueued — close loops that are done |
+| `EVENT_LOOP_LIMIT` | Refused | The broker serves its limit of open event loops (5, plus its sync runner loop and, in a worker child, the task loop) and this send ran on a new one; nothing was enqueued — close loops that are done |
 | `LOOP_RUNNER_FAILED` | Accepted | Sync `.send()` / `.schedule()` (or a sync retry) could not run the enqueue on the broker's sync runner (stopped, thread did not start, or scheduling failed); nothing was enqueued. A stopped runner does not start again, so a sync retry returns the same error — `retry_send_async(err)` / `retry_schedule_async(err)` completes the same send |
 
 ### `TaskSendPayload`

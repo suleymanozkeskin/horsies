@@ -44,6 +44,7 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.types.result import Result, is_err, is_ok
 from horsies.core.worker.child_runner import _discard_inherited_broker
+from horsies.core.worker.task_loop import TaskLoop
 from tests.broker_resources_support import fake_resources
 
 RUNTIME_URL = 'postgresql+psycopg://u:p@localhost:5432/db'
@@ -228,6 +229,48 @@ class TestDecideForLoop:
 
         assert decision == BuildForLoop()
 
+    def test_task_loop_builds_at_the_limit(self) -> None:
+        entries = tuple(_fake_entry() for _ in range(MAX_CALLER_EVENT_LOOPS))
+        loop = MagicMock(spec=asyncio.AbstractEventLoop)
+
+        decision = decide_for_loop(
+            entries, loop, 'MainThread', LoopRole.TASK_LOOP, limit=MAX_CALLER_EVENT_LOOPS,
+        )
+
+        assert decision == BuildForLoop()
+
+    def test_a_task_loop_entry_leaves_the_last_caller_place_free(self) -> None:
+        entries = (
+            _fake_entry(role=LoopRole.TASK_LOOP),
+            *(_fake_entry() for _ in range(MAX_CALLER_EVENT_LOOPS - 1)),
+        )
+        loop = MagicMock(spec=asyncio.AbstractEventLoop)
+
+        decision = decide_for_loop(
+            entries, loop, 'caller', LoopRole.CALLER, limit=MAX_CALLER_EVENT_LOOPS,
+        )
+
+        assert decision == BuildForLoop()
+
+    def test_callers_at_the_limit_beside_a_task_loop_get_the_limit(self) -> None:
+        entries = (
+            _fake_entry(role=LoopRole.TASK_LOOP, thread_name='MainThread'),
+            *(_fake_entry(thread_name=f'c{n}') for n in range(MAX_CALLER_EVENT_LOOPS)),
+        )
+        loop = MagicMock(spec=asyncio.AbstractEventLoop)
+
+        decision = decide_for_loop(
+            entries, loop, 'extra', LoopRole.CALLER, limit=MAX_CALLER_EVENT_LOOPS,
+        )
+
+        assert decision == LimitReached(
+            loop_limit=EventLoopLimit(
+                limit=MAX_CALLER_EVENT_LOOPS,
+                held_thread_names=tuple(f'c{n}' for n in range(MAX_CALLER_EVENT_LOOPS)),
+                current_thread_name='extra',
+            ),
+        )
+
 
 @pytest.mark.unit
 class TestSplitClosedLoops:
@@ -405,6 +448,27 @@ class TestLoopLimit:
         finally:
             broker._loop_runner.stop()
             for loop in loops:
+                loop.close()
+
+    def test_the_task_loop_is_not_counted(self) -> None:
+        """A worker child's task loop gets a set beside the full caller loops,
+        and the next caller loop still gets the limit."""
+        broker = _broker()
+        loops = self._open_caller_loops(broker, MAX_CALLER_EVENT_LOOPS)
+        task_loop = TaskLoop()
+        extra = asyncio.new_event_loop()
+        try:
+            task_loop_result = task_loop.run(broker.select_resources()).unwrap()
+            extra_result = _select_on(broker, extra)
+
+            assert is_ok(task_loop_result)
+            assert is_err(extra_result)
+            assert extra_result.err_value.held_thread_names == (
+                ('MainThread',) * MAX_CALLER_EVENT_LOOPS
+            )
+        finally:
+            task_loop.close()
+            for loop in (*loops, extra):
                 loop.close()
 
 

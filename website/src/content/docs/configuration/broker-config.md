@@ -192,7 +192,8 @@ has its own set.
 - When a loop closes, the next broker call from any loop releases that loop's
   set: its idle connections and its listener connections close. A connection
   that a task of the closed loop still held is closed by garbage collection.
-- A broker serves at most 5 open loops other than its sync runner loop. A call
+- A broker serves at most 5 open loops other than its sync runner loop and, in
+  a worker child, the task loop that runs `async def` tasks. A call
   from one more open loop returns `EVENT_LOOP_LIMIT` in the error type of that
   call, and nothing runs. The error clears when one of those loops closes.
   The limit covers pytest-asyncio, which keeps one loop open per fixture scope

@@ -87,7 +87,7 @@ Prefer one form per application. A mix of both forms opens one more connection s
 
 ## The Event-Loop Limit
 
-A broker keeps one resource set (pools and a listener) for each event loop that calls it. It serves at most 5 open caller loops, plus its own sync runner loop (`MAX_CALLER_EVENT_LOOPS = 5`).
+A broker keeps one resource set (pools and a listener) for each event loop that calls it. It serves at most 5 open caller loops, plus its own sync runner loop and, in a worker child, the task loop (`MAX_CALLER_EVENT_LOOPS = 5`).
 
 A call from one more open loop returns `EVENT_LOOP_LIMIT` in the error type of that call. Nothing runs. The error clears when one of the open loops closes.
 

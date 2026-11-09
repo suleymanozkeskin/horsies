@@ -127,6 +127,7 @@ from horsies.core.utils.loop_runner import (
     async_context_message,
     in_running_event_loop,
 )
+from horsies.core.utils.task_loop_registry import is_task_loop
 from horsies.core.utils.url import to_psycopg_url
 from horsies.core.utils.wait_timeout import wait_timeout_seconds
 
@@ -866,8 +867,8 @@ ENQUEUE_INSERT_SQL = text("""
 """)
 
 
-# Most open event loops, other than the broker's sync runner loop, that get
-# their own resource set. pytest-asyncio keeps one event loop open per
+# Most open event loops, other than the broker's sync runner loop and a worker
+# child's task loop, that get their own resource set. pytest-asyncio keeps one event loop open per
 # fixture scope (session, package, module, class, function), so one test
 # run can hold five open loops on one thread. A loop beyond the limit gets
 # EVENT_LOOP_LIMIT instead of one more connection pool.
@@ -1010,8 +1011,9 @@ class PostgresBroker:
         Call once at a public entry point and pass the value to helpers.
         Each open event loop gets its own set, built on its first call
         without I/O (engines and the listener connect on first use). The
-        broker's sync runner loop always gets a set. Other loops get one up
-        to ``MAX_CALLER_EVENT_LOOPS``; a loop beyond that gets
+        broker's sync runner loop, and in a worker child the task loop,
+        always get a set. Other loops get one up to
+        ``MAX_CALLER_EVENT_LOOPS``; a loop beyond that gets
         ``Err(EventLoopLimit)`` and nothing runs.
 
         Each call also releases the sets of loops that closed, each bounded
@@ -1032,12 +1034,7 @@ class PostgresBroker:
         self, loop: asyncio.AbstractEventLoop, thread_name: str,
     ) -> Result[BrokerResources, EventLoopLimit]:
         """Find or build the set for ``loop``. No I/O; it never releases a set."""
-        role: LoopRole
-        match self._loop_runner.runs_on(loop):
-            case True:
-                role = LoopRole.SYNC_RUNNER
-            case False:
-                role = LoopRole.CALLER
+        role = self._loop_role(loop)
         with self._loop_sets_lock:
             decision = decide_for_loop(
                 self._loop_sets, loop, thread_name, role, MAX_CALLER_EVENT_LOOPS,
@@ -1055,6 +1052,16 @@ class PostgresBroker:
                     )
                     self._loop_sets = (*self._loop_sets, entry)
                     return Ok(resources)
+
+    def _loop_role(self, loop: asyncio.AbstractEventLoop) -> LoopRole:
+        """The sync runner loop of this broker, a task loop, or a caller loop."""
+        match (self._loop_runner.runs_on(loop), is_task_loop(loop)):
+            case (True, _):
+                return LoopRole.SYNC_RUNNER
+            case (False, True):
+                return LoopRole.TASK_LOOP
+            case (False, False):
+                return LoopRole.CALLER
 
     def _take_closed_loop_sets(self) -> tuple[LoopResources, ...]:
         """Remove and return the entries whose event loop is closed."""
