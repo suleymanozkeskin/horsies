@@ -61,6 +61,9 @@ class OperationalErrorCode(str, Enum):
     WORKFLOW_ENQUEUE_FAILED = 'WORKFLOW_ENQUEUE_FAILED'
     SUBWORKFLOW_LOAD_FAILED = 'SUBWORKFLOW_LOAD_FAILED'
     WORKFLOW_RECOVERY_LIMIT_REACHED = 'WORKFLOW_RECOVERY_LIMIT_REACHED'
+    # The engine did not start a child workflow, because its depth would
+    # pass MAX_SUBWORKFLOW_DEPTH (horsies.core.models.workflow.limits).
+    SUBWORKFLOW_DEPTH_LIMIT_REACHED = 'SUBWORKFLOW_DEPTH_LIMIT_REACHED'
 
 
 class ContractCode(str, Enum):

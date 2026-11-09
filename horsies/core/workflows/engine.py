@@ -49,6 +49,7 @@ from horsies.core.codec.typed import (
     validate_task_result_envelope,
 )
 from horsies.core.codec.validation_errors import ValueValidationError
+from horsies.core.models.workflow.limits import MAX_SUBWORKFLOW_DEPTH
 from horsies.core.models.workflow.nodes import stored_kwargs
 from horsies.core.utils.fingerprint import enqueue_fingerprint
 from horsies.core.types.result import Err, Ok, Result, is_err
@@ -1034,6 +1035,23 @@ async def enqueue_subworkflow_task(
     # Parent name rides the CAS RETURNING (the statement already joins
     # horsies_workflows); a CAS hit implies the workflow row exists.
     workflow_name = row.parent_workflow_name
+    # The depth bound also bounds the recursion below: a child root that is a
+    # SubWorkflowNode starts its own child one level deeper.
+    child_depth = parent_depth + 1
+    if child_depth > MAX_SUBWORKFLOW_DEPTH:
+        await _fail_enqueued_task(
+            session,
+            workflow_id,
+            task_index,
+            (
+                f'Subworkflow not started: the child workflow would have depth '
+                f'{child_depth}, and the limit is {MAX_SUBWORKFLOW_DEPTH} '
+                f'(workflow {workflow_name}:{task_index})'
+            ),
+            broker,
+            error_code=OperationalErrorCode.SUBWORKFLOW_DEPTH_LIMIT_REACHED,
+        )
+        return None
     # 2. Load the child workflow definition by its explicit definition_key.
 
     workflow_def: type[WorkflowDefinition[Any]] | None = None

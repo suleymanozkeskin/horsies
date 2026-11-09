@@ -8,6 +8,43 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking: a child workflow has at most depth 32.** A top-level workflow
+  has depth 0, and a child workflow has the depth of its parent plus 1. A
+  `SubWorkflowNode` whose child would have depth 33 does not start its child:
+  the node goes `FAILED` with the new
+  `OperationalErrorCode.SUBWORKFLOW_DEPTH_LIMIT_REACHED`, and the `on_error`
+  policy of its workflow applies. Before, nesting had no limit at run time,
+  and a definition that included itself as a root node nested in one
+  transaction until Python's recursion limit.
+- **Breaking: a `WorkflowSpec` holds at most 10,000 nodes.** A spec with more
+  nodes raises `HRS-038` (`WORKFLOW_TOO_MANY_NODES`) when it is built. In
+  `build_with()`, that raise fails the `SubWorkflowNode` with
+  `WORKFLOW_ENQUEUE_FAILED`. Split more nodes into `SubWorkflowNode`s: each
+  child workflow has its own limit.
+- **`horsies check` reports two nesting errors.** `HRS-036`
+  (`WORKFLOW_SUBWORKFLOW_DEPTH_LIMIT`): a nesting would start a child deeper
+  than 32, and no `SubWorkflowNode` on its path has `waits_for`. `HRS-037`
+  (`WORKFLOW_SUBWORKFLOW_SELF_NESTING`): a definition includes itself with the
+  same kwargs, and no `SubWorkflowNode` from one level to the next has
+  `waits_for`, so the nesting never ends once it starts. Before, the check
+  stopped at both with no finding. Through a node with `waits_for`, the results
+  of its dependencies decide the depth, so the check does not report the
+  nesting, and the engine applies the limit at run time.
+- **An exhaustive `match` on `OperationalErrorCode` needs a
+  `SUBWORKFLOW_DEPTH_LIMIT_REACHED` case.** The code string is now reserved:
+  an `exception_mapper` or `default_unhandled_error_code` with that value
+  fails `horsies check` with `HRS-212`. A process of an earlier version cannot
+  decode an error stored with this code.
+
+### Fixed
+
+- **The cycle check of a `WorkflowSpec` takes time linear in its nodes and
+  dependencies.** It scanned every node for each node that it removed. On an
+  Apple M2 with Python 3.13, a spec of 10,000 nodes took about 7.5 s to build,
+  and now takes 0.23 s. The findings do not change.
+
 ## [0.6.1] - 2026-11-08
 
 0.6.1 identifies a retention class by its period and makes the windowed

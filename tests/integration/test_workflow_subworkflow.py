@@ -21,7 +21,13 @@ from horsies.core.codec.typed import (
     encode_task_result,
 )
 from horsies.core.errors import WorkflowValidationError
-from horsies.core.models.tasks import SubWorkflowError, TaskResult, TaskError
+from horsies.core.models.tasks import (
+    OperationalErrorCode,
+    SubWorkflowError,
+    TaskError,
+    TaskResult,
+)
+from horsies.core.models.workflow.limits import MAX_SUBWORKFLOW_DEPTH
 from horsies.core.models.workflow import (
     TaskNode,
     SubWorkflowNode,
@@ -288,6 +294,71 @@ class MiddleWorkflow(WorkflowDefinition[int]):
             name=cls.name,
             tasks=[node_child],
             output=node_child,
+            on_error=OnError.FAIL,
+        )
+
+
+
+
+class RootNestingWorkflow(WorkflowDefinition[int]):
+    """Includes itself, one level deeper, as its only root node.
+
+    Only the subworkflow depth limit ends this nesting.
+    """
+
+    name = 'root_nesting_workflow'
+    definition_key = 'tests.root_nesting.v1'
+
+    @classmethod
+    def build_with(
+        cls, app: Horsies, level: int = 0, *_args: Any, **_kwargs: Any,
+    ) -> Any:
+        node: SubWorkflowNode[int] = SubWorkflowNode(
+            workflow_def=RootNestingWorkflow,
+            kwargs={'level': level + 1},
+        )
+        return app.workflow(
+            name=cls.name,
+            tasks=[node],
+            output=node,
+            on_error=OnError.FAIL,
+        )
+
+
+class DependentNestingWorkflow(WorkflowDefinition[int]):
+    """Nests through root nodes to the depth limit. There, a task runs first,
+    and the deeper child waits for it, so the limit applies when the task
+    completes, not when the workflow starts."""
+
+    name = 'dependent_nesting_workflow'
+    definition_key = 'tests.dependent_nesting.v1'
+
+    @classmethod
+    def build_with(
+        cls, app: Horsies, level: int = 0, *_args: Any, **_kwargs: Any,
+    ) -> Any:
+        if level < MAX_SUBWORKFLOW_DEPTH:
+            node: SubWorkflowNode[int] = SubWorkflowNode(
+                workflow_def=DependentNestingWorkflow,
+                kwargs={'level': level + 1},
+            )
+            return app.workflow(
+                name=cls.name,
+                tasks=[node],
+                output=node,
+                on_error=OnError.FAIL,
+            )
+        leaf_task = make_simple_task(app, 'dependent_nesting_leaf_task')
+        leaf: TaskNode[int] = TaskNode(fn=leaf_task, kwargs={'value': 1})
+        deeper: SubWorkflowNode[int] = SubWorkflowNode(
+            workflow_def=DependentNestingWorkflow,
+            kwargs={'level': level + 1},
+            waits_for=[leaf],
+        )
+        return app.workflow(
+            name=cls.name,
+            tasks=[leaf, deeper],
+            output=deeper,
             on_error=OnError.FAIL,
         )
 
@@ -1075,6 +1146,88 @@ class TestSubworkflowIntegration:
             {'wf_id': child_id},
         )
         assert child_depth.scalar_one() == 1
+
+    async def _workflows_at_depth(
+        self, session: AsyncSession, depth: int,
+    ) -> list[str]:
+        res = await session.execute(
+            text('SELECT id FROM horsies_workflows WHERE depth = :depth'),
+            {'depth': depth},
+        )
+        return [str(row[0]) for row in res.fetchall()]
+
+    async def _deeper_workflow_count(self, session: AsyncSession, depth: int) -> int:
+        res = await session.execute(
+            text('SELECT COUNT(*) FROM horsies_workflows WHERE depth > :depth'),
+            {'depth': depth},
+        )
+        return int(res.scalar_one())
+
+    async def _failed_error_code(
+        self, session: AsyncSession, workflow_id: str, task_index: int,
+    ) -> object:
+        row = await self._get_workflow_task_row(session, workflow_id, task_index)
+        assert row is not None
+        status, _, result_json = row
+        assert status == 'FAILED'
+        tr = _decode_task_result(result_json)
+        assert tr is not None and tr.err is not None
+        return tr.err.error_code
+
+    async def test_a_root_nesting_stops_at_the_depth_limit(
+        self,
+        setup: tuple[AsyncSession, PostgresBroker, Horsies],
+    ) -> None:
+        """A self-including root node starts children down to depth 32 and
+        fails at depth 32 with SUBWORKFLOW_DEPTH_LIMIT_REACHED."""
+        session, broker, app = setup
+        node: SubWorkflowNode[int] = SubWorkflowNode(
+            workflow_def=RootNestingWorkflow, kwargs={'level': 1},
+        )
+        spec = _workflow(app, name='root_nesting_parent', tasks=[node], output=node)
+
+        handle = await start_ok(spec, broker)
+        await drain_parent_propagations_in_session(session, broker)
+        await session.commit()
+
+        deepest = await self._workflows_at_depth(session, MAX_SUBWORKFLOW_DEPTH)
+        assert len(deepest) == 1
+        assert await self._deeper_workflow_count(session, MAX_SUBWORKFLOW_DEPTH) == 0
+        assert (
+            await self._failed_error_code(session, deepest[0], 0)
+            is OperationalErrorCode.SUBWORKFLOW_DEPTH_LIMIT_REACHED
+        )
+        root_status = await session.execute(
+            text('SELECT status FROM horsies_workflows WHERE id = :wf_id'),
+            {'wf_id': handle.workflow_id},
+        )
+        assert root_status.scalar_one() == 'FAILED'
+
+    async def test_a_dependent_nesting_stops_at_the_depth_limit(
+        self,
+        setup: tuple[AsyncSession, PostgresBroker, Horsies],
+    ) -> None:
+        """At depth 32, a child that waits for a task is refused when the task
+        completes, with SUBWORKFLOW_DEPTH_LIMIT_REACHED."""
+        session, broker, app = setup
+        node: SubWorkflowNode[int] = SubWorkflowNode(
+            workflow_def=DependentNestingWorkflow, kwargs={'level': 1},
+        )
+        spec = _workflow(
+            app, name='dependent_nesting_parent', tasks=[node], output=node,
+        )
+
+        await start_ok(spec, broker)
+        deepest = await self._workflows_at_depth(session, MAX_SUBWORKFLOW_DEPTH)
+        assert len(deepest) == 1
+
+        await self._complete_task(session, broker, deepest[0], 0, TaskResult(ok=2))
+
+        assert await self._deeper_workflow_count(session, MAX_SUBWORKFLOW_DEPTH) == 0
+        assert (
+            await self._failed_error_code(session, deepest[0], 1)
+            is OperationalErrorCode.SUBWORKFLOW_DEPTH_LIMIT_REACHED
+        )
 
     async def test_root_workflow_id_propagation(
         self,

@@ -70,6 +70,15 @@ from horsies.core.codec.kwargs import (
     decode_subworkflow_kwargs,
     fill_build_with_defaults,
 )
+from horsies.core.models.workflow.nesting_check import (
+    NestingPath,
+    NestingStep,
+    StopWithFinding,
+    StopWithoutFinding,
+    WalkChild,
+    child_start,
+    decide_nesting,
+)
 from horsies.core.models.workflow.nodes import stored_kwargs
 from horsies.core.codec.validation_errors import ValueValidationError, exception_text
 from horsies.core.types.result import is_err
@@ -97,12 +106,21 @@ ChildProcessStartHook = Callable[[], None]
 # Sentinel attribute name stamped on functions decorated with @app.workflow_builder
 _BUILDER_ATTR = '__horsies_workflow_builder__'
 
-# Recursion backstop for check-time static subworkflow expansion (cycles are
-# guarded by definition_key; this caps pathological nesting depth).
-_CHECK_MAX_SUBWORKFLOW_DEPTH = 32
-
 # Attribute name for opt-out of undecorated builder detection
 _NO_CHECK_ATTR = '__horsies_no_check__'
+
+
+@dataclass(frozen=True, slots=True)
+class _ChildBuilt:
+    """A child spec that ``horsies check`` built from static kwargs."""
+
+    spec: WorkflowSpec[Any]
+
+
+@dataclass(frozen=True, slots=True)
+class _ChildNotBuilt:
+    """A child spec that ``horsies check`` did not build. The cause is in the
+    check findings, in the log, or left to the run time."""
 
 
 @dataclass
@@ -2097,7 +2115,7 @@ class Horsies:
                 )
             else:
                 result._require_definition_key()
-                self._validate_spec_bindings(result, errors, frozenset(), 0)
+                self._validate_spec_bindings(result, errors, ())
         except MultipleValidationErrors as exc:
             errors.extend(exc.report.errors)
         except HorsiesError as exc:
@@ -2121,99 +2139,126 @@ class Horsies:
         self,
         spec: Any,
         errors: list[HorsiesError],
-        seen: frozenset[tuple[str, str | None]],
-        depth: int,
+        path: NestingPath,
     ) -> None:
-        """Validate a spec's TaskNodes (queue binding) and recurse into
-        statically-parameterized SubWorkflowNodes (full child validation).
+        """Check the nodes of ``spec`` and append each finding to ``errors``.
 
-        TaskNodes are bound through the same resolver the runtime persist paths
-        use, so an invalid queue fails check instead of surfacing at enqueue
-        time. A SubWorkflowNode is expanded only when its build_with inputs are
-        fully static — no ``args_from`` mapping — so the child spec is
-        deterministic at check time; runtime-parameterized subworkflows are
-        skipped (register their build_with as a builder for coverage). Building
-        the child runs its full validation (queue/mode AND structural — empty
-        tasks, cycles, node ids); any resulting ``HorsiesError`` is surfaced, so
-        single- and multi-error failures are treated alike. Non-horsies
-        exceptions from build_with are out of scope (user-code/environmental).
-        ``seen`` (by definition_key + wire kwargs) guards cycles; ``depth``
-        is a backstop.
+        A TaskNode is bound through the resolver that the runtime persist
+        paths use, so an invalid queue fails check instead of surfacing at
+        enqueue time. A SubWorkflowNode goes to ``_check_subworkflow_node``.
+        ``path`` holds the SubWorkflowNodes from the root spec to ``spec``.
+        Raises nothing for a finding.
         """
         for node in getattr(spec, 'tasks', ()):
-            if not isinstance(node, SubWorkflowNode):
-                try:
-                    resolve_node_queue_and_priority(self, node)
-                except ConfigurationError as exc:
-                    errors.append(exc)
-                continue
-
-            if depth >= _CHECK_MAX_SUBWORKFLOW_DEPTH:
-                continue
-            # Only expand when build_with's inputs are fully static. args_from
-            # and from_node() markers are runtime injections (dependency
-            # results) the engine merges in at enqueue, absent at check.
-            if node.args_from:
+            if isinstance(node, SubWorkflowNode):
+                self._check_subworkflow_node(node, errors, path)
                 continue
             try:
-                def_key = node.workflow_def._require_definition_key()
-            except HorsiesError:
-                continue  # missing definition_key reported elsewhere
-            # Key the cycle guard on (definition_key, kwargs signature), not
-            # definition_key alone: a definition that self-references with
-            # DIFFERENT kwargs produces a different child spec whose queue
-            # binding must still be validated. Deduping by key alone would skip
-            # the parameter-varying instance (a false negative). The kwargs
-            # signature is a stable repr (workflow kwargs are serializable);
-            # the depth cap still bounds genuinely-unbounded parameterizations.
-            wire = stored_kwargs(node)
-            node_key = (def_key, repr(sorted(wire.items())))
-            if node_key in seen:
-                continue  # cycle (same definition AND same kwargs)
-            try:
-                # The engine's read of the same row: real containers and
-                # filled defaults, not the frozen snapshot on the node.
-                child_kwargs = fill_build_with_defaults(
-                    node.workflow_def,
-                    decode_subworkflow_kwargs(node.workflow_def, wire),
-                )
-            except (StrictJsonError, ValueValidationError) as exc:
-                # At run time this fails the parent node, so it is a finding.
-                errors.append(WorkflowValidationError(
-                    message='subworkflow kwargs do not fit build_with',
-                    code=ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
-                    notes=[f"node '{node.name}': {exc}"],
-                    help_text='fix the kwarg, or the default of the parameter',
-                ))
-                continue
-            except Exception as exc:
-                # No verdict on the value: a validator can need a service that
-                # is down at boot, so this must not stop the process.
-                self.logger.warning(
-                    f"check could not fill the defaults of node '{node.name}': "
-                    f'{type(exc).__name__}: {exception_text(exc)}',
-                )
-                continue
-            try:
-                child_spec = node.workflow_def.build_with(self, **child_kwargs)
-            except MultipleValidationErrors as exc:
-                errors.extend(exc.report.errors)
-                continue
-            except HorsiesError as exc:
-                # Any horsies validation error building the child — invalid
-                # queue/mode AND structural (empty tasks, cycle, bad node_id) —
-                # is a real check finding for this static subworkflow. Surface
-                # it so single- and multi-error failures are treated alike.
+                resolve_node_queue_and_priority(self, node)
+            except ConfigurationError as exc:
                 errors.append(exc)
-                continue
-            except Exception:
-                # A non-horsies exception from build_with is out of scope (a
-                # user-code or environmental failure, not workflow validation);
-                # it surfaces via the registered-builder path or at runtime.
-                continue
-            self._validate_spec_bindings(
-                child_spec, errors, seen | {node_key}, depth + 1,
+
+    def _check_subworkflow_node(
+        self,
+        node: SubWorkflowNode[Any],
+        errors: list[HorsiesError],
+        path: NestingPath,
+    ) -> None:
+        """Walk the child spec of ``node`` when check can build it.
+
+        A node with ``args_from`` takes kwargs from results at run time, so
+        its child is not built; register its build_with as a builder for
+        coverage. ``decide_nesting`` stops the walk at a repeated definition
+        and at the depth limit, and gives a finding only for a nesting that
+        fails for certain. Each finding goes to ``errors``.
+        """
+        # Only expand when build_with's inputs are fully static. args_from
+        # and from_node() markers are runtime injections (dependency
+        # results) the engine merges in at enqueue, absent at check.
+        if node.args_from:
+            return
+        try:
+            def_key = node.workflow_def._require_definition_key()
+        except HorsiesError:
+            return  # missing definition_key reported elsewhere
+        # Key a repeat on (definition_key, kwargs signature), not
+        # definition_key alone: a definition that includes itself with
+        # DIFFERENT kwargs produces a different child spec whose queue
+        # binding must still be validated. The kwargs signature is a stable
+        # repr (workflow kwargs are serializable).
+        wire = stored_kwargs(node)
+        step = NestingStep(
+            definition_key=def_key,
+            kwargs_signature=repr(sorted(wire.items())),
+            start=child_start(node),
+        )
+        match decide_nesting(path, node.name, step):
+            case StopWithoutFinding():
+                return
+            case StopWithFinding(finding=finding):
+                errors.append(finding)
+            case WalkChild(path=child_path):
+                match self._build_child_spec_for_check(node, wire, errors):
+                    case _ChildNotBuilt():
+                        return
+                    case _ChildBuilt(spec=child_spec):
+                        self._validate_spec_bindings(child_spec, errors, child_path)
+
+    def _build_child_spec_for_check(
+        self,
+        node: SubWorkflowNode[Any],
+        wire: dict[str, Any],
+        errors: list[HorsiesError],
+    ) -> _ChildBuilt | _ChildNotBuilt:
+        """Build the child spec of ``node`` the way the engine does.
+
+        Building the child runs its full validation (queue/mode AND
+        structural: empty tasks, cycles, node ids). Each finding goes to
+        ``errors``, and the result is then ``_ChildNotBuilt``. A non-horsies
+        exception gives no verdict on the workflow: it is logged, or left to
+        the run time, and the result is ``_ChildNotBuilt``.
+        """
+        try:
+            # The engine's read of the same row: real containers and
+            # filled defaults, not the frozen snapshot on the node.
+            child_kwargs = fill_build_with_defaults(
+                node.workflow_def,
+                decode_subworkflow_kwargs(node.workflow_def, wire),
             )
+        except (StrictJsonError, ValueValidationError) as exc:
+            # At run time this fails the parent node, so it is a finding.
+            errors.append(WorkflowValidationError(
+                message='subworkflow kwargs do not fit build_with',
+                code=ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
+                notes=[f"node '{node.name}': {exc}"],
+                help_text='fix the kwarg, or the default of the parameter',
+            ))
+            return _ChildNotBuilt()
+        except Exception as exc:
+            # No verdict on the value: a validator can need a service that
+            # is down at boot, so this must not stop the process.
+            self.logger.warning(
+                f"check could not fill the defaults of node '{node.name}': "
+                f'{type(exc).__name__}: {exception_text(exc)}',
+            )
+            return _ChildNotBuilt()
+        try:
+            child_spec = node.workflow_def.build_with(self, **child_kwargs)
+        except MultipleValidationErrors as exc:
+            errors.extend(exc.report.errors)
+            return _ChildNotBuilt()
+        except HorsiesError as exc:
+            # Any horsies validation error building the child is a real check
+            # finding for this static subworkflow. Surface it so single- and
+            # multi-error failures are treated alike.
+            errors.append(exc)
+            return _ChildNotBuilt()
+        except Exception:
+            # A non-horsies exception from build_with is out of scope (a
+            # user-code or environmental failure, not workflow validation);
+            # it surfaces via the registered-builder path or at runtime.
+            return _ChildNotBuilt()
+        return _ChildBuilt(child_spec)
 
     def _check_undecorated_builders(self) -> list[HorsiesError]:
         """Detect top-level functions returning WorkflowSpec without decorator.
