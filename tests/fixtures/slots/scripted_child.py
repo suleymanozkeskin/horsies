@@ -10,6 +10,7 @@ database.
 
 from __future__ import annotations
 
+import asyncio
 import ctypes
 import gc
 import os
@@ -31,8 +32,14 @@ from horsies.core.worker.child_protocol import (
     encode_parent_frame,
 )
 from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
+from horsies.core.utils.loop_runner import in_running_event_loop
+from horsies.core.worker.task_loop import TaskLoop
 
 _sock: socket.socket
+# The loop holds only weak references to its tasks.
+_kept_tasks: list[asyncio.Task[None]] = []
+# Strong references, so that a freed loop cannot pass its id to a new one.
+_seen_loops: list[asyncio.AbstractEventLoop] = []
 
 
 def _pid_result() -> WireResult:
@@ -88,16 +95,49 @@ def _socket_count() -> int:
     return count
 
 
+async def _loops_seen() -> str:
+    """Count the distinct loops that ran a ``loop_count`` operation."""
+    loop = asyncio.get_running_loop()
+    if not any(seen is loop for seen in _seen_loops):
+        _seen_loops.append(loop)
+    return str(len(_seen_loops))
+
+
+async def _mark_when_cancelled(path: str) -> None:
+    try:
+        await asyncio.Event().wait()
+    finally:
+        with open(path, 'w', encoding='ascii') as target:
+            target.write('cancelled')
+
+
+async def _leave_pending(path: str) -> str:
+    _kept_tasks.append(asyncio.get_running_loop().create_task(_mark_when_cancelled(path)))
+    await asyncio.sleep(0)
+    return str(os.getpid())
+
+
+def _no_running_loop() -> str:
+    """Report a running loop, then run one with ``asyncio.run``."""
+    return f'{in_running_event_loop()}|{asyncio.run(asyncio.sleep(0, "ran"))}'
+
+
 def _half_frame() -> bytes:
     encoded = encode_parent_frame(StopFrame())
     return encoded.head[: FRAME_HEADER.size] + b'x' * 8
 
 
-def _run(frame: RunFrame, init: InitFrame) -> WireResult:
+def _run(frame: RunFrame, init: InitFrame, task_loop: TaskLoop) -> WireResult:
     argument = frame.kwargs_json or ''
     match frame.task_name:
         case 'echo':
             return True, argument, None
+        case 'loop_count':
+            return True, task_loop.run(_loops_seen()), None
+        case 'no_running_loop':
+            return True, _no_running_loop(), None
+        case 'leave_pending':
+            return True, task_loop.run(_leave_pending(argument)), None
         case 'pid':
             return _pid_result()
         case 'freeze_count':

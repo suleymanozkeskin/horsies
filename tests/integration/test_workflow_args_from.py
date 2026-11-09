@@ -18,6 +18,7 @@ from horsies.core.codec.json_io import loads_json
 from horsies.core.codec.typed import decode_task_result
 from horsies.core.worker.current import set_current_app
 from horsies.core.worker.worker import _run_task_entry, _initialize_worker_pool
+from horsies.core.worker.task_loop import TaskLoop
 
 from .conftest import (
     task_name_for,
@@ -493,6 +494,7 @@ class TestArgsFromInjection:
             task_id=task_id,
             database_url=database_url,
             master_worker_id='test-worker',
+            task_loop=TaskLoop(),
         )
         assert ok is True
         assert worker_failure is None
@@ -579,6 +581,7 @@ class TestArgsFromInjection:
             task_id=task_id,
             database_url=database_url,
             master_worker_id='test-worker',
+            task_loop=TaskLoop(),
         )
         assert ok is True
         assert worker_failure is None
@@ -744,6 +747,7 @@ class TestArgsFromInjection:
             task_id=task_id,
             database_url=database_url,
             master_worker_id='test-worker',
+            task_loop=TaskLoop(),
         )
         assert ok is True
         assert worker_failure is None
@@ -827,6 +831,7 @@ class TestArgsFromInjection:
             task_id=task_id,
             database_url=database_url,
             master_worker_id='test-worker',
+            task_loop=TaskLoop(),
         )
         assert ok is True
         assert worker_failure is None

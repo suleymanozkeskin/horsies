@@ -44,6 +44,7 @@ from horsies.core.worker.slots import (
     NotDispatched,
     NotRunCause,
 )
+from horsies.core.worker.task_loop import TaskLoop
 from horsies.core.worker.worker import (
     Worker,
     _FinalizeError,
@@ -605,6 +606,7 @@ async def test_task_expired_workflow_task_advances_workflow_without_reaper(
         database_url=database_url,
         master_worker_id=TEST_WORKER_ID,
         claimed_at=claimed_at,
+        task_loop=TaskLoop(),
     )
     assert wire == (False, '', 'TASK_EXPIRED')
     # The child self-expired the row before the parent finalizes.

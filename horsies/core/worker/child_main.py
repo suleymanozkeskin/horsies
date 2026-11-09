@@ -2,7 +2,8 @@
 
 The child has two threads. The control thread owns socket reads, so EOF means
 the parent is gone, whatever the main thread is doing. The main thread boots
-the app, runs tasks one at a time, and writes results.
+the app, runs tasks one at a time, and writes results. An ``async def`` task
+runs on the child's one task loop (``task_loop.TaskLoop``), on the main thread.
 
 When the parent is gone the child exits at once. Nothing can save its result,
 and a run that continues could overlap a retry of the same task.
@@ -47,6 +48,7 @@ from horsies.core.worker.child_protocol import (
     parse_header,
 )
 from horsies.core.worker.runtime import _read_current_rss_mb
+from horsies.core.worker.task_loop import TaskLoop
 
 logger = get_logger('worker')
 
@@ -62,7 +64,7 @@ _PR_SET_PDEATHSIG: Final = 1
 
 WireResult = tuple[bool, str, str | None]
 BootFn = Callable[[InitFrame], None]
-RunTaskFn = Callable[[RunFrame, InitFrame], WireResult]
+RunTaskFn = Callable[[RunFrame, InitFrame, TaskLoop], WireResult]
 
 
 def _recv_exact(sock: socket.socket, count: int) -> bytes:
@@ -224,7 +226,12 @@ def flush_output() -> None:
             continue
 
 
-def _run_or_exit(run_task: RunTaskFn, frame: RunFrame, init: InitFrame) -> WireResult:
+def _run_or_exit(
+    run_task: RunTaskFn,
+    frame: RunFrame,
+    init: InitFrame,
+    task_loop: TaskLoop,
+) -> WireResult:
     """Run one task. Anything that escapes ends this process at once.
 
     A normal exit would wait for every non-daemon thread that the task started,
@@ -232,7 +239,7 @@ def _run_or_exit(run_task: RunTaskFn, frame: RunFrame, init: InitFrame) -> WireR
     recovers the row by its status.
     """
     try:
-        return run_task(frame, init)
+        return run_task(frame, init, task_loop)
     except SystemExit as exc:
         flush_output()
         os._exit(exc.code if isinstance(exc.code, int) else 1)
@@ -249,6 +256,9 @@ def serve(
     run_task: RunTaskFn,
 ) -> None:
     """Run the child until the parent sends a stop frame.
+
+    Every task of the child gets the same ``TaskLoop``. The stop frame closes
+    it, bounded by ``LOOP_CLOSE_TIMEOUT_S``, before this returns.
 
     Failure exits: an exception from ``boot`` propagates, so the child exits
     non-zero before it reports ready. A parent that is gone or that sends a
@@ -268,13 +278,14 @@ def serve(
     ).start()
     boot(init)
     gc.collect()
+    task_loop = TaskLoop()
     _send_child_frame(sock, ReadyFrame(pid=os.getpid(), rss=_read_rss()))
     while True:
         match work.get():
             case RunFrame() as frame:
                 ok, result_json, failed_reason = _bounded_result(
                     frame,
-                    _run_or_exit(run_task, frame, init),
+                    _run_or_exit(run_task, frame, init, task_loop),
                 )
                 _send_child_frame(
                     sock,
@@ -287,6 +298,7 @@ def serve(
                     ),
                 )
             case StopFrame():
+                task_loop.close()
                 return
             case _ as unreachable:
                 assert_never(unreachable)
@@ -317,7 +329,7 @@ def boot_app(init: InitFrame) -> None:
     )
 
 
-def run_child_task(frame: RunFrame, init: InitFrame) -> WireResult:
+def run_child_task(frame: RunFrame, init: InitFrame, task_loop: TaskLoop) -> WireResult:
     from horsies.core.worker.child_runner import _run_task_entry
 
     return _run_task_entry(
@@ -331,6 +343,7 @@ def run_child_task(frame: RunFrame, init: InitFrame) -> WireResult:
         frame.is_workflow_task,
         frame.timeout,
         frame.claimed_at,
+        task_loop=task_loop,
     )
 
 

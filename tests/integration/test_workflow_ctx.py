@@ -25,6 +25,7 @@ from horsies.core.models.workflow import (
 from horsies.core.workflows.engine import on_workflow_task_complete
 from horsies.core.worker.current import set_current_app
 from horsies.core.worker.worker import _run_task_entry, _initialize_worker_pool
+from horsies.core.worker.task_loop import TaskLoop
 
 from .conftest import make_simple_task, make_no_ctx_task, make_workflow_spec, start_ok
 from tests.integration.conftest import task_name_for
@@ -531,6 +532,7 @@ class TestWorkflowCtx:
             task_id=task_id,
             database_url=database_url,
             master_worker_id='test-worker',
+            task_loop=TaskLoop(),
         )
         assert ok is True
         assert worker_failure is None
@@ -600,6 +602,7 @@ class TestWorkflowCtx:
             task_id=task_id,
             database_url=database_url,
             master_worker_id='test-worker',
+            task_loop=TaskLoop(),
         )
         assert ok is True
         assert worker_failure is None
@@ -672,6 +675,7 @@ class TestWorkflowCtx:
             task_id=task_id,
             database_url=database_url,
             master_worker_id='test-worker',
+            task_loop=TaskLoop(),
         )
         assert ok is True
         assert worker_failure is None
@@ -959,6 +963,7 @@ class TestWorkflowCtx:
             task_id=task_id,
             database_url=database_url,
             master_worker_id='test-worker',
+            task_loop=TaskLoop(),
         )
         assert ok is True
         assert worker_failure is None

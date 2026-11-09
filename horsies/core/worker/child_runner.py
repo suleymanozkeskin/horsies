@@ -8,7 +8,7 @@ import os
 import socket
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Coroutine, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from importlib import import_module
@@ -63,6 +63,7 @@ from horsies.core.worker.stored_timeout import (
     TimeoutRefusal,
     TimeoutValueInvalid,
 )
+from horsies.core.worker.task_loop import TaskLoop
 from horsies.core.lifecycle.commands import (
     AbandonOwnedNode,
     CancelOwnedNode,
@@ -1069,6 +1070,29 @@ def _mark_task_finalizing(
         )
 
 
+def _task_call_result(
+    task_name: str,
+    called: TaskResult[Any, TaskError] | Coroutine[Any, Any, TaskResult[Any, TaskError]],
+    task_loop: TaskLoop,
+) -> TaskResult[Any, TaskError]:
+    """The result of one call of a task wrapper.
+
+    The call of a ``def`` task returns its result. The call of an
+    ``async def`` task returns a coroutine, which runs on ``task_loop``.
+    Exceptions from that run propagate. The wrapper returns one of the two,
+    so another value is a defect in the library: ``AssertionError``.
+    """
+    match called:
+        case TaskResult():
+            return called
+        case Coroutine():
+            return task_loop.run(called)
+        case _:
+            raise AssertionError(
+                f'task wrapper of {task_name!r} returned {type(called).__name__}',
+            )
+
+
 def _run_task_entry(
     task_name: str,
     args_json: Optional[str],
@@ -1080,11 +1104,16 @@ def _run_task_entry(
     is_workflow_task: bool = True,
     timeout: StoredTimeout = NoTimeout(),
     claimed_at: Optional[datetime] = None,
+    *,
+    task_loop: TaskLoop,
 ) -> Tuple[bool, str, Optional[str]]:
     """
     Child-process entry.
     Returns:
       (ok, serialized_task_result_json, worker_failure_reason)
+
+    An ``async def`` task runs on ``task_loop``, the one loop of this child.
+    A ``def`` task runs on this thread with no running event loop.
 
     ok=True: we produced a valid TaskResult JSON (success *or* failure).
     ok=False: worker couldn't even produce a TaskResult (infra error).
@@ -1454,7 +1483,7 @@ def _run_task_entry(
                 ),
             )
 
-        out = task(*args, **kwargs)  # __call__ returns TaskResult
+        out = _task_call_result(task_name, task(*args, **kwargs), task_loop)
         logger.info(f'Task execution completed: {task_name} ({task_id})')
 
         # Strict-serde phase 5: result encoding routes through
@@ -1472,9 +1501,6 @@ def _run_task_entry(
                 ),
             )
 
-        assert isinstance(out, TaskResult), (
-            f'task wrapper of {task_name!r} returned {type(out).__name__}'
-        )
         try:
             envelope = encode_returned_result(out, ok_type)
         except (StrictJsonError, ValueValidationError) as exc:

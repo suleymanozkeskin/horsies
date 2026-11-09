@@ -456,6 +456,41 @@ class TestTaskRuns:
             last = now
         assert worst < 2.0
 
+    async def test_async_runs_of_one_child_share_one_loop(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        """``serve`` gives each task of a child the same task loop."""
+        pool = await pool_factory()
+        handles = [pool.submit(_frame('loop_count')) for _ in range(2)]
+        assert [await _result_json(handle) for handle in handles] == ['1', '1']
+
+    async def test_no_loop_runs_between_async_runs(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        """A run after an async run sees no running loop and can run its own."""
+        pool = await pool_factory()
+        handles = [
+            pool.submit(_frame('loop_count')),
+            pool.submit(_frame('no_running_loop')),
+            pool.submit(_frame('loop_count')),
+        ]
+        results = [await _result_json(handle) for handle in handles]
+        assert results == ['1', 'False|ran', '1']
+
+    async def test_a_stop_cancels_a_task_left_on_the_loop(
+        self,
+        pool_factory: PoolFactory,
+        tmp_path: Path,
+    ) -> None:
+        """The recycle stop closes the task loop, which cancels what is left."""
+        marker = tmp_path / 'cancelled'
+        pool = await pool_factory(_config(max_tasks_per_child=1))
+        await _result_json(pool.submit(_frame('leave_pending', str(marker))))
+        await _until(marker.exists)
+        assert marker.read_text(encoding='ascii') == 'cancelled'
+
     async def test_child_program_restores_parent_argv_and_keeps_asserts(
         self,
         pool_factory: PoolFactory,

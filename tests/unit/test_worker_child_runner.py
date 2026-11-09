@@ -9,10 +9,12 @@ E. _get_workflow_status_for_task
 F. _handle_workflow_stop_before_start (wildcard branch)
 I. _run_task_entry error paths
 J. Workflow injection deserialization errors in _run_task_entry
+K. Async task calls in _run_task_entry
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import threading
@@ -26,7 +28,8 @@ from pydantic import BaseModel, SecretStr, field_validator
 from pydantic_core import PydanticCustomError
 
 from horsies.core.app import Horsies
-from horsies.core.codec.json_io import SerializationError
+from horsies.core.codec.json_io import SerializationError, loads_json
+from horsies.core.codec.typed import decode_task_result
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import (
@@ -46,6 +49,7 @@ from horsies.core.worker.stored_timeout import (
     TimeoutRefusal,
     TimeoutValueInvalid,
 )
+from horsies.core.worker.task_loop import LoopOpen, TaskLoop
 from horsies.core.worker.child_runner import (
     _debug_imports_log,
     _get_workflow_status_for_task,
@@ -830,6 +834,7 @@ def _run_entry_defaults() -> dict[str, Any]:
         'database_url': 'postgresql://localhost/test',
         'master_worker_id': 'w-1',
         'runner_heartbeat_interval_ms': 100,
+        'task_loop': TaskLoop(),
     }
 
 
@@ -2574,3 +2579,48 @@ class TestRunTaskEntryStoredTimeout:
             _run_task_entry(**_run_entry_defaults, timeout=timeout)
 
         assert heartbeat.call_args.args[-1] == deadline_ms
+
+
+# ===================================================================
+# K. Async task calls in _run_task_entry
+# ===================================================================
+
+
+def _ok_value(payload: str, ok_type: Any) -> Any:
+    return decode_task_result(loads_json(payload).unwrap(), ok_type).unwrap()
+
+
+@pytest.mark.unit
+class TestRunTaskEntryCoroutineCall:
+    """The call of an `async def` task returns a coroutine."""
+
+    def test_the_coroutine_runs_on_the_given_task_loop(
+        self,
+        _run_entry_defaults: dict[str, Any],
+    ) -> None:
+        task_loop = TaskLoop()
+        _run_entry_defaults['task_loop'] = task_loop
+        seen: list[asyncio.AbstractEventLoop] = []
+
+        async def body() -> TaskResult[int, TaskError]:
+            seen.append(asyncio.get_running_loop())
+            return TaskResult(ok=5)
+
+        patches = _make_run_task_patches()
+        mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
+        mock_task = MagicMock(side_effect=lambda: body())
+        mock_task.task_ok_type = int
+        mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
+
+        try:
+            with _apply_patches(patches):
+                ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            loop_state = task_loop.state
+        finally:
+            task_loop.close()
+
+        assert (ok, reason) == (True, None)
+        assert _ok_value(payload, int) == 5
+        assert isinstance(loop_state, LoopOpen)
+        assert seen == [loop_state.loop]
+
