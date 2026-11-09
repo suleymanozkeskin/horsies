@@ -18,6 +18,9 @@ from horsies.core.utils.loop_runner import in_running_event_loop
 from horsies.core.worker.child_protocol import (
     LoopHoldsNoTask,
     LoopHoldsTasks,
+    LoopOpenedEarlier,
+    LoopOpenedForThisTask,
+    NoTaskLoop,
     TaskLoopUnavailable,
 )
 from horsies.core.worker import task_loop as task_loop_module
@@ -116,7 +119,9 @@ class TestOpen:
         assert new_task_loop.state == LoopCreateRefused(failed)
         assert new_task_loop.open() == Err(failed)
         assert calls == ['new_event_loop']
-        assert new_task_loop.report() == TaskLoopUnavailable(detail=failed.describe())
+        assert new_task_loop.report(LoopNotCreated()) == TaskLoopUnavailable(
+            detail=failed.describe(),
+        )
 
     def test_a_refused_loop_runs_nothing_and_closes(
         self,
@@ -252,15 +257,34 @@ class TestRun:
 
 
 class TestReport:
-    def test_no_loop_holds_no_task(self, new_task_loop: TaskLoop) -> None:
-        assert new_task_loop.report() == LoopHoldsNoTask()
+    def test_no_loop_is_no_task_loop(self, new_task_loop: TaskLoop) -> None:
+        assert new_task_loop.report(new_task_loop.state) == NoTaskLoop()
+
+    def test_the_task_that_opened_the_loop_says_so_and_a_later_one_does_not(
+        self,
+        new_task_loop: TaskLoop,
+    ) -> None:
+        """The parent counts an open only once per child: for the task that
+        found no loop and left an open one."""
+        first_before = new_task_loop.state
+        new_task_loop.open().unwrap()
+        new_task_loop.run(_value(1))
+        first = new_task_loop.report(first_before)
+
+        second_before = new_task_loop.state
+        new_task_loop.run(_value(2))
+        second = new_task_loop.report(second_before)
+
+        assert first == LoopHoldsNoTask(opening=LoopOpenedForThisTask())
+        assert second == LoopHoldsNoTask(opening=LoopOpenedEarlier())
 
     def test_a_run_that_awaits_its_work_leaves_no_task(self, task_loop: TaskLoop) -> None:
         async def awaits_its_task() -> None:
             await asyncio.get_running_loop().create_task(asyncio.sleep(0))
 
+        before = task_loop.state
         task_loop.run(awaits_its_task())
-        assert task_loop.report() == LoopHoldsNoTask()
+        assert task_loop.report(before) == LoopHoldsNoTask(opening=LoopOpenedEarlier())
 
     def test_tasks_that_a_run_did_not_await_are_counted(self, task_loop: TaskLoop) -> None:
         kept: list[asyncio.Task[bool]] = []
@@ -270,13 +294,18 @@ class TestReport:
             kept.extend(loop.create_task(asyncio.Event().wait()) for _ in range(2))
             await asyncio.sleep(0)
 
+        before = task_loop.state
         task_loop.run(leaves_two())
-        assert task_loop.report() == LoopHoldsTasks(count=2)
+        assert task_loop.report(before) == LoopHoldsTasks(
+            count=2,
+            opening=LoopOpenedEarlier(),
+        )
 
     def test_a_call_after_close_is_a_defect(self, task_loop: TaskLoop) -> None:
+        before = task_loop.state
         task_loop.close()
         with pytest.raises(AssertionError, match='after close'):
-            task_loop.report()
+            task_loop.report(before)
 
 
 class TestClose:

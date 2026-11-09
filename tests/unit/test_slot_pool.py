@@ -36,6 +36,8 @@ from horsies.core.worker.child_protocol import (
     InitFrame,
     LoopHoldsNoTask,
     LoopHoldsTasks,
+    LoopOpenedForThisTask,
+    NoTaskLoop,
     ReadyFrame,
     ResultFrame,
     RssUnreadable,
@@ -47,6 +49,7 @@ from horsies.core.worker.stored_timeout import NoTimeout
 from horsies.core.worker import slots
 from horsies.core.worker.slots import (
     CHILD_BOOT_ATTEMPTS,
+    MAX_TASK_LOOP_REFUSALS_WITHOUT_OPEN,
     CHILD_BOOT_KILL_DELAY_MAX_S,
     SLOT_DEFECT_LIMIT,
     Assigned,
@@ -72,7 +75,7 @@ from horsies.core.worker.slots import (
     SlotPoolConfig,
     SpawnFailed,
     TaskFinished,
-    TaskLoopUnavailableInNewChild,
+    TaskLoopRefusedRepeatedly,
     child_exit_from_returncode,
     describe_exit,
     interpreter_flags,
@@ -218,6 +221,16 @@ def _alive(pid: int) -> bool:
     return bool(state.stdout.strip()) and not state.stdout.strip().startswith('Z')
 
 
+async def _refused(pool: SlotPool) -> RunFrame:
+    """Submit a task whose child is refused a task loop, and wait for it."""
+    frame = _frame('loop_unavailable')
+    match await _outcome(pool.submit(frame)):
+        case TaskFinished(failed_reason='TASK_LOOP_UNAVAILABLE', task_loop=TaskLoopUnavailable()):
+            return frame
+        case other:
+            raise AssertionError(other)
+
+
 async def _until(predicate: Callable[[], bool], timeout_s: float = 10.0) -> None:
     deadline = time.monotonic() + timeout_s
     while not predicate():
@@ -298,7 +311,7 @@ class TestFrameProtocol:
             offset += size
 
     def _result_bytes(self, body: str) -> bytes:
-        encoded = encode_child_frame(ResultFrame('t', True, body, None, RssUnreadable(), LoopHoldsNoTask()))
+        encoded = encode_child_frame(ResultFrame('t', True, body, None, RssUnreadable(), NoTaskLoop()))
         return encoded.head + encoded.body
 
     @pytest.mark.parametrize('chunk', [1, 2, 7, 1 << 20])
@@ -510,7 +523,7 @@ class TestTaskRuns:
         pool = await pool_factory()
         match await _outcome(pool.submit(_frame('leave_pending', str(marker)))):
             case TaskFinished(result_json=first_pid, task_loop=task_loop):
-                assert task_loop == LoopHoldsTasks(count=1)
+                assert task_loop == LoopHoldsTasks(count=1, opening=LoopOpenedForThisTask())
             case other:
                 raise AssertionError(other)
         await _until(marker.exists)
@@ -524,7 +537,7 @@ class TestTaskRuns:
         pool = await pool_factory()
         match await _outcome(pool.submit(_frame('async_pid'))):
             case TaskFinished(result_json=first_pid, task_loop=task_loop):
-                assert task_loop == LoopHoldsNoTask()
+                assert task_loop == LoopHoldsNoTask(opening=LoopOpenedForThisTask())
             case other:
                 raise AssertionError(other)
         assert await _result_json(pool.submit(_frame('pid'))) == first_pid
@@ -547,26 +560,70 @@ class TestTaskRuns:
         assert await _result_json(pool.submit(_frame('pid'))) != first_pid
         assert pool._failure is None
 
-    async def test_a_new_child_that_has_no_task_loop_fails_the_pool(
+    async def test_a_second_refusal_with_no_open_between_fails_the_pool(
         self,
         pool_factory: PoolFactory,
     ) -> None:
-        """A child that ran no task has nothing to leak: the environment is the
-        cause, so the pool fails and the worker stops."""
+        """Each child runs a def task first, then is refused a task loop. The
+        def tasks do not count: the second refusal stops the pool."""
         pool = await pool_factory()
-        child = pool._slots[0].child
-        assert child is not None
-        frame = _frame('loop_unavailable')
-        match await _outcome(pool.submit(frame)):
-            case TaskFinished(task_loop=TaskLoopUnavailable()):
+        first_pid = await _result_json(pool.submit(_frame('pid')))
+        await _refused(pool)
+        assert pool._failure is None
+
+        second_pid = await _result_json(pool.submit(_frame('pid')))
+        assert second_pid != first_pid
+        frame = await _refused(pool)
+
+        failure = await asyncio.wait_for(pool.wait_failed(), OUTCOME_TIMEOUT_S)
+        match failure:
+            case TaskLoopRefusedRepeatedly(
+                refusals=refusals,
+                pid=pid,
+                task_id=task_id,
+                detail=detail,
+            ):
+                assert refusals == MAX_TASK_LOOP_REFUSALS_WITHOUT_OPEN
+                assert (pid, task_id) == (int(second_pid), frame.task_id)
+                assert '[Errno 24]' in detail
+            case other:
+                raise AssertionError(other)
+
+    async def test_an_open_between_two_refusals_keeps_the_pool(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        """A loop opened in another child ends the run of refusals."""
+        pool = await pool_factory(_config(max_tasks_per_child=1))
+        await _refused(pool)
+        match await _outcome(pool.submit(_frame('async_pid'))):
+            case TaskFinished(task_loop=LoopHoldsNoTask(opening=LoopOpenedForThisTask())):
                 pass
             case other:
                 raise AssertionError(other)
+        await _refused(pool)
+
+        assert int(await _result_json(pool.submit(_frame('pid')))) > 0
+        assert pool._failure is None
+
+    async def test_refusals_in_two_slots_with_no_open_fail_the_pool(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        """The count is pool-wide: one refusal in each of two children."""
+        pool = await pool_factory(_config(slots=2))
+        handles = [pool.submit(_frame('loop_unavailable')) for _ in range(2)]
+        outcomes = [await _outcome(handle) for handle in handles]
+        assert all(
+            isinstance(outcome, TaskFinished)
+            and isinstance(outcome.task_loop, TaskLoopUnavailable)
+            for outcome in outcomes
+        )
+
         failure = await asyncio.wait_for(pool.wait_failed(), OUTCOME_TIMEOUT_S)
         match failure:
-            case TaskLoopUnavailableInNewChild(pid=pid, task_id=task_id, detail=detail):
-                assert (pid, task_id) == (child.pid, frame.task_id)
-                assert '[Errno 24]' in detail
+            case TaskLoopRefusedRepeatedly(refusals=refusals):
+                assert refusals == MAX_TASK_LOOP_REFUSALS_WITHOUT_OPEN
             case other:
                 raise AssertionError(other)
 
@@ -841,7 +898,7 @@ class TestVerdicts:
 
     async def test_complete_frame_still_unread_wins_over_the_death(self) -> None:
         """Only the drain can find this frame: the transport has not read it yet."""
-        encoded = encode_child_frame(ResultFrame('t', True, 'kept', None, RssUnreadable(), LoopHoldsNoTask()))
+        encoded = encode_child_frame(ResultFrame('t', True, 'kept', None, RssUnreadable(), NoTaskLoop()))
         child = await self._dead_child_with(encoded.head + encoded.body)
         match await child.await_frame(None):
             case ResultFrame(result_json='kept'):
@@ -851,7 +908,7 @@ class TestVerdicts:
         await child.dispose()
 
     async def test_half_a_frame_still_unread_is_reported_partial(self) -> None:
-        encoded = encode_child_frame(ResultFrame('t', True, 'lost', None, RssUnreadable(), LoopHoldsNoTask()))
+        encoded = encode_child_frame(ResultFrame('t', True, 'lost', None, RssUnreadable(), NoTaskLoop()))
         child = await self._dead_child_with(encoded.head[:-1])
         match await child.await_frame(None):
             case ChildLost(partial_frame=True, child_exit=KilledBySignal(9)):

@@ -45,7 +45,7 @@ from horsies.core.process_role import ProcessRole
 from horsies.core.types.result import Err, Ok, is_ok
 from horsies.core.utils.loop_runner import in_running_event_loop
 from horsies.core.worker import child_runner
-from horsies.core.worker.child_protocol import LoopHoldsNoTask
+from horsies.core.worker.child_protocol import LoopHoldsNoTask, LoopOpenedForThisTask
 from horsies.core.worker.task_loop import (
     LoopCreateRefused,
     LoopNotCreated,
@@ -495,6 +495,7 @@ class TestTheSendPathLeavesNoLoopTask:
                         err=TaskError(error_code='SEND_FAILED', message=str(send_err)),
                     )
 
+        state_before_task = task_loop.state
         try:
             with patch.object(broker, 'enqueue_async', enqueue_async):
                 wire = _runner(app, task_loop)(sends.task_name)
@@ -502,7 +503,9 @@ class TestTheSendPathLeavesNoLoopTask:
             broker._loop_runner.stop()
 
         assert _result(wire, str).ok_value == enqueued[0]
-        assert task_loop.report() == LoopHoldsNoTask()
+        assert task_loop.report(state_before_task) == LoopHoldsNoTask(
+            opening=LoopOpenedForThisTask(),
+        )
 
 
 class TestTheTaskLoopIsNotACallerLoop:

@@ -52,7 +52,11 @@ from horsies.core.worker.child_protocol import (
     InitFrame,
     LoopHoldsNoTask,
     LoopHoldsTasks,
+    LoopOpenedEarlier,
+    LoopOpenedForThisTask,
+    LoopOpening,
     MalformedFrame,
+    NoTaskLoop,
     ParentFrame,
     ReadyFrame,
     ResultFrame,
@@ -80,6 +84,11 @@ CHILD_BOOT_RETRY_DELAY_S: Final = 0.5
 CHILD_BOOT_KILL_DELAY_MAX_S: Final = 5.0
 CHILD_READY_TIMEOUT_S: Final = 120.0
 CHILD_STOP_TIMEOUT_S: Final = 10.0
+# Task loop refusals across the pool, with no successful open anywhere in the
+# pool in between, after which the worker stops: a refusal, then a second one
+# before any child opened a loop. Each refusal retires its child, so the
+# second comes from a replacement child.
+MAX_TASK_LOOP_REFUSALS_WITHOUT_OPEN: Final = 2
 CHILD_KILL_WAIT_S: Final = 30.0
 SLOT_DEFECT_LIMIT: Final = 3
 CHANNEL_LOST_GRACE_S: Final = 0.2
@@ -246,15 +255,18 @@ class BootAttemptsExhausted:
 
 
 @dataclass(frozen=True, slots=True)
-class TaskLoopUnavailableInNewChild:
-    """A child that had run no task could not create its task loop.
+class TaskLoopRefusedRepeatedly:
+    """Children refused their task loop ``MAX_TASK_LOOP_REFUSALS_WITHOUT_OPEN``
+    times, with no successful open anywhere in the pool in between.
 
-    Nothing in the child could leak descriptors yet, so the cause is the
-    process environment, for example its file descriptor limit. A new child
-    would fail the same way, so the worker stops and its supervisor restarts
-    it. The task returns to the queue unrun.
+    A replacement child was refused too, so the cause is the process
+    environment, for example its file descriptor limit, and a further child
+    would fail the same way. The worker stops, and its supervisor restarts
+    it. Each refused task returns to the queue unrun. ``pid``, ``task_id``
+    and ``detail`` describe the last refusal.
     """
 
+    refusals: int
     pid: int
     task_id: str
     detail: str
@@ -265,8 +277,15 @@ PoolFailure: TypeAlias = (
     | ChildHookFailed
     | BootAttemptsExhausted
     | PreloadRefused
-    | TaskLoopUnavailableInNewChild
+    | TaskLoopRefusedRepeatedly
 )
+
+
+class _ChildAfterTask(Enum):
+    """Whether a child takes another task after a finished one."""
+
+    SERVE = 'serve'
+    RETIRE = 'retire'
 
 
 @dataclass(frozen=True, slots=True)
@@ -836,6 +855,8 @@ class SlotPool:
         self._stopping = False
         self._failure: PoolFailure | None = None
         self._failed: asyncio.Future[PoolFailure] = self._loop.create_future()
+        # Refusals since the last successful task loop open in any child.
+        self._task_loop_refusals_without_open = 0
         self._baselines: dict[int, ChildBaseline] = {}
         self._stop_requested: asyncio.Future[None] = self._loop.create_future()
         self._first_generation: asyncio.Future[None] = self._loop.create_future()
@@ -1054,7 +1075,7 @@ class SlotPool:
                 | ChildHookFailed()
                 | BootAttemptsExhausted()
                 | PreloadRefused()
-                | TaskLoopUnavailableInNewChild()
+                | TaskLoopRefusedRepeatedly()
             ):
                 self._record_failure(error)
             case _ as unreachable:
@@ -1189,32 +1210,13 @@ class SlotPool:
             outcome = await self._run_task(slot, child, handle)
             tasks_done += 1
             match outcome:
-                case TaskFinished(task_loop=LoopHoldsTasks(count=count)):
-                    # No later task may share the loop with this work. The
-                    # stop frame makes the child cancel it.
+                case TaskFinished():
                     slot.defects = 0
-                    logger.warning(
-                        'Retiring child pid=%s: task %s left %d task(s) on its event loop',
-                        child.pid,
-                        handle.frame.task_id,
-                        count,
-                    )
-                    break
-                case TaskFinished(task_loop=TaskLoopUnavailable(detail=detail)):
-                    slot.defects = 0
-                    self._retire_after_task_loop_refused(
-                        child,
-                        handle.frame.task_id,
-                        detail,
-                        fresh_child=tasks_done == 1,
-                    )
-                    break
-                case TaskFinished(rss=rss, task_loop=LoopHoldsNoTask()):
-                    slot.defects = 0
-                    reason = self._recycle_reason(tasks_done, rss)
-                    if reason is not None:
-                        logger.debug('Retiring child pid=%s: %s', child.pid, reason.value)
-                        break
+                    match self._child_after_task(child, handle, outcome, tasks_done):
+                        case _ChildAfterTask.RETIRE:
+                            break
+                        case _ChildAfterTask.SERVE:
+                            pass
                 case ChildLost():
                     logger.warning(
                         'Lost child pid=%s on slot %s: %s',
@@ -1290,46 +1292,88 @@ class SlotPool:
         handle.finish(outcome)
         return outcome
 
-    def _retire_after_task_loop_refused(
+    def _child_after_task(
         self,
         child: Child,
-        task_id: str,
-        detail: str,
-        *,
-        fresh_child: bool,
-    ) -> None:
-        """Log the refused task loop, and stop the pool when the child was new.
+        handle: SlotHandle,
+        finished: TaskFinished,
+        tasks_done: int,
+    ) -> _ChildAfterTask:
+        """Read the task loop report of a finished task, and decide whether
+        the child takes another task. Counts task loop opens and refusals."""
+        task_id = handle.frame.task_id
+        match finished.task_loop:
+            case LoopHoldsNoTask(opening=opening) | LoopHoldsTasks(opening=opening):
+                self._count_task_loop_opening(opening)
+            case NoTaskLoop() | TaskLoopUnavailable():
+                pass
+        match finished.task_loop:
+            case LoopHoldsTasks(count=count):
+                # No later task may share the loop with this work. The stop
+                # frame makes the child cancel it.
+                logger.warning(
+                    'Retiring child pid=%s: task %s left %d task(s) on its event loop',
+                    child.pid,
+                    task_id,
+                    count,
+                )
+                return _ChildAfterTask.RETIRE
+            case TaskLoopUnavailable(detail=detail):
+                self._count_task_loop_refusal(child, task_id, detail)
+                return _ChildAfterTask.RETIRE
+            case NoTaskLoop() | LoopHoldsNoTask():
+                reason = self._recycle_reason(tasks_done, finished.rss)
+                if reason is None:
+                    return _ChildAfterTask.SERVE
+                logger.debug('Retiring child pid=%s: %s', child.pid, reason.value)
+                return _ChildAfterTask.RETIRE
+
+    def _count_task_loop_opening(self, opening: LoopOpening) -> None:
+        """A loop opened for this task ends the run of refusals."""
+        match opening:
+            case LoopOpenedForThisTask():
+                self._task_loop_refusals_without_open = 0
+            case LoopOpenedEarlier():
+                pass
+
+    def _count_task_loop_refusal(self, child: Child, task_id: str, detail: str) -> None:
+        """Count a refused task loop, and fail the pool at the bound.
 
         The caller retires the child either way, and its task returns to the
-        queue through its finalizer. A child that had run tasks may have
-        leaked descriptors, so a new child replaces it and the worker goes
-        on. A new child has nothing to leak: the pool fails, and the worker
-        stops with a non-zero exit.
+        queue through its finalizer. Below
+        ``MAX_TASK_LOOP_REFUSALS_WITHOUT_OPEN`` a new child replaces it and
+        the worker goes on: that child may only have run out of descriptors
+        itself. At the bound the pool fails, and the worker stops with a
+        non-zero exit.
         """
-        match fresh_child:
-            case True:
-                logger.critical(
-                    'A new child pid=%s could not create the task loop for task %s '
-                    '(%s); the task returns to the queue, and the worker stops',
-                    child.pid,
-                    task_id,
-                    detail,
-                )
-                self._record_failure(
-                    TaskLoopUnavailableInNewChild(
-                        pid=child.pid,
-                        task_id=task_id,
-                        detail=detail,
-                    ),
-                )
-            case False:
-                logger.warning(
-                    'Retiring child pid=%s: it could not create the task loop for '
-                    'task %s (%s); the task returns to the queue',
-                    child.pid,
-                    task_id,
-                    detail,
-                )
+        self._task_loop_refusals_without_open += 1
+        refusals = self._task_loop_refusals_without_open
+        if refusals < MAX_TASK_LOOP_REFUSALS_WITHOUT_OPEN:
+            logger.warning(
+                'Retiring child pid=%s: it could not create the task loop for '
+                'task %s (%s); the task returns to the queue',
+                child.pid,
+                task_id,
+                detail,
+            )
+            return
+        logger.critical(
+            'Child pid=%s could not create the task loop for task %s (%s); %d '
+            'children were refused a task loop with no open in between, so the '
+            'task returns to the queue and the worker stops',
+            child.pid,
+            task_id,
+            detail,
+            refusals,
+        )
+        self._record_failure(
+            TaskLoopRefusedRepeatedly(
+                refusals=refusals,
+                pid=child.pid,
+                task_id=task_id,
+                detail=detail,
+            ),
+        )
 
     def _recycle_reason(self, tasks_done: int, rss: RssReading) -> RecycleReason | None:
         limit = self._config.max_tasks_per_child

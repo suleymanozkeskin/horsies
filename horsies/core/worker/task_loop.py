@@ -31,6 +31,10 @@ from horsies.core.utils.task_loop_registry import register_task_loop, unregister
 from horsies.core.worker.child_protocol import (
     LoopHoldsNoTask,
     LoopHoldsTasks,
+    LoopOpenedEarlier,
+    LoopOpenedForThisTask,
+    LoopOpening,
+    NoTaskLoop,
     TaskLoopReport,
     TaskLoopUnavailable,
 )
@@ -191,20 +195,25 @@ class TaskLoop:
             case _ as unreachable:
                 assert_never(unreachable)
 
-    def report(self) -> TaskLoopReport:
+    def report(self, state_before_task: LoopState) -> TaskLoopReport:
         """What the loop holds after a task, or that it could not be created.
+
+        ``state_before_task`` is ``state`` as it was when the task started.
+        An open loop that was ``LoopNotCreated`` then was opened for this
+        task, which the parent counts as a successful open.
 
         Reads only. Call it between runs, on the thread that runs them. A call
         after ``close`` is a defect in the caller: ``AssertionError``.
         """
         match self._state:
             case LoopNotCreated():
-                return LoopHoldsNoTask()
+                return NoTaskLoop()
             case LoopOpen(loop=loop):
+                opening = _opening(state_before_task)
                 count = len(asyncio.all_tasks(loop))
                 if count == 0:
-                    return LoopHoldsNoTask()
-                return LoopHoldsTasks(count=count)
+                    return LoopHoldsNoTask(opening=opening)
+                return LoopHoldsTasks(count=count, opening=opening)
             case LoopCreateRefused(failed=failed):
                 return TaskLoopUnavailable(detail=failed.describe())
             case LoopClosed():
@@ -237,6 +246,21 @@ class TaskLoop:
             case _ as unreachable:
                 assert_never(unreachable)
         return self._state.executor
+
+
+def _opening(state_before_task: LoopState) -> LoopOpening:
+    """Whether an open loop was opened for the task that started in this state."""
+    match state_before_task:
+        case LoopNotCreated():
+            return LoopOpenedForThisTask()
+        case LoopOpen():
+            return LoopOpenedEarlier()
+        case LoopCreateRefused() | LoopClosed():
+            raise AssertionError(
+                f'no task opens a loop from {type(state_before_task).__name__}',
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _new_loop() -> Result[asyncio.AbstractEventLoop, LoopCreateFailed]:

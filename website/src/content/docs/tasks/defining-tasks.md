@@ -55,7 +55,7 @@ A child creates its event loop before it marks its first async task RUNNING. Whe
 
 - The task goes back to the queue unrun. It uses no attempt and no retry.
 - The worker replaces the child, and a new child runs the next task.
-- When the refused child had run no task before, the cause is the process environment, so a new child would fail too. The worker then also stops with a non-zero exit, and its supervisor restarts it.
+- When a second child cannot create its loop before any child has opened one, the cause is the process environment, and a further child would fail too. The worker then stops with a non-zero exit, and its supervisor restarts it. A `def` task does not count either way.
 
 In an async task, send with `.send_async()` or `.schedule_async()`. The sync `.send()` and `.schedule()` refuse a running event loop: they return `Err(TaskSendAsyncContext)` and enqueue nothing. See [Sending Tasks](sending-tasks).
 

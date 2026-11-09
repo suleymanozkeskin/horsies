@@ -38,7 +38,7 @@ from horsies.core.worker.slots import (
     SlotPoolConfig,
     PreloadRefused,
     SpawnFailed,
-    TaskLoopUnavailableInNewChild,
+    TaskLoopRefusedRepeatedly,
 )
 from horsies.core.worker.child_runner import (  # noqa: F401
     CHILD_HOOK_FAILURE_EXIT_CODE as CHILD_HOOK_FAILURE_EXIT_CODE,
@@ -365,13 +365,13 @@ class Worker(
         """Service loop: end the worker when no replacement child can start.
 
         Running tasks drain first, through ``stop``, and so do finalizers:
-        a task whose new child could not create its task loop returns to the
+        a task whose child could not create its task loop returns to the
         queue before the worker exits. Returns after a hook failure, because
         that stop is a graceful one.
 
         Raises:
-            ChildStartFailedError: no replacement child could start, or a new
-                child could not create its task loop.
+            ChildStartFailedError: no replacement child could start, or
+                children kept failing to create their task loop.
         """
         failure = await pool.wait_failed()
         match failure:
@@ -381,10 +381,16 @@ class Worker(
                 )
             case SpawnFailed() | BootAttemptsExhausted() | PreloadRefused():
                 raise ChildStartFailedError(f'worker child start failed: {failure}')
-            case TaskLoopUnavailableInNewChild(pid=pid, task_id=task_id, detail=detail):
+            case TaskLoopRefusedRepeatedly(
+                refusals=refusals,
+                pid=pid,
+                task_id=task_id,
+                detail=detail,
+            ):
                 raise ChildStartFailedError(
-                    f'a new worker child (pid {pid}) could not create the task '
-                    f'loop for task {task_id}: {detail}',
+                    f'{refusals} worker children could not create the task loop '
+                    f'with no open in between; the last, pid {pid}, for task '
+                    f'{task_id}: {detail}',
                 )
             case _ as unreachable:
                 assert_never(unreachable)

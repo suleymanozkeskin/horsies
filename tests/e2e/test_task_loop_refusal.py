@@ -1,9 +1,9 @@
 """E2E: a worker child that cannot create the event loop of an async task.
 
 The instance's child start hook makes loop creation raise OSError(EMFILE)
-while a budget file allows it. The task returns to the queue unrun. A child
-that ran a task before is replaced and the worker goes on. A new child that
-ran no task stops the worker with a non-zero exit.
+while a budget file allows it. The task returns to the queue unrun, and the
+child is replaced. The worker goes on after one refusal, and stops with a
+non-zero exit when a second child is refused before any child opened a loop.
 """
 
 from __future__ import annotations
@@ -115,14 +115,14 @@ async def test_a_workflow_node_returns_to_the_queue_and_the_workflow_completes(
 
 @pytest.mark.e2e
 @pytest.mark.asyncio(loop_scope='function')
-async def test_a_new_child_without_a_task_loop_stops_the_worker(
+async def test_a_second_refusal_with_no_open_between_stops_the_worker(
     broker: PostgresBroker,
     refusals: Path,
 ) -> None:
     """A def task runs with the refusals armed and leaves them unused. The
-    first refusal comes from the child that ran it, so that child is
-    replaced. Its replacement ran no task, so its refusal stops the
-    worker, after the task returned to the queue."""
+    first refusal retires the child that ran it. Its replacement is refused
+    too, before any child opened a loop, so the worker stops, after the task
+    returned to the queue."""
     with run_worker(INSTANCE, ready_check=_ready_check()) as worker:
         refusals.write_text('2', encoding='ascii')
         sync_result = await asyncio.to_thread(

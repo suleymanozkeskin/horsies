@@ -103,27 +103,51 @@ class ReadyFrame:
 
 
 @dataclass(frozen=True, slots=True)
+class LoopOpenedForThisTask:
+    """The child created its task loop for this task: the open succeeded."""
+
+
+@dataclass(frozen=True, slots=True)
+class LoopOpenedEarlier:
+    """The task loop was already open when this task started."""
+
+
+LoopOpening: TypeAlias = LoopOpenedForThisTask | LoopOpenedEarlier
+
+
+@dataclass(frozen=True, slots=True)
+class NoTaskLoop:
+    """After the task, the child has no task loop: no async task has run in it."""
+
+
+@dataclass(frozen=True, slots=True)
 class LoopHoldsNoTask:
-    """After the task, the child's task loop holds no task that is not done."""
+    """After the task, the child's task loop is open and holds no task that
+    is not done."""
+
+    opening: LoopOpening
 
 
 @dataclass(frozen=True, slots=True)
 class LoopHoldsTasks:
     """After the task, asyncio tasks that it started and did not await are
-    still on the child's task loop. The parent retires such a child."""
+    still on the child's open task loop. The parent retires such a child."""
 
     count: int
+    opening: LoopOpening
 
 
 @dataclass(frozen=True, slots=True)
 class TaskLoopUnavailable:
     """The child could not create its task loop, so the async task did not
-    run. The parent retires such a child. ``detail`` names the OS error."""
+    run. The parent retires such a child. ``detail`` names the error."""
 
     detail: str
 
 
-TaskLoopReport: TypeAlias = LoopHoldsNoTask | LoopHoldsTasks | TaskLoopUnavailable
+TaskLoopReport: TypeAlias = (
+    NoTaskLoop | LoopHoldsNoTask | LoopHoldsTasks | TaskLoopUnavailable
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,12 +257,24 @@ def _rss_field(rss: RssReading) -> float | None:
             assert_never(unreachable)
 
 
+def _opening_field(opening: LoopOpening) -> str:
+    match opening:
+        case LoopOpenedForThisTask():
+            return 'this_task'
+        case LoopOpenedEarlier():
+            return 'earlier'
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def _task_loop_field(task_loop: TaskLoopReport) -> dict[str, object]:
     match task_loop:
-        case LoopHoldsNoTask():
+        case NoTaskLoop():
             return {'kind': 'none'}
-        case LoopHoldsTasks(count=count):
-            return {'kind': 'held', 'count': count}
+        case LoopHoldsNoTask(opening=opening):
+            return {'kind': 'empty', 'opened': _opening_field(opening)}
+        case LoopHoldsTasks(count=count, opening=opening):
+            return {'kind': 'held', 'count': count, 'opened': _opening_field(opening)}
         case TaskLoopUnavailable(detail=detail):
             return {'kind': 'unavailable', 'detail': detail}
         case _ as unreachable:
@@ -441,6 +477,16 @@ def _rss(meta: Mapping[str, Any]) -> RssReading:
     return RssMb(float(value))
 
 
+def _opening(task_loop: Mapping[str, Any]) -> LoopOpening:
+    match task_loop.get('opened'):
+        case 'this_task':
+            return LoopOpenedForThisTask()
+        case 'earlier':
+            return LoopOpenedEarlier()
+        case _:
+            raise _BadField('task_loop.opened')
+
+
 def _task_loop(meta: Mapping[str, Any]) -> TaskLoopReport:
     value = meta.get('task_loop')
     if not isinstance(value, dict):
@@ -448,12 +494,14 @@ def _task_loop(meta: Mapping[str, Any]) -> TaskLoopReport:
     task_loop = cast('Mapping[str, Any]', value)
     match task_loop.get('kind'):
         case 'none':
-            return LoopHoldsNoTask()
+            return NoTaskLoop()
+        case 'empty':
+            return LoopHoldsNoTask(opening=_opening(task_loop))
         case 'held':
             count = task_loop.get('count')
             if not isinstance(count, int) or isinstance(count, bool) or count < 1:
                 raise _BadField('task_loop.count')
-            return LoopHoldsTasks(count=count)
+            return LoopHoldsTasks(count=count, opening=_opening(task_loop))
         case 'unavailable':
             return TaskLoopUnavailable(detail=_text(task_loop, 'detail'))
         case _:

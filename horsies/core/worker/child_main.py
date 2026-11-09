@@ -38,6 +38,7 @@ from horsies.core.worker.child_protocol import (
     InitFrame,
     LoopHoldsNoTask,
     LoopHoldsTasks,
+    NoTaskLoop,
     ParentFrame,
     TaskLoopUnavailable,
     ReadyFrame,
@@ -268,8 +269,8 @@ def _refuse_run_on_a_child_to_retire(task_loop: TaskLoop, frame: RunFrame) -> No
     in its result frame, and the parent retires the child. So a run frame
     here is a defect in the parent.
     """
-    match task_loop.report():
-        case LoopHoldsNoTask():
+    match task_loop.report(task_loop.state):
+        case NoTaskLoop() | LoopHoldsNoTask():
             return
         case LoopHoldsTasks(count=count):
             logger.critical(
@@ -357,6 +358,7 @@ def serve(
         match work.get():
             case RunFrame() as frame:
                 _refuse_run_on_a_child_to_retire(task_loop, frame)
+                state_before_task = task_loop.state
                 ok, result_json, failed_reason = _bounded_result(
                     frame,
                     _run_or_exit(run_task, frame, init, task_loop),
@@ -369,7 +371,7 @@ def serve(
                         result_json=result_json,
                         failed_reason=failed_reason,
                         rss=_read_rss(),
-                        task_loop=task_loop.report(),
+                        task_loop=task_loop.report(state_before_task),
                     ),
                 )
             case StopFrame():

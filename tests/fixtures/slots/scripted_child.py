@@ -30,7 +30,7 @@ from horsies.core.worker.child_main import WireResult, _send_child_frame, serve
 from horsies.core.worker.child_protocol import (
     FRAME_HEADER,
     InitFrame,
-    LoopHoldsNoTask,
+    NoTaskLoop,
     ResultFrame,
     RssUnreadable,
     RunFrame,
@@ -224,7 +224,7 @@ def _run(frame: RunFrame, init: InitFrame, task_loop: TaskLoop) -> WireResult:
         case 'exit_after_result':
             _send_child_frame(
                 _sock,
-                ResultFrame(frame.task_id, True, 'complete', None, RssUnreadable(), LoopHoldsNoTask()),
+                ResultFrame(frame.task_id, True, 'complete', None, RssUnreadable(), NoTaskLoop()),
             )
             os._exit(1)
         case 'die_mid_frame':
@@ -256,7 +256,7 @@ def _run(frame: RunFrame, init: InitFrame, task_loop: TaskLoop) -> WireResult:
         case 'wrong_task_id':
             _send_child_frame(
                 _sock,
-                ResultFrame('another-task', True, '', None, RssUnreadable(), LoopHoldsNoTask()),
+                ResultFrame('another-task', True, '', None, RssUnreadable(), NoTaskLoop()),
             )
             time.sleep(3600)
             return _pid_result()
@@ -276,7 +276,7 @@ def _run(frame: RunFrame, init: InitFrame, task_loop: TaskLoop) -> WireResult:
                 os._exit(0)
             _send_child_frame(
                 _sock,
-                ResultFrame(frame.task_id, True, 'complete', None, RssUnreadable(), LoopHoldsNoTask()),
+                ResultFrame(frame.task_id, True, 'complete', None, RssUnreadable(), NoTaskLoop()),
             )
             os.kill(os.getpid(), signal.SIGKILL)
             return _pid_result()

@@ -58,7 +58,7 @@ from horsies.core.worker.worker import (
 from horsies.core.models.recovery import OrphanTaskAuditReport, RecoveryConfig
 from horsies.core.models.tasks import OperationalErrorCode
 from horsies.core.worker.child_protocol import (
-    LoopHoldsNoTask,
+    NoTaskLoop,
     RssMb,
     RssUnreadable,
     TaskLoopUnavailable,
@@ -87,7 +87,7 @@ from horsies.core.worker.slots import (
     SlotOutcome,
     SpawnFailed,
     TaskFinished,
-    TaskLoopUnavailableInNewChild,
+    TaskLoopRefusedRepeatedly,
 )
 from tests.broker_resources_support import (
     attach_loop_limit,
@@ -1176,7 +1176,7 @@ class TestFinalizeResultPayloadWarn:
         )
 
         handle = _finished_handle(
-            TaskFinished(True, '{"big": "' + 'x' * 1024 + '"}', None, RssUnreadable(), LoopHoldsNoTask()),
+            TaskFinished(True, '{"big": "' + 'x' * 1024 + '"}', None, RssUnreadable(), NoTaskLoop()),
         )
 
         with caplog.at_level(logging.WARNING):
@@ -1369,7 +1369,7 @@ class TestFinalizeAfterSlotOutcome:
         )
 
         await worker._finalize_after(
-            _finished_handle(TaskFinished(True, '{}', None, RssUnreadable(), LoopHoldsNoTask())),
+            _finished_handle(TaskFinished(True, '{}', None, RssUnreadable(), NoTaskLoop())),
             'task-13',
             task_name='helper_task',
         )
@@ -1425,7 +1425,7 @@ class TestAwaitSlotOutcome:
     async def test_a_result_inside_the_limit_needs_no_timeout_handler(self) -> None:
         worker = _make_worker()
         worker._handle_task_timeout = AsyncMock()  # type: ignore[method-assign]
-        done = TaskFinished(True, '{}', None, RssUnreadable(), LoopHoldsNoTask())
+        done = TaskFinished(True, '{}', None, RssUnreadable(), NoTaskLoop())
 
         outcome = await worker._await_slot_outcome(
             _finished_handle(done),
@@ -1455,7 +1455,7 @@ class TestAwaitSlotOutcome:
         worker._handle_task_timeout = AsyncMock()  # type: ignore[method-assign]
         wait_for = AsyncMock()
         monkeypatch.setattr(asyncio, 'wait_for', wait_for)
-        done = TaskFinished(True, '{}', None, RssUnreadable(), LoopHoldsNoTask())
+        done = TaskFinished(True, '{}', None, RssUnreadable(), NoTaskLoop())
 
         outcome = await worker._await_slot_outcome(
             _finished_handle(done), 'task-1', timeout, None,
@@ -1733,20 +1733,24 @@ class TestSlotFailureLoop:
             await worker._slot_failure_loop(pool)
 
     @pytest.mark.asyncio
-    async def test_a_new_child_without_a_task_loop_is_fatal(self) -> None:
+    async def test_repeated_task_loop_refusals_are_fatal(self) -> None:
         """The worker stops through the same fatal path as a failed child
         start, so its supervisor restarts it."""
         worker = _make_worker()
         pool = MagicMock()
         pool.wait_failed = AsyncMock(
-            return_value=TaskLoopUnavailableInNewChild(
+            return_value=TaskLoopRefusedRepeatedly(
+                refusals=2,
                 pid=4321,
                 task_id='task-22',
                 detail='OSError: [Errno 24] Too many open files',
             ),
         )
 
-        with pytest.raises(ChildStartFailedError, match='pid 4321.*task-22.*Errno 24'):
+        with pytest.raises(
+            ChildStartFailedError,
+            match='2 worker children.*pid 4321.*task-22.*Errno 24',
+        ):
             await worker._slot_failure_loop(pool)  # pyright: ignore[reportPrivateUsage]
 
 
