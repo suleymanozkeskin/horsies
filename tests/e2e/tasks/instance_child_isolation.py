@@ -16,7 +16,8 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
 from horsies.core.models.recovery import RecoveryConfig
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import RetrievalCode, TaskError, TaskResult
+from horsies.core.types.result import is_err
 
 from tests.e2e.helpers.env import e2e_database_url
 
@@ -43,6 +44,21 @@ broker.app = app
 @app.task(task_name='e2e_isolation_healthcheck')
 def healthcheck() -> TaskResult[str, TaskError]:
     return TaskResult(ok='ready')
+
+
+@app.task(task_name='e2e_isolation_wait_refused')
+def wait_refused_in_child() -> TaskResult[bool, TaskError]:
+    """Report whether a result wait in this worker child is refused at once."""
+    sent = healthcheck.send()
+    if is_err(sent):
+        return TaskResult(
+            err=TaskError(error_code='E2E_SEND_FAILED', message=str(sent.err_value)),
+        )
+    waited = sent.ok_value.get(timeout_ms=1000)
+    return TaskResult(
+        ok=waited.is_err()
+        and waited.unwrap_err().error_code is RetrievalCode.WAIT_INSIDE_TASK,
+    )
 
 
 @app.task(task_name='e2e_isolation_sleep')

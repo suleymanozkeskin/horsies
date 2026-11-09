@@ -234,6 +234,22 @@ async def test_crash_leaves_healthy_siblings_running(
 
 @pytest.mark.e2e
 @pytest.mark.asyncio(loop_scope='function')
+async def test_a_child_refuses_a_result_wait_on_every_start_path() -> None:
+    """Each start path marks the child, so a task cannot wait for another task."""
+    with _worker(
+        INSTANCE,
+        processes=1,
+        ready_check=_ready_check(isolation.healthcheck),
+        timeout=SLOW_START_S,
+    ):
+        handle = unwrap_send(await isolation.wait_refused_in_child.send_async())
+        result = await handle.get_async(timeout_ms=int(FINISH_TIMEOUT_S * 1000))
+
+        assert result.unwrap() is True
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
 async def test_child_stops_when_the_parent_dies(
     isolation_broker: PostgresBroker,
 ) -> None:

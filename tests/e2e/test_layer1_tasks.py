@@ -101,7 +101,8 @@ async def test_status_transitions(broker: PostgresBroker) -> None:
 
 @pytest.mark.e2e
 def test_a_task_cannot_wait_for_another_task() -> None:
-    """In a worker child, result waits return WAIT_INSIDE_TASK; send and info work."""
+    """In a worker child, every result wait is refused at once, also on a thread
+    that the task starts. send, a workflow start and info work."""
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
@@ -109,7 +110,15 @@ def test_a_task_cannot_wait_for_another_task() -> None:
         result = handle.get(timeout_ms=10000)
         assert_ok(
             result,
-            {'get_refused': True, 'app_get_result_refused': True, 'info_read': True},
+            {
+                'get_refused': True,
+                'thread_get_refused': True,
+                'app_get_result_refused': True,
+                'raw_refused': True,
+                'workflow_started': True,
+                'workflow_get_refused': True,
+                'info_read': True,
+            },
         )
 
 
