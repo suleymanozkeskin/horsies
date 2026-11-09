@@ -151,6 +151,7 @@ from .core.brokers.result_types import (
     BrokerAsyncContext,
     BrokerLoopRunnerFailed,
     BrokerListenerDisabled,
+    BrokerWaitInsideTask,
     broker_error_cause,
 )
 from .core.types.error_detail import NoCause
@@ -332,6 +333,7 @@ __all__ = [
     'BrokerAsyncContext',
     'BrokerLoopRunnerFailed',
     'BrokerListenerDisabled',
+    'BrokerWaitInsideTask',
     'broker_error_cause',
     # Health / liveness API
     'DatabasePing',

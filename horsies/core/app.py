@@ -64,6 +64,11 @@ from horsies.core.utils.loop_runner import (
     async_context_message,
     in_running_event_loop,
 )
+from horsies.core.process_role import (
+    ProcessRole,
+    process_role,
+    wait_inside_task_message,
+)
 from horsies.core.codec.json_io import loads_json
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import (
@@ -1129,9 +1134,15 @@ class Horsies:
         terminal rows). Cross-process monitoring / debugging callers
         use this to inspect payloads without importing user task
         modules.
+
+        In a process that runs task bodies it returns
+        ``Err(BrokerWaitInsideTask)`` at once, before the argument checks,
+        and does no I/O.
         """
         from horsies.core.types.result import Err, Ok, is_err
 
+        if process_role() is ProcessRole.RUNS_TASK_BODIES:
+            return self._wait_inside_task_err('get_raw_result_async', task_id)
         broker = self.get_broker()
         record_result = await broker.get_raw_result_record_async(
             task_id, timeout_ms,
@@ -1150,11 +1161,14 @@ class Horsies:
     ) -> 'BrokerResult[dict[str, Any] | None]':
         """Synchronous version of ``get_raw_result_async``.
 
-        On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
-        and does no I/O.
+        In a process that runs task bodies it returns
+        ``Err(BrokerWaitInsideTask)`` first. On a thread that runs an event
+        loop it returns ``Err(ASYNC_CONTEXT)``. Neither does I/O.
         """
         from horsies.core.types.result import Err, Ok, is_err
 
+        if process_role() is ProcessRole.RUNS_TASK_BODIES:
+            return self._wait_inside_task_err('get_raw_result', task_id)
         if in_running_event_loop():
             return self._async_context_err('get_raw_result')
         broker = self.get_broker()
@@ -1182,7 +1196,13 @@ class Horsies:
         when the ok slot is populated and ``task_name`` isn't in the
         local registry. Cross-process callers inspecting failed tasks
         can therefore decode without importing user code.
+
+        In a process that runs task bodies it returns
+        ``Ok(TaskResult(err=RetrievalCode.WAIT_INSIDE_TASK))`` at once and
+        does no I/O.
         """
+        if process_role() is ProcessRole.RUNS_TASK_BODIES:
+            return self._wait_inside_task_ok('get_result_async', task_id)
         from horsies.core.brokers.result_types import (
             BrokerInvalidJsonPayload,
             BrokerNoTypeAvailable,
@@ -1316,9 +1336,13 @@ class Horsies:
     ) -> 'BrokerResult[TaskResult[Any, TaskError]]':
         """Synchronous version of ``get_result_async``.
 
-        On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
-        and does no I/O.
+        In a process that runs task bodies it returns
+        ``Ok(TaskResult(err=RetrievalCode.WAIT_INSIDE_TASK))`` at once. On a
+        thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``.
+        Neither does I/O.
         """
+        if process_role() is ProcessRole.RUNS_TASK_BODIES:
+            return self._wait_inside_task_ok('get_result', task_id)
         if in_running_event_loop():
             return self._async_context_err('get_result')
         broker = self.get_broker()
@@ -1466,6 +1490,30 @@ class Horsies:
         return Err(BrokerLoopRunnerFailed(
             message=f'Loop runner failed for app.{label}(): {exc}',
             exception=exc,
+        ))
+
+    def _wait_inside_task_ok(
+        self, label: str, task_id: str,
+    ) -> 'BrokerResult[TaskResult[Any, TaskError]]':
+        """Refuse a result wait in a process that runs task bodies. Nothing ran."""
+        from horsies.core.models.tasks import RetrievalCode, TaskError, TaskResult
+        from horsies.core.types.result import Ok
+
+        return Ok(TaskResult(
+            err=TaskError(
+                error_code=RetrievalCode.WAIT_INSIDE_TASK,
+                message=wait_inside_task_message(f'app.{label}() for task {task_id}'),
+                data={'task_id': task_id},
+            ),
+        ))
+
+    def _wait_inside_task_err(self, label: str, task_id: str) -> 'BrokerResult[Any]':
+        """Refuse a raw result wait in a process that runs task bodies. Nothing ran."""
+        from horsies.core.brokers.result_types import BrokerWaitInsideTask
+        from horsies.core.types.result import Err
+
+        return Err(BrokerWaitInsideTask(
+            message=wait_inside_task_message(f'app.{label}() for task {task_id}'),
         ))
 
     def _async_context_err(self, label: str) -> 'BrokerResult[Any]':

@@ -81,6 +81,7 @@ Errors from `handle.get()` / `get_async()`. These indicate issues retrieving the
 | `EVENT_LOOP_LIMIT` | The broker serves its limit of open event loops (5) and this is a new one; not cached, clears when one of those loops closes | No |
 | `ASYNC_CONTEXT` | Sync `get()` / `result_for()` was called on a thread that runs an event loop; nothing ran; not cached. Call `await handle.get_async()` / `result_for_async()` | No |
 | `INVALID_INPUT` | An argument of `get()` / `get_async()` was refused before any read, for example a `timeout_ms` that is negative, not an int, or above `MAX_TASK_TIMEOUT_MS` (4,294,967,295 ms); not cached | No |
+| `WAIT_INSIDE_TASK` | A result wait was called inside a worker child, where task bodies run; it waited for nothing; not cached. Compose the tasks with a workflow: see [Waiting for a Result Inside a Task](/horsies/concepts/result-handling/#waiting-for-a-result-inside-a-task) | No |
 
 #### OutcomeCode
 
@@ -151,6 +152,7 @@ Three broker methods return a subset of `BrokerOperationError`, their only failu
 | `INVALID_TASK_OPTIONS` | `enqueue_async` received task options that are not valid JSON, or a `retry_policy` that does not validate as `RetryPolicy` (strict types, no unknown fields). The message names each failing field. Nothing was written | No |
 | `INVALID_INPUT` | An argument was refused before anything ran: a non-positive `timeout_seconds`, `min_responses` or history `limit`, a `target_worker_id` that is not a string, both `enqueued_at` and `enqueue_delay_seconds`, a future `sent_at` without either, a naive `sent_at`, `enqueued_at` or `good_until`, malformed args or kwargs JSON, args that are not null or an empty array, kwargs that are not an object or null, an empty task or queue name, a priority outside 1..100, a negative `enqueue_delay_seconds`, an empty `retention_class_key`, or an idempotency key that is empty or over 255 bytes. Nothing was written | No |
 | `LISTENER_DISABLED` | The broker was built with `assume_initialized=True` and has no listener, so `ping_workers` cannot run. Nothing ran | No |
+| `WAIT_INSIDE_TASK` | A raw result read (`app.get_raw_result()`, `broker.get_raw_result_record()` or an `*_async` form) was called in a worker child, where task bodies run. Nothing ran. Compose the tasks with a workflow: see [Waiting for a Result Inside a Task](/horsies/concepts/result-handling/#waiting-for-a-result-inside-a-task) | No |
 
 #### BrokerOperationError
 
@@ -171,6 +173,7 @@ Three broker methods return a subset of `BrokerOperationError`, their only failu
 | `BrokerAsyncContext` | `ASYNC_CONTEXT` | – | `False` | Nothing ran |
 | `BrokerLoopRunnerFailed` | `LOOP_RUNNER_FAILED` | `exception` | `False` | Nothing ran |
 | `BrokerListenerDisabled` | `LISTENER_DISABLED` | – | `False` | Nothing ran |
+| `BrokerWaitInsideTask` | `WAIT_INSIDE_TASK` | – | `False` | Nothing ran |
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |

@@ -51,6 +51,7 @@ from horsies.core.brokers.result_types import (
     BrokerPayloadMismatch,
     BrokerResult,
     BrokerSyncCallError,
+    BrokerWaitInsideTask,
     RawResultRecord,
 )
 from horsies.core.models.broker import PostgresConfig
@@ -114,6 +115,11 @@ from horsies.core.utils.db import (
     SessionSettings,
     register_identity_text_reads,
     register_session_settings,
+)
+from horsies.core.process_role import (
+    ProcessRole,
+    process_role,
+    wait_inside_task_message,
 )
 from horsies.core.utils.loop_runner import (
     LoopRunner,
@@ -372,6 +378,20 @@ def _async_context_err(
     return Err(
         BrokerAsyncContext(
             message=async_context_message(sync_call, async_call),
+        )
+    )
+
+
+def _wait_inside_task_err(
+    operation: str, task_id: str,
+) -> Err[BrokerWaitInsideTask]:
+    """Build the broker error for a result wait in a process that runs task bodies.
+
+    Nothing ran, and nothing waited.
+    """
+    return Err(
+        BrokerWaitInsideTask(
+            message=wait_inside_task_message(f'{operation} for task {task_id}'),
         )
     )
 
@@ -3014,10 +3034,17 @@ class PostgresBroker:
         - ``Err(BrokerOperationError(INVALID_JSON_PAYLOAD, ...))``:
           stored JSON failed strict parse (malformed, non-finite
           float, non-object envelope).
+        - ``Err(BrokerWaitInsideTask)``: the call runs in a process that
+          runs task bodies (a worker child). This is the first check: it
+          comes before the argument checks. Nothing ran.
         - ``Err(BrokerInvalidInput)``: ``timeout_ms`` is not None or an int
           from 0 to ``MAX_TASK_TIMEOUT_MS``. Nothing ran.
         - ``Err(...)`` with other codes for DB / listener failures.
         """
+        if process_role() is ProcessRole.RUNS_TASK_BODIES:
+            return _wait_inside_task_err(
+                'PostgresBroker.get_raw_result_record_async()', task_id,
+            )
         match wait_timeout_seconds(timeout_ms):
             case Err(err_value=refused):
                 return Err(BrokerInvalidInput(
@@ -3149,9 +3176,14 @@ class PostgresBroker:
         """Synchronous wrapper around ``get_raw_result_record_async``.
 
         Runs the async path on the broker's background event loop via
-        ``LoopRunner``. On a thread that runs an event loop it returns
-        ``Err(ASYNC_CONTEXT)`` and does no I/O.
+        ``LoopRunner``. In a process that runs task bodies it returns
+        ``Err(BrokerWaitInsideTask)`` first. On a thread that runs an event
+        loop it returns ``Err(ASYNC_CONTEXT)``. Neither does I/O.
         """
+        if process_role() is ProcessRole.RUNS_TASK_BODIES:
+            return _wait_inside_task_err(
+                'PostgresBroker.get_raw_result_record()', task_id,
+            )
         if in_running_event_loop():
             return _async_context_err(
                 'PostgresBroker.get_raw_result_record()',

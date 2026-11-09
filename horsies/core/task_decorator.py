@@ -42,6 +42,11 @@ from horsies.core.codec.payload_guard import (
     warn_if_payload_large,
 )
 from horsies.core.codec.task_options import serialize_task_options
+from horsies.core.process_role import (
+    ProcessRole,
+    process_role,
+    wait_inside_task_message,
+)
 from horsies.core.codec.typed import (
     Json,
     TypeAnnotation,
@@ -98,6 +103,7 @@ from horsies.core.brokers.result_types import (
     BrokerPayloadMismatch,
     BrokerResult,
     BrokerSyncCallError,
+    BrokerWaitInsideTask,
     RawResultRecord,
     broker_error_cause,
 )
@@ -496,6 +502,8 @@ class TaskHandle(Generic[T]):
                     )
                 case BrokerEventLoopLimit():
                     err_code, cache = RetrievalCode.EVENT_LOOP_LIMIT, False
+                case BrokerWaitInsideTask():
+                    err_code, cache = RetrievalCode.WAIT_INSIDE_TASK, False
                 case BrokerAsyncContext():
                     raise AssertionError(
                         f'TaskHandle result read for task {self.task_id} got '
@@ -652,6 +660,29 @@ class TaskHandle(Generic[T]):
         self._result_fetched = True
         return decoded_tr
 
+    def _waits_are_refused(self) -> bool:
+        """Return whether a result wait on this handle is refused here.
+
+        A broker-backed handle waits on the broker. In a process that runs
+        task bodies, that wait is refused.
+        """
+        return (
+            self._broker_mode
+            and self._app is not None
+            and process_role() is ProcessRole.RUNS_TASK_BODIES
+        )
+
+    def _wait_inside_task_result(self, operation: str) -> TaskResult[T, TaskError]:
+        """Return ``WAIT_INSIDE_TASK`` for a refused wait. Not cached; nothing ran."""
+        return self._error_result(
+            error_code=RetrievalCode.WAIT_INSIDE_TASK,
+            message=wait_inside_task_message(
+                f'TaskHandle.{operation}() for task {self.task_id}',
+            ),
+            data={'task_id': self.task_id},
+            cache=False,
+        )
+
     def get(
         self,
         timeout_ms: Optional[int] = None,
@@ -659,9 +690,11 @@ class TaskHandle(Generic[T]):
         """
         Get the task result (blocking).
 
-        A broker-backed handle without its result returns
-        ``RetrievalCode.ASYNC_CONTEXT`` (not cached) on a thread that runs an
-        event loop; use ``get_async()`` there.
+        A broker-backed handle returns ``RetrievalCode.WAIT_INSIDE_TASK`` (not
+        cached) in a process that runs task bodies, as its first check, before
+        the ``timeout_ms`` check; compose tasks with a workflow there. It
+        returns ``RetrievalCode.ASYNC_CONTEXT`` (not cached) on a thread that
+        runs an event loop; use ``get_async()`` there.
 
         Args:
             timeout_ms: Maximum time to wait for result (milliseconds)
@@ -672,6 +705,8 @@ class TaskHandle(Generic[T]):
             A timeout_ms that is not None or an int from 0 to MAX_TASK_TIMEOUT_MS
             returns ``RetrievalCode.INVALID_INPUT`` (not cached) before any read.
         """
+        if self._waits_are_refused():
+            return self._wait_inside_task_result('get')
         match wait_timeout_seconds(timeout_ms):
             case Err(err_value=refused):
                 return self._error_result(
@@ -728,6 +763,10 @@ class TaskHandle(Generic[T]):
         """
         Get the task result asynchronously.
 
+        A broker-backed handle returns ``RetrievalCode.WAIT_INSIDE_TASK`` (not
+        cached) in a process that runs task bodies, as its first check, before
+        the ``timeout_ms`` check; compose tasks with a workflow there.
+
         Args:
             timeout_ms: Maximum time to wait for result (milliseconds)
 
@@ -737,6 +776,8 @@ class TaskHandle(Generic[T]):
             A timeout_ms that is not None or an int from 0 to MAX_TASK_TIMEOUT_MS
             returns ``RetrievalCode.INVALID_INPUT`` (not cached) before any read.
         """
+        if self._waits_are_refused():
+            return self._wait_inside_task_result('get_async')
         match wait_timeout_seconds(timeout_ms):
             case Err(err_value=refused):
                 return self._error_result(

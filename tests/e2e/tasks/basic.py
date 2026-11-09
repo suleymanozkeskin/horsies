@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from typing import Any, cast
 
 from pydantic import BaseModel
 
+from horsies.core.brokers.result_types import BrokerWaitInsideTask
 from horsies.core.codec.json_value import JsonValue
-from horsies.core.models.tasks import TaskResult, TaskError, OperationalErrorCode
+from horsies.core.models.tasks import (
+    OperationalErrorCode,
+    RetrievalCode,
+    TaskError,
+    TaskResult,
+)
+from horsies.core.types.result import is_err, is_ok
 
 from tests.e2e.tasks.instance import app
 
@@ -236,3 +244,55 @@ def idempotent_task(*, token: str) -> TaskResult[str, TaskError]:
                 error_code='DOUBLE_EXECUTION', message=f'Token {token} already executed'
             )
         )
+
+
+WAIT_PROBE_JOIN_TIMEOUT_S = 10.0
+"""Bound on the wait for the probe thread. A refused wait returns at once."""
+
+
+def _refused(result: TaskResult[Any, TaskError]) -> bool:
+    return (
+        result.is_err()
+        and result.unwrap_err().error_code is RetrievalCode.WAIT_INSIDE_TASK
+    )
+
+
+@app.task(task_name='e2e_wait_inside_task')
+def wait_inside_task() -> TaskResult[dict[str, bool], TaskError]:
+    """Send a task and start a workflow, then try the waits that a task cannot make.
+
+    One wait runs on a thread that the task starts: the refusal belongs to the
+    process, not to the thread.
+    """
+    from tests.e2e.tasks.workflows import spec_single_node
+
+    sent = simple_task.send(x=1)
+    if is_err(sent):
+        return TaskResult(
+            err=TaskError(error_code='E2E_SEND_FAILED', message=str(sent.err_value)),
+        )
+    handle = sent.ok_value
+    thread_refusals: list[bool] = []
+
+    def wait_on_a_thread() -> None:
+        thread_refusals.append(_refused(handle.get(timeout_ms=1000)))
+
+    thread = threading.Thread(target=wait_on_a_thread, name='e2e-wait-on-a-thread')
+    thread.start()
+    thread.join(timeout=WAIT_PROBE_JOIN_TIMEOUT_S)
+    read = app.get_result(handle.task_id, 1000)
+    raw = app.get_raw_result(handle.task_id, 1000)
+    started = spec_single_node.start()
+    return TaskResult(
+        ok={
+            'get_refused': _refused(handle.get(timeout_ms=1000)),
+            'thread_get_refused': thread_refusals == [True],
+            'app_get_result_refused': is_ok(read) and _refused(read.ok_value),
+            'raw_refused': is_err(raw)
+            and isinstance(raw.err_value, BrokerWaitInsideTask),
+            'workflow_started': is_ok(started),
+            'workflow_get_refused': is_ok(started)
+            and _refused(started.ok_value.get(timeout_ms=1000)),
+            'info_read': is_ok(handle.info()),
+        },
+    )
