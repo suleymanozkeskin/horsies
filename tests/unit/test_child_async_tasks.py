@@ -15,6 +15,7 @@ import gc
 import json
 import warnings
 from collections.abc import Callable, Iterator
+from enum import Enum
 from contextlib import ExitStack
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -22,7 +23,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pydantic import SecretStr
 
+from horsies.core import process_role as process_role_module
 from horsies.core.app import Horsies
+from horsies.core.brokers.result_types import BrokerWaitInsideTask
 from horsies.core.codec.json_io import loads_json
 from horsies.core.codec.typed import decode_task_result, encode_task_result
 from horsies.core.models.app import AppConfig
@@ -35,7 +38,9 @@ from horsies.core.models.tasks import (
     TaskResult,
 )
 from horsies.core.models.workflow import NodeKey, WorkflowContext
-from horsies.core.types.result import Err
+from horsies.core.models.workflow.handle import WorkflowHandle
+from horsies.core.process_role import ProcessRole
+from horsies.core.types.result import Err, Ok
 from horsies.core.utils.loop_runner import in_running_event_loop
 from horsies.core.worker import child_runner
 from horsies.core.worker.task_loop import LoopNotCreated, LoopOpen, TaskLoop
@@ -295,6 +300,93 @@ class TestTheLoopCannotBeCreated:
         )
         assert ran == []
         assert isinstance(task_loop.state, LoopNotCreated)
+
+
+UNREACHABLE_URL = 'postgresql+psycopg://u:p@127.0.0.1:1/db'
+WORKFLOW_ID = '0b6f2f0e-6c1d-4f7a-9a52-3d2b1c0e9f81'
+
+
+def _refusal_text(code: object, message: str | None) -> str:
+    """The refusing operation, as its message names it, and the code."""
+    operation = (message or '').split(' for ', 1)[0]
+    return f'{operation}:{code.value if isinstance(code, Enum) else code}'
+
+
+def _task_refusal(result: TaskResult[Any, TaskError]) -> str:
+    error = result.unwrap_err()
+    return _refusal_text(error.error_code, error.message)
+
+
+class TestResultWaitsInsideAnAsyncTask:
+    def test_each_async_wait_is_refused_at_once_and_send_async_works(
+        self,
+        task_loop: TaskLoop,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The child start marks the process, so a wait in an async task body
+        is refused before it reads anything. ``send_async()`` still enqueues."""
+        monkeypatch.setattr(process_role_module, '_role', ProcessRole.RUNS_NO_TASK_BODIES)
+        app = Horsies(
+            AppConfig(broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL))),
+        )
+        broker = app.get_broker()
+        enqueued: list[str] = []
+
+        async def enqueue_async(*_args: object, task_id: str, **_kwargs: object) -> Ok[str]:
+            enqueued.append(task_id)
+            return Ok(task_id)
+
+        @app.task('async_sent')
+        async def sent() -> TaskResult[int, TaskError]:
+            return TaskResult(ok=1)
+
+        @app.task('async_waits_inside_task')
+        async def waits_inside_task() -> TaskResult[list[str], TaskError]:
+            match await sent.send_async():
+                case Ok(handle):
+                    pass
+                case Err(send_err):
+                    return TaskResult(
+                        err=TaskError(error_code='SEND_FAILED', message=str(send_err)),
+                    )
+            outcomes = [f'send_async:{handle.task_id == enqueued[0]}']
+            outcomes.append(_task_refusal(await handle.get_async()))
+            read = (await app.get_result_async(handle.task_id)).unwrap()
+            outcomes.append(_task_refusal(read))
+            match await app.get_raw_result_async(handle.task_id):
+                case Err(BrokerWaitInsideTask(code=code, message=message)):
+                    outcomes.append(_refusal_text(code, message))
+                case other:
+                    outcomes.append(f'not refused: {other!r}')
+            workflow: WorkflowHandle[Any] = WorkflowHandle(
+                workflow_id=WORKFLOW_ID,
+                broker=broker,
+            )
+            outcomes.append(_task_refusal(await workflow.get_async()))
+            return TaskResult(ok=outcomes)
+
+        try:
+            with (
+                patch.object(child_runner, '_run_child_start_hooks'),
+                patch.object(child_runner, '_initialize_worker_pool'),
+            ):
+                child_runner.finish_child_start(app, UNREACHABLE_URL, None, 0, 2, True)
+            with patch.object(broker, 'enqueue_async', enqueue_async):
+                wire = _runner(app, task_loop)(waits_inside_task.task_name)
+        finally:
+            broker._loop_runner.stop()
+
+        assert _result(wire, list[str]).ok_value == [
+            'send_async:True',
+            'TaskHandle.get_async():WAIT_INSIDE_TASK',
+            'app.get_result_async():WAIT_INSIDE_TASK',
+            'app.get_raw_result_async():WAIT_INSIDE_TASK',
+            'WorkflowHandle.get_async():WAIT_INSIDE_TASK',
+        ]
+        assert len(enqueued) == 1
+        # Refused before any read: no resource set, and no sync runner.
+        assert broker._loop_sets == ()
+        assert broker._loop_runner._started is False
 
 
 class TestTheSameOutcomesAsASyncTask:
