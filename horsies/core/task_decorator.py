@@ -1344,12 +1344,13 @@ def _async_task_call(
     coroutine has a cancel request, so a timeout or a task group around the
     call works. A `CancelledError` with no cancel request, for example from
     an inner task that was cancelled, becomes an error result.
+    `GeneratorExit` propagates, so `close()` on a suspended call ends it.
     """
 
     async def call(*args: P.args, **kwargs: P.kwargs) -> TaskResult[T, TaskError]:
         try:
             return checked_result(await body(*args, **kwargs))
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, GeneratorExit):
             raise
         except asyncio.CancelledError as exc:
             if _cancel_requested():

@@ -1538,6 +1538,30 @@ class TestCreateTaskWrapperAsyncExecution:
         with pytest.raises(KeyboardInterrupt):
             asyncio.run(wrapper(x=1))
 
+    def test_close_of_a_suspended_call_ends_it_with_no_result(self) -> None:
+        """`close()` throws GeneratorExit in at the await. The wrapper lets it
+        end the coroutine: it maps no error and returns no result, so
+        `close()` returns None."""
+        body_saw: list[type[BaseException]] = []
+
+        async def suspends(*, x: int) -> TaskResult[int, TaskError]:
+            try:
+                await asyncio.sleep(0)
+            except BaseException as exc:
+                body_saw.append(type(exc))
+                raise
+            return TaskResult(ok=x)
+
+        wrapper = create_task_wrapper(suspends, _make_app(), 'test.suspends')
+
+        coroutine = wrapper(x=1)
+        assert coroutine.send(None) is None
+        closed_with = coroutine.close()
+
+        assert closed_with is None
+        assert body_saw == [GeneratorExit]
+        assert inspect.getcoroutinestate(coroutine) == inspect.CORO_CLOSED
+
     def test_a_cancelled_inner_task_is_an_error_result(self) -> None:
         """No cancel request for the caller: the CancelledError is the
         body's failure, mapped like any exception."""
