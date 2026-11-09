@@ -104,11 +104,14 @@ async def _loops_seen() -> str:
 
 
 async def _mark_when_cancelled(path: str) -> None:
+    """Write the marker only on a cancel. A coroutine that is closed at
+    interpreter exit gets GeneratorExit, which must not write it."""
     try:
         await asyncio.Event().wait()
-    finally:
+    except asyncio.CancelledError:
         with open(path, 'w', encoding='ascii') as target:
             target.write('cancelled')
+        raise
 
 
 async def _leave_pending(path: str) -> str:
