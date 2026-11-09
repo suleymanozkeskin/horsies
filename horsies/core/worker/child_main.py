@@ -39,6 +39,7 @@ from horsies.core.worker.child_protocol import (
     LoopHoldsNoTask,
     LoopHoldsTasks,
     ParentFrame,
+    TaskLoopUnavailable,
     ReadyFrame,
     ResultFrame,
     RssMb,
@@ -260,13 +261,14 @@ def _run_or_exit(
         os._exit(1)
 
 
-def _refuse_run_beside_loop_tasks(task_loop: TaskLoop, frame: RunFrame) -> None:
-    """Exit loud when a task would share the loop with work of an earlier task.
+def _refuse_run_on_a_child_to_retire(task_loop: TaskLoop, frame: RunFrame) -> None:
+    """Exit loud when the task loop report says this child must be retired.
 
-    The child reports such work in its result frame, and the parent retires
-    the child, so a run frame here is a defect in the parent.
+    The child reports work left on its loop, or a loop it could not create,
+    in its result frame, and the parent retires the child. So a run frame
+    here is a defect in the parent.
     """
-    match task_loop.tasks_left():
+    match task_loop.report():
         case LoopHoldsNoTask():
             return
         case LoopHoldsTasks(count=count):
@@ -276,10 +278,17 @@ def _refuse_run_beside_loop_tasks(task_loop: TaskLoop, frame: RunFrame) -> None:
                 frame.task_id,
                 count,
             )
-            flush_output()
-            os._exit(BAD_PARENT_FRAME_EXIT_CODE)
+        case TaskLoopUnavailable(detail=detail):
+            logger.critical(
+                'Parent sent task %s to a child that has no task loop (%s); '
+                'such a child must be retired',
+                frame.task_id,
+                detail,
+            )
         case _ as unreachable:
             assert_never(unreachable)
+    flush_output()
+    os._exit(BAD_PARENT_FRAME_EXIT_CODE)
 
 
 def exit_after_stop(executor: ExecutorAfterClose) -> NoReturn:
@@ -319,11 +328,11 @@ def serve(
     """Run the child until the parent sends a stop frame, then end the process.
 
     Every task of the child gets the same ``TaskLoop``. Each result frame
-    reports the tasks left on it. The stop frame closes it, bounded by
+    reports the state of that loop. The stop frame closes it, bounded by
     ``LOOP_CLOSE_TIMEOUT_S``, and ``exit_after_stop`` ends the process.
 
-    Failure exits: a run frame while the loop holds tasks of an earlier task
-    is a parent defect and ends the process with
+    Failure exits: a run frame after a report that this child must be
+    retired is a parent defect and ends the process with
     ``BAD_PARENT_FRAME_EXIT_CODE``. An exception from ``boot`` propagates, so the child exits
     non-zero before it reports ready. A parent that is gone or that sends a
     bad frame ends the process through ``os._exit``, and so does an exception
@@ -347,7 +356,7 @@ def serve(
     while True:
         match work.get():
             case RunFrame() as frame:
-                _refuse_run_beside_loop_tasks(task_loop, frame)
+                _refuse_run_on_a_child_to_retire(task_loop, frame)
                 ok, result_json, failed_reason = _bounded_result(
                     frame,
                     _run_or_exit(run_task, frame, init, task_loop),
@@ -360,7 +369,7 @@ def serve(
                         result_json=result_json,
                         failed_reason=failed_reason,
                         rss=_read_rss(),
-                        loop_tasks=task_loop.tasks_left(),
+                        task_loop=task_loop.report(),
                     ),
                 )
             case StopFrame():

@@ -9,7 +9,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -61,6 +61,7 @@ from horsies.core.worker.child_protocol import (
     LoopHoldsNoTask,
     RssMb,
     RssUnreadable,
+    TaskLoopUnavailable,
     RunFrame,
     encode_parent_frame,
 )
@@ -86,6 +87,7 @@ from horsies.core.worker.slots import (
     SlotOutcome,
     SpawnFailed,
     TaskFinished,
+    TaskLoopUnavailableInNewChild,
 )
 from tests.broker_resources_support import (
     attach_loop_limit,
@@ -149,6 +151,14 @@ _LOST = ChildLost(
     cause=LossCause.CHILD_DIED,
     child_exit=KilledBySignal(9),
     partial_frame=False,
+)
+
+_TASK_LOOP_REFUSED = TaskFinished(
+    False,
+    '',
+    'TASK_LOOP_UNAVAILABLE',
+    RssUnreadable(),
+    TaskLoopUnavailable(detail='OSError: [Errno 24] Too many open files'),
 )
 
 
@@ -1283,6 +1293,75 @@ class TestFinalizeAfterSlotOutcome:
         assert result.err_value.retryable is True
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize('is_workflow_task', [False, True], ids=['plain', 'workflow'])
+    async def test_a_task_loop_refusal_returns_the_task_with_its_claim_fence(
+        self,
+        is_workflow_task: bool,
+    ) -> None:
+        """No task code ran: the claim is released, and nothing else is
+        written. The session factory is never used, so no attempt row and no
+        terminal state can be written, and no workflow phase follows."""
+        worker = _make_worker()
+        worker._requeue_claimed_task = AsyncMock(  # type: ignore[method-assign]
+            return_value=_RequeueOutcome.REQUEUED,
+        )
+        worker._finalize_workflow_phase = AsyncMock()  # type: ignore[method-assign]
+        claimed_at = datetime(2026, 11, 1, tzinfo=timezone.utc)
+
+        result = await worker._finalize_after(  # pyright: ignore[reportPrivateUsage]
+            _finished_handle(_TASK_LOOP_REFUSED),
+            'task-20',
+            is_workflow_task=is_workflow_task,
+            task_name='helper_task',
+            claimed_at=claimed_at,
+        )
+
+        assert result == Ok(None)
+        worker._requeue_claimed_task.assert_awaited_once_with(  # pyright: ignore[reportPrivateUsage]
+            'task-20',
+            'TASK_LOOP_UNAVAILABLE',
+            claimed_at=claimed_at,
+        )
+        cast(MagicMock, worker.sf).assert_not_called()
+        worker._finalize_workflow_phase.assert_not_awaited()  # pyright: ignore[reportPrivateUsage]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ('requeue_outcome', 'retryable'),
+        [
+            (_RequeueOutcome.REQUEUED, None),
+            (_RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED, None),
+            (_RequeueOutcome.DB_ERROR, True),
+        ],
+    )
+    async def test_a_task_loop_refusal_handles_each_requeue_outcome(
+        self,
+        requeue_outcome: _RequeueOutcome,
+        retryable: bool | None,
+    ) -> None:
+        """Only a database error leaves the row CLAIMED: the future-stage
+        retry releases it later."""
+        worker = _make_worker()
+        worker._requeue_claimed_task = AsyncMock(  # type: ignore[method-assign]
+            return_value=requeue_outcome,
+        )
+
+        result = await worker._finalize_after(  # pyright: ignore[reportPrivateUsage]
+            _finished_handle(_TASK_LOOP_REFUSED),
+            'task-21',
+            task_name='helper_task',
+        )
+
+        match result:
+            case Ok():
+                assert retryable is None
+            case Err(err):
+                assert err.retryable is retryable
+                assert err.stage == 'future'
+                assert err.data is not None
+                assert err.data['requeue_outcome'] == requeue_outcome.value
+
+    @pytest.mark.asyncio
     async def test_finished_task_goes_to_persist(self) -> None:
         worker = _make_worker()
         worker._persist_task_terminal_state = AsyncMock(  # type: ignore[method-assign]
@@ -1652,6 +1731,23 @@ class TestSlotFailureLoop:
 
         with pytest.raises(ChildStartFailedError):
             await worker._slot_failure_loop(pool)
+
+    @pytest.mark.asyncio
+    async def test_a_new_child_without_a_task_loop_is_fatal(self) -> None:
+        """The worker stops through the same fatal path as a failed child
+        start, so its supervisor restarts it."""
+        worker = _make_worker()
+        pool = MagicMock()
+        pool.wait_failed = AsyncMock(
+            return_value=TaskLoopUnavailableInNewChild(
+                pid=4321,
+                task_id='task-22',
+                detail='OSError: [Errno 24] Too many open files',
+            ),
+        )
+
+        with pytest.raises(ChildStartFailedError, match='pid 4321.*task-22.*Errno 24'):
+            await worker._slot_failure_loop(pool)  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.unit

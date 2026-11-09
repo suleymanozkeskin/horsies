@@ -45,7 +45,12 @@ from horsies.core.process_role import ProcessRole
 from horsies.core.types.result import Err, Ok, is_ok
 from horsies.core.utils.loop_runner import in_running_event_loop
 from horsies.core.worker import child_runner
-from horsies.core.worker.task_loop import LoopNotCreated, LoopOpen, TaskLoop
+from horsies.core.worker.task_loop import (
+    LoopCreateRefused,
+    LoopNotCreated,
+    LoopOpen,
+    TaskLoop,
+)
 
 pytestmark = [pytest.mark.unit]
 
@@ -76,8 +81,15 @@ def task_loop() -> Iterator[TaskLoop]:
     loop.close()
 
 
-def _runner(app: Horsies, task_loop: TaskLoop) -> Callable[..., WireResult]:
-    """Run one task through `_run_task_entry`, as the child does."""
+def _runner(
+    app: Horsies,
+    task_loop: TaskLoop,
+    set_running: MagicMock | None = None,
+) -> Callable[..., WireResult]:
+    """Run one task through `_run_task_entry`, as the child does.
+
+    ``set_running`` stands in for the RUNNING update; it confirms the claim.
+    """
 
     def run(task_name: str, kwargs: dict[str, Any] | None = None) -> WireResult:
         with ExitStack() as stack:
@@ -85,7 +97,7 @@ def _runner(app: Horsies, task_loop: TaskLoop) -> Callable[..., WireResult]:
                 patch.object(
                     child_runner,
                     '_confirm_ownership_and_set_running',
-                    MagicMock(return_value=None),
+                    set_running or MagicMock(return_value=None),
                 ),
             )
             stack.enter_context(
@@ -268,39 +280,95 @@ def _failing_tasks(app: Horsies) -> dict[str, tuple[str, str]]:
     }
 
 
-class TestTheLoopCannotBeCreated:
-    def test_it_is_a_worker_failure_and_the_task_does_not_run(
+def _no_descriptors() -> asyncio.AbstractEventLoop:
+    raise OSError(errno.EMFILE, 'Too many open files')
+
+
+class TestTheLoopIsCreatedBeforeRunning:
+    def test_a_refused_loop_returns_the_task_before_running(
         self,
         task_loop: TaskLoop,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """No task code ran, so the result is the worker's own failure
-        (``ok`` is False), not a ``TASK_EXCEPTION`` of the task."""
+        """The row is still CLAIMED and no task code ran: the child reports
+        the abort reason, and the worker returns the task to the queue."""
         app = _app()
         ran: list[bool] = []
+        set_running = MagicMock(return_value=None)
 
         @app.task('async_never_runs')
         async def never_runs() -> TaskResult[int, TaskError]:
             ran.append(True)
             return TaskResult(ok=1)
 
-        def no_descriptors() -> asyncio.AbstractEventLoop:
-            raise OSError(errno.EMFILE, 'Too many open files')
-
-        monkeypatch.setattr(asyncio, 'new_event_loop', no_descriptors)
+        monkeypatch.setattr(asyncio, 'new_event_loop', _no_descriptors)
 
         with warnings.catch_warnings():
             warnings.simplefilter('error', RuntimeWarning)
-            wire = _runner(app, task_loop)(never_runs.task_name)
+            wire = _runner(app, task_loop, set_running)(never_runs.task_name)
             gc.collect()
 
-        assert wire == (
-            False,
-            '',
-            'the event loop for async tasks could not be created: '
-            'OSError: [Errno 24] Too many open files',
-        )
+        assert wire == (False, '', 'TASK_LOOP_UNAVAILABLE')
+        set_running.assert_not_called()
         assert ran == []
+        assert isinstance(task_loop.state, LoopCreateRefused)
+
+    def test_an_async_task_finds_its_loop_open_at_the_running_update(
+        self,
+        task_loop: TaskLoop,
+    ) -> None:
+        app = _app()
+        states_at_running: list[str] = []
+
+        def record_state(*_args: object, **_kwargs: object) -> None:
+            states_at_running.append(type(task_loop.state).__name__)
+
+        @app.task('async_one')
+        async def one() -> TaskResult[int, TaskError]:
+            return TaskResult(ok=1)
+
+        wire = _runner(app, task_loop, MagicMock(side_effect=record_state))(
+            one.task_name,
+        )
+
+        assert _result(wire, int).ok_value == 1
+        assert states_at_running == ['LoopOpen']
+
+    def test_a_def_task_does_not_touch_the_loop(
+        self,
+        task_loop: TaskLoop,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        app = _app()
+        set_running = MagicMock(return_value=None)
+
+        @app.task('sync_one')
+        def one() -> TaskResult[int, TaskError]:
+            return TaskResult(ok=1)
+
+        monkeypatch.setattr(asyncio, 'new_event_loop', _no_descriptors)
+
+        wire = _runner(app, task_loop, set_running)(one.task_name)
+
+        assert _result(wire, int).ok_value == 1
+        set_running.assert_called_once()
+        assert isinstance(task_loop.state, LoopNotCreated)
+
+    def test_a_task_the_registry_lacks_fails_resolution_after_running(
+        self,
+        task_loop: TaskLoop,
+    ) -> None:
+        """The lookup before RUNNING does not decide this case: the
+        resolution error after the RUNNING update reports it, as before."""
+        set_running = MagicMock(return_value=None)
+
+        ok, payload, reason = _runner(_app(), task_loop, set_running)('not_registered')
+
+        set_running.assert_called_once()
+        assert ok is True
+        assert reason is not None and 'not registered' in reason
+        error = decode_task_result(loads_json(payload).unwrap(), int).unwrap_err()
+        assert error.error_code is OperationalErrorCode.WORKER_RESOLUTION_ERROR
         assert isinstance(task_loop.state, LoopNotCreated)
 
 

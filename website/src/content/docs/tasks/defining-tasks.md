@@ -51,6 +51,12 @@ An async task must await the work that it starts:
 - A client that keeps its own background tasks on the loop, for example a keepalive or a consumer task, causes a child replacement after each async task.
 - A thread that `asyncio.to_thread()` starts can outlive its task, for example when a timeout ends the wait for it. The thread is not an asyncio task, so it does not cause a replacement. When the worker stops the child, the child does not wait for that thread past the 5-second close: it exits, and its `atexit` handlers do not run.
 
+A child creates its event loop before it marks its first async task RUNNING. When the operating system refuses the loop, for example because the process has no file descriptor left:
+
+- The task goes back to the queue unrun. It uses no attempt and no retry.
+- The worker replaces the child, and a new child runs the next task.
+- When the refused child had run no task before, the cause is the process environment, so a new child would fail too. The worker then also stops with a non-zero exit, and its supervisor restarts it.
+
 In an async task, send with `.send_async()` or `.schedule_async()`. The sync `.send()` and `.schedule()` refuse a running event loop: they return `Err(TaskSendAsyncContext)` and enqueue nothing. See [Sending Tasks](sending-tasks).
 
 ```python

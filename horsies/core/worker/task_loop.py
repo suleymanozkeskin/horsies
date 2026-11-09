@@ -1,16 +1,18 @@
 """The event loop that runs ``async def`` tasks in a worker child.
 
-A child creates the loop when its first async task starts, and keeps it until
-the child stops. An async client or pool that a task keeps in module state is
-bound to this loop, so a later async task in the same child can use it.
+A child creates the loop with ``open`` before the RUNNING update of its first
+async task, and keeps it until the child stops. An async client or pool that a
+task keeps in module state is bound to this loop, so a later async task in the
+same child can use it.
 
 The loop runs only while an async task runs. Between tasks the loop is stopped
 and not closed. A sync task runs on the same thread with no running event
 loop, so it can call ``asyncio.run()`` and the sync send methods.
 
-A task must await the work that it starts. ``tasks_left`` counts what is still
-on the loop after a task, and the worker replaces a child that reports any, so
-no later task shares the loop with that work.
+A task must await the work that it starts. ``report`` counts what is still on
+the loop after a task, and the worker replaces a child that reports any, so no
+later task shares the loop with that work. ``report`` also says when the loop
+could not be created, and the worker replaces that child too.
 """
 
 from __future__ import annotations
@@ -26,7 +28,12 @@ from horsies.core.logging import get_logger
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.utils.loop_runner import in_running_event_loop
 from horsies.core.utils.task_loop_registry import register_task_loop, unregister_task_loop
-from horsies.core.worker.child_protocol import LoopHoldsNoTask, LoopHoldsTasks, LoopTasks
+from horsies.core.worker.child_protocol import (
+    LoopHoldsNoTask,
+    LoopHoldsTasks,
+    TaskLoopReport,
+    TaskLoopUnavailable,
+)
 
 logger = get_logger('worker')
 
@@ -39,8 +46,29 @@ R = TypeVar('R')
 
 
 @dataclass(frozen=True, slots=True)
+class LoopCreateFailed:
+    """The OS refused a resource that a new event loop needs.
+
+    ``asyncio.new_event_loop()`` opens a selector and a socket pair, so a
+    process at its file descriptor limit (EMFILE) gets this. No task code ran.
+    Retry condition: the worker replaces the child, and a new child tries
+    again; it succeeds once the process has descriptors free.
+    """
+
+    error_name: str
+    detail: str
+
+    def describe(self) -> str:
+        """Subject and cause, for a log line and a report."""
+        return (
+            'the event loop for async tasks could not be created: '
+            f'{self.error_name}: {self.detail}'
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class LoopNotCreated:
-    """No async task has run in this process."""
+    """No async task has started in this process."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +76,13 @@ class LoopOpen:
     """The loop exists. It runs only while ``TaskLoop.run`` runs."""
 
     loop: asyncio.AbstractEventLoop
+
+
+@dataclass(frozen=True, slots=True)
+class LoopCreateRefused:
+    """The OS refused the loop. No task runs on this child after this state."""
+
+    failed: LoopCreateFailed
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,7 +110,7 @@ class LoopClosed:
     executor: ExecutorAfterClose
 
 
-type LoopState = LoopNotCreated | LoopOpen | LoopClosed
+type LoopState = LoopNotCreated | LoopOpen | LoopCreateRefused | LoopClosed
 
 
 class _CloseStep(Enum):
@@ -83,27 +118,6 @@ class _CloseStep(Enum):
 
     ENDED = 'ended'
     PAST_DEADLINE = 'past_deadline'
-
-
-@dataclass(frozen=True, slots=True)
-class LoopCreateFailed:
-    """The OS refused a resource that a new event loop needs.
-
-    ``asyncio.new_event_loop()`` opens a selector and a socket pair, so a
-    process at its file descriptor limit (EMFILE) gets this. The coroutine
-    did not run. Retry condition: a later run tries again, and it succeeds
-    once the process has descriptors free.
-    """
-
-    error_name: str
-    detail: str
-
-    def describe(self) -> str:
-        """Subject and cause, for a log line and a failure reason."""
-        return (
-            'the event loop for async tasks could not be created: '
-            f'{self.error_name}: {self.detail}'
-        )
 
 
 class TaskLoop:
@@ -116,22 +130,46 @@ class TaskLoop:
     def state(self) -> LoopState:
         return self._state
 
-    def run(self, coroutine: Coroutine[Any, Any, R]) -> Result[R, LoopCreateFailed]:
-        """Run one coroutine to its end on the loop, then stop the loop.
+    def open(self) -> Result[None, LoopCreateFailed]:
+        """Create the loop when this child has none. Call it before ``run``.
 
-        Creates the loop on the first call. The coroutine runs in a copy of
-        the caller's context. The value of the coroutine comes back in
-        ``Ok``, and its exception propagates unchanged. Tasks that the
+        The child calls it before the RUNNING update of an async task, so a
+        refusal leaves the task claimed, with no task code run.
+
+        ``Err(LoopCreateFailed)``: the OS refused the loop. The state becomes
+        ``LoopCreateRefused``, and each later call returns the same error,
+        because the worker replaces this child. A call after ``close`` is a
+        defect in the caller: ``AssertionError``.
+        """
+        match self._state:
+            case LoopNotCreated():
+                match _new_loop():
+                    case Ok(loop):
+                        self._state = LoopOpen(loop)
+                        return Ok(None)
+                    case Err(failed):
+                        self._state = LoopCreateRefused(failed)
+                        return Err(failed)
+            case LoopOpen():
+                return Ok(None)
+            case LoopCreateRefused(failed=failed):
+                return Err(failed)
+            case LoopClosed():
+                raise AssertionError('TaskLoop.open was called after close')
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def run(self, coroutine: Coroutine[Any, Any, R]) -> R:
+        """Run one coroutine to its end on the open loop, then stop the loop.
+
+        The coroutine runs in a copy of the caller's context. Its value comes
+        back, and its exception propagates unchanged. Tasks that the
         coroutine starts and does not await stay on the stopped loop:
-        ``tasks_left`` counts them.
+        ``report`` counts them.
 
-        ``Err(LoopCreateFailed)``: the loop could not be created. The
-        coroutine is closed unrun, the state stays ``LoopNotCreated``, and
-        the next call tries again.
-
-        A call while an event loop runs on this thread, or after ``close``,
-        is a defect in the caller. It closes the coroutine unrun and raises
-        ``AssertionError``.
+        A call while an event loop runs on this thread, or while the loop is
+        not open, is a defect in the caller. It closes the coroutine unrun
+        and raises ``AssertionError``.
         """
         if in_running_event_loop():
             coroutine.close()
@@ -139,27 +177,25 @@ class TaskLoop:
                 'TaskLoop.run was called while an event loop runs on this thread',
             )
         match self._state:
-            case LoopNotCreated():
-                match _new_loop():
-                    case Ok(loop):
-                        self._state = LoopOpen(loop)
-                    case Err(failed):
-                        coroutine.close()
-                        return Err(failed)
             case LoopOpen(loop=loop):
-                pass
+                return loop.run_until_complete(coroutine)
+            case LoopNotCreated():
+                coroutine.close()
+                raise AssertionError('TaskLoop.run was called before open')
+            case LoopCreateRefused():
+                coroutine.close()
+                raise AssertionError('TaskLoop.run was called after open failed')
             case LoopClosed():
                 coroutine.close()
                 raise AssertionError('TaskLoop.run was called after close')
             case _ as unreachable:
                 assert_never(unreachable)
-        return Ok(loop.run_until_complete(coroutine))
 
-    def tasks_left(self) -> LoopTasks:
-        """Count the tasks on the loop that are not done. Reads only.
+    def report(self) -> TaskLoopReport:
+        """What the loop holds after a task, or that it could not be created.
 
-        Call it between runs, on the thread that runs them. A call after
-        ``close`` is a defect in the caller: ``AssertionError``.
+        Reads only. Call it between runs, on the thread that runs them. A call
+        after ``close`` is a defect in the caller: ``AssertionError``.
         """
         match self._state:
             case LoopNotCreated():
@@ -169,8 +205,10 @@ class TaskLoop:
                 if count == 0:
                     return LoopHoldsNoTask()
                 return LoopHoldsTasks(count=count)
+            case LoopCreateRefused(failed=failed):
+                return TaskLoopUnavailable(detail=failed.describe())
             case LoopClosed():
-                raise AssertionError('TaskLoop.tasks_left was called after close')
+                raise AssertionError('TaskLoop.report was called after close')
             case _ as unreachable:
                 assert_never(unreachable)
 
@@ -184,7 +222,7 @@ class TaskLoop:
         returns the answer of the first.
         """
         match self._state:
-            case LoopNotCreated():
+            case LoopNotCreated() | LoopCreateRefused():
                 self._state = LoopClosed(ExecutorShutDown())
             case LoopOpen(loop=loop):
                 # A step that raises still leaves the loop closed. Until the

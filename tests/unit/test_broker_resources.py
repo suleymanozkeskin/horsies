@@ -458,7 +458,8 @@ class TestLoopLimit:
         task_loop = TaskLoop()
         extra = asyncio.new_event_loop()
         try:
-            task_loop_result = task_loop.run(broker.select_resources()).unwrap()
+            task_loop.open().unwrap()
+            task_loop_result = task_loop.run(broker.select_resources())
             extra_result = _select_on(broker, extra)
 
             assert is_ok(task_loop_result)

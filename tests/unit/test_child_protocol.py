@@ -34,6 +34,8 @@ from horsies.core.worker.child_protocol import (
     RssUnreadable,
     RunFrame,
     StopFrame,
+    TaskLoopReport,
+    TaskLoopUnavailable,
     decode_child_frame,
     decode_parent_frame,
     decode_preload_frame,
@@ -171,18 +173,22 @@ class TestChildFrames:
     @pytest.mark.parametrize('ok', [True, False])
     @pytest.mark.parametrize('result_json', ['', '{"é":1}'])
     @pytest.mark.parametrize(
-        'loop_tasks',
-        [LoopHoldsNoTask(), LoopHoldsTasks(count=3)],
-        ids=['no-loop-task', 'loop-tasks'],
+        'task_loop',
+        [
+            LoopHoldsNoTask(),
+            LoopHoldsTasks(count=3),
+            TaskLoopUnavailable(detail='OSError: [Errno 24] Too many open files'),
+        ],
+        ids=['no-loop-task', 'loop-tasks', 'loop-unavailable'],
     )
     def test_result_frame_round_trip(
         self,
         ok: bool,
         failed_reason: str | None,
         result_json: str,
-        loop_tasks: LoopHoldsNoTask | LoopHoldsTasks,
+        task_loop: TaskLoopReport,
     ) -> None:
-        frame = ResultFrame('task-1', ok, result_json, failed_reason, RssMb(3.0), loop_tasks)
+        frame = ResultFrame('task-1', ok, result_json, failed_reason, RssMb(3.0), task_loop)
         meta, body = _split(encode_child_frame(frame))
         assert decode_child_frame(meta, body) == Ok(frame)
 
@@ -327,12 +333,14 @@ class TestMalformedMetadata:
             ('failed_reason', 1),
             ('rss_mb', 'x'),
             ('rss_mb', True),
-            ('loop_tasks', None),
-            ('loop_tasks', {'kind': 'unknown'}),
-            ('loop_tasks', {'kind': 'held'}),
-            ('loop_tasks', {'kind': 'held', 'count': 0}),
-            ('loop_tasks', {'kind': 'held', 'count': True}),
-            ('loop_tasks', {'kind': 'held', 'count': '2'}),
+            ('task_loop', None),
+            ('task_loop', {'kind': 'unknown'}),
+            ('task_loop', {'kind': 'held'}),
+            ('task_loop', {'kind': 'held', 'count': 0}),
+            ('task_loop', {'kind': 'held', 'count': True}),
+            ('task_loop', {'kind': 'held', 'count': '2'}),
+            ('task_loop', {'kind': 'unavailable'}),
+            ('task_loop', {'kind': 'unavailable', 'detail': 24}),
         ],
     )
     def test_every_result_field_is_checked(self, key: str, value: object) -> None:

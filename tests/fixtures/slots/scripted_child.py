@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
+import errno
 import gc
 import os
 import signal
@@ -20,7 +21,11 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Coroutine
+from typing import Any
 
+from horsies.core.lifecycle.classify import AbortReason
+from horsies.core.types.result import Err, Ok
 from horsies.core.worker.child_main import WireResult, _send_child_frame, serve
 from horsies.core.worker.child_protocol import (
     FRAME_HEADER,
@@ -140,6 +145,27 @@ async def _thread_outlives_wait(seconds: float) -> str:
     raise AssertionError('the executor thread ended within the wait')
 
 
+def _run_async(task_loop: TaskLoop, coroutine: Coroutine[Any, Any, str]) -> str:
+    """Open the loop, as the child runner does before RUNNING, then run."""
+    task_loop.open().unwrap()
+    return task_loop.run(coroutine)
+
+
+def _no_descriptors() -> asyncio.AbstractEventLoop:
+    raise OSError(errno.EMFILE, 'Too many open files')
+
+
+def _open_without_descriptors(task_loop: TaskLoop) -> WireResult:
+    """Open the loop while the process has no descriptor left, as the child
+    runner does before the RUNNING update of an async task."""
+    asyncio.new_event_loop = _no_descriptors
+    match task_loop.open():
+        case Ok():
+            raise AssertionError('the loop opened with no descriptor left')
+        case Err():
+            return False, '', AbortReason.TASK_LOOP_UNAVAILABLE.value
+
+
 def _no_running_loop() -> str:
     """Report a running loop, then run one with ``asyncio.run``."""
     return f'{in_running_event_loop()}|{asyncio.run(asyncio.sleep(0, "ran"))}'
@@ -156,15 +182,17 @@ def _run(frame: RunFrame, init: InitFrame, task_loop: TaskLoop) -> WireResult:
         case 'echo':
             return True, argument, None
         case 'loop_count':
-            return True, task_loop.run(_loops_seen()).unwrap(), None
+            return True, _run_async(task_loop, _loops_seen()), None
         case 'no_running_loop':
             return True, _no_running_loop(), None
         case 'async_pid':
-            return True, task_loop.run(_async_pid()).unwrap(), None
+            return True, _run_async(task_loop, _async_pid()), None
+        case 'loop_unavailable':
+            return _open_without_descriptors(task_loop)
         case 'leave_pending':
-            return True, task_loop.run(_leave_pending(argument)).unwrap(), None
+            return True, _run_async(task_loop, _leave_pending(argument)), None
         case 'thread_outlives_wait':
-            return True, task_loop.run(_thread_outlives_wait(float(argument))).unwrap(), None
+            return True, _run_async(task_loop, _thread_outlives_wait(float(argument))), None
         case 'pid':
             return _pid_result()
         case 'freeze_count':

@@ -119,12 +119,13 @@ Key features:
 
 In child process:
 
-1. Resolve task from registry by name
-2. Deserialize arguments
-3. Start heartbeat thread
-4. Call task function. An `async def` task runs on the event loop of the child. The child keeps one loop until it stops, and the loop runs only while an async task runs. The result reports the asyncio tasks that are still on the loop after the task, and the worker retires a child that reports any
-5. Serialize result
-6. Stop heartbeat thread
+1. For an `async def` task, create the event loop of the child, before the RUNNING update. When the operating system refuses it, the task returns to the queue unrun, with no attempt used, and the worker retires the child. When that child had run no task, the worker also stops with a non-zero exit
+2. Resolve task from registry by name
+3. Deserialize arguments
+4. Start heartbeat thread
+5. Call task function. An `async def` task runs on the event loop of the child. The child keeps one loop until it stops, and the loop runs only while an async task runs. The result reports the asyncio tasks that are still on the loop after the task, and the worker retires a child that reports any
+6. Serialize result
+7. Stop heartbeat thread
 
 ### 5. Result Handling
 

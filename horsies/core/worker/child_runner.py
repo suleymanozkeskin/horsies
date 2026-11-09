@@ -63,7 +63,7 @@ from horsies.core.worker.stored_timeout import (
     TimeoutRefusal,
     TimeoutValueInvalid,
 )
-from horsies.core.worker.task_loop import LoopCreateFailed, TaskLoop
+from horsies.core.worker.task_loop import TaskLoop
 from horsies.core.lifecycle.commands import (
     AbandonOwnedNode,
     CancelOwnedNode,
@@ -78,8 +78,10 @@ from horsies.core.lifecycle.outcomes import (
     SourceStateConflict,
     TaskAbsent,
 )
+from horsies.core.lifecycle.classify import AbortReason
 from horsies.core.lifecycle.persistence import apply_sync
-from horsies.core.types.result import Err, Ok, Result, is_err
+from horsies.core.task_decorator import TaskBodyKind
+from horsies.core.types.result import Err, Ok, is_err
 
 
 @dataclass(frozen=True, slots=True)
@@ -1070,23 +1072,75 @@ def _mark_task_finalizing(
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _BodyKindUnknown:
+    """The registry lookup before the RUNNING update failed.
+
+    The task then takes the resolution path after the RUNNING update, which
+    reports the failure as before.
+    """
+
+
+def _registered_body_kind(task_name: str) -> TaskBodyKind | _BodyKindUnknown:
+    """How the registered task was defined. Reads the in-memory registry only."""
+    try:
+        task = get_current_app().tasks[task_name]
+    except Exception:
+        return _BodyKindUnknown()
+    match getattr(task, 'task_body_kind', None):
+        case TaskBodyKind() as kind:
+            return kind
+        case other:
+            raise AssertionError(
+                f'registered task {task_name!r} has no TaskBodyKind: {other!r}',
+            )
+
+
+def _open_task_loop_before_running(
+    task_name: str,
+    task_id: str,
+    task_loop: TaskLoop,
+) -> Tuple[bool, str, Optional[str]] | None:
+    """Create the task loop of an ``async def`` task while the task is claimed.
+
+    Returns None when the task may go on to its RUNNING update. Returns the
+    abort tuple with ``AbortReason.TASK_LOOP_UNAVAILABLE`` when the OS refused
+    the loop: no task code ran, the row is still CLAIMED, and the worker
+    returns the task to the queue. A ``def`` task does not touch the loop.
+    """
+    match _registered_body_kind(task_name):
+        case TaskBodyKind.ASYNC_DEF:
+            match task_loop.open():
+                case Ok():
+                    return None
+                case Err(failed):
+                    logger.error(
+                        'Task %s (%s) did not start: %s',
+                        task_name,
+                        task_id,
+                        failed.describe(),
+                    )
+                    return (False, '', AbortReason.TASK_LOOP_UNAVAILABLE.value)
+        case TaskBodyKind.DEF | _BodyKindUnknown():
+            return None
+
+
 def _task_call_result(
     task_name: str,
     called: TaskResult[Any, TaskError] | Coroutine[Any, Any, TaskResult[Any, TaskError]],
     task_loop: TaskLoop,
-) -> Result[TaskResult[Any, TaskError], LoopCreateFailed]:
+) -> TaskResult[Any, TaskError]:
     """The result of one call of a task wrapper.
 
     The call of a ``def`` task returns its result. The call of an
-    ``async def`` task returns a coroutine, which runs on ``task_loop``.
-    ``Err(LoopCreateFailed)``: the loop for the coroutine could not be
-    created, and the coroutine did not run. Exceptions from that run
+    ``async def`` task returns a coroutine, which runs on ``task_loop``; the
+    loop was opened before the RUNNING update. Exceptions from that run
     propagate. The wrapper returns one of the two, so another value is a
     defect in the library: ``AssertionError``.
     """
     match called:
         case TaskResult():
-            return Ok(called)
+            return called
         case Coroutine():
             return task_loop.run(called)
         case _:
@@ -1131,6 +1185,12 @@ def _run_task_entry(
     docstring) and is recovered by the parent as a future failure.
     """
     logger.info(f'Starting task execution: {task_name} ({task_id})')
+
+    # An async task needs the task loop. Create it while the row is still
+    # CLAIMED, so a refusal returns the task to the queue unrun.
+    loop_abort = _open_task_loop_before_running(task_name, task_id, task_loop)
+    if loop_abort is not None:
+        return loop_abort
 
     # Mark as RUNNING in DB at the actual start of execution (child process).
     # CRITICAL: Include ownership check to prevent double-execution when claim
@@ -1485,13 +1545,7 @@ def _run_task_entry(
                 ),
             )
 
-        match _task_call_result(task_name, task(*args, **kwargs), task_loop):
-            case Ok(out):
-                pass
-            case Err(loop_failed):
-                # The task did not run, and it produced no result: the worker
-                # reports why, as for other failures of its own.
-                return (False, '', loop_failed.describe())
+        out = _task_call_result(task_name, task(*args, **kwargs), task_loop)
         logger.info(f'Task execution completed: {task_name} ({task_id})')
 
         # Strict-serde phase 5: result encoding routes through

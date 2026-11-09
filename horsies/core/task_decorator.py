@@ -5,6 +5,7 @@ import dataclasses
 import inspect
 import time
 from dataclasses import dataclass
+from enum import Enum
 from typing import (
     Callable,
     Final,
@@ -1276,6 +1277,19 @@ def _returned_type_name(returned: object) -> str:
     if returned_type.__name__ == TaskResult.__name__:
         return f'{returned_type.__module__}.{returned_type.__qualname__}'
     return returned_type.__name__
+
+
+class TaskBodyKind(Enum):
+    """How a task function was defined, which decides how a worker runs it.
+
+    The decorator sets it as ``task_body_kind`` on the task function. A worker
+    child reads it from the registry before the RUNNING update, so it can
+    create the event loop for an ``async def`` task while the task is still
+    claimed.
+    """
+
+    DEF = 'def'
+    ASYNC_DEF = 'async_def'
 
 
 @dataclass(frozen=True, slots=True)
@@ -2763,6 +2777,8 @@ def create_task_wrapper(
             sync_call = _sync_task_call(sync_body, checked_result, exception_result)
 
             class SyncTaskFunctionImpl(TaskFunctionImpl):
+                task_body_kind = TaskBodyKind.DEF
+
                 def __call__(
                     self,
                     *args: P.args,
@@ -2775,6 +2791,8 @@ def create_task_wrapper(
             async_call = _async_task_call(async_body, checked_result, exception_result)
 
             class AsyncTaskFunctionImpl(TaskFunctionImpl):
+                task_body_kind = TaskBodyKind.ASYNC_DEF
+
                 def __call__(
                     self,
                     *args: P.args,

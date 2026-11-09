@@ -15,13 +15,18 @@ import pytest
 
 from horsies.core.types.result import Err, Ok
 from horsies.core.utils.loop_runner import in_running_event_loop
-from horsies.core.worker.child_protocol import LoopHoldsNoTask, LoopHoldsTasks
+from horsies.core.worker.child_protocol import (
+    LoopHoldsNoTask,
+    LoopHoldsTasks,
+    TaskLoopUnavailable,
+)
 from horsies.core.worker import task_loop as task_loop_module
 from horsies.core.worker.task_loop import (
     ExecutorShutDown,
     ExecutorThreadsLeft,
     LoopClosed,
     LoopCreateFailed,
+    LoopCreateRefused,
     LoopNotCreated,
     LoopOpen,
     TaskLoop,
@@ -37,10 +42,27 @@ THREAD_RELEASE_TIMEOUT_S = 5.0
 
 
 @pytest.fixture
-def task_loop() -> Iterator[TaskLoop]:
+def new_task_loop() -> Iterator[TaskLoop]:
+    """A task loop that ``open`` has not created yet."""
     loop = TaskLoop()
     yield loop
     loop.close()
+
+
+@pytest.fixture
+def task_loop() -> Iterator[TaskLoop]:
+    """An open task loop, as an async task finds it."""
+    loop = TaskLoop()
+    loop.open().unwrap()
+    yield loop
+    loop.close()
+
+
+EMFILE_DETAIL = '[Errno 24] Too many open files'
+
+
+def _no_descriptors() -> asyncio.AbstractEventLoop:
+    raise OSError(errno.EMFILE, 'Too many open files')
 
 
 def _open_loop(task_loop: TaskLoop) -> asyncio.AbstractEventLoop:
@@ -63,27 +85,83 @@ async def _raise(error: BaseException) -> None:
     raise error
 
 
+class TestOpen:
+    def test_open_creates_the_loop(self, new_task_loop: TaskLoop) -> None:
+        assert new_task_loop.state == LoopNotCreated()
+        assert new_task_loop.open() == Ok(None)
+        assert isinstance(new_task_loop.state, LoopOpen)
+
+    def test_a_second_open_keeps_the_loop(self, new_task_loop: TaskLoop) -> None:
+        new_task_loop.open().unwrap()
+        loop = _open_loop(new_task_loop)
+        assert new_task_loop.open() == Ok(None)
+        assert _open_loop(new_task_loop) is loop
+
+    def test_a_refused_loop_stays_refused(
+        self,
+        new_task_loop: TaskLoop,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The worker replaces this child, so the child does not try again."""
+        calls: list[str] = []
+
+        def no_descriptors() -> asyncio.AbstractEventLoop:
+            calls.append('new_event_loop')
+            return _no_descriptors()
+
+        monkeypatch.setattr(asyncio, 'new_event_loop', no_descriptors)
+        failed = LoopCreateFailed(error_name='OSError', detail=EMFILE_DETAIL)
+
+        assert new_task_loop.open() == Err(failed)
+        assert new_task_loop.state == LoopCreateRefused(failed)
+        assert new_task_loop.open() == Err(failed)
+        assert calls == ['new_event_loop']
+        assert new_task_loop.report() == TaskLoopUnavailable(detail=failed.describe())
+
+    def test_a_refused_loop_runs_nothing_and_closes(
+        self,
+        new_task_loop: TaskLoop,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(asyncio, 'new_event_loop', _no_descriptors)
+        assert isinstance(new_task_loop.open(), Err)
+        coroutine = _value(1)
+
+        with pytest.raises(AssertionError, match='after open failed'):
+            new_task_loop.run(coroutine)
+
+        assert inspect.getcoroutinestate(coroutine) == inspect.CORO_CLOSED
+        assert new_task_loop.close() == ExecutorShutDown()
+
+    def test_open_after_close_is_a_defect(self, new_task_loop: TaskLoop) -> None:
+        new_task_loop.close()
+        with pytest.raises(AssertionError, match='after close'):
+            new_task_loop.open()
+
+
 class TestRun:
-    def test_the_first_run_creates_the_loop(self, task_loop: TaskLoop) -> None:
-        assert task_loop.state == LoopNotCreated()
-        task_loop.run(_value(1)).unwrap()
-        assert isinstance(task_loop.state, LoopOpen)
+    def test_a_run_before_open_is_a_defect(self, new_task_loop: TaskLoop) -> None:
+        coroutine = _value(1)
+        with pytest.raises(AssertionError, match='before open'):
+            new_task_loop.run(coroutine)
+        assert inspect.getcoroutinestate(coroutine) == inspect.CORO_CLOSED
+        assert new_task_loop.state == LoopNotCreated()
 
     def test_a_run_returns_the_value_of_the_coroutine(
         self, task_loop: TaskLoop
     ) -> None:
-        assert task_loop.run(_value(7)).unwrap() == 7
+        assert task_loop.run(_value(7)) == 7
 
     def test_two_runs_use_one_loop(self, task_loop: TaskLoop) -> None:
-        first = task_loop.run(_running_loop()).unwrap()
-        second = task_loop.run(_running_loop()).unwrap()
+        first = task_loop.run(_running_loop())
+        second = task_loop.run(_running_loop())
         assert first is second is _open_loop(task_loop)
 
     def test_after_a_run_no_loop_runs_and_the_loop_stays_open(
         self,
         task_loop: TaskLoop,
     ) -> None:
-        task_loop.run(_value(1)).unwrap()
+        task_loop.run(_value(1))
         loop = _open_loop(task_loop)
         assert not in_running_event_loop()
         assert not loop.is_running()
@@ -93,24 +171,24 @@ class TestRun:
         self,
         task_loop: TaskLoop,
     ) -> None:
-        first = task_loop.run(_running_loop()).unwrap()
+        first = task_loop.run(_running_loop())
         assert asyncio.run(_value(3)) == 3
-        assert task_loop.run(_running_loop()).unwrap() is first
+        assert task_loop.run(_running_loop()) is first
 
     def test_an_exception_of_the_coroutine_propagates(
         self, task_loop: TaskLoop
     ) -> None:
         with pytest.raises(ValueError, match='boom'):
-            task_loop.run(_raise(ValueError('boom'))).unwrap()
-        assert task_loop.run(_value(2)).unwrap() == 2
+            task_loop.run(_raise(ValueError('boom')))
+        assert task_loop.run(_value(2)) == 2
 
     def test_keyboard_interrupt_propagates_and_the_loop_stays_usable(
         self,
         task_loop: TaskLoop,
     ) -> None:
         with pytest.raises(KeyboardInterrupt):
-            task_loop.run(_raise(KeyboardInterrupt())).unwrap()
-        assert task_loop.run(_value(2)).unwrap() == 2
+            task_loop.run(_raise(KeyboardInterrupt()))
+        assert task_loop.run(_value(2)) == 2
 
     def test_the_coroutine_runs_in_a_copy_of_the_callers_context(
         self,
@@ -123,7 +201,7 @@ class TestRun:
 
         token = _REQUEST.set('caller')
         try:
-            assert task_loop.run(read_then_set()).unwrap() == 'caller'
+            assert task_loop.run(read_then_set()) == 'caller'
             assert _REQUEST.get() == 'caller'
         finally:
             _REQUEST.reset(token)
@@ -147,75 +225,42 @@ class TestRun:
             await asyncio.sleep(0)
             await asyncio.sleep(0)
 
-        task_loop.run(start()).unwrap()
+        task_loop.run(start())
         release.set()
         assert finished == []
-        task_loop.run(two_steps()).unwrap()
+        task_loop.run(two_steps())
         assert finished == ['done']
 
     def test_a_run_inside_a_running_loop_is_a_defect(self, task_loop: TaskLoop) -> None:
         coroutine = _value(1)
+        loop = _open_loop(task_loop)
 
         async def nested() -> None:
-            task_loop.run(coroutine).unwrap()
+            task_loop.run(coroutine)
 
         with pytest.raises(AssertionError, match='while an event loop runs'):
             asyncio.run(nested())
         assert coroutine.cr_frame is None
-        assert task_loop.state == LoopNotCreated()
+        assert not loop.is_running()
 
     def test_a_run_after_close_is_a_defect(self, task_loop: TaskLoop) -> None:
         task_loop.close()
         coroutine = _value(1)
         with pytest.raises(AssertionError, match='after close'):
-            task_loop.run(coroutine).unwrap()
+            task_loop.run(coroutine)
         assert coroutine.cr_frame is None
 
 
-class TestLoopCreateFailure:
-    def test_the_coroutine_is_closed_and_a_later_run_tries_again(
-        self,
-        task_loop: TaskLoop,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        real_new_event_loop = asyncio.new_event_loop
-        calls: list[str] = []
-
-        def fails_once() -> asyncio.AbstractEventLoop:
-            calls.append('new_event_loop')
-            if len(calls) == 1:
-                raise OSError(errno.EMFILE, 'Too many open files')
-            return real_new_event_loop()
-
-        monkeypatch.setattr(asyncio, 'new_event_loop', fails_once)
-        coroutine = _value(1)
-
-        match task_loop.run(coroutine):
-            case Err(failed):
-                assert failed == LoopCreateFailed(
-                    error_name='OSError',
-                    detail='[Errno 24] Too many open files',
-                )
-            case Ok(value):
-                raise AssertionError(value)
-        assert inspect.getcoroutinestate(coroutine) == inspect.CORO_CLOSED
-        assert task_loop.state == LoopNotCreated()
-
-        assert task_loop.run(_value(2)).unwrap() == 2
-        assert calls == ['new_event_loop', 'new_event_loop']
-        assert isinstance(task_loop.state, LoopOpen)
-
-
-class TestTasksLeft:
-    def test_no_loop_holds_no_task(self, task_loop: TaskLoop) -> None:
-        assert task_loop.tasks_left() == LoopHoldsNoTask()
+class TestReport:
+    def test_no_loop_holds_no_task(self, new_task_loop: TaskLoop) -> None:
+        assert new_task_loop.report() == LoopHoldsNoTask()
 
     def test_a_run_that_awaits_its_work_leaves_no_task(self, task_loop: TaskLoop) -> None:
         async def awaits_its_task() -> None:
             await asyncio.get_running_loop().create_task(asyncio.sleep(0))
 
-        task_loop.run(awaits_its_task()).unwrap()
-        assert task_loop.tasks_left() == LoopHoldsNoTask()
+        task_loop.run(awaits_its_task())
+        assert task_loop.report() == LoopHoldsNoTask()
 
     def test_tasks_that_a_run_did_not_await_are_counted(self, task_loop: TaskLoop) -> None:
         kept: list[asyncio.Task[bool]] = []
@@ -225,29 +270,29 @@ class TestTasksLeft:
             kept.extend(loop.create_task(asyncio.Event().wait()) for _ in range(2))
             await asyncio.sleep(0)
 
-        task_loop.run(leaves_two()).unwrap()
-        assert task_loop.tasks_left() == LoopHoldsTasks(count=2)
+        task_loop.run(leaves_two())
+        assert task_loop.report() == LoopHoldsTasks(count=2)
 
     def test_a_call_after_close_is_a_defect(self, task_loop: TaskLoop) -> None:
         task_loop.close()
         with pytest.raises(AssertionError, match='after close'):
-            task_loop.tasks_left()
+            task_loop.report()
 
 
 class TestClose:
-    def test_close_before_any_run_creates_no_loop(self, task_loop: TaskLoop) -> None:
-        assert task_loop.close() == ExecutorShutDown()
-        assert task_loop.state == LoopClosed(ExecutorShutDown())
+    def test_close_before_open_creates_no_loop(self, new_task_loop: TaskLoop) -> None:
+        assert new_task_loop.close() == ExecutorShutDown()
+        assert new_task_loop.state == LoopClosed(ExecutorShutDown())
 
     def test_close_closes_the_loop(self, task_loop: TaskLoop) -> None:
-        task_loop.run(_value(1)).unwrap()
+        task_loop.run(_value(1))
         loop = _open_loop(task_loop)
         assert task_loop.close() == ExecutorShutDown()
         assert loop.is_closed()
         assert task_loop.state == LoopClosed(ExecutorShutDown())
 
     def test_a_second_close_does_nothing(self, task_loop: TaskLoop) -> None:
-        task_loop.run(_value(1)).unwrap()
+        task_loop.run(_value(1))
         assert task_loop.close() == ExecutorShutDown()
         assert task_loop.close() == ExecutorShutDown()
         assert task_loop.state == LoopClosed(ExecutorShutDown())
@@ -266,7 +311,7 @@ class TestClose:
             kept.append(asyncio.get_running_loop().create_task(wait_forever()))
             await asyncio.sleep(0)
 
-        task_loop.run(start()).unwrap()
+        task_loop.run(start())
         task_loop.close()
         assert cleaned == ['cancelled']
         assert kept[0].cancelled()
@@ -288,7 +333,7 @@ class TestClose:
             kept.append(asyncio.get_running_loop().create_task(fail_on_cancel()))
             await asyncio.sleep(0)
 
-        task_loop.run(start()).unwrap()
+        task_loop.run(start())
         with caplog.at_level(logging.WARNING, logger='horsies.worker'):
             task_loop.close()
         assert 'ValueError: cleanup failed' in caplog.text
@@ -310,7 +355,7 @@ class TestClose:
         async def take_one() -> int:
             return await anext(generator)
 
-        assert task_loop.run(take_one()).unwrap() == 1
+        assert task_loop.run(take_one()) == 1
         task_loop.close()
         assert finalized == ['closed']
 
@@ -336,7 +381,7 @@ class TestClose:
             kept.append(asyncio.get_running_loop().create_task(ignore_cancel()))
             await asyncio.sleep(0)
 
-        task_loop.run(start()).unwrap()
+        task_loop.run(start())
         loop = _open_loop(task_loop)
         started = time.monotonic()
         with caplog.at_level(logging.WARNING, logger='horsies.worker'):
@@ -364,7 +409,7 @@ class TestClose:
             kept.append(asyncio.get_running_loop().create_task(work))
             await asyncio.sleep(0)
 
-        task_loop.run(start()).unwrap()
+        task_loop.run(start())
         loop = _open_loop(task_loop)
         started = time.monotonic()
         try:

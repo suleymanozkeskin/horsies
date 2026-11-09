@@ -39,6 +39,7 @@ from horsies.core.worker.child_protocol import (
     ReadyFrame,
     ResultFrame,
     RssUnreadable,
+    TaskLoopUnavailable,
     RunFrame,
     encode_child_frame,
 )
@@ -71,6 +72,7 @@ from horsies.core.worker.slots import (
     SlotPoolConfig,
     SpawnFailed,
     TaskFinished,
+    TaskLoopUnavailableInNewChild,
     child_exit_from_returncode,
     describe_exit,
     interpreter_flags,
@@ -507,8 +509,8 @@ class TestTaskRuns:
         marker = tmp_path / 'cancelled'
         pool = await pool_factory()
         match await _outcome(pool.submit(_frame('leave_pending', str(marker)))):
-            case TaskFinished(result_json=first_pid, loop_tasks=loop_tasks):
-                assert loop_tasks == LoopHoldsTasks(count=1)
+            case TaskFinished(result_json=first_pid, task_loop=task_loop):
+                assert task_loop == LoopHoldsTasks(count=1)
             case other:
                 raise AssertionError(other)
         await _until(marker.exists)
@@ -521,11 +523,52 @@ class TestTaskRuns:
     ) -> None:
         pool = await pool_factory()
         match await _outcome(pool.submit(_frame('async_pid'))):
-            case TaskFinished(result_json=first_pid, loop_tasks=loop_tasks):
-                assert loop_tasks == LoopHoldsNoTask()
+            case TaskFinished(result_json=first_pid, task_loop=task_loop):
+                assert task_loop == LoopHoldsNoTask()
             case other:
                 raise AssertionError(other)
         assert await _result_json(pool.submit(_frame('pid'))) == first_pid
+
+    async def test_a_child_that_ran_a_task_and_has_no_task_loop_is_replaced(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        """The task returns to the queue through its finalizer, the child is
+        retired, and the pool goes on with a new child."""
+        pool = await pool_factory()
+        first_pid = await _result_json(pool.submit(_frame('pid')))
+        match await _outcome(pool.submit(_frame('loop_unavailable'))):
+            case TaskFinished(ok=ok, failed_reason=reason, task_loop=report):
+                assert (ok, reason) == (False, 'TASK_LOOP_UNAVAILABLE')
+                assert isinstance(report, TaskLoopUnavailable)
+                assert '[Errno 24]' in report.detail
+            case other:
+                raise AssertionError(other)
+        assert await _result_json(pool.submit(_frame('pid'))) != first_pid
+        assert pool._failure is None
+
+    async def test_a_new_child_that_has_no_task_loop_fails_the_pool(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        """A child that ran no task has nothing to leak: the environment is the
+        cause, so the pool fails and the worker stops."""
+        pool = await pool_factory()
+        child = pool._slots[0].child
+        assert child is not None
+        frame = _frame('loop_unavailable')
+        match await _outcome(pool.submit(frame)):
+            case TaskFinished(task_loop=TaskLoopUnavailable()):
+                pass
+            case other:
+                raise AssertionError(other)
+        failure = await asyncio.wait_for(pool.wait_failed(), OUTCOME_TIMEOUT_S)
+        match failure:
+            case TaskLoopUnavailableInNewChild(pid=pid, task_id=task_id, detail=detail):
+                assert (pid, task_id) == (child.pid, frame.task_id)
+                assert '[Errno 24]' in detail
+            case other:
+                raise AssertionError(other)
 
     async def test_a_run_frame_beside_loop_tasks_ends_the_child(
         self,
@@ -545,7 +588,35 @@ class TestTaskRuns:
             assert isinstance(await child.await_frame(OUTCOME_TIMEOUT_S), ReadyFrame)
             child.send(_frame('leave_pending', str(tmp_path / 'cancelled')))
             match await child.await_frame(OUTCOME_TIMEOUT_S):
-                case ResultFrame(loop_tasks=LoopHoldsTasks(count=1)):
+                case ResultFrame(task_loop=LoopHoldsTasks(count=1)):
+                    pass
+                case other:
+                    raise AssertionError(other)
+            child.send(_frame('echo', 'x'))
+            match await child.await_frame(OUTCOME_TIMEOUT_S):
+                case ChildLost(child_exit=child_exit):
+                    assert child_exit == ExitedWith(BAD_PARENT_FRAME_EXIT_CODE)
+                case other:
+                    raise AssertionError(other)
+        finally:
+            await child.dispose_lost()
+
+    async def test_a_run_frame_after_a_refused_task_loop_ends_the_child(self) -> None:
+        """The child refuses to run a task after its loop was refused.
+
+        The pool never sends that frame, so this drives one child directly.
+        """
+        config = _config()
+        match await Child.start(config, config.init):
+            case Ok(child):
+                pass
+            case Err(failed):
+                raise AssertionError(failed)
+        try:
+            assert isinstance(await child.await_frame(OUTCOME_TIMEOUT_S), ReadyFrame)
+            child.send(_frame('loop_unavailable'))
+            match await child.await_frame(OUTCOME_TIMEOUT_S):
+                case ResultFrame(task_loop=TaskLoopUnavailable()):
                     pass
                 case other:
                     raise AssertionError(other)

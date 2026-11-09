@@ -36,6 +36,7 @@ from horsies.core.history.reads.detail import (
 )
 from horsies.core.lifecycle.classify import (
     AbortedBeforeResult,
+    AbortReason,
     ApplyTerminalization,
     ErrorProduced,
     FinalizeContext,
@@ -43,6 +44,7 @@ from horsies.core.lifecycle.classify import (
     ReplayWorkflowPhase2,
     ResultProduced,
     ResultUndecodable,
+    ReturnClaimedTaskToQueue,
     ScheduleAutomaticRetry,
     WorkerLevelFailure,
     classify,
@@ -312,32 +314,11 @@ class FinalizeMixin:
                 result_json_str = outcome.result_json
                 failed_reason = outcome.failed_reason
             case NotDispatched(cause=cause):
-                requeued = await self._requeue_claimed_task(
+                return await self._return_claimed_task_to_queue(
                     task_id,
                     cause.value,
-                    claimed_at=claimed_at,
+                    claimed_at,
                 )
-                if requeued is _RequeueOutcome.DB_ERROR:
-                    logger.critical(
-                        'Requeue DB_ERROR: task %s may remain orphaned CLAIMED '
-                        '(worker=%s, reason=%s)',
-                        task_id,
-                        self.worker_instance_id,
-                        cause.value,
-                    )
-                    return Err(
-                        self._make_finalize_error(
-                            task_id=task_id,
-                            stage=_FINALIZE_STAGE_FUTURE,
-                            message=f'Requeue failed: {cause.value}',
-                            retryable=True,
-                            data={
-                                'requeue_outcome': requeued.value,
-                                'claimed_at': claimed_at,
-                            },
-                        )
-                    )
-                return Ok(None)
             case ChildLost():
                 reason = f'Worker child lost: {outcome.describe()}'
                 requeue_outcome = await self._recover_worker_future_failure(
@@ -415,6 +396,54 @@ class FinalizeMixin:
         self._clear_finalize_retry_attempts(task_id, _FINALIZE_STAGE_PHASE1)
         self._clear_finalize_retry_attempts(task_id, _FINALIZE_STAGE_PHASE2)
         return Ok(None)
+
+    async def _return_claimed_task_to_queue(
+        self,
+        task_id: str,
+        reason: str,
+        claimed_at: Optional[datetime],
+    ) -> Result[None, _FinalizeError]:
+        """Release this worker's claim on a task that ran no task code.
+
+        Uses the fenced unclaim of ``_requeue_claimed_task``: the row goes to
+        PENDING only while it is still CLAIMED by this worker at
+        ``claimed_at``. It writes no attempt row. ``REQUEUED`` and
+        ``NOT_OWNER_OR_NOT_CLAIMED`` end here: in the second case another
+        party owns the row's next state. ``DB_ERROR`` leaves the row CLAIMED
+        and returns a retryable future-stage error, whose retry releases it.
+        """
+        requeued = await self._requeue_claimed_task(
+            task_id,
+            reason,
+            claimed_at=claimed_at,
+        )
+        match requeued:
+            case (
+                _RequeueOutcome.REQUEUED
+                | _RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED
+                | _RequeueOutcome.TERMINAL_REPLAYED
+            ):
+                return Ok(None)
+            case _RequeueOutcome.DB_ERROR:
+                logger.critical(
+                    'Requeue DB_ERROR: task %s may remain orphaned CLAIMED '
+                    '(worker=%s, reason=%s)',
+                    task_id,
+                    self.worker_instance_id,
+                    reason,
+                )
+                return Err(
+                    self._make_finalize_error(
+                        task_id=task_id,
+                        stage=_FINALIZE_STAGE_FUTURE,
+                        message=f'Requeue failed: {reason}',
+                        retryable=True,
+                        data={
+                            'requeue_outcome': requeued.value,
+                            'claimed_at': claimed_at,
+                        },
+                    )
+                )
 
     def _make_finalize_error(
         self,
@@ -725,6 +754,12 @@ class FinalizeMixin:
                 locked_command = command
             case ScheduleAutomaticRetry(error=error):
                 retry_error = error
+            case ReturnClaimedTaskToQueue():
+                return await self._return_claimed_task_to_queue(
+                    task_id,
+                    AbortReason.TASK_LOOP_UNAVAILABLE.value,
+                    claimed_at,
+                )
             case ApplyTerminalization(command=unsupported):
                 raise RuntimeError(
                     f'{type(unsupported).__name__} is not part of this '

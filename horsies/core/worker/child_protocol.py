@@ -115,20 +115,28 @@ class LoopHoldsTasks:
     count: int
 
 
-LoopTasks: TypeAlias = LoopHoldsNoTask | LoopHoldsTasks
+@dataclass(frozen=True, slots=True)
+class TaskLoopUnavailable:
+    """The child could not create its task loop, so the async task did not
+    run. The parent retires such a child. ``detail`` names the OS error."""
+
+    detail: str
+
+
+TaskLoopReport: TypeAlias = LoopHoldsNoTask | LoopHoldsTasks | TaskLoopUnavailable
 
 
 @dataclass(frozen=True, slots=True)
 class ResultFrame:
     """Child to parent: the wire tuple of ``_run_task_entry``, plus the RSS
-    and the tasks left on the task loop."""
+    and the state of the task loop after the task."""
 
     task_id: str
     ok: bool
     result_json: str
     failed_reason: str | None
     rss: RssReading
-    loop_tasks: LoopTasks
+    task_loop: TaskLoopReport
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,12 +233,14 @@ def _rss_field(rss: RssReading) -> float | None:
             assert_never(unreachable)
 
 
-def _loop_tasks_field(loop_tasks: LoopTasks) -> dict[str, object]:
-    match loop_tasks:
+def _task_loop_field(task_loop: TaskLoopReport) -> dict[str, object]:
+    match task_loop:
         case LoopHoldsNoTask():
             return {'kind': 'none'}
         case LoopHoldsTasks(count=count):
             return {'kind': 'held', 'count': count}
+        case TaskLoopUnavailable(detail=detail):
+            return {'kind': 'unavailable', 'detail': detail}
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -305,7 +315,7 @@ def encode_child_frame(frame: ChildFrame) -> EncodedFrame:
                     'ok': frame.ok,
                     'failed_reason': frame.failed_reason,
                     'rss_mb': _rss_field(frame.rss),
-                    'loop_tasks': _loop_tasks_field(frame.loop_tasks),
+                    'task_loop': _task_loop_field(frame.task_loop),
                 },
                 frame.result_json.encode('utf-8'),
             )
@@ -431,21 +441,23 @@ def _rss(meta: Mapping[str, Any]) -> RssReading:
     return RssMb(float(value))
 
 
-def _loop_tasks(meta: Mapping[str, Any]) -> LoopTasks:
-    value = meta.get('loop_tasks')
+def _task_loop(meta: Mapping[str, Any]) -> TaskLoopReport:
+    value = meta.get('task_loop')
     if not isinstance(value, dict):
-        raise _BadField('loop_tasks')
-    loop_tasks = cast('Mapping[str, Any]', value)
-    match loop_tasks.get('kind'):
+        raise _BadField('task_loop')
+    task_loop = cast('Mapping[str, Any]', value)
+    match task_loop.get('kind'):
         case 'none':
             return LoopHoldsNoTask()
         case 'held':
-            count = loop_tasks.get('count')
+            count = task_loop.get('count')
             if not isinstance(count, int) or isinstance(count, bool) or count < 1:
-                raise _BadField('loop_tasks.count')
+                raise _BadField('task_loop.count')
             return LoopHoldsTasks(count=count)
+        case 'unavailable':
+            return TaskLoopUnavailable(detail=_text(task_loop, 'detail'))
         case _:
-            raise _BadField('loop_tasks.kind')
+            raise _BadField('task_loop.kind')
 
 
 def _load_meta(meta_bytes: bytes) -> Mapping[str, Any]:
@@ -538,7 +550,7 @@ def decode_child_frame(
                         result_json=body.decode('utf-8'),
                         failed_reason=_optional_text(meta, 'failed_reason'),
                         rss=_rss(meta),
-                        loop_tasks=_loop_tasks(meta),
+                        task_loop=_task_loop(meta),
                     ),
                 )
             case _:

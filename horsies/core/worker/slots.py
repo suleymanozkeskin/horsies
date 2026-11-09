@@ -52,13 +52,14 @@ from horsies.core.worker.child_protocol import (
     InitFrame,
     LoopHoldsNoTask,
     LoopHoldsTasks,
-    LoopTasks,
     MalformedFrame,
     ParentFrame,
     ReadyFrame,
     ResultFrame,
     RssMb,
     RssReading,
+    TaskLoopReport,
+    TaskLoopUnavailable,
     RssUnreadable,
     RunFrame,
     StopFrame,
@@ -145,14 +146,14 @@ class LossCause(str, Enum):
 class TaskFinished:
     """The child reported a result. ``ok`` has the ``_run_task_entry`` meaning.
 
-    ``rss`` and ``loop_tasks`` decide whether the child takes another task.
+    ``rss`` and ``task_loop`` decide whether the child takes another task.
     """
 
     ok: bool
     result_json: str
     failed_reason: str | None
     rss: RssReading
-    loop_tasks: LoopTasks
+    task_loop: TaskLoopReport
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,8 +245,27 @@ class BootAttemptsExhausted:
     last_detail: str
 
 
+@dataclass(frozen=True, slots=True)
+class TaskLoopUnavailableInNewChild:
+    """A child that had run no task could not create its task loop.
+
+    Nothing in the child could leak descriptors yet, so the cause is the
+    process environment, for example its file descriptor limit. A new child
+    would fail the same way, so the worker stops and its supervisor restarts
+    it. The task returns to the queue unrun.
+    """
+
+    pid: int
+    task_id: str
+    detail: str
+
+
 PoolFailure: TypeAlias = (
-    SpawnFailed | ChildHookFailed | BootAttemptsExhausted | PreloadRefused
+    SpawnFailed
+    | ChildHookFailed
+    | BootAttemptsExhausted
+    | PreloadRefused
+    | TaskLoopUnavailableInNewChild
 )
 
 
@@ -1030,7 +1050,11 @@ class SlotPool:
             case PoolStopped():
                 return
             case (
-                SpawnFailed() | ChildHookFailed() | BootAttemptsExhausted() | PreloadRefused()
+                SpawnFailed()
+                | ChildHookFailed()
+                | BootAttemptsExhausted()
+                | PreloadRefused()
+                | TaskLoopUnavailableInNewChild()
             ):
                 self._record_failure(error)
             case _ as unreachable:
@@ -1165,7 +1189,7 @@ class SlotPool:
             outcome = await self._run_task(slot, child, handle)
             tasks_done += 1
             match outcome:
-                case TaskFinished(loop_tasks=LoopHoldsTasks(count=count)):
+                case TaskFinished(task_loop=LoopHoldsTasks(count=count)):
                     # No later task may share the loop with this work. The
                     # stop frame makes the child cancel it.
                     slot.defects = 0
@@ -1176,7 +1200,16 @@ class SlotPool:
                         count,
                     )
                     break
-                case TaskFinished(rss=rss, loop_tasks=LoopHoldsNoTask()):
+                case TaskFinished(task_loop=TaskLoopUnavailable(detail=detail)):
+                    slot.defects = 0
+                    self._retire_after_task_loop_refused(
+                        child,
+                        handle.frame.task_id,
+                        detail,
+                        fresh_child=tasks_done == 1,
+                    )
+                    break
+                case TaskFinished(rss=rss, task_loop=LoopHoldsNoTask()):
                     slot.defects = 0
                     reason = self._recycle_reason(tasks_done, rss)
                     if reason is not None:
@@ -1243,7 +1276,7 @@ class SlotPool:
                     answer.result_json,
                     answer.failed_reason,
                     answer.rss,
-                    answer.loop_tasks,
+                    answer.task_loop,
                 )
             case ResultFrame() | ReadyFrame():
                 outcome = await child.discard_violating_child()
@@ -1256,6 +1289,47 @@ class SlotPool:
         slot.handle = None
         handle.finish(outcome)
         return outcome
+
+    def _retire_after_task_loop_refused(
+        self,
+        child: Child,
+        task_id: str,
+        detail: str,
+        *,
+        fresh_child: bool,
+    ) -> None:
+        """Log the refused task loop, and stop the pool when the child was new.
+
+        The caller retires the child either way, and its task returns to the
+        queue through its finalizer. A child that had run tasks may have
+        leaked descriptors, so a new child replaces it and the worker goes
+        on. A new child has nothing to leak: the pool fails, and the worker
+        stops with a non-zero exit.
+        """
+        match fresh_child:
+            case True:
+                logger.critical(
+                    'A new child pid=%s could not create the task loop for task %s '
+                    '(%s); the task returns to the queue, and the worker stops',
+                    child.pid,
+                    task_id,
+                    detail,
+                )
+                self._record_failure(
+                    TaskLoopUnavailableInNewChild(
+                        pid=child.pid,
+                        task_id=task_id,
+                        detail=detail,
+                    ),
+                )
+            case False:
+                logger.warning(
+                    'Retiring child pid=%s: it could not create the task loop for '
+                    'task %s (%s); the task returns to the queue',
+                    child.pid,
+                    task_id,
+                    detail,
+                )
 
     def _recycle_reason(self, tasks_done: int, rss: RssReading) -> RecycleReason | None:
         limit = self._config.max_tasks_per_child
