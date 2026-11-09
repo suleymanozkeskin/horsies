@@ -75,15 +75,13 @@ async def test_a_child_that_ran_a_task_is_replaced_and_the_task_runs_later(
     refusals: Path,
 ) -> None:
     with run_worker(INSTANCE, ready_check=_ready_check()) as worker:
-        sync_result = await asyncio.to_thread(
-            unwrap_send(refusal.sync_pid.send()).get,
-            timeout_ms=RESULT_TIMEOUT_MS,
-        )
+        sync_handle = unwrap_send(await refusal.sync_pid.send_async())
+        sync_result = await sync_handle.get_async(timeout_ms=RESULT_TIMEOUT_MS)
         assert_ok(sync_result)
         refusals.write_text('1', encoding='ascii')
 
-        handle = unwrap_send(refusal.async_pid.send())
-        result = await asyncio.to_thread(handle.get, timeout_ms=RESULT_TIMEOUT_MS)
+        handle = unwrap_send(await refusal.async_pid.send_async())
+        result = await handle.get_async(timeout_ms=RESULT_TIMEOUT_MS)
 
         assert_ok(result)
         assert result.unwrap() != sync_result.unwrap()
@@ -125,14 +123,12 @@ async def test_a_second_refusal_with_no_open_between_stops_the_worker(
     returned to the queue."""
     with run_worker(INSTANCE, ready_check=_ready_check()) as worker:
         refusals.write_text('2', encoding='ascii')
-        sync_result = await asyncio.to_thread(
-            unwrap_send(refusal.sync_pid.send()).get,
-            timeout_ms=RESULT_TIMEOUT_MS,
-        )
+        sync_handle = unwrap_send(await refusal.sync_pid.send_async())
+        sync_result = await sync_handle.get_async(timeout_ms=RESULT_TIMEOUT_MS)
         assert_ok(sync_result)
         assert refusals.read_text(encoding='ascii') == '2'
 
-        handle = unwrap_send(refusal.async_pid.send())
+        handle = unwrap_send(await refusal.async_pid.send_async())
         returncode = await asyncio.to_thread(worker.wait, WORKER_STOP_TIMEOUT_S)
 
         assert returncode != 0
