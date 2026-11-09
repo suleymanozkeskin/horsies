@@ -10,7 +10,10 @@ the finalizing mark. Each test gets its own task loop, as a child gets one.
 from __future__ import annotations
 
 import asyncio
+import errno
+import gc
 import json
+import warnings
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack
 from typing import Any
@@ -35,7 +38,7 @@ from horsies.core.models.workflow import NodeKey, WorkflowContext
 from horsies.core.types.result import Err
 from horsies.core.utils.loop_runner import in_running_event_loop
 from horsies.core.worker import child_runner
-from horsies.core.worker.task_loop import LoopOpen, TaskLoop
+from horsies.core.worker.task_loop import LoopNotCreated, LoopOpen, TaskLoop
 
 pytestmark = [pytest.mark.unit]
 
@@ -256,6 +259,42 @@ def _failing_tasks(app: Horsies) -> dict[str, tuple[str, str]]:
         'raises_mapped': (sync_raises_mapped.task_name, async_raises_mapped.task_name),
         'wrong_return': (sync_wrong_return.task_name, async_wrong_return.task_name),
     }
+
+
+class TestTheLoopCannotBeCreated:
+    def test_it_is_a_worker_failure_and_the_task_does_not_run(
+        self,
+        task_loop: TaskLoop,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No task code ran, so the result is the worker's own failure
+        (``ok`` is False), not a ``TASK_EXCEPTION`` of the task."""
+        app = _app()
+        ran: list[bool] = []
+
+        @app.task('async_never_runs')
+        async def never_runs() -> TaskResult[int, TaskError]:
+            ran.append(True)
+            return TaskResult(ok=1)
+
+        def no_descriptors() -> asyncio.AbstractEventLoop:
+            raise OSError(errno.EMFILE, 'Too many open files')
+
+        monkeypatch.setattr(asyncio, 'new_event_loop', no_descriptors)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', RuntimeWarning)
+            wire = _runner(app, task_loop)(never_runs.task_name)
+            gc.collect()
+
+        assert wire == (
+            False,
+            '',
+            'the event loop for async tasks could not be created: '
+            'OSError: [Errno 24] Too many open files',
+        )
+        assert ran == []
+        assert isinstance(task_loop.state, LoopNotCreated)
 
 
 class TestTheSameOutcomesAsASyncTask:

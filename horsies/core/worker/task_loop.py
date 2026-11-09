@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Any, Final, TypeVar, assert_never
 
 from horsies.core.logging import get_logger
+from horsies.core.types.result import Err, Ok, Result
 from horsies.core.utils.loop_runner import in_running_event_loop
 
 logger = get_logger('worker')
@@ -50,6 +51,27 @@ class LoopClosed:
 type LoopState = LoopNotCreated | LoopOpen | LoopClosed
 
 
+@dataclass(frozen=True, slots=True)
+class LoopCreateFailed:
+    """The OS refused a resource that a new event loop needs.
+
+    ``asyncio.new_event_loop()`` opens a selector and a socket pair, so a
+    process at its file descriptor limit (EMFILE) gets this. The coroutine
+    did not run. Retry condition: a later run tries again, and it succeeds
+    once the process has descriptors free.
+    """
+
+    error_name: str
+    detail: str
+
+    def describe(self) -> str:
+        """Subject and cause, for a log line and a failure reason."""
+        return (
+            'the event loop for async tasks could not be created: '
+            f'{self.error_name}: {self.detail}'
+        )
+
+
 class TaskLoop:
     """One event loop for every async task of one child process."""
 
@@ -60,13 +82,18 @@ class TaskLoop:
     def state(self) -> LoopState:
         return self._state
 
-    def run(self, coroutine: Coroutine[Any, Any, R]) -> R:
+    def run(self, coroutine: Coroutine[Any, Any, R]) -> Result[R, LoopCreateFailed]:
         """Run one coroutine to its end on the loop, then stop the loop.
 
         Creates the loop on the first call. The coroutine runs in a copy of
-        the caller's context. The value or the exception of the coroutine
-        comes back unchanged. Tasks that the coroutine starts and does not
-        await stay on the stopped loop, and they continue in a later call.
+        the caller's context. The value of the coroutine comes back in
+        ``Ok``, and its exception propagates unchanged. Tasks that the
+        coroutine starts and does not await stay on the stopped loop, and
+        they continue in a later call.
+
+        ``Err(LoopCreateFailed)``: the loop could not be created. The
+        coroutine is closed unrun, the state stays ``LoopNotCreated``, and
+        the next call tries again.
 
         A call while an event loop runs on this thread, or after ``close``,
         is a defect in the caller. It closes the coroutine unrun and raises
@@ -79,8 +106,12 @@ class TaskLoop:
             )
         match self._state:
             case LoopNotCreated():
-                loop = asyncio.new_event_loop()
-                self._state = LoopOpen(loop)
+                match _new_loop():
+                    case Ok(loop):
+                        self._state = LoopOpen(loop)
+                    case Err(failed):
+                        coroutine.close()
+                        return Err(failed)
             case LoopOpen(loop=loop):
                 pass
             case LoopClosed():
@@ -88,7 +119,7 @@ class TaskLoop:
                 raise AssertionError('TaskLoop.run was called after close')
             case _ as unreachable:
                 assert_never(unreachable)
-        return loop.run_until_complete(coroutine)
+        return Ok(loop.run_until_complete(coroutine))
 
     def close(self) -> None:
         """Cancel the tasks left on the loop, then close the loop.
@@ -107,6 +138,16 @@ class TaskLoop:
                 pass
             case _ as unreachable:
                 assert_never(unreachable)
+
+
+def _new_loop() -> Result[asyncio.AbstractEventLoop, LoopCreateFailed]:
+    """Create an event loop. An ``OSError`` of the OS becomes ``LoopCreateFailed``."""
+    try:
+        return Ok(asyncio.new_event_loop())
+    except OSError as exc:
+        failed = LoopCreateFailed(error_name=type(exc).__name__, detail=str(exc))
+        logger.error('%s', failed.describe())
+        return Err(failed)
 
 
 def _seconds_left(deadline: float) -> float:

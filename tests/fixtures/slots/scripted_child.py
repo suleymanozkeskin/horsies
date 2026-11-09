@@ -136,11 +136,11 @@ def _run(frame: RunFrame, init: InitFrame, task_loop: TaskLoop) -> WireResult:
         case 'echo':
             return True, argument, None
         case 'loop_count':
-            return True, task_loop.run(_loops_seen()), None
+            return True, task_loop.run(_loops_seen()).unwrap(), None
         case 'no_running_loop':
             return True, _no_running_loop(), None
         case 'leave_pending':
-            return True, task_loop.run(_leave_pending(argument)), None
+            return True, task_loop.run(_leave_pending(argument)).unwrap(), None
         case 'pid':
             return _pid_result()
         case 'freeze_count':

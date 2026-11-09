@@ -63,7 +63,7 @@ from horsies.core.worker.stored_timeout import (
     TimeoutRefusal,
     TimeoutValueInvalid,
 )
-from horsies.core.worker.task_loop import TaskLoop
+from horsies.core.worker.task_loop import LoopCreateFailed, TaskLoop
 from horsies.core.lifecycle.commands import (
     AbandonOwnedNode,
     CancelOwnedNode,
@@ -79,7 +79,7 @@ from horsies.core.lifecycle.outcomes import (
     TaskAbsent,
 )
 from horsies.core.lifecycle.persistence import apply_sync
-from horsies.core.types.result import Err, Ok, is_err
+from horsies.core.types.result import Err, Ok, Result, is_err
 
 
 @dataclass(frozen=True, slots=True)
@@ -1074,17 +1074,19 @@ def _task_call_result(
     task_name: str,
     called: TaskResult[Any, TaskError] | Coroutine[Any, Any, TaskResult[Any, TaskError]],
     task_loop: TaskLoop,
-) -> TaskResult[Any, TaskError]:
+) -> Result[TaskResult[Any, TaskError], LoopCreateFailed]:
     """The result of one call of a task wrapper.
 
     The call of a ``def`` task returns its result. The call of an
     ``async def`` task returns a coroutine, which runs on ``task_loop``.
-    Exceptions from that run propagate. The wrapper returns one of the two,
-    so another value is a defect in the library: ``AssertionError``.
+    ``Err(LoopCreateFailed)``: the loop for the coroutine could not be
+    created, and the coroutine did not run. Exceptions from that run
+    propagate. The wrapper returns one of the two, so another value is a
+    defect in the library: ``AssertionError``.
     """
     match called:
         case TaskResult():
-            return called
+            return Ok(called)
         case Coroutine():
             return task_loop.run(called)
         case _:
@@ -1483,7 +1485,13 @@ def _run_task_entry(
                 ),
             )
 
-        out = _task_call_result(task_name, task(*args, **kwargs), task_loop)
+        match _task_call_result(task_name, task(*args, **kwargs), task_loop):
+            case Ok(out):
+                pass
+            case Err(loop_failed):
+                # The task did not run, and it produced no result: the worker
+                # reports why, as for other failures of its own.
+                return (False, '', loop_failed.describe())
         logger.info(f'Task execution completed: {task_name} ({task_id})')
 
         # Strict-serde phase 5: result encoding routes through
