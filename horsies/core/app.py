@@ -1134,9 +1134,15 @@ class Horsies:
         terminal rows). Cross-process monitoring / debugging callers
         use this to inspect payloads without importing user task
         modules.
+
+        In a process that runs task bodies it returns
+        ``Err(BrokerWaitInsideTask)`` at once, before the argument checks,
+        and does no I/O.
         """
         from horsies.core.types.result import Err, Ok, is_err
 
+        if process_role() is ProcessRole.RUNS_TASK_BODIES:
+            return self._wait_inside_task_err('get_raw_result_async', task_id)
         broker = self.get_broker()
         record_result = await broker.get_raw_result_record_async(
             task_id, timeout_ms,
@@ -1155,11 +1161,14 @@ class Horsies:
     ) -> 'BrokerResult[dict[str, Any] | None]':
         """Synchronous version of ``get_raw_result_async``.
 
-        On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
-        and does no I/O.
+        In a process that runs task bodies it returns
+        ``Err(BrokerWaitInsideTask)`` first. On a thread that runs an event
+        loop it returns ``Err(ASYNC_CONTEXT)``. Neither does I/O.
         """
         from horsies.core.types.result import Err, Ok, is_err
 
+        if process_role() is ProcessRole.RUNS_TASK_BODIES:
+            return self._wait_inside_task_err('get_raw_result', task_id)
         if in_running_event_loop():
             return self._async_context_err('get_raw_result')
         broker = self.get_broker()
@@ -1496,6 +1505,15 @@ class Horsies:
                 message=wait_inside_task_message(f'app.{label}() for task {task_id}'),
                 data={'task_id': task_id},
             ),
+        ))
+
+    def _wait_inside_task_err(self, label: str, task_id: str) -> 'BrokerResult[Any]':
+        """Refuse a raw result wait in a process that runs task bodies. Nothing ran."""
+        from horsies.core.brokers.result_types import BrokerWaitInsideTask
+        from horsies.core.types.result import Err
+
+        return Err(BrokerWaitInsideTask(
+            message=wait_inside_task_message(f'app.{label}() for task {task_id}'),
         ))
 
     def _async_context_err(self, label: str) -> 'BrokerResult[Any]':

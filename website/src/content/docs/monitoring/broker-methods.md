@@ -35,6 +35,8 @@ Uses PostgreSQL `LISTEN/NOTIFY` with a 1-second polling fallback.
 | `task_id` | `str` | — | Task ID to retrieve result for |
 | `timeout_ms` | `int \| None` | `None` | Max wait time in milliseconds, from 0 to `MAX_TASK_TIMEOUT_MS` (4,294,967,295); `None` waits indefinitely. Any other value returns `Err(BrokerInvalidInput)` (`INVALID_INPUT`) before any read |
 
+In a worker child, where task bodies run, it returns `Err(BrokerWaitInsideTask)` (`WAIT_INSIDE_TASK`) at once, as its first check, and waits for nothing. See [Waiting for a Result Inside a Task](/horsies/concepts/result-handling/#waiting-for-a-result-inside-a-task).
+
 **Returns:** `BrokerResult[RawResultRecord | None]` — `Ok(None)` if no task row exists for that ID; `Err(BrokerOperationError)` on infrastructure failure. The `RawResultRecord` carries `task_id`, `task_name`, `status`, and `raw_result` (the decoded JSON envelope, or `None` for cancelled tasks, non-terminal timeout snapshots, or terminal rows with no payload).
 
 Sync variant: `get_raw_result_record(task_id, timeout_ms)` (runs the async version in a background loop).

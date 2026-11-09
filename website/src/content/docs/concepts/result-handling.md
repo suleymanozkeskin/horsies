@@ -140,7 +140,9 @@ A task does not wait for the result of another task. In a worker child, these ca
 - `app.get_result()` and `app.get_result_async()`
 - `WorkflowHandle.get()` and `WorkflowHandle.get_async()`
 
-The rule covers the whole child process: the task body, the threads that it starts, and the `on_child_process_start` hooks. A handle that already holds its result returns that result, because it does not wait.
+The raw result reads wait too. In a worker child they return `Err(BrokerWaitInsideTask)` (`BrokerErrorCode.WAIT_INSIDE_TASK`) at once: `app.get_raw_result()`, `app.get_raw_result_async()`, `broker.get_raw_result_record()` and `broker.get_raw_result_record_async()`.
+
+The refusal is the first check of each call. It comes before the check of `timeout_ms` and before the `ASYNC_CONTEXT` check. The rule covers the whole child process: the task body, the threads that it starts, and the `on_child_process_start` hooks.
 
 These calls do not wait, so they work in a task:
 

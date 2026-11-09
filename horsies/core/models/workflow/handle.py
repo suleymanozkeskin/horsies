@@ -943,7 +943,7 @@ class WorkflowHandle(Generic[OutT]):
             Otherwise: TaskResult containing dict of terminal task results. A
             SKIPPED terminal task has an entry with that same code.
             In a process that runs task bodies: ``RetrievalCode.WAIT_INSIDE_TASK``
-            at once, with no wait.
+            at once, as the first check, with no wait.
         """
         if process_role() is ProcessRole.RUNS_TASK_BODIES:
             return cast(
@@ -957,11 +957,17 @@ class WorkflowHandle(Generic[OutT]):
     ) -> TaskResult[OutT, TaskError]:
         """Async version of get().
 
-        A timeout_ms that is not None or an int from 0 to MAX_TASK_TIMEOUT_MS
-        returns ``RetrievalCode.INVALID_INPUT`` before any read. In a process
-        that runs task bodies, a valid call returns
-        ``RetrievalCode.WAIT_INSIDE_TASK`` at once, with no wait.
+        In a process that runs task bodies it returns
+        ``RetrievalCode.WAIT_INSIDE_TASK`` at once, as its first check, with
+        no wait. Elsewhere, a timeout_ms that is not None or an int from 0 to
+        MAX_TASK_TIMEOUT_MS returns ``RetrievalCode.INVALID_INPUT`` before any
+        read.
         """
+        if process_role() is ProcessRole.RUNS_TASK_BODIES:
+            return cast(
+                'TaskResult[OutT, TaskError]',
+                _wait_inside_task_result(self.workflow_id, 'get_async'),
+            )
 
         start = time.monotonic()
         # timeout_ms=0 means "0ms budget": return the result if already
@@ -984,12 +990,6 @@ class WorkflowHandle(Generic[OutT]):
                 )
             case Ok(ok_value=timeout_sec):
                 pass
-
-        if process_role() is ProcessRole.RUNS_TASK_BODIES:
-            return cast(
-                'TaskResult[OutT, TaskError]',
-                _wait_inside_task_result(self.workflow_id, 'get_async'),
-            )
 
         match await self.broker.select_resources():
             case Err(loop_limit):
