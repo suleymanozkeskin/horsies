@@ -12,6 +12,27 @@ there is no migration contract between pre-1.0 versions.
 
 ## Unreleased
 
+### Added
+
+- **A task can be an `async def` function.** `@app.task()` registers it and
+  returns an `AsyncTaskFunction`. A worker child runs it as it runs a `def`
+  task: one task at a time, with the same RUNNING update, heartbeats,
+  `timeout_ms` kill, recovery and retry policy. Each child keeps one event
+  loop until the child stops, and an async task runs on that loop, so an
+  async client that a module keeps stays open across the tasks of one
+  child. The loop runs only while an async task runs. A `def` task still
+  runs with no running event loop and can call `asyncio.run()`. In an async
+  task, send with `send_async()`: the sync `send()` returns
+  `Err(TaskSendAsyncContext)` there.
+  - A direct call of an async task returns a coroutine of the `TaskResult`.
+    The return check and the exception mappers are the same as for a `def`
+    task.
+  - `TaskNode.fn`, `.node()` and the task registry take both kinds.
+  - An `async def` function that uses `yield` is refused with `HRS-101`, as
+    a generator function is.
+  - When the worker stops a child, the child cancels the coroutines left on
+    its loop and closes the loop. This takes at most 5 seconds.
+
 ### Changed
 
 - **Breaking: a result wait inside a task is refused at once.** In a worker
@@ -60,6 +81,13 @@ there is no migration contract between pre-1.0 versions.
   an `exception_mapper` or `default_unhandled_error_code` with that value
   fails `horsies check` with `HRS-212`. A process of an earlier version cannot
   decode an error stored with this code.
+
+### Removed
+
+- **`ErrorCode.TASK_ASYNC_FUNCTION_NOT_SUPPORTED` (`HRS-106`).** No code
+  raises it, because `@app.task()` accepts an `async def` function. The
+  number is retired and is not used again. Remove the member from each
+  `match` on `ErrorCode`.
 
 ### Fixed
 

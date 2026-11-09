@@ -34,13 +34,22 @@ def my_task(*, ...) -> TaskResult[T, TaskError]: ...
 
 - Return type annotation present and is `TaskResult[T, TaskError]` — missing raises `HRS-100`, wrong type raises `HRS-101`.
 - Pre-decorated functions (with `__wrapped__` chain) are rejected — `HRS-104`.
-- The function must be sync (`def`). An `async def` function, also one that yields, is rejected — `HRS-106`. Async task support is not available.
+- The function is `def` or `async def`. A function that yields is rejected — `HRS-101`, for a generator and for an async generator.
 - `exception_mapper` keys must be `BaseException` subclasses, values must be `UPPER_SNAKE_CASE`.
 - `queue_name` cross-validated against `AppConfig.queue_mode`.
 - `good_until` rejected — raises `HRS-102` with help text directing to `.with_options()` or `.node()`.
 - Top-level `auto_retry_for` kwarg is rejected — it belongs inside `RetryPolicy`.
 
-Returns `TaskFunction[P, T]`.
+Returns `TaskFunction[P, T]` for a `def` function, and `AsyncTaskFunction[P, T]` for an `async def` function.
+
+### Async tasks
+
+- A worker child runs one task at a time, `def` or `async def`. The same RUNNING update, heartbeats, `timeout_ms` kill, recovery and retry policy apply.
+- Each child keeps one event loop until the child stops. An `async def` task runs on it, so an async client that a module keeps stays open across the tasks of one child.
+- The loop runs only while an `async def` task runs. A `def` task runs with no running event loop and can call `asyncio.run()`.
+- A coroutine that a task starts and does not await continues only while a later async task runs in the same child. When the worker stops the child, the child cancels it.
+- In an `async def` task, send with `.send_async()` / `.schedule_async()`. The sync `.send()` / `.schedule()` return `Err(TaskSendAsyncContext)` there and enqueue nothing.
+- An exception, a wrong return, and the exception mappers give the same `TaskResult` as in a `def` task.
 
 ## `TaskResult[T, TaskError]`
 
@@ -205,6 +214,8 @@ task_name: str
 
 # Direct call — bypasses queue, use only in tests
 def __call__(*args: P.args, **kwargs: P.kwargs) -> TaskResult[T, TaskError]
+# AsyncTaskFunction[P, T] (an async def task) differs only here:
+# def __call__(*args: P.args, **kwargs: P.kwargs) -> Coroutine[Any, Any, TaskResult[T, TaskError]]
 
 # Enqueue for background execution
 def send(*args: P.args, **kwargs: P.kwargs) -> TaskSendResult[TaskHandle[T]]
@@ -245,7 +256,7 @@ def node(
 ) -> NodeFactory[P, T]
 ```
 
-**Direct call vs `.send()`**: Direct call runs synchronously in current process, no queue, no retry, no persistence. `.send()` enqueues for background execution by a worker.
+**Direct call vs `.send()`**: Direct call runs in current process, no queue, no retry, no persistence. For an `async def` task, the direct call returns a coroutine: `await` it. `.send()` enqueues for background execution by a worker.
 
 ## `TaskSendOptions[P, T]` — Per-Send Options
 

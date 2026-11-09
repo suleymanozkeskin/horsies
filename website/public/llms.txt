@@ -154,13 +154,15 @@ making web request, local will cost you less tokens and greater knowledgebase at
 
 ### @app.task Decorator
 - Decorated function must return TaskResult[T, TaskError]
-- Decorated function must be sync (def); an async def function raises HRS-106 at definition time
+- Decorated function is def or async def; a function that yields raises HRS-101 at definition time
+- An async def task runs on the one event loop that its worker child keeps; the loop runs only while an async task runs; in an async task, send with send_async (the sync send returns TaskSendAsyncContext in a running loop)
 - Options: task_name, queue_name, retry_policy, exception_mapper, default_unhandled_error_code, timeout_ms
 - good_until is NOT accepted at definition time (raises HRS-102) — use .with_options(good_until=...) at send time
-- Returns TaskFunction[P, T]
+- Returns TaskFunction[P, T] for a def function, AsyncTaskFunction[P, T] for an async def function
 
 ### TaskFunction[P, T] (decorated task)
 - .__call__(*args, **kwargs) -> TaskResult[T, TaskError] (sync direct call)
+- AsyncTaskFunction[P, T] has the same members; its .__call__ returns a coroutine of TaskResult[T, TaskError]
 - .send(*args, **kwargs) -> TaskSendResult[TaskHandle[T]] (enqueue for background execution)
 - .send_async(*args, **kwargs) -> TaskSendResult[TaskHandle[T]] (async enqueue)
 - .schedule(delay_seconds, *args, **kwargs) -> TaskSendResult[TaskHandle[T]] (delayed enqueue)
@@ -253,7 +255,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 
 ### TaskNode[T]
 - T = ok type of the task's TaskResult
-- fn: TaskFunction, kwargs: dict (args field exists but is init=False — not a construction param)
+- fn: TaskFunction | AsyncTaskFunction, kwargs: dict (args field exists but is init=False — not a construction param)
 - waits_for: list of TaskNode | SubWorkflowNode (wait for terminal)
 - args_from: dict[str, TaskNode | SubWorkflowNode] (inject TaskResult as kwarg)
 - workflow_ctx_from: list[TaskNode | SubWorkflowNode] | None (subset for WorkflowContext)

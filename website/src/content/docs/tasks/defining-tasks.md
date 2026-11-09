@@ -7,9 +7,7 @@ tags: [tasks, decorator, definition]
 
 # Defining Tasks
 
-Define tasks by decorating functions with `@app.task()` and returning `TaskResult[T, TaskError]`. For argument serialization rules, see `sending-tasks`.
-
-**Note:** Task functions must be synchronous (`def`). `@app.task()` refuses an `async def` task function with `HRS-106`. Use `.send_async()` / `.get_async()` on the producer side for non-blocking I/O.
+Define tasks by decorating functions with `@app.task()` and returning `TaskResult[T, TaskError]`. A task function is a `def` or an `async def` function. For argument serialization rules, see `sending-tasks`.
 
 ## How To
 
@@ -29,6 +27,42 @@ def process_order(*, order_id: int) -> TaskResult[str, TaskError]:
     # Do work
     return TaskResult(ok=f"Order {order_id} processed")
 ```
+
+### Async Tasks
+
+Define a task with `async def` to await I/O in its body. `@app.task()` checks it as it checks a `def` task, and it returns a `TaskResult` in the same way.
+
+```python
+import asyncio
+
+@app.task("fetch_price", timeout_ms=30_000)
+async def fetch_price(*, symbol: str) -> TaskResult[float, TaskError]:
+    await asyncio.sleep(0.1)  # stands in for an awaited client call
+    return TaskResult(ok=101.5)
+```
+
+A worker child runs one task at a time, `def` or `async def`. Each child keeps one event loop until the child stops, and an async task runs on that loop. An async client that a module keeps stays open across the tasks of one child.
+
+The loop runs only while an async task runs:
+
+- A `def` task runs with no running event loop, so it can call `asyncio.run()`.
+- A coroutine that a task starts and does not await continues only while a later async task runs in the same child. When the worker stops the child, for example to recycle it, the child cancels that coroutine.
+
+In an async task, send with `.send_async()` or `.schedule_async()`. The sync `.send()` and `.schedule()` refuse a running event loop: they return `Err(TaskSendAsyncContext)` and enqueue nothing. See [Sending Tasks](sending-tasks).
+
+```python
+from horsies import Ok, Err
+
+@app.task("refresh_price")
+async def refresh_price(*, symbol: str) -> TaskResult[str, TaskError]:
+    match await fetch_price.send_async(symbol=symbol):
+        case Ok(handle):
+            return TaskResult(ok=handle.task_id)
+        case Err(send_err):
+            return TaskResult(err=TaskError(error_code="SEND_FAILED", message=send_err.message))
+```
+
+`timeout_ms` works as for a `def` task: on expiry, the worker kills the child. An `async def` function that uses `yield` is refused with `HRS-101`.
 
 ### Parameters are keyword-only
 
@@ -223,6 +257,6 @@ def task_two() -> TaskResult[str, TaskError]:
 | `default_unhandled_error_code` | `str` | No | Error code for unmapped exceptions (overrides global) |
 | `timeout_ms` | `int` | No | Execution time limit in milliseconds, from 1000 to `MAX_TASK_TIMEOUT_MS` (4,294,967,295), measured from the moment a child takes the task. On expiry the child process is killed and the task fails with `TASK_TIMEOUT` |
 
-**Returns:** Decorated function that can be called directly or via `.send()` / `.send_async()`.
+**Returns:** For a `def` function, a `TaskFunction`: a direct call returns the `TaskResult`. For an `async def` function, an `AsyncTaskFunction`: a direct call returns a coroutine, and `await` gives the `TaskResult`. Both send with `.send()` / `.send_async()`.
 
 `good_until` is not accepted here — task expiry deadlines are a per-send concern. See [Sending Tasks — Set a Task Deadline](sending-tasks#set-a-task-deadline).

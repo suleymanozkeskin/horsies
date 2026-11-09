@@ -113,7 +113,7 @@ def build_regional_workflow(region: str) -> WorkflowSpec:
 ```python
 @dataclass
 class TaskNode(Generic[OkT]):
-    fn: TaskFunction[Any, OkT]                                     # required
+    fn: TaskFunction[Any, OkT] | AsyncTaskFunction[Any, OkT]       # required
     kwargs: Mapping[str, Any] = {}                                 # static task kwargs (JSON-serializable)
     waits_for: Sequence[TaskNode[Any] | SubWorkflowNode[Any]] = [] # dependencies
     args_from: Mapping[str, TaskNode[Any] | SubWorkflowNode[Any]] = {}  # inject upstream TaskResult
