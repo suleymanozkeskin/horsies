@@ -21,7 +21,12 @@ from horsies.core.codec.typed import (
     encode_task_result,
 )
 from horsies.core.errors import WorkflowValidationError
-from horsies.core.models.tasks import SubWorkflowError, TaskResult, TaskError
+from horsies.core.models.tasks import (
+    OperationalErrorCode,
+    SubWorkflowError,
+    TaskError,
+    TaskResult,
+)
 from horsies.core.models.workflow.limits import MAX_SUBWORKFLOW_DEPTH
 from horsies.core.models.workflow import (
     TaskNode,
@@ -1160,14 +1165,14 @@ class TestSubworkflowIntegration:
 
     async def _failed_error_code(
         self, session: AsyncSession, workflow_id: str, task_index: int,
-    ) -> str:
+    ) -> object:
         row = await self._get_workflow_task_row(session, workflow_id, task_index)
         assert row is not None
         status, _, result_json = row
         assert status == 'FAILED'
         tr = _decode_task_result(result_json)
         assert tr is not None and tr.err is not None
-        return str(tr.err.error_code)
+        return tr.err.error_code
 
     async def test_a_root_nesting_stops_at_the_depth_limit(
         self,
@@ -1190,7 +1195,7 @@ class TestSubworkflowIntegration:
         assert await self._deeper_workflow_count(session, MAX_SUBWORKFLOW_DEPTH) == 0
         assert (
             await self._failed_error_code(session, deepest[0], 0)
-            == 'SUBWORKFLOW_DEPTH_LIMIT_REACHED'
+            is OperationalErrorCode.SUBWORKFLOW_DEPTH_LIMIT_REACHED
         )
         root_status = await session.execute(
             text('SELECT status FROM horsies_workflows WHERE id = :wf_id'),
@@ -1221,7 +1226,7 @@ class TestSubworkflowIntegration:
         assert await self._deeper_workflow_count(session, MAX_SUBWORKFLOW_DEPTH) == 0
         assert (
             await self._failed_error_code(session, deepest[0], 1)
-            == 'SUBWORKFLOW_DEPTH_LIMIT_REACHED'
+            is OperationalErrorCode.SUBWORKFLOW_DEPTH_LIMIT_REACHED
         )
 
     async def test_root_workflow_id_propagation(
