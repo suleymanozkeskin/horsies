@@ -673,8 +673,8 @@ node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
 | HRS-033 | `WORKFLOW_INVALID_DEFINITION_CONFIG` | `WorkflowDefinition` class defines `Meta`, or its `config` is not a `WorkflowDefinitionConfig` (raised at class creation) |
 | HRS-034 | `WORKFLOW_INVALID_PRIORITY` | A `TaskNode` `priority` is outside 1–100 |
 | HRS-035 | `WORKFLOW_NAIVE_GOOD_UNTIL` | A `TaskNode` `good_until` is a naive `datetime` (no `tzinfo`) |
-| HRS-036 | `WORKFLOW_SUBWORKFLOW_DEPTH_LIMIT` | `horsies check`: a subworkflow nesting would start a child workflow deeper than 32 |
-| HRS-037 | `WORKFLOW_SUBWORKFLOW_SELF_NESTING` | `horsies check`: a subworkflow includes itself with the same kwargs, so its nesting never ends |
+| HRS-036 | `WORKFLOW_SUBWORKFLOW_DEPTH_LIMIT` | `horsies check`: a subworkflow nesting with no `waits_for` on its path would start a child workflow deeper than 32 |
+| HRS-037 | `WORKFLOW_SUBWORKFLOW_SELF_NESTING` | `horsies check`: a subworkflow includes itself with the same kwargs and with no `waits_for` between, so its nesting never ends |
 | HRS-038 | `WORKFLOW_TOO_MANY_NODES` | A `WorkflowSpec` has more than 10,000 nodes (raised when the spec is built) |
 
 ## Known Constraints

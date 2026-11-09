@@ -7,7 +7,8 @@ Both bounds fail closed:
 - A child workflow deeper than ``MAX_SUBWORKFLOW_DEPTH`` is not started. Its
   ``SubWorkflowNode`` fails with ``SUBWORKFLOW_DEPTH_LIMIT_REACHED``, and the
   ``on_error`` policy of the parent workflow applies. ``horsies check`` reports
-  a static nesting deeper than the bound with ``HRS-036``.
+  ``HRS-036`` for a nesting that passes the bound for certain; see
+  ``nesting_check``.
 """
 
 from __future__ import annotations

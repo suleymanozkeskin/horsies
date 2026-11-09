@@ -28,11 +28,14 @@ there is no migration contract between pre-1.0 versions.
   `WORKFLOW_ENQUEUE_FAILED`. Split more nodes into `SubWorkflowNode`s: each
   child workflow has its own limit.
 - **`horsies check` reports two nesting errors.** `HRS-036`
-  (`WORKFLOW_SUBWORKFLOW_DEPTH_LIMIT`): a nesting that the check can build
-  would start a child deeper than 32. Before, the check stopped at that depth
-  with no finding. `HRS-037` (`WORKFLOW_SUBWORKFLOW_SELF_NESTING`): a
-  definition includes itself with the same kwargs, so its nesting never ends.
-  Before, the check skipped it.
+  (`WORKFLOW_SUBWORKFLOW_DEPTH_LIMIT`): a nesting would start a child deeper
+  than 32, and no `SubWorkflowNode` on its path has `waits_for`. `HRS-037`
+  (`WORKFLOW_SUBWORKFLOW_SELF_NESTING`): a definition includes itself with the
+  same kwargs, and no `SubWorkflowNode` from one level to the next has
+  `waits_for`, so the nesting never ends once it starts. Before, the check
+  stopped at both with no finding. Through a node with `waits_for`, the results
+  of its dependencies decide the depth, so the check does not report the
+  nesting, and the engine applies the limit at run time.
 - **An exhaustive `match` on `OperationalErrorCode` needs a
   `SUBWORKFLOW_DEPTH_LIMIT_REACHED` case.** The code string is now reserved:
   an `exception_mapper` or `default_unhandled_error_code` with that value
