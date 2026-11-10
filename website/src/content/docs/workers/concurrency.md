@@ -48,7 +48,7 @@ horsies worker myapp.instance:app --profile default
 - Limits concurrent task execution on this worker
 - Each isolated child handles one task at a time
 - `count` is required, from 1 to 1024
-- A shared async child handles up to `seats` `SHARED_ASYNC` tasks at once. The tasks of a worker at once are its seats: one per isolated child, and `seats` per shared async child. See [Shared Async Tasks](shared-async-tasks)
+- A shared async child handles up to `seats` `SHARED_ASYNC` tasks at once, and a shared thread child up to `seats` `SHARED_THREAD` tasks. The tasks of a worker at once are its seats: one per isolated child, and `seats` per shared child. See [Shared Async Tasks](shared-async-tasks) and [Shared Thread Tasks](shared-thread-tasks)
 
 ## Process Recycling
 
@@ -380,13 +380,16 @@ from its profile, and logs it. The plan routes the rows of each class:
   logs one line that names each class it does not serve.
 
 A profile with `shared_async=SharedAsyncChildren(...)` has a `SHARED_ASYNC`
-budget; a profile with isolated children only claims the rows of every class
-into its `ISOLATED` budget. See [Shared Async Tasks](shared-async-tasks).
+budget, and a profile with `shared_thread=SharedThreadChildren(...)` has a
+`SHARED_THREAD` budget; a profile with isolated children only claims the rows
+of every class into its `ISOLATED` budget. See
+[Shared Async Tasks](shared-async-tasks) and
+[Shared Thread Tasks](shared-thread-tasks).
 
 The capacity of a budget is its children (`ISOLATED`) or seats (a shared
 class) that are in service: a [slot that is down](worker-architecture) does not
-count. A shared async child that closes counts only the tasks it still runs:
-its free seats take no task. The claim counts the use of each budget from the
+count. A shared child that closes counts only the tasks it still runs: its
+free seats take no task. The claim counts the use of each budget from the
 rows: this worker's RUNNING and live CLAIMED rows of the classes that the
 budget claims.
 
@@ -414,7 +417,7 @@ dispatched, and its child fails it as before.
 The capacity of a worker is the sum of the capacities of its budgets plus
 `prefetch_buffer`: it never holds more tasks than that. The sum is
 `WorkerProfile.seat_count()`: one per isolated child, and `seats` per shared
-async child. A limit above the capacity has no
+child. A limit above the capacity has no
 effect, so `AppConfig` validation refuses it (`HRS-218`).
 
 Both limits apply to the worker as a whole, across all budgets.

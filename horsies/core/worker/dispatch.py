@@ -5,7 +5,9 @@ failures: requeue of a task that never reached a child, recovery of a task
 whose child was lost, and the timeout handlers, which end the attempt before
 they write the ownership-guarded row. A ``SHARED_ASYNC`` row goes to a shared
 async child when the claim plan of the worker claimed it into the
-``SHARED_ASYNC`` budget (``dispatch_route``). Worker-internal
+``SHARED_ASYNC`` budget, and a ``SHARED_THREAD`` row to a shared thread child
+when it claimed it into the ``SHARED_THREAD`` budget (``dispatch_route``).
+Worker-internal
 mixin: the ``TYPE_CHECKING`` block declares the slice of ``Worker`` it relies
 on.
 """
@@ -41,10 +43,16 @@ from horsies.core.models.tasks import (
     TaskResult,
 )
 from horsies.core.types.result import Err, Ok, Result, is_err
-from horsies.core.worker.child_protocol import RunFrame, SeatWork
+from horsies.core.worker.child_protocol import (
+    RunFrame,
+    SeatWork,
+    SharedWork,
+    ThreadSeatWork,
+)
 from horsies.core.worker.dispatch_route import (
     RunIsolated,
     RunShared,
+    RunSharedThread,
     dispatch_route,
 )
 from horsies.core.worker.runtime import (
@@ -77,6 +85,7 @@ from horsies.core.worker.slots import (
     describe_exit,
 )
 from horsies.core.worker.stored_timeout import NoTimeout, StoredTimeout
+from horsies.core.worker.thread_slots import ThreadRunRequest
 from horsies.core.worker.sql import (
     SELECT_WORKER_OWNED_IN_FLIGHT_FOR_UPDATE_SQL,
     UNCLAIM_CLAIMED_TASK_SQL,
@@ -123,7 +132,7 @@ class DispatchMixin:
             task_id: str,
             queue_name: str,
             is_workflow_task: bool,
-            work: SeatWork,
+            work: SharedWork,
             *,
             task_name: str,
             claimed_at: Optional[datetime],
@@ -459,9 +468,9 @@ class DispatchMixin:
 
         ``timeout`` is the stored timeout as the claim read it. A refusal is
         sent to the child, which sets the row RUNNING and fails the task with
-        WORKER_SERIALIZATION_ERROR before it resolves the task. A
-        ``SHARED_ASYNC`` row without a usable stored timeout or grace is
-        refused the same way, by the child that its budget names.
+        WORKER_SERIALIZATION_ERROR before it resolves the task. A shared row
+        without a usable stored timeout or grace is refused the same way, by
+        the child that its budget names.
         """
         slots = self._slots
         assert slots is not None, 'dispatch before the slot pool started'
@@ -478,6 +487,22 @@ class DispatchMixin:
                     queue_name,
                     is_workflow_task,
                     claimed_at,
+                )
+                return
+            case RunSharedThread(work=thread_work):
+                self._dispatch_shared_thread(
+                    slots,
+                    ThreadRunRequest(
+                        task_id=task_id,
+                        task_name=task_name,
+                        args_json=args_json,
+                        kwargs_json=kwargs_json,
+                        worker_id=self.worker_instance_id,
+                        is_workflow_task=is_workflow_task,
+                        claimed_at=claimed_at,
+                        work=thread_work,
+                    ),
+                    queue_name,
                 )
                 return
             case RunIsolated(timeout=isolated_timeout):
@@ -553,6 +578,31 @@ class DispatchMixin:
             finalizer=True,
         )
 
+    def _dispatch_shared_thread(
+        self,
+        slots: SlotPool,
+        request: ThreadRunRequest,
+        queue_name: str,
+    ) -> None:
+        """Submit a ``SHARED_THREAD`` row to the shared thread children, and
+        spawn its finalizer. ``request.work`` is the task with its deadline,
+        or the refusal that fails it. Never raises for a task."""
+        handle = slots.submit_shared(request)
+        work: ThreadSeatWork = request.work
+        self._spawn_background(
+            self._finalize_shared_after(
+                handle,
+                request.task_id,
+                queue_name,
+                request.is_workflow_task,
+                work,
+                task_name=request.task_name,
+                claimed_at=request.claimed_at,
+            ),
+            name=f'finalize-{request.task_id}',
+            finalizer=True,
+        )
+
     # ----- finalize (write back to DB + notify) -----
 
     async def _handle_shared_backstop(
@@ -570,8 +620,8 @@ class DispatchMixin:
         isolated timeout, TASK_TIMEOUT, the retry, the attempt row and phase 2
         are written for this task, after the exit; every other task of that
         child ends with the loss of the child, through crash recovery. A
-        child that reported the deadline is alive, and its task ignores its
-        cancel: nothing is killed, and the outcome comes when the task ends.
+        child that reported the deadline is alive: nothing is killed here,
+        and the outcome comes when the task ends or the slot kills the child.
 
         Returns the outcome to finalize: ``_TimeoutSettled`` (this task is
         written), ``_AttemptEndUnknown`` (no exit seen: nothing is written,
@@ -607,8 +657,9 @@ class DispatchMixin:
                 return _AttemptEndUnknown()
             case DeadlineAcknowledged(pid=pid):
                 logger.warning(
-                    'Task %s ignores the cancel of its timeout_ms=%s in shared '
-                    'child pid=%s; it keeps its seat until it ends or the worker '
+                    'Task %s has not ended after its timeout_ms=%s in shared '
+                    'child pid=%s, which reported the deadline; it keeps its '
+                    'seat until it ends, its child is killed, or the worker '
                     'stops',
                     task_id,
                     timeout_ms,

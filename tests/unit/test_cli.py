@@ -54,8 +54,10 @@ from horsies.core.models.worker_profile import (
     MemoryLimit,
     NoMemoryLimit,
     NoSharedAsyncChildren,
+    NoSharedThreadChildren,
     NoTaskLimit,
     SharedAsyncChildren,
+    SharedThreadChildren,
     TaskLimit,
     WorkerProfile,
 )
@@ -2522,6 +2524,7 @@ class TestExecutionSettings:
             drain_timeout_s=45.0,
             child_preload=ChildPreload.NONE,
             shared_async=NoSharedAsyncChildren(),
+            shared_thread=NoSharedThreadChildren(),
         )
 
     def test_shared_async_children_keep_their_typed_form(self) -> None:
@@ -2740,6 +2743,34 @@ class TestBootMemoryFit:
         assert kwargs['max_tasks_per_child'] == 7
         assert kwargs['max_claim_per_worker'] == 3
         assert kwargs['max_claim_batch'] == 0
+
+    def test_the_shared_thread_children_reach_the_worker_config(self) -> None:
+        thread = SharedThreadChildren(count=2, seats=6)
+        app = _make_mock_app()
+        app.config.worker_profiles = {
+            'threads': WorkerProfile(shared_thread=thread),
+        }
+        with (
+            patch('horsies.core.cli.setup_logging', autospec=True),
+            patch(
+                'horsies.core.cli.discover_app',
+                autospec=True,
+                return_value=(app, 'app', 'my.mod', '/project'),
+            ),
+            patch('horsies.core.cli.print_banner', autospec=True),
+            patch('horsies.core.cli.WorkerConfig', autospec=True) as mock_cfg,
+            patch(
+                'horsies.core.cli.asyncio.run',
+                autospec=True,
+                side_effect=_closing_run_side_effect(KeyboardInterrupt),
+            ),
+        ):
+            worker_command(_make_worker_namespace(profile='threads'))
+
+        kwargs = mock_cfg.call_args.kwargs
+        assert kwargs['processes'] == 0
+        assert kwargs['shared_thread'] == thread
+        assert kwargs['shared_async'] == NoSharedAsyncChildren()
 
 
 @pytest.mark.unit

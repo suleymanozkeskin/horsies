@@ -14,6 +14,10 @@ adds to it), so every name below exists in every instance.
   children with 8 seats each.
 - ``shared-only-1x4``: no isolated child, and 1 shared async child with 4
   seats. It runs only ``SHARED_ASYNC`` tasks.
+- ``split-isolated-1-thread-2x4``: 1 isolated child, and 2 shared thread
+  children with 4 seats each.
+- ``thread-only-1x4``: no isolated child, and 1 shared thread child with 4
+  seats. It runs only ``SHARED_THREAD`` tasks.
 
 The child isolation instances add ``isolated-N-<preload>`` and
 ``drain-1s-<preload>`` for each ``ChildPreload`` mode, so each of their tests
@@ -33,6 +37,7 @@ from horsies.core.models.worker_profile import (
     NoIsolatedChildren,
     NoTaskLimit,
     SharedAsyncChildren,
+    SharedThreadChildren,
     TaskLimit,
     WorkerProfile,
 )
@@ -55,6 +60,10 @@ SPLIT_SHARED_2X8: Final = 'split-isolated-1-shared-2x8'
 SPLIT_SHARED_SEATS: Final = 8
 """The seats of each shared async child of ``split-isolated-1-shared-2x8``."""
 SHARED_ONLY_1X4: Final = 'shared-only-1x4'
+SPLIT_THREAD_2X4: Final = 'split-isolated-1-thread-2x4'
+SPLIT_THREAD_SEATS: Final = 4
+"""The seats of each shared thread child of ``split-isolated-1-thread-2x4``."""
+THREAD_ONLY_1X4: Final = 'thread-only-1x4'
 
 
 def isolated_profile_name(count: int) -> str:
@@ -108,6 +117,14 @@ E2E_WORKER_PROFILES: Final[dict[str, WorkerProfile]] = {
     SHARED_ONLY_1X4: WorkerProfile(
         isolated=NoIsolatedChildren(),
         shared_async=SharedAsyncChildren(count=1, seats=4),
+    ),
+    SPLIT_THREAD_2X4: WorkerProfile(
+        isolated=IsolatedChildren(count=1),
+        shared_thread=SharedThreadChildren(count=2, seats=SPLIT_THREAD_SEATS),
+    ),
+    THREAD_ONLY_1X4: WorkerProfile(
+        isolated=NoIsolatedChildren(),
+        shared_thread=SharedThreadChildren(count=1, seats=4),
     ),
 }
 """The profiles that every e2e app instance defines."""

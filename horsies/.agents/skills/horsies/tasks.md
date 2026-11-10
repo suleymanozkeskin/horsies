@@ -57,6 +57,15 @@ Returns `TaskFunction[P, T]` for a `def` function, and `AsyncTaskFunction[P, T]`
 - The RUNNING update, the first runner heartbeat and the finalizing marker run on an async connection pool of the child, so they do not block the loop. The worker process writes the later runner heartbeats for every task of the child.
 - Recycling: `SharedRecycle.after_per_seat` (`tasks × seats` tasks) or `above` (RSS after a task). The child closes: no new task, its tasks finish, then a new child starts.
 
+### Shared thread tasks
+
+- A worker profile with `shared_thread=SharedThreadChildren(count, seats)` runs `SHARED_THREAD` rows on shared thread children: one process runs up to `seats` such `def` tasks at once, each on a seat thread started at boot, and a free seat takes the next task at once. `seats` is 1 to 256. A worker with no shared thread children runs them in isolated children; its other children never run one. A `SHARED_THREAD` row whose function is now `async def` is written `ISOLATED` and returned to the queue before dispatch. A row without a usable stored `timeout_ms` fails with `WORKER_SERIALIZATION_ERROR` on every worker.
+- When threads help (Linux, 4 CPUs, CPython 3.13 and 3.14): C code that releases the GIL (zlib, hashlib) scales with threads on every build, 4 threads 2.6 to 3.8 times one; pure-Python code gains nothing on a standard build (0.56 to 1.02 times) and scales on a free-threaded build (1.9 to 3.6 times); more threads than CPUs added nothing. Sync I/O waits release the GIL.
+- Timeout: a thread cannot be cancelled. At `timeout_ms` the child reports the deadline and closes (no new task); the task runs on. When every task still in the child is past its own deadline, the worker kills the child with its session; after the exit each of those tasks gets `TASK_TIMEOUT`, its retry and its workflow step. A task alone in its child is killed at its deadline. A neighbour with time left runs to its end. A task that ends by itself after its deadline is `TASK_TIMEOUT`. A child that has not reported a deadline by `timeout_ms + 5 s` is frozen (C code holds the GIL) and killed: the timed-out task gets `TASK_TIMEOUT`, the others take the crash path; no culprit is named.
+- Author rules: the function runs next to itself on other threads; no module state without a lock; `timeout_ms` is required, and each blocking call needs its own timeout below it; a timeout closes the child and the kill ends every task still in it; a crash of the child ends every task in it.
+- The RUNNING update, the first runner heartbeat and the finalizing marker run on the seat thread, on the one sync pool of the child (`worker_child_pool_max_size`; a thread waits up to 30 s for a connection). The worker process writes the later runner heartbeats.
+- Recycling: as for shared async children (`SharedRecycle`).
+
 ### Async tasks
 
 - A worker child runs one task at a time, `def` or `async def`. The same RUNNING update, heartbeats, `timeout_ms` kill, recovery and retry policy apply.

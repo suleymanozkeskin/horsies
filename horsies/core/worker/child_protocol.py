@@ -36,7 +36,10 @@ from horsies.core.models.tasks import (
     MIN_CANCEL_GRACE_MS,
     MIN_TASK_TIMEOUT_MS,
 )
-from horsies.core.models.worker_profile import MAX_SEATS_PER_SHARED_ASYNC_CHILD
+from horsies.core.models.worker_profile import (
+    MAX_SEATS_PER_SHARED_ASYNC_CHILD,
+    MAX_SEATS_PER_SHARED_THREAD_CHILD,
+)
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.stored_timeout import (
     CancelGraceInvalid,
@@ -82,7 +85,21 @@ class SharedAsyncChild:
     seats: int
 
 
-ChildKind: TypeAlias = IsolatedChild | SharedAsyncChild
+@dataclass(frozen=True, slots=True)
+class SharedThreadChild:
+    """The child runs up to ``seats`` ``def`` tasks at once, each on a thread
+    of its own, in ``SharedRunFrame``s.
+
+    ``seats`` is from 1 to ``MAX_SEATS_PER_SHARED_THREAD_CHILD``.
+    """
+
+    seats: int
+
+
+SharedChildKind: TypeAlias = SharedAsyncChild | SharedThreadChild
+"""The kind of a child that runs many tasks at once."""
+
+ChildKind: TypeAlias = IsolatedChild | SharedAsyncChild | SharedThreadChild
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +156,19 @@ class SeatTask:
 
 
 @dataclass(frozen=True, slots=True)
+class ThreadSeatTask:
+    """Run the task on a seat of a shared thread child, with a deadline.
+
+    The child starts the deadline when it takes the run. A thread cannot be
+    cancelled: at ``timeout_ms`` the child reports the deadline, and the
+    task runs on until it ends or the child is killed. ``timeout_ms`` is from
+    ``MIN_TASK_TIMEOUT_MS`` to ``MAX_TASK_TIMEOUT_MS``.
+    """
+
+    timeout_ms: int
+
+
+@dataclass(frozen=True, slots=True)
 class SeatRefusal:
     """Fail the task with ``refusal``: the stored timeout or cancel grace of
     the row that the worker cannot use.
@@ -152,12 +182,20 @@ class SeatRefusal:
 
 
 SeatWork: TypeAlias = SeatTask | SeatRefusal
-"""What a seat does with the task of a ``SharedRunFrame``."""
+"""What a seat of a shared async child does with the task of a run."""
+
+ThreadSeatWork: TypeAlias = ThreadSeatTask | SeatRefusal
+"""What a seat of a shared thread child does with the task of a run."""
+
+SharedWork: TypeAlias = SeatTask | ThreadSeatTask | SeatRefusal
+"""The work of a ``SharedRunFrame``: ``SeatWork`` for a shared async child,
+``ThreadSeatWork`` for a shared thread child. A child that gets the task work
+of the other kind ends with ``BAD_PARENT_FRAME_EXIT_CODE``."""
 
 
 @dataclass(frozen=True, slots=True)
 class SharedRunFrame:
-    """Parent to a shared async child: run one task on a free seat.
+    """Parent to a shared child: run one task on a free seat.
 
     ``dispatch`` names this run in the pool, from 1, and each frame of the
     child about it carries the same number. ``work`` is the task with its
@@ -172,7 +210,7 @@ class SharedRunFrame:
     worker_id: str
     is_workflow_task: bool
     claimed_at: datetime | None
-    work: SeatWork
+    work: SharedWork
 
 
 @dataclass(frozen=True, slots=True)
@@ -307,7 +345,7 @@ SeatEnd: TypeAlias = SeatFinished | SeatTimedOut
 
 @dataclass(frozen=True, slots=True)
 class SharedResultFrame:
-    """Shared async child to parent: the task of run ``dispatch`` has ended,
+    """Shared child to parent: the task of run ``dispatch`` has ended,
     and its seat is free. ``rss`` is the RSS of the child after it."""
 
     dispatch: int
@@ -318,9 +356,10 @@ class SharedResultFrame:
 
 @dataclass(frozen=True, slots=True)
 class DeadlineFiredFrame:
-    """Shared async child to parent: the deadline of run ``dispatch`` fired,
-    and the child cancelled its task. The task has not ended yet: its
-    ``SharedResultFrame`` comes when it has."""
+    """Shared child to parent: the deadline of run ``dispatch`` fired. A
+    shared async child cancelled its task; a shared thread child cannot
+    cancel a thread. The task has not ended yet: its ``SharedResultFrame``
+    comes when it has."""
 
     dispatch: int
     task_id: str
@@ -528,7 +567,7 @@ def _encode_shared_run_frame(frame: SharedRunFrame) -> EncodedFrame:
     )
 
 
-def _encode_seat_work(work: SeatWork) -> dict[str, object]:
+def _encode_seat_work(work: SharedWork) -> dict[str, object]:
     match work:
         case SeatTask(timeout_ms=timeout_ms, cancel_grace_ms=cancel_grace_ms):
             return {
@@ -536,6 +575,8 @@ def _encode_seat_work(work: SeatWork) -> dict[str, object]:
                 'timeout_ms': timeout_ms,
                 'cancel_grace_ms': cancel_grace_ms,
             }
+        case ThreadSeatTask(timeout_ms=timeout_ms):
+            return {'kind': 'thread_task', 'timeout_ms': timeout_ms}
         case SeatRefusal(refusal=refusal):
             return {'kind': 'refusal', 'refusal': _encode_timeout(refusal)}
         case _ as unreachable:
@@ -548,6 +589,8 @@ def _child_kind_field(child_kind: ChildKind) -> dict[str, object]:
             return {'kind': 'isolated'}
         case SharedAsyncChild(seats=seats):
             return {'kind': 'shared_async', 'seats': seats}
+        case SharedThreadChild(seats=seats):
+            return {'kind': 'shared_thread', 'seats': seats}
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -848,6 +891,14 @@ def _child_kind(meta: Mapping[str, Any]) -> ChildKind:
                 MAX_SEATS_PER_SHARED_ASYNC_CHILD,
             )
             return SharedAsyncChild(seats=seats)
+        case 'shared_thread':
+            seats = _bounded_whole(
+                child_kind,
+                'seats',
+                1,
+                MAX_SEATS_PER_SHARED_THREAD_CHILD,
+            )
+            return SharedThreadChild(seats=seats)
         case _:
             raise _BadField('child_kind.kind')
 
@@ -924,7 +975,7 @@ def _decode_shared_run(meta: Mapping[str, Any], body: bytes) -> SharedRunFrame:
     )
 
 
-def _decode_seat_work(meta: Mapping[str, Any]) -> SeatWork:
+def _decode_seat_work(meta: Mapping[str, Any]) -> SharedWork:
     value = meta.get('work')
     if not isinstance(value, dict):
         raise _BadField('work')
@@ -943,6 +994,15 @@ def _decode_seat_work(meta: Mapping[str, Any]) -> SeatWork:
                     'cancel_grace_ms',
                     MIN_CANCEL_GRACE_MS,
                     MAX_CANCEL_GRACE_MS,
+                ),
+            )
+        case 'thread_task':
+            return ThreadSeatTask(
+                timeout_ms=_bounded_whole(
+                    work,
+                    'timeout_ms',
+                    MIN_TASK_TIMEOUT_MS,
+                    MAX_TASK_TIMEOUT_MS,
                 ),
             )
         case 'refusal':

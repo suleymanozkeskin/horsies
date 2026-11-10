@@ -45,8 +45,10 @@ from horsies.core.models.worker_profile import (
     NoIsolatedChildren,
     NoMemoryLimit,
     NoSharedAsyncChildren,
+    NoSharedThreadChildren,
     NoTaskLimit,
     SharedAsyncChildren,
+    SharedThreadChildren,
     TaskLimit,
     WorkerProfile,
     describe_worker_profile,
@@ -519,7 +521,7 @@ class ExecutionSettings:
     limit and ``None`` as no memory limit. The profile has named variants
     for those; this is the one place that turns them into that encoding.
     ``processes`` is the number of isolated children, 0 when the profile
-    has none. ``shared_async`` keeps its typed form.
+    has none. ``shared_async`` and ``shared_thread`` keep their typed form.
     """
 
     processes: int
@@ -530,6 +532,7 @@ class ExecutionSettings:
     drain_timeout_s: float
     child_preload: ChildPreload
     shared_async: SharedAsyncChildren | NoSharedAsyncChildren
+    shared_thread: SharedThreadChildren | NoSharedThreadChildren
 
 
 def _tasks_or_zero(limit: TaskLimit | NoTaskLimit) -> int:
@@ -584,6 +587,7 @@ def execution_settings(profile: WorkerProfile) -> ExecutionSettings:
         drain_timeout_s=profile.drain_timeout.total_seconds(),
         child_preload=profile.preload,
         shared_async=profile.shared_async,
+        shared_thread=profile.shared_thread,
     )
 
 
@@ -860,6 +864,7 @@ def worker_command(args: argparse.Namespace) -> None:
         drain_timeout_s=settings.drain_timeout_s,
         child_preload=settings.child_preload,
         shared_async=settings.shared_async,
+        shared_thread=settings.shared_thread,
         recovery_config=app.config.recovery,
         retention_config=app.config.retention,
         resilience_config=app.config.resilience,

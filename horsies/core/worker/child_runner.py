@@ -1045,7 +1045,13 @@ class OnSharedSeat:
     the running loop of that child, beside other tasks."""
 
 
-type RunPlace = OnIsolatedChild | OnSharedSeat
+@dataclass(frozen=True, slots=True)
+class OnSharedThreadSeat:
+    """The task runs on a seat of a shared thread child, on a thread of its
+    own, beside the tasks of the other seats."""
+
+
+type RunPlace = OnIsolatedChild | OnSharedSeat | OnSharedThreadSeat
 
 
 @dataclass(frozen=True, slots=True)
@@ -1067,7 +1073,8 @@ def _why_not_runnable(body_kind: object, place: RunPlace) -> str | None:
     ``async def`` task then: a task that was registered later finds no loop.
     A run after the loop closed is a defect in the caller: ``AssertionError``.
     A seat of a shared async child runs only ``async def`` tasks: a ``def``
-    body would block the loop of every task in the child.
+    body would block the loop of every task in the child. A seat of a shared
+    thread child runs only ``def`` tasks: it has no event loop.
     """
     match body_kind, place:
         case TaskBodyKind.DEF, OnIsolatedChild():
@@ -1089,6 +1096,13 @@ def _why_not_runnable(body_kind: object, place: RunPlace) -> str | None:
             return None
         case TaskBodyKind.DEF, OnSharedSeat():
             return 'the task is def, and a shared async child runs only async def tasks'
+        case TaskBodyKind.DEF, OnSharedThreadSeat():
+            return None
+        case TaskBodyKind.ASYNC_DEF, OnSharedThreadSeat():
+            return (
+                'the task is async def, and a shared thread child runs only '
+                'def tasks'
+            )
         case _:
             return (
                 'the registry entry is not a task function: its '

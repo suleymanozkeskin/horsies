@@ -15,7 +15,9 @@ if TYPE_CHECKING:
     from horsies.core.models.recovery import RecoveryConfig
     from horsies.core.models.worker_profile import (
         NoSharedAsyncChildren,
+        NoSharedThreadChildren,
         SharedAsyncChildren,
+        SharedThreadChildren,
     )
     from horsies.core.models.retention import RetentionConfig
     from horsies.core.models.resilience import WorkerResilienceConfig
@@ -40,6 +42,13 @@ def _no_shared_async_children() -> NoSharedAsyncChildren:
     return NoSharedAsyncChildren()
 
 
+def _no_shared_thread_children() -> NoSharedThreadChildren:
+    # Imported here: the profile module imports ChildPreload from this one.
+    from horsies.core.models.worker_profile import NoSharedThreadChildren
+
+    return NoSharedThreadChildren()
+
+
 class ChildPreload(str, Enum):
     """What a preload parent imports before it forks children. Linux only.
 
@@ -61,8 +70,7 @@ class WorkerConfig:
     queues: list[str]  # which queues to serve
     session_dsn: str = ''  # SQLAlchemy async URL for session features
     pgbouncer_transaction_mode: bool = False
-    # The isolated children. 0 is valid when the worker has shared async
-    # children.
+    # The isolated children. 0 is valid when the worker has shared children.
     processes: int = os.cpu_count() or 2
     parent_pool_size: int = 3
     parent_max_overflow: int = 2
@@ -146,6 +154,11 @@ class WorkerConfig:
     shared_async: SharedAsyncChildren | NoSharedAsyncChildren = field(
         default_factory=_no_shared_async_children,
     )
+    # The shared thread children of the worker profile, with their seats and
+    # their recycle limits.
+    shared_thread: SharedThreadChildren | NoSharedThreadChildren = field(
+        default_factory=_no_shared_thread_children,
+    )
 
     def shared_async_children(self) -> int:
         """The number of shared async children."""
@@ -160,32 +173,65 @@ class WorkerConfig:
             case NoSharedAsyncChildren():
                 return 0
 
+    def shared_thread_children(self) -> int:
+        """The number of shared thread children."""
+        from horsies.core.models.worker_profile import (
+            NoSharedThreadChildren,
+            SharedThreadChildren,
+        )
+
+        match self.shared_thread:
+            case SharedThreadChildren(count=count):
+                return count
+            case NoSharedThreadChildren():
+                return 0
+
+    def child_count(self) -> int:
+        """The children of the worker: the sum over the modes."""
+        return (
+            self.processes
+            + self.shared_async_children()
+            + self.shared_thread_children()
+        )
+
     def claim_plan(self) -> ClaimPlan:
         """Which budget claims the rows of each execution class: derived from
         the children of this config (``claim_plan_for_children``)."""
-        return claim_plan_for_children(self.processes, self.shared_async_children())
+        return claim_plan_for_children(
+            self.processes,
+            self.shared_async_children(),
+            self.shared_thread_children(),
+        )
 
     def seat_count(self) -> int:
         """The tasks that the children run at once: one per isolated child,
-        and the seats of each shared async child."""
+        and the seats of each shared child."""
         from horsies.core.models.worker_profile import (
             NoSharedAsyncChildren,
+            NoSharedThreadChildren,
             SharedAsyncChildren,
+            SharedThreadChildren,
         )
 
         match self.shared_async:
             case SharedAsyncChildren(count=count, seats=seats):
-                return self.processes + count * seats
+                async_seats = count * seats
             case NoSharedAsyncChildren():
-                return self.processes
+                async_seats = 0
+        match self.shared_thread:
+            case SharedThreadChildren(count=count, seats=seats):
+                thread_seats = count * seats
+            case NoSharedThreadChildren():
+                thread_seats = 0
+        return self.processes + async_seats + thread_seats
 
     def __post_init__(self) -> None:
         if self.processes < 0:
             raise ValueError(f'processes must be >= 0; got {self.processes}')
-        if self.processes + self.shared_async_children() < 1:
+        if self.child_count() < 1:
             raise ValueError(
                 'a worker needs at least one child: processes is 0 and there '
-                'are no shared async children'
+                'are no shared children'
             )
         if not math.isfinite(self.drain_timeout_s) or self.drain_timeout_s <= 0:
             raise ValueError(

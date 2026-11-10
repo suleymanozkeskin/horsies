@@ -1,7 +1,7 @@
 ---
 title: Worker Profiles
-summary: Named worker settings in AppConfig - isolated and shared async children, recycling, claim limits, drain timeout and preload - and what horsies check and worker boot validate.
-related: [worker-architecture, shared-async-tasks, concurrency, ../cli, ../configuration/app-config, ../migrations/migration-to-0-7-0]
+summary: Named worker settings in AppConfig - isolated, shared async and shared thread children, recycling, claim limits, drain timeout and preload - and what horsies check and worker boot validate.
+related: [worker-architecture, shared-async-tasks, shared-thread-tasks, concurrency, ../cli, ../configuration/app-config, ../migrations/migration-to-0-7-0]
 tags: [workers, profiles, configuration, concurrency, recycling, validation]
 ---
 
@@ -79,8 +79,9 @@ A profile sets a number of children for each execution mode. A child never chang
 |------|-------|--------------|
 | isolated | `isolated=IsolatedChildren(count=N)` | one task at a time, in its own process. See [Worker Architecture](worker-architecture) |
 | shared async | `shared_async=SharedAsyncChildren(count=N, seats=K)` | up to K `SHARED_ASYNC` tasks at once, as coroutines on one event loop. See [Shared Async Tasks](shared-async-tasks) |
+| shared thread | `shared_thread=SharedThreadChildren(count=N, seats=K)` | up to K `SHARED_THREAD` tasks at once, each on a thread of its own. See [Shared Thread Tasks](shared-thread-tasks) |
 
-The number of children of a worker is the sum of the per-mode counts. There is no separate total. A profile with only shared async children is valid. A worker with no shared async children runs `SHARED_ASYNC` tasks in isolated children.
+The number of children of a worker is the sum of the per-mode counts. There is no separate total. A profile with only shared children is valid. A worker with no shared async children runs `SHARED_ASYNC` tasks in isolated children, and a worker with no shared thread children runs `SHARED_THREAD` tasks in isolated children.
 
 ```python
 from horsies import SharedAsyncChildren, SharedRecycle
@@ -105,12 +106,13 @@ io_profile = WorkerProfile(
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `isolated` | `IsolatedChildren \| NoIsolatedChildren` | `NoIsolatedChildren()` | The isolated children |
-| `shared_async` | `SharedAsyncChildren \| NoSharedAsyncChildren` | `NoSharedAsyncChildren()` | The shared async children. A profile needs at least one child of either mode |
+| `shared_async` | `SharedAsyncChildren \| NoSharedAsyncChildren` | `NoSharedAsyncChildren()` | The shared async children |
+| `shared_thread` | `SharedThreadChildren \| NoSharedThreadChildren` | `NoSharedThreadChildren()` | The shared thread children. A profile needs at least one child of any mode |
 | `claim` | `ClaimLimits` | `ClaimLimits()` | Limits on the tasks that the worker claims |
 | `drain_timeout` | `timedelta` | 300 seconds | How long a stopping worker waits for running tasks. Above 0, at most 24 hours. See [Graceful Shutdown](worker-architecture#graceful-shutdown) |
 | `preload` | `ChildPreload` | `ChildPreload.LIBRARY` | What a Linux worker imports once before it forks children. See [Preload Parent](worker-architecture#preload-parent) |
 
-`WorkerProfile.child_count()` returns the number of children of the profile. `WorkerProfile.seat_count()` returns the tasks that they run at once: one per isolated child, and `seats` per shared async child.
+`WorkerProfile.child_count()` returns the number of children of the profile. `WorkerProfile.seat_count()` returns the tasks that they run at once: one per isolated child, and `seats` per shared child.
 
 ### `IsolatedChildren`
 
@@ -140,9 +142,19 @@ The worker replaces a child with a new one when either limit is reached. Each ch
 
 `NoSharedAsyncChildren()` states that the profile starts no shared async children.
 
+### `SharedThreadChildren`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `count` | `int` | required | Number of shared thread children, 1 to 1024 |
+| `seats` | `int` | required | Tasks that one child runs at once, 1 to 256. Each seat is an OS thread with a stack of its own |
+| `recycle` | `SharedRecycle` | `SharedRecycle()` | When a child is replaced |
+
+`NoSharedThreadChildren()` states that the profile starts no shared thread children.
+
 ### `SharedRecycle`
 
-A shared async child that reaches a limit closes: it takes no new task, its running tasks finish, then it stops and a new child starts. See [Recycling](shared-async-tasks#recycling).
+A shared child that reaches a limit closes: it takes no new task, its running tasks finish, then it stops and a new child starts. See [Recycling](shared-async-tasks#recycling) and [Recycling](shared-thread-tasks#recycling).
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -199,7 +211,7 @@ A value out of bounds fails where it is built, before the profile is in the dict
 
 ```text
 error[HRS-218]: worker_profiles['batch'].claim.claimed_per_worker: 10 tasks is above the capacity of the worker (4)
-   = note: capacity = 4 children + prefetch_buffer 0
+   = note: capacity = 4 isolated children + prefetch_buffer 0
    = note: the worker never holds more tasks than its capacity, so this limit has no effect
 
    = help:
@@ -217,7 +229,7 @@ worker_pool_size + worker_max_overflow   # parent pool
 + children × worker_child_pool_max_size  # child pools
 ```
 
-The worker process writes the runner heartbeats of its RUNNING tasks over one connection of its own. `children` counts both modes: an isolated child opens a sync pool, and a shared async child opens an async pool of the same size, whatever its seats. At the defaults, a profile of 8 children needs `3 + 2 + 2 + 1 + 8 × 2 = 24`.
+The worker process writes the runner heartbeats of its RUNNING tasks over one connection of its own. `children` counts every mode: an isolated child opens a sync pool, a shared async child opens an async pool of the same size, and a shared thread child opens a sync pool of the same size that its seat threads share, whatever its seats. At the defaults, a profile of 8 children needs `3 + 2 + 2 + 1 + 8 × 2 = 24`.
 
 The server has `max_connections` minus `superuser_reserved_connections` minus `reserved_connections` (PostgreSQL 16 and later) usable slots. `horsies check --live` reports `HRS-219` for each profile above that number. At boot the worker reads the same settings before it builds its children and logs a warning. With `pgbouncer_transaction_mode=True` the pooled connections do not map to server connections, and nothing is compared. See [Remote PostgreSQL](../configuration/remote-postgres#connection-budget).
 

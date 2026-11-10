@@ -1,9 +1,10 @@
 """Per-process connection pools for child worker processes.
 
-An isolated child opens a sync pool (``_initialize_worker_pool``). A shared
-async child opens an async pool on its event loop instead
+An isolated child and a shared thread child open a sync pool
+(``_initialize_worker_pool``); the seat threads of a shared thread child share
+it. A shared async child opens an async pool on its event loop instead
 (``open_shared_async_pool``): its lifecycle writes must not block the loop.
-Both have the size of ``PostgresConfig.worker_child_pool_*``.
+Each has the size of ``PostgresConfig.worker_child_pool_*``.
 """
 
 from __future__ import annotations
@@ -18,9 +19,14 @@ from psycopg_pool import AsyncConnectionPool, ConnectionPool
 CHILD_POOL_MAX_LIFETIME_S: Final = 300.0
 """Each pooled connection of a child is replaced after this time."""
 
-SHARED_POOL_CONNECTION_WAIT_S: Final = 30.0
+CHILD_POOL_CONNECTION_WAIT_S: Final = 30.0
+"""The longest wait of a lifecycle write of a child for a connection of its
+sync pool: the default wait of a psycopg pool. The seat threads of a shared
+thread child can wait for each other here."""
+
+SHARED_POOL_CONNECTION_WAIT_S: Final = CHILD_POOL_CONNECTION_WAIT_S
 """The longest wait of a lifecycle write of a shared async child for a pooled
-connection: the default wait of a psycopg pool, as for an isolated child."""
+connection: the same wait as for the sync pool."""
 
 
 # ---------- Per-process connection pool (initialized in child processes) ----------
@@ -97,6 +103,7 @@ def _initialize_worker_pool(
         max_lifetime=CHILD_POOL_MAX_LIFETIME_S,
         check=check,
         open=True,
+        timeout=CHILD_POOL_CONNECTION_WAIT_S,
         kwargs=dict(connect_kwargs) if connect_kwargs else {},
     )
     atexit.register(_cleanup_worker_pool)

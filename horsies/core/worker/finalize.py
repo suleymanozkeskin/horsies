@@ -74,7 +74,12 @@ from horsies.core.models.tasks import (
     TaskResult,
 )
 from horsies.core.types.result import Err, Ok, Result, is_err
-from horsies.core.worker.child_protocol import SeatRefusal, SeatTask, SeatWork
+from horsies.core.worker.child_protocol import (
+    SeatRefusal,
+    SeatTask,
+    SharedWork,
+    ThreadSeatTask,
+)
 from horsies.core.worker.slots import (
     SHARED_BACKSTOP_MARGIN_S,
     Assigned,
@@ -84,6 +89,7 @@ from horsies.core.worker.slots import (
     KilledBySignal,
     NotDispatched,
     NotRunCause,
+    ChildKilledPastDeadlines,
     SeatDeadlineEnded,
     SeatTaskFinished,
     SharedHandle,
@@ -485,14 +491,15 @@ class FinalizeMixin:
         self,
         handle: SharedHandle,
         task_id: str,
-        work: SeatWork,
+        work: SharedWork,
         claimed_at: Optional[datetime],
     ) -> SharedOutcome | _TimeoutSettled | _AttemptEndUnknown:
         """Wait for the end of a shared task, with one backstop timer.
 
-        The child holds the deadline of the task: it cancels the task at
-        ``timeout_ms`` and reports the end. The parent waits from the
-        placement until ``timeout_ms + cancel_grace_ms`` and
+        The child holds the deadline of the task and reports it at
+        ``timeout_ms``: a shared async child cancels the task, a shared
+        thread child closes. The parent waits from the placement until
+        ``timeout_ms``, plus ``cancel_grace_ms`` for an async task, and
         ``SHARED_BACKSTOP_MARGIN_S`` more; past that it hands the run to
         ``_handle_shared_backstop``, which kills the child only when it is
         frozen. The timer ends when the outcome arrives. A ``SeatRefusal``
@@ -509,12 +516,14 @@ class FinalizeMixin:
                 assert_never(unreachable)
         match work:
             case SeatTask(timeout_ms=timeout_ms, cancel_grace_ms=cancel_grace_ms):
-                pass
+                stop_ms = timeout_ms + cancel_grace_ms
+            case ThreadSeatTask(timeout_ms=timeout_ms):
+                stop_ms = timeout_ms
             case SeatRefusal():
                 return await asyncio.shield(handle.outcome)
             case _ as unreachable:
                 assert_never(unreachable)
-        backstop_s = (timeout_ms + cancel_grace_ms) / 1000.0 + SHARED_BACKSTOP_MARGIN_S
+        backstop_s = stop_ms / 1000.0 + SHARED_BACKSTOP_MARGIN_S
         try:
             return await asyncio.wait_for(
                 asyncio.shield(handle.outcome),
@@ -534,7 +543,7 @@ class FinalizeMixin:
         task_id: str,
         queue_name: str,
         is_workflow_task: bool,
-        work: SeatWork,
+        work: SharedWork,
         *,
         task_name: str,
         claimed_at: Optional[datetime],
@@ -542,10 +551,12 @@ class FinalizeMixin:
         """Finalize a shared task from its outcome.
 
         A result takes the path of an isolated result; the result of a
-        ``SeatRefusal`` is its ``WORKER_SERIALIZATION_ERROR``. A deadline that
-        the child reported ended the task before its row moves: TASK_TIMEOUT,
-        the retry and phase 2 go through ``_record_task_timeout``, the writer
-        of isolated timeouts. The pool refuses a deadline report of a run
+        ``SeatRefusal`` is its ``WORKER_SERIALIZATION_ERROR``. A task that
+        ended after its deadline, and a task whose child was killed when no
+        task in it had time left (``ChildKilledPastDeadlines``, after its
+        exit was seen), ended before its row moves: TASK_TIMEOUT, the retry
+        and phase 2 go through ``_record_task_timeout``, the writer of
+        isolated timeouts. The pool refuses a deadline report of a run
         without a deadline, so a ``SeatRefusal`` never ends that way:
         ``AssertionError``. A lost child takes crash recovery, which writes
         only after the exit of the child was seen.
@@ -563,9 +574,12 @@ class FinalizeMixin:
                     task_name=task_name,
                     claimed_at=claimed_at,
                 )
-            case SeatDeadlineEnded():
+            case SeatDeadlineEnded() | ChildKilledPastDeadlines():
                 match work:
-                    case SeatTask(timeout_ms=timeout_ms):
+                    case (
+                        SeatTask(timeout_ms=timeout_ms)
+                        | ThreadSeatTask(timeout_ms=timeout_ms)
+                    ):
                         pass
                     case SeatRefusal():
                         raise AssertionError(
@@ -608,8 +622,8 @@ class FinalizeMixin:
             case _ as unreachable:
                 assert_never(unreachable)
         reason = (
-            f'Task reached timeout_ms={timeout_ms} on a shared async child, and '
-            'the TASK_TIMEOUT write failed'
+            f'Task reached timeout_ms={timeout_ms} on a shared child, and the '
+            'TASK_TIMEOUT write failed'
         )
         requeue_outcome = await self._recover_worker_future_failure(
             task_id,
