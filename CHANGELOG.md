@@ -115,6 +115,49 @@ and there is no migration contract between pre-1.0 versions.
   - Enqueue refuses, with `INVALID_TASK_OPTIONS`, task options that are not a
     JSON object, and an `execution` or a `cancel_grace_ms` that does not fit
     the rules above.
+- **Shared async children run `SHARED_ASYNC` tasks, many at once.**
+  `WorkerProfile.shared_async` takes `SharedAsyncChildren(count, seats,
+  recycle=SharedRecycle(after_per_seat, above))` or `NoSharedAsyncChildren()`
+  (the default). A shared async child is one process that runs up to `seats`
+  `SHARED_ASYNC` tasks at once, as coroutines on one event loop, from its
+  start to its stop; a free seat takes the next task at once. `count` is 1 to
+  1024 and `seats` is 1 to 1000. A profile with only shared async children is
+  valid. `SharedAsyncChildren`, `NoSharedAsyncChildren`, `SharedRecycle` and
+  `SharedAsyncChildStartHook` are exported from `horsies`.
+  - A worker with shared async children runs each `SHARED_ASYNC` row on a
+    seat, and its isolated children never run one. A worker with none runs
+    `SHARED_ASYNC` rows in isolated children. A new task goes to the open
+    shared child with the fewest tasks in flight.
+  - The child holds the deadline of each task. At `timeout_ms` it cancels
+    the task; when the coroutine has ended, the worker writes `TASK_TIMEOUT`,
+    the retry and the workflow step, and the other tasks of the child
+    continue. A task that returns a value after its deadline fired still
+    fails with `TASK_TIMEOUT`. A child that has not reported the cancel by
+    `timeout_ms + cancel_grace_ms + 5 s` is frozen: the worker kills it, the
+    timed-out task fails with `TASK_TIMEOUT`, and every other task of that
+    child takes the crash path. A task that ignores its cancel keeps its seat
+    until it ends or the worker stops.
+  - A crash or a kill of a shared child ends every task in it, each through
+    crash recovery after the worker saw the exit.
+  - The RUNNING update with the first runner heartbeat and the finalizing
+    marker of a shared task run on an async connection pool that the child
+    opens on its loop, of `worker_child_pool_max_size` connections. The
+    child writes its frames from a thread, so a slow worker never stops the
+    loop. A shared child runs only `async def` tasks: a `SHARED_ASYNC` row
+    whose function is now `def` fails with `WORKER_RESOLUTION_ERROR`.
+  - `@app.on_shared_async_child_start` registers an `async def` hook that
+    runs on the loop of each shared async child before its first task, for
+    long-lived async clients. Same 10 s bound and fail-closed stop as
+    `on_child_process_start`.
+  - Recycling counts per seat: a shared child closes after
+    `after_per_seat.tasks × seats` tasks (default 100 per seat) or when its
+    RSS after a task reaches `above`. A closing child takes no new task, its
+    tasks finish, then a new child starts.
+  - `WorkerProfile.seat_count()` is one per isolated child plus `seats` per
+    shared child. The claim limit check (`HRS-218`) compares with it plus
+    `prefetch_buffer`; the connection check (`HRS-219`) and the memory
+    warning count the shared children; the boot memory guard compares each
+    mode's limit with the baseline of a child of that mode.
 
 ### Changed
 

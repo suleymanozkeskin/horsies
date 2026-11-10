@@ -48,6 +48,7 @@ horsies worker myapp.instance:app --profile default
 - Limits concurrent task execution on this worker
 - Each isolated child handles one task at a time
 - `count` is required, from 1 to 1024
+- A shared async child handles up to `seats` `SHARED_ASYNC` tasks at once. The tasks of a worker at once are its seats: one per isolated child, and `seats` per shared async child. See [Shared Async Tasks](shared-async-tasks)
 
 ## Process Recycling
 

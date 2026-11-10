@@ -1,7 +1,7 @@
 ---
 title: Worker Architecture
 summary: Worker-owned child processes for claiming and executing tasks.
-related: [concurrency, heartbeats-recovery, ../../concepts/architecture]
+related: [concurrency, heartbeats-recovery, shared-async-tasks, ../../concepts/architecture]
 tags: [workers, architecture, child-processes]
 ---
 
@@ -33,8 +33,8 @@ tags: [workers, architecture, child-processes]
 A worker owns one child process per slot:
 
 - **Main process**: Coordinates claiming, dispatching, result handling, and writes the runner heartbeats of the running tasks
-- **Child processes**: Execute task code in isolation, one task at a time
-- **N children**: Set by `IsolatedChildren(count=N)` in the [worker profile](worker-profiles)
+- **Isolated children**: Execute task code in isolation, one task at a time. Set by `IsolatedChildren(count=N)` in the [worker profile](worker-profiles)
+- **Shared async children**: Execute up to `seats` `SHARED_ASYNC` tasks at once, as coroutines on one event loop. Set by `SharedAsyncChildren(count=N, seats=K)`. See [Shared Async Children](#shared-async-children)
 
 Each child:
 
@@ -50,7 +50,7 @@ Benefits:
 
 ## Failure Isolation
 
-Each child holds one task, so a failure stays with that task.
+Each isolated child holds one task, so a failure stays with that task. A shared async child holds the tasks of its seats, so a crash or a kill of it ends every task in it; see [Shared Async Children](#shared-async-children).
 
 | Case | Result |
 | ---- | ------ |
@@ -138,6 +138,29 @@ Main process receives result from child:
 2. Check for retry eligibility
 3. Update task status (COMPLETED or FAILED)
 4. Send NOTIFY for result waiters
+
+## Shared Async Children
+
+A shared async child runs `SHARED_ASYNC` tasks of the claimed rows. It has three threads:
+
+- The control thread reads the frames of the worker. It hands each frame to the event loop, so EOF still means the worker is gone, whatever the loop does.
+- The main thread runs the event loop from the end of the start steps to the stop frame. A run frame starts its task at once on a free seat, as an asyncio task, while other tasks run.
+- The writer thread writes the frames of the child. The loop queues a frame and returns, so a worker that reads slowly never stops the loop.
+
+The start steps, after the import of the app and the `on_child_process_start` hooks: the child opens an async connection pool on its loop, runs the [`on_shared_async_child_start` hooks](child-process-hooks#shared-async-child-start-hooks), and sends its ready frame. Each task then runs on the loop: the RUNNING update with the first runner heartbeat, the task body, and the finalizing marker. Each write goes through the async pool, so no write of the child blocks the loop.
+
+The worker places each `SHARED_ASYNC` task on the open shared child with the fewest tasks in flight and a free seat. Each result frame names its run, and a free seat takes the next queued task at once. The runner heartbeats of every task of the child come from the worker process, as for an isolated child.
+
+| Case | Result |
+| ---- | ------ |
+| A task reaches `timeout_ms` | The child cancels it. When its coroutine has ended, the worker writes `TASK_TIMEOUT`, the retry and the next workflow step. Other tasks of the child continue |
+| A task returns a value after its deadline fired | The outcome is `TASK_TIMEOUT` |
+| The child does not report a cancel by `timeout_ms + cancel_grace_ms + 5 s` | The child is frozen. The worker kills it: the timed-out task fails with `TASK_TIMEOUT`, and every other task of the child takes the crash path |
+| A task ignores its cancel, and the loop runs | The task keeps its seat until it ends or the worker stops |
+| The child crashes or is killed | Every task of the child takes the crash path, after the worker saw the exit. A new child starts |
+| The child reaches a recycle limit | It takes no new task, its tasks finish, then it stops and a new child starts |
+
+At a stop the worker closes each shared child: it takes no new task, and it exits by stop frame when its tasks have ended. At the drain deadline the worker kills a shared child that still runs tasks, and each of them takes the crash path.
 
 ## Child Process Initialization
 
@@ -276,9 +299,9 @@ connection, for the runner heartbeats.
 On SIGTERM/SIGINT the worker:
 
 1. Stops new claims
-2. Returns tasks that wait for a child to `PENDING`, because they have not started
-3. Waits up to the `drain_timeout` of the profile for running tasks (default 300 seconds)
-4. Kills the children that still run a task. Each of these tasks takes the [child crash](heartbeats-recovery#child-process-crash) path
+2. Returns tasks that wait for a child or a seat to `PENDING`, because they have not started
+3. Waits up to the `drain_timeout` of the profile for running tasks (default 300 seconds). A shared async child takes no new task in this time
+4. Kills the children that still run a task. Each of these tasks takes the [child crash](heartbeats-recovery#child-process-crash) path; for a shared async child, every task in it
 5. Waits for pending result writes
 6. Closes database connections
 
