@@ -11,6 +11,8 @@ loop with real child processes is covered in ``test_slot_pool``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import dataclasses
 import threading
 import time
@@ -28,6 +30,7 @@ from horsies.core.worker.child_protocol import (
     RssMb,
     RssReading,
     RunFrame,
+    RunStuckFrame,
     SeatFinished,
     SeatRefusal,
     SeatTask,
@@ -99,7 +102,12 @@ class _ScriptedSeats:
         return None
 
 
-def _frame(dispatch: int, task_name: str, timeout_ms: int = 60_000) -> SharedRunFrame:
+def _frame(
+    dispatch: int,
+    task_name: str,
+    timeout_ms: int = 60_000,
+    grace_ms: int = 1000,
+) -> SharedRunFrame:
     return SharedRunFrame(
         dispatch=dispatch,
         task_id=f'task-{dispatch}',
@@ -109,7 +117,7 @@ def _frame(dispatch: int, task_name: str, timeout_ms: int = 60_000) -> SharedRun
         worker_id='worker-1',
         is_workflow_task=False,
         claimed_at=None,
-        work=SeatTask(timeout_ms=timeout_ms, cancel_grace_ms=1000),
+        work=SeatTask(timeout_ms=timeout_ms, cancel_grace_ms=grace_ms),
     )
 
 
@@ -117,14 +125,30 @@ def _rss() -> RssReading:
     return RssMb(10.0)
 
 
+class _Harness:
+    """A seat loop with a recording writer and scripted seats. ``serve``
+    builds the seat loop on the running loop and marks the runs, as
+    ``_live`` does."""
+
+    def __init__(self, seats: int, started: _ScriptedSeats) -> None:
+        self.seats = seats
+        self.writer = _RecordingWriter()
+        self.started = started
+        self.built: list[SeatLoop] = []
+
+    async def serve(self, inbox: ParentFrameInbox) -> None:
+        seat_loop = SeatLoop(self.seats, self.writer, _rss)  # type: ignore[arg-type]
+        seat_loop.install_marks()
+        self.built.append(seat_loop)
+        await seat_loop.serve(inbox, self.started)
+
+
 def _seat_loop(
     seats: int,
     behaviors: dict[str, Callable[[], Any]],
-) -> tuple[SeatLoop, _RecordingWriter, _ScriptedSeats]:
-    writer = _RecordingWriter()
-    started = _ScriptedSeats(behaviors)
-    loop = SeatLoop(seats, started, writer, _rss)  # type: ignore[arg-type]
-    return loop, writer, started
+) -> tuple[_Harness, _RecordingWriter, _ScriptedSeats]:
+    harness = _Harness(seats, _ScriptedSeats(behaviors))
+    return harness, harness.writer, harness.started
 
 
 async def _until(condition: Callable[[], bool]) -> None:
@@ -351,8 +375,12 @@ class TestDeadline:
         async def scenario() -> None:
             serving = asyncio.ensure_future(seat_loop.serve(inbox))
             inbox.put(refusal)
-            await _until(lambda: 1 in seat_loop._seats)
-            assert seat_loop._seats[1].deadline == shared_child._NoDeadline()
+            await _until(
+                lambda: bool(seat_loop.built) and 1 in seat_loop.built[0]._seats,
+            )
+            seat = seat_loop.built[0]._seats[1]
+            assert seat.stop is shared_child._Stop.NO_DEADLINE
+            assert seat.timer == shared_child._NoTimer()
             release.set()
             await _until(lambda: len(_results(writer)) == 1)
             inbox.put(StopFrame())
@@ -368,6 +396,400 @@ class TestDeadline:
                 rss=RssMb(10.0),
             ),
         ]
+
+
+def _kinds(writer: _RecordingWriter, dispatch: int) -> list[str]:
+    """The kinds of the frames about run ``dispatch``, in order."""
+    return [
+        type(frame).__name__
+        for frame in writer.frames
+        if getattr(frame, 'dispatch', None) == dispatch
+    ]
+
+
+def _run_to_end(
+    behaviors: dict[str, Callable[[], Any]],
+    frames: list[SharedRunFrame],
+    ended: Callable[[_RecordingWriter], bool],
+) -> _RecordingWriter:
+    """Serve ``frames`` until ``ended`` holds, then stop."""
+    harness, writer, _started = _seat_loop(len(frames), behaviors)
+    inbox = ParentFrameInbox()
+
+    async def scenario() -> None:
+        serving = asyncio.ensure_future(harness.serve(inbox))
+        for frame in frames:
+            inbox.put(frame)
+        await _until(lambda: ended(writer))
+        inbox.put(StopFrame())
+        await asyncio.wait_for(serving, RUN_TIMEOUT_S)
+
+    asyncio.run(scenario())
+    return writer
+
+
+def _results_of(count: int) -> Callable[[_RecordingWriter], bool]:
+    return lambda writer: len(_results(writer)) == count
+
+
+DEADLINE_MS = 50
+GRACE_MS = 80
+
+
+class TestTheWorkOfARun:
+    """A run ends when its coroutine and every task and executor item with
+    its mark ended."""
+
+    def test_a_run_waits_for_a_task_it_left(self) -> None:
+        left_done = asyncio.Event()
+
+        async def leave() -> int:
+            async def later() -> None:
+                await asyncio.sleep(0.2)
+                left_done.set()
+
+            _ = asyncio.get_running_loop().create_task(later())
+            return 1
+
+        started = time.monotonic()
+        writer = _run_to_end({'leave': leave}, [_frame(1, 'leave')], _results_of(1))
+
+        assert time.monotonic() - started >= 0.2
+        assert left_done.is_set()
+        assert _results(writer)[0].end == SeatFinished(True, '1', None)
+
+    def test_a_task_built_directly_is_found_by_the_scan(self) -> None:
+        """As aiohttp builds its DNS lookup task: ``asyncio.Task(...)``
+        bypasses the task factory, and still carries the mark."""
+        left_done = asyncio.Event()
+
+        async def leave_direct() -> int:
+            async def later() -> None:
+                await asyncio.sleep(0.2)
+                left_done.set()
+
+            _ = asyncio.Task(later(), loop=asyncio.get_running_loop())
+            return 1
+
+        writer = _run_to_end(
+            {'direct': leave_direct},
+            [_frame(1, 'direct')],
+            _results_of(1),
+        )
+
+        assert left_done.is_set()
+        assert _results(writer)[0].end == SeatFinished(True, '1', None)
+
+    def test_a_run_waits_for_its_executor_work(self) -> None:
+        thread_done = threading.Event()
+
+        def sync_call() -> None:
+            time.sleep(0.2)
+            thread_done.set()
+
+        async def start_thread() -> int:
+            _ = asyncio.get_running_loop().run_in_executor(None, sync_call)
+            return 1
+
+        writer = _run_to_end(
+            {'thread': start_thread},
+            [_frame(1, 'thread')],
+            _results_of(1),
+        )
+
+        assert thread_done.is_set()
+        assert _results(writer)[0].end == SeatFinished(True, '1', None)
+
+    def test_work_with_no_mark_is_not_waited_for(self) -> None:
+        """A task with an empty context, as a start hook creates."""
+        never = asyncio.Event()
+
+        async def leave_unmarked() -> int:
+            _ = asyncio.get_running_loop().create_task(
+                never.wait(),
+                context=contextvars.Context(),
+            )
+            return 1
+
+        writer = _run_to_end(
+            {'unmarked': leave_unmarked},
+            [_frame(1, 'unmarked')],
+            _results_of(1),
+        )
+
+        assert _results(writer)[0].end == SeatFinished(True, '1', None)
+
+    def test_a_neighbour_does_not_wait_for_the_work_of_another_run(self) -> None:
+        release = asyncio.Event()
+
+        async def leave_until_released() -> int:
+            _ = asyncio.get_running_loop().create_task(release.wait())
+            return 1
+
+        async def quick() -> int:
+            return 2
+
+        harness, writer, _started = _seat_loop(
+            2,
+            {'leave': leave_until_released, 'quick': quick},
+        )
+        inbox = ParentFrameInbox()
+
+        async def scenario() -> None:
+            serving = asyncio.ensure_future(harness.serve(inbox))
+            inbox.put(_frame(1, 'leave'))
+            inbox.put(_frame(2, 'quick'))
+            await _until(lambda: len(_results(writer)) == 1)
+            assert _results(writer)[0].dispatch == 2
+            release.set()
+            await _until(lambda: len(_results(writer)) == 2)
+            inbox.put(StopFrame())
+            await asyncio.wait_for(serving, RUN_TIMEOUT_S)
+
+        asyncio.run(scenario())
+
+
+class TestTheStopOfARun:
+    """The steps at T, at T + G, and after the cancel rounds."""
+
+    def test_a_cooperating_task_ends_at_the_first_cancel(self) -> None:
+        async def hang() -> int:
+            await asyncio.Event().wait()
+            return 0
+
+        writer = _run_to_end(
+            {'hang': hang},
+            [_frame(1, 'hang', DEADLINE_MS, GRACE_MS)],
+            _results_of(1),
+        )
+
+        assert _kinds(writer, 1) == ['DeadlineFiredFrame', 'SharedResultFrame']
+        assert _results(writer)[0].end == SeatTimedOut()
+
+    def test_marked_work_after_the_cancel_is_waited_for_within_the_grace(
+        self,
+    ) -> None:
+        """The task ends at the cancel; the shielded call it left ends before
+        T + G, so no second cancel is needed."""
+        inner_done = asyncio.Event()
+
+        async def shielded() -> int:
+            async def inner() -> None:
+                await asyncio.sleep(0.04)
+                inner_done.set()
+
+            await asyncio.shield(asyncio.get_running_loop().create_task(inner()))
+            return 0
+
+        writer = _run_to_end(
+            {'shielded': shielded},
+            [_frame(1, 'shielded', 20, 200)],
+            _results_of(1),
+        )
+
+        assert inner_done.is_set()
+        assert _kinds(writer, 1) == ['DeadlineFiredFrame', 'SharedResultFrame']
+        assert _results(writer)[0].end == SeatTimedOut()
+
+    @pytest.mark.parametrize(
+        'case',
+        ['suppress_then_work', 'shield_then_wait', 'hung_cleanup'],
+    )
+    def test_the_second_cancel_ends_what_the_first_did_not(self, case: str) -> None:
+        async def suppress_then_work() -> int:
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.Event().wait()
+            await asyncio.sleep(30)
+            return 1
+
+        async def shield_then_wait() -> int:
+            inner = asyncio.get_running_loop().create_task(asyncio.sleep(30))
+            try:
+                await asyncio.shield(inner)
+            except asyncio.CancelledError:
+                await inner
+            return 1
+
+        async def hung_cleanup() -> int:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                await asyncio.sleep(30)
+            return 1
+
+        behaviors: dict[str, Callable[[], Any]] = {
+            'suppress_then_work': suppress_then_work,
+            'shield_then_wait': shield_then_wait,
+            'hung_cleanup': hung_cleanup,
+        }
+        writer = _run_to_end(
+            behaviors,
+            [_frame(1, case, DEADLINE_MS, GRACE_MS)],
+            _results_of(1),
+        )
+
+        assert _kinds(writer, 1) == [
+            'DeadlineFiredFrame',
+            'SecondCancelFrame',
+            'SharedResultFrame',
+        ]
+        assert _results(writer)[0].end == SeatTimedOut()
+
+    def test_a_later_round_ends_work_that_the_second_cancel_started(self) -> None:
+        """As an asyncpg pool does: the cancel of one marked task starts a
+        refill task in the run's context. The next round cancels it."""
+        rounds_seen: list[str] = []
+
+        async def refill() -> None:
+            rounds_seen.append('refill started')
+            await asyncio.Event().wait()
+
+        async def release_on_cancel() -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                _ = asyncio.get_running_loop().create_task(refill())
+                raise
+
+        async def with_pool() -> int:
+            holder = asyncio.get_running_loop().create_task(release_on_cancel())
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.Event().wait()
+            await holder
+            return 1
+
+        writer = _run_to_end(
+            {'with_pool': with_pool},
+            [_frame(1, 'with_pool', DEADLINE_MS, GRACE_MS)],
+            _results_of(1),
+        )
+
+        assert rounds_seen == ['refill started']
+        assert _kinds(writer, 1) == [
+            'DeadlineFiredFrame',
+            'SecondCancelFrame',
+            'SharedResultFrame',
+        ]
+
+    def test_a_task_that_swallows_every_cancel_is_reported_stuck(self) -> None:
+        stop = threading.Event()
+
+        async def swallow_all() -> int:
+            give_up_at = time.monotonic() + RUN_TIMEOUT_S
+            while not stop.is_set() and time.monotonic() < give_up_at:
+                try:
+                    await asyncio.sleep(0.01)
+                except asyncio.CancelledError:
+                    continue
+            return 1
+
+        def stuck_then_released(writer: _RecordingWriter) -> bool:
+            if any(isinstance(frame, RunStuckFrame) for frame in writer.frames):
+                stop.set()
+            return len(_results(writer)) == 1
+
+        writer = _run_to_end(
+            {'swallow_all': swallow_all},
+            [_frame(1, 'swallow_all', DEADLINE_MS, GRACE_MS)],
+            stuck_then_released,
+        )
+
+        assert _kinds(writer, 1) == [
+            'DeadlineFiredFrame',
+            'SecondCancelFrame',
+            'RunStuckFrame',
+            'SharedResultFrame',
+        ]
+        stuck = next(f for f in writer.frames if isinstance(f, RunStuckFrame))
+        assert (stuck.tasks, stuck.executor_items) == (1, 0)
+        assert stuck.names == ('_ScriptedSeats.run',)
+        assert _results(writer)[0].end == SeatTimedOut()
+
+    def test_an_executor_thread_that_still_runs_is_stuck(self) -> None:
+        release = threading.Event()
+
+        async def wait_on_thread() -> int:
+            await asyncio.to_thread(release.wait, RUN_TIMEOUT_S)
+            return 1
+
+        def stuck_then_released(writer: _RecordingWriter) -> bool:
+            if any(isinstance(frame, RunStuckFrame) for frame in writer.frames):
+                release.set()
+            return len(_results(writer)) == 1
+
+        writer = _run_to_end(
+            {'thread': wait_on_thread},
+            [_frame(1, 'thread', DEADLINE_MS, GRACE_MS)],
+            stuck_then_released,
+        )
+
+        stuck = next(f for f in writer.frames if isinstance(f, RunStuckFrame))
+        assert (stuck.tasks, stuck.executor_items) == (0, 1)
+        assert _kinds(writer, 1)[-1] == 'SharedResultFrame'
+        assert _results(writer)[0].end == SeatTimedOut()
+
+    def test_a_task_left_after_its_return_past_the_deadline_is_the_timeout(
+        self,
+    ) -> None:
+        """The body returned, but its marked work outlived T: the attempt had
+        not ended, so the outcome is the timeout."""
+
+        async def leave_forever() -> int:
+            _ = asyncio.get_running_loop().create_task(asyncio.Event().wait())
+            return 1
+
+        writer = _run_to_end(
+            {'leave': leave_forever},
+            [_frame(1, 'leave', DEADLINE_MS, GRACE_MS)],
+            _results_of(1),
+        )
+
+        assert _kinds(writer, 1) == [
+            'DeadlineFiredFrame',
+            'SecondCancelFrame',
+            'SharedResultFrame',
+        ]
+        assert _results(writer)[0].end == SeatTimedOut()
+
+    def test_the_stop_of_one_run_leaves_its_neighbour_running(self) -> None:
+        release = asyncio.Event()
+        stop = threading.Event()
+
+        async def swallow_all() -> int:
+            give_up_at = time.monotonic() + RUN_TIMEOUT_S
+            while not stop.is_set() and time.monotonic() < give_up_at:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.sleep(0.01)
+            return 0
+
+        async def hold() -> int:
+            await release.wait()
+            return 5
+
+        harness, writer, _started = _seat_loop(
+            2,
+            {'swallow_all': swallow_all, 'hold': hold},
+        )
+        inbox = ParentFrameInbox()
+
+        async def scenario() -> None:
+            serving = asyncio.ensure_future(harness.serve(inbox))
+            inbox.put(_frame(1, 'swallow_all', DEADLINE_MS, GRACE_MS))
+            inbox.put(_frame(2, 'hold'))
+            await _until(
+                lambda: any(isinstance(f, RunStuckFrame) for f in writer.frames),
+            )
+            release.set()
+            await _until(lambda: len(_results(writer)) == 1)
+            stop.set()
+            await _until(lambda: len(_results(writer)) == 2)
+            inbox.put(StopFrame())
+            await asyncio.wait_for(serving, RUN_TIMEOUT_S)
+
+        asyncio.run(scenario())
+        ends = {frame.dispatch: frame.end for frame in _results(writer)}
+        assert ends == {1: SeatTimedOut(), 2: SeatFinished(True, '5', None)}
+        assert _kinds(writer, 2) == ['SharedResultFrame']
 
 
 class TestParentDefects:

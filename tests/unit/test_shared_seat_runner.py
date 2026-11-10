@@ -93,6 +93,20 @@ async def seat_quick() -> TaskResult[int, TaskError]:
     return TaskResult(ok=1)
 
 
+@APP.task(
+    task_name='seat_cancels_itself',
+    execution=Execution.SHARED_ASYNC,
+    timeout_ms=1000,
+    exception_mapper={asyncio.CancelledError: 'CANCELLED_BY_BODY'},
+)
+async def seat_cancels_itself() -> TaskResult[int, TaskError]:
+    current = asyncio.current_task()
+    assert current is not None
+    current.cancel()
+    await asyncio.sleep(0)
+    return TaskResult(ok=1)
+
+
 def _frame(task_name: str, kwargs: dict[str, Any] | None = None) -> SharedRunFrame:
     return SharedRunFrame(
         dispatch=1,
@@ -234,8 +248,20 @@ def test_a_cancel_of_the_body_ends_the_run_and_writes_the_marker(
         wire = asyncio.run(cancel_after_start())
 
     error = _result(wire, int).unwrap_err()
-    assert error.error_code == OperationalErrorCode.TASK_EXCEPTION
+    assert error.error_code == OperationalErrorCode.UNHANDLED_EXCEPTION
     assert 'CancelledError' in (error.message or '')
+    steps.mark.assert_awaited_once()
+
+
+def test_a_body_that_cancels_its_own_task_goes_through_the_mapper(
+    steps: _Steps,
+) -> None:
+    """No deadline fired: the cancel request is the body's own. The worker
+    maps it through the exception mapper of the task."""
+    wire = _run(_frame('seat_cancels_itself'))
+
+    error = _result(wire, int).unwrap_err()
+    assert error.error_code == 'CANCELLED_BY_BODY'
     steps.mark.assert_awaited_once()
 
 

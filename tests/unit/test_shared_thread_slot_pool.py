@@ -63,6 +63,7 @@ from horsies.core.worker.slots import (
     SlotPoolConfig,
 )
 from horsies.core.worker.stored_timeout import TimeoutValueInvalid
+from horsies.core.worker.shared_stop import RetryPlacement
 from horsies.core.worker.thread_slots import (
     ClosedAtDeadline,
     RunCulprit,
@@ -467,7 +468,9 @@ class TestDeadline:
         old_child = pool._thread_slots[0].child
         assert old_child is not None
 
-        assert await _outcome(late) == SeatDeadlineEnded()
+        assert await _outcome(late) == SeatDeadlineEnded(
+            retry=RetryPlacement.SAME_CLASS,
+        )
         assert await _value(neighbour) == str(old_child.pid)
         next_pid = await _value(pool.submit_shared(_request('pid')))
 

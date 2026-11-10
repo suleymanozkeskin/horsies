@@ -22,6 +22,7 @@ from horsies.core.models.tasks import (
     DEFAULT_CANCEL_GRACE_MS,
     MIN_TASK_TIMEOUT_MS,
     Execution,
+    OperationalErrorCode,
 )
 from horsies.core.models.worker_profile import (
     MemoryLimit,
@@ -30,7 +31,7 @@ from horsies.core.models.worker_profile import (
     SharedRecycle,
 )
 from horsies.core.worker.claim_plan import ClaimPlan, isolated_children_plan
-from horsies.core.types.result import Err, Ok
+from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker import finalize
 from horsies.core.worker.child_protocol import (
     IsolatedChild,
@@ -44,6 +45,7 @@ from horsies.core.worker.dispatch_route import RunIsolated, RunShared, dispatch_
 from horsies.core.worker.runtime import (
     MemoryBaselineExceedsThresholdError,
     _AttemptEndUnknown,
+    _FinalizeError,
     _RequeueOutcome,
     _TimeoutSettled,
     _TimeoutWriteFailed,
@@ -60,11 +62,22 @@ from horsies.core.worker.slots import (
     NotDispatched,
     NotRunCause,
     SeatDeadlineEnded,
+    SeatKilled,
     SeatTaskFinished,
     SharedAnswered,
     SharedHandle,
     SharedRunRequest,
     SlotPool,
+)
+from horsies.core.worker.shared_finalize import (
+    future_retry_data,
+    future_retry_write,
+)
+from horsies.core.worker.shared_stop import (
+    BesideBlockedLoop,
+    BlockedTheLoop,
+    RetryPlacement,
+    TimedOutAtKill,
 )
 from horsies.core.worker.stored_timeout import (
     CancelGraceInvalid,
@@ -429,16 +442,22 @@ class TestFinalizeShared:
             claimed_at=CLAIMED_AT,
         )
 
-    async def test_a_reported_deadline_writes_the_timeout(self) -> None:
+    @pytest.mark.parametrize('retry', list(RetryPlacement))
+    async def test_a_reported_deadline_writes_the_timeout(
+        self,
+        retry: RetryPlacement,
+    ) -> None:
+        """The retry of a run that the child reported stuck runs isolated."""
         worker = self._worker_with_paths()
 
-        result = await self._finalize(worker, SeatDeadlineEnded())
+        result = await self._finalize(worker, SeatDeadlineEnded(retry=retry))
 
         assert result == Ok(None)
         worker._record_task_timeout.assert_awaited_once_with(  # type: ignore[attr-defined]
             'task-1',
             1500,
             CLAIMED_AT,
+            retry=retry,
         )
         worker._recover_worker_future_failure.assert_not_awaited()  # type: ignore[attr-defined]
 
@@ -446,7 +465,10 @@ class TestFinalizeShared:
         worker = self._worker_with_paths()
         worker._record_task_timeout.return_value = _TimeoutWriteFailed()  # type: ignore[attr-defined]
 
-        result = await self._finalize(worker, SeatDeadlineEnded())
+        result = await self._finalize(
+            worker,
+            SeatDeadlineEnded(retry=RetryPlacement.SAME_CLASS),
+        )
 
         assert isinstance(result, Err)
         worker._recover_worker_future_failure.assert_awaited_once()  # type: ignore[attr-defined]
@@ -480,7 +502,11 @@ class TestFinalizeShared:
         refusal = SeatRefusal(refusal=TimeoutValueInvalid(reason='y'))
 
         with pytest.raises(AssertionError, match='deadline it does not have'):
-            await self._finalize(worker, SeatDeadlineEnded(), refusal)
+            await self._finalize(
+                worker,
+                SeatDeadlineEnded(retry=RetryPlacement.SAME_CLASS),
+                refusal,
+            )
 
         worker._record_task_timeout.assert_not_awaited()  # type: ignore[attr-defined]
 
@@ -505,6 +531,155 @@ class TestFinalizeShared:
         worker._record_task_timeout.assert_not_awaited()  # type: ignore[attr-defined]
 
 
+class _KillWrites:
+    """A worker whose writers are mocks, kept typed for the asserts."""
+
+    def __init__(self) -> None:
+        self.worker = _worker()
+        self.timeout = AsyncMock(return_value=_TimeoutSettled())
+        self.recovery = AsyncMock(return_value=_RequeueOutcome.REQUEUED)
+        self.worker._record_task_timeout = self.timeout
+        self.worker._recover_worker_future_failure = self.recovery
+
+    async def finalize(
+        self,
+        verdict: TimedOutAtKill | BlockedTheLoop | BesideBlockedLoop,
+        work: SeatTask | SeatRefusal = SeatTask(timeout_ms=1500, cancel_grace_ms=500),
+    ) -> Result[None, _FinalizeError]:
+        handle = _handle(asyncio.get_running_loop())
+        handle.finish(SeatKilled(verdict=verdict, pid=7, child_exit=KilledBySignal(9)))
+        return await self.worker._finalize_shared_after(
+            handle,
+            'task-1',
+            'default',
+            False,
+            work,
+            task_name='fetch',
+            claimed_at=CLAIMED_AT,
+        )
+
+
+@pytest.mark.asyncio
+class TestFinalizeKilledRun:
+    """The verdicts of a run whose child the worker killed and saw exit."""
+
+    @pytest.mark.parametrize('retry', list(RetryPlacement))
+    async def test_a_run_past_its_deadline_writes_the_timeout(
+        self,
+        retry: RetryPlacement,
+    ) -> None:
+        writes = _KillWrites()
+
+        result = await writes.finalize(TimedOutAtKill(retry=retry))
+
+        assert result == Ok(None)
+        writes.timeout.assert_awaited_once_with(
+            'task-1',
+            1500,
+            CLAIMED_AT,
+            retry=retry,
+        )
+        writes.recovery.assert_not_awaited()
+
+    async def test_the_run_that_blocked_the_loop_retries_isolated(self) -> None:
+        writes = _KillWrites()
+
+        result = await writes.finalize(
+            BlockedTheLoop(blocked_ms=5100, where='app.py:7 in fetch'),
+        )
+
+        assert result == Ok(None)
+        writes.recovery.assert_awaited_once()
+        assert writes.recovery.await_args is not None
+        assert writes.recovery.await_args.kwargs == {
+            'claimed_at': CLAIMED_AT,
+            'failure_code': OperationalErrorCode.TASK_BLOCKED_LOOP,
+            'retry': RetryPlacement.ISOLATED,
+        }
+        assert 'app.py:7 in fetch' in writes.recovery.await_args.args[1]
+        writes.timeout.assert_not_awaited()
+
+    async def test_a_neighbour_of_a_blocked_loop_gets_its_own_code(self) -> None:
+        writes = _KillWrites()
+
+        await writes.finalize(
+            BesideBlockedLoop(holder_task_id='task-9', blocked_ms=5100),
+        )
+
+        assert writes.recovery.await_args is not None
+        assert writes.recovery.await_args.kwargs == {
+            'claimed_at': CLAIMED_AT,
+            'failure_code': OperationalErrorCode.NEIGHBOUR_BLOCKED_LOOP,
+            'retry': RetryPlacement.SAME_CLASS,
+        }
+        assert 'Task task-9 held the event loop' in writes.recovery.await_args.args[1]
+
+    async def test_a_database_error_of_the_write_is_retryable(self) -> None:
+        """The error keeps the verdict, so its retry writes the same code in
+        the same class, not the crash code."""
+        writes = _KillWrites()
+        writes.recovery.return_value = _RequeueOutcome.DB_ERROR
+
+        result = await writes.finalize(
+            BlockedTheLoop(blocked_ms=5100, where='app.py:7 in fetch'),
+        )
+
+        match result:
+            case Err(err_value=error):
+                assert error.retryable is True
+                assert future_retry_write(error.data) == (
+                    OperationalErrorCode.TASK_BLOCKED_LOOP,
+                    RetryPlacement.ISOLATED,
+                )
+            case Ok():
+                raise AssertionError(result)
+
+    async def test_the_retry_of_a_failed_kill_write_writes_the_same_verdict(
+        self,
+    ) -> None:
+        writes = _KillWrites()
+        error = writes.worker._make_finalize_error(
+            task_id='task-1',
+            stage='future',
+            message='kill write failed',
+            retryable=True,
+            data=future_retry_data(
+                OperationalErrorCode.NEIGHBOUR_BLOCKED_LOOP,
+                RetryPlacement.SAME_CLASS,
+                CLAIMED_AT,
+            ),
+        )
+
+        await writes.worker._retry_finalize_future(error, 0.0)
+
+        assert writes.recovery.await_args is not None
+        assert writes.recovery.await_args.kwargs == {
+            'claimed_at': CLAIMED_AT,
+            'failure_code': OperationalErrorCode.NEIGHBOUR_BLOCKED_LOOP,
+            'retry': RetryPlacement.SAME_CLASS,
+        }
+
+    async def test_a_crash_error_retries_as_a_crash(self) -> None:
+        assert future_retry_write({'claimed_at': None}) == (
+            OperationalErrorCode.WORKER_CRASHED,
+            RetryPlacement.SAME_CLASS,
+        )
+        assert future_retry_write(None) == (
+            OperationalErrorCode.WORKER_CRASHED,
+            RetryPlacement.SAME_CLASS,
+        )
+
+    async def test_a_refusal_past_a_deadline_is_a_defect(self) -> None:
+        """A refusal has no deadline, so the slot never gives this verdict."""
+        writes = _KillWrites()
+
+        with pytest.raises(AssertionError, match='deadline it does not have'):
+            await writes.finalize(
+                TimedOutAtKill(retry=RetryPlacement.SAME_CLASS),
+                SeatRefusal(refusal=TimeoutValueInvalid(reason='y')),
+            )
+
+
 @pytest.mark.asyncio
 class TestBackstopTimer:
     async def test_the_backstop_runs_after_the_deadline_and_the_grace(
@@ -515,29 +690,23 @@ class TestBackstopTimer:
         the test waits 0.1 s."""
         monkeypatch.setattr(finalize, 'SHARED_BACKSTOP_MARGIN_S', -1.4)
         worker = _worker()
-        worker._handle_shared_backstop = AsyncMock(
-            return_value=_TimeoutSettled(),
+        killed = SeatKilled(
+            verdict=TimedOutAtKill(retry=RetryPlacement.SAME_CLASS),
+            pid=7,
+            child_exit=KilledBySignal(9),
         )
+        worker._handle_shared_backstop = AsyncMock(return_value=killed)
         handle = _handle(asyncio.get_running_loop())
         handle.assigned.set_result(Assigned())
         loop = asyncio.get_running_loop()
         started = loop.time()
+        work = SeatTask(timeout_ms=1000, cancel_grace_ms=500)
 
-        outcome = await worker._await_shared_outcome(
-            handle,
-            'task-1',
-            SeatTask(timeout_ms=1000, cancel_grace_ms=500),
-            CLAIMED_AT,
-        )
+        outcome = await worker._await_shared_outcome(handle, 'task-1', work)
 
-        assert outcome == _TimeoutSettled()
+        assert outcome == killed
         assert 0.05 <= loop.time() - started < 1.0
-        worker._handle_shared_backstop.assert_awaited_once_with(
-            handle,
-            'task-1',
-            1000,
-            CLAIMED_AT,
-        )
+        worker._handle_shared_backstop.assert_awaited_once_with(handle, 'task-1', work)
 
     async def test_an_outcome_before_the_backstop_removes_the_timer(self) -> None:
         worker = _worker()
@@ -550,18 +719,41 @@ class TestBackstopTimer:
             handle,
             'task-1',
             SeatTask(timeout_ms=1000, cancel_grace_ms=500),
-            CLAIMED_AT,
         )
 
         assert outcome == finished
         worker._handle_shared_backstop.assert_not_awaited()
 
-    async def test_a_refusal_has_no_backstop(
+    async def test_a_refusal_has_its_own_backstop(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """No task code runs, so the parent waits for the outcome, as for an
-        isolated refusal; a backstop at the cut margin would fire at once."""
+        """A refusal has no deadline. A child that freezes while it holds only
+        refusals is still ended: at the refusal backstop, cut here to 0.05 s."""
+        monkeypatch.setattr(finalize, 'SHARED_REFUSAL_BACKSTOP_S', 0.05)
+        worker = _worker()
+        lost = ChildLost(LossCause.KILLED_BY_PARENT, KilledBySignal(9), False, 7)
+        worker._handle_shared_backstop = AsyncMock(return_value=lost)
+        handle = _handle(asyncio.get_running_loop())
+        handle.assigned.set_result(Assigned())
+        refusal = SeatRefusal(refusal=TimeoutValueInvalid(reason='y'))
+
+        outcome = await asyncio.wait_for(
+            worker._await_shared_outcome(handle, 'task-1', refusal),
+            timeout=5.0,
+        )
+
+        assert outcome == lost
+        worker._handle_shared_backstop.assert_awaited_once_with(
+            handle,
+            'task-1',
+            refusal,
+        )
+
+    async def test_a_refusal_that_ends_before_its_backstop_is_not_killed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         monkeypatch.setattr(finalize, 'SHARED_BACKSTOP_MARGIN_S', -100.0)
         worker = _worker()
         worker._handle_shared_backstop = AsyncMock()
@@ -574,7 +766,6 @@ class TestBackstopTimer:
             handle,
             'task-1',
             SeatRefusal(refusal=TimeoutValueInvalid(reason='y')),
-            CLAIMED_AT,
         )
 
         assert outcome == finished
@@ -583,24 +774,35 @@ class TestBackstopTimer:
 
 @pytest.mark.asyncio
 class TestBackstopDecision:
+    WORK = SeatTask(timeout_ms=1000, cancel_grace_ms=500)
+
     async def _backstop(self, worker: Worker, kill: Any, handle: SharedHandle) -> Any:
         handle.backstop_kill = AsyncMock(return_value=kill)
-        return await worker._handle_shared_backstop(handle, 'task-1', 1000, CLAIMED_AT)
+        return await worker._handle_shared_backstop(handle, 'task-1', self.WORK)
 
-    async def test_a_frozen_child_killed_and_seen_exiting_writes_the_timeout(
+    async def test_a_frozen_child_killed_and_seen_exiting_gives_the_slot_verdict(
         self,
     ) -> None:
+        """The slot answers each run of the killed child; this run is past its
+        deadline, so its verdict is the timeout. Nothing is written here."""
         worker = _worker()
-        worker._record_task_timeout = AsyncMock(return_value=_TimeoutSettled())
+        worker._record_task_timeout = AsyncMock()
+        handle = _handle(asyncio.get_running_loop())
+        killed = SeatKilled(
+            verdict=TimedOutAtKill(retry=RetryPlacement.SAME_CLASS),
+            pid=7,
+            child_exit=KilledBySignal(9),
+        )
+        handle.finish(killed)
 
         outcome = await self._backstop(
             worker,
             ChildEnded(pid=7, child_exit=KilledBySignal(9)),
-            _handle(asyncio.get_running_loop()),
+            handle,
         )
 
-        assert outcome == _TimeoutSettled()
-        worker._record_task_timeout.assert_awaited_once_with('task-1', 1000, CLAIMED_AT)
+        assert outcome == killed
+        worker._record_task_timeout.assert_not_awaited()
 
     async def test_no_exit_seen_writes_nothing(self) -> None:
         worker = _worker()
@@ -619,15 +821,12 @@ class TestBackstopDecision:
         worker = _worker()
         worker._record_task_timeout = AsyncMock()
         handle = _handle(asyncio.get_running_loop())
-        asyncio.get_running_loop().call_later(
-            0.02,
-            handle.finish,
-            SeatDeadlineEnded(),
-        )
+        ended = SeatDeadlineEnded(retry=RetryPlacement.ISOLATED)
+        asyncio.get_running_loop().call_later(0.02, handle.finish, ended)
 
         outcome = await self._backstop(worker, DeadlineAcknowledged(pid=7), handle)
 
-        assert outcome == SeatDeadlineEnded()
+        assert outcome == ended
         worker._record_task_timeout.assert_not_awaited()
 
     async def test_a_run_that_already_ended_gives_its_outcome(self) -> None:
@@ -641,23 +840,6 @@ class TestBackstopDecision:
         )
 
         assert outcome == finished
-
-    async def test_a_failed_write_after_the_kill_gives_the_loss_of_the_child(
-        self,
-    ) -> None:
-        worker = _worker()
-        worker._record_task_timeout = AsyncMock(return_value=_TimeoutWriteFailed())
-        handle = _handle(asyncio.get_running_loop())
-        lost = ChildLost(LossCause.KILLED_BY_PARENT, KilledBySignal(9), False, 7)
-        handle.finish(lost)
-
-        outcome = await self._backstop(
-            worker,
-            ChildEnded(pid=7, child_exit=KilledBySignal(9)),
-            handle,
-        )
-
-        assert outcome == lost
 
 
 class TestCapacityAndConfig:

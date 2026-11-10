@@ -64,6 +64,14 @@ class OperationalErrorCode(str, Enum):
     # The engine did not start a child workflow, because its depth would
     # pass MAX_SUBWORKFLOW_DEPTH (horsies.core.models.workflow.limits).
     SUBWORKFLOW_DEPTH_LIMIT_REACHED = 'SUBWORKFLOW_DEPTH_LIMIT_REACHED'
+    # This task held the event loop of its shared async child past the block
+    # limit, before its timeout_ms. The worker killed the child; a retry
+    # (only when auto_retry_for names this code) runs in an isolated child.
+    TASK_BLOCKED_LOOP = 'TASK_BLOCKED_LOOP'
+    # Another task held the event loop of this task's shared async child
+    # past the block limit, before this task's timeout_ms. The worker killed
+    # the child. A retry runs only when auto_retry_for names this code.
+    NEIGHBOUR_BLOCKED_LOOP = 'NEIGHBOUR_BLOCKED_LOOP'
 
 
 class ContractCode(str, Enum):
@@ -545,16 +553,27 @@ libraries accept the same declarations.
 """
 
 MIN_CANCEL_GRACE_MS: Final = 100
-"""The smallest `cancel_grace_ms` of a `SHARED_ASYNC` task. Provisional."""
+"""The smallest `cancel_grace_ms` of a `SHARED_ASYNC` task.
 
-MAX_CANCEL_GRACE_MS: Final = 60_000
-"""The largest `cancel_grace_ms` of a `SHARED_ASYNC` task. Provisional."""
+A healthy cleanup after a cancel ended within 15.4 ms in the measured set
+(local network), so this is 6.5 times that. A lower value would send the
+second cancel into healthy cleanups and drop their connections.
+"""
 
-DEFAULT_CANCEL_GRACE_MS: Final = 5_000
+MAX_CANCEL_GRACE_MS: Final = 10_000
+"""The largest `cancel_grace_ms` of a `SHARED_ASYNC` task.
+
+The longest library cleanup with an end in the measured set took 10.0 s
+(psycopg 3.3.6 and later: a 5 s cancel request, then a 5 s drain). A larger
+grace changes no measured outcome; it only keeps a seat longer.
+"""
+
+DEFAULT_CANCEL_GRACE_MS: Final = 1_000
 """The `cancel_grace_ms` that a `SHARED_ASYNC` task gets when it sets none.
 
-Provisional. The task row stores the value in effect when the task was sent,
-so a change of this default does not change rows that are already queued.
+65 times the slowest healthy cleanup in the measured set. The task row
+stores the value in effect when the task was sent, so a change of this
+default does not change rows that are already queued.
 """
 
 
@@ -715,8 +734,10 @@ class TaskOptions(BaseModel):
             subprocesses in its session; retry only happens when
             'TASK_TIMEOUT' is listed in auto_retry_for. Other tasks on the
             worker continue. The worker must start a new child, so timeouts
-            are for exceptional hangs, not routine control flow. The value
-            is from MIN_TASK_TIMEOUT_MS to MAX_TASK_TIMEOUT_MS.
+            are for exceptional hangs, not routine control flow. A
+            SHARED_ASYNC task on a shared async child is cancelled instead,
+            and its child is killed only when no task in it has time left.
+            The value is from MIN_TASK_TIMEOUT_MS to MAX_TASK_TIMEOUT_MS.
         execution: How a worker runs the task (`Execution`). The default is
             `Execution.ISOLATED`.
         cancel_grace_ms: The cancel grace that the task declares, or None

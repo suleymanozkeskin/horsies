@@ -67,6 +67,7 @@ from horsies.core.worker.stored_timeout import (
     TaskTimeout,
     TimeoutValueInvalid,
 )
+from horsies.core.worker.shared_stop import RetryPlacement
 from horsies.core.worker.thread_slots import RunCulprit, ThreadRunRequest
 from horsies.core.worker.worker import Worker
 
@@ -318,18 +319,27 @@ class TestFinalizeThread:
         )
 
     @pytest.mark.parametrize(
-        'outcome',
+        ('outcome', 'retry'),
         [
-            SeatDeadlineEnded(),
-            ChildKilledPastDeadlines(
-                pid=7,
-                child_exit=KilledBySignal(9),
-                culprit=RunCulprit(dispatch=1, task_id='task-1'),
+            (
+                SeatDeadlineEnded(retry=RetryPlacement.SAME_CLASS),
+                RetryPlacement.SAME_CLASS,
             ),
-            ChildKilledPastDeadlines(
-                pid=7,
-                child_exit=KilledBySignal(9),
-                culprit=RunCulprit(dispatch=2, task_id='task-2'),
+            (
+                ChildKilledPastDeadlines(
+                    pid=7,
+                    child_exit=KilledBySignal(9),
+                    culprit=RunCulprit(dispatch=1, task_id='task-1'),
+                ),
+                RetryPlacement.ISOLATED,
+            ),
+            (
+                ChildKilledPastDeadlines(
+                    pid=7,
+                    child_exit=KilledBySignal(9),
+                    culprit=RunCulprit(dispatch=2, task_id='task-2'),
+                ),
+                RetryPlacement.SAME_CLASS,
             ),
         ],
         ids=['ended-after-deadline', 'killed-as-culprit', 'killed-as-neighbour'],
@@ -337,7 +347,10 @@ class TestFinalizeThread:
     async def test_a_task_past_its_deadline_writes_the_timeout(
         self,
         outcome: Any,
+        retry: RetryPlacement,
     ) -> None:
+        """The culprit of the kill, the run whose deadline closed the child,
+        retries in an isolated child."""
         worker = self._worker_with_paths()
 
         result = await self._finalize(worker, outcome)
@@ -347,6 +360,7 @@ class TestFinalizeThread:
             'task-1',
             1500,
             CLAIMED_AT,
+            retry=retry,
         )
         worker._finalize_child_loss.assert_not_awaited()  # type: ignore[attr-defined]
 
@@ -386,7 +400,11 @@ class TestFinalizeThread:
         refusal = SeatRefusal(refusal=TimeoutValueInvalid(reason='y'))
 
         with pytest.raises(AssertionError, match='deadline it does not have'):
-            await self._finalize(worker, SeatDeadlineEnded(), refusal)
+            await self._finalize(
+                worker,
+                SeatDeadlineEnded(retry=RetryPlacement.SAME_CLASS),
+                refusal,
+            )
 
 
 @pytest.mark.asyncio
@@ -405,21 +423,13 @@ class TestBackstopTimer:
         loop = asyncio.get_running_loop()
         started = loop.time()
 
-        outcome = await worker._await_shared_outcome(
-            handle,
-            'task-1',
-            ThreadSeatTask(timeout_ms=1000),
-            CLAIMED_AT,
-        )
+        work = ThreadSeatTask(timeout_ms=1000)
+
+        outcome = await worker._await_shared_outcome(handle, 'task-1', work)
 
         assert outcome == _TimeoutSettled()
         assert 0.05 <= loop.time() - started < 0.5
-        worker._handle_shared_backstop.assert_awaited_once_with(
-            handle,
-            'task-1',
-            1000,
-            CLAIMED_AT,
-        )
+        worker._handle_shared_backstop.assert_awaited_once_with(handle, 'task-1', work)
 
 
 class TestCapacityAndConfig:

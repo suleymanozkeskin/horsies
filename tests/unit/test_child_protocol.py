@@ -29,7 +29,13 @@ from horsies.core.types.result import Err, Ok
 from horsies.core.worker import child_main
 from horsies.core.worker.child_main import _bounded_result
 from horsies.core.worker.child_protocol import (
+    MAX_BLOCKED_WHERE_CHARS,
+    BlockingRun,
+    CulpritUnknown,
     DeadlineFiredFrame,
+    LoopBlockedFrame,
+    RunStuckFrame,
+    SecondCancelFrame,
     IsolatedChild,
     SeatFinished,
     SeatRefusal,
@@ -378,6 +384,91 @@ class TestSharedFrames:
         wire = set(json.loads(_split(encode_parent_frame(_shared_run_frame()))[0]))
         wire -= {'kind', 'args_bytes', 'kwargs_bytes'}
         assert names - {'args_json', 'kwargs_json'} == wire
+
+    @pytest.mark.parametrize(
+        'frame',
+        [
+            SecondCancelFrame(dispatch=3, task_id='task-9'),
+            RunStuckFrame(
+                dispatch=3,
+                task_id='task-9',
+                tasks=2,
+                executor_items=1,
+                names=('fetch', 'refill'),
+            ),
+            RunStuckFrame(
+                dispatch=3,
+                task_id='task-9',
+                tasks=0,
+                executor_items=1,
+                names=(),
+            ),
+            LoopBlockedFrame(
+                culprit=BlockingRun(dispatch=3, task_id='task-9'),
+                blocked_ms=5012,
+                where='app.py:12 in fetch',
+            ),
+            LoopBlockedFrame(culprit=CulpritUnknown(), blocked_ms=5000, where='x'),
+        ],
+    )
+    def test_each_stop_report_round_trips(
+        self,
+        frame: SecondCancelFrame | RunStuckFrame | LoopBlockedFrame,
+    ) -> None:
+        meta, body = _split(encode_child_frame(frame))
+        assert body == b''
+        assert decode_child_frame(meta, body) == Ok(frame)
+
+    @pytest.mark.parametrize(
+        ('key', 'value'),
+        [
+            ('tasks', -1),
+            ('tasks', 0),
+            ('executor_items', -1),
+            ('executor_items', True),
+            ('names', ['a']),
+            ('names', ['a', 'b', 'c']),
+            ('names', ['a', 'x' * (MAX_LEFTOVER_NAME_CHARS + 1)]),
+            ('dispatch', 0),
+        ],
+    )
+    def test_every_stuck_report_field_is_checked(self, key: str, value: object) -> None:
+        """``tasks`` 0 here also has ``executor_items`` 0: nothing would be
+        stuck."""
+        frame = RunStuckFrame(
+            dispatch=3,
+            task_id='t',
+            tasks=2,
+            executor_items=0,
+            names=('a', 'b'),
+        )
+        fields = json.loads(_split(encode_child_frame(frame))[0])
+        fields[key] = value
+        if key == 'tasks' and value == 0:
+            fields['names'] = []
+        assert isinstance(decode_child_frame(json.dumps(fields).encode(), b''), Err)
+
+    @pytest.mark.parametrize(
+        ('key', 'value'),
+        [
+            ('culprit', None),
+            ('culprit', {'kind': 'run', 'dispatch': 0, 'task_id': 't'}),
+            ('culprit', {'kind': 'run', 'dispatch': 3}),
+            ('culprit', {'kind': 'other'}),
+            ('blocked_ms', -1),
+            ('blocked_ms', 1.5),
+            ('where', 'x' * (MAX_BLOCKED_WHERE_CHARS + 1)),
+        ],
+    )
+    def test_every_blocked_loop_field_is_checked(
+        self,
+        key: str,
+        value: object,
+    ) -> None:
+        frame = LoopBlockedFrame(culprit=CulpritUnknown(), blocked_ms=5000, where='x')
+        fields = json.loads(_split(encode_child_frame(frame))[0])
+        fields[key] = value
+        assert isinstance(decode_child_frame(json.dumps(fields).encode(), b''), Err)
 
     def test_shared_result_frame_fields(self) -> None:
         names = {field.name for field in dataclasses.fields(SharedResultFrame)}

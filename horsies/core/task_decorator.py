@@ -1640,6 +1640,30 @@ def _async_task_call(
     return call
 
 
+async def await_task_call_in_worker(
+    called: Coroutine[Any, Any, TaskResult[T, TaskError]],
+    map_exception: Callable[[BaseException], TaskResult[T, TaskError]],
+) -> TaskResult[T, TaskError]:
+    """Await the direct call of an `async def` task inside a worker child.
+
+    `called` is the coroutine of the direct call, and `map_exception` the
+    exception mapping of the same task (`_map_exception` of the task
+    function). The direct call maps every exception of the body, but lets a
+    `CancelledError` pass while the awaiting asyncio task has a cancel
+    request. In a worker child that request can come from the body itself:
+    a body that cancels its own task. So the worker maps that
+    `CancelledError` through the exception mappers as well. A cancel that
+    the worker sends at a deadline is mapped the same way here; the worker
+    then drops the result and records `TASK_TIMEOUT`. `KeyboardInterrupt`
+    and `GeneratorExit` propagate. The direct call outside a worker does
+    not change.
+    """
+    try:
+        return await called
+    except asyncio.CancelledError as exc:
+        return map_exception(exc)
+
+
 def _cancel_requested() -> bool:
     """True when the current asyncio task has a cancel request."""
     match asyncio.current_task():
@@ -2946,6 +2970,9 @@ def create_task_wrapper(
                 MappingProxyType(exception_mapper) if exception_mapper is not None else None
             )
             self.default_unhandled_error_code: str | None = default_unhandled_error_code
+            # The exception mapping of this task, for the worker's await of
+            # an async call (`await_task_call_in_worker`).
+            self._map_exception = exception_result
 
         def send(
             self,

@@ -337,9 +337,11 @@ SELECT_WORKER_OWNED_IN_FLIGHT_FOR_UPDATE_SQL = text("""
     FOR UPDATE
 """)
 
-SCHEDULE_TASK_RETRY_SQL = text("""
+# Sets a RUNNING row of this worker PENDING for its retry. ``class_change``
+# is empty, or the SET item that moves the row to another execution class.
+_SCHEDULE_TASK_RETRY_TEMPLATE = """
     UPDATE horsies_tasks
-    SET status = 'PENDING',
+    SET status = 'PENDING',{class_change}
         retry_count = :retry_count,
         next_retry_at = :next_retry_at,
         enqueued_at = :next_retry_at,
@@ -360,7 +362,19 @@ SCHEDULE_TASK_RETRY_SQL = text("""
       AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
       AND (good_until IS NULL OR :next_retry_at < good_until)
     RETURNING id
-""")
+"""
+
+SCHEDULE_TASK_RETRY_SQL = text(_SCHEDULE_TASK_RETRY_TEMPLATE.format(class_change=''))
+
+# The retry of a task that stopped a shared child (it did not stop after its
+# second cancel, or it blocked the event loop) runs in an isolated child: the
+# write that schedules the retry also sets the class. The stored task options
+# keep their class: the column is what the claim reads.
+SCHEDULE_ISOLATED_TASK_RETRY_SQL = text(
+    _SCHEDULE_TASK_RETRY_TEMPLATE.format(
+        class_change=f"\n        execution = '{Execution.ISOLATED.value}',",
+    ),
+)
 
 SCHEDULE_STALE_TASK_RETRY_SQL = text("""
     UPDATE horsies_tasks AS t

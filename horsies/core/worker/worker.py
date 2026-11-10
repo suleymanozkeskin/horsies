@@ -172,6 +172,9 @@ from horsies.core.worker.finalize import (  # noqa: E402
 from horsies.core.worker.health import HealthMixin as HealthMixin  # noqa: E402
 from horsies.core.worker.reaper import ReaperMixin as ReaperMixin  # noqa: E402
 from horsies.core.worker.retrying import RetryMixin as RetryMixin  # noqa: E402
+from horsies.core.worker.shared_finalize import (  # noqa: E402
+    SharedKillFinalizeMixin as SharedKillFinalizeMixin,
+)
 from horsies.core.worker.runtime import (  # noqa: F401,E402
     _FINALIZE_STAGE_PHASE1 as _FINALIZE_STAGE_PHASE1,
     _FINALIZE_STAGE_PHASE2 as _FINALIZE_STAGE_PHASE2,
@@ -261,7 +264,13 @@ def _check_baseline_against(
 
 
 class Worker(
-    ClaimMixin, DispatchMixin, FinalizeMixin, HealthMixin, ReaperMixin, RetryMixin
+    ClaimMixin,
+    DispatchMixin,
+    FinalizeMixin,
+    HealthMixin,
+    ReaperMixin,
+    RetryMixin,
+    SharedKillFinalizeMixin,
 ):
     """
     Async master that:

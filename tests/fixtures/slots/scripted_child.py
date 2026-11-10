@@ -25,6 +25,8 @@ does.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import ctypes
 import errno
 import gc
@@ -68,6 +70,7 @@ from horsies.core.worker.child_protocol import (
 from horsies.core.worker.shared_child import StartedSeats
 from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
 from horsies.core.utils.loop_runner import in_running_event_loop
+from horsies.core.worker import loop_watchdog as loop_watchdog_module
 from horsies.core.worker import task_loop as task_loop_module
 from horsies.core.worker.task_loop import AsyncTaskPresence, TaskLoop
 
@@ -225,6 +228,9 @@ def _boot(init: InitFrame) -> Result[AsyncTaskPresence, BootFailedFrame]:
         case 'close_timeout':
             # A short close deadline keeps a test of the close bound fast.
             setattr(task_loop_module, 'LOOP_CLOSE_TIMEOUT_S', float(argument))
+        case 'block_limit':
+            # A short block limit keeps a test of the loop watchdog fast.
+            setattr(loop_watchdog_module, 'LOOP_BLOCK_LIMIT_MS', int(argument))
         case _:
             raise AssertionError(mode)
     return Ok(AsyncTaskPresence.HAS_ASYNC_TASKS)
@@ -474,6 +480,36 @@ async def _ignore_every_cancel() -> str:
             continue
 
 
+async def _leave_marked_task(seconds: float) -> str:
+    """Start a task that the run does not await, and return at once. The
+    task carries the mark of the run, so the run ends when it ends."""
+    _kept_tasks.append(asyncio.get_running_loop().create_task(asyncio.sleep(seconds)))
+    return str(os.getpid())
+
+
+async def _leave_direct_task(seconds: float) -> str:
+    """As aiohttp builds its DNS lookup task on Python 3.12 and 3.13: with
+    ``asyncio.Task(...)``, which the task factory does not see."""
+    loop = asyncio.get_running_loop()
+    _kept_tasks.append(asyncio.Task(asyncio.sleep(seconds), loop=loop))
+    return str(os.getpid())
+
+
+async def _thread_outlives_cancel(seconds: float) -> str:
+    """Wait for a sync call in the default executor; a cancel ends the
+    coroutine, and the thread runs on."""
+    await asyncio.to_thread(time.sleep, seconds)
+    return str(os.getpid())
+
+
+async def _suppress_then_work(seconds: float) -> str:
+    """Lose the first cancel with ``suppress``, then work on."""
+    with contextlib.suppress(asyncio.CancelledError):
+        await asyncio.Event().wait()
+    await asyncio.sleep(seconds)
+    return 'late value'
+
+
 async def _stamp(seconds: float) -> str:
     """Sleep on the loop; report when the run started and ended."""
     started = time.time()
@@ -498,10 +534,25 @@ async def _seat_run(frame: SharedRunFrame) -> WireResult:
             return True, await _wait_for_file(argument), None
         case 'swallow_one_cancel':
             return True, await _swallow_one_cancel(float(argument)), None
+        case 'suppress_then_work':
+            return True, await _suppress_then_work(float(argument)), None
+        case 'leave_marked_task':
+            return True, await _leave_marked_task(float(argument)), None
+        case 'leave_direct_task':
+            return True, await _leave_direct_task(float(argument)), None
+        case 'thread_outlives_cancel':
+            return True, await _thread_outlives_cancel(float(argument)), None
         case 'ignore_every_cancel':
             return True, await _ignore_every_cancel(), None
         case 'start_ticker':
-            _kept_tasks.append(asyncio.get_running_loop().create_task(_tick_forever()))
+            # An empty context carries no run mark, as a task that a start
+            # hook creates: the run ends while the ticker runs on.
+            _kept_tasks.append(
+                asyncio.get_running_loop().create_task(
+                    _tick_forever(),
+                    context=contextvars.Context(),
+                ),
+            )
             return True, str(_ticks[0]), None
         case 'read_ticks':
             return True, str(_ticks[0]), None
@@ -510,6 +561,14 @@ async def _seat_run(frame: SharedRunFrame) -> WireResult:
             return True, str(os.getpid()), None
         case 'gil_hang':
             ctypes.PyDLL(None).sleep(3600)
+            return True, str(os.getpid()), None
+        case 'gil_hang_after_cancel':
+            # The loop is alive at the deadline, then frozen by C code that
+            # holds the GIL, so the end of the grace is never reported.
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                ctypes.PyDLL(None).sleep(3600)
             return True, str(os.getpid()), None
         case 'kill_self':
             await asyncio.sleep(float(argument or '0'))

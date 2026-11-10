@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 from datetime import timedelta, timezone
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, assert_never
 
 from horsies.core.codec.json_io import loads_json
 from horsies.core.logging import get_logger
@@ -21,11 +21,13 @@ from horsies.core.models.tasks import OperationalErrorCode
 from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.worker.runtime import _RetryError
+from horsies.core.worker.shared_stop import RetryPlacement
 from horsies.core.worker.sql import (
     GET_TASK_RETRY_CONFIG_SQL,
     GET_TASK_RETRY_INFO_SQL,
     GET_TASK_RETRY_POSTCHECK_SQL,
     NOTIFY_DELAYED_SQL,
+    SCHEDULE_ISOLATED_TASK_RETRY_SQL,
     SCHEDULE_TASK_RETRY_SQL,
 )
 
@@ -151,6 +153,8 @@ class RetryMixin:
         task_id: str,
         session: AsyncSession,
         queue_name: str,
+        *,
+        retry: RetryPlacement = RetryPlacement.SAME_CLASS,
     ) -> Result[Literal['scheduled', 'reaper_reclaimed', 'expired'], _RetryError]:
         """Schedule a task for retry by updating its status and next retry time.
 
@@ -158,6 +162,9 @@ class RetryMixin:
         delayed wake-up notification targets that queue. Fetching it here
         would require a second pooled session while the caller holds one plus
         a row lock — a pool-starvation deadlock under mass failure.
+
+        ``retry`` is ``ISOLATED`` for a task that stopped a shared child: the
+        same statement then writes ``execution = 'ISOLATED'`` on the row.
 
         Returns:
         - Ok('scheduled') when retry was persisted
@@ -232,10 +239,17 @@ class RetryMixin:
                 )
                 return Ok('expired')
 
+        match retry:
+            case RetryPlacement.SAME_CLASS:
+                schedule_sql = SCHEDULE_TASK_RETRY_SQL
+            case RetryPlacement.ISOLATED:
+                schedule_sql = SCHEDULE_ISOLATED_TASK_RETRY_SQL
+            case _ as unreachable:
+                assert_never(unreachable)
         # Update task for retry — guarded by status = 'RUNNING' + ownership
         try:
             res = await session.execute(
-                SCHEDULE_TASK_RETRY_SQL,
+                schedule_sql,
                 {
                     'id': task_id,
                     'wid': self.worker_instance_id,

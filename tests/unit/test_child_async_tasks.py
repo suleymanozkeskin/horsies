@@ -642,6 +642,65 @@ class TestTheSameOutcomesAsASyncTask:
         assert sync_err['message'].replace('sync_', 'async_') == async_err['message']
 
 
+class TestASelfCancel:
+    """A body that cancels its own task ends with a cancel request on that
+    task. The direct call lets that ``CancelledError`` pass; the worker maps
+    it through the exception mappers, as any other exception of the body."""
+
+    @staticmethod
+    def _cancelling_app(mapper: dict[type[BaseException], str]) -> Horsies:
+        app = Horsies(
+            AppConfig(
+                broker=PostgresConfig(
+                    database_url=SecretStr(
+                        'postgresql+psycopg://user:password@localhost/unused'
+                    ),
+                ),
+                exception_mapper=mapper,
+            ),
+        )
+
+        @app.task('async_cancels_itself')
+        async def cancels_itself() -> TaskResult[int, TaskError]:
+            current = asyncio.current_task()
+            assert current is not None
+            current.cancel()
+            await asyncio.sleep(0)
+            return TaskResult(ok=1)
+
+        return app
+
+    def test_the_mapper_names_the_code(self, task_loop: TaskLoop) -> None:
+        app = self._cancelling_app({asyncio.CancelledError: 'CANCELLED_BY_BODY'})
+
+        error = _result(_runner(app, task_loop)('async_cancels_itself'), int).err_value
+
+        assert error is not None
+        assert error.error_code == 'CANCELLED_BY_BODY'
+        assert error.message is not None and 'CancelledError' in error.message
+
+    def test_with_no_mapping_it_gets_the_unhandled_code(
+        self,
+        task_loop: TaskLoop,
+    ) -> None:
+        app = self._cancelling_app({})
+
+        error = _result(_runner(app, task_loop)('async_cancels_itself'), int).err_value
+
+        assert error is not None
+        assert error.error_code == OperationalErrorCode.UNHANDLED_EXCEPTION
+
+    def test_the_direct_call_still_lets_the_cancel_pass(self) -> None:
+        app = self._cancelling_app({asyncio.CancelledError: 'CANCELLED_BY_BODY'})
+        task = app.tasks['async_cancels_itself']
+
+        async def call_directly() -> object:
+            return await task()
+
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(call_directly())
+
+
 class TestWorkflowContext:
     def test_workflow_ctx_reaches_an_async_task(self, task_loop: TaskLoop) -> None:
         app = _app()

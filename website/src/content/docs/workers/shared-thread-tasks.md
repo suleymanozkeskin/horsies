@@ -97,13 +97,13 @@ This worker runs `ISOLATED` tasks in 2 isolated children and `SHARED_THREAD` tas
 The shared thread child holds the deadline of each of its tasks. It starts the deadline when it takes the task. A thread cannot be cancelled, so a deadline cannot stop the task:
 
 1. At `timeout_ms`, the child reports the deadline, and the task runs on. The child closes: it takes no new task, and a new child starts when it has ended.
-2. When no task in the child has time left, that is, when every task still in it is past its own deadline, the worker kills the child with its session, so the subprocesses of its tasks go with it. After the exit, the worker writes `TASK_TIMEOUT`, the retry of the retry policy, and the next workflow step for each of those tasks. A task that is alone in its child is killed at its deadline.
+2. When no task in the child has time left, that is, when every task still in it is past its own deadline, the worker kills the child with its session, so the subprocesses of its tasks go with it. After the exit, the worker writes `TASK_TIMEOUT`, the retry of the retry policy, and the next workflow step for each of those tasks. The task whose deadline closed the child is the culprit: its retry runs in an isolated child, where its own timeout kills only it. A task that is alone in its child is killed at its deadline.
 3. A task in the child that still has time left runs on, to its end or to its own deadline.
 4. A task that ends by itself after its deadline fails with `TASK_TIMEOUT`, also when it returns a value.
 
 The attempt ends before its row moves, so a retry never runs next to the attempt that it replaces. A timeout is terminal by default; add `"TASK_TIMEOUT"` to `auto_retry_for` for a retry.
 
-The worker keeps one more timer per task, at `timeout_ms + 5 seconds`. A child reports each deadline at once, so a child that has not reported the deadline by then is frozen: C code holds the GIL, and no thread of the child runs. The worker kills that child. The timed-out task fails with `TASK_TIMEOUT`, and every other task of that child takes the crash path (`WORKER_CRASHED`, or a retry when its policy names that code). The worker cannot tell which thread held the GIL, so it names no culprit.
+The worker keeps one more timer per task, at `timeout_ms + 10 seconds`. A child reports each deadline at once, so a child that has not reported the deadline by then is frozen: C code holds the GIL, and no thread of the child runs. The worker kills that child. Each task in it that is past its deadline fails with `TASK_TIMEOUT`, and every other task takes the crash path (`WORKER_CRASHED`, or a retry when its policy names that code). The worker cannot tell which thread held the GIL, so it names no culprit.
 
 ## Rules for Task Authors
 
