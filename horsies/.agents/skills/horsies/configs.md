@@ -478,7 +478,7 @@ Runs on `check_interval_ms` cadence:
 
 **Runner heartbeats:** the worker process writes them for each RUNNING task whose child process runs and holds it, fenced on the worker and the claim generation; the child writes only the first one, in the RUNNING transaction. A task that holds the GIL does not delay them, so CPU-bound tasks need no extra margin. Beats end at the kill of the child, its exit, its finalizing mark, or the read of its result. The stale threshold is based on missing runner heartbeats, not total task duration.
 
-**Fail-closed exit:** if the heartbeat thread dies, or no heartbeat lands for half of `running_stale_threshold_ms`, the worker kills every child that holds a task, stops, and exits with code 1 (code 76 if it has not stopped within 120 s). So the reaper does not fail a task that still runs. Under a slow database, raise `running_stale_threshold_ms`.
+**Fail-closed exit:** if the heartbeat thread dies, or no heartbeat lands for half of `running_stale_threshold_ms`, the worker kills every child that holds a task, stops, and exits with code 1 (code 77 if it has not stopped within 120 s). So the reaper does not fail a task that still runs. Under a slow database, raise `running_stale_threshold_ms`.
 
 
 ## RetentionConfig

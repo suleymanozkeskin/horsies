@@ -63,8 +63,9 @@ BEAT_RETRY_MAX_DELAY_S: Final = 5.0
 WATCH_INTERVAL_S: Final = 0.25
 # Time that the worker gets to stop by itself after it failed closed.
 FAIL_CLOSED_EXIT_GRACE_S: Final = 120.0
-# Exit code when the worker failed closed and did not stop within the grace.
-RUNNER_HEARTBEAT_LOST_EXIT_CODE: Final = 76
+# Exit code of the worker process when it failed closed and did not stop
+# within the grace. No other horsies process uses it.
+RUNNER_HEARTBEAT_LOST_EXIT_CODE: Final = 77
 # Bound of each thread join in ``RunnerHeartbeat.stop``.
 THREAD_STOP_JOIN_S: Final = 5.0
 BEAT_THREAD_NAME: Final = 'horsies-runner-heartbeat'

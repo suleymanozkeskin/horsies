@@ -165,7 +165,7 @@ there is no migration contract between pre-1.0 versions.
   thread dies, or no heartbeat lands for half of
   `running_stale_threshold_ms`, the worker logs the cause at critical level,
   kills every child that holds a task, stops, and exits with code 1. It exits
-  with code 76 if it has not stopped 120 s later. A failed write is tried
+  with code 77 if it has not stopped 120 s later. A failed write is tried
   again within that half. Before, the reaper failed such tasks with
   `WORKER_CRASHED` while they still ran, and a retry could run next to them.
   A killed task takes the child crash path, or stale-task recovery when the

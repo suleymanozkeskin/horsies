@@ -48,7 +48,7 @@ The worker fails closed, so the reaper does not fail a task that still runs. If 
 2. Kills every child that holds a task, with its session
 3. Stops, and exits with code 1, so that a supervisor restarts it
 
-If the worker has not stopped 120 seconds later, it exits with code 76. A failed write is tried again within that half, after 0.25 s and then after doubling waits of at most 5 s.
+If the worker has not stopped 120 seconds later, it exits with code 77. A failed write is tried again within that half, after 0.25 s and then after doubling waits of at most 5 s.
 
 Each killed task takes the [child crash](#child-process-crash) path when the worker can still reach the database, and stale RUNNING recovery when it cannot.
 
