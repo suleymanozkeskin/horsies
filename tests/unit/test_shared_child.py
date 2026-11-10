@@ -675,7 +675,8 @@ class TestTheStopOfARun:
         stop = threading.Event()
 
         async def swallow_all() -> int:
-            while not stop.is_set():
+            give_up_at = time.monotonic() + RUN_TIMEOUT_S
+            while not stop.is_set() and time.monotonic() < give_up_at:
                 try:
                     await asyncio.sleep(0.01)
                 except asyncio.CancelledError:
@@ -755,7 +756,8 @@ class TestTheStopOfARun:
         stop = threading.Event()
 
         async def swallow_all() -> int:
-            while not stop.is_set():
+            give_up_at = time.monotonic() + RUN_TIMEOUT_S
+            while not stop.is_set() and time.monotonic() < give_up_at:
                 with contextlib.suppress(asyncio.CancelledError):
                     await asyncio.sleep(0.01)
             return 0

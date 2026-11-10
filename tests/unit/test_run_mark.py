@@ -15,9 +15,11 @@ from horsies.core.worker.run_mark import (
     UNMARKED,
     MarkedWork,
     RunMark,
+    ScanWhen,
     TrackedExecutor,
     mark_of,
 )
+from horsies.core.worker import run_mark
 
 pytestmark = [pytest.mark.unit]
 
@@ -78,13 +80,13 @@ class TestMarkedWork:
             through_factory, built_directly = await own
             neighbour = loop.create_task(gate.wait(), context=_marked(OTHER))
 
-            alive = marked.alive(MARK, own)
+            alive = marked.alive(MARK, own, ScanWhen.ALWAYS)
             assert alive.tasks == frozenset({through_factory, built_directly})
             assert alive.executor_items == 0
-            assert marked.alive(OTHER, neighbour).tasks == frozenset()
+            assert marked.alive(OTHER, neighbour, ScanWhen.ALWAYS).tasks == frozenset()
             gate.set()
             await asyncio.gather(through_factory, built_directly, neighbour)
-            assert marked.alive(MARK, own).is_empty()
+            assert marked.alive(MARK, own, ScanWhen.ALWAYS).is_empty()
 
         _run(scenario())
 
@@ -108,13 +110,13 @@ class TestMarkedWork:
             own = loop.create_task(run_body(), context=_marked(MARK))
             item = await own
             await asyncio.to_thread(started.wait, WAIT_S)
-            assert marked.alive(MARK, own).executor_items == 1
+            assert marked.alive(MARK, own, ScanWhen.ALWAYS).executor_items == 1
             release.set()
             await item
             while not ended:
                 await asyncio.sleep(0.001)
             assert ended == [MARK]
-            assert marked.alive(MARK, own).executor_items == 0
+            assert marked.alive(MARK, own, ScanWhen.ALWAYS).executor_items == 0
 
         _run(scenario())
 
@@ -137,7 +139,7 @@ class TestMarkedWork:
             task = loop.create_task(asyncio.sleep(0), context=_marked(MARK))
             await task
             marked.open(MARK)
-            assert marked.alive(MARK, task).is_empty()
+            assert marked.alive(MARK, task, ScanWhen.ALWAYS).is_empty()
 
         _run(scenario())
 
@@ -164,8 +166,79 @@ class TestMarkedWork:
             own = loop.create_task(gate.wait(), context=_marked(MARK))
             assert own in built
             # The task of the run itself is not its leftover work.
-            assert marked.alive(MARK, own).is_empty()
+            assert marked.alive(MARK, own, ScanWhen.ALWAYS).is_empty()
             gate.set()
             await own
+
+        _run(scenario())
+
+
+class TestTheScan:
+    """The record of the factory spares the scan of the end check."""
+
+    def test_the_end_check_scans_only_when_no_recorded_task_is_alive(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        scans: list[int] = []
+        all_tasks = asyncio.all_tasks
+
+        def counted(
+            loop: asyncio.AbstractEventLoop | None = None,
+        ) -> set[asyncio.Task[Any]]:
+            scans.append(1)
+            return all_tasks(loop)
+
+        monkeypatch.setattr(run_mark.asyncio, 'all_tasks', counted)
+
+        async def scenario() -> None:
+            loop = asyncio.get_running_loop()
+            marked = MarkedWork(loop, lambda _mark: None)
+            marked.install()
+            marked.open(MARK)
+            gate = asyncio.Event()
+            own = loop.create_task(asyncio.sleep(0), context=_marked(MARK))
+            left = loop.create_task(gate.wait(), context=_marked(MARK))
+            await own
+            scans.clear()
+
+            alive = marked.alive(MARK, own, ScanWhen.RECORD_EMPTY)
+
+            assert alive.tasks == frozenset({left})
+            assert scans == []
+            gate.set()
+            await left
+            assert marked.alive(MARK, own, ScanWhen.RECORD_EMPTY).is_empty()
+            assert scans == [1]
+
+        _run(scenario())
+
+    def test_a_cancel_round_scans_each_time(self) -> None:
+        """A recorded live task does not stop the scan that finds a task
+        built directly."""
+
+        async def scenario() -> None:
+            loop = asyncio.get_running_loop()
+            marked = MarkedWork(loop, lambda _mark: None)
+            marked.install()
+            marked.open(MARK)
+            gate = asyncio.Event()
+
+            async def run_body() -> tuple[asyncio.Task[Any], asyncio.Task[Any]]:
+                return loop.create_task(gate.wait()), asyncio.Task(
+                    gate.wait(), loop=loop
+                )
+
+            own = loop.create_task(run_body(), context=_marked(MARK))
+            recorded, direct = await own
+
+            assert marked.alive(MARK, own, ScanWhen.RECORD_EMPTY).tasks == frozenset(
+                {recorded},
+            )
+            assert marked.alive(MARK, own, ScanWhen.ALWAYS).tasks == frozenset(
+                {recorded, direct},
+            )
+            gate.set()
+            await asyncio.gather(recorded, direct)
 
         _run(scenario())

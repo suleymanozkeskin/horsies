@@ -22,6 +22,11 @@ start carries no mark.
 Not seen: threads and processes that a task starts itself, and work in an
 executor that the task created.
 
+The record of the factory spares the scan: the end check of a run scans
+only when no recorded task of the run is alive (``ScanWhen.RECORD_EMPTY``),
+since a run with a live recorded task has not ended. The cancel rounds scan
+each time (``ScanWhen.ALWAYS``): they must reach every live task of the run.
+
 The records hold only live work: a task leaves its record when it is
 garbage collected, and a work item when it ends. A run's records are dropped
 when the run ends.
@@ -36,6 +41,7 @@ import weakref
 from collections.abc import Callable, Coroutine
 from contextvars import ContextVar
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Final, ParamSpec, TypeVar, assert_never
 
 T = TypeVar('T')
@@ -72,6 +78,16 @@ def mark_of(task: asyncio.Task[Any]) -> RunMark | Unmarked:
             return mark
         case _:
             return UNMARKED
+
+
+class ScanWhen(Enum):
+    """When ``MarkedWork.alive`` scans every live task of the loop."""
+
+    RECORD_EMPTY = 'record_empty'
+    """Only when no recorded task of the run is alive: for the end check."""
+
+    ALWAYS = 'always'
+    """At each call: for the cancel rounds and the stuck check."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,17 +211,29 @@ class MarkedWork:
         with self._items_lock:
             del self._items[mark]
 
-    def alive(self, mark: RunMark, own_task: asyncio.Task[Any]) -> AliveWork:
+    def alive(
+        self,
+        mark: RunMark,
+        own_task: asyncio.Task[Any],
+        scan: ScanWhen,
+    ) -> AliveWork:
         """The work of an open run that is still alive, without ``own_task``,
-        the task of the run. Scans every live task of the loop once, and
-        records the marked tasks that the factory did not see."""
+        the task of the run. ``scan`` decides whether one pass over every
+        live task of the loop runs; that pass records the marked tasks that
+        the factory did not see."""
         recorded = self._tasks[mark]
-        for task in asyncio.all_tasks(self._loop):
-            if task not in recorded and mark_of(task) == mark:
-                recorded.add(task)
-        tasks = frozenset(
-            task for task in recorded if not task.done() and task is not own_task
-        )
+        live = {task for task in recorded if not task.done() and task is not own_task}
+        match scan:
+            case ScanWhen.RECORD_EMPTY if live:
+                pass
+            case ScanWhen.RECORD_EMPTY | ScanWhen.ALWAYS:
+                for task in asyncio.all_tasks(self._loop):
+                    if task is not own_task and mark_of(task) == mark:
+                        recorded.add(task)
+                        live.add(task)
+            case _ as unreachable:
+                assert_never(unreachable)
+        tasks = frozenset(live)
         with self._items_lock:
             executor_items = len(self._items[mark])
         return AliveWork(tasks=tasks, executor_items=executor_items)

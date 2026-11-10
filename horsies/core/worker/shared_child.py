@@ -90,7 +90,7 @@ from horsies.core.worker.child_protocol import (
     boot_failed_frame,
 )
 from horsies.core.worker.loop_watchdog import LoopWatchdog
-from horsies.core.worker.run_mark import RUN_MARK, MarkedWork, RunMark
+from horsies.core.worker.run_mark import RUN_MARK, MarkedWork, RunMark, ScanWhen
 from horsies.core.worker.task_loop import TaskLoop, _coroutine_name
 
 logger = get_logger('worker')
@@ -395,7 +395,14 @@ class SeatLoop:
 
     def _ended(self, seat: _Seat) -> bool:
         """Whether the coroutine of the run and all its marked work ended."""
-        return seat.task.done() and self._marked.alive(seat.mark, seat.task).is_empty()
+        return (
+            seat.task.done()
+            and self._marked.alive(
+                seat.mark,
+                seat.task,
+                ScanWhen.RECORD_EMPTY,
+            ).is_empty()
+        )
 
     def _fire(self, dispatch: int) -> None:
         """The deadline of run ``dispatch`` (T): cancel its task, report the
@@ -441,7 +448,7 @@ class SeatLoop:
         rounds after the second cancel are bounded by
         ``EXTRA_CANCEL_ROUNDS``; the stuck check follows the last one."""
         seat = self._seats[dispatch]
-        alive = self._marked.alive(seat.mark, seat.task)
+        alive = self._marked.alive(seat.mark, seat.task, ScanWhen.ALWAYS)
         if seat.task.done() and alive.is_empty():
             seat.timer = _NoTimer()
             self._check_end(dispatch)
@@ -470,7 +477,7 @@ class SeatLoop:
         stuck. It keeps its seat until it ends or the child is killed."""
         seat = self._seats[dispatch]
         seat.timer = _NoTimer()
-        alive = self._marked.alive(seat.mark, seat.task)
+        alive = self._marked.alive(seat.mark, seat.task, ScanWhen.ALWAYS)
         own = () if seat.task.done() else (seat.task,)
         tasks = (*own, *alive.tasks)
         if not tasks and alive.executor_items == 0:
@@ -540,7 +547,7 @@ class SeatLoop:
         seat = self._seats.get(dispatch)
         if seat is None or not seat.task.done():
             return
-        alive = self._marked.alive(seat.mark, seat.task)
+        alive = self._marked.alive(seat.mark, seat.task, ScanWhen.RECORD_EMPTY)
         if not alive.is_empty():
             self._watch(dispatch, seat, alive.tasks)
             return
