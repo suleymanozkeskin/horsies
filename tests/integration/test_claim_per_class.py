@@ -457,6 +457,72 @@ class TestExpiredArm:
         assert not_served == []
         assert served == [(lapsed, 'SHARED_ASYNC')]
 
+    async def test_an_unserved_expired_row_takes_no_budget(
+        self,
+        clean_workflow_tables: None,
+        broker: PostgresBroker,
+        session: AsyncSession,
+    ) -> None:
+        """An expired async row ranks first, and this worker serves only
+        ISOLATED: the one seat goes to the pending isolated row."""
+        await _seed(
+            session,
+            execution='SHARED_ASYNC',
+            priority=1,
+            status='CLAIMED',
+            owner='lapsed-worker',
+            lease='expired',
+        )
+        pending = await _seed(session, execution='ISOLATED', priority=5)
+        await session.commit()
+
+        claimed = await _claim(
+            broker,
+            _params(
+                worker_id=_worker_id(),
+                budgets={'ISOLATED': 1},
+                routes={'ISOLATED': 'ISOLATED'},
+            ),
+        )
+
+        assert claimed == [(pending, 'ISOLATED')]
+
+    async def test_the_expired_arm_takes_only_a_served_class(
+        self,
+        clean_workflow_tables: None,
+        broker: PostgresBroker,
+        session: AsyncSession,
+    ) -> None:
+        """Two expired rows; the async one ranks first and is not served."""
+        await _seed(
+            session,
+            execution='SHARED_ASYNC',
+            priority=1,
+            status='CLAIMED',
+            owner='lapsed-worker',
+            lease='expired',
+        )
+        isolated = await _seed(
+            session,
+            execution='ISOLATED',
+            priority=5,
+            status='CLAIMED',
+            owner='lapsed-worker',
+            lease='expired',
+        )
+        await session.commit()
+
+        claimed = await _claim(
+            broker,
+            _params(
+                worker_id=_worker_id(),
+                budgets={'ISOLATED': 1},
+                routes={'ISOLATED': 'ISOLATED'},
+            ),
+        )
+
+        assert claimed == [(isolated, 'ISOLATED')]
+
 
 class TestLocks:
     async def test_a_claim_locks_only_the_rows_it_takes(
