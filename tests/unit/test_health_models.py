@@ -6,15 +6,32 @@ import pytest
 from pydantic import ValidationError
 
 from horsies.core.codec.json_io import dumps_json, loads_json
+from datetime import datetime, timedelta, timezone
+
+from horsies.core.models.boot_failure import (
+    AppLoadFailed,
+    ClearableBootCause,
+    ResourceShortage,
+    ShortageErrno,
+    SpawnFailed,
+    TaskLoopCreateFailed,
+    ThreadStartRefused,
+)
 from horsies.core.models.health import (
     WORKER_PING_CHANNEL,
+    AllSlotsServing,
     DatabasePing,
+    DownSlot,
+    SlotHealthNotRecorded,
+    SlotsDown,
     WorkerPingRequest,
     WorkerPong,
     WorkerPongPayload,
     WorkerStateSnapshot,
+    parse_slot_health,
+    slots_down_json,
 )
-from horsies.core.types.result import is_ok
+from horsies.core.types.result import Err, Ok, is_ok
 
 
 @pytest.mark.unit
@@ -147,7 +164,120 @@ class TestResultModels:
             cpu_percent=None,
             children_memory_mb=None,
             worker_started_at=now,
+            slot_health=SlotHealthNotRecorded(),
         )
         assert snap.cluster_wide_cap is None
         assert snap.queues == ['default']
         assert snap.tasks_running == 0
+
+
+def _down_slot(slot: int) -> DownSlot:
+    return DownSlot(
+        slot=slot,
+        cause=ResourceShortage(ShortageErrno.EMFILE),
+        detail='OSError: [Errno 24] Too many open files',
+        down_since=datetime(2026, 1, 1, 12, tzinfo=timezone(timedelta(hours=2))),
+        failed_boots=3,
+    )
+
+
+@pytest.mark.unit
+class TestSlotHealth:
+    """The stored ``slots_down`` value and the typed slot health."""
+
+    def test_a_null_value_is_not_recorded(self) -> None:
+        assert parse_slot_health(None, 4) == Ok(SlotHealthNotRecorded())
+
+    def test_an_empty_list_means_every_slot_serves(self) -> None:
+        assert parse_slot_health(slots_down_json([]), 4) == Ok(AllSlotsServing())
+
+    @pytest.mark.parametrize(
+        'cause',
+        [
+            ResourceShortage(ShortageErrno.ENOMEM),
+            TaskLoopCreateFailed(),
+            ThreadStartRefused(),
+            SpawnFailed(),
+        ],
+    )
+    def test_each_cause_that_can_clear_round_trips(
+        self,
+        cause: ClearableBootCause,
+    ) -> None:
+        down = DownSlot(
+            slot=2,
+            cause=cause,
+            detail='x',
+            down_since=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            failed_boots=1,
+        )
+        assert parse_slot_health(slots_down_json([down]), 4) == Ok(SlotsDown((down,)))
+
+    def test_down_slots_come_back_in_slot_order(self) -> None:
+        stored = slots_down_json([_down_slot(3), _down_slot(0)])
+        assert parse_slot_health(stored, 4) == Ok(
+            SlotsDown((_down_slot(0), _down_slot(3))),
+        )
+
+    @pytest.mark.parametrize(
+        ('key', 'value'),
+        [
+            ('slot', 4),
+            ('slot', -1),
+            ('slot', True),
+            ('failed_boots', 0),
+            ('failed_boots', '3'),
+            ('detail', None),
+            ('detail', 'd' * 2401),
+            ('down_since', '2026-01-01T12:00:00'),
+            ('down_since', 'yesterday'),
+            ('cause', {'kind': 'app_load_failed'}),
+            ('cause', {'kind': 'resource_shortage', 'errno': 'ENOENT'}),
+        ],
+        ids=[
+            'slot-past-processes',
+            'slot-negative',
+            'slot-bool',
+            'failed-boots-zero',
+            'failed-boots-text',
+            'detail-missing',
+            'detail-over-bound',
+            'down-since-naive',
+            'down-since-not-iso',
+            'cause-that-repeats',
+            'cause-errno-not-in-table',
+        ],
+    )
+    def test_every_field_is_checked(self, key: str, value: object) -> None:
+        entry = slots_down_json([_down_slot(1)])[0]
+        entry[key] = value
+        assert isinstance(parse_slot_health([entry], 4), Err)
+
+    def test_more_entries_than_processes_is_unreadable(self) -> None:
+        stored = slots_down_json([_down_slot(0), _down_slot(1)])
+        assert isinstance(parse_slot_health(stored, 1), Err)
+
+    def test_one_slot_twice_is_unreadable(self) -> None:
+        stored = slots_down_json([_down_slot(1), _down_slot(1)])
+        assert isinstance(parse_slot_health(stored, 4), Err)
+
+    def test_a_value_that_is_not_a_list_is_unreadable(self) -> None:
+        assert isinstance(parse_slot_health({'slot': 1}, 4), Err)
+
+    def test_the_writer_covers_every_down_slot_field(self) -> None:
+        """A new field must reach the stored value."""
+        import dataclasses
+
+        names = {field.name for field in dataclasses.fields(DownSlot)}
+        assert set(slots_down_json([_down_slot(1)])[0]) == names
+
+    def test_a_cause_that_repeats_cannot_be_written_as_a_down_cause(self) -> None:
+        """The type admits only causes that can clear; a stored one that
+        repeats is refused on read."""
+        entry = slots_down_json([_down_slot(1)])[0]
+        entry['cause'] = {'kind': 'app_load_failed'}
+        match parse_slot_health([entry], 4):
+            case Err(unreadable):
+                assert repr(AppLoadFailed()) in unreadable.reason
+            case other:
+                raise AssertionError(other)

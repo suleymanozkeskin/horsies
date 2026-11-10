@@ -387,6 +387,14 @@ class WorkerStateModel(Base):
         DateTime(timezone=True), nullable=False
     )
 
+    # The slots that were down for a cause that can clear: a JSON array of
+    # {slot, cause, detail, down_since, failed_boots}, empty when none was.
+    # NULL in a row from a worker version that did not record it.
+    slots_down: Mapped[Optional[list[dict[str, Any]]]] = mapped_column(
+        JSONB,
+        nullable=True,
+    )
+
 
 class ScheduleStateModel(Base):
     """Schedule execution state tracking for scheduler service.

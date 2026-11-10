@@ -356,8 +356,11 @@ from sqlalchemy import text
 #      databases no longer build it.
 # v52: horsies_workflow_recovery_failures, the stored count of the workflow
 #      recovery limit.
+# v53: horsies_worker_states.slots_down, the worker slots that were down for a
+#      boot failure cause that can clear. Nullable, no backfill: a row from an
+#      earlier worker did not record it.
 
-SCHEMA_VERSION = 52
+SCHEMA_VERSION = 53
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,
@@ -1150,4 +1153,11 @@ SET_WORKFLOW_SENT_AT_DEFAULT_SQL = text("""
 ADD_WORKER_STATES_CHILDREN_MEMORY_COLUMN_SQL = text("""
     ALTER TABLE horsies_worker_states
     ADD COLUMN IF NOT EXISTS children_memory_mb DOUBLE PRECISION;
+""")
+
+# Migration (v53): the slots that a worker reports as down. Nullable, no
+# backfill: a snapshot written before this column did not record slot health.
+ADD_WORKER_STATES_SLOTS_DOWN_COLUMN_SQL = text("""
+    ALTER TABLE horsies_worker_states
+    ADD COLUMN IF NOT EXISTS slots_down JSONB;
 """)

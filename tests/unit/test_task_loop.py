@@ -628,6 +628,66 @@ class TestClose:
         # The task never ends. Drop it quietly: it is pending on a closed loop.
         kept[0]._log_destroy_pending = False  # pyright: ignore[reportAttributeAccessIssue]
 
+    def test_async_generators_close_after_a_stubborn_leftover(
+        self,
+        task_loop: TaskLoop,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A leftover that ignores the cancel uses all of the close deadline.
+        The async generator step still gets its minimum time, so the
+        ``finally`` of an open generator runs to its end."""
+        monkeypatch.setattr(
+            task_loop_module, 'LOOP_CLOSE_TIMEOUT_S', SHORT_CLOSE_TIMEOUT_S
+        )
+        kept: list[object] = []
+        closed: list[str] = []
+
+        async def ignore_cancel() -> None:
+            while True:
+                try:
+                    await asyncio.sleep(60)
+                except asyncio.CancelledError:
+                    continue
+
+        async def open_generator() -> AsyncIterator[int]:
+            try:
+                yield 1
+                await asyncio.sleep(60)
+            finally:
+                await asyncio.sleep(0.01)
+                closed.append('finally ran')
+
+        async def start() -> None:
+            generator = open_generator()
+            await anext(generator)
+            kept.append(generator)
+            kept.append(asyncio.get_running_loop().create_task(ignore_cancel()))
+            await asyncio.sleep(0)
+
+        task_loop.run(start())
+        with caplog.at_level(logging.WARNING, logger='horsies.worker'):
+            task_loop.close()
+
+        assert closed == ['finally ran']
+        assert 'async generators of the task loop did not shut down' not in caplog.text
+        # The task never ends. Drop it quietly: it is pending on a closed loop.
+        leftover = cast('asyncio.Task[None]', kept[1])
+        leftover._log_destroy_pending = False  # pyright: ignore[reportAttributeAccessIssue]
+
+    def test_close_steps_end_before_the_parent_kills_the_child(self) -> None:
+        """The worst case of the close: the leftovers use the whole deadline,
+        then each later step uses its minimum. It must end before the parent
+        kills a child that has not exited after its stop frame."""
+        from horsies.core.worker.slots import CHILD_STOP_TIMEOUT_S
+
+        worst_case_s = (
+            task_loop_module.LOOP_CLOSE_TIMEOUT_S
+            + task_loop_module.ASYNCGEN_SHUTDOWN_MIN_TIMEOUT_S
+            + task_loop_module.EXECUTOR_SHUTDOWN_MIN_TIMEOUT_S
+        )
+        assert worst_case_s < CHILD_STOP_TIMEOUT_S
+
     def test_close_is_bounded_when_executor_work_does_not_end(
         self,
         task_loop: TaskLoop,
