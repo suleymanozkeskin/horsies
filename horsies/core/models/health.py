@@ -24,6 +24,9 @@ from typing import Any, Final, TypeAlias, assert_never, cast
 
 from pydantic import BaseModel, ConfigDict
 
+from horsies.core.defaults import (
+    WORKER_STATE_LIVE_WINDOW_S as WORKER_STATE_LIVE_WINDOW_S,
+)
 from horsies.core.models.boot_failure import (
     MAX_BOOT_FAILURE_DETAIL_CHARS,
     AppLoadFailed,
@@ -44,13 +47,6 @@ from horsies.core.types.result import Err, Ok, Result
 # ``WorkerPingRequest`` payload; each worker replies on the request's
 # per-request ``reply_channel``.
 WORKER_PING_CHANNEL = 'horsies_worker_ping'
-
-# A worker is live while its latest state snapshot is at most this many
-# seconds old. Each worker writes a snapshot every
-# ``RecoveryConfig.worker_state_snapshot_interval_ms`` (30 s by default), so
-# a live worker at the default interval misses three snapshots before it
-# reads as not live.
-WORKER_STATE_LIVE_WINDOW_S: Final = 120
 
 
 class WorkerPingRequest(BaseModel):

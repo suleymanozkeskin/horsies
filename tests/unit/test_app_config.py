@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib.util
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -18,7 +20,11 @@ from datetime import timedelta
 
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import CustomQueueConfig, QueueMode
-from horsies.core.models.recovery import RecoveryConfig
+from horsies.core.models.health import WORKER_STATE_LIVE_WINDOW_S
+from horsies.core.models.recovery import (
+    WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS,
+    RecoveryConfig,
+)
 from horsies.core.models.retention import RetentionConfig
 from horsies.core.models.schedule import (
     DailySchedule,
@@ -1366,16 +1372,75 @@ class TestWorkerStateSnapshotInterval:
             worker_state_snapshot_interval_ms=1_000,
         ).worker_state_snapshot_interval_ms == 1_000
         assert RecoveryConfig(
-            worker_state_snapshot_interval_ms=300_000,
-        ).worker_state_snapshot_interval_ms == 300_000
+            worker_state_snapshot_interval_ms=60_000,
+        ).worker_state_snapshot_interval_ms == 60_000
 
     def test_below_minimum_rejected(self) -> None:
         with pytest.raises(ValidationError):
             RecoveryConfig(worker_state_snapshot_interval_ms=999)
 
-    def test_above_maximum_rejected(self) -> None:
-        with pytest.raises(ValidationError):
-            RecoveryConfig(worker_state_snapshot_interval_ms=300_001)
+    def test_cap_is_60_seconds_half_the_120_second_live_window(self) -> None:
+        assert WORKER_STATE_LIVE_WINDOW_S == 120
+        assert WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS == 60_000
+
+    def test_cap_follows_the_live_window(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A changed live window moves the cap, so the two cannot drift.
+
+        Loads a second copy of the recovery module while the window reads
+        200 s. The real module and its RecoveryConfig stay untouched.
+        """
+        import horsies.core.defaults as defaults
+        import horsies.core.models.recovery as recovery
+
+        monkeypatch.setattr(defaults, 'WORKER_STATE_LIVE_WINDOW_S', 200)
+        spec = importlib.util.spec_from_file_location(
+            '_recovery_with_a_200_s_live_window',
+            recovery.__file__,
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        monkeypatch.setitem(sys.modules, spec.name, module)
+        spec.loader.exec_module(module)
+
+        assert module.WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS == 100_000
+        accepted = module.RecoveryConfig(worker_state_snapshot_interval_ms=100_000)
+        assert accepted.worker_state_snapshot_interval_ms == 100_000
+        with pytest.raises(ConfigurationError, match='above the cap of 100000ms'):
+            module.RecoveryConfig(worker_state_snapshot_interval_ms=100_001)
+
+    @pytest.mark.parametrize('interval_ms', [60_001, 120_000, 300_000])
+    def test_above_cap_refused_with_field_value_cap_and_reason(
+        self,
+        interval_ms: int,
+    ) -> None:
+        with pytest.raises(ConfigurationError) as exc_info:
+            RecoveryConfig(worker_state_snapshot_interval_ms=interval_ms)
+
+        error = exc_info.value
+        assert type(error) is ConfigurationError
+        assert error.code == ErrorCode.CONFIG_INVALID_RECOVERY
+        assert error.message == (
+            f'worker_state_snapshot_interval_ms={interval_ms}ms '
+            'is above the cap of 60000ms'
+        )
+        notes = ' '.join(error.notes)
+        assert 'half the live window' in notes
+        assert 'WORKER_STATE_LIVE_WINDOW_S=120s' in notes
+        assert 'latest snapshot is inside the live window' in notes
+        assert error.help_text == 'set worker_state_snapshot_interval_ms <= 60000ms'
+
+    def test_above_cap_refused_through_app_config(self) -> None:
+        with pytest.raises(ConfigurationError, match='above the cap of 60000ms'):
+            AppConfig.model_validate(
+                {
+                    'queue_mode': QueueMode.DEFAULT,
+                    'broker': BROKER,
+                    'recovery': {'worker_state_snapshot_interval_ms': 120_000},
+                },
+            )
 
 
 @pytest.mark.unit

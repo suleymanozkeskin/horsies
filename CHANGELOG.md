@@ -385,6 +385,17 @@ and there is no migration contract between pre-1.0 versions.
   - The task of such a slot keeps the row that the earlier scheduler wrote:
     it runs with no timeout, no retries, and as `ISOLATED`. Later slots carry
     the task's options.
+- **Breaking: `RecoveryConfig.worker_state_snapshot_interval_ms` is at most
+  60,000 ms.** A worker is live while its latest snapshot is at most
+  `WORKER_STATE_LIVE_WINDOW_S` (120) seconds old. The cap is half of that
+  window, so a running worker stays live when a snapshot write is late by up
+  to half the window. A larger value raises `ConfigurationError` with
+  `HRS-204` (`CONFIG_INVALID_RECOVERY`); the message names the value, the cap
+  and the window. Before, the bound was
+  300,000 ms, and a value above it raised a pydantic `ValidationError`. An
+  interval above 120,000 ms made a live worker read as not live between its
+  snapshots: the fleet check reported its streams as unserved, and the web UI
+  marked it stale.
 
 ### Removed
 
