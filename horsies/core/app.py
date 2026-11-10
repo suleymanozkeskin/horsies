@@ -88,6 +88,17 @@ from horsies.core.models.workflow.nesting_check import (
 from horsies.core.models.workflow.nodes import stored_kwargs
 from horsies.core.codec.validation_errors import ValueValidationError, exception_text
 from horsies.core.types.result import is_err
+from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.worker_profile import WorkerProfile, profile_path
+from horsies.core.worker.profile_fit import (
+    CONNECTIONS_HELP,
+    ConnectionsExceedServer,
+    ConnectionsFit,
+    ServerConnectionLimit,
+    ServerConnectionLimitUnreadable,
+    compare_connections,
+    read_server_connection_limit,
+)
 
 if TYPE_CHECKING:
     from horsies.core.task_decorator import (
@@ -151,6 +162,34 @@ def _no_location(error: _E) -> _E:
     """
     error.location = None
     return error
+
+
+def _worker_connection_errors(
+    profiles: Mapping[str, WorkerProfile],
+    broker_config: PostgresConfig,
+    limit: ServerConnectionLimit,
+) -> list[HorsiesError]:
+    """One error for each profile that needs more connections than the
+    server has usable slots, in name order."""
+    errors: list[HorsiesError] = []
+    for name in sorted(profiles):
+        match compare_connections(profiles[name], broker_config, limit):
+            case ConnectionsExceedServer() as exceed:
+                errors.append(
+                    _no_location(
+                        ConfigurationError(
+                            message=f'{profile_path(name)}: {exceed.describe()}',
+                            code=ErrorCode.CHECK_WORKER_CONNECTIONS,
+                            notes=[exceed.need.formula()],
+                            help_text=CONNECTIONS_HELP,
+                        )
+                    )
+                )
+            case ConnectionsFit():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
+    return errors
 
 
 class Horsies:
@@ -502,9 +541,11 @@ class Horsies:
             never acts on schedules. Validates timezone, task registration,
             queue, and the kwargs wire contract for each enabled schedule.
         Phase 4 (if live): Broker connectivity — async SELECT 1.
+        Phase 4.1 (if live): Worker connections — each worker profile against
+            the server connection limit. Skipped through a transaction pooler.
 
         Args:
-            live: If True, also check broker connectivity (Phase 4).
+            live: If True, also run the live phases (Phase 4 and 4.1).
 
         Returns:
             List of all HorsiesError instances found across phases.
@@ -554,6 +595,10 @@ class Horsies:
         # Phase 4 (optional): broker connectivity
         if live:
             all_errors.extend(self._check_broker_connectivity())
+            if all_errors:
+                return all_errors
+            # Phase 4.1: worker profiles against the server connection limit
+            all_errors.extend(self._check_worker_connections())
 
         return all_errors
 
@@ -1106,6 +1151,61 @@ class Horsies:
                 )
             )
         return errors
+
+    def _check_worker_connections(self) -> list[HorsiesError]:
+        """Compare each worker profile with the server connection limit.
+
+        One worker of a profile can open its parent pool, its listener and
+        the pools of its children at once. A profile that needs more
+        connections than the server has usable slots is an error here; the
+        worker itself only warns at boot. With no profiles, or through a
+        transaction pooler, nothing is read. Runs after the connectivity
+        phase, so the server answered a moment before.
+        """
+        profiles = self.config.worker_profiles
+        broker_config = self.config.broker
+        if not profiles or broker_config.pgbouncer_transaction_mode:
+            return []
+
+        import asyncio
+
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+        async def _read_limit() -> (
+            ServerConnectionLimit | ServerConnectionLimitUnreadable
+        ):
+            engine_cfg = dict(broker_config.sqlalchemy_engine_kwargs())
+            engine_cfg['connect_args'] = broker_config.pooled_connect_args
+            engine = create_async_engine(
+                broker_config.database_url.get_secret_value(), **engine_cfg
+            )
+            try:
+                return await read_server_connection_limit(
+                    async_sessionmaker(engine, expire_on_commit=False),
+                )
+            finally:
+                await engine.dispose()
+
+        match asyncio.run(_read_limit()):
+            case ServerConnectionLimitUnreadable(reason=reason):
+                return [
+                    _no_location(
+                        ConfigurationError(
+                            message='the server connection limit could not be read',
+                            code=ErrorCode.CHECK_WORKER_CONNECTIONS,
+                            notes=[reason],
+                            help_text=(
+                                'the worker profiles were not compared with '
+                                'max_connections; check that the role can run '
+                                "current_setting('max_connections')"
+                            ),
+                        )
+                    )
+                ]
+            case ServerConnectionLimit() as limit:
+                return _worker_connection_errors(profiles, broker_config, limit)
+            case _ as unreachable:
+                assert_never(unreachable)
 
     def list_tasks(self) -> list[str]:
         """List tasks registered with this app"""

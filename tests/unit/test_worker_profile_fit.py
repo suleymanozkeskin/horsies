@@ -1,6 +1,6 @@
 """Machine and server facts of a worker profile: per-child memory limits
 against the RAM, and the Postgres connections of one worker against the
-server limit."""
+server limit (``horsies check --live``)."""
 
 from __future__ import annotations
 
@@ -14,6 +14,9 @@ import pytest
 from pydantic import SecretStr
 from sqlalchemy.exc import OperationalError
 
+from horsies.core.app import Horsies
+from horsies.core.errors import ErrorCode
+from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.worker_profile import (
     IsolatedChildren,
@@ -168,6 +171,117 @@ class TestConnectionNeed:
         profile = WorkerProfile(isolated=IsolatedChildren(count=8))
         limit = ServerConnectionLimit(max_connections=26, reserved=3)
         assert isinstance(compare_connections(profile, _broker(), limit), ConnectionsFit)
+
+
+def _app(
+    profiles: dict[str, WorkerProfile],
+    **broker_fields: Any,
+) -> Horsies:
+    return Horsies(
+        AppConfig(broker=_broker(**broker_fields), worker_profiles=profiles),
+    )
+
+
+class TestCheckLiveWorkerConnections:
+    """``app.check(live=True)``: each profile against the server limit."""
+
+    def test_a_profile_above_the_limit_is_an_error_with_its_path(self) -> None:
+        app = _app(
+            {
+                'big': WorkerProfile(isolated=IsolatedChildren(count=20)),
+                'small': WorkerProfile(isolated=IsolatedChildren(count=1)),
+            }
+        )
+        reader = mock.AsyncMock(
+            return_value=ServerConnectionLimit(max_connections=30, reserved=3),
+        )
+        with mock.patch('horsies.core.app.read_server_connection_limit', reader):
+            errors = app._check_worker_connections()  # pyright: ignore[reportPrivateUsage]
+
+        assert [error.code for error in errors] == [ErrorCode.CHECK_WORKER_CONNECTIONS]
+        assert errors[0].message == (
+            "worker_profiles['big']: one worker can open 47 Postgres "
+            'connections; the server has 27 usable slots (max_connections 30 '
+            '- reserved 3)'
+        )
+        assert errors[0].notes == [
+            'parent pool 5 + listener 2 + 20 children x worker_child_pool_max_size 2 = 47',
+        ]
+        assert errors[0].location is None
+
+    def test_profiles_that_fit_have_no_error(self) -> None:
+        app = _app({'small': WorkerProfile(isolated=IsolatedChildren(count=1))})
+        reader = mock.AsyncMock(
+            return_value=ServerConnectionLimit(max_connections=100, reserved=3),
+        )
+        with mock.patch('horsies.core.app.read_server_connection_limit', reader):
+            assert app._check_worker_connections() == []  # pyright: ignore[reportPrivateUsage]
+        reader.assert_awaited_once()
+
+    def test_an_unreadable_limit_is_one_error(self) -> None:
+        app = _app({'small': WorkerProfile(isolated=IsolatedChildren(count=1))})
+        reader = mock.AsyncMock(
+            return_value=ServerConnectionLimitUnreadable(reason='OSError: reset'),
+        )
+        with mock.patch('horsies.core.app.read_server_connection_limit', reader):
+            errors = app._check_worker_connections()  # pyright: ignore[reportPrivateUsage]
+        assert [(error.code, error.notes) for error in errors] == [
+            (ErrorCode.CHECK_WORKER_CONNECTIONS, ['OSError: reset']),
+        ]
+
+    def test_no_profiles_reads_nothing(self) -> None:
+        reader = mock.AsyncMock()
+        with mock.patch('horsies.core.app.read_server_connection_limit', reader):
+            assert _app({})._check_worker_connections() == []  # pyright: ignore[reportPrivateUsage]
+        reader.assert_not_awaited()
+
+    def test_a_transaction_pooler_reads_nothing(self) -> None:
+        app = _app(
+            {'small': WorkerProfile(isolated=IsolatedChildren(count=1))},
+            pgbouncer_transaction_mode=True,
+            session_database_url=SecretStr(
+                'postgresql+psycopg://user:pass@localhost:5433/db',
+            ),
+        )
+        reader = mock.AsyncMock()
+        with mock.patch('horsies.core.app.read_server_connection_limit', reader):
+            assert app._check_worker_connections() == []  # pyright: ignore[reportPrivateUsage]
+        reader.assert_not_awaited()
+
+    def test_check_live_runs_the_phase_after_connectivity(self) -> None:
+        app = _app({'big': WorkerProfile(isolated=IsolatedChildren(count=20))})
+        reader = mock.AsyncMock(
+            return_value=ServerConnectionLimit(max_connections=30, reserved=3),
+        )
+        with (
+            mock.patch.object(app, '_check_broker_connectivity', return_value=[]),
+            mock.patch('horsies.core.app.read_server_connection_limit', reader),
+        ):
+            errors = app.check(live=True)
+        assert [error.code for error in errors] == [ErrorCode.CHECK_WORKER_CONNECTIONS]
+
+    def test_check_live_skips_the_phase_when_connectivity_fails(self) -> None:
+        app = _app({'big': WorkerProfile(isolated=IsolatedChildren(count=20))})
+        reader = mock.AsyncMock()
+        connectivity_error = mock.MagicMock(code=ErrorCode.BROKER_INVALID_URL)
+        with (
+            mock.patch.object(
+                app,
+                '_check_broker_connectivity',
+                return_value=[connectivity_error],
+            ),
+            mock.patch('horsies.core.app.read_server_connection_limit', reader),
+        ):
+            errors = app.check(live=True)
+        assert errors == [connectivity_error]
+        reader.assert_not_awaited()
+
+    def test_check_without_live_reads_nothing(self) -> None:
+        app = _app({'big': WorkerProfile(isolated=IsolatedChildren(count=20))})
+        reader = mock.AsyncMock()
+        with mock.patch('horsies.core.app.read_server_connection_limit', reader):
+            assert app.check(live=False) == []
+        reader.assert_not_awaited()
 
 
 def test_no_isolated_children_has_no_memory_sum_to_exceed() -> None:
