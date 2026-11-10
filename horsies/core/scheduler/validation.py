@@ -5,15 +5,17 @@ The checks here are functions of ``(app, schedule_config)`` — they touch no
 broker or engine state — so the same validation runs as a preflight phase in
 ``Horsies.check()`` and as an eager fail-fast guard in ``Scheduler.start()``.
 
-:func:`prepare_schedules` is the one pass: it checks every enabled schedule and
-encodes its kwargs to wire text. ``Scheduler.start()`` raises the first error or
-keeps that text, and the tick does not encode again. ``check`` reports one error
-per bad schedule through :func:`collect_schedule_errors`.
+:func:`prepare_schedules` is the one pass: it checks every enabled schedule,
+encodes its kwargs to wire text, and takes the task's options text.
+``Scheduler.start()`` raises the first error or keeps that text, and the tick
+does not encode again. ``check`` reports one error per bad schedule through
+:func:`collect_schedule_errors`.
 """
 from __future__ import annotations
 
 import inspect
 from collections.abc import Mapping
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, assert_never
 
@@ -44,34 +46,50 @@ from horsies.core.types.result import Err, Ok, Result, is_err
 if TYPE_CHECKING:
     from horsies.core.app import Horsies
 
-type EncodedScheduleKwargs = Mapping[str, str | None]
-"""Kwargs wire text of each enabled schedule by name; None means no kwargs."""
+
+@dataclass(frozen=True, slots=True)
+class PreparedSchedule:
+    """The wire text that every slot of one schedule sends.
+
+    ``kwargs_json`` is the encoded kwargs, or None when the schedule has no
+    kwargs. ``task_options_json`` is the text that the task decorator encoded
+    from the task's options when the task was defined: the text that a plain
+    ``.send()`` of the task stores. It is None only for a task that has no
+    options.
+    """
+
+    kwargs_json: str | None
+    task_options_json: str | None
+
+
+type PreparedSchedules = Mapping[str, PreparedSchedule]
+"""The prepared wire text of each enabled schedule by schedule name."""
 
 
 def prepare_schedules(
     app: Horsies,
     schedule_config: ScheduleConfig,
-) -> Result[EncodedScheduleKwargs, tuple[HorsiesError, ...]]:
-    """Check every enabled schedule once and encode its kwargs.
+) -> Result[PreparedSchedules, tuple[HorsiesError, ...]]:
+    """Check every enabled schedule once and prepare its wire text.
 
     Returns Ok with the wire text of every enabled schedule, or Err with one
     error per invalid schedule in config order. Within a single schedule the
     first failing check wins. Disabled schedules are skipped and have no entry.
     Does no I/O. Validators of the task's parameter types run here, once.
     """
-    encoded_kwargs: dict[str, str | None] = {}
+    prepared: dict[str, PreparedSchedule] = {}
     errors: list[HorsiesError] = []
     for schedule in schedule_config.schedules:
         if not schedule.enabled:
             continue
         match _prepare_schedule(app, schedule):
-            case Ok(kwargs_json):
-                encoded_kwargs[schedule.name] = kwargs_json
+            case Ok(prepared_schedule):
+                prepared[schedule.name] = prepared_schedule
             case Err(error):
                 errors.append(error)
     if errors:
         return Err(tuple(errors))
-    return Ok(MappingProxyType(encoded_kwargs))
+    return Ok(MappingProxyType(prepared))
 
 
 def collect_schedule_errors(
@@ -89,12 +107,26 @@ def collect_schedule_errors(
 def _prepare_schedule(
     app: Horsies,
     schedule: TaskSchedule,
-) -> Result[str | None, HorsiesError]:
-    """Run the schedule checks in order; the first failure wins."""
+) -> Result[PreparedSchedule, HorsiesError]:
+    """Run the schedule checks in order; the first failure wins.
+
+    The options text is not encoded here: the task decorator encoded it once
+    when the task was defined, and a task whose options do not encode is not
+    registered, so the definition checks refuse its schedule.
+    """
     definition_error = _definition_error(app, schedule)
     if definition_error is not None:
         return Err(definition_error)
-    return _encode_schedule_kwargs(app, schedule)
+    match _encode_schedule_kwargs(app, schedule):
+        case Err(kwargs_error):
+            return Err(kwargs_error)
+        case Ok(kwargs_json):
+            return Ok(
+                PreparedSchedule(
+                    kwargs_json=kwargs_json,
+                    task_options_json=app.tasks[schedule.task_name].task_options_json,
+                ),
+            )
 
 
 def _definition_error(

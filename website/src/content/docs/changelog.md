@@ -292,6 +292,22 @@ there is no migration contract between pre-1.0 versions.
   no effect. The bounds of the old flags still apply; new upper bounds are
   1024 children, 2,147,483,647 tasks, 16,777,216 MB and a drain timeout of
   24 hours. Migrating to 0.7.0 has the table from each flag to its field.
+- **Breaking: the enqueue fingerprint of a scheduled run covers the task's
+  options.** A slot keeps its task id, but its `enqueue_sha` changes for
+  every schedule. This includes a task that declares no options, because its
+  stored options text is not null. A slot that a scheduler before this
+  release enqueued, and did not record because it stopped before it saved the
+  schedule state, gets `PAYLOAD_MISMATCH` when this release fires it.
+  - A slot whose task id already holds a different command counts as fired.
+    The scheduler logs one warning, records the run with that task id, and
+    moves to the next slot. In catch-up, the next due slots are enqueued in
+    the same tick. Before, the scheduler logged the slot as a permanent
+    enqueue failure, did not record a run, and stopped the catch-up of that
+    tick at the slot. The same applies when a change to the schedule's kwargs
+    or to the task's options meets a slot that is already enqueued.
+  - The task of such a slot keeps the row that the earlier scheduler wrote:
+    it runs with no timeout, no retries, and as `ISOLATED`. Later slots carry
+    the task's options.
 
 ### Removed
 
@@ -342,6 +358,13 @@ there is no migration contract between pre-1.0 versions.
   so after `running_stale_threshold_ms` the reaper failed the task with
   `WORKER_CRASHED`, and a retry could run next to it. CPU-bound tasks need no
   extra margin in the stale thresholds.
+- **A scheduled run carries the options of its task.** The scheduler
+  enqueued each slot with no task options, so the run had no timeout, no
+  retries (`max_retries` 0), and ran as `ISOLATED`, whatever `timeout_ms`,
+  `retry_policy`, `execution` and `cancel_grace_ms` the task declared. A
+  scheduled run now stores the options text that a plain `.send()` of the
+  task stores, and the worker applies these options. The scheduler takes
+  that text once at start, so every slot of a schedule sends the same text.
 
 ## 0.6.1 — 2026-11-08
 

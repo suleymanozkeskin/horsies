@@ -137,6 +137,16 @@ This prevents duplicate executions when:
 - Multiple schedulers run (advisory locks serialize)
 - Network issues cause delays
 
+### A slot that already has a task
+
+Each slot has a deterministic task id, and the row stores a fingerprint of the enqueue. A scheduler that stops after the enqueue of a slot and before it saves the state fires that slot again at its next start. With the same command, the enqueue returns the existing task. With a different command, the broker returns `PAYLOAD_MISMATCH`. The command is different when the next start runs another horsies version, or when the schedule's kwargs or the task's options changed.
+
+The slot already has its task, so the scheduler counts the slot as fired:
+
+1. It logs one warning that names the schedule, the slot and the task id.
+2. It records the run with that task id and moves to the next slot.
+3. The existing task keeps the command that it was enqueued with.
+
 ### Self-healing state rows
 
 State rows are created at scheduler startup. If a schedule's row
@@ -204,6 +214,12 @@ TaskSchedule(
 ```
 
 The scheduler encodes the kwargs of each schedule once at startup and sends that text for every slot until the next start. A kwargs model field with a `default_factory`, or a validator that reads the clock, runs once per start, not once per fire. If such a validator refuses the value later, the task is enqueued and fails at the worker with `WORKER_SERIALIZATION_ERROR`.
+
+## Task Options
+
+A scheduled run stores the options of its task, as a plain `.send()` of the task does. The worker reads `timeout_ms`, `retry_policy`, `execution` and `cancel_grace_ms` from the row, so a scheduled run gets the same timeout, retries and execution class as a sent one. A schedule has no options of its own: set them on `@app.task()`.
+
+`@app.task()` encodes the options once, when the task is defined. The scheduler takes that text at startup and sends it for every slot until the next start. If the options do not encode, `@app.task()` raises `ValueError` with the task name and the cause, and the task is not registered. `horsies scheduler` then exits 1 at startup: the startup check reports the module import with `MODULE_EXEC_ERROR`, and `Scheduler.start()` refuses the schedule with `TASK_NOT_REGISTERED`.
 
 ## Graceful Shutdown
 

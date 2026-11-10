@@ -716,6 +716,8 @@ All `TaskSchedule.name` values must be unique (HRS-205).
 | `catch_up_missed` | `bool` | `False` | `True`: replay missed runs on restart. `False`: drop missed runs, fire only the most recent due slot |
 | `max_catch_up_runs` | `int` | `100` | 1–10000; max runs per tick during catch-up |
 
+A scheduled run stores the task's options (`timeout_ms`, `retry_policy`, `execution`, `cancel_grace_ms`), as a plain `.send()` does; `TaskSchedule` has no options of its own. A slot whose task id already holds a different command (`PAYLOAD_MISMATCH`: another horsies version, or changed kwargs or options) counts as fired: one warning, the run is recorded, the existing task is kept.
+
 ### Schedule Patterns
 
 Use the smallest pattern that describes the schedule. `HourlySchedule`,
