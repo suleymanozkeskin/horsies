@@ -605,6 +605,7 @@ Config/broker (HRS-200-HRS-299):
 - HRS-215 CONFIG_INVALID_KEEPALIVE
 - HRS-216 CONFIG_INVALID_RETENTION
 - HRS-217 CHECK_LIVE_ASYNC_CONTEXT (check(live=True) called inside a running event loop; the live check did not run)
+- HRS-218 CONFIG_INVALID_WORKER_PROFILE (a worker profile is not valid; the message names the profile and the field path)
 Registry (HRS-300-HRS-399):
 <!-- members: ErrorCode part -->
 - HRS-300 TASK_NOT_REGISTERED
