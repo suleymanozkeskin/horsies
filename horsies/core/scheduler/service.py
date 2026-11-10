@@ -17,13 +17,15 @@ from horsies.core.models.schedule import ScheduleConfig, TaskSchedule
 from horsies.core.errors import ConfigurationError, ErrorCode
 from horsies.core.scheduler.state import ScheduleStateManager
 from horsies.core.scheduler.validation import (
-    EncodedScheduleKwargs,
+    PreparedSchedule,
+    PreparedSchedules,
     prepare_schedules,
 )
 from horsies.core.scheduler.calculator import calculate_next_run, should_run_now
 from horsies.core.logging import get_logger
 from horsies.core.brokers.result_types import (
     BrokerEnqueueError,
+    BrokerPayloadMismatch,
     broker_error_cause,
 )
 from horsies.core.types.error_detail import NoCause
@@ -87,7 +89,7 @@ class Scheduler:
         self._stop = asyncio.Event()
         self._initialized = False
         # Set by start(). The tick reads this text and does not encode.
-        self._encoded_kwargs: EncodedScheduleKwargs = {}
+        self._prepared_schedules: PreparedSchedules = {}
         # 0 -> the next tick runs the missing-row existence check.
         self._ticks_until_existence_check = 0
 
@@ -688,10 +690,10 @@ class Scheduler:
                             )
                             await session.rollback()
                             return
-                        # A permanent error (e.g. PAYLOAD_MISMATCH after a
-                        # deploy changed the schedule's kwargs) can never
-                        # succeed on retry: advance past the doomed slot so
-                        # the schedule does not retry it every tick forever.
+                        # A permanent error (e.g. INVALID_TASK_OPTIONS) can
+                        # never succeed on retry: advance past the doomed
+                        # slot so the schedule does not retry it every tick
+                        # forever.
                         logger.error(
                             f"Schedule '{schedule.name}' enqueue failed (permanent), "
                             f'skipping slot {slot_time}: {err.message}',
@@ -869,37 +871,69 @@ class Scheduler:
         return self.app.validate_queue_name(queue_name)
 
     def _validate_schedules(self) -> None:
-        """Fail fast on the first invalid schedule and keep the encoded kwargs.
+        """Fail fast on the first invalid schedule and keep the prepared text.
 
         Shares :func:`prepare_schedules` with ``Horsies.check()``; ``errors[0]``
         is the first bad schedule in iteration order, preserving the original
         raise-on-first behaviour. ``check`` collects all of them.
         """
         match prepare_schedules(self.app, self.schedule_config):
-            case Ok(encoded_kwargs):
-                self._encoded_kwargs = encoded_kwargs
+            case Ok(prepared_schedules):
+                self._prepared_schedules = prepared_schedules
             case Err(errors):
                 raise errors[0]
 
-    def _stored_kwargs_json(self, schedule: TaskSchedule) -> str | None:
-        """Return the wire text ``start()`` encoded for this schedule.
+    def _prepared_schedule(self, schedule: TaskSchedule) -> PreparedSchedule:
+        """Return the wire text that ``start()`` prepared for this schedule.
 
-        None means the schedule has no kwargs. Raises RuntimeError when
-        ``start()`` did not run: a programming error.
+        Logs the payload size warning when the kwargs text is over
+        ``payload.warn_bytes``. Raises RuntimeError when ``start()`` did not
+        run: a programming error.
         """
-        if schedule.name not in self._encoded_kwargs:
+        if schedule.name not in self._prepared_schedules:
             raise RuntimeError(
-                f"Schedule '{schedule.name}' has no encoded kwargs: start() did not run",
+                f"Schedule '{schedule.name}' has no prepared wire text: start() did not run",
             )
-        kwargs_json = self._encoded_kwargs[schedule.name]
-        if kwargs_json is not None:
+        prepared = self._prepared_schedules[schedule.name]
+        if prepared.kwargs_json is not None:
             warn_if_payload_large(
                 self.app.config.payload,
                 task_name=schedule.task_name,
                 kind='kwargs',
-                encoded_len=len(kwargs_json),
+                encoded_len=len(prepared.kwargs_json),
             )
-        return kwargs_json
+        return prepared
+
+    def _count_existing_slot_as_fired(
+        self,
+        schedule: TaskSchedule,
+        *,
+        slot_time: datetime,
+        task_id: str,
+        result: Result[str, BrokerEnqueueError],
+    ) -> Result[str, BrokerEnqueueError]:
+        """Return Ok(task_id) when the slot's task id already holds another command.
+
+        PAYLOAD_MISMATCH on the deterministic slot task id means a task for
+        this slot is already enqueued, with a different command: an earlier
+        horsies version enqueued it, or the schedule's kwargs or the task's
+        options changed after it was enqueued. The slot has its task, and the
+        same enqueue fails again, so the slot counts as fired: one warning is
+        logged and the caller records the run and moves to the next slot.
+        Every other result is returned unchanged. Does no I/O.
+        """
+        match result:
+            case Err(BrokerPayloadMismatch(message=message)):
+                logger.warning(
+                    f"Schedule '{schedule.name}' slot {slot_time} already has "
+                    f'task {task_id} with a different command (an earlier '
+                    f"horsies version, or a change to the schedule's kwargs or "
+                    f"the task's options); the slot counts as fired and is not "
+                    f'enqueued again: {message}',
+                )
+                return Ok(task_id)
+            case _:
+                return result
 
     async def _enqueue_scheduled_task(
         self,
@@ -911,12 +945,16 @@ class Scheduler:
 
         Uses a deterministic task_id derived from the schedule name and slot_time.
         sent_at is set to slot_time (the logical schedule slot), not wall clock.
-        This ensures crash-and-retry produces the same task_id + same SHA,
-        making the INSERT idempotent via ON CONFLICT DO NOTHING.
+        The row stores the task's options text, as a plain ``.send()`` does,
+        and the fingerprint covers it. This ensures crash-and-retry produces
+        the same task_id + same SHA, making the INSERT idempotent via ON
+        CONFLICT DO NOTHING.
 
-        Returns Ok(task_id) on success, Err(BrokerEnqueueError) on broker failure.
-        Raises ValueError/RuntimeError for programming errors (missing task,
-        bad queue, start() not run).
+        Returns Ok(task_id) when the slot's task is enqueued, or already
+        exists (with the same command, or with a different command; see
+        ``_count_existing_slot_as_fired``). Returns Err(BrokerEnqueueError)
+        on any other broker failure. Raises ValueError/RuntimeError for
+        programming errors (missing task, bad queue, start() not run).
         """
         if not self.broker:
             raise RuntimeError('Broker not initialized')
@@ -937,9 +975,10 @@ class Scheduler:
 
         # Schedules are kwargs-only (TaskSchedule has no args field); the wire
         # carries no positional representation, matching the `.send()` contract.
-        # start() encoded the kwargs once, so a slot has no refusal of its own
-        # and a retry of the slot sends the same text.
-        kwargs_json = self._stored_kwargs_json(schedule)
+        # start() prepared the kwargs and the task's options text once, so a
+        # slot has no refusal of its own and a retry of the slot sends the
+        # same text.
+        prepared = self._prepared_schedule(schedule)
 
         # Deterministic sent_at — same slot produces same SHA across ticks.
         sent_at = slot_time
@@ -949,11 +988,11 @@ class Scheduler:
             queue_name=validated_queue_name,
             priority=priority,
             args_json=None,
-            kwargs_json=kwargs_json,
+            kwargs_json=prepared.kwargs_json,
             sent_at=sent_at,
             good_until=None,
             enqueue_delay_seconds=None,
-            task_options=None,
+            task_options=prepared.task_options_json,
         )
 
         # A fired slot lands on a queue like any other task, so the
@@ -966,14 +1005,21 @@ class Scheduler:
             validated_queue_name,
         )
 
-        return await self.broker.enqueue_async(
+        result = await self.broker.enqueue_async(
             task_name=schedule.task_name,
             queue_name=validated_queue_name,
             task_id=task_id,
             enqueue_sha=enqueue_sha,
             args_json=None,
-            kwargs_json=kwargs_json,
+            kwargs_json=prepared.kwargs_json,
             priority=priority,
             sent_at=sent_at,
+            task_options=prepared.task_options_json,
             retention_class_key=retention_class_key,
+        )
+        return self._count_existing_slot_as_fired(
+            schedule,
+            slot_time=slot_time,
+            task_id=task_id,
+            result=result,
         )
