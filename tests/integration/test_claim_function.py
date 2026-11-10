@@ -112,6 +112,8 @@ def _probe(broker: PostgresBroker, **cfg_kwargs: Any) -> ClaimMixin:
             self.sf = current_resources(broker).session_factory
             self.cfg = cfg
             self.worker_instance_id = f'probe-{uuid.uuid4().hex[:8]}'
+            # No task is registered: every claimed row is dispatched.
+            self._registered_classes = {}
 
         def _claim_slot_count(self) -> int:
             # No slot pool: every configured slot counts.

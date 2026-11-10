@@ -757,14 +757,20 @@ class TestMigrationText:
             column.server_default.arg,
         )
 
-    def test_the_claim_index_has_the_class_as_its_second_key(self) -> None:
+    def test_the_claim_indexes_have_the_class_as_their_second_key(self) -> None:
         from horsies.core.schemas.recovery import CLAIM_INDEXES
 
-        (index,) = CLAIM_INDEXES
-        assert index.name == 'idx_horsies_tasks_claim_pending_class'
-        assert '(queue_name, execution, priority, enqueued_at, id)' in index.create_sql
-        assert "WHERE status = 'PENDING'" in index.create_sql
-        assert index.create_sql.startswith('CREATE INDEX CONCURRENTLY ')
+        pending, expired = CLAIM_INDEXES
+        assert pending.name == 'idx_horsies_tasks_claim_pending_class'
+        assert "WHERE status = 'PENDING'" in pending.create_sql
+        assert expired.name == 'idx_horsies_tasks_claim_expired_class'
+        assert "WHERE status = 'CLAIMED'" in expired.create_sql
+        for index in CLAIM_INDEXES:
+            assert (
+                '(queue_name, execution, priority, enqueued_at, id)'
+                in index.create_sql
+            )
+            assert index.create_sql.startswith('CREATE INDEX CONCURRENTLY ')
 
 
 class TestMonitoringDetail:

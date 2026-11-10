@@ -49,7 +49,9 @@ from horsies.core.models.worker_profile import (
     WorkerProfile,
     describe_worker_profile,
 )
+from horsies.core.models.tasks import Execution
 from horsies.core.scheduler import Scheduler
+from horsies.core.worker.claim_plan import ClaimPlan
 from horsies.core.worker.config import ChildPreload
 from horsies.core.worker.profile_fit import (
     CONNECTIONS_HELP,
@@ -525,6 +527,25 @@ class ExecutionSettings:
     max_claim_per_worker: int
     drain_timeout_s: float
     child_preload: ChildPreload
+    claim_plan: ClaimPlan
+
+
+def claim_plan_for_profile(profile: WorkerProfile) -> ClaimPlan:
+    """The claim plan of a worker of ``profile``: its budget classes are the
+    classes that the profile starts children for.
+
+    This is the one place that maps the child settings of a profile to
+    budget classes. A profile setting that starts children of a shared class
+    adds that class here; ``ClaimMixin._capacity_in_service`` then needs
+    the arm that counts their seats.
+    """
+    match profile.isolated:
+        case IsolatedChildren():
+            return ClaimPlan(budget_classes=frozenset({Execution.ISOLATED}))
+        case NoIsolatedChildren():
+            return ClaimPlan(budget_classes=frozenset())
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _tasks_or_zero(limit: TaskLimit | NoTaskLimit) -> int:
@@ -561,6 +582,7 @@ def execution_settings(profile: WorkerProfile) -> ExecutionSettings:
                 ),
                 drain_timeout_s=profile.drain_timeout.total_seconds(),
                 child_preload=profile.preload,
+                claim_plan=claim_plan_for_profile(profile),
             )
         case NoIsolatedChildren():
             raise AssertionError(
@@ -842,6 +864,7 @@ def worker_command(args: argparse.Namespace) -> None:
         max_memory_per_child_mb=settings.max_memory_per_child_mb,
         drain_timeout_s=settings.drain_timeout_s,
         child_preload=settings.child_preload,
+        claim_plan=settings.claim_plan,
         recovery_config=app.config.recovery,
         retention_config=app.config.retention,
         resilience_config=app.config.resilience,

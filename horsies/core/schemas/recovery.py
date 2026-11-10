@@ -272,24 +272,44 @@ async def install_recovery_indexes(engine: 'AsyncEngine') -> None:
     await _install_exact_indexes(engine, RECOVERY_INDEXES)
 
 
-# v54: the class-keyed pending claim index. A claim stream asks for one
-# queue and one execution class in (priority, enqueued_at, id) order, so
-# the class is the second key: each stream is one ordered range, also when
-# the class is rare or absent in the queue. It is added next to
-# idx_horsies_tasks_claim_pending, which still serves the claim that reads
-# every class in one order.
-CLAIM_INDEXES: Final[tuple[RecoveryIndex, ...]] = (
-    RecoveryIndex(
-        name='idx_horsies_tasks_claim_pending_class',
-        table='horsies_tasks',
-        create_sql=(
-            'CREATE INDEX CONCURRENTLY '
-            'idx_horsies_tasks_claim_pending_class '
-            'ON horsies_tasks '
-            '(queue_name, execution, priority, enqueued_at, id) '
-            "WHERE status = 'PENDING'"
-        ),
-    ),
+# The class-keyed claim indexes. A claim stream asks for one queue and one
+# execution class in (priority, enqueued_at, id) order, so the class is the
+# second key: each stream is one ordered range, also when the class is rare
+# or absent in the queue.
+# - v54: the pending arm, over PENDING rows.
+# - v55: the expired arm, over CLAIMED rows. It replaces
+#   idx_horsies_tasks_claim_expired_ordered, whose key had no class: with
+#   50,000 expired leases in one queue, a stream of an absent class read
+#   7,848 buffers, against 142 on this index.
+_CLAIM_INDEX_KEY: Final = '(queue_name, execution, priority, enqueued_at, id)'
+
+
+@dataclass(frozen=True, slots=True)
+class ClaimIndex:
+    """One class-keyed claim index over horsies_tasks rows of one status."""
+
+    name: str
+    status: str
+
+    def recovery_index(self) -> RecoveryIndex:
+        return RecoveryIndex(
+            name=self.name,
+            table='horsies_tasks',
+            create_sql=(
+                f'CREATE INDEX CONCURRENTLY {self.name} '
+                f'ON horsies_tasks {_CLAIM_INDEX_KEY} '
+                f"WHERE status = '{self.status}'"
+            ),
+        )
+
+
+CLAIM_INDEX_SPECS: Final[tuple[ClaimIndex, ...]] = (
+    ClaimIndex(name='idx_horsies_tasks_claim_pending_class', status='PENDING'),
+    ClaimIndex(name='idx_horsies_tasks_claim_expired_class', status='CLAIMED'),
+)
+
+CLAIM_INDEXES: Final[tuple[RecoveryIndex, ...]] = tuple(
+    spec.recovery_index() for spec in CLAIM_INDEX_SPECS
 )
 
 
@@ -303,25 +323,7 @@ async def install_claim_indexes(engine: 'AsyncEngine') -> None:
     await _install_exact_indexes(engine, CLAIM_INDEXES)
 
 
-# The catalog form of idx_horsies_tasks_claim_pending_class against the
-# same index built on a temporary table. Any difference (columns, order,
-# predicate, validity) fails the migration.
-VALIDATE_CLAIM_INDEXES_SQL = text("""
-DO $migration$
-DECLARE
-    v_actual jsonb;
-    v_expected jsonb;
-BEGIN
-    CREATE TEMP TABLE horsies_expected_claim_class_index
-        ON COMMIT DROP
-        AS SELECT queue_name, execution, priority, enqueued_at, id, status
-           FROM horsies_tasks WITH NO DATA;
-    CREATE INDEX horsies_expected_claim_class_index_idx
-        ON horsies_expected_claim_class_index
-        (queue_name, execution, priority, enqueued_at, id)
-        WHERE status = 'PENDING';
-
-    SELECT jsonb_build_object(
+_INDEX_SHAPE_SQL: Final = """jsonb_build_object(
                'method', am.amname, 'valid', i.indisvalid,
                'ready', i.indisready, 'live', i.indislive,
                'unique', i.indisunique, 'key_count', i.indnkeyatts,
@@ -335,43 +337,62 @@ BEGIN
                'collations', to_jsonb(i.indcollation::oid[]),
                'options', to_jsonb(i.indoption::smallint[]),
                'predicate', pg_get_expr(i.indpred, i.indrelid)
-           )
+           )"""
+
+
+def _claim_index_check(spec: ClaimIndex, position: int) -> str:
+    """The catalog form of one claim index against the same index on a
+    temporary table; any difference raises."""
+    expected_table = f'horsies_expected_claim_index_{position}'
+    expected_index = f'{expected_table}_idx'
+    return f"""
+    CREATE TEMP TABLE {expected_table}
+        ON COMMIT DROP
+        AS SELECT queue_name, execution, priority, enqueued_at, id, status
+           FROM horsies_tasks WITH NO DATA;
+    CREATE INDEX {expected_index}
+        ON {expected_table} {_CLAIM_INDEX_KEY}
+        WHERE status = '{spec.status}';
+
+    SELECT {_INDEX_SHAPE_SQL}
     INTO v_expected
     FROM pg_index AS i
     JOIN pg_class AS ic ON ic.oid = i.indexrelid
     JOIN pg_am AS am ON am.oid = ic.relam
-    WHERE ic.oid = to_regclass('horsies_expected_claim_class_index_idx');
+    WHERE ic.oid = to_regclass('{expected_index}');
 
-    SELECT jsonb_build_object(
-               'method', am.amname, 'valid', i.indisvalid,
-               'ready', i.indisready, 'live', i.indislive,
-               'unique', i.indisunique, 'key_count', i.indnkeyatts,
-               'attribute_count', i.indnatts,
-               'columns', (
-                   SELECT jsonb_agg(pg_get_indexdef(i.indexrelid, n, FALSE)
-                                    ORDER BY n)
-                   FROM generate_series(1, i.indnatts) AS n
-               ),
-               'operator_classes', to_jsonb(i.indclass::oid[]),
-               'collations', to_jsonb(i.indcollation::oid[]),
-               'options', to_jsonb(i.indoption::smallint[]),
-               'predicate', pg_get_expr(i.indpred, i.indrelid)
-           )
+    SELECT {_INDEX_SHAPE_SQL}
     INTO v_actual
     FROM pg_index AS i
     JOIN pg_class AS ic ON ic.oid = i.indexrelid
     JOIN pg_am AS am ON am.oid = ic.relam
-    WHERE ic.oid = to_regclass('idx_horsies_tasks_claim_pending_class')
+    WHERE ic.oid = to_regclass('{spec.name}')
       AND i.indrelid = 'horsies_tasks'::regclass;
 
     IF v_actual IS DISTINCT FROM v_expected THEN
         RAISE EXCEPTION
-            'idx_horsies_tasks_claim_pending_class is absent, invalid, or noncanonical'
+            '{spec.name} is absent, invalid, or noncanonical'
             USING ERRCODE = 'object_not_in_prerequisite_state';
     END IF;
-END
-$migration$
-""")
+"""
+
+
+# The catalog form of each claim index against the same index built on a
+# temporary table. Any difference (columns, order, predicate, validity)
+# fails the migration.
+VALIDATE_CLAIM_INDEXES_SQL = text(
+    'DO $migration$\n'
+    'DECLARE\n'
+    '    v_actual jsonb;\n'
+    '    v_expected jsonb;\n'
+    'BEGIN'
+    + ''.join(
+        _claim_index_check(spec, position)
+        for position, spec in enumerate(CLAIM_INDEX_SPECS)
+    )
+    + 'END\n'
+    '$migration$\n'
+)
 
 
 VALIDATE_RECOVERY_INDEXES_SQL = text("""
@@ -590,6 +611,13 @@ class RetiredIndex:
 
 
 RETIRED_INDEXES: Final[tuple[RetiredIndex, ...]] = (
+    # v55: the claim reads one (queue, execution class) stream at a time on
+    # the class-keyed claim indexes; these two have no class in their key.
+    RetiredIndex(name='idx_horsies_tasks_claim_pending', table='horsies_tasks'),
+    RetiredIndex(
+        name='idx_horsies_tasks_claim_expired_ordered',
+        table='horsies_tasks',
+    ),
     # Terminal tasks move to history, so no retention delete reads the live
     # table by terminal age.
     RetiredIndex(name='idx_horsies_tasks_retention', table='horsies_tasks'),

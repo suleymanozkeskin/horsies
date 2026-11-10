@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pydantic import SecretStr
 
+from horsies.core.worker.claim_plan import isolated_children_plan
 from horsies.core.worker.config import ChildPreload
 from horsies.core.app import Horsies
 from horsies.core.brokers.resources import ListenerDisabled, ListenerEnabled
@@ -2519,6 +2520,7 @@ class TestExecutionSettings:
             max_claim_per_worker=4,
             drain_timeout_s=45.0,
             child_preload=ChildPreload.NONE,
+            claim_plan=isolated_children_plan(),
         )
 
     def test_no_limit_variants_become_the_no_limit_encoding(self) -> None:

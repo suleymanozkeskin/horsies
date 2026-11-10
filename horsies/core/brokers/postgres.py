@@ -469,9 +469,7 @@ from horsies.core.schemas.indexes import (
     CREATE_TASK_ATTEMPTS_ERROR_CODE_INDEX_SQL,
     CREATE_TASK_ATTEMPTS_FINISHED_AT_INDEX_SQL,
     CREATE_TASKS_CLAIM_EXPIRED_INDEX_SQL,
-    CREATE_TASKS_CLAIM_PENDING_INDEX_SQL,
     CREATE_HEARTBEATS_SENT_AT_INDEX_SQL,
-    CREATE_TASKS_CLAIM_EXPIRED_ORDERED_INDEX_SQL,
     CREATE_TASKS_ENQUEUED_AT_INDEX_SQL,
     CREATE_TASKS_ERROR_CODE_INDEX_SQL,
     CREATE_TASKS_TASK_NAME_INDEX_SQL,
@@ -493,7 +491,7 @@ from horsies.core.schemas.migrations import (
     CREATE_TERMINALIZATION_FUNCTIONS_SQL,
     DROP_TASKS_RETENTION_STATISTICS_SQL,
     CREATE_WORKFLOWS_RETENTION_STATISTICS_SQL,
-    DROP_CLAIM_FUNCTION_SQL,
+    DROP_PREVIOUS_CLAIM_FUNCTIONS_SQL,
     DROP_TERMINALIZATION_FUNCTIONS_SQL,
     VALIDATE_TERMINAL_AT_CHECK_SQL,
     VALIDATE_TERMINALIZATION_KIND_CHECK_SQL,
@@ -537,6 +535,7 @@ from horsies.core.schemas.migrations import (
     ADD_WORKFLOW_SENT_AT_COLUMN_SQL,
     ADD_WORKER_STATES_CHILDREN_MEMORY_COLUMN_SQL,
     ADD_WORKER_STATES_SLOTS_DOWN_COLUMN_SQL,
+    ADD_WORKER_STATES_CLASS_CAPACITY_COLUMN_SQL,
     ADD_DEFINITION_KEY_COLUMN_SQL,
     BACKFILL_TASK_IS_WORKFLOW_TASK_SQL,
     BACKFILL_ENQUEUE_SHA_SQL,
@@ -1643,10 +1642,13 @@ class PostgresBroker:
             await self._add_task_execution_column(engine)
             await install_recovery_indexes(engine)
             # v54: the class-keyed pending claim index.
+            # v55: the class-keyed expired claim index.
             await install_claim_indexes(engine)
             # v43: drop the task retention indexes that no query reads.
             # v45: drop the workflow-node indexes that the workflow-scoped
             # indexes make redundant.
+            # v55: drop the claim indexes that have no class in their key,
+            # after the class-keyed ones exist.
             await remove_retired_indexes(engine)
             await self._activate_bounded_recovery(engine)
 
@@ -1683,9 +1685,11 @@ class PostgresBroker:
             await close_workflow_node_status_set(conn)
             await conn.execute(VALIDATE_RECOVERY_INDEXES_SQL)
             await conn.execute(VALIDATE_CLAIM_INDEXES_SQL)
-            # v39 on a database already past the v35 apply path: the claim
-            # pair keeps its signatures and return columns, so CREATE OR
-            # REPLACE installs the current bodies.
+            # v55 on a database already past the v35 apply path: the claim
+            # pair before v55 has other signatures, so it is dropped by its
+            # exact argument types, and the current pair is installed.
+            for drop_claim_function in DROP_PREVIOUS_CLAIM_FUNCTIONS_SQL:
+                await conn.execute(drop_claim_function)
             await conn.execute(CREATE_CLAIM_CANDIDATES_FUNCTION_SQL)
             await conn.execute(CREATE_CLAIM_FUNCTION_SQL)
             uuid_identity = bool(
@@ -1722,6 +1726,8 @@ class PostgresBroker:
             await conn.execute(CREATE_WORKFLOW_RECOVERY_FAILURES_SQL)
             # v53: the slots that a worker reports as down.
             await conn.execute(ADD_WORKER_STATES_SLOTS_DOWN_COLUMN_SQL)
+            # v55: the capacity of each claim budget of a worker.
+            await conn.execute(ADD_WORKER_STATES_CLASS_CAPACITY_COLUMN_SQL)
             await conn.execute(
                 INSERT_SCHEMA_VERSION_SQL,
                 {'version': SCHEMA_VERSION},
@@ -1797,11 +1803,10 @@ class PostgresBroker:
             await conn.execute(ADD_TASK_TERMINAL_AT_COLUMN_SQL)
             await conn.execute(CREATE_TASKS_ERROR_CODE_INDEX_SQL)
 
-            # Migration (v3): claim-path indexes.
-            await conn.execute(CREATE_TASKS_CLAIM_PENDING_INDEX_SQL)
+            # Migration (v3): claim-path indexes. The ordered claim indexes
+            # carry the execution class since v55 and are built
+            # concurrently (install_claim_indexes).
             await conn.execute(CREATE_TASKS_CLAIM_EXPIRED_INDEX_SQL)
-            # Migration (v7): ordered walk for deep expired backlogs.
-            await conn.execute(CREATE_TASKS_CLAIM_EXPIRED_ORDERED_INDEX_SQL)
             await conn.execute(CREATE_TASKS_WORKER_STATUS_INDEX_SQL)
             await conn.execute(CREATE_WORKER_STATES_WORKER_SNAPSHOT_INDEX_SQL)
 
@@ -1839,7 +1844,9 @@ class PostgresBroker:
             # (claim-generation fence, C10); the return-type change requires
             # dropping the v10/v11 definition first.
             # Migration (v39): candidate selection moved into its own helper.
-            await conn.execute(DROP_CLAIM_FUNCTION_SQL)
+            # Migration (v55): per-class budgets; the earlier signatures go.
+            for drop_claim_function in DROP_PREVIOUS_CLAIM_FUNCTIONS_SQL:
+                await conn.execute(drop_claim_function)
             await conn.execute(CREATE_CLAIM_CANDIDATES_FUNCTION_SQL)
             await conn.execute(CREATE_CLAIM_FUNCTION_SQL)
 
