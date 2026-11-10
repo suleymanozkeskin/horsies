@@ -31,7 +31,11 @@
     "tests/unit/test_task_action_variants.py",
     "tests/unit/test_history_detail_status_parse.py",
     "tests/docs_examples/extract.py",
-    "tests/unit/test_docs_examples_extract.py"
+    "tests/unit/test_docs_examples_extract.py",
+    "horsies/core/worker/live_dispatches.py",
+    "horsies/core/worker/runner_heartbeat.py",
+    "tests/unit/test_live_dispatches.py",
+    "tests/unit/test_runner_heartbeat.py"
   ],
   "reportUnnecessaryTypeIgnoreComment": "error"
 }

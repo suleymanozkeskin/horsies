@@ -906,6 +906,7 @@ class TestKillBeforeSession:
         child = Child.__new__(Child)
         child.pid = 4321
         child.process = MagicMock(returncode=returncode)
+        child.on_kill_sent = None
         return child
 
     @pytest.fixture

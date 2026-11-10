@@ -35,6 +35,11 @@ from horsies.core.logging import get_logger
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
 from horsies.core.worker.config import ChildPreload
+from horsies.core.worker.live_dispatches import (
+    Held,
+    LiveDispatches,
+    RegistryClosed,
+)
 from horsies.core.worker.preload import (
     ChildProcess,
     PreloadNotLinux,
@@ -476,6 +481,7 @@ class Child:
         self.channel_closed = False
         self.killed_by_parent = False
         self.on_channel_closed: Callable[[], None] | None = None
+        self.on_kill_sent: Callable[[], None] | None = None
 
     @classmethod
     async def start(
@@ -609,8 +615,11 @@ class Child:
         """SIGKILL the child's session, so task subprocesses go with it.
 
         The session id is the child's pid. A task that calls ``setsid`` itself
-        leaves the group.
+        leaves the group. ``on_kill_sent`` runs first, so no runner heartbeat
+        covers the child's task once the kill is sent.
         """
+        if self.on_kill_sent is not None:
+            self.on_kill_sent()
         try:
             os.killpg(self.pid, signal.SIGKILL)
         except ProcessLookupError:
@@ -895,6 +904,7 @@ class SlotPool:
         self._preload_watch: asyncio.Task[None] | None = None
         # Every child that has not exited, from any preload parent or ``exec``.
         self._live_pids: set[int] = set()
+        self._live_dispatches = LiveDispatches(config.slots)
 
     async def start(self) -> Result[tuple[ChildBaseline, ...], PoolFailure | PoolStopped]:
         """Boot every slot. Returns when all are ready, on the first failure, or at a stop.
@@ -917,6 +927,11 @@ class SlotPool:
         if self._stopping:
             return Err(PoolStopped())
         return Ok(tuple(self._baselines.values()))
+
+    @property
+    def live_dispatches(self) -> LiveDispatches:
+        """The tasks that this pool's children hold, for the runner heartbeat."""
+        return self._live_dispatches
 
     def submit(self, frame: RunFrame) -> SlotHandle:
         """Queue a task. A pool that cannot take it answers ``NotDispatched`` at once."""
@@ -1146,6 +1161,7 @@ class SlotPool:
                     slot.child = child
                     child.notify_on_exit(slot.wake.set)
                     child.on_channel_closed = slot.wake.set
+                    self._release_on_kill_or_exit(child)
             if self._stopping:
                 # ``stop`` ran during that await, so it did not see this child.
                 await child.dispose_lost()
@@ -1194,6 +1210,15 @@ class SlotPool:
             if attempt < CHILD_BOOT_ATTEMPTS:
                 await asyncio.sleep(CHILD_BOOT_RETRY_DELAY_S * attempt)
         return Err(BootAttemptsExhausted(CHILD_BOOT_ATTEMPTS, last_detail))
+
+    def _release_on_kill_or_exit(self, child: Child) -> None:
+        """Stop the runner heartbeat of this child's task at a kill or an exit."""
+
+        def release() -> None:
+            _ = self._live_dispatches.release_child(child.pid)
+
+        child.on_kill_sent = release
+        child.notify_on_exit(release)
 
     def _kill_spares_the_attempt(
         self,
@@ -1297,12 +1322,25 @@ class SlotPool:
         child: Child,
         handle: SlotHandle,
     ) -> TaskFinished | ChildLost:
-        """Run one task and finish its handle. The state stays ``Busy`` until then."""
+        """Run one task and finish its handle. The state stays ``Busy`` until then.
+
+        The task is in the runner heartbeat registry from the send until the
+        slot reads the answer. A closed registry means the worker failed
+        closed: the child is killed, because no heartbeat would cover it.
+        """
         frame = handle.frame
         slot.state = Busy(frame.task_id)
         slot.handle = handle
         child.send(frame)
         handle.bind_child(child)
+        held = self._live_dispatches.hold(frame, child.pid)
+        match held:
+            case Held():
+                pass
+            case RegistryClosed():
+                child.kill_for_caller()
+            case _ as unreachable:
+                assert_never(unreachable)
         answer = await child.await_frame(None)
         outcome: TaskFinished | ChildLost
         match answer:
@@ -1323,6 +1361,13 @@ class SlotPool:
             case _ as unreachable:
                 assert_never(unreachable)
         slot.handle = None
+        match held:
+            case Held(ticket=ticket):
+                _ = self._live_dispatches.release(ticket)
+            case RegistryClosed():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
         handle.finish(outcome)
         return outcome
 
