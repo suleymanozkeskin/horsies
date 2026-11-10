@@ -339,17 +339,17 @@ class TestSeatThreads:
 
         def hold() -> str:
             arrived.release()
-            assert release.wait(WAIT_S)
-            return 'held'
+            return 'held' if release.wait(WAIT_S) else 'not released'
 
         seats, table, writer, program = seats_of(3, {'hold': hold})
-        for dispatch in (1, 2, 3):
-            _give(table, seats, _frame(dispatch, 'hold'))
-        for _ in range(3):
-            assert arrived.acquire(timeout=WAIT_S)
-
-        assert writer.results() == []
-        release.set()
+        try:
+            for dispatch in (1, 2, 3):
+                _give(table, seats, _frame(dispatch, 'hold'))
+            for _ in range(3):
+                assert arrived.acquire(timeout=WAIT_S)
+            assert writer.results() == []
+        finally:
+            release.set()
         _until(lambda: len(writer.results()) == 3)
         assert len(set(program.threads)) == 3
         assert all(name.startswith('horsies-seat-') for name in program.threads)
@@ -363,20 +363,20 @@ class TestSeatThreads:
         release_long = threading.Event()
 
         def long() -> str:
-            assert release_long.wait(WAIT_S)
-            return 'long'
+            return 'long' if release_long.wait(WAIT_S) else 'not released'
 
         seats, table, writer, _program = seats_of(
             2, {'long': long, 'short': lambda: 'short'}
         )
-        _give(table, seats, _frame(1, 'long'))
-        _give(table, seats, _frame(2, 'short'))
-        _until(lambda: len(writer.results()) == 1)
-        _give(table, seats, _frame(3, 'short'))
-
-        _until(lambda: len(writer.results()) == 2)
-        assert [frame.dispatch for frame in writer.results()] == [2, 3]
-        release_long.set()
+        try:
+            _give(table, seats, _frame(1, 'long'))
+            _give(table, seats, _frame(2, 'short'))
+            _until(lambda: len(writer.results()) == 1)
+            _give(table, seats, _frame(3, 'short'))
+            _until(lambda: len(writer.results()) == 2)
+            assert [frame.dispatch for frame in writer.results()] == [2, 3]
+        finally:
+            release_long.set()
         _until(lambda: len(writer.results()) == 3)
 
     @pytest.mark.filterwarnings('ignore::pytest.PytestUnhandledThreadExceptionWarning')
@@ -425,6 +425,8 @@ class _Taker:
 
 class TestServeRuns:
     def _serve(self, taker: _Taker, *frames: WorkFrame) -> ThreadRunTable:
+        """Serve ``frames``. Each test ends them with a stop frame, so a run
+        that a defect should refuse ends the loop instead of a wait."""
         inbox = ParentFrameInbox()
         for frame in frames:
             inbox.put(frame)
@@ -441,10 +443,12 @@ class TestServeRuns:
         inbox.put(_frame(2, work=refusal))
 
         def end_runs_then_stop() -> None:
-            _until(lambda: len(taker.given) == 2)
-            table.finish(1, OK_WIRE, RssMb(1.0))
-            table.finish(2, OK_WIRE, RssMb(1.0))
-            inbox.put(StopFrame())
+            try:
+                _until(lambda: len(taker.given) == 2)
+                table.finish(1, OK_WIRE, RssMb(1.0))
+                table.finish(2, OK_WIRE, RssMb(1.0))
+            finally:
+                inbox.put(StopFrame())
 
         stopper = threading.Thread(target=end_runs_then_stop)
         stopper.start()
@@ -479,11 +483,14 @@ class TestServeRuns:
         self,
         exits: list[tuple[str, int]],
     ) -> None:
+        taker = _Taker()
         with pytest.raises(_Exited):
             self._serve(
-                _Taker(),
+                taker,
                 _frame(1, work=SeatTask(timeout_ms=1000, cancel_grace_ms=100)),
+                StopFrame(),
             )
+        assert taker.given == []
         assert exits == [
             (
                 'parent sent run 1 of a shared async child to a shared thread child',
@@ -506,7 +513,7 @@ class TestServeRuns:
             claimed_at=None,
         )
         with pytest.raises(_Exited):
-            self._serve(_Taker(), run)
+            self._serve(_Taker(), run, StopFrame())
         assert exits == [
             (
                 'parent sent an isolated run frame to a shared thread child',
