@@ -1607,6 +1607,7 @@ class TestCallerUnwrapContract:
         worker.listener = mock_listener
         worker._stop = asyncio.Event()
         worker._slots = None
+        worker._runner_heartbeat = None
         worker._service_tasks = set()
         worker._finalizer_tasks = set()
         worker._start_slots = AsyncMock()
@@ -1652,6 +1653,7 @@ class TestCallerUnwrapContract:
         worker.listener = mock_listener
         worker._stop = asyncio.Event()
         worker._slots = None
+        worker._runner_heartbeat = None
         worker._service_tasks = set()
         worker._finalizer_tasks = set()
         worker._start_slots = AsyncMock()

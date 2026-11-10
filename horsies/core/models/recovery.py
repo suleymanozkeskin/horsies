@@ -74,7 +74,7 @@ class RecoveryConfig(BaseModel):
     - workflow_recovery_failure_limit: Reaper passes with a persistent recovery raise before a workflow fails closed
     - check_interval_ms: How often the reaper checks for stale tasks
     - orphan_task_audit_interval_ms: How often the orphan cursor scans one page
-    - runner_heartbeat_interval_ms: How often RUNNING tasks send heartbeats from inside the task process
+    - runner_heartbeat_interval_ms: How often the worker process writes the heartbeats of its RUNNING tasks
     - claimer_heartbeat_interval_ms: How often CLAIMED tasks send heartbeats
     - worker_state_snapshot_interval_ms: How often each worker persists a monitoring snapshot row
 
@@ -104,7 +104,11 @@ class RecoveryConfig(BaseModel):
 
     auto_fail_stale_running: bool = Field(
         default=True,
-        description='Automatically mark stale RUNNING tasks as FAILED (not safe to requeue)',
+        description=(
+            'Automatically mark stale RUNNING tasks as FAILED (not safe to requeue); '
+            'when on, a worker whose runner heartbeats cannot land for half of '
+            'running_stale_threshold_ms kills its tasks and stops'
+        ),
     )
     running_stale_threshold_ms: Annotated[int, Field(ge=1_000, le=7_200_000)] = Field(
         default=300_000,  # 5 minutes
@@ -190,8 +194,8 @@ class RecoveryConfig(BaseModel):
     runner_heartbeat_interval_ms: Annotated[int, Field(ge=1_000, le=120_000)] = Field(
         default=30_000,  # 30 seconds
         description=(
-            'How often RUNNING tasks send heartbeats from inside the task process in milliseconds (1s-2min); '
-            'increase stale thresholds for CPU/GIL-heavy tasks to avoid false positives'
+            'How often the worker process writes the heartbeats of its RUNNING tasks in milliseconds (1s-2min); '
+            'a task that holds the GIL in its child does not delay them'
         ),
     )
 

@@ -1,4 +1,4 @@
-"""Child-process helpers: import resolution, heartbeat, task execution."""
+"""Child-process helpers: import resolution and task execution."""
 
 # pyright: reportPrivateUsage=false
 
@@ -7,7 +7,6 @@ from __future__ import annotations
 import os
 import socket
 import threading
-import time
 from collections.abc import Coroutine, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -484,108 +483,6 @@ def finish_child_start(
 
 
 # ---------- Child-process execution ----------
-def _heartbeat_worker(
-    task_id: str,
-    database_url: str,
-    stop_event: threading.Event,
-    sender_worker_id: str,
-    heartbeat_interval_ms: int = 30_000,
-    timeout_ms: int | None = None,
-) -> None:
-    """
-    Runs in a separate thread within the task process.
-    Sends heartbeats at configured interval until stopped or process dies.
-
-    Uses the per-process connection pool for efficient connection reuse.
-
-    Total per beat: send_heartbeat contains DB errors and returns False.
-    The loop keeps beating until stopped or the timeout deadline —
-    consecutive failures are tracked for logging only, deliberately: a
-    recovered DB resumes reaper protection, and a stopped thread could not.
-
-    Args:
-        task_id: The task ID
-        database_url: Database connection string (unused, kept for compatibility)
-        stop_event: Event to signal thread termination
-        sender_worker_id: Worker instance ID
-        heartbeat_interval_ms: Milliseconds between heartbeats (default: 30000 = 30s)
-    """
-    # Convert to seconds only for threading.Event.wait()
-    heartbeat_interval_seconds = heartbeat_interval_ms / 1000.0
-    consecutive_failures = 0
-    # Reaper backstop for timed-out tasks: stop beating past the deadline
-    # (plus one interval of grace) so the staleness machinery reclaims the
-    # task even if the parent worker died before it could kill this child.
-    # The thread cannot kill the process itself — that needs the GIL, which
-    # hung user code may never release.
-    deadline_monotonic: float | None = None
-    if timeout_ms is not None:
-        deadline_monotonic = (
-            time.monotonic() + timeout_ms / 1000.0 + heartbeat_interval_seconds
-        )
-
-    def send_heartbeat() -> bool:
-        nonlocal consecutive_failures
-        try:
-            pool = _get_worker_pool()
-            with pool.connection() as conn:
-                cursor = conn.cursor(row_factory=namedtuple_row)
-                cursor.execute(
-                    """
-                    INSERT INTO horsies_heartbeats (task_id, sender_id, role, sent_at, hostname, pid)
-                    VALUES (%s, %s, 'runner', NOW(), %s, %s)
-                    """,
-                    (
-                        task_id,
-                        sender_worker_id + f':{os.getpid()}',
-                        socket.gethostname(),
-                        os.getpid(),
-                    ),
-                )
-                conn.commit()
-                cursor.close()
-            if consecutive_failures > 0:
-                logger.info(
-                    'Runner heartbeat recovered for task %s after %d failed attempt(s)',
-                    task_id,
-                    consecutive_failures,
-                )
-                consecutive_failures = 0
-            return True
-        except Exception as e:
-            consecutive_failures += 1
-            logger.error(
-                'Runner heartbeat failed for task %s (attempt %d): %s',
-                task_id,
-                consecutive_failures,
-                e,
-            )
-            return False
-
-    # No immediate beat here: _confirm_ownership_and_set_running inserts the
-    # first heartbeat inside the RUNNING transaction, so coverage starts
-    # atomically with the state transition.
-    while not stop_event.is_set():
-        # Wait for interval, but check stop_event periodically
-        if stop_event.wait(timeout=heartbeat_interval_seconds):
-            break  # stop_event was set
-
-        if (
-            deadline_monotonic is not None
-            and time.monotonic() >= deadline_monotonic
-        ):
-            logger.warning(
-                'Task %s exceeded timeout_ms=%s; stopping runner heartbeats '
-                'so the reaper can reclaim it',
-                task_id,
-                timeout_ms,
-            )
-            break
-
-        # Use pooled connection for heartbeat
-        send_heartbeat()
-
-
 def _get_workflow_status_for_task(cursor: Cursor[Any], task_id: str) -> str | None:
     """Read the owning workflow's status for a task (None if not in one).
 
@@ -852,9 +749,9 @@ def _confirm_ownership_and_set_running(
                   )
             """
             # The first runner heartbeat is part of the transition: the row can
-            # never be observed RUNNING without heartbeat coverage, a transition
-            # that does not apply inserts no beat, and the heartbeat thread
-            # skips its immediate beat.
+            # never be observed RUNNING without heartbeat coverage, and a
+            # transition that does not apply inserts no beat. The worker
+            # process writes the later beats while this child holds the task.
             sql = (
                 """
                 WITH started AS (
@@ -1001,40 +898,6 @@ def _confirm_ownership_and_set_running(
         return (False, '', 'OWNERSHIP_UNCONFIRMED')
 
 
-def _start_heartbeat_thread(
-    task_id: str,
-    database_url: str,
-    heartbeat_stop_event: threading.Event,
-    worker_id: str,
-    runner_heartbeat_interval_ms: int,
-    timeout_ms: int | None = None,
-) -> threading.Thread:
-    """Start the daemon heartbeat thread for a running task.
-
-    Raises:
-        RuntimeError: thread start failed (resource exhaustion). Runs before
-            _run_task_entry's containment, so it escapes the child as a
-            future failure; the parent recovers via
-            _recover_worker_future_failure (the row is RUNNING by then, so
-            retry policy applies).
-    """
-    heartbeat_thread = threading.Thread(
-        target=_heartbeat_worker,
-        args=(
-            task_id,
-            database_url,
-            heartbeat_stop_event,
-            worker_id,
-            runner_heartbeat_interval_ms,
-            timeout_ms,
-        ),
-        daemon=True,
-        name=f'heartbeat-{task_id[:8]}',
-    )
-    heartbeat_thread.start()
-    return heartbeat_thread
-
-
 def _mark_task_finalizing(
     task_id: str,
     worker_id: str,
@@ -1046,7 +909,10 @@ def _mark_task_finalizing(
     stale attempt cannot refresh the marker of a later claim of the same
     task, which would delay that claim's stale-RUNNING recovery. A NULL
     claimed_at disables the generation half, matching the ownership confirm.
-    The marker is best effort: a skipped or failed write is logged only.
+    The worker's runner heartbeat skips a row that carries the marker, so
+    the beats of the attempt end here, also while the worker's event loop
+    has not read the result. The marker is best effort: a skipped or failed
+    write is logged only.
     """
     try:
         pool = _get_worker_pool()
@@ -1096,15 +962,10 @@ def async_task_presence(app: Horsies) -> AsyncTaskPresence:
 
 def _resolution_failure(
     task_name: str,
-    task_id: str,
-    heartbeat_stop_event: threading.Event,
     message: str,
     reason: str,
 ) -> Tuple[bool, str, Optional[str]]:
-    """The wire tuple of a task the worker cannot resolve: WORKER_RESOLUTION_ERROR.
-
-    Stops the heartbeat thread, because no task code runs.
-    """
+    """The wire tuple of a task the worker cannot resolve: WORKER_RESOLUTION_ERROR."""
     tr: TaskResult[Any, TaskError] = TaskResult(
         err=TaskError(
             error_code=OperationalErrorCode.WORKER_RESOLUTION_ERROR,
@@ -1112,8 +973,6 @@ def _resolution_failure(
             data={'task_name': task_name},
         )
     )
-    heartbeat_stop_event.set()
-    logger.debug(f'Heartbeat stop signal sent for task {task_id} (resolution failed)')
     return (True, serialize_error_payload(tr), reason)
 
 
@@ -1178,9 +1037,7 @@ def _run_task_entry(
     args_json: Optional[str],
     kwargs_json: Optional[str],
     task_id: str,
-    database_url: str,
     master_worker_id: str,
-    runner_heartbeat_interval_ms: int = 30_000,
     is_workflow_task: bool = True,
     timeout: StoredTimeout = NoTimeout(),
     claimed_at: Optional[datetime] = None,
@@ -1205,8 +1062,11 @@ def _run_task_entry(
     This is the child's containment seam: the execution body is wrapped in
     ``except BaseException`` and folds everything into the wire tuple. The
     pre-try steps (preflight, ownership confirm) return wire tuples
-    themselves; only ``_start_heartbeat_thread`` can escape (see its
-    docstring) and is recovered by the parent as a future failure.
+    themselves.
+
+    The child writes the first runner heartbeat, in the RUNNING transition.
+    The worker process writes the later ones while this child holds the
+    task.
     """
     logger.info(f'Starting task execution: {task_name} ({task_id})')
 
@@ -1223,25 +1083,6 @@ def _run_task_entry(
     )
     if ownership_result is not None:
         return ownership_result
-
-    match timeout:
-        case TaskTimeout(ms=deadline_ms):
-            pass
-        case NoTimeout() | OptionsUnreadable() | TimeoutValueInvalid():
-            deadline_ms = None
-        case _ as unreachable:
-            assert_never(unreachable)
-
-    # Start heartbeat monitoring in separate thread
-    heartbeat_stop_event = threading.Event()
-    _start_heartbeat_thread(
-        task_id,
-        database_url,
-        heartbeat_stop_event,
-        master_worker_id,
-        runner_heartbeat_interval_ms,
-        deadline_ms,
-    )
 
     try:
         # A stored timeout that the worker cannot use fails the task before
@@ -1263,8 +1104,6 @@ def _run_task_entry(
             logger.error(f'Failed to resolve task {task_name}: {e}')
             return _resolution_failure(
                 task_name,
-                task_id,
-                heartbeat_stop_event,
                 f'Failed to resolve {task_name}: {type(e).__name__}: {e}',
                 f'{type(e).__name__}: {e}',
             )
@@ -1275,8 +1114,6 @@ def _run_task_entry(
                 logger.error(f'Failed to resolve task {task_name}: {not_runnable}')
                 return _resolution_failure(
                     task_name,
-                    task_id,
-                    heartbeat_stop_event,
                     f'Failed to resolve {task_name}: {not_runnable}',
                     not_runnable,
                 )
@@ -1617,13 +1454,10 @@ def _run_task_entry(
         return (True, serialize_error_payload(tr), None)
 
     finally:
-        # Mark finalizing before stopping heartbeat so the reaper does not
-        # mistake a completed child for a crashed child while the parent writes
-        # the durable terminal state.
+        # Mark finalizing so the reaper does not mistake a completed child
+        # for a crashed child while the parent writes the durable terminal
+        # state. The worker's runner heartbeat stops at this marker.
         _mark_task_finalizing(task_id, master_worker_id, claimed_at)
-        # Always stop the heartbeat thread when task completes (success/failure/error)
-        heartbeat_stop_event.set()
-        logger.debug(f'Heartbeat stop signal sent for task {task_id}')
 
 
 _CHILD_RUNNER_ENTRYPOINTS = (_child_initializer, _run_task_entry)

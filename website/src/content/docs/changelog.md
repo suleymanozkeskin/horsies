@@ -182,6 +182,31 @@ there is no migration contract between pre-1.0 versions.
   an `exception_mapper` or `default_unhandled_error_code` with that value
   fails `horsies check` with `HRS-212`. A process of an earlier version cannot
   decode an error stored with this code.
+- **The worker process writes the runner heartbeats of its RUNNING tasks.**
+  One thread of the worker, not on its event loop, writes one statement per
+  `runner_heartbeat_interval_ms` for the tasks that its children hold. A row
+  gets a beat only while it is `RUNNING`, owned by this worker at the claim
+  generation of the dispatch, and without the finalizing mark, and only while
+  its child process runs. So the beats of a task end when the worker sends
+  its child a kill, when the child exits, when the child marks its result
+  finalizing, and when the worker reads the result. The child writes only the
+  first beat, in the transaction that sets the row `RUNNING`, and runs no
+  heartbeat thread. A child now uses one connection of its pool at a time,
+  and the worker process uses one more connection, for the heartbeats. A
+  timed-out task's beats end with the kill at its deadline; the child no
+  longer stops them one interval after `timeout_ms`.
+- **A worker that cannot write runner heartbeats stops, when its reaper
+  fails stale RUNNING rows.** With `auto_fail_stale_running=True` (the
+  default), when the heartbeat thread dies, or no heartbeat lands for half of
+  `running_stale_threshold_ms`, the worker logs the cause at critical level,
+  kills every child that holds a task, stops, and exits with code 1. It exits
+  with code 77 if it has not stopped 120 s later. A failed write is tried
+  again within that half. Before, the reaper failed such tasks with
+  `WORKER_CRASHED` while they still ran, and a retry could run next to them.
+  A killed task takes the child crash path, or stale-task recovery when the
+  database cannot be reached. With `auto_fail_stale_running=False`, or no
+  recovery config, no reaper fails a RUNNING row, so the worker logs failed
+  writes, at most once per 60 s, and keeps running.
 
 ### Removed
 
@@ -222,6 +247,11 @@ there is no migration contract between pre-1.0 versions.
   dependencies.** It scanned every node for each node that it removed. On an
   Apple M2 with Python 3.13, a spec of 10,000 nodes took about 7.5 s to build,
   and now takes 0.23 s. The findings do not change.
+- **A task that holds the GIL is no longer failed as stale while it runs.**
+  C code that held the GIL in a child stopped the child's heartbeat thread,
+  so after `running_stale_threshold_ms` the reaper failed the task with
+  `WORKER_CRASHED`, and a retry could run next to it. CPU-bound tasks need no
+  extra margin in the stale thresholds.
 
 ## 0.6.1 — 2026-11-08
 

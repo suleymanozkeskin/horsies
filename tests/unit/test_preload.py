@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import ctypes
 import errno
 import logging
@@ -122,7 +123,6 @@ def _frame(task_name: str, argument: str | None = None) -> RunFrame:
         args_json=None,
         kwargs_json=argument,
         worker_id='worker-1',
-        runner_heartbeat_interval_ms=30_000,
         is_workflow_task=False,
         timeout=NoTimeout(),
         claimed_at=None,
@@ -894,25 +894,47 @@ class TestChildSteps:
         assert steps == ['setsid', 'reparent', 'serve']
 
 
+def _cli_exit_literals() -> set[int]:
+    """The codes that the CLI passes to ``sys.exit`` as literals."""
+    from horsies.core import cli
+
+    tree = ast.parse(Path(cli.__file__).read_text(encoding='utf-8'))
+    return {
+        node.args[0].value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and ast.unparse(node.func) == 'sys.exit'
+        and len(node.args) == 1
+        and isinstance(node.args[0], ast.Constant)
+        and isinstance(node.args[0].value, int)
+    }
+
+
 class TestChildExitCodes:
-    def test_every_exit_code_of_a_forked_child_is_distinct(self) -> None:
+    def test_every_named_exit_code_is_distinct(self) -> None:
         """A forked child can exit through ``preload_main`` before the
-        reparent and through ``child_main`` after it. The parent reads the
-        cause from the code, so no two causes share one."""
-        from horsies.core.worker import child_main
+        reparent and through ``child_main`` after it, and the worker process
+        exits with its own code when its runner heartbeats fail closed. A
+        reader tells the cause from the code, so no two causes share one,
+        and none is a code the CLI exits with."""
+        from horsies.core.worker import child_main, runner_heartbeat
         from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
 
         codes = {
             name: value
-            for module in (child_main, preload_main)
+            for module in (child_main, preload_main, runner_heartbeat)
             for name, value in vars(module).items()
             if name.endswith('_EXIT_CODE') and isinstance(value, int)
         }
         codes['CHILD_HOOK_FAILURE_EXIT_CODE'] = CHILD_HOOK_FAILURE_EXIT_CODE
+        cli_codes = _cli_exit_literals()
 
         assert 'REPARENT_FAILED_EXIT_CODE' in codes
         assert 'STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE' in codes
+        assert 'RUNNER_HEARTBEAT_LOST_EXIT_CODE' in codes
+        assert {0, 1, 2} <= cli_codes
         assert len(set(codes.values())) == len(codes), codes
+        assert not set(codes.values()) & cli_codes, (codes, cli_codes)
 
 
 @linux_only
@@ -935,6 +957,7 @@ class TestKillBeforeSession:
         child = Child.__new__(Child)
         child.pid = 4321
         child.process = MagicMock(returncode=returncode)
+        child.on_kill_sent = None
         return child
 
     @pytest.fixture
