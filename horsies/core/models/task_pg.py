@@ -403,6 +403,15 @@ class WorkerStateModel(Base):
         nullable=True,
     )
 
+    # The claim budgets: each budget class to {capacity, serves}, where
+    # capacity counts the children or seats of that class in service and
+    # serves lists the execution classes whose rows the budget claims.
+    # NULL in a row from a worker version that did not record it.
+    class_capacity: Mapped[Optional[dict[str, Any]]] = mapped_column(
+        JSONB,
+        nullable=True,
+    )
+
 
 class ScheduleStateModel(Base):
     """Schedule execution state tracking for scheduler service.

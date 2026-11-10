@@ -57,7 +57,7 @@ _FROZEN_DUMPS: Final = Counter(
         (_CODEC_MODULE, 'dumps_canonical_json'): 1,
         ('horsies/core/history/maintenance/coverage.py', '_expected_registrations'): 1,
         ('horsies/core/utils/fingerprint.py', 'enqueue_fingerprint'): 1,
-        ('horsies/core/worker/claiming.py', 'ClaimMixin._claim_and_dispatch_all'): 4,
+        ('horsies/core/worker/claiming.py', 'ClaimMixin._claim_params'): 6,
         ('horsies/core/workflows/recovery.py', 'recover_stuck_workflows'): 1,
         ('horsies/core/workflows/recovery.py', '_recover_global_orphan_candidate'): 1,
         ('horsies/web/app.py', '_inject'): 1,
@@ -71,6 +71,7 @@ _FROZEN_JSONB_COLUMNS: Final = frozenset(
         ('horsies/core/models/task_pg.py', 'queue_max_concurrency'),
         ('horsies/core/models/task_pg.py', 'recovery_config'),
         ('horsies/core/models/task_pg.py', 'slots_down'),
+        ('horsies/core/models/task_pg.py', 'class_capacity'),
         ('horsies/core/models/workflow_pg.py', 'success_policy'),
         ('horsies/core/models/workflow_pg.py', 'args_from'),
     }

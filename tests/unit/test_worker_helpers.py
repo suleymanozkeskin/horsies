@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import time
@@ -61,7 +62,7 @@ from horsies.core.worker.worker import (
     ServiceLoopDiedError,
 )
 from horsies.core.models.recovery import OrphanTaskAuditReport, RecoveryConfig
-from horsies.core.models.tasks import OperationalErrorCode
+from horsies.core.models.tasks import Execution, OperationalErrorCode
 from horsies.core.models.boot_failure import (
     ResourceShortage,
     ShortageErrno,
@@ -3177,14 +3178,14 @@ class TestClaimPass:
         worker = _make_worker()
         _unstarted_pool(worker)
         rows = [
-            ('id-1', 'task', '[]', '{}', 'default', True, None, None),
-            ('id-2', 'task', '[]', '{}', 'default', True, None, None),
-            ('id-3', 'task', '[]', '{}', 'default', True, None, None),
+            ('id-1', 'task', '[]', '{}', 'default', True, None, None, 'ISOLATED'),
+            ('id-2', 'task', '[]', '{}', 'default', True, None, None, 'ISOLATED'),
+            ('id-3', 'task', '[]', '{}', 'default', True, None, None, 'ISOLATED'),
         ]
         result = MagicMock()
         result.keys.return_value = [
             'id', 'task_name', 'args', 'kwargs', 'queue_name',
-            'is_workflow_task', 'task_options', 'claimed_at',
+            'is_workflow_task', 'task_options', 'claimed_at', 'execution',
         ]
         result.fetchall.return_value = rows
         session = AsyncMock()
@@ -3248,7 +3249,7 @@ class TestClaimPass:
         await worker._claim_and_dispatch_all()  # pyright: ignore[reportPrivateUsage]
 
         params = session.execute.await_args.args[1]
-        assert params['p_processes'] == expected_processes
+        assert json.loads(params['p_budgets']) == {'ISOLATED': expected_processes}
 
     def test_a_claim_before_the_slot_pool_exists_is_a_defect(self) -> None:
         worker = _make_worker()
@@ -3659,6 +3660,60 @@ class TestWorkerStartConnectionOrdering:
             'database-paths',
             'coverage-ensure',
             'listener-start',
+        ]
+
+    @pytest.mark.asyncio
+    async def test_start_logs_the_claim_plan(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The worker logs its claim plan once, when it starts."""
+        worker = _make_worker()
+        from horsies.core.history.maintenance import coverage as coverage_module
+
+        async def _ensured(*_args: Any, **_kwargs: Any) -> Any:
+            return coverage_module.CoverageEnsured(
+                created_history_leaves=0,
+                created_heartbeat_leaves=0,
+                republished=False,
+                absent_leaves=(),
+                heartbeat_covered_now=True,
+                history_covered_through=datetime(2026, 1, 2, tzinfo=timezone.utc),
+                heartbeats_covered_through=datetime(
+                    2026, 1, 1, 1, tzinfo=timezone.utc
+                ),
+            )
+
+        monkeypatch.setattr(
+            coverage_module, 'ensure_startup_coverage_in_database', _ensured
+        )
+        worker.broker = MagicMock()
+        attach_resources(worker.broker, fake_resources())
+        worker.broker.validate_worker_database_paths = AsyncMock()
+        worker._preload_modules_main = MagicMock()  # type: ignore[assignment]
+        _stub_slot_start(worker, lambda: None)
+        worker.listener.start = AsyncMock(return_value=Ok(None))
+        worker.listener.listen_many = AsyncMock(return_value=Ok([asyncio.Queue()]))
+        worker.listener.listen = AsyncMock(return_value=Ok(asyncio.Queue()))
+
+        def _close_spawned(coro, **kwargs):  # type: ignore[no-untyped-def]
+            coro.close()
+            return MagicMock()
+
+        worker._spawn_background = MagicMock(side_effect=_close_spawned)  # type: ignore[assignment]
+
+        with caplog.at_level(logging.INFO, logger='horsies.worker'):
+            await worker.start()
+
+        plan_lines = [
+            record.getMessage()
+            for record in caplog.records
+            if record.getMessage().startswith('Claim plan: ')
+        ]
+        assert plan_lines == [
+            'Claim plan: ISOLATED -> ISOLATED budget, SHARED_ASYNC -> '
+            'ISOLATED budget, SHARED_THREAD -> ISOLATED budget',
         ]
 
 
@@ -4276,6 +4331,33 @@ class TestPreloadModulesMain:
 
         mocks['import_module'].assert_called_once_with('auto.discovered')
 
+    def test_records_the_class_of_each_registered_task(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The preload keeps the Execution of each task for the claim's
+        class check."""
+        worker = _make_worker()
+        mocks = self._patch_preload(monkeypatch)
+        mocks['app'].tasks.items.return_value = [
+            ('plain', SimpleNamespace(task_options_json=None)),
+            (
+                'awaited',
+                SimpleNamespace(
+                    task_options_json=(
+                        '{"execution": "SHARED_ASYNC", "cancel_grace_ms": 5000}'
+                    ),
+                ),
+            ),
+        ]
+
+        worker._preload_modules_main()
+
+        assert worker._registered_classes == {
+            'plain': Execution.ISOLATED,
+            'awaited': Execution.SHARED_ASYNC,
+        }
+
     # --- U-5e: import error → logged + re-raised ---
 
     def test_import_error_logged_and_reraised(
@@ -4425,6 +4507,7 @@ class TestUpdateWorkerState:
     ) -> None:
         """Executes INSERT_WORKER_STATE_SQL with expected parameters."""
         worker = _make_worker()
+        worker.cfg.processes = 1
         worker._started_at = datetime(2025, 1, 1, tzinfo=timezone.utc)
         _unstarted_pool(worker)
 
@@ -4465,6 +4548,12 @@ class TestUpdateWorkerState:
         assert params['cpu_pct'] == 12.3
         assert params['children_mem_mb'] == 250.0
         assert params['slots_down'].obj == []
+        assert params['class_capacity'].obj == {
+            'ISOLATED': {
+                'capacity': 1,
+                'serves': ['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD'],
+            },
+        }
 
     @pytest.mark.asyncio
     async def test_a_degraded_worker_reports_its_down_slots(
@@ -4513,6 +4602,7 @@ class TestUpdateWorkerState:
                 ),
             ),
         )
+        assert params['class_capacity'].obj['ISOLATED']['capacity'] == 1
 
     # --- U-7c ---
 

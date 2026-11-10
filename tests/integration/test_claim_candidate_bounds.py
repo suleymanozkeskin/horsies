@@ -33,6 +33,12 @@ QUEUE = 'bounds_q'
 SEEDED_PENDING = 50
 CLAIM_PROCESSES = 10
 LEASE_MS = 60_000
+# A worker with isolated children only: every class goes to its budget.
+ISOLATED_ROUTES = {
+    'ISOLATED': 'ISOLATED',
+    'SHARED_ASYNC': 'ISOLATED',
+    'SHARED_THREAD': 'ISOLATED',
+}
 
 PLAIN_NON_RUNNABLE_JOIN_SQL = text("""
     SELECT t.id, w.status
@@ -114,7 +120,8 @@ def _claim_params(
         'p_queue_priority': json.dumps(queue_priority),
         'p_queue_max_concurrency': json.dumps(queue_max_concurrency),
         'p_hard_cap_mode': True,
-        'p_processes': CLAIM_PROCESSES,
+        'p_budgets': json.dumps({'ISOLATED': CLAIM_PROCESSES}),
+        'p_routes': json.dumps(ISOLATED_ROUTES),
         'p_prefetch_buffer': 0,
         'p_max_claim_per_worker': 0,
         'p_max_claim_batch': max_claim_batch,
@@ -255,9 +262,11 @@ async def test_only_candidate_selection_forces_a_generic_plan(
             .tuples()
             .all()
         )
+    # Both run without JIT: the generic plan's cost estimate would compile
+    # the statement on every pass.
     assert settings == {
-        'horsies_claim': '',
-        'horsies_claim_candidates': 'plan_cache_mode=force_generic_plan',
+        'horsies_claim': 'jit=off',
+        'horsies_claim_candidates': 'plan_cache_mode=force_generic_plan,jit=off',
     }
 
 

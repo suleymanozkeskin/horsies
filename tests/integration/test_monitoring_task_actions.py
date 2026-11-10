@@ -351,7 +351,14 @@ async def claim_once(broker: PostgresBroker, worker_id: str) -> list[str]:
         'p_queue_priority': json.dumps({'default': 100}),
         'p_queue_max_concurrency': json.dumps({}),
         'p_hard_cap_mode': False,
-        'p_processes': 4,
+        'p_budgets': json.dumps({'ISOLATED': 4}),
+        'p_routes': json.dumps(
+            {
+                'ISOLATED': 'ISOLATED',
+                'SHARED_ASYNC': 'ISOLATED',
+                'SHARED_THREAD': 'ISOLATED',
+            },
+        ),
         'p_prefetch_buffer': 2,
         'p_max_claim_per_worker': 10,
         'p_max_claim_batch': 10,
