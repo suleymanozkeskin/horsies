@@ -34,7 +34,9 @@ from horsies.core.models.worker_profile import (
     NoIsolatedChildren,
     NoMemoryLimit,
     NoSharedAsyncChildren,
+    NoSharedThreadChildren,
     SharedAsyncChildren,
+    SharedThreadChildren,
     WorkerProfile,
 )
 
@@ -307,6 +309,18 @@ def _shared_async_memory_mb(
             assert_never(unreachable)
 
 
+def _shared_thread_memory_mb(
+    shared_thread: SharedThreadChildren | NoSharedThreadChildren,
+) -> int | MemoryLimitsNotSet:
+    match shared_thread:
+        case SharedThreadChildren(count=count, recycle=recycle):
+            return _mode_memory_mb(count, recycle.above)
+        case NoSharedThreadChildren():
+            return 0
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def compare_memory_limits(
     profile: WorkerProfile,
     machine: UsableMemory,
@@ -321,6 +335,7 @@ def compare_memory_limits(
     for mode_mb in (
         _isolated_memory_mb(profile.isolated),
         _shared_async_memory_mb(profile.shared_async),
+        _shared_thread_memory_mb(profile.shared_thread),
     ):
         match mode_mb:
             case MemoryLimitsNotSet():

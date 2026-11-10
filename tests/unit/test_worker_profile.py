@@ -26,7 +26,9 @@ from horsies.core.models.worker_profile import (
     MAX_ISOLATED_CHILDREN,
     MAX_MEMORY_LIMIT_MB,
     MAX_SEATS_PER_SHARED_ASYNC_CHILD,
+    MAX_SEATS_PER_SHARED_THREAD_CHILD,
     MAX_SHARED_ASYNC_CHILDREN,
+    MAX_SHARED_THREAD_CHILDREN,
     MAX_TASK_LIMIT,
     PROFILE_NAME_MAX_LENGTH,
     ClaimLimits,
@@ -36,9 +38,11 @@ from horsies.core.models.worker_profile import (
     NoIsolatedChildren,
     NoMemoryLimit,
     NoSharedAsyncChildren,
+    NoSharedThreadChildren,
     NoTaskLimit,
     SharedAsyncChildren,
     SharedRecycle,
+    SharedThreadChildren,
     TaskLimit,
     WorkerProfile,
     describe_worker_profile,
@@ -180,6 +184,59 @@ class TestSharedAsyncChildrenBounds:
             SharedAsyncChildren.model_validate({'count': 1})
 
 
+class TestSharedThreadChildrenBounds:
+    @pytest.mark.parametrize('count', [0, -1])
+    def test_a_count_below_one_is_refused(self, count: int) -> None:
+        with pytest.raises(ValidationError, match='greater than or equal to 1'):
+            SharedThreadChildren(count=count, seats=1)
+
+    def test_a_count_above_max_is_refused(self) -> None:
+        with pytest.raises(ValidationError, match='less than or equal to'):
+            SharedThreadChildren(count=MAX_SHARED_THREAD_CHILDREN + 1, seats=1)
+
+    @pytest.mark.parametrize('seats', [0, -2])
+    def test_seats_below_one_are_refused(self, seats: int) -> None:
+        with pytest.raises(ValidationError, match='greater than or equal to 1'):
+            SharedThreadChildren(count=1, seats=seats)
+
+    def test_seats_above_max_are_refused(self) -> None:
+        with pytest.raises(ValidationError, match='less than or equal to'):
+            SharedThreadChildren(count=1, seats=MAX_SEATS_PER_SHARED_THREAD_CHILD + 1)
+
+    def test_the_bounds_are_accepted(self) -> None:
+        shared = SharedThreadChildren(
+            count=MAX_SHARED_THREAD_CHILDREN,
+            seats=MAX_SEATS_PER_SHARED_THREAD_CHILD,
+        )
+        assert (shared.count, shared.seats) == (1024, 256)
+
+    def test_seats_are_required(self) -> None:
+        with pytest.raises(ValidationError, match='seats'):
+            SharedThreadChildren.model_validate({'count': 1})
+
+    def test_the_default_recycle_is_the_shared_default(self) -> None:
+        assert SharedThreadChildren(count=1, seats=2).recycle == SharedRecycle()
+
+    @pytest.mark.parametrize(
+        ('data', 'expected'),
+        [
+            (
+                {'kind': 'shared_thread_children', 'count': 2, 'seats': 8},
+                SharedThreadChildren(count=2, seats=8),
+            ),
+            ({'kind': 'no_shared_thread_children'}, NoSharedThreadChildren()),
+        ],
+    )
+    def test_the_variants_parse_by_kind(
+        self, data: dict[str, Any], expected: Any
+    ) -> None:
+        profile = WorkerProfile.model_validate({'shared_thread': data})
+        assert profile.shared_thread == expected
+
+    def test_a_profile_starts_no_thread_children_by_default(self) -> None:
+        assert WorkerProfile().shared_thread == NoSharedThreadChildren()
+
+
 class TestDefaults:
     def test_shared_recycle_defaults_to_100_tasks_per_seat_and_no_memory_limit(
         self,
@@ -295,6 +352,8 @@ class TestNamedVariants:
             SharedRecycle(),
             SharedAsyncChildren(count=1, seats=1),
             NoSharedAsyncChildren(),
+            SharedThreadChildren(count=1, seats=1),
+            NoSharedThreadChildren(),
             ClaimLimits(),
             WorkerProfile(),
         ],
@@ -326,6 +385,19 @@ class TestNamedVariants:
         )
         assert profile.seat_count() == 103
 
+    def test_counts_include_the_shared_thread_children(self) -> None:
+        profile = WorkerProfile(
+            isolated=IsolatedChildren(count=3),
+            shared_async=SharedAsyncChildren(count=2, seats=50),
+            shared_thread=SharedThreadChildren(count=4, seats=8),
+        )
+        assert profile.child_count() == 9
+        assert profile.seat_count() == 3 + 100 + 32
+
+    def test_a_profile_with_only_thread_children_has_children(self) -> None:
+        profile = WorkerProfile(shared_thread=SharedThreadChildren(count=1, seats=4))
+        assert (profile.child_count(), profile.seat_count()) == (1, 4)
+
     def test_seat_count_of_isolated_children_is_their_count(self) -> None:
         assert WorkerProfile(isolated=IsolatedChildren(count=4)).seat_count() == 4
 
@@ -337,6 +409,8 @@ class TestNamedVariants:
             'IsolatedRecycle',
             'SharedAsyncChildren',
             'NoSharedAsyncChildren',
+            'SharedThreadChildren',
+            'NoSharedThreadChildren',
             'SharedRecycle',
             'TaskLimit',
             'NoTaskLimit',
@@ -434,6 +508,30 @@ class TestAppConfigProfileChecks:
             'seats + prefetch_buffer 0'
         )
 
+    def test_a_profile_with_only_thread_children_is_valid(self) -> None:
+        config = _app_config(
+            {
+                'cpu': WorkerProfile(
+                    shared_thread=SharedThreadChildren(count=2, seats=4)
+                )
+            },
+        )
+        assert 'cpu' in config.worker_profiles
+
+    def test_a_claim_limit_above_the_seats_names_the_thread_term(self) -> None:
+        profile = WorkerProfile(
+            isolated=IsolatedChildren(count=1),
+            shared_async=SharedAsyncChildren(count=1, seats=10),
+            shared_thread=SharedThreadChildren(count=2, seats=4),
+            claim=ClaimLimits(claimed_per_worker=TaskLimit(tasks=20)),
+        )
+        with pytest.raises(ConfigurationError) as raised:
+            _app_config({'split': profile})
+        assert raised.value.notes[0] == (
+            'capacity = 1 isolated children + 1 shared async children x 10 '
+            'seats + 2 shared thread children x 4 seats + prefetch_buffer 0'
+        )
+
     def test_capacity_includes_the_prefetch_buffer(self) -> None:
         config = _app_config(
             {'soft': _isolated(2, claimed_per_worker=TaskLimit(tasks=5))},
@@ -502,7 +600,7 @@ class TestDescribeWorkerProfile:
         )
         assert describe_worker_profile(profile) == (
             'isolated=8 (recycle after no limit, above 1024 MB), '
-            'shared_async=none, '
+            'shared_async=none, shared_thread=none, '
             'claim per queue per pass: 4 tasks, claimed per worker: no limit, '
             'drain_timeout=90s, preload=app'
         )
@@ -521,6 +619,22 @@ class TestDescribeWorkerProfile:
         assert (
             'shared_async=3x25 seats (recycle after 40 tasks per seat, '
             'above 2048 MB), '
+        ) in describe_worker_profile(profile)
+
+    def test_shared_thread_children_are_named(self) -> None:
+        profile = WorkerProfile(
+            shared_thread=SharedThreadChildren(
+                count=2,
+                seats=8,
+                recycle=SharedRecycle(
+                    after_per_seat=NoTaskLimit(),
+                    above=MemoryLimit(mb=1024),
+                ),
+            ),
+        )
+        assert (
+            'shared_thread=2x8 seats (recycle after no limit per seat, '
+            'above 1024 MB), '
         ) in describe_worker_profile(profile)
 
     def test_no_isolated_children(self) -> None:

@@ -26,6 +26,7 @@ from horsies.core.models.worker_profile import (
     NoIsolatedChildren,
     SharedAsyncChildren,
     SharedRecycle,
+    SharedThreadChildren,
     WorkerProfile,
 )
 from horsies.core.worker import profile_fit
@@ -117,6 +118,31 @@ class TestCompareMemoryLimits:
             shared_async=SharedAsyncChildren(count=1, seats=10),
         )
         assert compare_memory_limits(profile, _host_ram(1)) == MemoryLimitsNotSet()
+
+    def test_the_sum_covers_shared_thread_children(self) -> None:
+        profile = WorkerProfile(
+            isolated=IsolatedChildren(
+                count=1,
+                recycle=IsolatedRecycle(above=MemoryLimit(mb=256)),
+            ),
+            shared_thread=SharedThreadChildren(
+                count=2,
+                seats=8,
+                recycle=SharedRecycle(above=MemoryLimit(mb=700)),
+            ),
+        )
+        outcome = compare_memory_limits(profile, _host_ram(1655))
+        assert outcome == MemoryLimitsExceedMachine(total_mb=1656, machine_mb=1655)
+
+    def test_thread_children_with_no_memory_limit_have_no_sum(self) -> None:
+        profile = WorkerProfile(
+            isolated=IsolatedChildren(
+                count=2,
+                recycle=IsolatedRecycle(above=MemoryLimit(mb=256)),
+            ),
+            shared_thread=SharedThreadChildren(count=1, seats=4),
+        )
+        assert compare_memory_limits(profile, _host_ram(10**6)) == MemoryLimitsNotSet()
 
     def test_only_shared_children_are_summed(self) -> None:
         profile = WorkerProfile(
@@ -356,6 +382,18 @@ class TestConnectionNeed:
         )
         assert need.children == 5
         assert need.total() == 3 + 2 + 2 + 1 + 5 * 2
+
+    def test_shared_thread_children_open_a_child_pool_each(self) -> None:
+        """The seat threads of a thread child share its one sync pool."""
+        need = worker_connection_need(
+            WorkerProfile(
+                isolated=IsolatedChildren(count=1),
+                shared_thread=SharedThreadChildren(count=2, seats=64),
+            ),
+            _broker(),
+        )
+        assert need.children == 3
+        assert need.total() == 3 + 2 + 2 + 1 + 3 * 2
 
     def test_parent_pool_inherits_pool_size_when_worker_pool_is_none(self) -> None:
         need = worker_connection_need(
