@@ -234,8 +234,9 @@ either_limit = WorkerProfile(
   backstop, then tune the memory threshold from observed `children_memory_mb`
   under production-like load.
 
-At boot the worker warns when `count × MemoryLimit.mb` is above the RAM of the
-machine. It starts in every case. See [Worker Profiles](worker-profiles#memory).
+At boot the worker warns when `count × MemoryLimit.mb` is above the memory that
+it can use: the container (cgroup) limit when it is below the host RAM, else the
+host RAM. It starts in every case. See [Worker Profiles](worker-profiles#memory).
 
 To run **memory-only**, disable count recycling explicitly (otherwise its
 default `TaskLimit(tasks=100)` still applies):

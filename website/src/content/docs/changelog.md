@@ -67,8 +67,10 @@ there is no migration contract between pre-1.0 versions.
   (`CHECK_WORKER_CONNECTIONS`). With `pgbouncer_transaction_mode=True`
   nothing is compared. At boot, before any child starts, a worker logs the
   same comparison as a warning. It also warns when the per-child memory
-  limits of its profile add up to more than the RAM of the machine. It
-  starts in both cases.
+  limits of its profile add up to more than the memory that it can use: the
+  container (cgroup v2 or v1) memory limit when that is below the host RAM,
+  else the host RAM. The warning names the source. It starts in both
+  cases.
 
 ### Changed
 

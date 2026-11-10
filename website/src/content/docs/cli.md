@@ -48,7 +48,7 @@ horsies worker myapp.instance:app --profile default --loglevel=DEBUG
 horsies worker app/configs/instance.py:app --profile default
 ```
 
-At boot, before any child starts, the worker logs the settings of the profile, and warns when the per-child memory limits add up to more than the RAM of the machine, or when one worker can open more Postgres connections than the server has usable slots. See [Validation](workers/worker-profiles#validation).
+At boot, before any child starts, the worker logs the settings of the profile, and warns when the per-child memory limits add up to more than the memory that the worker can use (the container limit, or the host RAM), or when one worker can open more Postgres connections than the server has usable slots. See [Validation](workers/worker-profiles#validation).
 
 ### horsies scheduler
 

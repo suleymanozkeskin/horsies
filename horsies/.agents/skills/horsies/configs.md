@@ -117,7 +117,7 @@ worker_profiles = {
 
 The number of children is `WorkerProfile.child_count()`, the sum over modes.
 There is one mode, isolated. Boot also warns (never refuses) when `count × mb`
-is above the machine RAM, and when one worker can open more Postgres
+is above the usable memory (container limit or host RAM), and when one worker can open more Postgres
 connections than the server has usable slots.
 
 Removed flags and their fields: `--processes` → `IsolatedChildren.count`;
@@ -381,7 +381,10 @@ slot.
   80% of it.
 - `mb` from 1 to 16,777,216 — no fixed floor, the baseline guard is the real floor.
 - At boot the worker warns (and still starts) when `count × mb` is above the
-  RAM of the machine.
+  usable memory: the cgroup limit (v2 `/sys/fs/cgroup/memory.max`, else v1
+  `/sys/fs/cgroup/memory/memory.limit_in_bytes`; `max` or no file = no limit)
+  when it is below the host RAM, else the host RAM. The warning names the
+  source: `container limit` or `host RAM`.
 
 **Using both (OR semantics).** When both are set, a child exits when *either*
 limit is reached. Recommended default for memory-quota deployments (containers,
@@ -900,7 +903,7 @@ horsies worker <module> --profile NAME [--loglevel LEVEL]
 | `--profile` | required | Name of a profile in `AppConfig.worker_profiles`. See [Worker profiles](#worker-profiles) |
 | `--loglevel` | `INFO` | Log level |
 
-Startup: logging → import app (builds `AppConfig`, validates every profile) → select `--profile` → `app.check()` → RAM warning → schema init with retry → connection warning → start children.
+Startup: logging → import app (builds `AppConfig`, validates every profile) → select `--profile` → `app.check()` → memory warning → schema init with retry → connection warning → start children.
 SIGTERM/SIGINT: graceful shutdown: stops claims, returns tasks that wait for a child to PENDING, waits up to the profile's `drain_timeout` for running tasks, then kills their children. On systemd set `KillMode=mixed`; in Docker use the exec form of `CMD`.
 
 ### `horsies scheduler`

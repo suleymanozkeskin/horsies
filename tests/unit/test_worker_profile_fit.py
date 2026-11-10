@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from pathlib import Path
 from collections.abc import AsyncGenerator
 from typing import Any
 from unittest import mock
@@ -27,7 +28,10 @@ from horsies.core.models.worker_profile import (
 )
 from horsies.core.worker import profile_fit
 from horsies.core.worker.profile_fit import (
+    CGROUP_FILE_MAX_BYTES,
     LISTENER_CONNECTIONS_PER_WORKER,
+    CgroupLimit,
+    CgroupUnreadable,
     ConnectionsExceedServer,
     ConnectionsFit,
     MachineMemory,
@@ -35,13 +39,19 @@ from horsies.core.worker.profile_fit import (
     MemoryLimitsExceedMachine,
     MemoryLimitsFit,
     MemoryLimitsNotSet,
+    MemorySource,
+    NoCgroupLimit,
     ServerConnectionLimit,
     ServerConnectionLimitUnreadable,
+    UsableMemory,
+    UsableMemoryUnreadable,
     WorkerConnectionNeed,
     compare_connections,
     compare_memory_limits,
+    read_cgroup_memory_limit,
     read_machine_memory,
     read_server_connection_limit,
+    usable_memory,
     worker_connection_need,
 )
 
@@ -63,20 +73,165 @@ def _broker(**fields: Any) -> PostgresConfig:
     return PostgresConfig(database_url=SecretStr(_URL), **fields)
 
 
+def _host_ram(mb: int) -> UsableMemory:
+    return UsableMemory(mb=mb, source=MemorySource.HOST_RAM)
+
+
 class TestCompareMemoryLimits:
-    def test_sum_above_the_ram_exceeds(self) -> None:
-        outcome = compare_memory_limits(_limited(4, 512), MachineMemory(mb=2047))
+    def test_sum_above_the_usable_memory_exceeds(self) -> None:
+        outcome = compare_memory_limits(_limited(4, 512), _host_ram(2047))
         assert outcome == MemoryLimitsExceedMachine(total_mb=2048, machine_mb=2047)
 
-    def test_sum_equal_to_the_ram_fits(self) -> None:
-        outcome = compare_memory_limits(_limited(4, 512), MachineMemory(mb=2048))
+    def test_sum_equal_to_the_usable_memory_fits(self) -> None:
+        outcome = compare_memory_limits(_limited(4, 512), _host_ram(2048))
         assert outcome == MemoryLimitsFit(total_mb=2048, machine_mb=2048)
 
     def test_no_memory_limit_has_no_sum(self) -> None:
         profile = WorkerProfile(isolated=IsolatedChildren(count=4))
-        assert compare_memory_limits(profile, MachineMemory(mb=1)) == (
-            MemoryLimitsNotSet()
+        assert compare_memory_limits(profile, _host_ram(1)) == MemoryLimitsNotSet()
+
+
+_MIB = 1024 * 1024
+# The cgroup v1 value for "no limit" on 64-bit Linux with 4 KiB pages.
+_V1_NO_LIMIT = 9_223_372_036_854_771_712
+
+
+class _CgroupFiles:
+    """Fake cgroup v2 and v1 limit files under ``tmp_path``."""
+
+    def __init__(self, root: Path) -> None:
+        self.v2 = root / 'v2' / 'memory.max'
+        self.v1 = root / 'v1' / 'memory.limit_in_bytes'
+
+    def write(self, path: Path, content: str | bytes) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        match content:
+            case str():
+                path.write_text(content)
+            case bytes():
+                path.write_bytes(content)
+
+    def read(self) -> CgroupLimit | NoCgroupLimit | CgroupUnreadable:
+        return read_cgroup_memory_limit(v2_path=self.v2, v1_path=self.v1)
+
+
+@pytest.fixture
+def cgroup(tmp_path: Path) -> _CgroupFiles:
+    return _CgroupFiles(tmp_path)
+
+
+class TestReadCgroupMemoryLimit:
+    def test_v2_number_is_the_limit(self, cgroup: _CgroupFiles) -> None:
+        cgroup.write(cgroup.v2, '536870912\n')
+        assert cgroup.read() == CgroupLimit(limit_bytes=536_870_912)
+
+    def test_v2_max_is_no_limit(self, cgroup: _CgroupFiles) -> None:
+        cgroup.write(cgroup.v2, 'max\n')
+        assert cgroup.read() == NoCgroupLimit()
+
+    def test_v2_is_read_before_v1(self, cgroup: _CgroupFiles) -> None:
+        cgroup.write(cgroup.v2, 'max\n')
+        cgroup.write(cgroup.v1, '536870912\n')
+        assert cgroup.read() == NoCgroupLimit()
+
+    def test_v1_number_is_the_limit_when_v2_is_absent(
+        self,
+        cgroup: _CgroupFiles,
+    ) -> None:
+        cgroup.write(cgroup.v1, '1073741824\n')
+        assert cgroup.read() == CgroupLimit(limit_bytes=1_073_741_824)
+
+    def test_no_file_is_no_limit(self, cgroup: _CgroupFiles) -> None:
+        assert cgroup.read() == NoCgroupLimit()
+
+    @pytest.mark.parametrize('content', ['', 'lots', '-1', '12 MB', '1e9'])
+    def test_unexpected_content_is_unreadable(
+        self,
+        cgroup: _CgroupFiles,
+        content: str,
+    ) -> None:
+        cgroup.write(cgroup.v2, content)
+        outcome = cgroup.read()
+        assert isinstance(outcome, CgroupUnreadable)
+        assert outcome.reason == f'{cgroup.v2}: unexpected content {content!r}'
+
+    def test_a_file_that_cannot_be_opened_is_unreadable(
+        self,
+        cgroup: _CgroupFiles,
+    ) -> None:
+        cgroup.v2.mkdir(parents=True)
+        outcome = cgroup.read()
+        assert isinstance(outcome, CgroupUnreadable)
+        assert outcome.reason.startswith(f'{cgroup.v2}: IsADirectoryError: ')
+
+    def test_a_file_above_the_read_bound_is_unreadable(
+        self,
+        cgroup: _CgroupFiles,
+    ) -> None:
+        cgroup.write(cgroup.v2, '1' * (CGROUP_FILE_MAX_BYTES + 1))
+        assert cgroup.read() == CgroupUnreadable(
+            reason=f'{cgroup.v2}: more than {CGROUP_FILE_MAX_BYTES} bytes',
         )
+
+    def test_a_file_at_the_read_bound_is_read(self, cgroup: _CgroupFiles) -> None:
+        cgroup.write(cgroup.v2, '1' * CGROUP_FILE_MAX_BYTES)
+        assert cgroup.read() == CgroupLimit(limit_bytes=int('1' * CGROUP_FILE_MAX_BYTES))
+
+    def test_non_ascii_content_is_unreadable(self, cgroup: _CgroupFiles) -> None:
+        cgroup.write(cgroup.v1, b'\xff\xfe')
+        assert cgroup.read() == CgroupUnreadable(reason=f'{cgroup.v1}: not ASCII text')
+
+
+class TestUsableMemory:
+    def test_a_container_limit_below_the_host_ram_wins(self) -> None:
+        outcome = usable_memory(
+            MachineMemory(mb=16_384),
+            CgroupLimit(limit_bytes=2048 * _MIB),
+        )
+        assert outcome == UsableMemory(mb=2048, source=MemorySource.CONTAINER_LIMIT)
+
+    def test_a_container_limit_equal_to_the_host_ram_is_host_ram(self) -> None:
+        outcome = usable_memory(
+            MachineMemory(mb=2048),
+            CgroupLimit(limit_bytes=2048 * _MIB),
+        )
+        assert outcome == UsableMemory(mb=2048, source=MemorySource.HOST_RAM)
+
+    def test_the_v1_no_limit_value_is_host_ram(self) -> None:
+        outcome = usable_memory(
+            MachineMemory(mb=16_384),
+            CgroupLimit(limit_bytes=_V1_NO_LIMIT),
+        )
+        assert outcome == UsableMemory(mb=16_384, source=MemorySource.HOST_RAM)
+
+    def test_no_cgroup_limit_is_host_ram(self) -> None:
+        outcome = usable_memory(MachineMemory(mb=16_384), NoCgroupLimit())
+        assert outcome == UsableMemory(mb=16_384, source=MemorySource.HOST_RAM)
+
+    def test_an_unreadable_cgroup_falls_back_to_host_ram(self) -> None:
+        outcome = usable_memory(
+            MachineMemory(mb=16_384),
+            CgroupUnreadable(reason='denied'),
+        )
+        assert outcome == UsableMemory(mb=16_384, source=MemorySource.HOST_RAM)
+
+    def test_a_container_limit_stands_when_the_host_ram_is_unreadable(self) -> None:
+        outcome = usable_memory(
+            MachineMemoryUnreadable(reason='no /proc'),
+            CgroupLimit(limit_bytes=512 * _MIB),
+        )
+        assert outcome == UsableMemory(mb=512, source=MemorySource.CONTAINER_LIMIT)
+
+    @pytest.mark.parametrize(
+        'cgroup',
+        [NoCgroupLimit(), CgroupUnreadable(reason='denied')],
+    )
+    def test_nothing_readable_is_unreadable(
+        self,
+        cgroup: NoCgroupLimit | CgroupUnreadable,
+    ) -> None:
+        outcome = usable_memory(MachineMemoryUnreadable(reason='no /proc'), cgroup)
+        assert outcome == UsableMemoryUnreadable(reason='no /proc')
 
 
 class TestReadMachineMemory:
@@ -288,6 +443,6 @@ def test_no_isolated_children_has_no_memory_sum_to_exceed() -> None:
     """A profile with no children sums to 0; the compare does not need a limit."""
     outcome = compare_memory_limits(
         WorkerProfile(isolated=NoIsolatedChildren()),
-        MachineMemory(mb=1),
+        _host_ram(1),
     )
     assert outcome == MemoryLimitsFit(total_mb=0, machine_mb=1)

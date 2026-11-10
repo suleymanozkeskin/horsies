@@ -149,7 +149,7 @@ Validation runs in two places. `horsies check` validates every profile with the 
 | Claim limit above the capacity | error `HRS-218` | error `HRS-218` | error: the app config does not build |
 | `--profile` names a defined profile | not checked | not checked | error `HRS-206`, exit 1 |
 | Postgres connections of one worker against the server | not checked | error `HRS-219` | warning |
-| Sum of the per-child memory limits against the RAM | not checked | not checked | warning |
+| Sum of the per-child memory limits against the usable memory (container limit or host RAM) | not checked | not checked | warning |
 | Memory limit against the measured child baseline RSS | not checked | not checked | refusal, exit 1 |
 
 The app config is built when the worker imports the app module, so a worker boot validates every profile again, the chosen one included. A worker does not start from a config that has an invalid profile.
@@ -181,7 +181,22 @@ The comparison is for one worker. Several workers, producers and other clients s
 
 ### Memory
 
-At boot the worker compares `count × MemoryLimit.mb` with the RAM of the machine and logs a warning when the sum is above it. The worker starts in every case: a deployment can move between machine sizes. Inside a container the RAM is the RAM of the host, not the container limit. A profile with `NoMemoryLimit()` has no sum to compare.
+At boot the worker compares `count × MemoryLimit.mb` with the memory that it can use, and logs a warning when the sum is above it. The worker starts in every case: a deployment can move between machine sizes. A profile with `NoMemoryLimit()` has no sum to compare.
+
+The memory that the worker can use is the smaller of two values:
+
+| Source | Read from | Named in the warning |
+|--------|-----------|----------------------|
+| Container limit | cgroup v2 `/sys/fs/cgroup/memory.max`; when that file does not exist, cgroup v1 `/sys/fs/cgroup/memory/memory.limit_in_bytes` | `container limit` |
+| Host RAM | `psutil.virtual_memory().total` | `host RAM` |
+
+- A cgroup value of `max`, or no cgroup file, means no container limit.
+- A cgroup limit at or above the host RAM, such as the cgroup v1 value for no limit, leaves the host RAM.
+- A cgroup file that exists but cannot be read or parsed gives a separate warning, and the host RAM is used.
+
+```text
+Worker profile 'default': the per-child memory limits add up to 2048 MB, above the 1024 MB container limit. Children can use more memory than the worker has before they are recycled.
+```
 
 ## Things to Avoid
 
@@ -201,7 +216,7 @@ claim_at_capacity = WorkerProfile(
 )
 ```
 
-**Don't size the memory limits for one machine and ignore the boot warning on another.** The warning names the sum and the RAM of the machine that started the worker.
+**Don't size the memory limits for one machine and ignore the boot warning on another.** The warning names the sum, the usable memory of the worker that started, and its source.
 
 ## Migrating from Worker Flags
 

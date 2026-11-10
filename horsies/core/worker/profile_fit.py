@@ -3,9 +3,10 @@
 These are facts that only a running machine or a live server knows, so the
 static profile validation in ``AppConfig`` cannot check them:
 
-- The sum of the per-child memory limits against the RAM of the machine.
-  The worker logs a warning when the sum is above the RAM, and starts:
-  a deployment can move between machine sizes.
+- The sum of the per-child memory limits against the memory that the
+  worker can use: the cgroup limit of its container when that is below the
+  host RAM, else the host RAM. The worker logs a warning when the sum is
+  above it, and starts: a deployment can move between machine sizes.
 - The Postgres connections that one worker can open against the
   ``max_connections`` of the server, less the reserved slots. A worker
   logs a warning at boot; ``horsies check --live`` reports an error.
@@ -18,6 +19,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
 from typing import Final, assert_never
 
 from sqlalchemy import text
@@ -42,6 +45,18 @@ CONNECTION_LIMIT_READ_TIMEOUT_S: Final = 10.0
 
 _BYTES_PER_MB: Final = 1024 * 1024
 
+CGROUP_V2_MEMORY_MAX: Final = Path('/sys/fs/cgroup/memory.max')
+"""The memory limit of the cgroup of this process under cgroup v2."""
+
+CGROUP_V1_MEMORY_LIMIT: Final = Path('/sys/fs/cgroup/memory/memory.limit_in_bytes')
+"""The memory limit of the cgroup of this process under cgroup v1."""
+
+CGROUP_FILE_MAX_BYTES: Final = 64
+"""The most bytes read from a cgroup limit file. A limit is one decimal
+number of at most 20 digits, or ``max``."""
+
+_CGROUP_NO_LIMIT: Final = 'max'
+
 _CONNECTION_LIMIT_SQL: Final = text(
     """
     SELECT
@@ -54,22 +69,23 @@ _CONNECTION_LIMIT_SQL: Final = text(
 
 @dataclass(frozen=True, slots=True)
 class MachineMemory:
-    """The total RAM of the machine, in MB."""
+    """The total RAM of the host, in MB."""
 
     mb: int
 
 
 @dataclass(frozen=True, slots=True)
 class MachineMemoryUnreadable:
-    """The RAM of the machine could not be read."""
+    """The RAM of the host could not be read."""
 
     reason: str
 
 
 def read_machine_memory() -> MachineMemory | MachineMemoryUnreadable:
-    """Read the total RAM of the machine through ``psutil``.
+    """Read the total RAM of the host through ``psutil``.
 
-    Inside a container this is the RAM of the host, not a cgroup limit.
+    Inside a container this is the RAM of the host, not a cgroup limit; see
+    ``read_cgroup_memory_limit``.
     """
     import psutil
 
@@ -81,8 +97,152 @@ def read_machine_memory() -> MachineMemory | MachineMemoryUnreadable:
 
 
 @dataclass(frozen=True, slots=True)
+class CgroupLimit:
+    """The cgroup of this process limits its memory to ``limit_bytes``."""
+
+    limit_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class NoCgroupLimit:
+    """No cgroup memory limit applies: the limit file says ``max``, or no
+    limit file exists (no cgroup memory controller, or not Linux)."""
+
+
+@dataclass(frozen=True, slots=True)
+class CgroupUnreadable:
+    """A cgroup limit file exists but could not be read or parsed."""
+
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class _CgroupFileAbsent:
+    """The limit file does not exist."""
+
+
+def _read_cgroup_file(path: Path) -> str | _CgroupFileAbsent | CgroupUnreadable:
+    """The text of a cgroup limit file, read up to ``CGROUP_FILE_MAX_BYTES``."""
+    try:
+        with path.open('rb') as handle:
+            raw = handle.read(CGROUP_FILE_MAX_BYTES + 1)
+    except FileNotFoundError:
+        return _CgroupFileAbsent()
+    except OSError as exc:
+        return CgroupUnreadable(reason=f'{path}: {type(exc).__name__}: {exc}')
+    if len(raw) > CGROUP_FILE_MAX_BYTES:
+        return CgroupUnreadable(
+            reason=f'{path}: more than {CGROUP_FILE_MAX_BYTES} bytes',
+        )
+    try:
+        return raw.decode('ascii').strip()
+    except UnicodeDecodeError:
+        return CgroupUnreadable(reason=f'{path}: not ASCII text')
+
+
+def _parse_cgroup_value(
+    path: Path,
+    value: str,
+) -> CgroupLimit | NoCgroupLimit | CgroupUnreadable:
+    """Parse ``max`` or a decimal number of bytes."""
+    if value == _CGROUP_NO_LIMIT:
+        return NoCgroupLimit()
+    if value.isascii() and value.isdigit():
+        return CgroupLimit(limit_bytes=int(value))
+    return CgroupUnreadable(reason=f'{path}: unexpected content {value!r}')
+
+
+def read_cgroup_memory_limit(
+    v2_path: Path = CGROUP_V2_MEMORY_MAX,
+    v1_path: Path = CGROUP_V1_MEMORY_LIMIT,
+) -> CgroupLimit | NoCgroupLimit | CgroupUnreadable:
+    """Read the memory limit of the cgroup of this process.
+
+    The cgroup v2 file is read when it exists, else the cgroup v1 file. No
+    file means no cgroup limit. The cgroup v1 value for "no limit" is a
+    number far above any RAM; ``usable_memory`` then keeps the host RAM.
+    """
+    match _read_cgroup_file(v2_path):
+        case str() as value:
+            return _parse_cgroup_value(v2_path, value)
+        case CgroupUnreadable() as unreadable:
+            return unreadable
+        case _CgroupFileAbsent():
+            pass
+        case _ as unreachable_v2:
+            assert_never(unreachable_v2)
+    match _read_cgroup_file(v1_path):
+        case str() as value:
+            return _parse_cgroup_value(v1_path, value)
+        case CgroupUnreadable() as unreadable:
+            return unreadable
+        case _CgroupFileAbsent():
+            return NoCgroupLimit()
+        case _ as unreachable_v1:
+            assert_never(unreachable_v1)
+
+
+class MemorySource(Enum):
+    """Where the memory that a worker can use comes from."""
+
+    CONTAINER_LIMIT = 'container limit'
+    HOST_RAM = 'host RAM'
+
+
+@dataclass(frozen=True, slots=True)
+class UsableMemory:
+    """The memory that the worker can use, in MB, and where it comes from."""
+
+    mb: int
+    source: MemorySource
+
+
+@dataclass(frozen=True, slots=True)
+class UsableMemoryUnreadable:
+    """Neither a cgroup limit nor the host RAM could be read."""
+
+    reason: str
+
+
+def usable_memory(
+    host: MachineMemory | MachineMemoryUnreadable,
+    cgroup: CgroupLimit | NoCgroupLimit | CgroupUnreadable,
+) -> UsableMemory | UsableMemoryUnreadable:
+    """The smaller of the cgroup limit and the host RAM.
+
+    A cgroup limit at or above the host RAM, which includes the cgroup v1
+    value for "no limit", leaves the host RAM. An unreadable cgroup file
+    leaves the host RAM; the caller reports it.
+    """
+    match (cgroup, host):
+        case (CgroupLimit(limit_bytes=limit_bytes), MachineMemory(mb=host_mb)):
+            container_mb = limit_bytes // _BYTES_PER_MB
+            if container_mb < host_mb:
+                return UsableMemory(
+                    mb=container_mb, source=MemorySource.CONTAINER_LIMIT
+                )
+            return UsableMemory(mb=host_mb, source=MemorySource.HOST_RAM)
+        case (CgroupLimit(limit_bytes=limit_bytes), MachineMemoryUnreadable()):
+            return UsableMemory(
+                mb=limit_bytes // _BYTES_PER_MB,
+                source=MemorySource.CONTAINER_LIMIT,
+            )
+        case (NoCgroupLimit() | CgroupUnreadable(), MachineMemory(mb=host_mb)):
+            return UsableMemory(mb=host_mb, source=MemorySource.HOST_RAM)
+        case (
+            NoCgroupLimit()
+            | CgroupUnreadable(),
+            MachineMemoryUnreadable(reason=reason),
+        ):
+            return UsableMemoryUnreadable(reason=reason)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+@dataclass(frozen=True, slots=True)
 class MemoryLimitsFit:
-    """The sum of the per-child memory limits is at or below the RAM."""
+    """The sum of the per-child memory limits is at or below the usable
+    memory (``machine_mb``)."""
 
     total_mb: int
     machine_mb: int
@@ -90,7 +250,8 @@ class MemoryLimitsFit:
 
 @dataclass(frozen=True, slots=True)
 class MemoryLimitsExceedMachine:
-    """The sum of the per-child memory limits is above the RAM."""
+    """The sum of the per-child memory limits is above the usable memory
+    (``machine_mb``)."""
 
     total_mb: int
     machine_mb: int
@@ -104,9 +265,10 @@ class MemoryLimitsNotSet:
 
 def compare_memory_limits(
     profile: WorkerProfile,
-    machine: MachineMemory,
+    machine: UsableMemory,
 ) -> MemoryLimitsFit | MemoryLimitsExceedMachine | MemoryLimitsNotSet:
-    """Compare the sum over the children of their memory limits with the RAM."""
+    """Compare the sum over the children of their memory limits with the
+    memory that the worker can use."""
     match profile.isolated:
         case IsolatedChildren(count=count, recycle=recycle):
             match recycle.above:

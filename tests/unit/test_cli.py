@@ -59,8 +59,11 @@ from horsies.core.models.worker_profile import (
 )
 from horsies.core.types.result import Err, Ok
 from horsies.core.worker.profile_fit import (
+    CgroupLimit,
+    CgroupUnreadable,
     MachineMemory,
     MachineMemoryUnreadable,
+    NoCgroupLimit,
     ServerConnectionLimit,
     ServerConnectionLimitUnreadable,
 )
@@ -2543,8 +2546,10 @@ class TestExecutionSettings:
 def _start_worker_with(
     profile: WorkerProfile,
     machine: MachineMemory | MachineMemoryUnreadable,
+    cgroup: CgroupLimit | NoCgroupLimit | CgroupUnreadable = NoCgroupLimit(),
 ) -> MagicMock:
-    """Run worker_command up to asyncio.run with one profile and a RAM reading."""
+    """Run worker_command up to asyncio.run with one profile, a host RAM
+    reading and a cgroup limit reading."""
     app = _make_mock_app()
     app.config.worker_profiles = {'default': profile}
     with (
@@ -2556,6 +2561,7 @@ def _start_worker_with(
         ),
         patch('horsies.core.cli.print_banner', autospec=True),
         patch('horsies.core.cli.read_machine_memory', return_value=machine),
+        patch('horsies.core.cli.read_cgroup_memory_limit', return_value=cgroup),
         patch(
             'horsies.core.cli.asyncio.run',
             autospec=True,
@@ -2577,9 +2583,10 @@ def _memory_profile(count: int, mb: int) -> WorkerProfile:
 
 @pytest.mark.unit
 class TestBootMemoryFit:
-    """The sum of the memory limits against the RAM warns and never refuses."""
+    """The sum of the memory limits against the memory the worker can use
+    (container limit or host RAM) warns and never refuses."""
 
-    def test_limits_above_the_ram_warn_and_the_worker_starts(
+    def test_limits_above_the_host_ram_warn_and_the_worker_starts(
         self,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
@@ -2590,9 +2597,52 @@ class TestBootMemoryFit:
         warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
         assert warnings == [
             "Worker profile 'default': the per-child memory limits add up to "
-            '2048 MB, above the 1000 MB of RAM of this machine. Children can use '
-            'more memory than the machine has before they are recycled.',
+            '2048 MB, above the 1000 MB host RAM. Children can use more memory '
+            'than the worker has before they are recycled.',
         ]
+
+    def test_limits_above_the_container_limit_warn_and_name_it(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """16 GiB host, 1 GiB container: the container limit is the bound."""
+        with caplog.at_level(logging.INFO, logger='horsies'):
+            mock_run = _start_worker_with(
+                _memory_profile(4, 512),
+                MachineMemory(mb=16_384),
+                CgroupLimit(limit_bytes=1024 * 1024 * 1024),
+            )
+
+        mock_run.assert_called_once()
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert warnings == [
+            "Worker profile 'default': the per-child memory limits add up to "
+            '2048 MB, above the 1024 MB container limit. Children can use more '
+            'memory than the worker has before they are recycled.',
+        ]
+
+    def test_an_unreadable_container_limit_warns_and_uses_the_host_ram(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        with caplog.at_level(logging.INFO, logger='horsies'):
+            mock_run = _start_worker_with(
+                _memory_profile(2, 512),
+                MachineMemory(mb=4096),
+                CgroupUnreadable(reason='/sys/fs/cgroup/memory.max: PermissionError: denied'),
+            )
+
+        mock_run.assert_called_once()
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert warnings == [
+            "Worker profile 'default': the container memory limit could not be "
+            'read (/sys/fs/cgroup/memory.max: PermissionError: denied); the '
+            'per-child memory limits are compared with the host RAM',
+        ]
+        assert any(
+            'add up to 1024 MB of the 4096 MB host RAM' in r.getMessage()
+            for r in caplog.records
+        )
 
     def test_limits_within_the_ram_do_not_warn(
         self,
@@ -2603,7 +2653,10 @@ class TestBootMemoryFit:
 
         mock_run.assert_called_once()
         assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
-        assert any('add up to 1024 MB of 1024 MB' in r.getMessage() for r in caplog.records)
+        assert any(
+            'add up to 1024 MB of the 1024 MB host RAM' in r.getMessage()
+            for r in caplog.records
+        )
 
     def test_unreadable_ram_warns_and_the_worker_starts(
         self,
@@ -2618,7 +2671,7 @@ class TestBootMemoryFit:
         mock_run.assert_called_once()
         warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
         assert len(warnings) == 1
-        assert 'the RAM of the machine could not be read (OSError: no /proc)' in warnings[0]
+        assert 'the memory of the machine could not be read (OSError: no /proc)' in warnings[0]
 
     def test_no_memory_limit_has_nothing_to_compare(
         self,

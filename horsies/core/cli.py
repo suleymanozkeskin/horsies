@@ -53,19 +53,24 @@ from horsies.core.scheduler import Scheduler
 from horsies.core.worker.config import ChildPreload
 from horsies.core.worker.profile_fit import (
     CONNECTIONS_HELP,
+    CgroupLimit,
+    CgroupUnreadable,
     ConnectionsExceedServer,
     ConnectionsFit,
-    MachineMemory,
-    MachineMemoryUnreadable,
     MemoryLimitsExceedMachine,
     MemoryLimitsFit,
     MemoryLimitsNotSet,
+    NoCgroupLimit,
     ServerConnectionLimit,
     ServerConnectionLimitUnreadable,
+    UsableMemory,
+    UsableMemoryUnreadable,
     compare_connections,
     compare_memory_limits,
+    read_cgroup_memory_limit,
     read_machine_memory,
     read_server_connection_limit,
+    usable_memory,
 )
 from horsies.core.worker.worker import Worker, WorkerConfig
 from horsies.core.types.result import Err, Ok, Result, is_err, is_ok
@@ -565,44 +570,72 @@ def execution_settings(profile: WorkerProfile) -> ExecutionSettings:
             assert_never(unreachable)
 
 
+def _read_usable_memory(
+    selected: SelectedProfile,
+    logger: logging.Logger,
+) -> UsableMemory | UsableMemoryUnreadable:
+    """Read the host RAM and the cgroup limit, and keep the smaller.
+
+    Warns when a cgroup limit file exists but cannot be read: the host RAM
+    is then the only bound, and inside a container it can be far too high.
+    """
+    cgroup = read_cgroup_memory_limit()
+    match cgroup:
+        case CgroupUnreadable(reason=reason):
+            logger.warning(
+                'Worker profile %r: the container memory limit could not be '
+                'read (%s); the per-child memory limits are compared with the '
+                'host RAM',
+                selected.name,
+                reason,
+            )
+        case CgroupLimit() | NoCgroupLimit():
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
+    return usable_memory(read_machine_memory(), cgroup)
+
+
 def _log_memory_fit(selected: SelectedProfile, logger: logging.Logger) -> None:
-    """Warn when the per-child memory limits add up to more than the RAM.
+    """Warn when the per-child memory limits add up to more than the memory
+    that the worker can use: the container limit, or the host RAM.
 
     A warning, not a refusal: a deployment can move between machine sizes.
     The worker starts in every outcome.
     """
-    match read_machine_memory():
-        case MachineMemoryUnreadable(reason=reason):
+    match _read_usable_memory(selected, logger):
+        case UsableMemoryUnreadable(reason=reason):
             logger.warning(
-                'Worker profile %r: the RAM of the machine could not be read '
+                'Worker profile %r: the memory of the machine could not be read '
                 '(%s); the per-child memory limits were not compared with it',
                 selected.name,
                 reason,
             )
-        case MachineMemory() as machine:
-            match compare_memory_limits(selected.profile, machine):
-                case MemoryLimitsExceedMachine(total_mb=total_mb, machine_mb=ram_mb):
+        case UsableMemory(source=source) as usable:
+            match compare_memory_limits(selected.profile, usable):
+                case MemoryLimitsExceedMachine(total_mb=total_mb, machine_mb=usable_mb):
                     logger.warning(
                         'Worker profile %r: the per-child memory limits add up '
-                        'to %s MB, above the %s MB of RAM of this machine. '
-                        'Children can use more memory than the machine has '
-                        'before they are recycled.',
+                        'to %s MB, above the %s MB %s. Children can use more '
+                        'memory than the worker has before they are recycled.',
                         selected.name,
                         total_mb,
-                        ram_mb,
+                        usable_mb,
+                        source.value,
                     )
-                case MemoryLimitsFit(total_mb=total_mb, machine_mb=ram_mb):
+                case MemoryLimitsFit(total_mb=total_mb, machine_mb=usable_mb):
                     logger.info(
                         'Worker profile %r: per-child memory limits add up to '
-                        '%s MB of %s MB of RAM',
+                        '%s MB of the %s MB %s',
                         selected.name,
                         total_mb,
-                        ram_mb,
+                        usable_mb,
+                        source.value,
                     )
                 case MemoryLimitsNotSet():
                     logger.info(
                         'Worker profile %r: no per-child memory limit, so '
-                        'there is no sum to compare with the RAM',
+                        'there is no sum to compare with the memory',
                         selected.name,
                     )
                 case _ as unreachable:
