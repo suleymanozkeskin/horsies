@@ -69,8 +69,9 @@ and there is no migration contract between pre-1.0 versions.
   `horsies_worker_states.slots_down` (`jsonb`, nullable, no backfill).
 - **`horsies check --live` compares every worker profile with the server
   connection limit.** One worker can open its parent pool
-  (`worker_pool_size + worker_max_overflow`), 2 listener connections and
-  `worker_child_pool_max_size` for each child. A profile whose worker can
+  (`worker_pool_size + worker_max_overflow`), 2 listener connections, 1
+  runner heartbeat connection and `worker_child_pool_max_size` for each
+  child. A profile whose worker can
   open more than `max_connections` less `superuser_reserved_connections`
   and `reserved_connections` fails with `HRS-219`
   (`CHECK_WORKER_CONNECTIONS`). With `pgbouncer_transaction_mode=True`

@@ -254,6 +254,7 @@ budget for one worker is approximately:
 ```text
 worker_pool_size + worker_max_overflow
   + 2 listener/session connections
+  + 1 runner heartbeat connection (the worker process writes the beats)
   + children * worker_child_pool_max_size
   + task-code database connections
 ```

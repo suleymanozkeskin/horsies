@@ -2781,7 +2781,7 @@ class TestBootConnectionFit:
         warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
         assert len(warnings) == 1
         assert warnings[0].startswith(
-            "Worker profile 'default': one worker can open 47 Postgres "
+            "Worker profile 'default': one worker can open 48 Postgres "
             'connections; the server has 27 usable slots',
         )
 

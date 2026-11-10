@@ -30,6 +30,7 @@ from horsies.core.worker import profile_fit
 from horsies.core.worker.profile_fit import (
     CGROUP_FILE_MAX_BYTES,
     LISTENER_CONNECTIONS_PER_WORKER,
+    RUNNER_HEARTBEAT_CONNECTIONS_PER_WORKER,
     CgroupLimit,
     CgroupUnreadable,
     ConnectionsExceedServer,
@@ -289,7 +290,7 @@ class TestReadServerConnectionLimit:
 
 
 class TestConnectionNeed:
-    def test_parent_pool_listener_and_child_pools(self) -> None:
+    def test_parent_pool_listener_heartbeat_and_child_pools(self) -> None:
         need = worker_connection_need(
             WorkerProfile(isolated=IsolatedChildren(count=8)),
             _broker(),
@@ -297,10 +298,13 @@ class TestConnectionNeed:
         assert need == WorkerConnectionNeed(
             parent_pool=3 + 2,
             listener=LISTENER_CONNECTIONS_PER_WORKER,
+            runner_heartbeat=RUNNER_HEARTBEAT_CONNECTIONS_PER_WORKER,
             children=8,
             per_child=2,
         )
-        assert need.total() == 23
+        assert LISTENER_CONNECTIONS_PER_WORKER == 2
+        assert RUNNER_HEARTBEAT_CONNECTIONS_PER_WORKER == 1
+        assert need.total() == 24
 
     def test_parent_pool_inherits_pool_size_when_worker_pool_is_none(self) -> None:
         need = worker_connection_need(
@@ -314,17 +318,17 @@ class TestConnectionNeed:
 
     def test_need_above_usable_exceeds(self) -> None:
         profile = WorkerProfile(isolated=IsolatedChildren(count=8))
-        limit = ServerConnectionLimit(max_connections=25, reserved=3)
+        limit = ServerConnectionLimit(max_connections=26, reserved=3)
         outcome = compare_connections(profile, _broker(), limit)
         assert isinstance(outcome, ConnectionsExceedServer)
         assert outcome.describe() == (
-            'one worker can open 23 Postgres connections; the server has 22 '
-            'usable slots (max_connections 25 - reserved 3)'
+            'one worker can open 24 Postgres connections; the server has 23 '
+            'usable slots (max_connections 26 - reserved 3)'
         )
 
     def test_need_equal_to_usable_fits(self) -> None:
         profile = WorkerProfile(isolated=IsolatedChildren(count=8))
-        limit = ServerConnectionLimit(max_connections=26, reserved=3)
+        limit = ServerConnectionLimit(max_connections=27, reserved=3)
         assert isinstance(compare_connections(profile, _broker(), limit), ConnectionsFit)
 
 
@@ -355,12 +359,13 @@ class TestCheckLiveWorkerConnections:
 
         assert [error.code for error in errors] == [ErrorCode.CHECK_WORKER_CONNECTIONS]
         assert errors[0].message == (
-            "worker_profiles['big']: one worker can open 47 Postgres "
+            "worker_profiles['big']: one worker can open 48 Postgres "
             'connections; the server has 27 usable slots (max_connections 30 '
             '- reserved 3)'
         )
         assert errors[0].notes == [
-            'parent pool 5 + listener 2 + 20 children x worker_child_pool_max_size 2 = 47',
+            'parent pool 5 + listener 2 + runner heartbeat 1 + 20 children x '
+            'worker_child_pool_max_size 2 = 48',
         ]
         assert errors[0].location is None
 

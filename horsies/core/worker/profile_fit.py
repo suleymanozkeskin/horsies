@@ -40,6 +40,10 @@ LISTENER_CONNECTIONS_PER_WORKER: Final = 2
 """Connections of the LISTEN/NOTIFY listener of a worker: one that waits for
 notifications and one that runs LISTEN commands."""
 
+RUNNER_HEARTBEAT_CONNECTIONS_PER_WORKER: Final = 1
+"""The connection over which the worker process writes the runner heartbeats
+of the RUNNING tasks of its children (``horsies.core.worker.runner_heartbeat``)."""
+
 CONNECTION_LIMIT_READ_TIMEOUT_S: Final = 10.0
 """The longest wait for the server to answer the connection limit query."""
 
@@ -340,15 +344,22 @@ class WorkerConnectionNeed:
 
     parent_pool: int
     listener: int
+    runner_heartbeat: int
     children: int
     per_child: int
 
     def total(self) -> int:
-        return self.parent_pool + self.listener + self.children * self.per_child
+        return (
+            self.parent_pool
+            + self.listener
+            + self.runner_heartbeat
+            + self.children * self.per_child
+        )
 
     def formula(self) -> str:
         return (
             f'parent pool {self.parent_pool} + listener {self.listener} + '
+            f'runner heartbeat {self.runner_heartbeat} + '
             f'{self.children} children x worker_child_pool_max_size '
             f'{self.per_child} = {self.total()}'
         )
@@ -363,6 +374,7 @@ def worker_connection_need(
     return WorkerConnectionNeed(
         parent_pool=parent.pool_size + parent.max_overflow,
         listener=LISTENER_CONNECTIONS_PER_WORKER,
+        runner_heartbeat=RUNNER_HEARTBEAT_CONNECTIONS_PER_WORKER,
         children=profile.child_count(),
         per_child=broker.worker_child_pool_max_size,
     )

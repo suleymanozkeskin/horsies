@@ -172,8 +172,11 @@ One worker can open this many Postgres connections:
 ```text
 worker_pool_size + worker_max_overflow   # parent pool
 + 2                                      # listener
++ 1                                      # runner heartbeat
 + children × worker_child_pool_max_size  # child pools
 ```
+
+The worker process writes the runner heartbeats of its RUNNING tasks over one connection of its own. At the defaults, a profile of 8 children needs `3 + 2 + 2 + 1 + 8 × 2 = 24`.
 
 The server has `max_connections` minus `superuser_reserved_connections` minus `reserved_connections` (PostgreSQL 16 and later) usable slots. `horsies check --live` reports `HRS-219` for each profile above that number. At boot the worker reads the same settings before it builds its children and logs a warning. With `pgbouncer_transaction_mode=True` the pooled connections do not map to server connections, and nothing is compared. See [Remote PostgreSQL](../configuration/remote-postgres#connection-budget).
 
