@@ -75,6 +75,12 @@ class ErrorCode(str, Enum):
     TASK_PREDECORATED_NOT_SUPPORTED = 'HRS-104'
     TASK_STRICT_SIGNATURE_VIOLATION = 'HRS-105'
     # HRS-106 is retired and is not used again.
+    # The execution rules of `@app.task(execution=...)`, one code per rule.
+    TASK_SHARED_ASYNC_REQUIRES_ASYNC_DEF = 'HRS-107'
+    TASK_SHARED_THREAD_REQUIRES_DEF = 'HRS-108'
+    TASK_SHARED_EXECUTION_REQUIRES_TIMEOUT = 'HRS-109'
+    TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC = 'HRS-110'
+    TASK_CANCEL_GRACE_OUT_OF_RANGE = 'HRS-111'
 
     # Config/broker (HRS-200-HRS-299)
     CONFIG_INVALID_QUEUE_MODE = 'HRS-200'

@@ -72,6 +72,40 @@ there is no migration contract between pre-1.0 versions.
   fails the read with `MONITORING_QUERY_FAILED`. Schema v53 adds the column
   `horsies_worker_states.slots_down` (`jsonb`, nullable, no backfill).
 
+- **Each task declares its execution class, and each task row stores it.**
+  `@app.task(..., execution=...)` takes an `Execution` member:
+  `Execution.ISOLATED` (the default: one task at a time in its own child
+  process), `Execution.SHARED_ASYNC` (many `async def` tasks as coroutines in
+  one child process) or `Execution.SHARED_THREAD` (many `def` tasks on threads
+  in one child process). `Execution` is exported from `horsies`.
+  - The decorator checks the rules when the task is defined, one code per
+    rule: `SHARED_ASYNC` needs an `async def` function (`HRS-107`),
+    `SHARED_THREAD` needs a `def` function (`HRS-108`), both shared classes
+    need `timeout_ms` (`HRS-109`), only `SHARED_ASYNC` takes `cancel_grace_ms`
+    (`HRS-110`), and `cancel_grace_ms` is from 100 to 60,000 ms (`HRS-111`).
+    `horsies check` reports them. With `execution` written as a member, a
+    type checker refuses the same declarations.
+  - `cancel_grace_ms` is the time that a `SHARED_ASYNC` task gets to stop
+    after its cancel. A task that sets none gets 5,000 ms. The stored task
+    options hold the class (`"execution"`) and the grace in effect at send
+    (`"cancel_grace_ms"`, null for the other classes).
+  - Schema v54 adds `horsies_tasks.execution` (TEXT, NOT NULL, default
+    `'ISOLATED'`, a CHECK on the three values) and builds
+    `idx_horsies_tasks_claim_pending_class` on
+    `(queue_name, execution, priority, enqueued_at, id)` over PENDING rows,
+    concurrently. A send, a delayed send, a workflow node and a rerun write
+    the column from the stored task options. Rows written before v54, and
+    rows that a process of an earlier version writes, read `ISOLATED`.
+  - `TaskInfo.execution` and the monitoring `LeafTaskInfo.execution` give the
+    class of a live task. Both are `None` for a task read from history, which
+    does not keep the class.
+  - The stored task options have two more keys, so the command fingerprint
+    and the enqueue digest of a send change. A keyed resend of a request that
+    an earlier version sent is a conflict, not a replay.
+  - Enqueue refuses, with `INVALID_TASK_OPTIONS`, task options that are not a
+    JSON object, and an `execution` or a `cancel_grace_ms` that does not fit
+    the rules above.
+
 ### Changed
 
 - **Breaking: a slot that cannot start a child for a cause that can clear no

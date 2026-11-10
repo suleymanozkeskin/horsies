@@ -1,6 +1,7 @@
 # app/core/app.py
 from collections.abc import Coroutine
 from typing import (
+    Literal,
     Optional,
     Callable,
     TypeVar,
@@ -14,6 +15,7 @@ from typing import (
 from horsies.core.models.app import AppConfig
 from horsies.core.models.queues import QueueMode
 from horsies.core.models.tasks import (
+    Execution,
     TaskError,
     TaskOptions,
     RetryPolicy,
@@ -92,6 +94,8 @@ from horsies.core.types.result import is_err
 if TYPE_CHECKING:
     from horsies.core.task_decorator import (
         AsyncTaskFunction,
+        SharedAsyncTaskDecorator,
+        SharedThreadTaskDecorator,
         TaskDecorator,
         TaskFunction,
     )
@@ -304,11 +308,58 @@ class Horsies:
         self,
         task_name: str,
         *,
+        execution: Literal[Execution.SHARED_ASYNC],
+        timeout_ms: int,
+        cancel_grace_ms: Optional[int] = None,
+        queue_name: Optional[str] = None,
+        retry_policy: Optional['RetryPolicy'] = None,
+        exception_mapper: Optional['ExceptionMapper'] = None,
+        default_unhandled_error_code: Optional[str] = None,
+    ) -> 'SharedAsyncTaskDecorator': ...
+
+    # The last overload also accepts a literal SHARED_THREAD, and its return
+    # type accepts more function kinds than this one. A type checker picks
+    # this overload first for the literal, so the overlap only reaches a
+    # class known at run time, which the decorator checks at run time.
+    @overload
+    def task(  # pyright: ignore[reportOverlappingOverload]
+        self,
+        task_name: str,
+        *,
+        execution: Literal[Execution.SHARED_THREAD],
+        timeout_ms: int,
+        queue_name: Optional[str] = None,
+        retry_policy: Optional['RetryPolicy'] = None,
+        exception_mapper: Optional['ExceptionMapper'] = None,
+        default_unhandled_error_code: Optional[str] = None,
+    ) -> 'SharedThreadTaskDecorator': ...
+
+    @overload
+    def task(
+        self,
+        task_name: str,
+        *,
         queue_name: Optional[str] = None,
         retry_policy: Optional['RetryPolicy'] = None,
         exception_mapper: Optional['ExceptionMapper'] = None,
         default_unhandled_error_code: Optional[str] = None,
         timeout_ms: Optional[int] = None,
+        execution: Literal[Execution.ISOLATED] = Execution.ISOLATED,
+    ) -> 'TaskDecorator': ...
+
+    # A class known only at run time: timeout_ms is required, because a
+    # shared class needs it. The decorator checks the rules at run time.
+    @overload
+    def task(
+        self,
+        task_name: str,
+        *,
+        execution: Execution,
+        timeout_ms: int,
+        queue_name: Optional[str] = None,
+        retry_policy: Optional['RetryPolicy'] = None,
+        exception_mapper: Optional['ExceptionMapper'] = None,
+        default_unhandled_error_code: Optional[str] = None,
     ) -> 'TaskDecorator': ...
 
     def task(
@@ -323,6 +374,8 @@ class Horsies:
         'TaskFunction[Any, Any]',
         'AsyncTaskFunction[Any, Any]',
         'TaskDecorator',
+        'SharedAsyncTaskDecorator',
+        'SharedThreadTaskDecorator',
     ]:
         """
         Decorator to register a task with this app.
@@ -331,9 +384,15 @@ class Horsies:
         A `def` function gives a `TaskFunction`. An `async def` function
         gives an `AsyncTaskFunction`, whose direct call returns a coroutine.
 
+        `execution` (an `Execution`, default `ISOLATED`) declares how a
+        worker runs the task. `SHARED_ASYNC` needs an `async def` function
+        and `timeout_ms`; `SHARED_THREAD` needs a `def` function and
+        `timeout_ms`; only `SHARED_ASYNC` takes `cancel_grace_ms`.
+
         Raises:
             TaskDefinitionError: empty task name, invalid options, mapper,
-                or error code.
+                or error code; or an execution declaration that breaks a
+                rule (HRS-107 to HRS-111, one code per rule).
             ConfigurationError: queue name not in app config.
             RegistryError: duplicate task name from a different source.
                 All three fire at import/definition time by design — a task

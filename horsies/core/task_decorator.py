@@ -135,6 +135,10 @@ if TYPE_CHECKING:
     )
 
 from horsies.core.models.tasks import (
+    DEFAULT_CANCEL_GRACE_MS,
+    MAX_CANCEL_GRACE_MS,
+    MIN_CANCEL_GRACE_MS,
+    Execution,
     TaskResult,
     TaskError,
     TaskOptions,
@@ -1162,6 +1166,34 @@ class TaskDecorator(Protocol):
     ) -> TaskFunction[P, T]: ...
 
 
+class SharedAsyncTaskDecorator(Protocol):
+    """What `app.task(task_name, execution=Execution.SHARED_ASYNC, ...)` returns.
+
+    It accepts only an `async def` function, so a type checker refuses a
+    `def` function. The decorator refuses it at run time too (HRS-107).
+    """
+
+    def __call__(
+        self,
+        fn: Callable[P, Coroutine[Any, Any, TaskResult[T, TaskError]]],
+        /,
+    ) -> AsyncTaskFunction[P, T]: ...
+
+
+class SharedThreadTaskDecorator(Protocol):
+    """What `app.task(task_name, execution=Execution.SHARED_THREAD, ...)` returns.
+
+    It accepts only a `def` function, so a type checker refuses an
+    `async def` function. The decorator refuses it at run time too (HRS-108).
+    """
+
+    def __call__(
+        self,
+        fn: Callable[P, TaskResult[T, TaskError]],
+        /,
+    ) -> TaskFunction[P, T]: ...
+
+
 class TaskSendOptions(Protocol[P, T]):
     """Per-send options for ad-hoc sends.
 
@@ -1322,6 +1354,239 @@ def _task_body(
     return _SyncTaskBody(cast('Callable[P, TaskResult[T, TaskError]]', fn))
 
 
+def _task_body_kind(
+    fn: Callable[P, TaskResult[T, TaskError]]
+    | Callable[P, Coroutine[Any, Any, TaskResult[T, TaskError]]],
+) -> TaskBodyKind:
+    """The kind of a task function, as `_task_body` sorts it."""
+    match _task_body(fn):
+        case _SyncTaskBody():
+            return TaskBodyKind.DEF
+        case _AsyncTaskBody():
+            return TaskBodyKind.ASYNC_DEF
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+@dataclass(frozen=True, slots=True)
+class SharedAsyncOnDef:
+    """`execution=SHARED_ASYNC` on a function defined with `def`."""
+
+
+@dataclass(frozen=True, slots=True)
+class SharedThreadOnAsyncDef:
+    """`execution=SHARED_THREAD` on a function defined with `async def`."""
+
+
+@dataclass(frozen=True, slots=True)
+class SharedWithoutTimeout:
+    """A shared class without `timeout_ms`."""
+
+    execution: Execution
+
+
+@dataclass(frozen=True, slots=True)
+class CancelGraceWithoutSharedAsync:
+    """`cancel_grace_ms` with a class other than `SHARED_ASYNC`."""
+
+    execution: Execution
+
+
+@dataclass(frozen=True, slots=True)
+class CancelGraceOutOfRange:
+    """`cancel_grace_ms` outside MIN_CANCEL_GRACE_MS to MAX_CANCEL_GRACE_MS."""
+
+
+type ExecutionRuleViolation = (
+    SharedAsyncOnDef
+    | SharedThreadOnAsyncDef
+    | SharedWithoutTimeout
+    | CancelGraceWithoutSharedAsync
+    | CancelGraceOutOfRange
+)
+"""A task declaration that breaks one of the execution rules."""
+
+
+def check_execution_rules(
+    kind: TaskBodyKind,
+    options: TaskOptions,
+) -> Result[None, ExecutionRuleViolation]:
+    """Check the execution declaration of one task against its function.
+
+    The rules, checked in this order, give the first violation:
+    `SHARED_ASYNC` needs an `async def` function and `SHARED_THREAD` a `def`
+    function; a shared class needs `timeout_ms`; only `SHARED_ASYNC` takes
+    `cancel_grace_ms`; and a `cancel_grace_ms` is from MIN_CANCEL_GRACE_MS
+    to MAX_CANCEL_GRACE_MS. `ISOLATED` takes both kinds and no timeout.
+    Pure: it does not read or change any state.
+    """
+    match options.execution:
+        case Execution.ISOLATED:
+            pass
+        case Execution.SHARED_ASYNC | Execution.SHARED_THREAD:
+            kind_r = _check_function_kind(options.execution, kind)
+            if is_err(kind_r):
+                return kind_r
+            if options.timeout_ms is None:
+                return Err(SharedWithoutTimeout(execution=options.execution))
+        case _ as unreachable:
+            assert_never(unreachable)
+    return _check_cancel_grace(options.execution, options.cancel_grace_ms)
+
+
+def _check_function_kind(
+    execution: Literal[Execution.SHARED_ASYNC, Execution.SHARED_THREAD],
+    kind: TaskBodyKind,
+) -> Result[None, SharedAsyncOnDef | SharedThreadOnAsyncDef]:
+    """A shared class runs only the function kind that it is for."""
+    match execution, kind:
+        case Execution.SHARED_ASYNC, TaskBodyKind.DEF:
+            return Err(SharedAsyncOnDef())
+        case Execution.SHARED_THREAD, TaskBodyKind.ASYNC_DEF:
+            return Err(SharedThreadOnAsyncDef())
+        case _:
+            return Ok(None)
+
+
+def _check_cancel_grace(
+    execution: Execution,
+    cancel_grace_ms: int | None,
+) -> Result[None, CancelGraceWithoutSharedAsync | CancelGraceOutOfRange]:
+    """Only `SHARED_ASYNC` takes a grace, and the grace is in its bounds."""
+    match cancel_grace_ms:
+        case None:
+            return Ok(None)
+        case int():
+            pass
+    match execution:
+        case Execution.SHARED_ASYNC:
+            if MIN_CANCEL_GRACE_MS <= cancel_grace_ms <= MAX_CANCEL_GRACE_MS:
+                return Ok(None)
+            return Err(CancelGraceOutOfRange())
+        case Execution.ISOLATED | Execution.SHARED_THREAD:
+            return Err(CancelGraceWithoutSharedAsync(execution=execution))
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+@dataclass(frozen=True, slots=True)
+class _RuleText:
+    """The code and the text of one execution rule error."""
+
+    code: ErrorCode
+    message: str
+    notes: tuple[str, ...]
+    help_text: str
+
+
+def execution_rule_error(
+    violation: ExecutionRuleViolation,
+    *,
+    task_name: str,
+    location: SourceLocation | None,
+) -> TaskDefinitionError:
+    """The definition error, with its own code, for one rule violation.
+
+    The text names the rule and the fix, never the declared grace: an int
+    with more than 4300 digits cannot be converted to a string.
+    """
+    match violation:
+        case SharedAsyncOnDef() | SharedThreadOnAsyncDef() | SharedWithoutTimeout():
+            rule = _function_rule_text(violation)
+        case CancelGraceWithoutSharedAsync() | CancelGraceOutOfRange():
+            rule = _grace_rule_text(violation)
+        case _ as unreachable:
+            assert_never(unreachable)
+    return TaskDefinitionError(
+        message=rule.message,
+        code=rule.code,
+        location=location,
+        notes=[f"task '{task_name}'", *rule.notes],
+        help_text=rule.help_text,
+    )
+
+
+def _function_rule_text(
+    violation: SharedAsyncOnDef | SharedThreadOnAsyncDef | SharedWithoutTimeout,
+) -> _RuleText:
+    """The text of a rule about the function kind or the timeout."""
+    match violation:
+        case SharedAsyncOnDef():
+            return _RuleText(
+                code=ErrorCode.TASK_SHARED_ASYNC_REQUIRES_ASYNC_DEF,
+                message='execution=SHARED_ASYNC requires an `async def` function',
+                notes=(
+                    'the function is defined with `def`',
+                    'SHARED_ASYNC runs many tasks as coroutines in one child process',
+                ),
+                help_text=(
+                    'define the function with `async def`, or use '
+                    'Execution.SHARED_THREAD for a `def` function'
+                ),
+            )
+        case SharedThreadOnAsyncDef():
+            return _RuleText(
+                code=ErrorCode.TASK_SHARED_THREAD_REQUIRES_DEF,
+                message='execution=SHARED_THREAD requires a `def` function',
+                notes=(
+                    'the function is defined with `async def`',
+                    'SHARED_THREAD runs many tasks on threads in one child process',
+                ),
+                help_text=(
+                    'define the function with `def`, or use '
+                    'Execution.SHARED_ASYNC for an `async def` function'
+                ),
+            )
+        case SharedWithoutTimeout(execution=execution):
+            return _RuleText(
+                code=ErrorCode.TASK_SHARED_EXECUTION_REQUIRES_TIMEOUT,
+                message=f'execution={execution.value} requires timeout_ms',
+                notes=('a shared task runs in one child process with other tasks',),
+                help_text=(
+                    'set timeout_ms, for example @app.task(..., '
+                    f'execution=Execution.{execution.value}, timeout_ms=30_000)'
+                ),
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _grace_rule_text(
+    violation: CancelGraceWithoutSharedAsync | CancelGraceOutOfRange,
+) -> _RuleText:
+    """The text of a rule about `cancel_grace_ms`."""
+    match violation:
+        case CancelGraceWithoutSharedAsync(execution=execution):
+            return _RuleText(
+                code=ErrorCode.TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC,
+                message='cancel_grace_ms requires execution=SHARED_ASYNC',
+                notes=(
+                    f'execution is {execution.value}',
+                    'only a SHARED_ASYNC task is cancelled and gets a grace '
+                    'to stop; a thread cannot be cancelled',
+                ),
+                help_text=(
+                    'remove cancel_grace_ms, or use '
+                    'Execution.SHARED_ASYNC with an `async def` function'
+                ),
+            )
+        case CancelGraceOutOfRange():
+            return _RuleText(
+                code=ErrorCode.TASK_CANCEL_GRACE_OUT_OF_RANGE,
+                message='cancel_grace_ms is out of range',
+                notes=(
+                    f'cancel_grace_ms must be from {MIN_CANCEL_GRACE_MS} to '
+                    f'{MAX_CANCEL_GRACE_MS} ms',
+                ),
+                help_text=(
+                    'set a value in the range, or remove cancel_grace_ms to '
+                    f'use the default of {DEFAULT_CANCEL_GRACE_MS} ms'
+                ),
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def _sync_task_call(
     body: Callable[P, TaskResult[T, TaskError]],
     checked_result: Callable[[object], TaskResult[T, TaskError]],
@@ -1470,6 +1735,20 @@ def create_task_wrapper(
             ],
             help_text='collect the items and return them in one TaskResult',
         )
+
+    # The execution class must fit the function kind, which is known only
+    # now that generator functions are refused.
+    match task_options:
+        case None:
+            pass
+        case declared_options:
+            rules_r = check_execution_rules(_task_body_kind(fn), declared_options)
+            if is_err(rules_r):
+                raise execution_rule_error(
+                    rules_r.err_value,
+                    task_name=task_name,
+                    location=fn_location,
+                )
 
     hints = get_type_hints(fn, include_extras=True)
 
@@ -1720,6 +1999,12 @@ def create_task_wrapper(
                 good_until=good_until,
                 retry_policy=task_options.retry_policy if task_options else None,
                 timeout_ms=task_options.timeout_ms if task_options else None,
+                execution=(
+                    task_options.execution if task_options else Execution.ISOLATED
+                ),
+                cancel_grace_ms=(
+                    task_options.cancel_grace_ms if task_options else None
+                ),
             )
         except Exception as exc:
             cause = without_validation_input(exc)
