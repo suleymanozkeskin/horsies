@@ -34,6 +34,10 @@ from horsies.core.brokers.resources import (
     split_closed_loops,
 )
 from horsies.core.brokers.session_capability import probe_session_capability
+from horsies.core.brokers.class_coverage_reads import (
+    read_class_coverage,
+    read_class_report,
+)
 from horsies.core.brokers.result_types import (
     BrokerAsyncContext,
     BrokerEnqueueError,
@@ -86,6 +90,11 @@ from horsies.core.lifecycle.outcomes import (
     TaskAbsent,
 )
 from horsies.core.lifecycle.persistence import apply_async, apply_batch_async
+from horsies.core.models.class_coverage import (
+    ClassCoverage,
+    ClassReadRefused,
+    ClassReport,
+)
 from horsies.core.models.health import (
     WORKER_PING_CHANNEL,
     DatabasePing,
@@ -93,6 +102,7 @@ from horsies.core.models.health import (
     WorkerPongPayload,
     WorkerPingRequest,
     WorkerStateSnapshot,
+    parse_class_capacity,
     parse_slot_health,
 )
 from horsies.core.history.errors import HistoryContractError
@@ -378,6 +388,22 @@ def _loop_limit_err(
     )
 
 
+def _class_read_refused(
+    operation: str,
+    refused: ClassReadRefused,
+) -> Err[BrokerOperationFailed]:
+    """Stored data that a class read cannot decide on, or a bound it reached.
+
+    Not retryable: the same rows give the same answer. Nothing changed.
+    """
+    message = f'{operation} refused: {refused.reason}'
+    return _operation_failed(
+        BrokerErrorCode.MONITORING_QUERY_FAILED,
+        message,
+        ValueError(message),
+    )
+
+
 def _loop_runner_err(
     sync_call: str, exc: LoopRunnerError,
 ) -> Err[BrokerLoopRunnerFailed]:
@@ -656,7 +682,8 @@ _WORKER_STATE_COLUMNS = """
         cpu_percent,
         children_memory_mb,
         worker_started_at,
-        slots_down
+        slots_down,
+        class_capacity
 """
 
 # Recursive skip-scan: one (worker_id, snapshot_at DESC) index probe per
@@ -3574,9 +3601,9 @@ class PostgresBroker:
         """Map a worker-states row to a typed snapshot.
 
         Raises:
-            ValueError: the stored ``slots_down`` does not have the shape that
-                the worker writes. The read methods catch it and return
-                ``MONITORING_QUERY_FAILED``.
+            ValueError: the stored ``slots_down`` or ``class_capacity`` does
+                not have the shape that the worker writes. The read methods
+                catch it and return ``MONITORING_QUERY_FAILED``.
         """
         m = row._mapping
         match parse_slot_health(m['slots_down'], m['processes']):
@@ -3586,6 +3613,14 @@ class PostgresBroker:
                 raise ValueError(
                     f'worker {m["worker_id"]} snapshot at {m["snapshot_at"]}: '
                     f'slots_down is unreadable: {unreadable.reason}',
+                )
+        match parse_class_capacity(m['class_capacity']):
+            case Ok(class_capacity):
+                pass
+            case Err(unreadable):
+                raise ValueError(
+                    f'worker {m["worker_id"]} snapshot at {m["snapshot_at"]}: '
+                    f'class_capacity is unreadable: {unreadable.reason}',
                 )
         return WorkerStateSnapshot(
             worker_id=m['worker_id'],
@@ -3608,6 +3643,7 @@ class PostgresBroker:
             children_memory_mb=m['children_memory_mb'],
             worker_started_at=m['worker_started_at'],
             slot_health=slot_health,
+            class_capacity=class_capacity,
         )
 
     async def list_worker_states_async(self) -> BrokerResult[list[WorkerStateSnapshot]]:
@@ -3700,6 +3736,67 @@ class PostgresBroker:
                 f'get_worker_state_history failed: {exc}',
                 exc,
             )
+
+    async def get_class_coverage_async(self) -> BrokerResult[ClassCoverage]:
+        """The fleet check: for each (queue, class) with PENDING rows, whether
+        a live worker serves it.
+
+        A worker is live while its latest snapshot is at most
+        ``WORKER_STATE_LIVE_WINDOW_S`` old. It serves a (queue, class) when
+        the queue is one of its queues and one of its budgets serves the
+        class. Reads only. ``Err(MONITORING_QUERY_FAILED)``: a database or
+        network error, a live snapshot whose ``class_capacity`` is
+        unreadable or missing, or a read that reached its bound
+        (``retryable`` is ``False`` for the last three).
+        ``Err(EVENT_LOOP_LIMIT)``: nothing ran. A code defect raises.
+        """
+        match await self.select_resources():
+            case Err(loop_limit):
+                return _loop_limit_err('get_class_coverage', loop_limit)
+            case Ok(resources):
+                pass
+        try:
+            async with resources.session_factory() as session:
+                read = await read_class_coverage(session)
+        except _DRIVER_ERRORS as exc:
+            return _operation_failed(
+                BrokerErrorCode.MONITORING_QUERY_FAILED,
+                f'get_class_coverage failed: {exc}',
+                exc,
+            )
+        match read:
+            case Ok(coverage):
+                return Ok(coverage)
+            case Err(refused):
+                return _class_read_refused('get_class_coverage', refused)
+
+    async def get_class_report_async(self) -> BrokerResult[ClassReport]:
+        """Pending streams with the wait of their oldest due row and their
+        coverage, and the budget load of each live worker.
+
+        Reads only. ``Err(MONITORING_QUERY_FAILED)``: as
+        ``get_class_coverage_async``, or a live worker holds rows of a class
+        that its recorded budgets do not serve.
+        """
+        match await self.select_resources():
+            case Err(loop_limit):
+                return _loop_limit_err('get_class_report', loop_limit)
+            case Ok(resources):
+                pass
+        try:
+            async with resources.session_factory() as session:
+                read = await read_class_report(session)
+        except _DRIVER_ERRORS as exc:
+            return _operation_failed(
+                BrokerErrorCode.MONITORING_QUERY_FAILED,
+                f'get_class_report failed: {exc}',
+                exc,
+            )
+        match read:
+            case Ok(report):
+                return Ok(report)
+            case Err(refused):
+                return _class_read_refused('get_class_report', refused)
 
     async def get_expired_tasks(self) -> BrokerResult[list[dict[str, Any]]]:
         """Find tasks that expired before worker processing."""

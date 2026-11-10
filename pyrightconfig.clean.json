@@ -46,7 +46,15 @@
     "tests/unit/test_shared_lifecycle.py",
     "tests/unit/test_shared_seat_runner.py",
     "tests/unit/test_shared_slot_pool.py",
-    "tests/unit/test_shared_dispatch.py"
+    "tests/unit/test_shared_dispatch.py",
+    "horsies/core/models/class_coverage.py",
+    "horsies/core/brokers/class_coverage_reads.py",
+    "horsies/core/worker/class_coverage_log.py",
+    "horsies/monitoring/execution_classes.py",
+    "tests/unit/test_class_coverage.py",
+    "tests/unit/test_class_coverage_log.py",
+    "tests/unit/test_monitoring_execution_classes.py",
+    "tests/integration/test_class_coverage.py"
   ],
   "reportUnnecessaryTypeIgnoreComment": "error"
 }

@@ -159,6 +159,8 @@ APP_CALLS: dict[str, Callable[[Horsies], Any]] = {
     'list_worker_states': lambda app: app.list_worker_states(),
     'get_worker_state': lambda app: app.get_worker_state('worker-1'),
     'get_worker_state_history': lambda app: app.get_worker_state_history('worker-1'),
+    'get_class_coverage': lambda app: app.get_class_coverage(),
+    'get_class_report': lambda app: app.get_class_report(),
     'get_raw_result': lambda app: app.get_raw_result(TASK_ID, 0),
 }
 
@@ -522,6 +524,8 @@ RUN_SYNC_SITES: dict[str, Callable[[Horsies, PostgresBroker], Any]] = {
     'app.list_worker_states': lambda app, broker: app.list_worker_states(),
     'app.get_worker_state': lambda app, broker: app.get_worker_state('worker-1'),
     'app.get_worker_state_history': lambda app, broker: app.get_worker_state_history('worker-1'),
+    'app.get_class_coverage': lambda app, broker: app.get_class_coverage(),
+    'app.get_class_report': lambda app, broker: app.get_class_report(),
     'WorkflowHandle.status': lambda app, broker: _workflow_handle(broker).status(),
     'WorkflowHandle.get': lambda app, broker: _workflow_handle(broker).get(timeout_ms=0),
     'start_workflow': lambda app, broker: _spec(app).start(WORKFLOW_ID),

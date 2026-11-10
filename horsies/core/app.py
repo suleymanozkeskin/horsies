@@ -112,6 +112,7 @@ if TYPE_CHECKING:
     )
     from horsies.core.models.tasks import TaskInfo, TaskResult, TaskError
     from horsies.core.brokers.result_types import BrokerResult
+    from horsies.core.models.class_coverage import ClassCoverage, ClassReport
     from horsies.core.models.health import (
         DatabasePing,
         WorkerPong,
@@ -1909,6 +1910,49 @@ class Horsies:
             )
         except LoopRunnerError as exc:
             return self._loop_runner_err('get_worker_state_history', exc)
+
+    async def get_class_coverage_async(self) -> 'BrokerResult[ClassCoverage]':
+        """For each (queue, class) with PENDING rows, whether a live worker serves it.
+
+        See ``PostgresBroker.get_class_coverage_async``.
+        """
+        return await self.get_broker().get_class_coverage_async()
+
+    def get_class_coverage(self) -> 'BrokerResult[ClassCoverage]':
+        """Synchronous version of ``get_class_coverage_async``.
+
+        On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
+        and does no I/O.
+        """
+        if in_running_event_loop():
+            return self._async_context_err('get_class_coverage')
+        broker = self.get_broker()
+        try:
+            return broker.run_sync(self.get_class_coverage_async)
+        except LoopRunnerError as exc:
+            return self._loop_runner_err('get_class_coverage', exc)
+
+    async def get_class_report_async(self) -> 'BrokerResult[ClassReport]':
+        """Pending streams with their oldest wait and coverage, and the budget
+        load of each live worker.
+
+        See ``PostgresBroker.get_class_report_async``.
+        """
+        return await self.get_broker().get_class_report_async()
+
+    def get_class_report(self) -> 'BrokerResult[ClassReport]':
+        """Synchronous version of ``get_class_report_async``.
+
+        On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
+        and does no I/O.
+        """
+        if in_running_event_loop():
+            return self._async_context_err('get_class_report')
+        broker = self.get_broker()
+        try:
+            return broker.run_sync(self.get_class_report_async)
+        except LoopRunnerError as exc:
+            return self._loop_runner_err('get_class_report', exc)
 
     def discover_tasks(
         self,

@@ -543,6 +543,113 @@ class TestWorkerReads:
         assert response.status_code == 200
         assert isinstance(response.json(), list)
 
+    async def test_worker_list_carries_the_slot_health(
+        self,
+        api: AsyncClient,
+        session: AsyncSession,
+    ) -> None:
+        worker_id = f'itest-{uuid.uuid4().hex}'
+        await session.execute(
+            text("""
+                INSERT INTO horsies_worker_states (
+                    worker_id, snapshot_at, hostname, pid, processes,
+                    max_claim_batch, max_claim_per_worker, queues,
+                    tasks_running, tasks_claimed, worker_started_at,
+                    slots_down, class_capacity
+                ) VALUES (
+                    :wid, now(), 'itest-host', 4242, 2, 0, 2,
+                    ARRAY['default'], 0, 0, now(),
+                    CAST(:slots_down AS JSONB), NULL
+                )
+            """),
+            {
+                'wid': worker_id,
+                'slots_down': json.dumps(
+                    [
+                        {
+                            'slot': 1,
+                            'cause': {'kind': 'spawn_failed'},
+                            'detail': 'OSError: fork failed',
+                            'down_since': '2026-11-10T12:00:00+00:00',
+                            'failed_boots': 2,
+                        },
+                    ],
+                ),
+            },
+        )
+        await session.commit()
+        try:
+            body = (await api.get('/api/workers')).json()
+        finally:
+            await session.execute(
+                text('DELETE FROM horsies_worker_states WHERE worker_id = :wid'),
+                {'wid': worker_id},
+            )
+            await session.commit()
+
+        (worker,) = [entry for entry in body if entry['worker_id'] == worker_id]
+        assert worker['slot_health'] == 'slots_down'
+        assert worker['down_slots'] == [
+            {
+                'slot': 1,
+                'cause': 'the OS refused to start the child process',
+                'detail': 'OSError: fork failed',
+                'down_since': '2026-11-10T12:00:00Z',
+                'failed_boots': 2,
+            },
+        ]
+
+    async def test_class_report_answers_with_streams_and_budgets(
+        self,
+        api: AsyncClient,
+        session: AsyncSession,
+    ) -> None:
+        await session.execute(text('DELETE FROM horsies_worker_states'))
+        await session.execute(
+            text("""
+                INSERT INTO horsies_worker_states (
+                    worker_id, snapshot_at, hostname, pid, processes,
+                    max_claim_batch, max_claim_per_worker, queues,
+                    tasks_running, tasks_claimed, worker_started_at,
+                    slots_down, class_capacity
+                ) VALUES (
+                    'w-async', now(), 'itest-host', 4242, 2, 0, 2,
+                    ARRAY['default'], 0, 0, now(), '[]'::jsonb,
+                    '{"SHARED_ASYNC": {"capacity": 8, "serves": ["SHARED_ASYNC"]}}'
+                )
+            """),
+        )
+        await session.commit()
+        await persist(session, make_task())
+        try:
+            response = await api.get('/api/workers/classes')
+        finally:
+            await session.execute(text('DELETE FROM horsies_worker_states'))
+            await session.commit()
+
+        assert response.status_code == 200
+        body = response.json()
+        (stream,) = body['streams']
+        assert stream['queue_name'] == 'default'
+        assert stream['execution'] == 'ISOLATED'
+        assert stream['coverage'] == {'kind': 'unserved'}
+        assert stream['wait']['kind'] == 'waiting'
+        assert body['workers'] == [
+            {
+                'worker_id': 'w-async',
+                'snapshot_at': body['workers'][0]['snapshot_at'],
+                'budgets': [
+                    {
+                        'budget': 'SHARED_ASYNC',
+                        'capacity': 8,
+                        'serves': ['SHARED_ASYNC'],
+                        'in_flight': 0,
+                        'free': 8,
+                    },
+                ],
+            },
+        ]
+
     async def test_schedules_answer(self, api: AsyncClient) -> None:
         response = await api.get('/api/workers/schedules')
 

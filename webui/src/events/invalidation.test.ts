@@ -100,6 +100,12 @@ describe('topic to invalidation mapping', () => {
       expect(TOPIC_INVALIDATIONS[topic]).not.toContain(QUERY_ROOT.schedules);
     }
   });
+
+  it('does not invalidate the class report — it reads the whole fleet and polls', () => {
+    for (const topic of ['tasks', 'workflows', 'workers'] as const) {
+      expect(TOPIC_INVALIDATIONS[topic]).not.toContain(QUERY_ROOT.classReport);
+    }
+  });
 });
 
 describe('reconnect sweep', () => {
@@ -111,6 +117,7 @@ describe('reconnect sweep', () => {
       QUERY_ROOT.taskStats,
       QUERY_ROOT.taskFacets,
       QUERY_ROOT.taskBreakdown,
+      QUERY_ROOT.classReport,
     ]);
     expect(new Set(RECONNECT_SWEEP_ROOTS)).toEqual(union);
     expect(RECONNECT_SWEEP_ROOTS.length).toBe(union.size);

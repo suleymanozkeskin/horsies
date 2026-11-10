@@ -393,6 +393,10 @@ budget claims.
 The worker publishes each budget, its capacity, and the classes it claims in
 `horsies_worker_states.class_capacity`, with each state snapshot.
 
+Each reaper pass checks that a live worker serves every (queue, class) with
+`PENDING` rows, and logs each one that no live worker serves. See
+[Does a live worker serve every pending class?](../monitoring/worker-health#does-a-live-worker-serve-every-pending-class)
+
 ### A row whose class does not fit its task
 
 A row stores the class of its task at send. A deploy can change the class of
@@ -631,6 +635,8 @@ Check:
 - `cluster_wide_cap` reached?
 - `max_concurrency` for queue reached?
 - Tasks expired (`good_until`)?
+- No live worker serves the task's execution class on its queue? The worker
+  logs it, and `get_class_coverage()` reports it as `StreamUnserved()`.
 
 ### Uneven Distribution
 

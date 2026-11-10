@@ -71,6 +71,37 @@ there is no migration contract between pre-1.0 versions.
   `get_worker_state_history()` return it. A stored value of another shape
   fails the read with `MONITORING_QUERY_FAILED`. Schema v53 adds the column
   `horsies_worker_states.slots_down` (`jsonb`, nullable, no backfill).
+- **The worker state reads the claim budgets, and a fleet check finds the
+  pending classes that no live worker can run.** No schema change.
+  - `WorkerStateSnapshot.class_capacity` is `ClassBudgets(budgets)`, with one
+    `ClassBudget(budget, capacity, serves)` per budget in `Execution` order,
+    or `ClassCapacityNotRecorded()` for a snapshot without the column value.
+    A stored value of another shape (an unknown class name, a capacity that
+    is not a whole number of 0 or more, a `serves` list without its own class,
+    or a class in two budgets) fails the read with `MONITORING_QUERY_FAILED`,
+    and the message names the worker.
+  - `get_class_coverage()` gives each (queue, class) with `PENDING` rows one
+    state: `StreamServed(workers, capacity)`, `StreamWithoutCapacity(workers)`
+    (every child or seat of the serving budgets is down) or `StreamUnserved()`.
+    A worker is live while its latest snapshot is at most 120 seconds old
+    (`WORKER_STATE_LIVE_WINDOW_S`, the threshold at which the web UI already
+    marked a worker stale). A live snapshot without readable budgets fails the
+    read and names the worker.
+  - Each reaper pass runs the check, one check interval after the worker
+    starts. An unserved (queue, class) logs an error, one without capacity a
+    warning; each worker logs one (queue, class) at most once per 5 minutes.
+    This covers a shared task that went back to the queue as `ISOLATED` while
+    no live worker has isolated children.
+  - `get_class_report()` adds the wait of each stream's oldest due row
+    (`OldestWaiting` or `NoneDue`) and, per live worker, each budget's
+    capacity, rows in flight and free capacity (`BudgetLoad`).
+  - Both reads probe `idx_horsies_tasks_claim_pending_class`: the check once
+    per pending (queue, class), the report once per (queue, class, priority).
+    Each read has a bound and fails closed at it.
+  - The web UI shows the pending rows per execution class with fleet
+    warnings, each live worker's budgets with free capacity, and each
+    worker's down slots (`GET /api/workers/classes`; `WorkerStateInfo` gains
+    `slot_health` and `down_slots`).
 - **`horsies check --live` compares every worker profile with the server
   connection limit.** One worker can open its parent pool
   (`worker_pool_size + worker_max_overflow`), 2 listener connections, 1

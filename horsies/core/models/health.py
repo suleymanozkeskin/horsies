@@ -36,6 +36,7 @@ from horsies.core.models.boot_failure import (
     boot_cause_json,
     parse_boot_cause,
 )
+from horsies.core.models.tasks import Execution
 from horsies.core.types.result import Err, Ok, Result
 
 
@@ -43,6 +44,13 @@ from horsies.core.types.result import Err, Ok, Result
 # ``WorkerPingRequest`` payload; each worker replies on the request's
 # per-request ``reply_channel``.
 WORKER_PING_CHANNEL = 'horsies_worker_ping'
+
+# A worker is live while its latest state snapshot is at most this many
+# seconds old. Each worker writes a snapshot every
+# ``RecoveryConfig.worker_state_snapshot_interval_ms`` (30 s by default), so
+# a live worker at the default interval misses three snapshots before it
+# reads as not live.
+WORKER_STATE_LIVE_WINDOW_S: Final = 120
 
 
 class WorkerPingRequest(BaseModel):
@@ -263,12 +271,160 @@ def _clearable_cause(value: object) -> Result[ClearableBootCause, SlotHealthUnre
 
 
 @dataclass(slots=True, frozen=True)
+class ClassBudget:
+    """One claim budget of a worker, as its snapshot recorded it.
+
+    ``capacity`` counts the children (``ISOLATED``) or seats (a shared class)
+    of ``budget`` that were in service, 0 or more. ``serves`` lists the
+    execution classes whose rows the budget claims, in ``Execution`` order.
+    It always holds ``budget`` itself.
+    """
+
+    budget: Execution
+    capacity: int
+    serves: tuple[Execution, ...]
+
+
+@dataclass(slots=True, frozen=True)
+class ClassBudgets:
+    """The claim budgets of a worker, in ``Execution`` order.
+
+    No class is in the ``serves`` of two budgets. A class that no budget
+    serves is not claimed by the worker. Empty when the worker serves no
+    class.
+    """
+
+    budgets: tuple[ClassBudget, ...]
+
+
+@dataclass(slots=True, frozen=True)
+class ClassCapacityNotRecorded:
+    """The snapshot comes from a worker version that did not record its budgets."""
+
+
+ClassCapacity: TypeAlias = ClassBudgets | ClassCapacityNotRecorded
+
+
+@dataclass(slots=True, frozen=True)
+class ClassCapacityUnreadable:
+    """A stored ``class_capacity`` value does not have the shape that the worker writes."""
+
+    reason: str
+
+
+def parse_class_capacity(
+    value: object,
+) -> Result[ClassCapacity, ClassCapacityUnreadable]:
+    """Build the class capacity from a stored ``class_capacity`` value.
+
+    ``None`` (SQL NULL) is ``ClassCapacityNotRecorded``. Each key must be an
+    ``Execution`` value, and each entry an object with a ``capacity`` (a
+    whole number, 0 or more) and a ``serves`` list of distinct ``Execution``
+    values that holds the key. No class may be in the ``serves`` of two
+    budgets. Other keys of an entry are not read. Reads only.
+    """
+    match value:
+        case None:
+            return Ok(ClassCapacityNotRecorded())
+        case dict():
+            entries = cast('dict[object, object]', value)
+        case _:
+            return Err(ClassCapacityUnreadable('class_capacity is not a JSON object'))
+    budgets: list[ClassBudget] = []
+    for name, entry in entries.items():
+        match _parse_class_budget(name, entry):
+            case Ok(budget):
+                budgets.append(budget)
+            case Err(unreadable):
+                return Err(unreadable)
+    served = [member for budget in budgets for member in budget.serves]
+    if len(set(served)) != len(served):
+        return Err(ClassCapacityUnreadable('a class is in the serves of two budgets'))
+    order = list(Execution)
+    return Ok(
+        ClassBudgets(
+            tuple(sorted(budgets, key=lambda entry: order.index(entry.budget))),
+        ),
+    )
+
+
+def _parse_class_budget(
+    name: object,
+    value: object,
+) -> Result[ClassBudget, ClassCapacityUnreadable]:
+    match _execution_named(name, 'budget'):
+        case Ok(budget):
+            pass
+        case Err(unreadable):
+            return Err(unreadable)
+    if not isinstance(value, dict):
+        return Err(
+            ClassCapacityUnreadable(f'budget {budget.value} is not a JSON object'),
+        )
+    fields = cast('Mapping[str, object]', value)
+    match fields.get('capacity'):
+        case bool() as capacity:
+            return Err(
+                ClassCapacityUnreadable(f'capacity {capacity!r} is not a whole number'),
+            )
+        case int() as capacity if capacity in range(_COUNT_LIMIT):
+            pass
+        case capacity:
+            return Err(
+                ClassCapacityUnreadable(f'capacity {capacity!r} is out of range'),
+            )
+    match _served_classes(fields.get('serves')):
+        case Ok(serves):
+            pass
+        case Err(unreadable):
+            return Err(unreadable)
+    if budget not in serves:
+        return Err(
+            ClassCapacityUnreadable(
+                f'budget {budget.value} does not serve its own class',
+            ),
+        )
+    return Ok(ClassBudget(budget=budget, capacity=capacity, serves=serves))
+
+
+def _served_classes(
+    value: object,
+) -> Result[tuple[Execution, ...], ClassCapacityUnreadable]:
+    """The distinct ``Execution`` values of a ``serves`` list, in ``Execution`` order."""
+    if not isinstance(value, list):
+        return Err(ClassCapacityUnreadable('serves is not a JSON array'))
+    members: list[Execution] = []
+    for entry in cast('list[object]', value):
+        match _execution_named(entry, 'serves entry'):
+            case Ok(member):
+                members.append(member)
+            case Err(unreadable):
+                return Err(unreadable)
+    if len(set(members)) != len(members):
+        return Err(ClassCapacityUnreadable('serves names one class twice'))
+    return Ok(tuple(member for member in Execution if member in members))
+
+
+def _execution_named(
+    value: object,
+    name: str,
+) -> Result[Execution, ClassCapacityUnreadable]:
+    for member in Execution:
+        if value == member.value:
+            return Ok(member)
+    return Err(ClassCapacityUnreadable(f'{name} {value!r} is not an execution class'))
+
+
+@dataclass(slots=True, frozen=True)
 class WorkerStateSnapshot:
     """One ``horsies_worker_states`` row — a worker's state at a point in time.
 
     Mirrors ``WorkerStateModel``. Returned as the latest snapshot per worker
     (cluster-wide listing) or as a timeseries (single-worker history).
     ``slot_health`` says whether any slot was down, and why.
+    ``class_capacity`` holds the claim budget of each execution class that
+    the worker runs children for: its capacity in service and the classes
+    whose rows it claims.
     """
 
     worker_id: str
@@ -291,3 +447,4 @@ class WorkerStateSnapshot:
     children_memory_mb: float | None
     worker_started_at: datetime
     slot_health: SlotHealth
+    class_capacity: ClassCapacity
