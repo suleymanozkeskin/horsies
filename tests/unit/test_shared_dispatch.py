@@ -169,8 +169,8 @@ class TestDispatch:
     async def test_a_shared_row_is_submitted_to_the_shared_children(self) -> None:
         worker = _worker()
         worker._slots = MagicMock()
-        worker._spawn_background = MagicMock()  # type: ignore[method-assign]
-        worker._finalize_shared_after = MagicMock()  # type: ignore[method-assign]
+        worker._spawn_background = MagicMock()
+        worker._finalize_shared_after = MagicMock()
 
         await worker._dispatch_one(
             'task-9',
@@ -211,7 +211,7 @@ class TestDispatch:
     async def test_with_no_shared_children_the_row_runs_isolated(self) -> None:
         worker = _worker(NoSharedAsyncChildren())
         worker._slots = MagicMock()
-        worker._spawn_background = MagicMock(  # type: ignore[method-assign]
+        worker._spawn_background = MagicMock(
             side_effect=_close_coroutine,
         )
 
@@ -233,13 +233,13 @@ class TestDispatch:
 class TestFinalizeShared:
     def _worker_with_paths(self) -> Worker:
         worker = _worker()
-        worker._finalize_task_result = AsyncMock(return_value=Ok(None))  # type: ignore[method-assign]
-        worker._record_task_timeout = AsyncMock(return_value=_TimeoutSettled())  # type: ignore[method-assign]
-        worker._finalize_child_loss = AsyncMock(return_value=Ok(None))  # type: ignore[method-assign]
-        worker._requeue_claimed_task = AsyncMock(  # type: ignore[method-assign]
+        worker._finalize_task_result = AsyncMock(return_value=Ok(None))
+        worker._record_task_timeout = AsyncMock(return_value=_TimeoutSettled())
+        worker._finalize_child_loss = AsyncMock(return_value=Ok(None))
+        worker._requeue_claimed_task = AsyncMock(
             return_value=_RequeueOutcome.REQUEUED,
         )
-        worker._recover_worker_future_failure = AsyncMock(  # type: ignore[method-assign]
+        worker._recover_worker_future_failure = AsyncMock(
             return_value=_RequeueOutcome.REQUEUED,
         )
         return worker
@@ -326,7 +326,7 @@ class TestBackstopTimer:
         the test waits 0.1 s."""
         monkeypatch.setattr(finalize, 'SHARED_BACKSTOP_MARGIN_S', -1.4)
         worker = _worker()
-        worker._handle_shared_backstop = AsyncMock(  # type: ignore[method-assign]
+        worker._handle_shared_backstop = AsyncMock(
             return_value=_TimeoutSettled(),
         )
         handle = _handle(asyncio.get_running_loop())
@@ -343,7 +343,7 @@ class TestBackstopTimer:
 
         assert outcome == _TimeoutSettled()
         assert 0.05 <= loop.time() - started < 1.0
-        worker._handle_shared_backstop.assert_awaited_once_with(  # type: ignore[attr-defined]
+        worker._handle_shared_backstop.assert_awaited_once_with(
             handle,
             'task-1',
             1000,
@@ -352,7 +352,7 @@ class TestBackstopTimer:
 
     async def test_an_outcome_before_the_backstop_removes_the_timer(self) -> None:
         worker = _worker()
-        worker._handle_shared_backstop = AsyncMock()  # type: ignore[method-assign]
+        worker._handle_shared_backstop = AsyncMock()
         handle = _handle(asyncio.get_running_loop())
         finished = SeatTaskFinished(True, '1', None)
         handle.finish(finished)
@@ -365,20 +365,20 @@ class TestBackstopTimer:
         )
 
         assert outcome == finished
-        worker._handle_shared_backstop.assert_not_awaited()  # type: ignore[attr-defined]
+        worker._handle_shared_backstop.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 class TestBackstopDecision:
     async def _backstop(self, worker: Worker, kill: Any, handle: SharedHandle) -> Any:
-        handle.backstop_kill = AsyncMock(return_value=kill)  # type: ignore[method-assign]
+        handle.backstop_kill = AsyncMock(return_value=kill)
         return await worker._handle_shared_backstop(handle, 'task-1', 1000, CLAIMED_AT)
 
     async def test_a_frozen_child_killed_and_seen_exiting_writes_the_timeout(
         self,
     ) -> None:
         worker = _worker()
-        worker._record_task_timeout = AsyncMock(return_value=_TimeoutSettled())  # type: ignore[method-assign]
+        worker._record_task_timeout = AsyncMock(return_value=_TimeoutSettled())
 
         outcome = await self._backstop(
             worker,
@@ -387,11 +387,11 @@ class TestBackstopDecision:
         )
 
         assert outcome == _TimeoutSettled()
-        worker._record_task_timeout.assert_awaited_once_with('task-1', 1000, CLAIMED_AT)  # type: ignore[attr-defined]
+        worker._record_task_timeout.assert_awaited_once_with('task-1', 1000, CLAIMED_AT)
 
     async def test_no_exit_seen_writes_nothing(self) -> None:
         worker = _worker()
-        worker._record_task_timeout = AsyncMock()  # type: ignore[method-assign]
+        worker._record_task_timeout = AsyncMock()
 
         outcome = await self._backstop(
             worker,
@@ -400,11 +400,11 @@ class TestBackstopDecision:
         )
 
         assert outcome == _AttemptEndUnknown()
-        worker._record_task_timeout.assert_not_awaited()  # type: ignore[attr-defined]
+        worker._record_task_timeout.assert_not_awaited()
 
     async def test_a_live_child_is_not_killed_and_the_outcome_is_awaited(self) -> None:
         worker = _worker()
-        worker._record_task_timeout = AsyncMock()  # type: ignore[method-assign]
+        worker._record_task_timeout = AsyncMock()
         handle = _handle(asyncio.get_running_loop())
         asyncio.get_running_loop().call_later(
             0.02,
@@ -415,7 +415,7 @@ class TestBackstopDecision:
         outcome = await self._backstop(worker, DeadlineAcknowledged(pid=7), handle)
 
         assert outcome == SeatDeadlineEnded()
-        worker._record_task_timeout.assert_not_awaited()  # type: ignore[attr-defined]
+        worker._record_task_timeout.assert_not_awaited()
 
     async def test_a_run_that_already_ended_gives_its_outcome(self) -> None:
         worker = _worker()
@@ -433,7 +433,7 @@ class TestBackstopDecision:
         self,
     ) -> None:
         worker = _worker()
-        worker._record_task_timeout = AsyncMock(return_value=_TimeoutWriteFailed())  # type: ignore[method-assign]
+        worker._record_task_timeout = AsyncMock(return_value=_TimeoutWriteFailed())
         handle = _handle(asyncio.get_running_loop())
         lost = ChildLost(LossCause.KILLED_BY_PARENT, KilledBySignal(9), False, 7)
         handle.finish(lost)

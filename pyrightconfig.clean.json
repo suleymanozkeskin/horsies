@@ -36,7 +36,17 @@
     "horsies/core/worker/live_dispatches.py",
     "horsies/core/worker/runner_heartbeat.py",
     "tests/unit/test_live_dispatches.py",
-    "tests/unit/test_runner_heartbeat.py"
+    "tests/unit/test_runner_heartbeat.py",
+    "horsies/core/worker/child_inbox.py",
+    "horsies/core/worker/shared_child.py",
+    "horsies/core/worker/shared_runner.py",
+    "horsies/core/worker/shared_lifecycle.py",
+    "horsies/core/worker/dispatch_route.py",
+    "tests/unit/test_shared_child.py",
+    "tests/unit/test_shared_lifecycle.py",
+    "tests/unit/test_shared_seat_runner.py",
+    "tests/unit/test_shared_slot_pool.py",
+    "tests/unit/test_shared_dispatch.py"
   ],
   "reportUnnecessaryTypeIgnoreComment": "error"
 }
