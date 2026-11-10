@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from sqlalchemy import text
 
+from horsies.core.models.tasks import Execution
+
 
 # ---- Schema infrastructure ----
 #
@@ -356,8 +358,14 @@ from sqlalchemy import text
 #      databases no longer build it.
 # v52: horsies_workflow_recovery_failures, the stored count of the workflow
 #      recovery limit.
+# v53: horsies_tasks.execution, the Execution of each task, with a CHECK on
+#      its value domain. The constant default makes the ADD catalog-only on
+#      PostgreSQL 11+; existing rows, and rows from a process that does not
+#      know the column, read ISOLATED. idx_horsies_tasks_claim_pending_class
+#      (queue_name, execution, priority, enqueued_at, id) over PENDING rows is
+#      built concurrently: one ordered range per queue and class.
 
-SCHEMA_VERSION = 52
+SCHEMA_VERSION = 53
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,
@@ -1090,6 +1098,64 @@ ADD_TASK_FINALIZING_COLUMNS_SQL = text("""
 ADD_TASK_TERMINAL_AT_COLUMN_SQL = text("""
     ALTER TABLE horsies_tasks
     ADD COLUMN IF NOT EXISTS terminal_at TIMESTAMPTZ;
+""")
+
+# Migration (v53): the execution class of each task. The constant default
+# is a catalog-only change on PostgreSQL 11+. The default stays after the
+# migration: a process of an earlier version that inserts a task does not
+# know the column, and its rows run isolated.
+ADD_TASK_EXECUTION_COLUMN_SQL = text("""
+    ALTER TABLE horsies_tasks
+    ADD COLUMN IF NOT EXISTS execution TEXT NOT NULL DEFAULT 'ISOLATED';
+""")
+
+
+def _execution_domain() -> str:
+    """The Execution values as sorted SQL literals."""
+    return ', '.join(sorted(f"'{member.value}'" for member in Execution))
+
+
+# The CHECK is guarded on its definition, not on its name: a constraint of
+# this name with another value domain is dropped and added again, so a new
+# Execution member reaches every deployed database with the next version.
+# The expected definition comes from the same constraint on a temporary
+# table, so both sides are rendered by the same server.
+ADD_TASK_EXECUTION_CHECK_SQL = text(f"""
+DO $$
+DECLARE
+    v_actual text;
+    v_expected text;
+BEGIN
+    CREATE TEMP TABLE horsies_expected_task_execution (execution text)
+        ON COMMIT DROP;
+    ALTER TABLE horsies_expected_task_execution
+        ADD CONSTRAINT ck_horsies_tasks_execution
+        CHECK (execution IN ({_execution_domain()}));
+    SELECT pg_get_constraintdef(oid) INTO v_expected
+    FROM pg_constraint
+    WHERE conrelid = 'horsies_expected_task_execution'::regclass
+      AND conname = 'ck_horsies_tasks_execution';
+    SELECT pg_get_constraintdef(oid) INTO v_actual
+    FROM pg_constraint
+    WHERE conrelid = 'horsies_tasks'::regclass
+      AND conname = 'ck_horsies_tasks_execution'
+      AND convalidated;
+    DROP TABLE horsies_expected_task_execution;
+    IF v_actual IS DISTINCT FROM v_expected THEN
+        ALTER TABLE horsies_tasks
+        DROP CONSTRAINT IF EXISTS ck_horsies_tasks_execution;
+        ALTER TABLE horsies_tasks
+        ADD CONSTRAINT ck_horsies_tasks_execution
+        CHECK (execution IN ({_execution_domain()})) NOT VALID;
+    END IF;
+END
+$$""")
+
+# ADD and VALIDATE share the migration transaction. Validating a valid
+# constraint is a no-op, so a later release does not scan again.
+VALIDATE_TASK_EXECUTION_CHECK_SQL = text("""
+    ALTER TABLE horsies_tasks
+    VALIDATE CONSTRAINT ck_horsies_tasks_execution
 """)
 
 # Migration (v4): widen timeseries PKs to BIGINT. Both tables are

@@ -66,13 +66,13 @@ from horsies.core.types.error_detail import NoCause
 from horsies.core.types.status import TaskStatus, TaskAttemptOutcome
 from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.codec.json_io import Json, loads_json, dumps_json
-from horsies.core.codec.task_options import stored_max_retries
+from horsies.core.codec.task_options import stored_execution, stored_max_retries
 from horsies.core.codec.validation_errors import (
     exception_text,
     validation_summary,
     without_validation_input,
 )
-from horsies.core.models.tasks import TaskInfo, TaskAttemptInfo
+from horsies.core.models.tasks import Execution, TaskInfo, TaskAttemptInfo
 from horsies.core.lifecycle.commands import (
     CancelOrphanedTasks,
     ExpirePendingTasks,
@@ -242,16 +242,28 @@ def _check_enqueue_timing(
     return Ok(None)
 
 
+@dataclass(frozen=True, slots=True)
+class _EnqueueOptions:
+    """The task options of one enqueue, and the columns read from them."""
+
+    value: Json
+    max_retries: int
+    execution: Execution
+
+
 def _parse_enqueue_task_options(
     task_name: str, task_options: str | None,
-) -> Result[tuple[Json, int], BrokerInvalidTaskOptions]:
-    """Parse task options to their value and retry limit.
+) -> Result[_EnqueueOptions, BrokerInvalidTaskOptions]:
+    """Parse task options to their value, retry limit and execution class.
 
     ``serialize_task_options()`` always produces this text, so malformed JSON
     is a bug, not a runtime condition, and it must not be silently swallowed.
+    No options store no retries and ``ISOLATED``.
     """
     if not task_options:
-        return Ok((None, 0))
+        return Ok(_EnqueueOptions(
+            value=None, max_retries=0, execution=Execution.ISOLATED,
+        ))
     opts_r = loads_json(task_options)
     if is_err(opts_r):
         return Err(BrokerInvalidTaskOptions(
@@ -265,7 +277,18 @@ def _parse_enqueue_task_options(
             message=f'task_options refused for {task_name}: {detail}',
             exception=NoCause(),
         ))
-    return Ok((opts_r.ok_value, retry_limit_r.ok_value))
+    execution_r = stored_execution(opts_r.ok_value)
+    if is_err(execution_r):
+        detail = execution_r.err_value.detail
+        return Err(BrokerInvalidTaskOptions(
+            message=f'task_options refused for {task_name}: {detail}',
+            exception=NoCause(),
+        ))
+    return Ok(_EnqueueOptions(
+        value=opts_r.ok_value,
+        max_retries=retry_limit_r.ok_value,
+        execution=execution_r.ok_value,
+    ))
 
 
 def _parse_enqueue_json(
@@ -481,6 +504,9 @@ from horsies.core.schemas.migrations import (
     ADD_ERROR_CODE_COLUMN_SQL,
     ADD_TASK_FINALIZING_COLUMNS_SQL,
     ADD_TASK_TERMINAL_AT_COLUMN_SQL,
+    ADD_TASK_EXECUTION_COLUMN_SQL,
+    ADD_TASK_EXECUTION_CHECK_SQL,
+    VALIDATE_TASK_EXECUTION_CHECK_SQL,
     ADD_TASK_IS_WORKFLOW_TASK_COLUMN_SQL,
     ADD_TRANSITIONAL_CUTOVER_COLUMNS_SQL,
     ADD_ATTEMPT_SNAPSHOT_COLUMNS_SQL,
@@ -540,7 +566,9 @@ from horsies.core.schemas.recovery import (
     CREATE_RECOVERY_SCAN_CURSORS_SQL,
     CREATE_WORKFLOW_RECOVERY_FAILURES_SQL,
     SEED_RECOVERY_SCAN_CURSORS_SQL,
+    VALIDATE_CLAIM_INDEXES_SQL,
     VALIDATE_RECOVERY_INDEXES_SQL,
+    install_claim_indexes,
     install_recovery_indexes,
     remove_retired_indexes,
 )
@@ -839,8 +867,8 @@ ENQUEUE_INSERT_SQL = text("""
     INSERT INTO horsies_tasks (
         idempotency_key_digest, id, task_name, queue_name, priority,
         args, kwargs, status, sent_at, enqueued_at, good_until,
-        claimed, retry_count, max_retries, task_options, enqueue_sha,
-        is_workflow_task, created_at, updated_at,
+        claimed, retry_count, max_retries, task_options, execution,
+        enqueue_sha, is_workflow_task, created_at, updated_at,
         command_fingerprint_version, command_fingerprint,
         retention_class_key, retain_rerun_input, input_digest,
         prepared_rerun_input_disposition, prepared_rerun_input_version,
@@ -854,8 +882,8 @@ ENQUEUE_INSERT_SQL = text("""
             NOW() + COALESCE(:enqueue_delay, INTERVAL '0 seconds')
         ),
         :good_until,
-        FALSE, 0, :max_retries, :task_options, :enqueue_sha,
-        FALSE, NOW(), NOW(),
+        FALSE, 0, :max_retries, :task_options, :execution,
+        :enqueue_sha, FALSE, NOW(), NOW(),
         :command_fingerprint_version, :command_fingerprint,
         :retention_class_key, :retain_rerun_input, :input_digest,
         :prepared_rerun_input_disposition, :prepared_rerun_input_version,
@@ -1607,12 +1635,28 @@ class PostgresBroker:
             )
             if await self._read_schema_version_if_exists(engine) >= SCHEMA_VERSION:
                 return
+            # v53: the column comes before the concurrent index build that
+            # reads it.
+            await self._add_task_execution_column(engine)
             await install_recovery_indexes(engine)
+            # v53: the class-keyed pending claim index.
+            await install_claim_indexes(engine)
             # v43: drop the task retention indexes that no query reads.
             # v45: drop the workflow-node indexes that the workflow-scoped
             # indexes make redundant.
             await remove_retired_indexes(engine)
             await self._activate_bounded_recovery(engine)
+
+    async def _add_task_execution_column(self, engine: AsyncEngine) -> None:
+        """Add horsies_tasks.execution and its value domain (v53), in one
+        transaction. Idempotent: the column is added only when absent, and the
+        CHECK only when its definition differs. The pass before this one stops
+        at v35 on a database past it, so v53 cannot live there.
+        """
+        async with engine.begin() as conn:
+            await conn.execute(ADD_TASK_EXECUTION_COLUMN_SQL)
+            await conn.execute(ADD_TASK_EXECUTION_CHECK_SQL)
+            await conn.execute(VALIDATE_TASK_EXECUTION_CHECK_SQL)
 
     async def _activate_bounded_recovery(self, engine: AsyncEngine) -> None:
         from horsies.core.history.terminalization.move import (
@@ -1635,6 +1679,7 @@ class PostgresBroker:
         async with engine.begin() as conn:
             await close_workflow_node_status_set(conn)
             await conn.execute(VALIDATE_RECOVERY_INDEXES_SQL)
+            await conn.execute(VALIDATE_CLAIM_INDEXES_SQL)
             # v39 on a database already past the v35 apply path: the claim
             # pair keeps its signatures and return columns, so CREATE OR
             # REPLACE installs the current bodies.
@@ -2267,7 +2312,8 @@ class PostgresBroker:
         options_r = _parse_enqueue_task_options(task_name, task_options)
         if is_err(options_r):
             return options_r
-        task_options_value, max_retries = options_r.ok_value
+        parsed_options = options_r.ok_value
+        task_options_value = parsed_options.value
 
         # The cutover payload: command fingerprint, retention
         # snapshot, and the prepared rerun-input envelope, computed
@@ -2317,8 +2363,9 @@ class PostgresBroker:
                 enqueued_at=enqueued_at,
                 enqueue_delay_seconds=enqueue_delay_seconds,
                 good_until=good_until,
-                max_retries=max_retries,
+                max_retries=parsed_options.max_retries,
                 task_options=task_options,
+                execution=parsed_options.execution,
                 enqueue_sha=enqueue_sha,
                 scoped_key_digest=scoped_key_digest,
                 cutover_values=cutover.ok_value,
@@ -2342,6 +2389,7 @@ class PostgresBroker:
         good_until: Optional[datetime],
         max_retries: Json,
         task_options: Optional[str],
+        execution: Execution,
         enqueue_sha: str,
         scoped_key_digest: Optional[bytes],
         cutover_values: dict[str, Any],
@@ -2372,6 +2420,7 @@ class PostgresBroker:
             'good_until': good_until,
             'max_retries': max_retries,
             'task_options': task_options,
+            'execution': execution.value,
             'enqueue_sha': enqueue_sha,
             'command_fingerprint_version': (
                 cutover_values['command_fingerprint_version']
@@ -4349,6 +4398,7 @@ class PostgresBroker:
                     'worker_pid',
                     'worker_process_name',
                     'error_code',
+                    'execution',
                 ]
                 if include_result:
                     base_columns.append('result')
@@ -4416,6 +4466,10 @@ class PostgresBroker:
                 worker_process_name = row[idx]
                 idx += 1
                 error_code_value = row[idx]
+                idx += 1
+                # The CHECK on the column holds the domain. A value outside
+                # it raises here, and the read fails as a query failure.
+                execution = Execution(row[idx])
                 idx += 1
 
                 if include_result:
@@ -4505,6 +4559,7 @@ class PostgresBroker:
                         result_decoded=False,
                         failed_reason=failed_reason,
                         attempts=attempts,
+                        execution=execution,
                     )
                 )
         except Exception as exc:

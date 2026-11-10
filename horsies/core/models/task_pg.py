@@ -62,6 +62,7 @@ class TaskModel(Base):
     - max_retries: int # maximum number of retry attempts allowed
     - next_retry_at: datetime # when the task should be retried next
     - task_options: str # serialized TaskOptions configuration for retry policies
+    - execution: str # Execution value: ISOLATED, SHARED_ASYNC or SHARED_THREAD
     - worker_pid: int # process ID of the worker executing this task
     - worker_hostname: str # hostname of the machine running the worker
     - worker_process_name: str # name/identifier of the worker process
@@ -162,6 +163,13 @@ class TaskModel(Base):
         DateTime(timezone=True), nullable=True
     )  # filter inside claim index scans only; standalone index unused
     task_options: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # The task's `Execution` value (schema v53). Every insert path writes it
+    # from the stored options. The default serves rows written before v53
+    # and writers that do not know the column; the CHECK
+    # ck_horsies_tasks_execution (migration DDL) bounds the domain.
+    execution: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'ISOLATED'"),
+    )
 
     # Idempotent enqueue verification
     enqueue_sha: Mapped[str] = mapped_column(

@@ -35,7 +35,7 @@ from horsies.core.codec.json_io import (
     loads_json,
 )
 from horsies.core.codec.payload_guard import warn_if_payload_large
-from horsies.core.codec.task_options import stored_max_retries
+from horsies.core.codec.task_options import stored_execution, stored_max_retries
 from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.codec.typed import (
     Json,
@@ -123,7 +123,7 @@ logger = get_logger('workflow.engine')
 #   debug — when routine completion paths hit one (broker callback redelivery /
 #     replay: on_workflow_task_complete, on_subworkflow_complete).
 
-from horsies.core.models.tasks import OperationalErrorCode, OutcomeCode
+from horsies.core.models.tasks import Execution, OperationalErrorCode, OutcomeCode
 
 if TYPE_CHECKING:
     from horsies.core.app import Horsies
@@ -746,6 +746,7 @@ async def _build_enqueued_task_params(
             defect, not stored data that does not parse.
     """
     max_retries = 0
+    execution = Execution.ISOLATED
     good_until_str: str | None = None
     good_until_dt: datetime | None = None
     if task_options_str:
@@ -763,7 +764,9 @@ async def _build_enqueued_task_params(
         # A retry_policy that does not validate (corrupt row) is refused
         # here; a limit that cannot be stored would otherwise surface as an
         # INSERT error and loop the finalize retries.
-        retry_limit_r = stored_max_retries(options_data)
+        # `_deser_json` returns the parsed JSON value typed as Any.
+        stored_options = cast(Json, options_data)
+        retry_limit_r = stored_max_retries(stored_options)
         if is_err(retry_limit_r):
             return Err(_EnqueueBuildError(
                 (
@@ -773,6 +776,16 @@ async def _build_enqueued_task_params(
                 error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
             ))
         max_retries = retry_limit_r.ok_value
+        execution_r = stored_execution(stored_options)
+        if is_err(execution_r):
+            return Err(_EnqueueBuildError(
+                (
+                    f'Invalid execution for task {task_index}: '
+                    f'{execution_r.err_value.detail}'
+                ),
+                error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+            ))
+        execution = execution_r.ok_value
         good_until_raw = options_data.get('good_until')
         if good_until_raw is not None:
             good_until_str = str(good_until_raw)
@@ -953,6 +966,7 @@ async def _build_enqueued_task_params(
         'sent_at': sent_at,
         'max_retries': max_retries,
         'task_options': task_options_str,
+        'execution': execution.value,
         'good_until': good_until_str,
         'enqueue_sha': sha,
         **workflow_task_enqueue_stamp(
@@ -1276,7 +1290,10 @@ async def enqueue_subworkflow_task(
     # roots recurse. Task options that do not parse are a defect (they come
     # from the task function) and raise SerializationError before any
     # INSERT; the caller's transaction rolls back.
-    from horsies.core.workflows.lifecycle import root_retry_and_deadline
+    from horsies.core.workflows.lifecycle import (
+        root_execution,
+        root_retry_and_deadline,
+    )
 
     child_node_params: list[dict[str, Any]] = []
     child_root_task_params: list[dict[str, Any]] = []
@@ -1424,6 +1441,9 @@ async def enqueue_subworkflow_task(
                     )
                 )
             if is_fast_root and child_task.index is not None:
+                child_root_class = root_execution(
+                    child_task_options_json, child_task.name,
+                )
                 child_task_id = mint_task_id()
                 # Task-row kwargs = node kwargs + workflow_meta (mirrors
                 # enqueue_workflow_task; args_from/ctx injection is
@@ -1461,6 +1481,7 @@ async def enqueue_subworkflow_task(
                     'sent_at': root_sent_at,
                     'max_retries': max_retries,
                     'task_options': child_task_options_json,
+                    'execution': child_root_class.value,
                     'good_until': good_until_str,
                     'enqueue_sha': sha,
                     **workflow_task_enqueue_stamp(

@@ -17,6 +17,7 @@ from .core.models.tasks import (
     BuiltInTaskCode,
     SubWorkflowError,
     RetryPolicy,
+    Execution,
     TaskInfo,
     TaskAttemptInfo,
 )
@@ -198,6 +199,7 @@ __all__ = [
     'BuiltInTaskCode',
     'SubWorkflowError',
     'RetryPolicy',
+    'Execution',
     'TaskInfo',
     'TaskAttemptInfo',
     'QueueMode',

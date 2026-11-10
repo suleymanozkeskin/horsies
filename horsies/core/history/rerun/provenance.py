@@ -52,6 +52,8 @@ RERUN_FIELD_PROVENANCE: Final[dict[str, FieldProvenance]] = {
     'args': FieldProvenance.REPLAYED_VIA_ENVELOPE,
     'kwargs': FieldProvenance.REPLAYED_VIA_ENVELOPE,
     'task_options': FieldProvenance.REPLAYED_VIA_ENVELOPE,
+    # Read from the replayed task options, as every enqueue reads it.
+    'execution': FieldProvenance.REPLAYED_VIA_ENVELOPE,
     # The atomic pair per the frozen CHECK.
     'rerun_of_task_id': FieldProvenance.LINEAGE,
     'rerun_root_task_id': FieldProvenance.LINEAGE,

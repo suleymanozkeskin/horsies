@@ -15,6 +15,8 @@ Covers all parameters, error codes, serialization rules, retry patterns, and pit
     exception_mapper: dict[type[BaseException], str] | None = None,
     default_unhandled_error_code: str | None = None,
     timeout_ms: int | None = None,
+    execution: Execution = Execution.ISOLATED,
+    cancel_grace_ms: int | None = None,
 )
 def my_task(*, ...) -> TaskResult[T, TaskError]: ...
 ```
@@ -27,6 +29,8 @@ def my_task(*, ...) -> TaskResult[T, TaskError]: ...
 | `exception_mapper` | `dict[type[BaseException], str] \| None` | `None` | Per-task exception-to-error-code mapping. See ExceptionMapper section. |
 | `default_unhandled_error_code` | `str \| None` | `None` | Override global default for unmapped exceptions. Must be `UPPER_SNAKE_CASE`. |
 | `timeout_ms` | `int \| None` | `None` | Execution time limit in ms, from 1000 to `MAX_TASK_TIMEOUT_MS` (4,294,967,295, about 49.7 days, the Rust port's `u32` limit), measured from the moment a child takes the task; time waiting for a free child does not count. On expiry the child and the subprocesses in its session are SIGKILLed, and after the child exits the task fails with `TASK_TIMEOUT`; retry is opt-in via `auto_retry_for`, and a retry never runs next to the killed attempt. A deadline that fires before user code starts requeues the task instead, also after the exit. If the child does not exit within 30 s of the kill, nothing is written and stale-task recovery takes the task. Other tasks on the worker continue. Use it as a hang backstop, not as routine control flow. |
+| `execution` | `Execution` | `Execution.ISOLATED` | How a worker runs the task. `ISOLATED`: `def` or `async def`, `timeout_ms` optional. `SHARED_ASYNC`: `async def` only, `timeout_ms` required. `SHARED_THREAD`: `def` only, `timeout_ms` required. Every task row stores the class (`horsies_tasks.execution`). |
+| `cancel_grace_ms` | `int \| None` | `None` | `SHARED_ASYNC` only: the time to stop after a cancel, from `MIN_CANCEL_GRACE_MS` (100) to `MAX_CANCEL_GRACE_MS` (60,000). `None` stores `DEFAULT_CANCEL_GRACE_MS` (5,000). The stored options hold the value in effect at send. |
 
 `good_until` is **not** accepted at definition time — it is a per-send concern. Passing it raises `HRS-102`. Use `.with_options(good_until=...)` at send time instead. For workflow nodes, use `.node(good_until=...)`.
 
@@ -39,6 +43,8 @@ def my_task(*, ...) -> TaskResult[T, TaskError]: ...
 - `queue_name` cross-validated against `AppConfig.queue_mode`.
 - `good_until` rejected — raises `HRS-102` with help text directing to `.with_options()` or `.node()`.
 - Top-level `auto_retry_for` kwarg is rejected — it belongs inside `RetryPolicy`.
+- `execution` rules, one code each, checked in this order (the first broken rule is reported): `SHARED_ASYNC` on a `def` function — `HRS-107`; `SHARED_THREAD` on an `async def` function — `HRS-108`; `SHARED_ASYNC` or `SHARED_THREAD` without `timeout_ms` — `HRS-109`; `cancel_grace_ms` with a class other than `SHARED_ASYNC` — `HRS-110`; `cancel_grace_ms` outside 100 to 60,000 — `HRS-111`. A value that is not an `Execution` member raises `HRS-102`.
+- With `execution` written as a member, a type checker refuses the same declarations: the overloads require `timeout_ms` for a shared class and take `cancel_grace_ms` only with `SHARED_ASYNC`, and the decorator they return accepts only the function kind of the class. A class known only at run time requires `timeout_ms`.
 
 Returns `TaskFunction[P, T]` for a `def` function, and `AsyncTaskFunction[P, T]` for an `async def` function.
 
