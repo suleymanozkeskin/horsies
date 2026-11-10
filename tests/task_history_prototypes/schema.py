@@ -67,7 +67,13 @@ _IDENTIFIER = re.compile(r'^[a-z][a-z0-9_]{0,62}$')
 # the default. The index replay reads the deployed definitions from the
 # catalog, and the clone has the indexed column, so the replay holds; the
 # replayed name stays inside the 63-byte bound. The base advances.
-_EXPECTED_BASE_SCHEMA_VERSION = 54
+# v55 builds idx_horsies_tasks_claim_expired_class on columns that the clone
+# has, drops idx_horsies_tasks_claim_pending and
+# idx_horsies_tasks_claim_expired_ordered, which no prototype names, replaces
+# the claim function pair, and adds horsies_worker_states.class_capacity. The
+# replay reads the deployed set, and the longest replayed name is 47 bytes.
+# The base advances.
+_EXPECTED_BASE_SCHEMA_VERSION = 55
 
 
 @dataclass(frozen=True, slots=True)

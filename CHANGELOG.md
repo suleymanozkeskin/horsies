@@ -159,8 +159,61 @@ and there is no migration contract between pre-1.0 versions.
     warning count the shared children; the boot memory guard compares each
     mode's limit with the baseline of a child of that mode.
 
+- **A worker claims per execution class.** A worker has one claim budget
+  for each execution class that it runs children for. Its capacity is the
+  children (`ISOLATED`) or seats (a shared class) of that class in service.
+  The worker builds its claim plan once at start from its profile and logs it:
+  - A class with children of its own is claimed into its own budget.
+  - A shared class with no children of its own is claimed into the
+    `ISOLATED` budget, when the worker runs isolated children. Isolated
+    children never take a class that has children of its own.
+  - Any other class is not claimed. The worker still starts, and logs one
+    line that names those classes.
+  - In this release a profile runs isolated children only, so every class is
+    claimed into the `ISOLATED` budget.
+  - Priority holds within one class. Each (queue, class) is its own claim
+    stream in `(priority, enqueued_at, id)` order, and a budget of several
+    classes reads their merge in that order.
+  - The use of each budget is counted from the rows: this worker's RUNNING
+    and live CLAIMED rows of the classes that the budget claims.
+  - `ClaimLimits.per_queue_per_pass`, `ClaimLimits.claimed_per_worker`, the
+    queue caps and `cluster_wide_cap` apply to the worker as a whole. In soft
+    cap mode each budget, and the worker, may hold `prefetch_buffer` rows
+    more than its capacity. The capacity that `HRS-218` compares with is the
+    sum of the budgets plus `prefetch_buffer`.
+  - A claimed row of a shared class whose task, as this worker registered it,
+    has another class (for example `SHARED_ASYNC` on the row, and the
+    function is now `def`) is written `ISOLATED` and returned to `PENDING`,
+    fenced to its claim generation, with one warning. A row of a task that
+    the worker did not register is dispatched as before.
+  - Schema v55 adds `horsies_worker_states.class_capacity` (`jsonb`,
+    nullable, no backfill): each budget class with its `capacity` and the
+    classes it `serves`.
+
 ### Changed
 
+- **Breaking: the claim function takes a budget per execution class.**
+  `horsies_claim` takes `p_budgets` and `p_routes` in place of `p_processes`,
+  and returns each row's `execution`. Schema v55 drops the earlier signature,
+  so a 0.6.x worker fails every claim pass after a 0.7.0 process migrates.
+  Stop every 0.6.x worker before the first 0.7.0 worker starts.
+  - A claim pass reads the head of each (queue, class) stream without locks,
+    then takes the rows it needs from each stream with `FOR UPDATE SKIP
+    LOCKED`. It locks only the rows it takes. Before, a pass over two queues
+    of equal priority could lock up to its batch in each queue and return
+    one batch.
+  - v55 builds `idx_horsies_tasks_claim_expired_class` on `(queue_name,
+    execution, priority, enqueued_at, id)` over CLAIMED rows concurrently,
+    and drops `idx_horsies_tasks_claim_pending` and
+    `idx_horsies_tasks_claim_expired_ordered` concurrently. Each claim stream
+    is one range of `idx_horsies_tasks_claim_pending_class` or of the new
+    index. With 50,000 expired leases in one queue, the expired stream of a
+    class with no rows reads 142 buffers on the new index and 7,848 on the
+    unclassed one.
+  - Both claim functions run with `jit = off`. Their generic plan passed
+    `jit_above_cost`, so a server with JIT compiled the statement on every
+    pass: 26 to 47 ms per pass against 0.7 to 1.8 ms of work, at a 90,000-row
+    backlog on PostgreSQL 17.
 - **Breaking: a slot that cannot start a child for a cause that can clear no
   longer stops the worker.** A child that fails its start now reports the
   cause to the worker before it exits.
@@ -278,6 +331,22 @@ and there is no migration contract between pre-1.0 versions.
   no effect. The bounds of the old flags still apply; new upper bounds are
   1024 children, 2,147,483,647 tasks, 16,777,216 MB and a drain timeout of
   24 hours. Migrating to 0.7.0 has the table from each flag to its field.
+- **Breaking: the enqueue fingerprint of a scheduled run covers the task's
+  options.** A slot keeps its task id, but its `enqueue_sha` changes for
+  every schedule. This includes a task that declares no options, because its
+  stored options text is not null. A slot that a scheduler before this
+  release enqueued, and did not record because it stopped before it saved the
+  schedule state, gets `PAYLOAD_MISMATCH` when this release fires it.
+  - A slot whose task id already holds a different command counts as fired.
+    The scheduler logs one warning, records the run with that task id, and
+    moves to the next slot. In catch-up, the next due slots are enqueued in
+    the same tick. Before, the scheduler logged the slot as a permanent
+    enqueue failure, did not record a run, and stopped the catch-up of that
+    tick at the slot. The same applies when a change to the schedule's kwargs
+    or to the task's options meets a slot that is already enqueued.
+  - The task of such a slot keeps the row that the earlier scheduler wrote:
+    it runs with no timeout, no retries, and as `ISOLATED`. Later slots carry
+    the task's options.
 
 ### Removed
 
@@ -328,6 +397,13 @@ and there is no migration contract between pre-1.0 versions.
   so after `running_stale_threshold_ms` the reaper failed the task with
   `WORKER_CRASHED`, and a retry could run next to it. CPU-bound tasks need no
   extra margin in the stale thresholds.
+- **A scheduled run carries the options of its task.** The scheduler
+  enqueued each slot with no task options, so the run had no timeout, no
+  retries (`max_retries` 0), and ran as `ISOLATED`, whatever `timeout_ms`,
+  `retry_policy`, `execution` and `cancel_grace_ms` the task declared. A
+  scheduled run now stores the options text that a plain `.send()` of the
+  task stores, and the worker applies these options. The scheduler takes
+  that text once at start, so every slot of a schedule sends the same text.
 
 ## [0.6.1] - 2026-11-08
 

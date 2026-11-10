@@ -5,6 +5,13 @@ related: [../changelog, ../workers/worker-profiles, ../cli, migration-to-0-6-0]
 tags: [migration, 0.7.0, breaking-changes, worker, profiles, cli]
 ---
 
+## Stop 0.6.x workers before the first 0.7.0 worker starts
+
+The first 0.7.0 process that starts migrates the schema to v55. v55 replaces
+the claim function with one that takes a budget per execution class, and drops
+the earlier one. A 0.6.x worker that still runs then fails each claim pass and
+exits. Stop every 0.6.x worker first, then start the 0.7.0 workers.
+
 ## Worker settings move into profiles
 
 `horsies worker` no longer takes execution flags. The settings live in named worker profiles in `AppConfig.worker_profiles`, and a worker starts with `--profile <name>`. `--loglevel` and the app locator stay.

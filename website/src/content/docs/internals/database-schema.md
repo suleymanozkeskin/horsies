@@ -1,6 +1,6 @@
 ---
 title: Database Schema
-summary: PostgreSQL tables for live tasks, the task-history archive, heartbeats, worker states, and schedules (schema v54).
+summary: PostgreSQL tables for live tasks, the task-history archive, heartbeats, worker states, and schedules (schema v55).
 related: [../../configuration/broker-config, ../../migrations/migration-to-0-5-0]
 tags: [internals, database, schema, PostgreSQL, task-history]
 ---
@@ -52,6 +52,13 @@ Live task storage. Holds only `PENDING`, `CLAIMED`, and `RUNNING` rows
 | `retain_rerun_input`, `prepared_rerun_input_*` | — | Rerun-input envelope: disposition, version, codec, content type, digest, inline bytes or reference |
 | `worker_pid`, `worker_hostname`, `worker_process_name` | — | Executing process identity |
 | `created_at`, `updated_at` | TIMESTAMPTZ | Row bookkeeping |
+
+The claim reads one stream per queue and execution class:
+`idx_horsies_tasks_claim_pending_class` and
+`idx_horsies_tasks_claim_expired_class` key `(queue_name, execution, priority,
+enqueued_at, id)` over PENDING and CLAIMED rows, and
+`idx_horsies_tasks_claim_expired` keys `(queue_name, claim_expires_at)` over
+CLAIMED rows. The worker builds the two class indexes concurrently.
 
 Enqueue-time facts (`enqueue_sha`, `retention_class_key`, the fingerprint
 pair) are required columns with their declared checks from the first row
@@ -172,6 +179,8 @@ Worker monitoring snapshots (timeseries). Each worker inserts one row per
 | `queue_max_concurrency` | JSONB | Per-queue concurrency limits |
 | `recovery_config` | JSONB | Recovery configuration snapshot |
 | `worker_started_at` | TIMESTAMP | Worker start time |
+| `slots_down` | JSONB | Each slot that is down for a cause that can clear: `{slot, cause, detail, down_since, failed_boots}`; an empty array when none is. NULL in a row from a worker before v53 |
+| `class_capacity` | JSONB | Each claim budget class to `{"capacity": N, "serves": [classes]}`: the children or seats in service, and the execution classes whose rows the budget claims. NULL in a row from a worker before v55 |
 
 ## horsies_schedule_state
 
@@ -212,7 +221,7 @@ credentials accordingly.
 
 Tables are created by the broker's first initialization and evolved by
 the versioned migration chain (`horsies_schema_version` records the installed
-version; the current schema is v54). The exact version and the
+version; the current schema is v55). The exact version and the
 `task_history_v1_validated_v1` row in `horsies_cutover_state` are both required
 after an offline upgrade; the integer watermark and the legacy
 `task_history_v1` row do not attest stage-6 validation. Creation is protected

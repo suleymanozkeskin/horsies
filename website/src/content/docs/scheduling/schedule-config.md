@@ -111,6 +111,10 @@ TaskSchedule(
 
 The scheduler encodes the kwargs of each schedule once at startup and sends that text for every slot until the next start. A kwargs model field with a `default_factory`, or a validator that reads the clock, runs once per start, not once per fire. If such a validator refuses the value later, the task is enqueued and fails at the worker with `WORKER_SERIALIZATION_ERROR`.
 
+### Task Options
+
+`TaskSchedule` has no task options. A scheduled run stores the options that the task declares on `@app.task()` (`timeout_ms`, `retry_policy`, `execution`, `cancel_grace_ms`), as a plain `.send()` of the task does. See [Scheduler Overview](../scheduler-overview#task-options).
+
 ### Queue Override
 
 In CUSTOM mode, override the task's default queue:

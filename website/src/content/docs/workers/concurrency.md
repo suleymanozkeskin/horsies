@@ -7,7 +7,7 @@ tags: [workers, concurrency, claiming, limits]
 
 ## Operational Notes
 
-- **Priority ordering:** Within the same priority, FIFO ordering uses `enqueued_at`. When many tasks share the same timestamp, ordering can appear non-deterministic.
+- **Priority ordering:** Priority holds within one execution class. Each (queue, class) is its own claim stream in `(priority, enqueued_at, id)` order. A budget that claims more than one class reads the merge of their streams in that order. Two budgets do not compare priorities: a high-priority `SHARED_ASYNC` row does not take a seat from an `ISOLATED` row. Within the same priority, FIFO ordering uses `enqueued_at`. When many tasks share the same timestamp, ordering can appear non-deterministic.
 - **Soft-cap overshoot:** With `prefetch_buffer > 0`, queue concurrency counts only RUNNING tasks; buffered CLAIMED tasks are invisible to the cap and are dispatched without a re-check. A queue's RUNNING count can therefore exceed its nominal cap, the excess lasts for the duration of those tasks (not just the claim pass), and with multiple workers each pass grants against the same RUNNING snapshot — N workers can reach up to N × cap RUNNING, bounded by their aggregate process slots. Use hard cap mode (`prefetch_buffer = 0`) where the cap must hold strictly.
 - **Claim leases:** In soft-cap mode, claims can expire and be reclaimed. Workers must verify ownership before running user code.
 
@@ -360,12 +360,56 @@ config = AppConfig(
 - Single-worker deployments where prefetch latency matters
 - Uniform task durations where work imbalance isn't a concern
 
+## Budgets per Execution Class
+
+A worker has one claim budget for each [execution class](../tasks/defining-tasks)
+that it runs children for. The worker builds its claim plan once at start,
+from its profile, and logs it. The plan routes the rows of each class:
+
+| The worker runs | Rows of that class are claimed into |
+|-----------------|-------------------------------------|
+| Children of the class | The budget of that class |
+| No children of a shared class, and isolated children | The `ISOLATED` budget |
+| Neither | No budget: the worker claims none of them |
+
+- An isolated child runs a task of any class. A worker gives a task more
+  isolation than its row asks, never less.
+- The isolated children of a worker that runs children of a shared class never
+  take rows of that class.
+- A worker with no isolated children claims no `ISOLATED` rows. It starts, and
+  logs one line that names each class it does not serve.
+
+In this release a profile runs isolated children only, so a worker claims the
+rows of every class into its `ISOLATED` budget.
+
+The capacity of a budget is its children (`ISOLATED`) or seats (a shared
+class) that are in service: a [slot that is down](worker-architecture) does not
+count. The claim counts the use of each budget from the rows: this worker's
+RUNNING and live CLAIMED rows of the classes that the budget claims.
+
+The worker publishes each budget, its capacity, and the classes it claims in
+`horsies_worker_states.class_capacity`, with each state snapshot.
+
+### A row whose class does not fit its task
+
+A row stores the class of its task at send. A deploy can change the class of
+the function later, for example from `async def` with `SHARED_ASYNC` to `def`.
+Before it dispatches a claimed row of a shared class, the worker compares that
+class with the class of the task that it registered. When they differ, the
+worker writes `ISOLATED` on the row, returns it to `PENDING` with the claim
+fence, wakes the workers of the queue, and logs one warning. An `ISOLATED` row
+fits every task. A row of a task that this worker did not register is
+dispatched, and its child fails it as before.
+
 ## Claiming Controls
 
 `ClaimLimits` in the [worker profile](worker-profiles) holds the claim limits.
-The capacity of a worker is its number of children plus `prefetch_buffer`: it
-never holds more tasks than that. A limit above the capacity has no effect, so
-`AppConfig` validation refuses it (`HRS-218`).
+The capacity of a worker is the sum of the capacities of its budgets plus
+`prefetch_buffer`: it never holds more tasks than that. With isolated children
+only, the sum is the number of children. A limit above the capacity has no
+effect, so `AppConfig` validation refuses it (`HRS-218`).
+
+Both limits apply to the worker as a whole, across all budgets.
 
 ### per_queue_per_pass
 
@@ -409,22 +453,36 @@ few_claimed = WorkerProfile(
 
 ## How Claiming Works
 
+One claim pass is one call of the `horsies_claim` function. For each queue and
+each class that the plan routes to a budget, it reads one stream:
+
 ```sql
--- Simplified claim query
+-- Simplified: one stream
 SELECT id FROM tasks
 WHERE queue_name = :queue
+  AND execution = :class
   AND status = 'PENDING'
-ORDER BY priority ASC, enqueued_at ASC
+ORDER BY priority ASC, enqueued_at ASC, id ASC
 FOR UPDATE SKIP LOCKED
-LIMIT :limit
+LIMIT :take
 ```
+
+The pass has two steps in one statement:
+
+1. Read the head of each stream, without locks, and count the rows to take
+   from each stream within the queue caps, the batch limit, each budget, and
+   the worker budget.
+2. Take that many rows from each stream with `FOR UPDATE SKIP LOCKED`.
 
 Key behaviors:
 
-1. **SKIP LOCKED**: Don't wait for locked rows, skip them
-2. **Priority first**: Lower number = higher priority
-3. **FIFO within priority**: Earlier `enqueued_at` wins
-4. **Limit**: Respects batch size limits
+1. **Locks only what it takes**: Another worker can claim every row that this
+   pass does not take, while the pass runs
+2. **SKIP LOCKED**: A row that another claim holds is skipped, and the stream
+   goes on to its next row
+3. **Priority first**: Lower number = higher priority, within one class
+4. **FIFO within priority**: Earlier `enqueued_at` wins
+5. **Limit**: Respects batch size limits
 
 ## Concurrency Calculation
 
@@ -432,29 +490,30 @@ During each claim pass:
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
-# Hard cap mode (prefetch_buffer=0): local budget counts RUNNING + CLAIMED
-# Soft cap mode (prefetch_buffer>0): queue caps count RUNNING, but local
-# worker budget still subtracts already-claimed rows.
+# Hard cap mode (prefetch_buffer=0): local budgets count RUNNING + CLAIMED
+# Soft cap mode (prefetch_buffer>0): queue caps count RUNNING; the local
+# budgets subtract already-claimed rows, and each may prefetch.
 hard_cap_mode = prefetch_buffer == 0
+extra = 0 if hard_cap_mode else prefetch_buffer
 
-if hard_cap_mode:
-    in_flight_locally = count_running_and_claimed_for_worker()
-    local_budget = children - in_flight_locally
-else:
-    running_locally = count_running_for_worker()
-    claimed_locally = count_claimed_for_worker()
-    local_budget = children + prefetch_buffer - running_locally - claimed_locally
+# One budget per budget class of the claim plan
+for budget in budgets:
+    in_flight = count_running_and_claimed_for_worker(budget.classes)
+    budget.available = budget.capacity + extra - in_flight
+
+capacity = sum(budget.capacity for budget in budgets)
+local_budget = capacity + extra - count_running_and_claimed_for_worker()
 
 # Global budget (if cluster_wide_cap set)
 if cluster_wide_cap:
     # Hard cap mode always counts RUNNING + CLAIMED globally
     in_flight_globally = count_all_running_and_claimed()
     global_budget = cluster_wide_cap - in_flight_globally
-    budget = min(local_budget, global_budget)
+    worker_budget = min(local_budget, global_budget)
 else:
-    budget = local_budget
+    worker_budget = local_budget
 
-# Per-queue limits (CUSTOM mode)
+# Per-queue limits (CUSTOM mode), across all classes of the queue
 for queue in queues:
     if queue.max_concurrency:
         if hard_cap_mode:
@@ -463,9 +522,12 @@ for queue in queues:
             in_flight_in_queue = count_running_in_queue(queue)
         queue_budget = queue.max_concurrency - in_flight_in_queue
         if isinstance(per_queue_per_pass, TaskLimit):
-            claim_count = min(budget, queue_budget, per_queue_per_pass.tasks)
+            claim_count = min(worker_budget, queue_budget, per_queue_per_pass.tasks)
         else:
-            claim_count = min(budget, queue_budget)
+            claim_count = min(worker_budget, queue_budget)
+
+# Each budget takes at most budget.available rows of the classes it claims,
+# and the pass takes at most worker_budget rows in all.
 ```
 
 ## Advisory Locks

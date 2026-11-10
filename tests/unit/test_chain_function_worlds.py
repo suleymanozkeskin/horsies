@@ -123,4 +123,4 @@ class TestChainFunctionsDeclareTheirWorld:
     def test_the_claim_identity_is_declared_agnostic(self) -> None:
         source = inspect.getsource(migrations_module)
         assert 'id text,' in source
-        assert 'RETURNING t.id::text' in source
+        assert 't.id::text AS id' in source

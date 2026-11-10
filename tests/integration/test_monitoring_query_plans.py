@@ -2,7 +2,7 @@
 
 Each test EXPLAINs the statement production executes — compiled from the
 same builders ``list_tasks`` / ``task_facets`` use, or the worker's claim
-SQL verbatim — and asserts the index the plan must ride. Any drift that
+statement through auto_explain — and asserts the index the plan must ride. Any drift that
 falls off the index (an ordering wrapper the btree cannot satisfy, a
 projection change, a claim predicate rewrite) fails here, not on an
 adopter's dashboard.
@@ -24,7 +24,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.worker.sql import CLAIM_SQL
+from horsies.core.worker.sql import HORSIES_CLAIM_SQL
 from horsies.monitoring.queries import (
     facet_statement,
     list_rows_statement,
@@ -154,28 +154,85 @@ async def test_task_name_facet_plans_index_only(
     assert 'Index Only Scan' in plan, plan
 
 
-async def test_claim_statement_still_plans_on_claim_pending_index(
+async def _nested_plans(session: AsyncSession, params: dict[str, object]) -> str:
+    """Run one claim through HORSIES_CLAIM_SQL and return the plans of the
+    statements inside the claim functions, from auto_explain. Rolled back."""
+    connection = await session.connection()
+    raw = await connection.get_raw_connection()
+    driver = raw.driver_connection
+    assert driver is not None
+    notices: list[str] = []
+
+    def _collect(diagnostic: Any) -> None:
+        notices.append(str(diagnostic.message_primary or ''))
+
+    driver.add_notice_handler(_collect)
+    try:
+        await session.execute(text('SET LOCAL enable_seqscan = off'))
+        await session.execute(text("LOAD 'auto_explain'"))
+        for setting in (
+            'auto_explain.log_min_duration = 0',
+            'auto_explain.log_nested_statements = on',
+            "auto_explain.log_level = 'notice'",
+        ):
+            await session.execute(text(f'SET LOCAL {setting}'))
+        await session.execute(HORSIES_CLAIM_SQL, params)
+    finally:
+        await session.rollback()
+        driver.remove_notice_handler(_collect)
+    return '\n'.join(notices)
+
+
+async def test_claim_streams_plan_on_the_class_indexes(
     broker: PostgresBroker,  # noqa: ARG001 - ensures schema migrations are applied
     session: AsyncSession,
 ) -> None:
-    """The hot-path claim is unaffected by the v16 monitoring indexes.
-
-    Neither ``enqueued_at`` nor ``task_name`` can serve the claim's
-    predicate (queue_name + status) or its ordering (priority leads); this
-    pins that the planner keeps idx_horsies_tasks_claim_pending.
+    """Each claim stream of a worker with isolated children rides a class
+    index: the pending arm idx_horsies_tasks_claim_pending_class, the expired
+    arm one of the two expired indexes. Neither v16 monitoring index and
+    neither claim index without a class (dropped at v55) appears, and no
+    stream scans the heap.
     """
     await _seed_tasks(session)
 
-    plan = await _explain(
+    plans = await _nested_plans(
         session,
-        CLAIM_SQL.text,
         {
-            'queue': 'default',
-            'lim': 20,
-            'worker_id': 'plan-test-worker',
-            'claim_lease_ms': 30_000,
+            'p_worker_id': 'plan-test-worker',
+            'p_queues': '["default"]',
+            'p_queue_priority': '{"default": 100}',
+            'p_queue_max_concurrency': '{}',
+            'p_hard_cap_mode': True,
+            'p_budgets': '{"ISOLATED": 20}',
+            'p_routes': (
+                '{"ISOLATED": "ISOLATED", "SHARED_ASYNC": "ISOLATED", '
+                '"SHARED_THREAD": "ISOLATED"}'
+            ),
+            'p_prefetch_buffer': 0,
+            'p_max_claim_per_worker': 0,
+            'p_max_claim_batch': 0,
+            'p_cluster_wide_cap': None,
+            'p_lease_ms': 30_000,
+            'p_lock_keys': '[]',
         },
     )
-    assert 'idx_horsies_tasks_claim_pending' in plan, plan
-    assert 'idx_horsies_tasks_enqueued_at' not in plan, plan
-    assert 'idx_horsies_tasks_task_name' not in plan, plan
+    candidates = next(
+        plan for plan in plans.split('duration:') if 'WITH queue_room' in plan
+    )
+    # Phase 1 reads each pending stream; phase 2 locks from it.
+    assert (
+        candidates.count('Index Scan using idx_horsies_tasks_claim_pending_class')
+        == 2
+    ), candidates
+    assert (
+        'idx_horsies_tasks_claim_expired_class' in candidates
+        or 'idx_horsies_tasks_claim_expired ' in candidates
+    ), candidates
+    for absent in (
+        'Seq Scan on horsies_tasks',
+        'idx_horsies_tasks_enqueued_at',
+        'idx_horsies_tasks_task_name',
+        'idx_horsies_tasks_claim_pending ',
+        'idx_horsies_tasks_claim_expired_ordered',
+    ):
+        assert absent not in candidates, (absent, candidates)

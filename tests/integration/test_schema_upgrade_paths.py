@@ -2310,7 +2310,7 @@ class TestExecutionClassMigration:
                       (CAST(:id AS uuid), 'old_writer', 'default', 100,
                        'PENDING', now(), false, false, :sha, now(), now(),
                        0, 0, 'standard_30d', 1,
-                       sha256(convert_to(:id, 'UTF8')), false,
+                       sha256(convert_to(CAST(:id AS text), 'UTF8')), false,
                        'DECLINED_BY_POLICY')
                 """),
                 {'id': task_id, 'sha': '0' * 64},
@@ -2480,6 +2480,167 @@ class TestExecutionClassMigration:
 
             await _migrate(scratch_database)
 
+            await self._assert_declared_shape(engine)
+        finally:
+            await engine.dispose()
+
+
+class TestPerClassClaimMigration:
+    """v55: the claim pair with per-class budgets and its indexes.
+
+    A database at v54 has the claim pair of one process count, the claim
+    indexes without a class, and no class_capacity column. The upgrade drops
+    the earlier signatures, installs the current pair, builds the
+    class-keyed expired index, drops the two indexes without a class, and
+    adds the column.
+    """
+
+    RETIRED = (
+        'idx_horsies_tasks_claim_pending',
+        'idx_horsies_tasks_claim_expired_ordered',
+    )
+    CLASS_INDEXES = (
+        ('idx_horsies_tasks_claim_pending_class', 'PENDING'),
+        ('idx_horsies_tasks_claim_expired_class', 'CLAIMED'),
+    )
+    # The argument types of each signature, as pg_proc renders them.
+    V54_CLAIM_ARGS = (
+        'text, jsonb, jsonb, jsonb, boolean, integer, integer, integer, '
+        'integer, integer, bigint, jsonb'
+    )
+    V54_CANDIDATES_ARGS = (
+        'integer, jsonb, jsonb, jsonb, jsonb, integer, text, bigint'
+    )
+    V55_CLAIM_ARGS = (
+        'text, jsonb, jsonb, jsonb, boolean, jsonb, jsonb, integer, integer, '
+        'integer, integer, bigint, jsonb'
+    )
+    V55_CANDIDATES_ARGS = (
+        'integer, jsonb, jsonb, jsonb, jsonb, jsonb, jsonb, integer, text, bigint'
+    )
+
+    async def _demote_to_v54(self, engine: AsyncEngine) -> None:
+        """Rebuild the v54 shape: old signatures, old indexes, no column."""
+        async with engine.connect() as connection:
+            await connection.execute(
+                text('DROP INDEX IF EXISTS idx_horsies_tasks_claim_expired_class')
+            )
+            await connection.execute(text(
+                'CREATE INDEX idx_horsies_tasks_claim_pending '
+                'ON horsies_tasks (queue_name, priority, enqueued_at, id) '
+                "WHERE status = 'PENDING'"
+            ))
+            await connection.execute(text(
+                'CREATE INDEX idx_horsies_tasks_claim_expired_ordered '
+                'ON horsies_tasks (queue_name, priority, enqueued_at, id) '
+                "WHERE status = 'CLAIMED'"
+            ))
+            await connection.execute(text(
+                'ALTER TABLE horsies_worker_states DROP COLUMN class_capacity'
+            ))
+            await connection.execute(text(f"""
+                CREATE FUNCTION horsies_claim({self.V54_CLAIM_ARGS})
+                RETURNS TABLE(id text) LANGUAGE sql AS 'SELECT NULL::text'
+            """))
+            await connection.execute(text(f"""
+                CREATE FUNCTION horsies_claim_candidates(
+                    {self.V54_CANDIDATES_ARGS})
+                RETURNS TABLE(id text) LANGUAGE sql AS 'SELECT NULL::text'
+            """))
+            await connection.execute(
+                text('DELETE FROM horsies_schema_version WHERE version > 54')
+            )
+            await connection.execute(text(
+                'INSERT INTO horsies_schema_version (version) VALUES (54) '
+                'ON CONFLICT DO NOTHING'
+            ))
+            await connection.commit()
+
+    async def _signatures(self, engine: AsyncEngine) -> set[tuple[str, str]]:
+        async with engine.connect() as connection:
+            rows = (
+                await connection.execute(text("""
+                    SELECT proname::text, oidvectortypes(proargtypes)
+                    FROM pg_proc
+                    WHERE proname IN ('horsies_claim', 'horsies_claim_candidates')
+                      AND pronamespace = current_schema()::regnamespace
+                """))
+            ).all()
+        return {(str(row[0]), str(row[1])) for row in rows}
+
+    async def _index_definitions(self, engine: AsyncEngine) -> dict[str, str]:
+        async with engine.connect() as connection:
+            rows = (
+                await connection.execute(text("""
+                    SELECT c.relname::text, pg_get_indexdef(i.indexrelid),
+                           i.indisvalid
+                    FROM pg_index AS i
+                    JOIN pg_class AS c ON c.oid = i.indexrelid
+                    WHERE i.indrelid = 'horsies_tasks'::regclass
+                      AND c.relname LIKE 'idx_horsies_tasks_claim%'
+                """))
+            ).all()
+        assert all(bool(row[2]) for row in rows), rows
+        return {str(row[0]): str(row[1]) for row in rows}
+
+    async def _column(self, engine: AsyncEngine) -> list[tuple[str, bool]]:
+        async with engine.connect() as connection:
+            rows = (
+                await connection.execute(text("""
+                    SELECT format_type(atttypid, atttypmod), attnotnull
+                    FROM pg_attribute
+                    WHERE attrelid = 'horsies_worker_states'::regclass
+                      AND attname = 'class_capacity'
+                      AND NOT attisdropped
+                """))
+            ).all()
+        return [(str(row[0]), bool(row[1])) for row in rows]
+
+    async def _assert_declared_shape(self, engine: AsyncEngine) -> None:
+        assert await _stored_version(engine) == SCHEMA_VERSION
+        assert await self._signatures(engine) == {
+            ('horsies_claim', self.V55_CLAIM_ARGS),
+            ('horsies_claim_candidates', self.V55_CANDIDATES_ARGS),
+        }
+        definitions = await self._index_definitions(engine)
+        for name in self.RETIRED:
+            assert name not in definitions, definitions
+        for name, status in self.CLASS_INDEXES:
+            definition = definitions[name]
+            assert (
+                '(queue_name, execution, priority, enqueued_at, id)' in definition
+            ), definition
+            assert f"'{status}'" in definition, definition
+        assert 'idx_horsies_tasks_claim_expired' in definitions
+        assert await self._column(engine) == [('jsonb', False)]
+
+    async def test_a_fresh_database_is_born_with_the_declared_shape(
+        self,
+        scratch_database: str,
+    ) -> None:
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            await self._assert_declared_shape(engine)
+        finally:
+            await engine.dispose()
+
+    async def test_a_v54_database_gains_the_v55_claim(
+        self,
+        scratch_database: str,
+    ) -> None:
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            await self._demote_to_v54(engine)
+            assert ('horsies_claim', self.V54_CLAIM_ARGS) in await self._signatures(
+                engine,
+            )
+
+            await _migrate(scratch_database)
+            await self._assert_declared_shape(engine)
+
+            await _migrate(scratch_database)
             await self._assert_declared_shape(engine)
         finally:
             await engine.dispose()

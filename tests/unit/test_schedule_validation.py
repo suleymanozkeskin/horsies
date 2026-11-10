@@ -31,6 +31,7 @@ from horsies.core.models.schedule import (
 )
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.scheduler.validation import (
+    PreparedSchedule,
     collect_schedule_errors,
     prepare_schedules,
 )
@@ -63,11 +64,12 @@ def _make_mock_app(tasks: dict[str, MagicMock] | None = None) -> MagicMock:
     return app
 
 
-def _make_task_mock(fn: object) -> MagicMock:
-    """Mock task object exposing _original_fn and a default queue."""
+def _make_task_mock(fn: object, *, task_options_json: str | None = None) -> MagicMock:
+    """Mock task object exposing _original_fn, a default queue and its options text."""
     task = MagicMock()
     task._original_fn = fn
     task.task_queue_name = None
+    task.task_options_json = task_options_json
     return task
 
 
@@ -101,10 +103,14 @@ class TestPrepareSchedules:
     """The pass that boot keeps and check reports from."""
 
     def test_ok_holds_the_text_of_each_enabled_schedule(self) -> None:
-        """A schedule without kwargs has None; a disabled one has no entry."""
+        """A schedule without kwargs has None; a disabled one has no entry.
+
+        Each entry holds the options text of its task as the task has it.
+        """
         def fn(x: int = 0) -> str:
             return str(x)
 
+        options_json = '{"timeout_ms":5000}'
         config = ScheduleConfig(
             schedules=[
                 _schedule(name='with_kwargs', kwargs={'x': 1}),
@@ -112,14 +118,22 @@ class TestPrepareSchedules:
                 _schedule(name='disabled', kwargs={'x': 2}, enabled=False),
             ],
         )
-        app = _make_mock_app(tasks={'task_a': _make_task_mock(fn)})
+        app = _make_mock_app(
+            tasks={'task_a': _make_task_mock(fn, task_options_json=options_json)},
+        )
 
         result = prepare_schedules(app, config)
 
         assert result == Ok(
             {
-                'with_kwargs': dumps_json({'x': 1}).ok_value,
-                'without_kwargs': None,
+                'with_kwargs': PreparedSchedule(
+                    kwargs_json=dumps_json({'x': 1}).ok_value,
+                    task_options_json=options_json,
+                ),
+                'without_kwargs': PreparedSchedule(
+                    kwargs_json=None,
+                    task_options_json=options_json,
+                ),
             },
         )
 

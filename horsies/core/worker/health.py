@@ -29,6 +29,7 @@ from horsies.core.models.health import (
     slots_down_json,
 )
 from horsies.core.types.result import is_err
+from horsies.core.worker.claim_plan import BudgetCapacity, class_capacity_json
 from horsies.core.worker.runtime import _collect_psutil_metrics
 from horsies.core.worker.sql import (
     INSERT_CLAIMER_HEARTBEAT_SQL,
@@ -83,6 +84,7 @@ class HealthMixin:
         # Cross-concern methods provided by sibling mixins / Worker.
         def _claim_lease_ms(self) -> int: ...
         def _down_slots(self) -> tuple[DownSlot, ...]: ...
+        def _claim_capacity(self) -> tuple[BudgetCapacity, ...]: ...
         async def _count_claimed_for_worker(
             self, session: AsyncSession
         ) -> int: ...
@@ -192,7 +194,9 @@ class HealthMixin:
         """Update worker state snapshot in database for monitoring.
 
         ``slots_down`` lists each slot that is down, with its cause. An empty
-        list means that every slot serves or boots.
+        list means that every slot serves or boots. ``class_capacity`` maps
+        each claim budget to the capacity that the claim counts and the
+        classes it serves.
         """
         try:
             rss_mb, mem_pct, cpu_pct, children_rss_mb = await asyncio.to_thread(
@@ -280,6 +284,12 @@ class HealthMixin:
                         'children_mem_mb': children_rss_mb,
                         'started': self._started_at,
                         'slots_down': Jsonb(slots_down_json(self._down_slots())),
+                        'class_capacity': Jsonb(
+                            class_capacity_json(
+                                self.cfg.claim_plan,
+                                self._claim_capacity(),
+                            )
+                        ),
                     },
                 )
                 await s.commit()

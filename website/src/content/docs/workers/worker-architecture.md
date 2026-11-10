@@ -95,28 +95,35 @@ while not stopped:
 
 ### 3. Claiming
 
+One stream per queue and execution class, simplified:
+
 ```sql
 WITH next AS (
   SELECT id FROM tasks
   WHERE queue_name = :queue
+    AND execution = :class
     AND status = 'PENDING'
     AND enqueued_at <= now()
     AND (good_until IS NULL OR good_until > now())
-  ORDER BY priority ASC, enqueued_at ASC
+  ORDER BY priority ASC, enqueued_at ASC, id ASC
   FOR UPDATE SKIP LOCKED
-  LIMIT :limit
+  LIMIT :take
 )
 UPDATE tasks SET status='CLAIMED', claimed_at=now()
 FROM next WHERE tasks.id = next.id
-RETURNING tasks.id
+RETURNING tasks.id, tasks.execution
 ```
 
 Key features:
 
 - `FOR UPDATE SKIP LOCKED`: Non-blocking concurrent claiming
-- Priority ordering: Lower priority number = higher priority
+- One budget per execution class that the worker runs children for; see
+  [Budgets per Execution Class](concurrency#budgets-per-execution-class)
+- Priority ordering within one class: Lower priority number = higher priority
 - FIFO within same priority
 - Expiry check: Skip tasks past `good_until`
+- Class check: a claimed row of a shared class whose registered task has
+  another class goes back to the queue as `ISOLATED`
 
 ### 4. Task Execution
 

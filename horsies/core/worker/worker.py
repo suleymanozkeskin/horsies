@@ -6,13 +6,14 @@ import uuid
 import os
 from datetime import datetime, timezone
 from importlib import import_module
-from collections.abc import Coroutine
+from collections.abc import Coroutine, Mapping
 from typing import Any, TYPE_CHECKING, assert_never
 import sys
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from horsies.core.app import Horsies
 from horsies.core.brokers.listener import PostgresListener
 from horsies.core.models.health import WORKER_PING_CHANNEL, DownSlot
+from horsies.core.models.tasks import Execution
 from horsies.core.logging import get_logger
 from horsies.core.worker.current import set_current_app
 from horsies.core.models.resilience import WorkerResilienceConfig
@@ -50,6 +51,8 @@ from horsies.core.worker.runner_heartbeat import (
     stale_running_recovery,
 )
 from horsies.core.models.recovery import RecoveryConfig
+from horsies.core.worker.claim_plan import ClaimPlan, describe_claim_plan
+from horsies.core.worker.row_class import registered_task_classes
 from horsies.core.worker.slots import (
     BootAttemptsExhausted,
     ChildBaseline,
@@ -132,6 +135,22 @@ def _frame_sys_path() -> tuple[str, ...]:
             continue
         entries.append(text)
     return tuple(entries)
+
+
+def _log_claim_plan(plan: ClaimPlan) -> None:
+    """Log the route of each execution class, and name the classes of which
+    this worker claims no row. A worker is not refused for them."""
+    logger.info('Claim plan: %s', describe_claim_plan(plan))
+    match plan.unserved():
+        case ():
+            pass
+        case unserved:
+            logger.info(
+                'This worker claims no rows of class %s: it runs no children '
+                'that can run them',
+                ', '.join(member.value for member in unserved),
+            )
+
 
 _HOOK_FAILURE_MESSAGE = (
     'on_child_process_start hook failed in a worker child (see the child log '
@@ -253,6 +272,9 @@ class Worker(
         self.worker_instance_id = str(uuid.uuid4())
         self._started_at = datetime.now(timezone.utc)
         self._app: Horsies | None = None
+        # The Execution of each task that the preload registered, by name.
+        # Empty until the preload: no claim pass runs before it.
+        self._registered_classes: Mapping[str, Execution] = {}
         self._resilience = self.cfg.resilience_config or WorkerResilienceConfig()
         # Last coverage-ensure outcome, published with worker-state
         # snapshots so operators see covered_through and typed failures.
@@ -831,6 +853,7 @@ class Worker(
                 max_claimed_effective,
                 self.cfg.max_claim_batch,
             )
+            _log_claim_plan(self.cfg.claim_plan)
 
             # Subscribe to each queue channel in one batch. The global
             # task_new channel is deliberately NOT subscribed: queue channels
@@ -1032,6 +1055,9 @@ class Worker(
             finally:
                 app.suppress_sends(False)
             _debug_imports_log(f'[preload] registered_tasks={app.list_tasks()}')
+            self._registered_classes = registered_task_classes(
+                (name, task.task_options_json) for name, task in app.tasks.items()
+            )
         except Exception as e:
             # Surface the error clearly and re-raise to stop startup
             logger.error(f'Failed during preload of task modules: {e}')

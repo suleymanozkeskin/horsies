@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from sqlalchemy import text
 
+from horsies.core.models.tasks import Execution
 from horsies.core.models.workflow import WORKFLOW_TERMINAL_STATES
 from horsies.core.schemas.indexes import (
     WORKFLOW_TERMINAL_STATUS_SQL_LITERALS,
@@ -29,6 +30,10 @@ TASK_NONTERMINAL_STATUS_SQL_LITERALS: str = ', '.join(
 # ---------- Claim SQL (priority + enqueued_at) ----------
 # All claimed tasks receive a bounded lease via claim_expires_at.
 # Expired leases are reclaimable by any worker (crash recovery + soft-cap prefetch).
+#
+# CLAIM_SQL reads every execution class of one queue in one order. The worker
+# claims through horsies_claim (HORSIES_CLAIM_SQL); only tests call
+# CLAIM_SQL, through ClaimMixin._claim_batch_locked.
 #
 # The two eligibility arms (fresh PENDING, expired CLAIMED lease) are scanned
 # separately so each walks its partial index in ORDER BY order and stops at
@@ -96,14 +101,15 @@ RETURNING t.id, t.task_name, t.args, t.kwargs, t.queue_name, t.is_workflow_task,
 # CLAIM_SQL loop.
 HORSIES_CLAIM_SQL = text("""
     SELECT id, task_name, args, kwargs, queue_name, is_workflow_task, task_options,
-           claimed_at
+           claimed_at, execution
     FROM horsies_claim(
         :p_worker_id,
         CAST(:p_queues AS jsonb),
         CAST(:p_queue_priority AS jsonb),
         CAST(:p_queue_max_concurrency AS jsonb),
         :p_hard_cap_mode,
-        :p_processes,
+        CAST(:p_budgets AS jsonb),
+        CAST(:p_routes AS jsonb),
         :p_prefetch_buffer,
         :p_max_claim_per_worker,
         :p_max_claim_batch,
@@ -252,6 +258,33 @@ UNCLAIM_CLAIMED_TASK_SQL = text("""
            OR claimed_at = CAST(:claimed_at AS TIMESTAMPTZ))
 """)
 
+# A claimed row whose class does not fit the task that this worker
+# registered goes back to PENDING as ISOLATED, which any worker with
+# isolated children runs. Fenced to this worker's claim generation, which
+# the claim always returns, so a row that was claimed again is not touched.
+# The stored task options keep their class: the column is what the claim
+# reads.
+RETURN_CLAIMED_TASK_AS_ISOLATED_SQL = text(f"""
+    UPDATE horsies_tasks
+    SET execution = '{Execution.ISOLATED.value}',
+        status = 'PENDING',
+        claimed = FALSE,
+        claimed_at = NULL,
+        claimed_by_worker_id = NULL,
+        claim_expires_at = NULL,
+        started_at = NULL,
+        worker_pid = NULL,
+        worker_hostname = NULL,
+        worker_process_name = NULL,
+        finalizing_at = NULL,
+        finalizing_by_worker_id = NULL,
+        updated_at = NOW()
+    WHERE id = :id
+      AND status = 'CLAIMED'
+      AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
+      AND claimed_at = CAST(:claimed_at AS TIMESTAMPTZ)
+""")
+
 RESET_PAUSED_WORKFLOW_TASKS_SQL = text("""
     UPDATE horsies_workflow_tasks
     SET status = 'READY', task_id = NULL, started_at = NULL
@@ -395,12 +428,13 @@ INSERT_WORKER_STATE_SQL = text("""
         cluster_wide_cap, queues, queue_priorities, queue_max_concurrency,
         recovery_config, tasks_running, tasks_claimed,
         memory_usage_mb, memory_percent, cpu_percent, children_memory_mb,
-        worker_started_at, slots_down
+        worker_started_at, slots_down, class_capacity
     )
     VALUES (
         :wid, NOW(), :host, :pid, :procs, :mcb, :mcpw, :cwc,
         :queues, :qp, :qmc, :recovery, :running, :claimed,
-        :mem_mb, :mem_pct, :cpu_pct, :children_mem_mb, :started, :slots_down
+        :mem_mb, :mem_pct, :cpu_pct, :children_mem_mb, :started, :slots_down,
+        :class_capacity
     )
 """)
 
