@@ -17,11 +17,26 @@ written every few seconds); reads expose it without coercion.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Final, TypeAlias, assert_never, cast
 
 from pydantic import BaseModel, ConfigDict
+
+from horsies.core.models.boot_failure import (
+    MAX_BOOT_FAILURE_DETAIL_CHARS,
+    AppLoadFailed,
+    ChildPoolSetupFailed,
+    ClearableBootCause,
+    ResourceShortage,
+    SpawnFailed,
+    TaskLoopCreateFailed,
+    ThreadStartRefused,
+    boot_cause_json,
+    parse_boot_cause,
+)
+from horsies.core.types.result import Err, Ok, Result
 
 
 # Shared inbound channel every worker subscribes to. A ping NOTIFY carries a
@@ -79,11 +94,181 @@ class WorkerPong:
 
 
 @dataclass(slots=True, frozen=True)
+class DownSlot:
+    """A worker slot whose last child boot failed for a cause that can clear.
+
+    The slot takes no task, and the worker's claim budget leaves it out. The
+    worker boots it again after a delay that grows up to a bound, and it
+    returns to service when a boot succeeds. ``detail`` is the error text of
+    the last failed boot, at most ``MAX_BOOT_FAILURE_DETAIL_CHARS``
+    characters. ``failed_boots`` counts the failed boots since the slot went
+    down, at least 1.
+    """
+
+    slot: int
+    cause: ClearableBootCause
+    detail: str
+    down_since: datetime
+    failed_boots: int
+
+
+@dataclass(slots=True, frozen=True)
+class AllSlotsServing:
+    """No slot of the worker was down when it wrote the snapshot."""
+
+
+@dataclass(slots=True, frozen=True)
+class SlotsDown:
+    """The worker is degraded: these slots were down, in slot order. Never empty."""
+
+    slots: tuple[DownSlot, ...]
+
+
+@dataclass(slots=True, frozen=True)
+class SlotHealthNotRecorded:
+    """The snapshot comes from a worker version that did not record slot health."""
+
+
+SlotHealth: TypeAlias = AllSlotsServing | SlotsDown | SlotHealthNotRecorded
+
+# A stored count stays in the range of a Postgres bigint.
+_COUNT_LIMIT: Final = 2**63
+
+
+@dataclass(slots=True, frozen=True)
+class SlotHealthUnreadable:
+    """A stored ``slots_down`` value does not have the shape that the worker writes."""
+
+    reason: str
+
+
+def slots_down_json(slots: Sequence[DownSlot]) -> list[dict[str, object]]:
+    """Encode the down slots for the ``slots_down`` column. An empty list means
+    that no slot was down."""
+    return [
+        {
+            'slot': down.slot,
+            'cause': boot_cause_json(down.cause),
+            'detail': down.detail,
+            'down_since': down.down_since.isoformat(),
+            'failed_boots': down.failed_boots,
+        }
+        for down in slots
+    ]
+
+
+def parse_slot_health(
+    value: object,
+    processes: int,
+) -> Result[SlotHealth, SlotHealthUnreadable]:
+    """Build the slot health from a stored ``slots_down`` value.
+
+    ``None`` (SQL NULL) is ``SlotHealthNotRecorded``. An empty list is
+    ``AllSlotsServing``. Each entry must name a distinct slot below
+    ``processes``, a cause that can clear, a bounded detail, an aware
+    ``down_since`` and ``failed_boots`` of at least 1. Reads only.
+    """
+    match value:
+        case None:
+            return Ok(SlotHealthNotRecorded())
+        case list():
+            entries = cast('list[object]', value)
+        case _:
+            return Err(SlotHealthUnreadable('slots_down is not a JSON array'))
+    if not entries:
+        return Ok(AllSlotsServing())
+    if len(entries) > processes:
+        return Err(SlotHealthUnreadable('slots_down lists more slots than processes'))
+    slots: list[DownSlot] = []
+    for entry in entries:
+        match _parse_down_slot(entry, processes):
+            case Ok(down):
+                slots.append(down)
+            case Err(unreadable):
+                return Err(unreadable)
+    if len({down.slot for down in slots}) != len(slots):
+        return Err(SlotHealthUnreadable('slots_down names one slot twice'))
+    return Ok(SlotsDown(tuple(sorted(slots, key=lambda down: down.slot))))
+
+
+def _parse_down_slot(
+    value: object,
+    processes: int,
+) -> Result[DownSlot, SlotHealthUnreadable]:
+    if not isinstance(value, dict):
+        return Err(SlotHealthUnreadable('a slots_down entry is not a JSON object'))
+    fields = cast('Mapping[str, Any]', value)
+    detail = fields.get('detail')
+    if not isinstance(detail, str) or len(detail) > MAX_BOOT_FAILURE_DETAIL_CHARS:
+        return Err(SlotHealthUnreadable('detail is not text within its bound'))
+    match (
+        _whole_in(fields.get('slot'), 'slot', range(processes)),
+        _whole_in(fields.get('failed_boots'), 'failed_boots', range(1, _COUNT_LIMIT)),
+        _aware_instant(fields.get('down_since')),
+        _clearable_cause(fields.get('cause')),
+    ):
+        case (Ok(slot), Ok(failed_boots), Ok(since), Ok(cause)):
+            return Ok(DownSlot(slot, cause, detail, since, failed_boots))
+        case (Err(unreadable), _, _, _) | (_, Err(unreadable), _, _):
+            return Err(unreadable)
+        case (_, _, Err(unreadable), _) | (_, _, _, Err(unreadable)):
+            return Err(unreadable)
+
+
+def _whole_in(
+    value: object,
+    name: str,
+    valid: range,
+) -> Result[int, SlotHealthUnreadable]:
+    """An int, not a bool, inside ``valid``."""
+    match value:
+        case bool():
+            return Err(SlotHealthUnreadable(f'{name} {value!r} is not a whole number'))
+        case int() if value in valid:
+            return Ok(value)
+        case _:
+            return Err(SlotHealthUnreadable(f'{name} {value!r} is out of range'))
+
+
+def _aware_instant(value: object) -> Result[datetime, SlotHealthUnreadable]:
+    if not isinstance(value, str):
+        return Err(SlotHealthUnreadable('down_since is not text'))
+    try:
+        instant = datetime.fromisoformat(value)
+    except ValueError:
+        return Err(SlotHealthUnreadable(f'down_since {value!r} is not an ISO instant'))
+    if instant.tzinfo is None:
+        return Err(SlotHealthUnreadable(f'down_since {value!r} has no offset'))
+    return Ok(instant)
+
+
+def _clearable_cause(value: object) -> Result[ClearableBootCause, SlotHealthUnreadable]:
+    match parse_boot_cause(value):
+        case Ok(cause):
+            pass
+        case Err(unreadable):
+            return Err(SlotHealthUnreadable(f'cause: {unreadable.reason}'))
+    match cause:
+        case (
+            ResourceShortage()
+            | TaskLoopCreateFailed()
+            | ThreadStartRefused()
+            | SpawnFailed()
+        ):
+            return Ok(cause)
+        case AppLoadFailed() | ChildPoolSetupFailed():
+            return Err(SlotHealthUnreadable(f'cause {cause!r} cannot keep a slot down'))
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+@dataclass(slots=True, frozen=True)
 class WorkerStateSnapshot:
     """One ``horsies_worker_states`` row — a worker's state at a point in time.
 
     Mirrors ``WorkerStateModel``. Returned as the latest snapshot per worker
     (cluster-wide listing) or as a timeseries (single-worker history).
+    ``slot_health`` says whether any slot was down, and why.
     """
 
     worker_id: str
@@ -105,3 +290,4 @@ class WorkerStateSnapshot:
     cpu_percent: float | None
     children_memory_mb: float | None
     worker_started_at: datetime
+    slot_health: SlotHealth

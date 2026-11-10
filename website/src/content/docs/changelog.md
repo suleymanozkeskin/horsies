@@ -34,10 +34,10 @@ there is no migration contract between pre-1.0 versions.
     boot, before it reports ready. A child whose app has none creates no
     loop. When the loop cannot be created, for example with EMFILE or an
     event loop policy that raises, the child fails its boot, and no task
-    reaches it. The worker counts it as a failed child start: after three
-    failed attempts it exits non-zero, so its supervisor restarts it. The log
-    and the error name the cause, for example `the child could not create
-    the event loop for async tasks: OSError: [Errno 24] Too many open files`.
+    reaches it. That cause can clear, so only that slot is down (see the
+    change to child start failures below). The log names the slot and the
+    cause, for example `Slot 1 is down: the child could not create the event
+    loop for async tasks: OSError: [Errno 24] Too many open files`.
   - The task loop of a worker child does not count against the broker's
     limit of 5 open caller loops (`EVENT_LOOP_LIMIT`), as the broker's sync
     runner loop does not. An async task that calls the broker gives the task
@@ -45,7 +45,7 @@ there is no migration contract between pre-1.0 versions.
   - A task must await the work that it starts. When an async task ends and
     asyncio tasks that it started are still on the loop, the worker replaces
     the child after that task. When the old child stops, it cancels that work
-    and closes the loop. This takes at most 6 seconds. A client that keeps its
+    and closes the loop. This takes at most 7 seconds. A client that keeps its
     own background tasks on the loop causes a child replacement after each
     async task. The warning of the replacement names the coroutine of each task
     left, up to 10. A task that cancels a helper task in `finally` must also
@@ -55,9 +55,22 @@ there is no migration contract between pre-1.0 versions.
     replacement and can still run during a later task of the same child.
   - A thread of `asyncio.to_thread()` that still runs after that time does
     not hold the child: the child exits without waiting for it, and its
-    `atexit` handlers do not run. The shutdown of the default executor gets
-    at least 1 second, also when the cancel of left tasks used the first 5
-    seconds, so an idle executor does not count as a running thread.
+    `atexit` handlers do not run. The close of the async generators and the
+    shutdown of the default executor each get at least 1 second, also when
+    the cancel of left tasks used the first 5 seconds. So the `finally` of an
+    open async generator runs, and an idle executor does not count as a
+    running thread.
+- **The worker state names the slots that are down.**
+  `WorkerStateSnapshot.slot_health` is `AllSlotsServing()`,
+  `SlotsDown(slots)`, or `SlotHealthNotRecorded()` for a snapshot that a
+  worker without this field wrote. Each `DownSlot` holds the slot index, the
+  cause (`ResourceShortage(errno_name)`, `TaskLoopCreateFailed()`,
+  `ThreadStartRefused()` or `SpawnFailed()`), the error text of the last
+  failed start (at most 2400 characters), `down_since`, and `failed_boots`.
+  `list_worker_states()`, `get_worker_state()` and
+  `get_worker_state_history()` return it. A stored value of another shape
+  fails the read with `MONITORING_QUERY_FAILED`. Schema v53 adds the column
+  `horsies_worker_states.slots_down` (`jsonb`, nullable, no backfill).
 - **`horsies check --live` compares every worker profile with the server
   connection limit.** One worker can open its parent pool
   (`worker_pool_size + worker_max_overflow`), 2 listener connections and
@@ -74,6 +87,34 @@ there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **Breaking: a slot that cannot start a child for a cause that can clear no
+  longer stops the worker.** A child that fails its start now reports the
+  cause to the worker before it exits.
+  - A cause that is the same on every attempt still counts one of three
+    attempts, and the third stops the worker: the app or a task module does
+    not import, the child connection pool cannot be set up, the child dies
+    with no report, or it is not ready within 120 seconds. A failed
+    `on_child_process_start` hook still stops the worker at once.
+  - A cause that can clear takes only that slot down: `OSError` with
+    `EMFILE`, `ENFILE`, `ENOMEM` or `EAGAIN` in a start step, an event loop
+    for `async def` tasks that cannot be created, a control thread that the
+    OS refuses, or a spawn that the OS refuses. Before, each of these used an
+    attempt, and the worker stopped after three, also while other children
+    served tasks. A spawn refusal stopped the worker at once.
+  - A slot that is down takes no task, and the claim passes only the slots
+    that are not down as the worker's process count. The worker starts a new
+    child for that slot after 1 second, then 2, 4, up to 60 seconds, and
+    logs one line per failed attempt with the slot, the cause and the next
+    wait. The slot returns to service when a child starts.
+  - When every slot is down, a failed start for a cause that can clear
+    counts an attempt, so a worker that serves no task stops after three.
+    A worker with 1 process has no other slot, so each of its failed starts
+    counts.
+  - At the first start, the worker starts degraded when at least one child
+    is ready and each other slot is down. When no child starts, it exits
+    non-zero.
+  - The error of a worker that stops names the cause and the error text of
+    the last attempt.
 - **Breaking: a result wait inside a task is refused at once.** In a worker
   child, `TaskHandle.get()` and `get_async()` on a sent task,
   `app.get_result()` and `get_result_async()`, and `WorkflowHandle.get()` and
@@ -153,6 +194,9 @@ there is no migration contract between pre-1.0 versions.
 
 ### Fixed
 
+- **A forked child that does not reparent to the worker exits with code 76.**
+  It exited with 74, which a child also uses after a stop with executor
+  threads left, so one exit code named two causes.
 - **A timed-out task's row moves only after its child has exited.** At the
   deadline the worker kills the child, waits up to 30 s for its exit, and
   only then writes `TASK_TIMEOUT`, the retry and the attempt row, or requeues

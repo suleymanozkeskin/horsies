@@ -77,6 +77,32 @@ if is_ok(result):
         print(f"{snap.worker_id}: {snap.tasks_running} running, {snap.tasks_claimed} claimed")
 ```
 
+### Which slots are down?
+
+`WorkerStateSnapshot.slot_health` says whether any slot of the worker was down when it wrote the snapshot. A slot is down when its last child start failed for a cause that can clear, such as `EMFILE`. It takes no task, and the worker starts a new child for it after a growing wait. See [Child Start Failures](/horsies/workers/worker-architecture/#child-start-failures).
+
+| `slot_health` | Meaning |
+| ------------- | ------- |
+| `AllSlotsServing()` | No slot was down |
+| `SlotsDown(slots)` | The worker is degraded. `slots` holds one `DownSlot` per slot that was down, in slot order |
+| `SlotHealthNotRecorded()` | The snapshot comes from a worker version that did not record slot health |
+
+```python
+from horsies import AllSlotsServing, SlotHealthNotRecorded, SlotsDown, is_ok
+
+result = await app.list_worker_states_async()
+if is_ok(result):
+    for snap in result.ok_value:
+        match snap.slot_health:
+            case SlotsDown(slots=down):
+                for slot in down:
+                    print(f"{snap.worker_id} slot {slot.slot}: {slot.cause} since {slot.down_since}")
+            case AllSlotsServing() | SlotHealthNotRecorded():
+                pass
+```
+
+`DownSlot` fields: `slot` (index), `cause` (`ResourceShortage(errno_name)`, `TaskLoopCreateFailed()`, `ThreadStartRefused()` or `SpawnFailed()`), `detail` (error text of the last failed start, at most 2400 characters), `down_since` (aware `datetime`), `failed_boots` (failed starts since the slot went down, at least 1).
+
 `get_worker_state_async(worker_id)` returns one worker's latest snapshot (or `None`). `get_worker_state_history_async(worker_id, limit=...)` returns the snapshot timeseries newest-first; `limit=None` returns all retained rows.
 
 ```python
@@ -121,7 +147,7 @@ Each method has a sync variant with the same name minus the `_async` suffix (it 
 
 ### `list_worker_states_async() -> BrokerResult[list[WorkerStateSnapshot]]`
 
-Latest snapshot per worker, including idle workers. **Returns:** `Ok(list[WorkerStateSnapshot])`; `Err` with code `MONITORING_QUERY_FAILED` on failure.
+Latest snapshot per worker, including idle workers. **Returns:** `Ok(list[WorkerStateSnapshot])`; `Err` with code `MONITORING_QUERY_FAILED` on failure, also when a stored `slots_down` value does not have the shape that the worker writes.
 
 ### `get_worker_state_async(worker_id: str) -> BrokerResult[WorkerStateSnapshot | None]`
 

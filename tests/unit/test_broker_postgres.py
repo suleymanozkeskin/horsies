@@ -30,6 +30,13 @@ from horsies.core.brokers.result_types import (
     BrokerListenerDisabled,
 )
 from horsies.core.codec.json_io import SerializationError
+from horsies.core.models.boot_failure import SpawnFailed
+from horsies.core.models.health import (
+    AllSlotsServing,
+    DownSlot,
+    SlotHealthNotRecorded,
+    SlotsDown,
+)
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.task_send_types import (
     TaskSendErrorCode,
@@ -1743,6 +1750,7 @@ def _worker_state_row(**overrides: Any) -> Any:
         'cpu_percent': 3.0,
         'children_memory_mb': 250.0,
         'worker_started_at': now,
+        'slots_down': [],
     }
     mapping.update(overrides)
     return SimpleNamespace(_mapping=mapping)
@@ -1862,6 +1870,65 @@ class TestWorkerStateReads:
 
         assert is_ok(result)
         assert len(result.ok_value) == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ('stored', 'expected'),
+        [
+            (None, SlotHealthNotRecorded()),
+            ([], AllSlotsServing()),
+            (
+                [
+                    {
+                        'slot': 3,
+                        'cause': {'kind': 'spawn_failed'},
+                        'detail': 'OSError: [Errno 11] Resource temporarily unavailable',
+                        'down_since': '2026-01-01T00:00:00+00:00',
+                        'failed_boots': 5,
+                    },
+                ],
+                SlotsDown(
+                    (
+                        DownSlot(
+                            3,
+                            SpawnFailed(),
+                            'OSError: [Errno 11] Resource temporarily unavailable',
+                            datetime(2026, 1, 1, tzinfo=timezone.utc),
+                            5,
+                        ),
+                    ),
+                ),
+            ),
+        ],
+        ids=['not-recorded', 'all-serving', 'one-down'],
+    )
+    async def test_the_snapshot_carries_the_slot_health(
+        self,
+        stored: object,
+        expected: object,
+    ) -> None:
+        broker = _make_broker()
+        _setup_session_returning(broker, fetchone=_worker_state_row(slots_down=stored))
+
+        result = await broker.get_worker_state_async('worker-1')
+
+        assert is_ok(result)
+        assert result.ok_value is not None
+        assert result.ok_value.slot_health == expected
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_slot_health_fails_the_read(self) -> None:
+        broker = _make_broker()
+        _setup_session_returning(
+            broker,
+            fetchone=_worker_state_row(slots_down=[{'slot': 9}]),
+        )
+
+        result = await broker.get_worker_state_async('worker-1')
+
+        assert is_err(result)
+        assert 'slots_down is unreadable' in result.err_value.message
+        assert 'worker-1' in result.err_value.message
 
 
 @pytest.mark.unit

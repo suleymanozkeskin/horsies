@@ -10,6 +10,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import AsyncGenerator
@@ -22,10 +23,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies.core.brokers.listener import PostgresListener
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.json_io import dumps_json, loads_json
+from horsies.core.models.boot_failure import ResourceShortage, ShortageErrno
 from horsies.core.models.health import (
     WORKER_PING_CHANNEL,
+    AllSlotsServing,
+    DownSlot,
+    SlotHealthNotRecorded,
+    SlotsDown,
     WorkerPingRequest,
     WorkerPongPayload,
+    slots_down_json,
 )
 from horsies.core.types.result import is_ok
 from horsies.core.utils.url import to_psycopg_url
@@ -172,6 +179,92 @@ async def test_list_worker_states_covers_all_workers_including_stale(
         await session.execute(
             text('DELETE FROM horsies_worker_states WHERE worker_id LIKE :p'),
             {'p': f'{prefix}%'},
+        )
+        await session.commit()
+
+
+_INSERT_WORKER_STATE_WITH_SLOTS = text("""
+    INSERT INTO horsies_worker_states (
+        worker_id, snapshot_at, hostname, pid, processes,
+        max_claim_batch, max_claim_per_worker, queues,
+        tasks_running, tasks_claimed, worker_started_at, slots_down
+    ) VALUES (
+        :worker_id, NOW(), 'itest-host', 4242, 2,
+        2, 2, ARRAY['default'],
+        0, 0, NOW(), CAST(:slots_down AS JSONB)
+    )
+""")
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_worker_state_reads_the_slot_health(
+    broker: PostgresBroker,
+    session: AsyncSession,
+    worker_state_seed: str,
+) -> None:
+    """A row with down slots reads as ``SlotsDown``, an empty list as
+    ``AllSlotsServing``, and a row with no value as ``SlotHealthNotRecorded``."""
+    prefix = f'itest-{uuid.uuid4().hex}'
+    down = DownSlot(
+        slot=1,
+        cause=ResourceShortage(ShortageErrno.EMFILE),
+        detail='OSError: [Errno 24] Too many open files',
+        down_since=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        failed_boots=2,
+    )
+    for suffix, slots_down in (('degraded', [down]), ('serving', [])):
+        await session.execute(
+            _INSERT_WORKER_STATE_WITH_SLOTS,
+            {
+                'worker_id': f'{prefix}-{suffix}',
+                'slots_down': json.dumps(slots_down_json(slots_down)),
+            },
+        )
+    await session.commit()
+    try:
+        degraded = await broker.get_worker_state_async(f'{prefix}-degraded')
+        serving = await broker.get_worker_state_async(f'{prefix}-serving')
+        not_recorded = await broker.get_worker_state_async(worker_state_seed)
+
+        assert is_ok(degraded) and degraded.ok_value is not None
+        assert degraded.ok_value.slot_health == SlotsDown((down,))
+        assert is_ok(serving) and serving.ok_value is not None
+        assert serving.ok_value.slot_health == AllSlotsServing()
+        assert is_ok(not_recorded) and not_recorded.ok_value is not None
+        assert not_recorded.ok_value.slot_health == SlotHealthNotRecorded()
+    finally:
+        await session.execute(
+            text('DELETE FROM horsies_worker_states WHERE worker_id LIKE :p'),
+            {'p': f'{prefix}%'},
+        )
+        await session.commit()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_an_unreadable_slot_health_fails_the_read(
+    broker: PostgresBroker,
+    session: AsyncSession,
+) -> None:
+    """A stored value of another shape is a monitoring query failure, with
+    the worker named, not a quiet default."""
+    worker_id = f'itest-{uuid.uuid4().hex}'
+    await session.execute(
+        _INSERT_WORKER_STATE_WITH_SLOTS,
+        {'worker_id': worker_id, 'slots_down': json.dumps({'slot': 1})},
+    )
+    await session.commit()
+    try:
+        result = await broker.get_worker_state_async(worker_id)
+
+        assert not is_ok(result)
+        assert worker_id in result.err_value.message
+        assert 'slots_down is unreadable' in result.err_value.message
+    finally:
+        await session.execute(
+            text('DELETE FROM horsies_worker_states WHERE worker_id = :wid'),
+            {'wid': worker_id},
         )
         await session.commit()
 

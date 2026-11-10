@@ -45,10 +45,15 @@ logger = get_logger('worker')
 # The child closes its loop after a stop frame. The parent kills a child that
 # has not exited CHILD_STOP_TIMEOUT_S (10 s) after that frame, so the close
 # must end before that time: LOOP_CLOSE_TIMEOUT_S plus
-# EXECUTOR_SHUTDOWN_MIN_TIMEOUT_S stays under it.
+# ASYNCGEN_SHUTDOWN_MIN_TIMEOUT_S plus EXECUTOR_SHUTDOWN_MIN_TIMEOUT_S stays
+# under it.
 LOOP_CLOSE_TIMEOUT_S: Final = 5.0
+# The step that closes the async generators gets at least this time, also when
+# the leftover tasks used up LOOP_CLOSE_TIMEOUT_S. A generator with a short
+# ``finally`` then still runs it.
+ASYNCGEN_SHUTDOWN_MIN_TIMEOUT_S: Final = 1.0
 # The step that shuts down the default executor gets at least this time, also
-# when the leftover tasks used up LOOP_CLOSE_TIMEOUT_S. An idle executor shuts
+# when the earlier steps used up LOOP_CLOSE_TIMEOUT_S. An idle executor shuts
 # down well within it, so it is not reported as threads left.
 EXECUTOR_SHUTDOWN_MIN_TIMEOUT_S: Final = 1.0
 
@@ -223,10 +228,11 @@ class TaskLoop:
     def close(self) -> ExecutorAfterClose:
         """Cancel the tasks left on the loop, then close the loop.
 
-        Waits at most ``LOOP_CLOSE_TIMEOUT_S`` for the leftover tasks and the
-        async generators. The default executor gets what is left of that
-        time, and at least ``EXECUTOR_SHUTDOWN_MIN_TIMEOUT_S``. Logs what did
-        not end in time. Closes the loop also when a step fails.
+        Waits at most ``LOOP_CLOSE_TIMEOUT_S`` for the leftover tasks. The
+        async generators get what is left of that time, and at least
+        ``ASYNCGEN_SHUTDOWN_MIN_TIMEOUT_S``. The default executor gets what is
+        left after them, and at least ``EXECUTOR_SHUTDOWN_MIN_TIMEOUT_S``.
+        Logs what did not end in time. Closes the loop also when a step fails.
         Returns whether threads of the default executor can still run, which
         decides how the process can exit. A second call changes nothing and
         returns the answer of the first.
@@ -311,9 +317,11 @@ def _seconds_left(deadline: float) -> float:
 def _close_loop(loop: asyncio.AbstractEventLoop) -> ExecutorAfterClose:
     """Close the loop the way ``asyncio.run`` does, within bounded time.
 
-    The executor step does not take its time only from the shared deadline:
-    a leftover that ignores the cancel can use all of it, and an executor
-    step with no time reports an idle executor as threads left.
+    The async generator step and the executor step do not take their time
+    only from the shared deadline: a leftover that ignores the cancel can use
+    all of it. An async generator step with no time cancels each generator
+    before its ``finally`` runs, and an executor step with no time reports an
+    idle executor as threads left.
     """
     deadline = time.monotonic() + LOOP_CLOSE_TIMEOUT_S
     try:
@@ -321,7 +329,7 @@ def _close_loop(loop: asyncio.AbstractEventLoop) -> ExecutorAfterClose:
         _run_within(
             loop,
             loop.shutdown_asyncgens(),
-            _seconds_left(deadline),
+            max(_seconds_left(deadline), ASYNCGEN_SHUTDOWN_MIN_TIMEOUT_S),
             'async generators',
         )
         executor_step = _run_within(

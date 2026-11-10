@@ -20,7 +20,8 @@ import threading
 import time
 from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, ClassVar, cast
 
@@ -28,16 +29,26 @@ import pytest
 import pytest_asyncio
 
 from horsies.core.types.result import Err, Ok
+from horsies.core.models.boot_failure import (
+    AppLoadFailed,
+    ChildPoolSetupFailed,
+    ResourceShortage,
+    ShortageErrno,
+    SpawnFailed,
+    TaskLoopCreateFailed,
+    ThreadStartRefused,
+)
 from horsies.core.worker.child_main import (
     BAD_PARENT_FRAME_EXIT_CODE,
+    BOOT_FAILED_EXIT_CODE,
     STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE,
-    TASK_LOOP_CREATE_FAILED_EXIT_CODE,
 )
 from horsies.core.worker.config import ChildPreload
+from horsies.core.worker.preload_main import REPARENT_FAILED_EXIT_CODE
 from horsies.core.worker.child_protocol import (
+    BootFailedFrame,
     ChildFrame,
     InitFrame,
-    LoopCreateFailedFrame,
     LoopHoldsNoTask,
     LoopHoldsTasks,
     NoTaskLoop,
@@ -55,6 +66,7 @@ from horsies.core.worker.slots import (
     SLOT_DEFECT_LIMIT,
     Assigned,
     BootAttemptsExhausted,
+    BootFailure,
     Busy,
     Child,
     ChildBaseline,
@@ -62,6 +74,7 @@ from horsies.core.worker.slots import (
     ChildEndUnknown,
     ChildHookFailed,
     ChildLost,
+    Down,
     ExitedWith,
     ExitUnknown,
     FrameProtocol,
@@ -69,15 +82,17 @@ from horsies.core.worker.slots import (
     KilledBySignal,
     KillSent,
     LossCause,
+    LostBeforeReady,
     NotDispatched,
     NothingToKill,
     NotRunCause,
     PoolStopped,
     SlotAnswered,
+    SlotDefectsRepeated,
     SlotHandle,
     SlotPool,
     SlotPoolConfig,
-    SpawnFailed,
+    Starting,
     TaskFinished,
     child_exit_from_returncode,
     describe_exit,
@@ -224,9 +239,9 @@ def _alive(pid: int) -> bool:
     return bool(state.stdout.strip()) and not state.stdout.strip().startswith('Z')
 
 
+EMFILE_DETAIL = 'OSError: [Errno 24] Too many open files'
 EMFILE_LOOP_DETAIL = (
-    'the child could not create the event loop for async tasks: '
-    'OSError: [Errno 24] Too many open files'
+    f'the child could not create the event loop for async tasks: {EMFILE_DETAIL}'
 )
 
 
@@ -366,7 +381,13 @@ class TestBoot:
     async def test_boot_failure_is_bounded_and_named(self) -> None:
         pool = SlotPool(_config(init=_init('raises')), pending_limit=10)
         match await pool.start():
-            case Err(BootAttemptsExhausted(attempts=3, last_detail=detail)):
+            case Err(
+                BootAttemptsExhausted(
+                    attempts=3,
+                    cause=LostBeforeReady(child_exit=ExitedWith(1)),
+                    detail=detail,
+                ),
+            ):
                 assert 'exit code 1' in detail
             case other:
                 raise AssertionError(other)
@@ -396,22 +417,26 @@ class TestBoot:
                 raise AssertionError(failed)
         try:
             frame = await child.await_frame(OUTCOME_TIMEOUT_S)
-            assert frame == LoopCreateFailedFrame(
+            assert frame == BootFailedFrame(
+                cause=TaskLoopCreateFailed(),
                 error_name='OSError',
                 detail='[Errno 24] Too many open files',
             )
             await _until(lambda: child.has_exited)
-            exited = ExitedWith(TASK_LOOP_CREATE_FAILED_EXIT_CODE)
+            exited = ExitedWith(BOOT_FAILED_EXIT_CODE)
             assert child._current_exit() == exited
         finally:
             await child.dispose_lost()
 
-    async def test_a_task_loop_failure_at_boot_uses_every_attempt_and_names_its_cause(
+    async def test_a_task_loop_failure_on_the_only_slot_uses_every_attempt(
         self,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        monkeypatch.setattr(slots, 'CHILD_BOOT_RETRY_DELAY_S', 0.01)
+        """The cause can clear, but no other slot can serve, so each failed
+        boot counts, and the log line of each names the slot, the cause, the
+        count and the next wait."""
+        monkeypatch.setattr(slots, 'SLOT_DOWN_FIRST_DELAY_S', 0.01)
         pool = SlotPool(_config(init=_init('loop_create_fails')), pending_limit=10)
         with caplog.at_level(logging.WARNING, logger='horsies.worker'):
             started = await pool.start()
@@ -420,17 +445,19 @@ class TestBoot:
         assert started == Err(
             BootAttemptsExhausted(
                 attempts=CHILD_BOOT_ATTEMPTS,
-                last_detail=EMFILE_LOOP_DETAIL,
+                cause=TaskLoopCreateFailed(),
+                detail=EMFILE_DETAIL,
             ),
         )
-        attempts = [
+        down_lines = [
             record.getMessage()
             for record in caplog.records
-            if record.getMessage().startswith('Child boot attempt')
+            if record.getMessage().startswith('Slot 0 is down')
         ]
-        assert attempts == [
-            f'Child boot attempt {number}/{CHILD_BOOT_ATTEMPTS} failed on slot 0: '
-            f'{EMFILE_LOOP_DETAIL}'
+        assert down_lines == [
+            f'Slot 0 is down: {EMFILE_LOOP_DETAIL}. Failed boots: {number}, '
+            f'counted attempts: {number}/{CHILD_BOOT_ATTEMPTS}. '
+            f'Next boot in {slots.slot_down_delay_s(number):.1f}s'
             for number in range(1, CHILD_BOOT_ATTEMPTS + 1)
         ]
 
@@ -439,7 +466,7 @@ class TestBoot:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A task that waits for the slot is released unrun when the pool fails."""
-        monkeypatch.setattr(slots, 'CHILD_BOOT_RETRY_DELAY_S', 0.01)
+        monkeypatch.setattr(slots, 'SLOT_DOWN_FIRST_DELAY_S', 0.01)
         pool = SlotPool(_config(init=_init('loop_create_fails')), pending_limit=10)
         handle = pool.submit(_frame('echo', 'x'))
         started = await pool.start()
@@ -456,7 +483,7 @@ class TestBoot:
     ) -> None:
         """The first boot cannot create the loop. The second boot can, and
         its child runs on that loop."""
-        monkeypatch.setattr(slots, 'CHILD_BOOT_RETRY_DELAY_S', 0.01)
+        monkeypatch.setattr(slots, 'SLOT_DOWN_FIRST_DELAY_S', 0.01)
         marks = tmp_path / 'marks'
         pool = SlotPool(
             _config(init=_init(f'loop_fails_first:{marks}', ('1',))),
@@ -469,14 +496,15 @@ class TestBoot:
             await pool.stop(0)
         assert marks.read_text() == 'xx'
 
-    async def test_a_replacement_that_cannot_create_its_task_loop_fails_the_pool(
+    async def test_a_replacement_on_the_only_slot_that_cannot_create_its_loop_fails_the_pool(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The first child serves a task and retires. Its replacement cannot
-        create the loop, so the next task never reaches a child."""
-        monkeypatch.setattr(slots, 'CHILD_BOOT_RETRY_DELAY_S', 0.01)
+        create the loop. No other slot can serve, so the failed boots count,
+        and the next task never reaches a child."""
+        monkeypatch.setattr(slots, 'SLOT_DOWN_FIRST_DELAY_S', 0.01)
         init = _init(f'loop_fails_after_first:{tmp_path / "marks"}', ('100', '1'))
         pool = await _started_pool(_config(init=init, max_tasks_per_child=1))
         try:
@@ -487,20 +515,31 @@ class TestBoot:
 
             assert failure == BootAttemptsExhausted(
                 attempts=CHILD_BOOT_ATTEMPTS,
-                last_detail=EMFILE_LOOP_DETAIL,
+                cause=TaskLoopCreateFailed(),
+                detail=EMFILE_DETAIL,
             )
             assert await _outcome(waiting) == NotDispatched(NotRunCause.POOL_FAILED)
         finally:
             await pool.stop(0)
 
-    async def test_spawn_failure_is_typed(self) -> None:
-        config = _config()
-        pool = SlotPool(config, pending_limit=10)
+    async def test_a_spawn_failure_is_a_cause_that_can_clear(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The only slot cannot spawn, so its failed spawns count."""
+        monkeypatch.setattr(slots, 'SLOT_DOWN_FIRST_DELAY_S', 0.01)
+        pool = SlotPool(_config(), pending_limit=10)
         real_executable = sys.executable
         sys.executable = '/nonexistent/python'
         try:
             match await pool.start():
-                case Err(SpawnFailed(detail=detail)):
+                case Err(
+                    BootAttemptsExhausted(
+                        attempts=slots.CHILD_BOOT_ATTEMPTS,
+                        cause=SpawnFailed(),
+                        detail=detail,
+                    ),
+                ):
                     assert 'FileNotFoundError' in detail
                 case other:
                     raise AssertionError(other)
@@ -512,11 +551,429 @@ class TestBoot:
         child_entry = ('-c', 'import sys; sys.exit(0 if len(sys.argv) == 3 else 9)')
         pool = SlotPool(_config(child_entry=child_entry), pending_limit=10)
         match await pool.start():
-            case Err(BootAttemptsExhausted(last_detail=detail)):
+            case Err(BootAttemptsExhausted(detail=detail)):
                 assert 'exit code 0' in detail
             case other:
                 raise AssertionError(other)
         await pool.stop(0)
+
+
+SHORT_OF_DESCRIPTORS = ResourceShortage(ShortageErrno.EMFILE)
+
+
+def _down_lines(caplog: pytest.LogCaptureFixture, slot: int) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith(f'Slot {slot} is down')
+    ]
+
+
+@pytest.mark.asyncio(loop_scope='function')
+class TestBootCauses:
+    """The cause of a failed boot decides whether the worker stops."""
+
+    async def test_a_reported_app_load_failure_repeats_and_stops_the_pool(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(slots, 'CHILD_BOOT_RETRY_DELAY_S', 0.01)
+        pool = SlotPool(_config(2, init=_init('report_app_load')), pending_limit=10)
+        started = await asyncio.wait_for(pool.start(), OUTCOME_TIMEOUT_S)
+        await pool.stop(0)
+
+        assert started == Err(
+            BootAttemptsExhausted(
+                CHILD_BOOT_ATTEMPTS,
+                AppLoadFailed(),
+                'ImportError: scripted',
+            ),
+        )
+
+    async def test_a_reported_pool_setup_failure_repeats_and_stops_the_pool(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(slots, 'CHILD_BOOT_RETRY_DELAY_S', 0.01)
+        pool = SlotPool(_config(init=_init('report_pool_setup')), pending_limit=10)
+        started = await asyncio.wait_for(pool.start(), OUTCOME_TIMEOUT_S)
+        await pool.stop(0)
+
+        assert started == Err(
+            BootAttemptsExhausted(
+                CHILD_BOOT_ATTEMPTS,
+                ChildPoolSetupFailed(),
+                'ValueError: scripted',
+            ),
+        )
+
+    async def test_a_death_without_a_frame_counts_while_another_child_serves(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A replacement that dies with no boot failure frame names no cause,
+        so its failed boots count as a cause that repeats, also while the
+        other slot serves."""
+        monkeypatch.setattr(slots, 'CHILD_BOOT_RETRY_DELAY_S', 0.01)
+        init = _init(f'fails_after_first:{tmp_path / "marks"}', ('100', '2'))
+        pool = await _started_pool(_config(2, init=init, max_tasks_per_child=1))
+        try:
+            await _outcome(pool.submit(_frame('echo', 'first')))
+            failure = await asyncio.wait_for(pool.wait_failed(), OUTCOME_TIMEOUT_S)
+        finally:
+            await pool.stop(0)
+
+        match failure:
+            case BootAttemptsExhausted(
+                attempts=slots.CHILD_BOOT_ATTEMPTS,
+                cause=LostBeforeReady(
+                    loss=LossCause.CHILD_DIED,
+                    child_exit=ExitedWith(1),
+                ),
+            ):
+                pass
+            case other:
+                raise AssertionError(other)
+
+    async def test_a_refused_control_thread_is_reported(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The child cannot start the thread that reads parent frames. It
+        reports the cause, and the only slot uses every attempt."""
+        monkeypatch.setattr(slots, 'SLOT_DOWN_FIRST_DELAY_S', 0.01)
+        monkeypatch.setenv('HORSIES_TEST_REFUSE_THREADS', '1')
+        pool = SlotPool(_config(child_entry=(SCRIPTED_CHILD,)), pending_limit=10)
+        started = await asyncio.wait_for(pool.start(), OUTCOME_TIMEOUT_S)
+        await pool.stop(0)
+
+        match started:
+            case Err(BootAttemptsExhausted(cause=ThreadStartRefused(), detail=detail)):
+                assert detail == "RuntimeError: can't start new thread"
+            case other:
+                raise AssertionError(other)
+
+
+@pytest.mark.asyncio(loop_scope='function')
+class TestDownSlots:
+    """A slot whose boot fails for a cause that can clear stays down alone."""
+
+    async def test_the_first_start_is_degraded_when_one_slot_boots(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        monkeypatch.setattr(slots, 'SLOT_DOWN_FIRST_DELAY_S', 0.01)
+        pool = SlotPool(_config(2, init=_init('short_on_slot:1')), pending_limit=10)
+        try:
+            with caplog.at_level(logging.WARNING, logger='horsies.worker'):
+                started = await asyncio.wait_for(pool.start(), OUTCOME_TIMEOUT_S)
+
+            match started:
+                case Ok(baselines):
+                    assert len(baselines) == 1
+                case Err(failure):
+                    raise AssertionError(failure)
+            assert isinstance(pool.states()[0], Idle)
+            match pool.states()[1]:
+                case Down(cause=cause, detail=detail, failed_boots=failed_boots):
+                    assert cause == SHORT_OF_DESCRIPTORS
+                    assert detail == EMFILE_DETAIL
+                    assert failed_boots >= 1
+                case other:
+                    raise AssertionError(other)
+            assert pool.slots_in_service() == 1
+            assert [down.slot for down in pool.down_slots()] == [1]
+            assert 'Worker starts degraded: 1 of 2 slots serve' in caplog.text
+            assert await _result_json(pool.submit(_frame('echo', 'served'))) == 'served'
+            assert pool._failure is None
+        finally:
+            await pool.stop(0)
+
+    async def test_the_first_start_stops_when_no_slot_boots(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Every slot is down, so failed boots count, and the start fails."""
+        monkeypatch.setattr(slots, 'SLOT_DOWN_FIRST_DELAY_S', 0.01)
+        pool = SlotPool(_config(2, init=_init('short_always')), pending_limit=10)
+        started = await asyncio.wait_for(pool.start(), OUTCOME_TIMEOUT_S)
+        await pool.stop(0)
+
+        assert started == Err(
+            BootAttemptsExhausted(
+                CHILD_BOOT_ATTEMPTS,
+                SHORT_OF_DESCRIPTORS,
+                EMFILE_DETAIL,
+            ),
+        )
+
+    async def test_a_down_slot_returns_to_service_and_its_boots_do_not_count(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The first two boots pass. The retired child's replacement is short
+        of descriptors twice, while the other slot serves, then boots."""
+        monkeypatch.setattr(slots, 'SLOT_DOWN_FIRST_DELAY_S', 0.01)
+        marks = tmp_path / 'marks'
+        init = _init(f'short_after_first:{marks}', ('2', '2'))
+        pool = await _started_pool(_config(2, init=init, max_tasks_per_child=1))
+        try:
+            with caplog.at_level(logging.WARNING, logger='horsies.worker'):
+                await _outcome(pool.submit(_frame('echo', 'first')))
+                await _until(
+                    lambda: len(marks.read_text()) == 5
+                    and all(isinstance(state, Idle) for state in pool.states()),
+                )
+            assert pool._failure is None
+            assert pool.slots_in_service() == 2
+            assert pool.down_slots() == ()
+        finally:
+            await pool.stop(0)
+
+        down = [line for slot in (0, 1) for line in _down_lines(caplog, slot)]
+        assert len(down) == 2
+        assert 'Failed boots: 1, counted attempts: 0/3' in down[0]
+        assert 'Failed boots: 2, counted attempts: 0/3' in down[1]
+        assert 'back in service after 2 failed boots' in caplog.text
+
+    async def test_a_pool_where_every_slot_is_down_fails(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Both children retire, and no replacement can boot. With no slot
+        that can serve, the failed boots count."""
+        monkeypatch.setattr(slots, 'SLOT_DOWN_FIRST_DELAY_S', 0.01)
+        init = _init(f'short_after_first:{tmp_path / "marks"}', ('1000', '2'))
+        pool = await _started_pool(_config(2, init=init, max_tasks_per_child=1))
+        try:
+            first = pool.submit(_frame('sleep', '0.2'))
+            second = pool.submit(_frame('sleep', '0.2'))
+            await _outcome(first)
+            await _outcome(second)
+            failure = await asyncio.wait_for(pool.wait_failed(), OUTCOME_TIMEOUT_S)
+        finally:
+            await pool.stop(0)
+
+        assert failure == BootAttemptsExhausted(
+            CHILD_BOOT_ATTEMPTS,
+            SHORT_OF_DESCRIPTORS,
+            EMFILE_DETAIL,
+        )
+
+    async def test_stop_ends_the_booting_child_of_a_down_slot(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A slot that is down keeps that state while its next child boots.
+        A stop kills that child, as it kills any child that boots."""
+        monkeypatch.setattr(slots, 'SLOT_DOWN_FIRST_DELAY_S', 0.01)
+        init = _init(f'short_then_hang:{tmp_path / "marks"}', ('1',))
+        pool = SlotPool(_config(2, init=init), pending_limit=10)
+        assert isinstance(await asyncio.wait_for(pool.start(), OUTCOME_TIMEOUT_S), Ok)
+        await _until(lambda: pool._slots[1].child is not None)
+        assert isinstance(pool.states()[1], Down)
+        booting = pool._slots[1].child
+        assert booting is not None
+
+        await asyncio.wait_for(pool.stop(30), 10)
+
+        assert not _alive(booting.pid)
+
+    async def test_stop_ends_a_down_slot_at_once(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A slot that waits a long time before its next boot does not hold
+        up the stop."""
+        monkeypatch.setattr(slots, 'SLOT_DOWN_FIRST_DELAY_S', 3600.0)
+        pool = SlotPool(_config(2, init=_init('short_on_slot:1')), pending_limit=10)
+        assert isinstance(await asyncio.wait_for(pool.start(), OUTCOME_TIMEOUT_S), Ok)
+
+        await asyncio.wait_for(pool.stop(30), 10)
+
+        assert all(task.done() for task in pool._tasks)
+
+
+VALID_APP = """
+from pydantic import SecretStr
+from horsies.core.app import Horsies
+from horsies.core.models.app import AppConfig
+from horsies.core.models.broker import PostgresConfig
+
+app = Horsies(
+    config=AppConfig(
+        broker=PostgresConfig(
+            database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+        ),
+    ),
+)
+"""
+
+
+@pytest.mark.asyncio(loop_scope='function')
+class TestRealChildBootCauses:
+    """The real child program names the cause of each boot step that fails."""
+
+    @staticmethod
+    async def _start(app_file: Path, init: InitFrame | None = None) -> object:
+        boot_init = init or _init(f'{app_file}:app')
+        pool = SlotPool(
+            _config(init=boot_init, child_entry=slots.CHILD_ENTRY),
+            pending_limit=10,
+        )
+        started = await asyncio.wait_for(pool.start(), 3 * OUTCOME_TIMEOUT_S)
+        await pool.stop(0)
+        return started
+
+    @pytest.fixture(autouse=True)
+    def _short_waits(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(slots, 'CHILD_BOOT_RETRY_DELAY_S', 0.01)
+        monkeypatch.setattr(slots, 'SLOT_DOWN_FIRST_DELAY_S', 0.01)
+
+    async def test_an_app_that_does_not_import_is_an_app_load_failure(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        app_file = tmp_path / 'broken_app.py'
+        app_file.write_text("raise ImportError('scripted import failure')\n")
+
+        assert await self._start(app_file) == Err(
+            BootAttemptsExhausted(
+                CHILD_BOOT_ATTEMPTS,
+                AppLoadFailed(),
+                'ImportError: scripted import failure',
+            ),
+        )
+
+    async def test_an_import_short_of_descriptors_is_a_resource_shortage(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The cause can clear. The only slot cannot serve, so it still counts."""
+        app_file = tmp_path / 'short_app.py'
+        app_file.write_text(
+            "import errno\nraise OSError(errno.EMFILE, 'Too many open files')\n",
+        )
+
+        assert await self._start(app_file) == Err(
+            BootAttemptsExhausted(
+                CHILD_BOOT_ATTEMPTS,
+                SHORT_OF_DESCRIPTORS,
+                EMFILE_DETAIL,
+            ),
+        )
+
+    async def test_a_pool_that_cannot_be_set_up_is_a_pool_setup_failure(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        app_file = tmp_path / 'valid_app.py'
+        app_file.write_text(VALID_APP)
+        init = replace(
+            _init(f'{app_file}:app'),
+            child_pool_min_size=2,
+            child_pool_max_size=1,
+        )
+
+        assert await self._start(app_file, init) == Err(
+            BootAttemptsExhausted(
+                CHILD_BOOT_ATTEMPTS,
+                ChildPoolSetupFailed(),
+                'ValueError: min_size must be <= max_size',
+            ),
+        )
+
+    async def test_a_valid_app_boots(self, tmp_path: Path) -> None:
+        app_file = tmp_path / 'valid_app.py'
+        app_file.write_text(VALID_APP)
+
+        assert isinstance(await self._start(app_file), Ok)
+
+
+class TestDownSlotRules:
+    """Pure rules of a slot that is down."""
+
+    def test_a_boot_failure_frame_carries_its_cause(self) -> None:
+        frame = BootFailedFrame(TaskLoopCreateFailed(), 'OSError', '[Errno 24] x')
+        assert slots.boot_failure_of(frame) == BootFailure(
+            TaskLoopCreateFailed(),
+            'OSError: [Errno 24] x',
+        )
+
+    def test_the_hook_exit_code_is_a_hook_failure(self) -> None:
+        lost = ChildLost(
+            LossCause.CHILD_DIED,
+            ExitedWith(slots.CHILD_HOOK_FAILURE_EXIT_CODE),
+            partial_frame=False,
+            pid=1,
+        )
+        assert slots.boot_failure_of(lost) == ChildHookFailed()
+
+    def test_the_reparent_exit_code_is_a_spawn_failure(self) -> None:
+        lost = ChildLost(
+            LossCause.CHILD_DIED,
+            ExitedWith(REPARENT_FAILED_EXIT_CODE),
+            partial_frame=False,
+            pid=1,
+        )
+        match slots.boot_failure_of(lost):
+            case BootFailure(cause=SpawnFailed(), detail=detail):
+                assert 'did not reach the worker' in detail
+            case other:
+                raise AssertionError(other)
+
+    @pytest.mark.parametrize(
+        'child_exit',
+        [
+            ExitedWith(1),
+            ExitedWith(STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE),
+            KilledBySignal(11),
+        ],
+        ids=['exit-1', 'exit-74', 'sigsegv'],
+    )
+    def test_any_other_end_with_no_frame_is_lost_before_ready(
+        self,
+        child_exit: ExitedWith | KilledBySignal,
+    ) -> None:
+        lost = ChildLost(LossCause.CHILD_DIED, child_exit, partial_frame=False, pid=1)
+        match slots.boot_failure_of(lost):
+            case BootFailure(cause=LostBeforeReady(loss=LossCause.CHILD_DIED) as cause):
+                assert cause.child_exit == child_exit
+            case other:
+                raise AssertionError(other)
+
+    def test_no_reply_in_time_is_not_ready_in_time(self) -> None:
+        match slots.boot_failure_of(slots.WaitExpired()):
+            case BootFailure(cause=slots.NotReadyInTime()):
+                pass
+            case other:
+                raise AssertionError(other)
+
+    def test_the_wait_doubles_and_stays_bounded(self) -> None:
+        assert slots.slot_down_delay_s(1) == slots.SLOT_DOWN_FIRST_DELAY_S
+        assert slots.slot_down_delay_s(2) == 2 * slots.SLOT_DOWN_FIRST_DELAY_S
+        assert slots.slot_down_delay_s(3) == 4 * slots.SLOT_DOWN_FIRST_DELAY_S
+        assert slots.slot_down_delay_s(10**9) == slots.SLOT_DOWN_MAX_DELAY_S
+        waits = [slots.slot_down_delay_s(boots) for boots in range(1, 20)]
+        assert waits == sorted(waits)
+        assert max(waits) == slots.SLOT_DOWN_MAX_DELAY_S
+
+    def test_only_a_slot_that_is_down_leaves_the_budget(self) -> None:
+        down = Down(SHORT_OF_DESCRIPTORS, EMFILE_DETAIL, datetime.now(timezone.utc), 1)
+        states: list[slots.SlotState] = [
+            Starting(),
+            Idle(),
+            Busy('t'),
+            slots.Retiring(),
+            down,
+        ]
+        assert [slots._in_service(state) for state in states] == [True] * 4 + [False]
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -1324,7 +1781,8 @@ class TestSlotDefects:
         for _ in range(SLOT_DEFECT_LIMIT):
             await _outcome(pool.submit(self._unsendable()))
         failure = await asyncio.wait_for(pool.wait_failed(), OUTCOME_TIMEOUT_S)
-        assert isinstance(failure, BootAttemptsExhausted)
+        assert isinstance(failure, SlotDefectsRepeated)
+        assert failure.slot == 0
 
     async def test_a_finished_task_clears_the_count(self, pool_factory: PoolFactory) -> None:
         pool = await pool_factory()
@@ -1565,7 +2023,11 @@ class TestPoolFailure:
     async def test_replacement_failure_is_loud_and_releases_queued_tasks(
         self,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """The only slot cannot spawn its replacement, so the failed spawns
+        count and the pool fails."""
+        monkeypatch.setattr(slots, 'SLOT_DOWN_FIRST_DELAY_S', 0.01)
         pool = await _started_pool(
             _config(max_tasks_per_child=1, child_entry=(SCRIPTED_CHILD,)),
         )
@@ -1578,7 +2040,11 @@ class TestPoolFailure:
             failure = await asyncio.wait_for(pool.wait_failed(), 15)
         finally:
             sys.executable = real_executable
-        assert isinstance(failure, SpawnFailed)
+        match failure:
+            case BootAttemptsExhausted(cause=SpawnFailed()):
+                pass
+            case other:
+                raise AssertionError(other)
         outcome = await _outcome(queued)
         assert outcome == NotDispatched(NotRunCause.POOL_FAILED) or isinstance(
             outcome,

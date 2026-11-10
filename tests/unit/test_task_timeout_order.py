@@ -31,7 +31,7 @@ from horsies.core.lifecycle.outcomes import (
 from horsies.core.models.tasks import OutcomeCode
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.types.status import TaskStatus
-from horsies.core.worker.child_protocol import RssUnreadable
+from horsies.core.worker.child_protocol import NoTaskLoop, RssUnreadable
 from horsies.core.worker.runtime import (
     _AttemptEndUnknown,
     _RequeueOutcome,
@@ -523,7 +523,7 @@ class TestSlotAnsweredAfterTheDeadline:
     ) -> None:
         rig = _Rig(row=_row('RUNNING'))
         rig.slot_answers_before_the_kill(
-            TaskFinished(True, '{}', None, RssUnreadable()),
+            TaskFinished(True, '{}', None, RssUnreadable(), NoTaskLoop()),
         )
 
         with rig.fail_row(_applied()):
