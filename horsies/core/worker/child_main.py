@@ -10,7 +10,8 @@ creates that loop at boot, before it reports ready, when its app has an
 
 A shared async child runs up to its seats ``async def`` tasks at once on its
 task loop, which runs from the ready frame to the stop frame; see
-``shared_child``.
+``shared_child``. A shared thread child runs up to its seats ``def`` tasks at
+once, each on a seat thread; see ``thread_child``.
 
 When the parent is gone the child exits at once. Nothing can save its result,
 and a run that continues could overlap a retry of the same task.
@@ -66,6 +67,7 @@ from horsies.core.worker.child_protocol import (
     RunFrame,
     SharedAsyncChild,
     SharedRunFrame,
+    SharedThreadChild,
     StopFrame,
     WireResult,
     boot_failed_frame,
@@ -86,6 +88,7 @@ from horsies.core.worker.task_loop import (
 
 if TYPE_CHECKING:
     from horsies.core.worker.shared_child import SeatProgram
+    from horsies.core.worker.thread_child import ThreadSeatProgram
 
 logger = get_logger('worker')
 
@@ -113,10 +116,12 @@ RunTaskFn = Callable[[RunFrame, InitFrame, TaskLoop], WireResult]
 @dataclass(frozen=True, slots=True)
 class TaskRunners:
     """How a child runs tasks: ``run_task`` runs one task of an isolated
-    child, ``seats`` runs the seats of a shared async child."""
+    child, ``seats`` runs the seats of a shared async child, and ``threads``
+    runs one task on a seat of a shared thread child."""
 
     run_task: RunTaskFn
     seats: SeatProgram
+    threads: ThreadSeatProgram
 
 
 def _recv_exact(sock: socket.socket, count: int) -> bytes:
@@ -420,7 +425,8 @@ def _boot_or_exit(
     the task loop.
 
     An isolated child opens the loop when its app has an ``async def`` task.
-    A shared async child always opens it: its tasks run on it. Each step
+    A shared async child always opens it: its tasks run on it. A shared
+    thread child never opens it: it runs no ``async def`` task. Each step
     that fails ends the process through ``fail_boot``, with the cause of
     that step.
     """
@@ -439,6 +445,8 @@ def _boot_or_exit(
             pass
         case SharedAsyncChild():
             presence = AsyncTaskPresence.HAS_ASYNC_TASKS
+        case SharedThreadChild():
+            presence = AsyncTaskPresence.NO_ASYNC_TASK
         case _ as unreachable:
             assert_never(unreachable)
     match open_task_loop_at_boot(presence):
@@ -487,8 +495,10 @@ def serve(
     After ``boot``, the child creates its ``TaskLoop`` when ``boot`` reports
     an ``async def`` task in the app, or when the child is a shared async
     child, and only then sends its ready frame. An isolated child runs
-    ``runners.run_task`` for each run frame, and a shared async child runs
-    its seats with ``runners.seats`` (``shared_child.serve_shared``).
+    ``runners.run_task`` for each run frame, a shared async child runs its
+    seats with ``runners.seats`` (``shared_child.serve_shared``), and a
+    shared thread child runs each task with ``runners.threads`` on a seat
+    thread (``thread_child.serve_thread``).
 
     Failure exits: a control thread that the OS refuses, an ``Err`` from
     ``boot``, and a loop that cannot be created each end the boot through
@@ -514,6 +524,10 @@ def serve(
             from horsies.core.worker.shared_child import serve_shared
 
             serve_shared(sock, init, work, task_loop, seats, runners.seats)
+        case SharedThreadChild(seats=seats):
+            from horsies.core.worker.thread_child import serve_thread
+
+            serve_thread(sock, init, work, task_loop, seats, runners.threads)
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -573,9 +587,9 @@ def boot_app(init: InitFrame) -> Result[AsyncTaskPresence, BootFailedFrame]:
     """Restore the parent's import state, import the app, then run the
     per-child start steps of the kind of the child.
 
-    An isolated child opens its sync connection pool here. A shared async
-    child opens no pool here: it opens an async pool on its event loop,
-    after the ready steps of ``shared_child``.
+    An isolated child and a shared thread child open their sync connection
+    pool here. A shared async child opens no pool here: it opens an async
+    pool on its event loop, after the ready steps of ``shared_child``.
 
     ``Ok``: whether the booted app has an ``async def`` task, which decides
     whether the child creates its task loop.
@@ -606,7 +620,7 @@ def boot_app(init: InitFrame) -> Result[AsyncTaskPresence, BootFailedFrame]:
         return Err(boot_failure_from_exception(exc, AppLoadFailed()))
     try:
         match init.child_kind:
-            case IsolatedChild():
+            case IsolatedChild() | SharedThreadChild():
                 finish_child_start(
                     app,
                     init.database_url,
@@ -642,10 +656,16 @@ def run_child_task(frame: RunFrame, init: InitFrame, task_loop: TaskLoop) -> Wir
 
 def production_runners() -> TaskRunners:
     """The runners of a worker child: ``run_child_task`` for an isolated
-    child, and the Postgres seat program for a shared async child."""
+    child, the Postgres seat program for a shared async child, and the
+    Postgres thread seats for a shared thread child."""
     from horsies.core.worker.shared_runner import PostgresSeatProgram
+    from horsies.core.worker.thread_runner import PostgresThreadSeats
 
-    return TaskRunners(run_task=run_child_task, seats=PostgresSeatProgram())
+    return TaskRunners(
+        run_task=run_child_task,
+        seats=PostgresSeatProgram(),
+        threads=PostgresThreadSeats(),
+    )
 
 
 def parse_arguments(argv: Sequence[str]) -> tuple[int, int] | None:

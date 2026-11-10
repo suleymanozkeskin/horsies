@@ -71,6 +71,7 @@ from horsies.core.worker.child_protocol import (
     SharedResultFrame,
     SharedRunFrame,
     StopFrame,
+    ThreadSeatTask,
     WireResult,
     boot_failed_frame,
 )
@@ -333,6 +334,12 @@ class SeatLoop:
                 )
             case SeatRefusal():
                 deadline = _NoDeadline()
+            case ThreadSeatTask():
+                _exit_for_defect(
+                    f'parent sent run {frame.dispatch} of a shared thread child '
+                    'to a shared async child',
+                    BAD_PARENT_FRAME_EXIT_CODE,
+                )
             case _ as unreachable:
                 assert_never(unreachable)
         self._seats[frame.dispatch] = _Seat(frame, task, deadline, _Deadline.PENDING)

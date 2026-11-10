@@ -165,6 +165,7 @@ class ClaimMixin:
         # Cross-concern methods provided by sibling mixins / Worker.
         def _claim_slot_count(self) -> int: ...
         def _shared_async_seats_in_service(self) -> int: ...
+        def _shared_thread_seats_in_service(self) -> int: ...
         async def _dispatch_one(
             self,
             task_id: str,
@@ -306,9 +307,10 @@ class ClaimMixin:
         This is the one place that maps a budget class to the children that
         serve it: the isolated slots that are not down for ``ISOLATED``, the
         seats of the shared async children in service for ``SHARED_ASYNC``
-        (``_shared_async_seats_in_service``). The plan's budget classes come
-        from ``claim_plan_for_children`` (``WorkerConfig.claim_plan``). A plan
-        with a budget that no arm serves is a defect: ``AssertionError``.
+        (``_shared_async_seats_in_service``), and the seats of the shared
+        thread children in service for ``SHARED_THREAD``
+        (``_shared_thread_seats_in_service``). The plan's budget classes come
+        from ``claim_plan_for_children`` (``WorkerConfig.claim_plan``).
         """
         match budget:
             case Execution.ISOLATED:
@@ -316,10 +318,7 @@ class ClaimMixin:
             case Execution.SHARED_ASYNC:
                 return self._shared_async_seats_in_service()
             case Execution.SHARED_THREAD:
-                raise AssertionError(
-                    f'the claim plan has a {budget.value} budget, and this '
-                    f'worker starts no {budget.value} children',
-                )
+                return self._shared_thread_seats_in_service()
             case _ as unreachable:
                 assert_never(unreachable)
 

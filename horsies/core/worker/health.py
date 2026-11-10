@@ -232,9 +232,7 @@ class HealthMixin:
                         'wid': self.worker_instance_id,
                         'host': socket.gethostname(),
                         'pid': os.getpid(),
-                        'procs': (
-                            self.cfg.processes + self.cfg.shared_async_children()
-                        ),
+                        'procs': self.cfg.child_count(),
                         'mcb': self.cfg.max_claim_batch,
                         'mcpw': self.cfg.max_claim_per_worker
                         if self.cfg.max_claim_per_worker > 0
