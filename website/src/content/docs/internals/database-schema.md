@@ -179,6 +179,7 @@ Worker monitoring snapshots (timeseries). Each worker inserts one row per
 | `queue_max_concurrency` | JSONB | Per-queue concurrency limits |
 | `recovery_config` | JSONB | Recovery configuration snapshot |
 | `worker_started_at` | TIMESTAMP | Worker start time |
+| `slots_down` | JSONB | Each slot that is down for a cause that can clear: `{slot, cause, detail, down_since, failed_boots}`; an empty array when none is. NULL in a row from a worker before v53 |
 | `class_capacity` | JSONB | Each claim budget class to `{"capacity": N, "serves": [classes]}`: the children or seats in service, and the execution classes whose rows the budget claims. NULL in a row from a worker before v55 |
 
 ## horsies_schedule_state
