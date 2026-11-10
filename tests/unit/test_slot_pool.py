@@ -47,6 +47,7 @@ from horsies.core.worker.config import ChildPreload
 from horsies.core.worker.preload_main import REPARENT_FAILED_EXIT_CODE
 from horsies.core.worker.child_protocol import (
     BootFailedFrame,
+    IsolatedChild,
     ChildFrame,
     InitFrame,
     LoopHoldsNoTask,
@@ -147,6 +148,7 @@ def _init(app_locator: str = 'ok', imports: tuple[str, ...] = ()) -> InitFrame:
         child_pool_max_size=1,
         child_pool_check=False,
         process_name='test-child',
+        child_kind=IsolatedChild(),
     )
 
 
@@ -2058,12 +2060,15 @@ class TestPoolFailure:
 PARENT_PROGRAM = """
 import asyncio, os, sys, time
 sys.path[:0] = {paths!r}
-from horsies.core.worker.child_protocol import InitFrame, RunFrame
+from horsies.core.worker.child_protocol import InitFrame, IsolatedChild, RunFrame
 from horsies.core.worker.config import ChildPreload
 from horsies.core.worker.slots import SlotPool, SlotPoolConfig
 
 async def main():
-    init = InitFrame('ok', (), (), tuple(sys.path), ('p',), 30, 'x', {{}}, 0, 1, False, 'c')
+    init = InitFrame(
+        'ok', (), (), tuple(sys.path), ('p',), 30, 'x', {{}}, 0, 1, False, 'c',
+        IsolatedChild(),
+    )
     pool = SlotPool(
         SlotPoolConfig(1, init, 0, None, ({child!r},), ChildPreload({mode!r}), ({preload!r},)),
         10,

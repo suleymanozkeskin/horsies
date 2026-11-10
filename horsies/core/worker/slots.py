@@ -77,12 +77,14 @@ from horsies.core.worker.child_protocol import (
     NoTaskLoop,
     ParentFrame,
     ReadyFrame,
+    DeadlineFiredFrame,
     ResultFrame,
     RssMb,
     RssReading,
     TaskLoopReport,
     RssUnreadable,
     RunFrame,
+    SharedResultFrame,
     StopFrame,
     decode_child_frame,
     encode_parent_frame,
@@ -1492,7 +1494,7 @@ class SlotPool:
             case ReadyFrame(pid=pid, rss=rss):
                 self._note_ready(slot, ChildBaseline(pid=pid, rss=rss))
                 return Ok(child)
-            case ResultFrame():
+            case ResultFrame() | SharedResultFrame() | DeadlineFiredFrame():
                 failed = boot_failure_of(await child.discard_violating_child())
             case BootFailedFrame() | ChildLost() | WaitExpired():
                 failed = boot_failure_of(reply)
@@ -1748,7 +1750,7 @@ class SlotPool:
         slot.handle = handle
         child.send(frame)
         handle.bind_child(child)
-        held = self._live_dispatches.hold(frame, child.pid)
+        held = self._live_dispatches.hold(frame, child.pid, seats=1)
         match held:
             case Held():
                 pass
@@ -1767,7 +1769,13 @@ class SlotPool:
                     answer.rss,
                     answer.task_loop,
                 )
-            case ResultFrame() | ReadyFrame() | BootFailedFrame():
+            case (
+                ResultFrame()
+                | ReadyFrame()
+                | BootFailedFrame()
+                | SharedResultFrame()
+                | DeadlineFiredFrame()
+            ):
                 outcome = await child.discard_violating_child()
             case ChildLost():
                 outcome = answer

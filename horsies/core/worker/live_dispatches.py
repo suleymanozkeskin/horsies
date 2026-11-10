@@ -2,7 +2,8 @@
 
 The slot pool writes this registry on its event loop:
 
-- a child takes a task: ``hold``;
+- a child takes a task: ``hold``. An isolated child holds one task, a
+  shared async child up to its seats;
 - the attempt ends, because the slot read the child's answer: ``release``;
 - a kill goes to a child, or its exit is seen: ``release_child``.
 
@@ -21,7 +22,7 @@ from datetime import datetime
 from enum import Enum
 from typing import TypeAlias, assert_never
 
-from horsies.core.worker.child_protocol import RunFrame
+from horsies.core.worker.child_protocol import RunFrame, SharedRunFrame
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,24 +77,32 @@ class _RegistryState(Enum):
 class LiveDispatches:
     """The tasks that live children hold. Safe to share between threads.
 
-    ``capacity`` is the number of slots: each child holds at most one task, so
-    the registry never holds more entries than that.
+    ``capacity`` is the number of seats of the pool: one per isolated slot,
+    and the seats of each shared async slot. A child holds at most its own
+    seats, so the registry never holds more entries than that.
     """
 
     def __init__(self, capacity: int) -> None:
-        assert capacity >= 1, f'a slot pool has at least one slot, got {capacity}'
+        assert capacity >= 1, f'a slot pool has at least one seat, got {capacity}'
         self._capacity = capacity
         self._lock = threading.Lock()
         self._by_ticket: dict[int, LiveDispatch] = {}
         self._next_ticket = 1
         self._state = _RegistryState.OPEN
 
-    def hold(self, frame: RunFrame, pid: int) -> HoldOutcome:
-        """Record that child ``pid`` took the task of ``frame``.
+    def hold(
+        self,
+        frame: RunFrame | SharedRunFrame,
+        pid: int,
+        *,
+        seats: int,
+    ) -> HoldOutcome:
+        """Record that child ``pid``, which has ``seats`` seats, took the task
+        of ``frame``.
 
         Returns ``RegistryClosed`` after ``close``: the caller must then kill
         the child, because no heartbeat covers it. A child that already holds
-        a task, or a registry at capacity, is a defect in the caller:
+        ``seats`` tasks, or a registry at capacity, is a defect in the caller:
         ``AssertionError``.
         """
         with self._lock:
@@ -104,12 +113,16 @@ class LiveDispatches:
                     pass
                 case _ as unreachable:
                     assert_never(unreachable)
-            assert all(
-                held.pid != pid for held in self._by_ticket.values()
-            ), f'child pid={pid} took task {frame.task_id} while it holds another'
+            held_by_child = sum(
+                1 for held in self._by_ticket.values() if held.pid == pid
+            )
+            assert held_by_child < seats, (
+                f'child pid={pid} took task {frame.task_id} while it holds '
+                f'{held_by_child} of its {seats} seats'
+            )
             assert (
                 len(self._by_ticket) < self._capacity
-            ), f'more held tasks than the {self._capacity} slots'
+            ), f'more held tasks than the {self._capacity} seats'
             ticket = self._next_ticket
             self._next_ticket += 1
             self._by_ticket[ticket] = LiveDispatch(

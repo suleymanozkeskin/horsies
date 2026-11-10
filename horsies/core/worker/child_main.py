@@ -58,6 +58,7 @@ from horsies.core.worker.child_protocol import (
     RssReading,
     RssUnreadable,
     RunFrame,
+    SharedRunFrame,
     StopFrame,
     boot_failed_frame,
     decode_parent_frame,
@@ -152,6 +153,11 @@ def _read_parent_frames(
                     os._exit(BAD_PARENT_FRAME_EXIT_CODE)
                 case RunFrame() | StopFrame() as frame:
                     work.put(frame)
+                case SharedRunFrame():
+                    logger.critical(
+                        'Parent sent a shared run frame to an isolated child'
+                    )
+                    os._exit(BAD_PARENT_FRAME_EXIT_CODE)
                 case _ as unreachable:
                     assert_never(unreachable)
     except (EOFError, OSError):
@@ -197,7 +203,7 @@ def read_init_frame(sock: socket.socket) -> InitFrame:
     match frame:
         case InitFrame():
             return frame
-        case RunFrame() | StopFrame():
+        case RunFrame() | SharedRunFrame() | StopFrame():
             logger.critical('First parent frame was not an init frame')
             os._exit(BAD_PARENT_FRAME_EXIT_CODE)
         case _ as unreachable:

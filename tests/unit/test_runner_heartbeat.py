@@ -32,7 +32,7 @@ import pytest_asyncio
 from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.types.result import Err, Ok
 from horsies.core.worker import runner_heartbeat
-from horsies.core.worker.child_protocol import InitFrame, RunFrame
+from horsies.core.worker.child_protocol import InitFrame, IsolatedChild, RunFrame
 from horsies.core.worker.config import ChildPreload, WorkerConfig
 from horsies.core.worker.live_dispatches import (
     Held,
@@ -122,7 +122,7 @@ def _frame(task_name: str = 'beat_test', argument: str | None = None) -> RunFram
 
 
 def _hold(live: LiveDispatches, frame: RunFrame, pid: int) -> int:
-    match live.hold(frame, pid):
+    match live.hold(frame, pid, seats=1):
         case Held(ticket=ticket):
             return ticket
         case RegistryClosed():
@@ -368,6 +368,7 @@ def _init() -> InitFrame:
         child_pool_max_size=1,
         child_pool_check=False,
         process_name='test-child',
+        child_kind=IsolatedChild(),
     )
 
 
@@ -578,7 +579,7 @@ async def test_writes_failing_past_the_window_stop_the_worker(
         detail='OperationalError: connection refused'
     )
     assert await asyncio.to_thread(child.wait, WAIT_S) == -signal.SIGKILL
-    assert live.hold(_frame(), pid=child.pid) == RegistryClosed()
+    assert live.hold(_frame(), pid=child.pid, seats=1) == RegistryClosed()
     await asyncio.to_thread(heartbeat.stop)
     assert exits.codes == []
 
@@ -733,7 +734,7 @@ async def test_with_recovery_off_failing_writes_never_stop_the_worker(
     assert exits.codes == []
     assert child.poll() is None
     assert writer.count_with(frame.task_id) >= 5
-    assert isinstance(live.hold(_frame(), pid=child.pid + 1), Held)
+    assert isinstance(live.hold(_frame(), pid=child.pid + 1, seats=1), Held)
 
 
 @pytest.mark.asyncio

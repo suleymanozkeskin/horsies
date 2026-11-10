@@ -27,6 +27,7 @@ import pytest_asyncio
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker import preload, preload_main, slots
 from horsies.core.worker.child_protocol import (
+    IsolatedChild,
     ChildForkedFrame,
     ForkFailedFrame,
     InitFrame,
@@ -90,6 +91,7 @@ def _init(app_locator: str = 'ok') -> InitFrame:
         child_pool_max_size=1,
         child_pool_check=False,
         process_name='horsies-child',
+        child_kind=IsolatedChild(),
     )
 
 

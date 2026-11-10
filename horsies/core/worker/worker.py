@@ -28,7 +28,7 @@ from horsies.core.worker.config import WorkerConfig as WorkerConfig  # noqa: F40
 from horsies.core.worker.child_pool import (
     _initialize_worker_pool as _initialize_worker_pool,
 )  # noqa: F401
-from horsies.core.worker.child_protocol import InitFrame, RssMb
+from horsies.core.worker.child_protocol import InitFrame, IsolatedChild, RssMb
 from horsies.core.worker.runner_heartbeat import (
     FailClosedCause,
     PostgresBeatWriter,
@@ -328,6 +328,7 @@ class Worker(
                 child_pool_max_size=self.cfg.child_pool_max_size,
                 child_pool_check=self.cfg.child_pool_check,
                 process_name='horsies-child',
+                child_kind=IsolatedChild(),
             ),
             max_tasks_per_child=self.cfg.max_tasks_per_child,
             max_memory_per_child_mb=self.cfg.max_memory_per_child_mb,
