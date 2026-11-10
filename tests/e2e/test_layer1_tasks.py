@@ -36,6 +36,7 @@ from tests.e2e.helpers.assertions import (
 from tests.e2e.helpers.db import poll_max_during, read_task
 from tests.integration.history_seeding import force_terminal
 from tests.e2e.helpers.worker import run_worker
+from tests.e2e.tasks import async_tasks
 from tests.e2e.tasks import basic as basic_tasks
 from tests.e2e.tasks import retry as retry_tasks
 from tests.e2e.tasks import instance as default_instance
@@ -120,6 +121,31 @@ def test_a_task_cannot_wait_for_another_task() -> None:
                 'info_read': True,
             },
         )
+
+
+@pytest.mark.e2e
+def test_an_async_task_cannot_wait_for_another_task() -> None:
+    """In an `async def` task, every async result wait is refused at once.
+    send_async enqueues: the sent task completes, read from outside the worker."""
+    with run_worker(
+        DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+    ):
+        handle = unwrap_send(async_tasks.async_wait_inside_task.send())
+        probe = handle.get(timeout_ms=10000)
+        assert probe.is_ok(), f'Expected Ok, got Err: {probe.err}'
+        value = probe.unwrap()
+        assert value == async_tasks.AsyncWaitProbe(
+            sent_task_id=value.sent_task_id,
+            get_async_refused=True,
+            app_get_result_async_refused=True,
+            raw_async_refused=True,
+            workflow_started=True,
+            workflow_get_async_refused=True,
+        )
+        sent = unwrap_get_result(
+            default_instance.app.get_result(value.sent_task_id, timeout_ms=10000),
+        )
+        assert_ok(sent, expected_value=2)
 
 
 @pytest.mark.e2e

@@ -35,6 +35,10 @@ MAX_META_BYTES: Final = 1 << 20
 # Postgres cannot store a field of 1 GiB or more, so a larger result could
 # never be saved. This bound changes no outcome: it only fails earlier.
 MAX_BODY_BYTES: Final = (1 << 30) - 1
+# A report of tasks left on the task loop names at most this many of them,
+# each name cut to MAX_LEFTOVER_NAME_CHARS, so the report stays small.
+MAX_LEFTOVER_TASK_NAMES: Final = 10
+MAX_LEFTOVER_NAME_CHARS: Final = 200
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,14 +107,73 @@ class ReadyFrame:
 
 
 @dataclass(frozen=True, slots=True)
+class LoopCreateFailedFrame:
+    """Child to parent, in place of the ready frame: the app has an
+    ``async def`` task, and the child could not create the event loop for it.
+
+    The child exits after this frame, so the parent counts a failed boot
+    attempt. ``error_name`` and ``detail`` are the type and the text of the
+    exception.
+    """
+
+    error_name: str
+    detail: str
+
+    def describe(self) -> str:
+        """Subject and cause, for the boot failure of the parent."""
+        return (
+            'the child could not create the event loop for async tasks: '
+            f'{self.error_name}: {self.detail}'
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class NoTaskLoop:
+    """After the task, the child has no task loop: its app has no
+    ``async def`` task."""
+
+
+@dataclass(frozen=True, slots=True)
+class LoopHoldsNoTask:
+    """After the task, the child's task loop holds no task that is not done."""
+
+
+@dataclass(frozen=True, slots=True)
+class LoopHoldsTasks:
+    """After the task, asyncio tasks that it started and did not await are
+    still on the child's task loop. The parent retires such a child.
+
+    ``names`` holds the coroutine ``__qualname__`` of
+    ``min(count, MAX_LEFTOVER_TASK_NAMES)`` of those tasks, sorted, each at
+    most ``MAX_LEFTOVER_NAME_CHARS`` characters.
+    """
+
+    count: int
+    names: tuple[str, ...]
+
+    def names_text(self) -> str:
+        """The names, and how many tasks they leave out, for a log line."""
+        named = ', '.join(self.names)
+        left_out = self.count - len(self.names)
+        if left_out == 0:
+            return named
+        return f'{named}, and {left_out} more'
+
+
+TaskLoopReport: TypeAlias = NoTaskLoop | LoopHoldsNoTask | LoopHoldsTasks
+
+
+@dataclass(frozen=True, slots=True)
 class ResultFrame:
-    """Child to parent: the wire tuple of ``_run_task_entry``, plus the RSS."""
+    """Child to parent: the wire tuple of ``_run_task_entry``, plus the RSS
+    and the state of the task loop after the task."""
 
     task_id: str
     ok: bool
     result_json: str
     failed_reason: str | None
     rss: RssReading
+    task_loop: TaskLoopReport
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,7 +205,7 @@ class PreloadRefusedFrame:
 
 
 ParentFrame: TypeAlias = InitFrame | RunFrame | StopFrame
-ChildFrame: TypeAlias = ReadyFrame | ResultFrame
+ChildFrame: TypeAlias = ReadyFrame | LoopCreateFailedFrame | ResultFrame
 PreloadFrame: TypeAlias = (
     PreloadReadyFrame | ChildForkedFrame | ForkFailedFrame | PreloadRefusedFrame
 )
@@ -203,6 +266,18 @@ def _rss_field(rss: RssReading) -> float | None:
             return value
         case RssUnreadable():
             return None
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _task_loop_field(task_loop: TaskLoopReport) -> dict[str, object]:
+    match task_loop:
+        case NoTaskLoop():
+            return {'kind': 'none'}
+        case LoopHoldsNoTask():
+            return {'kind': 'empty'}
+        case LoopHoldsTasks(count=count, names=names):
+            return {'kind': 'held', 'count': count, 'names': list(names)}
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -269,6 +344,15 @@ def encode_child_frame(frame: ChildFrame) -> EncodedFrame:
                 {'kind': 'ready', 'pid': frame.pid, 'rss_mb': _rss_field(frame.rss)},
                 b'',
             )
+        case LoopCreateFailedFrame():
+            return _pack(
+                {
+                    'kind': 'loop_create_failed',
+                    'error_name': frame.error_name,
+                    'detail': frame.detail,
+                },
+                b'',
+            )
         case ResultFrame():
             return _pack(
                 {
@@ -277,6 +361,7 @@ def encode_child_frame(frame: ChildFrame) -> EncodedFrame:
                     'ok': frame.ok,
                     'failed_reason': frame.failed_reason,
                     'rss_mb': _rss_field(frame.rss),
+                    'task_loop': _task_loop_field(frame.task_loop),
                 },
                 frame.result_json.encode('utf-8'),
             )
@@ -402,6 +487,36 @@ def _rss(meta: Mapping[str, Any]) -> RssReading:
     return RssMb(float(value))
 
 
+def _leftover_names(task_loop: Mapping[str, Any], count: int) -> tuple[str, ...]:
+    """One name for each leftover task up to the bound, each within its bound."""
+    names = _text_tuple(task_loop, 'names')
+    if len(names) != min(count, MAX_LEFTOVER_TASK_NAMES):
+        raise _BadField('task_loop.names')
+    if any(len(name) > MAX_LEFTOVER_NAME_CHARS for name in names):
+        raise _BadField('task_loop.names')
+    return names
+
+
+def _task_loop(meta: Mapping[str, Any]) -> TaskLoopReport:
+    value = meta.get('task_loop')
+    if not isinstance(value, dict):
+        raise _BadField('task_loop')
+    task_loop = cast('Mapping[str, Any]', value)
+    match task_loop.get('kind'):
+        case 'none':
+            return NoTaskLoop()
+        case 'empty':
+            return LoopHoldsNoTask()
+        case 'held':
+            count = task_loop.get('count')
+            if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+                raise _BadField('task_loop.count')
+            names = _leftover_names(task_loop, count)
+            return LoopHoldsTasks(count=count, names=names)
+        case _:
+            raise _BadField('task_loop.kind')
+
+
 def _load_meta(meta_bytes: bytes) -> Mapping[str, Any]:
     match loads_json_bytes(meta_bytes):
         case Ok(value) if isinstance(value, dict):
@@ -484,6 +599,13 @@ def decode_child_frame(
         match kind:
             case 'ready':
                 return Ok(ReadyFrame(pid=_whole(meta, 'pid'), rss=_rss(meta)))
+            case 'loop_create_failed':
+                return Ok(
+                    LoopCreateFailedFrame(
+                        error_name=_text(meta, 'error_name'),
+                        detail=_text(meta, 'detail'),
+                    ),
+                )
             case 'result':
                 return Ok(
                     ResultFrame(
@@ -492,6 +614,7 @@ def decode_child_frame(
                         result_json=body.decode('utf-8'),
                         failed_reason=_optional_text(meta, 'failed_reason'),
                         rss=_rss(meta),
+                        task_loop=_task_loop(meta),
                     ),
                 )
             case _:

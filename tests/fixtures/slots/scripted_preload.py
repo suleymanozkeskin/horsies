@@ -11,6 +11,7 @@ from __future__ import annotations
 import socket
 import sys
 from pathlib import Path
+from typing import NoReturn
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -21,7 +22,7 @@ from horsies.core.worker.child_main import BootFn, serve as real_serve  # noqa: 
 from horsies.core.worker.child_protocol import InitFrame  # noqa: E402
 
 
-def _serve_with_socket(sock: socket.socket, *args: object) -> None:
+def _serve_with_socket(sock: socket.socket, *args: object) -> NoReturn:
     """Give scripted operations the socket, as the exec entry does."""
     scripted_child._sock = sock
     real_serve(sock, *args)  # type: ignore[arg-type]

@@ -4,13 +4,19 @@ It speaks the real protocol through ``child_main.serve``. Only boot and task
 execution are replaced: ``task_name`` selects an operation, ``kwargs_json``
 holds its argument, and ``app_locator`` selects the boot behavior. It needs no
 database.
+
+Each boot that passes reports an app with ``async def`` tasks, so ``serve``
+creates the task loop, except the ``no_async`` modes. The ``loop_*`` modes make
+that creation raise ``OSError(EMFILE)``.
 """
 
 # pyright: reportPrivateUsage=false
 
 from __future__ import annotations
 
+import asyncio
 import ctypes
+import errno
 import gc
 import os
 import signal
@@ -19,11 +25,14 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Coroutine
+from typing import Any
 
 from horsies.core.worker.child_main import WireResult, _send_child_frame, serve
 from horsies.core.worker.child_protocol import (
     FRAME_HEADER,
     InitFrame,
+    NoTaskLoop,
     ResultFrame,
     RssUnreadable,
     RunFrame,
@@ -31,19 +40,71 @@ from horsies.core.worker.child_protocol import (
     encode_parent_frame,
 )
 from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
+from horsies.core.utils.loop_runner import in_running_event_loop
+from horsies.core.worker import task_loop as task_loop_module
+from horsies.core.worker.task_loop import AsyncTaskPresence, TaskLoop
 
 _sock: socket.socket
+# The loop holds only weak references to its tasks.
+_kept_tasks: list[asyncio.Task[None]] = []
+# Strong references, so that a freed loop cannot pass its id to a new one.
+_seen_loops: list[asyncio.AbstractEventLoop] = []
 
 
 def _pid_result() -> WireResult:
     return True, str(os.getpid()), None
 
 
-def _boot(init: InitFrame) -> None:
+def _no_descriptors() -> asyncio.AbstractEventLoop:
+    raise OSError(errno.EMFILE, 'Too many open files')
+
+
+def _boot_mark(path: str) -> int:
+    """Add one mark for this boot. Return the marks so far, this one included."""
+    with open(path, 'a+', encoding='ascii') as marks:
+        marks.write('x')
+        marks.seek(0)
+        return len(marks.read())
+
+
+def _loop_boot(mode: str, argument: str, init: InitFrame) -> AsyncTaskPresence:
+    """Boot modes for the task loop creation at boot."""
+    match mode:
+        case 'no_async':
+            return AsyncTaskPresence.NO_ASYNC_TASK
+        case 'no_async_no_descriptors':
+            asyncio.new_event_loop = _no_descriptors
+            return AsyncTaskPresence.NO_ASYNC_TASK
+        case 'loop_create_fails':
+            asyncio.new_event_loop = _no_descriptors
+        case 'loop_fails_first':
+            # The first boots cannot create the loop, then boots pass.
+            if _boot_mark(argument) <= int(init.imports[0]):
+                asyncio.new_event_loop = _no_descriptors
+        case 'loop_fails_after_first':
+            # The first boots pass, then the next boots cannot create the loop.
+            seen = _boot_mark(argument)
+            first_boots = int(init.imports[1])
+            if first_boots < seen <= first_boots + int(init.imports[0]):
+                asyncio.new_event_loop = _no_descriptors
+        case _:
+            raise AssertionError(mode)
+    return AsyncTaskPresence.HAS_ASYNC_TASKS
+
+
+def _boot(init: InitFrame) -> AsyncTaskPresence:
     mode, _, argument = init.app_locator.partition(':')
     match mode:
         case 'ok':
-            return
+            pass
+        case (
+            'no_async'
+            | 'no_async_no_descriptors'
+            | 'loop_create_fails'
+            | 'loop_fails_first'
+            | 'loop_fails_after_first'
+        ):
+            return _loop_boot(mode, argument, init)
         case 'hook_fails':
             os._exit(CHILD_HOOK_FAILURE_EXIT_CODE)
         case 'raises':
@@ -71,9 +132,13 @@ def _boot(init: InitFrame) -> None:
                     os.kill(os.getpid(), signal.SIGKILL)
                 raise RuntimeError('scripted replacement boot failure')
         case 'parent_identity':
-            return
+            pass
+        case 'close_timeout':
+            # A short close deadline keeps a test of the close bound fast.
+            setattr(task_loop_module, 'LOOP_CLOSE_TIMEOUT_S', float(argument))
         case _:
             raise AssertionError(mode)
+    return AsyncTaskPresence.HAS_ASYNC_TASKS
 
 
 def _socket_count() -> int:
@@ -88,16 +153,97 @@ def _socket_count() -> int:
     return count
 
 
+async def _loops_seen() -> str:
+    """Count the distinct loops that ran a ``loop_count`` operation."""
+    loop = asyncio.get_running_loop()
+    if not any(seen is loop for seen in _seen_loops):
+        _seen_loops.append(loop)
+    return str(len(_seen_loops))
+
+
+async def _mark_when_cancelled(path: str) -> None:
+    """Write the marker only on a cancel. A coroutine that is closed at
+    interpreter exit gets GeneratorExit, which must not write it."""
+    try:
+        await asyncio.Event().wait()
+    except asyncio.CancelledError:
+        with open(path, 'w', encoding='ascii') as target:
+            target.write('cancelled')
+        raise
+
+
+async def _leave_pending(path: str) -> str:
+    _kept_tasks.append(asyncio.get_running_loop().create_task(_mark_when_cancelled(path)))
+    await asyncio.sleep(0)
+    return str(os.getpid())
+
+
+async def _async_pid() -> str:
+    """Await all the work it starts, so the loop holds nothing after it."""
+    await asyncio.get_running_loop().create_task(asyncio.sleep(0))
+    return str(os.getpid())
+
+
+async def _ignore_cancel() -> None:
+    while True:
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            continue
+
+
+async def _idle_executor_beside_a_stubborn_task() -> str:
+    """Leave the default executor idle, and a task that ignores the cancel."""
+    await asyncio.to_thread(int)
+    _kept_tasks.append(asyncio.get_running_loop().create_task(_ignore_cancel()))
+    await asyncio.sleep(0)
+    return str(os.getpid())
+
+
+async def _thread_outlives_wait(seconds: float) -> str:
+    """Stop waiting for an executor thread that keeps running."""
+    try:
+        await asyncio.wait_for(asyncio.to_thread(time.sleep, seconds), 0.05)
+    except TimeoutError:
+        return str(os.getpid())
+    raise AssertionError('the executor thread ended within the wait')
+
+
+def _run_async(task_loop: TaskLoop, coroutine: Coroutine[Any, Any, str]) -> str:
+    """Run on the loop that ``serve`` opened at boot, as the child runner does."""
+    return task_loop.run(coroutine)
+
+
+def _no_running_loop() -> str:
+    """Report a running loop, then run one with ``asyncio.run``."""
+    return f'{in_running_event_loop()}|{asyncio.run(asyncio.sleep(0, "ran"))}'
+
+
 def _half_frame() -> bytes:
     encoded = encode_parent_frame(StopFrame())
     return encoded.head[: FRAME_HEADER.size] + b'x' * 8
 
 
-def _run(frame: RunFrame, init: InitFrame) -> WireResult:
+def _run(frame: RunFrame, init: InitFrame, task_loop: TaskLoop) -> WireResult:
     argument = frame.kwargs_json or ''
     match frame.task_name:
         case 'echo':
             return True, argument, None
+        case 'loop_count':
+            return True, _run_async(task_loop, _loops_seen()), None
+        case 'no_running_loop':
+            return True, _no_running_loop(), None
+        case 'async_pid':
+            return True, _run_async(task_loop, _async_pid()), None
+        case 'loop_state':
+            return True, type(task_loop.state).__name__, None
+        case 'leave_pending':
+            return True, _run_async(task_loop, _leave_pending(argument)), None
+        case 'idle_executor_beside_a_stubborn_task':
+            pid = _run_async(task_loop, _idle_executor_beside_a_stubborn_task())
+            return True, pid, None
+        case 'thread_outlives_wait':
+            return True, _run_async(task_loop, _thread_outlives_wait(float(argument))), None
         case 'pid':
             return _pid_result()
         case 'freeze_count':
@@ -129,7 +275,7 @@ def _run(frame: RunFrame, init: InitFrame) -> WireResult:
         case 'exit_after_result':
             _send_child_frame(
                 _sock,
-                ResultFrame(frame.task_id, True, 'complete', None, RssUnreadable()),
+                ResultFrame(frame.task_id, True, 'complete', None, RssUnreadable(), NoTaskLoop()),
             )
             os._exit(1)
         case 'die_mid_frame':
@@ -161,7 +307,7 @@ def _run(frame: RunFrame, init: InitFrame) -> WireResult:
         case 'wrong_task_id':
             _send_child_frame(
                 _sock,
-                ResultFrame('another-task', True, '', None, RssUnreadable()),
+                ResultFrame('another-task', True, '', None, RssUnreadable(), NoTaskLoop()),
             )
             time.sleep(3600)
             return _pid_result()
@@ -181,7 +327,7 @@ def _run(frame: RunFrame, init: InitFrame) -> WireResult:
                 os._exit(0)
             _send_child_frame(
                 _sock,
-                ResultFrame(frame.task_id, True, 'complete', None, RssUnreadable()),
+                ResultFrame(frame.task_id, True, 'complete', None, RssUnreadable(), NoTaskLoop()),
             )
             os.kill(os.getpid(), signal.SIGKILL)
             return _pid_result()
@@ -209,7 +355,6 @@ def main() -> None:
     global _sock
     _sock = socket.socket(fileno=int(sys.argv[1]))
     serve(_sock, int(sys.argv[2]), _boot, _run)
-    sys.exit(0)
 
 
 if __name__ == '__main__':

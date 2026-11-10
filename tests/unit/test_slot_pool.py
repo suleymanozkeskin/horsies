@@ -9,6 +9,7 @@ Linux. On macOS the same verdicts are covered through SIGKILL and ``os._exit``.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import random
 import signal
@@ -27,10 +28,20 @@ import pytest
 import pytest_asyncio
 
 from horsies.core.types.result import Err, Ok
+from horsies.core.worker.child_main import (
+    BAD_PARENT_FRAME_EXIT_CODE,
+    STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE,
+    TASK_LOOP_CREATE_FAILED_EXIT_CODE,
+)
 from horsies.core.worker.config import ChildPreload
 from horsies.core.worker.child_protocol import (
     ChildFrame,
     InitFrame,
+    LoopCreateFailedFrame,
+    LoopHoldsNoTask,
+    LoopHoldsTasks,
+    NoTaskLoop,
+    ReadyFrame,
     ResultFrame,
     RssUnreadable,
     RunFrame,
@@ -213,6 +224,12 @@ def _alive(pid: int) -> bool:
     return bool(state.stdout.strip()) and not state.stdout.strip().startswith('Z')
 
 
+EMFILE_LOOP_DETAIL = (
+    'the child could not create the event loop for async tasks: '
+    'OSError: [Errno 24] Too many open files'
+)
+
+
 async def _until(predicate: Callable[[], bool], timeout_s: float = 10.0) -> None:
     deadline = time.monotonic() + timeout_s
     while not predicate():
@@ -293,7 +310,7 @@ class TestFrameProtocol:
             offset += size
 
     def _result_bytes(self, body: str) -> bytes:
-        encoded = encode_child_frame(ResultFrame('t', True, body, None, RssUnreadable()))
+        encoded = encode_child_frame(ResultFrame('t', True, body, None, RssUnreadable(), NoTaskLoop()))
         return encoded.head + encoded.body
 
     @pytest.mark.parametrize('chunk', [1, 2, 7, 1 << 20])
@@ -364,6 +381,117 @@ class TestBoot:
         assert isinstance(await pool.start(), Ok)
         await pool.stop(0)
         assert marks.read_text() == 'xx'
+
+    async def test_a_child_that_cannot_create_its_task_loop_reports_it_and_exits(
+        self,
+    ) -> None:
+        """The frame comes in place of the ready frame, so the child never
+        takes a task. This drives one child directly, to read the frame and
+        the exit code that the pool sees as one failed boot attempt."""
+        config = _config(init=_init('loop_create_fails'))
+        match await Child.start(config, config.init):
+            case Ok(child):
+                pass
+            case Err(failed):
+                raise AssertionError(failed)
+        try:
+            frame = await child.await_frame(OUTCOME_TIMEOUT_S)
+            assert frame == LoopCreateFailedFrame(
+                error_name='OSError',
+                detail='[Errno 24] Too many open files',
+            )
+            await _until(lambda: child.has_exited)
+            exited = ExitedWith(TASK_LOOP_CREATE_FAILED_EXIT_CODE)
+            assert child._current_exit() == exited
+        finally:
+            await child.dispose_lost()
+
+    async def test_a_task_loop_failure_at_boot_uses_every_attempt_and_names_its_cause(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        monkeypatch.setattr(slots, 'CHILD_BOOT_RETRY_DELAY_S', 0.01)
+        pool = SlotPool(_config(init=_init('loop_create_fails')), pending_limit=10)
+        with caplog.at_level(logging.WARNING, logger='horsies.worker'):
+            started = await pool.start()
+        await pool.stop(0)
+
+        assert started == Err(
+            BootAttemptsExhausted(
+                attempts=CHILD_BOOT_ATTEMPTS,
+                last_detail=EMFILE_LOOP_DETAIL,
+            ),
+        )
+        attempts = [
+            record.getMessage()
+            for record in caplog.records
+            if record.getMessage().startswith('Child boot attempt')
+        ]
+        assert attempts == [
+            f'Child boot attempt {number}/{CHILD_BOOT_ATTEMPTS} failed on slot 0: '
+            f'{EMFILE_LOOP_DETAIL}'
+            for number in range(1, CHILD_BOOT_ATTEMPTS + 1)
+        ]
+
+    async def test_no_task_reaches_a_child_that_has_no_task_loop(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A task that waits for the slot is released unrun when the pool fails."""
+        monkeypatch.setattr(slots, 'CHILD_BOOT_RETRY_DELAY_S', 0.01)
+        pool = SlotPool(_config(init=_init('loop_create_fails')), pending_limit=10)
+        handle = pool.submit(_frame('echo', 'x'))
+        started = await pool.start()
+        await pool.stop(0)
+
+        assert isinstance(started, Err)
+        assert handle.assigned.result() == NotDispatched(NotRunCause.POOL_FAILED)
+        assert await _outcome(handle) == NotDispatched(NotRunCause.POOL_FAILED)
+
+    async def test_a_transient_task_loop_failure_at_boot_is_retried(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The first boot cannot create the loop. The second boot can, and
+        its child runs on that loop."""
+        monkeypatch.setattr(slots, 'CHILD_BOOT_RETRY_DELAY_S', 0.01)
+        marks = tmp_path / 'marks'
+        pool = SlotPool(
+            _config(init=_init(f'loop_fails_first:{marks}', ('1',))),
+            pending_limit=10,
+        )
+        try:
+            assert isinstance(await pool.start(), Ok)
+            assert await _result_json(pool.submit(_frame('loop_state'))) == 'LoopOpen'
+        finally:
+            await pool.stop(0)
+        assert marks.read_text() == 'xx'
+
+    async def test_a_replacement_that_cannot_create_its_task_loop_fails_the_pool(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The first child serves a task and retires. Its replacement cannot
+        create the loop, so the next task never reaches a child."""
+        monkeypatch.setattr(slots, 'CHILD_BOOT_RETRY_DELAY_S', 0.01)
+        init = _init(f'loop_fails_after_first:{tmp_path / "marks"}', ('100', '1'))
+        pool = await _started_pool(_config(init=init, max_tasks_per_child=1))
+        try:
+            assert await _result_json(pool.submit(_frame('echo', 'first'))) == 'first'
+            waiting = pool.submit(_frame('echo', 'next'))
+
+            failure = await asyncio.wait_for(pool.wait_failed(), OUTCOME_TIMEOUT_S)
+
+            assert failure == BootAttemptsExhausted(
+                attempts=CHILD_BOOT_ATTEMPTS,
+                last_detail=EMFILE_LOOP_DETAIL,
+            )
+            assert await _outcome(waiting) == NotDispatched(NotRunCause.POOL_FAILED)
+        finally:
+            await pool.stop(0)
 
     async def test_spawn_failure_is_typed(self) -> None:
         config = _config()
@@ -459,6 +587,180 @@ class TestTaskRuns:
             worst = max(worst, now - last)
             last = now
         assert worst < 2.0
+
+    async def test_async_runs_of_one_child_share_one_loop(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        """``serve`` gives each task of a child the same task loop."""
+        pool = await pool_factory()
+        handles = [pool.submit(_frame('loop_count')) for _ in range(2)]
+        assert [await _result_json(handle) for handle in handles] == ['1', '1']
+
+    async def test_no_loop_runs_between_async_runs(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        """A run after an async run sees no running loop and can run its own."""
+        pool = await pool_factory()
+        handles = [
+            pool.submit(_frame('loop_count')),
+            pool.submit(_frame('no_running_loop')),
+            pool.submit(_frame('loop_count')),
+        ]
+        results = [await _result_json(handle) for handle in handles]
+        assert results == ['1', 'False|ran', '1']
+
+    async def test_a_stop_cancels_a_task_left_on_the_loop(
+        self,
+        pool_factory: PoolFactory,
+        tmp_path: Path,
+    ) -> None:
+        """The recycle stop closes the task loop, which cancels what is left."""
+        marker = tmp_path / 'cancelled'
+        pool = await pool_factory(_config(max_tasks_per_child=1))
+        await _result_json(pool.submit(_frame('leave_pending', str(marker))))
+        await _until(marker.exists)
+        assert marker.read_text(encoding='ascii') == 'cancelled'
+
+    async def test_a_task_that_leaves_loop_tasks_retires_its_child(
+        self,
+        pool_factory: PoolFactory,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The leftover is cancelled, and the next task runs in a new child.
+        The retire warning names the coroutine that was left."""
+        marker = tmp_path / 'cancelled'
+        pool = await pool_factory()
+        frame = _frame('leave_pending', str(marker))
+        with caplog.at_level(logging.WARNING, logger='horsies.worker'):
+            outcome = await _outcome(pool.submit(frame))
+        match outcome:
+            case TaskFinished(result_json=first_pid, task_loop=task_loop):
+                assert task_loop == LoopHoldsTasks(
+                    count=1,
+                    names=('_mark_when_cancelled',),
+                )
+            case other:
+                raise AssertionError(other)
+        assert (
+            f'Retiring child pid={first_pid}: task {frame.task_id} left 1 task(s) on '
+            'its event loop: _mark_when_cancelled'
+        ) in caplog.text
+        await _until(marker.exists)
+        assert marker.read_text(encoding='ascii') == 'cancelled'
+        assert await _result_json(pool.submit(_frame('pid'))) != first_pid
+
+    async def test_a_task_that_leaves_no_loop_task_keeps_its_child(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        pool = await pool_factory()
+        match await _outcome(pool.submit(_frame('async_pid'))):
+            case TaskFinished(result_json=first_pid, task_loop=task_loop):
+                assert task_loop == LoopHoldsNoTask()
+            case other:
+                raise AssertionError(other)
+        assert await _result_json(pool.submit(_frame('pid'))) == first_pid
+
+    async def test_the_loop_is_open_before_the_first_async_task(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        """The child of an app with async tasks creates its loop at boot."""
+        pool = await pool_factory()
+        assert await _result_json(pool.submit(_frame('loop_state'))) == 'LoopOpen'
+
+    async def test_an_app_with_no_async_task_creates_no_loop(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        """Loop creation would fail in this child, and its boot still passes."""
+        pool = await pool_factory(_config(init=_init('no_async_no_descriptors')))
+        handles = [pool.submit(_frame('loop_state')), pool.submit(_frame('echo', 'x'))]
+        assert [await _result_json(handle) for handle in handles] == [
+            'LoopNotCreated',
+            'x',
+        ]
+
+    async def test_a_run_frame_beside_loop_tasks_ends_the_child(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The child refuses to run a task beside work of an earlier task.
+
+        The pool never sends that frame, so this drives one child directly.
+        """
+        config = _config()
+        match await Child.start(config, config.init):
+            case Ok(child):
+                pass
+            case Err(failed):
+                raise AssertionError(failed)
+        try:
+            assert isinstance(await child.await_frame(OUTCOME_TIMEOUT_S), ReadyFrame)
+            child.send(_frame('leave_pending', str(tmp_path / 'cancelled')))
+            match await child.await_frame(OUTCOME_TIMEOUT_S):
+                case ResultFrame(task_loop=LoopHoldsTasks(count=1)):
+                    pass
+                case other:
+                    raise AssertionError(other)
+            child.send(_frame('echo', 'x'))
+            match await child.await_frame(OUTCOME_TIMEOUT_S):
+                case ChildLost(child_exit=child_exit):
+                    assert child_exit == ExitedWith(BAD_PARENT_FRAME_EXIT_CODE)
+                case other:
+                    raise AssertionError(other)
+        finally:
+            await child.dispose_lost()
+
+    async def test_a_stop_with_executor_threads_left_ends_the_process(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        """An executor thread that outlives the close does not hold the exit.
+
+        Without the bound the child waits for the thread at exit, and the
+        parent kills it only after ``CHILD_STOP_TIMEOUT_S``.
+        """
+        pool = await pool_factory(
+            _config(max_tasks_per_child=1, init=_init('close_timeout:0.2')),
+        )
+        pid = int(await _result_json(pool.submit(_frame('thread_outlives_wait', '60'))))
+        child = pool._slots[0].child
+        assert child is not None and child.pid == pid
+        await _until(lambda: child.has_exited, timeout_s=slots.CHILD_STOP_TIMEOUT_S / 2)
+        assert child._current_exit() == ExitedWith(STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE)
+
+    async def test_an_idle_executor_after_a_stubborn_leftover_exits_normally(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        """The leftover ignores the cancel and uses the whole close deadline.
+        The idle executor still shuts down, so the child exits 0, not with
+        ``STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE``."""
+        pool = await pool_factory(
+            _config(max_tasks_per_child=1, init=_init('close_timeout:0.2')),
+        )
+        frame = _frame('idle_executor_beside_a_stubborn_task')
+        pid = int(await _result_json(pool.submit(frame)))
+        child = pool._slots[0].child
+        assert child is not None and child.pid == pid
+        await _until(lambda: child.has_exited, timeout_s=slots.CHILD_STOP_TIMEOUT_S / 2)
+        assert child._current_exit() == ExitedWith(0)
+
+    async def test_a_stop_with_no_executor_threads_exits_normally(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        """With nothing left to wait for, the child exits 0 and runs ``atexit``."""
+        pool = await pool_factory(_config(max_tasks_per_child=1))
+        assert await _result_json(pool.submit(_frame('loop_count'))) == '1'
+        child = pool._slots[0].child
+        assert child is not None
+        await _until(lambda: child.has_exited, timeout_s=slots.CHILD_STOP_TIMEOUT_S / 2)
+        assert child._current_exit() == ExitedWith(0)
 
     async def test_child_program_restores_parent_argv_and_keeps_asserts(
         self,
@@ -642,7 +944,7 @@ class TestVerdicts:
 
     async def test_complete_frame_still_unread_wins_over_the_death(self) -> None:
         """Only the drain can find this frame: the transport has not read it yet."""
-        encoded = encode_child_frame(ResultFrame('t', True, 'kept', None, RssUnreadable()))
+        encoded = encode_child_frame(ResultFrame('t', True, 'kept', None, RssUnreadable(), NoTaskLoop()))
         child = await self._dead_child_with(encoded.head + encoded.body)
         match await child.await_frame(None):
             case ResultFrame(result_json='kept'):
@@ -652,7 +954,7 @@ class TestVerdicts:
         await child.dispose()
 
     async def test_half_a_frame_still_unread_is_reported_partial(self) -> None:
-        encoded = encode_child_frame(ResultFrame('t', True, 'lost', None, RssUnreadable()))
+        encoded = encode_child_frame(ResultFrame('t', True, 'lost', None, RssUnreadable(), NoTaskLoop()))
         child = await self._dead_child_with(encoded.head[:-1])
         match await child.await_frame(None):
             case ChildLost(partial_frame=True, child_exit=KilledBySignal(9)):

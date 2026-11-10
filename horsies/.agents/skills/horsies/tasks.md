@@ -34,13 +34,25 @@ def my_task(*, ...) -> TaskResult[T, TaskError]: ...
 
 - Return type annotation present and is `TaskResult[T, TaskError]` — missing raises `HRS-100`, wrong type raises `HRS-101`.
 - Pre-decorated functions (with `__wrapped__` chain) are rejected — `HRS-104`.
-- The function must be sync (`def`). An `async def` function, also one that yields, is rejected — `HRS-106`. Async task support is not available.
+- The function is `def` or `async def`. A function that yields is rejected — `HRS-101`, for a generator and for an async generator.
 - `exception_mapper` keys must be `BaseException` subclasses, values must be `UPPER_SNAKE_CASE`.
 - `queue_name` cross-validated against `AppConfig.queue_mode`.
 - `good_until` rejected — raises `HRS-102` with help text directing to `.with_options()` or `.node()`.
 - Top-level `auto_retry_for` kwarg is rejected — it belongs inside `RetryPolicy`.
 
-Returns `TaskFunction[P, T]`.
+Returns `TaskFunction[P, T]` for a `def` function, and `AsyncTaskFunction[P, T]` for an `async def` function.
+
+### Async tasks
+
+- A worker child runs one task at a time, `def` or `async def`. The same RUNNING update, heartbeats, `timeout_ms` kill, recovery and retry policy apply.
+- Each child keeps one event loop until the child stops. An `async def` task runs on it, so an async client that a module keeps stays open across the tasks of one child.
+- The loop runs only while an `async def` task runs. A `def` task runs with no running event loop and can call `asyncio.run()`. While the child runs a `def` task or waits for its next task, the timers of a module-level async client (a keepalive, a pool maintenance task) do not run.
+- An `async def` task must await the work that it starts. When it ends and asyncio tasks that it started (`asyncio.create_task()`) are still on the loop, the worker replaces the child after that task, and the next task runs in a new child. The old child cancels that work when it stops, within 5 seconds. A client that keeps its own background tasks on the loop (a keepalive, a consumer) causes a replacement after each async task. Only asyncio tasks are seen: a `loop.call_soon()` / `loop.call_later()` callback, or `loop.run_in_executor()` work that the task did not await, causes no replacement and can still run during a later task of the same child.
+- A child creates its event loop at boot, before it reports ready, when the app has an `async def` task; an app with none gets no loop. When the loop cannot be created (for example EMFILE, or an event loop policy that raises), the child fails its boot and no task reaches it. After three failed child starts the worker exits non-zero, so its supervisor restarts it. The error names the cause: `the child could not create the event loop for async tasks: <error>`.
+- A task that cancels a helper task in `finally` must also await it, for example `helper.cancel()` then `await asyncio.gather(helper, return_exceptions=True)`. Without the await, a helper that awaits while it stops (a close) is still on the loop when the task ends, and the worker replaces the child. The retire warning names the coroutine of each task left, up to 10.
+- A thread of `asyncio.to_thread()` that outlives its task does not cause a replacement. At the stop, the child does not wait for it past the close (at most 6 seconds): it exits, and `atexit` handlers do not run. An idle executor does not count: its shutdown gets at least 1 second.
+- In an `async def` task, send with `.send_async()` / `.schedule_async()`. The sync `.send()` / `.schedule()` return `Err(TaskSendAsyncContext)` there and enqueue nothing.
+- An exception, a wrong return, and the exception mappers give the same `TaskResult` as in a `def` task.
 
 ## `TaskResult[T, TaskError]`
 
@@ -205,6 +217,8 @@ task_name: str
 
 # Direct call — bypasses queue, use only in tests
 def __call__(*args: P.args, **kwargs: P.kwargs) -> TaskResult[T, TaskError]
+# AsyncTaskFunction[P, T] (an async def task) differs only here:
+# def __call__(*args: P.args, **kwargs: P.kwargs) -> Coroutine[Any, Any, TaskResult[T, TaskError]]
 
 # Enqueue for background execution
 def send(*args: P.args, **kwargs: P.kwargs) -> TaskSendResult[TaskHandle[T]]
@@ -245,7 +259,7 @@ def node(
 ) -> NodeFactory[P, T]
 ```
 
-**Direct call vs `.send()`**: Direct call runs synchronously in current process, no queue, no retry, no persistence. `.send()` enqueues for background execution by a worker.
+**Direct call vs `.send()`**: Direct call runs in current process, no queue, no retry, no persistence. For an `async def` task, the direct call returns a coroutine: `await` it. `.send()` enqueues for background execution by a worker.
 
 ## `TaskSendOptions[P, T]` — Per-Send Options
 
@@ -448,7 +462,7 @@ Validation failure text never contains the refused value: each failure is `<loc>
 | `PAYLOAD_MISMATCH` | Refused | The task id exists, and the command or the idempotency key differs from the original send — the payload was altered between send and retry |
 | `IDEMPOTENCY_KEY_CONFLICT` | Accepted | The idempotency key is reserved by another task with a different command; nothing was enqueued. `owner_task_id` names the owner task. A retry after the reservation ends is accepted |
 | `PAYLOAD_TOO_LARGE` | Refused | Serialized kwargs exceeded `payload.reject_bytes` (off by default); nothing was enqueued — shrink the payload (pass a reference to external storage) or raise the limit |
-| `EVENT_LOOP_LIMIT` | Refused | The broker serves its limit of open event loops (5, plus its sync runner loop) and this send ran on a new one; nothing was enqueued — close loops that are done |
+| `EVENT_LOOP_LIMIT` | Refused | The broker serves its limit of open event loops (5, plus its sync runner loop and, in a worker child, the task loop) and this send ran on a new one; nothing was enqueued — close loops that are done |
 | `LOOP_RUNNER_FAILED` | Accepted | Sync `.send()` / `.schedule()` (or a sync retry) could not run the enqueue on the broker's sync runner (stopped, thread did not start, or scheduling failed); nothing was enqueued. A stopped runner does not start again, so a sync retry returns the same error — `retry_send_async(err)` / `retry_schedule_async(err)` completes the same send |
 
 ### `TaskSendPayload`

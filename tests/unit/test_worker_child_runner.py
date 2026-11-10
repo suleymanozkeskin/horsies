@@ -9,10 +9,12 @@ E. _get_workflow_status_for_task
 F. _handle_workflow_stop_before_start (wildcard branch)
 I. _run_task_entry error paths
 J. Workflow injection deserialization errors in _run_task_entry
+K. Async task calls in _run_task_entry
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import threading
@@ -26,7 +28,8 @@ from pydantic import BaseModel, SecretStr, field_validator
 from pydantic_core import PydanticCustomError
 
 from horsies.core.app import Horsies
-from horsies.core.codec.json_io import SerializationError
+from horsies.core.codec.json_io import SerializationError, loads_json
+from horsies.core.codec.typed import decode_task_result
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import (
@@ -46,6 +49,8 @@ from horsies.core.worker.stored_timeout import (
     TimeoutRefusal,
     TimeoutValueInvalid,
 )
+from horsies.core.task_decorator import TaskBodyKind
+from horsies.core.worker.task_loop import LoopOpen, TaskLoop
 from horsies.core.worker.child_runner import (
     _debug_imports_log,
     _get_workflow_status_for_task,
@@ -804,12 +809,14 @@ def _make_run_task_patches(
         )
     elif task_fn is not None:
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.__call__ = MagicMock(return_value=task_fn())
         mock_task._original_fn = task_fn
         mock_task._fn = task_fn
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
     else:
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.__call__ = MagicMock(return_value=TaskResult(ok='hello'))
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
@@ -830,6 +837,7 @@ def _run_entry_defaults() -> dict[str, Any]:
         'database_url': 'postgresql://localhost/test',
         'master_worker_id': 'w-1',
         'runner_heartbeat_interval_ms': 100,
+        'task_loop': TaskLoop(),
     }
 
 
@@ -1128,6 +1136,7 @@ class TestRunTaskEntryErrorPaths:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.task_ok_type = int
         mock_task.return_value = TaskResult(ok=42)
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
@@ -1152,6 +1161,7 @@ class TestRunTaskEntryErrorPaths:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.task_ok_type = int
         mock_task.return_value = 42
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
@@ -1174,6 +1184,7 @@ class TestRunTaskEntryErrorPaths:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.side_effect = ValueError('boom')
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
@@ -1208,6 +1219,7 @@ class TestRunTaskEntryErrorPaths:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.task_ok_type = ok_type
         mock_task.return_value = returned
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
@@ -1235,6 +1247,7 @@ class TestRunTaskEntryErrorPaths:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.task_ok_type = _EchoingModel
         mock_task.return_value = TaskResult(ok={'name': f'text{chr(0xd800)}'})
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
@@ -1385,6 +1398,7 @@ class TestRunTaskEntryErrorPaths:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task._original_fn = _constant_surrogate_task
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
         _run_entry_defaults['kwargs_json'] = json.dumps({'x': {'name': 'plain'}})
@@ -1412,6 +1426,7 @@ class TestRunTaskEntryErrorPaths:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.task_ok_type = int
         mock_task.return_value = TaskResult(
             err=TaskError(
@@ -1436,6 +1451,7 @@ class TestRunTaskEntryErrorPaths:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.task_ok_type = str
         mock_task.side_effect = ValueError(f'text{chr(0xd800)}')
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
@@ -1471,6 +1487,7 @@ class TestRunTaskEntryErrorPaths:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.task_ok_type = int
 
         def _identity(x: Any) -> Any:
@@ -1501,6 +1518,7 @@ class TestRunTaskEntryErrorPaths:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.return_value = TaskResult(ok='success')
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
@@ -1518,6 +1536,7 @@ class TestRunTaskEntryErrorPaths:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.return_value = TaskResult(
             err=TaskError(error_code='CUSTOM_ERR', message='failed'),
         )
@@ -1537,6 +1556,7 @@ class TestRunTaskEntryErrorPaths:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.task_ok_type = str
         mock_task.return_value = TaskResult(ok='data')
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
@@ -1617,6 +1637,7 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         patches = _make_run_task_patches(task_fn=_task_with_ctx)
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.return_value = TaskResult(ok='done')
         mock_task._original_fn = _task_with_ctx
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
@@ -1656,6 +1677,7 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         patches = _make_run_task_patches(task_fn=_task_with_ctx)
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.return_value = TaskResult(ok='done')
         mock_task._original_fn = _task_with_ctx
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
@@ -1692,6 +1714,7 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.return_value = TaskResult(ok='meta_ok')
         mock_task._original_fn = _task_with_meta
         mock_task._fn = _task_with_meta
@@ -2139,6 +2162,7 @@ class TestRunTaskEntryWorkflowHappyPaths:
         # Consumer task whose kwarg gets injected. Real type for its
         # own return-encoding too.
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task._original_fn = _takes_upstream
         mock_task.task_ok_type = str
         mock_task.return_value = TaskResult(ok='processed')
@@ -2182,6 +2206,7 @@ class TestRunTaskEntryWorkflowHappyPaths:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.return_value = TaskResult(ok='ctx_ok')
         mock_task._original_fn = _task_with_ctx
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
@@ -2296,6 +2321,7 @@ class TestRunTaskEntryRefusalTextHoldsNoInput:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task._original_fn = _typed_count_task
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
         _run_entry_defaults['kwargs_json'] = json.dumps({'count': _INPUT_MARKER})
@@ -2317,6 +2343,7 @@ class TestRunTaskEntryRefusalTextHoldsNoInput:
         source_task = MagicMock()
         source_task.task_ok_type = int
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.task_ok_type = str
 
         def _task_lookup(name: str) -> Any:
@@ -2350,6 +2377,7 @@ class TestRunTaskEntryRefusalTextHoldsNoInput:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock(side_effect=refused.value)
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with caplog.at_level(logging.DEBUG), _apply_patches(patches):
@@ -2369,6 +2397,7 @@ class TestRunTaskEntryRefusalTextHoldsNoInput:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.task_ok_type = int
         mock_task.return_value = TaskResult(ok=_INPUT_MARKER)
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
@@ -2393,6 +2422,7 @@ class TestRunTaskEntryStoredErrorRefusal:
         source_task = MagicMock()
         source_task.task_ok_type = str
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task._original_fn = _takes_upstream
         mock_task.task_ok_type = str
 
@@ -2434,6 +2464,7 @@ class TestRunTaskEntryStoredErrorRefusal:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.task_ok_type = str
         mock_task.return_value = TaskResult(ok='done')
         mock_task._original_fn = _task_with_ctx
@@ -2574,3 +2605,50 @@ class TestRunTaskEntryStoredTimeout:
             _run_task_entry(**_run_entry_defaults, timeout=timeout)
 
         assert heartbeat.call_args.args[-1] == deadline_ms
+
+
+# ===================================================================
+# K. Async task calls in _run_task_entry
+# ===================================================================
+
+
+def _ok_value(payload: str, ok_type: Any) -> Any:
+    return decode_task_result(loads_json(payload).unwrap(), ok_type).unwrap()
+
+
+@pytest.mark.unit
+class TestRunTaskEntryCoroutineCall:
+    """The call of an `async def` task returns a coroutine."""
+
+    def test_the_coroutine_runs_on_the_given_task_loop(
+        self,
+        _run_entry_defaults: dict[str, Any],
+    ) -> None:
+        task_loop = TaskLoop()
+        task_loop.open().unwrap()
+        _run_entry_defaults['task_loop'] = task_loop
+        seen: list[asyncio.AbstractEventLoop] = []
+
+        async def body() -> TaskResult[int, TaskError]:
+            seen.append(asyncio.get_running_loop())
+            return TaskResult(ok=5)
+
+        patches = _make_run_task_patches()
+        mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
+        mock_task = MagicMock(side_effect=lambda: body())
+        mock_task.task_body_kind = TaskBodyKind.ASYNC_DEF
+        mock_task.task_ok_type = int
+        mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
+
+        try:
+            with _apply_patches(patches):
+                ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            loop_state = task_loop.state
+        finally:
+            task_loop.close()
+
+        assert (ok, reason) == (True, None)
+        assert _ok_value(payload, int) == 5
+        assert isinstance(loop_state, LoopOpen)
+        assert seen == [loop_state.loop]
+

@@ -130,7 +130,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - BrokerEnqueueError = BrokerEnqueueFailed | BrokerPayloadMismatch | BrokerIdempotencyKeyConflict | BrokerInvalidTaskOptions | BrokerInvalidInput | BrokerEventLoopLimit (every failure of enqueue_async); BrokerSyncCallError = BrokerAsyncContext | BrokerLoopRunnerFailed (the failures that the sync enqueue adds; nothing ran)
 - BrokerErrorCode: SCHEMA_INIT_FAILED, ENQUEUE_FAILED, PAYLOAD_MISMATCH, IDEMPOTENCY_KEY_CONFLICT, TASK_INFO_QUERY_FAILED, MONITORING_QUERY_FAILED, DB_PING_FAILED, WORKER_PING_FAILED, CLEANUP_FAILED, CLOSE_FAILED, LISTENER_START_FAILED, LISTENER_SUBSCRIBE_FAILED, NO_BROKER, NO_TYPE_AVAILABLE, INVALID_JSON_PAYLOAD, INVALID_TASK_OPTIONS, EVENT_LOOP_LIMIT, ASYNC_CONTEXT, LOOP_RUNNER_FAILED, INVALID_INPUT, LISTENER_DISABLED, WAIT_INSIDE_TASK
 - ASYNC_CONTEXT (BrokerErrorCode, TaskSendErrorCode, WorkflowStartErrorCode, HandleErrorCode, RetrievalCode): a sync call was made on a thread that runs an event loop (a coroutine, a Jupyter cell); nothing ran and the sync runner did not start; call the *_async form (not retryable; RetrievalCode.ASYNC_CONTEXT is not cached)
-- EVENT_LOOP_LIMIT (in every result catalog): a broker keeps one resource set per open event loop, up to 5 loops plus its sync runner loop; the next open loop gets this error, nothing runs, and it clears when one of those loops closes
+- EVENT_LOOP_LIMIT (in every result catalog): a broker keeps one resource set per open event loop, up to 5 loops plus its sync runner loop and, in a worker child, the task loop; the next open loop gets this error, nothing runs, and it clears when one of those loops closes
 - LOOP_RUNNER_FAILED (BrokerErrorCode, TaskSendErrorCode, WorkflowStartErrorCode, HandleErrorCode): a sync call could not run on the broker's sync runner (stopped, thread did not start, or scheduling failed); nothing ran; close()/close_async() stop the runner and it does not start again; call the *_async form (not retryable; the send error is accepted by retry_send_async / retry_schedule_async). Any other exception from a sync call propagates, as from the *_async form
 - retryable=True: transient (connection blip), retryable=False: permanent (schema drift, code bug)
 - Broker methods: enqueue_async -> Result[str, BrokerEnqueueError], enqueue (sync) -> Result[str, BrokerEnqueueError | BrokerSyncCallError], get_task_info_async -> BrokerResult[TaskInfo | None],
@@ -154,13 +154,17 @@ making web request, local will cost you less tokens and greater knowledgebase at
 
 ### @app.task Decorator
 - Decorated function must return TaskResult[T, TaskError]
-- Decorated function must be sync (def); an async def function raises HRS-106 at definition time
+- Decorated function is def or async def; a function that yields raises HRS-101 at definition time
+- An async def task runs on the one event loop that its worker child keeps; the loop runs only while an async task runs; in an async task, send with send_async (the sync send returns TaskSendAsyncContext in a running loop)
+- An async def task must await the work it starts: asyncio tasks of it still on the loop when it ends make the worker replace the child after that task, and the child cancels them when it stops (within 5 s); a client that keeps its own background tasks on the loop causes a replacement after each async task; an asyncio.to_thread() thread is not a task and does not cause one; only asyncio tasks are seen: a loop.call_soon()/call_later() callback or loop.run_in_executor() work that the task did not await causes no replacement and can still run during a later task of the same child; a task that cancels a helper task in finally must also await it (helper.cancel(), then await asyncio.gather(helper, return_exceptions=True)); the retire warning names the coroutine of each task left, up to 10
+- A child creates its event loop at boot, before it reports ready, when the app has an async def task (an app with none gets no loop); when it cannot be created (for example EMFILE, or an event loop policy that raises), the child fails its boot and no task reaches it; after three failed child starts the worker exits non-zero so its supervisor restarts it
 - Options: task_name, queue_name, retry_policy, exception_mapper, default_unhandled_error_code, timeout_ms
 - good_until is NOT accepted at definition time (raises HRS-102) — use .with_options(good_until=...) at send time
-- Returns TaskFunction[P, T]
+- Returns TaskFunction[P, T] for a def function, AsyncTaskFunction[P, T] for an async def function
 
 ### TaskFunction[P, T] (decorated task)
 - .__call__(*args, **kwargs) -> TaskResult[T, TaskError] (sync direct call)
+- AsyncTaskFunction[P, T] has the same members; its .__call__ returns a coroutine of TaskResult[T, TaskError]
 - .send(*args, **kwargs) -> TaskSendResult[TaskHandle[T]] (enqueue for background execution)
 - .send_async(*args, **kwargs) -> TaskSendResult[TaskHandle[T]] (async enqueue)
 - .schedule(delay_seconds, *args, **kwargs) -> TaskSendResult[TaskHandle[T]] (delayed enqueue)
@@ -253,7 +257,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 
 ### TaskNode[T]
 - T = ok type of the task's TaskResult
-- fn: TaskFunction, kwargs: dict (args field exists but is init=False — not a construction param)
+- fn: TaskFunction | AsyncTaskFunction, kwargs: dict (args field exists but is init=False — not a construction param)
 - waits_for: list of TaskNode | SubWorkflowNode (wait for terminal)
 - args_from: dict[str, TaskNode | SubWorkflowNode] (inject TaskResult as kwarg)
 - workflow_ctx_from: list[TaskNode | SubWorkflowNode] | None (subset for WorkflowContext)
@@ -581,7 +585,6 @@ Task definition (HRS-100-HRS-199):
 - HRS-103 TASK_INVALID_QUEUE
 - HRS-104 TASK_PREDECORATED_NOT_SUPPORTED (the task function is pre-decorated: it has a __wrapped__ chain)
 - HRS-105 TASK_STRICT_SIGNATURE_VIOLATION
-- HRS-106 TASK_ASYNC_FUNCTION_NOT_SUPPORTED
 Config/broker (HRS-200-HRS-299):
 <!-- members: ErrorCode part -->
 - HRS-200 CONFIG_INVALID_QUEUE_MODE

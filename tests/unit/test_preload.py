@@ -14,8 +14,9 @@ import subprocess
 import sys
 import textwrap
 from collections.abc import AsyncIterator, Callable, Iterator
+from dataclasses import replace
 from pathlib import Path
-from typing import cast
+from typing import NoReturn, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import psutil
@@ -447,7 +448,10 @@ class TestForkedChild:
         self,
         started_pools: list[SlotPool],
     ) -> None:
-        pool = await _started(started_pools, _config())
+        """No socket of another child or of the preload parent. The app has
+        no async task, so the child has no task loop and its socket pair."""
+        config = replace(_config(), init=_init('no_async'))
+        pool = await _started(started_pools, config)
         assert await _result(pool, 'socket_count') == '1'
 
     async def test_an_exited_child_leaves_the_registry(
@@ -865,9 +869,14 @@ class TestChildSteps:
 
             return note
 
+        def serve_then_exit(*_args: object) -> NoReturn:
+            """``serve`` ends the process after a stop frame."""
+            steps.append('serve')
+            raise SystemExit(0)
+
         monkeypatch.setattr(preload_main.os, 'setsid', record('setsid'))
         monkeypatch.setattr(preload_main, '_wait_for_reparent', record('reparent'))
-        monkeypatch.setattr(preload_main, 'serve', record('serve'))
+        monkeypatch.setattr(preload_main, 'serve', serve_then_exit)
         monkeypatch.setattr(preload_main.socket, 'socket', MagicMock())
 
         with pytest.raises(SystemExit) as stopped:

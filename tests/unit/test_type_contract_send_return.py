@@ -35,6 +35,7 @@ from horsies.core.task_decorator import create_task_wrapper
 from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.worker import child_runner
+from horsies.core.worker.task_loop import TaskLoop
 
 Positive = Annotated[int, Field(gt=0)]
 Upper = Annotated[str, AfterValidator(str.upper)]
@@ -464,6 +465,7 @@ def _run_child(
             master_worker_id='worker',
             runner_heartbeat_interval_ms=100,
             is_workflow_task=True,
+            task_loop=TaskLoop(),
         )
 
 

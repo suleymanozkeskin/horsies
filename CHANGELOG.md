@@ -8,6 +8,53 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+### Added
+
+- **A task can be an `async def` function.** `@app.task()` registers it and
+  returns an `AsyncTaskFunction`. A worker child runs it as it runs a `def`
+  task: one task at a time, with the same RUNNING update, heartbeats,
+  `timeout_ms` kill, recovery and retry policy. Each child keeps one event
+  loop until the child stops, and an async task runs on that loop, so an
+  async client that a module keeps stays open across the tasks of one
+  child. The loop runs only while an async task runs. A `def` task still
+  runs with no running event loop and can call `asyncio.run()`. In an async
+  task, send with `send_async()`: the sync `send()` returns
+  `Err(TaskSendAsyncContext)` there.
+  - A direct call of an async task returns a coroutine of the `TaskResult`.
+    The return check and the exception mappers are the same as for a `def`
+    task.
+  - `TaskNode.fn`, `.node()` and the task registry take both kinds.
+  - An `async def` function that uses `yield` is refused with `HRS-101`, as
+    a generator function is.
+  - A child whose app has an `async def` task creates its event loop at
+    boot, before it reports ready. A child whose app has none creates no
+    loop. When the loop cannot be created, for example with EMFILE or an
+    event loop policy that raises, the child fails its boot, and no task
+    reaches it. The worker counts it as a failed child start: after three
+    failed attempts it exits non-zero, so its supervisor restarts it. The log
+    and the error name the cause, for example `the child could not create
+    the event loop for async tasks: OSError: [Errno 24] Too many open files`.
+  - The task loop of a worker child does not count against the broker's
+    limit of 5 open caller loops (`EVENT_LOOP_LIMIT`), as the broker's sync
+    runner loop does not. An async task that calls the broker gives the task
+    loop a resource set, which it keeps until the child stops.
+  - A task must await the work that it starts. When an async task ends and
+    asyncio tasks that it started are still on the loop, the worker replaces
+    the child after that task. When the old child stops, it cancels that work
+    and closes the loop. This takes at most 6 seconds. A client that keeps its
+    own background tasks on the loop causes a child replacement after each
+    async task. The warning of the replacement names the coroutine of each task
+    left, up to 10. A task that cancels a helper task in `finally` must also
+    await it. The check sees asyncio tasks only: a callback that
+    `loop.call_soon()` or `loop.call_later()` scheduled, and
+    `loop.run_in_executor()` work that the task did not await, cause no
+    replacement and can still run during a later task of the same child.
+  - A thread of `asyncio.to_thread()` that still runs after that time does
+    not hold the child: the child exits without waiting for it, and its
+    `atexit` handlers do not run. The shutdown of the default executor gets
+    at least 1 second, also when the cancel of left tasks used the first 5
+    seconds, so an idle executor does not count as a running thread.
+
 ### Changed
 
 - **Breaking: a result wait inside a task is refused at once.** In a worker
@@ -56,6 +103,13 @@ and there is no migration contract between pre-1.0 versions.
   an `exception_mapper` or `default_unhandled_error_code` with that value
   fails `horsies check` with `HRS-212`. A process of an earlier version cannot
   decode an error stored with this code.
+
+### Removed
+
+- **`ErrorCode.TASK_ASYNC_FUNCTION_NOT_SUPPORTED` (`HRS-106`).** No code
+  raises it, because `@app.task()` accepts an `async def` function. The
+  number is retired and is not used again. Remove the member from each
+  `match` on `ErrorCode`.
 
 ### Fixed
 

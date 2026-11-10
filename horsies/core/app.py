@@ -1,4 +1,5 @@
 # app/core/app.py
+from collections.abc import Coroutine
 from typing import (
     Optional,
     Callable,
@@ -89,7 +90,11 @@ from horsies.core.codec.validation_errors import ValueValidationError, exception
 from horsies.core.types.result import is_err
 
 if TYPE_CHECKING:
-    from horsies.core.task_decorator import TaskFunction
+    from horsies.core.task_decorator import (
+        AsyncTaskFunction,
+        TaskDecorator,
+        TaskFunction,
+    )
     from horsies.core.models.tasks import TaskInfo, TaskResult, TaskError
     from horsies.core.brokers.result_types import BrokerResult
     from horsies.core.models.health import (
@@ -161,7 +166,9 @@ class Horsies:
         self.run_schema_migrations = run_schema_migrations
         self._broker: Optional['PostgresBroker'] = None
         self._broker_init_lock = threading.Lock()
-        self.tasks: TaskRegistry['TaskFunction[Any, Any]'] = TaskRegistry()
+        self.tasks: TaskRegistry[
+            'TaskFunction[Any, Any] | AsyncTaskFunction[Any, Any]'
+        ] = TaskRegistry()
         self.logger = get_logger('app')
         self._discovered_task_modules: list[str] = []
         self._workflow_builders: list[_WorkflowBuilderMeta] = []
@@ -282,6 +289,13 @@ class Horsies:
 
     @overload
     def task(
+        self,
+        task_name: str,
+        func: Callable[P, Coroutine[Any, Any, 'TaskResult[T, TaskError]']],
+    ) -> 'AsyncTaskFunction[P, T]': ...
+
+    @overload
+    def task(
         self, task_name: str, func: Callable[P, 'TaskResult[T, TaskError]']
     ) -> 'TaskFunction[P, T]': ...
 
@@ -295,26 +309,27 @@ class Horsies:
         exception_mapper: Optional['ExceptionMapper'] = None,
         default_unhandled_error_code: Optional[str] = None,
         timeout_ms: Optional[int] = None,
-    ) -> Callable[
-        [Callable[P, 'TaskResult[T, TaskError]']],
-        'TaskFunction[P, T]',
-    ]: ...
+    ) -> 'TaskDecorator': ...
 
     def task(
         self,
         task_name: str,
-        func: Optional[Callable[P, 'TaskResult[T, TaskError]']] = None,
+        func: Optional[
+            Callable[..., 'TaskResult[Any, TaskError]']
+            | Callable[..., Coroutine[Any, Any, 'TaskResult[Any, TaskError]']]
+        ] = None,
         **task_options_kwargs: Any,
     ) -> Union[
-        'TaskFunction[P, T]',
-        Callable[
-            [Callable[P, 'TaskResult[T, TaskError]']],
-            'TaskFunction[P, T]',
-        ],
+        'TaskFunction[Any, Any]',
+        'AsyncTaskFunction[Any, Any]',
+        'TaskDecorator',
     ]:
         """
         Decorator to register a task with this app.
         Task options are validated against TaskOptions model and app configuration.
+
+        A `def` function gives a `TaskFunction`. An `async def` function
+        gives an `AsyncTaskFunction`, whose direct call returns a coroutine.
 
         Raises:
             TaskDefinitionError: empty task name, invalid options, mapper,
@@ -326,7 +341,20 @@ class Horsies:
                 at first send.
         """
 
-        def decorator(fn: Callable[P, 'TaskResult[T, TaskError]']):
+        @overload
+        def decorator(
+            fn: Callable[P, Coroutine[Any, Any, 'TaskResult[T, TaskError]']],
+        ) -> 'AsyncTaskFunction[P, T]': ...
+
+        @overload
+        def decorator(
+            fn: Callable[P, 'TaskResult[T, TaskError]'],
+        ) -> 'TaskFunction[P, T]': ...
+
+        def decorator(
+            fn: Callable[P, 'TaskResult[T, TaskError]']
+            | Callable[P, Coroutine[Any, Any, 'TaskResult[T, TaskError]']],
+        ) -> 'TaskFunction[P, T] | AsyncTaskFunction[P, T]':
             fn_location = SourceLocation.from_function(fn)
 
             if task_name == '':

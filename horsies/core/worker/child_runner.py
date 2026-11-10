@@ -8,7 +8,7 @@ import os
 import socket
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Coroutine, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from importlib import import_module
@@ -63,6 +63,13 @@ from horsies.core.worker.stored_timeout import (
     TimeoutRefusal,
     TimeoutValueInvalid,
 )
+from horsies.core.worker.task_loop import (
+    AsyncTaskPresence,
+    LoopClosed,
+    LoopNotCreated,
+    LoopOpen,
+    TaskLoop,
+)
 from horsies.core.lifecycle.commands import (
     AbandonOwnedNode,
     CancelOwnedNode,
@@ -78,6 +85,7 @@ from horsies.core.lifecycle.outcomes import (
     TaskAbsent,
 )
 from horsies.core.lifecycle.persistence import apply_sync
+from horsies.core.task_decorator import TaskBodyKind
 from horsies.core.types.result import Err, Ok, is_err
 
 
@@ -1069,6 +1077,102 @@ def _mark_task_finalizing(
         )
 
 
+def async_task_presence(app: Horsies) -> AsyncTaskPresence:
+    """Whether the registry of ``app`` holds an ``async def`` task function.
+
+    Reads the in-memory registry only, and runs no code of the entries: it
+    reads ``task_body_kind`` from the class of each entry, where the task
+    decorator sets it. An entry with no such class attribute is not a task
+    function, and the run step reports it as ``WORKER_RESOLUTION_ERROR``.
+    """
+    for task in app.tasks.values():
+        match getattr(type(task), 'task_body_kind', None):
+            case TaskBodyKind.ASYNC_DEF:
+                return AsyncTaskPresence.HAS_ASYNC_TASKS
+            case _:
+                continue
+    return AsyncTaskPresence.NO_ASYNC_TASK
+
+
+def _resolution_failure(
+    task_name: str,
+    task_id: str,
+    heartbeat_stop_event: threading.Event,
+    message: str,
+    reason: str,
+) -> Tuple[bool, str, Optional[str]]:
+    """The wire tuple of a task the worker cannot resolve: WORKER_RESOLUTION_ERROR.
+
+    Stops the heartbeat thread, because no task code runs.
+    """
+    tr: TaskResult[Any, TaskError] = TaskResult(
+        err=TaskError(
+            error_code=OperationalErrorCode.WORKER_RESOLUTION_ERROR,
+            message=message,
+            data={'task_name': task_name},
+        )
+    )
+    heartbeat_stop_event.set()
+    logger.debug(f'Heartbeat stop signal sent for task {task_id} (resolution failed)')
+    return (True, serialize_error_payload(tr), reason)
+
+
+def _why_not_runnable(body_kind: object, task_loop: TaskLoop) -> str | None:
+    """Why this child cannot run a registry entry, or None when it can.
+
+    Only the task decorator makes a task function, with its
+    ``task_body_kind``. An ``async def`` task needs the task loop, which the
+    child creates at boot only when its app had an ``async def`` task then:
+    a task that was registered later finds no loop. A run after the loop
+    closed is a defect in the caller: ``AssertionError``.
+    """
+    match body_kind:
+        case TaskBodyKind.DEF:
+            return None
+        case TaskBodyKind.ASYNC_DEF:
+            match task_loop.state:
+                case LoopOpen():
+                    return None
+                case LoopNotCreated():
+                    return (
+                        'the task is async def, and this child has no task loop: '
+                        'no async def task was registered when the child booted'
+                    )
+                case LoopClosed():
+                    raise AssertionError('a task ran after the task loop closed')
+                case _ as unreachable:
+                    assert_never(unreachable)
+        case _:
+            return (
+                'the registry entry is not a task function: its '
+                f'task_body_kind is {body_kind!r}'
+            )
+
+
+def _task_call_result(
+    task_name: str,
+    called: TaskResult[Any, TaskError] | Coroutine[Any, Any, TaskResult[Any, TaskError]],
+    task_loop: TaskLoop,
+) -> TaskResult[Any, TaskError]:
+    """The result of one call of a task wrapper.
+
+    The call of a ``def`` task returns its result. The call of an
+    ``async def`` task returns a coroutine, which runs on ``task_loop``; the
+    child opened that loop at boot. Exceptions from that run
+    propagate. The wrapper returns one of the two, so another value is a
+    defect in the library: ``AssertionError``.
+    """
+    match called:
+        case TaskResult():
+            return called
+        case Coroutine():
+            return task_loop.run(called)
+        case _:
+            raise AssertionError(
+                f'task wrapper of {task_name!r} returned {type(called).__name__}',
+            )
+
+
 def _run_task_entry(
     task_name: str,
     args_json: Optional[str],
@@ -1080,11 +1184,16 @@ def _run_task_entry(
     is_workflow_task: bool = True,
     timeout: StoredTimeout = NoTimeout(),
     claimed_at: Optional[datetime] = None,
+    *,
+    task_loop: TaskLoop,
 ) -> Tuple[bool, str, Optional[str]]:
     """
     Child-process entry.
     Returns:
       (ok, serialized_task_result_json, worker_failure_reason)
+
+    An ``async def`` task runs on ``task_loop``, the one loop of this child.
+    A ``def`` task runs on this thread with no running event loop.
 
     ok=True: we produced a valid TaskResult JSON (success *or* failure).
     ok=False: worker couldn't even produce a TaskResult (infra error).
@@ -1149,21 +1258,28 @@ def _run_task_entry(
         try:
             app = get_current_app()
             task = app.tasks[task_name]  # may raise NotRegistered
+            body_kind = getattr(task, 'task_body_kind', None)
         except Exception as e:
             logger.error(f'Failed to resolve task {task_name}: {e}')
-            tr: TaskResult[Any, TaskError] = TaskResult(
-                err=TaskError(
-                    error_code=OperationalErrorCode.WORKER_RESOLUTION_ERROR,
-                    message=f'Failed to resolve {task_name}: {type(e).__name__}: {e}',
-                    data={'task_name': task_name},
+            return _resolution_failure(
+                task_name,
+                task_id,
+                heartbeat_stop_event,
+                f'Failed to resolve {task_name}: {type(e).__name__}: {e}',
+                f'{type(e).__name__}: {e}',
+            )
+        match _why_not_runnable(body_kind, task_loop):
+            case None:
+                pass
+            case not_runnable:
+                logger.error(f'Failed to resolve task {task_name}: {not_runnable}')
+                return _resolution_failure(
+                    task_name,
+                    task_id,
+                    heartbeat_stop_event,
+                    f'Failed to resolve {task_name}: {not_runnable}',
+                    not_runnable,
                 )
-            )
-            # Stop heartbeat thread since task failed to resolve
-            heartbeat_stop_event.set()
-            logger.debug(
-                f'Heartbeat stop signal sent for task {task_id} (resolution failed)'
-            )
-            return (True, serialize_error_payload(tr), f'{type(e).__name__}: {e}')
 
         # Deserialize task arguments. Strict-serde: positional args are
         # rejected at every producer; the wire shape for args is always
@@ -1454,7 +1570,7 @@ def _run_task_entry(
                 ),
             )
 
-        out = task(*args, **kwargs)  # __call__ returns TaskResult
+        out = _task_call_result(task_name, task(*args, **kwargs), task_loop)
         logger.info(f'Task execution completed: {task_name} ({task_id})')
 
         # Strict-serde phase 5: result encoding routes through
@@ -1472,9 +1588,6 @@ def _run_task_entry(
                 ),
             )
 
-        assert isinstance(out, TaskResult), (
-            f'task wrapper of {task_name!r} returned {type(out).__name__}'
-        )
         try:
             envelope = encode_returned_result(out, ok_type)
         except (StrictJsonError, ValueValidationError) as exc:

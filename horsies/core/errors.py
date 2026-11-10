@@ -74,7 +74,7 @@ class ErrorCode(str, Enum):
     TASK_INVALID_QUEUE = 'HRS-103'
     TASK_PREDECORATED_NOT_SUPPORTED = 'HRS-104'
     TASK_STRICT_SIGNATURE_VIOLATION = 'HRS-105'
-    TASK_ASYNC_FUNCTION_NOT_SUPPORTED = 'HRS-106'
+    # HRS-106 is retired and is not used again.
 
     # Config/broker (HRS-200-HRS-299)
     CONFIG_INVALID_QUEUE_MODE = 'HRS-200'

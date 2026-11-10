@@ -57,7 +57,7 @@ def add_numbers(*, a: int, b: int) -> TaskResult[int, TaskError]:
 ```
 
 Every task must return `TaskResult[T, TaskError]`.
-Task functions are sync (`def`). `@app.task()` refuses an `async def` function with `HRS-106`. Async task support is not available; use `.send_async()` and `.get_async()` on the producer side.
+A task function is `def` or `async def`. A worker child runs one task at a time, and an `async def` task runs on the one event loop that the child keeps. In an `async def` task, send with `.send_async()`: the sync `.send()` returns `Err(TaskSendAsyncContext)` in a running event loop. See `tasks.md`, Async tasks.
 Use `TaskResult(ok=value)` for success, `TaskResult(err=TaskError(...))` for failure.
 
 Register task modules for worker discovery:
@@ -341,7 +341,7 @@ Use `is_ok(result)` / `is_err(result)` type guards, or `match Ok / Err`.
 
 `HandleOperationError` is a union with one variant per `HandleErrorCode` member (`HandleWorkflowNotFound`, `HandleDbOperationFailed`, `HandleStoredDataInvalid`, `HandleResumeRecoveryFailed`, `HandleLoopRunnerFailed`, `HandleEventLoopLimit`, `HandleAsyncContext`); match on the variant. `HandleResumeRecoveryFailed` means `resume()` committed and only its recovery pass failed: the workflow is `RUNNING`.
 
-`EVENT_LOOP_LIMIT` (every catalog above, `BrokerErrorCode`, `RetrievalCode`, monitoring codes): a broker keeps one resource set per open event loop, up to 5 loops plus its sync runner loop. The next open loop gets this error and nothing runs; it clears when one of those loops closes.
+`EVENT_LOOP_LIMIT` (every catalog above, `BrokerErrorCode`, `RetrievalCode`, monitoring codes): a broker keeps one resource set per open event loop, up to 5 loops plus its sync runner loop and, in a worker child, the task loop. The next open loop gets this error and nothing runs; it clears when one of those loops closes.
 
 `ASYNC_CONTEXT` (every catalog above, `BrokerErrorCode`, `RetrievalCode`): a sync call was made on a thread that runs an event loop (a coroutine, a Jupyter cell). Its wait would stall that loop, so nothing ran. Call the `*_async` form. `retryable=False` where the error has the field; `RetrievalCode.ASYNC_CONTEXT` is not cached; `await spec.retry_start_async(err)` completes a start that returned it. `app.check(live=True)` there reports `HRS-217` (`CHECK_LIVE_ASYNC_CONTEXT`).
 

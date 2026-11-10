@@ -42,6 +42,7 @@ from horsies.core.worker.stored_timeout import (
     TimeoutValueInvalid,
 )
 from horsies.core.worker.worker import Worker, _initialize_worker_pool, _run_task_entry
+from horsies.core.worker.task_loop import TaskLoop
 from tests.broker_resources_support import current_resources, listener_of
 from tests.fixtures.slots.handles import task_finished_handle
 from tests.integration.history_seeding import read_attempts
@@ -105,6 +106,7 @@ def _run_in_process(
             is_workflow_task=is_workflow_task,
             timeout=timeout,
             claimed_at=claimed_at,
+            task_loop=TaskLoop(),
         )
         result = await worker._finalize_after(
             task_finished_handle(wire[0], wire[1], wire[2]),

@@ -63,6 +63,8 @@ from horsies.core.worker.worker import (
 from horsies.core.models.recovery import OrphanTaskAuditReport, RecoveryConfig
 from horsies.core.models.tasks import OperationalErrorCode
 from horsies.core.worker.child_protocol import (
+    LoopCreateFailedFrame,
+    NoTaskLoop,
     RssMb,
     RssUnreadable,
     RunFrame,
@@ -1170,7 +1172,7 @@ class TestFinalizeResultPayloadWarn:
         )
 
         handle = _finished_handle(
-            TaskFinished(True, '{"big": "' + 'x' * 1024 + '"}', None, RssUnreadable()),
+            TaskFinished(True, '{"big": "' + 'x' * 1024 + '"}', None, RssUnreadable(), NoTaskLoop()),
         )
 
         with caplog.at_level(logging.WARNING):
@@ -1294,7 +1296,7 @@ class TestFinalizeAfterSlotOutcome:
         )
 
         await worker._finalize_after(
-            _finished_handle(TaskFinished(True, '{}', None, RssUnreadable())),
+            _finished_handle(TaskFinished(True, '{}', None, RssUnreadable(), NoTaskLoop())),
             'task-13',
             task_name='helper_task',
         )
@@ -1376,7 +1378,7 @@ class TestAwaitSlotOutcome:
     async def test_a_result_inside_the_limit_needs_no_timeout_handler(self) -> None:
         worker = _make_worker()
         worker._handle_task_timeout = AsyncMock()  # type: ignore[method-assign]
-        done = TaskFinished(True, '{}', None, RssUnreadable())
+        done = TaskFinished(True, '{}', None, RssUnreadable(), NoTaskLoop())
 
         outcome = await worker._await_slot_outcome(
             _finished_handle(done),
@@ -1406,7 +1408,7 @@ class TestAwaitSlotOutcome:
         worker._handle_task_timeout = AsyncMock()  # type: ignore[method-assign]
         wait_for = AsyncMock()
         monkeypatch.setattr(asyncio, 'wait_for', wait_for)
-        done = TaskFinished(True, '{}', None, RssUnreadable())
+        done = TaskFinished(True, '{}', None, RssUnreadable(), NoTaskLoop())
 
         outcome = await worker._await_slot_outcome(
             _finished_handle(done), 'task-1', timeout, None,
@@ -1682,6 +1684,23 @@ class TestSlotFailureLoop:
 
         with pytest.raises(ChildStartFailedError):
             await worker._slot_failure_loop(pool)
+
+    @pytest.mark.asyncio
+    async def test_a_task_loop_failure_at_boot_names_its_cause(self) -> None:
+        """Replacement children that cannot create their task loop stop the
+        worker with the cause in the error."""
+        worker = _make_worker()
+        pool = MagicMock()
+        cause = LoopCreateFailedFrame(
+            error_name='OSError',
+            detail='[Errno 24] Too many open files',
+        ).describe()
+        pool.wait_failed = AsyncMock(return_value=BootAttemptsExhausted(3, cause))
+
+        with pytest.raises(ChildStartFailedError) as stopped:
+            await worker._slot_failure_loop(pool)  # pyright: ignore[reportPrivateUsage]
+
+        assert cause in str(stopped.value)
 
 
 @pytest.mark.unit

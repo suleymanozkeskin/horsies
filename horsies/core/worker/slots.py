@@ -50,12 +50,17 @@ from horsies.core.worker.child_protocol import (
     ChildFrame,
     FrameOverBound,
     InitFrame,
+    LoopCreateFailedFrame,
+    LoopHoldsNoTask,
+    LoopHoldsTasks,
     MalformedFrame,
+    NoTaskLoop,
     ParentFrame,
     ReadyFrame,
     ResultFrame,
     RssMb,
     RssReading,
+    TaskLoopReport,
     RssUnreadable,
     RunFrame,
     StopFrame,
@@ -140,12 +145,16 @@ class LossCause(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class TaskFinished:
-    """The child reported a result. ``ok`` has the ``_run_task_entry`` meaning."""
+    """The child reported a result. ``ok`` has the ``_run_task_entry`` meaning.
+
+    ``rss`` and ``task_loop`` decide whether the child takes another task.
+    """
 
     ok: bool
     result_json: str
     failed_reason: str | None
     rss: RssReading
+    task_loop: TaskLoopReport
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,6 +250,13 @@ class BootAttemptsExhausted:
 PoolFailure: TypeAlias = (
     SpawnFailed | ChildHookFailed | BootAttemptsExhausted | PreloadRefused
 )
+
+
+class _ChildAfterTask(Enum):
+    """Whether a child takes another task after a finished one."""
+
+    SERVE = 'serve'
+    RETIRE = 'retire'
 
 
 @dataclass(frozen=True, slots=True)
@@ -1146,7 +1162,7 @@ class SlotPool:
                     await child.dispose_lost()
                     slot.child = None
                     return Err(ChildHookFailed())
-                case ChildLost():
+                case ChildLost() | LoopCreateFailedFrame():
                     last_detail = ready.describe()
                 case WaitExpired():
                     last_detail = f'not ready after {CHILD_READY_TIMEOUT_S}s'
@@ -1221,12 +1237,13 @@ class SlotPool:
             outcome = await self._run_task(slot, child, handle)
             tasks_done += 1
             match outcome:
-                case TaskFinished(rss=rss):
+                case TaskFinished():
                     slot.defects = 0
-                    reason = self._recycle_reason(tasks_done, rss)
-                    if reason is not None:
-                        logger.debug('Retiring child pid=%s: %s', child.pid, reason.value)
-                        break
+                    match self._child_after_task(child, handle, outcome, tasks_done):
+                        case _ChildAfterTask.RETIRE:
+                            break
+                        case _ChildAfterTask.SERVE:
+                            pass
                 case ChildLost():
                     logger.warning(
                         'Lost child pid=%s on slot %s: %s',
@@ -1295,8 +1312,9 @@ class SlotPool:
                     answer.result_json,
                     answer.failed_reason,
                     answer.rss,
+                    answer.task_loop,
                 )
-            case ResultFrame() | ReadyFrame():
+            case ResultFrame() | ReadyFrame() | LoopCreateFailedFrame():
                 outcome = await child.discard_violating_child()
             case ChildLost():
                 outcome = answer
@@ -1307,6 +1325,35 @@ class SlotPool:
         slot.handle = None
         handle.finish(outcome)
         return outcome
+
+    def _child_after_task(
+        self,
+        child: Child,
+        handle: SlotHandle,
+        finished: TaskFinished,
+        tasks_done: int,
+    ) -> _ChildAfterTask:
+        """Read the task loop report of a finished task, and decide whether
+        the child takes another task."""
+        match finished.task_loop:
+            case LoopHoldsTasks() as leftover:
+                # No later task may run beside these asyncio tasks. The stop
+                # frame makes the child cancel them.
+                logger.warning(
+                    'Retiring child pid=%s: task %s left %d task(s) on its event '
+                    'loop: %s',
+                    child.pid,
+                    handle.frame.task_id,
+                    leftover.count,
+                    leftover.names_text(),
+                )
+                return _ChildAfterTask.RETIRE
+            case NoTaskLoop() | LoopHoldsNoTask():
+                reason = self._recycle_reason(tasks_done, finished.rss)
+                if reason is None:
+                    return _ChildAfterTask.SERVE
+                logger.debug('Retiring child pid=%s: %s', child.pid, reason.value)
+                return _ChildAfterTask.RETIRE
 
     def _recycle_reason(self, tasks_done: int, rss: RssReading) -> RecycleReason | None:
         limit = self._config.max_tasks_per_child

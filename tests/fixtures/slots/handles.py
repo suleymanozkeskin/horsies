@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-from horsies.core.worker.child_protocol import RssUnreadable, RunFrame
+from horsies.core.worker.child_protocol import NoTaskLoop, RssUnreadable, RunFrame
 from horsies.core.worker.stored_timeout import NoTimeout
 from horsies.core.worker.slots import SlotHandle, SlotOutcome, TaskFinished
 
@@ -42,5 +42,5 @@ def task_finished_handle(
 ) -> SlotHandle:
     """Return a handle for a task that ran and sent its result."""
     return finished_handle(
-        TaskFinished(ok, result_json, failed_reason, RssUnreadable()),
+        TaskFinished(ok, result_json, failed_reason, RssUnreadable(), NoTaskLoop()),
     )

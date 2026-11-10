@@ -7,9 +7,7 @@ tags: [tasks, decorator, definition]
 
 # Defining Tasks
 
-Define tasks by decorating functions with `@app.task()` and returning `TaskResult[T, TaskError]`. For argument serialization rules, see `sending-tasks`.
-
-**Note:** Task functions must be synchronous (`def`). `@app.task()` refuses an `async def` task function with `HRS-106`. Use `.send_async()` / `.get_async()` on the producer side for non-blocking I/O.
+Define tasks by decorating functions with `@app.task()` and returning `TaskResult[T, TaskError]`. A task function is a `def` or an `async def` function. For argument serialization rules, see `sending-tasks`.
 
 ## How To
 
@@ -29,6 +27,76 @@ def process_order(*, order_id: int) -> TaskResult[str, TaskError]:
     # Do work
     return TaskResult(ok=f"Order {order_id} processed")
 ```
+
+### Async Tasks
+
+Define a task with `async def` to await I/O in its body. `@app.task()` checks it as it checks a `def` task, and it returns a `TaskResult` in the same way.
+
+```python
+import asyncio
+
+@app.task("fetch_price", timeout_ms=30_000)
+async def fetch_price(*, symbol: str) -> TaskResult[float, TaskError]:
+    await asyncio.sleep(0.1)  # stands in for an awaited client call
+    return TaskResult(ok=101.5)
+```
+
+A worker child runs one task at a time, `def` or `async def`. Each child keeps one event loop until the child stops, and an async task runs on that loop. An async client that a module keeps stays open across the tasks of one child.
+
+The loop runs only while an async task runs. A `def` task runs with no running event loop, so it can call `asyncio.run()`. While the child runs a `def` task or waits for its next task, the timers of a module-level async client, for example a keepalive or a pool maintenance task, do not run.
+
+An async task must await the work that it starts:
+
+- When an async task ends and asyncio tasks that it started, for example with `asyncio.create_task()`, are still on the loop, the worker replaces the child after that task. The next task runs in a new child. When the old child stops, it cancels that work, within 5 seconds.
+- The worker sees asyncio tasks only. A callback that `loop.call_soon()` or `loop.call_later()` scheduled, and work that `loop.run_in_executor()` started and the task did not await, cause no replacement. They can still run during a later task of the same child.
+- A client that keeps its own background tasks on the loop, for example a keepalive or a consumer task, causes a child replacement after each async task.
+- A thread that `asyncio.to_thread()` starts can outlive its task, for example when a timeout ends the wait for it. The thread is not an asyncio task, so it does not cause a replacement. When the worker stops the child, the child does not wait for that thread past the close, which takes at most 6 seconds: it exits, and its `atexit` handlers do not run. An idle executor thread does not count: the shutdown of the executor gets at least 1 second, also when the cancel of left tasks used the first 5 seconds.
+- The worker log names the coroutine of each asyncio task that was left, for up to 10 tasks, for example `Retiring child pid=4242: task <id> left 1 task(s) on its event loop: refresh_session`.
+
+A task that cancels a helper task in `finally` must also await it. `cancel()` only asks the helper to stop. A helper that awaits while it stops, for example to close a session, is still on the loop when the task ends, and the worker replaces the child. Await the helper after the cancel:
+
+```python
+async def refresh_session() -> None:
+    try:
+        while True:
+            await asyncio.sleep(30)  # stands in for a keepalive call
+    finally:
+        await asyncio.sleep(0)  # stands in for closing the session
+
+
+@app.task("watch_price")
+async def watch_price(*, symbol: str) -> TaskResult[float, TaskError]:
+    helper = asyncio.create_task(refresh_session())
+    try:
+        await asyncio.sleep(0.1)  # stands in for the work of the task
+        return TaskResult(ok=101.5)
+    finally:
+        helper.cancel()
+        # gather returns the CancelledError of the helper instead of raising it.
+        await asyncio.gather(helper, return_exceptions=True)
+```
+
+A child creates its event loop at boot, before it reports ready, when the app has at least one `async def` task. A child of an app with no `async def` task creates no loop. When the loop cannot be created, for example because the process has no file descriptor left or an event loop policy raises:
+
+- The child fails its boot, and no task reaches it.
+- The worker counts it as a failed child start. After three failed attempts, the worker exits non-zero, so its supervisor restarts it. See [Worker Architecture](/horsies/workers/worker-architecture/#what-it-handles).
+- The log and the error name the cause, for example `the child could not create the event loop for async tasks: OSError: [Errno 24] Too many open files`.
+
+In an async task, send with `.send_async()` or `.schedule_async()`. The sync `.send()` and `.schedule()` refuse a running event loop: they return `Err(TaskSendAsyncContext)` and enqueue nothing. See [Sending Tasks](sending-tasks).
+
+```python
+from horsies import Ok, Err
+
+@app.task("refresh_price")
+async def refresh_price(*, symbol: str) -> TaskResult[str, TaskError]:
+    match await fetch_price.send_async(symbol=symbol):
+        case Ok(handle):
+            return TaskResult(ok=handle.task_id)
+        case Err(send_err):
+            return TaskResult(err=TaskError(error_code="SEND_FAILED", message=send_err.message))
+```
+
+`timeout_ms` works as for a `def` task: on expiry, the worker kills the child. An `async def` function that uses `yield` is refused with `HRS-101`.
 
 ### Parameters are keyword-only
 
@@ -225,6 +293,6 @@ def task_two() -> TaskResult[str, TaskError]:
 | `default_unhandled_error_code` | `str` | No | Error code for unmapped exceptions (overrides global) |
 | `timeout_ms` | `int` | No | Execution time limit in milliseconds, from 1000 to `MAX_TASK_TIMEOUT_MS` (4,294,967,295), measured from the moment a child takes the task. On expiry the child process is killed and the task fails with `TASK_TIMEOUT` |
 
-**Returns:** Decorated function that can be called directly or via `.send()` / `.send_async()`.
+**Returns:** For a `def` function, a `TaskFunction`: a direct call returns the `TaskResult`. For an `async def` function, an `AsyncTaskFunction`: a direct call returns a coroutine, and `await` gives the `TaskResult`. Both send with `.send()` / `.send_async()`.
 
 `good_until` is not accepted here — task expiry deadlines are a per-send concern. See [Sending Tasks — Set a Task Deadline](sending-tasks#set-a-task-deadline).
