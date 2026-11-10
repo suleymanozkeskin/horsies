@@ -66,7 +66,7 @@ async def test_worker_processes_task_and_workflow_through_pgbouncer_split_urls()
             assert schema_r.is_ok()
 
             try:
-                with run_worker(PGB_INSTANCE):
+                with run_worker(PGB_INSTANCE, profile='isolated-1'):
                     task_handle = unwrap_send(await pgbouncer_tasks.double.send_async(value=21))
                     assert_ok(await task_handle.get_async(timeout_ms=15000), 42)
 

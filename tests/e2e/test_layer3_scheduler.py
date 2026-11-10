@@ -75,7 +75,7 @@ async def test_schedule_executes_after_due_time(
 
     # Start scheduler AND worker (scheduler enqueues, worker executes)
     with run_scheduler(SCHEDULER_INSTANCE, timeout=10.0):
-        with run_worker(SCHEDULER_INSTANCE, timeout=10.0):
+        with run_worker(SCHEDULER_INSTANCE, profile='isolated-1', timeout=10.0):
             # The predefined schedule runs every 2 seconds.
             # Wait for first execution (schedule check + interval)
             # Poll DB for task creation
@@ -172,7 +172,7 @@ async def test_repeating_schedule(scheduler_broker: PostgresBroker) -> None:
     # Wait for at least 2 cycles (~5 seconds to be safe)
 
     with run_scheduler(SCHEDULER_INSTANCE, timeout=10.0):
-        with run_worker(SCHEDULER_INSTANCE, timeout=10.0):
+        with run_worker(SCHEDULER_INSTANCE, profile='isolated-1', timeout=10.0):
             # Step 1: Wait for the scheduler to fire at least 2 runs.
             # This decouples the assertion from subprocess startup time.
             deadline = time.time() + 15.0
@@ -349,7 +349,7 @@ async def test_schedule_with_args_passes_arguments(
 ) -> None:
     """T3.8: Scheduled task receives args and produces correct result (42*2=84)."""
     with run_scheduler(SCHEDULER_INSTANCE, timeout=10.0):
-        with run_worker(SCHEDULER_INSTANCE, timeout=10.0):
+        with run_worker(SCHEDULER_INSTANCE, profile='isolated-1', timeout=10.0):
             # Step 1: Wait for the scheduler to process the schedule.
             state: ScheduleStateModel | None = None
             deadline = time.time() + 15.0
@@ -514,7 +514,7 @@ async def test_catch_up_missed_enqueues_missed_runs(
 
     # Phase 3: Restart scheduler with worker - should catch up missed runs
     with run_scheduler(SCHEDULER_INSTANCE, timeout=10.0):
-        with run_worker(SCHEDULER_INSTANCE, timeout=10.0):
+        with run_worker(SCHEDULER_INSTANCE, profile='isolated-1', timeout=10.0):
             # Step 1: Wait for the scheduler to process the catch-up schedule.
             # Once next_run_at advances past the backdated value, the scheduler
             # has committed its catch-up enqueues.
@@ -571,7 +571,7 @@ async def test_scheduler_restart_reuses_existing_state(
     # Phase 1: Start scheduler + worker, let it run at least once
     state: ScheduleStateModel | None = None
     with run_scheduler(SCHEDULER_INSTANCE, timeout=10.0):
-        with run_worker(SCHEDULER_INSTANCE, timeout=10.0):
+        with run_worker(SCHEDULER_INSTANCE, profile='isolated-1', timeout=10.0):
             deadline = time.time() + 8.0
             while time.time() < deadline:
                 async with current_resources(scheduler_broker).session_factory() as session:

@@ -22,6 +22,7 @@ from horsies.core.history.periods import period_class_key
 from horsies.core.models.retention import RetentionConfig
 
 from tests.e2e.helpers.env import e2e_database_url
+from tests.e2e.tasks.profiles import E2E_WORKER_PROFILES
 
 DB_URL = e2e_database_url('HORSES_E2E_DB_URL')
 
@@ -42,6 +43,7 @@ config = AppConfig(
         partition_maintenance_interval_s=60,
         retention_periods=(E2E_CLASS_DURATION,),
     ),
+    worker_profiles=E2E_WORKER_PROFILES,
 )
 
 app = Horsies(config)

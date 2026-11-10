@@ -81,7 +81,7 @@ def test_a_booted_worker_registers_its_declared_class() -> None:
 
         with run_worker(
             INSTANCE,
-            processes=1,
+            profile='isolated-1',
             timeout=60.0,
             ready_check=_class_is_registered,
         ):

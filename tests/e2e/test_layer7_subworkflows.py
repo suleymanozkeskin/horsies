@@ -355,7 +355,11 @@ async def _workflow_task_rows(
 async def test_subworkflow_success_full_surface_matrix(
     broker: PostgresBroker,
 ) -> None:
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(wf_tasks.spec_subworkflow_success_full_surface)
 
         status = await wait_for_workflow_completion(
@@ -409,7 +413,11 @@ async def test_subworkflow_success_full_surface_matrix(
 async def test_subworkflow_failure_fail_policy_preserves_error_everywhere(
     broker: PostgresBroker,
 ) -> None:
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(wf_tasks.spec_subworkflow_failure_fail_policy)
 
         status = await wait_for_workflow_completion(
@@ -454,7 +462,11 @@ async def test_subworkflow_failure_fail_policy_preserves_error_everywhere(
 async def test_subworkflow_failure_pause_policy_preserves_error_after_resume(
     broker: PostgresBroker,
 ) -> None:
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(wf_tasks.spec_subworkflow_failure_pause_policy)
 
         async def _is_paused() -> bool:
@@ -502,7 +514,11 @@ async def test_subworkflow_failure_pause_policy_preserves_error_after_resume(
 async def test_successful_subworkflow_is_available_through_workflow_ctx(
     broker: PostgresBroker,
 ) -> None:
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(wf_tasks.spec_subworkflow_success_ctx_probe)
 
         status = await wait_for_workflow_completion(
@@ -527,7 +543,11 @@ async def test_successful_subworkflow_is_available_through_workflow_ctx(
 async def test_failed_subworkflow_flows_through_args_from_and_workflow_ctx(
     broker: PostgresBroker,
 ) -> None:
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(wf_tasks.spec_subworkflow_failure_args_ctx_probe)
 
         status = await wait_for_workflow_completion(
@@ -553,7 +573,11 @@ async def test_failed_subworkflow_flows_through_args_from_and_workflow_ctx(
 async def test_outputless_success_policy_keeps_failed_subworkflow_result(
     broker: PostgresBroker,
 ) -> None:
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(wf_tasks.spec_subworkflow_outputless_success_policy)
 
         status = await wait_for_workflow_completion(
@@ -583,7 +607,11 @@ async def test_outputless_success_policy_keeps_failed_subworkflow_result(
 async def test_parallel_subworkflows_preserve_independent_success_and_failure(
     broker: PostgresBroker,
 ) -> None:
-    with run_worker(DEFAULT_INSTANCE, processes=3, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-3',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(wf_tasks.spec_subworkflow_parallel_success_failure)
 
         status = await wait_for_workflow_completion(
@@ -618,7 +646,11 @@ async def test_parallel_subworkflows_preserve_independent_success_and_failure(
 async def test_nested_subworkflow_success_records_depth_root_and_result(
     broker: PostgresBroker,
 ) -> None:
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(wf_tasks.spec_subworkflow_nested_success)
 
         status = await wait_for_workflow_completion(
@@ -647,7 +679,11 @@ async def test_nested_subworkflow_success_records_depth_root_and_result(
 async def test_nested_subworkflow_failure_surfaces_each_child_error(
     broker: PostgresBroker,
 ) -> None:
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(wf_tasks.spec_subworkflow_nested_failure)
 
         status = await wait_for_workflow_completion(
@@ -680,7 +716,11 @@ async def test_nested_subworkflow_failure_surfaces_each_child_error(
 async def test_subworkflow_build_with_args_from_receives_typed_task_result(
     broker: PostgresBroker,
 ) -> None:
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(wf_tasks.spec_subworkflow_build_with_args_from)
 
         status = await wait_for_workflow_completion(
@@ -720,7 +760,11 @@ async def test_runtime_built_child_reads_its_shard_nodes_through_workflow_ctx(
     ``workflow_ctx``. Three shards of ten characters give a total of 30.
     """
     spec = fanout_tasks.TenantReport.build(fanout_tasks.app)
-    with run_worker(FANOUT_INSTANCE, ready_check=_fanout_ready_check()):
+    with run_worker(
+        FANOUT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_fanout_ready_check(),
+    ):
         handle = await start_ok_in_thread(spec)
 
         status = await wait_for_workflow_completion(
@@ -765,7 +809,11 @@ async def test_runtime_built_child_reads_its_shard_nodes_through_workflow_ctx(
 async def test_subworkflow_allow_failed_deps_passes_failed_task_result_to_build_with(
     broker: PostgresBroker,
 ) -> None:
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(
             wf_tasks.spec_subworkflow_allow_failed_deps_to_build_with,
         )
@@ -788,7 +836,11 @@ async def test_subworkflow_allow_failed_deps_passes_failed_task_result_to_build_
 async def test_subworkflow_static_kwargs_preserve_build_with_types(
     broker: PostgresBroker,
 ) -> None:
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(wf_tasks.spec_subworkflow_static_kwargs_preserve_types)
 
         status = await wait_for_workflow_completion(
@@ -832,7 +884,11 @@ async def test_subworkflow_join_any_first_success(
         output=child,
     )
 
-    with run_worker(DEFAULT_INSTANCE, processes=3, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-3',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(spec)
         child_id = await _wait_for_subworkflow_id(
             broker, handle.workflow_id, child.node_id or '',
@@ -875,7 +931,11 @@ async def test_subworkflow_join_any_all_fail(
         output=child,
     )
 
-    with run_worker(DEFAULT_INSTANCE, processes=2, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-2',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(spec)
         status = await wait_for_workflow_completion(
             current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0,
@@ -923,7 +983,11 @@ async def test_subworkflow_join_quorum_met(
         ),
     )
 
-    with run_worker(DEFAULT_INSTANCE, processes=3, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-3',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(spec)
         status = await wait_for_workflow_completion(
             current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0,
@@ -968,7 +1032,11 @@ async def test_subworkflow_join_quorum_unmet(
         output=child,
     )
 
-    with run_worker(DEFAULT_INSTANCE, processes=3, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-3',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(spec)
         status = await wait_for_workflow_completion(
             current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0,
@@ -1012,7 +1080,11 @@ async def test_subworkflow_join_quorum_impossible(
         output=child,
     )
 
-    with run_worker(DEFAULT_INSTANCE, processes=3, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-3',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(spec)
         skipped = await _wait_for_node_status(
             broker,
@@ -1049,7 +1121,11 @@ async def test_subworkflow_skip_task_fail_to_sub_skip(
         output=child,
     )
 
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(spec)
         status = await wait_for_workflow_completion(
             current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0,
@@ -1079,7 +1155,11 @@ async def test_subworkflow_skip_sub_fail_to_task_skip(
         output=downstream,
     )
 
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(spec)
         status = await wait_for_workflow_completion(
             current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0,
@@ -1093,7 +1173,11 @@ async def test_subworkflow_skip_sub_fail_to_task_skip(
 async def test_subworkflow_skip_allow_failed_deps(
     broker: PostgresBroker,
 ) -> None:
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(
             wf_tasks.spec_subworkflow_allow_failed_deps_to_build_with,
         )
@@ -1148,7 +1232,11 @@ async def test_subworkflow_skip_chain_skip(
         output=second_sub,
     )
 
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(spec)
         status = await wait_for_workflow_completion(
             current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0,
@@ -1175,7 +1263,11 @@ async def test_subworkflow_cancel_running_child_cascade(
         output=child,
     )
 
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(spec)
         child_id = await _wait_for_subworkflow_id(
             broker, handle.workflow_id, child.node_id or '',
@@ -1212,7 +1304,11 @@ async def test_subworkflow_cancel_before_start(
         output=child,
     )
 
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(spec)
         await _wait_for_node_status(
             broker, handle.workflow_id, gate.node_id or '', {'ENQUEUED', 'RUNNING'},
@@ -1232,7 +1328,11 @@ async def test_subworkflow_cancel_before_start(
 async def test_subworkflow_cancel_after_complete_noop(
     broker: PostgresBroker,
 ) -> None:
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(wf_tasks.spec_subworkflow_success_full_surface)
         status = await wait_for_workflow_completion(
             current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0,
@@ -1261,7 +1361,11 @@ async def test_subworkflow_cancel_nested_cascade(
         output=child,
     )
 
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(spec)
         middle_id = await _wait_for_subworkflow_id(
             broker, handle.workflow_id, child.node_id or '',
@@ -1303,7 +1407,11 @@ async def test_subworkflow_pause_running_child(
         output=child,
     )
 
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(spec)
         child_id = await _wait_for_subworkflow_id(
             broker, handle.workflow_id, child.node_id or '',
@@ -1332,7 +1440,11 @@ async def test_subworkflow_pause_resume_completes(
         output=child,
     )
 
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(spec)
         child_id = await _wait_for_subworkflow_id(
             broker, handle.workflow_id, child.node_id or '',
@@ -1369,7 +1481,11 @@ async def test_subworkflow_pause_then_cancel(
         output=child,
     )
 
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(spec)
         child_id = await _wait_for_subworkflow_id(
             broker, handle.workflow_id, child.node_id or '',
@@ -1429,7 +1545,11 @@ async def test_subworkflow_recovery_ready_unstarted(
         broker, handle.workflow_id, child.node_id or '',
     )
 
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         status = await wait_for_workflow_completion(
             current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0,
         )
@@ -1443,7 +1563,11 @@ async def test_subworkflow_recovery_ready_unstarted(
 async def test_subworkflow_recovery_child_complete_parent_not_updated(
     broker: PostgresBroker,
 ) -> None:
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(wf_tasks.spec_subworkflow_success_full_surface)
         status = await wait_for_workflow_completion(
             current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0,
@@ -1485,7 +1609,11 @@ async def test_subworkflow_recovery_child_complete_parent_not_updated(
 async def test_subworkflow_recovery_failed_child_parent_not_updated(
     broker: PostgresBroker,
 ) -> None:
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(wf_tasks.spec_subworkflow_failure_fail_policy)
         status = await wait_for_workflow_completion(
             current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0,
@@ -1562,7 +1690,11 @@ async def test_subworkflow_recovery_parent_crashed_mid_child(
 async def test_subworkflow_recovery_outputless_recovery(
     broker: PostgresBroker,
 ) -> None:
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(wf_tasks.spec_subworkflow_outputless_success_policy)
         status = await wait_for_workflow_completion(
             current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0,
@@ -1619,7 +1751,11 @@ async def test_subworkflow_child_retries_succeed_eventually(
         output=child,
     )
 
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(spec)
         status = await wait_for_workflow_completion(
             current_resources(broker).session_factory, handle.workflow_id, timeout_s=45.0,
@@ -1649,7 +1785,11 @@ async def test_subworkflow_child_retries_exhaust(
         output=child,
     )
 
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(spec)
         status = await wait_for_workflow_completion(
             current_resources(broker).session_factory, handle.workflow_id, timeout_s=75.0,
@@ -1715,7 +1855,11 @@ async def test_subworkflow_success_policy_required_fail_workflow_fail(
         success_policy=SuccessPolicy(cases=[SuccessCase(required=[child])]),
     )
 
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(spec)
         status = await wait_for_workflow_completion(
             current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0,
@@ -1749,7 +1893,11 @@ async def test_subworkflow_success_policy_optional_fail_workflow_complete(
         ),
     )
 
-    with run_worker(DEFAULT_INSTANCE, processes=2, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-2',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(spec)
         status = await wait_for_workflow_completion(
             current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0,
@@ -1783,7 +1931,11 @@ async def test_subworkflow_success_policy_multi_case_any(
         ),
     )
 
-    with run_worker(DEFAULT_INSTANCE, processes=2, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-2',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(spec)
         status = await wait_for_workflow_completion(
             current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0,
@@ -1821,7 +1973,11 @@ async def test_subworkflow_success_policy_mixed_required_optional(
         ),
     )
 
-    with run_worker(DEFAULT_INSTANCE, processes=3, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-3',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(spec)
         status = await wait_for_workflow_completion(
             current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0,
@@ -1843,7 +1999,11 @@ async def test_subworkflow_success_policy_mixed_required_optional(
 async def test_subworkflow_reconstructed_handle_status(
     broker: PostgresBroker,
 ) -> None:
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(wf_tasks.spec_subworkflow_success_full_surface)
         status = await wait_for_workflow_completion(
             current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0,
@@ -1863,7 +2023,11 @@ async def test_subworkflow_reconstructed_handle_status(
 async def test_subworkflow_reconstructed_handle_tasks(
     broker: PostgresBroker,
 ) -> None:
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(wf_tasks.spec_subworkflow_success_full_surface)
         status = await wait_for_workflow_completion(
             current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0,
@@ -1889,7 +2053,11 @@ async def test_subworkflow_reconstructed_handle_tasks(
 async def test_subworkflow_reconstructed_handle_results(
     broker: PostgresBroker,
 ) -> None:
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(wf_tasks.spec_subworkflow_success_full_surface)
         status = await wait_for_workflow_completion(
             current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0,
@@ -1930,7 +2098,11 @@ async def test_subworkflow_deep_outputless_nested_failed_optional(
         ),
     )
 
-    with run_worker(DEFAULT_INSTANCE, processes=2, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-2',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(spec)
         status = await wait_for_workflow_completion(
             current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0,
@@ -1974,7 +2146,11 @@ async def test_subworkflow_deep_outputless_all_failed_required(
         ),
     )
 
-    with run_worker(DEFAULT_INSTANCE, processes=2, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-2',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(spec)
         status = await wait_for_workflow_completion(
             current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0,
@@ -2025,7 +2201,11 @@ async def test_subworkflow_deep_mixed_paths(
         ),
     )
 
-    with run_worker(DEFAULT_INSTANCE, processes=4, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-4',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(spec)
         status = await wait_for_workflow_completion(
             current_resources(broker).session_factory, handle.workflow_id, timeout_s=20.0,

@@ -24,6 +24,7 @@ from horsies.core.models.retention import RetentionConfig
 from horsies.core.models.tasks import TaskError, TaskResult
 
 from tests.e2e.helpers.env import e2e_database_url
+from tests.e2e.tasks.profiles import E2E_WORKER_PROFILES
 
 DB_URL = e2e_database_url('HORSES_E2E_DB_URL')
 
@@ -44,6 +45,7 @@ config = AppConfig(
         retention_sweep_interval_s=30,
         queue_retention={MAPPED_QUEUE: MAPPED_DURATION},
     ),
+    worker_profiles=E2E_WORKER_PROFILES,
 )
 
 app = Horsies(config)

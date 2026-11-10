@@ -150,7 +150,7 @@ async def test_multi_worker_distribution(broker: PostgresBroker) -> None:
     with run_workers(
         DEFAULT_INSTANCE,
         count=num_workers,
-        processes=1,
+        profile='isolated-1',
         ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         # Enqueue slow tasks to force overlap and spread across workers
@@ -214,7 +214,7 @@ async def test_cluster_wide_cap(cluster_cap_broker: PostgresBroker) -> None:
     with run_workers(
         CLUSTER_CAP_INSTANCE,
         count=num_workers,
-        processes=2,  # Each worker has 2 processes
+        profile='isolated-2',  # Each worker has 2 processes
         ready_check=_make_ready_check(instance_cluster_cap.healthcheck),
     ):
         # Enqueue slow tasks (use cluster_cap-specific task)
@@ -278,7 +278,7 @@ async def test_per_queue_concurrency_cap(custom_broker: PostgresBroker) -> None:
     with run_workers(
         CUSTOM_INSTANCE,
         count=1,
-        processes=8,  # More processes than max_concurrency
+        profile='isolated-8',  # More processes than max_concurrency
         ready_check=_make_ready_check(queues_custom.high_task),
     ):
         # Enqueue slow tasks to the high queue (use custom-specific task)
@@ -344,7 +344,7 @@ def test_multi_worker_no_double_execution() -> None:
             with run_workers(
                 DEFAULT_INSTANCE,
                 count=num_workers,
-                processes=2,
+                profile='isolated-2',
                 ready_check=_make_ready_check(basic_tasks.healthcheck),
             ):
                 # Use unique tokens for each task
@@ -390,7 +390,7 @@ async def test_softcap_db_ledger_race_single_execution(
 
     with run_worker(
         SOFTCAP_INSTANCE,
-        processes=1,
+        profile='isolated-1',
         timeout=20.0,
         ready_check=_make_ready_check(instance_softcap.healthcheck),
     ):
@@ -432,7 +432,7 @@ async def test_softcap_db_ledger_race_single_execution(
 
         with run_worker(
             SOFTCAP_INSTANCE,
-            processes=1,
+            profile='isolated-1',
             timeout=20.0,
             ready_check=_make_ready_check(instance_softcap.healthcheck),
         ):
@@ -500,7 +500,7 @@ async def test_stale_running_marked_failed_on_crash(
 
     with run_worker(
         RECOVERY_INSTANCE,
-        processes=1,
+        profile='isolated-1',
         ready_check=_make_ready_check(instance_recovery.healthcheck),
     ) as worker_proc:
         # Enqueue a long-running task
@@ -528,7 +528,7 @@ async def test_stale_running_marked_failed_on_crash(
     # Start a NEW worker whose reaper will detect the orphaned task
     with run_worker(
         RECOVERY_INSTANCE,
-        processes=1,
+        profile='isolated-1',
         ready_check=_make_ready_check(instance_recovery.healthcheck),
     ):
         # Wait for task to reach terminal state (reaper marks it FAILED)
@@ -594,7 +594,7 @@ async def test_stale_claimed_requeued_and_completed(
     # Start a worker whose reaper will detect the stale CLAIMED task and requeue it
     with run_worker(
         RECOVERY_INSTANCE,
-        processes=1,
+        profile='isolated-1',
         ready_check=_make_ready_check(instance_recovery.healthcheck),
     ):
         await wait_for_all_terminal(
@@ -634,7 +634,7 @@ async def test_cluster_cap_not_leaked_on_failure(
     with run_workers(
         CLUSTER_CAP_INSTANCE,
         count=num_workers,
-        processes=2,
+        profile='isolated-2',
         ready_check=_make_ready_check(instance_cluster_cap.healthcheck),
     ):
         # Phase 1: Enqueue always-failing tasks
@@ -706,7 +706,7 @@ async def test_retry_works_across_multiple_workers(broker: PostgresBroker) -> No
     with run_workers(
         DEFAULT_INSTANCE,
         count=num_workers,
-        processes=2,
+        profile='isolated-2',
         ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         # Use .send() so retry policy (task_options) is persisted in DB
@@ -777,7 +777,7 @@ async def test_per_queue_caps_independent_across_queues(
     with run_workers(
         CUSTOM_INSTANCE,
         count=1,
-        processes=8,
+        profile='isolated-8',
         ready_check=_make_ready_check(queues_custom.high_task),
     ):
         # Enqueue tasks to both queues
@@ -893,7 +893,7 @@ async def test_queue_priority_ordering(custom_broker: PostgresBroker) -> None:
     # Start worker AFTER all tasks are enqueued — 1 process for serial execution
     with run_worker(
         CUSTOM_INSTANCE,
-        processes=1,
+        profile='isolated-1',
         ready_check=_make_ready_check(queues_custom.high_task),
     ):
         await wait_for_all_terminal(
@@ -948,7 +948,7 @@ async def test_single_worker_crash_remaining_continue(
     with run_workers(
         DEFAULT_INSTANCE,
         count=num_workers,
-        processes=2,
+        profile='isolated-2',
         ready_check=_make_ready_check(basic_tasks.healthcheck),
     ) as workers:
         task_ids = [
@@ -1031,7 +1031,7 @@ async def test_concurrent_enqueue_during_processing(
     with run_workers(
         DEFAULT_INSTANCE,
         count=num_workers,
-        processes=2,
+        profile='isolated-2',
         ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         # First batch
@@ -1112,7 +1112,7 @@ def test_softcap_lease_no_double_execution(
             with run_workers(
                 SOFTCAP_INSTANCE,
                 count=num_workers,
-                processes=1,
+                profile='isolated-1',
                 timeout=20.0,
                 ready_check=_make_ready_check(instance_softcap.healthcheck),
             ):
@@ -1195,7 +1195,7 @@ async def test_softcap_expired_claim_requeued(
             # Start 1 worker — its claim loop will pick up the expired claim
             with run_worker(
                 SOFTCAP_INSTANCE,
-                processes=1,
+                profile='isolated-1',
                 timeout=20.0,
                 ready_check=_make_ready_check(instance_softcap.healthcheck),
             ):
@@ -1260,7 +1260,7 @@ async def test_softcap_owner_transition_after_worker_crash(
         try:
             with run_worker(
                 SOFTCAP_INSTANCE,
-                processes=1,
+                profile='isolated-1',
                 timeout=20.0,
                 ready_check=_make_ready_check(instance_softcap.healthcheck),
             ) as worker_a_proc:
@@ -1305,7 +1305,7 @@ async def test_softcap_owner_transition_after_worker_crash(
 
                 with run_worker(
                     SOFTCAP_INSTANCE,
-                    processes=1,
+                    profile='isolated-1',
                     timeout=20.0,
                     ready_check=_make_ready_check(instance_softcap.healthcheck),
                 ):
@@ -1375,7 +1375,7 @@ def _start_fault_injected_worker() -> subprocess.Popen[str]:
         [
             'uv', 'run', 'horsies', 'worker',
             REQUEUE_GUARD_INSTANCE,
-            '--processes=1',
+            '--profile=isolated-1',
             '--loglevel=warning',
         ],
         env=env,
@@ -1395,7 +1395,7 @@ def _start_normal_worker() -> subprocess.Popen[str]:
         [
             'uv', 'run', 'horsies', 'worker',
             REQUEUE_GUARD_INSTANCE,
-            '--processes=1',
+            '--profile=isolated-1',
             '--loglevel=warning',
         ],
         env=env,

@@ -20,6 +20,7 @@ from horsies.core.models.queues import QueueMode
 from horsies.core.models.tasks import TaskError, TaskResult
 
 from tests.e2e.helpers.env import e2e_database_url
+from tests.e2e.tasks.profiles import E2E_WORKER_PROFILES
 from tests.e2e.tasks.loop_creation_budget import fail_loop_creation_on_demand
 
 DB_URL = e2e_database_url('HORSES_E2E_DB_URL')
@@ -31,6 +32,7 @@ config = AppConfig(
         pool_size=5,
         max_overflow=5,
     ),
+    worker_profiles=E2E_WORKER_PROFILES,
 )
 
 app = Horsies(config)

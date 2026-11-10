@@ -3,7 +3,7 @@
 
 Run every process from the repository root:
 
-    uv run horsies worker showcase.acme.app:app --processes 12
+    uv run horsies worker showcase.acme.app:app --profile default
     uv run horsies scheduler showcase.acme.app:app
     uv run horsies web showcase.acme.app:app --enable-actions
     uv run horsies check showcase.acme.app:app
@@ -32,6 +32,7 @@ from horsies import (
     Horsies,
     HourlySchedule,
     IntervalSchedule,
+    IsolatedChildren,
     Month,
     MonthlySchedule,
     PostgresConfig,
@@ -42,6 +43,7 @@ from horsies import (
     TaskSchedule,
     Weekday,
     WeeklySchedule,
+    WorkerProfile,
 )
 
 from . import domain, tuning
@@ -333,6 +335,13 @@ SCHEDULES: Final[ScheduleConfig] = ScheduleConfig(
     ],
 )
 
+# `horsies worker ... --profile default` runs 12 isolated children: about 1.6x
+# headroom over steady mode's demand, and just under the sum of the queue caps,
+# so a burst still drives the caps into a visible backlog.
+WORKER_PROFILES: Final[dict[str, WorkerProfile]] = {
+    'default': WorkerProfile(isolated=IsolatedChildren(count=12)),
+}
+
 app = Horsies(
     config=AppConfig(
         queue_mode=QueueMode.CUSTOM,
@@ -341,6 +350,7 @@ app = Horsies(
         recovery=RECOVERY,
         retention=RETENTION,
         schedule=SCHEDULES,
+        worker_profiles=WORKER_PROFILES,
         # One global mapping: any task that lets a KeyError escape reports
         # DATA_CORRUPTION. `apply_promotions` shows it next to an unmapped
         # exception, so the two interception paths sit side by side.

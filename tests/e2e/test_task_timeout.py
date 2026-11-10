@@ -61,7 +61,7 @@ async def test_timeout_fails_task_and_worker_survives(
     survives the pool restart and completes a subsequent task."""
     with run_worker(
         DEFAULT_INSTANCE,
-        processes=1,
+        profile='isolated-1',
         ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         handle = unwrap_send(await basic_tasks.timeout_sleeper.send_async(duration_ms=60_000))
@@ -127,7 +127,7 @@ async def test_timeout_backlog_drains_without_killing_worker(
     backlog_size = 24
     with run_worker(
         DEFAULT_INSTANCE,
-        processes=6,
+        profile='isolated-6',
         ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         # Staggered sends desynchronize the deadline kills: instead of one
@@ -201,7 +201,7 @@ async def test_pool_breaker_storm_does_not_kill_worker(
     storm_size = 12
     with run_worker(
         DEFAULT_INSTANCE,
-        processes=6,
+        profile='isolated-6',
         ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         handles: list[TaskHandle[str]] = []

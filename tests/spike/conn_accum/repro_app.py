@@ -18,11 +18,16 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
+from horsies.core.models.worker_profile import IsolatedChildren, WorkerProfile
 
 _DB_URL = os.environ.get(
     'HORSES_E2E_DB_URL',
     f'postgresql+psycopg://postgres:{os.environ.get("DB_PASSWORD", "")}@localhost:5432/horsies',
 )
+
+# The driver starts the worker with --profile=REPRO_PROFILE.
+PROCESSES = 4
+REPRO_PROFILE = 'repro'
 
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
@@ -31,6 +36,9 @@ config = AppConfig(
         pool_size=5,
         max_overflow=5,
     ),
+    worker_profiles={
+        REPRO_PROFILE: WorkerProfile(isolated=IsolatedChildren(count=PROCESSES)),
+    },
 )
 
 app = Horsies(config)
