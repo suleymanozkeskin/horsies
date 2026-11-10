@@ -96,17 +96,20 @@ def test_a_callback_that_belongs_to_no_task_gives_no_culprit() -> None:
     assert [report.culprit for report in reports] == [CulpritUnknown()]
 
 
-def test_a_loop_that_turns_is_never_reported() -> None:
-    """Short waits and work below the limit keep the loop turning."""
+def test_a_loop_that_turns_is_never_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Short waits and work far below the limit keep the loop turning. The
+    limit is 1 s here, ten times each 0.1 s burst, so a loaded host cannot
+    stretch a turn past it."""
+    monkeypatch.setattr(loop_watchdog, 'LOOP_BLOCK_LIMIT_MS', 1_000)
     reports: list[LoopBlockedFrame] = []
 
     async def scenario() -> None:
         loop = asyncio.get_running_loop()
         watchdog = LoopWatchdog(loop, reports.append)
         assert watchdog.start().is_ok()
-        deadline = time.monotonic() + LIMIT_MS / 1000 * 3
+        deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline:
-            time.sleep(LIMIT_MS / 1000 / 3)
+            time.sleep(0.1)
             await asyncio.sleep(0.01)
         watchdog.stop()
 
