@@ -84,6 +84,11 @@ from horsies.core.worker.slots import (
 )
 from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.worker.runtime import (
+    _AttemptEndUnknown,
+    _SlotAnsweredFirst,
+    _TimeoutOutcome,
+    _TimeoutSettled,
+    _TimeoutWriteFailed,
     _FINALIZE_FUTURE_MAX_RETRIES,
     _FINALIZE_PARENT_MAX_RETRIES,
     _FINALIZE_PHASE1_MAX_RETRIES,
@@ -209,7 +214,7 @@ class FinalizeMixin:
             task_id: str,
             timeout_ms: int,
             claimed_at: Optional[datetime] = None,
-        ) -> None: ...
+        ) -> _TimeoutOutcome: ...
         async def _requeue_claimed_task(
             self,
             task_id: str,
@@ -246,14 +251,21 @@ class FinalizeMixin:
         task_id: str,
         timeout: StoredTimeout,
         claimed_at: Optional[datetime],
-    ) -> SlotOutcome:
+    ) -> SlotOutcome | _TimeoutSettled | _AttemptEndUnknown:
         """Wait for the outcome. The timeout starts when a child gets the task.
 
         Time waiting for a free slot does not count: a ``TaskTimeout`` bounds
         execution. A refused stored timeout has no deadline: the child fails
         the task at once, before it resolves the task. Never raises for a
-        task; a timeout goes through ``_handle_task_timeout``, and the slot
-        still reports what happened.
+        task.
+
+        At the deadline ``_handle_task_timeout`` decides who finalizes the
+        task. ``_TimeoutSettled`` and ``_AttemptEndUnknown`` mean that the
+        timeout path wrote the row, or left it on purpose, so the slot's
+        outcome is not read. After ``_SlotAnsweredFirst`` or
+        ``_TimeoutWriteFailed`` the slot's outcome is returned, and the usual
+        path finalizes it: the child has exited or no longer holds the task,
+        so that outcome comes without an open-ended wait.
         """
         assigned = await asyncio.shield(handle.assigned)
         match assigned:
@@ -272,22 +284,25 @@ class FinalizeMixin:
                 assert_never(unreachable)
         try:
             # shield: wait_for must not cancel the outcome. The child keeps
-            # running regardless, and the outcome is awaited again below.
+            # running regardless, and the outcome may be awaited again below.
             return await asyncio.wait_for(
                 asyncio.shield(handle.outcome),
                 timeout=timeout_ms / 1000.0,
             )
         except asyncio.TimeoutError:
-            await self._handle_task_timeout(
+            timeout_outcome = await self._handle_task_timeout(
                 handle,
                 task_id,
                 timeout_ms,
                 claimed_at=claimed_at,
             )
-            # A kill ends the child, and the slot then reports it. A complete
-            # result that beat the kill still arrives here, and the fences in
-            # the persist path refuse it if the row has moved on.
-            return await asyncio.shield(handle.outcome)
+        match timeout_outcome:
+            case _TimeoutSettled() | _AttemptEndUnknown():
+                return timeout_outcome
+            case _SlotAnsweredFirst() | _TimeoutWriteFailed():
+                return await asyncio.shield(handle.outcome)
+            case _ as unreachable:
+                assert_never(unreachable)
 
     async def _finalize_after(
         self,
@@ -361,6 +376,10 @@ class FinalizeMixin:
                         },
                     )
                 )
+            case _TimeoutSettled() | _AttemptEndUnknown():
+                # The timeout path settled this row, or left it to stale-task
+                # recovery. Crash recovery must not write it as WORKER_CRASHED.
+                return Ok(None)
             case _ as unreachable:
                 assert_never(unreachable)
         now = datetime.now(timezone.utc)

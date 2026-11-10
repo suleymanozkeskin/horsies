@@ -1,8 +1,9 @@
 """E2E: per-task timeout_ms enforcement through a real worker.
 
 A task declared with timeout_ms outruns its deadline; the worker's
-parent-side enforcement persists TASK_TIMEOUT, SIGKILLs the child, and
-the process pool restarts. The worker must stay functional afterwards.
+parent-side enforcement SIGKILLs the child, waits for its exit, persists
+TASK_TIMEOUT, and the slot restarts. The worker must stay functional
+afterwards.
 """
 
 from __future__ import annotations

@@ -269,6 +269,24 @@ KillOutcome: TypeAlias = KillSent | NothingToKill
 
 
 @dataclass(frozen=True, slots=True)
+class ChildEnded:
+    """SIGKILL went to the child that held this task, and its exit was seen."""
+
+    pid: int
+    child_exit: ExitedWith | KilledBySignal
+
+
+@dataclass(frozen=True, slots=True)
+class ChildEndUnknown:
+    """SIGKILL went to the child that held this task. No exit was seen in the wait."""
+
+    pid: int
+
+
+KillWaitOutcome: TypeAlias = ChildEnded | ChildEndUnknown | NothingToKill
+
+
+@dataclass(frozen=True, slots=True)
 class Assigned:
     """The task frame reached a child."""
 
@@ -679,6 +697,15 @@ class Child:
     async def _wait_exit(self, timeout_s: float) -> None:
         await asyncio.wait({self._exit}, timeout=timeout_s)
 
+    async def wait_exit(self, timeout_s: float) -> ChildExit:
+        """Wait up to ``timeout_s`` for the process to end, and report its exit.
+
+        ``ExitUnknown`` means the process was not reaped in that time. Sends
+        no signal.
+        """
+        await self._wait_exit(timeout_s)
+        return self._current_exit()
+
     async def discard_violating_child(self) -> ChildLost:
         """Kill a child that sent a valid frame at the wrong time, and wait for it."""
         self.kill_group()
@@ -774,6 +801,26 @@ class SlotHandle:
             return NothingToKill()
         child.kill_for_caller()
         return KillSent()
+
+    async def kill_and_wait(self, wait_s: float) -> KillWaitOutcome:
+        """Kill the child only while it holds this task, then wait for its exit.
+
+        The kill is the one that ``kill`` sends. The wait follows the child
+        that got the kill, also after the slot ends the binding, and it ends
+        after ``wait_s``. Does not resolve ``outcome``: the slot still does
+        that. ``NothingToKill`` has the meaning that it has for ``kill``.
+        """
+        child = self._child
+        if child is None:
+            return NothingToKill()
+        child.kill_for_caller()
+        match await child.wait_exit(wait_s):
+            case ExitedWith() | KilledBySignal() as child_exit:
+                return ChildEnded(pid=child.pid, child_exit=child_exit)
+            case ExitUnknown():
+                return ChildEndUnknown(pid=child.pid)
+            case _ as unreachable:
+                assert_never(unreachable)
 
 
 @dataclass(slots=True)

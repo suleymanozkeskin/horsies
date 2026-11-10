@@ -24,6 +24,12 @@ from horsies.core.worker.finalize import (
     _PersistedTaskOutcome,
     _finalize_data_for_log,
 )
+from horsies.core.worker.runtime import (
+    _AttemptEndUnknown,
+    _SlotAnsweredFirst,
+    _TimeoutSettled,
+    _TimeoutWriteFailed,
+)
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.models.retention import RetentionConfig
 from horsies.core.worker.claiming import ClaimPass
@@ -78,7 +84,6 @@ from horsies.core.worker.slots import (
     KilledBySignal,
     LossCause,
     NotDispatched,
-    NothingToKill,
     NotRunCause,
     PoolStopped,
     SlotHandle,
@@ -1322,13 +1327,21 @@ class TestAwaitSlotOutcome:
         assert await waiter == NotDispatched(NotRunCause.POOL_STOPPING)
 
     @pytest.mark.asyncio
-    async def test_timeout_handler_runs_then_the_slot_decides(self) -> None:
+    @pytest.mark.parametrize(
+        'timeout_outcome',
+        [_SlotAnsweredFirst(), _TimeoutWriteFailed()],
+    )
+    async def test_the_slot_decides_when_the_timeout_path_did_not_settle(
+        self,
+        timeout_outcome: _SlotAnsweredFirst | _TimeoutWriteFailed,
+    ) -> None:
         worker = _make_worker()
         handle = SlotHandle(_run_frame(), asyncio.get_running_loop())
         handle.bind_child(MagicMock())
 
-        async def _timeout_handler(*_args: Any, **_kwargs: Any) -> None:
+        async def _timeout_handler(*_args: Any, **_kwargs: Any) -> object:
             handle.finish(_LOST)
+            return timeout_outcome
 
         worker._handle_task_timeout = AsyncMock(  # type: ignore[method-assign]
             side_effect=_timeout_handler,
@@ -1340,6 +1353,31 @@ class TestAwaitSlotOutcome:
 
         worker._handle_task_timeout.assert_awaited_once()
         assert outcome == _LOST
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        'timeout_outcome',
+        [_TimeoutSettled(), _AttemptEndUnknown()],
+    )
+    async def test_the_slot_outcome_is_not_read_when_the_timeout_path_owns_the_row(
+        self,
+        timeout_outcome: _TimeoutSettled | _AttemptEndUnknown,
+    ) -> None:
+        """The slot never answers here, so a read of its outcome would hang."""
+        worker = _make_worker()
+        handle = SlotHandle(_run_frame(), asyncio.get_running_loop())
+        handle.bind_child(MagicMock())
+        worker._handle_task_timeout = AsyncMock(  # type: ignore[method-assign]
+            return_value=timeout_outcome,
+        )
+
+        outcome = await asyncio.wait_for(
+            worker._await_slot_outcome(handle, 'task-1', TaskTimeout(ms=1), None),
+            5.0,
+        )
+
+        assert outcome == timeout_outcome
+        assert not handle.outcome.done()
 
     @pytest.mark.asyncio
     async def test_a_result_inside_the_limit_needs_no_timeout_handler(self) -> None:
@@ -1681,46 +1719,6 @@ class TestMemoryBaselineGuard:
                 (ChildBaseline(1, RssUnreadable()),),
             )
         assert 'unreadable' in caplog.text
-
-
-@pytest.mark.unit
-class TestTimedOutChildKill:
-    @pytest.mark.asyncio
-    async def test_the_child_that_holds_the_task_is_killed(self) -> None:
-        worker = _make_worker()
-        handle = SlotHandle(_run_frame(), asyncio.get_running_loop())
-        child = MagicMock()
-        handle.bind_child(child)
-
-        worker._kill_timed_out_child(handle, 'task-1', 1000)
-
-        child.kill_for_caller.assert_called_once_with()
-
-    @pytest.mark.asyncio
-    async def test_a_database_error_at_the_timeout_still_kills_the_child(self) -> None:
-        """The slot is held until the child exits, so the kill cannot wait on the row."""
-        worker = _make_worker()
-        worker.sf = MagicMock(side_effect=OperationalError('db down'))
-        handle = SlotHandle(_run_frame(), asyncio.get_running_loop())
-        child = MagicMock()
-        handle.bind_child(child)
-
-        await worker._handle_task_timeout(handle, 'task-1', 1000)
-
-        child.kill_for_caller.assert_called_once_with()
-
-    def test_a_child_that_no_longer_holds_the_task_is_not_killed(
-        self,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        worker = _make_worker()
-        handle = MagicMock()
-        handle.kill.return_value = NothingToKill()
-
-        with caplog.at_level(logging.WARNING, logger='horsies.worker'):
-            worker._kill_timed_out_child(handle, 'task-1', 1000)
-
-        assert 'no longer holds it' in caplog.text
 
 
 # ---------------------------------------------------------------------------

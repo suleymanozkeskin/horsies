@@ -46,6 +46,8 @@ from horsies.core.worker.slots import (
     Busy,
     Child,
     ChildBaseline,
+    ChildEnded,
+    ChildEndUnknown,
     ChildHookFailed,
     ChildLost,
     ExitedWith,
@@ -774,6 +776,72 @@ class TestKill:
         if not handle.outcome.done():
             handle.kill()
         assert isinstance(await _outcome(handle), ChildLost)
+
+
+@pytest.mark.asyncio(loop_scope='function')
+class TestKillAndWait:
+    """The timeout path waits for the exit before it writes the row."""
+
+    async def test_the_exit_of_the_killed_child_is_seen(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        pool = await pool_factory()
+        handle = pool.submit(_frame('hang'))
+        await asyncio.wait_for(handle.assigned, 5)
+        child = pool._slots[0].child
+        assert child is not None
+
+        ended = await handle.kill_and_wait(OUTCOME_TIMEOUT_S)
+
+        assert ended == ChildEnded(pid=child.pid, child_exit=KilledBySignal(9))
+        assert not _alive(child.pid)
+        lost = await _outcome(handle)
+        assert isinstance(lost, ChildLost)
+        assert lost.cause is LossCause.KILLED_BY_PARENT
+
+    async def test_a_finished_task_has_nothing_to_kill(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        pool = await pool_factory()
+        finished = pool.submit(_frame('echo', 'x'))
+        await _outcome(finished)
+        running = pool.submit(_frame('sleep', '0.3'))
+        await asyncio.wait_for(running.assigned, 5)
+
+        assert await finished.kill_and_wait(OUTCOME_TIMEOUT_S) == NothingToKill()
+        assert isinstance(await _outcome(running), TaskFinished)
+
+    async def test_a_child_that_does_not_end_in_the_wait_is_reported(self) -> None:
+        """A process stuck in the kernel ignores SIGKILL until it leaves it."""
+
+        class StuckProcess:
+            pid = NO_SUCH_PID
+            returncode = None
+
+            async def wait(self) -> int:
+                await asyncio.Event().wait()
+                raise AssertionError('a stuck process does not end')
+
+        parent_sock, child_sock = socket.socketpair()
+        child = await Child._attach(
+            cast('asyncio.subprocess.Process', StuckProcess()),
+            parent_sock,
+            _init(),
+        )
+        handle = SlotHandle(_frame('hang'), asyncio.get_running_loop())
+        handle.bind_child(child)
+        try:
+            ended = await handle.kill_and_wait(0.05)
+        finally:
+            child._exit.cancel()
+            child._transport.abort()
+            child_sock.close()
+
+        assert ended == ChildEndUnknown(pid=NO_SUCH_PID)
+        assert child.killed_by_parent
+        assert not handle.outcome.done()
 
 
 @pytest.mark.asyncio(loop_scope='function')

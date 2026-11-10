@@ -2,8 +2,9 @@
 
 DispatchMixin submits claimed rows to the slot pool and contains child
 failures: requeue of a task that never reached a child, recovery of a task
-whose child was lost, and the ownership-guarded timeout handler. Worker-internal
-mixin: the ``TYPE_CHECKING`` block declares the slice of ``Worker`` it relies on.
+whose child was lost, and the timeout handler, which ends the attempt before it
+writes the ownership-guarded row. Worker-internal mixin: the ``TYPE_CHECKING``
+block declares the slice of ``Worker`` it relies on.
 """
 
 # pyright: reportPrivateUsage=false
@@ -35,10 +36,27 @@ from horsies.core.models.tasks import (
     TaskError,
     TaskResult,
 )
-from horsies.core.types.result import Result, is_err
+from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.worker.child_protocol import RunFrame
-from horsies.core.worker.runtime import _FinalizeError, _RequeueOutcome, _RetryError
-from horsies.core.worker.slots import KillSent, NothingToKill, SlotHandle, SlotPool
+from horsies.core.worker.runtime import (
+    _AttemptEndUnknown,
+    _FinalizeError,
+    _RequeueOutcome,
+    _RetryError,
+    _SlotAnsweredFirst,
+    _TimeoutOutcome,
+    _TimeoutSettled,
+    _TimeoutWriteFailed,
+)
+from horsies.core.worker.slots import (
+    CHILD_KILL_WAIT_S,
+    ChildEnded,
+    ChildEndUnknown,
+    NothingToKill,
+    SlotHandle,
+    SlotPool,
+    describe_exit,
+)
 from horsies.core.worker.stored_timeout import NoTimeout, StoredTimeout
 from horsies.core.worker.sql import (
     SELECT_WORKER_OWNED_IN_FLIGHT_FOR_UPDATE_SQL,
@@ -449,211 +467,323 @@ class DispatchMixin:
         task_id: str,
         timeout_ms: int,
         claimed_at: Optional[datetime] = None,
-    ) -> None:
-        """Persist TASK_TIMEOUT for an over-deadline task and kill its child.
+    ) -> _TimeoutOutcome:
+        """End a timed-out attempt, then record the timeout.
 
-        Ownership-guarded like every finalize path: a row already resolved by
-        another actor (reaper reclaim, cancel) is left alone, and a CLAIMED row
-        (child never confirmed RUNNING) is requeued. The child is killed on
-        every path, also after a database error: a child past its deadline may
-        be hung, and only its exit frees the slot and ends the wait for it.
+        The attempt ends before its row moves. The child that holds this task
+        gets SIGKILL, with its session, and the parent waits up to
+        ``CHILD_KILL_WAIT_S`` for that child's exit. Only after the exit are
+        TASK_TIMEOUT, the retry, the attempt row or the requeue written, and
+        only then does phase 2 run. So a retry never runs next to the attempt
+        that it replaces, and phase 2 cannot start a successor while that
+        attempt runs. The kill is bound to this task's slot, so it cannot
+        reach the next task.
 
-        ``claimed_at`` fences the row lookup to this dispatch's claim
-        generation (C10); a re-claimed row is left alone entirely.
+        Returns:
+        - ``_SlotAnsweredFirst``: the child no longer held the task, so the
+          slot already has the outcome. Nothing is killed or written, and
+          the caller finalizes that outcome.
+        - ``_TimeoutSettled`` or ``_TimeoutWriteFailed``: the exit was seen,
+          and ``_record_task_timeout`` ran.
+        - ``_AttemptEndUnknown``: no exit was seen in the wait, so the
+          attempt may still have effects in flight. Nothing is written and
+          phase 2 does not run. The row keeps its state for stale-task
+          recovery: a RUNNING row fails after ``running_stale_threshold_ms``
+          with no runner heartbeat, and a CLAIMED row is claimed again when
+          its lease ends. Logged at critical level with the task id and pid.
 
-        A hung child keeps executing user code whatever the row says, and a
-        zombie attempt racing a re-claimed retry would be a double execution.
-        The kill is bound to this task's slot, so it cannot reach the next
-        task, and it goes to the child's session, so task subprocesses go too.
+        Does not raise for an expected database failure.
+        """
+        match await handle.kill_and_wait(CHILD_KILL_WAIT_S):
+            case NothingToKill():
+                logger.warning(
+                    'Skipping kill for timed-out task %s: its child no longer '
+                    'holds it, and the outcome that its slot reported stands',
+                    task_id,
+                )
+                return _SlotAnsweredFirst()
+            case ChildEndUnknown(pid=pid):
+                logger.critical(
+                    'Child pid=%s of timed-out task %s did not exit %ss after '
+                    'SIGKILL; nothing is written, and the row is left to '
+                    'stale-task recovery',
+                    pid,
+                    task_id,
+                    CHILD_KILL_WAIT_S,
+                )
+                return _AttemptEndUnknown()
+            case ChildEnded(pid=pid, child_exit=child_exit):
+                logger.warning(
+                    'Killed the child pid=%s of timed-out task %s '
+                    '(timeout_ms=%s, %s); the slot restarts and other tasks '
+                    'are not affected',
+                    pid,
+                    task_id,
+                    timeout_ms,
+                    describe_exit(child_exit),
+                )
+                return await self._record_task_timeout(
+                    task_id,
+                    timeout_ms,
+                    claimed_at,
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    async def _record_task_timeout(
+        self,
+        task_id: str,
+        timeout_ms: int,
+        claimed_at: Optional[datetime],
+    ) -> _TimeoutSettled | _TimeoutWriteFailed:
+        """Record the timeout of an attempt whose child has exited.
+
+        Ownership-guarded like every finalize path, and fenced to the claim
+        generation ``claimed_at``; None disables the fence.
+
+        ``_TimeoutSettled`` covers each way the row is settled:
+        - a RUNNING row fails with TASK_TIMEOUT and its attempt row, then
+          phase 2 runs; a phase-2 error goes to the finalize retry handler;
+        - a RUNNING row whose policy retries TASK_TIMEOUT gets its retry and
+          its attempt row;
+        - a CLAIMED row (the child never confirmed RUNNING) is requeued;
+        - a row that this claim already failed has its phase 2 replayed;
+        - a row that another actor holds (reaper reclaim, cancel) is left
+          alone.
+
+        ``_TimeoutWriteFailed``: a database error, or a failed retry decision
+        or retry schedule, logged here. An error before the commit leaves the
+        row unchanged; an error after it leaves the row written. The caller's
+        crash recovery reads the row under its lock and acts on its state.
         """
         try:
-            task_error = TaskError(
-                error_code=OutcomeCode.TASK_TIMEOUT,
-                message=f'Task exceeded timeout_ms={timeout_ms}',
-                data={'task_id': task_id, 'timeout_ms': timeout_ms},
-            )
-            task_result: TaskResult[None, TaskError] = TaskResult(err=task_error)
-            failure_command = FailLockedTask(
-                task_id=task_id,
-                fence=PriorLockedRead(worker_id=self.worker_instance_id),
-                result_json=serialize_error_payload(task_result),
-                error_code=OutcomeCode.TASK_TIMEOUT.value,
-                # T05 leaves the task summary reason unchanged. The attempt row
-                # owns this failure's reason.
-                failed_reason=None,
-            )
             async with self.sf() as s:
-                ctx_result = await s.execute(
-                    SELECT_WORKER_OWNED_IN_FLIGHT_FOR_UPDATE_SQL,
+                return await self._settle_timed_out_row(
+                    s,
+                    task_id,
+                    timeout_ms,
+                    claimed_at,
+                )
+        except Exception as exc:
+            logger.error(
+                'Failed to persist TASK_TIMEOUT for task %s: %s; crash '
+                'recovery will classify the row',
+                task_id,
+                exc,
+            )
+            return _TimeoutWriteFailed()
+
+    async def _settle_timed_out_row(
+        self,
+        s: AsyncSession,
+        task_id: str,
+        timeout_ms: int,
+        claimed_at: Optional[datetime],
+    ) -> _TimeoutSettled | _TimeoutWriteFailed:
+        """Lock this claim's row and settle it for a timeout.
+
+        The contract is the one of ``_record_task_timeout``. Database errors
+        raise to that caller.
+        """
+        task_error = TaskError(
+            error_code=OutcomeCode.TASK_TIMEOUT,
+            message=f'Task exceeded timeout_ms={timeout_ms}',
+            data={'task_id': task_id, 'timeout_ms': timeout_ms},
+        )
+        task_result: TaskResult[None, TaskError] = TaskResult(err=task_error)
+        failure_command = FailLockedTask(
+            task_id=task_id,
+            fence=PriorLockedRead(worker_id=self.worker_instance_id),
+            result_json=serialize_error_payload(task_result),
+            error_code=OutcomeCode.TASK_TIMEOUT.value,
+            # The task summary reason stays unchanged. The attempt row holds
+            # the reason of this failure.
+            failed_reason=None,
+        )
+        ctx_result = await s.execute(
+            SELECT_WORKER_OWNED_IN_FLIGHT_FOR_UPDATE_SQL,
+            {
+                'id': task_id,
+                'wid': self.worker_instance_id,
+                'claimed_at': claimed_at,
+            },
+        )
+        ctx_row = ctx_result.fetchone()
+        if ctx_row is None:
+            await self._settle_timeout_miss(s, task_id, failure_command, claimed_at)
+            return _TimeoutSettled()
+
+        status_value = (
+            ctx_row.status.value
+            if hasattr(ctx_row.status, 'value')
+            else str(ctx_row.status)
+        )
+        match status_value:
+            case 'CLAIMED':
+                await s.execute(
+                    UNCLAIM_CLAIMED_TASK_SQL,
                     {
                         'id': task_id,
                         'wid': self.worker_instance_id,
                         'claimed_at': claimed_at,
                     },
                 )
-                ctx_row = ctx_result.fetchone()
-                if ctx_row is None:
-                    miss_outcome = await classify_locked_read_miss_async(
-                        await s.connection(),
-                        failure_command,
-                        claimed_at=claimed_at,
-                    )
-                    match miss_outcome:
-                        case AlreadyApplied():
-                            await self._replay_committed_terminalization(
-                                task_id,
-                                s,
-                            )
-                            return
-                        case LostClaim() | SourceStateConflict() | TaskAbsent():
-                            await s.rollback()
-                            return
-                        case Applied():
-                            await s.rollback()
-                            raise RuntimeError(
-                                'locked-read miss classifier returned APPLIED'
-                            )
-                        case _ as unreachable:
-                            assert_never(unreachable)
-
-                status_value = (
-                    ctx_row.status.value
-                    if hasattr(ctx_row.status, 'value')
-                    else str(ctx_row.status)
-                )
-                if status_value == 'CLAIMED':
-                    await s.execute(
-                        UNCLAIM_CLAIMED_TASK_SQL,
-                        {
-                            'id': task_id,
-                            'wid': self.worker_instance_id,
-                            'claimed_at': claimed_at,
-                        },
-                    )
-                    await s.commit()
-                    logger.warning(
-                        'Task %s hit timeout_ms=%s before user code started; '
-                        'requeued',
-                        task_id,
-                        timeout_ms,
-                    )
-                    return
-
-                attempt_num = (ctx_row.retry_count or 0) + 1
-                db_now = ctx_row.db_now or datetime.now(timezone.utc)
-                attempt_started_at = ctx_row.started_at or db_now
-                attempt_worker = {
-                    'worker_id': ctx_row.claimed_by_worker_id,
-                    'worker_hostname': ctx_row.worker_hostname,
-                    'worker_pid': ctx_row.worker_pid,
-                    'worker_process_name': ctx_row.worker_process_name,
-                }
-
-                retry_scheduled = False
-                should_retry_r = await self._should_retry_task(
-                    task_id,
-                    task_error,
-                    s,
-                )
-                if is_err(should_retry_r):
-                    logger.error(
-                        'Retry decision failed for timed-out task %s: %s; '
-                        'killing the child anyway (crash recovery will '
-                        'classify the row)',
-                        task_id,
-                        should_retry_r.err_value.message,
-                    )
-                    return
-                if should_retry_r.ok_value:
-                    retry_r = await self._schedule_retry(
-                        task_id,
-                        s,
-                        queue_name=ctx_row.queue_name or 'default',
-                    )
-                    if is_err(retry_r):
-                        logger.error(
-                            'Retry scheduling failed for timed-out task %s: %s; '
-                            'killing the child anyway (crash recovery will '
-                            'classify the row)',
-                            task_id,
-                            retry_r.err_value.message,
-                        )
-                        return
-                    retry_scheduled = retry_r.ok_value == 'scheduled'
-
-                await s.execute(
-                    UPSERT_TASK_ATTEMPT_SQL,
-                    {
-                        'task_id': task_id,
-                        'attempt': attempt_num,
-                        'outcome': 'FAILED',
-                        'will_retry': retry_scheduled,
-                        'started_at': attempt_started_at,
-                        'finished_at': db_now,
-                        'error_code': OutcomeCode.TASK_TIMEOUT.value,
-                        'error_message': task_error.message,
-                        'failed_reason': task_error.message,
-                        **attempt_worker,
-                    },
-                )
-                if retry_scheduled:
-                    await s.commit()
-                    return
-
-                terminalization = await apply_async(
-                    await s.connection(),
-                    failure_command,
-                )
-                match terminalization:
-                    case Applied():
-                        await s.commit()
-                    case AlreadyApplied():
-                        await self._replay_committed_terminalization(task_id, s)
-                        return
-                    case LostClaim() | SourceStateConflict() | TaskAbsent():
-                        await s.rollback()
-                        return
-                    case _ as unreachable:
-                        assert_never(unreachable)
-                phase2_r = await self._finalize_workflow_phase(
-                    task_id,
-                    task_result,
-                    queue_name=ctx_row.queue_name or 'default',
-                    is_workflow_task=bool(ctx_row.is_workflow_task),
-                    task_name=str(ctx_row.task_name or ''),
-                )
-                if is_err(phase2_r):
-                    await self._handle_finalize_error(phase2_r.err_value)
-        except Exception as exc:
-            logger.error(
-                'Failed to persist TASK_TIMEOUT for task %s: %s; killing the '
-                'child anyway (crash recovery will classify the row)',
-                task_id,
-                exc,
-            )
-        finally:
-            self._kill_timed_out_child(handle, task_id, timeout_ms)
-
-    def _kill_timed_out_child(
-        self,
-        handle: SlotHandle,
-        task_id: str,
-        timeout_ms: int,
-    ) -> None:
-        """Kill the child that holds this task, if it still holds it."""
-        match handle.kill():
-            case KillSent():
+                await s.commit()
                 logger.warning(
-                    'Killed the child of timed-out task %s (timeout_ms=%s); the '
-                    'slot restarts and other tasks are not affected',
+                    'Task %s hit timeout_ms=%s before user code started; requeued',
                     task_id,
                     timeout_ms,
                 )
-            case NothingToKill():
-                logger.warning(
-                    'Skipping kill for timed-out task %s: its child no longer '
-                    'holds it',
-                    task_id,
+                return _TimeoutSettled()
+            case 'RUNNING':
+                return await self._fail_timed_out_attempt(
+                    s,
+                    ctx_row,
+                    task_result,
+                    failure_command,
                 )
+            case _:
+                raise RuntimeError(
+                    f'in-flight read of task {task_id} returned status '
+                    f'{status_value!r}',
+                )
+
+    async def _settle_timeout_miss(
+        self,
+        s: AsyncSession,
+        task_id: str,
+        failure_command: FailLockedTask,
+        claimed_at: Optional[datetime],
+    ) -> None:
+        """Settle a timeout whose locked read found no in-flight row of this claim.
+
+        A row that this claim already failed has its phase 2 replayed. A row
+        that another actor holds is left alone. Database errors raise.
+        """
+        miss_outcome = await classify_locked_read_miss_async(
+            await s.connection(),
+            failure_command,
+            claimed_at=claimed_at,
+        )
+        match miss_outcome:
+            case AlreadyApplied():
+                await self._replay_committed_terminalization(task_id, s)
+            case LostClaim() | SourceStateConflict() | TaskAbsent():
+                await s.rollback()
+            case Applied():
+                await s.rollback()
+                raise RuntimeError('locked-read miss classifier returned APPLIED')
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    async def _fail_timed_out_attempt(
+        self,
+        s: AsyncSession,
+        ctx_row: Any,
+        task_result: TaskResult[None, TaskError],
+        failure_command: FailLockedTask,
+    ) -> _TimeoutSettled | _TimeoutWriteFailed:
+        """Retry or fail a RUNNING row whose child has exited, then run phase 2.
+
+        ``ctx_row`` is this claim's row, locked in ``s``. The attempt row is
+        written in the same transaction as the retry or the fail. Phase 2
+        runs only after the fail commits. Database errors raise.
+        """
+        task_id = failure_command.task_id
+        task_error = task_result.unwrap_err()
+        queue_name = ctx_row.queue_name or 'default'
+        attempt_num = (ctx_row.retry_count or 0) + 1
+        db_now = ctx_row.db_now or datetime.now(timezone.utc)
+        attempt_started_at = ctx_row.started_at or db_now
+
+        retry_r = await self._schedule_timeout_retry(s, task_id, task_error, queue_name)
+        if is_err(retry_r):
+            return _TimeoutWriteFailed()
+        retry_scheduled = retry_r.ok_value
+
+        await s.execute(
+            UPSERT_TASK_ATTEMPT_SQL,
+            {
+                'task_id': task_id,
+                'attempt': attempt_num,
+                'outcome': 'FAILED',
+                'will_retry': retry_scheduled,
+                'started_at': attempt_started_at,
+                'finished_at': db_now,
+                'error_code': OutcomeCode.TASK_TIMEOUT.value,
+                'error_message': task_error.message,
+                'failed_reason': task_error.message,
+                'worker_id': ctx_row.claimed_by_worker_id,
+                'worker_hostname': ctx_row.worker_hostname,
+                'worker_pid': ctx_row.worker_pid,
+                'worker_process_name': ctx_row.worker_process_name,
+            },
+        )
+        if retry_scheduled:
+            await s.commit()
+            return _TimeoutSettled()
+
+        terminalization = await apply_async(await s.connection(), failure_command)
+        match terminalization:
+            case Applied():
+                await s.commit()
+            case AlreadyApplied():
+                await self._replay_committed_terminalization(task_id, s)
+                return _TimeoutSettled()
+            case LostClaim() | SourceStateConflict() | TaskAbsent():
+                await s.rollback()
+                return _TimeoutSettled()
+            case _ as unreachable:
+                assert_never(unreachable)
+        phase2_r = await self._finalize_workflow_phase(
+            task_id,
+            task_result,
+            queue_name=queue_name,
+            is_workflow_task=bool(ctx_row.is_workflow_task),
+            task_name=str(ctx_row.task_name or ''),
+        )
+        if is_err(phase2_r):
+            await self._handle_finalize_error(phase2_r.err_value)
+        return _TimeoutSettled()
+
+    async def _schedule_timeout_retry(
+        self,
+        s: AsyncSession,
+        task_id: str,
+        task_error: TaskError,
+        queue_name: str,
+    ) -> Result[bool, _RetryError]:
+        """Set a timed-out RUNNING row PENDING when its retry policy asks for it.
+
+        Ok(True): the retry is written in ``s``, not committed. Ok(False): no
+        retry; the policy declines it, it would land after ``good_until``, or
+        the row is no longer RUNNING. Err: the decision or the schedule
+        failed, logged here; ``s`` is then not usable for more statements.
+        """
+        should_retry_r = await self._should_retry_task(task_id, task_error, s)
+        if is_err(should_retry_r):
+            logger.error(
+                'Retry decision failed for timed-out task %s: %s; crash '
+                'recovery will classify the row',
+                task_id,
+                should_retry_r.err_value.message,
+            )
+            return Err(should_retry_r.err_value)
+        if not should_retry_r.ok_value:
+            return Ok(False)
+        retry_r = await self._schedule_retry(task_id, s, queue_name=queue_name)
+        if is_err(retry_r):
+            logger.error(
+                'Retry scheduling failed for timed-out task %s: %s; crash '
+                'recovery will classify the row',
+                task_id,
+                retry_r.err_value.message,
+            )
+            return Err(retry_r.err_value)
+        match retry_r.ok_value:
+            case 'scheduled':
+                return Ok(True)
+            case 'expired' | 'reaper_reclaimed':
+                return Ok(False)
             case _ as unreachable:
                 assert_never(unreachable)

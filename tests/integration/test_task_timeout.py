@@ -3,7 +3,8 @@
 
 Covers Worker._handle_task_timeout: the parent-side handler invoked when a
 dispatched task outruns TaskOptions.timeout_ms. The kill goes through the
-task's slot handle; these handles hold no child, so nothing is killed.
+task's slot handle. Each handle here holds a child double: it records the
+kill, and its exit is seen at once unless a test says otherwise.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from horsies.core.codec.task_options import serialize_task_options
 from horsies.core.models.tasks import OutcomeCode, TaskOptions
 from horsies.core.types.result import Ok, is_ok
 from horsies.core.worker.config import WorkerConfig
-from horsies.core.worker.slots import SlotHandle
+from horsies.core.worker.slots import ChildExit, ExitUnknown, KilledBySignal, SlotHandle
 from horsies.core.worker.stored_timeout import NoTimeout, TaskTimeout, read_stored_timeout
 from horsies.core.worker.worker import Worker
 from tests.fixtures.slots.handles import unbound_handle
@@ -39,9 +40,13 @@ OTHER_WORKER_ID = 'w-timeout-other'
 FAKE_DEAD_PID = 2**22 - 1
 
 
-def _handle_with_child() -> tuple[SlotHandle, MagicMock]:
+def _handle_with_child(
+    child_exit: ChildExit = KilledBySignal(9),
+) -> tuple[SlotHandle, MagicMock]:
     handle = unbound_handle()
     child = MagicMock()
+    child.pid = FAKE_DEAD_PID
+    child.wait_exit = AsyncMock(return_value=child_exit)
     handle.bind_child(child)
     return handle, child
 
@@ -164,9 +169,9 @@ async def test_timeout_replay_uses_committed_result_without_duplicate_attempt(
         return_value=Ok(None),
     )
 
-    await worker._handle_task_timeout(unbound_handle(), task_id, 5_000)
+    await worker._handle_task_timeout(_handle_with_child()[0], task_id, 5_000)
     worker._finalize_workflow_phase.reset_mock()
-    await worker._handle_task_timeout(unbound_handle(), task_id, 5_000)
+    await worker._handle_task_timeout(_handle_with_child()[0], task_id, 5_000)
 
     worker._finalize_workflow_phase.assert_awaited_once()
     persisted_result = worker._finalize_workflow_phase.await_args.args[1]
@@ -264,6 +269,47 @@ async def test_timeout_retries_when_opted_in(
     assert attempt.will_retry is True
     assert attempt.error_code == OutcomeCode.TASK_TIMEOUT.value
     child.kill_for_caller.assert_called_once_with()
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_timeout_without_a_seen_exit_leaves_the_row_running(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """No exit seen after SIGKILL → no write; stale-task recovery owns the row."""
+    task_id = await _insert_task(session)
+    worker = _make_worker(engine)
+
+    handle, child = _handle_with_child(ExitUnknown())
+    await worker._handle_task_timeout(handle, task_id, 5_000)
+    session.expire_all()
+
+    row = await _get_row(session, task_id)
+    assert row.status == 'RUNNING'
+    assert row.error_code is None
+    assert row.claimed_by_worker_id == TEST_WORKER_ID
+    assert await read_attempts(session, task_id) == ()
+    child.kill_for_caller.assert_called_once_with()
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_timeout_after_the_slot_answered_writes_nothing(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """A handle with no child: the slot's own outcome finalizes the row."""
+    task_id = await _insert_task(session)
+    worker = _make_worker(engine)
+
+    await worker._handle_task_timeout(unbound_handle(), task_id, 5_000)
+    session.expire_all()
+
+    row = await _get_row(session, task_id)
+    assert row.status == 'RUNNING'
+    assert await read_attempts(session, task_id) == ()
+
 
 class TestTimeoutWireRoundTrip:
     """serialize_task_options must carry timeout_ms to the claim-side reader.

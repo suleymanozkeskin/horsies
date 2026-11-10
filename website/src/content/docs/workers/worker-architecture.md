@@ -53,7 +53,7 @@ Each child holds one task, so a failure stays with that task.
 
 | Case | Result |
 | ---- | ------ |
-| A task exceeds `timeout_ms` | Its child and the subprocesses in its session are killed, and the task fails with `TASK_TIMEOUT`. Other tasks continue |
+| A task exceeds `timeout_ms` | Its child and the subprocesses in its session are killed. After the child exits, the task fails with `TASK_TIMEOUT`. Other tasks continue |
 | A child crashes (segfault, out-of-memory kill, `os._exit()`) | The worker sees the exit at once and recovers that task. Other tasks continue |
 | The worker dies | Each child stops at once, also while C code holds the GIL. A subprocess that a task started keeps running, because the child cannot act after a SIGKILL |
 | A supervisor sends SIGTERM to every process | Running tasks continue, and the worker drains them |
