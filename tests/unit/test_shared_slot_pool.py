@@ -53,6 +53,7 @@ from horsies.core.worker.slots import (
     CHILD_KILL_WAIT_S,
     Assigned,
     BootAttemptsExhausted,
+    ChildKilledPastDeadlines,
     ChildEnded,
     ChildHookFailed,
     ChildLost,
@@ -84,6 +85,7 @@ from horsies.core.worker.slots import (
     place_on_shared_child,
     shared_recycle_reason,
 )
+from horsies.core.worker.thread_slots import ClosedAtDeadline, RunCulprit
 from horsies.core.worker.shared_stop import (
     BesideBlockedLoop,
     BlockedLoopKill,
@@ -525,7 +527,7 @@ class TestDeadline:
         )
         neighbour = pool.submit_shared(_request('sleep', '30'))
         await asyncio.wait_for(asyncio.shield(neighbour.assigned), OUTCOME_TIMEOUT_S)
-        await _until(lambda: _closing_reason(pool) is CloseReason.TASK_STUCK)
+        await _until(lambda: _closed_by_a_stuck_task(pool))
 
         outcome = await stuck.backstop_kill(CHILD_KILL_WAIT_S)
 
@@ -581,14 +583,14 @@ class TestDeadline:
         assert _alive(int(pid))
 
 
-def _closing_reason(pool: SlotPool) -> CloseReason | None:
-    """The close reason of the one shared slot, or None while it is not
-    closing."""
+def _closed_by_a_stuck_task(pool: SlotPool) -> bool:
+    """Whether the one shared slot closed because a task is stuck: it
+    closes at that deadline, and it is killed when no task has time left."""
     match pool.shared_states():
-        case (Closing(reason=reason),):
-            return reason
+        case (Closing(reason=ClosedAtDeadline()),):
+            return True
         case _:
-            return None
+            return False
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -609,23 +611,23 @@ class TestTheStopOfARun:
                 grace_ms=MIN_CANCEL_GRACE_MS,
             )
         )
-        await _until(lambda: _closing_reason(pool) is CloseReason.TASK_STUCK)
+        await _until(lambda: _closed_by_a_stuck_task(pool))
         assert pool.shared_async_capacity() == 2
         assert not stuck.outcome.done()
 
         neighbour_pid = await _value(neighbour)
         stuck_outcome = await _outcome(stuck)
 
-        match stuck_outcome:
-            case SeatKilled(
-                verdict=TimedOutAtKill(retry=RetryPlacement.ISOLATED),
-                pid=pid,
-                child_exit=KilledBySignal(signal_number=number),
-            ):
-                assert pid == int(neighbour_pid)
-                assert number == signal.SIGKILL
-            case other:
-                raise AssertionError(other)
+        # The stuck task is the culprit of its own stop: its retry runs
+        # isolated (``culprit_retry``).
+        assert stuck_outcome == ChildKilledPastDeadlines(
+            pid=int(neighbour_pid),
+            child_exit=KilledBySignal(signal.SIGKILL),
+            culprit=RunCulprit(
+                dispatch=stuck.frame.dispatch,
+                task_id=stuck.frame.task_id,
+            ),
+        )
         replacement = await _value(pool.submit_shared(_request('pid')))
         assert int(replacement) != int(neighbour_pid)
 
@@ -670,8 +672,11 @@ class TestTheStopOfARun:
         )
 
         match await _outcome(handle):
-            case SeatKilled(verdict=TimedOutAtKill(retry=RetryPlacement.ISOLATED)):
-                pass
+            case ChildKilledPastDeadlines(culprit=culprit):
+                assert culprit == RunCulprit(
+                    dispatch=handle.frame.dispatch,
+                    task_id=handle.frame.task_id,
+                )
             case other:
                 raise AssertionError(other)
 

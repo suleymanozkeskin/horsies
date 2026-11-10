@@ -5,7 +5,9 @@ failures: requeue of a task that never reached a child, recovery of a task
 whose child was lost, and the timeout handlers, which end the attempt before
 they write the ownership-guarded row. A ``SHARED_ASYNC`` row goes to a shared
 async child when the claim plan of the worker claimed it into the
-``SHARED_ASYNC`` budget (``dispatch_route``). Worker-internal
+``SHARED_ASYNC`` budget, and a ``SHARED_THREAD`` row to a shared thread child
+when it claimed it into the ``SHARED_THREAD`` budget (``dispatch_route``).
+Worker-internal
 mixin: the ``TYPE_CHECKING`` block declares the slice of ``Worker`` it relies
 on.
 """
@@ -41,10 +43,19 @@ from horsies.core.models.tasks import (
     TaskResult,
 )
 from horsies.core.types.result import Err, Ok, Result, is_err
-from horsies.core.worker.child_protocol import RunFrame, SeatRefusal, SeatTask, SeatWork
+from horsies.core.worker.child_protocol import (
+    RunFrame,
+    SeatRefusal,
+    SeatTask,
+    SeatWork,
+    SharedWork,
+    ThreadSeatTask,
+    ThreadSeatWork,
+)
 from horsies.core.worker.dispatch_route import (
     RunIsolated,
     RunShared,
+    RunSharedThread,
     dispatch_route,
 )
 from horsies.core.worker.runtime import (
@@ -78,6 +89,7 @@ from horsies.core.worker.slots import (
 )
 from horsies.core.worker.shared_stop import RetryPlacement
 from horsies.core.worker.stored_timeout import NoTimeout, StoredTimeout
+from horsies.core.worker.thread_slots import ThreadRunRequest
 from horsies.core.worker.sql import (
     SELECT_WORKER_OWNED_IN_FLIGHT_FOR_UPDATE_SQL,
     UNCLAIM_CLAIMED_TASK_SQL,
@@ -124,7 +136,7 @@ class DispatchMixin:
             task_id: str,
             queue_name: str,
             is_workflow_task: bool,
-            work: SeatWork,
+            work: SharedWork,
             *,
             task_name: str,
             claimed_at: Optional[datetime],
@@ -470,9 +482,9 @@ class DispatchMixin:
 
         ``timeout`` is the stored timeout as the claim read it. A refusal is
         sent to the child, which sets the row RUNNING and fails the task with
-        WORKER_SERIALIZATION_ERROR before it resolves the task. A
-        ``SHARED_ASYNC`` row without a usable stored timeout or grace is
-        refused the same way, by the child that its budget names.
+        WORKER_SERIALIZATION_ERROR before it resolves the task. A shared row
+        without a usable stored timeout or grace is refused the same way, by
+        the child that its budget names.
         """
         slots = self._slots
         assert slots is not None, 'dispatch before the slot pool started'
@@ -489,6 +501,22 @@ class DispatchMixin:
                     queue_name,
                     is_workflow_task,
                     claimed_at,
+                )
+                return
+            case RunSharedThread(work=thread_work):
+                self._dispatch_shared_thread(
+                    slots,
+                    ThreadRunRequest(
+                        task_id=task_id,
+                        task_name=task_name,
+                        args_json=args_json,
+                        kwargs_json=kwargs_json,
+                        worker_id=self.worker_instance_id,
+                        is_workflow_task=is_workflow_task,
+                        claimed_at=claimed_at,
+                        work=thread_work,
+                    ),
+                    queue_name,
                 )
                 return
             case RunIsolated(timeout=isolated_timeout):
@@ -564,32 +592,59 @@ class DispatchMixin:
             finalizer=True,
         )
 
+    def _dispatch_shared_thread(
+        self,
+        slots: SlotPool,
+        request: ThreadRunRequest,
+        queue_name: str,
+    ) -> None:
+        """Submit a ``SHARED_THREAD`` row to the shared thread children, and
+        spawn its finalizer. ``request.work`` is the task with its deadline,
+        or the refusal that fails it. Never raises for a task."""
+        handle = slots.submit_shared(request)
+        work: ThreadSeatWork = request.work
+        self._spawn_background(
+            self._finalize_shared_after(
+                handle,
+                request.task_id,
+                queue_name,
+                request.is_workflow_task,
+                work,
+                task_name=request.task_name,
+                claimed_at=request.claimed_at,
+            ),
+            name=f'finalize-{request.task_id}',
+            finalizer=True,
+        )
+
     # ----- finalize (write back to DB + notify) -----
 
     async def _handle_shared_backstop(
         self,
         handle: SharedHandle,
         task_id: str,
-        work: SeatWork,
+        work: SharedWork,
     ) -> SharedOutcome | _AttemptEndUnknown:
         """Act on a shared run with no end at its backstop time.
 
-        The child reports the end of the cancel grace of a run at once, and
-        its watchdog reports a blocked loop. A child that has reported
-        neither the end of the grace nor the end of the run by the backstop
-        is frozen; a refusal reports neither, so its backstop always ends
-        the child. ``backstop_kill`` kills the child, bound to this run, and
-        waits for its exit. The slot then answers each run of the child by
-        its verdict (``shared_stop``): this run, past its deadline,
-        ``TASK_TIMEOUT``; a refusal, the crash path. A child that reported
-        the end of the grace is alive: nothing is killed, and the outcome
-        comes when the run ends or the child is killed.
+        The child reports at once the step of the stop of a run that is
+        due: the deadline of a thread task (a thread cannot be cancelled),
+        the second cancel of an async task. The watchdog of an async child
+        reports a blocked loop. A child that has reported neither that step
+        nor the end of the run by the backstop is frozen; a refusal reports
+        neither, so its backstop always ends the child. ``backstop_kill``
+        kills the child, bound to this run, and waits for its exit. The slot
+        then answers each run of the child by its verdict (``shared_stop``):
+        this run, past its deadline, ``TASK_TIMEOUT``; a refusal, the crash
+        path. A child that reported the step is alive: nothing is killed
+        here, and the outcome comes when the run ends or the slot kills the
+        child.
 
         Returns the outcome to finalize, or ``_AttemptEndUnknown`` (no exit
         seen: nothing is written, the row is left to stale-task recovery).
         """
         match work:
-            case SeatTask(timeout_ms=timeout_ms):
+            case SeatTask(timeout_ms=timeout_ms) | ThreadSeatTask(timeout_ms=timeout_ms):
                 limit = f'timeout_ms={timeout_ms}'
             case SeatRefusal():
                 limit = 'the refusal backstop'
@@ -599,7 +654,7 @@ class DispatchMixin:
             case ChildEnded(pid=pid, child_exit=child_exit):
                 logger.warning(
                     'Killed shared child pid=%s (%s): task %s passed %s and the '
-                    'child reported neither the end of its cancel grace nor its '
+                    'child reported neither the due step of its stop nor its '
                     'end; every task of that child ends with it',
                     pid,
                     describe_exit(child_exit),
@@ -619,9 +674,9 @@ class DispatchMixin:
                 return _AttemptEndUnknown()
             case DeadlineAcknowledged(pid=pid):
                 logger.warning(
-                    'Task %s still runs after its second cancel in shared child '
-                    'pid=%s; it keeps its seat until it ends, or until the child '
-                    'is killed when every task left in it is stuck',
+                    'Task %s has not ended in shared child pid=%s, which '
+                    'reported the stop of its deadline; it keeps its seat until '
+                    'it ends, its child is killed, or the worker stops',
                     task_id,
                     pid,
                 )

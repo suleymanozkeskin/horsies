@@ -118,6 +118,7 @@ export default defineConfig({
 						{ label: 'Worker Architecture', slug: 'workers/worker-architecture' },
 						{ label: 'Worker Profiles', slug: 'workers/worker-profiles' },
 						{ label: 'Shared Async Tasks', slug: 'workers/shared-async-tasks' },
+						{ label: 'Shared Thread Tasks', slug: 'workers/shared-thread-tasks' },
 						{ label: 'Concurrency', slug: 'workers/concurrency' },
 						{ label: 'Heartbeats & Recovery', slug: 'workers/heartbeats-recovery' },
 						{ label: 'Child-Process Hooks', slug: 'workers/child-process-hooks' },

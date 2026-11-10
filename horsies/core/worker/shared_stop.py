@@ -1,29 +1,29 @@
-"""What the worker writes for each run of a shared async child that it kills.
+"""What the worker writes for each run of a shared child that it kills.
 
-The worker kills a shared async child for a named cause, or for none:
+A shared child that has no task with time left is killed by the close and
+kill path of the slot pool (``ChildKilledPastDeadlines``): every task of a
+thread child is past its deadline, every task of an async child is stuck.
+Its culprit retries isolated (``culprit_retry``). The worker also kills a
+shared child for these causes:
 
-- ``StuckRunsKill``: every run left in the child is stuck. A stuck run did
-  not stop after its second cancel and its cancel rounds; the child closed
-  when the first one was reported, and the worker kills it only when no run
-  in it has time left.
-- ``BlockedLoopKill``: the watchdog of the child reported that the event loop
-  has not turned for the block limit. No task of the child can move, so the
-  kill comes at once.
+- ``BlockedLoopKill``: the watchdog of an async child reported that the
+  event loop has not turned for the block limit. No task of the child can
+  move, so the kill comes at once.
 - ``NoNamedKill``: a kill with no named cause: the backstop of a frozen child,
   the drain deadline of a stopping worker, a closed heartbeat registry.
 
-The verdict of each run, at a kill whose exit the worker saw:
+The verdict of each run at such a kill, whose exit the worker saw
+(``verdict_at_kill``):
 
-- a run past its own deadline: ``TASK_TIMEOUT``;
-- the run that blocked the loop, before its deadline: ``TASK_BLOCKED_LOOP``;
-- another run, before its deadline, when the loop was blocked and the
+- the run that blocked the loop: ``TASK_BLOCKED_LOOP`` before its deadline,
+  ``TASK_TIMEOUT`` past it; its retry runs in an isolated child;
+- another run past its own deadline: ``TASK_TIMEOUT``;
+- another run before its deadline, when the loop was blocked and the
   watchdog named the run that blocked it: ``NEIGHBOUR_BLOCKED_LOOP``;
 - any other run: the crash path (``WORKER_CRASHED``, or its retry).
 
-A run that was reported stuck, and the run that blocked the loop, retry in an
-isolated child when their policy retries them. A crash of the child that the
-worker did not cause takes the crash path for every run, and isolates no
-run. Pure.
+A kill with no named cause isolates no run, and neither does a crash of the
+child that the worker did not cause. Pure.
 """
 
 from __future__ import annotations
@@ -31,6 +31,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from typing import assert_never
+
+from horsies.core.worker.thread_slots import RunCulprit
 
 
 class RetryPlacement(Enum):
@@ -42,11 +44,6 @@ class RetryPlacement(Enum):
     ISOLATED = 'isolated'
     """In an isolated child: the row gets ``execution = 'ISOLATED'`` in the
     write that schedules the retry."""
-
-
-@dataclass(frozen=True, slots=True)
-class StuckRunsKill:
-    """Every run left in the child was reported stuck."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,7 +77,7 @@ class NoNamedKill:
     """No kill with a named cause was sent to this child."""
 
 
-type ChildKill = StuckRunsKill | BlockedLoopKill | NoNamedKill
+type ChildKill = BlockedLoopKill | NoNamedKill
 
 
 class DeadlineState(Enum):
@@ -141,24 +138,31 @@ def retry_placement(stop: StopState) -> RetryPlacement:
             assert_never(unreachable)
 
 
+def culprit_retry(culprit: RunCulprit, dispatch: int) -> RetryPlacement:
+    """The retry of run ``dispatch`` of a child killed when no task in it had
+    time left: the culprit retries isolated, every other run in its class."""
+    if culprit.dispatch == dispatch:
+        return RetryPlacement.ISOLATED
+    return RetryPlacement.SAME_CLASS
+
+
 def verdict_at_kill(
     kill: ChildKill,
     dispatch: int,
     deadline: DeadlineState,
-    stop: StopState,
 ) -> KilledRunVerdict | CrashPath:
     """The verdict of run ``dispatch`` at a kill of its child by the worker,
     whose exit was seen. Pure."""
     match kill:
         case BlockedLoopKill(holder=LoopHeldBy(dispatch=holder)) if holder == dispatch:
             return _verdict_of_holder(kill, deadline)
-        case BlockedLoopKill() | StuckRunsKill() | NoNamedKill():
+        case BlockedLoopKill() | NoNamedKill():
             pass
         case _ as unreachable:
             assert_never(unreachable)
     match deadline, kill:
         case DeadlineState.PASSED, _:
-            return TimedOutAtKill(retry=retry_placement(stop))
+            return TimedOutAtKill(retry=RetryPlacement.SAME_CLASS)
         case (
             DeadlineState.PENDING,
             BlockedLoopKill(holder=LoopHeldBy(task_id=holder_task_id)),
@@ -167,12 +171,7 @@ def verdict_at_kill(
                 holder_task_id=holder_task_id,
                 blocked_ms=kill.blocked_ms,
             )
-        case (
-            DeadlineState.PENDING,
-            BlockedLoopKill()
-            | StuckRunsKill()
-            | NoNamedKill(),
-        ):
+        case DeadlineState.PENDING, BlockedLoopKill() | NoNamedKill():
             return CrashPath()
         case _ as unreachable:
             assert_never(unreachable)

@@ -223,6 +223,51 @@ and there is no migration contract between pre-1.0 versions.
     warning count the shared children; the boot memory guard compares each
     mode's limit with the baseline of a child of that mode.
 
+- **Shared thread children run `SHARED_THREAD` tasks, many at once.**
+  `WorkerProfile.shared_thread` takes `SharedThreadChildren(count, seats,
+  recycle=SharedRecycle(after_per_seat, above))` or `NoSharedThreadChildren()`
+  (the default). A shared thread child is one process that runs up to `seats`
+  `def` tasks at once, each on a seat thread that the child starts at boot; a
+  free seat takes the next task at once. `count` is 1 to 1024 and `seats` is 1
+  to 256 (each seat is an OS thread with its own stack). A profile with only
+  shared thread children is valid. `SharedThreadChildren` and
+  `NoSharedThreadChildren` are exported from `horsies`.
+  - A worker with shared thread children claims `SHARED_THREAD` rows into a
+    `SHARED_THREAD` budget, whose capacity is the seats of its thread children
+    in service (a closing child counts only the tasks it still runs); its other
+    children never run one. A worker with none runs `SHARED_THREAD` rows in
+    isolated children. A new task goes to the open thread child with the
+    fewest tasks in flight.
+  - A thread cannot be cancelled. The child holds the deadline of each task:
+    at `timeout_ms` it reports the deadline and closes (it takes no new task),
+    and the task runs on. When every task still in the child is past its own
+    deadline, the worker kills the child with its session; after the exit,
+    each of those tasks fails with `TASK_TIMEOUT`, with its retry and its
+    workflow step. The task whose deadline closed the child retries in an
+    isolated child. A task alone in its child is killed at its deadline; a
+    neighbour with time left runs to its end. A task that ends by itself after
+    its deadline fails with `TASK_TIMEOUT`. A child that has not reported a
+    deadline by `timeout_ms + 10 s` is frozen (C code holds the GIL): the
+    worker kills it, each task past its deadline fails with `TASK_TIMEOUT`,
+    and every other task of the child takes the crash path.
+  - A crash or a kill of a thread child ends every task in it, each through
+    crash recovery after the worker saw the exit.
+  - A `SHARED_THREAD` row without a usable stored `timeout_ms` fails with
+    `WORKER_SERIALIZATION_ERROR` on every worker, also on an isolated child,
+    after its RUNNING update and before the task resolves.
+  - A thread child boots as an isolated child does and opens one sync pool of
+    `worker_child_pool_max_size` connections; its seat threads share it for
+    the RUNNING update and the finalizing marker, and wait up to 30 s for a
+    connection. A thread child runs only `def` tasks; a row that reaches one
+    with an `async def` function fails with `WORKER_RESOLUTION_ERROR`.
+  - Recycling is per seat, as for shared async children. The claim limit
+    check (`HRS-218`), the connection check (`HRS-219`), the memory warning
+    and the boot memory guard count the thread children.
+  - New docs page "Shared Thread Tasks", with
+    when threads help (C code that releases the GIL scales on every build;
+    pure-Python code needs a free-threaded build) and the rules for task
+    authors.
+
 - **A worker claims per execution class.** A worker has one claim budget
   for each execution class that it runs children for. Its capacity is the
   children (`ISOLATED`) or seats (a shared class) of that class in service.

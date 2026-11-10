@@ -1,7 +1,7 @@
 ---
 title: Worker Architecture
 summary: Worker-owned child processes for claiming and executing tasks.
-related: [concurrency, heartbeats-recovery, shared-async-tasks, ../../concepts/architecture]
+related: [concurrency, heartbeats-recovery, shared-async-tasks, shared-thread-tasks, ../../concepts/architecture]
 tags: [workers, architecture, child-processes]
 ---
 
@@ -35,6 +35,7 @@ A worker owns one child process per slot:
 - **Main process**: Coordinates claiming, dispatching, result handling, and writes the runner heartbeats of the running tasks
 - **Isolated children**: Execute task code in isolation, one task at a time. Set by `IsolatedChildren(count=N)` in the [worker profile](worker-profiles)
 - **Shared async children**: Execute up to `seats` `SHARED_ASYNC` tasks at once, as coroutines on one event loop. Set by `SharedAsyncChildren(count=N, seats=K)`. See [Shared Async Children](#shared-async-children)
+- **Shared thread children**: Execute up to `seats` `SHARED_THREAD` tasks at once, each on a thread of its own. Set by `SharedThreadChildren(count=N, seats=K)`. See [Shared Thread Children](#shared-thread-children)
 
 Each child:
 
@@ -50,7 +51,7 @@ Benefits:
 
 ## Failure Isolation
 
-Each isolated child holds one task, so a failure stays with that task. A shared async child holds the tasks of its seats, so a crash or a kill of it ends every task in it; see [Shared Async Children](#shared-async-children).
+Each isolated child holds one task, so a failure stays with that task. A shared child holds the tasks of its seats, so a crash or a kill of it ends every task in it; see [Shared Async Children](#shared-async-children) and [Shared Thread Children](#shared-thread-children).
 
 | Case | Result |
 | ---- | ------ |
@@ -171,6 +172,32 @@ The worker places each `SHARED_ASYNC` task on the open shared child with the few
 | The child reaches a recycle limit | It takes no new task, its tasks finish, then it stops and a new child starts |
 
 At a stop the worker closes each shared child: it takes no new task, and it exits by stop frame when its tasks have ended. At the drain deadline the worker kills a shared child that still runs tasks: each of them past its deadline fails with `TASK_TIMEOUT`, and every other one takes the crash path.
+
+## Shared Thread Children
+
+A shared thread child runs `SHARED_THREAD` tasks of the claimed rows. Its threads:
+
+- The control thread reads the frames of the worker and hands each one to the main thread.
+- The main thread starts the deadline of each run and hands the run to a free seat.
+- `seats` seat threads, started at boot. Each one runs one task at a time, and takes the next run when its task has ended.
+- The deadline thread reports each deadline at its time.
+- The writer thread writes the frames of the child.
+
+The child boots as an isolated child does: the import of the app, the `on_child_process_start` hooks, and one sync connection pool. Then it starts its threads and sends its ready frame. A refused thread fails the boot (`ThreadStartRefused`), and that cause can clear. Each task runs on its seat thread: the RUNNING update with the first runner heartbeat, the task body, and the finalizing marker. The seat threads share the sync pool of the child.
+
+The worker places each `SHARED_THREAD` task on the open shared thread child with the fewest tasks in flight and a free seat. The runner heartbeats of every task of the child come from the worker process.
+
+| Case | Result |
+| ---- | ------ |
+| A task reaches `timeout_ms` | The child reports the deadline, and the task runs on: a thread cannot be cancelled. The child closes: it takes no new task |
+| No task in a closed child has time left | The worker kills the child with its session. After the exit, each task that was still in it fails with `TASK_TIMEOUT`, with the retry and the next workflow step; the task whose deadline closed the child retries in an isolated child. A new child starts |
+| A task ends by itself after its deadline | The outcome is `TASK_TIMEOUT` |
+| A task in the closed child still has time left | It runs to its end or to its own deadline |
+| The child does not report a deadline by `timeout_ms + 10 s` | C code holds the GIL, and no thread of the child runs. The worker kills it: each task past its deadline fails with `TASK_TIMEOUT`, and every other task of the child takes the crash path |
+| The child crashes or is killed | Every task of the child takes the crash path, after the worker saw the exit. A new child starts |
+| The child reaches a recycle limit | It takes no new task, its tasks finish, then it stops and a new child starts |
+
+See [Shared Thread Tasks](shared-thread-tasks).
 
 ## Child Process Initialization
 
@@ -310,8 +337,8 @@ On SIGTERM/SIGINT the worker:
 
 1. Stops new claims
 2. Returns tasks that wait for a child or a seat to `PENDING`, because they have not started
-3. Waits up to the `drain_timeout` of the profile for running tasks (default 300 seconds). A shared async child takes no new task in this time
-4. Kills the children that still run a task. Each of these tasks takes the [child crash](heartbeats-recovery#child-process-crash) path; for a shared async child, every task in it
+3. Waits up to the `drain_timeout` of the profile for running tasks (default 300 seconds). A shared child takes no new task in this time
+4. Kills the children that still run a task. Each of these tasks takes the [child crash](heartbeats-recovery#child-process-crash) path; for a shared child, every task in it
 5. Waits for pending result writes
 6. Closes database connections
 

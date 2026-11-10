@@ -32,6 +32,7 @@ from horsies.core.types.result import Ok
 from horsies.core.models.worker_profile import (
     IsolatedChildren,
     SharedAsyncChildren,
+    SharedThreadChildren,
     WorkerProfile,
 )
 from horsies.core.worker.claim_plan import (
@@ -152,6 +153,7 @@ def _config_of(profile: WorkerProfile) -> WorkerConfig:
         queues=['default'],
         processes=settings.processes,
         shared_async=settings.shared_async,
+        shared_thread=settings.shared_thread,
     )
 
 
@@ -161,7 +163,9 @@ class TestPlanFromChildren:
         assert _config_of(profile).claim_plan() == isolated_children_plan()
 
     def test_no_children_give_no_budget(self) -> None:
-        assert claim_plan_for_children(0, 0) == ClaimPlan(budget_classes=frozenset())
+        assert claim_plan_for_children(0, 0, 0) == ClaimPlan(
+            budget_classes=frozenset(),
+        )
 
     def test_shared_async_children_give_a_shared_async_budget(self) -> None:
         profile = WorkerProfile(
@@ -177,6 +181,29 @@ class TestPlanFromChildren:
         plan = _config_of(profile).claim_plan()
         assert plan.budgets() == (SHARED_ASYNC,)
         assert plan.unserved() == (ISOLATED, SHARED_THREAD)
+
+    def test_shared_thread_children_give_a_shared_thread_budget(self) -> None:
+        profile = WorkerProfile(
+            isolated=IsolatedChildren(count=1),
+            shared_thread=SharedThreadChildren(count=2, seats=4),
+        )
+        plan = _config_of(profile).claim_plan()
+        assert plan == ClaimPlan(budget_classes=frozenset({ISOLATED, SHARED_THREAD}))
+        assert plan.route(SHARED_THREAD) == ServedBy(budget=SHARED_THREAD)
+        assert plan.route(SHARED_ASYNC) == ServedBy(budget=ISOLATED)
+
+    def test_only_shared_thread_children_serve_only_thread_rows(self) -> None:
+        profile = WorkerProfile(shared_thread=SharedThreadChildren(count=1, seats=4))
+        plan = _config_of(profile).claim_plan()
+        assert plan.budgets() == (SHARED_THREAD,)
+        assert plan.unserved() == (ISOLATED, SHARED_ASYNC)
+
+    def test_every_mode_gives_its_own_budget(self) -> None:
+        assert claim_plan_for_children(1, 1, 1).budgets() == (
+            ISOLATED,
+            SHARED_ASYNC,
+            SHARED_THREAD,
+        )
 
     def test_the_worker_config_default_is_the_isolated_plan(self) -> None:
         cfg = WorkerConfig(dsn='x', psycopg_dsn='y', queues=['default'])
@@ -530,11 +557,21 @@ class TestClaimPassWithClasses:
 
 class TestCapacityHook:
     @pytest.mark.asyncio
-    async def test_a_shared_thread_budget_is_a_defect(self) -> None:
-        """This worker starts no SHARED_THREAD children."""
-        worker = _worker()
-        with pytest.raises(AssertionError, match='SHARED_THREAD budget'):
-            worker._capacity_in_service(SHARED_THREAD)
+    async def test_the_shared_thread_budget_counts_the_seats_in_service(
+        self,
+    ) -> None:
+        """Before boot every shared slot is starting, so every seat counts.
+        Each shared budget counts only the seats of its own kind."""
+        worker = _worker(
+            processes=1,
+            shared_async=SharedAsyncChildren(count=1, seats=5),
+            shared_thread=SharedThreadChildren(count=3, seats=4),
+        )
+        assert worker._claim_capacity() == (
+            BudgetCapacity(budget=ISOLATED, in_service=1),
+            BudgetCapacity(budget=SHARED_ASYNC, in_service=5),
+            BudgetCapacity(budget=SHARED_THREAD, in_service=12),
+        )
 
     @pytest.mark.asyncio
     async def test_the_shared_async_budget_counts_the_seats_in_service(self) -> None:
@@ -583,8 +620,18 @@ class TestClassCapacityOfAProfile:
                 WorkerProfile(isolated=IsolatedChildren(count=2)),
                 (ClassBudget(ISOLATED, 2, (ISOLATED, SHARED_ASYNC, SHARED_THREAD)),),
             ),
+            (
+                WorkerProfile(
+                    isolated=IsolatedChildren(count=1),
+                    shared_thread=SharedThreadChildren(count=2, seats=3),
+                ),
+                (
+                    ClassBudget(ISOLATED, 1, (ISOLATED, SHARED_ASYNC)),
+                    ClassBudget(SHARED_THREAD, 6, (SHARED_THREAD,)),
+                ),
+            ),
         ],
-        ids=['isolated-and-shared', 'shared-only', 'isolated-only'],
+        ids=['isolated-and-shared', 'shared-only', 'isolated-only', 'thread'],
     )
     async def test_the_snapshot_value_reads_back(
         self,
@@ -595,6 +642,7 @@ class TestClassCapacityOfAProfile:
         worker = _worker(
             processes=settings.processes,
             shared_async=settings.shared_async,
+            shared_thread=settings.shared_thread,
         )
         stored = json.loads(
             json.dumps(

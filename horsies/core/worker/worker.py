@@ -33,13 +33,17 @@ from horsies.core.models.worker_profile import (
     MemoryLimit,
     NoMemoryLimit,
     NoSharedAsyncChildren,
+    NoSharedThreadChildren,
     SharedAsyncChildren,
+    SharedRecycle,
+    SharedThreadChildren,
 )
 from horsies.core.worker.child_protocol import (
     InitFrame,
     IsolatedChild,
     RssMb,
     SharedAsyncChild,
+    SharedThreadChild,
 )
 from horsies.core.worker.runner_heartbeat import (
     FailClosedCause,
@@ -194,6 +198,15 @@ from horsies.core.worker.runtime import (  # noqa: F401,E402
     _ReaperPassState as _ReaperPassState,
     _collect_psutil_metrics as _collect_psutil_metrics,
 )
+
+
+def _recycle_memory_limit_mb(recycle: SharedRecycle) -> int | None:
+    """The memory limit of a shared recycle setting, in MB, or None for none."""
+    match recycle.above:
+        case MemoryLimit(mb=mb):
+            return mb
+        case NoMemoryLimit():
+            return None
 
 
 def _check_baseline_against(
@@ -430,6 +443,7 @@ class Worker(
             max_memory_per_child_mb=self.cfg.max_memory_per_child_mb,
             child_preload=self.cfg.child_preload,
             shared_async=self.cfg.shared_async,
+            shared_thread=self.cfg.shared_thread,
         )
 
     def _pending_task_limit(self) -> int:
@@ -467,6 +481,19 @@ class Worker(
         match self._slots:
             case SlotPool() as pool:
                 return pool.shared_async_capacity()
+            case None:
+                raise AssertionError('a claim pass ran before the slot pool exists')
+
+    def _shared_thread_seats_in_service(self) -> int:
+        """The seats that the ``SHARED_THREAD`` budget counts
+        (``SlotPool.shared_thread_capacity``), as for ``SHARED_ASYNC``.
+
+        A claim pass before the slot pool exists is a defect:
+        ``AssertionError``.
+        """
+        match self._slots:
+            case SlotPool() as pool:
+                return pool.shared_thread_capacity()
             case None:
                 raise AssertionError('a claim pass ran before the slot pool exists')
 
@@ -511,7 +538,7 @@ class Worker(
                 logger.info(
                     'Worker child processes ready: %s/%s',
                     len(baselines),
-                    self.cfg.processes + self.cfg.shared_async_children(),
+                    self.cfg.child_count(),
                 )
                 self._check_memory_baseline(baselines)
                 self._runner_heartbeat = self._launch_runner_heartbeat(pool)
@@ -595,8 +622,8 @@ class Worker(
         """Fail or warn when the booted child baseline crowds the threshold.
 
         Each kind of child is compared with its own limit: isolated children
-        with ``max_memory_per_child_mb``, shared async children with the
-        memory limit of their recycle setting.
+        with ``max_memory_per_child_mb``, shared async and shared thread
+        children with the memory limit of their recycle setting.
 
         Raises:
             MemoryBaselineExceedsThresholdError: a child's settled baseline RSS
@@ -615,11 +642,7 @@ class Worker(
         )
         match self.cfg.shared_async:
             case SharedAsyncChildren(recycle=recycle):
-                match recycle.above:
-                    case MemoryLimit(mb=mb):
-                        shared_limit_mb: int | None = mb
-                    case NoMemoryLimit():
-                        shared_limit_mb = None
+                shared_limit_mb = _recycle_memory_limit_mb(recycle)
             case NoSharedAsyncChildren():
                 shared_limit_mb = None
         shared = tuple(
@@ -631,6 +654,20 @@ class Worker(
             shared,
             shared_limit_mb,
             'the shared async memory limit',
+        )
+        match self.cfg.shared_thread:
+            case SharedThreadChildren(recycle=recycle):
+                thread_limit_mb = _recycle_memory_limit_mb(recycle)
+            case NoSharedThreadChildren():
+                thread_limit_mb = None
+        _check_baseline_against(
+            tuple(
+                baseline
+                for baseline in baselines
+                if isinstance(baseline.child_kind, SharedThreadChild)
+            ),
+            thread_limit_mb,
+            'the shared thread memory limit',
         )
 
     def _stop_for_child_hook_failure(self, exc: ChildHookFailedError) -> None:
@@ -850,9 +887,10 @@ class Worker(
                 else self.cfg.seat_count()
             )
             logger.info(
-                'Concurrency config: processes=%s, shared_async_children=%s, seats=%s, cluster_wide_cap=%s, max_claim_per_worker=%s, max_claim_batch=%s',
+                'Concurrency config: processes=%s, shared_async_children=%s, shared_thread_children=%s, seats=%s, cluster_wide_cap=%s, max_claim_per_worker=%s, max_claim_batch=%s',
                 self.cfg.processes,
                 self.cfg.shared_async_children(),
+                self.cfg.shared_thread_children(),
                 self.cfg.seat_count(),
                 (
                     self.cfg.cluster_wide_cap

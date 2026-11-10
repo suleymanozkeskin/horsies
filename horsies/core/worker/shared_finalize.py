@@ -28,7 +28,12 @@ from typing import TYPE_CHECKING, Any, Optional, assert_never
 from horsies.core.logging import get_logger
 from horsies.core.models.tasks import OperationalErrorCode
 from horsies.core.types.result import Err, Ok, Result
-from horsies.core.worker.child_protocol import SeatRefusal, SeatTask, SeatWork
+from horsies.core.worker.child_protocol import (
+    SeatRefusal,
+    SeatTask,
+    SharedWork,
+    ThreadSeatTask,
+)
 from horsies.core.worker.runtime import (
     _FINALIZE_STAGE_FUTURE,
     _FinalizeError,
@@ -84,7 +89,7 @@ class SharedKillFinalizeMixin:
         self,
         task_id: str,
         killed: SeatKilled,
-        work: SeatWork,
+        work: SharedWork,
         claimed_at: Optional[datetime],
     ) -> Result[None, _FinalizeError]:
         """Write the verdict of a run whose child the worker killed and saw
@@ -94,7 +99,10 @@ class SharedKillFinalizeMixin:
         match killed.verdict:
             case TimedOutAtKill(retry=retry):
                 match work:
-                    case SeatTask(timeout_ms=timeout_ms):
+                    case (
+                        SeatTask(timeout_ms=timeout_ms)
+                        | ThreadSeatTask(timeout_ms=timeout_ms)
+                    ):
                         pass
                     case SeatRefusal():
                         raise AssertionError(

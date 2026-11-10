@@ -29,6 +29,7 @@ from horsies.core.worker.shared_stop import (
     TimedOutAtKill,
 )
 from horsies.core.worker.slots import (
+    ChildKilledPastDeadlines,
     KilledBySignal,
     SeatDeadlineEnded,
     SeatKilled,
@@ -36,6 +37,7 @@ from horsies.core.worker.slots import (
     SharedOutcome,
     SharedRunRequest,
 )
+from horsies.core.worker.thread_slots import RunCulprit
 from horsies.core.worker.worker import Worker
 from tests.integration.conftest import compute_test_enqueue_sha
 
@@ -146,6 +148,16 @@ async def _finalize(worker: Worker, task_id: str, outcome: SharedOutcome) -> Non
     )
 
 
+def _no_time_left(culprit_dispatch: int) -> ChildKilledPastDeadlines:
+    """The child was killed when no run had time left. The run under test is
+    run 1: it is the culprit when ``culprit_dispatch`` is 1."""
+    return ChildKilledPastDeadlines(
+        pid=FAKE_DEAD_PID,
+        child_exit=KilledBySignal(9),
+        culprit=RunCulprit(dispatch=culprit_dispatch, task_id='culprit'),
+    )
+
+
 def _killed(verdict: KilledRunVerdict) -> SeatKilled:
     return SeatKilled(verdict=verdict, pid=FAKE_DEAD_PID, child_exit=KilledBySignal(9))
 
@@ -195,12 +207,19 @@ async def _attempt(session: AsyncSession, task_id: str) -> Row[Any]:
 @pytest.mark.parametrize(
     ('outcome', 'execution'),
     [
-        (_killed(TimedOutAtKill(retry=RetryPlacement.ISOLATED)), 'ISOLATED'),
+        (_no_time_left(culprit_dispatch=1), 'ISOLATED'),
+        (_no_time_left(culprit_dispatch=2), 'SHARED_ASYNC'),
         (_killed(TimedOutAtKill(retry=RetryPlacement.SAME_CLASS)), 'SHARED_ASYNC'),
         (SeatDeadlineEnded(retry=RetryPlacement.ISOLATED), 'ISOLATED'),
         (SeatDeadlineEnded(retry=RetryPlacement.SAME_CLASS), 'SHARED_ASYNC'),
     ],
-    ids=['stuck-kill', 'kill-past-deadline', 'stuck-then-ended', 'ended-at-timeout'],
+    ids=[
+        'killed-as-culprit',
+        'killed-beside-the-culprit',
+        'killed-past-deadline-no-named-cause',
+        'stuck-then-ended',
+        'ended-at-timeout',
+    ],
 )
 async def test_a_timeout_retry_runs_where_its_verdict_says(
     engine: AsyncEngine,

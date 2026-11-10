@@ -37,6 +37,7 @@ from horsies.core.worker.child_protocol import (
     SeatRefusal,
     SeatTask,
     SharedRunFrame,
+    ThreadSeatTask,
     WireResult,
 )
 from horsies.core.worker import child_runner
@@ -206,6 +207,12 @@ async def run_seat_task(
                 return _stored_timeout_refusal_response(frame.task_name, refusal)
             case SeatTask():
                 pass
+            case ThreadSeatTask():
+                # The seat loop ends the child before such a run starts.
+                raise AssertionError(
+                    f'run {frame.dispatch} of a shared thread child reached a '
+                    'shared async seat',
+                )
             case _ as unreachable:
                 assert_never(unreachable)
         prepared = _prepare_task_call(

@@ -44,6 +44,8 @@ from horsies.core.worker.child_protocol import (
     SharedAsyncChild,
     SharedResultFrame,
     SharedRunFrame,
+    SharedThreadChild,
+    ThreadSeatTask,
     FRAME_HEADER,
     MAX_BODY_BYTES,
     MAX_BOOT_DETAIL_CHARS,
@@ -86,7 +88,10 @@ from horsies.core.models.tasks import (
     MIN_CANCEL_GRACE_MS,
     MIN_TASK_TIMEOUT_MS,
 )
-from horsies.core.models.worker_profile import MAX_SEATS_PER_SHARED_ASYNC_CHILD
+from horsies.core.models.worker_profile import (
+    MAX_SEATS_PER_SHARED_ASYNC_CHILD,
+    MAX_SEATS_PER_SHARED_THREAD_CHILD,
+)
 from horsies.core.worker.task_loop import AsyncTaskPresence
 from horsies.core.worker.stored_timeout import (
     CancelGraceInvalid,
@@ -168,6 +173,53 @@ def _shared_run_frame(**changes: object) -> SharedRunFrame:
 
 def _shared_result(end: SeatFinished | SeatTimedOut) -> SharedResultFrame:
     return SharedResultFrame(dispatch=7, task_id='task-1', end=end, rss=RssMb(80.5))
+
+
+class TestThreadFrames:
+    def test_thread_init_frame_round_trip(self) -> None:
+        frame = dataclasses.replace(
+            _init_frame(),
+            child_kind=SharedThreadChild(seats=MAX_SEATS_PER_SHARED_THREAD_CHILD),
+        )
+        meta, body = _split(encode_parent_frame(frame))
+        assert decode_parent_frame(meta, body) == Ok(frame)
+
+    def test_thread_run_frame_round_trip(self) -> None:
+        frame = _shared_run_frame(work=ThreadSeatTask(timeout_ms=30_000))
+        meta, body = _split(encode_parent_frame(frame))
+        assert decode_parent_frame(meta, body) == Ok(frame)
+
+    @pytest.mark.parametrize(
+        'work',
+        [
+            {'kind': 'thread_task', 'timeout_ms': MIN_TASK_TIMEOUT_MS - 1},
+            {'kind': 'thread_task', 'timeout_ms': MAX_TASK_TIMEOUT_MS + 1},
+            {'kind': 'thread_task', 'timeout_ms': None},
+            {'kind': 'thread_task', 'timeout_ms': True},
+            {'kind': 'thread_task'},
+        ],
+    )
+    def test_the_thread_task_work_is_checked(self, work: object) -> None:
+        frame = _shared_run_frame(work=ThreadSeatTask(timeout_ms=30_000))
+        meta, body = _split(encode_parent_frame(frame))
+        fields = json.loads(meta)
+        fields['work'] = work
+        assert isinstance(decode_parent_frame(json.dumps(fields).encode(), body), Err)
+
+    @pytest.mark.parametrize(
+        'child_kind',
+        [
+            {'kind': 'shared_thread'},
+            {'kind': 'shared_thread', 'seats': 0},
+            {'kind': 'shared_thread', 'seats': MAX_SEATS_PER_SHARED_THREAD_CHILD + 1},
+            {'kind': 'shared_thread', 'seats': '4'},
+        ],
+    )
+    def test_the_thread_child_kind_is_checked(self, child_kind: object) -> None:
+        meta, body = _split(encode_parent_frame(_init_frame()))
+        fields = json.loads(meta)
+        fields['child_kind'] = child_kind
+        assert isinstance(decode_parent_frame(json.dumps(fields).encode(), body), Err)
 
 
 class TestSharedFrames:

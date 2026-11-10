@@ -43,5 +43,6 @@ app.discover_tasks(
         'tests.e2e.tasks.workflows',
         'tests.e2e.tasks.async_tasks',
         'tests.e2e.tasks.shared_async_tasks',
+        'tests.e2e.tasks.shared_thread_tasks',
     ]
 )

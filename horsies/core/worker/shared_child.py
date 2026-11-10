@@ -86,6 +86,7 @@ from horsies.core.worker.child_protocol import (
     SharedResultFrame,
     SharedRunFrame,
     StopFrame,
+    ThreadSeatTask,
     WireResult,
     boot_failed_frame,
 )
@@ -388,6 +389,12 @@ class SeatLoop:
             case SeatRefusal():
                 stop = _Stop.NO_DEADLINE
                 timer = _NoTimer()
+            case ThreadSeatTask():
+                _exit_for_defect(
+                    f'parent sent run {frame.dispatch} of a shared thread child '
+                    'to a shared async child',
+                    BAD_PARENT_FRAME_EXIT_CODE,
+                )
             case _ as unreachable:
                 assert_never(unreachable)
         self._seats[frame.dispatch] = _Seat(frame, mark, task, stop, timer, set())
@@ -599,8 +606,10 @@ def _grace_s(frame: SharedRunFrame) -> float:
     match frame.work:
         case SeatTask(cancel_grace_ms=cancel_grace_ms):
             return cancel_grace_ms / 1000.0
-        case SeatRefusal():
-            raise AssertionError(f'run {frame.dispatch} has no deadline, so no grace')
+        case SeatRefusal() | ThreadSeatTask():
+            raise AssertionError(
+                f'run {frame.dispatch} has no cancel grace on a shared async child',
+            )
         case _ as unreachable:
             assert_never(unreachable)
 

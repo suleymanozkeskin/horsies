@@ -9,6 +9,10 @@ A shared async child runs the real seat loop of ``shared_child``. Only its
 seat program is replaced: ``_ScriptedSeatProgram`` starts with no pool, and
 each run is a scripted coroutine (``_seat_run``).
 
+A shared thread child runs the real seats of ``thread_child``. Only its seat
+program is replaced: each run is a scripted ``def`` call on the seat thread
+(``_ScriptedThreadSeats``).
+
 Each boot that passes reports an app with ``async def`` tasks, so ``serve``
 creates the task loop, except the ``no_async`` modes. The ``loop_*`` modes make
 that creation raise ``OSError(EMFILE)``. The ``report_*`` and ``short_*`` modes
@@ -59,6 +63,7 @@ from horsies.core.worker.child_protocol import (
     RunFrame,
     SharedRunFrame,
     StopFrame,
+    ThreadSeatWork,
     boot_failed_frame,
     encode_parent_frame,
 )
@@ -602,7 +607,54 @@ class _ScriptedSeatProgram:
                 return Ok(_ScriptedSeats())
 
 
-RUNNERS = TaskRunners(run_task=_run, seats=_ScriptedSeatProgram())
+def _thread_seat_run(frame: SharedRunFrame) -> WireResult:
+    """One scripted run on a thread seat. ``kwargs_json`` holds the argument."""
+    argument = frame.kwargs_json or ''
+    match frame.task_name:
+        case 'echo':
+            return True, argument, None
+        case 'pid':
+            return True, str(os.getpid()), None
+        case 'thread_name':
+            return True, threading.current_thread().name, None
+        case 'sleep':
+            time.sleep(float(argument))
+            return True, str(os.getpid()), None
+        case 'stamp':
+            started = time.time()
+            time.sleep(float(argument))
+            return True, f'{os.getpid()}:{started}:{time.time()}', None
+        case 'wait_for_file':
+            while not os.path.exists(argument):
+                time.sleep(0.005)
+            return True, str(os.getpid()), None
+        case 'late_value':
+            time.sleep(float(argument))
+            return True, 'late value', None
+        case 'gil_hang':
+            ctypes.PyDLL(None).sleep(3600)
+            return True, str(os.getpid()), None
+        case 'kill_self':
+            time.sleep(float(argument or '0'))
+            os.kill(os.getpid(), signal.SIGKILL)
+            return True, str(os.getpid()), None
+        case 'raises':
+            raise RuntimeError('scripted thread seat defect')
+        case _:
+            raise AssertionError(frame.task_name)
+
+
+class _ScriptedThreadSeats:
+    def run(self, frame: SharedRunFrame, work: ThreadSeatWork) -> WireResult:
+        _ = work
+        return _thread_seat_run(frame)
+
+
+RUNNERS = TaskRunners(
+    run_task=_run,
+    seats=_ScriptedSeatProgram(),
+    threads=_ScriptedThreadSeats(),
+)
 
 
 def _refuse_thread(_thread: threading.Thread) -> None:
