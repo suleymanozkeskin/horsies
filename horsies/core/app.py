@@ -128,6 +128,10 @@ _F = TypeVar('_F', bound=Callable[..., Any])
 # Sync, zero-argument callable run once per worker child process.
 ChildProcessStartHook = Callable[[], None]
 
+# Zero-argument coroutine function run once per shared async child, on the
+# event loop of that child, before its first task.
+SharedAsyncChildStartHook = Callable[[], Coroutine[Any, Any, None]]
+
 # Sentinel attribute name stamped on functions decorated with @app.workflow_builder
 _BUILDER_ATTR = '__horsies_workflow_builder__'
 
@@ -222,6 +226,9 @@ class Horsies:
         # Hooks run once per worker child process, after task imports and
         # before the child opens its own connection pool.
         self._child_process_start_hooks: list[ChildProcessStartHook] = []
+        # Hooks run once per shared async child, on its event loop, before it
+        # takes its first task.
+        self._shared_async_child_start_hooks: list[SharedAsyncChildStartHook] = []
 
         if os.getenv('HORSIES_CHILD_PROCESS') == '1':
             # Child processes re-run this on every recycle
@@ -290,6 +297,56 @@ class Horsies:
     def get_child_process_start_hooks(self) -> list[ChildProcessStartHook]:
         """Snapshot of registered child-process start hooks, in order."""
         return list(self._child_process_start_hooks)
+
+    def on_shared_async_child_start(
+        self,
+        fn: SharedAsyncChildStartHook,
+    ) -> SharedAsyncChildStartHook:
+        """Register a hook that runs once in every shared async child.
+
+        The hook is an ``async def`` function with no arguments. It runs on
+        the event loop of the child, before the child takes its first task,
+        so a client that it builds (an HTTP client, an async database pool)
+        is bound to the loop that every task of the child shares. Keep such
+        a client in module state, and use it from the tasks.
+
+        Hooks run after the ``on_child_process_start`` hooks and after the
+        child opens its connection pool, in registration order, each for at
+        most 10 seconds. A hook that raises or runs longer ends the child and
+        stops the worker, as an ``on_child_process_start`` hook does. They
+        run in every shared async child, also in a replacement child, so
+        bodies must be idempotent. Work that a hook starts and leaves
+        running, such as a background task of a client, belongs to no task.
+        Isolated children do not run these hooks.
+        """
+        if not callable(fn):
+            raise ConfigurationError(
+                message='on_shared_async_child_start requires a callable',
+                code=ErrorCode.CONFIG_INVALID_CHILD_HOOK,
+                notes=[f'got {type(fn).__name__!r}'],
+                help_text='register a zero-argument async def function',
+            )
+        if not inspect.iscoroutinefunction(fn):
+            raise ConfigurationError(
+                message='on_shared_async_child_start hooks must be async def',
+                code=ErrorCode.CONFIG_INVALID_CHILD_HOOK,
+                notes=[
+                    f"hook '{getattr(fn, '__name__', repr(fn))}' is not an async "
+                    'function',
+                    'the hook runs on the event loop of the shared async child',
+                ],
+                help_text=(
+                    'use an async def function; for setup with no event loop, '
+                    'use on_child_process_start'
+                ),
+            )
+        if all(existing is not fn for existing in self._shared_async_child_start_hooks):
+            self._shared_async_child_start_hooks.append(fn)
+        return fn
+
+    def get_shared_async_child_start_hooks(self) -> list[SharedAsyncChildStartHook]:
+        """Snapshot of registered shared async child start hooks, in order."""
+        return list(self._shared_async_child_start_hooks)
 
     def get_valid_queue_names(self) -> list[str]:
         """Get list of valid queue names based on configuration"""

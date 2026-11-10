@@ -1,11 +1,16 @@
 """Child program: ``python -m horsies.core.worker.child_main <fd> <parent pid>``.
 
-The child has two threads. The control thread owns socket reads, so EOF means
-the parent is gone, whatever the main thread is doing. The main thread boots
-the app, runs tasks one at a time, and writes results. An ``async def`` task
-runs on the child's one task loop (``task_loop.TaskLoop``), on the main thread.
-The child creates that loop at boot, before it reports ready, when its app has
-an ``async def`` task.
+The init frame names the kind of the child. An isolated child has two
+threads. The control thread owns socket reads, so EOF means the parent is
+gone, whatever the main thread is doing. The main thread boots the app, runs
+tasks one at a time, and writes results. An ``async def`` task runs on the
+child's one task loop (``task_loop.TaskLoop``), on the main thread. The child
+creates that loop at boot, before it reports ready, when its app has an
+``async def`` task.
+
+A shared async child runs up to its seats ``async def`` tasks at once on its
+task loop, which runs from the ready frame to the stop frame; see
+``shared_child``.
 
 When the parent is gone the child exits at once. Nothing can save its result,
 and a run that continues could overlap a retry of the same task.
@@ -26,7 +31,8 @@ import socket
 import sys
 import threading
 from collections.abc import Callable, Sequence
-from typing import Final, NoReturn, assert_never
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Final, NoReturn, TypeAlias, assert_never
 
 from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.logging import get_logger
@@ -48,6 +54,7 @@ from horsies.core.worker.child_protocol import (
     ChildFrame,
     FrameOverBound,
     InitFrame,
+    IsolatedChild,
     LoopHoldsNoTask,
     LoopHoldsTasks,
     NoTaskLoop,
@@ -58,8 +65,10 @@ from horsies.core.worker.child_protocol import (
     RssReading,
     RssUnreadable,
     RunFrame,
+    SharedAsyncChild,
     SharedRunFrame,
     StopFrame,
+    WireResult,
     boot_failed_frame,
     decode_parent_frame,
     encode_child_frame,
@@ -74,6 +83,9 @@ from horsies.core.worker.task_loop import (
     LoopCreateFailed,
     TaskLoop,
 )
+
+if TYPE_CHECKING:
+    from horsies.core.worker.shared_child import SeatProgram
 
 logger = get_logger('worker')
 
@@ -92,11 +104,68 @@ MAX_FAILED_REASON_CHARS: Final = 64 * 1024
 
 _PR_SET_PDEATHSIG: Final = 1
 
-WireResult = tuple[bool, str, str | None]
 # A boot step returns whether the booted app has an ``async def`` task, or the
 # frame that reports why it failed.
 BootFn = Callable[[InitFrame], Result[AsyncTaskPresence, BootFailedFrame]]
 RunTaskFn = Callable[[RunFrame, InitFrame, TaskLoop], WireResult]
+# The frames that the control thread hands to the main thread.
+WorkFrame: TypeAlias = RunFrame | SharedRunFrame | StopFrame
+
+
+@dataclass(frozen=True, slots=True)
+class TaskRunners:
+    """How a child runs tasks: ``run_task`` runs one task of an isolated
+    child, ``seats`` runs the seats of a shared async child."""
+
+    run_task: RunTaskFn
+    seats: SeatProgram
+
+
+@dataclass(frozen=True, slots=True)
+class NoFrameYet:
+    """The inbox holds no frame now."""
+
+
+def _nothing_to_wake() -> None:
+    return None
+
+
+class ParentFrameInbox:
+    """Frames from the control thread to the main thread. Safe between threads.
+
+    The isolated main thread waits in ``get``. A shared async child reads with
+    ``take`` on its event loop, and ``call_on_put`` makes each later ``put``
+    wake that loop. Holds at most the frames the parent sent and the main
+    thread has not read: the parent sends a run only to a free seat.
+    """
+
+    def __init__(self) -> None:
+        self._frames: queue.SimpleQueue[WorkFrame] = queue.SimpleQueue()
+        self._lock = threading.Lock()
+        self._on_put: Callable[[], None] = _nothing_to_wake
+
+    def put(self, frame: WorkFrame) -> None:
+        """Control thread: hand over one frame, then run the wake callback."""
+        self._frames.put(frame)
+        with self._lock:
+            on_put = self._on_put
+        on_put()
+
+    def get(self) -> WorkFrame:
+        """Wait for the next frame. Blocks the calling thread."""
+        return self._frames.get()
+
+    def take(self) -> WorkFrame | NoFrameYet:
+        """The next frame, or ``NoFrameYet`` at once. Never blocks."""
+        try:
+            return self._frames.get_nowait()
+        except queue.Empty:
+            return NoFrameYet()
+
+    def call_on_put(self, on_put: Callable[[], None]) -> None:
+        """Run ``on_put`` after each later ``put``, on the control thread."""
+        with self._lock:
+            self._on_put = on_put
 
 
 def _recv_exact(sock: socket.socket, count: int) -> bytes:
@@ -142,7 +211,7 @@ def _send_child_frame(sock: socket.socket, frame: ChildFrame) -> None:
 
 def _read_parent_frames(
     sock: socket.socket,
-    work: queue.SimpleQueue[RunFrame | StopFrame],
+    work: ParentFrameInbox,
 ) -> None:
     """Control thread body. Ends the process when the parent is gone."""
     try:
@@ -151,13 +220,8 @@ def _read_parent_frames(
                 case InitFrame():
                     logger.critical('Parent sent a second init frame')
                     os._exit(BAD_PARENT_FRAME_EXIT_CODE)
-                case RunFrame() | StopFrame() as frame:
+                case RunFrame() | SharedRunFrame() | StopFrame() as frame:
                     work.put(frame)
-                case SharedRunFrame():
-                    logger.critical(
-                        'Parent sent a shared run frame to an isolated child'
-                    )
-                    os._exit(BAD_PARENT_FRAME_EXIT_CODE)
                 case _ as unreachable:
                     assert_never(unreachable)
     except (EOFError, OSError):
@@ -227,7 +291,7 @@ def bounded_text(text: str, limit: int) -> str:
     return f'{safe[:limit]} [cut from {len(safe)} characters]'
 
 
-def _bounded_result(frame: RunFrame, wire: WireResult) -> WireResult:
+def _bounded_result(task_name: str, wire: WireResult) -> WireResult:
     """Make a wire result safe to frame.
 
     A result too large to ever be stored becomes a typed failure. A long
@@ -240,7 +304,7 @@ def _bounded_result(frame: RunFrame, wire: WireResult) -> WireResult:
             failed_reason = bounded_text(failed_reason, MAX_FAILED_REASON_CHARS)
         return ok, result_json, failed_reason
     message = (
-        f'result of task {frame.task_name} is {size} bytes, above the '
+        f'result of task {task_name} is {size} bytes, above the '
         f'{MAX_BODY_BYTES} byte bound'
     )
     logger.error(message)
@@ -248,7 +312,7 @@ def _bounded_result(frame: RunFrame, wire: WireResult) -> WireResult:
         err=TaskError(
             error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
             message=message,
-            data={'task_name': frame.task_name, 'result_bytes': size},
+            data={'task_name': task_name, 'result_bytes': size},
         ),
     )
     return True, serialize_error_payload(failure), message
@@ -331,7 +395,7 @@ def boot_failure_from_exception(
 
 def start_control_thread(
     sock: socket.socket,
-    work: queue.SimpleQueue[RunFrame | StopFrame],
+    work: ParentFrameInbox,
 ) -> Result[None, BootFailedFrame]:
     """Start the thread that reads parent frames into ``work``.
 
@@ -399,13 +463,15 @@ def _boot_or_exit(
     sock: socket.socket,
     init: InitFrame,
     boot: BootFn,
-    work: queue.SimpleQueue[RunFrame | StopFrame],
+    work: ParentFrameInbox,
 ) -> TaskLoop:
     """Start the control thread that fills ``work``, boot the app, and open
     the task loop.
 
-    Each step that fails ends the process through ``fail_boot``, with the
-    cause of that step.
+    An isolated child opens the loop when its app has an ``async def`` task.
+    A shared async child always opens it: its tasks run on it. Each step
+    that fails ends the process through ``fail_boot``, with the cause of
+    that step.
     """
     match start_control_thread(sock, work):
         case Ok():
@@ -417,6 +483,13 @@ def _boot_or_exit(
             pass
         case Err(failed):
             fail_boot(sock, failed)
+    match init.child_kind:
+        case IsolatedChild():
+            pass
+        case SharedAsyncChild():
+            presence = AsyncTaskPresence.HAS_ASYNC_TASKS
+        case _ as unreachable:
+            assert_never(unreachable)
     match open_task_loop_at_boot(presence):
         case Ok(task_loop):
             return task_loop
@@ -456,32 +529,57 @@ def serve(
     sock: socket.socket,
     parent_pid: int,
     boot: BootFn,
-    run_task: RunTaskFn,
+    runners: TaskRunners,
 ) -> NoReturn:
     """Run the child until the parent sends a stop frame, then end the process.
 
     After ``boot``, the child creates its ``TaskLoop`` when ``boot`` reports
-    an ``async def`` task in the app, and only then sends its ready frame.
-    Every task of the child gets that ``TaskLoop``. Each result frame reports
-    the state of that loop. The stop frame closes it, bounded by
-    ``LOOP_CLOSE_TIMEOUT_S``, and ``exit_after_stop`` ends the process.
+    an ``async def`` task in the app, or when the child is a shared async
+    child, and only then sends its ready frame. An isolated child runs
+    ``runners.run_task`` for each run frame, and a shared async child runs
+    its seats with ``runners.seats`` (``shared_child.serve_shared``).
 
     Failure exits: a control thread that the OS refuses, an ``Err`` from
     ``boot``, and a loop that cannot be created each end the boot through
     ``fail_boot``, before the ready frame, with a ``BootFailedFrame`` that
     names the cause. An exception that escapes ``boot`` is a defect: it
-    propagates, so the child exits non-zero with no frame. A run frame after
-    a report that this child must be retired is a parent defect and ends the
-    process with ``BAD_PARENT_FRAME_EXIT_CODE``. A parent that is gone or
-    that sends a bad frame ends the process through ``os._exit``, and so does
-    an exception from ``run_task``: the parent sees the exit and recovers the
-    row by its status. Does not write to the database itself.
+    propagates, so the child exits non-zero with no frame. A frame of the
+    other kind of child, or a run frame after a report that this child must
+    be retired, is a parent defect and ends the process with
+    ``BAD_PARENT_FRAME_EXIT_CODE``. A parent that is gone or that sends a bad
+    frame ends the process through ``os._exit``, and so does an exception
+    from ``run_task``: the parent sees the exit and recovers the row by its
+    status. Does not write to the database itself.
     """
     ignore_stop_signals()
     bind_to_parent(parent_pid)
     init = read_init_frame(sock)
-    work: queue.SimpleQueue[RunFrame | StopFrame] = queue.SimpleQueue()
+    work = ParentFrameInbox()
     task_loop = _boot_or_exit(sock, init, boot, work)
+    match init.child_kind:
+        case IsolatedChild():
+            _serve_isolated(sock, init, work, task_loop, runners.run_task)
+        case SharedAsyncChild(seats=seats):
+            from horsies.core.worker.shared_child import serve_shared
+
+            serve_shared(sock, init, work, task_loop, seats, runners.seats)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _serve_isolated(
+    sock: socket.socket,
+    init: InitFrame,
+    work: ParentFrameInbox,
+    task_loop: TaskLoop,
+    run_task: RunTaskFn,
+) -> NoReturn:
+    """Run tasks one at a time until the stop frame, then end the process.
+
+    Every task of the child gets ``task_loop``. Each result frame reports the
+    state of that loop. The stop frame closes it, bounded by
+    ``LOOP_CLOSE_TIMEOUT_S``, and ``exit_after_stop`` ends the process.
+    """
     gc.collect()
     _send_child_frame(sock, ReadyFrame(pid=os.getpid(), rss=_read_rss()))
     while True:
@@ -489,7 +587,7 @@ def serve(
             case RunFrame() as frame:
                 _refuse_run_on_a_child_to_retire(task_loop, frame)
                 ok, result_json, failed_reason = _bounded_result(
-                    frame,
+                    frame.task_name,
                     _run_or_exit(run_task, frame, init, task_loop),
                 )
                 _send_child_frame(
@@ -503,6 +601,10 @@ def serve(
                         task_loop=task_loop.report(),
                     ),
                 )
+            case SharedRunFrame():
+                logger.critical('Parent sent a shared run frame to an isolated child')
+                flush_output()
+                os._exit(BAD_PARENT_FRAME_EXIT_CODE)
             case StopFrame():
                 exit_after_stop(task_loop.close())
             case _ as unreachable:
@@ -518,7 +620,11 @@ def restore_parent_state(init: InitFrame) -> None:
 
 def boot_app(init: InitFrame) -> Result[AsyncTaskPresence, BootFailedFrame]:
     """Restore the parent's import state, import the app, then run the
-    per-child start steps.
+    per-child start steps of the kind of the child.
+
+    An isolated child opens its sync connection pool here. A shared async
+    child opens no pool here: it opens an async pool on its event loop,
+    after the ready steps of ``shared_child``.
 
     ``Ok``: whether the booted app has an ``async def`` task, which decides
     whether the child creates its task loop.
@@ -533,6 +639,7 @@ def boot_app(init: InitFrame) -> Result[AsyncTaskPresence, BootFailedFrame]:
     from horsies.core.worker.child_runner import (
         async_task_presence,
         finish_child_start,
+        finish_shared_child_start,
         import_app_for_child,
     )
 
@@ -547,14 +654,20 @@ def boot_app(init: InitFrame) -> Result[AsyncTaskPresence, BootFailedFrame]:
     except Exception as exc:
         return Err(boot_failure_from_exception(exc, AppLoadFailed()))
     try:
-        finish_child_start(
-            app,
-            init.database_url,
-            dict(init.connect_kwargs),
-            init.child_pool_min_size,
-            init.child_pool_max_size,
-            init.child_pool_check,
-        )
+        match init.child_kind:
+            case IsolatedChild():
+                finish_child_start(
+                    app,
+                    init.database_url,
+                    dict(init.connect_kwargs),
+                    init.child_pool_min_size,
+                    init.child_pool_max_size,
+                    init.child_pool_check,
+                )
+            case SharedAsyncChild():
+                finish_shared_child_start(app)
+            case _ as unreachable:
+                assert_never(unreachable)
     except Exception as exc:
         return Err(boot_failure_from_exception(exc, ChildPoolSetupFailed()))
     return Ok(async_task_presence(app))
@@ -576,6 +689,14 @@ def run_child_task(frame: RunFrame, init: InitFrame, task_loop: TaskLoop) -> Wir
     )
 
 
+def production_runners() -> TaskRunners:
+    """The runners of a worker child: ``run_child_task`` for an isolated
+    child, and the Postgres seat program for a shared async child."""
+    from horsies.core.worker.shared_runner import PostgresSeatProgram
+
+    return TaskRunners(run_task=run_child_task, seats=PostgresSeatProgram())
+
+
 def parse_arguments(argv: Sequence[str]) -> tuple[int, int] | None:
     """Return (socket fd, parent pid), or None when the arguments are invalid."""
     if len(argv) != 2 or not argv[0].isdecimal() or not argv[1].isdecimal():
@@ -590,7 +711,7 @@ def main(argv: Sequence[str]) -> NoReturn:
         sys.stderr.write(f'child_main: bad arguments: {list(argv)!r}\n')
         sys.exit(BAD_ARGUMENTS_EXIT_CODE)
     fd, parent_pid = parsed
-    serve(socket.socket(fileno=fd), parent_pid, boot_app, run_child_task)
+    serve(socket.socket(fileno=fd), parent_pid, boot_app, production_runners())
 
 
 if __name__ == '__main__':

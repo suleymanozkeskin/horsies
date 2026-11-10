@@ -711,14 +711,14 @@ class TestInitFrameRepr:
 
 class TestFailureReasonText:
     def test_a_long_reason_is_cut_and_framed(self) -> None:
-        wire = _bounded_result(_run_frame(), (True, 'kept', '\x00' * (2 << 20)))
+        wire = _bounded_result('add', (True, 'kept', '\x00' * (2 << 20)))
         assert wire[:2] == (True, 'kept')
         frame = ResultFrame('task-1', wire[0], wire[1], wire[2], RssUnreadable(), NoTaskLoop())
         meta, body = _split(encode_child_frame(frame))
         assert decode_child_frame(meta, body) == Ok(frame)
 
     def test_lone_surrogate_in_a_reason_can_be_framed(self) -> None:
-        wire = _bounded_result(_run_frame(), (False, '', 'bad \ud800 text'))
+        wire = _bounded_result('add', (False, '', 'bad \ud800 text'))
         frame = ResultFrame('task-1', wire[0], wire[1], wire[2], RssUnreadable(), NoTaskLoop())
         meta, body = _split(encode_child_frame(frame))
         assert decode_child_frame(meta, body) == Ok(frame)
@@ -728,7 +728,7 @@ class TestFailureReasonText:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(child_main, 'MAX_BODY_BYTES', 4)
-        ok, result_json, reason = _bounded_result(_run_frame(), (True, 'x' * 5, None))
+        ok, result_json, reason = _bounded_result('add', (True, 'x' * 5, None))
         assert ok is True
         assert 'WORKER_SERIALIZATION_ERROR' in result_json
         assert reason is not None and 'above the' in reason

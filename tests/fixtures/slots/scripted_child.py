@@ -5,6 +5,10 @@ execution are replaced: ``task_name`` selects an operation, ``kwargs_json``
 holds its argument, and ``app_locator`` selects the boot behavior. It needs no
 database.
 
+A shared async child runs the real seat loop of ``shared_child``. Only its
+seat program is replaced: ``_ScriptedSeatProgram`` starts with no pool, and
+each run is a scripted coroutine (``_seat_run``).
+
 Each boot that passes reports an app with ``async def`` tasks, so ``serve``
 creates the task loop, except the ``no_async`` modes. The ``loop_*`` modes make
 that creation raise ``OSError(EMFILE)``. The ``report_*`` and ``short_*`` modes
@@ -37,7 +41,12 @@ from horsies.core.models.boot_failure import (
     ShortageErrno,
 )
 from horsies.core.types.result import Err, Ok, Result
-from horsies.core.worker.child_main import WireResult, _send_child_frame, serve
+from horsies.core.worker.child_main import (
+    TaskRunners,
+    WireResult,
+    _send_child_frame,
+    serve,
+)
 from horsies.core.worker.child_protocol import (
     FRAME_HEADER,
     BootFailedFrame,
@@ -46,10 +55,12 @@ from horsies.core.worker.child_protocol import (
     ResultFrame,
     RssUnreadable,
     RunFrame,
+    SharedRunFrame,
     StopFrame,
     boot_failed_frame,
     encode_parent_frame,
 )
+from horsies.core.worker.shared_child import StartedSeats
 from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
 from horsies.core.utils.loop_runner import in_running_event_loop
 from horsies.core.worker import task_loop as task_loop_module
@@ -204,7 +215,7 @@ def _boot(init: InitFrame) -> Result[AsyncTaskPresence, BootFailedFrame]:
                 if mode == 'killed_after_first':
                     os.kill(os.getpid(), signal.SIGKILL)
                 raise RuntimeError('scripted replacement boot failure')
-        case 'parent_identity':
+        case 'parent_identity' | 'seat_start_fails' | 'seat_hook_fails':
             pass
         case 'close_timeout':
             # A short close deadline keeps a test of the close bound fast.
@@ -424,6 +435,117 @@ def _run(frame: RunFrame, init: InitFrame, task_loop: TaskLoop) -> WireResult:
             raise AssertionError(frame.task_name)
 
 
+_ticks: list[int] = [0]
+
+
+async def _tick_forever() -> None:
+    """Count passes of the loop while no run is in flight."""
+    while True:
+        _ticks[0] += 1
+        await asyncio.sleep(0.005)
+
+
+async def _wait_for_file(path: str) -> str:
+    """Hold the seat until ``path`` exists, then return the pid."""
+    while not os.path.exists(path):
+        await asyncio.sleep(0.005)
+    return str(os.getpid())
+
+
+async def _swallow_one_cancel(seconds: float) -> str:
+    """Catch the first cancel, then return a value after ``seconds``."""
+    try:
+        await asyncio.Event().wait()
+    except asyncio.CancelledError:
+        await asyncio.sleep(seconds)
+    return 'late value'
+
+
+async def _ignore_every_cancel() -> str:
+    while True:
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            continue
+
+
+async def _stamp(seconds: float) -> str:
+    """Sleep on the loop; report when the run started and ended."""
+    started = time.time()
+    await asyncio.sleep(seconds)
+    return f'{os.getpid()}:{started}:{time.time()}'
+
+
+async def _seat_run(frame: SharedRunFrame) -> WireResult:
+    """One scripted run on a seat. ``kwargs_json`` holds the argument."""
+    argument = frame.kwargs_json or ''
+    match frame.task_name:
+        case 'echo':
+            return True, argument, None
+        case 'pid':
+            return True, str(os.getpid()), None
+        case 'sleep':
+            await asyncio.sleep(float(argument))
+            return True, str(os.getpid()), None
+        case 'stamp':
+            return True, await _stamp(float(argument)), None
+        case 'wait_for_file':
+            return True, await _wait_for_file(argument), None
+        case 'swallow_one_cancel':
+            return True, await _swallow_one_cancel(float(argument)), None
+        case 'ignore_every_cancel':
+            return True, await _ignore_every_cancel(), None
+        case 'start_ticker':
+            _kept_tasks.append(asyncio.get_running_loop().create_task(_tick_forever()))
+            return True, str(_ticks[0]), None
+        case 'read_ticks':
+            return True, str(_ticks[0]), None
+        case 'block':
+            time.sleep(float(argument))
+            return True, str(os.getpid()), None
+        case 'gil_hang':
+            ctypes.PyDLL(None).sleep(3600)
+            return True, str(os.getpid()), None
+        case 'kill_self':
+            await asyncio.sleep(float(argument or '0'))
+            os.kill(os.getpid(), signal.SIGKILL)
+            return True, str(os.getpid()), None
+        case 'raises':
+            raise RuntimeError('scripted seat defect')
+        case 'big_result':
+            return True, 'x' * int(argument), None
+        case _:
+            raise AssertionError(frame.task_name)
+
+
+class _ScriptedSeats:
+    async def run(self, frame: SharedRunFrame) -> WireResult:
+        return await _seat_run(frame)
+
+    async def stop(self) -> None:
+        return None
+
+
+class _ScriptedSeatProgram:
+    """Starts with no pool. ``seat_start_fails`` and ``seat_hook_fails`` are
+    the two ways a start fails."""
+
+    async def start(self, init: InitFrame) -> Result[StartedSeats, BootFailedFrame]:
+        mode, _, _argument = init.app_locator.partition(':')
+        match mode:
+            case 'seat_start_fails':
+                return Err(
+                    boot_failed_frame(ChildPoolSetupFailed(), 'ValueError', 'scripted'),
+                )
+            case 'seat_hook_fails':
+                os._exit(CHILD_HOOK_FAILURE_EXIT_CODE)
+            case _:
+                return Ok(_ScriptedSeats())
+
+
+RUNNERS = TaskRunners(run_task=_run, seats=_ScriptedSeatProgram())
+
+
 def _refuse_thread(_thread: threading.Thread) -> None:
     raise RuntimeError("can't start new thread")
 
@@ -434,7 +556,7 @@ def main() -> None:
     if os.environ.get('HORSIES_TEST_REFUSE_THREADS') == '1':
         # As the OS does at its thread limit: ``Thread.start`` raises.
         setattr(threading.Thread, 'start', _refuse_thread)
-    serve(_sock, int(sys.argv[2]), _boot, _run)
+    serve(_sock, int(sys.argv[2]), _boot, RUNNERS)
 
 
 if __name__ == '__main__':
