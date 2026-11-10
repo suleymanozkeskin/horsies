@@ -51,9 +51,7 @@ from horsies.core.models.worker_profile import (
     WorkerProfile,
     describe_worker_profile,
 )
-from horsies.core.models.tasks import Execution
 from horsies.core.scheduler import Scheduler
-from horsies.core.worker.claim_plan import ClaimPlan
 from horsies.core.worker.config import ChildPreload
 from horsies.core.worker.profile_fit import (
     CONNECTIONS_HELP,
@@ -532,34 +530,6 @@ class ExecutionSettings:
     drain_timeout_s: float
     child_preload: ChildPreload
     shared_async: SharedAsyncChildren | NoSharedAsyncChildren
-    claim_plan: ClaimPlan
-
-
-def claim_plan_for_profile(profile: WorkerProfile) -> ClaimPlan:
-    """The claim plan of a worker of ``profile``: its budget classes are the
-    classes that the profile starts children for.
-
-    This is the one place that maps the child settings of a profile to
-    budget classes: ``ISOLATED`` for isolated children, ``SHARED_ASYNC`` for
-    shared async children. ``ClaimMixin._capacity_in_service`` counts the
-    capacity of each.
-    """
-    budgets: set[Execution] = set()
-    match profile.isolated:
-        case IsolatedChildren():
-            budgets.add(Execution.ISOLATED)
-        case NoIsolatedChildren():
-            pass
-        case _ as unreachable:
-            assert_never(unreachable)
-    match profile.shared_async:
-        case SharedAsyncChildren():
-            budgets.add(Execution.SHARED_ASYNC)
-        case NoSharedAsyncChildren():
-            pass
-        case _ as unreachable:
-            assert_never(unreachable)
-    return ClaimPlan(budget_classes=frozenset(budgets))
 
 
 def _tasks_or_zero(limit: TaskLimit | NoTaskLimit) -> int:
@@ -614,7 +584,6 @@ def execution_settings(profile: WorkerProfile) -> ExecutionSettings:
         drain_timeout_s=profile.drain_timeout.total_seconds(),
         child_preload=profile.preload,
         shared_async=profile.shared_async,
-        claim_plan=claim_plan_for_profile(profile),
     )
 
 
@@ -891,7 +860,6 @@ def worker_command(args: argparse.Namespace) -> None:
         drain_timeout_s=settings.drain_timeout_s,
         child_preload=settings.child_preload,
         shared_async=settings.shared_async,
-        claim_plan=settings.claim_plan,
         recovery_config=app.config.recovery,
         retention_config=app.config.retention,
         resilience_config=app.config.resilience,

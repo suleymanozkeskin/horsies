@@ -286,7 +286,7 @@ class HealthMixin:
                         'slots_down': Jsonb(slots_down_json(self._down_slots())),
                         'class_capacity': Jsonb(
                             class_capacity_json(
-                                self.cfg.claim_plan,
+                                self.cfg.claim_plan(),
                                 self._claim_capacity(),
                             )
                         ),

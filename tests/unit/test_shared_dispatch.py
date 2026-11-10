@@ -23,15 +23,11 @@ from horsies.core.models.tasks import (
     MIN_TASK_TIMEOUT_MS,
     Execution,
 )
-from horsies.core.cli import claim_plan_for_profile
 from horsies.core.models.worker_profile import (
-    IsolatedChildren,
     MemoryLimit,
-    NoIsolatedChildren,
     NoSharedAsyncChildren,
     SharedAsyncChildren,
     SharedRecycle,
-    WorkerProfile,
 )
 from horsies.core.worker.claim_plan import ClaimPlan, isolated_children_plan
 from horsies.core.types.result import Err, Ok
@@ -88,19 +84,12 @@ def _worker(
     shared_async: SharedAsyncChildren | NoSharedAsyncChildren = SHARED,
     processes: int = 1,
 ) -> Worker:
-    profile = WorkerProfile(
-        isolated=(
-            IsolatedChildren(count=processes) if processes else NoIsolatedChildren()
-        ),
-        shared_async=shared_async,
-    )
     cfg = WorkerConfig(
         dsn='postgresql+psycopg://u:p@localhost/db',
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=['default'],
         processes=processes,
         shared_async=shared_async,
-        claim_plan=claim_plan_for_profile(profile),
     )
     return Worker(session_factory=MagicMock(), listener=MagicMock(), cfg=cfg)
 

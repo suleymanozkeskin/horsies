@@ -270,7 +270,7 @@ class ClaimMixin:
                 allow_nan=False,
             ),
             'p_routes': json.dumps(
-                routes_json(self.cfg.claim_plan),
+                routes_json(self.cfg.claim_plan()),
                 allow_nan=False,
             ),
             'p_prefetch_buffer': int(self.cfg.prefetch_buffer),
@@ -297,7 +297,7 @@ class ClaimMixin:
                 budget=budget,
                 in_service=self._capacity_in_service(budget),
             )
-            for budget in self.cfg.claim_plan.budgets()
+            for budget in self.cfg.claim_plan().budgets()
         )
 
     def _capacity_in_service(self, budget: Execution) -> int:
@@ -307,7 +307,7 @@ class ClaimMixin:
         serve it: the isolated slots that are not down for ``ISOLATED``, the
         seats of the shared async children in service for ``SHARED_ASYNC``
         (``_shared_async_seats_in_service``). The plan's budget classes come
-        from ``claim_plan_for_profile`` in ``horsies/core/cli.py``. A plan
+        from ``claim_plan_for_children`` (``WorkerConfig.claim_plan``). A plan
         with a budget that no arm serves is a defect: ``AssertionError``.
         """
         match budget:

@@ -9,7 +9,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Optional
 
 from horsies.core.defaults import MAX_CLAIM_RENEW_AGE_MS
-from horsies.core.worker.claim_plan import ClaimPlan, isolated_children_plan
+from horsies.core.worker.claim_plan import ClaimPlan, claim_plan_for_children
 
 if TYPE_CHECKING:
     from horsies.core.models.recovery import RecoveryConfig
@@ -141,10 +141,6 @@ class WorkerConfig:
     # takes the crash path. Set it below the supervisor's stop window.
     drain_timeout_s: float = 300.0
     child_preload: ChildPreload = ChildPreload.LIBRARY
-    # Which budget claims the rows of each execution class, built once from
-    # the profile. The default is a worker that runs `processes` isolated
-    # children and no shared ones.
-    claim_plan: ClaimPlan = field(default_factory=isolated_children_plan)
     # The shared async children of the worker profile, with their seats and
     # their recycle limits.
     shared_async: SharedAsyncChildren | NoSharedAsyncChildren = field(
@@ -163,6 +159,11 @@ class WorkerConfig:
                 return count
             case NoSharedAsyncChildren():
                 return 0
+
+    def claim_plan(self) -> ClaimPlan:
+        """Which budget claims the rows of each execution class: derived from
+        the children of this config (``claim_plan_for_children``)."""
+        return claim_plan_for_children(self.processes, self.shared_async_children())
 
     def seat_count(self) -> int:
         """The tasks that the children run at once: one per isolated child,

@@ -23,13 +23,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from horsies.core.app import Horsies
-from horsies.core.cli import claim_plan_for_profile, execution_settings
+from horsies.core.cli import execution_settings
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import Execution, TaskError, TaskResult
 from horsies.core.models.worker_profile import (
     IsolatedChildren,
-    NoIsolatedChildren,
     SharedAsyncChildren,
     WorkerProfile,
 )
@@ -42,6 +41,7 @@ from horsies.core.worker.claim_plan import (
     budgets_json,
     class_capacity_json,
     describe_claim_plan,
+    claim_plan_for_children,
     isolated_children_plan,
     routes_json,
 )
@@ -141,36 +141,50 @@ class TestRoutes:
         assert routes_json(plan) == {}
 
 
-class TestPlanFromProfile:
+def _config_of(profile: WorkerProfile) -> WorkerConfig:
+    """The worker config that ``horsies worker`` builds from ``profile``."""
+    settings = execution_settings(profile)
+    return WorkerConfig(
+        dsn='x',
+        psycopg_dsn='y',
+        queues=['default'],
+        processes=settings.processes,
+        shared_async=settings.shared_async,
+    )
+
+
+class TestPlanFromChildren:
     def test_isolated_children_give_the_isolated_plan(self) -> None:
         profile = WorkerProfile(isolated=IsolatedChildren(count=4))
-        assert claim_plan_for_profile(profile) == isolated_children_plan()
-        assert execution_settings(profile).claim_plan == isolated_children_plan()
+        assert _config_of(profile).claim_plan() == isolated_children_plan()
 
-    def test_no_isolated_children_give_no_budget(self) -> None:
-        profile = WorkerProfile(isolated=NoIsolatedChildren())
-        assert claim_plan_for_profile(profile) == ClaimPlan(
-            budget_classes=frozenset(),
-        )
+    def test_no_children_give_no_budget(self) -> None:
+        assert claim_plan_for_children(0, 0) == ClaimPlan(budget_classes=frozenset())
 
     def test_shared_async_children_give_a_shared_async_budget(self) -> None:
         profile = WorkerProfile(
             isolated=IsolatedChildren(count=1),
             shared_async=SharedAsyncChildren(count=2, seats=10),
         )
-        assert claim_plan_for_profile(profile) == ClaimPlan(
+        assert _config_of(profile).claim_plan() == ClaimPlan(
             budget_classes=frozenset({ISOLATED, SHARED_ASYNC}),
         )
 
     def test_only_shared_async_children_serve_no_isolated_row(self) -> None:
         profile = WorkerProfile(shared_async=SharedAsyncChildren(count=1, seats=4))
-        plan = claim_plan_for_profile(profile)
+        plan = _config_of(profile).claim_plan()
         assert plan.budgets() == (SHARED_ASYNC,)
         assert plan.unserved() == (ISOLATED, SHARED_THREAD)
 
     def test_the_worker_config_default_is_the_isolated_plan(self) -> None:
         cfg = WorkerConfig(dsn='x', psycopg_dsn='y', queues=['default'])
-        assert cfg.claim_plan == isolated_children_plan()
+        assert cfg.claim_plan() == isolated_children_plan()
+
+    def test_the_plan_follows_a_change_of_the_children(self) -> None:
+        """No stored plan can disagree with the children of the config."""
+        cfg = WorkerConfig(dsn='x', psycopg_dsn='y', queues=['default'], processes=2)
+        cfg.shared_async = SharedAsyncChildren(count=1, seats=3)
+        assert cfg.claim_plan().budgets() == (ISOLATED, SHARED_ASYNC)
 
 
 class TestEncodings:
@@ -516,11 +530,9 @@ class TestCapacityHook:
     @pytest.mark.asyncio
     async def test_a_shared_thread_budget_is_a_defect(self) -> None:
         """This worker starts no SHARED_THREAD children."""
-        worker = _worker(
-            claim_plan=ClaimPlan(budget_classes=frozenset({SHARED_THREAD})),
-        )
+        worker = _worker()
         with pytest.raises(AssertionError, match='SHARED_THREAD budget'):
-            worker._claim_capacity()
+            worker._capacity_in_service(SHARED_THREAD)
 
     @pytest.mark.asyncio
     async def test_the_shared_async_budget_counts_the_seats_in_service(self) -> None:
@@ -528,7 +540,6 @@ class TestCapacityHook:
         worker = _worker(
             processes=1,
             shared_async=SharedAsyncChildren(count=2, seats=6),
-            claim_plan=ClaimPlan(budget_classes=frozenset({ISOLATED, SHARED_ASYNC})),
         )
         assert worker._claim_capacity() == (
             BudgetCapacity(budget=ISOLATED, in_service=1),

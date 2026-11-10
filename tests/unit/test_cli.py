@@ -13,7 +13,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pydantic import SecretStr
 
-from horsies.core.worker.claim_plan import isolated_children_plan
 from horsies.core.worker.config import ChildPreload
 from horsies.core.app import Horsies
 from horsies.core.brokers.resources import ListenerDisabled, ListenerEnabled
@@ -2523,7 +2522,6 @@ class TestExecutionSettings:
             drain_timeout_s=45.0,
             child_preload=ChildPreload.NONE,
             shared_async=NoSharedAsyncChildren(),
-            claim_plan=isolated_children_plan(),
         )
 
     def test_shared_async_children_keep_their_typed_form(self) -> None:

@@ -853,7 +853,7 @@ class Worker(
                 max_claimed_effective,
                 self.cfg.max_claim_batch,
             )
-            _log_claim_plan(self.cfg.claim_plan)
+            _log_claim_plan(self.cfg.claim_plan())
 
             # Subscribe to each queue channel in one batch. The global
             # task_new channel is deliberately NOT subscribed: queue channels

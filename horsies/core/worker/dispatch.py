@@ -464,7 +464,7 @@ class DispatchMixin:
         slots = self._slots
         assert slots is not None, 'dispatch before the slot pool started'
 
-        match dispatch_route(execution, self.cfg.claim_plan, task_options, timeout):
+        match dispatch_route(execution, self.cfg.claim_plan(), task_options, timeout):
             case RunShared() as route:
                 self._dispatch_shared(
                     slots,
