@@ -11,7 +11,7 @@ from collections.abc import Coroutine, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from importlib import import_module
-from typing import Any, Optional, Tuple, assert_never, cast
+from typing import Any, Final, LiteralString, Optional, Tuple, assert_never, cast
 
 from psycopg import Connection, Cursor
 from psycopg.rows import namedtuple_row
@@ -482,7 +482,175 @@ def finish_child_start(
     logger.debug(f'[child {os.getpid()}] Connection pool initialized')
 
 
+def finish_shared_child_start(app: Horsies) -> None:
+    """Run the per-child steps of a shared async child that need no loop.
+
+    The same steps as ``finish_child_start`` up to the pool: the process
+    runs task bodies from here on, and the ``on_child_process_start`` hooks
+    run. A shared async child opens no sync pool: it opens an async pool on
+    its event loop afterwards (``shared_runner``). A failing hook exits the
+    child with CHILD_HOOK_FAILURE_EXIT_CODE.
+    """
+    mark_process_runs_task_bodies()
+    _run_child_start_hooks(app)
+
+
 # ---------- Child-process execution ----------
+# The statements of the writes around one attempt. An isolated child runs
+# them on a sync connection here; a shared async child runs the same text on
+# an async connection (``horsies.core.worker.shared_lifecycle``).
+
+WORKFLOW_STATUS_OF_TASK_SQL: Final[LiteralString] = """
+        SELECT w.status FROM horsies_workflows w
+        JOIN horsies_workflow_tasks wt ON wt.workflow_id = w.id
+        WHERE wt.task_id = %s
+        """
+
+CLAIM_STILL_STARTABLE_SQL: Final[LiteralString] = """
+        SELECT EXISTS (
+            SELECT 1 FROM horsies_tasks
+            WHERE id = %s
+              AND status = 'CLAIMED'
+              AND claimed_by_worker_id = %s
+              AND (%s::timestamptz IS NULL OR claimed_at = %s::timestamptz)
+              AND (claim_expires_at IS NULL OR claim_expires_at > now())
+              AND (good_until IS NULL OR good_until > now())
+        ) AS startable
+        """
+
+RESET_PAUSED_NODE_SQL: Final[LiteralString] = """
+                        UPDATE horsies_workflow_tasks
+                        SET status = 'READY',
+                            task_id = NULL,
+                            started_at = NULL
+                        WHERE task_id = %s
+                          AND status IN ('ENQUEUED', 'RUNNING')
+                        """
+
+SKIP_CANCELLED_NODE_SQL: Final[LiteralString] = """
+                        UPDATE horsies_workflow_tasks
+                        SET status = 'SKIPPED',
+                            completed_at = NOW()
+                        WHERE task_id = %s
+                          AND status IN ('ENQUEUED', 'READY')
+                        """
+
+_SET_RUNNING_HEAD_SQL: Final[LiteralString] = """
+                WITH started AS (
+                    UPDATE horsies_tasks
+                    SET status = 'RUNNING',
+                        claimed = FALSE,
+                        claim_expires_at = NULL,
+                        started_at = NOW(),
+                        worker_pid = %s,
+                        worker_hostname = %s,
+                        worker_process_name = %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                      AND status = 'CLAIMED'
+                      AND claimed_by_worker_id = %s
+                      AND (%s::timestamptz IS NULL OR claimed_at = %s::timestamptz)
+                      AND (claim_expires_at IS NULL OR claim_expires_at > now())
+                      AND (good_until IS NULL OR good_until > now())
+                """
+
+_SET_RUNNING_WORKFLOW_GUARD_SQL: Final[LiteralString] = """
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM horsies_workflow_tasks wt
+                      JOIN horsies_workflows w ON w.id = wt.workflow_id
+                      WHERE wt.task_id = %s
+                        AND w.status IN ('PAUSED', 'CANCELLED')
+                  )
+            """
+
+_SET_RUNNING_TAIL_SQL: Final[LiteralString] = """
+                    RETURNING id
+                ),
+                first_beat AS (
+                    INSERT INTO horsies_heartbeats (
+                        task_id, sender_id, role, sent_at, hostname, pid
+                    )
+                    SELECT id, %s, 'runner', NOW(), %s, %s
+                    FROM started
+                )
+                SELECT id FROM started
+                """
+
+START_WORKFLOW_NODE_SQL: Final[LiteralString] = """
+                    WITH linked AS MATERIALIZED (
+                        SELECT id, status
+                        FROM horsies_workflow_tasks
+                        WHERE task_id = %s
+                          AND status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')
+                        FOR UPDATE
+                    ),
+                    changed AS (
+                        UPDATE horsies_workflow_tasks node
+                        SET status = 'RUNNING',
+                            started_at = NOW()
+                        FROM linked
+                        WHERE node.id = linked.id
+                          AND linked.status <> 'RUNNING'
+                        RETURNING node.id
+                    )
+                    SELECT EXISTS (SELECT 1 FROM linked) AS node_linked
+                    """
+
+MARK_FINALIZING_SQL: Final[LiteralString] = """
+                UPDATE horsies_tasks
+                SET finalizing_at = NOW(),
+                    finalizing_by_worker_id = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+                  AND status = 'RUNNING'
+                  AND claimed_by_worker_id = %s
+                  AND (%s::timestamptz IS NULL OR claimed_at = %s::timestamptz)
+                """
+
+
+def set_running_sql(is_workflow_task: bool) -> LiteralString:
+    """The RUNNING transition with its first runner heartbeat. A workflow task
+    adds the guard against a paused or cancelled workflow."""
+    match is_workflow_task:
+        case True:
+            return (
+                _SET_RUNNING_HEAD_SQL
+                + _SET_RUNNING_WORKFLOW_GUARD_SQL
+                + _SET_RUNNING_TAIL_SQL
+            )
+        case False:
+            return _SET_RUNNING_HEAD_SQL + _SET_RUNNING_TAIL_SQL
+
+
+def set_running_params(
+    task_id: str,
+    worker_id: str,
+    is_workflow_task: bool,
+    claimed_at: Optional[datetime],
+) -> tuple[object, ...]:
+    """The parameters of ``set_running_sql(is_workflow_task)``, in order.
+
+    The row and the first beat name this process: its pid, its host, and the
+    sender ``<worker_id>:<pid>``. Reads the pid and the host name; no I/O.
+    """
+    pid = os.getpid()
+    hostname = socket.gethostname()
+    params: list[object] = [
+        pid,
+        hostname,
+        f'worker-{pid}',
+        task_id,
+        worker_id,
+        claimed_at,
+        claimed_at,
+    ]
+    if is_workflow_task:
+        params.append(task_id)
+    params += [f'{worker_id}:{pid}', hostname, pid]
+    return tuple(params)
+
+
 def _get_workflow_status_for_task(cursor: Cursor[Any], task_id: str) -> str | None:
     """Read the owning workflow's status for a task (None if not in one).
 
@@ -491,14 +659,7 @@ def _get_workflow_status_for_task(cursor: Cursor[Any], task_id: str) -> str | No
             _confirm_ownership_and_set_running, which folds them into
             OWNERSHIP_UNCONFIRMED.
     """
-    cursor.execute(
-        """
-        SELECT w.status FROM horsies_workflows w
-        JOIN horsies_workflow_tasks wt ON wt.workflow_id = w.id
-        WHERE wt.task_id = %s
-        """,
-        (task_id,),
-    )
+    cursor.execute(WORKFLOW_STATUS_OF_TASK_SQL, (task_id,))
     row = cursor.fetchone()
     if row is None:
         return None
@@ -520,17 +681,7 @@ def _claim_still_startable(
     claimed_at disables the generation half, as there.
     """
     cursor.execute(
-        """
-        SELECT EXISTS (
-            SELECT 1 FROM horsies_tasks
-            WHERE id = %s
-              AND status = 'CLAIMED'
-              AND claimed_by_worker_id = %s
-              AND (%s::timestamptz IS NULL OR claimed_at = %s::timestamptz)
-              AND (claim_expires_at IS NULL OR claim_expires_at > now())
-              AND (good_until IS NULL OR good_until > now())
-        ) AS startable
-        """,
+        CLAIM_STILL_STARTABLE_SQL,
         (task_id, worker_id, claimed_at, claimed_at),
     )
     row = cursor.fetchone()
@@ -604,17 +755,7 @@ def _handle_workflow_stop_before_start(
                         workflow_status=resumed_status,
                     )
                 case Applied() | AlreadyApplied():
-                    cursor.execute(
-                        """
-                        UPDATE horsies_workflow_tasks
-                        SET status = 'READY',
-                            task_id = NULL,
-                            started_at = NULL
-                        WHERE task_id = %s
-                          AND status IN ('ENQUEUED', 'RUNNING')
-                        """,
-                        (task_id,),
-                    )
+                    cursor.execute(RESET_PAUSED_NODE_SQL, (task_id,))
                 case LostClaim() | SourceStateConflict() | TaskAbsent():
                     pass
                 case _ as unreachable:
@@ -638,16 +779,7 @@ def _handle_workflow_stop_before_start(
             )
             match outcome:
                 case Applied() | AlreadyApplied():
-                    cursor.execute(
-                        """
-                        UPDATE horsies_workflow_tasks
-                        SET status = 'SKIPPED',
-                            completed_at = NOW()
-                        WHERE task_id = %s
-                          AND status IN ('ENQUEUED', 'READY')
-                        """,
-                        (task_id,),
-                    )
+                    cursor.execute(SKIP_CANCELLED_NODE_SQL, (task_id,))
                 case LostClaim() | SourceStateConflict() | TaskAbsent():
                     pass
                 case _ as unreachable:
@@ -739,76 +871,18 @@ def _confirm_ownership_and_set_running(
         pool = _get_worker_pool()
         with pool.connection() as conn:
             cursor = conn.cursor(row_factory=namedtuple_row)
-            workflow_guard_sql = """
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM horsies_workflow_tasks wt
-                      JOIN horsies_workflows w ON w.id = wt.workflow_id
-                      WHERE wt.task_id = %s
-                        AND w.status IN ('PAUSED', 'CANCELLED')
-                  )
-            """
             # The first runner heartbeat is part of the transition: the row can
             # never be observed RUNNING without heartbeat coverage, and a
             # transition that does not apply inserts no beat. The worker
             # process writes the later beats while this child holds the task.
-            sql = (
-                """
-                WITH started AS (
-                    UPDATE horsies_tasks
-                    SET status = 'RUNNING',
-                        claimed = FALSE,
-                        claim_expires_at = NULL,
-                        started_at = NOW(),
-                        worker_pid = %s,
-                        worker_hostname = %s,
-                        worker_process_name = %s,
-                        updated_at = NOW()
-                    WHERE id = %s
-                      AND status = 'CLAIMED'
-                      AND claimed_by_worker_id = %s
-                      AND (%s::timestamptz IS NULL OR claimed_at = %s::timestamptz)
-                      AND (claim_expires_at IS NULL OR claim_expires_at > now())
-                      AND (good_until IS NULL OR good_until > now())
-                """
-                + (workflow_guard_sql if is_workflow_task else '')
-                + """
-                    RETURNING id
-                ),
-                first_beat AS (
-                    INSERT INTO horsies_heartbeats (
-                        task_id, sender_id, role, sent_at, hostname, pid
-                    )
-                    SELECT id, %s, 'runner', NOW(), %s, %s
-                    FROM started
-                )
-                SELECT id FROM started
-                """
-            )
             # The claimed_at pair is the claim-generation fence (C10): the
             # dispatch that submitted this child carries the claim's own
             # claimed_at; a row requeued and re-claimed since then (same
             # worker or not) no longer matches, so the stale child aborts
             # with CLAIM_LOST instead of double-running the task.
-            params = [
-                os.getpid(),
-                socket.gethostname(),
-                f'worker-{os.getpid()}',
-                task_id,
-                worker_id,
-                claimed_at,
-                claimed_at,
-            ]
-            if is_workflow_task:
-                params.append(task_id)
-            params += [
-                worker_id + f':{os.getpid()}',
-                socket.gethostname(),
-                os.getpid(),
-            ]
             cursor.execute(
-                sql,
-                tuple(params),
+                set_running_sql(is_workflow_task),
+                set_running_params(task_id, worker_id, is_workflow_task, claimed_at),
             )
             updated_row = cursor.fetchone()
             if updated_row is None:
@@ -859,28 +933,7 @@ def _confirm_ownership_and_set_running(
                 # keeps its tuple and its first started_at. Only a node that
                 # is not RUNNING yet is written. A node in none of the four
                 # statuses (or no node) fails the workflow check.
-                cursor.execute(
-                    """
-                    WITH linked AS MATERIALIZED (
-                        SELECT id, status
-                        FROM horsies_workflow_tasks
-                        WHERE task_id = %s
-                          AND status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')
-                        FOR UPDATE
-                    ),
-                    changed AS (
-                        UPDATE horsies_workflow_tasks node
-                        SET status = 'RUNNING',
-                            started_at = NOW()
-                        FROM linked
-                        WHERE node.id = linked.id
-                          AND linked.status <> 'RUNNING'
-                        RETURNING node.id
-                    )
-                    SELECT EXISTS (SELECT 1 FROM linked) AS node_linked
-                    """,
-                    (task_id,),
-                )
+                cursor.execute(START_WORKFLOW_NODE_SQL, (task_id,))
                 handoff_row = cursor.fetchone()
                 assert handoff_row is not None, 'SELECT EXISTS returns one row'
                 node_linked = bool(handoff_row[0])
@@ -919,16 +972,7 @@ def _mark_task_finalizing(
         with pool.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                """
-                UPDATE horsies_tasks
-                SET finalizing_at = NOW(),
-                    finalizing_by_worker_id = %s,
-                    updated_at = NOW()
-                WHERE id = %s
-                  AND status = 'RUNNING'
-                  AND claimed_by_worker_id = %s
-                  AND (%s::timestamptz IS NULL OR claimed_at = %s::timestamptz)
-                """,
+                MARK_FINALIZING_SQL,
                 (worker_id, task_id, worker_id, claimed_at, claimed_at),
             )
             marked_rows = cursor.rowcount
@@ -976,19 +1020,48 @@ def _resolution_failure(
     return (True, serialize_error_payload(tr), reason)
 
 
-def _why_not_runnable(body_kind: object, task_loop: TaskLoop) -> str | None:
-    """Why this child cannot run a registry entry, or None when it can.
+@dataclass(frozen=True, slots=True)
+class OnIsolatedChild:
+    """The task runs alone in an isolated child: a ``def`` task on its
+    thread, an ``async def`` task on ``task_loop``."""
+
+    task_loop: TaskLoop
+
+
+@dataclass(frozen=True, slots=True)
+class OnSharedSeat:
+    """The task runs on a seat of a shared async child, as a coroutine on
+    the running loop of that child, beside other tasks."""
+
+
+type RunPlace = OnIsolatedChild | OnSharedSeat
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedCall:
+    """A resolved task, the app that holds it, and the arguments of its call."""
+
+    task: Any
+    app: Horsies
+    args: tuple[Any, ...]
+    kwargs: dict[str, Any]
+
+
+def _why_not_runnable(body_kind: object, place: RunPlace) -> str | None:
+    """Why ``place`` cannot run a registry entry, or None when it can.
 
     Only the task decorator makes a task function, with its
-    ``task_body_kind``. An ``async def`` task needs the task loop, which the
-    child creates at boot only when its app had an ``async def`` task then:
-    a task that was registered later finds no loop. A run after the loop
-    closed is a defect in the caller: ``AssertionError``.
+    ``task_body_kind``. An ``async def`` task in an isolated child needs the
+    task loop, which the child creates at boot only when its app had an
+    ``async def`` task then: a task that was registered later finds no loop.
+    A run after the loop closed is a defect in the caller: ``AssertionError``.
+    A seat of a shared async child runs only ``async def`` tasks: a ``def``
+    body would block the loop of every task in the child.
     """
-    match body_kind:
-        case TaskBodyKind.DEF:
+    match body_kind, place:
+        case TaskBodyKind.DEF, OnIsolatedChild():
             return None
-        case TaskBodyKind.ASYNC_DEF:
+        case TaskBodyKind.ASYNC_DEF, OnIsolatedChild(task_loop=task_loop):
             match task_loop.state:
                 case LoopOpen():
                     return None
@@ -1001,6 +1074,10 @@ def _why_not_runnable(body_kind: object, task_loop: TaskLoop) -> str | None:
                     raise AssertionError('a task ran after the task loop closed')
                 case _ as unreachable:
                     assert_never(unreachable)
+        case TaskBodyKind.ASYNC_DEF, OnSharedSeat():
+            return None
+        case TaskBodyKind.DEF, OnSharedSeat():
+            return 'the task is def, and a shared async child runs only async def tasks'
         case _:
             return (
                 'the registry entry is not a task function: its '
@@ -1030,6 +1107,393 @@ def _task_call_result(
             raise AssertionError(
                 f'task wrapper of {task_name!r} returned {type(called).__name__}',
             )
+
+
+def _prepare_task_call(
+    task_name: str,
+    args_json: Optional[str],
+    kwargs_json: Optional[str],
+    place: RunPlace,
+) -> _PreparedCall | Tuple[bool, str, Optional[str]]:
+    """Resolve a task from the registry and decode the arguments of its call.
+
+    Returns the task and its arguments, or the wire tuple that ends the run
+    before user code: a task that cannot be resolved or cannot run in
+    ``place`` (``WORKER_RESOLUTION_ERROR``), or arguments that do not
+    decode (``WORKER_SERIALIZATION_ERROR``). Runs no user code but the
+    pydantic validators of the declared types. An exception propagates to
+    the caller, whose containment seam maps it. No I/O.
+    """
+    # Resolve from TaskRegistry
+    try:
+        app = get_current_app()
+        task = app.tasks[task_name]  # may raise NotRegistered
+        body_kind = getattr(task, 'task_body_kind', None)
+    except Exception as e:
+        logger.error(f'Failed to resolve task {task_name}: {e}')
+        return _resolution_failure(
+            task_name,
+            f'Failed to resolve {task_name}: {type(e).__name__}: {e}',
+            f'{type(e).__name__}: {e}',
+        )
+    match _why_not_runnable(body_kind, place):
+        case None:
+            pass
+        case not_runnable:
+            logger.error(f'Failed to resolve task {task_name}: {not_runnable}')
+            return _resolution_failure(
+                task_name,
+                f'Failed to resolve {task_name}: {not_runnable}',
+                not_runnable,
+            )
+
+    # Deserialize task arguments. Strict-serde: positional args are
+    # rejected at every producer; the wire shape for args is always
+    # `null` or `[]`. Inspect the raw loaded JSON to enforce this
+    # before any typed decode runs.
+    args_json_result = loads_json(args_json)
+    if is_err(args_json_result):
+        return _serialization_error_response(task_name, args_json_result.err_value)
+    raw_args = args_json_result.ok_value
+    if raw_args is not None and raw_args != []:
+        return _serialization_error_response(
+            task_name,
+            SerializationError(
+                f'Task {task_name!r} row carries positional args; '
+                f'strict-serde rejects positional args. '
+                f'Drop in-flight pre-strict rows before upgrading.',
+            ),
+        )
+    args: tuple[Any, ...] = ()
+
+    if kwargs_json is None:
+        raw_kwargs: dict[str, Any] = {}
+    else:
+        kwargs_json_result = loads_json(kwargs_json)
+        if is_err(kwargs_json_result):
+            return _serialization_error_response(
+                task_name, kwargs_json_result.err_value
+            )
+        decoded_kwargs = kwargs_json_result.ok_value
+        if not isinstance(decoded_kwargs, dict):
+            return _serialization_error_response(
+                task_name,
+                SerializationError(
+                    f'kwargs must be a JSON object, got '
+                    f'{type(decoded_kwargs).__name__}',
+                ),
+            )
+        raw_kwargs = decoded_kwargs
+
+    # Strict-serde phase 3+4: decode user kwargs using the receiver's
+    # declared parameter types. Engine-private transport keys
+    # (`__h_workflow_ctx__`, `__h_workflow_meta__`,
+    # `__h_taskresult_envelope__`) pass through ``decode_kwargs``
+    # unchanged because their leading prefix is in the transport
+    # allowlist; per-key unpacking happens immediately below.
+    underlying_fn = underlying_task_fn(task)
+    try:
+        kwargs = decode_kwargs(underlying_fn, raw_kwargs)
+    except (StrictJsonError, ValueValidationError) as exc:
+        return _serialization_error_response(
+            task_name,
+            SerializationError(
+                f'Failed to decode kwargs for {task_name}: {exc}',
+            ),
+        )
+
+    # Deserialize injected TaskResults from workflow args_from.
+    # Strict-serde envelope shape (engine.py emit sites):
+    #   {
+    #     '__h_taskresult_envelope__': True,
+    #     'source_task_name': '<upstream task name>',
+    #     'inner': <encode_task_result(tr, source_ok_type)>,
+    #   }
+    # The worker derives the upstream OkT from `app.tasks[source_task_name]`
+    # and decodes via `decode_task_result(inner, ok_type)`.
+    for key, value in list(kwargs.items()):
+        if not (
+            isinstance(value, dict)
+            and value.get(_ENGINE_KEY_TASKRESULT_ENVELOPE) is True
+        ):
+            continue
+        envelope = cast('dict[str, Any]', value)
+        source_task_name = envelope.get('source_task_name')
+        if not isinstance(source_task_name, str):
+            return _serialization_error_response(
+                task_name,
+                SerializationError(
+                    f'args_from envelope for kwarg {key!r} is missing '
+                    f'source_task_name'
+                ),
+            )
+        inner = envelope.get('inner')
+        source_definition_key = envelope.get('source_definition_key')
+        from horsies.core.models.workflow.typing_utils import (
+            resolve_source_ok_type,
+        )
+
+        source_ok_type = resolve_source_ok_type(
+            app, source_task_name,
+            sub_definition_key=(
+                source_definition_key
+                if isinstance(source_definition_key, str)
+                else None
+            ),
+        )
+        if source_ok_type is None:
+            return _serialization_error_response(
+                task_name,
+                SerializationError(
+                    f'args_from source {source_task_name!r} is not '
+                    f'registered (no task or workflow definition with '
+                    f'this name); cannot decode kwarg {key!r}'
+                ),
+            )
+        try:
+            decoded_result = decode_task_result(inner, source_ok_type)
+        except (StrictJsonError, ValueValidationError) as exc:
+            return _serialization_error_response(
+                task_name,
+                SerializationError(
+                    f'decode_task_result failed for kwarg {key!r} '
+                    f'(source task {source_task_name!r}): {exc}'
+                ),
+            )
+        target_ok_type = declared_taskresult_ok_type(underlying_fn, key)
+        if target_ok_type is None or target_ok_type == source_ok_type:
+            kwargs[key] = decoded_result
+            continue
+        match conform_to_target(decoded_result, target_ok_type):
+            case Ok(ok_value=conformed):
+                kwargs[key] = conformed
+            case Err(err_value=refusal):
+                return _serialization_error_response(
+                    task_name,
+                    SerializationError(
+                        f'kwarg {key!r} does not fit its declared type '
+                        f'(source task {source_task_name!r}): {refusal}'
+                    ),
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    # Handle workflow injection payloads (workflow_ctx / workflow_meta).
+    workflow_ctx_data = kwargs.pop(_ENGINE_KEY_WORKFLOW_CTX, None)
+    workflow_meta_data = kwargs.pop(_ENGINE_KEY_WORKFLOW_META, None)
+    if workflow_ctx_data is not None or workflow_meta_data is not None:
+        import inspect
+
+        underlying_fn = underlying_task_fn(task)
+        sig = inspect.signature(underlying_fn)
+        if workflow_ctx_data is not None and 'workflow_ctx' in sig.parameters:
+            from horsies.core.models.workflow import (
+                WorkflowContext,
+                SubWorkflowSummary,
+            )
+
+            results_by_id_raw = workflow_ctx_data.get('results_by_id', {})
+            task_name_by_id = workflow_ctx_data.get('task_name_by_id', {})
+            definition_key_by_id = workflow_ctx_data.get(
+                'definition_key_by_id', {},
+            )
+            results_by_id: dict[str, TaskResult[Any, TaskError]] = {}
+            for node_id, envelope in results_by_id_raw.items():
+                if envelope is None:
+                    # Engine couldn't encode this entry (no
+                    # registered task or no ok_type); surface as a
+                    # sentinel TaskError so the context still has a
+                    # typed value.
+                    results_by_id[node_id] = TaskResult(
+                        err=TaskError(
+                            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                            message=(
+                                f'workflow_ctx result for node '
+                                f'{node_id!r} unavailable (source '
+                                f'task not registered at encode '
+                                f'time)'
+                            ),
+                            data={'node_id': node_id},
+                        ),
+                    )
+                    continue
+                source_task_name = task_name_by_id.get(node_id)
+                if not isinstance(source_task_name, str):
+                    results_by_id[node_id] = TaskResult(
+                        err=TaskError(
+                            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                            message=(
+                                f'workflow_ctx missing task_name for '
+                                f'node {node_id!r}; cannot decode'
+                            ),
+                            data={'node_id': node_id},
+                        ),
+                    )
+                    continue
+                from horsies.core.models.workflow.typing_utils import (
+                    resolve_source_ok_type as _resolve_src_ok,
+                )
+
+                _sub_def_key = definition_key_by_id.get(node_id)
+                source_ok_type = _resolve_src_ok(
+                    app, source_task_name,
+                    sub_definition_key=(
+                        _sub_def_key
+                        if isinstance(_sub_def_key, str)
+                        else None
+                    ),
+                )
+                if source_ok_type is None:
+                    results_by_id[node_id] = TaskResult(
+                        err=TaskError(
+                            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                            message=(
+                                f'workflow_ctx source '
+                                f'{source_task_name!r} not '
+                                f'registered in this process (no task '
+                                f'or workflow definition with this name)'
+                            ),
+                            data={
+                                'node_id': node_id,
+                                'source_task_name': source_task_name,
+                            },
+                        ),
+                    )
+                    continue
+                try:
+                    results_by_id[node_id] = decode_task_result(
+                        envelope, source_ok_type,
+                    )
+                except (StrictJsonError, ValueValidationError) as exc:
+                    results_by_id[node_id] = TaskResult(
+                        err=TaskError(
+                            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                            message=(
+                                f'decode_task_result failed for '
+                                f'workflow_ctx node {node_id!r}: '
+                                f'{exc}'
+                            ),
+                            data={
+                                'node_id': node_id,
+                                'source_task_name': source_task_name,
+                            },
+                        ),
+                    )
+
+            summaries_by_id_raw = workflow_ctx_data.get('summaries_by_id', {})
+            summaries_by_id: dict[str, SubWorkflowSummary[Any]] = {}
+            for node_id, summary_json in summaries_by_id_raw.items():
+                if isinstance(summary_json, str):
+                    sj = loads_json(summary_json)
+                    if is_err(sj):
+                        return _serialization_error_response(
+                            task_name, sj.err_value
+                        )
+                    try:
+                        summaries_by_id[node_id] = SubWorkflowSummary.from_json(
+                            sj.ok_value,
+                        )
+                    except ValueError as summary_exc:
+                        return _serialization_error_response(
+                            task_name, SerializationError(str(summary_exc))
+                        )
+
+            kwargs['workflow_ctx'] = WorkflowContext.from_serialized(
+                workflow_id=workflow_ctx_data.get('workflow_id', ''),
+                task_index=workflow_ctx_data.get('task_index', 0),
+                task_name=workflow_ctx_data.get('task_name', ''),
+                results_by_id=results_by_id,
+                summaries_by_id=summaries_by_id,
+            )
+        # If task doesn't declare workflow_ctx, silently skip injection.
+
+        if workflow_meta_data is not None and 'workflow_meta' in sig.parameters:
+            from horsies.core.models.workflow import WorkflowMeta
+
+            if isinstance(workflow_meta_data, dict):
+                meta_dict = cast(dict[str, Any], workflow_meta_data)
+                task_index_raw: Any = meta_dict.get('task_index', 0)
+                try:
+                    task_index_value = int(task_index_raw)
+                except (TypeError, ValueError):
+                    task_index_value = 0
+
+                kwargs['workflow_meta'] = WorkflowMeta(
+                    workflow_id=str(meta_dict.get('workflow_id', '')),
+                    task_index=task_index_value,
+                    task_name=str(meta_dict.get('task_name', '')),
+                )
+        # If task doesn't declare workflow_meta, silently skip injection.
+
+    try:
+        kwargs = fill_omitted_defaults(underlying_fn, kwargs)
+    except (StrictJsonError, ValueValidationError) as exc:
+        return _serialization_error_response(
+            task_name,
+            SerializationError(
+                f'A default of {task_name!r} does not fit its declared type: '
+                f'{exc}',
+            ),
+        )
+
+    return _PreparedCall(task=task, app=app, args=args, kwargs=kwargs)
+
+
+def _task_exception_response(
+    task_name: str,
+    e: BaseException,
+) -> Tuple[bool, str, Optional[str]]:
+    """The wire tuple of a task that raised: ``TASK_EXCEPTION``. Logs it."""
+    logger.error(f'Task exception: {task_name}: {exception_text(e)}')
+    # If the task raised an exception, we wrap it in a TaskError
+    tr = TaskResult(
+        err=TaskError(
+            error_code=OperationalErrorCode.TASK_EXCEPTION,
+            message=f'{type(e).__name__}: {exception_text(e)}',
+            data={'task_name': task_name},
+            exception=e,  # pydantic will accept and we flatten on serialization if needed elsewhere
+        )
+    )
+    return (True, serialize_error_payload(tr), None)
+
+
+def _encode_task_outcome(
+    task_name: str,
+    task: Any,
+    out: TaskResult[Any, TaskError],
+) -> Tuple[bool, str, Optional[str]]:
+    """Encode the result of a task call for the wire, against the declared
+    ok type of the task. A value that does not fit ends the run with
+    ``WORKER_SERIALIZATION_ERROR``. An exception propagates. No I/O."""
+    # Strict-serde phase 5: result encoding routes through
+    # ``encode_task_result(result, ok_type)`` so the wire envelope
+    # uses ``__h_task_result__`` and the ok-slot is encoded against
+    # the task's declared ``OkT`` (path-aware reserved-key scan and
+    # JsonValue fence inherited from ``encode_value``).
+    ok_type = getattr(task, 'task_ok_type', None)
+    if ok_type is None:
+        return _serialization_error_response(
+            task_name,
+            SerializationError(
+                f'Task {task_name!r} has no `task_ok_type`; '
+                f'cannot encode return value'
+            ),
+        )
+
+    try:
+        envelope = encode_returned_result(out, ok_type)
+    except (StrictJsonError, ValueValidationError) as exc:
+        return _serialization_error_response(
+            task_name,
+            SerializationError(
+                f'encode_task_result failed for {task_name!r}: '
+                f'{exc}'
+            ),
+        )
+    ser = dumps_json(envelope)
+    if is_err(ser):
+        return _serialization_error_response(task_name, ser.err_value)
+    return (True, ser.ok_value, None)
 
 
 def _run_task_entry(
@@ -1095,363 +1559,23 @@ def _run_task_entry(
             case _ as unreachable:
                 assert_never(unreachable)
 
-        # Resolve from TaskRegistry
-        try:
-            app = get_current_app()
-            task = app.tasks[task_name]  # may raise NotRegistered
-            body_kind = getattr(task, 'task_body_kind', None)
-        except Exception as e:
-            logger.error(f'Failed to resolve task {task_name}: {e}')
-            return _resolution_failure(
-                task_name,
-                f'Failed to resolve {task_name}: {type(e).__name__}: {e}',
-                f'{type(e).__name__}: {e}',
-            )
-        match _why_not_runnable(body_kind, task_loop):
-            case None:
+        prepared = _prepare_task_call(
+            task_name,
+            args_json,
+            kwargs_json,
+            OnIsolatedChild(task_loop),
+        )
+        match prepared:
+            case _PreparedCall(task=task, args=args, kwargs=kwargs):
                 pass
-            case not_runnable:
-                logger.error(f'Failed to resolve task {task_name}: {not_runnable}')
-                return _resolution_failure(
-                    task_name,
-                    f'Failed to resolve {task_name}: {not_runnable}',
-                    not_runnable,
-                )
-
-        # Deserialize task arguments. Strict-serde: positional args are
-        # rejected at every producer; the wire shape for args is always
-        # `null` or `[]`. Inspect the raw loaded JSON to enforce this
-        # before any typed decode runs.
-        args_json_result = loads_json(args_json)
-        if is_err(args_json_result):
-            return _serialization_error_response(task_name, args_json_result.err_value)
-        raw_args = args_json_result.ok_value
-        if raw_args is not None and raw_args != []:
-            return _serialization_error_response(
-                task_name,
-                SerializationError(
-                    f'Task {task_name!r} row carries positional args; '
-                    f'strict-serde rejects positional args. '
-                    f'Drop in-flight pre-strict rows before upgrading.',
-                ),
-            )
-        args: tuple[Any, ...] = ()
-
-        if kwargs_json is None:
-            raw_kwargs: dict[str, Any] = {}
-        else:
-            kwargs_json_result = loads_json(kwargs_json)
-            if is_err(kwargs_json_result):
-                return _serialization_error_response(
-                    task_name, kwargs_json_result.err_value
-                )
-            decoded_kwargs = kwargs_json_result.ok_value
-            if not isinstance(decoded_kwargs, dict):
-                return _serialization_error_response(
-                    task_name,
-                    SerializationError(
-                        f'kwargs must be a JSON object, got '
-                        f'{type(decoded_kwargs).__name__}',
-                    ),
-                )
-            raw_kwargs = decoded_kwargs
-
-        # Strict-serde phase 3+4: decode user kwargs using the receiver's
-        # declared parameter types. Engine-private transport keys
-        # (`__h_workflow_ctx__`, `__h_workflow_meta__`,
-        # `__h_taskresult_envelope__`) pass through ``decode_kwargs``
-        # unchanged because their leading prefix is in the transport
-        # allowlist; per-key unpacking happens immediately below.
-        underlying_fn = underlying_task_fn(task)
-        try:
-            kwargs = decode_kwargs(underlying_fn, raw_kwargs)
-        except (StrictJsonError, ValueValidationError) as exc:
-            return _serialization_error_response(
-                task_name,
-                SerializationError(
-                    f'Failed to decode kwargs for {task_name}: {exc}',
-                ),
-            )
-
-        # Deserialize injected TaskResults from workflow args_from.
-        # Strict-serde envelope shape (engine.py emit sites):
-        #   {
-        #     '__h_taskresult_envelope__': True,
-        #     'source_task_name': '<upstream task name>',
-        #     'inner': <encode_task_result(tr, source_ok_type)>,
-        #   }
-        # The worker derives the upstream OkT from `app.tasks[source_task_name]`
-        # and decodes via `decode_task_result(inner, ok_type)`.
-        for key, value in list(kwargs.items()):
-            if not (
-                isinstance(value, dict)
-                and value.get(_ENGINE_KEY_TASKRESULT_ENVELOPE) is True
-            ):
-                continue
-            envelope = cast('dict[str, Any]', value)
-            source_task_name = envelope.get('source_task_name')
-            if not isinstance(source_task_name, str):
-                return _serialization_error_response(
-                    task_name,
-                    SerializationError(
-                        f'args_from envelope for kwarg {key!r} is missing '
-                        f'source_task_name'
-                    ),
-                )
-            inner = envelope.get('inner')
-            source_definition_key = envelope.get('source_definition_key')
-            from horsies.core.models.workflow.typing_utils import (
-                resolve_source_ok_type,
-            )
-
-            source_ok_type = resolve_source_ok_type(
-                app, source_task_name,
-                sub_definition_key=(
-                    source_definition_key
-                    if isinstance(source_definition_key, str)
-                    else None
-                ),
-            )
-            if source_ok_type is None:
-                return _serialization_error_response(
-                    task_name,
-                    SerializationError(
-                        f'args_from source {source_task_name!r} is not '
-                        f'registered (no task or workflow definition with '
-                        f'this name); cannot decode kwarg {key!r}'
-                    ),
-                )
-            try:
-                decoded_result = decode_task_result(inner, source_ok_type)
-            except (StrictJsonError, ValueValidationError) as exc:
-                return _serialization_error_response(
-                    task_name,
-                    SerializationError(
-                        f'decode_task_result failed for kwarg {key!r} '
-                        f'(source task {source_task_name!r}): {exc}'
-                    ),
-                )
-            target_ok_type = declared_taskresult_ok_type(underlying_fn, key)
-            if target_ok_type is None or target_ok_type == source_ok_type:
-                kwargs[key] = decoded_result
-                continue
-            match conform_to_target(decoded_result, target_ok_type):
-                case Ok(ok_value=conformed):
-                    kwargs[key] = conformed
-                case Err(err_value=refusal):
-                    return _serialization_error_response(
-                        task_name,
-                        SerializationError(
-                            f'kwarg {key!r} does not fit its declared type '
-                            f'(source task {source_task_name!r}): {refusal}'
-                        ),
-                    )
-                case _ as unreachable:
-                    assert_never(unreachable)
-
-        # Handle workflow injection payloads (workflow_ctx / workflow_meta).
-        workflow_ctx_data = kwargs.pop(_ENGINE_KEY_WORKFLOW_CTX, None)
-        workflow_meta_data = kwargs.pop(_ENGINE_KEY_WORKFLOW_META, None)
-        if workflow_ctx_data is not None or workflow_meta_data is not None:
-            import inspect
-
-            underlying_fn = underlying_task_fn(task)
-            sig = inspect.signature(underlying_fn)
-            if workflow_ctx_data is not None and 'workflow_ctx' in sig.parameters:
-                from horsies.core.models.workflow import (
-                    WorkflowContext,
-                    SubWorkflowSummary,
-                )
-
-                results_by_id_raw = workflow_ctx_data.get('results_by_id', {})
-                task_name_by_id = workflow_ctx_data.get('task_name_by_id', {})
-                definition_key_by_id = workflow_ctx_data.get(
-                    'definition_key_by_id', {},
-                )
-                results_by_id: dict[str, TaskResult[Any, TaskError]] = {}
-                for node_id, envelope in results_by_id_raw.items():
-                    if envelope is None:
-                        # Engine couldn't encode this entry (no
-                        # registered task or no ok_type); surface as a
-                        # sentinel TaskError so the context still has a
-                        # typed value.
-                        results_by_id[node_id] = TaskResult(
-                            err=TaskError(
-                                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
-                                message=(
-                                    f'workflow_ctx result for node '
-                                    f'{node_id!r} unavailable (source '
-                                    f'task not registered at encode '
-                                    f'time)'
-                                ),
-                                data={'node_id': node_id},
-                            ),
-                        )
-                        continue
-                    source_task_name = task_name_by_id.get(node_id)
-                    if not isinstance(source_task_name, str):
-                        results_by_id[node_id] = TaskResult(
-                            err=TaskError(
-                                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
-                                message=(
-                                    f'workflow_ctx missing task_name for '
-                                    f'node {node_id!r}; cannot decode'
-                                ),
-                                data={'node_id': node_id},
-                            ),
-                        )
-                        continue
-                    from horsies.core.models.workflow.typing_utils import (
-                        resolve_source_ok_type as _resolve_src_ok,
-                    )
-
-                    _sub_def_key = definition_key_by_id.get(node_id)
-                    source_ok_type = _resolve_src_ok(
-                        app, source_task_name,
-                        sub_definition_key=(
-                            _sub_def_key
-                            if isinstance(_sub_def_key, str)
-                            else None
-                        ),
-                    )
-                    if source_ok_type is None:
-                        results_by_id[node_id] = TaskResult(
-                            err=TaskError(
-                                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
-                                message=(
-                                    f'workflow_ctx source '
-                                    f'{source_task_name!r} not '
-                                    f'registered in this process (no task '
-                                    f'or workflow definition with this name)'
-                                ),
-                                data={
-                                    'node_id': node_id,
-                                    'source_task_name': source_task_name,
-                                },
-                            ),
-                        )
-                        continue
-                    try:
-                        results_by_id[node_id] = decode_task_result(
-                            envelope, source_ok_type,
-                        )
-                    except (StrictJsonError, ValueValidationError) as exc:
-                        results_by_id[node_id] = TaskResult(
-                            err=TaskError(
-                                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
-                                message=(
-                                    f'decode_task_result failed for '
-                                    f'workflow_ctx node {node_id!r}: '
-                                    f'{exc}'
-                                ),
-                                data={
-                                    'node_id': node_id,
-                                    'source_task_name': source_task_name,
-                                },
-                            ),
-                        )
-
-                summaries_by_id_raw = workflow_ctx_data.get('summaries_by_id', {})
-                summaries_by_id: dict[str, SubWorkflowSummary[Any]] = {}
-                for node_id, summary_json in summaries_by_id_raw.items():
-                    if isinstance(summary_json, str):
-                        sj = loads_json(summary_json)
-                        if is_err(sj):
-                            return _serialization_error_response(
-                                task_name, sj.err_value
-                            )
-                        try:
-                            summaries_by_id[node_id] = SubWorkflowSummary.from_json(
-                                sj.ok_value,
-                            )
-                        except ValueError as summary_exc:
-                            return _serialization_error_response(
-                                task_name, SerializationError(str(summary_exc))
-                            )
-
-                kwargs['workflow_ctx'] = WorkflowContext.from_serialized(
-                    workflow_id=workflow_ctx_data.get('workflow_id', ''),
-                    task_index=workflow_ctx_data.get('task_index', 0),
-                    task_name=workflow_ctx_data.get('task_name', ''),
-                    results_by_id=results_by_id,
-                    summaries_by_id=summaries_by_id,
-                )
-            # If task doesn't declare workflow_ctx, silently skip injection.
-
-            if workflow_meta_data is not None and 'workflow_meta' in sig.parameters:
-                from horsies.core.models.workflow import WorkflowMeta
-
-                if isinstance(workflow_meta_data, dict):
-                    meta_dict = cast(dict[str, Any], workflow_meta_data)
-                    task_index_raw: Any = meta_dict.get('task_index', 0)
-                    try:
-                        task_index_value = int(task_index_raw)
-                    except (TypeError, ValueError):
-                        task_index_value = 0
-
-                    kwargs['workflow_meta'] = WorkflowMeta(
-                        workflow_id=str(meta_dict.get('workflow_id', '')),
-                        task_index=task_index_value,
-                        task_name=str(meta_dict.get('task_name', '')),
-                    )
-            # If task doesn't declare workflow_meta, silently skip injection.
-
-        try:
-            kwargs = fill_omitted_defaults(underlying_fn, kwargs)
-        except (StrictJsonError, ValueValidationError) as exc:
-            return _serialization_error_response(
-                task_name,
-                SerializationError(
-                    f'A default of {task_name!r} does not fit its declared type: '
-                    f'{exc}',
-                ),
-            )
-
+            case tuple():
+                return prepared
         out = _task_call_result(task_name, task(*args, **kwargs), task_loop)
         logger.info(f'Task execution completed: {task_name} ({task_id})')
-
-        # Strict-serde phase 5: result encoding routes through
-        # ``encode_task_result(result, ok_type)`` so the wire envelope
-        # uses ``__h_task_result__`` and the ok-slot is encoded against
-        # the task's declared ``OkT`` (path-aware reserved-key scan and
-        # JsonValue fence inherited from ``encode_value``).
-        ok_type = getattr(task, 'task_ok_type', None)
-        if ok_type is None:
-            return _serialization_error_response(
-                task_name,
-                SerializationError(
-                    f'Task {task_name!r} has no `task_ok_type`; '
-                    f'cannot encode return value'
-                ),
-            )
-
-        try:
-            envelope = encode_returned_result(out, ok_type)
-        except (StrictJsonError, ValueValidationError) as exc:
-            return _serialization_error_response(
-                task_name,
-                SerializationError(
-                    f'encode_task_result failed for {task_name!r}: '
-                    f'{exc}'
-                ),
-            )
-        ser = dumps_json(envelope)
-        if is_err(ser):
-            return _serialization_error_response(task_name, ser.err_value)
-        return (True, ser.ok_value, None)
+        return _encode_task_outcome(task_name, task, out)
 
     except BaseException as e:
-        logger.error(f'Task exception: {task_name}: {exception_text(e)}')
-        # If the task raised an exception, we wrap it in a TaskError
-        tr = TaskResult(
-            err=TaskError(
-                error_code=OperationalErrorCode.TASK_EXCEPTION,
-                message=f'{type(e).__name__}: {exception_text(e)}',
-                data={'task_name': task_name},
-                exception=e,  # pydantic will accept and we flatten on serialization if needed elsewhere
-            )
-        )
-        return (True, serialize_error_payload(tr), None)
+        return _task_exception_response(task_name, e)
 
     finally:
         # Mark finalizing so the reaper does not mistake a completed child

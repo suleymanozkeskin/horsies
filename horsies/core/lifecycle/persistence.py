@@ -18,8 +18,9 @@ import logging
 import re
 from collections.abc import Mapping, Sequence
 from datetime import datetime
-from typing import Any, assert_never
+from typing import Any, LiteralString, assert_never, cast
 
+from psycopg import AsyncCursor
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -500,6 +501,30 @@ def apply_sync(
     cursor.execute(_as_psycopg(statement), parameters)
     columns = [description.name for description in cursor.description]
     rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+    outcome = decode_outcome_row(_single_row(rows, command))
+    _log_outcome(command, outcome)
+    return outcome
+
+
+async def apply_psycopg_async(
+    cursor: AsyncCursor[Any],
+    command: ExecutableCommand,
+) -> TerminalizationOutcome:
+    """Execute a command on the async psycopg driver of a shared async child.
+
+    The async twin of ``apply_sync``: the same call, the same decoder, on a
+    cursor whose connection runs on the child's event loop. The transaction
+    stays the caller's.
+    """
+    statement, parameters = call_for(command)
+    # The text comes from the statement constants of this module, never from
+    # input, so it is a literal in all but its type.
+    query = cast('LiteralString', _as_psycopg(statement))
+    await cursor.execute(query, parameters)
+    description = cursor.description
+    assert description is not None, 'an operation function returns a row'
+    columns = [column.name for column in description]
+    rows = [dict(zip(columns, row)) for row in await cursor.fetchall()]
     outcome = decode_outcome_row(_single_row(rows, command))
     _log_outcome(command, outcome)
     return outcome

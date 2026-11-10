@@ -1,11 +1,26 @@
-"""Per-process connection pool for child worker processes."""
+"""Per-process connection pools for child worker processes.
+
+An isolated child opens a sync pool (``_initialize_worker_pool``). A shared
+async child opens an async pool on its event loop instead
+(``open_shared_async_pool``): its lifecycle writes must not block the loop.
+Both have the size of ``PostgresConfig.worker_child_pool_*``.
+"""
 
 from __future__ import annotations
 
 import atexit
 from collections.abc import Mapping
+from typing import Any, Final
 
-from psycopg_pool import ConnectionPool
+from psycopg import AsyncConnection
+from psycopg_pool import AsyncConnectionPool, ConnectionPool
+
+CHILD_POOL_MAX_LIFETIME_S: Final = 300.0
+"""Each pooled connection of a child is replaced after this time."""
+
+SHARED_POOL_CONNECTION_WAIT_S: Final = 30.0
+"""The longest wait of a lifecycle write of a shared async child for a pooled
+connection: the default wait of a psycopg pool, as for an isolated child."""
 
 
 # ---------- Per-process connection pool (initialized in child processes) ----------
@@ -79,12 +94,52 @@ def _initialize_worker_pool(
         database_url,
         min_size=min_size,
         max_size=max_size,
-        max_lifetime=300.0,
+        max_lifetime=CHILD_POOL_MAX_LIFETIME_S,
         check=check,
         open=True,
         kwargs=dict(connect_kwargs) if connect_kwargs else {},
     )
     atexit.register(_cleanup_worker_pool)
+
+
+async def open_shared_async_pool(
+    database_url: str,
+    *,
+    connect_kwargs: Mapping[str, object],
+    min_size: int,
+    max_size: int,
+    check_on_checkout: bool,
+) -> AsyncConnectionPool[AsyncConnection[Any]]:
+    """Open the async pool of a shared async child, on the running loop.
+
+    The sizes and the checkout check are those of the sync pool of an
+    isolated child. Opens without a connection when ``min_size`` is 0; an
+    unreachable database shows at the first write, inside its containment.
+
+    Raises:
+        ValueError: invalid pool sizing.
+        Exception: a conninfo that does not parse raises from the
+            constructor; the caller fails the boot with it.
+    """
+    if min_size < 0:
+        raise ValueError('min_size must be >= 0')
+    if max_size < 1:
+        raise ValueError('max_size must be >= 1')
+    if min_size > max_size:
+        raise ValueError('min_size must be <= max_size')
+    check = AsyncConnectionPool.check_connection if check_on_checkout else None
+    pool: AsyncConnectionPool[AsyncConnection[Any]] = AsyncConnectionPool(
+        database_url,
+        min_size=min_size,
+        max_size=max_size,
+        max_lifetime=CHILD_POOL_MAX_LIFETIME_S,
+        check=check,
+        open=False,
+        timeout=SHARED_POOL_CONNECTION_WAIT_S,
+        kwargs=dict(connect_kwargs),
+    )
+    await pool.open(wait=False)
+    return pool
 
 
 _CHILD_POOL_API = (_get_worker_pool, _initialize_worker_pool)

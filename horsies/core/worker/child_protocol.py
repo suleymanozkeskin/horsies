@@ -325,6 +325,10 @@ class PreloadRefusedFrame:
     reason: str
 
 
+WireResult: TypeAlias = tuple[bool, str, str | None]
+"""What a child produced for one task run: whether it produced a task result
+(``ok``), that result as JSON, and the reason of a worker-level failure."""
+
 ParentFrame: TypeAlias = InitFrame | RunFrame | SharedRunFrame | StopFrame
 ChildFrame: TypeAlias = (
     ReadyFrame | BootFailedFrame | ResultFrame | SharedResultFrame | DeadlineFiredFrame
