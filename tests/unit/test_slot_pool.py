@@ -623,15 +623,27 @@ class TestTaskRuns:
         self,
         pool_factory: PoolFactory,
         tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """The leftover is cancelled, and the next task runs in a new child."""
+        """The leftover is cancelled, and the next task runs in a new child.
+        The retire warning names the coroutine that was left."""
         marker = tmp_path / 'cancelled'
         pool = await pool_factory()
-        match await _outcome(pool.submit(_frame('leave_pending', str(marker)))):
+        frame = _frame('leave_pending', str(marker))
+        with caplog.at_level(logging.WARNING, logger='horsies.worker'):
+            outcome = await _outcome(pool.submit(frame))
+        match outcome:
             case TaskFinished(result_json=first_pid, task_loop=task_loop):
-                assert task_loop == LoopHoldsTasks(count=1)
+                assert task_loop == LoopHoldsTasks(
+                    count=1,
+                    names=('_mark_when_cancelled',),
+                )
             case other:
                 raise AssertionError(other)
+        assert (
+            f'Retiring child pid={first_pid}: task {frame.task_id} left 1 task(s) on '
+            'its event loop: _mark_when_cancelled'
+        ) in caplog.text
         await _until(marker.exists)
         assert marker.read_text(encoding='ascii') == 'cancelled'
         assert await _result_json(pool.submit(_frame('pid'))) != first_pid

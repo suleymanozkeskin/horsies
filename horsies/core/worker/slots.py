@@ -1266,14 +1266,16 @@ class SlotPool:
         """Read the task loop report of a finished task, and decide whether
         the child takes another task."""
         match finished.task_loop:
-            case LoopHoldsTasks(count=count):
+            case LoopHoldsTasks() as leftover:
                 # No later task may share the loop with this work. The stop
                 # frame makes the child cancel it.
                 logger.warning(
-                    'Retiring child pid=%s: task %s left %d task(s) on its event loop',
+                    'Retiring child pid=%s: task %s left %d task(s) on its event '
+                    'loop: %s',
                     child.pid,
                     handle.frame.task_id,
-                    count,
+                    leftover.count,
+                    leftover.names_text(),
                 )
                 return _ChildAfterTask.RETIRE
             case NoTaskLoop() | LoopHoldsNoTask():

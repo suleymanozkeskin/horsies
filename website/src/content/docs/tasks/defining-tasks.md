@@ -50,6 +50,30 @@ An async task must await the work that it starts:
 - When an async task ends and asyncio tasks that it started, for example with `asyncio.create_task()`, are still on the loop, the worker replaces the child after that task. The next task runs in a new child, so no task shares the loop with that work. When the old child stops, it cancels that work, within 5 seconds.
 - A client that keeps its own background tasks on the loop, for example a keepalive or a consumer task, causes a child replacement after each async task.
 - A thread that `asyncio.to_thread()` starts can outlive its task, for example when a timeout ends the wait for it. The thread is not an asyncio task, so it does not cause a replacement. When the worker stops the child, the child does not wait for that thread past the 5-second close: it exits, and its `atexit` handlers do not run.
+- The worker log names the coroutine of each asyncio task that was left, for up to 10 tasks, for example `Retiring child pid=4242: task <id> left 1 task(s) on its event loop: refresh_session`.
+
+A task that cancels a helper task in `finally` must also await it. `cancel()` only asks the helper to stop. A helper that awaits while it stops, for example to close a session, is still on the loop when the task ends, and the worker replaces the child. Await the helper after the cancel:
+
+```python
+async def refresh_session() -> None:
+    try:
+        while True:
+            await asyncio.sleep(30)  # stands in for a keepalive call
+    finally:
+        await asyncio.sleep(0)  # stands in for closing the session
+
+
+@app.task("watch_price")
+async def watch_price(*, symbol: str) -> TaskResult[float, TaskError]:
+    helper = asyncio.create_task(refresh_session())
+    try:
+        await asyncio.sleep(0.1)  # stands in for the work of the task
+        return TaskResult(ok=101.5)
+    finally:
+        helper.cancel()
+        # gather returns the CancelledError of the helper instead of raising it.
+        await asyncio.gather(helper, return_exceptions=True)
+```
 
 A child creates its event loop at boot, before it reports ready, when the app has at least one `async def` task. A child of an app with no `async def` task creates no loop. When the loop cannot be created, for example because the process has no file descriptor left or an event loop policy raises:
 

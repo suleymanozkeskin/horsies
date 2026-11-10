@@ -278,12 +278,13 @@ def _refuse_run_on_a_child_to_retire(task_loop: TaskLoop, frame: RunFrame) -> No
     match task_loop.report():
         case NoTaskLoop() | LoopHoldsNoTask():
             return
-        case LoopHoldsTasks(count=count):
+        case LoopHoldsTasks() as leftover:
             logger.critical(
                 'Parent sent task %s to a child whose task loop holds %d task(s) '
-                'of an earlier task; such a child must be retired',
+                'of an earlier task (%s); such a child must be retired',
                 frame.task_id,
-                count,
+                leftover.count,
+                leftover.names_text(),
             )
         case _ as unreachable:
             assert_never(unreachable)

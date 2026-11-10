@@ -35,6 +35,10 @@ MAX_META_BYTES: Final = 1 << 20
 # Postgres cannot store a field of 1 GiB or more, so a larger result could
 # never be saved. This bound changes no outcome: it only fails earlier.
 MAX_BODY_BYTES: Final = (1 << 30) - 1
+# A report of tasks left on the task loop names at most this many of them,
+# each name cut to MAX_LEFTOVER_NAME_CHARS, so the report stays small.
+MAX_LEFTOVER_TASK_NAMES: Final = 10
+MAX_LEFTOVER_NAME_CHARS: Final = 200
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,9 +141,23 @@ class LoopHoldsNoTask:
 @dataclass(frozen=True, slots=True)
 class LoopHoldsTasks:
     """After the task, asyncio tasks that it started and did not await are
-    still on the child's task loop. The parent retires such a child."""
+    still on the child's task loop. The parent retires such a child.
+
+    ``names`` holds the coroutine ``__qualname__`` of
+    ``min(count, MAX_LEFTOVER_TASK_NAMES)`` of those tasks, sorted, each at
+    most ``MAX_LEFTOVER_NAME_CHARS`` characters.
+    """
 
     count: int
+    names: tuple[str, ...]
+
+    def names_text(self) -> str:
+        """The names, and how many tasks they leave out, for a log line."""
+        named = ', '.join(self.names)
+        left_out = self.count - len(self.names)
+        if left_out == 0:
+            return named
+        return f'{named}, and {left_out} more'
 
 
 TaskLoopReport: TypeAlias = NoTaskLoop | LoopHoldsNoTask | LoopHoldsTasks
@@ -258,8 +276,8 @@ def _task_loop_field(task_loop: TaskLoopReport) -> dict[str, object]:
             return {'kind': 'none'}
         case LoopHoldsNoTask():
             return {'kind': 'empty'}
-        case LoopHoldsTasks(count=count):
-            return {'kind': 'held', 'count': count}
+        case LoopHoldsTasks(count=count, names=names):
+            return {'kind': 'held', 'count': count, 'names': list(names)}
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -469,6 +487,16 @@ def _rss(meta: Mapping[str, Any]) -> RssReading:
     return RssMb(float(value))
 
 
+def _leftover_names(task_loop: Mapping[str, Any], count: int) -> tuple[str, ...]:
+    """One name for each leftover task up to the bound, each within its bound."""
+    names = _text_tuple(task_loop, 'names')
+    if len(names) != min(count, MAX_LEFTOVER_TASK_NAMES):
+        raise _BadField('task_loop.names')
+    if any(len(name) > MAX_LEFTOVER_NAME_CHARS for name in names):
+        raise _BadField('task_loop.names')
+    return names
+
+
 def _task_loop(meta: Mapping[str, Any]) -> TaskLoopReport:
     value = meta.get('task_loop')
     if not isinstance(value, dict):
@@ -483,7 +511,8 @@ def _task_loop(meta: Mapping[str, Any]) -> TaskLoopReport:
             count = task_loop.get('count')
             if not isinstance(count, int) or isinstance(count, bool) or count < 1:
                 raise _BadField('task_loop.count')
-            return LoopHoldsTasks(count=count)
+            names = _leftover_names(task_loop, count)
+            return LoopHoldsTasks(count=count, names=names)
         case _:
             raise _BadField('task_loop.kind')
 

@@ -30,6 +30,8 @@ from horsies.core.types.result import Err, Ok, Result
 from horsies.core.utils.loop_runner import in_running_event_loop
 from horsies.core.utils.task_loop_registry import register_task_loop, unregister_task_loop
 from horsies.core.worker.child_protocol import (
+    MAX_LEFTOVER_NAME_CHARS,
+    MAX_LEFTOVER_TASK_NAMES,
     LoopHoldsNoTask,
     LoopHoldsTasks,
     NoTaskLoop,
@@ -195,7 +197,8 @@ class TaskLoop:
                 assert_never(unreachable)
 
     def report(self) -> TaskLoopReport:
-        """What the loop holds after a task.
+        """What the loop holds after a task, with the names of the leftover
+        tasks, bounded by ``MAX_LEFTOVER_TASK_NAMES``.
 
         Reads only. Call it between runs, on the thread that runs them. A call
         after ``close`` is a defect in the caller: ``AssertionError``.
@@ -204,10 +207,7 @@ class TaskLoop:
             case LoopNotCreated():
                 return NoTaskLoop()
             case LoopOpen(loop=loop):
-                count = len(asyncio.all_tasks(loop))
-                if count == 0:
-                    return LoopHoldsNoTask()
-                return LoopHoldsTasks(count=count)
+                return _leftover_report(asyncio.all_tasks(loop))
             case LoopClosed():
                 raise AssertionError('TaskLoop.report was called after close')
             case _ as unreachable:
@@ -238,6 +238,36 @@ class TaskLoop:
             case _ as unreachable:
                 assert_never(unreachable)
         return self._state.executor
+
+
+def _leftover_report(
+    leftover: Set[asyncio.Task[Any]],
+) -> LoopHoldsNoTask | LoopHoldsTasks:
+    """Count the tasks that are not done. Name the first
+    ``MAX_LEFTOVER_TASK_NAMES`` of them, in sorted order."""
+    if not leftover:
+        return LoopHoldsNoTask()
+    names = sorted(_coroutine_name(task) for task in leftover)
+    return LoopHoldsTasks(
+        count=len(leftover),
+        names=tuple(names[:MAX_LEFTOVER_TASK_NAMES]),
+    )
+
+
+def _coroutine_name(task: asyncio.Task[Any]) -> str:
+    """The ``__qualname__`` of the coroutine of ``task``, safe for a frame field.
+
+    A coroutine object of a C extension can lack ``__qualname__``; the task
+    name stands in then. The name is made valid UTF-8, because user code can
+    set ``__qualname__`` to any string, and cut to ``MAX_LEFTOVER_NAME_CHARS``.
+    """
+    match getattr(task.get_coro(), '__qualname__', None):
+        case str() as qualname:
+            name = qualname
+        case _:
+            name = task.get_name()
+    safe = name.encode('utf-8', 'backslashreplace').decode('utf-8')
+    return safe[:MAX_LEFTOVER_NAME_CHARS]
 
 
 def _new_loop() -> Result[asyncio.AbstractEventLoop, LoopCreateFailed]:
@@ -320,12 +350,17 @@ def _cancel_leftover_tasks(loop: asyncio.AbstractEventLoop, deadline: float) -> 
         asyncio.wait(leftover, timeout=_seconds_left(deadline)),
     )
     _log_failed_leftovers(done)
-    if pending:
-        logger.warning(
-            '%d task(s) left on the task loop did not end within %ss of the cancel',
-            len(pending),
-            LOOP_CLOSE_TIMEOUT_S,
-        )
+    match _leftover_report(pending):
+        case LoopHoldsNoTask():
+            pass
+        case LoopHoldsTasks() as still_running:
+            logger.warning(
+                '%d task(s) left on the task loop did not end within %ss of the '
+                'cancel: %s',
+                still_running.count,
+                LOOP_CLOSE_TIMEOUT_S,
+                still_running.names_text(),
+            )
 
 
 def _log_failed_leftovers(done: Set[asyncio.Task[Any]]) -> None:

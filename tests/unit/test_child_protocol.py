@@ -16,6 +16,8 @@ from horsies.core.worker.child_main import _bounded_result
 from horsies.core.worker.child_protocol import (
     FRAME_HEADER,
     MAX_BODY_BYTES,
+    MAX_LEFTOVER_NAME_CHARS,
+    MAX_LEFTOVER_TASK_NAMES,
     MAX_META_BYTES,
     ChildForkedFrame,
     EncodedFrame,
@@ -175,8 +177,16 @@ class TestChildFrames:
     @pytest.mark.parametrize('result_json', ['', '{"é":1}'])
     @pytest.mark.parametrize(
         'task_loop',
-        [NoTaskLoop(), LoopHoldsNoTask(), LoopHoldsTasks(count=3)],
-        ids=['no-task-loop', 'empty', 'held'],
+        [
+            NoTaskLoop(),
+            LoopHoldsNoTask(),
+            LoopHoldsTasks(count=3, names=('a', 'b', 'Client._keepalive')),
+            LoopHoldsTasks(
+                count=MAX_LEFTOVER_TASK_NAMES + 5,
+                names=('n' * MAX_LEFTOVER_NAME_CHARS,) * MAX_LEFTOVER_TASK_NAMES,
+            ),
+        ],
+        ids=['no-task-loop', 'empty', 'held', 'held-at-the-bounds'],
     )
     def test_result_frame_round_trip(
         self,
@@ -203,6 +213,21 @@ class TestChildFrames:
         meta, body = _split(encode_child_frame(frame))
         assert body == b''
         assert decode_child_frame(meta, body) == Ok(frame)
+
+    @pytest.mark.parametrize(
+        ('report', 'text'),
+        [
+            (LoopHoldsTasks(count=2, names=('a', 'b')), 'a, b'),
+            (LoopHoldsTasks(count=12, names=('a', 'b')), 'a, b, and 10 more'),
+        ],
+        ids=['all-named', 'some-left-out'],
+    )
+    def test_the_leftover_text_says_how_many_names_it_leaves_out(
+        self,
+        report: LoopHoldsTasks,
+        text: str,
+    ) -> None:
+        assert report.names_text() == text
 
     def test_loop_create_failed_frame_names_subject_and_cause(self) -> None:
         frame = LoopCreateFailedFrame(
@@ -352,10 +377,31 @@ class TestMalformedMetadata:
             ('rss_mb', True),
             ('task_loop', None),
             ('task_loop', {'kind': 'unknown'}),
-            ('task_loop', {'kind': 'held'}),
-            ('task_loop', {'kind': 'held', 'count': 0}),
-            ('task_loop', {'kind': 'held', 'count': True}),
-            ('task_loop', {'kind': 'held', 'count': '2'}),
+            ('task_loop', {'kind': 'held', 'names': ['a']}),
+            ('task_loop', {'kind': 'held', 'count': 0, 'names': []}),
+            ('task_loop', {'kind': 'held', 'count': True, 'names': ['a']}),
+            ('task_loop', {'kind': 'held', 'count': '2', 'names': ['a', 'b']}),
+            ('task_loop', {'kind': 'held', 'count': 1}),
+            ('task_loop', {'kind': 'held', 'count': 1, 'names': 'a'}),
+            ('task_loop', {'kind': 'held', 'count': 1, 'names': [1]}),
+            ('task_loop', {'kind': 'held', 'count': 2, 'names': ['a']}),
+            ('task_loop', {'kind': 'held', 'count': 1, 'names': ['a', 'b']}),
+            (
+                'task_loop',
+                {
+                    'kind': 'held',
+                    'count': MAX_LEFTOVER_TASK_NAMES + 1,
+                    'names': ['a'] * (MAX_LEFTOVER_TASK_NAMES + 1),
+                },
+            ),
+            (
+                'task_loop',
+                {
+                    'kind': 'held',
+                    'count': 1,
+                    'names': ['n' * (MAX_LEFTOVER_NAME_CHARS + 1)],
+                },
+            ),
             ('task_loop', {'kind': 'unavailable', 'detail': 'OSError'}),
         ],
     )
@@ -407,9 +453,17 @@ class TestFieldCoverage:
 
     def test_result_frame_fields(self) -> None:
         names = {field.name for field in dataclasses.fields(ResultFrame)}
-        frame = ResultFrame('t', True, 'x', None, RssMb(1.0), LoopHoldsTasks(count=1))
+        held = LoopHoldsTasks(count=1, names=('a',))
+        frame = ResultFrame('t', True, 'x', None, RssMb(1.0), held)
         wire = set(json.loads(_split(encode_child_frame(frame))[0]))
         assert names - {'result_json', 'rss'} == wire - {'kind', 'rss_mb'}
+
+    def test_leftover_report_fields(self) -> None:
+        names = {field.name for field in dataclasses.fields(LoopHoldsTasks)}
+        held = LoopHoldsTasks(count=1, names=('a',))
+        frame = ResultFrame('t', True, 'x', None, RssMb(1.0), held)
+        wire = json.loads(_split(encode_child_frame(frame))[0])['task_loop']
+        assert names == set(wire) - {'kind'}
 
     def test_loop_create_failed_frame_fields(self) -> None:
         names = {field.name for field in dataclasses.fields(LoopCreateFailedFrame)}

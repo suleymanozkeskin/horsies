@@ -44,7 +44,9 @@ and there is no migration contract between pre-1.0 versions.
     work. When the old child stops, it cancels that work and closes the
     loop. This takes at most 5 seconds. A client that keeps its own
     background tasks on the loop causes a child replacement after each async
-    task.
+    task. The warning of the replacement names the coroutine of each task
+    left, up to 10. A task that cancels a helper task in `finally` must also
+    await it.
   - A thread of `asyncio.to_thread()` that still runs after that time does
     not hold the child: the child exits without waiting for it, and its
     `atexit` handlers do not run.

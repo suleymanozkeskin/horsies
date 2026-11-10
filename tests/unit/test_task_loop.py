@@ -1,5 +1,7 @@
 """The one event loop that runs the async tasks of a worker child."""
 
+# pyright: reportPrivateUsage=false
+
 from __future__ import annotations
 
 import asyncio
@@ -9,13 +11,17 @@ import inspect
 import logging
 import threading
 import time
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Coroutine, Iterator
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
 from horsies.core.types.result import Err, Ok
 from horsies.core.utils.loop_runner import in_running_event_loop
 from horsies.core.worker.child_protocol import (
+    MAX_LEFTOVER_NAME_CHARS,
+    MAX_LEFTOVER_TASK_NAMES,
     LoopHoldsNoTask,
     LoopHoldsTasks,
     NoTaskLoop,
@@ -306,7 +312,140 @@ class TestReport:
             await asyncio.sleep(0)
 
         task_loop.run(leaves_two())
-        assert task_loop.report() == LoopHoldsTasks(count=2)
+        assert task_loop.report() == LoopHoldsTasks(
+            count=2,
+            names=('Event.wait', 'Event.wait'),
+        )
+
+    def test_the_report_names_the_coroutine_of_each_leftover(
+        self,
+        task_loop: TaskLoop,
+    ) -> None:
+        kept: list[asyncio.Task[None]] = []
+
+        async def poll_forever() -> None:
+            await asyncio.Event().wait()
+
+        async def keep_alive_forever() -> None:
+            await asyncio.Event().wait()
+
+        async def leaves_two() -> None:
+            loop = asyncio.get_running_loop()
+            kept.append(loop.create_task(poll_forever()))
+            kept.append(loop.create_task(keep_alive_forever()))
+            await asyncio.sleep(0)
+
+        task_loop.run(leaves_two())
+        prefix = (
+            'TestReport.test_the_report_names_the_coroutine_of_each_leftover.<locals>.'
+        )
+        report = task_loop.report()
+        assert report == LoopHoldsTasks(
+            count=2,
+            names=(f'{prefix}keep_alive_forever', f'{prefix}poll_forever'),
+        )
+
+    def test_the_names_are_bounded_and_say_how_many_they_leave_out(
+        self,
+        task_loop: TaskLoop,
+    ) -> None:
+        count = MAX_LEFTOVER_TASK_NAMES + 3
+        kept: list[asyncio.Task[bool]] = []
+
+        async def leaves_many() -> None:
+            loop = asyncio.get_running_loop()
+            kept.extend(loop.create_task(asyncio.Event().wait()) for _ in range(count))
+            await asyncio.sleep(0)
+
+        task_loop.run(leaves_many())
+        report = task_loop.report()
+        match report:
+            case LoopHoldsTasks(count=reported, names=names):
+                assert reported == count
+                assert names == ('Event.wait',) * MAX_LEFTOVER_TASK_NAMES
+                assert report.names_text().endswith(', and 3 more')
+            case other:
+                raise AssertionError(other)
+
+    def test_a_long_or_invalid_name_is_cut_and_made_valid(
+        self,
+        task_loop: TaskLoop,
+    ) -> None:
+        kept: list[asyncio.Task[bool]] = []
+
+        def renamed(name: str) -> Coroutine[Any, Any, bool]:
+            waiting = asyncio.Event().wait()
+            waiting.__qualname__ = name
+            return waiting
+
+        async def leaves_two() -> None:
+            loop = asyncio.get_running_loop()
+            kept.append(loop.create_task(renamed('x' * (MAX_LEFTOVER_NAME_CHARS + 50))))
+            kept.append(loop.create_task(renamed('bad \ud800 name')))
+            await asyncio.sleep(0)
+
+        task_loop.run(leaves_two())
+        match task_loop.report():
+            case LoopHoldsTasks(names=names):
+                assert sorted(names) == sorted(
+                    ['x' * MAX_LEFTOVER_NAME_CHARS, 'bad \\ud800 name'],
+                )
+            case other:
+                raise AssertionError(other)
+
+    def test_a_helper_cancelled_in_finally_and_not_awaited_is_left(
+        self,
+        task_loop: TaskLoop,
+    ) -> None:
+        """``cancel()`` only asks. A helper that awaits while it stops is
+        still on the loop when the task ends."""
+
+        async def helper() -> None:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                await asyncio.sleep(0)  # a close that awaits
+
+        async def cancels_only() -> None:
+            running = asyncio.create_task(helper())
+            try:
+                await asyncio.sleep(0)
+            finally:
+                running.cancel()
+
+        task_loop.run(cancels_only())
+        match task_loop.report():
+            case LoopHoldsTasks(count=1, names=(name,)):
+                assert name.endswith('.<locals>.helper')
+            case other:
+                raise AssertionError(other)
+
+    def test_a_helper_cancelled_and_awaited_in_finally_is_not_left(
+        self,
+        task_loop: TaskLoop,
+    ) -> None:
+        """The idiom that the async task docs show."""
+
+        async def helper() -> None:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                await asyncio.sleep(0)  # a close that awaits
+
+        async def cancels_and_awaits() -> None:
+            running = asyncio.create_task(helper())
+            try:
+                await asyncio.sleep(0)
+            finally:
+                running.cancel()
+                await asyncio.gather(running, return_exceptions=True)
+
+        task_loop.run(cancels_and_awaits())
+        assert task_loop.report() == LoopHoldsNoTask()
+
+    def test_a_coroutine_with_no_qualname_is_named_by_its_task(self) -> None:
+        task = SimpleNamespace(get_coro=object, get_name=lambda: 'Task-7')
+        assert task_loop_module._coroutine_name(cast(Any, task)) == 'Task-7'
 
     def test_a_call_after_close_is_a_defect(self, task_loop: TaskLoop) -> None:
         task_loop.close()
@@ -423,7 +562,12 @@ class TestClose:
             task_loop.close()
         assert time.monotonic() - started < 10 * SHORT_CLOSE_TIMEOUT_S
         assert loop.is_closed()
-        assert '1 task(s) left on the task loop did not end' in caplog.text
+        not_ended = [
+            line for line in caplog.text.splitlines() if 'did not end within' in line
+        ]
+        assert len(not_ended) == 1
+        assert '1 task(s) left on the task loop did not end' in not_ended[0]
+        assert not_ended[0].endswith('.<locals>.ignore_cancel')
         # The task never ends. Drop it quietly: it is pending on a closed loop.
         kept[0]._log_destroy_pending = False  # pyright: ignore[reportAttributeAccessIssue]
 
