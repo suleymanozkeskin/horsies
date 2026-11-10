@@ -175,6 +175,10 @@ class TestClaimPassCounts:
                 self.cfg = cfg
                 self.worker_instance_id = f'probe-{uuid.uuid4().hex[:8]}'
 
+            def _claim_slot_count(self) -> int:
+                # No slot pool: every configured slot counts.
+                return cfg.processes
+
             async def _dispatch_one(self, *args: Any, **kwargs: Any) -> None:
                 raise AssertionError('empty pass must not dispatch')
 

@@ -37,11 +37,14 @@ def _make_worker(engine: AsyncEngine, *, queues: dict[str, int]) -> Worker:
         queue_priorities={name: 1 for name in queues},
         queue_max_concurrency=dict(queues),
     )
-    return Worker(
+    worker = Worker(
         session_factory=async_sessionmaker(engine, expire_on_commit=False),
         listener=MagicMock(),
         cfg=cfg,
     )
+    # No slot pool: every configured slot counts.
+    worker._claim_slot_count = lambda: cfg.processes  # type: ignore[method-assign]
+    return worker
 
 
 @pytest.mark.asyncio(loop_scope='function')

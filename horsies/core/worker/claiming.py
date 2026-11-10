@@ -142,6 +142,7 @@ class ClaimMixin:
         worker_instance_id: str
 
         # Cross-concern methods provided by sibling mixins / Worker.
+        def _claim_slot_count(self) -> int: ...
         async def _dispatch_one(
             self,
             task_id: str,
@@ -160,7 +161,8 @@ class ClaimMixin:
           - max_claim_per_worker guard (prevents over-claiming)
           - queue priorities (CUSTOM mode)
           - per-queue max_concurrency (CUSTOM mode)
-          - worker global concurrency (processes)
+          - worker global concurrency: the slots that are not down
+            (``_claim_slot_count``), at most ``processes``
 
         Raises:
             Exception: DB errors propagate to the main loop, which
@@ -201,7 +203,7 @@ class ClaimMixin:
                 allow_nan=False,
             ),
             'p_hard_cap_mode': self.cfg.prefetch_buffer == 0,
-            'p_processes': int(self.cfg.processes),
+            'p_processes': self._claim_slot_count(),
             'p_prefetch_buffer': int(self.cfg.prefetch_buffer),
             'p_max_claim_per_worker': int(self.cfg.max_claim_per_worker),
             'p_max_claim_batch': int(self.cfg.max_claim_batch),
