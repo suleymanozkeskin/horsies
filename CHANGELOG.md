@@ -429,6 +429,26 @@ and there is no migration contract between pre-1.0 versions.
   - The task of such a slot keeps the row that the earlier scheduler wrote:
     it runs with no timeout, no retries, and as `ISOLATED`. Later slots carry
     the task's options.
+- **Breaking: `RecoveryConfig.worker_state_snapshot_interval_ms` is at most
+  60,000 ms.** A worker is live while its latest snapshot is at most
+  `WORKER_STATE_LIVE_WINDOW_S` (120) seconds old. The cap is half of that
+  window, so a running worker stays live when a snapshot write is late by up
+  to half the window. A larger value raises `ConfigurationError` with
+  `HRS-204` (`CONFIG_INVALID_RECOVERY`); the message names the value, the cap
+  and the window. Before, the bound was
+  300,000 ms, and a value above it raised a pydantic `ValidationError`. An
+  interval above 120,000 ms made a live worker read as not live between its
+  snapshots: the fleet check reported its streams as unserved, and the web UI
+  marked it stale.
+- **horsies requires psycopg 3.3.6 or later.** The floor of `psycopg`, and
+  of `psycopg-binary` and `psycopg-c` (the `pg-binary` and `pg-c` extras), is
+  3.3.6, up from 3.3.2. When a running query is interrupted by a cancelled
+  asyncio task, `KeyboardInterrupt` or `SystemExit`, psycopg 3.3.6 waits at
+  most 10 s: up to 5 s to send the cancel request and up to 5 s for the query
+  to end. Then it closes the connection. Before 3.3.6, psycopg waited for the
+  query to end with no limit. The 5 s limit on the cancel request needs
+  libpq 17 or later; with an older libpq, psycopg sends the cancel with a
+  blocking call that has no limit. `psycopg-binary` bundles its own libpq.
 
 ### Removed
 

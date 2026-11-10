@@ -140,7 +140,7 @@ if is_ok(history):
 
 ## Does a live worker serve every pending class?
 
-A pending stream is the `PENDING` rows of one queue and one execution class. A worker is live while its latest snapshot is at most `WORKER_STATE_LIVE_WINDOW_S` (120) seconds old. A live worker serves a stream when the queue is one of its `queues` and one of its budgets serves the class. `get_class_coverage_async` gives each pending stream one state:
+A pending stream is the `PENDING` rows of one queue and one execution class. A worker is live while its latest snapshot is at most `WORKER_STATE_LIVE_WINDOW_S` (120) seconds old. `RecoveryConfig.worker_state_snapshot_interval_ms` is at most half of that window (60,000 ms), so a running worker stays live when a snapshot write is late by up to half the window. A live worker serves a stream when the queue is one of its `queues` and one of its budgets serves the class. `get_class_coverage_async` gives each pending stream one state:
 
 | `state` | Meaning |
 | ------- | ------- |
@@ -180,7 +180,6 @@ Each worker logs one stream at most once per 5 minutes (`CLASS_COVERAGE_LOG_INTE
 - **Unserved `ISOLATED`**: start a worker with isolated children (`WorkerProfile(isolated=IsolatedChildren(...))`) that serves the queue. A row of a shared class goes back to the queue as `ISOLATED` when its task, as the worker registered it, has another class; such rows need isolated children too.
 - **Unserved shared class**: start a worker with children of that class, or with isolated children, that serves the queue.
 - **Without capacity**: the serving workers' slots are down. Read their `slot_health` (above) for the cause. Each slot boots again after a growing wait.
-- **A worker that reports less often than every 120 seconds** (`worker_state_snapshot_interval_ms` above 120,000) is not live between its snapshots, so the check reports its streams as unserved. Keep the interval at or below 120 seconds.
 
 ## How long do pending tasks wait, and what capacity is free?
 

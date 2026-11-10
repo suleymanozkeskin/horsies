@@ -35,7 +35,7 @@ keywords = [
 dependencies = [
     "greenlet>=3.3.0",
     "psutil>=7.2.1",
-    "psycopg>=3.3.2",
+    "psycopg>=3.3.6",
     "psycopg-pool>=3.2.0",
     "pydantic>=2.12.5",
     "sqlalchemy>=2.0.46",
@@ -43,8 +43,8 @@ dependencies = [
 
 [project.optional-dependencies]
 web = ["fastapi>=0.115.0", "uvicorn>=0.30.0"]
-pg-binary = ["psycopg-binary>=3.3.2"]
-pg-c = ["psycopg-c>=3.3.2"]
+pg-binary = ["psycopg-binary>=3.3.6"]
+pg-c = ["psycopg-c>=3.3.6"]
 
 [project.urls]
 Homepage = "https://github.com/suleymanozkeskin/horsies"
@@ -67,7 +67,7 @@ horsies = [".agents/skills/horsies/*.md", "web/static/**"]
 
 [dependency-groups]
 dev = [
-    "psycopg-binary>=3.3.2",
+    "psycopg-binary>=3.3.6",
     "pyright>=1.1.409",
     "ty>=0.0.34",
     "python-dotenv>=1.2.1",

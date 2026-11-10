@@ -142,7 +142,10 @@ list_schedules(broker)
   `StreamServed(workers, capacity)`, `StreamWithoutCapacity(workers)` (every
   serving child or seat is down) or `StreamUnserved()` (no live worker has
   the queue and a budget that serves the class). Live = latest snapshot at
-  most `WORKER_STATE_LIVE_WINDOW_S` (120) s old. Each reaper pass runs it and
+  most `WORKER_STATE_LIVE_WINDOW_S` (120) s old;
+  `worker_state_snapshot_interval_ms` is at most half of it (60,000 ms), so a
+  running worker stays live when a snapshot write is late by up to half the
+  window. Each reaper pass runs it and
   logs unserved at error, without-capacity at warning, once per 5 min per
   (queue, class) per worker. Fix unserved `ISOLATED` with a worker that has
   isolated children (shared rows go back to the queue as `ISOLATED` when

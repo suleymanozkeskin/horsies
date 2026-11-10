@@ -583,7 +583,7 @@ to `AppConfig.retention` — see RetentionConfig below.
 | `orphan_task_audit_interval_ms` | `int` | `60_000` | 1s–24hr | Ms between bounded orphan workflow-task audit pages; the audit runs only when `auto_terminate_orphaned_workflow_tasks` is `True` |
 | `runner_heartbeat_interval_ms` | `int` | `30_000` | 1s–2min | How often the worker process writes the heartbeats of its RUNNING tasks, from one thread that does not run on its event loop |
 | `claimer_heartbeat_interval_ms` | `int` | `30_000` | 1s–2min | Heartbeat for CLAIMED tasks |
-| `worker_state_snapshot_interval_ms` | `int` | `30_000` | 1s–5min | How often each worker inserts a monitoring snapshot row into `horsies_worker_states` |
+| `worker_state_snapshot_interval_ms` | `int` | `30_000` | 1s–1min | How often each worker inserts a monitoring snapshot row into `horsies_worker_states`. The cap is half the 120 s live window (`WORKER_STATE_LIVE_WINDOW_S`), so a running worker stays live when a snapshot write is late by up to half the window; a larger value fails with `HRS-204` |
 | `phase2_quarantine_after_attempts` | `int` | `25` | 3–1000 | Recovery passes an unresolvable workflow-progression row may retain before its evidence moves to the quarantine table and discovery stops retrying it. A persistent raise counts too, and at the bound the workflow fails closed |
 | `workflow_recovery_failure_limit` | `int` | `25` | 3–1000 | Reaper passes in which the recovery of a workflow may raise a persistent error before the workflow fails with `WORKFLOW_RECOVERY_LIMIT_REACHED`. A connection, lock or timeout error does not count. The count is stored. The count has no reset, so a later unrelated raise after a repair reaches the limit sooner |
 
