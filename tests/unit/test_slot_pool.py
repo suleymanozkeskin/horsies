@@ -729,6 +729,23 @@ class TestTaskRuns:
         await _until(lambda: child.has_exited, timeout_s=slots.CHILD_STOP_TIMEOUT_S / 2)
         assert child._current_exit() == ExitedWith(STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE)
 
+    async def test_an_idle_executor_after_a_stubborn_leftover_exits_normally(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        """The leftover ignores the cancel and uses the whole close deadline.
+        The idle executor still shuts down, so the child exits 0, not with
+        ``STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE``."""
+        pool = await pool_factory(
+            _config(max_tasks_per_child=1, init=_init('close_timeout:0.2')),
+        )
+        frame = _frame('idle_executor_beside_a_stubborn_task')
+        pid = int(await _result_json(pool.submit(frame)))
+        child = pool._slots[0].child
+        assert child is not None and child.pid == pid
+        await _until(lambda: child.has_exited, timeout_s=slots.CHILD_STOP_TIMEOUT_S / 2)
+        assert child._current_exit() == ExitedWith(0)
+
     async def test_a_stop_with_no_executor_threads_exits_normally(
         self,
         pool_factory: PoolFactory,

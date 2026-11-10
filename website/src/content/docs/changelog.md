@@ -45,9 +45,9 @@ there is no migration contract between pre-1.0 versions.
   - A task must await the work that it starts. When an async task ends and
     asyncio tasks that it started are still on the loop, the worker replaces
     the child after that task. When the old child stops, it cancels that work
-    and closes the loop. This takes at most 5 seconds. A client that keeps its own
-    background tasks on the loop causes a child replacement after each async
-    task. The warning of the replacement names the coroutine of each task
+    and closes the loop. This takes at most 6 seconds. A client that keeps its
+    own background tasks on the loop causes a child replacement after each
+    async task. The warning of the replacement names the coroutine of each task
     left, up to 10. A task that cancels a helper task in `finally` must also
     await it. The check sees asyncio tasks only: a callback that
     `loop.call_soon()` or `loop.call_later()` scheduled, and
@@ -55,7 +55,9 @@ there is no migration contract between pre-1.0 versions.
     replacement and can still run during a later task of the same child.
   - A thread of `asyncio.to_thread()` that still runs after that time does
     not hold the child: the child exits without waiting for it, and its
-    `atexit` handlers do not run.
+    `atexit` handlers do not run. The shutdown of the default executor gets
+    at least 1 second, also when the cancel of left tasks used the first 5
+    seconds, so an idle executor does not count as a running thread.
 
 ### Changed
 

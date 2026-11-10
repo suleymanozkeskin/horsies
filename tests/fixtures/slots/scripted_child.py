@@ -184,6 +184,22 @@ async def _async_pid() -> str:
     return str(os.getpid())
 
 
+async def _ignore_cancel() -> None:
+    while True:
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            continue
+
+
+async def _idle_executor_beside_a_stubborn_task() -> str:
+    """Leave the default executor idle, and a task that ignores the cancel."""
+    await asyncio.to_thread(int)
+    _kept_tasks.append(asyncio.get_running_loop().create_task(_ignore_cancel()))
+    await asyncio.sleep(0)
+    return str(os.getpid())
+
+
 async def _thread_outlives_wait(seconds: float) -> str:
     """Stop waiting for an executor thread that keeps running."""
     try:
@@ -223,6 +239,9 @@ def _run(frame: RunFrame, init: InitFrame, task_loop: TaskLoop) -> WireResult:
             return True, type(task_loop.state).__name__, None
         case 'leave_pending':
             return True, _run_async(task_loop, _leave_pending(argument)), None
+        case 'idle_executor_beside_a_stubborn_task':
+            pid = _run_async(task_loop, _idle_executor_beside_a_stubborn_task())
+            return True, pid, None
         case 'thread_outlives_wait':
             return True, _run_async(task_loop, _thread_outlives_wait(float(argument))), None
         case 'pid':

@@ -593,6 +593,41 @@ class TestClose:
         # The task never ends. Drop it quietly: it is pending on a closed loop.
         kept[0]._log_destroy_pending = False  # pyright: ignore[reportAttributeAccessIssue]
 
+    def test_an_idle_executor_shuts_down_after_a_cancel_that_used_the_deadline(
+        self,
+        task_loop: TaskLoop,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A leftover that ignores the cancel uses all of the close deadline.
+        The executor ran one call earlier and is idle now, so it still shuts
+        down, and the child can exit normally."""
+        monkeypatch.setattr(
+            task_loop_module, 'LOOP_CLOSE_TIMEOUT_S', SHORT_CLOSE_TIMEOUT_S
+        )
+        kept: list[asyncio.Task[None]] = []
+
+        async def ignore_cancel() -> None:
+            while True:
+                try:
+                    await asyncio.sleep(60)
+                except asyncio.CancelledError:
+                    continue
+
+        async def start() -> None:
+            await asyncio.to_thread(int)
+            kept.append(asyncio.get_running_loop().create_task(ignore_cancel()))
+            await asyncio.sleep(0)
+
+        task_loop.run(start())
+        with caplog.at_level(logging.WARNING, logger='horsies.worker'):
+            executor = task_loop.close()
+
+        assert executor == ExecutorShutDown()
+        assert 'default executor' not in caplog.text
+        # The task never ends. Drop it quietly: it is pending on a closed loop.
+        kept[0]._log_destroy_pending = False  # pyright: ignore[reportAttributeAccessIssue]
+
     def test_close_is_bounded_when_executor_work_does_not_end(
         self,
         task_loop: TaskLoop,
@@ -601,6 +636,9 @@ class TestClose:
     ) -> None:
         monkeypatch.setattr(
             task_loop_module, 'LOOP_CLOSE_TIMEOUT_S', SHORT_CLOSE_TIMEOUT_S
+        )
+        monkeypatch.setattr(
+            task_loop_module, 'EXECUTOR_SHUTDOWN_MIN_TIMEOUT_S', SHORT_CLOSE_TIMEOUT_S
         )
         release = threading.Event()
         kept: list[asyncio.Task[bool]] = []

@@ -44,8 +44,13 @@ logger = get_logger('worker')
 
 # The child closes its loop after a stop frame. The parent kills a child that
 # has not exited CHILD_STOP_TIMEOUT_S (10 s) after that frame, so the close
-# must end before that time.
+# must end before that time: LOOP_CLOSE_TIMEOUT_S plus
+# EXECUTOR_SHUTDOWN_MIN_TIMEOUT_S stays under it.
 LOOP_CLOSE_TIMEOUT_S: Final = 5.0
+# The step that shuts down the default executor gets at least this time, also
+# when the leftover tasks used up LOOP_CLOSE_TIMEOUT_S. An idle executor shuts
+# down well within it, so it is not reported as threads left.
+EXECUTOR_SHUTDOWN_MIN_TIMEOUT_S: Final = 1.0
 
 R = TypeVar('R')
 
@@ -218,8 +223,10 @@ class TaskLoop:
     def close(self) -> ExecutorAfterClose:
         """Cancel the tasks left on the loop, then close the loop.
 
-        Waits at most ``LOOP_CLOSE_TIMEOUT_S`` in total, and logs what did
-        not end in that time. Closes the loop also when a step fails.
+        Waits at most ``LOOP_CLOSE_TIMEOUT_S`` for the leftover tasks and the
+        async generators. The default executor gets what is left of that
+        time, and at least ``EXECUTOR_SHUTDOWN_MIN_TIMEOUT_S``. Logs what did
+        not end in time. Closes the loop also when a step fails.
         Returns whether threads of the default executor can still run, which
         decides how the process can exit. A second call changes nothing and
         returns the answer of the first.
@@ -302,15 +309,25 @@ def _seconds_left(deadline: float) -> float:
 
 
 def _close_loop(loop: asyncio.AbstractEventLoop) -> ExecutorAfterClose:
-    """Close the loop the way ``asyncio.run`` does, within one deadline."""
+    """Close the loop the way ``asyncio.run`` does, within bounded time.
+
+    The executor step does not take its time only from the shared deadline:
+    a leftover that ignores the cancel can use all of it, and an executor
+    step with no time reports an idle executor as threads left.
+    """
     deadline = time.monotonic() + LOOP_CLOSE_TIMEOUT_S
     try:
         _cancel_leftover_tasks(loop, deadline)
-        _run_until(loop, loop.shutdown_asyncgens(), deadline, 'async generators')
-        executor_step = _run_until(
+        _run_within(
+            loop,
+            loop.shutdown_asyncgens(),
+            _seconds_left(deadline),
+            'async generators',
+        )
+        executor_step = _run_within(
             loop,
             loop.shutdown_default_executor(),
-            deadline,
+            max(_seconds_left(deadline), EXECUTOR_SHUTDOWN_MIN_TIMEOUT_S),
             'default executor',
         )
     finally:
@@ -322,20 +339,21 @@ def _close_loop(loop: asyncio.AbstractEventLoop) -> ExecutorAfterClose:
             return ExecutorThreadsLeft()
 
 
-def _run_until(
+def _run_within(
     loop: asyncio.AbstractEventLoop,
     step: Coroutine[Any, Any, None],
-    deadline: float,
+    timeout_s: float,
     what: str,
 ) -> _CloseStep:
-    """Run one close step until ``deadline``. A step past it is cancelled and logged."""
+    """Run one close step for at most ``timeout_s``. A step past it is
+    cancelled and logged."""
     try:
-        loop.run_until_complete(asyncio.wait_for(step, _seconds_left(deadline)))
+        loop.run_until_complete(asyncio.wait_for(step, timeout_s))
     except TimeoutError:
         logger.warning(
-            'The %s of the task loop did not shut down within %ss',
+            'The %s of the task loop did not shut down within %.1fs',
             what,
-            LOOP_CLOSE_TIMEOUT_S,
+            timeout_s,
         )
         return _CloseStep.PAST_DEADLINE
     return _CloseStep.ENDED
