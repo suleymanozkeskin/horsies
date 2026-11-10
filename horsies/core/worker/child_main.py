@@ -25,14 +25,13 @@ import gc
 import logging
 import multiprocessing
 import os
-import queue
 import signal
 import socket
 import sys
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final, NoReturn, TypeAlias, assert_never
+from typing import TYPE_CHECKING, Final, NoReturn, assert_never
 
 from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.logging import get_logger
@@ -74,6 +73,7 @@ from horsies.core.worker.child_protocol import (
     encode_child_frame,
     parse_header,
 )
+from horsies.core.worker.child_inbox import ParentFrameInbox
 from horsies.core.worker.runtime import _read_current_rss_mb
 from horsies.core.worker.task_loop import (
     AsyncTaskPresence,
@@ -108,8 +108,6 @@ _PR_SET_PDEATHSIG: Final = 1
 # frame that reports why it failed.
 BootFn = Callable[[InitFrame], Result[AsyncTaskPresence, BootFailedFrame]]
 RunTaskFn = Callable[[RunFrame, InitFrame, TaskLoop], WireResult]
-# The frames that the control thread hands to the main thread.
-WorkFrame: TypeAlias = RunFrame | SharedRunFrame | StopFrame
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,53 +117,6 @@ class TaskRunners:
 
     run_task: RunTaskFn
     seats: SeatProgram
-
-
-@dataclass(frozen=True, slots=True)
-class NoFrameYet:
-    """The inbox holds no frame now."""
-
-
-def _nothing_to_wake() -> None:
-    return None
-
-
-class ParentFrameInbox:
-    """Frames from the control thread to the main thread. Safe between threads.
-
-    The isolated main thread waits in ``get``. A shared async child reads with
-    ``take`` on its event loop, and ``call_on_put`` makes each later ``put``
-    wake that loop. Holds at most the frames the parent sent and the main
-    thread has not read: the parent sends a run only to a free seat.
-    """
-
-    def __init__(self) -> None:
-        self._frames: queue.SimpleQueue[WorkFrame] = queue.SimpleQueue()
-        self._lock = threading.Lock()
-        self._on_put: Callable[[], None] = _nothing_to_wake
-
-    def put(self, frame: WorkFrame) -> None:
-        """Control thread: hand over one frame, then run the wake callback."""
-        self._frames.put(frame)
-        with self._lock:
-            on_put = self._on_put
-        on_put()
-
-    def get(self) -> WorkFrame:
-        """Wait for the next frame. Blocks the calling thread."""
-        return self._frames.get()
-
-    def take(self) -> WorkFrame | NoFrameYet:
-        """The next frame, or ``NoFrameYet`` at once. Never blocks."""
-        try:
-            return self._frames.get_nowait()
-        except queue.Empty:
-            return NoFrameYet()
-
-    def call_on_put(self, on_put: Callable[[], None]) -> None:
-        """Run ``on_put`` after each later ``put``, on the control thread."""
-        with self._lock:
-            self._on_put = on_put
 
 
 def _recv_exact(sock: socket.socket, count: int) -> bytes:

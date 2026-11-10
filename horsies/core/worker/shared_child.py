@@ -44,10 +44,9 @@ from typing import Final, NoReturn, Protocol, assert_never
 from horsies.core.logging import get_logger
 from horsies.core.models.boot_failure import ThreadStartRefused
 from horsies.core.types.result import Err, Ok, Result
+from horsies.core.worker.child_inbox import NoFrameYet, ParentFrameInbox
 from horsies.core.worker.child_main import (
     BAD_PARENT_FRAME_EXIT_CODE,
-    NoFrameYet,
-    ParentFrameInbox,
     _bounded_result,
     _read_rss,
     _send_child_frame,
@@ -367,8 +366,12 @@ async def _next_frame(
                         await arrived.wait()
                     case SharedRunFrame() | StopFrame() | RunFrame() as frame:
                         return frame
+                    case _ as unreachable:
+                        assert_never(unreachable)
             case SharedRunFrame() | StopFrame() | RunFrame() as frame:
                 return frame
+            case _ as unreachable:
+                assert_never(unreachable)
 
 
 def _end_of(seat: _Seat, task: asyncio.Task[WireResult]) -> SeatEnd:

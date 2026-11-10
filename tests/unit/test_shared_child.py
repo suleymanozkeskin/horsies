@@ -19,7 +19,7 @@ from typing import Any, NoReturn
 import pytest
 
 from horsies.core.worker import child_main, shared_child
-from horsies.core.worker.child_main import ParentFrameInbox
+from horsies.core.worker.child_inbox import ParentFrameInbox
 from horsies.core.worker.child_protocol import (
     ChildFrame,
     DeadlineFiredFrame,

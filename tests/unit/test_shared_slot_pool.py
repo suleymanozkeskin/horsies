@@ -15,6 +15,7 @@ import signal
 import sys
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -646,3 +647,42 @@ class TestStartAndStop:
         assert isinstance(isolated_outcome, TaskFinished)
         assert isolated_outcome.result_json != await _value(shared)
         assert isinstance(isolated.assigned.result(), Assigned)
+
+
+IDLE_CPU_PROBE_S = 1.0
+IDLE_CPU_LIMIT_S = 0.3
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_a_production_shared_child_waits_for_frames_without_spinning() -> None:
+    """The real child program runs as ``__main__``. A frame type that it
+    builds there must match the one that the seat loop checks, or the loop
+    spins and never takes a frame. The pool opens without a connection, so
+    no database is needed."""
+    import psutil
+
+    from horsies.core.worker.slots import CHILD_ENTRY
+
+    init = replace(
+        _init('tests.e2e.tasks.instance:app'),
+        parent_sys_path=(str(Path(__file__).parent.parent.parent), *sys.path),
+        database_url='postgresql://unused@127.0.0.1:1/unused',
+    )
+    config = replace(_config(1, 2, init=init), child_entry=CHILD_ENTRY)
+    pool = SlotPool(config, pending_limit=10)
+    try:
+        match await asyncio.wait_for(pool.start(), OUTCOME_TIMEOUT_S):
+            case Ok(_):
+                pass
+            case Err(failure):
+                raise AssertionError(failure)
+        child = pool._shared_slots[0].child
+        assert child is not None
+        process = psutil.Process(child.pid)
+        before = sum(process.cpu_times()[:2])
+        await asyncio.sleep(IDLE_CPU_PROBE_S)
+        used = sum(process.cpu_times()[:2]) - before
+    finally:
+        await pool.stop(1.0)
+
+    assert used < IDLE_CPU_LIMIT_S
