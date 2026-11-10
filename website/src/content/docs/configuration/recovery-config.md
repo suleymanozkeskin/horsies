@@ -46,7 +46,7 @@ config = AppConfig(
 | `check_interval_ms` | `int` | 30,000 | How often to check for stale tasks |
 | `runner_heartbeat_interval_ms` | `int` | 30,000 | How often the worker process writes the heartbeats of its RUNNING tasks |
 | `claimer_heartbeat_interval_ms` | `int` | 30,000 | CLAIMED task heartbeat frequency |
-| `worker_state_snapshot_interval_ms` | `int` | 30,000 | How often each worker persists a monitoring snapshot row to `horsies_worker_states` (1s–5min) |
+| `worker_state_snapshot_interval_ms` | `int` | 30,000 | How often each worker persists a monitoring snapshot row to `horsies_worker_states` (1s–1min). The cap is half the 120 s [live window](/horsies/monitoring/worker-health/), so a running worker stays live when a snapshot write is late by up to half the window. A larger value fails with `HRS-204` |
 | `auto_terminate_orphaned_workflow_tasks` | `bool` | `True` | Terminate claimed tasks whose workflow node linkage no longer exists |
 | `phase2_quarantine_after_attempts` | `int` | 25 | Recovery passes an unresolvable crashed-worker progression row may retain before its evidence moves to the quarantine table and discovery stops retrying it (3–1,000) |
 | `workflow_recovery_failure_limit` | `int` | 25 | Reaper passes in which the recovery of a workflow may raise a persistent error before the workflow fails closed (3–1,000) |

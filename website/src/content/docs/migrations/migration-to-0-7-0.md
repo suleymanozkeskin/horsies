@@ -1,7 +1,7 @@
 ---
 title: Migrating to 0.7.0
 summary: What to change to upgrade from 0.6.x to 0.7.0 - worker settings move from command-line flags into named worker profiles in the app config.
-related: [../changelog, ../workers/worker-profiles, ../cli, migration-to-0-6-0]
+related: [../changelog, ../workers/worker-profiles, ../cli, ../configuration/recovery-config, migration-to-0-6-0]
 tags: [migration, 0.7.0, breaking-changes, worker, profiles, cli]
 ---
 
@@ -111,3 +111,11 @@ These were not checked before 0.7.0, because the values were command-line flags:
 Each bound of the old flags still applies: at least one child, a task limit of at least 1, a memory limit of at least 1 MB, and a drain timeout above 0. New upper bounds: 1024 isolated children, 2,147,483,647 tasks for a task limit, 16,777,216 MB for a memory limit, and 24 hours for the drain timeout.
 
 See [Worker Profiles](../workers/worker-profiles) for every field and for the validation table.
+
+## `worker_state_snapshot_interval_ms` is at most 60,000 ms
+
+0.6.x accepted `RecoveryConfig.worker_state_snapshot_interval_ms` up to
+300,000 ms. In 0.7.0 the cap is 60,000 ms, half of the 120 s window in which a
+worker reads as live. A larger value raises `ConfigurationError` with
+`HRS-204` when the config is built. Set the interval to 60,000 ms or less. See
+[Recovery Config](/horsies/configuration/recovery-config/).

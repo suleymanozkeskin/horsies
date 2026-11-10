@@ -441,7 +441,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - finalizing_stale_threshold_ms: int (default 300_000, range 1s-2hr)
 - crashed_worker_recovery_grace_ms: int (default 10_000, range 0-1hr; 0 disables)
 - orphan_task_audit_interval_ms: int (default 60_000, range 1s-24hr)
-- worker_state_snapshot_interval_ms: int (default 30_000, range 1s-5min)
+- worker_state_snapshot_interval_ms: int (default 30_000, range 1s-1min; the cap is half the 120 s live window WORKER_STATE_LIVE_WINDOW_S, so a running worker stays live when a snapshot write is late by up to half the window; a larger value fails with HRS-204)
 - phase2_quarantine_after_attempts: int (default 25, range 3-1000)
 - workflow_recovery_failure_limit: int (default 25, range 3-1000; reaper passes in which the recovery of a workflow may raise a persistent error before the workflow fails with WORKFLOW_RECOVERY_LIMIT_REACHED)
 - Constraint: stale thresholds must be >= 2x heartbeat intervals
