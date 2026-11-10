@@ -88,6 +88,8 @@ When the library itself encounters an error (not your task code), it uses one of
 | `SUBWORKFLOW_LOAD_FAILED` | Subworkflow definition could not be loaded |
 | `WORKFLOW_RECOVERY_LIMIT_REACHED` | Workflow recovery raised a persistent error in too many reaper passes |
 | `SUBWORKFLOW_DEPTH_LIMIT_REACHED` | The engine did not start a child workflow, because its depth would pass 32 |
+| `TASK_BLOCKED_LOOP` | The task held the event loop of its shared async child past the block limit, before its `timeout_ms`; the worker killed the child |
+| `NEIGHBOUR_BLOCKED_LOOP` | Another task held the event loop of this task's shared async child past the block limit, before this task's `timeout_ms`; the worker killed the child |
 
 ### ContractCode
 
@@ -122,7 +124,7 @@ Returned by `handle.get()` for issues retrieving results:
 | ---- | ---- |
 | `TASK_CANCELLED` | Task was cancelled before completion |
 | `TASK_EXPIRED` | Task's `good_until` deadline passed before execution started |
-| `TASK_TIMEOUT` | Task exceeded its `timeout_ms` execution limit; the child process was killed |
+| `TASK_TIMEOUT` | Task exceeded its `timeout_ms` execution limit: the worker killed its child process, or, for a `SHARED_ASYNC` task on a shared async child, cancelled it and ended its work |
 | `WORKFLOW_PAUSED` | Workflow was paused |
 | `WORKFLOW_EXPIRED` | A paused workflow passed `paused_workflow_auto_cancel_after` and expired |
 | `WORKFLOW_FAILED` | Workflow failed |

@@ -1,8 +1,8 @@
 ---
 title: Shared Async Tasks
-summary: SHARED_ASYNC tasks run as coroutines, many at once, in shared async children - what runs where, the timeout, the rules for task authors, recycling and sizing.
+summary: SHARED_ASYNC tasks run as coroutines, many at once, in shared async children - what runs where, the timeout (cancel, second cancel, close, kill), a blocked event loop, the rules for task authors, recycling and sizing.
 related: [worker-profiles, worker-architecture, child-process-hooks, ../tasks/defining-tasks]
-tags: [workers, async, shared-async, execution, timeouts, concurrency]
+tags: [workers, async, shared-async, execution, timeouts, cancellation, concurrency]
 ---
 
 # Shared Async Tasks
@@ -108,21 +108,58 @@ See [Child-Process Hooks](child-process-hooks#shared-async-child-start-hooks).
 
 ## The Timeout
 
-The shared async child holds the deadline of each of its tasks. It starts the deadline when it starts the task.
+The shared async child holds the deadline of each of its tasks. It starts the deadline when it starts the task. Here T is the deadline and G is `cancel_grace_ms` (default 1,000 ms, from 100 to 10,000 ms).
 
-1. At `timeout_ms`, the child cancels the task: the task gets `asyncio.CancelledError` at its next `await`.
-2. When the coroutine of the task has ended, the child reports the end. The worker then writes `TASK_TIMEOUT`, the retry of the retry policy, and the next workflow step. The attempt ends before its row moves, so a retry never runs next to the attempt that it replaces.
-3. A task that returns a value after its deadline fired still fails with `TASK_TIMEOUT`.
+1. **At T**, the child cancels the task: the task gets `asyncio.CancelledError` at its next `await`.
+2. **The attempt ends** when its coroutine has ended and no work that the task started is alive. That work is each asyncio task that the task created, itself or through a library, and each call that it sent to the default executor (`asyncio.to_thread()`, `loop.run_in_executor(None, ...)`, the DNS lookups of `loop.getaddrinfo()`). The child waits for that work, then reports the end. Only then does the worker write `TASK_TIMEOUT`, the retry of the retry policy, and the next workflow step. So a retry never runs next to the attempt that it replaces.
+3. **At T + G**, when anything of the attempt is still alive, the child sends a second cancel to the task and to the asyncio tasks that it started. Then it cancels the tasks that it finds alive again, two more times, 0.1 seconds apart. The child takes no new task from this point: cancelled code can leave broken state in the process, so the child is replaced when its other tasks end, also when this attempt ends.
+4. **0.3 seconds after the second cancel**, an attempt that is still alive is stuck. It keeps its seat. The other tasks of the child run to their own end. The worker kills the child when every task left in it is stuck: then no task in it has time left. Each of those tasks fails with `TASK_TIMEOUT`, and its retry (when the policy names `TASK_TIMEOUT`) runs in an isolated child.
 
-The other tasks of the child continue. A timeout is terminal by default; add `"TASK_TIMEOUT"` to `auto_retry_for` for a retry.
+A task that returns a value after its deadline fired still fails with `TASK_TIMEOUT`. A task that returns before its deadline, but leaves work that is still alive at T, has not ended by T: it fails with `TASK_TIMEOUT` as well. The other tasks of the child continue in every case. A timeout is terminal by default; add `"TASK_TIMEOUT"` to `auto_retry_for` for a retry.
 
-The worker keeps one more timer per task, at `timeout_ms + cancel_grace_ms + 5 seconds`. A child reports each cancel at once, so a child that has not reported the cancel by then is frozen: a task blocks its event loop, or C code holds the GIL. The worker kills that child. The timed-out task fails with `TASK_TIMEOUT`, and every other task of that child takes the crash path (`WORKER_CRASHED`, or a retry when its policy names that code).
+Library work that a task causes counts as the work of that task. For example, when a cancel closes a connection of an asyncpg pool, the pool starts a refill task in the context of the task, and the attempt ends when that refill task ends. Work that an `on_shared_async_child_start` hook started is not the work of any task.
 
-A task that catches its cancel and goes on keeps its seat until it ends, or until the worker stops and its drain timeout kills the child. Do not catch `asyncio.CancelledError` to go on working.
+What a cancel does to common libraries, measured on one shared child (CPython 3.13, local network, see the notes below the table):
+
+| Case | After the first cancel | After the second cancel |
+| ---- | ---------------------- | ----------------------- |
+| healthy server, every library below | ended within 16 ms | not needed |
+| httpx or aiohttp, server that does not answer or stops mid-body | ended within 6 ms (one run: 64 ms, during a stall of the host) | not needed |
+| psycopg 3.3.6 or later, server that stops answering during a query | ends after 10.0 s (cancel request 5 s, then a drain of 5 s) | ended within 5 ms |
+| SQLAlchemy with asyncpg, server that stops answering during a query | ends after 2.0 s | ended within 7 ms |
+| asyncpg, server that stops answering | no end | connection: within 1 ms; pool: one more round, about 0.1 s |
+| SQLAlchemy 2.0.55 or later, server that stops answering while a session closes | no end (the close holds the cancel back) | one more round, about 0.1 s |
+| `asyncio.to_thread()` with a sync client | the thread runs on | the thread runs on: it ends only by the client's own timeout |
+| DNS lookup with a resolver that does not answer | the lookup thread runs on, 9.7 s with glibc defaults | the thread runs on |
+
+Notes: a pause of the database container stood in for a server that stops answering; the kernel still accepted TCP connections. Networks that drop packets, TLS and remote servers add round trips to each cleanup step, and were not measured.
+
+The worker keeps one timer per task, at `timeout_ms + cancel_grace_ms + 10 seconds`. The child reports the second cancel at T + G, so a child that has reported neither the second cancel nor the end by then is frozen: C code holds the GIL, and nothing in the child can run. The worker kills that child. Each task in it that is past its deadline fails with `TASK_TIMEOUT`; every other task takes the crash path (`WORKER_CRASHED`, or a retry when its policy names that code). No task is named as the cause, so no retry moves to an isolated child.
+
+## A Blocked Event Loop
+
+Every task of the child runs on one event loop. A thread in the child, not on the loop, watches it. When the loop has not turned for 5 seconds (the block limit), that thread names the task that holds the loop, with the source line, and reports it to the worker. The worker kills the child at once: no task of a blocked loop can move, and no deadline can act during the block.
+
+| Task | Outcome |
+| ---- | ------- |
+| the task that held the loop, before its deadline | `TASK_BLOCKED_LOOP`; its retry runs in an isolated child |
+| the task that held the loop, past its deadline | `TASK_TIMEOUT`; its retry runs in an isolated child |
+| another task, past its deadline | `TASK_TIMEOUT` |
+| another task, before its deadline | `NEIGHBOUR_BLOCKED_LOOP` |
+
+Each code retries only when `auto_retry_for` names it: a neighbour is not retried for free, because its side effects may already have happened. When the loop runs code of no task (a callback, or work of a start hook), no task is named: each task before its deadline takes the crash path. C code that holds the GIL stops the watching thread as well, so no report comes; the timer of the worker above ends that child, and no task is named.
+
+The block limit is 7.4 times the longest common burst of CPU work measured on one call: 674 ms for a backtracking `re.findall` over 10 MB of text. A full garbage collection of about one million objects took 258 ms, and `json.loads` of 10 MB took 118 ms. During a block no timer of the loop runs, so each deadline in the child can be late by up to the block limit.
 
 ## Rules for Task Authors
 
-**Do not block the event loop.** Every task of the child runs on one loop. A call that blocks it, such as `time.sleep()`, a sync HTTP or database client, or long CPU work, stops every task of the child for that time, and no deadline can act during it.
+**Let `CancelledError` propagate.** Catch it only to clean up, then raise it again. A task that catches its cancel to go on working needs the second cancel, and closes its child. A task that ignores every cancel is stuck: its child is killed when every task left in it is stuck. `anyio` shielded scopes (`CancelScope(shield=True)`) protect only against cancels of other `anyio` scopes, not against `Task.cancel()`: the cancel of the worker can cut such a section.
+
+**Give each client call its own timeout, below the task timeout.** A database or HTTP call that waits on a server that stopped answering then ends by itself, and the task can return its own error. For a sync call in `asyncio.to_thread()`, a timeout is the only way the call ends: a cancel does not stop a thread. Set the client timeout so that the call returns before `timeout_ms + cancel_grace_ms`, or the task is stuck.
+
+**Open long-lived clients in the start hook.** A client that a task opens on first use carries the mark of that task: its background work counts as the work of that task, so the task does not end while it runs, and a cancel of that task reaches it. Open it in `on_shared_async_child_start` (see [Keep a client for the life of the child](#keep-a-client-for-the-life-of-the-child)).
+
+**Do not block the event loop.** A call that blocks it, such as `time.sleep()`, a sync HTTP or database client, or long CPU work, stops every task of the child for that time. A block of 5 seconds kills the child.
 
 ```python
 import time
@@ -141,15 +178,13 @@ async def wait_right() -> TaskResult[None, TaskError]:
     return TaskResult(ok=None)
 ```
 
-A short sync call can go to `asyncio.to_thread()`. A cancel does not stop a thread: at the timeout the coroutine ends, and the thread runs on.
+**Await what you start.** The attempt ends only when the work that the task started has ended. A task that leaves an asyncio task running holds its seat until that task ends, and fails with `TASK_TIMEOUT` when it runs past the deadline.
 
 **Send with `send_async()`.** In an async task the sync `send()` returns `Err(TaskSendAsyncContext)`, as in any running event loop.
 
-**Await what you start.** A task that creates an asyncio task must await it, or cancel it and await it, before it returns. Work that is left on the loop keeps running beside the next tasks of the child, and a cancel at the timeout does not reach it.
-
 **Set `timeout_ms`.** The decorator refuses a `SHARED_ASYNC` task without one (`HRS-109`). Size it as a hang backstop above the normal runtime.
 
-**Expect to share the process.** Module state, caches and clients are shared by every task of the child. A crash of the child, an out-of-memory kill, or a kill by the worker ends every task in it. Such a task takes the crash path. A task that must not share a process stays `ISOLATED`.
+**Expect to share the process.** Module state, caches and clients are shared by every task of the child. A crash of the child, an out-of-memory kill, or a kill by the worker ends every task in it. A task that must not share a process stays `ISOLATED`.
 
 ## Recycling
 
@@ -170,15 +205,18 @@ A seat that waits on the network holds at least one socket, and a process has a 
 
 ## Limits
 
-- A cancel ends the coroutine of a task, not threads or subprocesses that it started.
-- A task that ignores its cancel keeps its seat until it ends or the worker stops.
-- A blocked loop delays every timeout of the child until the block ends, or until the worker kills the frozen child.
+- A cancel ends coroutines, not threads. A thread that a task started, in the default executor or by itself, runs on after the cancel. Threads and processes that a task starts itself are not seen as its work.
+- A stuck task keeps its seat until every task left in its child is stuck, or until the worker stops and its drain timeout kills the child.
+- A blocked loop delays every timeout of the child until the block ends, or until the worker kills the child.
+- A refusal (a row whose stored timeout or grace the worker cannot use) runs no task code. A child that still holds one 120 seconds after its placement is frozen or waits on a database that does not answer; the worker kills it, and the refusal takes the crash path.
 - Each shared async child opens one async connection pool of `worker_child_pool_max_size` connections, as an isolated child opens one sync pool. See [Connections](worker-profiles#connections).
 
 ## Things to Avoid
 
 **Don't mark CPU work `SHARED_ASYNC`.** It blocks the loop of every task in the child. Keep it `ISOLATED`.
 
-**Don't open a client per task in module state on first use.** A client that a task opens on first use belongs to the loop as well, but the child cannot tell it from work that the task left running. Open it in `on_shared_async_child_start`.
+**Don't open a client per task in module state on first use.** Its background work carries the mark of the task that opened it. Open it in `on_shared_async_child_start`.
 
 **Don't rely on a thread to stop at the timeout.** `asyncio.to_thread()` work runs to its end after the cancel. Give the sync call its own timeout.
+
+**Don't catch `CancelledError` to go on working.** The task then needs the second cancel, and its child is replaced.

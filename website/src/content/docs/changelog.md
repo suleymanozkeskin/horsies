@@ -26,7 +26,9 @@ there is no migration contract between pre-1.0 versions.
   `Err(TaskSendAsyncContext)` there.
   - A direct call of an async task returns a coroutine of the `TaskResult`.
     The return check and the exception mappers are the same as for a `def`
-    task.
+    task. In a worker, a `CancelledError` of a body that cancelled its own
+    task goes through the exception mappers too; the direct call lets it
+    pass.
   - `TaskNode.fn`, `.node()` and the task registry take both kinds.
   - An `async def` function that uses `yield` is refused with `HRS-101`, as
     a generator function is.
@@ -165,17 +167,41 @@ there is no migration contract between pre-1.0 versions.
     each on a seat; its isolated children never run one. A worker with none
     runs `SHARED_ASYNC` rows in isolated children. A new task goes to the
     open shared child with the fewest tasks in flight.
+  - An attempt ends when its coroutine has ended and no work that it
+    started is alive: the asyncio tasks that it created, itself or through a
+    library (found by a task factory and by a scan of the live tasks, so a
+    task built with `asyncio.Task(...)` counts too), and its calls in the
+    default executor. The child reports the end only then, so a retry never
+    runs next to work of the attempt that it replaces. A task that returns
+    but leaves work alive past its deadline fails with `TASK_TIMEOUT`.
   - The child holds the deadline of each task. At `timeout_ms` it cancels
-    the task; when the coroutine has ended, the worker writes `TASK_TIMEOUT`,
+    the task; when the attempt has ended, the worker writes `TASK_TIMEOUT`,
     the retry and the workflow step, and the other tasks of the child
     continue. A task that returns a value after its deadline fired still
-    fails with `TASK_TIMEOUT`. A child that has not reported the cancel by
-    `timeout_ms + cancel_grace_ms + 5 s` is frozen: the worker kills it, the
-    timed-out task fails with `TASK_TIMEOUT`, and every other task of that
-    child takes the crash path. A task that ignores its cancel keeps its seat
-    until it ends or the worker stops.
-  - A crash or a kill of a shared child ends every task in it, each through
-    crash recovery after the worker saw the exit.
+    fails with `TASK_TIMEOUT`. At `timeout_ms + cancel_grace_ms`, when the
+    attempt is alive, the child sends a second cancel to the task and to its
+    asyncio tasks, then two more rounds 0.1 s apart, and the child closes: it
+    takes no new task and is replaced when its tasks end. An attempt still
+    alive 0.3 s after the second cancel is stuck: it keeps its seat, and the
+    worker kills the child when every task left in it is stuck. Those tasks
+    fail with `TASK_TIMEOUT`, and their retry runs in an isolated child (the
+    retry write sets `execution = 'ISOLATED'` on the row).
+  - A thread in each shared child watches its event loop. A loop that has
+    not turned for 5 s is reported with the task that holds it and the
+    source line, and the worker kills the child at once. That task fails
+    with the new `TASK_BLOCKED_LOOP` and retries in an isolated child; each
+    other task before its deadline fails with the new
+    `NEIGHBOUR_BLOCKED_LOOP`, and runs again only when `auto_retry_for`
+    names that code; a task past its deadline fails with `TASK_TIMEOUT`.
+  - The worker kills a child that has reported neither the second cancel
+    nor the end of a task `timeout_ms + cancel_grace_ms + 10 s` after its
+    placement: C code holds the GIL in it. A child that still holds a
+    refusal 120 s after its placement is killed as well. At these kills a
+    task past its deadline fails with `TASK_TIMEOUT`, every other task takes
+    the crash path, and no retry moves to an isolated child.
+  - A crash of a shared child that the worker did not cause ends every task
+    in it through crash recovery (`WORKER_CRASHED`, or its retry), after the
+    worker saw the exit.
   - A `SHARED_ASYNC` row without a usable stored `timeout_ms` or
     `cancel_grace_ms` fails with `WORKER_SERIALIZATION_ERROR` on every
     worker, after its RUNNING update and before the task resolves; the data

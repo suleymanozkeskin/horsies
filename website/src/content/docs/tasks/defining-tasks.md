@@ -239,7 +239,7 @@ The kill goes to the child and to the subprocesses in its session. Other tasks o
 
 The worker writes the timeout only after the child has exited. So a retry never runs next to the attempt that it replaces, and a workflow node that runs after a failure does not start while that attempt runs. If the child does not exit within 30 seconds of the kill, the worker writes nothing and logs at critical level. Then [stale-task recovery](/horsies/workers/heartbeats-recovery/) handles the task: a started task as a crashed worker's task, and a task that had not started when its claim lease ends.
 
-A `SHARED_ASYNC` task on a shared async child is different. On expiry the child cancels it: the task gets `asyncio.CancelledError` at its next `await`. The task fails with `TASK_TIMEOUT` when its coroutine has ended, also when it returns a value after the cancel, and the other tasks of the child continue. A child that has not reported the cancel `cancel_grace_ms` and 5 seconds after the deadline is frozen, and the worker kills it, with every task in it. See [Shared Async Tasks](/horsies/workers/shared-async-tasks/#the-timeout).
+A task with `Execution.SHARED_ASYNC` on a shared async child is different. On expiry the worker cancels it: the task gets `asyncio.CancelledError` at its next `await`. The task fails with `TASK_TIMEOUT` when it has stopped, with the work that it started, also when it returns a value after the cancel. If it has not stopped `cancel_grace_ms` after the cancel (default 1 second), the worker cancels it a second time, and the child takes no new task. A task that still has not stopped is stuck: the worker kills the child when every task left in it is stuck, so no other task in that child loses time that it still had. Each of those tasks then fails with `TASK_TIMEOUT`. A task that blocks the event loop of its child for 5 seconds makes the worker kill the child at once: that task fails with `TASK_BLOCKED_LOOP`, each other task before its deadline with `NEIGHBOUR_BLOCKED_LOOP`. See [Shared Async Tasks](/horsies/workers/shared-async-tasks/#the-timeout).
 
 ### Choose the Execution Class
 
@@ -269,7 +269,7 @@ def render_thumbnail(*, image_id: str) -> TaskResult[str, TaskError]:
 
 A `SHARED_ASYNC` task runs on a seat of a shared async child when the worker profile has `shared_async=SharedAsyncChildren(...)`, and in an isolated child otherwise. See [Shared Async Tasks](/horsies/workers/shared-async-tasks/).
 
-`cancel_grace_ms` is the time that a `SHARED_ASYNC` task gets to stop after its cancel. A thread cannot be cancelled, so only `SHARED_ASYNC` takes it. The value is from `MIN_CANCEL_GRACE_MS` (100) to `MAX_CANCEL_GRACE_MS` (10,000). A `SHARED_ASYNC` task that sets none gets `DEFAULT_CANCEL_GRACE_MS` (1,000). The stored options of the task hold the value in effect when the task is sent, so a later change of the default does not change a queued task.
+`cancel_grace_ms` is the time that a `SHARED_ASYNC` task gets to stop after its cancel. After it, the worker cancels the task a second time. A thread cannot be cancelled, so only `SHARED_ASYNC` takes it. The value is from `MIN_CANCEL_GRACE_MS` (100) to `MAX_CANCEL_GRACE_MS` (10,000). A `SHARED_ASYNC` task that sets none gets `DEFAULT_CANCEL_GRACE_MS` (1,000). The stored options of the task hold the value in effect when the task is sent, so a later change of the default does not change a queued task.
 
 `@app.task` refuses a declaration that breaks a rule with a `TaskDefinitionError`, one code per rule:
 

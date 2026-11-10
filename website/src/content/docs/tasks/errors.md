@@ -50,6 +50,8 @@ Errors from task execution, broker, and worker internals.
 | `SUBWORKFLOW_LOAD_FAILED` | Subworkflow definition could not be loaded | No |
 | `WORKFLOW_RECOVERY_LIMIT_REACHED` | Workflow recovery raised a persistent error in `workflow_recovery_failure_limit` reaper passes, so the workflow failed closed | No |
 | `SUBWORKFLOW_DEPTH_LIMIT_REACHED` | The engine did not start a child workflow, because its depth would pass 32 | No |
+| `TASK_BLOCKED_LOOP` | The task held the event loop of its shared async child for the block limit (5 s) or longer, before its `timeout_ms`. The worker killed the child. The retry runs in an isolated child. See [Shared Async Tasks](/horsies/workers/shared-async-tasks/#a-blocked-event-loop) | Yes, if in `auto_retry_for` |
+| `NEIGHBOUR_BLOCKED_LOOP` | Another task held the event loop of this task's shared async child for the block limit (5 s) or longer, before this task's `timeout_ms`. The worker killed the child, with this task in it. See [Shared Async Tasks](/horsies/workers/shared-async-tasks/#a-blocked-event-loop) | Yes, if in `auto_retry_for` |
 
 #### ContractCode
 
@@ -92,7 +94,7 @@ Terminal outcome codes for tasks and workflows.
 | ---- | ----------- | ----------- |
 | `TASK_CANCELLED` | Task was cancelled before completion | No |
 | `TASK_EXPIRED` | Task's `good_until` deadline passed before execution started (PENDING or CLAIMED) | No |
-| `TASK_TIMEOUT` | Task exceeded its `timeout_ms` execution limit; the child process was killed | Yes, if in `auto_retry_for` |
+| `TASK_TIMEOUT` | Task exceeded its `timeout_ms` execution limit: the worker killed its child process, or, for a `SHARED_ASYNC` task on a shared async child, cancelled it and ended its work | Yes, if in `auto_retry_for` |
 | `WORKFLOW_PAUSED` | Workflow was paused | No |
 | `WORKFLOW_EXPIRED` | A paused workflow passed `paused_workflow_auto_cancel_after` and expired; `data` holds the policy name and the age | No |
 | `WORKFLOW_FAILED` | Workflow failed | No |
