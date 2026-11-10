@@ -101,7 +101,6 @@ def _run_in_process(
             args_json=args_json,
             kwargs_json=kwargs_json,
             task_id=task_id,
-            database_url=database_url,
             master_worker_id=worker.worker_instance_id,
             is_workflow_task=is_workflow_task,
             timeout=timeout,

@@ -1,8 +1,7 @@
 """Registered `async def` tasks run by the child runner.
 
 `_run_task_entry` runs real registered tasks here. Only the database steps
-around the body are replaced: the RUNNING update, the heartbeat thread and
-the finalizing mark. Each test gets its own task loop, open as the boot of a
+around the body are replaced: the RUNNING update and the finalizing mark. Each test gets its own task loop, open as the boot of a
 child leaves it when its app has an async task.
 """
 
@@ -110,9 +109,6 @@ def _runner(
                 ),
             )
             stack.enter_context(
-                patch.object(child_runner, '_start_heartbeat_thread', MagicMock()),
-            )
-            stack.enter_context(
                 patch.object(child_runner, '_mark_task_finalizing', MagicMock()),
             )
             stack.enter_context(
@@ -125,9 +121,7 @@ def _runner(
                 args_json='[]',
                 kwargs_json=json.dumps(kwargs or {}),
                 task_id='task-id',
-                database_url='postgresql://unused/unused',
                 master_worker_id='worker',
-                runner_heartbeat_interval_ms=100,
                 is_workflow_task=False,
                 task_loop=task_loop,
             )

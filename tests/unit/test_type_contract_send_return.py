@@ -452,7 +452,6 @@ def _run_child(
             '_confirm_ownership_and_set_running',
             MagicMock(return_value=None),
         ),
-        patch.object(child_runner, '_start_heartbeat_thread', MagicMock()),
         patch.object(child_runner, '_mark_task_finalizing', MagicMock()),
         patch.object(child_runner, 'get_current_app', MagicMock(return_value=app)),
     ):
@@ -461,9 +460,7 @@ def _run_child(
             args_json='[]',
             kwargs_json=json.dumps(kwargs),
             task_id='task-id',
-            database_url='postgresql://unused/unused',
             master_worker_id='worker',
-            runner_heartbeat_interval_ms=100,
             is_workflow_task=True,
             task_loop=TaskLoop(),
         )

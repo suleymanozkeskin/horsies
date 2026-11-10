@@ -121,7 +121,6 @@ def _frame(task_name: str, argument: str | None = None) -> RunFrame:
         args_json=None,
         kwargs_json=argument,
         worker_id='worker-1',
-        runner_heartbeat_interval_ms=30_000,
         is_workflow_task=False,
         timeout=NoTimeout(),
         claimed_at=None,

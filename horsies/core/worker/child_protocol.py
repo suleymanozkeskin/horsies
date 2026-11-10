@@ -72,7 +72,6 @@ class RunFrame:
     args_json: str | None
     kwargs_json: str | None
     worker_id: str
-    runner_heartbeat_interval_ms: int
     is_workflow_task: bool
     timeout: StoredTimeout
     claimed_at: datetime | None
@@ -325,7 +324,6 @@ def _encode_run_frame(frame: RunFrame) -> EncodedFrame:
             'args_bytes': None if args is None else len(args),
             'kwargs_bytes': None if kwargs is None else len(kwargs),
             'worker_id': frame.worker_id,
-            'runner_heartbeat_interval_ms': frame.runner_heartbeat_interval_ms,
             'is_workflow_task': frame.is_workflow_task,
             'timeout': _encode_timeout(frame.timeout),
             'claimed_at': (
@@ -560,7 +558,6 @@ def _decode_run(meta: Mapping[str, Any], body: bytes) -> RunFrame:
         args_json=None if args_bytes is None else body[:args_end].decode('utf-8'),
         kwargs_json=None if kwargs_bytes is None else body[args_end:].decode('utf-8'),
         worker_id=_text(meta, 'worker_id'),
-        runner_heartbeat_interval_ms=_whole(meta, 'runner_heartbeat_interval_ms'),
         is_workflow_task=_flag(meta, 'is_workflow_task'),
         timeout=_decode_timeout(meta),
         claimed_at=None if claimed_at is None else datetime.fromisoformat(claimed_at),

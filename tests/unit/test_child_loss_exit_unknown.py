@@ -95,7 +95,6 @@ def _frame() -> RunFrame:
         args_json=None,
         kwargs_json=None,
         worker_id='worker-1',
-        runner_heartbeat_interval_ms=30_000,
         is_workflow_task=False,
         timeout=NoTimeout(),
         claimed_at=None,
