@@ -63,6 +63,29 @@ there is no migration contract between pre-1.0 versions.
 
 ### Fixed
 
+- **A timed-out task's row moves only after its child has exited.** At the
+  deadline the worker kills the child, waits up to 30 s for its exit, and
+  only then writes `TASK_TIMEOUT`, the retry and the attempt row, or requeues
+  a task whose code had not started. The workflow step that follows the
+  failure runs after that write. Before, the worker wrote the row first and
+  killed the child last: a retry was kept apart from the attempt that it
+  replaced only by its retry delay of at least 1 s, and an `on_error` or
+  `allow_failed_deps` successor could start while the timed-out child still
+  ran. If the child does not exit within 30 s, the worker writes nothing and
+  logs at critical level, and stale-task recovery takes the task. A timed-out
+  task no longer also goes through crash recovery, which replayed its
+  workflow step and logged a finalize error.
+- **Crash recovery moves a lost child's row only after it saw the child
+  exit.** When the worker kills a child and does not see it exit within
+  30 s (the socket to the child was lost, the child sent a bad frame, or the
+  slot was cleared at a stop or after a defect), it writes nothing and logs
+  the task id and pid at critical level. Stale-task recovery then takes the
+  task. Before, the worker wrote `WORKER_CRASHED` or scheduled a retry at
+  once, so the retry could run next to a child that was still alive.
+- **A child that the worker killed takes no next task.** A kill can land
+  after the child's result arrived and before the worker read it. The worker
+  then gave the next queued task to the dying child, and that task was lost
+  and requeued. Now the worker starts a new child for it.
 - **The cycle check of a `WorkflowSpec` takes time linear in its nodes and
   dependencies.** It scanned every node for each node that it removed. On an
   Apple M2 with Python 3.13, a spec of 10,000 nodes took about 7.5 s to build,

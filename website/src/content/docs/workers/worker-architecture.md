@@ -53,12 +53,12 @@ Each child holds one task, so a failure stays with that task.
 
 | Case | Result |
 | ---- | ------ |
-| A task exceeds `timeout_ms` | Its child and the subprocesses in its session are killed, and the task fails with `TASK_TIMEOUT`. Other tasks continue |
+| A task exceeds `timeout_ms` | Its child and the subprocesses in its session are killed. After the child exits, the task fails with `TASK_TIMEOUT`. Other tasks continue |
 | A child crashes (segfault, out-of-memory kill, `os._exit()`) | The worker sees the exit at once and recovers that task. Other tasks continue |
 | The worker dies | Each child stops at once, also while C code holds the GIL. A subprocess that a task started keeps running, because the child cannot act after a SIGKILL |
 | A supervisor sends SIGTERM to every process | Running tasks continue, and the worker drains them |
 | A task forks a helper, then its child dies | The worker sees the death at once. The helper does not hide it |
-| A timeout fires as a task ends | The kill is bound to that task, so it cannot reach the next task |
+| A timeout fires as a task ends | The kill is bound to that task, so it cannot reach the next task. The killed child takes no next task |
 
 ## Execution Flow
 
@@ -274,7 +274,7 @@ On SIGTERM/SIGINT the worker:
 5. Waits for pending result writes
 6. Closes database connections
 
-Set `--drain-timeout` below the stop window of your supervisor, and leave a few seconds for result writes. If the supervisor kills the worker first, its running tasks wait for the reaper. At the deadline, the worker records each killed task at once.
+Set `--drain-timeout` below the stop window of your supervisor, and leave a few seconds for result writes. If the supervisor kills the worker first, its running tasks wait for the reaper. At the deadline, the worker records each killed task at once. A task whose child does not exit within 30 seconds of the kill is left to stale-task recovery.
 
 | Supervisor | Default stop window | Signal goes to |
 | ---------- | ------------------- | -------------- |

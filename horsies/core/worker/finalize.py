@@ -77,6 +77,9 @@ from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.worker.slots import (
     Assigned,
     ChildLost,
+    ExitedWith,
+    ExitUnknown,
+    KilledBySignal,
     NotDispatched,
     SlotHandle,
     SlotOutcome,
@@ -84,6 +87,10 @@ from horsies.core.worker.slots import (
 )
 from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.worker.runtime import (
+    _AttemptEndUnknown,
+    _TimeoutOutcome,
+    _TimeoutSettled,
+    _TimeoutWriteFailed,
     _FINALIZE_FUTURE_MAX_RETRIES,
     _FINALIZE_PARENT_MAX_RETRIES,
     _FINALIZE_PHASE1_MAX_RETRIES,
@@ -209,7 +216,7 @@ class FinalizeMixin:
             task_id: str,
             timeout_ms: int,
             claimed_at: Optional[datetime] = None,
-        ) -> None: ...
+        ) -> _TimeoutOutcome: ...
         async def _requeue_claimed_task(
             self,
             task_id: str,
@@ -246,14 +253,21 @@ class FinalizeMixin:
         task_id: str,
         timeout: StoredTimeout,
         claimed_at: Optional[datetime],
-    ) -> SlotOutcome:
+    ) -> SlotOutcome | _TimeoutSettled | _AttemptEndUnknown:
         """Wait for the outcome. The timeout starts when a child gets the task.
 
         Time waiting for a free slot does not count: a ``TaskTimeout`` bounds
         execution. A refused stored timeout has no deadline: the child fails
         the task at once, before it resolves the task. Never raises for a
-        task; a timeout goes through ``_handle_task_timeout``, and the slot
-        still reports what happened.
+        task.
+
+        Once the deadline fires, ``_handle_task_timeout`` owns the row.
+        ``_TimeoutSettled`` and ``_AttemptEndUnknown`` mean that the timeout
+        path wrote the row, or left it on purpose, so the slot's outcome is
+        not read, even when the slot answered after the timer fired. After
+        ``_TimeoutWriteFailed`` the slot's outcome is returned, and the usual
+        path finalizes it as the crash-recovery fallback: the attempt has
+        ended, so that outcome comes without an open-ended wait.
         """
         assigned = await asyncio.shield(handle.assigned)
         match assigned:
@@ -272,22 +286,25 @@ class FinalizeMixin:
                 assert_never(unreachable)
         try:
             # shield: wait_for must not cancel the outcome. The child keeps
-            # running regardless, and the outcome is awaited again below.
+            # running regardless, and the outcome may be awaited again below.
             return await asyncio.wait_for(
                 asyncio.shield(handle.outcome),
                 timeout=timeout_ms / 1000.0,
             )
         except asyncio.TimeoutError:
-            await self._handle_task_timeout(
+            timeout_outcome = await self._handle_task_timeout(
                 handle,
                 task_id,
                 timeout_ms,
                 claimed_at=claimed_at,
             )
-            # A kill ends the child, and the slot then reports it. A complete
-            # result that beat the kill still arrives here, and the fences in
-            # the persist path refuse it if the row has moved on.
-            return await asyncio.shield(handle.outcome)
+        match timeout_outcome:
+            case _TimeoutSettled() | _AttemptEndUnknown():
+                return timeout_outcome
+            case _TimeoutWriteFailed():
+                return await asyncio.shield(handle.outcome)
+            case _ as unreachable:
+                assert_never(unreachable)
 
     async def _finalize_after(
         self,
@@ -339,28 +356,11 @@ class FinalizeMixin:
                     )
                 return Ok(None)
             case ChildLost():
-                reason = f'Worker child lost: {outcome.describe()}'
-                requeue_outcome = await self._recover_worker_future_failure(
-                    task_id,
-                    reason,
-                    claimed_at=claimed_at,
-                )
-                return Err(
-                    self._make_finalize_error(
-                        task_id=task_id,
-                        stage=_FINALIZE_STAGE_FUTURE,
-                        message=reason,
-                        # Retryability is keyed on the recovery DB failure: a
-                        # requeue that hit a transient DB blip must retry the
-                        # recovery instead of waiting on the reaper.
-                        retryable=requeue_outcome is _RequeueOutcome.DB_ERROR,
-                        data={
-                            'loss_cause': outcome.cause.value,
-                            'requeue_outcome': requeue_outcome.value,
-                            'claimed_at': claimed_at,
-                        },
-                    )
-                )
+                return await self._finalize_child_loss(task_id, outcome, claimed_at)
+            case _TimeoutSettled() | _AttemptEndUnknown():
+                # The timeout path settled this row, or left it to stale-task
+                # recovery. Crash recovery must not write it as WORKER_CRASHED.
+                return Ok(None)
             case _ as unreachable:
                 assert_never(unreachable)
         now = datetime.now(timezone.utc)
@@ -415,6 +415,60 @@ class FinalizeMixin:
         self._clear_finalize_retry_attempts(task_id, _FINALIZE_STAGE_PHASE1)
         self._clear_finalize_retry_attempts(task_id, _FINALIZE_STAGE_PHASE2)
         return Ok(None)
+
+    async def _finalize_child_loss(
+        self,
+        task_id: str,
+        lost: ChildLost,
+        claimed_at: Optional[datetime],
+    ) -> Result[None, _FinalizeError]:
+        """Recover the row of a task whose child ended with no result.
+
+        Crash recovery moves the row only after the child's exit was seen,
+        so a retry never runs next to a child that may still be alive.
+        ``ExitUnknown`` (the slot gave up waiting after SIGKILL) writes
+        nothing and returns Ok(None): the row keeps its state for stale-task
+        recovery, and the loss is logged at critical level with the task id
+        and the pid. A seen exit goes to ``_recover_worker_future_failure``;
+        its result is a future-stage error, retryable only when the recovery
+        hit a database error.
+        """
+        match lost.child_exit:
+            case ExitUnknown():
+                logger.critical(
+                    'Lost child pid=%s of task %s did not exit (%s); nothing '
+                    'is written, and the row is left to stale-task recovery',
+                    lost.pid,
+                    task_id,
+                    lost.describe(),
+                )
+                return Ok(None)
+            case ExitedWith() | KilledBySignal():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
+        reason = f'Worker child lost: {lost.describe()}'
+        requeue_outcome = await self._recover_worker_future_failure(
+            task_id,
+            reason,
+            claimed_at=claimed_at,
+        )
+        return Err(
+            self._make_finalize_error(
+                task_id=task_id,
+                stage=_FINALIZE_STAGE_FUTURE,
+                message=reason,
+                # Retryability is keyed on the recovery DB failure: a
+                # requeue that hit a transient DB blip must retry the
+                # recovery instead of waiting on the reaper.
+                retryable=requeue_outcome is _RequeueOutcome.DB_ERROR,
+                data={
+                    'loss_cause': lost.cause.value,
+                    'requeue_outcome': requeue_outcome.value,
+                    'claimed_at': claimed_at,
+                },
+            )
+        )
 
     def _make_finalize_error(
         self,

@@ -11,7 +11,7 @@ import os
 import random
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Optional, TypeAlias
 
 from horsies.core.logging import get_logger
 from horsies.core.models.tasks import BuiltInTaskCode
@@ -38,6 +38,10 @@ __all__ = [
     '_FinalizeError',
     '_RetryError',
     '_RequeueOutcome',
+    '_TimeoutSettled',
+    '_TimeoutWriteFailed',
+    '_AttemptEndUnknown',
+    '_TimeoutOutcome',
     '_ReaperPassState',
     '_collect_psutil_metrics',
     '_read_current_rss_mb',
@@ -114,6 +118,24 @@ class _RequeueOutcome(str, Enum):
     TERMINAL_REPLAYED = 'TERMINAL_REPLAYED'
     NOT_OWNER_OR_NOT_CLAIMED = 'NOT_OWNER_OR_NOT_CLAIMED'
     DB_ERROR = 'DB_ERROR'
+
+
+@dataclass(frozen=True, slots=True)
+class _TimeoutSettled:
+    """The timed-out attempt had ended, then the timeout path settled the row."""
+
+
+@dataclass(frozen=True, slots=True)
+class _TimeoutWriteFailed:
+    """The timed-out attempt had ended, and the timeout write did not complete."""
+
+
+@dataclass(frozen=True, slots=True)
+class _AttemptEndUnknown:
+    """SIGKILL was sent, and no exit of the child was seen. Nothing was written."""
+
+
+_TimeoutOutcome: TypeAlias = _TimeoutSettled | _TimeoutWriteFailed | _AttemptEndUnknown
 
 
 # After this many consecutive permanent failures, a reaper operation is

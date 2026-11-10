@@ -155,7 +155,7 @@ def resize_video(*, video_id: str) -> TaskResult[str, TaskError]:
     ...
 ```
 
-On expiry, the worker kills the child process and the task fails with `TASK_TIMEOUT`. If the deadline elapses before user code starts, the task is requeued instead. Timeouts are terminal by default; opt into retries by adding `"TASK_TIMEOUT"` to `auto_retry_for`:
+On expiry, the worker kills the child process, waits for it to exit, and then fails the task with `TASK_TIMEOUT`. A result that reaches the worker after the deadline does not change this. If the deadline elapses before user code starts, the task is requeued instead. Timeouts are terminal by default; opt into retries by adding `"TASK_TIMEOUT"` to `auto_retry_for`:
 
 ```python
 @app.task(
@@ -168,6 +168,8 @@ def resize_video(*, video_id: str) -> TaskResult[str, TaskError]:
 ```
 
 The kill goes to the child and to the subprocesses in its session. Other tasks on the same worker continue. A subprocess that calls `setsid` itself leaves the session, and the kill does not reach it. The worker starts a new child in that slot, so size `timeout_ms` as a hang backstop well above normal runtime, not as routine control flow.
+
+The worker writes the timeout only after the child has exited. So a retry never runs next to the attempt that it replaces, and a workflow node that runs after a failure does not start while that attempt runs. If the child does not exit within 30 seconds of the kill, the worker writes nothing and logs at critical level. Then [stale-task recovery](/horsies/workers/heartbeats-recovery/) handles the task: a started task as a crashed worker's task, and a task that had not started when its claim lease ends.
 
 ### Register Tasks for Workers
 
