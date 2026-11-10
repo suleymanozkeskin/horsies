@@ -53,7 +53,9 @@ from horsies.core.models.worker_profile import (
     IsolatedRecycle,
     MemoryLimit,
     NoMemoryLimit,
+    NoSharedAsyncChildren,
     NoTaskLimit,
+    SharedAsyncChildren,
     TaskLimit,
     WorkerProfile,
 )
@@ -2519,7 +2521,24 @@ class TestExecutionSettings:
             max_claim_per_worker=4,
             drain_timeout_s=45.0,
             child_preload=ChildPreload.NONE,
+            shared_async=NoSharedAsyncChildren(),
         )
+
+    def test_shared_async_children_keep_their_typed_form(self) -> None:
+        shared = SharedAsyncChildren(count=3, seats=20)
+        settings = execution_settings(
+            WorkerProfile(isolated=IsolatedChildren(count=1), shared_async=shared),
+        )
+        assert settings.processes == 1
+        assert settings.shared_async == shared
+
+    def test_a_profile_with_only_shared_children_has_no_isolated_child(self) -> None:
+        settings = execution_settings(
+            WorkerProfile(shared_async=SharedAsyncChildren(count=2, seats=5)),
+        )
+        assert settings.processes == 0
+        assert settings.max_tasks_per_child == 0
+        assert settings.max_memory_per_child_mb is None
 
     def test_no_limit_variants_become_the_no_limit_encoding(self) -> None:
         settings = execution_settings(

@@ -9,9 +9,14 @@ that name from ``AppConfig.worker_profiles``. A profile states:
 - how long a stopping worker waits for running tasks,
 - what a Linux worker imports before it forks children.
 
-This release has one execution mode, isolated: an isolated child runs one
-task at a time in its own process. The number of children of a worker is the
-sum of the counts of its modes; no separate total exists.
+Two execution modes have children here:
+
+- isolated: an isolated child runs one task at a time in its own process;
+- shared async: a shared async child runs up to ``seats`` ``async def`` tasks
+  of ``Execution.SHARED_ASYNC`` at once, as coroutines on one event loop.
+
+The number of children of a worker is the sum of the counts of its modes; no
+separate total exists. A child never changes its mode.
 
 Each value is bounded where it is built. The checks that need more than one
 value (at least one child, claim limits against capacity) run in
@@ -42,8 +47,23 @@ The claim limits go to the claim function as that type."""
 MAX_MEMORY_LIMIT_MB: Final = 16 * 1024 * 1024
 """The largest memory limit of one child: 16 TiB, in MB."""
 
+MAX_SHARED_ASYNC_CHILDREN: Final = 1024
+"""The most shared async children that one profile starts."""
+
+MAX_SEATS_PER_SHARED_ASYNC_CHILD: Final = 1000
+"""The most tasks that one shared async child runs at once.
+
+A seat that waits on the network holds at least one socket, and the common
+default limit of open files of one process is 1024 (``ulimit -n``). Above
+1000 seats a child runs out of file descriptors before its seats are full.
+"""
+
 DEFAULT_RECYCLE_AFTER_TASKS: Final = 100
 """Tasks after which a child is replaced when the profile does not say."""
+
+DEFAULT_RECYCLE_AFTER_TASKS_PER_SEAT: Final = 100
+"""Tasks per seat after which a shared async child is replaced when the
+profile does not say."""
 
 DEFAULT_DRAIN_TIMEOUT: Final = timedelta(seconds=300)
 """Time that a stopping worker waits for running tasks by default."""
@@ -161,10 +181,76 @@ IsolatedSetting = Annotated[
 ]
 
 
+def _default_recycle_after_per_seat() -> TaskLimit:
+    return TaskLimit(tasks=DEFAULT_RECYCLE_AFTER_TASKS_PER_SEAT)
+
+
+class SharedRecycle(BaseModel):
+    """When the worker replaces a shared async child with a new one.
+
+    - ``after_per_seat``: replace a child after it completes
+      ``after_per_seat.tasks × seats`` tasks. The limit counts per seat, so
+      a child with many seats is not replaced after a few seconds of work.
+    - ``above``: replace a child when its own RSS reaches this limit. The
+      child reports its RSS after each task. Its tasks share the process, so
+      this bounds the memory of all of them together.
+
+    A child that reaches a limit closes: it takes no new task, its running
+    tasks finish, and then it stops and a new child starts.
+    """
+
+    model_config = ConfigDict(extra='forbid', frozen=True)
+
+    after_per_seat: TaskLimitSetting = Field(
+        default_factory=_default_recycle_after_per_seat,
+    )
+    above: MemoryLimitSetting = Field(default_factory=NoMemoryLimit)
+
+
+class SharedAsyncChildren(BaseModel):
+    """``count`` shared async children, each with ``seats`` seats.
+
+    A shared async child runs up to ``seats`` tasks of
+    ``Execution.SHARED_ASYNC`` at once, as coroutines on one event loop, and
+    a free seat takes the next task at once. ``count`` is from 1 to
+    ``MAX_SHARED_ASYNC_CHILDREN``; ``seats`` is from 1 to
+    ``MAX_SEATS_PER_SHARED_ASYNC_CHILD``.
+    """
+
+    model_config = ConfigDict(extra='forbid', frozen=True)
+
+    kind: Literal['shared_async_children'] = 'shared_async_children'
+    count: int = Field(
+        ge=1,
+        le=MAX_SHARED_ASYNC_CHILDREN,
+        description='Number of shared async children',
+    )
+    seats: int = Field(
+        ge=1,
+        le=MAX_SEATS_PER_SHARED_ASYNC_CHILD,
+        description='Tasks that one child runs at once',
+    )
+    recycle: SharedRecycle = Field(default_factory=SharedRecycle)
+
+
+class NoSharedAsyncChildren(BaseModel):
+    """The profile starts no shared async children."""
+
+    model_config = ConfigDict(extra='forbid', frozen=True)
+
+    kind: Literal['no_shared_async_children'] = 'no_shared_async_children'
+
+
+SharedAsyncSetting = Annotated[
+    Union[SharedAsyncChildren, NoSharedAsyncChildren],
+    Field(discriminator='kind'),
+]
+
+
 class ClaimLimits(BaseModel):
     """Limits on the tasks that the worker claims.
 
-    The capacity of a worker is its number of children plus
+    The capacity of a worker is its number of seats (``seat_count``) plus
     ``AppConfig.prefetch_buffer``: it never holds more tasks than that. A
     limit above the capacity has no effect, and validation refuses it.
 
@@ -188,7 +274,9 @@ def _default_drain_timeout() -> timedelta:
 class WorkerProfile(BaseModel):
     """The settings of one worker.
 
-    - ``isolated``: the isolated children. At least one child is required.
+    - ``isolated``: the isolated children.
+    - ``shared_async``: the shared async children. At least one child of
+      either mode is required.
     - ``claim``: the claim limits.
     - ``drain_timeout``: how long a stopping worker waits for running tasks,
       above 0 and at most ``MAX_DRAIN_TIMEOUT``. At this deadline it kills
@@ -201,6 +289,7 @@ class WorkerProfile(BaseModel):
     model_config = ConfigDict(extra='forbid', frozen=True)
 
     isolated: IsolatedSetting = Field(default_factory=NoIsolatedChildren)
+    shared_async: SharedAsyncSetting = Field(default_factory=NoSharedAsyncChildren)
     claim: ClaimLimits = Field(default_factory=ClaimLimits)
     drain_timeout: timedelta = Field(
         default_factory=_default_drain_timeout,
@@ -211,13 +300,43 @@ class WorkerProfile(BaseModel):
 
     def child_count(self) -> int:
         """The number of children of the worker: the sum over the modes."""
-        match self.isolated:
-            case IsolatedChildren(count=count):
-                return count
-            case NoIsolatedChildren():
-                return 0
+        return _isolated_count(self.isolated) + _shared_async_count(
+            self.shared_async,
+        )
+
+    def seat_count(self) -> int:
+        """The tasks that the children of the worker run at once: one per
+        isolated child, and ``seats`` per shared async child."""
+        match self.shared_async:
+            case SharedAsyncChildren(count=count, seats=seats):
+                shared_seats = count * seats
+            case NoSharedAsyncChildren():
+                shared_seats = 0
             case _ as unreachable:
                 assert_never(unreachable)
+        return _isolated_count(self.isolated) + shared_seats
+
+
+def _isolated_count(isolated: IsolatedChildren | NoIsolatedChildren) -> int:
+    match isolated:
+        case IsolatedChildren(count=count):
+            return count
+        case NoIsolatedChildren():
+            return 0
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _shared_async_count(
+    shared_async: SharedAsyncChildren | NoSharedAsyncChildren,
+) -> int:
+    match shared_async:
+        case SharedAsyncChildren(count=count):
+            return count
+        case NoSharedAsyncChildren():
+            return 0
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _describe_task_limit(limit: TaskLimit | NoTaskLimit) -> str:
@@ -254,10 +373,27 @@ def _describe_isolated(isolated: IsolatedChildren | NoIsolatedChildren) -> str:
             assert_never(unreachable)
 
 
+def _describe_shared_async(
+    shared_async: SharedAsyncChildren | NoSharedAsyncChildren,
+) -> str:
+    match shared_async:
+        case SharedAsyncChildren(count=count, seats=seats, recycle=recycle):
+            return (
+                f'shared_async={count}x{seats} seats (recycle after '
+                f'{_describe_task_limit(recycle.after_per_seat)} per seat, '
+                f'above {_describe_memory_limit(recycle.above)})'
+            )
+        case NoSharedAsyncChildren():
+            return 'shared_async=none'
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def describe_worker_profile(profile: WorkerProfile) -> str:
     """One line that states every setting of a profile, for logs."""
     return (
         f'{_describe_isolated(profile.isolated)}, '
+        f'{_describe_shared_async(profile.shared_async)}, '
         f'claim per queue per pass: '
         f'{_describe_task_limit(profile.claim.per_queue_per_pass)}, '
         f'claimed per worker: '
@@ -310,23 +446,40 @@ def profile_children_errors(
         _profile_error(
             f'{profile_path(name)}: the profile starts no children',
             ['a worker needs at least one child to run a task'],
-            f'set {profile_path(name)}.isolated, for example '
+            f'set {profile_path(name)}.isolated or '
+            f'{profile_path(name)}.shared_async, for example '
             'isolated=IsolatedChildren(count=4)',
         ),
     ]
 
 
+def _capacity_formula(profile: WorkerProfile, prefetch_buffer: int) -> str:
+    """The capacity of a worker of this profile, term by term."""
+    isolated = _isolated_count(profile.isolated)
+    match profile.shared_async:
+        case SharedAsyncChildren(count=count, seats=seats):
+            return (
+                f'capacity = {isolated} isolated children + {count} shared '
+                f'async children x {seats} seats + prefetch_buffer '
+                f'{prefetch_buffer}'
+            )
+        case NoSharedAsyncChildren():
+            return f'capacity = {isolated} children + prefetch_buffer {prefetch_buffer}'
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def _claim_limit_error(
     path: str,
     tasks: int,
-    children: int,
+    profile: WorkerProfile,
     prefetch_buffer: int,
 ) -> ConfigurationError:
-    capacity = children + prefetch_buffer
+    capacity = profile.seat_count() + prefetch_buffer
     return _profile_error(
         f'{path}: {tasks} tasks is above the capacity of the worker ({capacity})',
         [
-            f'capacity = {children} children + prefetch_buffer {prefetch_buffer}',
+            _capacity_formula(profile, prefetch_buffer),
             'the worker never holds more tasks than its capacity, so this '
             'limit has no effect',
         ],
@@ -342,9 +495,9 @@ def profile_claim_errors(
     """Refuse a claim limit above the capacity of the worker.
 
     ``prefetch_buffer`` is the validated ``AppConfig.prefetch_buffer``
-    (0 or more). The capacity is the number of children plus it.
+    (0 or more). The capacity is the number of seats plus it.
     """
-    children = profile.child_count()
+    capacity = profile.seat_count() + prefetch_buffer
     claim_path = f'{profile_path(name)}.claim'
     limits = {
         f'{claim_path}.per_queue_per_pass': profile.claim.per_queue_per_pass,
@@ -353,9 +506,9 @@ def profile_claim_errors(
     errors: list[ConfigurationError] = []
     for path, limit in limits.items():
         match limit:
-            case TaskLimit(tasks=tasks) if tasks > children + prefetch_buffer:
+            case TaskLimit(tasks=tasks) if tasks > capacity:
                 errors.append(
-                    _claim_limit_error(path, tasks, children, prefetch_buffer),
+                    _claim_limit_error(path, tasks, profile, prefetch_buffer),
                 )
             case TaskLimit() | NoTaskLimit():
                 pass

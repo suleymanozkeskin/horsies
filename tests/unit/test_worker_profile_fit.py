@@ -24,6 +24,8 @@ from horsies.core.models.worker_profile import (
     IsolatedRecycle,
     MemoryLimit,
     NoIsolatedChildren,
+    SharedAsyncChildren,
+    SharedRecycle,
     WorkerProfile,
 )
 from horsies.core.worker import profile_fit
@@ -90,6 +92,42 @@ class TestCompareMemoryLimits:
     def test_no_memory_limit_has_no_sum(self) -> None:
         profile = WorkerProfile(isolated=IsolatedChildren(count=4))
         assert compare_memory_limits(profile, _host_ram(1)) == MemoryLimitsNotSet()
+
+    def test_the_sum_covers_shared_async_children(self) -> None:
+        profile = WorkerProfile(
+            isolated=IsolatedChildren(
+                count=2,
+                recycle=IsolatedRecycle(above=MemoryLimit(mb=256)),
+            ),
+            shared_async=SharedAsyncChildren(
+                count=3,
+                seats=10,
+                recycle=SharedRecycle(above=MemoryLimit(mb=1000)),
+            ),
+        )
+        outcome = compare_memory_limits(profile, _host_ram(3511))
+        assert outcome == MemoryLimitsExceedMachine(total_mb=3512, machine_mb=3511)
+
+    def test_shared_children_with_no_memory_limit_have_no_sum(self) -> None:
+        profile = WorkerProfile(
+            isolated=IsolatedChildren(
+                count=2,
+                recycle=IsolatedRecycle(above=MemoryLimit(mb=256)),
+            ),
+            shared_async=SharedAsyncChildren(count=1, seats=10),
+        )
+        assert compare_memory_limits(profile, _host_ram(1)) == MemoryLimitsNotSet()
+
+    def test_only_shared_children_are_summed(self) -> None:
+        profile = WorkerProfile(
+            shared_async=SharedAsyncChildren(
+                count=4,
+                seats=10,
+                recycle=SharedRecycle(above=MemoryLimit(mb=500)),
+            ),
+        )
+        outcome = compare_memory_limits(profile, _host_ram(2000))
+        assert outcome == MemoryLimitsFit(total_mb=2000, machine_mb=2000)
 
 
 _MIB = 1024 * 1024
@@ -305,6 +343,19 @@ class TestConnectionNeed:
         assert LISTENER_CONNECTIONS_PER_WORKER == 2
         assert RUNNER_HEARTBEAT_CONNECTIONS_PER_WORKER == 1
         assert need.total() == 24
+
+    def test_shared_async_children_open_a_child_pool_each(self) -> None:
+        """A shared async child opens its async pool with the size of a
+        child pool, so it counts like an isolated child, whatever its seats."""
+        need = worker_connection_need(
+            WorkerProfile(
+                isolated=IsolatedChildren(count=2),
+                shared_async=SharedAsyncChildren(count=3, seats=200),
+            ),
+            _broker(),
+        )
+        assert need.children == 5
+        assert need.total() == 3 + 2 + 2 + 1 + 5 * 2
 
     def test_parent_pool_inherits_pool_size_when_worker_pool_is_none(self) -> None:
         need = worker_connection_need(
