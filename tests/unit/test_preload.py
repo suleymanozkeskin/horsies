@@ -46,12 +46,13 @@ from horsies.core.worker.preload import (
     reap_landed_orphans,
 )
 from horsies.core.worker.preload_main import REPARENT_FAILED_EXIT_CODE, parse_arguments
+from horsies.core.models.boot_failure import SpawnFailed
 from horsies.core.worker.slots import (
     PRELOAD_ENTRY,
+    BootAttemptsExhausted,
     Child,
     SlotPool,
     SlotPoolConfig,
-    SpawnFailed,
     TaskFinished,
 )
 
@@ -552,7 +553,10 @@ class TestPreloadParentDeath:
         started_pools: list[SlotPool],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """The only slot cannot spawn its replacement, so the failed spawns
+        count, and the pool fails."""
         monkeypatch.setattr(slots, 'PRELOAD_RESTART_DELAY_S', 60.0)
+        monkeypatch.setattr(slots, 'SLOT_DOWN_FIRST_DELAY_S', 0.01)
         pool = await _started(started_pools, _config(max_tasks_per_child=1))
         parent = await _running_preload(pool)
         parent.process.kill()
@@ -563,7 +567,11 @@ class TestPreloadParentDeath:
         await asyncio.wait_for(handle.outcome, OUTCOME_TIMEOUT_S)
         failure = await asyncio.wait_for(pool.wait_failed(), OUTCOME_TIMEOUT_S)
 
-        assert isinstance(failure, SpawnFailed)
+        match failure:
+            case BootAttemptsExhausted(cause=SpawnFailed()):
+                pass
+            case other:
+                raise AssertionError(other)
 
     async def test_a_refused_fork_uses_exec_and_keeps_the_parent(
         self,
@@ -883,6 +891,27 @@ class TestChildSteps:
 
         assert stopped.value.code == 0
         assert steps == ['setsid', 'reparent', 'serve']
+
+
+class TestChildExitCodes:
+    def test_every_exit_code_of_a_forked_child_is_distinct(self) -> None:
+        """A forked child can exit through ``preload_main`` before the
+        reparent and through ``child_main`` after it. The parent reads the
+        cause from the code, so no two causes share one."""
+        from horsies.core.worker import child_main
+        from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
+
+        codes = {
+            name: value
+            for module in (child_main, preload_main)
+            for name, value in vars(module).items()
+            if name.endswith('_EXIT_CODE') and isinstance(value, int)
+        }
+        codes['CHILD_HOOK_FAILURE_EXIT_CODE'] = CHILD_HOOK_FAILURE_EXIT_CODE
+
+        assert 'REPARENT_FAILED_EXIT_CODE' in codes
+        assert 'STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE' in codes
+        assert len(set(codes.values())) == len(codes), codes
 
 
 @linux_only

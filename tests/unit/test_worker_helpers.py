@@ -62,8 +62,13 @@ from horsies.core.worker.worker import (
 )
 from horsies.core.models.recovery import OrphanTaskAuditReport, RecoveryConfig
 from horsies.core.models.tasks import OperationalErrorCode
+from horsies.core.models.boot_failure import (
+    ResourceShortage,
+    ShortageErrno,
+    TaskLoopCreateFailed,
+)
+from horsies.core.models.health import DownSlot, SlotsDown, parse_slot_health
 from horsies.core.worker.child_protocol import (
-    LoopCreateFailedFrame,
     NoTaskLoop,
     RssMb,
     RssUnreadable,
@@ -86,10 +91,13 @@ from horsies.core.worker.slots import (
     LossCause,
     NotDispatched,
     NotRunCause,
+    Down,
     PoolStopped,
+    PreloadRefused,
+    SlotDefectsRepeated,
     SlotHandle,
+    SlotPool,
     SlotOutcome,
-    SpawnFailed,
     TaskFinished,
 )
 from tests.broker_resources_support import (
@@ -184,6 +192,22 @@ def _make_worker(
         session_factory=MagicMock(),
         listener=MagicMock(),
         cfg=cfg,
+    )
+
+
+def _unstarted_pool(worker: Worker) -> SlotPool:
+    """A pool with no child yet: every slot is ``Starting``. Needs a running loop."""
+    pool = SlotPool(worker._slot_pool_config(), pending_limit=1)  # pyright: ignore[reportPrivateUsage]
+    worker._slots = pool  # pyright: ignore[reportPrivateUsage]
+    return pool
+
+
+def _down(failed_boots: int = 1) -> Down:
+    return Down(
+        ResourceShortage(ShortageErrno.EMFILE),
+        'OSError: [Errno 24] Too many open files',
+        datetime(2026, 1, 1, tzinfo=timezone.utc),
+        failed_boots,
     )
 
 
@@ -1634,7 +1658,7 @@ class TestSlotPoolSetup:
     async def test_start_failure_raises_and_keeps_the_pool_for_cleanup(self) -> None:
         worker = _make_worker()
         pool = MagicMock()
-        pool.start = AsyncMock(return_value=Err(SpawnFailed('no such file')))
+        pool.start = AsyncMock(return_value=Err(PreloadRefused('no such file')))
 
         with patch('horsies.core.worker.worker.SlotPool', return_value=pool):
             with pytest.raises(ChildStartFailedError, match='no such file'):
@@ -1673,7 +1697,16 @@ class TestSlotFailureLoop:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         'failure',
-        [SpawnFailed('x'), BootAttemptsExhausted(3, 'exit code 1')],
+        [
+            PreloadRefused('x'),
+            BootAttemptsExhausted(
+                3,
+                ResourceShortage(ShortageErrno.EMFILE),
+                'OSError: [Errno 24] Too many open files',
+            ),
+            SlotDefectsRepeated(0, 'UnicodeEncodeError: x'),
+        ],
+        ids=['preload-refused', 'attempts-exhausted', 'slot-defects'],
     )
     async def test_other_failures_are_fatal(self, failure: Any) -> None:
         worker = _make_worker()
@@ -1689,16 +1722,21 @@ class TestSlotFailureLoop:
         worker with the cause in the error."""
         worker = _make_worker()
         pool = MagicMock()
-        cause = LoopCreateFailedFrame(
-            error_name='OSError',
-            detail='[Errno 24] Too many open files',
-        ).describe()
-        pool.wait_failed = AsyncMock(return_value=BootAttemptsExhausted(3, cause))
+        pool.wait_failed = AsyncMock(
+            return_value=BootAttemptsExhausted(
+                3,
+                TaskLoopCreateFailed(),
+                'OSError: [Errno 24] Too many open files',
+            ),
+        )
 
         with pytest.raises(ChildStartFailedError) as stopped:
             await worker._slot_failure_loop(pool)  # pyright: ignore[reportPrivateUsage]
 
-        assert cause in str(stopped.value)
+        assert (
+            'the child could not create the event loop for async tasks: '
+            'OSError: [Errno 24] Too many open files'
+        ) in str(stopped.value)
 
 
 @pytest.mark.unit
@@ -3137,6 +3175,7 @@ class TestClaimPass:
         expected: ClaimPass,
     ) -> None:
         worker = _make_worker()
+        _unstarted_pool(worker)
         rows = [
             ('id-1', 'task', '[]', '{}', 'default', True, None, None),
             ('id-2', 'task', '[]', '{}', 'default', True, None, None),
@@ -3167,6 +3206,7 @@ class TestClaimPass:
     @pytest.mark.asyncio
     async def test_an_empty_pass_reports_nothing(self) -> None:
         worker = _make_worker()
+        _unstarted_pool(worker)
         result = MagicMock()
         result.keys.return_value = []
         result.fetchall.return_value = []
@@ -3178,6 +3218,42 @@ class TestClaimPass:
         worker.sf = factory
 
         assert await worker._claim_and_dispatch_all() == _NO_CLAIM
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ('down_slots', 'expected_processes'),
+        [((), 3), ((1,), 2), ((0, 2), 1), ((0, 1, 2), 0)],
+        ids=['none-down', 'one-down', 'two-down', 'all-down'],
+    )
+    async def test_the_claim_budget_leaves_out_the_slots_that_are_down(
+        self,
+        down_slots: tuple[int, ...],
+        expected_processes: int,
+    ) -> None:
+        worker = _make_worker()
+        worker.cfg.processes = 3
+        pool = _unstarted_pool(worker)
+        for index in down_slots:
+            pool._slots[index].state = _down()  # pyright: ignore[reportPrivateUsage]
+        result = MagicMock()
+        result.keys.return_value = []
+        result.fetchall.return_value = []
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=result)
+        factory = MagicMock()
+        factory.return_value.__aenter__ = AsyncMock(return_value=session)
+        factory.return_value.__aexit__ = AsyncMock(return_value=False)
+        worker.sf = factory
+
+        await worker._claim_and_dispatch_all()  # pyright: ignore[reportPrivateUsage]
+
+        params = session.execute.await_args.args[1]
+        assert params['p_processes'] == expected_processes
+
+    def test_a_claim_before_the_slot_pool_exists_is_a_defect(self) -> None:
+        worker = _make_worker()
+        with pytest.raises(AssertionError, match='before the slot pool exists'):
+            worker._claim_slot_count()  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.unit
@@ -4350,6 +4426,7 @@ class TestUpdateWorkerState:
         """Executes INSERT_WORKER_STATE_SQL with expected parameters."""
         worker = _make_worker()
         worker._started_at = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        _unstarted_pool(worker)
 
         monkeypatch.setattr(
             'horsies.core.worker.health._collect_psutil_metrics',
@@ -4387,6 +4464,55 @@ class TestUpdateWorkerState:
         assert params['mem_pct'] == 5.5
         assert params['cpu_pct'] == 12.3
         assert params['children_mem_mb'] == 250.0
+        assert params['slots_down'].obj == []
+
+    @pytest.mark.asyncio
+    async def test_a_degraded_worker_reports_its_down_slots(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The snapshot names each slot that is down, with its typed cause."""
+        worker = _make_worker()
+        worker.cfg.processes = 2
+        pool = _unstarted_pool(worker)
+        pool._slots[1].state = _down(failed_boots=4)  # pyright: ignore[reportPrivateUsage]
+        monkeypatch.setattr(
+            'horsies.core.worker.health._collect_psutil_metrics',
+            lambda: (1.0, 1.0, 1.0, 1.0),
+        )
+        worker._count_only_running_for_worker = AsyncMock(return_value=0)  # type: ignore[assignment]
+        worker._count_claimed_for_worker = AsyncMock(return_value=0)  # type: ignore[assignment]
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.execute = AsyncMock(return_value=MagicMock(rowcount=1))
+        worker.sf = MagicMock(return_value=session)
+
+        await worker._update_worker_state()  # pyright: ignore[reportPrivateUsage]
+
+        params = session.execute.await_args.args[1]
+        assert params['slots_down'].obj == [
+            {
+                'slot': 1,
+                'cause': {'kind': 'resource_shortage', 'errno': 'EMFILE'},
+                'detail': 'OSError: [Errno 24] Too many open files',
+                'down_since': '2026-01-01T00:00:00+00:00',
+                'failed_boots': 4,
+            },
+        ]
+        assert parse_slot_health(params['slots_down'].obj, 2) == Ok(
+            SlotsDown(
+                (
+                    DownSlot(
+                        1,
+                        ResourceShortage(ShortageErrno.EMFILE),
+                        'OSError: [Errno 24] Too many open files',
+                        datetime(2026, 1, 1, tzinfo=timezone.utc),
+                        4,
+                    ),
+                ),
+            ),
+        )
 
     # --- U-7c ---
 

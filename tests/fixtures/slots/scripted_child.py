@@ -7,7 +7,9 @@ database.
 
 Each boot that passes reports an app with ``async def`` tasks, so ``serve``
 creates the task loop, except the ``no_async`` modes. The ``loop_*`` modes make
-that creation raise ``OSError(EMFILE)``.
+that creation raise ``OSError(EMFILE)``. The ``report_*`` and ``short_*`` modes
+return a boot failure frame with a named cause, as ``child_main.boot_app``
+does.
 """
 
 # pyright: reportPrivateUsage=false
@@ -28,15 +30,24 @@ import time
 from collections.abc import Coroutine
 from typing import Any
 
+from horsies.core.models.boot_failure import (
+    AppLoadFailed,
+    ChildPoolSetupFailed,
+    ResourceShortage,
+    ShortageErrno,
+)
+from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.child_main import WireResult, _send_child_frame, serve
 from horsies.core.worker.child_protocol import (
     FRAME_HEADER,
+    BootFailedFrame,
     InitFrame,
     NoTaskLoop,
     ResultFrame,
     RssUnreadable,
     RunFrame,
     StopFrame,
+    boot_failed_frame,
     encode_parent_frame,
 )
 from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
@@ -92,7 +103,59 @@ def _loop_boot(mode: str, argument: str, init: InitFrame) -> AsyncTaskPresence:
     return AsyncTaskPresence.HAS_ASYNC_TASKS
 
 
-def _boot(init: InitFrame) -> AsyncTaskPresence:
+_SHORT_OF_DESCRIPTORS = boot_failed_frame(
+    ResourceShortage(ShortageErrno.EMFILE),
+    'OSError',
+    '[Errno 24] Too many open files',
+)
+
+
+def _slot_index(init: InitFrame) -> int:
+    """The slot of this child: the pool names each child ``<name>-<slot>``."""
+    return int(init.process_name.rpartition('-')[2])
+
+
+def _report_boot(
+    mode: str,
+    argument: str,
+    init: InitFrame,
+) -> Result[AsyncTaskPresence, BootFailedFrame]:
+    """Boot modes that return a boot failure frame with a named cause."""
+    match mode:
+        case 'report_app_load':
+            return Err(boot_failed_frame(AppLoadFailed(), 'ImportError', 'scripted'))
+        case 'report_pool_setup':
+            return Err(
+                boot_failed_frame(ChildPoolSetupFailed(), 'ValueError', 'scripted'),
+            )
+        case 'short_always':
+            return Err(_SHORT_OF_DESCRIPTORS)
+        case 'short_on_slot':
+            # Only the slot named in the argument is short of descriptors.
+            if _slot_index(init) == int(argument):
+                return Err(_SHORT_OF_DESCRIPTORS)
+        case 'short_first':
+            # The first boots are short of descriptors, then boots pass.
+            if _boot_mark(argument) <= int(init.imports[0]):
+                return Err(_SHORT_OF_DESCRIPTORS)
+        case 'short_after_first':
+            # The first boots pass, then the next boots are short of descriptors.
+            seen = _boot_mark(argument)
+            first_boots = int(init.imports[1])
+            if first_boots < seen <= first_boots + int(init.imports[0]):
+                return Err(_SHORT_OF_DESCRIPTORS)
+        case 'short_then_hang':
+            # The slot in imports[0] is short of descriptors once, then hangs.
+            if _slot_index(init) == int(init.imports[0]):
+                if _boot_mark(argument) == 1:
+                    return Err(_SHORT_OF_DESCRIPTORS)
+                time.sleep(3600)
+        case _:
+            raise AssertionError(mode)
+    return Ok(AsyncTaskPresence.HAS_ASYNC_TASKS)
+
+
+def _boot(init: InitFrame) -> Result[AsyncTaskPresence, BootFailedFrame]:
     mode, _, argument = init.app_locator.partition(':')
     match mode:
         case 'ok':
@@ -104,7 +167,17 @@ def _boot(init: InitFrame) -> AsyncTaskPresence:
             | 'loop_fails_first'
             | 'loop_fails_after_first'
         ):
-            return _loop_boot(mode, argument, init)
+            return Ok(_loop_boot(mode, argument, init))
+        case (
+            'report_app_load'
+            | 'report_pool_setup'
+            | 'short_always'
+            | 'short_on_slot'
+            | 'short_first'
+            | 'short_after_first'
+            | 'short_then_hang'
+        ):
+            return _report_boot(mode, argument, init)
         case 'hook_fails':
             os._exit(CHILD_HOOK_FAILURE_EXIT_CODE)
         case 'raises':
@@ -138,7 +211,7 @@ def _boot(init: InitFrame) -> AsyncTaskPresence:
             setattr(task_loop_module, 'LOOP_CLOSE_TIMEOUT_S', float(argument))
         case _:
             raise AssertionError(mode)
-    return AsyncTaskPresence.HAS_ASYNC_TASKS
+    return Ok(AsyncTaskPresence.HAS_ASYNC_TASKS)
 
 
 def _socket_count() -> int:
@@ -351,9 +424,16 @@ def _run(frame: RunFrame, init: InitFrame, task_loop: TaskLoop) -> WireResult:
             raise AssertionError(frame.task_name)
 
 
+def _refuse_thread(_thread: threading.Thread) -> None:
+    raise RuntimeError("can't start new thread")
+
+
 def main() -> None:
     global _sock
     _sock = socket.socket(fileno=int(sys.argv[1]))
+    if os.environ.get('HORSIES_TEST_REFUSE_THREADS') == '1':
+        # As the OS does at its thread limit: ``Thread.start`` raises.
+        setattr(threading.Thread, 'start', _refuse_thread)
     serve(_sock, int(sys.argv[2]), _boot, _run)
 
 

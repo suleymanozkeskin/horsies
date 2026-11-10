@@ -1751,6 +1751,43 @@ class TestUpgradePaths:
             await broker.close_async()
             await engine.dispose()
 
+    async def test_slots_down_column_upgrade_from_52(
+        self,
+        scratch_database: str,
+    ) -> None:
+        """A v52 database gets horsies_worker_states.slots_down at v53, as a
+        nullable jsonb column, and a second apply changes nothing."""
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        column_sql = text("""
+            SELECT format_type(atttypid, atttypmod), attnotnull
+            FROM pg_attribute
+            WHERE attrelid = 'horsies_worker_states'::regclass
+              AND attname = 'slots_down'
+              AND NOT attisdropped
+        """)
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(
+                    text('ALTER TABLE horsies_worker_states DROP COLUMN slots_down'),
+                )
+                await conn.execute(
+                    text('DELETE FROM horsies_schema_version WHERE version >= 53'),
+                )
+                await conn.execute(
+                    text(
+                        'INSERT INTO horsies_schema_version(version) VALUES (52) '
+                        'ON CONFLICT DO NOTHING',
+                    ),
+                )
+            await _migrate(scratch_database)
+            await _migrate(scratch_database)
+            async with engine.connect() as conn:
+                assert await _stored_version(engine) == SCHEMA_VERSION
+                assert (await conn.execute(column_sql)).all() == [('jsonb', False)]
+        finally:
+            await engine.dispose()
+
     async def test_recovery_failure_table_upgrade_from_51(
         self, scratch_database: str,
     ) -> None:

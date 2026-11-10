@@ -58,7 +58,9 @@ _IDENTIFIER = re.compile(r'^[a-z][a-z0-9_]{0,62}$')
 # v52 adds horsies_workflow_recovery_failures and its orphan delete in
 # worker/sql.py. Neither touches horsies_tasks, and no prototype names a
 # workflow table, so the qualified shape is unchanged and the base advances.
-_EXPECTED_BASE_SCHEMA_VERSION = 52
+# v53 adds horsies_worker_states.slots_down. It does not touch horsies_tasks,
+# and no prototype names the worker states table, so the base advances.
+_EXPECTED_BASE_SCHEMA_VERSION = 53
 
 
 @dataclass(frozen=True, slots=True)

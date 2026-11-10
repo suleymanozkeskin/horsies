@@ -30,15 +30,24 @@ from typing import Final, NoReturn, assert_never
 
 from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.logging import get_logger
+from horsies.core.models.boot_failure import (
+    CLEARABLE_ERRNOS,
+    AppLoadFailed,
+    ChildPoolSetupFailed,
+    ReportedBootCause,
+    ResourceShortage,
+    TaskLoopCreateFailed,
+    ThreadStartRefused,
+)
 from horsies.core.models.tasks import OperationalErrorCode, TaskError, TaskResult
-from horsies.core.types.result import Err, Ok
+from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.child_protocol import (
     FRAME_HEADER,
     MAX_BODY_BYTES,
+    BootFailedFrame,
     ChildFrame,
     FrameOverBound,
     InitFrame,
-    LoopCreateFailedFrame,
     LoopHoldsNoTask,
     LoopHoldsTasks,
     NoTaskLoop,
@@ -50,6 +59,7 @@ from horsies.core.worker.child_protocol import (
     RssUnreadable,
     RunFrame,
     StopFrame,
+    boot_failed_frame,
     decode_parent_frame,
     encode_child_frame,
     parse_header,
@@ -72,9 +82,8 @@ BAD_ARGUMENTS_EXIT_CODE: Final = 73
 # After a stop frame, when threads of the task loop's executor still run:
 # the child leaves without waiting for them, so ``atexit`` handlers do not run.
 STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE: Final = 74
-# At boot, after ``LoopCreateFailedFrame``: the app has an ``async def`` task,
-# and the child could not create the event loop for it.
-TASK_LOOP_CREATE_FAILED_EXIT_CODE: Final = 75
+# At boot, after ``BootFailedFrame``: the frame names the cause.
+BOOT_FAILED_EXIT_CODE: Final = 75
 INIT_FRAME_TIMEOUT_S: Final = 30.0
 # Metadata holds this text as JSON, and one character takes at most 12 bytes
 # there, so the reason stays well under ``MAX_META_BYTES``.
@@ -83,7 +92,9 @@ MAX_FAILED_REASON_CHARS: Final = 64 * 1024
 _PR_SET_PDEATHSIG: Final = 1
 
 WireResult = tuple[bool, str, str | None]
-BootFn = Callable[[InitFrame], AsyncTaskPresence]
+# A boot step returns whether the booted app has an ``async def`` task, or the
+# frame that reports why it failed.
+BootFn = Callable[[InitFrame], Result[AsyncTaskPresence, BootFailedFrame]]
 RunTaskFn = Callable[[RunFrame, InitFrame, TaskLoop], WireResult]
 
 
@@ -292,50 +303,119 @@ def _refuse_run_on_a_child_to_retire(task_loop: TaskLoop, frame: RunFrame) -> No
     os._exit(BAD_PARENT_FRAME_EXIT_CODE)
 
 
-def open_task_loop_at_boot(
+def boot_failure_from_exception(
+    exc: Exception,
+    step_cause: AppLoadFailed | ChildPoolSetupFailed,
+) -> BootFailedFrame:
+    """Name the cause of an exception that a boot step raised.
+
+    An ``OSError`` whose errno is in ``CLEARABLE_ERRNOS`` is a
+    ``ResourceShortage``, which can clear. Any other exception is
+    ``step_cause``, which repeats. Only the exception itself is read, not
+    its ``__cause__``. Pure.
+    """
+    cause: ReportedBootCause = step_cause
+    match exc:
+        case OSError(errno=int() as number) if number in CLEARABLE_ERRNOS:
+            cause = ResourceShortage(CLEARABLE_ERRNOS[number])
+        case _:
+            pass
+    return boot_failed_frame(cause, type(exc).__name__, str(exc))
+
+
+def start_control_thread(
     sock: socket.socket,
+    work: queue.SimpleQueue[RunFrame | StopFrame],
+) -> Result[None, BootFailedFrame]:
+    """Start the thread that reads parent frames into ``work``.
+
+    ``Err``: the OS refused the thread (``RuntimeError`` from
+    ``Thread.start``), so the cause is ``ThreadStartRefused``. Nothing else
+    changed then.
+    """
+    control = threading.Thread(
+        target=_read_parent_frames,
+        args=(sock, work),
+        name='horsies-child-control',
+        daemon=True,
+    )
+    try:
+        control.start()
+    except RuntimeError as exc:
+        return Err(
+            boot_failed_frame(ThreadStartRefused(), type(exc).__name__, str(exc)),
+        )
+    return Ok(None)
+
+
+def open_task_loop_at_boot(
     presence: AsyncTaskPresence,
-) -> TaskLoop:
+) -> Result[TaskLoop, BootFailedFrame]:
     """Return the task loop of this child, open when its app has an
     ``async def`` task, and not created when it has none.
 
-    When the loop cannot be created, the child sends ``LoopCreateFailedFrame``
-    and exits with ``TASK_LOOP_CREATE_FAILED_EXIT_CODE``, before its ready
-    frame. The parent counts that as a failed boot attempt, and no task
-    reaches this child.
+    ``Err``: the loop could not be created, so the cause is
+    ``TaskLoopCreateFailed``. The caller fails the boot before the ready
+    frame, so no task reaches this child.
     """
     task_loop = TaskLoop()
     match presence:
         case AsyncTaskPresence.NO_ASYNC_TASK:
-            return task_loop
+            return Ok(task_loop)
         case AsyncTaskPresence.HAS_ASYNC_TASKS:
             match task_loop.open():
                 case Ok():
-                    return task_loop
+                    return Ok(task_loop)
                 case Err(failed):
-                    _fail_boot_without_task_loop(sock, failed)
+                    return Err(_loop_create_failure(failed))
 
 
-def _fail_boot_without_task_loop(
-    sock: socket.socket,
-    failed: LoopCreateFailed,
-) -> NoReturn:
-    """Report the failed loop creation to the parent, then end the process.
+def _loop_create_failure(failed: LoopCreateFailed) -> BootFailedFrame:
+    return boot_failed_frame(TaskLoopCreateFailed(), failed.error_name, failed.detail)
+
+
+def fail_boot(sock: socket.socket, failed: BootFailedFrame) -> NoReturn:
+    """Report a failed boot to the parent, then end the process.
 
     The child has run no task, so it does not wait for threads that boot
-    started: it flushes its log handlers and its output, and leaves with
-    ``os._exit``.
+    started: it logs the cause, flushes its log handlers and its output, and
+    leaves with ``os._exit`` and ``BOOT_FAILED_EXIT_CODE``. A parent that is
+    gone ends the process with ``PARENT_GONE_EXIT_CODE`` instead.
     """
-    _send_child_frame(
-        sock,
-        LoopCreateFailedFrame(
-            error_name=bounded_text(failed.error_name, MAX_FAILED_REASON_CHARS),
-            detail=bounded_text(failed.detail, MAX_FAILED_REASON_CHARS),
-        ),
-    )
+    logger.error('Child boot failed: %s', failed.describe())
+    _send_child_frame(sock, failed)
     logging.shutdown()
     flush_output()
-    os._exit(TASK_LOOP_CREATE_FAILED_EXIT_CODE)
+    os._exit(BOOT_FAILED_EXIT_CODE)
+
+
+def _boot_or_exit(
+    sock: socket.socket,
+    init: InitFrame,
+    boot: BootFn,
+    work: queue.SimpleQueue[RunFrame | StopFrame],
+) -> TaskLoop:
+    """Start the control thread that fills ``work``, boot the app, and open
+    the task loop.
+
+    Each step that fails ends the process through ``fail_boot``, with the
+    cause of that step.
+    """
+    match start_control_thread(sock, work):
+        case Ok():
+            pass
+        case Err(failed):
+            fail_boot(sock, failed)
+    match boot(init):
+        case Ok(presence):
+            pass
+        case Err(failed):
+            fail_boot(sock, failed)
+    match open_task_loop_at_boot(presence):
+        case Ok(task_loop):
+            return task_loop
+        case Err(failed):
+            fail_boot(sock, failed)
 
 
 def exit_after_stop(executor: ExecutorAfterClose) -> NoReturn:
@@ -380,27 +460,22 @@ def serve(
     the state of that loop. The stop frame closes it, bounded by
     ``LOOP_CLOSE_TIMEOUT_S``, and ``exit_after_stop`` ends the process.
 
-    Failure exits: a loop that cannot be created ends the boot through
-    ``open_task_loop_at_boot``, before the ready frame. A run frame after a
-    report that this child must be retired is a parent defect and ends the
-    process with ``BAD_PARENT_FRAME_EXIT_CODE``. An exception from ``boot``
-    propagates, so the child exits non-zero before it reports ready. A parent
-    that is gone or that sends a bad frame ends the process through
-    ``os._exit``, and so does an exception from ``run_task``: the parent sees
-    the exit and recovers the row by its status. Does not write to the
-    database itself.
+    Failure exits: a control thread that the OS refuses, an ``Err`` from
+    ``boot``, and a loop that cannot be created each end the boot through
+    ``fail_boot``, before the ready frame, with a ``BootFailedFrame`` that
+    names the cause. An exception that escapes ``boot`` is a defect: it
+    propagates, so the child exits non-zero with no frame. A run frame after
+    a report that this child must be retired is a parent defect and ends the
+    process with ``BAD_PARENT_FRAME_EXIT_CODE``. A parent that is gone or
+    that sends a bad frame ends the process through ``os._exit``, and so does
+    an exception from ``run_task``: the parent sees the exit and recovers the
+    row by its status. Does not write to the database itself.
     """
     ignore_stop_signals()
     bind_to_parent(parent_pid)
     init = read_init_frame(sock)
     work: queue.SimpleQueue[RunFrame | StopFrame] = queue.SimpleQueue()
-    threading.Thread(
-        target=_read_parent_frames,
-        args=(sock, work),
-        name='horsies-child-control',
-        daemon=True,
-    ).start()
-    task_loop = open_task_loop_at_boot(sock, boot(init))
+    task_loop = _boot_or_exit(sock, init, boot, work)
     gc.collect()
     _send_child_frame(sock, ReadyFrame(pid=os.getpid(), rss=_read_rss()))
     while True:
@@ -435,31 +510,48 @@ def restore_parent_state(init: InitFrame) -> None:
     multiprocessing.current_process().name = init.process_name
 
 
-def boot_app(init: InitFrame) -> AsyncTaskPresence:
-    """Restore the parent's import state, then run the child initializer.
+def boot_app(init: InitFrame) -> Result[AsyncTaskPresence, BootFailedFrame]:
+    """Restore the parent's import state, import the app, then run the
+    per-child start steps.
 
-    Returns whether the booted app has an ``async def`` task, which decides
+    ``Ok``: whether the booted app has an ``async def`` task, which decides
     whether the child creates its task loop.
+
+    ``Err``: the cause comes from ``boot_failure_from_exception``. An
+    exception from locating or importing the app or a task module is
+    ``AppLoadFailed``. An exception from the per-child start steps, after the
+    start hooks, is ``ChildPoolSetupFailed``. A start hook that fails does
+    not return here: it ends the process with
+    ``CHILD_HOOK_FAILURE_EXIT_CODE``.
     """
     from horsies.core.worker.child_runner import (
-        _child_initializer,
         async_task_presence,
+        finish_child_start,
+        import_app_for_child,
     )
-    from horsies.core.worker.current import get_current_app
 
     restore_parent_state(init)
-    _child_initializer(
-        init.app_locator,
-        list(init.imports),
-        list(init.sys_path_roots),
-        init.loglevel,
-        init.database_url,
-        dict(init.connect_kwargs),
-        init.child_pool_min_size,
-        init.child_pool_max_size,
-        init.child_pool_check,
-    )
-    return async_task_presence(get_current_app())
+    try:
+        app = import_app_for_child(
+            init.app_locator,
+            list(init.imports),
+            list(init.sys_path_roots),
+            init.loglevel,
+        )
+    except Exception as exc:
+        return Err(boot_failure_from_exception(exc, AppLoadFailed()))
+    try:
+        finish_child_start(
+            app,
+            init.database_url,
+            dict(init.connect_kwargs),
+            init.child_pool_min_size,
+            init.child_pool_max_size,
+            init.child_pool_check,
+        )
+    except Exception as exc:
+        return Err(boot_failure_from_exception(exc, ChildPoolSetupFailed()))
+    return Ok(async_task_presence(app))
 
 
 def run_child_task(frame: RunFrame, init: InitFrame, task_loop: TaskLoop) -> WireResult:

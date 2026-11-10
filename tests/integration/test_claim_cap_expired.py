@@ -329,6 +329,8 @@ class TestReclaimUnderCap:
             listener=MagicMock(),
             cfg=cfg,
         )
+        # No slot pool: every configured slot counts.
+        worker._claim_slot_count = lambda: cfg.processes  # type: ignore[method-assign]
 
         dispatched_ids: list[str] = []
 

@@ -28,10 +28,24 @@ import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Final, TypeAlias, assert_never, cast
 
 from horsies.core.logging import get_logger
+from horsies.core.models.boot_failure import (
+    MAX_BOOT_FAILURE_DETAIL_CHARS,
+    AppLoadFailed,
+    ChildPoolSetupFailed,
+    ClearableBootCause,
+    ResourceShortage,
+    SpawnFailed,
+    TaskLoopCreateFailed,
+    ThreadStartRefused,
+    cut_text,
+    describe_boot_cause,
+)
+from horsies.core.models.health import DownSlot
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
 from horsies.core.worker.config import ChildPreload
@@ -40,6 +54,7 @@ from horsies.core.worker.live_dispatches import (
     LiveDispatches,
     RegistryClosed,
 )
+from horsies.core.worker.preload_main import REPARENT_FAILED_EXIT_CODE
 from horsies.core.worker.preload import (
     ChildProcess,
     PreloadNotLinux,
@@ -52,10 +67,10 @@ from horsies.core.worker.preload import (
 )
 from horsies.core.worker.child_protocol import (
     FRAME_HEADER,
+    BootFailedFrame,
     ChildFrame,
     FrameOverBound,
     InitFrame,
-    LoopCreateFailedFrame,
     LoopHoldsNoTask,
     LoopHoldsTasks,
     MalformedFrame,
@@ -84,6 +99,14 @@ SOCKET_BUFFER_BYTES: Final = 4 << 20
 CHILD_BOOT_ATTEMPTS: Final = 3
 CHILD_BOOT_RETRY_DELAY_S: Final = 0.5
 CHILD_BOOT_KILL_DELAY_MAX_S: Final = 5.0
+# A slot that is down boots again after a wait. The wait starts at
+# SLOT_DOWN_FIRST_DELAY_S, doubles with each failed boot, and stays at
+# SLOT_DOWN_MAX_DELAY_S. So the log line of each failed boot comes at most once
+# in that wait, per slot. SLOT_DOWN_DELAY_DOUBLINGS bounds the exponent:
+# 1 s * 2**6 = 64 s is past the cap.
+SLOT_DOWN_FIRST_DELAY_S: Final = 1.0
+SLOT_DOWN_MAX_DELAY_S: Final = 60.0
+SLOT_DOWN_DELAY_DOUBLINGS: Final = 6
 CHILD_READY_TIMEOUT_S: Final = 120.0
 CHILD_STOP_TIMEOUT_S: Final = 10.0
 CHILD_KILL_WAIT_S: Final = 30.0
@@ -229,14 +252,90 @@ class Retiring:
     """The child is being replaced or stopped. It takes no more tasks."""
 
 
-SlotState: TypeAlias = Starting | Idle | Busy | Retiring
+@dataclass(frozen=True, slots=True)
+class Down:
+    """The last boot of this slot failed for a cause that can clear.
+
+    The slot takes no task, and the claim budget leaves it out. It boots
+    again after ``slot_down_delay_s(failed_boots)``, and keeps this state
+    while that boot runs. A boot that succeeds returns it to service.
+    ``failed_boots`` counts the failed boots since the slot went down, at
+    least 1. ``detail`` has at most ``MAX_BOOT_FAILURE_DETAIL_CHARS``
+    characters.
+    """
+
+    cause: ClearableBootCause
+    detail: str
+    down_since: datetime
+    failed_boots: int
+
+
+SlotState: TypeAlias = Starting | Idle | Busy | Retiring | Down
 
 
 @dataclass(frozen=True, slots=True)
-class SpawnFailed:
-    """The OS refused to start a child. Retrying cannot be expected to help."""
+class LostBeforeReady:
+    """The child ended, or was ended, before its ready frame, and sent no
+    boot failure frame.
 
+    The worker cannot tell what failed: a crash in native code, an exit from
+    app code, or a defect. So this cause counts as one that repeats.
+    """
+
+    loss: LossCause
+    child_exit: ChildExit
+
+
+@dataclass(frozen=True, slots=True)
+class NotReadyInTime:
+    """The child sent no frame within ``CHILD_READY_TIMEOUT_S``. This cause repeats."""
+
+
+RepeatingBootCause: TypeAlias = (
+    AppLoadFailed | ChildPoolSetupFailed | LostBeforeReady | NotReadyInTime
+)
+BootFailureCause: TypeAlias = RepeatingBootCause | ClearableBootCause
+
+
+def describe_failure_cause(cause: BootFailureCause) -> str:
+    """Return the cause as short text for logs and error messages."""
+    match cause:
+        case LostBeforeReady():
+            return 'the child ended before it was ready'
+        case NotReadyInTime():
+            return 'the child was not ready in time'
+        case (
+            AppLoadFailed()
+            | ChildPoolSetupFailed()
+            | ResourceShortage()
+            | TaskLoopCreateFailed()
+            | ThreadStartRefused()
+            | SpawnFailed()
+        ):
+            return describe_boot_cause(cause)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+@dataclass(frozen=True, slots=True)
+class BootFailure:
+    """One boot that ended before the child was ready.
+
+    ``detail`` is the error text, at most ``MAX_BOOT_FAILURE_DETAIL_CHARS``
+    characters. Build it with ``boot_failure``.
+    """
+
+    cause: BootFailureCause
     detail: str
+
+    def describe(self) -> str:
+        """Subject and cause, for a log line."""
+        return f'{describe_failure_cause(self.cause)}: {self.detail}'
+
+
+def boot_failure(cause: BootFailureCause, detail: str) -> BootFailure:
+    """Build a ``BootFailure`` with its detail cut to the bound."""
+    return BootFailure(cause, cut_text(detail, MAX_BOOT_FAILURE_DETAIL_CHARS))
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,15 +345,54 @@ class ChildHookFailed:
 
 @dataclass(frozen=True, slots=True)
 class BootAttemptsExhausted:
-    """Every boot attempt ended before the child was ready."""
+    """``attempts`` counted boot attempts ended before the child was ready.
+
+    ``cause`` and ``detail`` are those of the last attempt. An attempt
+    counts when its cause repeats, or when every other slot is down.
+    """
 
     attempts: int
-    last_detail: str
+    cause: BootFailureCause
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class SlotDefectsRepeated:
+    """Slot ``slot`` hit ``SLOT_DEFECT_LIMIT`` defects with no finished task
+    between them. ``detail`` names the last one."""
+
+    slot: int
+    detail: str
 
 
 PoolFailure: TypeAlias = (
-    SpawnFailed | ChildHookFailed | BootAttemptsExhausted | PreloadRefused
+    ChildHookFailed | BootAttemptsExhausted | PreloadRefused | SlotDefectsRepeated
 )
+
+
+def describe_pool_failure(failure: PoolFailure) -> str:
+    """Return a pool failure as text, for logs and the worker's error."""
+    match failure:
+        case ChildHookFailed():
+            return 'an on_child_process_start hook failed'
+        case BootAttemptsExhausted(attempts=attempts, cause=cause, detail=detail):
+            return (
+                f'{attempts} child boot attempts failed; the last one: '
+                f'{BootFailure(cause, detail).describe()}'
+            )
+        case PreloadRefused(reason=reason):
+            return f'the preload parent refused: {reason}'
+        case SlotDefectsRepeated(slot=slot, detail=detail):
+            return f'slot {slot} hit {SLOT_DEFECT_LIMIT} defects in a row: {detail}'
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+class _AttemptCount(Enum):
+    """Whether a failed boot uses one of ``CHILD_BOOT_ATTEMPTS``."""
+
+    COUNTS = 'counts'
+    SPARED = 'spared'
 
 
 class _ChildAfterTask(Enum):
@@ -490,7 +628,7 @@ class Child:
         init: InitFrame,
         preload: PreloadParent | None = None,
         live_pids: set[int] | None = None,
-    ) -> Result['Child', SpawnFailed]:
+    ) -> Result['Child', BootFailure]:
         """Start a process and send its init frame.
 
         A child comes from ``preload`` when one is given and it can serve the
@@ -498,6 +636,9 @@ class Child:
         exits. Must run on a long-lived thread: on Linux the child's
         parent-death signal fires when the spawning thread ends. Does not wait
         for the child to be ready.
+
+        ``Err``: the OS refused the ``exec`` spawn. The cause is always
+        ``SpawnFailed``, and no process or socket is left.
         """
         registry = set[int]() if live_pids is None else live_pids
         if preload is not None:
@@ -537,7 +678,7 @@ class Child:
         config: SlotPoolConfig,
         init: InitFrame,
         registry: set[int],
-    ) -> Result['Child', SpawnFailed]:
+    ) -> Result['Child', BootFailure]:
         parent_sock, child_sock = _socket_pair()
         try:
             process = await asyncio.create_subprocess_exec(
@@ -552,7 +693,7 @@ class Child:
             )
         except OSError as exc:
             parent_sock.close()
-            return Err(SpawnFailed(f'{type(exc).__name__}: {exc}'))
+            return Err(boot_failure(SpawnFailed(), f'{type(exc).__name__}: {exc}'))
         finally:
             child_sock.close()
         return Ok(await cls._attach_registered(process, parent_sock, init, registry))
@@ -879,6 +1020,64 @@ def outside_kill_delay_s(kills_in_a_row: int) -> float:
     return min(CHILD_BOOT_RETRY_DELAY_S * kills_in_a_row, CHILD_BOOT_KILL_DELAY_MAX_S)
 
 
+def slot_down_delay_s(failed_boots: int) -> float:
+    """Return the wait before the next boot of a slot that is down.
+
+    ``failed_boots`` is at least 1. The wait is ``SLOT_DOWN_FIRST_DELAY_S``
+    after the first failed boot, doubles after each next one, and stays at
+    ``SLOT_DOWN_MAX_DELAY_S``.
+    """
+    doublings = min(failed_boots - 1, SLOT_DOWN_DELAY_DOUBLINGS)
+    return min(SLOT_DOWN_FIRST_DELAY_S * 2**doublings, SLOT_DOWN_MAX_DELAY_S)
+
+
+def boot_failure_of(
+    reply: BootFailedFrame | ChildLost | WaitExpired,
+) -> BootFailure | ChildHookFailed:
+    """Name the cause of a boot that ended with ``reply`` in place of a ready frame.
+
+    A boot failure frame carries its cause. A child with no frame is read by
+    its exit: ``CHILD_HOOK_FAILURE_EXIT_CODE`` is a failed start hook, and
+    ``REPARENT_FAILED_EXIT_CODE`` is a forked child that did not reach the
+    worker, so a spawn failure. Any other end is ``LostBeforeReady``, which
+    repeats. No reply in time is ``NotReadyInTime``. Pure.
+    """
+    match reply:
+        case BootFailedFrame(cause=cause, error_name=error_name, detail=detail):
+            return boot_failure(cause, f'{error_name}: {detail}')
+        case ChildLost(child_exit=ExitedWith(code=code)) if (
+            code == CHILD_HOOK_FAILURE_EXIT_CODE
+        ):
+            return ChildHookFailed()
+        case ChildLost(child_exit=ExitedWith(code=code)) if (
+            code == REPARENT_FAILED_EXIT_CODE
+        ):
+            return boot_failure(
+                SpawnFailed(),
+                f'the forked child did not reach the worker: {reply.describe()}',
+            )
+        case ChildLost(cause=loss, child_exit=child_exit):
+            return boot_failure(LostBeforeReady(loss, child_exit), reply.describe())
+        case WaitExpired():
+            return boot_failure(
+                NotReadyInTime(),
+                f'no ready frame after {CHILD_READY_TIMEOUT_S}s',
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _in_service(state: SlotState) -> bool:
+    """Whether a slot in this state counts in the claim budget."""
+    match state:
+        case Starting() | Idle() | Busy() | Retiring():
+            return True
+        case Down():
+            return False
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 class SlotPool:
     """A FIFO in the parent and one coroutine per slot.
 
@@ -906,8 +1105,17 @@ class SlotPool:
         self._live_pids: set[int] = set()
         self._live_dispatches = LiveDispatches(config.slots)
 
-    async def start(self) -> Result[tuple[ChildBaseline, ...], PoolFailure | PoolStopped]:
-        """Boot every slot. Returns when all are ready, on the first failure, or at a stop.
+    async def start(
+        self,
+    ) -> Result[tuple[ChildBaseline, ...], PoolFailure | PoolStopped]:
+        """Boot every slot. Returns when the first generation is in, on the
+        first failure, or at a stop.
+
+        The first generation is in when every slot booted once or is
+        ``Down``, and at least one slot booted. The pool then starts
+        degraded: ``Ok`` holds one baseline per booted slot, and each slot
+        that is down keeps booting. When every slot is down, failed boots
+        count, so the pool fails after ``CHILD_BOOT_ATTEMPTS`` of them.
 
         After a failure, ``stop`` is still required.
         """
@@ -926,12 +1134,26 @@ class SlotPool:
             return Err(self._failure)
         if self._stopping:
             return Err(PoolStopped())
+        self._log_degraded_start()
         return Ok(tuple(self._baselines.values()))
 
     @property
     def live_dispatches(self) -> LiveDispatches:
         """The tasks that this pool's children hold, for the runner heartbeat."""
         return self._live_dispatches
+
+    def _log_degraded_start(self) -> None:
+        down = self.down_slots()
+        if not down:
+            return
+        logger.warning(
+            'Worker starts degraded: %s of %s slots serve; down: %s',
+            len(self._slots) - len(down),
+            len(self._slots),
+            '; '.join(
+                f'slot {item.slot}: {describe_boot_cause(item.cause)}' for item in down
+            ),
+        )
 
     def submit(self, frame: RunFrame) -> SlotHandle:
         """Queue a task. A pool that cannot take it answers ``NotDispatched`` at once."""
@@ -1060,6 +1282,28 @@ class SlotPool:
         """Return each slot's state, for health reports and tests."""
         return tuple(slot.state for slot in self._slots)
 
+    def slots_in_service(self) -> int:
+        """Count the slots that the claim budget counts: every slot not ``Down``.
+
+        A slot that boots, serves, or retires counts, because it takes a task
+        once its child is ready. Reads only.
+        """
+        return sum(1 for slot in self._slots if _in_service(slot.state))
+
+    def down_slots(self) -> tuple[DownSlot, ...]:
+        """Each slot in ``Down``, in slot order, for the health report. Reads only."""
+        return tuple(
+            DownSlot(
+                slot=slot.index,
+                cause=state.cause,
+                detail=state.detail,
+                down_since=state.down_since,
+                failed_boots=state.failed_boots,
+            )
+            for slot in self._slots
+            if isinstance(state := slot.state, Down)
+        )
+
     def _not_run_cause(self) -> NotRunCause:
         return (
             NotRunCause.POOL_FAILED
@@ -1078,7 +1322,10 @@ class SlotPool:
     def _record_failure(self, failure: PoolFailure) -> None:
         if self._failure is not None:
             return
-        logger.critical('Worker cannot start a child: %s', failure)
+        logger.critical(
+            'Worker cannot start a child: %s',
+            describe_pool_failure(failure),
+        )
         self._failure = failure
         self._failed.set_result(failure)
         self._release_pending()
@@ -1107,9 +1354,11 @@ class SlotPool:
                 await self._clear_slot(slot)
                 slot.defects += 1
                 if slot.defects >= SLOT_DEFECT_LIMIT:
-                    self._record_failure(
-                        BootAttemptsExhausted(0, f'{type(exc).__name__}: {exc}'),
+                    detail = cut_text(
+                        f'{type(exc).__name__}: {exc}',
+                        MAX_BOOT_FAILURE_DETAIL_CHARS,
                     )
+                    self._record_failure(SlotDefectsRepeated(slot.index, detail))
                     return
 
     def _end_after_boot_error(self, error: PoolFailure | PoolStopped) -> None:
@@ -1117,7 +1366,10 @@ class SlotPool:
             case PoolStopped():
                 return
             case (
-                SpawnFailed() | ChildHookFailed() | BootAttemptsExhausted() | PreloadRefused()
+                ChildHookFailed()
+                | BootAttemptsExhausted()
+                | PreloadRefused()
+                | SlotDefectsRepeated()
             ):
                 self._record_failure(error)
             case _ as unreachable:
@@ -1137,79 +1389,69 @@ class SlotPool:
         self,
         slot: _Slot,
     ) -> Result[Child, PoolFailure | PoolStopped]:
-        """Start one ready child, with the failure classification in the type."""
+        """Start one ready child. The cause of each failed boot decides what follows.
+
+        - A cause that repeats counts one of ``CHILD_BOOT_ATTEMPTS``.
+        - A cause that can clear puts the slot in ``Down``, and the slot boots
+          again after ``slot_down_delay_s``. It counts only while every other
+          slot is ``Down`` too: a worker where no slot can serve must fail
+          where its supervisor sees it.
+        - A SIGKILL from outside does not count while another child serves
+          (``_kill_spares_the_attempt``).
+        - A failed start hook fails the pool at once.
+
+        The last counted attempt gives ``BootAttemptsExhausted``. Returns
+        ``Err(PoolStopped)`` once ``stop`` runs, and the pool's failure once
+        another slot failed it. After any ``Err`` the slot holds no child.
+
+        The loop ends at a ready child, at the counted bound, at a stop, or at
+        a pool failure. Attempts that do not count have no count bound, as a
+        slot that is down keeps booting while another slot serves; the waits
+        of ``slot_down_delay_s`` and ``outside_kill_delay_s`` pace them.
+        """
         slot.state = Starting()
-        last_detail = 'no attempt ran'
         init = replace(
             self._config.init,
             process_name=f'{self._config.init.process_name}-{slot.index}',
         )
-        attempt = 0
+        counted = 0
         outside_kills = 0
-        while attempt < CHILD_BOOT_ATTEMPTS:
+        while True:
             if self._stopping:
                 return Err(PoolStopped())
-            match await Child.start(
-                self._config,
-                init,
-                self._preload,
-                self._live_pids,
-            ):
-                case Err(spawn_failed):
-                    return Err(spawn_failed)
+            if self._failure is not None:
+                return Err(self._failure)
+            match await self._boot_attempt(slot, init):
                 case Ok(child):
-                    slot.child = child
-                    child.notify_on_exit(slot.wake.set)
-                    child.on_channel_closed = slot.wake.set
-                    self._release_on_kill_or_exit(child)
-            if self._stopping:
-                # ``stop`` ran during that await, so it did not see this child.
-                await child.dispose_lost()
-                slot.child = None
-                return Err(PoolStopped())
-            ready = await child.await_frame(CHILD_READY_TIMEOUT_S)
-            match ready:
-                case ReadyFrame():
-                    self._note_ready(slot, ChildBaseline(pid=ready.pid, rss=ready.rss))
+                    self._log_back_in_service(slot)
                     return Ok(child)
-                case ChildLost(child_exit=ExitedWith(code=code)) if (
-                    code == CHILD_HOOK_FAILURE_EXIT_CODE
-                ):
-                    await child.dispose_lost()
-                    slot.child = None
-                    return Err(ChildHookFailed())
-                case ChildLost() | LoopCreateFailedFrame():
-                    last_detail = ready.describe()
-                case WaitExpired():
-                    last_detail = f'not ready after {CHILD_READY_TIMEOUT_S}s'
-                case ResultFrame():
-                    last_detail = 'result frame before the ready frame'
+                case Err(ended):
+                    pass
+            match ended:
+                case ChildHookFailed() | PoolStopped():
+                    return Err(ended)
+                case BootFailure():
+                    failed = ended
                 case _ as unreachable:
                     assert_never(unreachable)
-            await child.dispose_lost()
-            slot.child = None
-            if self._stopping:
-                return Err(PoolStopped())
-            if self._kill_spares_the_attempt(slot, ready):
+            if self._kill_spares_the_attempt(slot, failed.cause):
                 outside_kills += 1
                 logger.warning(
                     'Replacement child on slot %s was killed during boot, %s in a row',
                     slot.index,
                     outside_kills,
                 )
-                await asyncio.sleep(outside_kill_delay_s(outside_kills))
+                await self._pause(outside_kill_delay_s(outside_kills))
                 continue
-            attempt += 1
-            logger.warning(
-                'Child boot attempt %s/%s failed on slot %s: %s',
-                attempt,
-                CHILD_BOOT_ATTEMPTS,
-                slot.index,
-                last_detail,
-            )
-            if attempt < CHILD_BOOT_ATTEMPTS:
-                await asyncio.sleep(CHILD_BOOT_RETRY_DELAY_S * attempt)
-        return Err(BootAttemptsExhausted(CHILD_BOOT_ATTEMPTS, last_detail))
+            match self._attempt_count(slot, failed.cause):
+                case _AttemptCount.COUNTS:
+                    counted += 1
+                case _AttemptCount.SPARED:
+                    pass
+            delay_s = self._record_failed_boot(slot, failed, counted)
+            if counted >= CHILD_BOOT_ATTEMPTS:
+                return Err(BootAttemptsExhausted(counted, failed.cause, failed.detail))
+            await self._pause(delay_s)
 
     def _release_on_kill_or_exit(self, child: Child) -> None:
         """Stop the runner heartbeat of this child's task at a kill or an exit."""
@@ -1220,11 +1462,168 @@ class SlotPool:
         child.on_kill_sent = release
         child.notify_on_exit(release)
 
-    def _kill_spares_the_attempt(
+    async def _boot_attempt(
         self,
         slot: _Slot,
-        ready: ChildFrame | ChildLost | WaitExpired,
-    ) -> bool:
+        init: InitFrame,
+    ) -> Result[Child, BootFailure | ChildHookFailed | PoolStopped]:
+        """Start one child and wait for its ready frame, bounded.
+
+        ``Ok``: the child is ready, it is ``slot.child``, and its baseline is
+        noted. ``Err``: the slot holds no child, and every process of this
+        attempt is ended. Does not change ``slot.state``.
+        """
+        match await Child.start(self._config, init, self._preload, self._live_pids):
+            case Err(spawn_failed):
+                return Err(spawn_failed)
+            case Ok(child):
+                pass
+        slot.child = child
+        child.notify_on_exit(slot.wake.set)
+        child.on_channel_closed = slot.wake.set
+        self._release_on_kill_or_exit(child)
+        if self._stopping:
+            # ``stop`` ran during that await, so it did not see this child.
+            await child.dispose_lost()
+            slot.child = None
+            return Err(PoolStopped())
+        reply = await child.await_frame(CHILD_READY_TIMEOUT_S)
+        match reply:
+            case ReadyFrame(pid=pid, rss=rss):
+                self._note_ready(slot, ChildBaseline(pid=pid, rss=rss))
+                return Ok(child)
+            case ResultFrame():
+                failed = boot_failure_of(await child.discard_violating_child())
+            case BootFailedFrame() | ChildLost() | WaitExpired():
+                failed = boot_failure_of(reply)
+            case _ as unreachable:
+                assert_never(unreachable)
+        await child.dispose_lost()
+        slot.child = None
+        if self._stopping:
+            return Err(PoolStopped())
+        return Err(failed)
+
+    def _attempt_count(self, slot: _Slot, cause: BootFailureCause) -> _AttemptCount:
+        """A cause that repeats counts. A cause that can clear counts only
+        while every other slot is ``Down``."""
+        match cause:
+            case (
+                AppLoadFailed()
+                | ChildPoolSetupFailed()
+                | LostBeforeReady()
+                | NotReadyInTime()
+            ):
+                return _AttemptCount.COUNTS
+            case (
+                ResourceShortage()
+                | TaskLoopCreateFailed()
+                | ThreadStartRefused()
+                | SpawnFailed()
+            ):
+                every_other_down = all(
+                    isinstance(other.state, Down)
+                    for other in self._slots
+                    if other is not slot
+                )
+                return (
+                    _AttemptCount.COUNTS if every_other_down else _AttemptCount.SPARED
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def _record_failed_boot(
+        self, slot: _Slot, failed: BootFailure, counted: int
+    ) -> float:
+        """Set the slot state after a failed boot, log it, and return the wait
+        before the next boot."""
+        match failed.cause:
+            case (
+                ResourceShortage()
+                | TaskLoopCreateFailed()
+                | ThreadStartRefused()
+                | SpawnFailed()
+            ):
+                return self._mark_down(slot, failed.cause, failed.detail, counted)
+            case (
+                AppLoadFailed()
+                | ChildPoolSetupFailed()
+                | LostBeforeReady()
+                | NotReadyInTime()
+            ):
+                slot.state = Starting()
+                logger.warning(
+                    'Child boot attempt %s/%s failed on slot %s: %s',
+                    counted,
+                    CHILD_BOOT_ATTEMPTS,
+                    slot.index,
+                    failed.describe(),
+                )
+                return CHILD_BOOT_RETRY_DELAY_S * counted
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def _mark_down(
+        self,
+        slot: _Slot,
+        cause: ClearableBootCause,
+        detail: str,
+        counted: int,
+    ) -> float:
+        """Put the slot in ``Down``, log the failed boot, and return the wait
+        before the next boot.
+
+        A slot that is already down keeps its ``down_since`` and counts one
+        more failed boot. One log line per failed boot: the wait between
+        boots bounds the rate. The line names the counted boot attempts of
+        this slot, which grow only while every other slot is down.
+        """
+        match slot.state:
+            case Down(down_since=since, failed_boots=failed_boots):
+                down = Down(cause, detail, since, failed_boots + 1)
+            case Starting() | Idle() | Busy() | Retiring():
+                down = Down(cause, detail, datetime.now(timezone.utc), 1)
+            case _ as unreachable:
+                assert_never(unreachable)
+        slot.state = down
+        delay_s = slot_down_delay_s(down.failed_boots)
+        logger.warning(
+            'Slot %s is down: %s: %s. Failed boots: %s, counted attempts: %s/%s. '
+            'Next boot in %.1fs',
+            slot.index,
+            describe_boot_cause(cause),
+            detail,
+            down.failed_boots,
+            counted,
+            CHILD_BOOT_ATTEMPTS,
+            delay_s,
+        )
+        self._check_first_generation()
+        return delay_s
+
+    def _log_back_in_service(self, slot: _Slot) -> None:
+        match slot.state:
+            case Down(cause=cause, failed_boots=failed_boots):
+                logger.warning(
+                    'Slot %s is back in service after %s failed boots (%s)',
+                    slot.index,
+                    failed_boots,
+                    describe_boot_cause(cause),
+                )
+            case Starting() | Idle() | Busy() | Retiring():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    async def _pause(self, delay_s: float) -> None:
+        """Wait ``delay_s``, or less when the pool stops or fails."""
+        await asyncio.wait(
+            {self._stop_requested, self._failed},
+            timeout=delay_s,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+    def _kill_spares_the_attempt(self, slot: _Slot, cause: BootFailureCause) -> bool:
         """Tell a SIGKILL from outside apart from a child that cannot boot.
 
         Such a kill says nothing about the code, so it must not stop a worker
@@ -1232,9 +1631,12 @@ class SlotPool:
         and when no other child is serving. Then no healthy task is at risk,
         and a worker that does no work must fail where a supervisor can see it.
         """
-        match ready:
-            case ChildLost(child_exit=KilledBySignal(signal_number=signal.SIGKILL)):
-                return self._first_generation.done() and self._another_child_serves(slot)
+        match cause:
+            case LostBeforeReady(
+                child_exit=KilledBySignal(signal_number=signal.SIGKILL)
+            ):
+                first_start_done = self._first_generation.done()
+                return first_start_done and self._another_child_serves(slot)
             case _:
                 return False
 
@@ -1248,7 +1650,20 @@ class SlotPool:
         if self._first_generation.done():
             return
         self._baselines[slot.index] = baseline
-        if len(self._baselines) == self._config.slots:
+        self._check_first_generation()
+
+    def _check_first_generation(self) -> None:
+        """The first generation is in once every slot booted once or is
+        ``Down``, and at least one slot booted."""
+        if self._first_generation.done():
+            return
+        booted = len(self._baselines)
+        down = sum(
+            1
+            for slot in self._slots
+            if slot.index not in self._baselines and isinstance(slot.state, Down)
+        )
+        if booted > 0 and booted + down == self._config.slots:
             self._first_generation.set_result(None)
 
     async def _run_generation(self, slot: _Slot, child: Child) -> None:
@@ -1352,7 +1767,7 @@ class SlotPool:
                     answer.rss,
                     answer.task_loop,
                 )
-            case ResultFrame() | ReadyFrame() | LoopCreateFailedFrame():
+            case ResultFrame() | ReadyFrame() | BootFailedFrame():
                 outcome = await child.discard_violating_child()
             case ChildLost():
                 outcome = answer
@@ -1422,7 +1837,7 @@ class SlotPool:
                     return ()
                 case _ as unreachable:
                     assert_never(unreachable)
-        if slot.child is not None and isinstance(slot.state, Starting):
+        if slot.child is not None and isinstance(slot.state, Starting | Down):
             slot.child.kill_group()
         return ()
 
@@ -1454,7 +1869,8 @@ class SlotPool:
         self._release_pending()
         for slot in self._slots:
             # A booting child holds no task, so it does not wait for the drain.
-            if slot.child is not None and isinstance(slot.state, Starting):
+            # A slot that is down keeps that state while its next child boots.
+            if slot.child is not None and isinstance(slot.state, Starting | Down):
                 slot.child.kill_group()
         self._wake_slots()
         if not self._tasks:

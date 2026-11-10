@@ -124,6 +124,13 @@ list_schedules(broker)
   DOMAIN is the complement of every built-in code.
 - Worker/health surfaces reuse the app APIs: `list_worker_states_async`,
   `ping_workers_async`, `ping_database_async`, `get_worker_state_history_async`.
+- A snapshot's `slot_health` is `AllSlotsServing()`, `SlotsDown(slots)` (the
+  worker is degraded) or `SlotHealthNotRecorded()` (a worker version without
+  the field). Each `DownSlot` has `slot`, `cause` (`ResourceShortage(errno_name)`,
+  `TaskLoopCreateFailed()`, `ThreadStartRefused()`, `SpawnFailed()`), `detail`
+  (at most 2400 characters), `down_since` and `failed_boots`. A slot is down
+  when its child start failed for a cause that can clear; it takes no task and
+  boots again after a growing wait. Match all three variants.
 - A snapshot's `recovery_config` embeds three health payloads:
   `partition_coverage` (coverage-ensure outcome; fails before fewer than two
   future partitions remain), `partition_pruning`

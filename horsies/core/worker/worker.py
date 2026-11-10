@@ -12,7 +12,7 @@ import sys
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from horsies.core.app import Horsies
 from horsies.core.brokers.listener import PostgresListener
-from horsies.core.models.health import WORKER_PING_CHANNEL
+from horsies.core.models.health import WORKER_PING_CHANNEL, DownSlot
 from horsies.core.logging import get_logger
 from horsies.core.worker.current import set_current_app
 from horsies.core.models.resilience import WorkerResilienceConfig
@@ -43,10 +43,11 @@ from horsies.core.worker.slots import (
     ChildBaseline,
     ChildHookFailed,
     PoolStopped,
+    SlotDefectsRepeated,
     SlotPool,
     SlotPoolConfig,
     PreloadRefused,
-    SpawnFailed,
+    describe_pool_failure,
 )
 from horsies.core.worker.child_runner import (  # noqa: F401
     CHILD_HOOK_FAILURE_EXIT_CODE as CHILD_HOOK_FAILURE_EXIT_CODE,
@@ -340,13 +341,44 @@ class Worker(
         )
         return 2 * budget
 
+    def _claim_slot_count(self) -> int:
+        """The slots that the claim budget counts: every slot that is not down.
+
+        A slot that is down for a cause that can clear takes no task, so the
+        claim leaves it out. A claim pass before the slot pool exists is a
+        defect: ``AssertionError``.
+        """
+        match self._slots:
+            case SlotPool() as pool:
+                return pool.slots_in_service()
+            case None:
+                raise AssertionError('a claim pass ran before the slot pool exists')
+
+    def _down_slots(self) -> tuple[DownSlot, ...]:
+        """Each slot that is down, for the worker state snapshot.
+
+        A snapshot before the slot pool exists is a defect: ``AssertionError``.
+        """
+        match self._slots:
+            case SlotPool() as pool:
+                return pool.down_slots()
+            case None:
+                raise AssertionError(
+                    'a worker state snapshot ran before the slot pool exists',
+                )
+
     async def _start_slots(self) -> None:
         """Start every child and publish the pool. A stop during this returns.
+
+        A slot that is down for a cause that can clear does not stop the
+        start: the worker starts degraded when at least one child is ready.
 
         Raises:
             ChildHookFailedError: an ``on_child_process_start`` hook failed.
                 Never retried.
-            ChildStartFailedError: a child could not start.
+            ChildStartFailedError: a child could not start: a cause that
+                repeats used every attempt, or every slot is down and used
+                every attempt.
             MemoryBaselineExceedsThresholdError: the booted child baseline is
                 at or above ``max_memory_per_child_mb``.
         """
@@ -367,12 +399,20 @@ class Worker(
                 )
                 self._check_memory_baseline(baselines)
                 self._runner_heartbeat = self._launch_runner_heartbeat(pool)
-            case Err(PoolStopped()):
                 return
-            case Err(ChildHookFailed()):
-                raise ChildHookFailedError(_HOOK_FAILURE_MESSAGE)
             case Err(failure):
-                raise ChildStartFailedError(f'worker child start failed: {failure}')
+                pass
+        match failure:
+            case PoolStopped():
+                return
+            case ChildHookFailed():
+                raise ChildHookFailedError(_HOOK_FAILURE_MESSAGE)
+            case BootAttemptsExhausted() | PreloadRefused() | SlotDefectsRepeated():
+                raise ChildStartFailedError(
+                    f'worker child start failed: {describe_pool_failure(failure)}',
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
 
     def _launch_runner_heartbeat(self, pool: SlotPool) -> RunnerHeartbeat:
         """Start the threads that write the runner heartbeats of ``pool``'s tasks.
@@ -425,8 +465,10 @@ class Worker(
                 self._stop_for_child_hook_failure(
                     ChildHookFailedError(_HOOK_FAILURE_MESSAGE),
                 )
-            case SpawnFailed() | BootAttemptsExhausted() | PreloadRefused():
-                raise ChildStartFailedError(f'worker child start failed: {failure}')
+            case BootAttemptsExhausted() | PreloadRefused() | SlotDefectsRepeated():
+                raise ChildStartFailedError(
+                    f'worker child start failed: {describe_pool_failure(failure)}',
+                )
             case _ as unreachable:
                 assert_never(unreachable)
 

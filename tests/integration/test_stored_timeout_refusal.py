@@ -73,6 +73,8 @@ def _make_worker(broker: PostgresBroker, app: Horsies) -> Worker:
     )
     worker._app = app
     worker.broker = broker
+    # No slot pool: every configured slot counts.
+    worker._claim_slot_count = lambda: cfg.processes  # type: ignore[method-assign]
     return worker
 
 

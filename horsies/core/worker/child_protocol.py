@@ -17,6 +17,19 @@ from datetime import datetime
 from typing import Any, Final, TypeAlias, assert_never, cast
 
 from horsies.core.codec.json_io import dumps_json, loads_json_bytes
+from horsies.core.models.boot_failure import (
+    AppLoadFailed,
+    ChildPoolSetupFailed,
+    ReportedBootCause,
+    ResourceShortage,
+    SpawnFailed,
+    TaskLoopCreateFailed,
+    ThreadStartRefused,
+    boot_cause_json,
+    cut_text,
+    describe_boot_cause,
+    parse_boot_cause,
+)
 from horsies.core.models.tasks import MAX_TASK_TIMEOUT_MS, MIN_TASK_TIMEOUT_MS
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.stored_timeout import (
@@ -39,6 +52,10 @@ MAX_BODY_BYTES: Final = (1 << 30) - 1
 # each name cut to MAX_LEFTOVER_NAME_CHARS, so the report stays small.
 MAX_LEFTOVER_TASK_NAMES: Final = 10
 MAX_LEFTOVER_NAME_CHARS: Final = 200
+# A boot failure frame names the exception type and its text within these
+# bounds. With ': ' between them they fit MAX_BOOT_FAILURE_DETAIL_CHARS.
+MAX_BOOT_ERROR_NAME_CHARS: Final = 200
+MAX_BOOT_DETAIL_CHARS: Final = 2000
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,24 +123,36 @@ class ReadyFrame:
 
 
 @dataclass(frozen=True, slots=True)
-class LoopCreateFailedFrame:
-    """Child to parent, in place of the ready frame: the app has an
-    ``async def`` task, and the child could not create the event loop for it.
+class BootFailedFrame:
+    """Child to parent, in place of the ready frame: the boot failed.
 
-    The child exits after this frame, so the parent counts a failed boot
-    attempt. ``error_name`` and ``detail`` are the type and the text of the
-    exception.
+    The child exits after this frame. ``cause`` decides how the parent
+    retries. ``error_name`` and ``detail`` are the type and the text of the
+    exception, at most ``MAX_BOOT_ERROR_NAME_CHARS`` and
+    ``MAX_BOOT_DETAIL_CHARS`` characters. Build it with ``boot_failed_frame``,
+    which cuts them to those bounds.
     """
 
+    cause: ReportedBootCause
     error_name: str
     detail: str
 
     def describe(self) -> str:
         """Subject and cause, for the boot failure of the parent."""
-        return (
-            'the child could not create the event loop for async tasks: '
-            f'{self.error_name}: {self.detail}'
-        )
+        return f'{describe_boot_cause(self.cause)}: {self.error_name}: {self.detail}'
+
+
+def boot_failed_frame(
+    cause: ReportedBootCause,
+    error_name: str,
+    detail: str,
+) -> BootFailedFrame:
+    """Build a boot failure frame. Each text becomes valid UTF-8, cut to its bound."""
+    return BootFailedFrame(
+        cause=cause,
+        error_name=cut_text(error_name, MAX_BOOT_ERROR_NAME_CHARS),
+        detail=cut_text(detail, MAX_BOOT_DETAIL_CHARS),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,7 +233,7 @@ class PreloadRefusedFrame:
 
 
 ParentFrame: TypeAlias = InitFrame | RunFrame | StopFrame
-ChildFrame: TypeAlias = ReadyFrame | LoopCreateFailedFrame | ResultFrame
+ChildFrame: TypeAlias = ReadyFrame | BootFailedFrame | ResultFrame
 PreloadFrame: TypeAlias = (
     PreloadReadyFrame | ChildForkedFrame | ForkFailedFrame | PreloadRefusedFrame
 )
@@ -342,10 +371,11 @@ def encode_child_frame(frame: ChildFrame) -> EncodedFrame:
                 {'kind': 'ready', 'pid': frame.pid, 'rss_mb': _rss_field(frame.rss)},
                 b'',
             )
-        case LoopCreateFailedFrame():
+        case BootFailedFrame():
             return _pack(
                 {
-                    'kind': 'loop_create_failed',
+                    'kind': 'boot_failed',
+                    'cause': boot_cause_json(frame.cause),
                     'error_name': frame.error_name,
                     'detail': frame.detail,
                 },
@@ -515,6 +545,43 @@ def _task_loop(meta: Mapping[str, Any]) -> TaskLoopReport:
             raise _BadField('task_loop.kind')
 
 
+def _bounded_text(meta: Mapping[str, Any], key: str, limit: int) -> str:
+    value = _text(meta, key)
+    if len(value) > limit:
+        raise _BadField(key)
+    return value
+
+
+def _reported_cause(meta: Mapping[str, Any]) -> ReportedBootCause:
+    """A cause that a child can report. A spawn failure is the parent's to see."""
+    match parse_boot_cause(meta.get('cause')):
+        case Ok(cause):
+            pass
+        case Err(unreadable):
+            raise _BadField(f'cause: {unreadable.reason}')
+    match cause:
+        case SpawnFailed():
+            raise _BadField('cause: a child cannot report a spawn failure')
+        case (
+            AppLoadFailed()
+            | ChildPoolSetupFailed()
+            | ResourceShortage()
+            | TaskLoopCreateFailed()
+            | ThreadStartRefused()
+        ):
+            return cause
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _decode_boot_failed(meta: Mapping[str, Any]) -> BootFailedFrame:
+    return BootFailedFrame(
+        cause=_reported_cause(meta),
+        error_name=_bounded_text(meta, 'error_name', MAX_BOOT_ERROR_NAME_CHARS),
+        detail=_bounded_text(meta, 'detail', MAX_BOOT_DETAIL_CHARS),
+    )
+
+
 def _load_meta(meta_bytes: bytes) -> Mapping[str, Any]:
     match loads_json_bytes(meta_bytes):
         case Ok(value) if isinstance(value, dict):
@@ -596,13 +663,8 @@ def decode_child_frame(
         match kind:
             case 'ready':
                 return Ok(ReadyFrame(pid=_whole(meta, 'pid'), rss=_rss(meta)))
-            case 'loop_create_failed':
-                return Ok(
-                    LoopCreateFailedFrame(
-                        error_name=_text(meta, 'error_name'),
-                        detail=_text(meta, 'detail'),
-                    ),
-                )
+            case 'boot_failed':
+                return Ok(_decode_boot_failed(meta))
             case 'result':
                 return Ok(
                     ResultFrame(

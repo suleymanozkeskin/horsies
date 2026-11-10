@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -69,8 +70,11 @@ from horsies.core.worker.runner_heartbeat import (
     kill_child_session,
     retry_delay_s,
 )
+from horsies.core.worker import slots as slots_module
 from horsies.core.worker.slots import (
+    Busy,
     ChildLost,
+    Down,
     KillSent,
     LossCause,
     SlotHandle,
@@ -438,6 +442,50 @@ async def test_a_task_that_holds_the_gil_keeps_its_beats(
     await asyncio.sleep(5 * INTERVAL_S)
 
     assert writer.count_with(task_id) <= settled + 1
+
+
+@pytest.mark.asyncio
+async def test_a_slot_that_goes_down_holds_no_task(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The child of slot 0 dies in its task, and its replacement cannot boot
+    for a cause that can clear. The slot is Down, and only the task of the
+    serving slot is held."""
+    monkeypatch.setattr(slots_module, 'SLOT_DOWN_FIRST_DELAY_S', 3600.0)
+    init = replace(
+        _init(),
+        app_locator=f'short_after_first:{tmp_path / "marks"}',
+        imports=('1000', '2'),
+    )
+    down_pool = SlotPool(
+        SlotPoolConfig(
+            slots=2,
+            init=init,
+            max_tasks_per_child=0,
+            max_memory_per_child_mb=None,
+            child_entry=(SCRIPTED_CHILD,),
+            child_preload=ChildPreload.NONE,
+        ),
+        pending_limit=10,
+    )
+    assert isinstance(await asyncio.wait_for(down_pool.start(), WAIT_S), Ok)
+    try:
+        lost = down_pool.submit(_frame('kill_self'))
+        assert isinstance(await _outcome(lost), ChildLost)
+        await _until_async(lambda: any(isinstance(s, Down) for s in down_pool.states()))
+        running = down_pool.submit(_frame('hang'))
+        await asyncio.wait_for(running.assigned, WAIT_S)
+
+        [held] = down_pool.live_dispatches.snapshot()
+        serving = [
+            slot.child for slot in down_pool._slots if isinstance(slot.state, Busy)
+        ]
+        assert held.task_id == running.frame.task_id
+        assert [child.pid for child in serving if child is not None] == [held.pid]
+    finally:
+        await down_pool.stop(0)
+    assert down_pool.live_dispatches.snapshot() == ()
 
 
 # ---------------------------------------------------------------------------

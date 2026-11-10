@@ -23,8 +23,10 @@ from horsies.core.codec.json_io import dumps_json, loads_json
 from horsies.core.codec.validation_errors import validation_summary
 from horsies.core.logging import get_logger
 from horsies.core.models.health import (
+    DownSlot,
     WorkerPingRequest,
     WorkerPongPayload,
+    slots_down_json,
 )
 from horsies.core.types.result import is_err
 from horsies.core.worker.runtime import _collect_psutil_metrics
@@ -80,6 +82,7 @@ class HealthMixin:
 
         # Cross-concern methods provided by sibling mixins / Worker.
         def _claim_lease_ms(self) -> int: ...
+        def _down_slots(self) -> tuple[DownSlot, ...]: ...
         async def _count_claimed_for_worker(
             self, session: AsyncSession
         ) -> int: ...
@@ -186,7 +189,11 @@ class HealthMixin:
             await s.commit()
 
     async def _update_worker_state(self) -> None:
-        """Update worker state snapshot in database for monitoring."""
+        """Update worker state snapshot in database for monitoring.
+
+        ``slots_down`` lists each slot that is down, with its cause. An empty
+        list means that every slot serves or boots.
+        """
         try:
             rss_mb, mem_pct, cpu_pct, children_rss_mb = await asyncio.to_thread(
                 _collect_psutil_metrics,
@@ -270,6 +277,7 @@ class HealthMixin:
                         'cpu_pct': cpu_pct,
                         'children_mem_mb': children_rss_mb,
                         'started': self._started_at,
+                        'slots_down': Jsonb(slots_down_json(self._down_slots())),
                     },
                 )
                 await s.commit()

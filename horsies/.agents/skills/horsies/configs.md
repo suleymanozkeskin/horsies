@@ -235,9 +235,20 @@ Failures stay with one task:
 - SIGTERM to every process (Heroku, systemd `KillMode=control-group`) does not
   stop a running task. The worker drains it. Task subprocesses do get the signal.
 - A dead preload parent stops no task. New children use `exec` until it is back.
-- A child that cannot boot gets 3 attempts, then the worker exits non-zero. An
-  outside SIGKILL of a booting replacement child uses no attempt while another
-  child is serving. It does count at first start, and when no other child serves.
+- A child that cannot boot reports the cause. A cause that repeats (the app or
+  a task module does not import, the child pool cannot be set up, a death with
+  no report, not ready in 120 s) uses one of 3 attempts, then the worker exits
+  non-zero. A failed `on_child_process_start` hook stops the worker at once.
+- A cause that can clear (`OSError` EMFILE / ENFILE / ENOMEM / EAGAIN, an
+  event loop that cannot be created, a refused control thread or spawn) takes
+  only that slot down: it takes no task, the claim budget leaves it out, and it
+  boots again after 1, 2, 4 ... up to 60 s. It uses an attempt only when every
+  other slot is down too. The worker starts degraded when one child is ready
+  and each other slot is down. `WorkerStateSnapshot.slot_health` names the
+  slots that are down (`SlotsDown`).
+- An outside SIGKILL of a booting replacement child uses no attempt while
+  another child is serving. It does count at first start, and when no other
+  child serves.
 
 A child differs from a `multiprocessing` process: `parent_process()` returns
 `None`, `current_process().name` is `horsies-child-<slot>`, and a `__main__:app`
