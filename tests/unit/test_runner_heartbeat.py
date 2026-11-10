@@ -12,6 +12,7 @@ program. The statement itself runs against Postgres in
 from __future__ import annotations
 
 import asyncio
+import logging
 import signal
 import subprocess
 import sys
@@ -64,11 +65,15 @@ from horsies.core.worker.runner_heartbeat import (
     _dispatches_json,
     _PrepareThreshold,
     _PsycopgDefaultPrepare,
+    StaleRunningRecovery,
+    StaleRunningRecoveryOff,
+    StaleRunningRecoveryOn,
     beat_timing,
     child_process_state,
     describe_fail_closed,
     kill_child_session,
     retry_delay_s,
+    stale_running_recovery,
 )
 from horsies.core.worker import slots as slots_module
 from horsies.core.worker.slots import (
@@ -187,6 +192,15 @@ class _ExitRecorder:
 HeartbeatFactory = Callable[..., RunnerHeartbeat]
 
 
+def _recovery_on(window_s: float) -> StaleRunningRecoveryOn:
+    """Stale running recovery whose fail-closed window is ``window_s``."""
+    return StaleRunningRecoveryOn(
+        threshold_ms=round(
+            window_s * 1000 * runner_heartbeat.FAIL_CLOSED_WINDOW_DIVISOR
+        ),
+    )
+
+
 @pytest_asyncio.fixture
 async def heartbeat_factory() -> AsyncIterator[HeartbeatFactory]:
     """Launch heartbeats on the test's loop; stop each at teardown."""
@@ -198,14 +212,18 @@ async def heartbeat_factory() -> AsyncIterator[HeartbeatFactory]:
         writer: Any,
         *,
         window_s: float = SAFE_WINDOW_S,
+        stale_running: StaleRunningRecovery | None = None,
         on_fail_closed: Callable[[FailClosedCause], None] | None = None,
         exit_policy: ExitPolicy | None = None,
         loop_override: asyncio.AbstractEventLoop | None = None,
     ) -> RunnerHeartbeat:
+        """``window_s`` is the fail-closed window of ``StaleRunningRecoveryOn``,
+        used unless ``stale_running`` is given."""
         heartbeat = RunnerHeartbeat.launch(
             live=live,
             writer=writer,
-            timing=BeatTiming(interval_s=INTERVAL_S, window_s=window_s),
+            timing=BeatTiming(interval_s=INTERVAL_S),
+            stale_running=stale_running or _recovery_on(window_s),
             loop=loop_override or loop,
             on_fail_closed=on_fail_closed or _FailClosedRecorder(),
             exit_policy=exit_policy or ExitPolicy(exit_process=_ExitRecorder()),
@@ -678,6 +696,142 @@ async def test_stop_ends_both_threads(heartbeat_factory: HeartbeatFactory) -> No
 
 
 # ---------------------------------------------------------------------------
+# Stale running recovery off: log, never stop
+# ---------------------------------------------------------------------------
+
+
+def _beat_records(
+    caplog: pytest.LogCaptureFixture, text: str
+) -> list[logging.LogRecord]:
+    return [record for record in caplog.records if text in record.getMessage()]
+
+
+@pytest.mark.asyncio
+async def test_with_recovery_off_failing_writes_never_stop_the_worker(
+    heartbeat_factory: HeartbeatFactory,
+    processes: Callable[..., subprocess.Popen[bytes]],
+) -> None:
+    """No reaper fails the row, so stopping would protect nothing."""
+    live = LiveDispatches(capacity=2)
+    child = processes()
+    frame = _frame()
+    _hold(live, frame, child.pid)
+    writer = _ScriptedWriter(_always_failing)
+    stopped = _FailClosedRecorder()
+    exits = _ExitRecorder()
+
+    heartbeat_factory(
+        live,
+        writer,
+        stale_running=StaleRunningRecoveryOff(),
+        on_fail_closed=stopped,
+        exit_policy=ExitPolicy(grace_s=0.1, exit_process=exits),
+    )
+    await asyncio.sleep(1.5)
+
+    assert stopped.causes == []
+    assert exits.codes == []
+    assert child.poll() is None
+    assert writer.count_with(frame.task_id) >= 5
+    assert isinstance(live.hold(_frame(), pid=child.pid + 1), Held)
+
+
+@pytest.mark.asyncio
+async def test_with_recovery_off_a_dead_beat_thread_is_logged_and_the_worker_runs(
+    heartbeat_factory: HeartbeatFactory,
+    processes: Callable[..., subprocess.Popen[bytes]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def defect(_: int) -> BeatWriteOutcome:
+        raise RuntimeError('scripted defect in the beat thread')
+
+    live = LiveDispatches(capacity=1)
+    child = processes()
+    _hold(live, _frame(), child.pid)
+    stopped = _FailClosedRecorder()
+
+    with caplog.at_level(logging.CRITICAL, logger='horsies.worker'):
+        heartbeat_factory(
+            live,
+            _ScriptedWriter(defect),
+            stale_running=StaleRunningRecoveryOff(),
+            on_fail_closed=stopped,
+        )
+        await _until_async(
+            lambda: bool(_beat_records(caplog, 'runs on without runner heartbeats')),
+        )
+
+    assert stopped.causes == []
+    assert child.poll() is None
+
+
+@pytest.mark.asyncio
+async def test_with_recovery_off_a_late_beat_is_logged(
+    heartbeat_factory: HeartbeatFactory,
+    processes: Callable[..., subprocess.Popen[bytes]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A write that never returns is no failure yet; the watchdog logs it."""
+    release = threading.Event()
+
+    def hang(_: int) -> BeatWriteOutcome:
+        release.wait(WAIT_S)
+        return BeatsWritten(rows=1)
+
+    live = LiveDispatches(capacity=1)
+    child = processes()
+    _hold(live, _frame(), child.pid)
+    stopped = _FailClosedRecorder()
+    try:
+        with caplog.at_level(logging.WARNING, logger='horsies.worker'):
+            heartbeat_factory(
+                live,
+                _ScriptedWriter(hang),
+                stale_running=StaleRunningRecoveryOff(),
+                on_fail_closed=stopped,
+            )
+            await _until_async(
+                lambda: bool(_beat_records(caplog, 'No runner heartbeat landed')),
+            )
+    finally:
+        release.set()
+
+    [late] = _beat_records(caplog, 'No runner heartbeat landed')
+    assert 'the last write has not returned' in late.getMessage()
+    assert stopped.causes == []
+    assert child.poll() is None
+
+
+@pytest.mark.parametrize(
+    'stale_running',
+    [StaleRunningRecoveryOff(), _recovery_on(SAFE_WINDOW_S)],
+    ids=['recovery off', 'recovery on'],
+)
+@pytest.mark.asyncio
+async def test_failed_writes_are_logged_at_most_once_per_log_interval(
+    heartbeat_factory: HeartbeatFactory,
+    processes: Callable[..., subprocess.Popen[bytes]],
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    stale_running: StaleRunningRecovery,
+) -> None:
+    """The writes fail about 20 times a second; the log has one line per 0.5 s."""
+    monkeypatch.setattr(runner_heartbeat, 'BEAT_FAILURE_LOG_INTERVAL_S', 0.5)
+    live = LiveDispatches(capacity=1)
+    _hold(live, _frame(), processes().pid)
+    writer = _ScriptedWriter(_always_failing)
+
+    with caplog.at_level(logging.ERROR, logger='horsies.worker'):
+        heartbeat_factory(live, writer, stale_running=stale_running)
+        await asyncio.sleep(1.2)
+        written = writer.count()
+        logged = len(_beat_records(caplog, 'Runner heartbeat write failed'))
+
+    assert written >= 15
+    assert 2 <= logged <= 4
+
+
+# ---------------------------------------------------------------------------
 # The worker stops through its real callback
 # ---------------------------------------------------------------------------
 
@@ -714,7 +868,8 @@ async def test_start_slots_launches_the_heartbeat_on_the_pool_registry() -> None
 
     kwargs = launched.call_args.kwargs
     assert kwargs['live'] is pool.live_dispatches
-    assert kwargs['timing'] == BeatTiming(interval_s=2.0, window_s=5.0)
+    assert kwargs['timing'] == BeatTiming(interval_s=2.0)
+    assert kwargs['stale_running'] == StaleRunningRecoveryOn(threshold_ms=10_000)
     assert kwargs['on_fail_closed'] == worker._stop_for_lost_runner_heartbeat
     assert worker._runner_heartbeat is launched.return_value
 
@@ -724,7 +879,13 @@ async def test_a_heartbeat_that_fails_closed_stops_the_worker_non_zero(
     processes: Callable[..., subprocess.Popen[bytes]],
 ) -> None:
     """Enter at the worker's launch, so the real callback is wired."""
-    worker = _worker()
+    worker = _worker(
+        RecoveryConfig(
+            runner_heartbeat_interval_ms=1_000,
+            running_stale_threshold_ms=2_000,
+            finalizing_stale_threshold_ms=2_000,
+        ),
+    )
     pool = MagicMock()
     pool.live_dispatches = LiveDispatches(capacity=1)
     child = processes()
@@ -733,7 +894,7 @@ async def test_a_heartbeat_that_fails_closed_stops_the_worker_non_zero(
     with (
         patch(
             'horsies.core.worker.worker.beat_timing',
-            return_value=BeatTiming(interval_s=INTERVAL_S, window_s=SHORT_WINDOW_S),
+            return_value=BeatTiming(interval_s=INTERVAL_S),
         ),
         patch(
             'horsies.core.worker.worker.PostgresBeatWriter',
@@ -751,6 +912,44 @@ async def test_a_heartbeat_that_fails_closed_stops_the_worker_non_zero(
     assert await asyncio.to_thread(child.wait, WAIT_S) == -signal.SIGKILL
     with pytest.raises(RunnerHeartbeatLostError):
         worker._raise_captured_fatal_error()
+
+
+@pytest.mark.parametrize(
+    'recovery',
+    [None, RecoveryConfig(auto_fail_stale_running=False)],
+    ids=['no recovery config', 'auto fail off'],
+)
+@pytest.mark.asyncio
+async def test_a_worker_whose_reaper_fails_no_running_row_runs_on(
+    processes: Callable[..., subprocess.Popen[bytes]],
+    recovery: RecoveryConfig | None,
+) -> None:
+    """Enter at the worker's launch: the recovery config decides the mode."""
+    worker = _worker(recovery)
+    pool = MagicMock()
+    pool.live_dispatches = LiveDispatches(capacity=1)
+    child = processes()
+    _hold(pool.live_dispatches, _frame(), child.pid)
+
+    with (
+        patch(
+            'horsies.core.worker.worker.beat_timing',
+            return_value=BeatTiming(interval_s=INTERVAL_S),
+        ),
+        patch(
+            'horsies.core.worker.worker.PostgresBeatWriter',
+            return_value=_ScriptedWriter(_always_failing),
+        ),
+    ):
+        worker._runner_heartbeat = worker._launch_runner_heartbeat(pool)
+    try:
+        await asyncio.sleep(1.5)
+    finally:
+        await worker._stop_runner_heartbeat()
+
+    assert not worker._stop.is_set()
+    assert worker._fatal_background_error is None
+    assert child.poll() is None
 
 
 @pytest.mark.asyncio
@@ -796,27 +995,43 @@ async def test_a_failed_start_stops_the_heartbeat() -> None:
 
 
 def test_the_window_is_half_the_stale_threshold() -> None:
-    timing = beat_timing(
-        RecoveryConfig(
-            runner_heartbeat_interval_ms=30_000,
-            running_stale_threshold_ms=300_000,
-        ),
+    recovery = RecoveryConfig(
+        runner_heartbeat_interval_ms=30_000,
+        running_stale_threshold_ms=300_000,
     )
 
-    assert timing == BeatTiming(interval_s=30.0, window_s=150.0)
+    assert beat_timing(recovery) == BeatTiming(interval_s=30.0)
+    assert stale_running_recovery(recovery) == StaleRunningRecoveryOn(300_000)
+    assert StaleRunningRecoveryOn(300_000).fail_closed_window_s() == 150.0
 
 
 def test_the_smallest_window_holds_one_interval() -> None:
-    timing = beat_timing(
-        RecoveryConfig(
-            runner_heartbeat_interval_ms=1_000,
-            running_stale_threshold_ms=2_000,
-            finalizing_stale_threshold_ms=2_000,
-        ),
+    recovery = RecoveryConfig(
+        runner_heartbeat_interval_ms=1_000,
+        running_stale_threshold_ms=2_000,
+        finalizing_stale_threshold_ms=2_000,
     )
+    on = stale_running_recovery(recovery)
 
-    assert timing.window_s >= timing.interval_s
-    assert runner_heartbeat.WATCH_INTERVAL_S < timing.window_s / 2
+    assert isinstance(on, StaleRunningRecoveryOn)
+    assert on.fail_closed_window_s() >= beat_timing(recovery).interval_s
+    assert runner_heartbeat.WATCH_INTERVAL_S < on.fail_closed_window_s() / 2
+
+
+@pytest.mark.parametrize(
+    ('recovery', 'expected'),
+    [
+        (None, StaleRunningRecoveryOff()),
+        (RecoveryConfig(auto_fail_stale_running=False), StaleRunningRecoveryOff()),
+        (RecoveryConfig(), StaleRunningRecoveryOn(threshold_ms=300_000)),
+    ],
+    ids=['no recovery config', 'auto fail off', 'auto fail on'],
+)
+def test_only_a_reaper_that_fails_stale_running_rows_makes_beats_fail_closed(
+    recovery: RecoveryConfig | None,
+    expected: StaleRunningRecovery,
+) -> None:
+    assert stale_running_recovery(recovery) == expected
 
 
 @pytest.mark.parametrize(

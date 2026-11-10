@@ -84,9 +84,10 @@ When a **regular** task is RUNNING but the runner heartbeat stops:
 
 `running_stale_threshold_ms` is based on missing runner heartbeats, not total
 task duration. Long tasks remain healthy as long as the worker writes their
-heartbeats. A worker that cannot write them for half of
-`running_stale_threshold_ms` kills its tasks and exits non-zero, so the reaper
-does not fail a task that still runs.
+heartbeats. With `auto_fail_stale_running` on, a worker that cannot write them
+for half of `running_stale_threshold_ms` kills its tasks and exits non-zero, so
+the reaper does not fail a task that still runs. With it off, the worker logs
+the failed writes and keeps running.
 After user code returns, the child marks the task as finalizing before the
 parent writes the terminal result. The reaper will not recover that task until
 `finalizing_stale_threshold_ms` has also elapsed.

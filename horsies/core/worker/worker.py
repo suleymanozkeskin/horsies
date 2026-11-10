@@ -36,6 +36,7 @@ from horsies.core.worker.runner_heartbeat import (
     RunnerHeartbeatLostError,
     beat_timing,
     describe_fail_closed,
+    stale_running_recovery,
 )
 from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.worker.slots import (
@@ -418,7 +419,9 @@ class Worker(
         """Start the threads that write the runner heartbeats of ``pool``'s tasks.
 
         The heartbeat connection uses the children's database URL and connect
-        kwargs. It opens at the first beat, not here.
+        kwargs. It opens at the first beat, not here. The recovery config
+        decides here, once, whether beats that cannot land stop the worker:
+        only when this config's reaper fails stale RUNNING rows.
         """
         return RunnerHeartbeat.launch(
             live=pool.live_dispatches,
@@ -428,6 +431,7 @@ class Worker(
                 worker_id=self.worker_instance_id,
             ),
             timing=beat_timing(self.cfg.recovery_config or RecoveryConfig()),
+            stale_running=stale_running_recovery(self.cfg.recovery_config),
             loop=asyncio.get_running_loop(),
             on_fail_closed=self._stop_for_lost_runner_heartbeat,
         )

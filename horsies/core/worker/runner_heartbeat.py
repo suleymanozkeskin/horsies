@@ -12,13 +12,23 @@ Two daemon threads, apart from the event loop:
   process still runs, and writes one statement that beats all of them. The
   statement beats a row only while it is RUNNING, owned by this worker, at
   the claim generation of the dispatch, and without the finalizing marker.
-- The watchdog fails closed when the beat thread is dead, or when no beat
-  landed for half of ``running_stale_threshold_ms``. It kills every child that
-  holds a task, asks the event loop to stop the worker with
-  ``RunnerHeartbeatLostError``, and exits the process with
-  ``RUNNER_HEARTBEAT_LOST_EXIT_CODE`` when the worker has not stopped within
-  ``FAIL_CLOSED_EXIT_GRACE_S``. So the reaper does not fail a task that still
-  runs because this worker could not write its heartbeats.
+- The watchdog acts on ``StaleRunningRecovery``, decided once at worker
+  start from the recovery config.
+
+  - ``StaleRunningRecoveryOn``: the reaper fails a RUNNING row that has no
+    runner heartbeat for the threshold. The watchdog fails closed when the
+    beat thread is dead, or when no beat landed for half of the threshold. It
+    kills every child that holds a task, asks the event loop to stop the
+    worker with ``RunnerHeartbeatLostError``, and exits the process with
+    ``RUNNER_HEARTBEAT_LOST_EXIT_CODE`` when the worker has not stopped within
+    ``FAIL_CLOSED_EXIT_GRACE_S``. So the reaper does not fail a task that
+    still runs because this worker could not write its heartbeats.
+  - ``StaleRunningRecoveryOff``: no reaper of this config fails a RUNNING
+    row, so a missing beat puts no running task at risk. The watchdog logs
+    late beats and a dead beat thread, and the worker keeps running.
+
+  Failed writes and late beats are logged at most once per
+  ``BEAT_FAILURE_LOG_INTERVAL_S``, and once at the start of each failure run.
 
 The first heartbeat of an attempt is not written here: the child writes it in
 the transaction that sets the row RUNNING.
@@ -61,6 +71,10 @@ BEAT_RETRY_MAX_DELAY_S: Final = 5.0
 # How often the watchdog checks the beat thread and the time since the last
 # beat. It is below half of the smallest fail-closed window (1 s).
 WATCH_INTERVAL_S: Final = 0.25
+# Failed writes and late beats are logged at most once per this time.
+BEAT_FAILURE_LOG_INTERVAL_S: Final = 60.0
+# With stale running recovery off, a beat is late after this many intervals.
+LATE_BEAT_INTERVALS: Final = 2
 # Time that the worker gets to stop by itself after it failed closed.
 FAIL_CLOSED_EXIT_GRACE_S: Final = 120.0
 # Exit code of the worker process when it failed closed and did not stop
@@ -103,24 +117,54 @@ class RunnerHeartbeatLostError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class BeatTiming:
-    """How often the beat thread writes, and how long its writes may fail."""
+    """How often the beat thread writes."""
 
     interval_s: float
-    window_s: float
 
 
 def beat_timing(recovery: RecoveryConfig) -> BeatTiming:
-    """Read the beat interval and the fail-closed window from ``recovery``.
+    """Read the beat interval from ``recovery``."""
+    return BeatTiming(interval_s=recovery.runner_heartbeat_interval_ms / 1000)
 
-    RecoveryConfig keeps ``running_stale_threshold_ms`` at two intervals or
-    more, so the window holds at least one interval.
+
+@dataclass(frozen=True, slots=True)
+class StaleRunningRecoveryOn:
+    """The reaper fails a RUNNING row with no runner heartbeat for ``threshold_ms``.
+
+    The worker fails closed when no beat lands for half of it. RecoveryConfig
+    keeps the threshold at two beat intervals or more, so the half holds at
+    least one interval.
     """
-    return BeatTiming(
-        interval_s=recovery.runner_heartbeat_interval_ms / 1000,
-        window_s=(
-            recovery.running_stale_threshold_ms / 1000 / FAIL_CLOSED_WINDOW_DIVISOR
-        ),
-    )
+
+    threshold_ms: int
+
+    def fail_closed_window_s(self) -> float:
+        """Half of the threshold, in seconds."""
+        return self.threshold_ms / 1000 / FAIL_CLOSED_WINDOW_DIVISOR
+
+
+@dataclass(frozen=True, slots=True)
+class StaleRunningRecoveryOff:
+    """No reaper of this config fails a RUNNING row.
+
+    ``auto_fail_stale_running`` is off, or the worker has no recovery config
+    and starts no reaper. A beat that cannot land puts no running task at
+    risk, so the worker logs it and keeps running.
+    """
+
+
+StaleRunningRecovery: TypeAlias = StaleRunningRecoveryOn | StaleRunningRecoveryOff
+
+
+def stale_running_recovery(recovery: RecoveryConfig | None) -> StaleRunningRecovery:
+    """Decide, from the worker's recovery config, whether beats must fail closed."""
+    match recovery:
+        case None:
+            return StaleRunningRecoveryOff()
+        case RecoveryConfig(auto_fail_stale_running=True):
+            return StaleRunningRecoveryOn(recovery.running_stale_threshold_ms)
+        case RecoveryConfig():
+            return StaleRunningRecoveryOff()
 
 
 @dataclass(frozen=True, slots=True)
@@ -389,7 +433,11 @@ class BeatThreadDied:
 
 @dataclass(frozen=True, slots=True)
 class BeatsOverdue:
-    """No beat landed for longer than the fail-closed window."""
+    """No beat landed for longer than ``window_s``.
+
+    With stale running recovery on, ``window_s`` is the fail-closed window;
+    with it off, it is ``LATE_BEAT_INTERVALS`` beat intervals.
+    """
 
     uncovered_s: float
     window_s: float
@@ -406,6 +454,17 @@ class WatchFailed:
 FailClosedCause: TypeAlias = BeatThreadDied | BeatsOverdue | WatchFailed
 
 
+def describe_last_failure(last_failure: BeatWriteFailed | NoBeatFailure) -> str:
+    """The last failed write, or that the last write has not returned."""
+    match last_failure:
+        case BeatWriteFailed(detail=detail):
+            return f'last error: {detail}'
+        case NoBeatFailure():
+            return 'the last write has not returned'
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def describe_fail_closed(cause: FailClosedCause) -> str:
     """Text for the critical log line and for ``RunnerHeartbeatLostError``."""
     match cause:
@@ -416,16 +475,10 @@ def describe_fail_closed(cause: FailClosedCause) -> str:
             window_s=window_s,
             last_failure=last_failure,
         ):
-            match last_failure:
-                case BeatWriteFailed(detail=detail):
-                    last = f'last error: {detail}'
-                case NoBeatFailure():
-                    last = 'the last write has not returned'
-                case _ as unreachable:
-                    assert_never(unreachable)
             return (
                 f'no runner heartbeat landed for {uncovered_s:.1f}s, past '
-                f'{window_s:.1f}s (half of running_stale_threshold_ms); {last}'
+                f'{window_s:.1f}s (half of running_stale_threshold_ms); '
+                f'{describe_last_failure(last_failure)}'
             )
         case WatchFailed(detail=detail):
             return f'the runner heartbeat watchdog failed: {detail}'
@@ -439,6 +492,42 @@ class ExitPolicy:
 
     grace_s: float = FAIL_CLOSED_EXIT_GRACE_S
     exit_process: Callable[[int], object] = field(default=os._exit)
+
+
+@dataclass(frozen=True, slots=True)
+class _NeverLogged:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class _LoggedAt:
+    at_s: float
+
+
+class _LogGate:
+    """Allows one log line per ``interval_s``. Used by one thread only."""
+
+    def __init__(self, interval_s: float) -> None:
+        self._interval_s = interval_s
+        self._last: _NeverLogged | _LoggedAt = _NeverLogged()
+
+    def due(self, now_s: float) -> bool:
+        """Whether a line may be logged now. A True answer counts as logged."""
+        match self._last:
+            case _NeverLogged():
+                pass
+            case _LoggedAt(at_s=at_s) if now_s - at_s < self._interval_s:
+                return False
+            case _LoggedAt():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
+        self._last = _LoggedAt(now_s)
+        return True
+
+    def reset(self) -> None:
+        """The next ``due`` is True: a new run of failures starts."""
+        self._last = _NeverLogged()
 
 
 @dataclass(frozen=True, slots=True)
@@ -476,9 +565,10 @@ class _LoopClosed:
 class RunnerHeartbeat:
     """The beat thread and the watchdog of one slot pool. Start with ``launch``.
 
-    ``on_fail_closed`` runs on ``loop``, once, after the watchdog killed the
-    children that held tasks. It must stop the worker. ``stop`` ends both
-    threads; the worker calls it after its children have stopped.
+    With ``StaleRunningRecoveryOn``, ``on_fail_closed`` runs on ``loop``,
+    once, after the watchdog killed the children that held tasks. It must
+    stop the worker. With ``StaleRunningRecoveryOff`` it never runs. ``stop``
+    ends both threads; the worker calls it after its children have stopped.
     """
 
     def __init__(
@@ -487,6 +577,7 @@ class RunnerHeartbeat:
         live: LiveDispatches,
         writer: BeatWriter,
         timing: BeatTiming,
+        stale_running: StaleRunningRecovery,
         loop: asyncio.AbstractEventLoop,
         on_fail_closed: Callable[[FailClosedCause], None],
         exit_policy: ExitPolicy,
@@ -494,6 +585,8 @@ class RunnerHeartbeat:
         self._live = live
         self._writer = writer
         self._timing = timing
+        self._stale_running = stale_running
+        self._failure_log = _LogGate(BEAT_FAILURE_LOG_INTERVAL_S)
         self._loop = loop
         self._on_fail_closed = on_fail_closed
         self._exit_policy = exit_policy
@@ -523,6 +616,7 @@ class RunnerHeartbeat:
         live: LiveDispatches,
         writer: BeatWriter,
         timing: BeatTiming,
+        stale_running: StaleRunningRecovery,
         loop: asyncio.AbstractEventLoop,
         on_fail_closed: Callable[[FailClosedCause], None],
         exit_policy: ExitPolicy = ExitPolicy(),
@@ -532,6 +626,7 @@ class RunnerHeartbeat:
             live=live,
             writer=writer,
             timing=timing,
+            stale_running=stale_running,
             loop=loop,
             on_fail_closed=on_fail_closed,
             exit_policy=exit_policy,
@@ -567,7 +662,7 @@ class RunnerHeartbeat:
             self._writer.close()
 
     def _beat_once(self) -> float:
-        """Beat every held task whose child runs. Return the wait until the next write."""
+        """Beat each held task whose child runs. Return the wait to the next write."""
         started_at = time.monotonic()
         dispatches = self._running_dispatches()
         if not dispatches:
@@ -578,20 +673,36 @@ class RunnerHeartbeat:
             case BeatsWritten():
                 self._record_covered(started_at)
                 return max(0.0, started_at + self._timing.interval_s - time.monotonic())
-            case BeatWriteFailed(detail=detail):
+            case BeatWriteFailed():
                 failures = self._record_failure(outcome)
-                uncovered_s = time.monotonic() - self._read_coverage().covered_at_s
-                logger.error(
-                    'Runner heartbeat write failed (attempt %d, %.1fs since the '
-                    'last beat, the worker stops at %.1fs): %s',
-                    failures,
-                    uncovered_s,
-                    self._timing.window_s,
-                    detail,
-                )
+                self._log_failed_write(outcome, failures)
                 return retry_delay_s(failures, self._timing.interval_s)
             case _ as unreachable:
                 assert_never(unreachable)
+
+    def _log_failed_write(self, failed: BeatWriteFailed, failures: int) -> None:
+        """Log the first failure of a run, then at most once per log interval."""
+        now_s = time.monotonic()
+        if failures == 1:
+            self._failure_log.reset()
+        if not self._failure_log.due(now_s):
+            return
+        uncovered_s = now_s - self._read_coverage().covered_at_s
+        match self._stale_running:
+            case StaleRunningRecoveryOn() as on:
+                consequence = f'the worker stops at {on.fail_closed_window_s():.1f}s'
+            case StaleRunningRecoveryOff():
+                consequence = 'no reaper fails a RUNNING row, so the worker runs on'
+            case _ as unreachable:
+                assert_never(unreachable)
+        logger.error(
+            'Runner heartbeat write failed (attempt %d, %.1fs since the last '
+            'beat; %s): %s',
+            failures,
+            uncovered_s,
+            consequence,
+            failed.detail,
+        )
 
     def _running_dispatches(self) -> tuple[LiveDispatch, ...]:
         """The held dispatches whose child process still runs.
@@ -650,17 +761,23 @@ class RunnerHeartbeat:
     # ----- watchdog -----
 
     def _run_watch(self) -> None:
-        """Watchdog body: wait for a fail-closed cause, then act on it."""
-        cause = self._watch_until_cause()
-        match cause:
-            case _WatchStopped():
-                return
-            case BeatThreadDied() | BeatsOverdue() | WatchFailed():
-                self._fail_closed(cause)
+        """Watchdog body. Fails closed only when stale running recovery is on."""
+        match self._stale_running:
+            case StaleRunningRecoveryOn() as on:
+                cause = self._watch_until_cause(on.fail_closed_window_s())
+                match cause:
+                    case _WatchStopped():
+                        return
+                    case BeatThreadDied() | BeatsOverdue() | WatchFailed():
+                        self._fail_closed(cause)
+                    case _ as unreachable:
+                        assert_never(unreachable)
+            case StaleRunningRecoveryOff():
+                self._watch_and_log()
             case _ as unreachable:
                 assert_never(unreachable)
 
-    def _watch_until_cause(self) -> FailClosedCause | _WatchStopped:
+    def _watch_until_cause(self, window_s: float) -> FailClosedCause | _WatchStopped:
         """Check every ``WATCH_INTERVAL_S`` until a cause or a stop.
 
         A defect in this check is itself a cause: the worker fails closed
@@ -668,7 +785,7 @@ class RunnerHeartbeat:
         """
         try:
             while not self._stopping.wait(WATCH_INTERVAL_S):
-                check = self._check_beats()
+                check = self._check_beats(window_s)
                 match check:
                     case _BeatsCurrent():
                         continue
@@ -681,7 +798,49 @@ class RunnerHeartbeat:
             logger.critical('Runner heartbeat watchdog failed', exc_info=True)
             return WatchFailed(f'{type(exc).__name__}: {exc}')
 
-    def _check_beats(self) -> BeatThreadDied | BeatsOverdue | _BeatsCurrent:
+    def _watch_and_log(self) -> None:
+        """Watchdog body with stale running recovery off: log, never stop.
+
+        Logs late beats at most once per ``BEAT_FAILURE_LOG_INTERVAL_S``, and
+        a dead beat thread once. A defect in this check is logged, and the
+        watchdog ends: no task depends on it.
+        """
+        late_after_s = LATE_BEAT_INTERVALS * self._timing.interval_s
+        late_log = _LogGate(BEAT_FAILURE_LOG_INTERVAL_S)
+        try:
+            while not self._stopping.wait(WATCH_INTERVAL_S):
+                check = self._check_beats(late_after_s)
+                match check:
+                    case _BeatsCurrent():
+                        late_log.reset()
+                    case BeatsOverdue():
+                        if late_log.due(time.monotonic()):
+                            logger.warning(
+                                'No runner heartbeat landed for %.1fs; the worker '
+                                'runs on, because no reaper fails a RUNNING row '
+                                '(auto_fail_stale_running is off, or no recovery '
+                                'config); %s',
+                                check.uncovered_s,
+                                describe_last_failure(check.last_failure),
+                            )
+                    case BeatThreadDied():
+                        logger.critical(
+                            '%s. The worker runs on without runner heartbeats, '
+                            'because no reaper fails a RUNNING row '
+                            '(auto_fail_stale_running is off, or no recovery '
+                            'config)',
+                            describe_fail_closed(check),
+                        )
+                        return
+                    case _ as unreachable:
+                        assert_never(unreachable)
+        except Exception:
+            logger.critical('Runner heartbeat watchdog failed', exc_info=True)
+
+    def _check_beats(
+        self,
+        window_s: float,
+    ) -> BeatThreadDied | BeatsOverdue | _BeatsCurrent:
         with self._state_lock:
             thread_state = self._beat_thread_state
             coverage = self._coverage
@@ -695,10 +854,10 @@ class RunnerHeartbeat:
         if not self._beat_thread.is_alive() and not self._stopping.is_set():
             return BeatThreadDied('the thread ended with no exception')
         uncovered_s = time.monotonic() - coverage.covered_at_s
-        if uncovered_s > self._timing.window_s:
+        if uncovered_s > window_s:
             return BeatsOverdue(
                 uncovered_s=uncovered_s,
-                window_s=self._timing.window_s,
+                window_s=window_s,
                 last_failure=coverage.last_failure,
             )
         return _BeatsCurrent()
@@ -743,7 +902,7 @@ class RunnerHeartbeat:
         self._exit_policy.exit_process(RUNNER_HEARTBEAT_LOST_EXIT_CODE)
 
     def _kill_held_children(self) -> None:
-        """Close the registry, and SIGKILL the session of each child that held a task."""
+        """Close the registry; SIGKILL the session of each child that held a task."""
         for dispatch in self._live.close():
             kill = kill_child_session(dispatch.pid)
             match kill:

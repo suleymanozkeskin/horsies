@@ -161,15 +161,18 @@ there is no migration contract between pre-1.0 versions.
   and the worker process uses one more connection, for the heartbeats. A
   timed-out task's beats end with the kill at its deadline; the child no
   longer stops them one interval after `timeout_ms`.
-- **A worker that cannot write runner heartbeats stops.** When the heartbeat
-  thread dies, or no heartbeat lands for half of
+- **A worker that cannot write runner heartbeats stops, when its reaper
+  fails stale RUNNING rows.** With `auto_fail_stale_running=True` (the
+  default), when the heartbeat thread dies, or no heartbeat lands for half of
   `running_stale_threshold_ms`, the worker logs the cause at critical level,
   kills every child that holds a task, stops, and exits with code 1. It exits
   with code 77 if it has not stopped 120 s later. A failed write is tried
   again within that half. Before, the reaper failed such tasks with
   `WORKER_CRASHED` while they still ran, and a retry could run next to them.
   A killed task takes the child crash path, or stale-task recovery when the
-  database cannot be reached.
+  database cannot be reached. With `auto_fail_stale_running=False`, or no
+  recovery config, no reaper fails a RUNNING row, so the worker logs failed
+  writes, at most once per 60 s, and keeps running.
 
 ### Removed
 

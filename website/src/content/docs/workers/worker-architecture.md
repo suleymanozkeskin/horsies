@@ -61,7 +61,7 @@ Each child holds one task, so a failure stays with that task.
 | A task forks a helper, then its child dies | The worker sees the death at once. The helper does not hide it |
 | A timeout fires as a task ends | The kill is bound to that task, so it cannot reach the next task. The killed child takes no next task |
 | A task holds the GIL in C code | Its runner heartbeats continue: the worker process writes them, so the reaper does not fail the task |
-| The worker cannot write runner heartbeats for half of `running_stale_threshold_ms`, or its heartbeat thread dies | The worker kills every child that holds a task, stops, and exits non-zero. See [When the Worker Cannot Write Heartbeats](heartbeats-recovery#when-the-worker-cannot-write-heartbeats) |
+| The worker cannot write runner heartbeats for half of `running_stale_threshold_ms`, or its heartbeat thread dies | With `auto_fail_stale_running` on, the worker kills every child that holds a task, stops, and exits non-zero. With it off, the worker logs it and runs on. See [When the Worker Cannot Write Heartbeats](heartbeats-recovery#when-the-worker-cannot-write-heartbeats) |
 
 ## Execution Flow
 

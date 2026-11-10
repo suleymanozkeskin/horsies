@@ -104,7 +104,11 @@ class RecoveryConfig(BaseModel):
 
     auto_fail_stale_running: bool = Field(
         default=True,
-        description='Automatically mark stale RUNNING tasks as FAILED (not safe to requeue)',
+        description=(
+            'Automatically mark stale RUNNING tasks as FAILED (not safe to requeue); '
+            'when on, a worker whose runner heartbeats cannot land for half of '
+            'running_stale_threshold_ms kills its tasks and stops'
+        ),
     )
     running_stale_threshold_ms: Annotated[int, Field(ge=1_000, le=7_200_000)] = Field(
         default=300_000,  # 5 minutes
