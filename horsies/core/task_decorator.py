@@ -1282,10 +1282,9 @@ def _returned_type_name(returned: object) -> str:
 class TaskBodyKind(Enum):
     """How a task function was defined, which decides how a worker runs it.
 
-    The decorator sets it as ``task_body_kind`` on the task function. A worker
-    child reads it from the registry before the RUNNING update, so it can
-    create the event loop for an ``async def`` task while the task is still
-    claimed.
+    The decorator sets it as ``task_body_kind`` on the class of the task
+    function. A worker child reads it from the registry at boot, and creates
+    its event loop only when the app has an ``async def`` task.
     """
 
     DEF = 'def'

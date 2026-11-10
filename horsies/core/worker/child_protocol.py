@@ -103,51 +103,46 @@ class ReadyFrame:
 
 
 @dataclass(frozen=True, slots=True)
-class LoopOpenedForThisTask:
-    """The child created its task loop for this task: the open succeeded."""
+class LoopCreateFailedFrame:
+    """Child to parent, in place of the ready frame: the app has an
+    ``async def`` task, and the child could not create the event loop for it.
 
+    The child exits after this frame, so the parent counts a failed boot
+    attempt. ``error_name`` and ``detail`` are the type and the text of the
+    exception.
+    """
 
-@dataclass(frozen=True, slots=True)
-class LoopOpenedEarlier:
-    """The task loop was already open when this task started."""
+    error_name: str
+    detail: str
 
-
-LoopOpening: TypeAlias = LoopOpenedForThisTask | LoopOpenedEarlier
+    def describe(self) -> str:
+        """Subject and cause, for the boot failure of the parent."""
+        return (
+            'the child could not create the event loop for async tasks: '
+            f'{self.error_name}: {self.detail}'
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class NoTaskLoop:
-    """After the task, the child has no task loop: no async task has run in it."""
+    """After the task, the child has no task loop: its app has no
+    ``async def`` task."""
 
 
 @dataclass(frozen=True, slots=True)
 class LoopHoldsNoTask:
-    """After the task, the child's task loop is open and holds no task that
-    is not done."""
-
-    opening: LoopOpening
+    """After the task, the child's task loop holds no task that is not done."""
 
 
 @dataclass(frozen=True, slots=True)
 class LoopHoldsTasks:
     """After the task, asyncio tasks that it started and did not await are
-    still on the child's open task loop. The parent retires such a child."""
+    still on the child's task loop. The parent retires such a child."""
 
     count: int
-    opening: LoopOpening
 
 
-@dataclass(frozen=True, slots=True)
-class TaskLoopUnavailable:
-    """The child could not create its task loop, so the async task did not
-    run. The parent retires such a child. ``detail`` names the error."""
-
-    detail: str
-
-
-TaskLoopReport: TypeAlias = (
-    NoTaskLoop | LoopHoldsNoTask | LoopHoldsTasks | TaskLoopUnavailable
-)
+TaskLoopReport: TypeAlias = NoTaskLoop | LoopHoldsNoTask | LoopHoldsTasks
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,7 +187,7 @@ class PreloadRefusedFrame:
 
 
 ParentFrame: TypeAlias = InitFrame | RunFrame | StopFrame
-ChildFrame: TypeAlias = ReadyFrame | ResultFrame
+ChildFrame: TypeAlias = ReadyFrame | LoopCreateFailedFrame | ResultFrame
 PreloadFrame: TypeAlias = (
     PreloadReadyFrame | ChildForkedFrame | ForkFailedFrame | PreloadRefusedFrame
 )
@@ -257,26 +252,14 @@ def _rss_field(rss: RssReading) -> float | None:
             assert_never(unreachable)
 
 
-def _opening_field(opening: LoopOpening) -> str:
-    match opening:
-        case LoopOpenedForThisTask():
-            return 'this_task'
-        case LoopOpenedEarlier():
-            return 'earlier'
-        case _ as unreachable:
-            assert_never(unreachable)
-
-
 def _task_loop_field(task_loop: TaskLoopReport) -> dict[str, object]:
     match task_loop:
         case NoTaskLoop():
             return {'kind': 'none'}
-        case LoopHoldsNoTask(opening=opening):
-            return {'kind': 'empty', 'opened': _opening_field(opening)}
-        case LoopHoldsTasks(count=count, opening=opening):
-            return {'kind': 'held', 'count': count, 'opened': _opening_field(opening)}
-        case TaskLoopUnavailable(detail=detail):
-            return {'kind': 'unavailable', 'detail': detail}
+        case LoopHoldsNoTask():
+            return {'kind': 'empty'}
+        case LoopHoldsTasks(count=count):
+            return {'kind': 'held', 'count': count}
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -341,6 +324,15 @@ def encode_child_frame(frame: ChildFrame) -> EncodedFrame:
         case ReadyFrame():
             return _pack(
                 {'kind': 'ready', 'pid': frame.pid, 'rss_mb': _rss_field(frame.rss)},
+                b'',
+            )
+        case LoopCreateFailedFrame():
+            return _pack(
+                {
+                    'kind': 'loop_create_failed',
+                    'error_name': frame.error_name,
+                    'detail': frame.detail,
+                },
                 b'',
             )
         case ResultFrame():
@@ -477,16 +469,6 @@ def _rss(meta: Mapping[str, Any]) -> RssReading:
     return RssMb(float(value))
 
 
-def _opening(task_loop: Mapping[str, Any]) -> LoopOpening:
-    match task_loop.get('opened'):
-        case 'this_task':
-            return LoopOpenedForThisTask()
-        case 'earlier':
-            return LoopOpenedEarlier()
-        case _:
-            raise _BadField('task_loop.opened')
-
-
 def _task_loop(meta: Mapping[str, Any]) -> TaskLoopReport:
     value = meta.get('task_loop')
     if not isinstance(value, dict):
@@ -496,14 +478,12 @@ def _task_loop(meta: Mapping[str, Any]) -> TaskLoopReport:
         case 'none':
             return NoTaskLoop()
         case 'empty':
-            return LoopHoldsNoTask(opening=_opening(task_loop))
+            return LoopHoldsNoTask()
         case 'held':
             count = task_loop.get('count')
             if not isinstance(count, int) or isinstance(count, bool) or count < 1:
                 raise _BadField('task_loop.count')
-            return LoopHoldsTasks(count=count, opening=_opening(task_loop))
-        case 'unavailable':
-            return TaskLoopUnavailable(detail=_text(task_loop, 'detail'))
+            return LoopHoldsTasks(count=count)
         case _:
             raise _BadField('task_loop.kind')
 
@@ -590,6 +570,13 @@ def decode_child_frame(
         match kind:
             case 'ready':
                 return Ok(ReadyFrame(pid=_whole(meta, 'pid'), rss=_rss(meta)))
+            case 'loop_create_failed':
+                return Ok(
+                    LoopCreateFailedFrame(
+                        error_name=_text(meta, 'error_name'),
+                        detail=_text(meta, 'detail'),
+                    ),
+                )
             case 'result':
                 return Ok(
                     ResultFrame(

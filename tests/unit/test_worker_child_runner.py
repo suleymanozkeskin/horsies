@@ -2545,7 +2545,7 @@ class TestRunTaskEntryStoredTimeout:
         confirm = patches[
             'horsies.core.worker.child_runner._confirm_ownership_and_set_running'
         ]
-        registry = patches['horsies.core.worker.child_runner.get_current_app'].return_value.tasks
+        app_lookup = patches['horsies.core.worker.child_runner.get_current_app']
 
         with _apply_patches(patches):
             ok, payload, reason = _run_task_entry(
@@ -2555,10 +2555,7 @@ class TestRunTaskEntryStoredTimeout:
         assert ok is True
         assert reason == f'StoredTimeoutRefused: {refusal.reason}'
         confirm.assert_called_once()
-        # One registry read: the task's kind, before RUNNING. The resolution
-        # after RUNNING did not run, and the task itself was not called.
-        registry.__getitem__.assert_called_once()
-        registry.__getitem__.return_value.assert_not_called()
+        app_lookup.assert_not_called()
         err = _parse_task_result(payload)['err']
         assert err['error_code'] == {
             '__builtin_task_code__': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
@@ -2628,6 +2625,7 @@ class TestRunTaskEntryCoroutineCall:
         _run_entry_defaults: dict[str, Any],
     ) -> None:
         task_loop = TaskLoop()
+        task_loop.open().unwrap()
         _run_entry_defaults['task_loop'] = task_loop
         seen: list[asyncio.AbstractEventLoop] = []
 

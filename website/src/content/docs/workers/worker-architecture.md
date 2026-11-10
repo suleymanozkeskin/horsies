@@ -72,7 +72,7 @@ horsies worker myapp.instance:app --processes=8
 1. Load app from module
 2. Import task modules (for registry population)
 3. Start the preload parent (Linux)
-4. Start N children (each loads app independently)
+4. Start N children (each loads app independently). A child whose app has an `async def` task creates its event loop before it reports ready
 5. Wait until each child reports ready
 6. Subscribe to NOTIFY channels
 
@@ -119,13 +119,12 @@ Key features:
 
 In child process:
 
-1. For an `async def` task, create the event loop of the child, before the RUNNING update. When it cannot be created, the task returns to the queue unrun, with no attempt used, and the worker retires the child. When a second child cannot create its loop before any child has opened one, the worker also stops with a non-zero exit
-2. Resolve task from registry by name
-3. Deserialize arguments
-4. Start heartbeat thread
-5. Call task function. An `async def` task runs on the event loop of the child. The child keeps one loop until it stops, and the loop runs only while an async task runs. The result reports the asyncio tasks that are still on the loop after the task, and the worker retires a child that reports any
-6. Serialize result
-7. Stop heartbeat thread
+1. Resolve task from registry by name
+2. Deserialize arguments
+3. Start heartbeat thread
+4. Call task function. An `async def` task runs on the event loop that the child created at boot. The child keeps that loop until it stops, and the loop runs only while an async task runs. The result reports the asyncio tasks that are still on the loop after the task, and the worker retires a child that reports any
+5. Serialize result
+6. Stop heartbeat thread
 
 ### 5. Result Handling
 
@@ -300,7 +299,7 @@ Workers recover from transient infrastructure failures without operator interven
 - **Database outages**: Worker retries on connection loss during startup, claiming, and result writes. No crash, no manual restart.
 - **Silent NOTIFY channels**: If the PostgreSQL NOTIFY mechanism stops delivering (broken listener connection, dropped trigger), the worker falls back to periodic polling so tasks are still picked up.
 - **Child loss**: If a child dies, the worker starts a new child in that slot. Other children continue. A task still in CLAIMED status is requeued back to PENDING. A task already in RUNNING status is recovered through the same retry policy used by the reaper: if `WORKER_CRASHED` is listed in `auto_retry_for` and retries remain, the task is scheduled for retry; otherwise it is marked FAILED with a `WORKER_CRASHED` result.
-- **Child start failure**: A child that fails to start gets three attempts. If they all fail, or the OS refuses to start a process, the worker exits non-zero so that a supervisor restarts it. A failed [child hook](child-process-hooks) stops the worker at once, because a retry runs the same hook. An outside SIGKILL of a booting replacement child, such as an out-of-memory kill, does not use an attempt while another child is serving: the worker waits up to 5 seconds and starts another. A kill during the first start counts, and so does a kill when no other child is serving, because a worker that does no work must fail where a supervisor can see it.
+- **Child start failure**: A child that fails to start gets three attempts. A child that cannot create its event loop for `async def` tasks fails its start too. If they all fail, or the OS refuses to start a process, the worker exits non-zero so that a supervisor restarts it. A failed [child hook](child-process-hooks) stops the worker at once, because a retry runs the same hook. An outside SIGKILL of a booting replacement child, such as an out-of-memory kill, does not use an attempt while another child is serving: the worker waits up to 5 seconds and starts another. A kill during the first start counts, and so does a kill when no other child is serving, because a worker that does no work must fail where a supervisor can see it.
 
 ### Configuration
 

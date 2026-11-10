@@ -31,7 +31,6 @@ from horsies.core.lifecycle.classify import (
     ReplayWorkflowPhase2,
     ResultProduced,
     ResultUndecodable,
-    ReturnClaimedTaskToQueue,
     ScheduleAutomaticRetry,
     WorkerLevelFailure,
     classify,
@@ -87,7 +86,6 @@ class TestSentinelParsing:
             ('WORKFLOW_STOPPED', AbortReason.WORKFLOW_STOPPED),
             ('WORKFLOW_CHECK_FAILED', AbortReason.WORKFLOW_CHECK_FAILED),
             ('TASK_EXPIRED', AbortReason.TASK_EXPIRED),
-            ('TASK_LOOP_UNAVAILABLE', AbortReason.TASK_LOOP_UNAVAILABLE),
         ],
     )
     def test_every_child_sentinel_parses(
@@ -109,22 +107,6 @@ class TestSentinelParsing:
 
     def test_absent_reason_is_not_a_sentinel(self) -> None:
         assert parse_abort_reason(None) is None
-
-
-class TestATaskLoopRefusalReturnsTheTask:
-    """No task code ran, so the claim is released, with no terminal write."""
-
-    @pytest.mark.parametrize('is_workflow_task', [False, True], ids=['plain', 'workflow'])
-    def test_the_decision_returns_the_claimed_task_to_the_queue(
-        self,
-        is_workflow_task: bool,
-    ) -> None:
-        decision = classify(
-            AbortedBeforeResult(reason=AbortReason.TASK_LOOP_UNAVAILABLE),
-            _context(is_workflow_task=is_workflow_task),
-        )
-
-        assert decision == ReturnClaimedTaskToQueue(task_id='t1')
 
 
 class TestAbortsThatWriteNothing:

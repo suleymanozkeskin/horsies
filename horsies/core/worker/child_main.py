@@ -4,6 +4,8 @@ The child has two threads. The control thread owns socket reads, so EOF means
 the parent is gone, whatever the main thread is doing. The main thread boots
 the app, runs tasks one at a time, and writes results. An ``async def`` task
 runs on the child's one task loop (``task_loop.TaskLoop``), on the main thread.
+The child creates that loop at boot, before it reports ready, when its app has
+an ``async def`` task.
 
 When the parent is gone the child exits at once. Nothing can save its result,
 and a run that continues could overlap a retry of the same task.
@@ -36,11 +38,11 @@ from horsies.core.worker.child_protocol import (
     ChildFrame,
     FrameOverBound,
     InitFrame,
+    LoopCreateFailedFrame,
     LoopHoldsNoTask,
     LoopHoldsTasks,
     NoTaskLoop,
     ParentFrame,
-    TaskLoopUnavailable,
     ReadyFrame,
     ResultFrame,
     RssMb,
@@ -54,9 +56,11 @@ from horsies.core.worker.child_protocol import (
 )
 from horsies.core.worker.runtime import _read_current_rss_mb
 from horsies.core.worker.task_loop import (
+    AsyncTaskPresence,
     ExecutorAfterClose,
     ExecutorShutDown,
     ExecutorThreadsLeft,
+    LoopCreateFailed,
     TaskLoop,
 )
 
@@ -68,6 +72,9 @@ BAD_ARGUMENTS_EXIT_CODE: Final = 73
 # After a stop frame, when threads of the task loop's executor still run:
 # the child leaves without waiting for them, so ``atexit`` handlers do not run.
 STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE: Final = 74
+# At boot, after ``LoopCreateFailedFrame``: the app has an ``async def`` task,
+# and the child could not create the event loop for it.
+TASK_LOOP_CREATE_FAILED_EXIT_CODE: Final = 75
 INIT_FRAME_TIMEOUT_S: Final = 30.0
 # Metadata holds this text as JSON, and one character takes at most 12 bytes
 # there, so the reason stays well under ``MAX_META_BYTES``.
@@ -76,7 +83,7 @@ MAX_FAILED_REASON_CHARS: Final = 64 * 1024
 _PR_SET_PDEATHSIG: Final = 1
 
 WireResult = tuple[bool, str, str | None]
-BootFn = Callable[[InitFrame], None]
+BootFn = Callable[[InitFrame], AsyncTaskPresence]
 RunTaskFn = Callable[[RunFrame, InitFrame, TaskLoop], WireResult]
 
 
@@ -265,11 +272,10 @@ def _run_or_exit(
 def _refuse_run_on_a_child_to_retire(task_loop: TaskLoop, frame: RunFrame) -> None:
     """Exit loud when the task loop report says this child must be retired.
 
-    The child reports work left on its loop, or a loop it could not create,
-    in its result frame, and the parent retires the child. So a run frame
-    here is a defect in the parent.
+    The child reports work left on its loop in its result frame, and the
+    parent retires the child. So a run frame here is a defect in the parent.
     """
-    match task_loop.report(task_loop.state):
+    match task_loop.report():
         case NoTaskLoop() | LoopHoldsNoTask():
             return
         case LoopHoldsTasks(count=count):
@@ -279,17 +285,56 @@ def _refuse_run_on_a_child_to_retire(task_loop: TaskLoop, frame: RunFrame) -> No
                 frame.task_id,
                 count,
             )
-        case TaskLoopUnavailable(detail=detail):
-            logger.critical(
-                'Parent sent task %s to a child that has no task loop (%s); '
-                'such a child must be retired',
-                frame.task_id,
-                detail,
-            )
         case _ as unreachable:
             assert_never(unreachable)
     flush_output()
     os._exit(BAD_PARENT_FRAME_EXIT_CODE)
+
+
+def open_task_loop_at_boot(
+    sock: socket.socket,
+    presence: AsyncTaskPresence,
+) -> TaskLoop:
+    """Return the task loop of this child, open when its app has an
+    ``async def`` task, and not created when it has none.
+
+    When the loop cannot be created, the child sends ``LoopCreateFailedFrame``
+    and exits with ``TASK_LOOP_CREATE_FAILED_EXIT_CODE``, before its ready
+    frame. The parent counts that as a failed boot attempt, and no task
+    reaches this child.
+    """
+    task_loop = TaskLoop()
+    match presence:
+        case AsyncTaskPresence.NO_ASYNC_TASK:
+            return task_loop
+        case AsyncTaskPresence.HAS_ASYNC_TASKS:
+            match task_loop.open():
+                case Ok():
+                    return task_loop
+                case Err(failed):
+                    _fail_boot_without_task_loop(sock, failed)
+
+
+def _fail_boot_without_task_loop(
+    sock: socket.socket,
+    failed: LoopCreateFailed,
+) -> NoReturn:
+    """Report the failed loop creation to the parent, then end the process.
+
+    The child has run no task, so it does not wait for threads that boot
+    started: it flushes its log handlers and its output, and leaves with
+    ``os._exit``.
+    """
+    _send_child_frame(
+        sock,
+        LoopCreateFailedFrame(
+            error_name=bounded_text(failed.error_name, MAX_FAILED_REASON_CHARS),
+            detail=bounded_text(failed.detail, MAX_FAILED_REASON_CHARS),
+        ),
+    )
+    logging.shutdown()
+    flush_output()
+    os._exit(TASK_LOOP_CREATE_FAILED_EXIT_CODE)
 
 
 def exit_after_stop(executor: ExecutorAfterClose) -> NoReturn:
@@ -328,17 +373,21 @@ def serve(
 ) -> NoReturn:
     """Run the child until the parent sends a stop frame, then end the process.
 
-    Every task of the child gets the same ``TaskLoop``. Each result frame
-    reports the state of that loop. The stop frame closes it, bounded by
+    After ``boot``, the child creates its ``TaskLoop`` when ``boot`` reports
+    an ``async def`` task in the app, and only then sends its ready frame.
+    Every task of the child gets that ``TaskLoop``. Each result frame reports
+    the state of that loop. The stop frame closes it, bounded by
     ``LOOP_CLOSE_TIMEOUT_S``, and ``exit_after_stop`` ends the process.
 
-    Failure exits: a run frame after a report that this child must be
-    retired is a parent defect and ends the process with
-    ``BAD_PARENT_FRAME_EXIT_CODE``. An exception from ``boot`` propagates, so the child exits
-    non-zero before it reports ready. A parent that is gone or that sends a
-    bad frame ends the process through ``os._exit``, and so does an exception
-    from ``run_task``: the parent sees the exit and recovers the row by its
-    status. Does not write to the database itself.
+    Failure exits: a loop that cannot be created ends the boot through
+    ``open_task_loop_at_boot``, before the ready frame. A run frame after a
+    report that this child must be retired is a parent defect and ends the
+    process with ``BAD_PARENT_FRAME_EXIT_CODE``. An exception from ``boot``
+    propagates, so the child exits non-zero before it reports ready. A parent
+    that is gone or that sends a bad frame ends the process through
+    ``os._exit``, and so does an exception from ``run_task``: the parent sees
+    the exit and recovers the row by its status. Does not write to the
+    database itself.
     """
     ignore_stop_signals()
     bind_to_parent(parent_pid)
@@ -350,15 +399,13 @@ def serve(
         name='horsies-child-control',
         daemon=True,
     ).start()
-    boot(init)
+    task_loop = open_task_loop_at_boot(sock, boot(init))
     gc.collect()
-    task_loop = TaskLoop()
     _send_child_frame(sock, ReadyFrame(pid=os.getpid(), rss=_read_rss()))
     while True:
         match work.get():
             case RunFrame() as frame:
                 _refuse_run_on_a_child_to_retire(task_loop, frame)
-                state_before_task = task_loop.state
                 ok, result_json, failed_reason = _bounded_result(
                     frame,
                     _run_or_exit(run_task, frame, init, task_loop),
@@ -371,7 +418,7 @@ def serve(
                         result_json=result_json,
                         failed_reason=failed_reason,
                         rss=_read_rss(),
-                        task_loop=task_loop.report(state_before_task),
+                        task_loop=task_loop.report(),
                     ),
                 )
             case StopFrame():
@@ -387,9 +434,17 @@ def restore_parent_state(init: InitFrame) -> None:
     multiprocessing.current_process().name = init.process_name
 
 
-def boot_app(init: InitFrame) -> None:
-    """Restore the parent's import state, then run the child initializer."""
-    from horsies.core.worker.child_runner import _child_initializer
+def boot_app(init: InitFrame) -> AsyncTaskPresence:
+    """Restore the parent's import state, then run the child initializer.
+
+    Returns whether the booted app has an ``async def`` task, which decides
+    whether the child creates its task loop.
+    """
+    from horsies.core.worker.child_runner import (
+        _child_initializer,
+        async_task_presence,
+    )
+    from horsies.core.worker.current import get_current_app
 
     restore_parent_state(init)
     _child_initializer(
@@ -403,6 +458,7 @@ def boot_app(init: InitFrame) -> None:
         init.child_pool_max_size,
         init.child_pool_check,
     )
+    return async_task_presence(get_current_app())
 
 
 def run_child_task(frame: RunFrame, init: InitFrame, task_loop: TaskLoop) -> WireResult:

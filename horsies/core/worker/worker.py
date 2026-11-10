@@ -38,7 +38,6 @@ from horsies.core.worker.slots import (
     SlotPoolConfig,
     PreloadRefused,
     SpawnFailed,
-    TaskLoopRefusedRepeatedly,
 )
 from horsies.core.worker.child_runner import (  # noqa: F401
     CHILD_HOOK_FAILURE_EXIT_CODE as CHILD_HOOK_FAILURE_EXIT_CODE,
@@ -364,14 +363,11 @@ class Worker(
     async def _slot_failure_loop(self, pool: SlotPool) -> None:
         """Service loop: end the worker when no replacement child can start.
 
-        Running tasks drain first, through ``stop``, and so do finalizers:
-        a task whose child could not create its task loop returns to the
-        queue before the worker exits. Returns after a hook failure, because
-        that stop is a graceful one.
+        Running tasks drain first, through ``stop``. Returns after a hook
+        failure, because that stop is a graceful one.
 
         Raises:
-            ChildStartFailedError: no replacement child could start, or
-                children kept failing to create their task loop.
+            ChildStartFailedError: no replacement child could start.
         """
         failure = await pool.wait_failed()
         match failure:
@@ -381,17 +377,6 @@ class Worker(
                 )
             case SpawnFailed() | BootAttemptsExhausted() | PreloadRefused():
                 raise ChildStartFailedError(f'worker child start failed: {failure}')
-            case TaskLoopRefusedRepeatedly(
-                refusals=refusals,
-                pid=pid,
-                task_id=task_id,
-                detail=detail,
-            ):
-                raise ChildStartFailedError(
-                    f'{refusals} worker children could not create the task loop '
-                    f'with no open in between; the last, pid {pid}, for task '
-                    f'{task_id}: {detail}',
-                )
             case _ as unreachable:
                 assert_never(unreachable)
 

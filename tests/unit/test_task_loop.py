@@ -18,10 +18,7 @@ from horsies.core.utils.loop_runner import in_running_event_loop
 from horsies.core.worker.child_protocol import (
     LoopHoldsNoTask,
     LoopHoldsTasks,
-    LoopOpenedEarlier,
-    LoopOpenedForThisTask,
     NoTaskLoop,
-    TaskLoopUnavailable,
 )
 from horsies.core.worker import task_loop as task_loop_module
 from horsies.core.worker.task_loop import (
@@ -29,7 +26,6 @@ from horsies.core.worker.task_loop import (
     ExecutorThreadsLeft,
     LoopClosed,
     LoopCreateFailed,
-    LoopCreateRefused,
     LoopNotCreated,
     LoopOpen,
     TaskLoop,
@@ -100,27 +96,21 @@ class TestOpen:
         assert new_task_loop.open() == Ok(None)
         assert _open_loop(new_task_loop) is loop
 
-    def test_a_refused_loop_stays_refused(
+    def test_a_refused_loop_is_an_error_and_creates_no_loop(
         self,
         new_task_loop: TaskLoop,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The worker replaces this child, so the child does not try again."""
-        calls: list[str] = []
-
-        def no_descriptors() -> asyncio.AbstractEventLoop:
-            calls.append('new_event_loop')
-            return _no_descriptors()
-
-        monkeypatch.setattr(asyncio, 'new_event_loop', no_descriptors)
+        """The child then fails its boot, so nothing runs on this loop."""
+        monkeypatch.setattr(asyncio, 'new_event_loop', _no_descriptors)
         failed = LoopCreateFailed(error_name='OSError', detail=EMFILE_DETAIL)
 
         assert new_task_loop.open() == Err(failed)
-        assert new_task_loop.state == LoopCreateRefused(failed)
-        assert new_task_loop.open() == Err(failed)
-        assert calls == ['new_event_loop']
-        assert new_task_loop.report(LoopNotCreated()) == TaskLoopUnavailable(
-            detail=failed.describe(),
+        assert new_task_loop.state == LoopNotCreated()
+        assert new_task_loop.report() == NoTaskLoop()
+        assert failed.describe() == (
+            'the event loop for async tasks could not be created: '
+            f'OSError: {EMFILE_DETAIL}'
         )
 
     def test_a_refused_loop_runs_nothing_and_closes(
@@ -132,7 +122,7 @@ class TestOpen:
         assert isinstance(new_task_loop.open(), Err)
         coroutine = _value(1)
 
-        with pytest.raises(AssertionError, match='after open failed'):
+        with pytest.raises(AssertionError, match='before open'):
             new_task_loop.run(coroutine)
 
         assert inspect.getcoroutinestate(coroutine) == inspect.CORO_CLOSED
@@ -150,7 +140,7 @@ class TestOpen:
         error: Exception,
     ) -> None:
         """Not only the OS: an event loop policy can raise too. The child
-        then takes the counted refusal path, not a crash."""
+        then takes the boot failure path, not a crash."""
 
         def refuses() -> asyncio.AbstractEventLoop:
             raise error
@@ -159,7 +149,7 @@ class TestOpen:
         failed = LoopCreateFailed(error_name=type(error).__name__, detail=str(error))
 
         assert new_task_loop.open() == Err(failed)
-        assert new_task_loop.state == LoopCreateRefused(failed)
+        assert new_task_loop.state == LoopNotCreated()
 
     def test_keyboard_interrupt_from_the_creation_is_not_caught(
         self,
@@ -295,33 +285,17 @@ class TestRun:
 
 class TestReport:
     def test_no_loop_is_no_task_loop(self, new_task_loop: TaskLoop) -> None:
-        assert new_task_loop.report(new_task_loop.state) == NoTaskLoop()
+        assert new_task_loop.report() == NoTaskLoop()
 
-    def test_the_task_that_opened_the_loop_says_so_and_a_later_one_does_not(
-        self,
-        new_task_loop: TaskLoop,
-    ) -> None:
-        """The parent counts an open only once per child: for the task that
-        found no loop and left an open one."""
-        first_before = new_task_loop.state
-        new_task_loop.open().unwrap()
-        new_task_loop.run(_value(1))
-        first = new_task_loop.report(first_before)
-
-        second_before = new_task_loop.state
-        new_task_loop.run(_value(2))
-        second = new_task_loop.report(second_before)
-
-        assert first == LoopHoldsNoTask(opening=LoopOpenedForThisTask())
-        assert second == LoopHoldsNoTask(opening=LoopOpenedEarlier())
+    def test_an_open_loop_with_no_run_holds_no_task(self, task_loop: TaskLoop) -> None:
+        assert task_loop.report() == LoopHoldsNoTask()
 
     def test_a_run_that_awaits_its_work_leaves_no_task(self, task_loop: TaskLoop) -> None:
         async def awaits_its_task() -> None:
             await asyncio.get_running_loop().create_task(asyncio.sleep(0))
 
-        before = task_loop.state
         task_loop.run(awaits_its_task())
-        assert task_loop.report(before) == LoopHoldsNoTask(opening=LoopOpenedEarlier())
+        assert task_loop.report() == LoopHoldsNoTask()
 
     def test_tasks_that_a_run_did_not_await_are_counted(self, task_loop: TaskLoop) -> None:
         kept: list[asyncio.Task[bool]] = []
@@ -331,18 +305,13 @@ class TestReport:
             kept.extend(loop.create_task(asyncio.Event().wait()) for _ in range(2))
             await asyncio.sleep(0)
 
-        before = task_loop.state
         task_loop.run(leaves_two())
-        assert task_loop.report(before) == LoopHoldsTasks(
-            count=2,
-            opening=LoopOpenedEarlier(),
-        )
+        assert task_loop.report() == LoopHoldsTasks(count=2)
 
     def test_a_call_after_close_is_a_defect(self, task_loop: TaskLoop) -> None:
-        before = task_loop.state
         task_loop.close()
         with pytest.raises(AssertionError, match='after close'):
-            task_loop.report(before)
+            task_loop.report()
 
 
 class TestClose:

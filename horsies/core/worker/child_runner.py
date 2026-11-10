@@ -63,7 +63,13 @@ from horsies.core.worker.stored_timeout import (
     TimeoutRefusal,
     TimeoutValueInvalid,
 )
-from horsies.core.worker.task_loop import TaskLoop
+from horsies.core.worker.task_loop import (
+    AsyncTaskPresence,
+    LoopClosed,
+    LoopNotCreated,
+    LoopOpen,
+    TaskLoop,
+)
 from horsies.core.lifecycle.commands import (
     AbandonOwnedNode,
     CancelOwnedNode,
@@ -78,7 +84,6 @@ from horsies.core.lifecycle.outcomes import (
     SourceStateConflict,
     TaskAbsent,
 )
-from horsies.core.lifecycle.classify import AbortReason
 from horsies.core.lifecycle.persistence import apply_sync
 from horsies.core.task_decorator import TaskBodyKind
 from horsies.core.types.result import Err, Ok, is_err
@@ -1072,32 +1077,21 @@ def _mark_task_finalizing(
         )
 
 
-@dataclass(frozen=True, slots=True)
-class _BodyKindUnknown:
-    """The registry read before the RUNNING update gave no task kind.
+def async_task_presence(app: Horsies) -> AsyncTaskPresence:
+    """Whether the registry of ``app`` holds an ``async def`` task function.
 
-    The lookup failed, or the entry is not a task function: an object put in
-    with ``app.tasks[name] = obj`` has no ``task_body_kind``. The task then
-    takes the resolution step after the RUNNING update, which reports either
-    case as ``WORKER_RESOLUTION_ERROR``.
+    Reads the in-memory registry only, and runs no code of the entries: it
+    reads ``task_body_kind`` from the class of each entry, where the task
+    decorator sets it. An entry with no such class attribute is not a task
+    function, and the run step reports it as ``WORKER_RESOLUTION_ERROR``.
     """
-
-
-def _registered_body_kind(task_name: str) -> TaskBodyKind | _BodyKindUnknown:
-    """How the registered task was defined. Reads the in-memory registry only.
-
-    Raises no ``Exception``: it runs before the containment try of
-    ``_run_task_entry``.
-    """
-    try:
-        kind = getattr(get_current_app().tasks[task_name], 'task_body_kind', None)
-    except Exception:
-        return _BodyKindUnknown()
-    match kind:
-        case TaskBodyKind():
-            return kind
-        case _:
-            return _BodyKindUnknown()
+    for task in app.tasks.values():
+        match getattr(type(task), 'task_body_kind', None):
+            case TaskBodyKind.ASYNC_DEF:
+                return AsyncTaskPresence.HAS_ASYNC_TASKS
+            case _:
+                continue
+    return AsyncTaskPresence.NO_ASYNC_TASK
 
 
 def _resolution_failure(
@@ -1123,33 +1117,36 @@ def _resolution_failure(
     return (True, serialize_error_payload(tr), reason)
 
 
-def _open_task_loop_before_running(
-    task_name: str,
-    task_id: str,
-    task_loop: TaskLoop,
-) -> Tuple[bool, str, Optional[str]] | None:
-    """Create the task loop of an ``async def`` task while the task is claimed.
+def _why_not_runnable(body_kind: object, task_loop: TaskLoop) -> str | None:
+    """Why this child cannot run a registry entry, or None when it can.
 
-    Returns None when the task may go on to its RUNNING update. Returns the
-    abort tuple with ``AbortReason.TASK_LOOP_UNAVAILABLE`` when the OS refused
-    the loop: no task code ran, the row is still CLAIMED, and the worker
-    returns the task to the queue. A ``def`` task does not touch the loop.
+    Only the task decorator makes a task function, with its
+    ``task_body_kind``. An ``async def`` task needs the task loop, which the
+    child creates at boot only when its app had an ``async def`` task then:
+    a task that was registered later finds no loop. A run after the loop
+    closed is a defect in the caller: ``AssertionError``.
     """
-    match _registered_body_kind(task_name):
-        case TaskBodyKind.ASYNC_DEF:
-            match task_loop.open():
-                case Ok():
-                    return None
-                case Err(failed):
-                    logger.error(
-                        'Task %s (%s) did not start: %s',
-                        task_name,
-                        task_id,
-                        failed.describe(),
-                    )
-                    return (False, '', AbortReason.TASK_LOOP_UNAVAILABLE.value)
-        case TaskBodyKind.DEF | _BodyKindUnknown():
+    match body_kind:
+        case TaskBodyKind.DEF:
             return None
+        case TaskBodyKind.ASYNC_DEF:
+            match task_loop.state:
+                case LoopOpen():
+                    return None
+                case LoopNotCreated():
+                    return (
+                        'the task is async def, and this child has no task loop: '
+                        'no async def task was registered when the child booted'
+                    )
+                case LoopClosed():
+                    raise AssertionError('a task ran after the task loop closed')
+                case _ as unreachable:
+                    assert_never(unreachable)
+        case _:
+            return (
+                'the registry entry is not a task function: its '
+                f'task_body_kind is {body_kind!r}'
+            )
 
 
 def _task_call_result(
@@ -1161,7 +1158,7 @@ def _task_call_result(
 
     The call of a ``def`` task returns its result. The call of an
     ``async def`` task returns a coroutine, which runs on ``task_loop``; the
-    loop was opened before the RUNNING update. Exceptions from that run
+    child opened that loop at boot. Exceptions from that run
     propagate. The wrapper returns one of the two, so another value is a
     defect in the library: ``AssertionError``.
     """
@@ -1207,22 +1204,11 @@ def _run_task_entry(
 
     This is the child's containment seam: the execution body is wrapped in
     ``except BaseException`` and folds everything into the wire tuple. The
-    steps before that try return wire tuples themselves: the task loop open
-    of an ``async def`` task, the preflight and the ownership confirm. The
-    task loop open turns an ``Exception`` from loop creation into
-    ``LoopCreateFailed`` and leaves a registry entry with no task kind to
-    the resolution step, so it adds no escape. ``_start_heartbeat_thread``
-    can escape (see its docstring), and so can a ``BaseException`` that is
-    not an ``Exception``, such as ``KeyboardInterrupt``; the parent
-    recovers either as a lost child.
+    pre-try steps (preflight, ownership confirm) return wire tuples
+    themselves; only ``_start_heartbeat_thread`` can escape (see its
+    docstring) and is recovered by the parent as a future failure.
     """
     logger.info(f'Starting task execution: {task_name} ({task_id})')
-
-    # An async task needs the task loop. Create it while the row is still
-    # CLAIMED, so a refusal returns the task to the queue unrun.
-    loop_abort = _open_task_loop_before_running(task_name, task_id, task_loop)
-    if loop_abort is not None:
-        return loop_abort
 
     # Mark as RUNNING in DB at the actual start of execution (child process).
     # CRITICAL: Include ownership check to prevent double-execution when claim
@@ -1282,23 +1268,17 @@ def _run_task_entry(
                 f'Failed to resolve {task_name}: {type(e).__name__}: {e}',
                 f'{type(e).__name__}: {e}',
             )
-        match body_kind:
-            case TaskBodyKind():
+        match _why_not_runnable(body_kind, task_loop):
+            case None:
                 pass
-            case _:
-                # Only the decorator makes a task function. An object put in
-                # the registry by hand cannot be run as a task.
-                not_a_task = (
-                    'the registry entry is not a task function: its '
-                    f'task_body_kind is {body_kind!r}'
-                )
-                logger.error(f'Failed to resolve task {task_name}: {not_a_task}')
+            case not_runnable:
+                logger.error(f'Failed to resolve task {task_name}: {not_runnable}')
                 return _resolution_failure(
                     task_name,
                     task_id,
                     heartbeat_stop_event,
-                    f'Failed to resolve {task_name}: {not_a_task}',
-                    not_a_task,
+                    f'Failed to resolve {task_name}: {not_runnable}',
+                    not_runnable,
                 )
 
         # Deserialize task arguments. Strict-serde: positional args are

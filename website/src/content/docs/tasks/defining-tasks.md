@@ -51,11 +51,11 @@ An async task must await the work that it starts:
 - A client that keeps its own background tasks on the loop, for example a keepalive or a consumer task, causes a child replacement after each async task.
 - A thread that `asyncio.to_thread()` starts can outlive its task, for example when a timeout ends the wait for it. The thread is not an asyncio task, so it does not cause a replacement. When the worker stops the child, the child does not wait for that thread past the 5-second close: it exits, and its `atexit` handlers do not run.
 
-A child creates its event loop before it marks its first async task RUNNING. When the loop cannot be created, for example because the process has no file descriptor left or an event loop policy raises:
+A child creates its event loop at boot, before it reports ready, when the app has at least one `async def` task. A child of an app with no `async def` task creates no loop. When the loop cannot be created, for example because the process has no file descriptor left or an event loop policy raises:
 
-- The task goes back to the queue unrun. It uses no attempt and no retry.
-- The worker replaces the child, and a new child runs the next task.
-- When a second child cannot create its loop before any child has opened one, the cause is the process environment, and a further child would fail too. The worker then stops with a non-zero exit, and its supervisor restarts it. A `def` task does not count either way.
+- The child fails its boot, and no task reaches it.
+- The worker counts it as a failed child start. After three failed attempts, the worker exits non-zero, so its supervisor restarts it. See [Worker Architecture](/horsies/workers/worker-architecture/#what-it-handles).
+- The log and the error name the cause, for example `the child could not create the event loop for async tasks: OSError: [Errno 24] Too many open files`.
 
 In an async task, send with `.send_async()` or `.schedule_async()`. The sync `.send()` and `.schedule()` refuse a running event loop: they return `Err(TaskSendAsyncContext)` and enqueue nothing. See [Sending Tasks](sending-tasks).
 

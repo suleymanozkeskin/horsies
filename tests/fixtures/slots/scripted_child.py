@@ -4,6 +4,10 @@ It speaks the real protocol through ``child_main.serve``. Only boot and task
 execution are replaced: ``task_name`` selects an operation, ``kwargs_json``
 holds its argument, and ``app_locator`` selects the boot behavior. It needs no
 database.
+
+Each boot that passes reports an app with ``async def`` tasks, so ``serve``
+creates the task loop, except the ``no_async`` modes. The ``loop_*`` modes make
+that creation raise ``OSError(EMFILE)``.
 """
 
 # pyright: reportPrivateUsage=false
@@ -24,8 +28,6 @@ import time
 from collections.abc import Coroutine
 from typing import Any
 
-from horsies.core.lifecycle.classify import AbortReason
-from horsies.core.types.result import Err, Ok
 from horsies.core.worker.child_main import WireResult, _send_child_frame, serve
 from horsies.core.worker.child_protocol import (
     FRAME_HEADER,
@@ -40,7 +42,7 @@ from horsies.core.worker.child_protocol import (
 from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
 from horsies.core.utils.loop_runner import in_running_event_loop
 from horsies.core.worker import task_loop as task_loop_module
-from horsies.core.worker.task_loop import TaskLoop
+from horsies.core.worker.task_loop import AsyncTaskPresence, TaskLoop
 
 _sock: socket.socket
 # The loop holds only weak references to its tasks.
@@ -53,11 +55,56 @@ def _pid_result() -> WireResult:
     return True, str(os.getpid()), None
 
 
-def _boot(init: InitFrame) -> None:
+def _no_descriptors() -> asyncio.AbstractEventLoop:
+    raise OSError(errno.EMFILE, 'Too many open files')
+
+
+def _boot_mark(path: str) -> int:
+    """Add one mark for this boot. Return the marks so far, this one included."""
+    with open(path, 'a+', encoding='ascii') as marks:
+        marks.write('x')
+        marks.seek(0)
+        return len(marks.read())
+
+
+def _loop_boot(mode: str, argument: str, init: InitFrame) -> AsyncTaskPresence:
+    """Boot modes for the task loop creation at boot."""
+    match mode:
+        case 'no_async':
+            return AsyncTaskPresence.NO_ASYNC_TASK
+        case 'no_async_no_descriptors':
+            asyncio.new_event_loop = _no_descriptors
+            return AsyncTaskPresence.NO_ASYNC_TASK
+        case 'loop_create_fails':
+            asyncio.new_event_loop = _no_descriptors
+        case 'loop_fails_first':
+            # The first boots cannot create the loop, then boots pass.
+            if _boot_mark(argument) <= int(init.imports[0]):
+                asyncio.new_event_loop = _no_descriptors
+        case 'loop_fails_after_first':
+            # The first boots pass, then the next boots cannot create the loop.
+            seen = _boot_mark(argument)
+            first_boots = int(init.imports[1])
+            if first_boots < seen <= first_boots + int(init.imports[0]):
+                asyncio.new_event_loop = _no_descriptors
+        case _:
+            raise AssertionError(mode)
+    return AsyncTaskPresence.HAS_ASYNC_TASKS
+
+
+def _boot(init: InitFrame) -> AsyncTaskPresence:
     mode, _, argument = init.app_locator.partition(':')
     match mode:
         case 'ok':
-            return
+            pass
+        case (
+            'no_async'
+            | 'no_async_no_descriptors'
+            | 'loop_create_fails'
+            | 'loop_fails_first'
+            | 'loop_fails_after_first'
+        ):
+            return _loop_boot(mode, argument, init)
         case 'hook_fails':
             os._exit(CHILD_HOOK_FAILURE_EXIT_CODE)
         case 'raises':
@@ -85,12 +132,13 @@ def _boot(init: InitFrame) -> None:
                     os.kill(os.getpid(), signal.SIGKILL)
                 raise RuntimeError('scripted replacement boot failure')
         case 'parent_identity':
-            return
+            pass
         case 'close_timeout':
             # A short close deadline keeps a test of the close bound fast.
             setattr(task_loop_module, 'LOOP_CLOSE_TIMEOUT_S', float(argument))
         case _:
             raise AssertionError(mode)
+    return AsyncTaskPresence.HAS_ASYNC_TASKS
 
 
 def _socket_count() -> int:
@@ -146,24 +194,8 @@ async def _thread_outlives_wait(seconds: float) -> str:
 
 
 def _run_async(task_loop: TaskLoop, coroutine: Coroutine[Any, Any, str]) -> str:
-    """Open the loop, as the child runner does before RUNNING, then run."""
-    task_loop.open().unwrap()
+    """Run on the loop that ``serve`` opened at boot, as the child runner does."""
     return task_loop.run(coroutine)
-
-
-def _no_descriptors() -> asyncio.AbstractEventLoop:
-    raise OSError(errno.EMFILE, 'Too many open files')
-
-
-def _open_without_descriptors(task_loop: TaskLoop) -> WireResult:
-    """Open the loop while the process has no descriptor left, as the child
-    runner does before the RUNNING update of an async task."""
-    asyncio.new_event_loop = _no_descriptors
-    match task_loop.open():
-        case Ok():
-            raise AssertionError('the loop opened with no descriptor left')
-        case Err():
-            return False, '', AbortReason.TASK_LOOP_UNAVAILABLE.value
 
 
 def _no_running_loop() -> str:
@@ -187,8 +219,8 @@ def _run(frame: RunFrame, init: InitFrame, task_loop: TaskLoop) -> WireResult:
             return True, _no_running_loop(), None
         case 'async_pid':
             return True, _run_async(task_loop, _async_pid()), None
-        case 'loop_unavailable':
-            return _open_without_descriptors(task_loop)
+        case 'loop_state':
+            return True, type(task_loop.state).__name__, None
         case 'leave_pending':
             return True, _run_async(task_loop, _leave_pending(argument)), None
         case 'thread_outlives_wait':

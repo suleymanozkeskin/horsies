@@ -1,7 +1,7 @@
 """Deciding what a finished child means, before any of it is written down.
 
 A child process reports back through two channels that predate this module: a
-success flag and a free-text reason, plus a serialized result payload. Six of
+success flag and a free-text reason, plus a serialized result payload. Five of
 those reason strings are not reasons at all — they are control-flow sentinels
 telling the worker that finalization must not proceed, or must proceed
 differently. Comparing them as strings at the point of use is what let a
@@ -60,10 +60,6 @@ class AbortReason(Enum):
     WORKFLOW_STOPPED = _WORKFLOW_STOPPED
     WORKFLOW_CHECK_FAILED = 'WORKFLOW_CHECK_FAILED'
     TASK_EXPIRED = OutcomeCode.TASK_EXPIRED.value
-    # The child could not create the event loop of an async task. It stopped
-    # before the RUNNING update, so the row is still CLAIMED and no task code
-    # ran.
-    TASK_LOOP_UNAVAILABLE = 'TASK_LOOP_UNAVAILABLE'
 
 
 def parse_abort_reason(failed_reason: str | None) -> AbortReason | None:
@@ -208,25 +204,11 @@ class ApplyTerminalization:
     command: TerminalizationCommand
 
 
-@dataclass(frozen=True, slots=True)
-class ReturnClaimedTaskToQueue:
-    """Release the claim: the row goes back to PENDING, unrun.
-
-    The child stopped before the RUNNING update, so no task code ran and the
-    task uses no attempt and no retry. The release is fenced to this
-    worker's claim; a workflow node keeps its status and its task id, which
-    still match a PENDING row.
-    """
-
-    task_id: str
-
-
 type FinalizeDecision = (
     NoTerminalAction
     | ScheduleAutomaticRetry
     | ReplayWorkflowPhase2
     | ApplyTerminalization
-    | ReturnClaimedTaskToQueue
 )
 
 
@@ -296,8 +278,6 @@ def _classify_abort(
                     reason=FinalizeNoOpReason.EXPIRED_PLAIN_TASK,
                 )
             return ReplayWorkflowPhase2(task_id=context.task_id)
-        case AbortReason.TASK_LOOP_UNAVAILABLE:
-            return ReturnClaimedTaskToQueue(task_id=context.task_id)
         case AbortReason.WORKFLOW_CHECK_FAILED:
             # The claim is held but the node linkage is gone, so this row can
             # never reach RUNNING. Cancelling it is the only progress

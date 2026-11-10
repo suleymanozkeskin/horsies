@@ -9,6 +9,7 @@ Linux. On macOS the same verdicts are covered through SIGKILL and ``os._exit``.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import random
 import signal
@@ -30,18 +31,18 @@ from horsies.core.types.result import Err, Ok
 from horsies.core.worker.child_main import (
     BAD_PARENT_FRAME_EXIT_CODE,
     STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE,
+    TASK_LOOP_CREATE_FAILED_EXIT_CODE,
 )
 from horsies.core.worker.config import ChildPreload
 from horsies.core.worker.child_protocol import (
     InitFrame,
+    LoopCreateFailedFrame,
     LoopHoldsNoTask,
     LoopHoldsTasks,
-    LoopOpenedForThisTask,
     NoTaskLoop,
     ReadyFrame,
     ResultFrame,
     RssUnreadable,
-    TaskLoopUnavailable,
     RunFrame,
     encode_child_frame,
 )
@@ -49,7 +50,6 @@ from horsies.core.worker.stored_timeout import NoTimeout
 from horsies.core.worker import slots
 from horsies.core.worker.slots import (
     CHILD_BOOT_ATTEMPTS,
-    MAX_TASK_LOOP_REFUSALS_WITHOUT_OPEN,
     CHILD_BOOT_KILL_DELAY_MAX_S,
     SLOT_DEFECT_LIMIT,
     Assigned,
@@ -75,7 +75,6 @@ from horsies.core.worker.slots import (
     SlotPoolConfig,
     SpawnFailed,
     TaskFinished,
-    TaskLoopRefusedRepeatedly,
     child_exit_from_returncode,
     describe_exit,
     interpreter_flags,
@@ -221,14 +220,10 @@ def _alive(pid: int) -> bool:
     return bool(state.stdout.strip()) and not state.stdout.strip().startswith('Z')
 
 
-async def _refused(pool: SlotPool) -> RunFrame:
-    """Submit a task whose child is refused a task loop, and wait for it."""
-    frame = _frame('loop_unavailable')
-    match await _outcome(pool.submit(frame)):
-        case TaskFinished(failed_reason='TASK_LOOP_UNAVAILABLE', task_loop=TaskLoopUnavailable()):
-            return frame
-        case other:
-            raise AssertionError(other)
+EMFILE_LOOP_DETAIL = (
+    'the child could not create the event loop for async tasks: '
+    'OSError: [Errno 24] Too many open files'
+)
 
 
 async def _until(predicate: Callable[[], bool], timeout_s: float = 10.0) -> None:
@@ -383,6 +378,117 @@ class TestBoot:
         await pool.stop(0)
         assert marks.read_text() == 'xx'
 
+    async def test_a_child_that_cannot_create_its_task_loop_reports_it_and_exits(
+        self,
+    ) -> None:
+        """The frame comes in place of the ready frame, so the child never
+        takes a task. This drives one child directly, to read the frame and
+        the exit code that the pool sees as one failed boot attempt."""
+        config = _config(init=_init('loop_create_fails'))
+        match await Child.start(config, config.init):
+            case Ok(child):
+                pass
+            case Err(failed):
+                raise AssertionError(failed)
+        try:
+            frame = await child.await_frame(OUTCOME_TIMEOUT_S)
+            assert frame == LoopCreateFailedFrame(
+                error_name='OSError',
+                detail='[Errno 24] Too many open files',
+            )
+            await _until(lambda: child.has_exited)
+            exited = ExitedWith(TASK_LOOP_CREATE_FAILED_EXIT_CODE)
+            assert child._current_exit() == exited
+        finally:
+            await child.dispose_lost()
+
+    async def test_a_task_loop_failure_at_boot_uses_every_attempt_and_names_its_cause(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        monkeypatch.setattr(slots, 'CHILD_BOOT_RETRY_DELAY_S', 0.01)
+        pool = SlotPool(_config(init=_init('loop_create_fails')), pending_limit=10)
+        with caplog.at_level(logging.WARNING, logger='horsies.worker'):
+            started = await pool.start()
+        await pool.stop(0)
+
+        assert started == Err(
+            BootAttemptsExhausted(
+                attempts=CHILD_BOOT_ATTEMPTS,
+                last_detail=EMFILE_LOOP_DETAIL,
+            ),
+        )
+        attempts = [
+            record.getMessage()
+            for record in caplog.records
+            if record.getMessage().startswith('Child boot attempt')
+        ]
+        assert attempts == [
+            f'Child boot attempt {number}/{CHILD_BOOT_ATTEMPTS} failed on slot 0: '
+            f'{EMFILE_LOOP_DETAIL}'
+            for number in range(1, CHILD_BOOT_ATTEMPTS + 1)
+        ]
+
+    async def test_no_task_reaches_a_child_that_has_no_task_loop(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A task that waits for the slot is released unrun when the pool fails."""
+        monkeypatch.setattr(slots, 'CHILD_BOOT_RETRY_DELAY_S', 0.01)
+        pool = SlotPool(_config(init=_init('loop_create_fails')), pending_limit=10)
+        handle = pool.submit(_frame('echo', 'x'))
+        started = await pool.start()
+        await pool.stop(0)
+
+        assert isinstance(started, Err)
+        assert handle.assigned.result() == NotDispatched(NotRunCause.POOL_FAILED)
+        assert await _outcome(handle) == NotDispatched(NotRunCause.POOL_FAILED)
+
+    async def test_a_transient_task_loop_failure_at_boot_is_retried(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The first boot cannot create the loop. The second boot can, and
+        its child runs on that loop."""
+        monkeypatch.setattr(slots, 'CHILD_BOOT_RETRY_DELAY_S', 0.01)
+        marks = tmp_path / 'marks'
+        pool = SlotPool(
+            _config(init=_init(f'loop_fails_first:{marks}', ('1',))),
+            pending_limit=10,
+        )
+        try:
+            assert isinstance(await pool.start(), Ok)
+            assert await _result_json(pool.submit(_frame('loop_state'))) == 'LoopOpen'
+        finally:
+            await pool.stop(0)
+        assert marks.read_text() == 'xx'
+
+    async def test_a_replacement_that_cannot_create_its_task_loop_fails_the_pool(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The first child serves a task and retires. Its replacement cannot
+        create the loop, so the next task never reaches a child."""
+        monkeypatch.setattr(slots, 'CHILD_BOOT_RETRY_DELAY_S', 0.01)
+        init = _init(f'loop_fails_after_first:{tmp_path / "marks"}', ('100', '1'))
+        pool = await _started_pool(_config(init=init, max_tasks_per_child=1))
+        try:
+            assert await _result_json(pool.submit(_frame('echo', 'first'))) == 'first'
+            waiting = pool.submit(_frame('echo', 'next'))
+
+            failure = await asyncio.wait_for(pool.wait_failed(), OUTCOME_TIMEOUT_S)
+
+            assert failure == BootAttemptsExhausted(
+                attempts=CHILD_BOOT_ATTEMPTS,
+                last_detail=EMFILE_LOOP_DETAIL,
+            )
+            assert await _outcome(waiting) == NotDispatched(NotRunCause.POOL_FAILED)
+        finally:
+            await pool.stop(0)
+
     async def test_spawn_failure_is_typed(self) -> None:
         config = _config()
         pool = SlotPool(config, pending_limit=10)
@@ -523,7 +629,7 @@ class TestTaskRuns:
         pool = await pool_factory()
         match await _outcome(pool.submit(_frame('leave_pending', str(marker)))):
             case TaskFinished(result_json=first_pid, task_loop=task_loop):
-                assert task_loop == LoopHoldsTasks(count=1, opening=LoopOpenedForThisTask())
+                assert task_loop == LoopHoldsTasks(count=1)
             case other:
                 raise AssertionError(other)
         await _until(marker.exists)
@@ -537,95 +643,30 @@ class TestTaskRuns:
         pool = await pool_factory()
         match await _outcome(pool.submit(_frame('async_pid'))):
             case TaskFinished(result_json=first_pid, task_loop=task_loop):
-                assert task_loop == LoopHoldsNoTask(opening=LoopOpenedForThisTask())
+                assert task_loop == LoopHoldsNoTask()
             case other:
                 raise AssertionError(other)
         assert await _result_json(pool.submit(_frame('pid'))) == first_pid
 
-    async def test_a_child_that_ran_a_task_and_has_no_task_loop_is_replaced(
+    async def test_the_loop_is_open_before_the_first_async_task(
         self,
         pool_factory: PoolFactory,
     ) -> None:
-        """The task returns to the queue through its finalizer, the child is
-        retired, and the pool goes on with a new child."""
+        """The child of an app with async tasks creates its loop at boot."""
         pool = await pool_factory()
-        first_pid = await _result_json(pool.submit(_frame('pid')))
-        match await _outcome(pool.submit(_frame('loop_unavailable'))):
-            case TaskFinished(ok=ok, failed_reason=reason, task_loop=report):
-                assert (ok, reason) == (False, 'TASK_LOOP_UNAVAILABLE')
-                assert isinstance(report, TaskLoopUnavailable)
-                assert '[Errno 24]' in report.detail
-            case other:
-                raise AssertionError(other)
-        assert await _result_json(pool.submit(_frame('pid'))) != first_pid
-        assert pool._failure is None
+        assert await _result_json(pool.submit(_frame('loop_state'))) == 'LoopOpen'
 
-    async def test_a_second_refusal_with_no_open_between_fails_the_pool(
+    async def test_an_app_with_no_async_task_creates_no_loop(
         self,
         pool_factory: PoolFactory,
     ) -> None:
-        """Each child runs a def task first, then is refused a task loop. The
-        def tasks do not count: the second refusal stops the pool."""
-        pool = await pool_factory()
-        first_pid = await _result_json(pool.submit(_frame('pid')))
-        await _refused(pool)
-        assert pool._failure is None
-
-        second_pid = await _result_json(pool.submit(_frame('pid')))
-        assert second_pid != first_pid
-        frame = await _refused(pool)
-
-        failure = await asyncio.wait_for(pool.wait_failed(), OUTCOME_TIMEOUT_S)
-        match failure:
-            case TaskLoopRefusedRepeatedly(
-                refusals=refusals,
-                pid=pid,
-                task_id=task_id,
-                detail=detail,
-            ):
-                assert refusals == MAX_TASK_LOOP_REFUSALS_WITHOUT_OPEN
-                assert (pid, task_id) == (int(second_pid), frame.task_id)
-                assert '[Errno 24]' in detail
-            case other:
-                raise AssertionError(other)
-
-    async def test_an_open_between_two_refusals_keeps_the_pool(
-        self,
-        pool_factory: PoolFactory,
-    ) -> None:
-        """A loop opened in another child ends the run of refusals."""
-        pool = await pool_factory(_config(max_tasks_per_child=1))
-        await _refused(pool)
-        match await _outcome(pool.submit(_frame('async_pid'))):
-            case TaskFinished(task_loop=LoopHoldsNoTask(opening=LoopOpenedForThisTask())):
-                pass
-            case other:
-                raise AssertionError(other)
-        await _refused(pool)
-
-        assert int(await _result_json(pool.submit(_frame('pid')))) > 0
-        assert pool._failure is None
-
-    async def test_refusals_in_two_slots_with_no_open_fail_the_pool(
-        self,
-        pool_factory: PoolFactory,
-    ) -> None:
-        """The count is pool-wide: one refusal in each of two children."""
-        pool = await pool_factory(_config(slots=2))
-        handles = [pool.submit(_frame('loop_unavailable')) for _ in range(2)]
-        outcomes = [await _outcome(handle) for handle in handles]
-        assert all(
-            isinstance(outcome, TaskFinished)
-            and isinstance(outcome.task_loop, TaskLoopUnavailable)
-            for outcome in outcomes
-        )
-
-        failure = await asyncio.wait_for(pool.wait_failed(), OUTCOME_TIMEOUT_S)
-        match failure:
-            case TaskLoopRefusedRepeatedly(refusals=refusals):
-                assert refusals == MAX_TASK_LOOP_REFUSALS_WITHOUT_OPEN
-            case other:
-                raise AssertionError(other)
+        """Loop creation would fail in this child, and its boot still passes."""
+        pool = await pool_factory(_config(init=_init('no_async_no_descriptors')))
+        handles = [pool.submit(_frame('loop_state')), pool.submit(_frame('echo', 'x'))]
+        assert [await _result_json(handle) for handle in handles] == [
+            'LoopNotCreated',
+            'x',
+        ]
 
     async def test_a_run_frame_beside_loop_tasks_ends_the_child(
         self,
@@ -646,34 +687,6 @@ class TestTaskRuns:
             child.send(_frame('leave_pending', str(tmp_path / 'cancelled')))
             match await child.await_frame(OUTCOME_TIMEOUT_S):
                 case ResultFrame(task_loop=LoopHoldsTasks(count=1)):
-                    pass
-                case other:
-                    raise AssertionError(other)
-            child.send(_frame('echo', 'x'))
-            match await child.await_frame(OUTCOME_TIMEOUT_S):
-                case ChildLost(child_exit=child_exit):
-                    assert child_exit == ExitedWith(BAD_PARENT_FRAME_EXIT_CODE)
-                case other:
-                    raise AssertionError(other)
-        finally:
-            await child.dispose_lost()
-
-    async def test_a_run_frame_after_a_refused_task_loop_ends_the_child(self) -> None:
-        """The child refuses to run a task after its loop was refused.
-
-        The pool never sends that frame, so this drives one child directly.
-        """
-        config = _config()
-        match await Child.start(config, config.init):
-            case Ok(child):
-                pass
-            case Err(failed):
-                raise AssertionError(failed)
-        try:
-            assert isinstance(await child.await_frame(OUTCOME_TIMEOUT_S), ReadyFrame)
-            child.send(_frame('loop_unavailable'))
-            match await child.await_frame(OUTCOME_TIMEOUT_S):
-                case ResultFrame(task_loop=TaskLoopUnavailable()):
                     pass
                 case other:
                     raise AssertionError(other)

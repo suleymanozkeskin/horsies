@@ -2,7 +2,8 @@
 
 `_run_task_entry` runs real registered tasks here. Only the database steps
 around the body are replaced: the RUNNING update, the heartbeat thread and
-the finalizing mark. Each test gets its own task loop, as a child gets one.
+the finalizing mark. Each test gets its own task loop, open as the boot of a
+child leaves it when its app has an async task.
 """
 
 # pyright: reportPrivateUsage=false
@@ -10,11 +11,8 @@ the finalizing mark. Each test gets its own task loop, as a child gets one.
 from __future__ import annotations
 
 import asyncio
-import errno
-import gc
 import json
 import threading
-import warnings
 from collections.abc import Callable, Iterator
 from enum import Enum
 from contextlib import ExitStack
@@ -45,9 +43,9 @@ from horsies.core.process_role import ProcessRole
 from horsies.core.types.result import Err, Ok, is_ok
 from horsies.core.utils.loop_runner import in_running_event_loop
 from horsies.core.worker import child_runner
-from horsies.core.worker.child_protocol import LoopHoldsNoTask, LoopOpenedForThisTask
+from horsies.core.worker.child_protocol import LoopHoldsNoTask
 from horsies.core.worker.task_loop import (
-    LoopCreateRefused,
+    AsyncTaskPresence,
     LoopNotCreated,
     LoopOpen,
     TaskLoop,
@@ -77,6 +75,16 @@ def _app() -> Horsies:
 
 @pytest.fixture
 def task_loop() -> Iterator[TaskLoop]:
+    """The loop of a child whose app has an async task: open since boot."""
+    loop = TaskLoop()
+    loop.open().unwrap()
+    yield loop
+    loop.close()
+
+
+@pytest.fixture
+def no_task_loop() -> Iterator[TaskLoop]:
+    """The loop of a child whose app had no async task at boot: not created."""
     loop = TaskLoop()
     yield loop
     loop.close()
@@ -281,8 +289,12 @@ def _failing_tasks(app: Horsies) -> dict[str, tuple[str, str]]:
     }
 
 
-def _no_descriptors() -> asyncio.AbstractEventLoop:
-    raise OSError(errno.EMFILE, 'Too many open files')
+def _sync_body() -> TaskResult[int, TaskError]:
+    return TaskResult(ok=1)
+
+
+async def _async_body() -> TaskResult[int, TaskError]:
+    return TaskResult(ok=1)
 
 
 async def _plain_async_function() -> TaskResult[int, TaskError]:
@@ -297,63 +309,46 @@ class _AttributeReadRaises:
         raise RuntimeError(f'reading {name} fails')
 
 
-class TestTheLoopIsCreatedBeforeRunning:
-    def test_a_refused_loop_returns_the_task_before_running(
-        self,
-        task_loop: TaskLoop,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """The row is still CLAIMED and no task code ran: the child reports
-        the abort reason, and the worker returns the task to the queue."""
+class TestTheAsyncTasksOfTheApp:
+    """The boot step reads the registry to decide whether the child creates
+    its task loop."""
+
+    def test_an_app_with_an_async_task_needs_the_loop(self) -> None:
         app = _app()
-        ran: list[bool] = []
-        set_running = MagicMock(return_value=None)
+        _ = app.task('sync_one')(_sync_body)
+        _ = app.task('async_one')(_async_body)
 
-        @app.task('async_never_runs')
-        async def never_runs() -> TaskResult[int, TaskError]:
-            ran.append(True)
-            return TaskResult(ok=1)
+        presence = child_runner.async_task_presence(app)
+        assert presence is AsyncTaskPresence.HAS_ASYNC_TASKS
 
-        monkeypatch.setattr(asyncio, 'new_event_loop', _no_descriptors)
-
-        with warnings.catch_warnings():
-            warnings.simplefilter('error', RuntimeWarning)
-            wire = _runner(app, task_loop, set_running)(never_runs.task_name)
-            gc.collect()
-
-        assert wire == (False, '', 'TASK_LOOP_UNAVAILABLE')
-        set_running.assert_not_called()
-        assert ran == []
-        assert isinstance(task_loop.state, LoopCreateRefused)
-
-    def test_a_loop_policy_that_raises_is_a_refusal_before_running(
-        self,
-        task_loop: TaskLoop,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """A non-OS failure of loop creation takes the same counted path."""
+    def test_an_app_with_only_def_tasks_needs_no_loop(self) -> None:
         app = _app()
-        set_running = MagicMock(return_value=None)
+        _ = app.task('sync_one')(_sync_body)
 
-        @app.task('async_policy_refused')
-        async def policy_refused() -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+        assert child_runner.async_task_presence(app) is AsyncTaskPresence.NO_ASYNC_TASK
 
-        def policy_refuses() -> asyncio.AbstractEventLoop:
-            raise RuntimeError('the event loop policy refuses')
+    def test_an_app_with_no_task_needs_no_loop(self) -> None:
+        presence = child_runner.async_task_presence(_app())
+        assert presence is AsyncTaskPresence.NO_ASYNC_TASK
 
-        monkeypatch.setattr(asyncio, 'new_event_loop', policy_refuses)
+    @pytest.mark.parametrize(
+        'entry',
+        [_plain_async_function, _AttributeReadRaises()],
+        ids=['plain-async-function', 'attribute-read-raises'],
+    )
+    def test_an_entry_that_is_not_a_task_function_does_not_count(
+        self,
+        entry: object,
+    ) -> None:
+        """The read runs no code of the entry, so an entry whose attribute
+        read raises cannot fail the boot."""
+        app = _app()
+        cast(Any, app.tasks)['not_a_task_function'] = entry
 
-        wire = _runner(app, task_loop, set_running)(policy_refused.task_name)
+        assert child_runner.async_task_presence(app) is AsyncTaskPresence.NO_ASYNC_TASK
 
-        assert wire == (False, '', 'TASK_LOOP_UNAVAILABLE')
-        set_running.assert_not_called()
-        match task_loop.state:
-            case LoopCreateRefused(failed=failed):
-                assert failed.error_name == 'RuntimeError'
-            case other:
-                raise AssertionError(other)
 
+class TestEntriesTheChildCannotRun:
     @pytest.mark.parametrize(
         'entry',
         [_plain_async_function, _AttributeReadRaises()],
@@ -364,68 +359,62 @@ class TestTheLoopIsCreatedBeforeRunning:
         task_loop: TaskLoop,
         entry: object,
     ) -> None:
-        """Nothing escapes before RUNNING: the resolution step after it
-        reports the entry, bounded like any task failure."""
+        """The resolution step after RUNNING reports the entry, bounded like
+        any task failure."""
         app = _app()
         cast(Any, app.tasks)['not_a_task_function'] = entry
         set_running = MagicMock(return_value=None)
 
-        ok, payload, reason = _runner(app, task_loop, set_running)('not_a_task_function')
+        run = _runner(app, task_loop, set_running)
+        ok, payload, reason = run('not_a_task_function')
 
         set_running.assert_called_once()
         assert ok is True
         assert reason is not None
         error = decode_task_result(loads_json(payload).unwrap(), int).unwrap_err()
         assert error.error_code is OperationalErrorCode.WORKER_RESOLUTION_ERROR
-        assert isinstance(task_loop.state, LoopNotCreated)
 
-    def test_an_async_task_finds_its_loop_open_at_the_running_update(
+    def test_an_async_task_in_a_child_with_no_task_loop_fails_resolution(
         self,
-        task_loop: TaskLoop,
+        no_task_loop: TaskLoop,
     ) -> None:
+        """A task registered after the boot of a child whose app had no async
+        task then. Its body does not run, and no loop is created for it."""
         app = _app()
-        states_at_running: list[str] = []
+        ran: list[bool] = []
 
-        def record_state(*_args: object, **_kwargs: object) -> None:
-            states_at_running.append(type(task_loop.state).__name__)
-
-        @app.task('async_one')
-        async def one() -> TaskResult[int, TaskError]:
+        @app.task('async_registered_late')
+        async def registered_late() -> TaskResult[int, TaskError]:
+            ran.append(True)
             return TaskResult(ok=1)
 
-        wire = _runner(app, task_loop, MagicMock(side_effect=record_state))(
-            one.task_name,
-        )
+        ok, payload, reason = _runner(app, no_task_loop)(registered_late.task_name)
 
-        assert _result(wire, int).ok_value == 1
-        assert states_at_running == ['LoopOpen']
+        assert ok is True
+        assert reason is not None and 'no task loop' in reason
+        error = decode_task_result(loads_json(payload).unwrap(), int).unwrap_err()
+        assert error.error_code is OperationalErrorCode.WORKER_RESOLUTION_ERROR
+        assert ran == []
+        assert isinstance(no_task_loop.state, LoopNotCreated)
 
-    def test_a_def_task_does_not_touch_the_loop(
+    def test_a_def_task_runs_in_a_child_with_no_task_loop(
         self,
-        task_loop: TaskLoop,
-        monkeypatch: pytest.MonkeyPatch,
+        no_task_loop: TaskLoop,
     ) -> None:
         app = _app()
-        set_running = MagicMock(return_value=None)
 
         @app.task('sync_one')
-        def one() -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+        def one() -> TaskResult[str, TaskError]:
+            return TaskResult(ok=f'{in_running_event_loop()}')
 
-        monkeypatch.setattr(asyncio, 'new_event_loop', _no_descriptors)
-
-        wire = _runner(app, task_loop, set_running)(one.task_name)
-
-        assert _result(wire, int).ok_value == 1
-        set_running.assert_called_once()
-        assert isinstance(task_loop.state, LoopNotCreated)
+        wire = _runner(app, no_task_loop)(one.task_name)
+        assert _result(wire, str).ok_value == 'False'
+        assert isinstance(no_task_loop.state, LoopNotCreated)
 
     def test_a_task_the_registry_lacks_fails_resolution_after_running(
         self,
         task_loop: TaskLoop,
     ) -> None:
-        """The lookup before RUNNING does not decide this case: the
-        resolution error after the RUNNING update reports it, as before."""
         set_running = MagicMock(return_value=None)
 
         ok, payload, reason = _runner(_app(), task_loop, set_running)('not_registered')
@@ -435,7 +424,6 @@ class TestTheLoopIsCreatedBeforeRunning:
         assert reason is not None and 'not registered' in reason
         error = decode_task_result(loads_json(payload).unwrap(), int).unwrap_err()
         assert error.error_code is OperationalErrorCode.WORKER_RESOLUTION_ERROR
-        assert isinstance(task_loop.state, LoopNotCreated)
 
 
 UNREACHABLE_URL = 'postgresql+psycopg://u:p@127.0.0.1:1/db'
@@ -560,7 +548,6 @@ class TestTheSendPathLeavesNoLoopTask:
                         err=TaskError(error_code='SEND_FAILED', message=str(send_err)),
                     )
 
-        state_before_task = task_loop.state
         try:
             with patch.object(broker, 'enqueue_async', enqueue_async):
                 wire = _runner(app, task_loop)(sends.task_name)
@@ -568,9 +555,7 @@ class TestTheSendPathLeavesNoLoopTask:
             broker._loop_runner.stop()
 
         assert _result(wire, str).ok_value == enqueued[0]
-        assert task_loop.report(state_before_task) == LoopHoldsNoTask(
-            opening=LoopOpenedForThisTask(),
-        )
+        assert task_loop.report() == LoopHoldsNoTask()
 
 
 class TestTheTaskLoopIsNotACallerLoop:

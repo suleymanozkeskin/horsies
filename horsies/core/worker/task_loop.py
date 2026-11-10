@@ -1,9 +1,11 @@
 """The event loop that runs ``async def`` tasks in a worker child.
 
-A child creates the loop with ``open`` before the RUNNING update of its first
-async task, and keeps it until the child stops. An async client or pool that a
-task keeps in module state is bound to this loop, so a later async task in the
-same child can use it.
+A child whose app has an ``async def`` task creates the loop with ``open`` at
+boot, before it reports ready, and keeps it until the child stops. A child that
+cannot create it fails its boot, so no task reaches it. A child whose app has
+no ``async def`` task creates no loop. An async client or pool that a task
+keeps in module state is bound to this loop, so a later async task in the same
+child can use it.
 
 The loop runs only while an async task runs. Between tasks the loop is stopped
 and not closed. A sync task runs on the same thread with no running event
@@ -11,8 +13,7 @@ loop, so it can call ``asyncio.run()`` and the sync send methods.
 
 A task must await the work that it starts. ``report`` counts what is still on
 the loop after a task, and the worker replaces a child that reports any, so no
-later task shares the loop with that work. ``report`` also says when the loop
-could not be created, and the worker replaces that child too.
+later task shares the loop with that work.
 """
 
 from __future__ import annotations
@@ -31,12 +32,8 @@ from horsies.core.utils.task_loop_registry import register_task_loop, unregister
 from horsies.core.worker.child_protocol import (
     LoopHoldsNoTask,
     LoopHoldsTasks,
-    LoopOpenedEarlier,
-    LoopOpenedForThisTask,
-    LoopOpening,
     NoTaskLoop,
     TaskLoopReport,
-    TaskLoopUnavailable,
 )
 
 logger = get_logger('worker')
@@ -49,15 +46,28 @@ LOOP_CLOSE_TIMEOUT_S: Final = 5.0
 R = TypeVar('R')
 
 
+class AsyncTaskPresence(Enum):
+    """Whether the app of a booted child has an ``async def`` task.
+
+    The boot step of a child returns it, and the child creates the task loop
+    only for ``HAS_ASYNC_TASKS``.
+    """
+
+    HAS_ASYNC_TASKS = 'has_async_tasks'
+    NO_ASYNC_TASK = 'no_async_task'
+
+
 @dataclass(frozen=True, slots=True)
 class LoopCreateFailed:
     """The runtime refused a new event loop.
 
     ``asyncio.new_event_loop()`` opens a selector and a socket pair, so a
     process at its file descriptor limit (EMFILE) gets this, and so does an
-    event loop policy that raises. No task code ran.
-    Retry condition: the worker replaces the child, and a new child tries
-    again; it succeeds once the process has descriptors free.
+    event loop policy that raises. The child gets it at boot, before it
+    reports ready, so no task reached it.
+    Retry condition: the child fails its boot, and the worker starts a new
+    child for the next boot attempt. That attempt succeeds once the process
+    has descriptors free.
     """
 
     error_name: str
@@ -73,7 +83,8 @@ class LoopCreateFailed:
 
 @dataclass(frozen=True, slots=True)
 class LoopNotCreated:
-    """No async task has started in this process."""
+    """The child has no loop: its app has no ``async def`` task, or the
+    boot step has not created the loop yet."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,13 +92,6 @@ class LoopOpen:
     """The loop exists. It runs only while ``TaskLoop.run`` runs."""
 
     loop: asyncio.AbstractEventLoop
-
-
-@dataclass(frozen=True, slots=True)
-class LoopCreateRefused:
-    """The OS refused the loop. No task runs on this child after this state."""
-
-    failed: LoopCreateFailed
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,7 +119,7 @@ class LoopClosed:
     executor: ExecutorAfterClose
 
 
-type LoopState = LoopNotCreated | LoopOpen | LoopCreateRefused | LoopClosed
+type LoopState = LoopNotCreated | LoopOpen | LoopClosed
 
 
 class _CloseStep(Enum):
@@ -138,13 +142,13 @@ class TaskLoop:
     def open(self) -> Result[None, LoopCreateFailed]:
         """Create the loop when this child has none. Call it before ``run``.
 
-        The child calls it before the RUNNING update of an async task, so a
-        refusal leaves the task claimed, with no task code run.
+        The child calls it at boot, before it reports ready, when its app has
+        an ``async def`` task.
 
-        ``Err(LoopCreateFailed)``: the OS refused the loop. The state becomes
-        ``LoopCreateRefused``, and each later call returns the same error,
-        because the worker replaces this child. A call after ``close`` is a
-        defect in the caller: ``AssertionError``.
+        ``Err(LoopCreateFailed)``: the runtime refused the loop. The state
+        stays ``LoopNotCreated``, and the child fails its boot. A call on an
+        open loop changes nothing. A call after ``close`` is a defect in the
+        caller: ``AssertionError``.
         """
         match self._state:
             case LoopNotCreated():
@@ -153,12 +157,9 @@ class TaskLoop:
                         self._state = LoopOpen(loop)
                         return Ok(None)
                     case Err(failed):
-                        self._state = LoopCreateRefused(failed)
                         return Err(failed)
             case LoopOpen():
                 return Ok(None)
-            case LoopCreateRefused(failed=failed):
-                return Err(failed)
             case LoopClosed():
                 raise AssertionError('TaskLoop.open was called after close')
             case _ as unreachable:
@@ -187,21 +188,14 @@ class TaskLoop:
             case LoopNotCreated():
                 coroutine.close()
                 raise AssertionError('TaskLoop.run was called before open')
-            case LoopCreateRefused():
-                coroutine.close()
-                raise AssertionError('TaskLoop.run was called after open failed')
             case LoopClosed():
                 coroutine.close()
                 raise AssertionError('TaskLoop.run was called after close')
             case _ as unreachable:
                 assert_never(unreachable)
 
-    def report(self, state_before_task: LoopState) -> TaskLoopReport:
-        """What the loop holds after a task, or that it could not be created.
-
-        ``state_before_task`` is ``state`` as it was when the task started.
-        An open loop that was ``LoopNotCreated`` then was opened for this
-        task, which the parent counts as a successful open.
+    def report(self) -> TaskLoopReport:
+        """What the loop holds after a task.
 
         Reads only. Call it between runs, on the thread that runs them. A call
         after ``close`` is a defect in the caller: ``AssertionError``.
@@ -210,13 +204,10 @@ class TaskLoop:
             case LoopNotCreated():
                 return NoTaskLoop()
             case LoopOpen(loop=loop):
-                opening = _opening(state_before_task)
                 count = len(asyncio.all_tasks(loop))
                 if count == 0:
-                    return LoopHoldsNoTask(opening=opening)
-                return LoopHoldsTasks(count=count, opening=opening)
-            case LoopCreateRefused(failed=failed):
-                return TaskLoopUnavailable(detail=failed.describe())
+                    return LoopHoldsNoTask()
+                return LoopHoldsTasks(count=count)
             case LoopClosed():
                 raise AssertionError('TaskLoop.report was called after close')
             case _ as unreachable:
@@ -232,7 +223,7 @@ class TaskLoop:
         returns the answer of the first.
         """
         match self._state:
-            case LoopNotCreated() | LoopCreateRefused():
+            case LoopNotCreated():
                 self._state = LoopClosed(ExecutorShutDown())
             case LoopOpen(loop=loop):
                 # A step that raises still leaves the loop closed. Until the
@@ -249,21 +240,6 @@ class TaskLoop:
         return self._state.executor
 
 
-def _opening(state_before_task: LoopState) -> LoopOpening:
-    """Whether an open loop was opened for the task that started in this state."""
-    match state_before_task:
-        case LoopNotCreated():
-            return LoopOpenedForThisTask()
-        case LoopOpen():
-            return LoopOpenedEarlier()
-        case LoopCreateRefused() | LoopClosed():
-            raise AssertionError(
-                f'no task opens a loop from {type(state_before_task).__name__}',
-            )
-        case _ as unreachable:
-            assert_never(unreachable)
-
-
 def _new_loop() -> Result[asyncio.AbstractEventLoop, LoopCreateFailed]:
     """Create an event loop. An ``Exception`` from the creation becomes
     ``LoopCreateFailed``, with its type and message.
@@ -271,8 +247,8 @@ def _new_loop() -> Result[asyncio.AbstractEventLoop, LoopCreateFailed]:
     ``asyncio.new_event_loop()`` runs the runtime the child depends on: the
     event loop policy, which user code can set, and the OS, which can refuse
     a selector or a socket pair (EMFILE) or memory. A failure there is a
-    failure of that runtime, not a horsies defect, so it takes the counted
-    refusal path: the task returns to the queue and the child is retired.
+    failure of that runtime, not a horsies defect, so it takes the boot
+    failure path: the child reports it and exits before it is ready.
     ``KeyboardInterrupt`` and ``SystemExit`` are not ``Exception`` and stay
     uncaught.
 
