@@ -886,6 +886,27 @@ class TestChildSteps:
         assert steps == ['setsid', 'reparent', 'serve']
 
 
+class TestChildExitCodes:
+    def test_every_exit_code_of_a_forked_child_is_distinct(self) -> None:
+        """A forked child can exit through ``preload_main`` before the
+        reparent and through ``child_main`` after it. The parent reads the
+        cause from the code, so no two causes share one."""
+        from horsies.core.worker import child_main
+        from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
+
+        codes = {
+            name: value
+            for module in (child_main, preload_main)
+            for name, value in vars(module).items()
+            if name.endswith('_EXIT_CODE') and isinstance(value, int)
+        }
+        codes['CHILD_HOOK_FAILURE_EXIT_CODE'] = CHILD_HOOK_FAILURE_EXIT_CODE
+
+        assert 'REPARENT_FAILED_EXIT_CODE' in codes
+        assert 'STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE' in codes
+        assert len(set(codes.values())) == len(codes), codes
+
+
 @linux_only
 class TestReparentWait:
     def test_a_child_that_never_reparents_exits(self) -> None:
