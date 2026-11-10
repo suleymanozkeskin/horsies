@@ -85,7 +85,6 @@ from horsies.core.worker.slots import (
 from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.worker.runtime import (
     _AttemptEndUnknown,
-    _SlotAnsweredFirst,
     _TimeoutOutcome,
     _TimeoutSettled,
     _TimeoutWriteFailed,
@@ -259,13 +258,13 @@ class FinalizeMixin:
         the task at once, before it resolves the task. Never raises for a
         task.
 
-        At the deadline ``_handle_task_timeout`` decides who finalizes the
-        task. ``_TimeoutSettled`` and ``_AttemptEndUnknown`` mean that the
-        timeout path wrote the row, or left it on purpose, so the slot's
-        outcome is not read. After ``_SlotAnsweredFirst`` or
+        Once the deadline fires, ``_handle_task_timeout`` owns the row.
+        ``_TimeoutSettled`` and ``_AttemptEndUnknown`` mean that the timeout
+        path wrote the row, or left it on purpose, so the slot's outcome is
+        not read, even when the slot answered after the timer fired. After
         ``_TimeoutWriteFailed`` the slot's outcome is returned, and the usual
-        path finalizes it: the child has exited or no longer holds the task,
-        so that outcome comes without an open-ended wait.
+        path finalizes it as the crash-recovery fallback: the attempt has
+        ended, so that outcome comes without an open-ended wait.
         """
         assigned = await asyncio.shield(handle.assigned)
         match assigned:
@@ -299,7 +298,7 @@ class FinalizeMixin:
         match timeout_outcome:
             case _TimeoutSettled() | _AttemptEndUnknown():
                 return timeout_outcome
-            case _SlotAnsweredFirst() | _TimeoutWriteFailed():
+            case _TimeoutWriteFailed():
                 return await asyncio.shield(handle.outcome)
             case _ as unreachable:
                 assert_never(unreachable)

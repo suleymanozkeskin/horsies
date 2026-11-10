@@ -36,7 +36,6 @@ from horsies.core.worker.runtime import (
     _AttemptEndUnknown,
     _RequeueOutcome,
     _RetryError,
-    _SlotAnsweredFirst,
     _TimeoutSettled,
     _TimeoutWriteFailed,
 )
@@ -47,8 +46,10 @@ from horsies.core.worker.slots import (
     ChildLost,
     ExitUnknown,
     KilledBySignal,
+    KillWaitOutcome,
     LossCause,
     SlotHandle,
+    SlotOutcome,
     TaskFinished,
 )
 from horsies.core.worker.sql import (
@@ -58,7 +59,11 @@ from horsies.core.worker.sql import (
 )
 from horsies.core.worker.stored_timeout import TaskTimeout
 from horsies.core.worker.worker import Worker, WorkerConfig
-from tests.fixtures.slots.handles import task_finished_handle, unbound_handle
+from tests.fixtures.slots.handles import (
+    finished_handle,
+    task_finished_handle,
+    unbound_handle,
+)
 
 TASK_ID = 'task-1'
 CHILD_PID = 4242
@@ -71,6 +76,13 @@ _KILLED_BY_PARENT = ChildLost(
     cause=LossCause.KILLED_BY_PARENT,
     child_exit=_KILLED,
     partial_frame=False,
+    pid=CHILD_PID,
+)
+_LOST_EXIT_UNKNOWN = ChildLost(
+    cause=LossCause.CHANNEL_LOST,
+    child_exit=ExitUnknown(),
+    partial_frame=False,
+    pid=CHILD_PID,
 )
 _RETRY_DB_ERROR: Result[Any, _RetryError] = Err(
     _RetryError(error_code='BROKER_ERROR', message='db down', task_id=TASK_ID),
@@ -254,6 +266,16 @@ class _Rig:
     def refuse_sessions(self) -> None:
         """Make every session open fail, as a database that is down."""
         self.session_factory.side_effect = self._refuse_session
+
+    def slot_answers_before_the_kill(self, outcome: SlotOutcome) -> None:
+        """Make the slot finish the handle after the timer fired, before the kill."""
+        kill_and_wait = self.handle.kill_and_wait
+
+        async def _answer_then_kill(wait_s: float) -> KillWaitOutcome:
+            self.handle.finish(outcome)
+            return await kill_and_wait(wait_s)
+
+        self.handle.kill_and_wait = _answer_then_kill  # type: ignore[method-assign]
 
     def _step(self, name: str, answer: object) -> Any:
         async def _record(*_args: object, **_kwargs: object) -> object:
@@ -473,36 +495,75 @@ class TestOneWriter:
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-class TestNothingToKill:
-    async def test_the_slot_outcome_stands_and_nothing_is_written(
+class TestSlotAnsweredAfterTheDeadline:
+    """The deadline decides: a later answer of the slot is dropped."""
+
+    async def test_a_result_after_the_deadline_is_still_a_timeout(self) -> None:
+        rig = _Rig(row=_row('RUNNING'))
+        rig.handle = task_finished_handle(True, '{}', None)
+
+        with rig.fail_row(_applied()):
+            outcome = await rig.handle_timeout()
+
+        assert outcome == _TimeoutSettled()
+        assert rig.timeline == [
+            'lock row',
+            'retry decision',
+            'attempt row',
+            'fail row',
+            'commit',
+            'phase 2',
+        ]
+        assert [command.error_code for command in rig.fail_commands] == [
+            OutcomeCode.TASK_TIMEOUT.value,
+        ]
+
+    async def test_the_finalizer_drops_a_result_that_came_after_the_timer(
+        self,
+    ) -> None:
+        rig = _Rig(row=_row('RUNNING'))
+        rig.slot_answers_before_the_kill(
+            TaskFinished(True, '{}', None, RssUnreadable()),
+        )
+
+        with rig.fail_row(_applied()):
+            result = await rig.finalize_after_deadline()
+
+        assert result == Ok(None)
+        assert 'kill' not in rig.timeline
+        assert 'persist slot outcome' not in rig.timeline
+        assert [command.error_code for command in rig.fail_commands] == [
+            OutcomeCode.TASK_TIMEOUT.value,
+        ]
+
+    async def test_a_failed_write_after_a_late_answer_falls_back_to_crash_recovery(
+        self,
+    ) -> None:
+        rig = _Rig(row=_row('RUNNING'))
+        rig.slot_answers_before_the_kill(_KILLED_BY_PARENT)
+        rig.refuse_sessions()
+
+        await rig.finalize_after_deadline()
+
+        assert rig.timeline == ['open session', 'crash recovery']
+
+    async def test_a_late_loss_with_no_exit_seen_writes_nothing(
         self,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         rig = _Rig(row=_row('RUNNING'))
-        rig.handle = task_finished_handle(True, '{}', None)
+        rig.handle = finished_handle(_LOST_EXIT_UNKNOWN)
 
-        with caplog.at_level(logging.WARNING, logger='horsies.worker'):
+        with caplog.at_level(logging.CRITICAL, logger='horsies.worker'):
             outcome = await rig.handle_timeout()
 
-        assert outcome == _SlotAnsweredFirst()
+        assert outcome == _AttemptEndUnknown()
         assert rig.timeline == []
         rig.session_factory.assert_not_called()
-        assert 'no longer holds it' in caplog.text
-
-    async def test_the_finalizer_persists_the_slot_outcome(self) -> None:
-        rig = _Rig(row=_row('RUNNING'))
-        finished = TaskFinished(True, '{}', None, RssUnreadable())
-
-        async def _slot_answers_first(*_args: object, **_kwargs: object) -> object:
-            rig.handle.finish(finished)
-            return _SlotAnsweredFirst()
-
-        rig.worker._handle_task_timeout = AsyncMock(  # type: ignore[method-assign]
-            side_effect=_slot_answers_first,
-        )
-        await rig.finalize_after_deadline()
-
-        assert rig.timeline == ['persist slot outcome']
+        critical = [r for r in caplog.records if r.levelno == logging.CRITICAL]
+        assert len(critical) == 1
+        assert TASK_ID in critical[0].message
+        assert f'pid={CHILD_PID}' in critical[0].message
 
 
 @pytest.mark.unit

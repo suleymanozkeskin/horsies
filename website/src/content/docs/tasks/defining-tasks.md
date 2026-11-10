@@ -155,7 +155,7 @@ def resize_video(*, video_id: str) -> TaskResult[str, TaskError]:
     ...
 ```
 
-On expiry, the worker kills the child process, waits for it to exit, and then fails the task with `TASK_TIMEOUT`. If the deadline elapses before user code starts, the task is requeued instead. Timeouts are terminal by default; opt into retries by adding `"TASK_TIMEOUT"` to `auto_retry_for`:
+On expiry, the worker kills the child process, waits for it to exit, and then fails the task with `TASK_TIMEOUT`. A result that reaches the worker after the deadline does not change this. If the deadline elapses before user code starts, the task is requeued instead. Timeouts are terminal by default; opt into retries by adding `"TASK_TIMEOUT"` to `auto_retry_for`:
 
 ```python
 @app.task(

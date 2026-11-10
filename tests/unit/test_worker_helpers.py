@@ -26,7 +26,6 @@ from horsies.core.worker.finalize import (
 )
 from horsies.core.worker.runtime import (
     _AttemptEndUnknown,
-    _SlotAnsweredFirst,
     _TimeoutSettled,
     _TimeoutWriteFailed,
 )
@@ -153,6 +152,7 @@ _LOST = ChildLost(
     cause=LossCause.CHILD_DIED,
     child_exit=KilledBySignal(9),
     partial_frame=False,
+    pid=4242,
 )
 
 
@@ -1327,21 +1327,14 @@ class TestAwaitSlotOutcome:
         assert await waiter == NotDispatched(NotRunCause.POOL_STOPPING)
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        'timeout_outcome',
-        [_SlotAnsweredFirst(), _TimeoutWriteFailed()],
-    )
-    async def test_the_slot_decides_when_the_timeout_path_did_not_settle(
-        self,
-        timeout_outcome: _SlotAnsweredFirst | _TimeoutWriteFailed,
-    ) -> None:
+    async def test_the_slot_decides_when_the_timeout_write_failed(self) -> None:
         worker = _make_worker()
         handle = SlotHandle(_run_frame(), asyncio.get_running_loop())
         handle.bind_child(MagicMock())
 
         async def _timeout_handler(*_args: Any, **_kwargs: Any) -> object:
             handle.finish(_LOST)
-            return timeout_outcome
+            return _TimeoutWriteFailed()
 
         worker._handle_task_timeout = AsyncMock(  # type: ignore[method-assign]
             side_effect=_timeout_handler,

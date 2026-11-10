@@ -61,6 +61,7 @@ from horsies.core.worker.slots import (
     NothingToKill,
     NotRunCause,
     PoolStopped,
+    SlotAnswered,
     SlotHandle,
     SlotPool,
     SlotPoolConfig,
@@ -800,18 +801,31 @@ class TestKillAndWait:
         assert isinstance(lost, ChildLost)
         assert lost.cause is LossCause.KILLED_BY_PARENT
 
-    async def test_a_finished_task_has_nothing_to_kill(
+    async def test_a_finished_task_reports_the_slot_answer(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        """A late timer cannot reach the next task on the same slot."""
+        pool = await pool_factory()
+        finished = pool.submit(_frame('echo', 'x'))
+        answer = await _outcome(finished)
+        running = pool.submit(_frame('sleep', '0.3'))
+        await asyncio.wait_for(running.assigned, 5)
+
+        assert await finished.kill_and_wait(OUTCOME_TIMEOUT_S) == SlotAnswered(answer)
+        assert isinstance(await _outcome(running), TaskFinished)
+
+    async def test_a_task_no_child_took_has_nothing_to_kill(
         self,
         pool_factory: PoolFactory,
     ) -> None:
         pool = await pool_factory()
-        finished = pool.submit(_frame('echo', 'x'))
-        await _outcome(finished)
         running = pool.submit(_frame('sleep', '0.3'))
-        await asyncio.wait_for(running.assigned, 5)
+        queued = pool.submit(_frame('echo', 'x'))
 
-        assert await finished.kill_and_wait(OUTCOME_TIMEOUT_S) == NothingToKill()
-        assert isinstance(await _outcome(running), TaskFinished)
+        assert await queued.kill_and_wait(OUTCOME_TIMEOUT_S) == NothingToKill()
+        await _outcome(running)
+        assert isinstance(await _outcome(queued), TaskFinished)
 
     async def test_a_child_that_does_not_end_in_the_wait_is_reported(self) -> None:
         """A process stuck in the kernel ignores SIGKILL until it leaves it."""

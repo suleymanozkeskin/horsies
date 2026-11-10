@@ -3,8 +3,9 @@
 
 Covers Worker._handle_task_timeout: the parent-side handler invoked when a
 dispatched task outruns TaskOptions.timeout_ms. The kill goes through the
-task's slot handle. Each handle here holds a child double: it records the
-kill, and its exit is seen at once unless a test says otherwise.
+task's slot handle. A handle here holds a child double that records the kill
+and whose exit is seen at once, unless a test says otherwise, or its slot has
+already answered.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.slots import ChildExit, ExitUnknown, KilledBySignal, SlotHandle
 from horsies.core.worker.stored_timeout import NoTimeout, TaskTimeout, read_stored_timeout
 from horsies.core.worker.worker import Worker
-from tests.fixtures.slots.handles import unbound_handle
+from tests.fixtures.slots.handles import task_finished_handle, unbound_handle
 from tests.integration.conftest import compute_test_enqueue_sha
 from tests.integration.history_seeding import read_attempts
 
@@ -294,21 +295,26 @@ async def test_timeout_without_a_seen_exit_leaves_the_row_running(
 
 
 @pytest.mark.asyncio(loop_scope='function')
-async def test_timeout_after_the_slot_answered_writes_nothing(
+async def test_timeout_after_the_slot_answered_is_still_a_timeout(
     engine: AsyncEngine,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """A handle with no child: the slot's own outcome finalizes the row."""
+    """A result that reached the slot after the deadline fired is dropped."""
     task_id = await _insert_task(session)
     worker = _make_worker(engine)
 
-    await worker._handle_task_timeout(unbound_handle(), task_id, 5_000)
+    handle = task_finished_handle(True, '{}', None)
+    await worker._handle_task_timeout(handle, task_id, 5_000)
     session.expire_all()
 
     row = await _get_row(session, task_id)
-    assert row.status == 'RUNNING'
-    assert await read_attempts(session, task_id) == ()
+    assert row.status == 'FAILED'
+    assert row.error_code == OutcomeCode.TASK_TIMEOUT.value
+    attempts = await read_attempts(session, task_id)
+    assert [attempt.error_code for attempt in attempts] == [
+        OutcomeCode.TASK_TIMEOUT.value,
+    ]
 
 
 class TestTimeoutWireRoundTrip:

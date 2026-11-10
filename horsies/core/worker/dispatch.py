@@ -43,7 +43,6 @@ from horsies.core.worker.runtime import (
     _FinalizeError,
     _RequeueOutcome,
     _RetryError,
-    _SlotAnsweredFirst,
     _TimeoutOutcome,
     _TimeoutSettled,
     _TimeoutWriteFailed,
@@ -52,9 +51,15 @@ from horsies.core.worker.slots import (
     CHILD_KILL_WAIT_S,
     ChildEnded,
     ChildEndUnknown,
+    ChildLost,
+    ExitUnknown,
+    NotDispatched,
     NothingToKill,
+    SlotAnswered,
     SlotHandle,
+    SlotOutcome,
     SlotPool,
+    TaskFinished,
     describe_exit,
 )
 from horsies.core.worker.stored_timeout import NoTimeout, StoredTimeout
@@ -470,6 +475,7 @@ class DispatchMixin:
     ) -> _TimeoutOutcome:
         """End a timed-out attempt, then record the timeout.
 
+        Once the deadline fires, the outcome of this dispatch is TASK_TIMEOUT.
         The attempt ends before its row moves. The child that holds this task
         gets SIGKILL, with its session, and the parent waits up to
         ``CHILD_KILL_WAIT_S`` for that child's exit. Only after the exit are
@@ -477,41 +483,24 @@ class DispatchMixin:
         only then does phase 2 run. So a retry never runs next to the attempt
         that it replaces, and phase 2 cannot start a successor while that
         attempt runs. The kill is bound to this task's slot, so it cannot
-        reach the next task.
+        reach the next task. A slot that answered after the timer fired has
+        nothing to kill; see ``_time_out_answered_task``.
 
         Returns:
-        - ``_SlotAnsweredFirst``: the child no longer held the task, so the
-          slot already has the outcome. Nothing is killed or written, and
-          the caller finalizes that outcome.
-        - ``_TimeoutSettled`` or ``_TimeoutWriteFailed``: the exit was seen,
+        - ``_TimeoutSettled`` or ``_TimeoutWriteFailed``: the attempt ended,
           and ``_record_task_timeout`` ran.
-        - ``_AttemptEndUnknown``: no exit was seen in the wait, so the
-          attempt may still have effects in flight. Nothing is written and
-          phase 2 does not run. The row keeps its state for stale-task
-          recovery: a RUNNING row fails after ``running_stale_threshold_ms``
-          with no runner heartbeat, and a CLAIMED row is claimed again when
-          its lease ends. Logged at critical level with the task id and pid.
+        - ``_AttemptEndUnknown``: no exit was seen, so the attempt may still
+          have effects in flight. Nothing is written and phase 2 does not
+          run. The row keeps its state for stale-task recovery: a RUNNING row
+          fails after ``running_stale_threshold_ms`` with no runner heartbeat,
+          and a CLAIMED row is claimed again when its lease ends. Logged at
+          critical level with the task id and pid.
 
-        Does not raise for an expected database failure.
+        Does not raise for an expected database failure. A handle that no
+        child has taken is a caller defect: the deadline starts only when a
+        child takes the task.
         """
         match await handle.kill_and_wait(CHILD_KILL_WAIT_S):
-            case NothingToKill():
-                logger.warning(
-                    'Skipping kill for timed-out task %s: its child no longer '
-                    'holds it, and the outcome that its slot reported stands',
-                    task_id,
-                )
-                return _SlotAnsweredFirst()
-            case ChildEndUnknown(pid=pid):
-                logger.critical(
-                    'Child pid=%s of timed-out task %s did not exit %ss after '
-                    'SIGKILL; nothing is written, and the row is left to '
-                    'stale-task recovery',
-                    pid,
-                    task_id,
-                    CHILD_KILL_WAIT_S,
-                )
-                return _AttemptEndUnknown()
             case ChildEnded(pid=pid, child_exit=child_exit):
                 logger.warning(
                     'Killed the child pid=%s of timed-out task %s '
@@ -526,6 +515,73 @@ class DispatchMixin:
                     task_id,
                     timeout_ms,
                     claimed_at,
+                )
+            case ChildEndUnknown(pid=pid):
+                logger.critical(
+                    'Child pid=%s of timed-out task %s did not exit %ss after '
+                    'SIGKILL; nothing is written, and the row is left to '
+                    'stale-task recovery',
+                    pid,
+                    task_id,
+                    CHILD_KILL_WAIT_S,
+                )
+                return _AttemptEndUnknown()
+            case SlotAnswered(outcome=outcome):
+                return await self._time_out_answered_task(
+                    task_id,
+                    timeout_ms,
+                    claimed_at,
+                    outcome,
+                )
+            case NothingToKill():
+                raise AssertionError(
+                    f'deadline of task {task_id} fired before a child took it',
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    async def _time_out_answered_task(
+        self,
+        task_id: str,
+        timeout_ms: int,
+        claimed_at: Optional[datetime],
+        outcome: SlotOutcome,
+    ) -> _TimeoutOutcome:
+        """Record the timeout of a task whose slot answered after the deadline fired.
+
+        The deadline decides the outcome: a result that reached the slot after
+        the timer fired is dropped, and the row gets TASK_TIMEOUT through
+        ``_record_task_timeout``, the one writer. The slot's answer shows that
+        the attempt ended. The exception is a loss whose exit the slot did not
+        see: that returns ``_AttemptEndUnknown`` and writes nothing, as in
+        ``_handle_task_timeout``.
+        """
+        match outcome:
+            case ChildLost(child_exit=ExitUnknown(), pid=pid):
+                logger.critical(
+                    'Timed-out task %s lost its child pid=%s with no exit seen; '
+                    'nothing is written, and the row is left to stale-task '
+                    'recovery',
+                    task_id,
+                    pid,
+                )
+                return _AttemptEndUnknown()
+            case TaskFinished() | ChildLost():
+                logger.warning(
+                    'Task %s reached timeout_ms=%s as its slot answered; the '
+                    'answer is dropped and TASK_TIMEOUT is recorded',
+                    task_id,
+                    timeout_ms,
+                )
+                return await self._record_task_timeout(
+                    task_id,
+                    timeout_ms,
+                    claimed_at,
+                )
+            case NotDispatched():
+                raise AssertionError(
+                    f'deadline of task {task_id} fired for a task that never '
+                    'reached a child',
                 )
             case _ as unreachable:
                 assert_never(unreachable)

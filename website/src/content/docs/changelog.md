@@ -72,10 +72,9 @@ there is no migration contract between pre-1.0 versions.
   replaced only by its retry delay of at least 1 s, and an `on_error` or
   `allow_failed_deps` successor could start while the timed-out child still
   ran. If the child does not exit within 30 s, the worker writes nothing and
-  logs at critical level, and stale-task recovery takes the task. A slot that
-  reports the task's outcome before the kill leaves nothing to kill, and that
-  outcome is recorded. A timed-out task no longer also goes through crash
-  recovery, which replayed its workflow step and logged a finalize error.
+  logs at critical level, and stale-task recovery takes the task. A timed-out
+  task no longer also goes through crash recovery, which replayed its
+  workflow step and logged a finalize error.
 - **The cycle check of a `WorkflowSpec` takes time linear in its nodes and
   dependencies.** It scanned every node for each node that it removed. On an
   Apple M2 with Python 3.13, a spec of 10,000 nodes took about 7.5 s to build,

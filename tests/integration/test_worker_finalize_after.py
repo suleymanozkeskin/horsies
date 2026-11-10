@@ -205,6 +205,7 @@ _LOST = ChildLost(
     cause=LossCause.CHILD_DIED,
     child_exit=KilledBySignal(9),
     partial_frame=False,
+    pid=4242,
 )
 
 

@@ -155,6 +155,7 @@ class ChildLost:
     cause: LossCause
     child_exit: ChildExit
     partial_frame: bool
+    pid: int
 
     def describe(self) -> str:
         """Return text for the task's crash reason."""
@@ -283,7 +284,14 @@ class ChildEndUnknown:
     pid: int
 
 
-KillWaitOutcome: TypeAlias = ChildEnded | ChildEndUnknown | NothingToKill
+@dataclass(frozen=True, slots=True)
+class SlotAnswered:
+    """The slot already finished this task, so nothing was killed."""
+
+    outcome: SlotOutcome
+
+
+KillWaitOutcome: TypeAlias = ChildEnded | ChildEndUnknown | SlotAnswered | NothingToKill
 
 
 @dataclass(frozen=True, slots=True)
@@ -675,6 +683,7 @@ class Child:
             cause=cause,
             child_exit=self._current_exit(),
             partial_frame=self._protocol.has_partial_frame(),
+            pid=self.pid,
         )
 
     def _current_exit(self) -> ChildExit:
@@ -808,11 +817,12 @@ class SlotHandle:
         The kill is the one that ``kill`` sends. The wait follows the child
         that got the kill, also after the slot ends the binding, and it ends
         after ``wait_s``. Does not resolve ``outcome``: the slot still does
-        that. ``NothingToKill`` has the meaning that it has for ``kill``.
+        that. A handle with no child gives ``SlotAnswered`` when the slot
+        finished it, and ``NothingToKill`` when no slot took it yet.
         """
         child = self._child
         if child is None:
-            return NothingToKill()
+            return self._answer_without_child()
         child.kill_for_caller()
         match await child.wait_exit(wait_s):
             case ExitedWith() | KilledBySignal() as child_exit:
@@ -821,6 +831,12 @@ class SlotHandle:
                 return ChildEndUnknown(pid=child.pid)
             case _ as unreachable:
                 assert_never(unreachable)
+
+    def _answer_without_child(self) -> SlotAnswered | NothingToKill:
+        """Report a handle that holds no child. A cancelled outcome has no answer."""
+        if self.outcome.done() and not self.outcome.cancelled():
+            return SlotAnswered(self.outcome.result())
+        return NothingToKill()
 
 
 @dataclass(slots=True)
