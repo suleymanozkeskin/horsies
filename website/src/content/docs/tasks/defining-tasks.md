@@ -43,7 +43,7 @@ async def fetch_price(*, symbol: str) -> TaskResult[float, TaskError]:
 
 A worker child runs one task at a time, `def` or `async def`. Each child keeps one event loop until the child stops, and an async task runs on that loop. An async client that a module keeps stays open across the tasks of one child.
 
-The loop runs only while an async task runs. A `def` task runs with no running event loop, so it can call `asyncio.run()`.
+The loop runs only while an async task runs. A `def` task runs with no running event loop, so it can call `asyncio.run()`. While the child runs a `def` task or waits for its next task, the timers of a module-level async client, for example a keepalive or a pool maintenance task, do not run.
 
 An async task must await the work that it starts:
 
