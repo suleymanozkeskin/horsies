@@ -121,6 +121,8 @@ class TestClaimLockScoping:
             listener=MagicMock(),
             cfg=cfg,
         )
+        # No slot pool: every configured slot counts.
+        passer._claim_slot_count = lambda: cfg.processes  # type: ignore[method-assign]
         sf = async_sessionmaker(engine, expire_on_commit=False)
 
         async with sf() as holding_session:
