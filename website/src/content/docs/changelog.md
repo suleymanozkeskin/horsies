@@ -75,6 +75,13 @@ there is no migration contract between pre-1.0 versions.
   logs at critical level, and stale-task recovery takes the task. A timed-out
   task no longer also goes through crash recovery, which replayed its
   workflow step and logged a finalize error.
+- **Crash recovery moves a lost child's row only after it saw the child
+  exit.** When the worker kills a child and does not see it exit within
+  30 s (the socket to the child was lost, the child sent a bad frame, or the
+  slot was cleared at a stop or after a defect), it writes nothing and logs
+  the task id and pid at critical level. Stale-task recovery then takes the
+  task. Before, the worker wrote `WORKER_CRASHED` or scheduled a retry at
+  once, so the retry could run next to a child that was still alive.
 - **The cycle check of a `WorkflowSpec` takes time linear in its nodes and
   dependencies.** It scanned every node for each node that it removed. On an
   Apple M2 with Python 3.13, a spec of 10,000 nodes took about 7.5 s to build,

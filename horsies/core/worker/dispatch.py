@@ -190,8 +190,13 @@ class DispatchMixin:
         CLAIMED means user code never started and can be unclaimed. RUNNING
         means user code may have executed, so recovery must respect retry policy.
 
+        Call it only when no child can still run the attempt: after the
+        child's exit was seen, or for a task that never reached a child. It
+        writes WORKER_CRASHED or a retry, and the attempt must end before its
+        row moves.
+
         ``claimed_at`` fences every statement to the dispatch's claim
-        generation (C10); None disables the fence.
+        generation; None disables the fence.
         """
         try:
             task_error = TaskError(
@@ -208,8 +213,8 @@ class DispatchMixin:
                 fence=PriorLockedRead(worker_id=self.worker_instance_id),
                 result_json=serialize_error_payload(task_result),
                 error_code=OperationalErrorCode.WORKER_CRASHED.value,
-                # T05 leaves the task summary reason unchanged. The attempt row
-                # owns this failure's reason.
+                # The task summary reason stays unchanged. The attempt row
+                # holds the reason of this failure.
                 failed_reason=None,
             )
             async with self.sf() as s:

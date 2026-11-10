@@ -101,7 +101,9 @@ Each task runs in its own child process. When a child exits abnormally (a segfau
 - CLAIMED task (user code not started): returned to PENDING
 - RUNNING task (user code started): if the task has a retry policy with `WORKER_CRASHED` in `auto_retry_for` and retries remaining, scheduled for retry; otherwise marked as FAILED with `WORKER_CRASHED` error
 
-Other children and their tasks continue. The worker also kills the subprocesses that the lost child leaves in its session. A task that exceeded `timeout_ms` fails with `TASK_TIMEOUT` instead, after the worker sees the child exit. If the child does not exit within 30 seconds of that kill, the worker writes nothing. A RUNNING task then goes through the stale RUNNING recovery above, and a CLAIMED task is claimed again when its claim lease ends.
+The worker writes this only after it sees the child exit. If the child does not exit within 30 seconds of a kill by the worker, the worker writes nothing and logs at critical level. A RUNNING task then goes through the stale RUNNING recovery above, and a CLAIMED task is claimed again when its claim lease ends.
+
+Other children and their tasks continue. The worker also kills the subprocesses that the lost child leaves in its session. A task that exceeded `timeout_ms` fails with `TASK_TIMEOUT` instead, also only after the worker sees the child exit.
 
 ### Workflow Task Recovery
 

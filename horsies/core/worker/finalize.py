@@ -77,6 +77,9 @@ from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.worker.slots import (
     Assigned,
     ChildLost,
+    ExitedWith,
+    ExitUnknown,
+    KilledBySignal,
     NotDispatched,
     SlotHandle,
     SlotOutcome,
@@ -353,28 +356,7 @@ class FinalizeMixin:
                     )
                 return Ok(None)
             case ChildLost():
-                reason = f'Worker child lost: {outcome.describe()}'
-                requeue_outcome = await self._recover_worker_future_failure(
-                    task_id,
-                    reason,
-                    claimed_at=claimed_at,
-                )
-                return Err(
-                    self._make_finalize_error(
-                        task_id=task_id,
-                        stage=_FINALIZE_STAGE_FUTURE,
-                        message=reason,
-                        # Retryability is keyed on the recovery DB failure: a
-                        # requeue that hit a transient DB blip must retry the
-                        # recovery instead of waiting on the reaper.
-                        retryable=requeue_outcome is _RequeueOutcome.DB_ERROR,
-                        data={
-                            'loss_cause': outcome.cause.value,
-                            'requeue_outcome': requeue_outcome.value,
-                            'claimed_at': claimed_at,
-                        },
-                    )
-                )
+                return await self._finalize_child_loss(task_id, outcome, claimed_at)
             case _TimeoutSettled() | _AttemptEndUnknown():
                 # The timeout path settled this row, or left it to stale-task
                 # recovery. Crash recovery must not write it as WORKER_CRASHED.
@@ -433,6 +415,60 @@ class FinalizeMixin:
         self._clear_finalize_retry_attempts(task_id, _FINALIZE_STAGE_PHASE1)
         self._clear_finalize_retry_attempts(task_id, _FINALIZE_STAGE_PHASE2)
         return Ok(None)
+
+    async def _finalize_child_loss(
+        self,
+        task_id: str,
+        lost: ChildLost,
+        claimed_at: Optional[datetime],
+    ) -> Result[None, _FinalizeError]:
+        """Recover the row of a task whose child ended with no result.
+
+        Crash recovery moves the row only after the child's exit was seen,
+        so a retry never runs next to a child that may still be alive.
+        ``ExitUnknown`` (the slot gave up waiting after SIGKILL) writes
+        nothing and returns Ok(None): the row keeps its state for stale-task
+        recovery, and the loss is logged at critical level with the task id
+        and the pid. A seen exit goes to ``_recover_worker_future_failure``;
+        its result is a future-stage error, retryable only when the recovery
+        hit a database error.
+        """
+        match lost.child_exit:
+            case ExitUnknown():
+                logger.critical(
+                    'Lost child pid=%s of task %s did not exit (%s); nothing '
+                    'is written, and the row is left to stale-task recovery',
+                    lost.pid,
+                    task_id,
+                    lost.describe(),
+                )
+                return Ok(None)
+            case ExitedWith() | KilledBySignal():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
+        reason = f'Worker child lost: {lost.describe()}'
+        requeue_outcome = await self._recover_worker_future_failure(
+            task_id,
+            reason,
+            claimed_at=claimed_at,
+        )
+        return Err(
+            self._make_finalize_error(
+                task_id=task_id,
+                stage=_FINALIZE_STAGE_FUTURE,
+                message=reason,
+                # Retryability is keyed on the recovery DB failure: a
+                # requeue that hit a transient DB blip must retry the
+                # recovery instead of waiting on the reaper.
+                retryable=requeue_outcome is _RequeueOutcome.DB_ERROR,
+                data={
+                    'loss_cause': lost.cause.value,
+                    'requeue_outcome': requeue_outcome.value,
+                    'claimed_at': claimed_at,
+                },
+            )
+        )
 
     def _make_finalize_error(
         self,

@@ -274,7 +274,7 @@ On SIGTERM/SIGINT the worker:
 5. Waits for pending result writes
 6. Closes database connections
 
-Set `--drain-timeout` below the stop window of your supervisor, and leave a few seconds for result writes. If the supervisor kills the worker first, its running tasks wait for the reaper. At the deadline, the worker records each killed task at once.
+Set `--drain-timeout` below the stop window of your supervisor, and leave a few seconds for result writes. If the supervisor kills the worker first, its running tasks wait for the reaper. At the deadline, the worker records each killed task at once. A task whose child does not exit within 30 seconds of the kill is left to stale-task recovery.
 
 | Supervisor | Default stop window | Signal goes to |
 | ---------- | ------------------- | -------------- |
