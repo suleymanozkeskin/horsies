@@ -36,7 +36,13 @@
     "horsies/core/worker/live_dispatches.py",
     "horsies/core/worker/runner_heartbeat.py",
     "tests/unit/test_live_dispatches.py",
-    "tests/unit/test_runner_heartbeat.py"
+    "tests/unit/test_runner_heartbeat.py",
+    "horsies/core/models/class_coverage.py",
+    "horsies/core/brokers/class_coverage_reads.py",
+    "horsies/core/worker/class_coverage_log.py",
+    "tests/unit/test_class_coverage.py",
+    "tests/unit/test_class_coverage_log.py",
+    "tests/integration/test_class_coverage.py"
   ],
   "reportUnnecessaryTypeIgnoreComment": "error"
 }

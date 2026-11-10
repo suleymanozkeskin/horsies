@@ -27,6 +27,9 @@ from horsies.core.models.boot_failure import ResourceShortage, ShortageErrno
 from horsies.core.models.health import (
     WORKER_PING_CHANNEL,
     AllSlotsServing,
+    ClassBudget,
+    ClassBudgets,
+    ClassCapacityNotRecorded,
     DownSlot,
     SlotHealthNotRecorded,
     SlotsDown,
@@ -34,6 +37,7 @@ from horsies.core.models.health import (
     WorkerPongPayload,
     slots_down_json,
 )
+from horsies.core.models.tasks import Execution
 from horsies.core.types.result import is_ok
 from horsies.core.utils.url import to_psycopg_url
 from tests.broker_resources_support import current_resources
@@ -261,6 +265,108 @@ async def test_an_unreadable_slot_health_fails_the_read(
         assert not is_ok(result)
         assert worker_id in result.err_value.message
         assert 'slots_down is unreadable' in result.err_value.message
+    finally:
+        await session.execute(
+            text('DELETE FROM horsies_worker_states WHERE worker_id = :wid'),
+            {'wid': worker_id},
+        )
+        await session.commit()
+
+
+_INSERT_WORKER_STATE_WITH_CAPACITY = text("""
+    INSERT INTO horsies_worker_states (
+        worker_id, snapshot_at, hostname, pid, processes,
+        max_claim_batch, max_claim_per_worker, queues,
+        tasks_running, tasks_claimed, worker_started_at, class_capacity
+    ) VALUES (
+        :worker_id, NOW(), 'itest-host', 4242, 2,
+        2, 2, ARRAY['default'],
+        0, 0, NOW(), CAST(:class_capacity AS JSONB)
+    )
+""")
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_worker_state_reads_the_class_capacity(
+    broker: PostgresBroker,
+    session: AsyncSession,
+    worker_state_seed: str,
+) -> None:
+    """A row with budgets reads as ``ClassBudgets`` in every read, and a row
+    with no value as ``ClassCapacityNotRecorded``."""
+    worker_id = f'itest-{uuid.uuid4().hex}'
+    stored = {
+        'SHARED_ASYNC': {'capacity': 40, 'serves': ['SHARED_ASYNC']},
+        'ISOLATED': {'capacity': 2, 'serves': ['ISOLATED', 'SHARED_THREAD']},
+    }
+    await session.execute(
+        _INSERT_WORKER_STATE_WITH_CAPACITY,
+        {'worker_id': worker_id, 'class_capacity': json.dumps(stored)},
+    )
+    await session.commit()
+    expected = ClassBudgets(
+        (
+            ClassBudget(
+                Execution.ISOLATED,
+                2,
+                (Execution.ISOLATED, Execution.SHARED_THREAD),
+            ),
+            ClassBudget(Execution.SHARED_ASYNC, 40, (Execution.SHARED_ASYNC,)),
+        ),
+    )
+    try:
+        latest = await broker.get_worker_state_async(worker_id)
+        history = await broker.get_worker_state_history_async(worker_id)
+        listed = await broker.list_worker_states_async()
+        not_recorded = await broker.get_worker_state_async(worker_state_seed)
+
+        assert is_ok(latest) and latest.ok_value is not None
+        assert latest.ok_value.class_capacity == expected
+        assert is_ok(history)
+        assert [snap.class_capacity for snap in history.ok_value] == [expected]
+        assert is_ok(listed)
+        assert [
+            snap.class_capacity
+            for snap in listed.ok_value
+            if snap.worker_id == worker_id
+        ] == [expected]
+        assert is_ok(not_recorded) and not_recorded.ok_value is not None
+        assert not_recorded.ok_value.class_capacity == ClassCapacityNotRecorded()
+    finally:
+        await session.execute(
+            text('DELETE FROM horsies_worker_states WHERE worker_id = :wid'),
+            {'wid': worker_id},
+        )
+        await session.commit()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_an_unreadable_class_capacity_fails_the_read(
+    broker: PostgresBroker,
+    session: AsyncSession,
+) -> None:
+    """An unknown budget name is a monitoring query failure, with the worker
+    named, not a quiet default."""
+    worker_id = f'itest-{uuid.uuid4().hex}'
+    await session.execute(
+        _INSERT_WORKER_STATE_WITH_CAPACITY,
+        {
+            'worker_id': worker_id,
+            'class_capacity': json.dumps(
+                {'EXCLUSIVE': {'capacity': 1, 'serves': ['EXCLUSIVE']}},
+            ),
+        },
+    )
+    await session.commit()
+    try:
+        result = await broker.get_worker_state_async(worker_id)
+
+        assert not is_ok(result)
+        assert worker_id in result.err_value.message
+        assert 'class_capacity is unreadable' in result.err_value.message
+        assert "'EXCLUSIVE'" in result.err_value.message
     finally:
         await session.execute(
             text('DELETE FROM horsies_worker_states WHERE worker_id = :wid'),

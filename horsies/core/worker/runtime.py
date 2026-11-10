@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import os
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional, TypeAlias
 
 from horsies.core.logging import get_logger
 from horsies.core.models.tasks import BuiltInTaskCode
+from horsies.core.worker.class_coverage_log import CoverageLogBound
 
 logger = get_logger('worker')
 
@@ -145,7 +146,7 @@ _REAPER_MAX_PERMANENT_FAILURES = 3
 
 @dataclass
 class _ReaperPassState:
-    """Per-process reaper failure counters and retention schedule."""
+    """Per-process reaper failure counters, schedules and log bounds."""
 
     requeue_permanent_failures: int = 0
     requeue_disabled: bool = False
@@ -156,6 +157,11 @@ class _ReaperPassState:
     next_orphan_task_audit_at: float = 0.0
     next_retention_cleanup_at: float = 0.0
     next_partition_maintenance_at: float = 0.0
+    # The pass checks class coverage from this time on. The reaper loop sets
+    # it one check interval after its start, so the workers that start with
+    # this one have written their first snapshot.
+    class_coverage_checks_from: float = 0.0
+    coverage_log: CoverageLogBound = field(default_factory=CoverageLogBound)
 
 
 # Per-child latch so a broken RSS reader logs once, not once per task.
