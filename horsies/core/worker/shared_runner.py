@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 import threading
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from typing import Any, Final, assert_never
 
 from psycopg import AsyncConnection
@@ -24,6 +24,7 @@ from psycopg_pool import AsyncConnectionPool
 from horsies.core.logging import get_logger
 from horsies.core.models.boot_failure import ChildPoolSetupFailed
 from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.task_decorator import await_task_call_in_worker
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.child_main import (
     boot_failure_from_exception,
@@ -153,16 +154,19 @@ type _TaskCall = (
 async def _seat_call_result(
     task_name: str,
     called: _TaskCall,
+    map_exception: Callable[[BaseException], TaskResult[Any, TaskError]],
 ) -> TaskResult[Any, TaskError]:
     """Await the coroutine of an ``async def`` task call on the running loop.
 
-    A seat runs only ``async def`` tasks, whose wrapper returns a coroutine;
-    ``_prepare_task_call`` refused the others. Another value is a defect:
-    ``AssertionError``.
+    A ``CancelledError`` that leaves the coroutine goes through
+    ``map_exception``, the mapping of the task
+    (``await_task_call_in_worker``). A seat runs only ``async def`` tasks,
+    whose wrapper returns a coroutine; ``_prepare_task_call`` refused the
+    others. Another value is a defect: ``AssertionError``.
     """
     match called:
         case Coroutine():
-            return await called
+            return await await_task_call_in_worker(called, map_exception)
         case _:
             raise AssertionError(
                 f'task wrapper of {task_name!r} returned {type(called).__name__} '
@@ -215,7 +219,11 @@ async def run_seat_task(
                 pass
             case tuple():
                 return prepared
-        out = await _seat_call_result(frame.task_name, task(*args, **kwargs))
+        out = await _seat_call_result(
+            frame.task_name,
+            task(*args, **kwargs),
+            task._map_exception,
+        )
         logger.info(f'Task execution completed: {frame.task_name} ({frame.task_id})')
         return _encode_task_outcome(frame.task_name, task, out)
     except BaseException as e:

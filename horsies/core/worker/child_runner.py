@@ -7,7 +7,7 @@ from __future__ import annotations
 import os
 import socket
 import threading
-from collections.abc import Coroutine, Mapping, Sequence
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from importlib import import_module
@@ -87,7 +87,7 @@ from horsies.core.lifecycle.outcomes import (
     TaskAbsent,
 )
 from horsies.core.lifecycle.persistence import apply_sync
-from horsies.core.task_decorator import TaskBodyKind
+from horsies.core.task_decorator import TaskBodyKind, await_task_call_in_worker
 from horsies.core.types.result import Err, Ok, is_err
 
 
@@ -1100,12 +1100,15 @@ def _task_call_result(
     task_name: str,
     called: TaskResult[Any, TaskError] | Coroutine[Any, Any, TaskResult[Any, TaskError]],
     task_loop: TaskLoop,
+    map_exception: Callable[[BaseException], TaskResult[Any, TaskError]],
 ) -> TaskResult[Any, TaskError]:
     """The result of one call of a task wrapper.
 
     The call of a ``def`` task returns its result. The call of an
     ``async def`` task returns a coroutine, which runs on ``task_loop``; the
-    child opened that loop at boot. Exceptions from that run
+    child opened that loop at boot. A ``CancelledError`` that leaves that
+    coroutine goes through ``map_exception``, the mapping of the task
+    (``await_task_call_in_worker``). Other exceptions from that run
     propagate. The wrapper returns one of the two, so another value is a
     defect in the library: ``AssertionError``.
     """
@@ -1113,7 +1116,7 @@ def _task_call_result(
         case TaskResult():
             return called
         case Coroutine():
-            return task_loop.run(called)
+            return task_loop.run(await_task_call_in_worker(called, map_exception))
         case _:
             raise AssertionError(
                 f'task wrapper of {task_name!r} returned {type(called).__name__}',
@@ -1581,7 +1584,12 @@ def _run_task_entry(
                 pass
             case tuple():
                 return prepared
-        out = _task_call_result(task_name, task(*args, **kwargs), task_loop)
+        out = _task_call_result(
+            task_name,
+            task(*args, **kwargs),
+            task_loop,
+            task._map_exception,
+        )
         logger.info(f'Task execution completed: {task_name} ({task_id})')
         return _encode_task_outcome(task_name, task, out)
 
