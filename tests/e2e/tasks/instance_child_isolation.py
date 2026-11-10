@@ -21,6 +21,7 @@ from horsies.core.models.tasks import RetrievalCode, TaskError, TaskResult
 from horsies.core.types.result import is_err
 
 from tests.e2e.helpers.env import e2e_database_url
+from tests.e2e.tasks.profiles import E2E_WORKER_PROFILES, preload_profiles
 
 DB_URL = e2e_database_url('HORSES_E2E_DB_URL')
 
@@ -34,6 +35,7 @@ config = AppConfig(
         finalizing_stale_threshold_ms=5_000,
         check_interval_ms=1_000,
     ),
+    worker_profiles={**E2E_WORKER_PROFILES, **preload_profiles()},
 )
 
 app = Horsies(config)

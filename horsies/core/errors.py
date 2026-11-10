@@ -103,6 +103,11 @@ class ErrorCode(str, Enum):
     # check(live=True) was called on a thread that runs an event loop; the
     # live connectivity check did not run.
     CHECK_LIVE_ASYNC_CONTEXT = 'HRS-217'
+    # A worker profile in AppConfig.worker_profiles is not valid.
+    CONFIG_INVALID_WORKER_PROFILE = 'HRS-218'
+    # check(live=True): a worker profile needs more Postgres connections than
+    # the server allows, or the server limit could not be read.
+    CHECK_WORKER_CONNECTIONS = 'HRS-219'
 
     # Registry (HRS-300-HRS-399)
     TASK_NOT_REGISTERED = 'HRS-300'

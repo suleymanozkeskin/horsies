@@ -106,6 +106,7 @@ async def test_a_child_that_cannot_create_its_task_loop_stops_the_worker_before_
     with pytest.raises(RuntimeError) as stopped:
         with run_worker(
             INSTANCE,
+            profile='isolated-1',
             timeout=WORKER_EXIT_TIMEOUT_S,
             ready_check=lambda: False,
         ):
@@ -141,6 +142,7 @@ async def test_a_task_loop_failure_at_boot_costs_one_attempt(
 
     with run_worker(
         INSTANCE,
+        profile='isolated-1',
         timeout=WORKER_EXIT_TIMEOUT_S,
         ready_check=_ready_check(boot.healthcheck),
     ) as worker:
@@ -168,6 +170,7 @@ async def test_an_app_with_no_async_task_creates_no_task_loop(
 
     with run_worker(
         SYNC_ONLY_INSTANCE,
+        profile='isolated-1',
         timeout=WORKER_EXIT_TIMEOUT_S,
         ready_check=_ready_check(sync_only.healthcheck),
     ) as worker:
@@ -212,7 +215,7 @@ async def test_a_slot_that_cannot_create_its_task_loop_leaves_the_worker_degrade
 
     with run_worker(
         INSTANCE,
-        processes=2,
+        profile='isolated-2',
         timeout=WORKER_EXIT_TIMEOUT_S,
         ready_check=_ready_check(boot.healthcheck),
     ) as worker:

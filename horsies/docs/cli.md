@@ -12,7 +12,7 @@ tags: [cli, worker, scheduler, commands]
 Start a task worker.
 
 ```bash
-horsies worker <module> [OPTIONS]
+horsies worker <module> --profile NAME [OPTIONS]
 ```
 
 **Arguments:**
@@ -25,32 +25,22 @@ horsies worker <module> [OPTIONS]
 
 | Option | Default | Description |
 | ------ | ------- | ----------- |
-| `--processes N` | 1 | Number of worker processes |
+| `--profile NAME` | (required) | Name of the worker profile in `AppConfig.worker_profiles`. The profile holds the settings of the worker: children, recycling, claim limits, drain timeout and preload. See [Worker Profiles](workers/worker-profiles) |
 | `--loglevel LEVEL` | INFO | DEBUG, INFO, WARNING, ERROR, CRITICAL |
-| `--max-claim-batch N` | 0 | Max claims per queue per pass (`0` auto-fills available capacity) |
-| `--max-claim-per-worker N` | 0 | Max total claimed tasks (0=auto) |
-| `--max-tasks-per-child N` | 100 | Recycle each worker child after it runs N tasks (`N >= 1`, per-child and staggered). `0` disables recycling. See [worker concurrency](workers/concurrency). |
-| `--max-memory-per-child-mb N` | _(off)_ | Recycle a child once its own RSS reaches N MB (per-child). Disabled by default. The worker refuses to start if N is at or below the warmed child baseline. See [worker concurrency](workers/concurrency#memory-recycling-max-memory-per-child-mb). |
-| `--drain-timeout SECONDS` | 300 | Seconds to wait for running tasks at shutdown. At this deadline the worker kills their children. Set it below the stop window of your supervisor. See [Graceful Shutdown](workers/worker-architecture#graceful-shutdown). |
-| `--child-preload MODE` | library | What a Linux worker imports once before it forks children: `library`, `app`, or `none`. See [Preload Parent](workers/worker-architecture#preload-parent). |
+
+There is no default profile. A missing or unknown `--profile` exits with code 1 and lists the defined profile names. The flags `--processes`, `--max-claim-batch`, `--max-claim-per-worker`, `--max-tasks-per-child`, `--max-memory-per-child-mb`, `--drain-timeout` and `--child-preload` were removed in 0.7.0; each one exits with code 2 and names the profile field that replaces it.
 
 **Examples:**
 
 ```bash
-# Basic worker (module:app format, recommended)
-horsies worker myapp.instance:app
-
-# With 8 processes
-horsies worker myapp.instance:app --processes=8
+# Start a worker with the 'default' profile (module:app format, recommended)
+horsies worker myapp.instance:app --profile default
 
 # Debug logging
-horsies worker myapp.instance:app --loglevel=DEBUG
-
-# Production settings
-horsies worker myapp.instance:app --processes=8 --loglevel=WARNING
+horsies worker myapp.instance:app --profile default --loglevel=DEBUG
 
 # Using file path (also supported)
-horsies worker app/configs/instance.py:app
+horsies worker app/configs/instance.py:app --profile default
 ```
 
 ### horsies scheduler
@@ -102,7 +92,7 @@ horsies check <module> [OPTIONS]
 | Option | Default | Description |
 | ------ | ------- | ----------- |
 | `--loglevel LEVEL` | WARNING | DEBUG, INFO, WARNING, ERROR, CRITICAL |
-| `--live` | false | Also test broker connectivity (SELECT 1) |
+| `--live` | false | Also test broker connectivity (SELECT 1), and compare each worker profile with the server connection limit |
 
 **Examples:**
 
@@ -226,7 +216,7 @@ Each agent tool reads a different folder, so `--target` has no default. The comm
 The recommended format is a dotted module path with an explicit variable name:
 
 ```bash
-horsies worker myapp.instance:app
+horsies worker myapp.instance:app --profile default
 ```
 
 Where `app` is the variable name of your `Horsies` instance in the module.
@@ -234,7 +224,7 @@ Where `app` is the variable name of your `Horsies` instance in the module.
 File paths are also supported:
 
 ```bash
-horsies worker app/configs/instance.py:app
+horsies worker app/configs/instance.py:app --profile default
 ```
 
 **Do not** mix dotted module notation with a `.py` extension (e.g., `myapp.instance.py`). The CLI will reject this with a helpful error.
@@ -270,20 +260,20 @@ Both commands handle graceful shutdown:
 | `SIGTERM` | Graceful shutdown |
 | `SIGINT` (Ctrl+C) | Graceful shutdown |
 
-Workers wait up to `--drain-timeout` seconds (default 300) for running tasks, then kill their children.
+Workers wait up to the `drain_timeout` of their profile (default 300 seconds) for running tasks, then kill their children.
 
 ## Exit Codes
 
 | Code | Meaning |
 | ---- | ------- |
 | 0 | Clean shutdown |
-| 1 | Error (check logs) |
-| 2 | Invalid `horsies web` arguments, or an argparse error |
+| 1 | Error (check logs), including a missing or unknown `--profile` |
+| 2 | Invalid `horsies web` arguments, a removed worker flag, or an argparse error |
 
 ## Environment Variables
 
 ```bash
-DATABASE_URL=postgresql+psycopg://... horsies worker myapp.instance:app
+DATABASE_URL=postgresql+psycopg://... horsies worker myapp.instance:app --profile default
 ```
 
 Use in config:
@@ -311,7 +301,7 @@ After=postgresql.service
 Type=simple
 User=app
 WorkingDirectory=/app
-ExecStart=/usr/bin/horsies worker myapp.instance:app --processes=8
+ExecStart=/usr/bin/horsies worker myapp.instance:app --profile default
 Restart=always
 
 [Install]
@@ -327,12 +317,12 @@ WORKDIR /app
 COPY . .
 RUN pip install horsies
 
-CMD ["horsies", "worker", "myapp.instance:app", "--processes=8"]
+CMD ["horsies", "worker", "myapp.instance:app", "--profile", "default"]
 ```
 
 ### Procfile
 
 ```text
-worker: horsies worker myapp.instance:app --processes=8
+worker: horsies worker myapp.instance:app --profile default
 scheduler: horsies scheduler myapp.instance:app
 ```

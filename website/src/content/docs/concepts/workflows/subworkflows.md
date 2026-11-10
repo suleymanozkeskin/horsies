@@ -1009,7 +1009,7 @@ app.discover_tasks(["myapp.tasks", "myapp.workflows"])
 ```
 Then start the worker via CLI:
 ```bash
-horsies worker myapp.instance:app
+horsies worker myapp.instance:app --profile default
 ```
 
 ### Task Stuck in PENDING

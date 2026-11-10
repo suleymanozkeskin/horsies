@@ -172,7 +172,7 @@ Snapshot timeseries for one worker, newest first.
 | `snapshot_at` | `datetime` | When the snapshot was taken |
 | `hostname` | `str` | Worker host |
 | `pid` | `int` | Worker process id |
-| `processes` | `int` | Child process count |
+| `processes` | `int` | Child process count: the number of children of the worker profile |
 | `max_claim_batch` | `int` | Claim batch size |
 | `max_claim_per_worker` | `int` | Per-worker claim cap |
 | `cluster_wide_cap` | `int \| None` | Cluster-wide concurrency cap, if set |
@@ -223,4 +223,4 @@ whole process tree. `children_memory_mb` sums RSS, so with a
 shared page once per child, and it reads above real use. Use it to see one child
 grow, and read the container or cgroup total for the footprint that the quota
 enforces. To bound it, see
-[`--max-tasks-per-child`](../workers/concurrency).
+[process recycling](../workers/concurrency#process-recycling).

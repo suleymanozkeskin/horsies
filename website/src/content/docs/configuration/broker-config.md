@@ -162,11 +162,11 @@ For direct PostgreSQL connections, budget a worker roughly as:
 worker_pool_size + worker_max_overflow
   + 2 session/LISTEN connections
   + 1 runner heartbeat connection
-  + processes * worker_child_pool_max_size
+  + children * worker_child_pool_max_size
   + task-code database connections
 ```
 
-With the defaults and `--processes=8`, the framework ceiling is about
+With the defaults and a profile of 8 children, the framework ceiling is about
 `3 + 2 + 2 + 1 + 8 * 2 = 24` direct connections, before application task code.
 Idle child processes keep no database connection by default because
 `worker_child_pool_min_size=0`; connections are opened lazily when task

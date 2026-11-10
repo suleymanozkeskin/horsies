@@ -6,15 +6,22 @@ import argparse
 import logging
 import signal
 import types
+from datetime import timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import SecretStr
 
 from horsies.core.worker.config import ChildPreload
 from horsies.core.app import Horsies
 from horsies.core.brokers.resources import ListenerDisabled, ListenerEnabled
 from horsies.core.cli import (
+    REMOVED_WORKER_FLAGS,
+    ExecutionSettings,
+    ProfileNotGiven,
+    ProfileUnknown,
+    SelectedProfile,
     _build_queue_settings,
     _ensure_schema_with_retry,
     _is_file_path,
@@ -22,9 +29,11 @@ from horsies.core.cli import (
     _resolve_module_argument,
     check_command,
     discover_app,
+    execution_settings,
     get_docs_command,
     main,
     scheduler_command,
+    select_worker_profile,
     setup_logging,
     worker_command,
 )
@@ -38,7 +47,26 @@ from horsies.core.errors import (
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.resilience import WorkerResilienceConfig
+from horsies.core.models.worker_profile import (
+    ClaimLimits,
+    IsolatedChildren,
+    IsolatedRecycle,
+    MemoryLimit,
+    NoMemoryLimit,
+    NoTaskLimit,
+    TaskLimit,
+    WorkerProfile,
+)
 from horsies.core.types.result import Err, Ok
+from horsies.core.worker.profile_fit import (
+    CgroupLimit,
+    CgroupUnreadable,
+    MachineMemory,
+    MachineMemoryUnreadable,
+    NoCgroupLimit,
+    ServerConnectionLimit,
+    ServerConnectionLimitUnreadable,
+)
 from tests.broker_resources_support import (
     attach_loop_limit,
     attach_resources,
@@ -386,14 +414,25 @@ class TestMainEntrypoint:
             args = mock_cmd.call_args[0][0]
             assert args.loglevel == 'INFO'
 
-    def test_worker_processes_default_is_1(self) -> None:
+    def test_worker_profile_is_none_when_not_passed(self) -> None:
+        """argparse does not require --profile, so that the error after app
+        discovery can list the defined profile names."""
         with (
             patch('sys.argv', ['horsies', 'worker', 'my.mod:app']),
             patch('horsies.core.cli.worker_command', autospec=True) as mock_cmd,
         ):
             main()
             args = mock_cmd.call_args[0][0]
-            assert args.processes == 1
+            assert args.profile is None
+
+    def test_worker_profile_parsed(self) -> None:
+        with (
+            patch('sys.argv', ['horsies', 'worker', 'my.mod:app', '--profile', 'batch']),
+            patch('horsies.core.cli.worker_command', autospec=True) as mock_cmd,
+        ):
+            main()
+            args = mock_cmd.call_args[0][0]
+            assert args.profile == 'batch'
 
     def test_check_live_flag_parsed(self) -> None:
         with (
@@ -465,26 +504,14 @@ def _make_worker_namespace(
     *,
     module: str = 'my.mod:app',
     loglevel: str = 'INFO',
-    processes: int = 1,
-    max_claim_batch: int = 0,
-    max_claim_per_worker: int = 0,
-    max_tasks_per_child: int = 100,
-    max_memory_per_child_mb: int | None = None,
-    drain_timeout: float = 300.0,
-    child_preload: str = 'library',
+    profile: str | None = 'default',
 ) -> argparse.Namespace:
     """Build a valid argparse.Namespace for worker_command."""
     return argparse.Namespace(
         module=module,
         module_pos=None,
         loglevel=loglevel,
-        processes=processes,
-        max_claim_batch=max_claim_batch,
-        max_claim_per_worker=max_claim_per_worker,
-        max_tasks_per_child=max_tasks_per_child,
-        max_memory_per_child_mb=max_memory_per_child_mb,
-        drain_timeout=drain_timeout,
-        child_preload=child_preload,
+        profile=profile,
     )
 
 
@@ -549,6 +576,9 @@ def _make_mock_app() -> MagicMock:
     app.config.claim_lease_ms = 30000
     app.config.max_claim_renew_age_ms = 120000
     app.config.recovery = RecoveryConfig()
+    app.config.worker_profiles = {
+        'default': WorkerProfile(isolated=IsolatedChildren(count=1)),
+    }
     return app
 
 
@@ -1749,6 +1779,16 @@ async def _run_captured_worker(
 class TestRunWorkerResourceSelection:
     """run_worker selects the worker broker's resources once and builds the Worker from them."""
 
+    @pytest.fixture(autouse=True)
+    def _server_connection_limit(self) -> Any:
+        """The run_worker coroutine reads the server connection limit before
+        it builds the Worker; the mocked session factory cannot answer."""
+        with patch(
+            'horsies.core.cli.read_server_connection_limit',
+            AsyncMock(return_value=ServerConnectionLimit(max_connections=100, reserved=3)),
+        ) as reader:
+            yield reader
+
     @patch('horsies.core.cli.Worker', autospec=True)
     @patch('horsies.core.cli.print_banner', autospec=True)
     @patch('horsies.core.cli.to_psycopg_url', autospec=True, return_value='psycopg://x')
@@ -1843,6 +1883,16 @@ class TestRunWorkerResourceSelection:
 class TestRunWorkerCoroutine:
     """Cover the inner run_worker async body by capturing the coroutine."""
 
+    @pytest.fixture(autouse=True)
+    def _server_connection_limit(self) -> Any:
+        """The run_worker coroutine reads the server connection limit before
+        it builds the Worker; the mocked session factory cannot answer."""
+        with patch(
+            'horsies.core.cli.read_server_connection_limit',
+            AsyncMock(return_value=ServerConnectionLimit(max_connections=100, reserved=3)),
+        ) as reader:
+            yield reader
+
     @patch('horsies.core.cli.Worker', autospec=True)
     @patch('horsies.core.cli.print_banner', autospec=True)
     @patch('horsies.core.cli.to_psycopg_url', autospec=True, return_value='psycopg://x')
@@ -1861,8 +1911,15 @@ class TestRunWorkerCoroutine:
         app = _make_mock_app()
         schema_broker = _make_mock_broker()
         broker = _make_mock_broker()
+        app.config.worker_profiles = {
+            'default': WorkerProfile(
+                isolated=IsolatedChildren(count=1),
+                drain_timeout=timedelta(seconds=7.5),
+                preload=ChildPreload.APP,
+            ),
+        }
         mock_discover.return_value = (app, 'app', 'my.mod', '/project')
-        args = _make_worker_namespace(drain_timeout=7.5, child_preload='app')
+        args = _make_worker_namespace()
 
         # Mock Worker instance
         mock_worker = MagicMock()
@@ -2287,77 +2344,540 @@ class TestRunSchedulerCoroutine:
 
 
 # ---------------------------------------------------------------------------
-# CLI numeric argument validation
+# Worker profiles: selection, removed flags, settings, machine facts
 # ---------------------------------------------------------------------------
 
 
+def _two_profiles() -> dict[str, WorkerProfile]:
+    return {
+        'default': WorkerProfile(isolated=IsolatedChildren(count=1)),
+        'batch': WorkerProfile(isolated=IsolatedChildren(count=2)),
+    }
+
+
 @pytest.mark.unit
-class TestCliNumericValidation:
-    """Numeric worker flags are validated at the argparse boundary.
+class TestSelectWorkerProfile:
+    def test_a_defined_name_selects_its_profile(self) -> None:
+        profiles = _two_profiles()
+        assert select_worker_profile(profiles, 'batch') == Ok(
+            SelectedProfile(name='batch', profile=profiles['batch']),
+        )
 
-    --processes 0 previously reached ProcessPoolExecutor(max_workers=0)
-    and crashed with a raw ValueError; negative claim knobs flowed into
-    claim SQL / capacity math unchecked.
-    """
+    def test_no_name_is_not_given_with_the_defined_names(self) -> None:
+        assert select_worker_profile(_two_profiles(), None) == Err(
+            ProfileNotGiven(defined=('batch', 'default')),
+        )
 
-    def test_processes_zero_rejected(self) -> None:
-        from horsies.core.cli import _positive_int
+    def test_an_unknown_name_is_unknown_with_the_defined_names(self) -> None:
+        assert select_worker_profile(_two_profiles(), 'nope') == Err(
+            ProfileUnknown(requested='nope', defined=('batch', 'default')),
+        )
 
-        with pytest.raises(Exception, match='must be >= 1'):
-            _positive_int('0')
 
-    def test_processes_negative_rejected(self) -> None:
-        from horsies.core.cli import _positive_int
+@pytest.mark.unit
+class TestWorkerCommandProfileSelection:
+    """A missing or unknown profile fails before anything starts."""
 
-        with pytest.raises(Exception, match='must be >= 1'):
-            _positive_int('-2')
+    def _run(
+        self,
+        profiles: dict[str, WorkerProfile],
+        profile: str | None,
+    ) -> tuple[MagicMock, MagicMock]:
+        app = _make_mock_app()
+        app.config.worker_profiles = profiles
+        with (
+            patch('horsies.core.cli.setup_logging', autospec=True),
+            patch(
+                'horsies.core.cli.discover_app',
+                autospec=True,
+                return_value=(app, 'app', 'my.mod', None),
+            ),
+            patch('horsies.core.cli.asyncio.run', autospec=True) as mock_run,
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            worker_command(_make_worker_namespace(profile=profile))
+        assert exc_info.value.code == 1
+        return app, mock_run
 
-    def test_processes_positive_accepted(self) -> None:
-        from horsies.core.cli import _positive_int
+    def test_missing_profile_exits_1_and_lists_the_names(
+        self,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        app, mock_run = self._run(_two_profiles(), None)
 
-        assert _positive_int('4') == 4
+        err = capsys.readouterr().err
+        assert '--profile is required' in err
+        assert 'defined profiles: batch, default' in err
+        assert 'horsies worker <app> --profile batch' in err
+        app.check.assert_not_called()
+        mock_run.assert_not_called()
 
-    def test_claim_knobs_reject_negative(self) -> None:
-        from horsies.core.cli import _non_negative_int
+    def test_unknown_profile_exits_1_and_lists_the_names(
+        self,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        app, mock_run = self._run(_two_profiles(), 'nope')
 
-        with pytest.raises(Exception, match='must be >= 0'):
-            _non_negative_int('-1')
+        err = capsys.readouterr().err
+        assert "unknown worker profile 'nope'" in err
+        assert 'defined profiles: batch, default' in err
+        app.check.assert_not_called()
+        mock_run.assert_not_called()
 
-    def test_claim_knobs_accept_zero_auto(self) -> None:
-        from horsies.core.cli import _non_negative_int
+    def test_an_app_with_no_profiles_says_so(
+        self,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        _app, mock_run = self._run({}, 'default')
 
-        assert _non_negative_int('0') == 0
+        err = capsys.readouterr().err
+        assert 'the app defines no worker profiles' in err
+        assert "'default': WorkerProfile(isolated=IsolatedChildren(count=4))" in err
+        mock_run.assert_not_called()
 
-    def test_drain_timeout_accepts_seconds(self) -> None:
-        from horsies.core.cli import _drain_timeout_s
 
-        assert _drain_timeout_s('2.5') == 2.5
+@pytest.mark.unit
+class TestRemovedWorkerFlags:
+    """Each flag that moved into a profile fails with the field that replaces it."""
 
-    @pytest.mark.parametrize('value', ['0', '-1', 'nan', 'inf'])
-    def test_drain_timeout_refuses_a_value_with_no_deadline(self, value: str) -> None:
-        from horsies.core.cli import _drain_timeout_s
+    @pytest.mark.parametrize('flag', sorted(REMOVED_WORKER_FLAGS))
+    @pytest.mark.parametrize('form', ['equals', 'separate'])
+    def test_removed_flag_names_its_replacement(
+        self,
+        flag: str,
+        form: str,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        flag_args = [f'{flag}=4'] if form == 'equals' else [flag, '4']
+        with (
+            patch('sys.argv', ['horsies', 'worker', 'my.mod:app', *flag_args]),
+            patch('horsies.core.cli.worker_command', autospec=True) as mock_cmd,
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            main()
 
-        with pytest.raises(Exception, match='finite number of seconds'):
-            _drain_timeout_s(value)
+        assert exc_info.value.code == 2
+        err = capsys.readouterr().err
+        assert f'{flag} was removed in 0.7.0' in err
+        assert REMOVED_WORKER_FLAGS[flag] in err
+        assert '--profile <name>' in err
+        mock_cmd.assert_not_called()
 
-    def test_max_tasks_per_child_negative_rejected(self) -> None:
-        from horsies.core.cli import _max_tasks_per_child
+    def test_the_table_covers_every_removed_flag(self) -> None:
+        assert set(REMOVED_WORKER_FLAGS) == {
+            '--processes',
+            '--max-claim-batch',
+            '--max-claim-per-worker',
+            '--max-tasks-per-child',
+            '--max-memory-per-child-mb',
+            '--drain-timeout',
+            '--child-preload',
+        }
 
-        with pytest.raises(Exception, match='must be >= 1'):
-            _max_tasks_per_child('-3')
+    def test_removed_flags_are_hidden_from_help(
+        self,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        with (
+            patch('sys.argv', ['horsies', 'worker', '--help']),
+            pytest.raises(SystemExit),
+        ):
+            main()
+        out = capsys.readouterr().out
+        assert '--profile' in out
+        for flag in REMOVED_WORKER_FLAGS:
+            assert flag not in out
 
-    def test_max_tasks_per_child_one_accepted(self) -> None:
-        from horsies.core.cli import _max_tasks_per_child
 
-        assert _max_tasks_per_child('1') == 1
+@pytest.mark.unit
+class TestExecutionSettings:
+    """The named variants of a profile reach the WorkerConfig encoding."""
 
-    def test_max_tasks_per_child_zero_disables(self) -> None:
-        from horsies.core.cli import _max_tasks_per_child
+    def test_limits_become_their_numbers(self) -> None:
+        settings = execution_settings(
+            WorkerProfile(
+                isolated=IsolatedChildren(
+                    count=6,
+                    recycle=IsolatedRecycle(
+                        after=TaskLimit(tasks=25),
+                        above=MemoryLimit(mb=768),
+                    ),
+                ),
+                claim=ClaimLimits(
+                    per_queue_per_pass=TaskLimit(tasks=2),
+                    claimed_per_worker=TaskLimit(tasks=4),
+                ),
+                drain_timeout=timedelta(seconds=45),
+                preload=ChildPreload.NONE,
+            ),
+        )
+        assert settings == ExecutionSettings(
+            processes=6,
+            max_tasks_per_child=25,
+            max_memory_per_child_mb=768,
+            max_claim_batch=2,
+            max_claim_per_worker=4,
+            drain_timeout_s=45.0,
+            child_preload=ChildPreload.NONE,
+        )
 
-        assert _max_tasks_per_child('0') == 0
+    def test_no_limit_variants_become_the_no_limit_encoding(self) -> None:
+        settings = execution_settings(
+            WorkerProfile(
+                isolated=IsolatedChildren(
+                    count=1,
+                    recycle=IsolatedRecycle(
+                        after=NoTaskLimit(),
+                        above=NoMemoryLimit(),
+                    ),
+                ),
+            ),
+        )
+        assert settings.max_tasks_per_child == 0
+        assert settings.max_memory_per_child_mb is None
+        assert settings.max_claim_batch == 0
+        assert settings.max_claim_per_worker == 0
 
-    def test_max_tasks_per_child_two_or_more_accepted(self) -> None:
-        from horsies.core.cli import _max_tasks_per_child
+    def test_a_profile_with_no_children_is_a_defect(self) -> None:
+        with pytest.raises(AssertionError, match='no children'):
+            execution_settings(WorkerProfile())
 
-        assert _max_tasks_per_child('2') == 2
-        assert _max_tasks_per_child('50') == 50
+
+def _start_worker_with(
+    profile: WorkerProfile,
+    machine: MachineMemory | MachineMemoryUnreadable,
+    cgroup: CgroupLimit | NoCgroupLimit | CgroupUnreadable = NoCgroupLimit(),
+) -> MagicMock:
+    """Run worker_command up to asyncio.run with one profile, a host RAM
+    reading and a cgroup limit reading."""
+    app = _make_mock_app()
+    app.config.worker_profiles = {'default': profile}
+    with (
+        patch('horsies.core.cli.setup_logging', autospec=True),
+        patch(
+            'horsies.core.cli.discover_app',
+            autospec=True,
+            return_value=(app, 'app', 'my.mod', '/project'),
+        ),
+        patch('horsies.core.cli.print_banner', autospec=True),
+        patch('horsies.core.cli.read_machine_memory', return_value=machine),
+        patch('horsies.core.cli.read_cgroup_memory_limit', return_value=cgroup),
+        patch(
+            'horsies.core.cli.asyncio.run',
+            autospec=True,
+            side_effect=_closing_run_side_effect(KeyboardInterrupt),
+        ) as mock_run,
+    ):
+        worker_command(_make_worker_namespace())
+    return mock_run
+
+
+def _memory_profile(count: int, mb: int) -> WorkerProfile:
+    return WorkerProfile(
+        isolated=IsolatedChildren(
+            count=count,
+            recycle=IsolatedRecycle(above=MemoryLimit(mb=mb)),
+        ),
+    )
+
+
+@pytest.mark.unit
+class TestBootMemoryFit:
+    """The sum of the memory limits against the memory the worker can use
+    (container limit or host RAM) warns and never refuses."""
+
+    def test_limits_above_the_host_ram_warn_and_the_worker_starts(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        with caplog.at_level(logging.INFO, logger='horsies'):
+            mock_run = _start_worker_with(_memory_profile(4, 512), MachineMemory(mb=1000))
+
+        mock_run.assert_called_once()
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert warnings == [
+            "Worker profile 'default': the per-child memory limits add up to "
+            '2048 MB, above the 1000 MB host RAM. Children can use more memory '
+            'than the worker has before they are recycled.',
+        ]
+
+    def test_limits_above_the_container_limit_warn_and_name_it(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """16 GiB host, 1 GiB container: the container limit is the bound."""
+        with caplog.at_level(logging.INFO, logger='horsies'):
+            mock_run = _start_worker_with(
+                _memory_profile(4, 512),
+                MachineMemory(mb=16_384),
+                CgroupLimit(limit_bytes=1024 * 1024 * 1024),
+            )
+
+        mock_run.assert_called_once()
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert warnings == [
+            "Worker profile 'default': the per-child memory limits add up to "
+            '2048 MB, above the 1024 MB container limit. Children can use more '
+            'memory than the worker has before they are recycled.',
+        ]
+
+    def test_an_unreadable_container_limit_warns_and_uses_the_host_ram(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        with caplog.at_level(logging.INFO, logger='horsies'):
+            mock_run = _start_worker_with(
+                _memory_profile(2, 512),
+                MachineMemory(mb=4096),
+                CgroupUnreadable(reason='/sys/fs/cgroup/memory.max: PermissionError: denied'),
+            )
+
+        mock_run.assert_called_once()
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert warnings == [
+            "Worker profile 'default': the container memory limit could not be "
+            'read (/sys/fs/cgroup/memory.max: PermissionError: denied); the '
+            'per-child memory limits are compared with the host RAM',
+        ]
+        assert any(
+            'add up to 1024 MB of the 4096 MB host RAM' in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_limits_within_the_ram_do_not_warn(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        with caplog.at_level(logging.INFO, logger='horsies'):
+            mock_run = _start_worker_with(_memory_profile(2, 512), MachineMemory(mb=1024))
+
+        mock_run.assert_called_once()
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any(
+            'add up to 1024 MB of the 1024 MB host RAM' in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_unreadable_ram_warns_and_the_worker_starts(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        with caplog.at_level(logging.INFO, logger='horsies'):
+            mock_run = _start_worker_with(
+                _memory_profile(2, 512),
+                MachineMemoryUnreadable(reason='OSError: no /proc'),
+            )
+
+        mock_run.assert_called_once()
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert 'the memory of the machine could not be read (OSError: no /proc)' in warnings[0]
+
+    def test_no_memory_limit_has_nothing_to_compare(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        with caplog.at_level(logging.INFO, logger='horsies'):
+            _start_worker_with(
+                WorkerProfile(isolated=IsolatedChildren(count=2)),
+                MachineMemory(mb=1),
+            )
+
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any('no per-child memory limit' in r.getMessage() for r in caplog.records)
+
+    def test_the_profile_settings_reach_the_worker_config(self) -> None:
+        """The CLI builds WorkerConfig from the chosen profile, not from flags."""
+        app = _make_mock_app()
+        app.config.worker_profiles = {
+            'default': WorkerProfile(isolated=IsolatedChildren(count=1)),
+            'batch': WorkerProfile(
+                isolated=IsolatedChildren(
+                    count=3,
+                    recycle=IsolatedRecycle(after=TaskLimit(tasks=7)),
+                ),
+                claim=ClaimLimits(claimed_per_worker=TaskLimit(tasks=3)),
+            ),
+        }
+        with (
+            patch('horsies.core.cli.setup_logging', autospec=True),
+            patch(
+                'horsies.core.cli.discover_app',
+                autospec=True,
+                return_value=(app, 'app', 'my.mod', '/project'),
+            ),
+            patch('horsies.core.cli.print_banner', autospec=True),
+            patch('horsies.core.cli.WorkerConfig', autospec=True) as mock_cfg,
+            patch(
+                'horsies.core.cli.asyncio.run',
+                autospec=True,
+                side_effect=_closing_run_side_effect(KeyboardInterrupt),
+            ),
+        ):
+            worker_command(_make_worker_namespace(profile='batch'))
+
+        kwargs = mock_cfg.call_args.kwargs
+        assert kwargs['processes'] == 3
+        assert kwargs['max_tasks_per_child'] == 7
+        assert kwargs['max_claim_per_worker'] == 3
+        assert kwargs['max_claim_batch'] == 0
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.filterwarnings('ignore:coroutine.*was never awaited:RuntimeWarning')
+class TestBootConnectionFit:
+    """At boot, before the Worker is built, the server connection limit is
+    read and compared. A worker that can need more warns and still starts."""
+
+    async def _boot(
+        self,
+        reader: AsyncMock,
+        app: MagicMock,
+        order: list[str],
+    ) -> MagicMock:
+        def build_worker(*_args: Any, **_kwargs: Any) -> MagicMock:
+            order.append('worker built')
+            return MagicMock(run_forever=AsyncMock())
+
+        async def read(*args: Any) -> Any:
+            order.append('limit read')
+            return await reader(*args)
+
+        with (
+            patch('horsies.core.cli.setup_logging', autospec=True),
+            patch(
+                'horsies.core.cli.discover_app',
+                autospec=True,
+                return_value=(app, 'app', 'my.mod', '/project'),
+            ),
+            patch('horsies.core.cli.print_banner', autospec=True),
+            patch('horsies.core.cli.to_psycopg_url', return_value='psycopg://x'),
+            patch('horsies.core.cli.read_server_connection_limit', side_effect=read),
+            patch('horsies.core.cli.Worker', side_effect=build_worker) as mock_worker,
+        ):
+            await _run_captured_worker(
+                _make_worker_namespace(), [_make_mock_broker(), _make_mock_broker()],
+            )
+        return mock_worker
+
+    async def test_a_profile_above_the_limit_warns_and_the_worker_starts(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        app = _make_mock_app()
+        app.config.worker_profiles = {
+            'default': WorkerProfile(isolated=IsolatedChildren(count=20)),
+        }
+        reader = AsyncMock(
+            return_value=ServerConnectionLimit(max_connections=30, reserved=3),
+        )
+        order: list[str] = []
+        with caplog.at_level(logging.INFO, logger='horsies'):
+            mock_worker = await self._boot(reader, app, order)
+
+        mock_worker.assert_called_once()
+        assert order == ['limit read', 'worker built']
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert warnings[0].startswith(
+            "Worker profile 'default': one worker can open 48 Postgres "
+            'connections; the server has 27 usable slots',
+        )
+
+    async def test_a_profile_within_the_limit_does_not_warn(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        reader = AsyncMock(
+            return_value=ServerConnectionLimit(max_connections=100, reserved=3),
+        )
+        order: list[str] = []
+        with caplog.at_level(logging.INFO, logger='horsies'):
+            await self._boot(reader, _make_mock_app(), order)
+
+        assert order == ['limit read', 'worker built']
+        assert not [
+            r for r in caplog.records
+            if r.levelno >= logging.WARNING and 'connections' in r.getMessage()
+        ]
+
+    async def test_an_unreadable_limit_warns_and_the_worker_starts(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        reader = AsyncMock(
+            return_value=ServerConnectionLimitUnreadable(reason='OSError: reset'),
+        )
+        order: list[str] = []
+        with caplog.at_level(logging.INFO, logger='horsies'):
+            mock_worker = await self._boot(reader, _make_mock_app(), order)
+
+        mock_worker.assert_called_once()
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert any(
+            'the server connection limit could not be read (OSError: reset)' in w
+            for w in warnings
+        )
+
+    async def test_a_transaction_pooler_reads_nothing(self) -> None:
+        app = _make_mock_app()
+        app.config.broker = PostgresConfig(
+            database_url=SecretStr('postgresql+psycopg://user:pass@localhost:6432/db'),
+            session_database_url=SecretStr(
+                'postgresql+psycopg://user:pass@localhost:5432/db',
+            ),
+            pgbouncer_transaction_mode=True,
+        )
+        reader = AsyncMock()
+        order: list[str] = []
+        mock_worker = await self._boot(reader, app, order)
+
+        mock_worker.assert_called_once()
+        assert order == ['worker built']
+        reader.assert_not_awaited()
+
+
+@pytest.mark.unit
+class TestCheckCommandReportsEveryProfile:
+    """`horsies check` on an app module reports each invalid profile with its
+    name and field path."""
+
+    def test_two_invalid_profiles_are_both_reported(
+        self,
+        tmp_path: Any,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        module = tmp_path / 'profiles_app.py'
+        module.write_text(
+            'from horsies import (AppConfig, ClaimLimits, Horsies, IsolatedChildren,\n'
+            '    PostgresConfig, TaskLimit, WorkerProfile)\n'
+            'app = Horsies(AppConfig(\n'
+            "    broker=PostgresConfig(database_url='postgresql+psycopg://u:p@h/db'),\n"
+            '    worker_profiles={\n'
+            "        'empty': WorkerProfile(),\n"
+            "        'greedy': WorkerProfile(\n"
+            '            isolated=IsolatedChildren(count=2),\n'
+            '            claim=ClaimLimits(claimed_per_worker=TaskLimit(tasks=10)),\n'
+            '        ),\n'
+            '    },\n'
+            '))\n'
+        )
+        args = _make_check_namespace(module=f'{module}:app')
+
+        with (
+            patch('horsies.core.cli.setup_logging', autospec=True),
+            patch('horsies.core.cli.setup_sys_path_from_cwd', return_value=None),
+            caplog.at_level(logging.ERROR, logger='horsies'),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            check_command(args)
+
+        assert exc_info.value.code == 1
+        logged = '\n'.join(r.getMessage() for r in caplog.records)
+        assert "error[HRS-218]: worker_profiles['empty']: the profile starts no children" in logged
+        assert (
+            "error[HRS-218]: worker_profiles['greedy'].claim.claimed_per_worker: "
+            '10 tasks is above the capacity of the worker (2)'
+        ) in logged
+        assert 'aborting due to 2 previous errors' in logged

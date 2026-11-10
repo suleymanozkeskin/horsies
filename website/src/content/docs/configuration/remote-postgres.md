@@ -22,11 +22,11 @@ Each worker holds, under load:
 worker_pool_size + worker_max_overflow   # coordinator engine
 + 2                                      # LISTEN connections (tasks, ping)
 + 1                                      # runner heartbeat connection
-+ processes × worker_child_pool_max_size # per-child pools
++ children × worker_child_pool_max_size  # per-child pools
 ```
 
 At defaults (`worker_pool_size=3`, `worker_max_overflow=2`,
-`worker_child_pool_max_size=2`) with `--processes=8`:
+`worker_child_pool_max_size=2`) with a profile of 8 children:
 
 ```text
 3 + 2 + 2 + 1 + 8 × 2 = 24 connections per worker
@@ -94,7 +94,7 @@ inside a small slot budget.
 With `prefetch_buffer=0` (the default), a worker claims new tasks only
 when a process slot is free, and each claim pass costs several round
 trips. At 30ms+ RTT this serializes into the task rate and caps
-throughput near `processes` tasks per second regardless of task duration.
+throughput near the number of children in tasks per second, regardless of task duration.
 
 Set a prefetch buffer and claim lease for remote deployments:
 
@@ -102,7 +102,7 @@ Set a prefetch buffer and claim lease for remote deployments:
 from horsies import AppConfig, PostgresConfig
 
 config = AppConfig(
-    prefetch_buffer=24,        # claim ahead: 2–3× processes
+    prefetch_buffer=24,        # claim ahead: 2–3× the children
     claim_lease_ms=120_000,    # required when prefetch_buffer > 0
     broker=PostgresConfig(database_url=SecretStr(os.environ['DATABASE_URL'])),
 )

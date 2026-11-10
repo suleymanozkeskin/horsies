@@ -12,7 +12,7 @@ tags: [cli, worker, scheduler, commands]
 Start a task worker.
 
 ```bash
-horsies worker <module> [OPTIONS]
+horsies worker <module> --profile NAME [OPTIONS]
 ```
 
 **Arguments:**
@@ -25,40 +25,30 @@ horsies worker <module> [OPTIONS]
 
 | Option | Default | Description |
 | ------ | ------- | ----------- |
-| `--processes N` | 1 | Number of worker processes |
+| `--profile NAME` | (required) | Name of the worker profile in `AppConfig.worker_profiles`. The profile holds the settings of the worker: children, recycling, claim limits, drain timeout and preload. See [Worker Profiles](workers/worker-profiles) |
 | `--loglevel LEVEL` | INFO | DEBUG, INFO, WARNING, ERROR, CRITICAL |
-| `--max-claim-batch N` | 0 | Max claims per queue per pass (`0` auto-fills available capacity) |
-| `--max-claim-per-worker N` | 0 | Max total claimed tasks (0=auto) |
-| `--max-tasks-per-child N` | 100 | Recycle each worker child after it runs N tasks (`N >= 1`, per-child and staggered). `0` disables recycling. See [worker concurrency](workers/concurrency). |
-| `--max-memory-per-child-mb N` | _(off)_ | Recycle a child once its own RSS reaches N MB (per-child). Disabled by default. The worker refuses to start if N is at or below the warmed child baseline. See [worker concurrency](workers/concurrency#memory-recycling-max-memory-per-child-mb). |
-| `--drain-timeout SECONDS` | 300 | Seconds to wait for running tasks at shutdown. At this deadline the worker kills their children. Set it below the stop window of your supervisor. See [Graceful Shutdown](workers/worker-architecture#graceful-shutdown). |
-| `--child-preload MODE` | library | What a Linux worker imports once before it forks children: `library`, `app`, or `none`. See [Preload Parent](workers/worker-architecture#preload-parent). |
+
+There is no default profile. A missing or unknown `--profile` exits with code 1 before the app check and before any child starts. The message lists the defined profile names.
+
+The flags `--processes`, `--max-claim-batch`, `--max-claim-per-worker`, `--max-tasks-per-child`, `--max-memory-per-child-mb`, `--drain-timeout` and `--child-preload` were removed in 0.7.0. Each one exits with code 2 and names the profile field that replaces it. See [Migrating to 0.7.0](migrations/migration-to-0-7-0).
 
 **Examples:**
 
 ```bash
-# Basic worker (module:app format, recommended)
-horsies worker myapp.instance:app
+# Start a worker with the 'default' profile (module:app format, recommended)
+horsies worker myapp.instance:app --profile default
 
-# With 8 processes
-horsies worker myapp.instance:app --processes=8
+# Start a worker with another profile of the same app
+horsies worker myapp.instance:app --profile batch
 
 # Debug logging
-horsies worker myapp.instance:app --loglevel=DEBUG
-
-# Production settings
-horsies worker myapp.instance:app --processes=8 --loglevel=WARNING
-
-# Recycle each child after 500 tasks (raise from the default 100 for
-# high-throughput or connection-constrained deployments)
-horsies worker myapp.instance:app --processes=8 --max-tasks-per-child=500
-
-# Disable recycling (children live for the worker's lifetime)
-horsies worker myapp.instance:app --processes=8 --max-tasks-per-child=0
+horsies worker myapp.instance:app --profile default --loglevel=DEBUG
 
 # Using file path (also supported)
-horsies worker app/configs/instance.py:app
+horsies worker app/configs/instance.py:app --profile default
 ```
+
+At boot, before any child starts, the worker logs the settings of the profile, and warns when the per-child memory limits add up to more than the memory that the worker can use (the container limit, or the host RAM), or when one worker can open more Postgres connections than the server has usable slots. See [Validation](workers/worker-profiles#validation).
 
 ### horsies scheduler
 
@@ -96,6 +86,8 @@ Validate configuration, task registration, workflow structure, and optionally br
 
 For details on validation phases, `@app.workflow_builder`, the guarantee model, and CI usage, see [Startup Validation](../configuration/app-config#startup-validation-appcheck).
 
+`horsies check` validates every worker profile of the app, and each error names the profile and the field path (`HRS-218`). With `--live`, a profile whose worker can open more Postgres connections than the server has usable slots is an error (`HRS-219`). See [Worker Profiles](workers/worker-profiles#validation).
+
 ```bash
 horsies check <module> [OPTIONS]
 ```
@@ -111,7 +103,7 @@ horsies check <module> [OPTIONS]
 | Option | Default | Description |
 | ------ | ------- | ----------- |
 | `--loglevel LEVEL` | WARNING | DEBUG, INFO, WARNING, ERROR, CRITICAL |
-| `--live` | false | Also test broker connectivity (SELECT 1) |
+| `--live` | false | Also test broker connectivity (SELECT 1), and compare each worker profile with the server connection limit |
 
 **Examples:**
 
@@ -119,7 +111,7 @@ horsies check <module> [OPTIONS]
 # Validate tasks, config, and workflows
 horsies check myapp.instance:app
 
-# Include broker connectivity check
+# Include broker connectivity and the worker connection check
 horsies check myapp.instance:app --live
 ```
 
@@ -260,7 +252,7 @@ on-demand loading by agents that support markdown skill files.
 The recommended format is a dotted module path with an explicit variable name:
 
 ```bash
-horsies worker myapp.instance:app
+horsies worker myapp.instance:app --profile default
 ```
 
 Where `app` is the variable name of your `Horsies` instance in the module.
@@ -268,7 +260,7 @@ Where `app` is the variable name of your `Horsies` instance in the module.
 File paths are also supported:
 
 ```bash
-horsies worker app/configs/instance.py:app
+horsies worker app/configs/instance.py:app --profile default
 ```
 
 **Do not** mix dotted module notation with a `.py` extension (e.g., `myapp.instance.py`). The CLI will reject this with a helpful error.
@@ -308,20 +300,20 @@ Both commands handle graceful shutdown:
 | `SIGTERM` | Graceful shutdown |
 | `SIGINT` (Ctrl+C) | Graceful shutdown |
 
-Workers wait up to `--drain-timeout` seconds for running tasks. See [Graceful Shutdown](workers/worker-architecture#graceful-shutdown).
+Workers wait up to the `drain_timeout` of their profile for running tasks. See [Graceful Shutdown](workers/worker-architecture#graceful-shutdown).
 
 ## Exit Codes
 
 | Code | Meaning |
 | ---- | ------- |
 | 0 | Clean shutdown |
-| 1 | Error (check logs) |
-| 2 | Invalid `horsies web` arguments, or an argparse error |
+| 1 | Error (check logs), including a missing or unknown `--profile` |
+| 2 | Invalid `horsies web` arguments, a removed worker flag, or an argparse error |
 
 ## Environment Variables
 
 ```bash
-DATABASE_URL=postgresql+psycopg://... horsies worker myapp.instance:app
+DATABASE_URL=postgresql+psycopg://... horsies worker myapp.instance:app --profile default
 ```
 
 Use in config:
@@ -348,7 +340,7 @@ After=postgresql.service
 Type=simple
 User=app
 WorkingDirectory=/app
-ExecStart=/usr/bin/horsies worker myapp.instance:app --processes=8
+ExecStart=/usr/bin/horsies worker myapp.instance:app --profile default
 Restart=always
 KillMode=mixed
 TimeoutStopSec=330
@@ -357,7 +349,7 @@ TimeoutStopSec=330
 WantedBy=multi-user.target
 ```
 
-`KillMode=mixed` sends SIGTERM to the worker only, so subprocesses of running tasks are not stopped by the signal. `TimeoutStopSec` must be above `--drain-timeout`.
+`KillMode=mixed` sends SIGTERM to the worker only, so subprocesses of running tasks are not stopped by the signal. `TimeoutStopSec` must be above the `drain_timeout` of the profile (300 seconds by default).
 
 ### Docker
 
@@ -368,14 +360,14 @@ WORKDIR /app
 COPY . .
 RUN pip install horsies
 
-CMD ["horsies", "worker", "myapp.instance:app", "--processes=8"]
+CMD ["horsies", "worker", "myapp.instance:app", "--profile", "default"]
 ```
 
-Use this exec form. With the shell form, `sh` receives SIGTERM and the worker does not. Docker waits 10 seconds by default, so set `--drain-timeout` below that or raise `docker stop --time`.
+Use this exec form. With the shell form, `sh` receives SIGTERM and the worker does not. Docker waits 10 seconds by default, so set the `drain_timeout` of the profile below that or raise `docker stop --time`.
 
 ### Procfile
 
 ```text
-worker: horsies worker myapp.instance:app --processes=8
+worker: horsies worker myapp.instance:app --profile default
 scheduler: horsies scheduler myapp.instance:app
 ```

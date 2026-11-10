@@ -43,6 +43,11 @@ from tests.e2e.tasks import instance as default_instance
 from tests.e2e.tasks import instance_retry_precedence
 from tests.e2e.tasks import instance_custom
 from tests.e2e.tasks import queues_custom
+from tests.e2e.tasks.profiles import (
+    CLAIM_BATCH_1,
+    CLAIM_BATCH_1_TASKS,
+    isolated_profile_name,
+)
 from tests.broker_resources_support import current_resources
 
 
@@ -74,7 +79,9 @@ def _make_ready_check(task_func: _HealthcheckTask):
 @pytest.mark.e2e
 def test_simple_task_lifecycle() -> None:
     with run_worker(
-        DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         handle = unwrap_send(basic_tasks.simple_task.send(x=5))
         result = handle.get(timeout_ms=5000)
@@ -85,7 +92,9 @@ def test_simple_task_lifecycle() -> None:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_status_transitions(broker: PostgresBroker) -> None:
     with run_worker(
-        DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         handle = unwrap_send(await basic_tasks.simple_task.send_async(x=5))
         result = await asyncio.to_thread(handle.get, timeout_ms=5000)
@@ -105,7 +114,9 @@ def test_a_task_cannot_wait_for_another_task() -> None:
     """In a worker child, every result wait is refused at once, also on a thread
     that the task starts. send, a workflow start and info work."""
     with run_worker(
-        DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         handle = unwrap_send(basic_tasks.wait_inside_task.send())
         result = handle.get(timeout_ms=10000)
@@ -128,7 +139,9 @@ def test_an_async_task_cannot_wait_for_another_task() -> None:
     """In an `async def` task, every async result wait is refused at once.
     send_async enqueues: the sent task completes, read from outside the worker."""
     with run_worker(
-        DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         handle = unwrap_send(async_tasks.async_wait_inside_task.send())
         probe = handle.get(timeout_ms=10000)
@@ -151,7 +164,9 @@ def test_an_async_task_cannot_wait_for_another_task() -> None:
 @pytest.mark.e2e
 def test_primitive_args() -> None:
     with run_worker(
-        DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         result = unwrap_send(basic_tasks.primitives_task.send(i=42, f=3.14, s='hello', b=True, n=None)).get(
             timeout_ms=5000
@@ -162,7 +177,9 @@ def test_primitive_args() -> None:
 @pytest.mark.e2e
 def test_collection_args() -> None:
     with run_worker(
-        DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         result = unwrap_send(basic_tasks.collections_task.send(lst=[1, 2, 3], dct={'a': 1}, tpl=(4, 5))).get(
             timeout_ms=5000
@@ -177,7 +194,9 @@ def test_collection_args() -> None:
 @pytest.mark.e2e
 def test_pydantic_model_args() -> None:
     with run_worker(
-        DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         user = basic_tasks.UserInput(name='Alice', age=30)
         result = unwrap_send(basic_tasks.pydantic_task.send(user=user)).get(timeout_ms=5000)
@@ -187,7 +206,9 @@ def test_pydantic_model_args() -> None:
 @pytest.mark.e2e
 def test_dataclass_args() -> None:
     with run_worker(
-        DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         result = unwrap_send(basic_tasks.dataclass_task.send(data=basic_tasks.DataInput(x=10, y=20))).get(
             timeout_ms=5000
@@ -198,7 +219,9 @@ def test_dataclass_args() -> None:
 @pytest.mark.e2e
 def test_kwargs_with_defaults() -> None:
     with run_worker(
-        DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         r1 = unwrap_send(basic_tasks.kwargs_task.send(required=5)).get(timeout_ms=5000)
         assert_ok(r1, '5_default')
@@ -215,7 +238,9 @@ def test_kwargs_with_defaults() -> None:
 @pytest.mark.e2e
 def test_explicit_error_result() -> None:
     with run_worker(
-        DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         result = unwrap_send(basic_tasks.error_task.send()).get(timeout_ms=5000)
         assert_err(result, expected_code='DELIBERATE_ERROR')
@@ -227,7 +252,9 @@ def test_explicit_error_result() -> None:
 @pytest.mark.e2e
 def test_exception_becomes_error() -> None:
     with run_worker(
-        DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         result = unwrap_send(basic_tasks.exception_task.send()).get(timeout_ms=5000)
         assert result.is_err()
@@ -240,7 +267,9 @@ def test_exception_becomes_error() -> None:
 @pytest.mark.e2e
 def test_return_type_mismatch() -> None:
     with run_worker(
-        DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         result = unwrap_send(basic_tasks.type_mismatch_task.send()).get(timeout_ms=5000)
         assert result.is_err()
@@ -251,7 +280,9 @@ def test_return_type_mismatch() -> None:
 @pytest.mark.e2e
 def test_complex_result_serialization() -> None:
     with run_worker(
-        DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         result = unwrap_send(basic_tasks.complex_result_task.send()).get(timeout_ms=5000)
         assert_ok(result)
@@ -264,7 +295,9 @@ def test_complex_result_serialization() -> None:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_retry_exhausted(broker: PostgresBroker) -> None:
     with run_worker(
-        DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         handle = unwrap_send(await retry_tasks.retry_exhausted_task.send_async())
         result = await asyncio.to_thread(handle.get, timeout_ms=15000)
@@ -286,7 +319,9 @@ def test_retry_eventual_success() -> None:
     os.environ['E2E_RETRY_SUCCESS_PATH'] = state_path
     try:
         with run_worker(
-            DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+            DEFAULT_INSTANCE,
+            profile='isolated-1',
+            ready_check=_make_ready_check(basic_tasks.healthcheck),
         ):
             result = unwrap_send(retry_tasks.retry_success_task.send()).get(timeout_ms=15000)
             assert_ok(result, 'succeeded_on_attempt_3')
@@ -302,7 +337,9 @@ def test_retry_eventual_success() -> None:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_exponential_backoff_state(broker: PostgresBroker) -> None:
     with run_worker(
-        DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         handle = unwrap_send(await retry_tasks.exponential_task.send_async())
 
@@ -323,7 +360,9 @@ async def test_exponential_backoff_state(broker: PostgresBroker) -> None:
 async def test_exponential_backoff_intervals(broker: PostgresBroker) -> None:
     """Exponential backoff: second retry interval exceeds first."""
     with run_worker(
-        DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         handle = unwrap_send(await retry_tasks.exponential_task.send_async())
 
@@ -372,7 +411,9 @@ async def test_exponential_backoff_intervals(broker: PostgresBroker) -> None:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_auto_retry_by_error_code(broker: PostgresBroker) -> None:
     with run_worker(
-        DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         handle = unwrap_send(await retry_tasks.retry_error_code_task.send_async())
         result = await asyncio.to_thread(handle.get, timeout_ms=10000)
@@ -388,7 +429,9 @@ async def test_auto_retry_by_error_code(broker: PostgresBroker) -> None:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_auto_retry_by_mapped_exception(broker: PostgresBroker) -> None:
     with run_worker(
-        DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         handle = unwrap_send(await retry_tasks.retry_mapped_exception_task.send_async())
         result = await asyncio.to_thread(handle.get, timeout_ms=10000)
@@ -404,7 +447,9 @@ async def test_auto_retry_by_mapped_exception(broker: PostgresBroker) -> None:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_no_retry_for_non_matching(broker: PostgresBroker) -> None:
     with run_worker(
-        DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         handle = unwrap_send(await basic_tasks.no_retry_task.send_async())
         result = await asyncio.to_thread(handle.get, timeout_ms=5000)
@@ -423,6 +468,7 @@ async def test_retry_precedence_task_mapper_wins_over_global_no_retry(
 ) -> None:
     with run_worker(
         RETRY_PRECEDENCE_INSTANCE,
+        profile='isolated-1',
         ready_check=_make_ready_check(instance_retry_precedence.healthcheck),
     ):
         handle = unwrap_send(await instance_retry_precedence.task_mapper_wins_no_retry_task.send_async())
@@ -445,6 +491,7 @@ async def test_retry_precedence_task_mapper_wins_and_retries(
 ) -> None:
     with run_worker(
         RETRY_PRECEDENCE_INSTANCE,
+        profile='isolated-1',
         ready_check=_make_ready_check(instance_retry_precedence.healthcheck),
     ):
         handle = unwrap_send(await instance_retry_precedence.task_mapper_wins_retry_task.send_async())
@@ -467,6 +514,7 @@ async def test_retry_precedence_global_mapper_triggers_retry(
 ) -> None:
     with run_worker(
         RETRY_PRECEDENCE_INSTANCE,
+        profile='isolated-1',
         ready_check=_make_ready_check(instance_retry_precedence.healthcheck),
     ):
         handle = unwrap_send(await instance_retry_precedence.global_mapper_retry_task.send_async())
@@ -489,6 +537,7 @@ async def test_retry_precedence_exception_name_collision_no_retry(
 ) -> None:
     with run_worker(
         RETRY_PRECEDENCE_INSTANCE,
+        profile='isolated-1',
         ready_check=_make_ready_check(instance_retry_precedence.healthcheck),
     ):
         handle = unwrap_send(await instance_retry_precedence.exception_name_collision_task.send_async())
@@ -517,7 +566,9 @@ def test_default_mode_rejects_queue_name() -> None:
 @pytest.mark.e2e
 def test_custom_mode_queue_routing() -> None:
     with run_worker(
-        CUSTOM_INSTANCE, ready_check=_make_ready_check(queues_custom.high_task)
+        CUSTOM_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(queues_custom.high_task),
     ):
         result_high = unwrap_send(queues_custom.high_task.send()).get(timeout_ms=5000)
         result_normal = unwrap_send(queues_custom.normal_task.send()).get(timeout_ms=5000)
@@ -532,7 +583,9 @@ def test_custom_mode_queue_routing() -> None:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_custom_mode_queue_names_stored(custom_broker: PostgresBroker) -> None:
     with run_worker(
-        CUSTOM_INSTANCE, ready_check=_make_ready_check(queues_custom.high_task)
+        CUSTOM_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(queues_custom.high_task),
     ):
         handle = unwrap_send(await queues_custom.high_task.send_async())
         result = await asyncio.to_thread(handle.get, timeout_ms=5000)
@@ -580,7 +633,7 @@ async def test_priority_ordering(custom_broker: PostgresBroker) -> None:
     # Now start worker - should claim high priority first despite later submission
     with run_worker(
         CUSTOM_INSTANCE,
-        processes=1,
+        profile='isolated-1',
         ready_check=_make_ready_check(queues_custom.high_task),
     ):
         # Wait for both to complete
@@ -639,7 +692,9 @@ async def test_task_expires_before_claim(broker: PostgresBroker) -> None:
 
     # Start worker - should not claim expired task
     with run_worker(
-        DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         # Observe for a short window and ensure the expired task is never claimed.
         # The reaper may transition it to EXPIRED — both PENDING and EXPIRED are valid.
@@ -670,7 +725,9 @@ async def test_task_completes_before_expiry(
     )).unwrap()
 
     with run_worker(
-        DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         result = unwrap_get_result(await asyncio.to_thread(app.get_result, task_id, timeout_ms=5000))
         assert_ok(result, expected_value=10)
@@ -697,7 +754,9 @@ async def test_good_until_already_past(broker: PostgresBroker) -> None:
     )).unwrap()
 
     with run_worker(
-        DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         await asyncio.sleep(2.0)  # Give worker time to potentially claim
 
@@ -736,7 +795,9 @@ async def test_retry_blocked_by_good_until_expiry(
     )).unwrap()
 
     with run_worker(
-        DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         result = unwrap_get_result(await asyncio.to_thread(app.get_result, task_id, timeout_ms=15000))
         assert_err(result, expected_code='TRANSIENT')
@@ -782,7 +843,9 @@ async def test_retry_succeeds_within_good_until(
         )).unwrap()
 
         with run_worker(
-            DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+            DEFAULT_INSTANCE,
+            profile='isolated-1',
+            ready_check=_make_ready_check(basic_tasks.healthcheck),
         ):
             result = unwrap_get_result(await asyncio.to_thread(app.get_result, task_id, timeout_ms=20000))
             assert_ok(result, expected_value='succeeded_on_attempt_3')
@@ -816,7 +879,9 @@ def test_worker_resolution_error(broker: PostgresBroker, app: Horsies) -> None:
     ).unwrap()
 
     with run_worker(
-        DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         result = unwrap_get_result(app.get_result(task_id, timeout_ms=5000))
         assert_err(result, expected_code=OperationalErrorCode.WORKER_RESOLUTION_ERROR)
@@ -828,7 +893,9 @@ def test_unencodable_return_value_is_a_type_mismatch() -> None:
     JSON-encodable stores RETURN_TYPE_MISMATCH. The stored error names the
     actual type, not the value, so it encodes."""
     with run_worker(
-        DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         result = unwrap_send(basic_tasks.unserializable_result_task.send()).get(timeout_ms=5000)
         assert_err(result, expected_code=ContractCode.RETURN_TYPE_MISMATCH)
@@ -867,7 +934,9 @@ def test_wait_timeout(broker: PostgresBroker, app: Horsies) -> None:
 def test_return_none_from_task() -> None:
     """L1.7.5: Task returning None instead of TaskResult gives RETURN_TYPE_MISMATCH."""
     with run_worker(
-        DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         result = unwrap_send(basic_tasks.return_none_task.send()).get(timeout_ms=5000)
         assert_err(result, expected_code=ContractCode.RETURN_TYPE_MISMATCH)
@@ -879,7 +948,9 @@ def test_return_none_from_task() -> None:
 def test_library_error_code_in_user_task() -> None:
     """L1.7.6: Task returning OperationalErrorCode is preserved correctly."""
     with run_worker(
-        DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         result = unwrap_send(basic_tasks.error_code_task.send()).get(timeout_ms=5000)
         assert_err(result, expected_code=OperationalErrorCode.TASK_EXCEPTION)
@@ -919,7 +990,9 @@ async def test_argument_deserialization_error(
         await session.commit()
 
     with run_worker(
-        DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         result = unwrap_get_result(await asyncio.to_thread(app.get_result, task_id, timeout_ms=5000))
         assert_err(result, expected_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR)
@@ -963,7 +1036,9 @@ async def test_malformed_pydantic_args(
         await session.commit()
 
     with run_worker(
-        DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         result = unwrap_get_result(await asyncio.to_thread(app.get_result, task_id, timeout_ms=5000))
         assert_err(result, expected_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR)
@@ -1009,7 +1084,7 @@ async def test_multiple_tasks_concurrent(broker: PostgresBroker) -> None:
 
     with run_worker(
         DEFAULT_INSTANCE,
-        processes=num_processes,
+        profile=isolated_profile_name(num_processes),
         ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         handles = [
@@ -1043,12 +1118,12 @@ def test_skip_locked_prevents_double_claim() -> None:
         try:
             with run_worker(
                 DEFAULT_INSTANCE,
-                processes=2,
+                profile='isolated-2',
                 ready_check=_make_ready_check(basic_tasks.healthcheck),
             ):
                 with run_worker(
                     DEFAULT_INSTANCE,
-                    processes=2,
+                    profile='isolated-2',
                     ready_check=_make_ready_check(basic_tasks.healthcheck),
                 ):
                     # Use unique tokens for each task
@@ -1074,14 +1149,14 @@ def test_skip_locked_prevents_double_claim() -> None:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_max_claim_batch(broker: PostgresBroker) -> None:
     """L1.8.3: Worker with max_claim_batch=1 never claims more than 1 task at a time."""
-    max_claim_batch = 1
+    max_claim_batch = CLAIM_BATCH_1_TASKS
     num_tasks = 6
     task_duration_ms = 300
 
+    # One child; one claim pass takes at most max_claim_batch tasks per queue.
     with run_worker(
         DEFAULT_INSTANCE,
-        processes=1,  # Single process to simplify assertion
-        extra_args=[f'--max-claim-batch={max_claim_batch}'],
+        profile=CLAIM_BATCH_1,
         ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         # Submit slow tasks
@@ -1133,7 +1208,9 @@ async def test_max_claim_batch(broker: PostgresBroker) -> None:
 def test_task_handle_info() -> None:
     """L1.9.1: TaskHandle.info() returns task metadata after completion."""
     with run_worker(
-        DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         handle = unwrap_send(basic_tasks.simple_task.send(x=5))
         result = handle.get(timeout_ms=5000)
@@ -1156,7 +1233,9 @@ def test_task_handle_info() -> None:
 async def test_task_handle_info_async() -> None:
     """L1.9.2: TaskHandle.info_async() returns task metadata after completion."""
     with run_worker(
-        DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         handle = unwrap_send(await basic_tasks.simple_task.send_async(x=5))
         result = await asyncio.to_thread(handle.get, timeout_ms=5000)

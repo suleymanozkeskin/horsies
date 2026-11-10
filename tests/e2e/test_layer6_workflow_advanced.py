@@ -88,7 +88,11 @@ async def _wait_until(
 @pytest.mark.asyncio(loop_scope='function')
 async def test_quorum_ctx_gating(broker: PostgresBroker) -> None:
     """T6.2: D waits for ctx dep (C) even when quorum (2) is satisfied by A,B."""
-    with run_worker(DEFAULT_INSTANCE, processes=3, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-3',
+        ready_check=_make_ready_check(),
+    ):
         # spec_quorum_ctx_gating: A(100ms), B(150ms), C(300ms) -> D
         # D has join=quorum, min_success=2, workflow_ctx_from=[C]
         # A and B complete first (satisfying quorum), but D must wait for C
@@ -120,7 +124,11 @@ async def test_quorum_ctx_gating(broker: PostgresBroker) -> None:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_quorum_impossible_skips(broker: PostgresBroker) -> None:
     """T6.2b: D is SKIPPED when quorum min_success=3 is unreachable (2 of 3 deps fail)."""
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(wf_tasks.spec_quorum_impossible)
 
         status = await wait_for_workflow_completion(
@@ -141,7 +149,11 @@ async def test_quorum_impossible_skips(broker: PostgresBroker) -> None:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_join_any_all_deps_fail_skips(broker: PostgresBroker) -> None:
     """T6.2c: C is SKIPPED when join=any but all deps fail."""
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(wf_tasks.spec_join_any_all_fail)
 
         status = await wait_for_workflow_completion(
@@ -166,7 +178,11 @@ async def test_join_any_all_deps_fail_skips(broker: PostgresBroker) -> None:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_pause_blocks_ready_transitions(broker: PostgresBroker) -> None:
     """T6.4: Pausing workflow prevents READY tasks from being enqueued."""
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         # spec_pausable: A(100ms) -> B(200ms) -> C(200ms) -> D(100ms)
         handle = await start_ok_in_thread(wf_tasks.spec_pausable)
 
@@ -206,7 +222,11 @@ async def test_pause_blocks_ready_transitions(broker: PostgresBroker) -> None:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_resume_continues_workflow(broker: PostgresBroker) -> None:
     """T6.5: Resuming paused workflow allows it to complete."""
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         # spec_pausable: A -> B -> C -> D
         handle = await start_ok_in_thread(wf_tasks.spec_pausable)
 
@@ -259,7 +279,11 @@ async def test_resume_continues_workflow(broker: PostgresBroker) -> None:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_pause_then_cancel(broker: PostgresBroker) -> None:
     """T6.4b: Paused workflow can be cancelled; remaining tasks become SKIPPED."""
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(wf_tasks.spec_pausable)
 
         async def _ready_to_pause() -> bool:
@@ -297,7 +321,11 @@ async def test_pause_then_cancel(broker: PostgresBroker) -> None:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_pause_idempotent(broker: PostgresBroker) -> None:
     """T6.4c: Second pause() on already-paused workflow returns False."""
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(wf_tasks.spec_pausable)
 
         async def _ready_to_pause() -> bool:
@@ -324,7 +352,11 @@ async def test_pause_idempotent(broker: PostgresBroker) -> None:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_resume_on_running_noop(broker: PostgresBroker) -> None:
     """T6.5b: resume() on a RUNNING workflow returns False (no-op)."""
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(wf_tasks.spec_pausable)
 
         # Wait briefly to ensure workflow is RUNNING
@@ -352,7 +384,11 @@ async def test_resume_on_running_noop(broker: PostgresBroker) -> None:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_success_policy_satisfied(broker: PostgresBroker) -> None:
     """T6.6: Workflow COMPLETED when success policy case is satisfied."""
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         # spec_success_policy_satisfied: A required, B optional (B fails)
         # Workflow should COMPLETE because A succeeds
         handle = await start_ok_in_thread(wf_tasks.spec_success_policy_satisfied)
@@ -383,7 +419,11 @@ async def test_success_policy_satisfied(broker: PostgresBroker) -> None:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_success_policy_not_met(broker: PostgresBroker) -> None:
     """T6.7: Workflow FAILED when no success policy case is satisfied."""
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         # spec_success_policy_not_met: A and B required, B fails
         # Workflow should FAIL because B is required and fails
         handle = await start_ok_in_thread(wf_tasks.spec_success_policy_not_met)
@@ -409,7 +449,11 @@ async def test_success_policy_not_met(broker: PostgresBroker) -> None:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_success_policy_not_met_error_content(broker: PostgresBroker) -> None:
     """T6.7b: handle.get() returns error with failed task's error code when policy not met."""
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(wf_tasks.spec_success_policy_not_met)
 
         status = await wait_for_workflow_completion(
@@ -430,7 +474,11 @@ async def test_success_policy_not_met_error_content(broker: PostgresBroker) -> N
 @pytest.mark.asyncio(loop_scope='function')
 async def test_success_policy_multiple_cases(broker: PostgresBroker) -> None:
     """T6.8: Workflow COMPLETED when any success case is satisfied."""
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         # spec_success_policy_multi: case1 requires A (fails), case2 requires B (succeeds)
         # Workflow should COMPLETE because case2 is satisfied
         handle = await start_ok_in_thread(wf_tasks.spec_success_policy_multi)
@@ -464,7 +512,11 @@ async def test_recovery_preserves_results(broker: PostgresBroker) -> None:
     from horsies.core.workflows.recovery import recover_stuck_workflows
     from sqlalchemy import text
 
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         # Start a workflow and let it complete normally
         handle = await start_ok_in_thread(wf_tasks.spec_linear)
 
@@ -513,7 +565,11 @@ async def test_recovery_preserves_failed_state(broker: PostgresBroker) -> None:
     from horsies.core.workflows.recovery import recover_stuck_workflows
     from sqlalchemy import text
 
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         # Start a workflow that fails (A ok → B fail → C skipped)
         handle = await start_ok_in_thread(wf_tasks.spec_linear_fail_mid)
 
@@ -582,7 +638,11 @@ async def test_workflow_task_retries(broker: PostgresBroker, tmp_path: Path) -> 
         definition_key='tests.e2e.retry_test.v1',
     )
 
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(spec_retry)
 
         # Allow time for retries (retry policy uses 1s base exponential)
@@ -630,7 +690,11 @@ async def test_workflow_task_retries_exhausted(
         definition_key='tests.e2e.retry_exhausted.v1',
     )
 
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(spec_retry_fail)
 
         status = await wait_for_workflow_completion(
@@ -658,7 +722,11 @@ async def test_workflow_task_retries_exhausted(
 @pytest.mark.asyncio(loop_scope='function')
 async def test_on_error_pause_stops_workflow(broker: PostgresBroker) -> None:
     """T6.11a: Workflow auto-pauses when task fails with on_error=PAUSE."""
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(wf_tasks.spec_on_error_pause)
 
         # Wait for workflow to reach PAUSED state (not terminal)
@@ -687,7 +755,11 @@ async def test_on_error_pause_stops_workflow(broker: PostgresBroker) -> None:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_on_error_pause_resume_completes(broker: PostgresBroker) -> None:
     """T6.11b: Resume after auto-pause finalizes workflow (C stays SKIPPED since B failed)."""
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(wf_tasks.spec_on_error_pause)
 
         # Wait for auto-pause
@@ -773,7 +845,7 @@ async def test_workflow_recovers_after_worker_crash(
 
     with run_worker(
         RECOVERY_INSTANCE,
-        processes=2,
+        profile='isolated-2',
         ready_check=_make_recovery_ready_check(),
     ) as worker_proc:
         handle = await start_ok_in_thread(instance_recovery.spec_recovery_crash)
@@ -827,7 +899,7 @@ async def test_workflow_recovers_after_worker_crash(
     # E and F will be picked up on the "recovery" queue after C,D are resolved.
     with run_worker(
         RECOVERY_INSTANCE,
-        processes=2,
+        profile='isolated-2',
         ready_check=_make_recovery_ready_check(),
     ):
         status = await wait_for_workflow_completion(

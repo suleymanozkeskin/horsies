@@ -61,7 +61,11 @@ async def test_async_tasks_of_one_child_share_one_loop(broker: PostgresBroker) -
     """Two async tasks in one child run on one loop. A def task between
     them sees no running loop and can run its own with asyncio.run()."""
     _ = broker
-    with run_worker(DEFAULT_INSTANCE, processes=1, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         first = await _result_of(
             unwrap_send(await async_tasks.async_loop_report.send_async()),
         )
@@ -89,7 +93,11 @@ async def test_an_async_task_sends_with_send_async(
     """send_async in an async task enqueues a task that a worker runs.
     Two sends in one child use the broker set of the one task loop."""
     _ = broker
-    with run_worker(DEFAULT_INSTANCE, processes=1, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         for x in (3, 4):
             sender = unwrap_send(await async_tasks.async_sends.send_async(x=x))
             sent_id = await _result_of(sender)
@@ -108,7 +116,11 @@ async def test_an_async_task_sends_with_send_async(
 @pytest.mark.asyncio(loop_scope='function')
 async def test_an_async_task_runs_as_a_workflow_node(broker: PostgresBroker) -> None:
     """A def node feeds an async def node, which feeds a def node."""
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(async_tasks.spec_mixed_chain)
 
         status = await wait_for_workflow_completion(
@@ -130,7 +142,11 @@ async def test_an_async_task_timeout_kills_its_child_and_the_worker_survives(
 ) -> None:
     """An async task that awaits past timeout_ms fails with TASK_TIMEOUT.
     The worker starts a new child, and a later async task completes."""
-    with run_worker(DEFAULT_INSTANCE, processes=1, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = unwrap_send(
             await async_tasks.async_timeout_sleeper.send_async(duration_ms=60_000),
         )

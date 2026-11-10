@@ -20,6 +20,7 @@ from horsies.core.models.schedule import (
 )
 
 from tests.e2e.helpers.env import e2e_database_url
+from tests.e2e.tasks.profiles import E2E_WORKER_PROFILES
 
 DB_URL = e2e_database_url('HORSES_E2E_DB_URL')
 
@@ -45,6 +46,7 @@ config = AppConfig(
         max_overflow=5,
     ),
     schedule=schedule_config,
+    worker_profiles=E2E_WORKER_PROFILES,
 )
 
 app = Horsies(config)

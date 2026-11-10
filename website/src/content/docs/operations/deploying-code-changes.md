@@ -217,7 +217,7 @@ A `PAUSED` workflow keeps its unstarted nodes until it resumes or ends.
 
 On SIGTERM or SIGINT a worker stops new claims and waits for running tasks. See [Worker Architecture](../workers/worker-architecture). A task that is already running keeps the code that it loaded. A row that is still `PENDING` is claimed later by any worker, with the code of that worker.
 
-A recycled child loads your app from disk, unless the worker runs `--child-preload=app`. With that mode, a recycled child keeps the code that the preload parent imported, so new code needs a worker restart.
+A recycled child loads your app from disk, unless the worker profile sets `preload=ChildPreload.APP`. With that mode, a recycled child keeps the code that the preload parent imported, so new code needs a worker restart.
 
 ## Things to Avoid
 

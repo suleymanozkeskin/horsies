@@ -224,12 +224,13 @@ def _kill_worker(proc: subprocess.Popen[str]) -> None:
 @contextmanager
 def run_worker(
     instance_path: str,
-    processes: int = 1,
+    *,
+    profile: str,
     timeout: float = 10.0,
-    extra_args: list[str] | None = None,
     ready_check: ReadyCheck | None = None,
 ) -> Generator[subprocess.Popen[str], None, None]:
-    """Start a worker process, yield, then terminate it."""
+    """Start a worker with the named profile of the instance, yield, then
+    terminate it. The profile holds every worker setting."""
     _enter_worker_context()
 
     cmd = [
@@ -238,11 +239,9 @@ def run_worker(
         'horsies',
         'worker',
         instance_path,
-        f'--processes={processes}',
+        f'--profile={profile}',
         '--loglevel=warning',
     ]
-    if extra_args:
-        cmd.extend(extra_args)
 
     # Set PYTHONPATH to repo root so absolute imports work
     env = os.environ.copy()
@@ -278,12 +277,13 @@ def run_worker(
 def run_workers(
     instance_path: str,
     count: int,
-    processes: int = 1,
+    *,
+    profile: str,
     timeout: float = 10.0,
-    extra_args: list[str] | None = None,
     ready_check: ReadyCheck | None = None,
 ) -> Generator[Sequence[subprocess.Popen[str]], None, None]:
-    """Start multiple worker processes, yield, then terminate all."""
+    """Start ``count`` workers with the named profile of the instance, yield,
+    then terminate all."""
     _enter_worker_context()
 
     workers: list[subprocess.Popen[str]] = []
@@ -301,11 +301,9 @@ def run_workers(
         'horsies',
         'worker',
         instance_path,
-        f'--processes={processes}',
+        f'--profile={profile}',
         '--loglevel=warning',
     ]
-    if extra_args:
-        cmd_base.extend(extra_args)
 
     try:
         # Start all workers

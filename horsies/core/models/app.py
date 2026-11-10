@@ -8,6 +8,12 @@ from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.retention import RetentionConfig
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.models.schedule import ScheduleConfig, SchedulePattern
+from horsies.core.models.worker_profile import (
+    WorkerProfile,
+    describe_worker_profile,
+    worker_profiles_claim_errors,
+    worker_profiles_shape_errors,
+)
 from horsies.core.exception_mapper import (
     ExceptionMapper,
     validate_exception_mapper,
@@ -48,6 +54,9 @@ class AppConfig(BaseModel):
     recovery: RecoveryConfig = Field(default_factory=RecoveryConfig)
     retention: RetentionConfig = Field(default_factory=RetentionConfig)
     resilience: WorkerResilienceConfig = Field(default_factory=WorkerResilienceConfig)
+    # Named worker settings. `horsies worker <app> --profile <name>` runs the
+    # profile of that name. An app that runs no worker defines none.
+    worker_profiles: dict[str, WorkerProfile] = Field(default_factory=dict)
     schedule: Optional[ScheduleConfig] = Field(
         default=None, description='Scheduler configuration'
     )
@@ -282,6 +291,20 @@ class AppConfig(BaseModel):
                 )
             )
 
+        # Every worker profile is validated here, not only the one a worker
+        # starts with: `horsies check` reports them all, and a worker with a
+        # valid profile does not start from a config with an invalid one.
+        # The claim limits are compared with capacity only when
+        # prefetch_buffer is valid; its own error is reported above.
+        for profile_error in worker_profiles_shape_errors(self.worker_profiles):
+            report.add(profile_error)
+        if self.prefetch_buffer >= 0:
+            for profile_error in worker_profiles_claim_errors(
+                self.worker_profiles,
+                self.prefetch_buffer,
+            ):
+                report.add(profile_error)
+
         raise_collected(report)
         return self
 
@@ -400,6 +423,13 @@ class AppConfig(BaseModel):
         lines.append(
             f'    notify_poll_interval_ms: {self.resilience.notify_poll_interval_ms}ms'
         )
+
+        # Worker profiles
+        if self.worker_profiles:
+            lines.append('  worker_profiles:')
+            for name in sorted(self.worker_profiles):
+                description = describe_worker_profile(self.worker_profiles[name])
+                lines.append(f'    {name}: {description}')
 
         # Send retry
         lines.append(f'  resend_on_transient_err: {self.resend_on_transient_err}')

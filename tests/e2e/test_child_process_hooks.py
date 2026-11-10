@@ -25,6 +25,7 @@ from tests.e2e.helpers.db import wait_for_all_terminal
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.tasks import instance_child_hook
 from tests.e2e.tasks import instance_child_hook_unfixed
+from tests.e2e.tasks.profiles import isolated_profile_name
 from tests.broker_resources_support import current_resources
 
 
@@ -103,7 +104,7 @@ async def test_hook_rebind_drops_post_burst_floor_to_zero(
     """Documented hook body (dispose + NullPool rebind) → floor 0 after drain."""
     with run_worker(
         FIXED_INSTANCE,
-        processes=PROCESSES,
+        profile=isolated_profile_name(PROCESSES),
         ready_check=_make_ready_check(instance_child_hook.healthcheck),
     ):
         await _run_burst(broker, instance_child_hook.db_task)
@@ -129,7 +130,7 @@ async def test_unfixed_control_retains_post_burst_floor(
     """
     with run_worker(
         UNFIXED_INSTANCE,
-        processes=PROCESSES,
+        profile=isolated_profile_name(PROCESSES),
         ready_check=_make_ready_check(instance_child_hook_unfixed.healthcheck),
     ):
         await _run_burst(broker, instance_child_hook_unfixed.db_task)
@@ -153,7 +154,7 @@ def test_failing_hook_stops_worker_at_boot() -> None:
         # process exits, which raises with its captured stdout/stderr.
         with run_worker(
             FAIL_INSTANCE,
-            processes=1,
+            profile='isolated-1',
             timeout=30.0,
             ready_check=lambda: False,
         ):

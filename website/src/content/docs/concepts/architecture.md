@@ -105,7 +105,7 @@ unavailable.
 | `@app.task` | Decorator to define tasks |
 | `TaskHandle` | Returned by `.send()` - use to retrieve results |
 | `TaskResult` | Return type of all tasks - contains success or error |
-| `Worker` (CLI) | Started via `horsies worker` command |
+| `Worker` (CLI) | Started via `horsies worker <app> --profile <name>` |
 | `Scheduler` (CLI) | Started via `horsies scheduler` command |
 
 ## Data Flow
@@ -136,8 +136,8 @@ unavailable.
 ## Concurrency Model
 
 - **Cluster level**: Optional `cluster_wide_cap` limits total RUNNING tasks
-- **Worker level**: `processes` setting limits concurrent executions per worker
+- **Worker level**: the children of the worker profile limit concurrent executions per worker
 - **Queue level**: `max_concurrency` per custom queue (CUSTOM mode only)
-- **Claiming**: `max_claim_batch` prevents one worker from starving others
+- **Claiming**: `ClaimLimits.per_queue_per_pass` prevents one worker from starving others
 
 See [Concurrency](../../workers/concurrency) for details.

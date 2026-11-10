@@ -18,6 +18,7 @@ from horsies.core.models.tasks import TaskResult, TaskError
 from horsies.core.models.workflow import TaskNode
 
 from tests.e2e.helpers.env import e2e_database_url
+from tests.e2e.tasks.profiles import E2E_WORKER_PROFILES
 
 DB_URL = e2e_database_url('HORSES_E2E_DB_URL')
 
@@ -42,6 +43,7 @@ config = AppConfig(
         crashed_worker_recovery_grace_ms=2_000,
         check_interval_ms=1_000,
     ),
+    worker_profiles=E2E_WORKER_PROFILES,
 )
 
 app = Horsies(config)

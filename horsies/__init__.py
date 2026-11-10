@@ -107,6 +107,18 @@ from .core.models.payload import PayloadPolicy
 from .core.models.recovery import RecoveryConfig
 from .core.models.retention import RetentionConfig
 from .core.models.resilience import WorkerResilienceConfig
+from .core.models.worker_profile import (
+    ClaimLimits,
+    IsolatedChildren,
+    IsolatedRecycle,
+    MemoryLimit,
+    NoIsolatedChildren,
+    NoMemoryLimit,
+    NoTaskLimit,
+    TaskLimit,
+    WorkerProfile,
+)
+from .core.worker.config import ChildPreload
 from .core.types.status import TaskStatus, TaskAttemptOutcome, TASK_TERMINAL_STATES
 from .core.errors import ErrorCode, ValidationReport, MultipleValidationErrors
 from .core.exception_mapper import ExceptionMapper
@@ -305,6 +317,17 @@ __all__ = [
     'RetentionChoice',
     'RetentionConfig',
     'WorkerResilienceConfig',
+    # Worker profiles
+    'WorkerProfile',
+    'IsolatedChildren',
+    'NoIsolatedChildren',
+    'IsolatedRecycle',
+    'TaskLimit',
+    'NoTaskLimit',
+    'MemoryLimit',
+    'NoMemoryLimit',
+    'ClaimLimits',
+    'ChildPreload',
     # Exception mapper
     'ExceptionMapper',
     # Task handle

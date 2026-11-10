@@ -2,9 +2,9 @@
 
 The pid_task returns the executing child PID. Without recycling, every task
 runs on one of the `processes` long-lived children, so the distinct-PID count
-is bounded by `processes`. With `--max-tasks-per-child`, children are retired
-and respawned during the burst, so distinct PIDs exceed `processes` — and every
-task must still reach a terminal OK state.
+is bounded by the child count. With a recycle-after task limit, children are
+retired and respawned during the burst, so distinct PIDs exceed the child count
+— and every task must still reach a terminal OK state.
 """
 
 from __future__ import annotations
@@ -16,8 +16,10 @@ from horsies.core.types.result import is_err
 from tests.e2e.helpers.assertions import assert_ok, unwrap_send
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.tasks import basic as basic_tasks
+from tests.e2e.tasks.profiles import RECYCLE_AFTER_2_TASKS, RECYCLE_OFF
 
 DEFAULT_INSTANCE = 'tests.e2e.tasks.instance:app'
+# Both profiles run 2 isolated children.
 PROCESSES = 2
 BURST = 16
 SLEEP_MS = 20
@@ -54,11 +56,10 @@ def _run_burst(timeout_ms: int) -> set[int]:
 
 @pytest.mark.e2e
 def test_recycle_disabled_bounds_pids_by_process_count() -> None:
-    """--max-tasks-per-child=0: recycling off, distinct PIDs <= process count."""
+    """recycle after=NoTaskLimit(): recycling off, distinct PIDs <= child count."""
     with run_worker(
         DEFAULT_INSTANCE,
-        processes=PROCESSES,
-        extra_args=['--max-tasks-per-child=0'],
+        profile=RECYCLE_OFF,
         ready_check=_ready_check(),
     ):
         pids = _run_burst(timeout_ms=10_000)
@@ -70,11 +71,10 @@ def test_recycle_disabled_bounds_pids_by_process_count() -> None:
 
 @pytest.mark.e2e
 def test_max_tasks_per_child_rotates_pids() -> None:
-    """--max-tasks-per-child=2: children rotate, all tasks still complete."""
+    """recycle after=TaskLimit(tasks=2): children rotate, all tasks complete."""
     with run_worker(
         DEFAULT_INSTANCE,
-        processes=PROCESSES,
-        extra_args=['--max-tasks-per-child=2'],
+        profile=RECYCLE_AFTER_2_TASKS,
         ready_check=_ready_check(),
     ):
         pids = _run_burst(timeout_ms=20_000)

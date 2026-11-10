@@ -89,7 +89,7 @@ def run() -> int:
 
     heading('next')
     bullet('start the four processes from the repository root:')
-    bullet('  uv run horsies worker showcase.acme.app:app --processes 12')
+    bullet('  uv run horsies worker showcase.acme.app:app --profile default')
     bullet('  uv run horsies scheduler showcase.acme.app:app')
     bullet('  uv run horsies web showcase.acme.app:app --enable-actions')
     bullet('  uv run python -m showcase.acme.scenarios steady')

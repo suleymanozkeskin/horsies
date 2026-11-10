@@ -25,6 +25,7 @@ from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.tasks import TaskResult, TaskError
 
 from tests.e2e.helpers.env import e2e_database_url
+from tests.e2e.tasks.profiles import E2E_WORKER_PROFILES
 
 DB_URL = e2e_database_url('HORSES_E2E_DB_URL')
 
@@ -46,6 +47,7 @@ config = AppConfig(
         auto_requeue_stale_claimed=False,
         claimed_stale_threshold_ms=120_000,   # high, won't trigger
     ),
+    worker_profiles=E2E_WORKER_PROFILES,
 )
 
 app = Horsies(config)

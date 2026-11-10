@@ -348,7 +348,7 @@ Use `is_ok(result)` / `is_err(result)` type guards, or `match Ok / Err`.
 ## CLI
 
 ```bash
-horsies worker myapp.config:app          # start worker
+horsies worker myapp.config:app --profile default  # start worker (--profile is required)
 horsies scheduler myapp.config:app       # start scheduler
 horsies check myapp.config:app [--live]  # validate before deploy
 horsies web myapp.config:app             # serve the monitoring web UI (needs horsies[web])
@@ -356,25 +356,45 @@ horsies web --database-url URL           # monitor a database without an app mod
 horsies get-docs                         # download the docs of the installed version
 horsies get-docs --ref main              # download the main branch docs (needed for a development version)
 horsies skills install --target DIR      # copy this skill folder to DIR/horsies/ (--force replaces a changed copy)
-
-# Recycle each child after N tasks to bound memory (default 100, per-child,
-# staggered). Tune per deployment; 0 disables.
-horsies worker myapp.config:app --max-tasks-per-child=500
 ```
 
-`horsies check` runs phased validation (config, imports, DAG, builders, policies,
-optional live DB check). Worker and scheduler also run check at startup.
+Worker settings live in named profiles in `AppConfig.worker_profiles`, not in
+flags. `--profile` is required, with no default; a missing or unknown name
+fails before anything starts and lists the defined names. The removed flags
+(`--processes`, `--max-claim-batch`, `--max-claim-per-worker`,
+`--max-tasks-per-child`, `--max-memory-per-child-mb`, `--drain-timeout`,
+`--child-preload`) exit 2 and name their profile field. See `configs.md`
+"Worker profiles".
+
+```python
+from horsies import (
+    IsolatedChildren, IsolatedRecycle, MemoryLimit, TaskLimit, WorkerProfile,
+)
+
+profiles = {
+    'default': WorkerProfile(
+        isolated=IsolatedChildren(
+            count=8,
+            recycle=IsolatedRecycle(after=TaskLimit(tasks=500), above=MemoryLimit(mb=1024)),
+        ),
+    ),
+}
+```
+
+`horsies check` runs phased validation (config and every worker profile, imports,
+DAG, builders, policies, optional live DB check and worker connection check).
+Worker and scheduler also run check at startup.
 
 A worker owns one child and one socket per slot, so a crash or a timeout affects
 only that task. On Linux a preload parent forks each child: a new child takes
-milliseconds, and children share memory. Before you change `--child-preload`,
+milliseconds, and children share memory. Before you change `WorkerProfile.preload`,
 read the traps under "Child process model" in `configs.md`: `app` mode changes
 what runs at import, and a recycle no longer reloads your code.
 
-Two knobs recycle worker children to bound memory, with **OR** semantics (a
-child exits when either limit is reached). `--max-tasks-per-child` (default
-`100`) recycles after N tasks; `--max-memory-per-child-mb` (default
-off) recycles once a child's own RSS reaches N MB after a task — the
+Two limits recycle worker children to bound memory, with **OR** semantics (a
+child exits when either limit is reached). `IsolatedRecycle.after` (default
+`TaskLimit(tasks=100)`) recycles after N tasks; `IsolatedRecycle.above` (default
+`NoMemoryLimit()`) recycles once a child's own RSS reaches N MB after a task — the
 primary guard for memory-quota deployments, since it maps to the RSS the quota
 charges. A threshold at or below the warmed child baseline fails startup.
 Recommended default: memory recycling on, count high as a

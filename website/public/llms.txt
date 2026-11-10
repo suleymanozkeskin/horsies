@@ -53,6 +53,16 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - exception_mapper: ExceptionMapper (global {ExceptionClass: "ERROR_CODE"})
 - default_unhandled_error_code: str (default "UNHANDLED_EXCEPTION")
 - resend_on_transient_err: bool (default False, auto-retry transient ENQUEUE_FAILED for both task send and workflow start)
+- worker_profiles: dict[str, WorkerProfile] (default {}; `horsies worker <app> --profile <name>` runs one; every profile is validated at construction, HRS-218)
+
+### WorkerProfile
+- isolated: IsolatedChildren(count: int 1-1024, recycle: IsolatedRecycle) | NoIsolatedChildren (default NoIsolatedChildren(); a profile needs at least one child)
+- IsolatedRecycle.after: TaskLimit(tasks: int 1-2147483647) | NoTaskLimit (default TaskLimit(tasks=100))
+- IsolatedRecycle.above: MemoryLimit(mb: int 1-16777216) | NoMemoryLimit (default NoMemoryLimit())
+- claim: ClaimLimits(per_queue_per_pass: TaskLimit | NoTaskLimit, claimed_per_worker: TaskLimit | NoTaskLimit) (defaults NoTaskLimit(); a TaskLimit above children + prefetch_buffer is refused)
+- drain_timeout: timedelta (default 300 s; above 0, at most 24 h)
+- preload: ChildPreload (LIBRARY default, APP, NONE)
+- child_count() -> int: the number of children, the sum over modes
 - Every config model (AppConfig, its nested configs, ScheduleConfig and the schedule patterns) refuses unknown keys: ValidationError type extra_forbidden
 
 ### PostgresConfig
@@ -519,7 +529,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Use as a feedback loop from the library during development: define tasks/workflows, run check, fix errors, repeat
 - `horsies check <module> [--live]` — validate without starting services
 - Runs app.check(live=...) which performs phased validation:
-  - Phase 1: Config validation (implicit at AppConfig construction)
+  - Phase 1: Config validation (implicit at AppConfig construction), including every worker profile (HRS-218, with the profile name and field path)
   - Phase 2: Task module imports — imports each module, collects import/definition errors
   - Phase 3: Workflow validation — triggered during imports (WorkflowSpec DAG construction)
   - Phase 3.1: WorkflowDefinition class validation — imported definitions must declare definition_key
@@ -528,6 +538,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
   - Phase 3.5: Runtime policy safety — validates retry/exception-mapper policy metadata
   - Phase 3.6: Schedule validation — validates timezone, task registration, queue, and the kwargs wire contract of each enabled schedule; skipped for the worker role
   - Phase 4 (--live only): Broker connectivity — async SELECT 1 against PostgreSQL
+  - Phase 4.1 (--live only): Worker connections — each worker profile against max_connections less reserved slots (HRS-219); skipped with no profiles or with pgbouncer_transaction_mode=True
 - Guarantee model:
   - Strong: @app.workflow_builder decorated functions are fully executed and validated for exercised builder cases
   - Best-effort: undecorated builder detection (HRS-030) is heuristic — only scans directly discovered modules
@@ -612,6 +623,8 @@ Config/broker (HRS-200-HRS-299):
 - HRS-215 CONFIG_INVALID_KEEPALIVE
 - HRS-216 CONFIG_INVALID_RETENTION
 - HRS-217 CHECK_LIVE_ASYNC_CONTEXT (check(live=True) called inside a running event loop; the live check did not run)
+- HRS-218 CONFIG_INVALID_WORKER_PROFILE (a worker profile is not valid; the message names the profile and the field path)
+- HRS-219 CHECK_WORKER_CONNECTIONS (check(live=True): a worker profile needs more Postgres connections than the server allows, or the limit could not be read)
 Registry (HRS-300-HRS-399):
 <!-- members: ErrorCode part -->
 - HRS-300 TASK_NOT_REGISTERED
@@ -677,12 +690,11 @@ Registry (HRS-300-HRS-399):
 - WORKFLOW_TASK_TERMINAL_STATES: frozenset[WorkflowTaskStatus] = {COMPLETED, FAILED, SKIPPED}
 
 ### CLI Commands
-- `horsies worker <module> [--processes N] [--loglevel LEVEL] [--max-claim-batch N] [--max-claim-per-worker N] [--max-tasks-per-child N] [--max-memory-per-child-mb N] [--drain-timeout SECONDS] [--child-preload library|app|none]`
-  - `--max-tasks-per-child N` — recycle each child process after N tasks (default 100; `>= 1`, or `0` to disable)
-  - `--max-memory-per-child-mb N` — recycle a child after its own RSS reaches N MB (default off; positive int; the worker refuses to start if N is at or below the warmed child baseline)
-  - When both are set, a child is recycled when either limit is reached
-  - `--drain-timeout SECONDS` — seconds to wait for running tasks at shutdown (default 300; finite, `> 0`); then the worker kills their children
-  - `--child-preload MODE` — what a Linux worker imports once before it forks children (default `library`). `library`: library code. `app`: library and app, so children share module state; the worker refuses to start if the import leaves a Python thread or a socket. `none`: every child starts with `exec`. Other platforms always use `exec`
+- `horsies worker <module> --profile NAME [--loglevel LEVEL]`
+  - `--profile NAME` — required; a profile in AppConfig.worker_profiles; no default profile; a missing or unknown name exits 1 and lists the defined names
+  - Worker settings live in the profile, not in flags: WorkerProfile(isolated=IsolatedChildren(count=N, recycle=IsolatedRecycle(after=TaskLimit(tasks=N) | NoTaskLimit(), above=MemoryLimit(mb=N) | NoMemoryLimit())), claim=ClaimLimits(per_queue_per_pass=..., claimed_per_worker=...), drain_timeout=timedelta, preload=ChildPreload.LIBRARY | APP | NONE)
+  - Removed flags exit 2 and name the field: --processes -> IsolatedChildren.count; --max-tasks-per-child -> IsolatedRecycle.after; --max-memory-per-child-mb -> IsolatedRecycle.above; --max-claim-batch -> ClaimLimits.per_queue_per_pass; --max-claim-per-worker -> ClaimLimits.claimed_per_worker; --drain-timeout -> WorkerProfile.drain_timeout; --child-preload -> WorkerProfile.preload
+  - Boot warns (never refuses) when count x MemoryLimit.mb is above the usable memory: the cgroup limit (v2 /sys/fs/cgroup/memory.max, else v1 /sys/fs/cgroup/memory/memory.limit_in_bytes; "max" or no file = no limit) when below the host RAM, else the host RAM; the warning names the source ("container limit" or "host RAM"), and when one worker can open more Postgres connections than the server has usable slots; a memory limit at or below the warmed child baseline still refuses to start
 - `horsies scheduler <module> [--loglevel LEVEL]`
 - `horsies check <module> [--live] [--loglevel LEVEL]`
 - `horsies web <module> [--host HOST] [--port PORT] [--auth none|trusted-header] [--trusted-header HEADER] [--enable-actions] [--loglevel LEVEL]` — serve the monitoring web UI (requires the `horsies[web]` extra)
@@ -696,7 +708,7 @@ Registry (HRS-300-HRS-399):
 - Module format: `myapp.config:app` (dotted:attr) or `app/config.py:app` (file:attr)
 - Auto-discovery: if module has exactly one Horsies instance, `:name` can be omitted
 - Exit codes: 0 = success, 1 = error, 2 = bad invocation (argument error)
-- Signals: SIGTERM/SIGINT for graceful shutdown (workers wait up to --drain-timeout seconds (default 300) for running tasks, then kill their children)
+- Signals: SIGTERM/SIGINT for graceful shutdown (workers wait up to the profile's drain_timeout (default 300 seconds) for running tasks, then kill their children)
 - Both worker and scheduler run app.check() at startup; fail with ValidationReport if errors
 
 ## Docs Sitemap
@@ -745,6 +757,7 @@ Each entry: Title -- summary -> URL
 
 ### Workers
 - Worker Architecture -- worker-owned child processes -> /horsies/workers/worker-architecture/
+- Worker Profiles -- named worker settings in AppConfig, --profile, check and boot validation -> /horsies/workers/worker-profiles/
 - Concurrency -- worker/queue/cluster limits -> /horsies/workers/concurrency/
 - Heartbeats & Recovery -- crash detection -> /horsies/workers/heartbeats-recovery/
 - Child-Process Hooks -- per-child-process setup with @app.on_child_process_start -> /horsies/workers/child-process-hooks/
@@ -787,6 +800,7 @@ Each entry: Title -- summary -> URL
 - Migrating to 0.1.2 -- strict-serde breaking changes from 0.1.1 -> /horsies/migrations/migration-to-0-1-2/
 - Migrating to 0.5.0 and 0.5.2 -- live/history split (schema v34), offline cutover, offline schema v35 upgrade -> /horsies/migrations/migration-to-0-5-0/
 - Migrating to 0.6.0 -- stop-all upgrade rule, schema v52, new settings and flags, required code changes -> /horsies/migrations/migration-to-0-6-0/
+- Migrating to 0.7.0 -- worker flags move into named worker profiles, flag to field table -> /horsies/migrations/migration-to-0-7-0/
 
 ### Changelog
 - Changelog -- notable changes per release -> /horsies/changelog/
@@ -865,6 +879,8 @@ performance, latency, hot path, statement cost -> /horsies/internals/performance
 migration 0.1.2, strict serde, upgrade from 0.1.1 -> /horsies/migrations/migration-to-0-1-2/
 migration 0.5.0, live/history split, offline cutover, schema v35 -> /horsies/migrations/migration-to-0-5-0/
 migration 0.6.0, upgrade from 0.5.x, schema v52, stop all processes -> /horsies/migrations/migration-to-0-6-0/
+migration 0.7.0, worker profiles, removed worker flags, --profile -> /horsies/migrations/migration-to-0-7-0/
+WorkerProfile, IsolatedChildren, IsolatedRecycle, TaskLimit, MemoryLimit, ClaimLimits, ChildPreload, worker_profiles, --profile -> /horsies/workers/worker-profiles/
 start once, idempotent start, deterministic workflow_id, uuid5, WORKFLOW_ID_CONFLICT, WorkflowStartIdConflict -> /horsies/guides/start-workflow-once/
 FastAPI, lifespan, ASGI, async framework, close_async, ASYNC_CONTEXT, EVENT_LOOP_LIMIT -> /horsies/guides/async-frameworks/
 dynamic fan-out, runtime-built child, build_with, args_from, SubWorkflowNode -> /horsies/concepts/workflows/subworkflows/
