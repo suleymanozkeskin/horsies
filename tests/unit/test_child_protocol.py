@@ -4,27 +4,44 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
+import errno
 import json
+import queue
+import socket
+import threading
 from datetime import datetime, timezone
 
 import pytest
 
+from horsies.core.models.boot_failure import (
+    CLEARABLE_ERRNOS,
+    AppLoadFailed,
+    ChildPoolSetupFailed,
+    ReportedBootCause,
+    ResourceShortage,
+    ShortageErrno,
+    TaskLoopCreateFailed,
+    ThreadStartRefused,
+)
 from horsies.core.types.result import Err, Ok
 from horsies.core.worker import child_main
 from horsies.core.worker.child_main import _bounded_result
 from horsies.core.worker.child_protocol import (
     FRAME_HEADER,
     MAX_BODY_BYTES,
+    MAX_BOOT_DETAIL_CHARS,
+    MAX_BOOT_ERROR_NAME_CHARS,
     MAX_LEFTOVER_NAME_CHARS,
     MAX_LEFTOVER_TASK_NAMES,
     MAX_META_BYTES,
+    BootFailedFrame,
     ChildForkedFrame,
     EncodedFrame,
     ForkFailedFrame,
     FrameOverBound,
     InitFrame,
-    LoopCreateFailedFrame,
     LoopHoldsNoTask,
     LoopHoldsTasks,
     MalformedFrame,
@@ -39,6 +56,7 @@ from horsies.core.worker.child_protocol import (
     RunFrame,
     StopFrame,
     TaskLoopReport,
+    boot_failed_frame,
     decode_child_frame,
     decode_parent_frame,
     decode_preload_frame,
@@ -48,6 +66,7 @@ from horsies.core.worker.child_protocol import (
     parse_header,
 )
 from horsies.core.models.tasks import MAX_TASK_TIMEOUT_MS, MIN_TASK_TIMEOUT_MS
+from horsies.core.worker.task_loop import AsyncTaskPresence
 from horsies.core.worker.stored_timeout import (
     NoTimeout,
     OptionsUnreadable,
@@ -55,6 +74,15 @@ from horsies.core.worker.stored_timeout import (
     TaskTimeout,
     TimeoutValueInvalid,
 )
+
+
+REPORTED_CAUSES: list[ReportedBootCause] = [
+    AppLoadFailed(),
+    ChildPoolSetupFailed(),
+    TaskLoopCreateFailed(),
+    ThreadStartRefused(),
+    *(ResourceShortage(name) for name in ShortageErrno),
+]
 
 
 def _split(encoded: EncodedFrame) -> tuple[bytes, bytes]:
@@ -208,8 +236,13 @@ class TestChildFrames:
         'detail',
         ['[Errno 24] Too many open files', '', 'é \x00'],
     )
-    def test_loop_create_failed_frame_round_trip(self, detail: str) -> None:
-        frame = LoopCreateFailedFrame(error_name='OSError', detail=detail)
+    @pytest.mark.parametrize('cause', REPORTED_CAUSES)
+    def test_boot_failed_frame_round_trip(
+        self,
+        cause: ReportedBootCause,
+        detail: str,
+    ) -> None:
+        frame = BootFailedFrame(cause=cause, error_name='OSError', detail=detail)
         meta, body = _split(encode_child_frame(frame))
         assert body == b''
         assert decode_child_frame(meta, body) == Ok(frame)
@@ -229,8 +262,9 @@ class TestChildFrames:
     ) -> None:
         assert report.names_text() == text
 
-    def test_loop_create_failed_frame_names_subject_and_cause(self) -> None:
-        frame = LoopCreateFailedFrame(
+    def test_boot_failed_frame_names_subject_and_cause(self) -> None:
+        frame = BootFailedFrame(
+            cause=TaskLoopCreateFailed(),
             error_name='OSError',
             detail='[Errno 24] Too many open files',
         )
@@ -238,6 +272,18 @@ class TestChildFrames:
             'the child could not create the event loop for async tasks: '
             'OSError: [Errno 24] Too many open files'
         )
+
+    def test_a_built_boot_failed_frame_is_cut_to_its_bounds(self) -> None:
+        frame = boot_failed_frame(
+            AppLoadFailed(),
+            'E' * (MAX_BOOT_ERROR_NAME_CHARS + 5),
+            'bad \ud800' + 'd' * MAX_BOOT_DETAIL_CHARS,
+        )
+        assert len(frame.error_name) == MAX_BOOT_ERROR_NAME_CHARS
+        assert len(frame.detail) == MAX_BOOT_DETAIL_CHARS
+        assert frame.detail.startswith('bad \\ud800')
+        meta, body = _split(encode_child_frame(frame))
+        assert decode_child_frame(meta, body) == Ok(frame)
 
 
 class TestPreloadFrames:
@@ -414,14 +460,45 @@ class TestMalformedMetadata:
 
     @pytest.mark.parametrize(
         ('key', 'value'),
-        [('error_name', None), ('error_name', 24), ('detail', None), ('detail', [])],
+        [
+            ('error_name', None),
+            ('error_name', 24),
+            ('error_name', 'E' * (MAX_BOOT_ERROR_NAME_CHARS + 1)),
+            ('detail', None),
+            ('detail', []),
+            ('detail', 'd' * (MAX_BOOT_DETAIL_CHARS + 1)),
+            ('cause', None),
+            ('cause', 'resource_shortage'),
+            ('cause', {'kind': 'unknown'}),
+            ('cause', {'kind': 'resource_shortage', 'errno': 'ENOENT'}),
+            ('cause', {'kind': 'resource_shortage'}),
+            ('cause', {'kind': 'spawn_failed'}),
+        ],
+        ids=[
+            'error-name-missing',
+            'error-name-number',
+            'error-name-over-bound',
+            'detail-missing',
+            'detail-list',
+            'detail-over-bound',
+            'cause-missing',
+            'cause-text',
+            'cause-unknown-kind',
+            'cause-errno-not-in-table',
+            'cause-errno-missing',
+            'cause-spawn-from-a-child',
+        ],
     )
-    def test_every_loop_create_failed_field_is_checked(
+    def test_every_boot_failed_field_is_checked(
         self,
         key: str,
         value: object,
     ) -> None:
-        frame = LoopCreateFailedFrame(error_name='OSError', detail='no descriptor')
+        frame = BootFailedFrame(
+            cause=ResourceShortage(ShortageErrno.EMFILE),
+            error_name='OSError',
+            detail='no descriptor',
+        )
         meta, body = _split(encode_child_frame(frame))
         fields = json.loads(meta)
         fields[key] = value
@@ -465,9 +542,9 @@ class TestFieldCoverage:
         wire = json.loads(_split(encode_child_frame(frame))[0])['task_loop']
         assert names == set(wire) - {'kind'}
 
-    def test_loop_create_failed_frame_fields(self) -> None:
-        names = {field.name for field in dataclasses.fields(LoopCreateFailedFrame)}
-        frame = LoopCreateFailedFrame(error_name='OSError', detail='x')
+    def test_boot_failed_frame_fields(self) -> None:
+        names = {field.name for field in dataclasses.fields(BootFailedFrame)}
+        frame = BootFailedFrame(cause=AppLoadFailed(), error_name='OSError', detail='x')
         wire = set(json.loads(_split(encode_child_frame(frame))[0]))
         assert names == wire - {'kind'}
 
@@ -500,3 +577,107 @@ class TestFailureReasonText:
         assert ok is True
         assert 'WORKER_SERIALIZATION_ERROR' in result_json
         assert reason is not None and 'above the' in reason
+
+
+class TestBootFailureFromException:
+    """The child names the cause of an exception that a boot step raised."""
+
+    @pytest.mark.parametrize(
+        ('number', 'name'),
+        [
+            (errno.EMFILE, ShortageErrno.EMFILE),
+            (errno.ENFILE, ShortageErrno.ENFILE),
+            (errno.ENOMEM, ShortageErrno.ENOMEM),
+            (errno.EAGAIN, ShortageErrno.EAGAIN),
+        ],
+    )
+    @pytest.mark.parametrize('step', [AppLoadFailed(), ChildPoolSetupFailed()])
+    def test_an_errno_in_the_table_is_a_resource_shortage(
+        self,
+        number: int,
+        name: ShortageErrno,
+        step: AppLoadFailed | ChildPoolSetupFailed,
+    ) -> None:
+        exc = OSError(number, 'short')
+        frame = child_main.boot_failure_from_exception(exc, step)
+        assert frame.cause == ResourceShortage(name)
+        # Python builds a subclass for some errno values, for example
+        # BlockingIOError for EAGAIN. The errno decides, not the class.
+        assert frame.error_name == type(exc).__name__
+
+    def test_the_table_holds_exactly_the_four_errno_values(self) -> None:
+        assert set(CLEARABLE_ERRNOS) == {
+            errno.EMFILE,
+            errno.ENFILE,
+            errno.ENOMEM,
+            errno.EAGAIN,
+        }
+
+    @pytest.mark.parametrize(
+        'exc',
+        [
+            OSError(errno.ENOENT, 'missing'),
+            OSError('no errno'),
+            PermissionError(errno.EACCES, 'denied'),
+            ImportError('no module'),
+            RuntimeError('boom'),
+            MemoryError(),
+        ],
+        ids=['enoent', 'no-errno', 'eacces', 'import', 'runtime', 'memory'],
+    )
+    @pytest.mark.parametrize('step', [AppLoadFailed(), ChildPoolSetupFailed()])
+    def test_any_other_exception_is_the_cause_of_its_step(
+        self,
+        exc: Exception,
+        step: AppLoadFailed | ChildPoolSetupFailed,
+    ) -> None:
+        frame = child_main.boot_failure_from_exception(exc, step)
+        assert frame.cause == step
+        assert frame.error_name == type(exc).__name__
+        assert frame.detail == str(exc)
+
+    def test_a_refused_control_thread_is_thread_start_refused(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def refuse(_thread: threading.Thread) -> None:
+            raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr(threading.Thread, 'start', refuse)
+        left, right = socket.socketpair()
+        try:
+            result = child_main.start_control_thread(left, queue.SimpleQueue())
+        finally:
+            left.close()
+            right.close()
+        assert result == Err(
+            boot_failed_frame(
+                ThreadStartRefused(),
+                'RuntimeError',
+                "can't start new thread",
+            ),
+        )
+
+    def test_a_loop_that_cannot_be_created_is_task_loop_create_failed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def no_descriptors() -> object:
+            raise OSError(errno.EMFILE, 'Too many open files')
+
+        monkeypatch.setattr(asyncio, 'new_event_loop', no_descriptors)
+        result = child_main.open_task_loop_at_boot(AsyncTaskPresence.HAS_ASYNC_TASKS)
+        assert result == Err(
+            boot_failed_frame(
+                TaskLoopCreateFailed(),
+                'OSError',
+                '[Errno 24] Too many open files',
+            ),
+        )
+
+    def test_an_app_with_no_async_task_gets_no_loop(self) -> None:
+        match child_main.open_task_loop_at_boot(AsyncTaskPresence.NO_ASYNC_TASK):
+            case Ok(task_loop):
+                assert task_loop.report() == NoTaskLoop()
+            case Err(failed):
+                raise AssertionError(failed)

@@ -1,6 +1,6 @@
 ---
 title: Database Schema
-summary: PostgreSQL tables for live tasks, the task-history archive, heartbeats, worker states, and schedules (schema v53).
+summary: PostgreSQL tables for live tasks, the task-history archive, heartbeats, worker states, and schedules (schema v54).
 related: [../../configuration/broker-config, ../../migrations/migration-to-0-5-0]
 tags: [internals, database, schema, PostgreSQL, task-history]
 ---
@@ -42,7 +42,7 @@ Live task storage. Holds only `PENDING`, `CLAIMED`, and `RUNNING` rows
 | `good_until` | TIMESTAMPTZ | Expiry deadline |
 | `retry_count`, `max_retries`, `next_retry_at` | — | Automatic retry state |
 | `task_options` | TEXT | Serialized TaskOptions |
-| `execution` | TEXT | The task's `Execution`: `ISOLATED`, `SHARED_ASYNC` or `SHARED_THREAD`. Required; every insert path reads it from the stored options; rows written before v53 read `ISOLATED` |
+| `execution` | TEXT | The task's `Execution`: `ISOLATED`, `SHARED_ASYNC` or `SHARED_THREAD`. Required; every insert path reads it from the stored options; rows written before v54 read `ISOLATED` |
 | `enqueue_sha` | VARCHAR(64) | Required enqueue digest |
 | `command_fingerprint`, `command_fingerprint_version` | BYTEA, INT | Canonical enqueue fingerprint |
 | `retention_class_key` | TEXT | Retention class assigned at enqueue (required at rest; default is the 30-day class) |
@@ -212,7 +212,7 @@ credentials accordingly.
 
 Tables are created by the broker's first initialization and evolved by
 the versioned migration chain (`horsies_schema_version` records the installed
-version; the current schema is v53). The exact version and the
+version; the current schema is v54). The exact version and the
 `task_history_v1_validated_v1` row in `horsies_cutover_state` are both required
 after an offline upgrade; the integer watermark and the legacy
 `task_history_v1` row do not attest stage-6 validation. Creation is protected

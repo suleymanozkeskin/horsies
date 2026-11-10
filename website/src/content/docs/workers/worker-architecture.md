@@ -299,7 +299,31 @@ Workers recover from transient infrastructure failures without operator interven
 - **Database outages**: Worker retries on connection loss during startup, claiming, and result writes. No crash, no manual restart.
 - **Silent NOTIFY channels**: If the PostgreSQL NOTIFY mechanism stops delivering (broken listener connection, dropped trigger), the worker falls back to periodic polling so tasks are still picked up.
 - **Child loss**: If a child dies, the worker starts a new child in that slot. Other children continue. A task still in CLAIMED status is requeued back to PENDING. A task already in RUNNING status is recovered through the same retry policy used by the reaper: if `WORKER_CRASHED` is listed in `auto_retry_for` and retries remain, the task is scheduled for retry; otherwise it is marked FAILED with a `WORKER_CRASHED` result.
-- **Child start failure**: A child that fails to start gets three attempts. A child that cannot create its event loop for `async def` tasks fails its start too. If they all fail, or the OS refuses to start a process, the worker exits non-zero so that a supervisor restarts it. A failed [child hook](child-process-hooks) stops the worker at once, because a retry runs the same hook. An outside SIGKILL of a booting replacement child, such as an out-of-memory kill, does not use an attempt while another child is serving: the worker waits up to 5 seconds and starts another. A kill during the first start counts, and so does a kill when no other child is serving, because a worker that does no work must fail where a supervisor can see it.
+- **Child start failure**: The cause of the failure decides what the worker does. See [Child Start Failures](#child-start-failures).
+
+### Child Start Failures
+
+A child that cannot start reports the cause of the failure to the worker, before it exits. The worker sees the causes that the child cannot report: a spawn that the OS refuses, a child that dies with no report, and a child that is not ready in time.
+
+| Cause | Class | What the worker does |
+| ----- | ----- | -------------------- |
+| The app or a task module does not import (`AppLoadFailed`) | Repeats | Counts an attempt |
+| The child connection pool cannot be set up, for example a URL that does not parse (`ChildPoolSetupFailed`) | Repeats | Counts an attempt |
+| The child dies with no report: a crash in native code, `os._exit()` in app code (`LostBeforeReady`) | Repeats | Counts an attempt |
+| No ready report within 120 seconds (`NotReadyInTime`) | Repeats | Counts an attempt |
+| An `on_child_process_start` [hook](child-process-hooks) fails | Repeats | Stops the worker at once |
+| A boot step fails with `OSError` `EMFILE`, `ENFILE`, `ENOMEM` or `EAGAIN` (`ResourceShortage`) | Can clear | Takes the slot down |
+| The child cannot create its event loop for `async def` tasks (`TaskLoopCreateFailed`) | Can clear | Takes the slot down |
+| The OS refuses the control thread of the child (`ThreadStartRefused`) | Can clear | Takes the slot down |
+| The OS refuses to start the child process (`SpawnFailed`) | Can clear | Takes the slot down |
+
+A child that dies with no report names no cause, so the worker counts it as a cause that repeats. The worker cannot tell a crash that clears from a crash in the code. Counting it stops a worker whose code crashes at every start, instead of keeping a slot down with no end.
+
+- After three counted attempts, the worker exits non-zero, so that its supervisor restarts it. This also applies when other children serve tasks.
+- A slot that is down takes no task, and the claim budget leaves it out: a worker with 4 processes and 1 slot down claims as a worker with 3 processes. The worker starts a new child for that slot after 1 second, then 2, 4, up to 60 seconds between attempts. Each failed attempt logs one line with the slot, the cause, and the next wait. The slot returns to service when a child starts.
+- A cause that can clear counts an attempt only when every other slot is down too. A worker that serves no task must fail where its supervisor can see it. A worker with 1 process has no other slot, so each of its failed attempts counts.
+- At the first start, the worker starts when each slot has a ready child or is down, and at least one child is ready. Its [worker state](/horsies/monitoring/worker-health/#which-slots-are-down) names the slots that are down. When no child starts, the worker exits non-zero.
+- An outside SIGKILL of a booting replacement child, such as an out-of-memory kill, does not count an attempt while another child is serving: the worker waits up to 5 seconds and starts another. A kill during the first start counts, and so does a kill when no other child is serving.
 
 ### Configuration
 

@@ -50,7 +50,7 @@ An async task must await the work that it starts:
 - When an async task ends and asyncio tasks that it started, for example with `asyncio.create_task()`, are still on the loop, the worker replaces the child after that task. The next task runs in a new child. When the old child stops, it cancels that work, within 5 seconds.
 - The worker sees asyncio tasks only. A callback that `loop.call_soon()` or `loop.call_later()` scheduled, and work that `loop.run_in_executor()` started and the task did not await, cause no replacement. They can still run during a later task of the same child.
 - A client that keeps its own background tasks on the loop, for example a keepalive or a consumer task, causes a child replacement after each async task.
-- A thread that `asyncio.to_thread()` starts can outlive its task, for example when a timeout ends the wait for it. The thread is not an asyncio task, so it does not cause a replacement. When the worker stops the child, the child does not wait for that thread past the close, which takes at most 6 seconds: it exits, and its `atexit` handlers do not run. An idle executor thread does not count: the shutdown of the executor gets at least 1 second, also when the cancel of left tasks used the first 5 seconds.
+- A thread that `asyncio.to_thread()` starts can outlive its task, for example when a timeout ends the wait for it. The thread is not an asyncio task, so it does not cause a replacement. When the worker stops the child, the child does not wait for that thread past the close, which takes at most 7 seconds: it exits, and its `atexit` handlers do not run. An idle executor thread does not count: the close of the async generators and the shutdown of the executor each get at least 1 second, also when the cancel of left tasks used the first 5 seconds.
 - The worker log names the coroutine of each asyncio task that was left, for up to 10 tasks, for example `Retiring child pid=4242: task <id> left 1 task(s) on its event loop: refresh_session`.
 
 A task that cancels a helper task in `finally` must also await it. `cancel()` only asks the helper to stop. A helper that awaits while it stops, for example to close a session, is still on the loop when the task ends, and the worker replaces the child. Await the helper after the cancel:
@@ -79,8 +79,8 @@ async def watch_price(*, symbol: str) -> TaskResult[float, TaskError]:
 A child creates its event loop at boot, before it reports ready, when the app has at least one `async def` task. A child of an app with no `async def` task creates no loop. When the loop cannot be created, for example because the process has no file descriptor left or an event loop policy raises:
 
 - The child fails its boot, and no task reaches it.
-- The worker counts it as a failed child start. After three failed attempts, the worker exits non-zero, so its supervisor restarts it. See [Worker Architecture](/horsies/workers/worker-architecture/#what-it-handles).
-- The log and the error name the cause, for example `the child could not create the event loop for async tasks: OSError: [Errno 24] Too many open files`.
+- The cause can clear, so the slot is down: it takes no task, and the worker starts a new child for it after a growing wait. Other children continue. When every slot is down, the worker exits non-zero after three failed attempts, so its supervisor restarts it. See [Child Start Failures](/horsies/workers/worker-architecture/#child-start-failures).
+- The log names the slot and the cause, for example `Slot 1 is down: the child could not create the event loop for async tasks: OSError: [Errno 24] Too many open files`.
 
 In an async task, send with `.send_async()` or `.schedule_async()`. The sync `.send()` and `.schedule()` refuse a running event loop: they return `Err(TaskSendAsyncContext)` and enqueue nothing. See [Sending Tasks](sending-tasks).
 

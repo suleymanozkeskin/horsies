@@ -70,6 +70,7 @@ _FROZEN_JSONB_COLUMNS: Final = frozenset(
         ('horsies/core/models/task_pg.py', 'queue_priorities'),
         ('horsies/core/models/task_pg.py', 'queue_max_concurrency'),
         ('horsies/core/models/task_pg.py', 'recovery_config'),
+        ('horsies/core/models/task_pg.py', 'slots_down'),
         ('horsies/core/models/workflow_pg.py', 'success_policy'),
         ('horsies/core/models/workflow_pg.py', 'args_from'),
     }

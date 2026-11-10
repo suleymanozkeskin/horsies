@@ -358,14 +358,17 @@ from horsies.core.models.tasks import Execution
 #      databases no longer build it.
 # v52: horsies_workflow_recovery_failures, the stored count of the workflow
 #      recovery limit.
-# v53: horsies_tasks.execution, the Execution of each task, with a CHECK on
+# v53: horsies_worker_states.slots_down, the worker slots that were down for a
+#      boot failure cause that can clear. Nullable, no backfill: a row from an
+#      earlier worker did not record it.
+# v54: horsies_tasks.execution, the Execution of each task, with a CHECK on
 #      its value domain. The constant default makes the ADD catalog-only on
 #      PostgreSQL 11+; existing rows, and rows from a process that does not
 #      know the column, read ISOLATED. idx_horsies_tasks_claim_pending_class
 #      (queue_name, execution, priority, enqueued_at, id) over PENDING rows is
 #      built concurrently: one ordered range per queue and class.
 
-SCHEMA_VERSION = 53
+SCHEMA_VERSION = 54
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,
@@ -1100,7 +1103,7 @@ ADD_TASK_TERMINAL_AT_COLUMN_SQL = text("""
     ADD COLUMN IF NOT EXISTS terminal_at TIMESTAMPTZ;
 """)
 
-# Migration (v53): the execution class of each task. The constant default
+# Migration (v54): the execution class of each task. The constant default
 # is a catalog-only change on PostgreSQL 11+. The default stays after the
 # migration: a process of an earlier version that inserts a task does not
 # know the column, and its rows run isolated.
@@ -1216,4 +1219,11 @@ SET_WORKFLOW_SENT_AT_DEFAULT_SQL = text("""
 ADD_WORKER_STATES_CHILDREN_MEMORY_COLUMN_SQL = text("""
     ALTER TABLE horsies_worker_states
     ADD COLUMN IF NOT EXISTS children_memory_mb DOUBLE PRECISION;
+""")
+
+# Migration (v53): the slots that a worker reports as down. Nullable, no
+# backfill: a snapshot written before this column did not record slot health.
+ADD_WORKER_STATES_SLOTS_DOWN_COLUMN_SQL = text("""
+    ALTER TABLE horsies_worker_states
+    ADD COLUMN IF NOT EXISTS slots_down JSONB;
 """)

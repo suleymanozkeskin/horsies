@@ -157,9 +157,22 @@ from .core.brokers.result_types import (
 )
 from .core.types.error_detail import NoCause
 from .core.models.health import (
+    AllSlotsServing,
     DatabasePing,
+    DownSlot,
+    SlotHealth,
+    SlotHealthNotRecorded,
+    SlotsDown,
     WorkerPong,
     WorkerStateSnapshot,
+)
+from .core.models.boot_failure import (
+    ClearableBootCause,
+    ResourceShortage,
+    ShortageErrno,
+    SpawnFailed,
+    TaskLoopCreateFailed,
+    ThreadStartRefused,
 )
 from .core.history.reads.detail import TaskAbsenceReason
 from .core.history.rerun.operations import (
@@ -341,6 +354,17 @@ __all__ = [
     'DatabasePing',
     'WorkerPong',
     'WorkerStateSnapshot',
+    'SlotHealth',
+    'AllSlotsServing',
+    'SlotsDown',
+    'SlotHealthNotRecorded',
+    'DownSlot',
+    'ClearableBootCause',
+    'ResourceShortage',
+    'ShortageErrno',
+    'SpawnFailed',
+    'TaskLoopCreateFailed',
+    'ThreadStartRefused',
     # Rerun
     'rerun_task',
     'RerunTask',

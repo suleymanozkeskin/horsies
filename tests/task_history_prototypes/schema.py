@@ -58,14 +58,16 @@ _IDENTIFIER = re.compile(r'^[a-z][a-z0-9_]{0,62}$')
 # v52 adds horsies_workflow_recovery_failures and its orphan delete in
 # worker/sql.py. Neither touches horsies_tasks, and no prototype names a
 # workflow table, so the qualified shape is unchanged and the base advances.
-# v53 DOES touch horsies_tasks: the execution column (NOT NULL, DEFAULT
+# v53 adds horsies_worker_states.slots_down. It does not touch horsies_tasks,
+# and no prototype names the worker states table, so the base advances.
+# v54 DOES touch horsies_tasks: the execution column (NOT NULL, DEFAULT
 # 'ISOLATED'), its CHECK, and idx_horsies_tasks_claim_pending_class. The LIKE
 # clones take the column with its default (INCLUDING DEFAULTS) and never the
 # CHECK. Every prototype statement names its columns, so its inserts store
 # the default. The index replay reads the deployed definitions from the
 # catalog, and the clone has the indexed column, so the replay holds; the
 # replayed name stays inside the 63-byte bound. The base advances.
-_EXPECTED_BASE_SCHEMA_VERSION = 53
+_EXPECTED_BASE_SCHEMA_VERSION = 54
 
 
 @dataclass(frozen=True, slots=True)

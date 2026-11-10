@@ -93,6 +93,7 @@ from horsies.core.models.health import (
     WorkerPongPayload,
     WorkerPingRequest,
     WorkerStateSnapshot,
+    parse_slot_health,
 )
 from horsies.core.history.errors import HistoryContractError
 from horsies.core.history.periods import RetentionClassKey
@@ -535,6 +536,7 @@ from horsies.core.schemas.migrations import (
     ADD_TASK_OPTIONS_COLUMN_SQL,
     ADD_WORKFLOW_SENT_AT_COLUMN_SQL,
     ADD_WORKER_STATES_CHILDREN_MEMORY_COLUMN_SQL,
+    ADD_WORKER_STATES_SLOTS_DOWN_COLUMN_SQL,
     ADD_DEFINITION_KEY_COLUMN_SQL,
     BACKFILL_TASK_IS_WORKFLOW_TASK_SQL,
     BACKFILL_ENQUEUE_SHA_SQL,
@@ -654,7 +656,8 @@ _WORKER_STATE_COLUMNS = """
         memory_percent,
         cpu_percent,
         children_memory_mb,
-        worker_started_at
+        worker_started_at,
+        slots_down
 """
 
 # Recursive skip-scan: one (worker_id, snapshot_at DESC) index probe per
@@ -1635,11 +1638,11 @@ class PostgresBroker:
             )
             if await self._read_schema_version_if_exists(engine) >= SCHEMA_VERSION:
                 return
-            # v53: the column comes before the concurrent index build that
+            # v54: the column comes before the concurrent index build that
             # reads it.
             await self._add_task_execution_column(engine)
             await install_recovery_indexes(engine)
-            # v53: the class-keyed pending claim index.
+            # v54: the class-keyed pending claim index.
             await install_claim_indexes(engine)
             # v43: drop the task retention indexes that no query reads.
             # v45: drop the workflow-node indexes that the workflow-scoped
@@ -1648,10 +1651,10 @@ class PostgresBroker:
             await self._activate_bounded_recovery(engine)
 
     async def _add_task_execution_column(self, engine: AsyncEngine) -> None:
-        """Add horsies_tasks.execution and its value domain (v53), in one
+        """Add horsies_tasks.execution and its value domain (v54), in one
         transaction. Idempotent: the column is added only when absent, and the
         CHECK only when its definition differs. The pass before this one stops
-        at v35 on a database past it, so v53 cannot live there.
+        at v35 on a database past it, so v54 cannot live there.
         """
         async with engine.begin() as conn:
             await conn.execute(ADD_TASK_EXECUTION_COLUMN_SQL)
@@ -1717,6 +1720,8 @@ class PostgresBroker:
             await conn.execute(DROP_TASKS_RETENTION_STATISTICS_SQL)
             # v52: the stored count of the workflow recovery limit.
             await conn.execute(CREATE_WORKFLOW_RECOVERY_FAILURES_SQL)
+            # v53: the slots that a worker reports as down.
+            await conn.execute(ADD_WORKER_STATES_SLOTS_DOWN_COLUMN_SQL)
             await conn.execute(
                 INSERT_SCHEMA_VERSION_SQL,
                 {'version': SCHEMA_VERSION},
@@ -3559,8 +3564,22 @@ class PostgresBroker:
 
     @staticmethod
     def _row_to_worker_snapshot(row: Any) -> WorkerStateSnapshot:
-        """Map a worker-states row to a typed snapshot."""
+        """Map a worker-states row to a typed snapshot.
+
+        Raises:
+            ValueError: the stored ``slots_down`` does not have the shape that
+                the worker writes. The read methods catch it and return
+                ``MONITORING_QUERY_FAILED``.
+        """
         m = row._mapping
+        match parse_slot_health(m['slots_down'], m['processes']):
+            case Ok(slot_health):
+                pass
+            case Err(unreadable):
+                raise ValueError(
+                    f'worker {m["worker_id"]} snapshot at {m["snapshot_at"]}: '
+                    f'slots_down is unreadable: {unreadable.reason}',
+                )
         return WorkerStateSnapshot(
             worker_id=m['worker_id'],
             snapshot_at=m['snapshot_at'],
@@ -3581,6 +3600,7 @@ class PostgresBroker:
             cpu_percent=m['cpu_percent'],
             children_memory_mb=m['children_memory_mb'],
             worker_started_at=m['worker_started_at'],
+            slot_health=slot_health,
         )
 
     async def list_worker_states_async(self) -> BrokerResult[list[WorkerStateSnapshot]]:

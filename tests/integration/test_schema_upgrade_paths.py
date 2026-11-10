@@ -1751,6 +1751,43 @@ class TestUpgradePaths:
             await broker.close_async()
             await engine.dispose()
 
+    async def test_slots_down_column_upgrade_from_52(
+        self,
+        scratch_database: str,
+    ) -> None:
+        """A v52 database gets horsies_worker_states.slots_down at v53, as a
+        nullable jsonb column, and a second apply changes nothing."""
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        column_sql = text("""
+            SELECT format_type(atttypid, atttypmod), attnotnull
+            FROM pg_attribute
+            WHERE attrelid = 'horsies_worker_states'::regclass
+              AND attname = 'slots_down'
+              AND NOT attisdropped
+        """)
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(
+                    text('ALTER TABLE horsies_worker_states DROP COLUMN slots_down'),
+                )
+                await conn.execute(
+                    text('DELETE FROM horsies_schema_version WHERE version >= 53'),
+                )
+                await conn.execute(
+                    text(
+                        'INSERT INTO horsies_schema_version(version) VALUES (52) '
+                        'ON CONFLICT DO NOTHING',
+                    ),
+                )
+            await _migrate(scratch_database)
+            await _migrate(scratch_database)
+            async with engine.connect() as conn:
+                assert await _stored_version(engine) == SCHEMA_VERSION
+                assert (await conn.execute(column_sql)).all() == [('jsonb', False)]
+        finally:
+            await engine.dispose()
+
     async def test_recovery_failure_table_upgrade_from_51(
         self, scratch_database: str,
     ) -> None:
@@ -2217,9 +2254,9 @@ class TestOrderingIndexMigration:
 
 
 class TestExecutionClassMigration:
-    """v53: horsies_tasks.execution, its CHECK, and the class claim index.
+    """v54: horsies_tasks.execution, its CHECK, and the class claim index.
 
-    A database at v52 has no column. The upgrade adds it with the constant
+    A database at v53 has no column. The upgrade adds it with the constant
     default, so the rows it holds read ISOLATED, and so do the rows that a
     process of an earlier version writes after it. The CHECK is guarded on
     its definition and the index is rebuilt to its exact form, so a database
@@ -2244,7 +2281,7 @@ class TestExecutionClassMigration:
             )
             await connection.commit()
 
-    async def _demote_to_v52(self, engine: AsyncEngine) -> None:
+    async def _demote_to_v53(self, engine: AsyncEngine) -> None:
         """Remove the index and the column; the CHECK goes with the column."""
         async with engine.connect() as connection:
             await connection.execute(
@@ -2254,7 +2291,7 @@ class TestExecutionClassMigration:
                 text('ALTER TABLE horsies_tasks DROP COLUMN IF EXISTS execution')
             )
             await connection.commit()
-        await self._rewind(engine, 52)
+        await self._rewind(engine, 53)
 
     async def _insert_old_writer_row(self, engine: AsyncEngine) -> str:
         """A PENDING row from a writer that does not name the column."""
@@ -2374,14 +2411,14 @@ class TestExecutionClassMigration:
         finally:
             await engine.dispose()
 
-    async def test_a_v52_database_gains_the_column_the_check_and_the_index(
+    async def test_a_v53_database_gains_the_column_the_check_and_the_index(
         self,
         scratch_database: str,
     ) -> None:
         await _migrate(scratch_database)
         engine = _engine(scratch_database)
         try:
-            await self._demote_to_v52(engine)
+            await self._demote_to_v53(engine)
             existing = await self._insert_old_writer_row(engine)
 
             await _migrate(scratch_database)
@@ -2415,7 +2452,7 @@ class TestExecutionClassMigration:
                     )
                 )
                 await connection.commit()
-            await self._rewind(engine, 52)
+            await self._rewind(engine, 53)
 
             await _migrate(scratch_database)
 
@@ -2439,7 +2476,7 @@ class TestExecutionClassMigration:
                     )
                 )
                 await connection.commit()
-            await self._rewind(engine, 52)
+            await self._rewind(engine, 53)
 
             await _migrate(scratch_database)
 

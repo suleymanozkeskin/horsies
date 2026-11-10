@@ -163,8 +163,8 @@ class TaskModel(Base):
         DateTime(timezone=True), nullable=True
     )  # filter inside claim index scans only; standalone index unused
     task_options: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    # The task's `Execution` value (schema v53). Every insert path writes it
-    # from the stored options. The default serves rows written before v53
+    # The task's `Execution` value (schema v54). Every insert path writes it
+    # from the stored options. The default serves rows written before v54
     # and writers that do not know the column; the CHECK
     # ck_horsies_tasks_execution (migration DDL) bounds the domain.
     execution: Mapped[str] = mapped_column(
@@ -393,6 +393,14 @@ class WorkerStateModel(Base):
     # Worker lifecycle metadata
     worker_started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
+    )
+
+    # The slots that were down for a cause that can clear: a JSON array of
+    # {slot, cause, detail, down_since, failed_boots}, empty when none was.
+    # NULL in a row from a worker version that did not record it.
+    slots_down: Mapped[Optional[list[dict[str, Any]]]] = mapped_column(
+        JSONB,
+        nullable=True,
     )
 
 

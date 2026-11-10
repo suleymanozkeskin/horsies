@@ -58,7 +58,9 @@ from horsies.core.worker.preload_protocol import SPAWN_REQUEST
 
 logger = get_logger('worker')
 
-REPARENT_FAILED_EXIT_CODE: Final = 74
+# A forked child runs ``child_main.serve`` after the reparent, so this code
+# must differ from every exit code of ``child_main``.
+REPARENT_FAILED_EXIT_CODE: Final = 76
 REPARENT_TIMEOUT_S: Final = 5.0
 REPARENT_POLL_S: Final = 0.0002
 MAX_REFUSAL_CHARS: Final = 4096

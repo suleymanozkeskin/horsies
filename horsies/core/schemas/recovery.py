@@ -272,7 +272,7 @@ async def install_recovery_indexes(engine: 'AsyncEngine') -> None:
     await _install_exact_indexes(engine, RECOVERY_INDEXES)
 
 
-# v53: the class-keyed pending claim index. A claim stream asks for one
+# v54: the class-keyed pending claim index. A claim stream asks for one
 # queue and one execution class in (priority, enqueued_at, id) order, so
 # the class is the second key: each stream is one ordered range, also when
 # the class is rare or absent in the queue. It is added next to
