@@ -75,15 +75,17 @@ WATCH_THREAD_NAME: Final = 'horsies-runner-heartbeat-watch'
 # dispatch: this worker, and the claim generation of the dispatch (a NULL
 # claimed_at disables the generation half, as in OwnedClaim). A row with the
 # finalizing marker gets no beat: its child has ended the attempt, and the
-# reaper reads the marker for that row.
+# reaper reads the marker for that row. Each parameter has an explicit type:
+# worker_id appears twice, and Postgres refuses two deduced types for it.
 INSERT_RUNNER_HEARTBEATS_SQL: Final[LiteralString] = """
     INSERT INTO horsies_heartbeats (task_id, sender_id, role, sent_at, hostname, pid)
-    SELECT t.id, %(worker_id)s, 'runner', NOW(), %(hostname)s, %(pid)s
+    SELECT t.id, CAST(%(worker_id)s AS VARCHAR), 'runner', NOW(),
+           CAST(%(hostname)s AS VARCHAR), CAST(%(pid)s AS INTEGER)
     FROM jsonb_to_recordset(CAST(%(dispatches)s AS jsonb))
          AS d(task_id uuid, claimed_at timestamptz)
     JOIN horsies_tasks t ON t.id = d.task_id
     WHERE t.status = 'RUNNING'
-      AND t.claimed_by_worker_id = %(worker_id)s
+      AND t.claimed_by_worker_id = CAST(%(worker_id)s AS VARCHAR)
       AND (d.claimed_at IS NULL OR t.claimed_at = d.claimed_at)
       AND t.finalizing_at IS NULL
 """

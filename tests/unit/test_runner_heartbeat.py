@@ -879,10 +879,10 @@ def test_the_statement_fences_each_row() -> None:
     statement = ' '.join(INSERT_RUNNER_HEARTBEATS_SQL.split())
 
     assert "WHERE t.status = 'RUNNING'" in statement
-    assert 'AND t.claimed_by_worker_id = %(worker_id)s' in statement
+    assert 'AND t.claimed_by_worker_id = CAST(%(worker_id)s AS VARCHAR)' in statement
     assert 'AND (d.claimed_at IS NULL OR t.claimed_at = d.claimed_at)' in statement
     assert 'AND t.finalizing_at IS NULL' in statement
-    assert "SELECT t.id, %(worker_id)s, 'runner', NOW()" in statement
+    assert "SELECT t.id, CAST(%(worker_id)s AS VARCHAR), 'runner', NOW()" in statement
 
 
 def test_dispatch_rows_carry_the_claim_generation() -> None:
