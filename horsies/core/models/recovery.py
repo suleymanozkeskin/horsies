@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Annotated, Final, Self, cast
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from horsies.core.defaults import WORKER_STATE_LIVE_WINDOW_S
 from horsies.core.errors import (
     ConfigurationError,
     ErrorCode,
@@ -13,6 +14,14 @@ from horsies.core.errors import (
 
 DEFAULT_WORKFLOW_RECOVERY_FAILURE_LIMIT: Final = 25
 """Reaper passes with a persistent recovery raise before a workflow fails."""
+
+
+WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS: Final = WORKER_STATE_LIVE_WINDOW_S * 1_000 // 2
+"""Largest `worker_state_snapshot_interval_ms`: half the live window.
+
+A worker reads as live only while its latest snapshot is inside the live
+window. At half the window, the other half is room for a late snapshot
+write."""
 
 
 MOVED_TO_RETENTION: frozenset[str] = frozenset({
@@ -77,6 +86,7 @@ class RecoveryConfig(BaseModel):
     - runner_heartbeat_interval_ms: How often the worker process writes the heartbeats of its RUNNING tasks
     - claimer_heartbeat_interval_ms: How often CLAIMED tasks send heartbeats
     - worker_state_snapshot_interval_ms: How often each worker persists a monitoring snapshot row
+      (at most WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS, half the live window)
 
     Retention fields live on `AppConfig.retention` (`RetentionConfig`).
     """
@@ -204,11 +214,17 @@ class RecoveryConfig(BaseModel):
         description='How often worker sends heartbeats for CLAIMED tasks in milliseconds (1s-2min)',
     )
 
-    worker_state_snapshot_interval_ms: Annotated[int, Field(ge=1_000, le=300_000)] = Field(
+    # The upper bound is WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS. The
+    # after-validator checks it, so the refusal can state why.
+    worker_state_snapshot_interval_ms: Annotated[int, Field(ge=1_000)] = Field(
         default=30_000,  # 30 seconds
         description=(
             'How often each worker persists a worker-state snapshot (monitoring '
-            'timeseries) in milliseconds (1s-5min); each snapshot is one row in '
+            'timeseries) in milliseconds '
+            f'(1000-{WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS}); at most half the '
+            f'{WORKER_STATE_LIVE_WINDOW_S} s live window, so a running worker '
+            'stays live when a snapshot write is late by up to half the window; '
+            'each snapshot is one row in '
             'horsies_worker_states, so shorter intervals grow the table faster'
         ),
     )
@@ -340,4 +356,34 @@ class RecoveryConfig(BaseModel):
             )
 
         raise_collected(report)
+        return self
+
+    @model_validator(mode='after')
+    def validate_snapshot_interval_within_live_window(self) -> Self:
+        """Refuse a snapshot interval above `WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS`.
+
+        A worker reads as live only while its latest snapshot is inside
+        the live window. A longer interval makes a live worker read as
+        not live between its snapshots.
+        """
+        interval_ms = self.worker_state_snapshot_interval_ms
+        if interval_ms > WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS:
+            raise ConfigurationError(
+                message=(
+                    f'worker_state_snapshot_interval_ms={interval_ms}ms is above '
+                    f'the cap of {WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS}ms'
+                ),
+                code=ErrorCode.CONFIG_INVALID_RECOVERY,
+                notes=[
+                    'the cap is half the live window '
+                    f'(WORKER_STATE_LIVE_WINDOW_S={WORKER_STATE_LIVE_WINDOW_S}s)',
+                    'a worker reads as live only while its latest snapshot is '
+                    'inside the live window; the other half of the window is '
+                    'room for a late snapshot write',
+                ],
+                help_text=(
+                    'set worker_state_snapshot_interval_ms <= '
+                    f'{WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS}ms'
+                ),
+            )
         return self
