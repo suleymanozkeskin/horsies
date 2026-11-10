@@ -70,7 +70,7 @@ string validates at runtime, but strict type checkers reject it — wrap with
 the profile and the field path, e.g. `worker_profiles['batch'].claim.claimed_per_worker`.
 - Name: 1-64 characters of letters, digits, `_`, `.`, `-`; not starting with `.` or `-`.
 - At least one child.
-- Each `ClaimLimits` `TaskLimit` at or below the capacity: children + `prefetch_buffer`.
+- Each `ClaimLimits` `TaskLimit` at or below the capacity: the sum of the claim budgets (the children, with isolated children only) + `prefetch_buffer`.
 
 ## Worker profiles
 
@@ -119,6 +119,25 @@ The number of children is `WorkerProfile.child_count()`, the sum over modes.
 There is one mode, isolated. Boot also warns (never refuses) when `count × mb`
 is above the usable memory (container limit or host RAM), and when one worker can open more Postgres
 connections than the server has usable slots.
+
+Claim budgets per execution class. A worker has one budget for each class it
+runs children for; its capacity is the children (or shared seats) in service.
+Routing: a class with its own children → its own budget; a shared class with no
+children of its own → the `ISOLATED` budget, when the worker has isolated
+children (more isolation than the row asks, never less); otherwise not claimed
+(one log line at start names those classes; the worker still starts). Isolated
+children never take a class that has children of its own. Priority holds within
+one class: each (queue, class) is its own stream; a budget of several classes
+reads their merge in `(priority, enqueued_at, id)` order. Usage per budget is
+this worker's RUNNING + live CLAIMED rows of its classes. Worker capacity (for
+HRS-218 and `claimed_per_worker`) = sum over budgets + `prefetch_buffer`; with
+isolated children only, the sum is `count`, and every class goes to the
+`ISOLATED` budget. `ClaimLimits` apply to the worker as a whole; soft cap mode
+lets each budget prefetch up to `prefetch_buffer`, within the worker total.
+A claimed row of a shared class whose registered task here has another class
+(e.g. `SHARED_ASYNC` row, function now `def`) is written `ISOLATED`, returned to
+`PENDING` with the claim fence, and logged. `horsies_worker_states.class_capacity`
+(v55) holds `{budget: {"capacity": N, "serves": [classes]}}`.
 
 Removed flags and their fields: `--processes` → `IsolatedChildren.count`;
 `--max-tasks-per-child` → `IsolatedRecycle.after`; `--max-memory-per-child-mb`
