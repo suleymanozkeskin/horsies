@@ -41,7 +41,7 @@ from horsies.core.models.tasks import (
     TaskResult,
 )
 from horsies.core.types.result import Err, Ok, Result, is_err
-from horsies.core.worker.child_protocol import RunFrame, SeatWork
+from horsies.core.worker.child_protocol import RunFrame, SeatRefusal, SeatTask, SeatWork
 from horsies.core.worker.dispatch_route import (
     RunIsolated,
     RunShared,
@@ -76,6 +76,7 @@ from horsies.core.worker.slots import (
     TaskFinished,
     describe_exit,
 )
+from horsies.core.worker.shared_stop import RetryPlacement
 from horsies.core.worker.stored_timeout import NoTimeout, StoredTimeout
 from horsies.core.worker.sql import (
     SELECT_WORKER_OWNED_IN_FLIGHT_FOR_UPDATE_SQL,
@@ -148,7 +149,12 @@ class DispatchMixin:
             self, task_id: str, error: TaskError, session: AsyncSession
         ) -> Result[bool, _RetryError]: ...
         async def _schedule_retry(
-            self, task_id: str, session: AsyncSession, queue_name: str
+            self,
+            task_id: str,
+            session: AsyncSession,
+            queue_name: str,
+            *,
+            retry: RetryPlacement = RetryPlacement.SAME_CLASS,
         ) -> Result[
             Literal['scheduled', 'reaper_reclaimed', 'expired'], _RetryError
         ]: ...
@@ -209,6 +215,9 @@ class DispatchMixin:
         task_id: str,
         reason: str,
         claimed_at: Optional[datetime] = None,
+        *,
+        failure_code: OperationalErrorCode = OperationalErrorCode.WORKER_CRASHED,
+        retry: RetryPlacement = RetryPlacement.SAME_CLASS,
     ) -> _RequeueOutcome:
         """Recover a task whose child ended without a task result.
 
@@ -217,15 +226,16 @@ class DispatchMixin:
 
         Call it only when no child can still run the attempt: after the
         child's exit was seen, or for a task that never reached a child. It
-        writes WORKER_CRASHED or a retry, and the attempt must end before its
-        row moves.
+        writes ``failure_code`` (WORKER_CRASHED for a crash) or a retry, and
+        the attempt must end before its row moves. ``retry`` is where that
+        retry runs (``_schedule_retry``).
 
         ``claimed_at`` fences every statement to the dispatch's claim
         generation; None disables the fence.
         """
         try:
             task_error = TaskError(
-                error_code=OperationalErrorCode.WORKER_CRASHED,
+                error_code=failure_code,
                 message=reason,
                 data={
                     'task_id': task_id,
@@ -237,7 +247,7 @@ class DispatchMixin:
                 task_id=task_id,
                 fence=PriorLockedRead(worker_id=self.worker_instance_id),
                 result_json=serialize_error_payload(task_result),
-                error_code=OperationalErrorCode.WORKER_CRASHED.value,
+                error_code=failure_code.value,
                 # The task summary reason stays unchanged. The attempt row
                 # holds the reason of this failure.
                 failed_reason=None,
@@ -325,6 +335,7 @@ class DispatchMixin:
                         task_id,
                         s,
                         queue_name=ctx_row.queue_name or 'default',
+                        retry=retry,
                     )
                     if is_err(retry_r):
                         logger.error(
@@ -345,7 +356,7 @@ class DispatchMixin:
                                     'will_retry': True,
                                     'started_at': attempt_started_at,
                                     'finished_at': db_now,
-                                    'error_code': OperationalErrorCode.WORKER_CRASHED.value,
+                                    'error_code': failure_code.value,
                                     'error_message': reason,
                                     'failed_reason': reason,
                                     **attempt_worker,
@@ -365,7 +376,7 @@ class DispatchMixin:
                         'will_retry': False,
                         'started_at': attempt_started_at,
                         'finished_at': db_now,
-                        'error_code': OperationalErrorCode.WORKER_CRASHED.value,
+                        'error_code': failure_code.value,
                         'error_message': reason,
                         'failed_reason': reason,
                         **attempt_worker,
@@ -559,46 +570,47 @@ class DispatchMixin:
         self,
         handle: SharedHandle,
         task_id: str,
-        timeout_ms: int,
-        claimed_at: Optional[datetime],
-    ) -> SharedOutcome | _TimeoutSettled | _AttemptEndUnknown:
-        """Act on a shared task with no end at its backstop time.
+        work: SeatWork,
+    ) -> SharedOutcome | _AttemptEndUnknown:
+        """Act on a shared run with no end at its backstop time.
 
-        The child holds the deadline and reports it at once, so a child that
-        has not reported it by the backstop is frozen: ``backstop_kill``
-        kills it, bound to this run, and waits for its exit. Then, as for an
-        isolated timeout, TASK_TIMEOUT, the retry, the attempt row and phase 2
-        are written for this task, after the exit; every other task of that
-        child ends with the loss of the child, through crash recovery. A
-        child that reported the deadline is alive, and its task ignores its
-        cancel: nothing is killed, and the outcome comes when the task ends.
+        The child reports the end of the cancel grace of a run at once, and
+        its watchdog reports a blocked loop. A child that has reported
+        neither the end of the grace nor the end of the run by the backstop
+        is frozen; a refusal reports neither, so its backstop always ends
+        the child. ``backstop_kill`` kills the child, bound to this run, and
+        waits for its exit. The slot then answers each run of the child by
+        its verdict (``shared_stop``): this run, past its deadline,
+        ``TASK_TIMEOUT``; a refusal, the crash path. A child that reported
+        the end of the grace is alive: nothing is killed, and the outcome
+        comes when the run ends or the child is killed.
 
-        Returns the outcome to finalize: ``_TimeoutSettled`` (this task is
-        written), ``_AttemptEndUnknown`` (no exit seen: nothing is written,
-        the row is left to stale-task recovery), or the outcome of the run.
+        Returns the outcome to finalize, or ``_AttemptEndUnknown`` (no exit
+        seen: nothing is written, the row is left to stale-task recovery).
         """
+        match work:
+            case SeatTask(timeout_ms=timeout_ms):
+                limit = f'timeout_ms={timeout_ms}'
+            case SeatRefusal():
+                limit = 'the refusal backstop'
+            case _ as unreachable:
+                assert_never(unreachable)
         match await handle.backstop_kill(CHILD_KILL_WAIT_S):
             case ChildEnded(pid=pid, child_exit=child_exit):
                 logger.warning(
-                    'Killed shared child pid=%s (%s): task %s reached timeout_ms=%s '
-                    'and the child did not report its deadline; every task of '
-                    'that child ends with it',
+                    'Killed shared child pid=%s (%s): task %s passed %s and the '
+                    'child reported neither the end of its cancel grace nor its '
+                    'end; every task of that child ends with it',
                     pid,
                     describe_exit(child_exit),
                     task_id,
-                    timeout_ms,
+                    limit,
                 )
-                match await self._record_task_timeout(task_id, timeout_ms, claimed_at):
-                    case _TimeoutSettled() as settled:
-                        return settled
-                    case _TimeoutWriteFailed():
-                        return await asyncio.shield(handle.outcome)
-                    case _ as unreachable:
-                        assert_never(unreachable)
+                return await asyncio.shield(handle.outcome)
             case ChildEndUnknown(pid=pid):
                 logger.critical(
-                    'Shared child pid=%s of timed-out task %s did not exit %ss '
-                    'after SIGKILL; nothing is written, and its rows are left to '
+                    'Shared child pid=%s of task %s did not exit %ss after '
+                    'SIGKILL; nothing is written, and its rows are left to '
                     'stale-task recovery',
                     pid,
                     task_id,
@@ -607,11 +619,10 @@ class DispatchMixin:
                 return _AttemptEndUnknown()
             case DeadlineAcknowledged(pid=pid):
                 logger.warning(
-                    'Task %s ignores the cancel of its timeout_ms=%s in shared '
-                    'child pid=%s; it keeps its seat until it ends or the worker '
-                    'stops',
+                    'Task %s still runs after its second cancel in shared child '
+                    'pid=%s; it keeps its seat until it ends, or until the child '
+                    'is killed when every task left in it is stuck',
                     task_id,
-                    timeout_ms,
                     pid,
                 )
                 return await asyncio.shield(handle.outcome)
@@ -674,6 +685,7 @@ class DispatchMixin:
                     task_id,
                     timeout_ms,
                     claimed_at,
+                    retry=RetryPlacement.SAME_CLASS,
                 )
             case ChildEndUnknown(pid=pid):
                 logger.critical(
@@ -736,6 +748,7 @@ class DispatchMixin:
                     task_id,
                     timeout_ms,
                     claimed_at,
+                    retry=RetryPlacement.SAME_CLASS,
                 )
             case NotDispatched():
                 raise AssertionError(
@@ -750,11 +763,14 @@ class DispatchMixin:
         task_id: str,
         timeout_ms: int,
         claimed_at: Optional[datetime],
+        *,
+        retry: RetryPlacement,
     ) -> _TimeoutSettled | _TimeoutWriteFailed:
         """Record the timeout of an attempt whose child has exited.
 
         Ownership-guarded like every finalize path, and fenced to the claim
-        generation ``claimed_at``; None disables the fence.
+        generation ``claimed_at``; None disables the fence. ``retry`` is
+        where the retry runs, when the policy retries the timeout.
 
         ``_TimeoutSettled`` covers each way the row is settled:
         - a RUNNING row fails with TASK_TIMEOUT and its attempt row, then
@@ -778,6 +794,7 @@ class DispatchMixin:
                     task_id,
                     timeout_ms,
                     claimed_at,
+                    retry,
                 )
         except Exception as exc:
             logger.error(
@@ -794,6 +811,7 @@ class DispatchMixin:
         task_id: str,
         timeout_ms: int,
         claimed_at: Optional[datetime],
+        retry: RetryPlacement,
     ) -> _TimeoutSettled | _TimeoutWriteFailed:
         """Lock this claim's row and settle it for a timeout.
 
@@ -856,6 +874,7 @@ class DispatchMixin:
                     ctx_row,
                     task_result,
                     failure_command,
+                    retry,
                 )
             case _:
                 raise RuntimeError(
@@ -897,6 +916,7 @@ class DispatchMixin:
         ctx_row: Any,
         task_result: TaskResult[None, TaskError],
         failure_command: FailLockedTask,
+        retry: RetryPlacement,
     ) -> _TimeoutSettled | _TimeoutWriteFailed:
         """Retry or fail a RUNNING row whose child has exited, then run phase 2.
 
@@ -911,7 +931,13 @@ class DispatchMixin:
         db_now = ctx_row.db_now or datetime.now(timezone.utc)
         attempt_started_at = ctx_row.started_at or db_now
 
-        retry_r = await self._schedule_timeout_retry(s, task_id, task_error, queue_name)
+        retry_r = await self._schedule_timeout_retry(
+            s,
+            task_id,
+            task_error,
+            queue_name,
+            retry,
+        )
         if is_err(retry_r):
             return _TimeoutWriteFailed()
         retry_scheduled = retry_r.ok_value
@@ -967,6 +993,7 @@ class DispatchMixin:
         task_id: str,
         task_error: TaskError,
         queue_name: str,
+        retry: RetryPlacement,
     ) -> Result[bool, _RetryError]:
         """Set a timed-out RUNNING row PENDING when its retry policy asks for it.
 
@@ -986,7 +1013,12 @@ class DispatchMixin:
             return Err(should_retry_r.err_value)
         if not should_retry_r.ok_value:
             return Ok(False)
-        retry_r = await self._schedule_retry(task_id, s, queue_name=queue_name)
+        retry_r = await self._schedule_retry(
+            task_id,
+            s,
+            queue_name=queue_name,
+            retry=retry,
+        )
         if is_err(retry_r):
             logger.error(
                 'Retry scheduling failed for timed-out task %s: %s; crash '

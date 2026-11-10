@@ -64,6 +64,8 @@ MAX_LEFTOVER_NAME_CHARS: Final = 200
 # bounds. With ': ' between them they fit MAX_BOOT_FAILURE_DETAIL_CHARS.
 MAX_BOOT_ERROR_NAME_CHARS: Final = 200
 MAX_BOOT_DETAIL_CHARS: Final = 2000
+# A report of a blocked loop names its source line within this bound.
+MAX_BLOCKED_WHERE_CHARS: Final = 500
 
 
 @dataclass(frozen=True, slots=True)
@@ -327,6 +329,71 @@ class DeadlineFiredFrame:
 
 
 @dataclass(frozen=True, slots=True)
+class SecondCancelFrame:
+    """Shared async child to parent: the cancel grace of run ``dispatch``
+    ran out while its task or its marked work was still alive. The child
+    sent the second cancel to the task and to its marked asyncio tasks, and
+    sends more cancel rounds. The run has not ended yet."""
+
+    dispatch: int
+    task_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class RunStuckFrame:
+    """Shared async child to parent: run ``dispatch`` did not stop after its
+    second cancel and its cancel rounds.
+
+    ``tasks`` counts its asyncio tasks that are still alive, the task of the
+    run included, and ``executor_items`` its work items that still run in
+    the default executor. ``names`` holds the coroutine ``__qualname__`` of
+    ``min(tasks, MAX_LEFTOVER_TASK_NAMES)`` of those tasks, sorted, each at
+    most ``MAX_LEFTOVER_NAME_CHARS`` characters. ``tasks + executor_items``
+    is at least 1. The run keeps its seat until it ends or the child is
+    killed.
+    """
+
+    dispatch: int
+    task_id: str
+    tasks: int
+    executor_items: int
+    names: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class BlockingRun:
+    """The run whose work held the event loop: the task of run ``dispatch``
+    or a task with its mark."""
+
+    dispatch: int
+    task_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class CulpritUnknown:
+    """The loop was held by code that belongs to no run: a callback, or a
+    task with no mark."""
+
+
+type LoopCulprit = BlockingRun | CulpritUnknown
+
+
+@dataclass(frozen=True, slots=True)
+class LoopBlockedFrame:
+    """Shared async child to parent: the event loop of the child has not
+    turned for ``blocked_ms`` milliseconds, at least the block limit.
+
+    ``where`` names the source line that the loop thread ran, at most
+    ``MAX_BLOCKED_WHERE_CHARS`` characters. The parent kills the child at
+    once: no task of a blocked loop can move.
+    """
+
+    culprit: LoopCulprit
+    blocked_ms: int
+    where: str
+
+
+@dataclass(frozen=True, slots=True)
 class PreloadReadyFrame:
     """Preload parent to worker: imports are done, so forks can start."""
 
@@ -360,7 +427,14 @@ WireResult: TypeAlias = tuple[bool, str, str | None]
 
 ParentFrame: TypeAlias = InitFrame | RunFrame | SharedRunFrame | StopFrame
 ChildFrame: TypeAlias = (
-    ReadyFrame | BootFailedFrame | ResultFrame | SharedResultFrame | DeadlineFiredFrame
+    ReadyFrame
+    | BootFailedFrame
+    | ResultFrame
+    | SharedResultFrame
+    | DeadlineFiredFrame
+    | SecondCancelFrame
+    | RunStuckFrame
+    | LoopBlockedFrame
 )
 PreloadFrame: TypeAlias = (
     PreloadReadyFrame | ChildForkedFrame | ForkFailedFrame | PreloadRefusedFrame
@@ -613,6 +687,51 @@ def encode_child_frame(frame: ChildFrame) -> EncodedFrame:
         case DeadlineFiredFrame(dispatch=dispatch, task_id=task_id):
             return _pack(
                 {'kind': 'deadline_fired', 'dispatch': dispatch, 'task_id': task_id},
+                b'',
+            )
+        case SecondCancelFrame(dispatch=dispatch, task_id=task_id):
+            return _pack(
+                {'kind': 'second_cancel', 'dispatch': dispatch, 'task_id': task_id},
+                b'',
+            )
+        case RunStuckFrame() | LoopBlockedFrame():
+            return _encode_stop_report(frame)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _culprit_field(culprit: LoopCulprit) -> dict[str, object]:
+    match culprit:
+        case BlockingRun(dispatch=dispatch, task_id=task_id):
+            return {'kind': 'run', 'dispatch': dispatch, 'task_id': task_id}
+        case CulpritUnknown():
+            return {'kind': 'unknown'}
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _encode_stop_report(frame: RunStuckFrame | LoopBlockedFrame) -> EncodedFrame:
+    match frame:
+        case RunStuckFrame():
+            return _pack(
+                {
+                    'kind': 'run_stuck',
+                    'dispatch': frame.dispatch,
+                    'task_id': frame.task_id,
+                    'tasks': frame.tasks,
+                    'executor_items': frame.executor_items,
+                    'names': list(frame.names),
+                },
+                b'',
+            )
+        case LoopBlockedFrame():
+            return _pack(
+                {
+                    'kind': 'loop_blocked',
+                    'culprit': _culprit_field(frame.culprit),
+                    'blocked_ms': frame.blocked_ms,
+                    'where': frame.where,
+                },
                 b'',
             )
         case _ as unreachable:
@@ -1004,6 +1123,53 @@ def _seat_end(meta: Mapping[str, Any], body: bytes) -> SeatEnd:
             raise _BadField('end.kind')
 
 
+def _decode_run_stuck(meta: Mapping[str, Any]) -> RunStuckFrame:
+    tasks = _whole(meta, 'tasks')
+    executor_items = _whole(meta, 'executor_items')
+    if tasks < 0 or executor_items < 0 or tasks + executor_items < 1:
+        raise _BadField('tasks and executor_items')
+    names = _text_tuple(meta, 'names')
+    if len(names) != min(tasks, MAX_LEFTOVER_TASK_NAMES):
+        raise _BadField('names')
+    if any(len(name) > MAX_LEFTOVER_NAME_CHARS for name in names):
+        raise _BadField('names')
+    return RunStuckFrame(
+        dispatch=_dispatch(meta),
+        task_id=_text(meta, 'task_id'),
+        tasks=tasks,
+        executor_items=executor_items,
+        names=names,
+    )
+
+
+def _loop_culprit(meta: Mapping[str, Any]) -> LoopCulprit:
+    value = meta.get('culprit')
+    if not isinstance(value, dict):
+        raise _BadField('culprit')
+    culprit = cast('Mapping[str, Any]', value)
+    match culprit.get('kind'):
+        case 'run':
+            return BlockingRun(
+                dispatch=_dispatch(culprit),
+                task_id=_text(culprit, 'task_id'),
+            )
+        case 'unknown':
+            return CulpritUnknown()
+        case _:
+            raise _BadField('culprit.kind')
+
+
+def _decode_loop_blocked(meta: Mapping[str, Any]) -> LoopBlockedFrame:
+    blocked_ms = _whole(meta, 'blocked_ms')
+    if blocked_ms < 0:
+        raise _BadField('blocked_ms')
+    return LoopBlockedFrame(
+        culprit=_loop_culprit(meta),
+        blocked_ms=blocked_ms,
+        where=_bounded_text(meta, 'where', MAX_BLOCKED_WHERE_CHARS),
+    )
+
+
 def _decode_shared_result(meta: Mapping[str, Any], body: bytes) -> SharedResultFrame:
     return SharedResultFrame(
         dispatch=_dispatch(meta),
@@ -1046,6 +1212,17 @@ def decode_child_frame(
                         task_id=_text(meta, 'task_id'),
                     ),
                 )
+            case 'second_cancel':
+                return Ok(
+                    SecondCancelFrame(
+                        dispatch=_dispatch(meta),
+                        task_id=_text(meta, 'task_id'),
+                    ),
+                )
+            case 'run_stuck':
+                return Ok(_decode_run_stuck(meta))
+            case 'loop_blocked':
+                return Ok(_decode_loop_blocked(meta))
             case _:
                 return Err(MalformedFrame(f'unknown child frame {kind!r}'))
     except (_BadField, ValueError, OverflowError, RecursionError) as exc:

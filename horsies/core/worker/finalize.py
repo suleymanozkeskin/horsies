@@ -77,6 +77,7 @@ from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.worker.child_protocol import SeatRefusal, SeatTask, SeatWork
 from horsies.core.worker.slots import (
     SHARED_BACKSTOP_MARGIN_S,
+    SHARED_REFUSAL_BACKSTOP_S,
     Assigned,
     ChildLost,
     ExitedWith,
@@ -85,6 +86,7 @@ from horsies.core.worker.slots import (
     NotDispatched,
     NotRunCause,
     SeatDeadlineEnded,
+    SeatKilled,
     SeatTaskFinished,
     SharedHandle,
     SharedOutcome,
@@ -112,6 +114,7 @@ from horsies.core.worker.runtime import (
     _RequeueOutcome,
     _RetryError,
 )
+from horsies.core.worker.shared_stop import RetryPlacement
 from horsies.core.worker.stored_timeout import (
     CancelGraceInvalid,
     NoTimeout,
@@ -229,15 +232,23 @@ class FinalizeMixin:
             self,
             handle: SharedHandle,
             task_id: str,
-            timeout_ms: int,
-            claimed_at: Optional[datetime],
-        ) -> SharedOutcome | _TimeoutSettled | _AttemptEndUnknown: ...
+            work: SeatWork,
+        ) -> SharedOutcome | _AttemptEndUnknown: ...
         async def _record_task_timeout(
             self,
             task_id: str,
             timeout_ms: int,
             claimed_at: Optional[datetime],
+            *,
+            retry: RetryPlacement,
         ) -> _TimeoutSettled | _TimeoutWriteFailed: ...
+        async def _finalize_killed_run(
+            self,
+            task_id: str,
+            killed: SeatKilled,
+            work: SeatWork,
+            claimed_at: Optional[datetime],
+        ) -> Result[None, _FinalizeError]: ...
         async def _requeue_claimed_task(
             self,
             task_id: str,
@@ -254,7 +265,12 @@ class FinalizeMixin:
             self, task_id: str, error: TaskError, session: AsyncSession
         ) -> Result[bool, _RetryError]: ...
         async def _schedule_retry(
-            self, task_id: str, session: AsyncSession, queue_name: str
+            self,
+            task_id: str,
+            session: AsyncSession,
+            queue_name: str,
+            *,
+            retry: RetryPlacement = RetryPlacement.SAME_CLASS,
         ) -> Result[
             Literal['scheduled', 'reaper_reclaimed', 'expired'], _RetryError
         ]: ...
@@ -486,18 +502,19 @@ class FinalizeMixin:
         handle: SharedHandle,
         task_id: str,
         work: SeatWork,
-        claimed_at: Optional[datetime],
-    ) -> SharedOutcome | _TimeoutSettled | _AttemptEndUnknown:
+    ) -> SharedOutcome | _AttemptEndUnknown:
         """Wait for the end of a shared task, with one backstop timer.
 
         The child holds the deadline of the task: it cancels the task at
-        ``timeout_ms`` and reports the end. The parent waits from the
-        placement until ``timeout_ms + cancel_grace_ms`` and
-        ``SHARED_BACKSTOP_MARGIN_S`` more; past that it hands the run to
-        ``_handle_shared_backstop``, which kills the child only when it is
-        frozen. The timer ends when the outcome arrives. A ``SeatRefusal``
-        runs no task code and has no deadline: the parent waits for its
-        outcome, as for an isolated refusal. Never raises for a task.
+        ``timeout_ms``, sends a second cancel after ``cancel_grace_ms``, and
+        reports each step and the end. The parent waits from the placement
+        until ``timeout_ms + cancel_grace_ms`` and ``SHARED_BACKSTOP_MARGIN_S``
+        more; past that it hands the run to ``_handle_shared_backstop``,
+        which kills the child only when it is frozen. A ``SeatRefusal`` runs
+        no task code and has no deadline: its backstop is
+        ``SHARED_REFUSAL_BACKSTOP_S``. The timer ends when the outcome
+        arrives.
+        Never raises for a task.
         """
         assigned = await asyncio.shield(handle.assigned)
         match assigned:
@@ -509,24 +526,20 @@ class FinalizeMixin:
                 assert_never(unreachable)
         match work:
             case SeatTask(timeout_ms=timeout_ms, cancel_grace_ms=cancel_grace_ms):
-                pass
+                backstop_s = (
+                    timeout_ms + cancel_grace_ms
+                ) / 1000.0 + SHARED_BACKSTOP_MARGIN_S
             case SeatRefusal():
-                return await asyncio.shield(handle.outcome)
+                backstop_s = SHARED_REFUSAL_BACKSTOP_S
             case _ as unreachable:
                 assert_never(unreachable)
-        backstop_s = (timeout_ms + cancel_grace_ms) / 1000.0 + SHARED_BACKSTOP_MARGIN_S
         try:
             return await asyncio.wait_for(
                 asyncio.shield(handle.outcome),
                 timeout=backstop_s,
             )
         except asyncio.TimeoutError:
-            return await self._handle_shared_backstop(
-                handle,
-                task_id,
-                timeout_ms,
-                claimed_at,
-            )
+            return await self._handle_shared_backstop(handle, task_id, work)
 
     async def _finalize_shared_after(
         self,
@@ -543,14 +556,17 @@ class FinalizeMixin:
 
         A result takes the path of an isolated result; the result of a
         ``SeatRefusal`` is its ``WORKER_SERIALIZATION_ERROR``. A deadline that
-        the child reported ended the task before its row moves: TASK_TIMEOUT,
-        the retry and phase 2 go through ``_record_task_timeout``, the writer
-        of isolated timeouts. The pool refuses a deadline report of a run
-        without a deadline, so a ``SeatRefusal`` never ends that way:
-        ``AssertionError``. A lost child takes crash recovery, which writes
-        only after the exit of the child was seen.
+        the child reported ended the task, and its marked work, before its
+        row moves: TASK_TIMEOUT, the retry and phase 2 go through
+        ``_record_task_timeout``, the writer of isolated timeouts. The pool
+        refuses a deadline report of a run without a deadline, so a
+        ``SeatRefusal`` never ends that way: ``AssertionError``. A child that
+        the worker killed for a named cause or after the deadline of the run
+        gives its verdict (``_finalize_killed_run``). A lost child takes
+        crash recovery, which writes only after the exit of the child was
+        seen.
         """
-        outcome = await self._await_shared_outcome(handle, task_id, work, claimed_at)
+        outcome = await self._await_shared_outcome(handle, task_id, work)
         match outcome:
             case SeatTaskFinished(ok=ok, result_json=result_json, failed_reason=reason):
                 return await self._finalize_task_result(
@@ -563,7 +579,7 @@ class FinalizeMixin:
                     task_name=task_name,
                     claimed_at=claimed_at,
                 )
-            case SeatDeadlineEnded():
+            case SeatDeadlineEnded(retry=retry):
                 match work:
                     case SeatTask(timeout_ms=timeout_ms):
                         pass
@@ -578,12 +594,20 @@ class FinalizeMixin:
                     task_id,
                     timeout_ms,
                     claimed_at,
+                    retry,
+                )
+            case SeatKilled():
+                return await self._finalize_killed_run(
+                    task_id,
+                    outcome,
+                    work,
+                    claimed_at,
                 )
             case NotDispatched(cause=cause):
                 return await self._requeue_not_dispatched(task_id, cause, claimed_at)
             case ChildLost():
                 return await self._finalize_child_loss(task_id, outcome, claimed_at)
-            case _TimeoutSettled() | _AttemptEndUnknown():
+            case _AttemptEndUnknown():
                 return Ok(None)
             case _ as unreachable:
                 assert_never(unreachable)
@@ -593,14 +617,22 @@ class FinalizeMixin:
         task_id: str,
         timeout_ms: int,
         claimed_at: Optional[datetime],
+        retry: RetryPlacement,
     ) -> Result[None, _FinalizeError]:
-        """Record the timeout of a shared task whose coroutine has ended.
+        """Record the timeout of a shared task whose attempt has ended: its
+        coroutine and its marked work ended, or its child exited. ``retry``
+        is where the retry runs.
 
         A failed write takes crash recovery, as the timeout of an isolated
         task does after its write failed: the recovery reads the row under
         its lock and acts on its state.
         """
-        match await self._record_task_timeout(task_id, timeout_ms, claimed_at):
+        match await self._record_task_timeout(
+            task_id,
+            timeout_ms,
+            claimed_at,
+            retry=retry,
+        ):
             case _TimeoutSettled():
                 return Ok(None)
             case _TimeoutWriteFailed():

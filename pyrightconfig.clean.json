@@ -54,7 +54,15 @@
     "tests/unit/test_class_coverage.py",
     "tests/unit/test_class_coverage_log.py",
     "tests/unit/test_monitoring_execution_classes.py",
-    "tests/integration/test_class_coverage.py"
+    "tests/integration/test_class_coverage.py",
+    "horsies/core/worker/run_mark.py",
+    "horsies/core/worker/loop_watchdog.py",
+    "horsies/core/worker/shared_stop.py",
+    "horsies/core/worker/shared_finalize.py",
+    "tests/unit/test_run_mark.py",
+    "tests/unit/test_loop_watchdog.py",
+    "tests/unit/test_shared_stop.py",
+    "tests/integration/test_shared_kill_writes.py"
   ],
   "reportUnnecessaryTypeIgnoreComment": "error"
 }
