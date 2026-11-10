@@ -738,7 +738,10 @@ class TestBackstopTimer:
         handle.assigned.set_result(Assigned())
         refusal = SeatRefusal(refusal=TimeoutValueInvalid(reason='y'))
 
-        outcome = await worker._await_shared_outcome(handle, 'task-1', refusal)
+        outcome = await asyncio.wait_for(
+            worker._await_shared_outcome(handle, 'task-1', refusal),
+            timeout=5.0,
+        )
 
         assert outcome == lost
         worker._handle_shared_backstop.assert_awaited_once_with(
