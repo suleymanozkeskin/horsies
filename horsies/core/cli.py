@@ -13,13 +13,16 @@ import asyncio
 import importlib
 import ipaddress
 import logging
-import math
 import os
 import random
 import signal
 import sys
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, NoReturn, assert_never
+from typing import Any, Final, NoReturn, assert_never
+
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.app import Horsies
 from horsies.core.banner import print_banner
@@ -34,11 +37,38 @@ from horsies.core.errors import (
     ValidationReport,
 )
 from horsies.core.logging import get_logger
+from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.resilience import WorkerResilienceConfig
+from horsies.core.models.worker_profile import (
+    IsolatedChildren,
+    MemoryLimit,
+    NoIsolatedChildren,
+    NoMemoryLimit,
+    NoTaskLimit,
+    TaskLimit,
+    WorkerProfile,
+    describe_worker_profile,
+)
 from horsies.core.scheduler import Scheduler
 from horsies.core.worker.config import ChildPreload
+from horsies.core.worker.profile_fit import (
+    CONNECTIONS_HELP,
+    ConnectionsExceedServer,
+    ConnectionsFit,
+    MachineMemory,
+    MachineMemoryUnreadable,
+    MemoryLimitsExceedMachine,
+    MemoryLimitsFit,
+    MemoryLimitsNotSet,
+    ServerConnectionLimit,
+    ServerConnectionLimitUnreadable,
+    compare_connections,
+    compare_memory_limits,
+    read_machine_memory,
+    read_server_connection_limit,
+)
 from horsies.core.worker.worker import Worker, WorkerConfig
-from horsies.core.types.result import Err, Ok, is_err, is_ok
+from horsies.core.types.result import Err, Ok, Result, is_err, is_ok
 from horsies.core.utils.imports import (
     import_file_path,
     setup_sys_path_from_cwd,
@@ -160,63 +190,6 @@ def _parse_locator(locator: str) -> tuple[str, str | None]:
         module_part, attr = locator.rsplit(':', 1)
         return (module_part, attr)
     return (locator, None)
-
-
-def _positive_int(value: str) -> int:
-    """argparse type: integer >= 1.
-
-    A worker needs at least one child; reject at the CLI boundary with a
-    usage error.
-    """
-    parsed = int(value)
-    if parsed < 1:
-        raise argparse.ArgumentTypeError(f'must be >= 1, got {parsed}')
-    return parsed
-
-
-def _non_negative_int(value: str) -> int:
-    """argparse type: integer >= 0 (0 means auto)."""
-    parsed = int(value)
-    if parsed < 0:
-        raise argparse.ArgumentTypeError(f'must be >= 0, got {parsed}')
-    return parsed
-
-
-def _max_tasks_per_child(value: str) -> int:
-    """argparse type: max_tasks_per_child, integer >= 1 or 0 to disable.
-
-    0 disables recycling (children live for the worker's lifetime).
-    """
-    parsed = int(value)
-    if parsed < 0:
-        raise argparse.ArgumentTypeError(f'must be >= 1, or 0 to disable, got {parsed}')
-    return parsed
-
-
-def _drain_timeout_s(value: str) -> float:
-    """argparse type: drain_timeout_s, finite seconds above 0."""
-    parsed = float(value)
-    if not math.isfinite(parsed) or parsed <= 0:
-        raise argparse.ArgumentTypeError(
-            f'must be a finite number of seconds above 0, got {parsed}',
-        )
-    return parsed
-
-
-def _max_memory_per_child_mb(value: str) -> int:
-    """argparse type: max_memory_per_child_mb, positive integer in MB.
-
-    No fixed lower floor is enforced here — a constant cannot know a
-    deployment's child baseline. The real floor is checked at worker
-    startup by the baseline guard, which fails loudly when the threshold is
-    below the measured baseline. Reject only non-positive values.
-    """
-    parsed = int(value)
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError(
-            f'must be a positive integer (MB), got {parsed}'
-        )
-    return parsed
 
 
 def _is_file_path(path: str) -> bool:
@@ -435,6 +408,274 @@ def setup_logging(loglevel: str) -> None:
     configure_logging(level)
 
 
+@dataclass(frozen=True, slots=True)
+class SelectedProfile:
+    """The worker profile that ``--profile`` names."""
+
+    name: str
+    profile: WorkerProfile
+
+
+@dataclass(frozen=True, slots=True)
+class ProfileNotGiven:
+    """``--profile`` was not passed. There is no default profile."""
+
+    defined: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ProfileUnknown:
+    """``--profile`` names no profile of the app."""
+
+    requested: str
+    defined: tuple[str, ...]
+
+
+def select_worker_profile(
+    profiles: Mapping[str, WorkerProfile],
+    requested: str | None,
+) -> Result[SelectedProfile, ProfileNotGiven | ProfileUnknown]:
+    """Find the profile that ``--profile`` names.
+
+    ``requested`` is the ``--profile`` value as argparse gives it: ``None``
+    when the option was not passed. Both errors carry the defined names.
+    """
+    defined = tuple(sorted(profiles))
+    match requested:
+        case None:
+            return Err(ProfileNotGiven(defined=defined))
+        case str() as name if name in profiles:
+            return Ok(SelectedProfile(name=name, profile=profiles[name]))
+        case str() as name:
+            return Err(ProfileUnknown(requested=name, defined=defined))
+
+
+def _defined_profiles_note(defined: tuple[str, ...]) -> str:
+    match defined:
+        case ():
+            return (
+                'the app defines no worker profiles: AppConfig.worker_profiles is empty'
+            )
+        case _:
+            return f'defined profiles: {", ".join(defined)}'
+
+
+def _profile_help(defined: tuple[str, ...]) -> str:
+    match defined:
+        case ():
+            return (
+                'add a profile to the app config, for example:\n'
+                '  AppConfig(..., worker_profiles={\n'
+                "      'default': WorkerProfile(isolated=IsolatedChildren(count=4)),\n"
+                '  })\n'
+                'then start the worker with: horsies worker <app> --profile default'
+            )
+        case _:
+            return f'start the worker with: horsies worker <app> --profile {defined[0]}'
+
+
+def _profile_selection_error(
+    error: ProfileNotGiven | ProfileUnknown,
+) -> ConfigurationError:
+    """The startup error for a missing or unknown ``--profile``."""
+    match error:
+        case ProfileNotGiven(defined=defined):
+            config_error = ConfigurationError(
+                message='--profile is required',
+                code=ErrorCode.CLI_INVALID_ARGS,
+                notes=[
+                    'a worker takes its settings from a named profile in '
+                    'AppConfig.worker_profiles; there is no default profile',
+                    _defined_profiles_note(defined),
+                ],
+                help_text=_profile_help(defined),
+            )
+        case ProfileUnknown(requested=requested, defined=defined):
+            config_error = ConfigurationError(
+                message=f'unknown worker profile {requested!r}',
+                code=ErrorCode.CLI_INVALID_ARGS,
+                notes=[_defined_profiles_note(defined)],
+                help_text=_profile_help(defined),
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+    # The cause is a command-line argument, not a line of user code.
+    config_error.location = None
+    return config_error
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionSettings:
+    """A profile in the encoding of ``WorkerConfig``.
+
+    ``WorkerConfig``, the slot pool and the claim function read 0 as no task
+    limit and ``None`` as no memory limit. The profile has named variants
+    for those; this is the one place that turns them into that encoding.
+    """
+
+    processes: int
+    max_tasks_per_child: int
+    max_memory_per_child_mb: int | None
+    max_claim_batch: int
+    max_claim_per_worker: int
+    drain_timeout_s: float
+    child_preload: ChildPreload
+
+
+def _tasks_or_zero(limit: TaskLimit | NoTaskLimit) -> int:
+    match limit:
+        case TaskLimit(tasks=tasks):
+            return tasks
+        case NoTaskLimit():
+            return 0
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _mb_or_none(limit: MemoryLimit | NoMemoryLimit) -> int | None:
+    match limit:
+        case MemoryLimit(mb=mb):
+            return mb
+        case NoMemoryLimit():
+            return None
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def execution_settings(profile: WorkerProfile) -> ExecutionSettings:
+    """Turn a validated profile into the settings of ``WorkerConfig``."""
+    match profile.isolated:
+        case IsolatedChildren(recycle=recycle):
+            return ExecutionSettings(
+                processes=profile.child_count(),
+                max_tasks_per_child=_tasks_or_zero(recycle.after),
+                max_memory_per_child_mb=_mb_or_none(recycle.above),
+                max_claim_batch=_tasks_or_zero(profile.claim.per_queue_per_pass),
+                max_claim_per_worker=_tasks_or_zero(
+                    profile.claim.claimed_per_worker,
+                ),
+                drain_timeout_s=profile.drain_timeout.total_seconds(),
+                child_preload=profile.preload,
+            )
+        case NoIsolatedChildren():
+            raise AssertionError(
+                'AppConfig validation refuses a worker profile with no children',
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _log_memory_fit(selected: SelectedProfile, logger: logging.Logger) -> None:
+    """Warn when the per-child memory limits add up to more than the RAM.
+
+    A warning, not a refusal: a deployment can move between machine sizes.
+    The worker starts in every outcome.
+    """
+    match read_machine_memory():
+        case MachineMemoryUnreadable(reason=reason):
+            logger.warning(
+                'Worker profile %r: the RAM of the machine could not be read '
+                '(%s); the per-child memory limits were not compared with it',
+                selected.name,
+                reason,
+            )
+        case MachineMemory() as machine:
+            match compare_memory_limits(selected.profile, machine):
+                case MemoryLimitsExceedMachine(total_mb=total_mb, machine_mb=ram_mb):
+                    logger.warning(
+                        'Worker profile %r: the per-child memory limits add up '
+                        'to %s MB, above the %s MB of RAM of this machine. '
+                        'Children can use more memory than the machine has '
+                        'before they are recycled.',
+                        selected.name,
+                        total_mb,
+                        ram_mb,
+                    )
+                case MemoryLimitsFit(total_mb=total_mb, machine_mb=ram_mb):
+                    logger.info(
+                        'Worker profile %r: per-child memory limits add up to '
+                        '%s MB of %s MB of RAM',
+                        selected.name,
+                        total_mb,
+                        ram_mb,
+                    )
+                case MemoryLimitsNotSet():
+                    logger.info(
+                        'Worker profile %r: no per-child memory limit, so '
+                        'there is no sum to compare with the RAM',
+                        selected.name,
+                    )
+                case _ as unreachable:
+                    assert_never(unreachable)
+        case _ as unreachable_memory:
+            assert_never(unreachable_memory)
+
+
+def _log_connection_limit(
+    selected: SelectedProfile,
+    broker: PostgresConfig,
+    limit: ServerConnectionLimit,
+    logger: logging.Logger,
+) -> None:
+    match compare_connections(selected.profile, broker, limit):
+        case ConnectionsExceedServer() as exceed:
+            logger.warning(
+                'Worker profile %r: %s. %s. To fix: %s',
+                selected.name,
+                exceed.describe(),
+                exceed.need.formula(),
+                CONNECTIONS_HELP,
+            )
+        case ConnectionsFit(need=need, limit=server_limit):
+            logger.info(
+                'Worker profile %r: one worker can open %s Postgres '
+                'connections of %s usable on the server',
+                selected.name,
+                need.total(),
+                server_limit.usable(),
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+async def _log_connection_fit(
+    selected: SelectedProfile,
+    broker: PostgresConfig,
+    session_factory: Callable[[], AsyncSession],
+    logger: logging.Logger,
+) -> None:
+    """Warn when one worker can open more connections than the server allows.
+
+    Runs at boot, before any child starts or any row is claimed. A warning,
+    not a refusal; ``horsies check --live`` reports the same fact as an
+    error. Through a transaction pooler the pooled connections do not map to
+    server connections, so nothing is compared.
+    """
+    match broker.pgbouncer_transaction_mode:
+        case True:
+            logger.info(
+                'Worker profile %r: connections go through a transaction '
+                'pooler; the server connection limit is not compared',
+                selected.name,
+            )
+            return
+        case False:
+            pass
+    match await read_server_connection_limit(session_factory):
+        case ServerConnectionLimitUnreadable(reason=reason):
+            logger.warning(
+                'Worker profile %r: the server connection limit could not be '
+                'read (%s); the connections of this worker were not compared '
+                'with it',
+                selected.name,
+                reason,
+            )
+        case ServerConnectionLimit() as limit:
+            _log_connection_limit(selected, broker, limit, logger)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def worker_command(args: argparse.Namespace) -> None:
     """Handle worker command.
 
@@ -463,6 +704,22 @@ def worker_command(args: argparse.Namespace) -> None:
     except Exception as e:
         logger.error(f'Failed to discover app: {e}')
         sys.exit(1)
+
+    # The profile is chosen before anything starts. AppConfig validation
+    # already checked every profile when the app module built the config.
+    match select_worker_profile(app.config.worker_profiles, args.profile):
+        case Err(selection_error):
+            report = ValidationReport('worker-startup')
+            report.add(_profile_selection_error(selection_error))
+            print(report.format_rust_style(), file=sys.stderr)
+            sys.exit(1)
+        case Ok(selected):
+            pass
+    settings = execution_settings(selected.profile)
+    logger.info(
+        f'Worker profile {selected.name!r}: '
+        f'{describe_worker_profile(selected.profile)}'
+    )
 
     # Strict startup validation before worker accepts tasks.
     startup_errors = app.check(live=False)
@@ -506,7 +763,6 @@ def worker_command(args: argparse.Namespace) -> None:
         logger.warning('No task modules discovered.')
 
     # Create worker config
-    processes: int = args.processes
     log_level_int = getattr(logging, loglevel.upper(), logging.INFO)
 
     # Build sys_path_roots
@@ -537,7 +793,7 @@ def worker_command(args: argparse.Namespace) -> None:
         child_pool_check=postgres_config.worker_child_pool_check,
         child_connect_kwargs=postgres_config.pooled_connect_args,
         queues=queues,
-        processes=processes,
+        processes=settings.processes,
         app_locator=app_locator,
         sys_path_roots=sys_path_roots,
         imports=discovered_modules,
@@ -547,17 +803,20 @@ def worker_command(args: argparse.Namespace) -> None:
         prefetch_buffer=app.config.prefetch_buffer,
         claim_lease_ms=app.config.claim_lease_ms,
         max_claim_renew_age_ms=app.config.max_claim_renew_age_ms,
-        max_claim_batch=args.max_claim_batch,
-        max_claim_per_worker=args.max_claim_per_worker,
-        max_tasks_per_child=args.max_tasks_per_child,
-        max_memory_per_child_mb=args.max_memory_per_child_mb,
-        drain_timeout_s=args.drain_timeout,
-        child_preload=ChildPreload(args.child_preload),
+        max_claim_batch=settings.max_claim_batch,
+        max_claim_per_worker=settings.max_claim_per_worker,
+        max_tasks_per_child=settings.max_tasks_per_child,
+        max_memory_per_child_mb=settings.max_memory_per_child_mb,
+        drain_timeout_s=settings.drain_timeout_s,
+        child_preload=settings.child_preload,
         recovery_config=app.config.recovery,
         retention_config=app.config.retention,
         resilience_config=app.config.resilience,
         loglevel=log_level_int,
     )
+
+    # Machine facts: a warning, never a refusal.
+    _log_memory_fit(selected, logger)
 
     # Print startup banner
     app.import_task_modules()  # Import tasks so they show in banner
@@ -626,6 +885,12 @@ def worker_command(args: argparse.Namespace) -> None:
                             'worker broker has no listener; a broker built '
                             'without assume_initialized always owns one',
                         )
+                await _log_connection_fit(
+                    selected,
+                    postgres_config,
+                    resources.session_factory,
+                    logger,
+                )
                 worker = Worker(
                     resources.session_factory,
                     listener,
@@ -1067,6 +1332,51 @@ def web_command(args: argparse.Namespace) -> None:
     )
 
 
+REMOVED_WORKER_FLAGS: Final[Mapping[str, str]] = {
+    '--processes': 'isolated=IsolatedChildren(count=N)',
+    '--max-claim-batch': 'claim=ClaimLimits(per_queue_per_pass=TaskLimit(tasks=N))',
+    '--max-claim-per-worker': (
+        'claim=ClaimLimits(claimed_per_worker=TaskLimit(tasks=N))'
+    ),
+    '--max-tasks-per-child': (
+        'isolated=IsolatedChildren(count=..., '
+        'recycle=IsolatedRecycle(after=TaskLimit(tasks=N)))'
+    ),
+    '--max-memory-per-child-mb': (
+        'isolated=IsolatedChildren(count=..., '
+        'recycle=IsolatedRecycle(above=MemoryLimit(mb=N)))'
+    ),
+    '--drain-timeout': 'drain_timeout=timedelta(seconds=N)',
+    '--child-preload': 'preload=ChildPreload.LIBRARY, .APP or .NONE',
+}
+"""The worker flags that moved into a worker profile, and the profile field
+that replaces each one."""
+
+
+class _RemovedWorkerFlag(argparse.Action):
+    """Refuse a worker flag that moved into a worker profile, and name the
+    profile field that replaces it. Exits 2, as argparse does."""
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: str | Sequence[Any] | None,
+        option_string: str | None = None,
+    ) -> NoReturn:
+        match option_string:
+            case str() as flag:
+                replacement = REMOVED_WORKER_FLAGS[flag]
+            case None:
+                raise AssertionError('argparse passes the flag of an option')
+        parser.error(
+            f'{flag} was removed in 0.7.0: worker settings live in a worker '
+            f'profile. Set WorkerProfile({replacement}) in '
+            'AppConfig.worker_profiles, and start the worker with '
+            '--profile <name>.'
+        )
+
+
 def main() -> None:
     """Main CLI entry point.
 
@@ -1082,13 +1392,13 @@ def main() -> None:
             epilog="""
 Examples:
   # Using dotted module path (recommended)
-  horsies worker app.configs.horsies:app
+  horsies worker app.configs.horsies:app --profile default
 
   # Using file path
-  horsies worker app/configs/horsies.py:app
+  horsies worker app/configs/horsies.py:app --profile default
 
   # Auto-discover app variable
-  horsies worker app.configs.horsies
+  horsies worker app.configs.horsies --profile default
 
   # Validate configuration without starting services
   horsies check app.configs.horsies:app
@@ -1122,66 +1432,21 @@ Examples:
             help='Logging level (default: INFO)',
         )
         worker_parser.add_argument(
-            '--processes',
-            type=_positive_int,
-            default=1,
-            help='Number of worker processes (default: 1)',
-        )
-        worker_parser.add_argument(
-            '--max-claim-batch',
-            type=_non_negative_int,
-            default=0,
-            help='Max tasks per queue per pass, 0=auto (default: 0)',
-        )
-        worker_parser.add_argument(
-            '--max-claim-per-worker',
-            type=_non_negative_int,
-            default=0,
-            help='Max claimed tasks per worker, 0=auto (default: 0)',
-        )
-        worker_parser.add_argument(
-            '--max-tasks-per-child',
-            type=_max_tasks_per_child,
-            default=100,
-            help=(
-                'Recycle each child process after it completes N tasks '
-                '(>=1, per-child and staggered). 0 disables recycling. '
-                'Default: 100'
-            ),
-        )
-        worker_parser.add_argument(
-            '--max-memory-per-child-mb',
-            type=_max_memory_per_child_mb,
+            '--profile',
             default=None,
             help=(
-                'Recycle a child after its own RSS reaches N MB (per-child). '
-                'Disabled by default. The worker refuses to start if N is '
-                'below the child baseline.'
+                'Name of the worker profile in AppConfig.worker_profiles. '
+                'Required: the profile holds the settings of the worker '
+                '(children, recycling, claim limits, drain timeout, preload).'
             ),
         )
-        worker_parser.add_argument(
-            '--drain-timeout',
-            type=_drain_timeout_s,
-            default=300.0,
-            help=(
-                'Seconds to wait for running tasks at shutdown. At this '
-                'deadline the worker kills their children, and each task takes '
-                'the crash path. Set it below the stop window of your '
-                'supervisor. Default: 300'
-            ),
-        )
-        worker_parser.add_argument(
-            '--child-preload',
-            choices=[mode.value for mode in ChildPreload],
-            default=ChildPreload.LIBRARY.value,
-            help=(
-                'What a Linux worker imports once before it forks children. '
-                'library: library code. app: library and app, so children '
-                'share module state, and the worker refuses to start if the '
-                'import leaves a thread or a socket. none: every child starts '
-                'with exec. Other platforms always use exec. Default: library'
-            ),
-        )
+        for removed_flag in REMOVED_WORKER_FLAGS:
+            worker_parser.add_argument(
+                removed_flag,
+                action=_RemovedWorkerFlag,
+                nargs='?',
+                help=argparse.SUPPRESS,
+            )
 
         # Scheduler command
         scheduler_parser = subparsers.add_parser(
