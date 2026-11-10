@@ -112,7 +112,8 @@ worker_profiles = {
 | Type | Field | Default | Bounds / meaning |
 |---|---|---|---|
 | `WorkerProfile` | `isolated` | `NoIsolatedChildren()` | `IsolatedChildren` or `NoIsolatedChildren` |
-| `WorkerProfile` | `shared_async` | `NoSharedAsyncChildren()` | `SharedAsyncChildren` or `NoSharedAsyncChildren`; at least one child of either mode is required |
+| `WorkerProfile` | `shared_async` | `NoSharedAsyncChildren()` | `SharedAsyncChildren` or `NoSharedAsyncChildren` |
+| `WorkerProfile` | `shared_thread` | `NoSharedThreadChildren()` | `SharedThreadChildren` or `NoSharedThreadChildren`; at least one child of any mode is required |
 | `WorkerProfile` | `claim` | `ClaimLimits()` | Claim limits |
 | `WorkerProfile` | `drain_timeout` | `timedelta(seconds=300)` | Above 0, at most 24 h; then running children are killed |
 | `WorkerProfile` | `preload` | `ChildPreload.LIBRARY` | `LIBRARY`, `APP` or `NONE`; see [Child process model](#child-process-model) |
@@ -123,6 +124,9 @@ worker_profiles = {
 | `SharedAsyncChildren` | `count` | required | 1-1024 children |
 | `SharedAsyncChildren` | `seats` | required | 1-1000 `SHARED_ASYNC` tasks at once per child |
 | `SharedAsyncChildren` | `recycle` | `SharedRecycle()` | When a shared child is replaced |
+| `SharedThreadChildren` | `count` | required | 1-1024 children |
+| `SharedThreadChildren` | `seats` | required | 1-256 `SHARED_THREAD` tasks at once per child, one OS thread each |
+| `SharedThreadChildren` | `recycle` | `SharedRecycle()` | When a shared child is replaced |
 | `SharedRecycle` | `after_per_seat` | `TaskLimit(tasks=100)` | Replace after `tasks × seats` tasks; `NoTaskLimit` |
 | `SharedRecycle` | `above` | `NoMemoryLimit()` | RSS limit of the child, read after each task |
 | `ClaimLimits` | `per_queue_per_pass` | `NoTaskLimit()` | Most tasks one claim pass takes from one queue |
@@ -132,12 +136,14 @@ worker_profiles = {
 
 The number of children is `WorkerProfile.child_count()`, the sum over modes;
 `WorkerProfile.seat_count()` is one per isolated child plus `seats` per shared
-async child, and the claim limits are checked against it plus
-`prefetch_buffer` (HRS-218). Two modes: isolated (one task per child) and
-shared async (up to `seats` `SHARED_ASYNC` tasks as coroutines per child, see
-the tasks skill). A worker with no shared async children runs `SHARED_ASYNC`
-tasks in isolated children. A shared child opens one async pool of
-`worker_child_pool_max_size`, so it counts as one child in HRS-219. Boot also
+child, and the claim limits are checked against it plus `prefetch_buffer`
+(HRS-218). Three modes: isolated (one task per child), shared async (up to
+`seats` `SHARED_ASYNC` tasks as coroutines per child) and shared thread (up to
+`seats` `SHARED_THREAD` tasks per child, one seat thread each); see the tasks
+skill. A worker with no shared children of a class runs the tasks of that
+class in isolated children. A shared async child opens one async pool, and a
+shared thread child one sync pool that its seat threads share, each of
+`worker_child_pool_max_size`, so each counts as one child in HRS-219. Boot also
 warns (never refuses) when the sum over modes of `count × mb` is above the
 usable memory (container limit or host RAM), and when one worker can open more
 Postgres connections than the server has usable slots.

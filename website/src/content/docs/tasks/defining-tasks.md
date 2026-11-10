@@ -241,6 +241,8 @@ The worker writes the timeout only after the child has exited. So a retry never 
 
 A `SHARED_ASYNC` task on a shared async child is different. On expiry the child cancels it: the task gets `asyncio.CancelledError` at its next `await`. The task fails with `TASK_TIMEOUT` when its coroutine has ended, also when it returns a value after the cancel, and the other tasks of the child continue. A child that has not reported the cancel `cancel_grace_ms` and 5 seconds after the deadline is frozen, and the worker kills it, with every task in it. See [Shared Async Tasks](/horsies/workers/shared-async-tasks/#the-timeout).
 
+A `SHARED_THREAD` task on a shared thread child cannot be cancelled. On expiry its child closes: it takes no new task. When no task in the child has time left, the worker kills the child, and each task that was still in it fails with `TASK_TIMEOUT`. A task alone in its child is killed at its deadline. See [Shared Thread Tasks](/horsies/workers/shared-thread-tasks/#the-timeout).
+
 ### Choose the Execution Class
 
 `execution` declares how a worker runs the task. The value is an `Execution` member, and the default is `Execution.ISOLATED`. Every task row stores the class.
@@ -267,7 +269,7 @@ def render_thumbnail(*, image_id: str) -> TaskResult[str, TaskError]:
     ...
 ```
 
-A `SHARED_ASYNC` task runs on a seat of a shared async child when the worker profile has `shared_async=SharedAsyncChildren(...)`, and in an isolated child otherwise. See [Shared Async Tasks](/horsies/workers/shared-async-tasks/).
+A `SHARED_ASYNC` task runs on a seat of a shared async child when the worker profile has `shared_async=SharedAsyncChildren(...)`, and in an isolated child otherwise. See [Shared Async Tasks](/horsies/workers/shared-async-tasks/). A `SHARED_THREAD` task runs on a seat thread of a shared thread child when the profile has `shared_thread=SharedThreadChildren(...)`, and in an isolated child otherwise. See [Shared Thread Tasks](/horsies/workers/shared-thread-tasks/).
 
 `cancel_grace_ms` is the time that a `SHARED_ASYNC` task gets to stop after its cancel. A thread cannot be cancelled, so only `SHARED_ASYNC` takes it. The value is from `MIN_CANCEL_GRACE_MS` (100) to `MAX_CANCEL_GRACE_MS` (60,000). A `SHARED_ASYNC` task that sets none gets `DEFAULT_CANCEL_GRACE_MS` (5,000). The stored options of the task hold the value in effect when the task is sent, so a later change of the default does not change a queued task.
 
