@@ -1930,7 +1930,7 @@ class TestStopDuringBoot:
 
     async def test_a_replaced_child_does_not_count_as_another_slot(self) -> None:
         pool = SlotPool(_config(2), pending_limit=10)
-        baseline = ChildBaseline(pid=1, rss=RssUnreadable())
+        baseline = ChildBaseline(pid=1, rss=RssUnreadable(), child_kind=IsolatedChild())
         pool._note_ready(pool._slots[0], baseline)
         pool._note_ready(pool._slots[0], baseline)
         assert not pool._first_generation.done()

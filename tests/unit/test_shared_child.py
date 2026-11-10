@@ -475,4 +475,3 @@ class TestBoundedResultFrame:
             rss=RssMb(1.0),
         )
         assert bounded_result_frame('x', frame) == frame
-
