@@ -3,12 +3,14 @@ import { useQuery } from '@tanstack/react-query';
 import { fallbackInterval, useLiveMode } from '@/events/live-provider';
 import { queryKeys } from '@/lib/query-keys';
 import {
+  getClassReport,
   getWorkerHistory,
   listSchedules,
   listWorkers,
   pingWorkers,
 } from '@/services/workers-api';
 import type {
+  ClassReport,
   LivenessReport,
   ScheduleState,
   WorkerHistoryPoint,
@@ -19,6 +21,9 @@ const POLL_WORKERS_MS = 5_000;
 const POLL_HISTORY_MS = 10_000;
 /** The schedule table has no NOTIFY trigger, so it polls in both modes. */
 const POLL_SCHEDULES_MS = 15_000;
+/** The class report reads the whole fleet, so no single event refreshes it;
+ * it polls in both modes, like the task aggregates. */
+const POLL_CLASS_REPORT_MS = 10_000;
 
 export function useWorkers(): {
   workers: WorkerState[];
@@ -99,4 +104,25 @@ export function useWorkerHistory(workerId: string | null): {
     refetchInterval: fallbackInterval(mode, POLL_HISTORY_MS),
   });
   return { history: data ?? [], isLoading };
+}
+
+export function useClassReport(): {
+  report: ClassReport | undefined;
+  isLoading: boolean;
+  isError: boolean;
+  refetch: () => void;
+} {
+  const { data, isLoading, isError, refetch } = useQuery({
+    queryKey: queryKeys.classReport(),
+    queryFn: getClassReport,
+    refetchInterval: POLL_CLASS_REPORT_MS,
+  });
+  return {
+    report: data,
+    isLoading,
+    isError,
+    refetch: () => {
+      void refetch();
+    },
+  };
 }

@@ -69,10 +69,20 @@ The selected run and open node are URL search parameters (`?run=&node=`).
   of workers that answered the last ping. The ping is an active round trip over
   LISTEN/NOTIFY, so it runs on demand only — never on a timer — and the banner
   states the age of the last one.
+- Pending by execution class: one row per (queue, class) with `PENDING` rows,
+  with the wait of its oldest due row and the live workers that serve it. A
+  fleet warning above the table names each (queue, class) that no live worker
+  serves (red) or whose serving workers have no child in service (amber), and
+  what to start or check. See
+  [Does a live worker serve every pending class?](worker-health#does-a-live-worker-serve-every-pending-class)
 - Per-worker cards with running/claimed counts, queues, CPU and memory, and
   uptime. A worker whose snapshot is older than 120 seconds is marked stale.
-  Stale workers collapse into a separate group.
-- Load and resource timeseries for the focused worker.
+  Stale workers collapse into a separate group. A live worker's card shows
+  each claim budget with its free capacity (`ISOLATED 3/8 free`), and a card
+  shows the number of down slots.
+- For the focused worker: each budget with its capacity in service, rows in
+  flight, free capacity and the classes it serves; each down slot with its
+  cause, failed starts and error text; and load and resource timeseries.
 - The schedule table: last run, next run, and run count per registered schedule.
 
 ## Freshness
@@ -95,6 +105,7 @@ coalesced task event up to 4×/s:
 | Facets | 30 s, always | Aggregate; event-decoupled |
 | Breakdown | 12 s, while the grouping view is active | Aggregate; event-decoupled |
 | Schedules | 15 s, always | `horsies_schedule_state` has no NOTIFY trigger |
+| Execution classes | 10 s, always | Reads the whole fleet; event-decoupled |
 | Liveness ping | Manual only | An active round trip, not a read |
 
 When the stream drops, the client reconnects with exponential backoff from 1 s

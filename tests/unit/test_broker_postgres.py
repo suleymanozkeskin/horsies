@@ -33,6 +33,9 @@ from horsies.core.codec.json_io import SerializationError
 from horsies.core.models.boot_failure import SpawnFailed
 from horsies.core.models.health import (
     AllSlotsServing,
+    ClassBudget,
+    ClassBudgets,
+    ClassCapacityNotRecorded,
     DownSlot,
     SlotHealthNotRecorded,
     SlotsDown,
@@ -68,7 +71,11 @@ from horsies.core.lifecycle.outcomes import (
 from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.types.status import TaskStatus
 from horsies.core.utils.loop_runner import LoopRunnerError
-from tests.broker_resources_support import pin_resources, resources_of
+from tests.broker_resources_support import (
+    attach_loop_limit,
+    pin_resources,
+    resources_of,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1764,6 +1771,12 @@ def _worker_state_row(**overrides: Any) -> Any:
         'children_memory_mb': 250.0,
         'worker_started_at': now,
         'slots_down': [],
+        'class_capacity': {
+            'ISOLATED': {
+                'capacity': 4,
+                'serves': ['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD'],
+            },
+        },
     }
     mapping.update(overrides)
     return SimpleNamespace(_mapping=mapping)
@@ -1942,6 +1955,103 @@ class TestWorkerStateReads:
         assert is_err(result)
         assert 'slots_down is unreadable' in result.err_value.message
         assert 'worker-1' in result.err_value.message
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ('stored', 'expected'),
+        [
+            (None, ClassCapacityNotRecorded()),
+            ({}, ClassBudgets(())),
+            (
+                {'ISOLATED': {'capacity': 2, 'serves': ['ISOLATED']}},
+                ClassBudgets(
+                    (ClassBudget(Execution.ISOLATED, 2, (Execution.ISOLATED,)),),
+                ),
+            ),
+        ],
+        ids=['not-recorded', 'serves-no-class', 'one-budget'],
+    )
+    async def test_the_snapshot_carries_the_class_capacity(
+        self,
+        stored: object,
+        expected: object,
+    ) -> None:
+        broker = _make_broker()
+        _setup_session_returning(
+            broker,
+            fetchone=_worker_state_row(class_capacity=stored),
+        )
+
+        result = await broker.get_worker_state_async('worker-1')
+
+        assert is_ok(result)
+        assert result.ok_value is not None
+        assert result.ok_value.class_capacity == expected
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_class_capacity_fails_the_read(self) -> None:
+        broker = _make_broker()
+        _setup_session_returning(
+            broker,
+            fetchone=_worker_state_row(class_capacity={'ISOLATED': {'capacity': -1}}),
+        )
+
+        result = await broker.get_worker_state_async('worker-1')
+
+        assert is_err(result)
+        assert 'class_capacity is unreadable' in result.err_value.message
+        assert 'worker-1' in result.err_value.message
+
+
+@pytest.mark.unit
+class TestClassReadOutcomes:
+    """The error side of ``get_class_coverage_async`` and
+    ``get_class_report_async``. The Ok side and the refusals run against a
+    real database in ``tests/integration/test_class_coverage.py``."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('method', ['get_class_coverage_async', 'get_class_report_async'])
+    async def test_a_driver_error_is_a_retryable_monitoring_failure(
+        self,
+        method: str,
+    ) -> None:
+        broker = _make_broker()
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.execute = AsyncMock(
+            side_effect=SAOperationalError('SELECT', None, Exception('conn lost')),
+        )
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
+
+        result = await getattr(broker, method)()
+
+        assert is_err(result)
+        assert result.err_value.code == BrokerErrorCode.MONITORING_QUERY_FAILED
+        assert result.err_value.retryable is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('method', ['get_class_coverage_async', 'get_class_report_async'])
+    async def test_the_loop_limit_runs_nothing(self, method: str) -> None:
+        broker = _make_broker()
+        attach_loop_limit(broker)
+
+        result = await getattr(broker, method)()
+
+        assert is_err(result)
+        assert result.err_value.code == BrokerErrorCode.EVENT_LOOP_LIMIT
+
+    @pytest.mark.asyncio
+    async def test_a_code_defect_is_not_turned_into_a_monitoring_failure(self) -> None:
+        broker = _make_broker()
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.execute = AsyncMock(side_effect=AssertionError('defect'))
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
+
+        with pytest.raises(AssertionError):
+            await broker.get_class_coverage_async()
 
 
 @pytest.mark.unit

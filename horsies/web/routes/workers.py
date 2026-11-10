@@ -13,8 +13,10 @@ from fastapi import APIRouter, HTTPException, Query, status
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.models.health import WORKER_STATE_LIVE_WINDOW_S
 from horsies.core.types.result import is_err
 from horsies.monitoring import (
+    ClassReportInfo,
     LivenessReport,
     ScheduleStateInfo,
     WorkerHistoryPoint,
@@ -23,13 +25,14 @@ from horsies.monitoring import (
     elapsed_s,
     list_schedules,
 )
+from horsies.monitoring.execution_classes import class_report_info, slot_health_info
 from horsies.web.routes._common import query_failed
 
 # A worker writes a snapshot periodically; treat its latest one as stale once
-# it is older than this, which signals a worker that stopped reporting. Idle
-# workers snapshot less often, so the threshold is deliberately loose.
-# Liveness right now is proven separately by the active ping.
-STALE_SNAPSHOT_THRESHOLD_S = 120
+# it is older than the live window, which signals a worker that stopped
+# reporting. The fleet check counts the same workers as live. Liveness right
+# now is proven separately by the active ping.
+STALE_SNAPSHOT_THRESHOLD_S = WORKER_STATE_LIVE_WINDOW_S
 
 
 def build_router(app: Horsies, broker: PostgresBroker) -> APIRouter:
@@ -78,6 +81,18 @@ def build_router(app: Horsies, broker: PostgresBroker) -> APIRouter:
             raise query_failed('Schedule state', result.err_value)
         return result.ok_value
 
+    @router.get('/classes')
+    async def read_class_report() -> ClassReportInfo:
+        """Pending streams per (queue, class) with their oldest wait and
+        coverage, and the budget load of each live worker."""
+        result = await app.get_class_report_async()
+        if is_err(result):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f'Class report query failed: {result.err_value.message}',
+            )
+        return class_report_info(result.ok_value)
+
     @router.get('')
     async def read_workers() -> list[WorkerStateInfo]:
         """Latest state snapshot per worker, including idle workers."""
@@ -91,6 +106,7 @@ def build_router(app: Horsies, broker: PostgresBroker) -> APIRouter:
         workers: list[WorkerStateInfo] = []
         for snapshot in result.ok_value:
             age_s = elapsed_s(snapshot.snapshot_at, None)
+            slot_health, down_slots = slot_health_info(snapshot.slot_health)
             workers.append(
                 WorkerStateInfo(
                     worker_id=snapshot.worker_id,
@@ -110,6 +126,8 @@ def build_router(app: Horsies, broker: PostgresBroker) -> APIRouter:
                     memory_usage_mb=snapshot.memory_usage_mb,
                     memory_percent=snapshot.memory_percent,
                     cpu_percent=snapshot.cpu_percent,
+                    slot_health=slot_health,
+                    down_slots=down_slots,
                 )
             )
         return workers

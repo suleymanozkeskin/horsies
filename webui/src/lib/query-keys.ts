@@ -21,6 +21,7 @@ export const QUERY_ROOT = {
   workers: 'workers',
   workerLiveness: 'worker-liveness',
   workerHistory: 'worker-history',
+  classReport: 'class-report',
   schedules: 'schedules',
   meta: 'meta',
 } as const;
@@ -57,6 +58,7 @@ export const queryKeys = {
   workerLiveness: () => [QUERY_ROOT.workerLiveness] as const,
   workerHistory: (workerId: string | null) =>
     [QUERY_ROOT.workerHistory, workerId] as const,
+  classReport: () => [QUERY_ROOT.classReport] as const,
   schedules: () => [QUERY_ROOT.schedules] as const,
   meta: () => [QUERY_ROOT.meta] as const,
 };

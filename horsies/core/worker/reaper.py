@@ -13,12 +13,21 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, assert_never
 
 from horsies.core.brokers.result_types import BrokerOperationError, broker_error_cause
 from horsies.core.types.error_detail import NoCause
 from horsies.core.logging import get_logger
 from horsies.core.types.result import Err, Ok, is_err
+from horsies.core.models.class_coverage import (
+    StreamServed,
+    StreamUnserved,
+    StreamWithoutCapacity,
+)
+from horsies.core.worker.class_coverage_log import (
+    CheckFailedKey,
+    describe_uncovered,
+)
 from horsies.core.worker.runtime import (
     _REAPER_MAX_PERMANENT_FAILURES,
     _ReaperPassState,
@@ -121,8 +130,9 @@ class ReaperMixin:
         state: _ReaperPassState,
     ) -> None:
         """One reaper pass: stale-task recovery, pending expiry, workflow
-        recovery, retention cleanup. Runs under the cluster-wide reaper
-        gate (one executing worker per interval).
+        recovery, retention cleanup, partition maintenance and the class
+        coverage check. Runs under the cluster-wide reaper gate (one
+        executing worker per interval).
 
         ``resources`` is the set selected from ``temp_broker`` when the
         reaper loop started.
@@ -617,6 +627,49 @@ class ReaperMixin:
                     + retention_cfg.partition_maintenance_interval_s
                 )
 
+        # The fleet check: a pending (queue, class) that no live worker
+        # serves waits until one starts. Every step above has run first.
+        try:
+            await self._check_class_coverage(temp_broker, state)
+        except Exception as coverage_err:
+            logger.error(f'Class coverage check error: {coverage_err}')
+
+    async def _check_class_coverage(
+        self,
+        temp_broker: 'PostgresBroker',
+        state: _ReaperPassState,
+    ) -> None:
+        """Log each pending (queue, class) that no live worker can run.
+
+        An unserved stream logs an error, a stream whose serving workers
+        have no capacity in service a warning, and a failed check a
+        warning. ``state.coverage_log`` bounds each to one line per
+        ``CLASS_COVERAGE_LOG_INTERVAL_S``. Before
+        ``state.class_coverage_checks_from`` it reads nothing. Reads only.
+        """
+        if time.monotonic() < state.class_coverage_checks_from:
+            return
+        match await temp_broker.get_class_coverage_async():
+            case Ok(coverage):
+                pass
+            case Err(err):
+                if state.coverage_log.take(CheckFailedKey(), time.monotonic()):
+                    logger.warning(f'Class coverage check failed: {err.message}')
+                return
+        for stream in state.coverage_log.take_uncovered(
+            coverage.streams,
+            time.monotonic(),
+        ):
+            match stream.state:
+                case StreamUnserved():
+                    logger.error(describe_uncovered(stream))
+                case StreamWithoutCapacity():
+                    logger.warning(describe_uncovered(stream))
+                case StreamServed():
+                    raise AssertionError('take_uncovered returned a served stream')
+                case _ as unreachable:
+                    assert_never(unreachable)
+
     async def _delete_expired_in_batches(
         self,
         session_factory: 'async_sessionmaker[AsyncSession]',
@@ -700,6 +753,7 @@ class ReaperMixin:
         owns_temp_broker = False
         state = _ReaperPassState(
             next_retention_cleanup_at=time.monotonic(),
+            class_coverage_checks_from=time.monotonic() + check_interval_ms / 1000.0,
         )
 
         logger.info(

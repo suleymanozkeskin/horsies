@@ -15,8 +15,9 @@ from __future__ import annotations
 import enum
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Annotated, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from horsies.core.history.reads.detail import TaskAbsenceReason
 from horsies.core.models.tasks import Execution
@@ -303,12 +304,31 @@ class WorkflowTaskDetail(BaseModel):
 # --------------------------------------------------------------------------- #
 # Workers and schedules
 # --------------------------------------------------------------------------- #
+class DownSlotInfo(BaseModel):
+    """One slot that was down when the worker wrote its snapshot.
+
+    ``cause`` describes the cause of the last failed child start, and
+    ``detail`` is its error text.
+    """
+
+    slot: int
+    cause: str
+    detail: str
+    down_since: datetime
+    failed_boots: int
+
+
 class WorkerStateInfo(BaseModel):
     """Latest state snapshot for one worker (from horsies_worker_states).
 
     ``snapshot_age_s`` is how long ago the snapshot was written; ``stale`` is
     True once that age exceeds the snapshot threshold, signalling a worker
     that stopped reporting. Liveness is proven separately by an active ping.
+
+    ``slot_health`` is ``all_serving``, ``slots_down`` (``down_slots`` lists
+    them, in slot order) or ``not_recorded`` (a worker version that did not
+    record it). ``down_slots`` is empty unless ``slot_health`` is
+    ``slots_down``.
     """
 
     worker_id: str
@@ -328,6 +348,101 @@ class WorkerStateInfo(BaseModel):
     memory_usage_mb: float | None
     memory_percent: float | None
     cpu_percent: float | None
+    slot_health: Literal['all_serving', 'slots_down', 'not_recorded']
+    down_slots: list[DownSlotInfo]
+
+
+class BudgetLoadInfo(BaseModel):
+    """One claim budget of a live worker.
+
+    ``capacity`` (children or seats in service) and ``serves`` come from the
+    worker's latest snapshot. ``in_flight`` counts, at the read, its RUNNING
+    rows and CLAIMED rows with a live lease of the classes in ``serves``.
+    ``free`` is ``capacity`` minus ``in_flight``, at least 0.
+    """
+
+    budget: Execution
+    capacity: int
+    serves: list[Execution]
+    in_flight: int
+    free: int
+
+
+class WorkerClassLoadInfo(BaseModel):
+    """The claim budgets of one live worker, in execution class order."""
+
+    worker_id: str
+    snapshot_at: datetime
+    budgets: list[BudgetLoadInfo]
+
+
+class StreamServedInfo(BaseModel):
+    """Live workers serve the stream with capacity in service.
+
+    ``workers`` counts them; ``capacity`` sums the capacity in service of
+    the budget that serves the class on each.
+    """
+
+    kind: Literal['served']
+    workers: int
+    capacity: int
+
+
+class StreamNoCapacityInfo(BaseModel):
+    """Live workers serve the stream, and none has capacity in service for it."""
+
+    kind: Literal['no_capacity']
+    workers: int
+
+
+class StreamUnservedInfo(BaseModel):
+    """No live worker serves the stream."""
+
+    kind: Literal['unserved']
+
+
+class StreamWaitingInfo(BaseModel):
+    """At least one row is due. ``wait_s`` is the wait of the oldest due row."""
+
+    kind: Literal['waiting']
+    oldest_due_at: datetime
+    wait_s: int
+
+
+class StreamNoneDueInfo(BaseModel):
+    """Every row is due later; ``next_due_at`` is the earliest due time."""
+
+    kind: Literal['none_due']
+    next_due_at: datetime
+
+
+class PendingStreamInfo(BaseModel):
+    """The PENDING rows of one queue and one execution class."""
+
+    queue_name: str
+    execution: Execution
+    coverage: Annotated[
+        StreamServedInfo | StreamNoCapacityInfo | StreamUnservedInfo,
+        Field(discriminator='kind'),
+    ]
+    wait: Annotated[
+        StreamWaitingInfo | StreamNoneDueInfo,
+        Field(discriminator='kind'),
+    ]
+
+
+class ClassReportInfo(BaseModel):
+    """Pending streams and the budget load of each live worker.
+
+    ``checked_at`` is database time. A worker is live while its latest
+    snapshot is at most ``live_window_s`` old. ``streams`` is ordered by
+    queue name, then by execution class.
+    """
+
+    checked_at: datetime
+    live_window_s: int
+    streams: list[PendingStreamInfo]
+    workers: list[WorkerClassLoadInfo]
 
 
 class WorkerPingInfo(BaseModel):

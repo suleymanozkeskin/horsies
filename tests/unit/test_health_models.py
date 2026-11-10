@@ -20,6 +20,9 @@ from horsies.core.models.boot_failure import (
 from horsies.core.models.health import (
     WORKER_PING_CHANNEL,
     AllSlotsServing,
+    ClassBudget,
+    ClassBudgets,
+    ClassCapacityNotRecorded,
     DatabasePing,
     DownSlot,
     SlotHealthNotRecorded,
@@ -28,10 +31,17 @@ from horsies.core.models.health import (
     WorkerPong,
     WorkerPongPayload,
     WorkerStateSnapshot,
+    parse_class_capacity,
     parse_slot_health,
     slots_down_json,
 )
+from horsies.core.models.tasks import Execution
 from horsies.core.types.result import Err, Ok, is_ok
+from horsies.core.worker.claim_plan import (
+    BudgetCapacity,
+    ClaimPlan,
+    class_capacity_json,
+)
 
 
 @pytest.mark.unit
@@ -165,6 +175,7 @@ class TestResultModels:
             children_memory_mb=None,
             worker_started_at=now,
             slot_health=SlotHealthNotRecorded(),
+            class_capacity=ClassCapacityNotRecorded(),
         )
         assert snap.cluster_wide_cap is None
         assert snap.queues == ['default']
@@ -281,3 +292,145 @@ class TestSlotHealth:
                 assert repr(AppLoadFailed()) in unreadable.reason
             case other:
                 raise AssertionError(other)
+
+
+_ALL_CLASSES = ['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']
+
+
+@pytest.mark.unit
+class TestClassCapacity:
+    """The stored ``class_capacity`` value and the typed class capacity."""
+
+    def test_a_null_value_is_not_recorded(self) -> None:
+        assert parse_class_capacity(None) == Ok(ClassCapacityNotRecorded())
+
+    def test_an_empty_object_is_a_worker_that_serves_no_class(self) -> None:
+        assert parse_class_capacity({}) == Ok(ClassBudgets(()))
+
+    def test_the_value_the_worker_writes_reads_back(self) -> None:
+        """The writer and the reader agree on the isolated-children plan."""
+        plan = ClaimPlan(budget_classes=frozenset({Execution.ISOLATED}))
+        stored = class_capacity_json(
+            plan,
+            [BudgetCapacity(budget=Execution.ISOLATED, in_service=3)],
+        )
+
+        assert parse_class_capacity(stored) == Ok(
+            ClassBudgets(
+                (
+                    ClassBudget(
+                        budget=Execution.ISOLATED,
+                        capacity=3,
+                        serves=tuple(Execution),
+                    ),
+                ),
+            ),
+        )
+
+    def test_a_shared_budget_reads_back_beside_the_isolated_one(self) -> None:
+        """A plan with a SHARED_ASYNC budget: each budget keeps its own serves,
+        and the budgets come back in Execution order."""
+        plan = ClaimPlan(
+            budget_classes=frozenset({Execution.ISOLATED, Execution.SHARED_ASYNC}),
+        )
+        stored = class_capacity_json(
+            plan,
+            [
+                BudgetCapacity(budget=Execution.SHARED_ASYNC, in_service=40),
+                BudgetCapacity(budget=Execution.ISOLATED, in_service=0),
+            ],
+        )
+
+        assert parse_class_capacity(stored) == Ok(
+            ClassBudgets(
+                (
+                    ClassBudget(
+                        Execution.ISOLATED,
+                        0,
+                        (Execution.ISOLATED, Execution.SHARED_THREAD),
+                    ),
+                    ClassBudget(
+                        Execution.SHARED_ASYNC,
+                        40,
+                        (Execution.SHARED_ASYNC,),
+                    ),
+                ),
+            ),
+        )
+
+    def test_serves_comes_back_in_execution_order(self) -> None:
+        stored = {
+            'ISOLATED': {
+                'capacity': 1,
+                'serves': ['SHARED_THREAD', 'ISOLATED', 'SHARED_ASYNC'],
+            },
+        }
+        match parse_class_capacity(stored):
+            case Ok(ClassBudgets(budgets=(budget,))):
+                assert budget.serves == tuple(Execution)
+            case other:
+                raise AssertionError(other)
+
+    def test_extra_keys_of_an_entry_are_not_read(self) -> None:
+        stored = {'ISOLATED': {'capacity': 1, 'serves': ['ISOLATED'], 'seats': 9}}
+        assert isinstance(parse_class_capacity(stored), Ok)
+
+    @pytest.mark.parametrize(
+        'stored',
+        [
+            ['ISOLATED'],
+            {'EXCLUSIVE': {'capacity': 1, 'serves': ['ISOLATED']}},
+            {'ISOLATED': 1},
+            {'ISOLATED': {'serves': ['ISOLATED']}},
+            {'ISOLATED': {'capacity': -1, 'serves': ['ISOLATED']}},
+            {'ISOLATED': {'capacity': True, 'serves': ['ISOLATED']}},
+            {'ISOLATED': {'capacity': 2**63, 'serves': ['ISOLATED']}},
+            {'ISOLATED': {'capacity': '1', 'serves': ['ISOLATED']}},
+            {'ISOLATED': {'capacity': 1}},
+            {'ISOLATED': {'capacity': 1, 'serves': 'ISOLATED'}},
+            {'ISOLATED': {'capacity': 1, 'serves': ['ISOLATED', 'BATCH']}},
+            {'ISOLATED': {'capacity': 1, 'serves': ['ISOLATED', 'ISOLATED']}},
+            {'ISOLATED': {'capacity': 1, 'serves': ['SHARED_ASYNC']}},
+            {
+                'ISOLATED': {'capacity': 1, 'serves': _ALL_CLASSES},
+                'SHARED_ASYNC': {'capacity': 1, 'serves': ['SHARED_ASYNC']},
+            },
+        ],
+        ids=[
+            'not-an-object',
+            'unknown-budget-name',
+            'entry-not-an-object',
+            'capacity-missing',
+            'capacity-negative',
+            'capacity-bool',
+            'capacity-past-bigint',
+            'capacity-text',
+            'serves-missing',
+            'serves-not-a-list',
+            'serves-unknown-class',
+            'serves-one-class-twice',
+            'serves-without-its-own-class',
+            'one-class-in-two-budgets',
+        ],
+    )
+    def test_every_shape_rule_is_checked(self, stored: object) -> None:
+        assert isinstance(parse_class_capacity(stored), Err)
+
+    def test_the_reason_names_the_unknown_budget(self) -> None:
+        match parse_class_capacity({'EXCLUSIVE': {'capacity': 1, 'serves': []}}):
+            case Err(unreadable):
+                assert "'EXCLUSIVE'" in unreadable.reason
+            case other:
+                raise AssertionError(other)
+
+    def test_the_writer_covers_every_read_field(self) -> None:
+        """Each field of ``ClassBudget`` except the budget (the key) reaches
+        the stored entry, so a new field cannot be read without a writer."""
+        import dataclasses
+
+        stored = class_capacity_json(
+            ClaimPlan(budget_classes=frozenset({Execution.ISOLATED})),
+            [BudgetCapacity(budget=Execution.ISOLATED, in_service=1)],
+        )
+        names = {field.name for field in dataclasses.fields(ClassBudget)}
+        assert set(stored['ISOLATED']) == names - {'budget'}
