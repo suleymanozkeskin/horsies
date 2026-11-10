@@ -26,7 +26,9 @@ from horsies.core.app import Horsies
 from horsies.core.cli import execution_settings
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.health import ClassBudget, ClassBudgets, parse_class_capacity
 from horsies.core.models.tasks import Execution, TaskError, TaskResult
+from horsies.core.types.result import Ok
 from horsies.core.models.worker_profile import (
     IsolatedChildren,
     SharedAsyncChildren,
@@ -39,9 +41,9 @@ from horsies.core.worker.claim_plan import (
     NotServed,
     ServedBy,
     budgets_json,
+    claim_plan_for_children,
     class_capacity_json,
     describe_claim_plan,
-    claim_plan_for_children,
     isolated_children_plan,
     routes_json,
 )
@@ -552,3 +554,51 @@ class TestCapacityHook:
         assert worker._claim_capacity() == (
             BudgetCapacity(budget=ISOLATED, in_service=3),
         )
+
+
+class TestClassCapacityOfAProfile:
+    """The ``class_capacity`` that a worker of a real profile writes in its
+    snapshot reads back through ``parse_class_capacity``, the reader of the
+    class report and the fleet check."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ('profile', 'budgets'),
+        [
+            (
+                WorkerProfile(
+                    isolated=IsolatedChildren(count=2),
+                    shared_async=SharedAsyncChildren(count=3, seats=5),
+                ),
+                (
+                    ClassBudget(ISOLATED, 2, (ISOLATED, SHARED_THREAD)),
+                    ClassBudget(SHARED_ASYNC, 15, (SHARED_ASYNC,)),
+                ),
+            ),
+            (
+                WorkerProfile(shared_async=SharedAsyncChildren(count=1, seats=4)),
+                (ClassBudget(SHARED_ASYNC, 4, (SHARED_ASYNC,)),),
+            ),
+            (
+                WorkerProfile(isolated=IsolatedChildren(count=2)),
+                (ClassBudget(ISOLATED, 2, (ISOLATED, SHARED_ASYNC, SHARED_THREAD)),),
+            ),
+        ],
+        ids=['isolated-and-shared', 'shared-only', 'isolated-only'],
+    )
+    async def test_the_snapshot_value_reads_back(
+        self,
+        profile: WorkerProfile,
+        budgets: tuple[ClassBudget, ...],
+    ) -> None:
+        settings = execution_settings(profile)
+        worker = _worker(
+            processes=settings.processes,
+            shared_async=settings.shared_async,
+        )
+        stored = json.loads(
+            json.dumps(
+                class_capacity_json(worker.cfg.claim_plan(), worker._claim_capacity()),
+            ),
+        )
+        assert parse_class_capacity(stored) == Ok(ClassBudgets(budgets))
