@@ -39,10 +39,12 @@ from horsies.core.models.tasks import (
 from horsies.core.models.worker_profile import MAX_SEATS_PER_SHARED_ASYNC_CHILD
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.stored_timeout import (
+    CancelGraceInvalid,
     NoTimeout,
     OptionsUnreadable,
     StoredTimeout,
     TaskTimeout,
+    TimeoutRefusal,
     TimeoutValueInvalid,
 )
 
@@ -122,16 +124,44 @@ class RunFrame:
 
 
 @dataclass(frozen=True, slots=True)
+class SeatTask:
+    """Run the task on the seat, with a deadline.
+
+    The child starts the deadline when it starts the task: ``timeout_ms``
+    after that it cancels the task. ``cancel_grace_ms`` is the time the task
+    gets to stop after that cancel. ``timeout_ms`` is from
+    ``MIN_TASK_TIMEOUT_MS`` to ``MAX_TASK_TIMEOUT_MS``, and
+    ``cancel_grace_ms`` from ``MIN_CANCEL_GRACE_MS`` to ``MAX_CANCEL_GRACE_MS``.
+    """
+
+    timeout_ms: int
+    cancel_grace_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class SeatRefusal:
+    """Fail the task with ``refusal``: the stored timeout or cancel grace of
+    the row that the worker cannot use.
+
+    The seat sets the row RUNNING and returns ``WORKER_SERIALIZATION_ERROR``
+    before it resolves the task, as an isolated child does for a refused
+    stored timeout. No task code runs, so the run has no deadline.
+    """
+
+    refusal: TimeoutRefusal
+
+
+SeatWork: TypeAlias = SeatTask | SeatRefusal
+"""What a seat does with the task of a ``SharedRunFrame``."""
+
+
+@dataclass(frozen=True, slots=True)
 class SharedRunFrame:
     """Parent to a shared async child: run one task on a free seat.
 
     ``dispatch`` names this run in the pool, from 1, and each frame of the
-    child about it carries the same number. The child starts the deadline
-    when it starts the task: ``timeout_ms`` after that it cancels the task.
-    ``cancel_grace_ms`` is the time the task gets to stop after that cancel.
-    ``timeout_ms`` is from ``MIN_TASK_TIMEOUT_MS`` to ``MAX_TASK_TIMEOUT_MS``,
-    and ``cancel_grace_ms`` from ``MIN_CANCEL_GRACE_MS`` to
-    ``MAX_CANCEL_GRACE_MS``.
+    child about it carries the same number. ``work`` is the task with its
+    deadline, or the refusal that fails it.
     """
 
     dispatch: int
@@ -142,8 +172,7 @@ class SharedRunFrame:
     worker_id: str
     is_workflow_task: bool
     claimed_at: datetime | None
-    timeout_ms: int
-    cancel_grace_ms: int
+    work: SeatWork
 
 
 @dataclass(frozen=True, slots=True)
@@ -493,11 +522,24 @@ def _encode_shared_run_frame(frame: SharedRunFrame) -> EncodedFrame:
             'claimed_at': (
                 None if frame.claimed_at is None else frame.claimed_at.isoformat()
             ),
-            'timeout_ms': frame.timeout_ms,
-            'cancel_grace_ms': frame.cancel_grace_ms,
+            'work': _encode_seat_work(frame.work),
         },
         body,
     )
+
+
+def _encode_seat_work(work: SeatWork) -> dict[str, object]:
+    match work:
+        case SeatTask(timeout_ms=timeout_ms, cancel_grace_ms=cancel_grace_ms):
+            return {
+                'kind': 'task',
+                'timeout_ms': timeout_ms,
+                'cancel_grace_ms': cancel_grace_ms,
+            }
+        case SeatRefusal(refusal=refusal):
+            return {'kind': 'refusal', 'refusal': _encode_timeout(refusal)}
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _child_kind_field(child_kind: ChildKind) -> dict[str, object]:
@@ -640,14 +682,16 @@ def _encode_timeout(timeout: StoredTimeout) -> dict[str, object]:
             return {'kind': 'options_unreadable', 'reason': reason}
         case TimeoutValueInvalid(reason=reason):
             return {'kind': 'value_invalid', 'reason': reason}
+        case CancelGraceInvalid(reason=reason):
+            return {'kind': 'grace_invalid', 'reason': reason}
         case _ as unreachable:
             assert_never(unreachable)
 
 
-def _decode_timeout(meta: Mapping[str, Any]) -> StoredTimeout:
-    value = meta.get('timeout')
+def _decode_timeout(meta: Mapping[str, Any], key: str = 'timeout') -> StoredTimeout:
+    value = meta.get(key)
     if not isinstance(value, dict):
-        raise _BadField('timeout')
+        raise _BadField(key)
     timeout = cast('Mapping[str, Any]', value)
     match timeout.get('kind'):
         case 'none':
@@ -665,8 +709,10 @@ def _decode_timeout(meta: Mapping[str, Any]) -> StoredTimeout:
             return OptionsUnreadable(reason=_text(timeout, 'reason'))
         case 'value_invalid':
             return TimeoutValueInvalid(reason=_text(timeout, 'reason'))
+        case 'grace_invalid':
+            return CancelGraceInvalid(reason=_text(timeout, 'reason'))
         case _:
-            raise _BadField('timeout.kind')
+            raise _BadField(f'{key}.kind')
 
 
 def _flag(meta: Mapping[str, Any], key: str) -> bool:
@@ -874,19 +920,45 @@ def _decode_shared_run(meta: Mapping[str, Any], body: bytes) -> SharedRunFrame:
         worker_id=_text(meta, 'worker_id'),
         is_workflow_task=_flag(meta, 'is_workflow_task'),
         claimed_at=None if claimed_at is None else datetime.fromisoformat(claimed_at),
-        timeout_ms=_bounded_whole(
-            meta,
-            'timeout_ms',
-            MIN_TASK_TIMEOUT_MS,
-            MAX_TASK_TIMEOUT_MS,
-        ),
-        cancel_grace_ms=_bounded_whole(
-            meta,
-            'cancel_grace_ms',
-            MIN_CANCEL_GRACE_MS,
-            MAX_CANCEL_GRACE_MS,
-        ),
+        work=_decode_seat_work(meta),
     )
+
+
+def _decode_seat_work(meta: Mapping[str, Any]) -> SeatWork:
+    value = meta.get('work')
+    if not isinstance(value, dict):
+        raise _BadField('work')
+    work = cast('Mapping[str, Any]', value)
+    match work.get('kind'):
+        case 'task':
+            return SeatTask(
+                timeout_ms=_bounded_whole(
+                    work,
+                    'timeout_ms',
+                    MIN_TASK_TIMEOUT_MS,
+                    MAX_TASK_TIMEOUT_MS,
+                ),
+                cancel_grace_ms=_bounded_whole(
+                    work,
+                    'cancel_grace_ms',
+                    MIN_CANCEL_GRACE_MS,
+                    MAX_CANCEL_GRACE_MS,
+                ),
+            )
+        case 'refusal':
+            return SeatRefusal(refusal=_refusal_of(_decode_timeout(work, 'refusal')))
+        case _:
+            raise _BadField('work.kind')
+
+
+def _refusal_of(timeout: StoredTimeout) -> TimeoutRefusal:
+    match timeout:
+        case OptionsUnreadable() | TimeoutValueInvalid() | CancelGraceInvalid():
+            return timeout
+        case NoTimeout() | TaskTimeout():
+            raise _BadField('work.refusal')
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def decode_parent_frame(

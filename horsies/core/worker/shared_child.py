@@ -8,7 +8,8 @@ tasks run at once.
 
 The child holds the deadline of each task. ``timeout_ms`` after the task
 starts, the loop cancels the task (``Task.cancel``) and reports the cancel
-with ``DeadlineFiredFrame``. When the coroutine has ended, the child reports
+with ``DeadlineFiredFrame``. A ``SeatRefusal`` runs no task code and has no
+deadline. When the coroutine has ended, the child reports
 the end with ``SharedResultFrame``: ``SeatTimedOut`` after a deadline that
 fired, whatever the task returned, else ``SeatFinished`` with its result.
 
@@ -64,6 +65,8 @@ from horsies.core.worker.child_protocol import (
     RunFrame,
     SeatEnd,
     SeatFinished,
+    SeatRefusal,
+    SeatTask,
     SeatTimedOut,
     SharedResultFrame,
     SharedRunFrame,
@@ -232,13 +235,19 @@ class _Deadline(Enum):
     FIRED = 'fired'
 
 
+@dataclass(frozen=True, slots=True)
+class _NoDeadline:
+    """The run of a ``SeatRefusal``: no task code runs, so no deadline."""
+
+
 @dataclass(slots=True)
 class _Seat:
-    """One run in flight. ``deadline_state`` turns ``FIRED`` once."""
+    """One run in flight. ``deadline_state`` turns ``FIRED`` once, and only
+    for a run with a timer."""
 
     frame: SharedRunFrame
     task: asyncio.Task[WireResult]
-    deadline: asyncio.TimerHandle
+    deadline: asyncio.TimerHandle | _NoDeadline
     deadline_state: _Deadline
 
 
@@ -296,7 +305,8 @@ class SeatLoop:
                     assert_never(unreachable)
 
     def _start(self, frame: SharedRunFrame) -> None:
-        """Start the run of ``frame`` on a free seat, with its deadline."""
+        """Start the run of ``frame`` on a free seat, with the deadline of a
+        ``SeatTask``."""
         if len(self._seats) >= self._capacity:
             _exit_for_defect(
                 f'parent sent run {frame.dispatch} while all {self._capacity} '
@@ -313,11 +323,18 @@ class SeatLoop:
             self._started.run(frame),
             name=f'horsies-seat-{frame.dispatch}',
         )
-        deadline = loop.call_later(
-            frame.timeout_ms / 1000.0,
-            self._fire,
-            frame.dispatch,
-        )
+        deadline: asyncio.TimerHandle | _NoDeadline
+        match frame.work:
+            case SeatTask(timeout_ms=timeout_ms):
+                deadline = loop.call_later(
+                    timeout_ms / 1000.0,
+                    self._fire,
+                    frame.dispatch,
+                )
+            case SeatRefusal():
+                deadline = _NoDeadline()
+            case _ as unreachable:
+                assert_never(unreachable)
         self._seats[frame.dispatch] = _Seat(frame, task, deadline, _Deadline.PENDING)
         task.add_done_callback(functools.partial(self._finish, frame.dispatch))
 
@@ -339,7 +356,13 @@ class SeatLoop:
     def _finish(self, dispatch: int, task: asyncio.Task[WireResult]) -> None:
         """The task of run ``dispatch`` has ended: free the seat, report the end."""
         seat = self._seats.pop(dispatch)
-        seat.deadline.cancel()
+        match seat.deadline:
+            case asyncio.TimerHandle():
+                seat.deadline.cancel()
+            case _NoDeadline():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
         self._writer.send_result(
             seat.frame.task_name,
             SharedResultFrame(

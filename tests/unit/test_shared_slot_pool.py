@@ -17,6 +17,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 import pytest_asyncio
@@ -32,11 +33,17 @@ from horsies.core.models.worker_profile import (
 )
 from horsies.core.types.result import Err, Ok
 from horsies.core.worker.child_protocol import (
+    DeadlineFiredFrame,
     InitFrame,
     IsolatedChild,
     RssMb,
     RssUnreadable,
+    SeatRefusal,
+    SeatTask,
+    SeatTimedOut,
+    SharedResultFrame,
 )
+from horsies.core.worker.live_dispatches import RegistryClosed
 from horsies.core.worker.config import ChildPreload
 from horsies.core.worker.slots import (
     CHILD_KILL_WAIT_S,
@@ -48,6 +55,7 @@ from horsies.core.worker.slots import (
     CloseReason,
     Closing,
     DeadlineAcknowledged,
+    DeadlineNotReported,
     Down,
     KilledBySignal,
     NoSeatFree,
@@ -55,6 +63,7 @@ from horsies.core.worker.slots import (
     Open,
     OpenChildLoad,
     SeatDeadlineEnded,
+    SeatRuns,
     SeatTaskFinished,
     SharedAnswered,
     SharedHandle,
@@ -62,9 +71,11 @@ from horsies.core.worker.slots import (
     SharedRunRequest,
     SlotPool,
     SlotPoolConfig,
+    _SeatRun,
     place_on_shared_child,
     shared_recycle_reason,
 )
+from horsies.core.worker.stored_timeout import TimeoutValueInvalid
 
 SCRIPTED_CHILD = str(
     Path(__file__).parent.parent / 'fixtures' / 'slots' / 'scripted_child.py'
@@ -141,8 +152,7 @@ def _request(
         worker_id='worker-1',
         is_workflow_task=False,
         claimed_at=None,
-        timeout_ms=timeout_ms,
-        cancel_grace_ms=GRACE_MS,
+        work=SeatTask(timeout_ms=timeout_ms, cancel_grace_ms=GRACE_MS),
     )
 
 
@@ -430,6 +440,20 @@ class TestDeadline:
 
         assert await _outcome(handle) == SeatDeadlineEnded()
 
+    async def test_a_refusal_has_no_deadline_in_the_child(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        """The refusal frame crosses to a real child; the run ends with its
+        result, past the smallest deadline a task can have."""
+        pool = await pool_factory(_config(1, 1))
+        refused = replace(
+            _request('sleep', str(PAST_SHORT_DEADLINE_S)),
+            work=SeatRefusal(refusal=TimeoutValueInvalid(reason='y')),
+        )
+
+        assert isinstance(await _outcome(pool.submit_shared(refused)), SeatTaskFinished)
+
     async def test_the_backstop_kills_a_frozen_child(
         self,
         pool_factory: PoolFactory,
@@ -647,6 +671,44 @@ class TestStartAndStop:
         assert isinstance(isolated_outcome, TaskFinished)
         assert isolated_outcome.result_json != await _value(shared)
         assert isinstance(isolated.assigned.result(), Assigned)
+
+
+class TestRefusalReports:
+    """A run without a deadline cannot report one: such a frame is a protocol
+    violation, and the run stays in flight for the loss of the child."""
+
+    def _refused_run(self) -> tuple[SlotPool, SeatRuns]:
+        pool = SlotPool(_config(1, 1), pending_limit=1)
+        request = replace(
+            _request('echo'),
+            work=SeatRefusal(refusal=TimeoutValueInvalid(reason='y')),
+        )
+        runs = SeatRuns(1)
+        handle = SharedHandle(request.frame_for(1), asyncio.get_running_loop())
+        runs.add(1, _SeatRun(handle, RegistryClosed(), DeadlineNotReported()))
+        return pool, runs
+
+    @pytest.mark.asyncio(loop_scope='function')
+    async def test_a_timed_out_end_of_a_refusal_is_refused(self) -> None:
+        pool, runs = self._refused_run()
+        frame = SharedResultFrame(
+            dispatch=1,
+            task_id=runs.task_ids()[0],
+            end=SeatTimedOut(),
+            rss=RssMb(1.0),
+        )
+
+        assert pool._end_run(runs, frame) is False
+        assert runs.count() == 1
+
+    @pytest.mark.asyncio(loop_scope='function')
+    async def test_a_deadline_report_of_a_refusal_is_refused(self) -> None:
+        pool, runs = self._refused_run()
+        frame = DeadlineFiredFrame(dispatch=1, task_id=runs.task_ids()[0])
+
+        assert pool._note_deadline(MagicMock(), runs, frame) is False
+        assert runs.get(1) is not None
+        assert runs.get(1).deadline == DeadlineNotReported()  # type: ignore[union-attr]
 
 
 IDLE_CPU_PROBE_S = 1.0

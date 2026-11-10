@@ -1,14 +1,17 @@
-"""Which kind of child runs a claimed row.
+"""Which kind of child runs a claimed row, and with which stored timeout.
 
 The claim plan of the worker claimed the row into the budget of a class
 (``ClaimPlan.route``). A row of the ``SHARED_ASYNC`` budget runs on a seat
 of a shared async child; a row of the ``ISOLATED`` budget runs in an isolated
 child. The budget decides, so dispatch and claim agree on every row.
 
-A seat needs the timeout and the cancel grace of the row, which enqueue
-stored in its ``task_options``. A row of the ``SHARED_ASYNC`` budget whose
-stored options give no usable timeout or grace runs in an isolated child
-instead, where a refused stored timeout fails the task as for any row. Pure.
+A ``SHARED_ASYNC`` row needs the timeout and the cancel grace that enqueue
+stored in its ``task_options``. A row whose stored options give no usable
+timeout or grace is refused on every worker: the child that the budget
+names sets the row RUNNING and fails the task with
+``WORKER_SERIALIZATION_ERROR`` before it resolves the task, as for an
+isolated row with a refused stored timeout. It never runs, and it never
+returns to the queue. Pure.
 """
 
 from __future__ import annotations
@@ -17,14 +20,13 @@ from dataclasses import dataclass
 from typing import TypeAlias, assert_never
 
 from horsies.core.codec.json_io import loads_json
-from horsies.core.models.tasks import (
-    MAX_CANCEL_GRACE_MS,
-    MIN_CANCEL_GRACE_MS,
-    Execution,
-)
+from horsies.core.codec.task_options import shared_async_grace_error
+from horsies.core.models.tasks import Execution
 from horsies.core.types.result import Err, Ok
+from horsies.core.worker.child_protocol import SeatRefusal, SeatTask, SeatWork
 from horsies.core.worker.claim_plan import ClaimPlan, NotServed, ServedBy
 from horsies.core.worker.stored_timeout import (
+    CancelGraceInvalid,
     NoTimeout,
     OptionsUnreadable,
     StoredTimeout,
@@ -35,57 +37,115 @@ from horsies.core.worker.stored_timeout import (
 
 @dataclass(frozen=True, slots=True)
 class RunIsolated:
-    """An isolated child runs the row, one task in its process."""
+    """An isolated child runs the row, one task in its process. ``timeout`` is
+    the stored timeout that the child applies; a refusal fails the task."""
+
+    timeout: StoredTimeout
 
 
 @dataclass(frozen=True, slots=True)
 class RunShared:
-    """A shared async child runs the row, on a seat. ``timeout_ms`` and
-    ``cancel_grace_ms`` are the stored values, within their bounds."""
+    """A shared async child takes the row on a seat: ``work`` is the task
+    with its deadline, or the refusal that fails it."""
 
-    timeout_ms: int
-    cancel_grace_ms: int
+    work: SeatWork
 
 
 DispatchRoute: TypeAlias = RunIsolated | RunShared
 
 
-def _stored_cancel_grace_ms(task_options: object) -> int | None:
-    """The ``cancel_grace_ms`` of stored task options, when it is an int in
-    its bounds; None otherwise."""
+def _stored_cancel_grace_ms(
+    task_options: object,
+) -> int | OptionsUnreadable | CancelGraceInvalid:
+    """The ``cancel_grace_ms`` of stored task options, checked against the
+    enqueue rule of a ``SHARED_ASYNC`` row (``shared_async_grace_error``)."""
     match task_options:
+        case None | '':
+            return CancelGraceInvalid(
+                reason='stored cancel_grace_ms is absent for execution SHARED_ASYNC',
+            )
         case str() as text:
             pass
         case _:
-            return None
+            return OptionsUnreadable(
+                reason=(
+                    'stored task_options are a '
+                    f'{type(task_options).__name__}, not text'
+                ),
+            )
     match loads_json(text):
         case Ok(ok_value=dict() as options):
-            grace = options.get('cancel_grace_ms')
-        case Ok() | Err():
-            return None
-    match grace:
-        case bool():
-            return None
-        case int() if MIN_CANCEL_GRACE_MS <= grace <= MAX_CANCEL_GRACE_MS:
-            return grace
-        case _:
-            return None
+            raw = options.get('cancel_grace_ms')
+        case Ok(ok_value=other):
+            return OptionsUnreadable(
+                reason=(
+                    'stored task_options are a JSON '
+                    f'{type(other).__name__}, not an object'
+                ),
+            )
+        case Err(err_value=error):
+            return OptionsUnreadable(
+                reason=f'stored task_options do not parse: {error}',
+            )
+    match shared_async_grace_error(raw):
+        case None:
+            assert isinstance(raw, int), 'the grace rule passes only an int'
+            return raw
+        case cause:
+            return CancelGraceInvalid(reason=f'stored {cause}')
 
 
-def _shared_or_isolated(task_options: object, timeout: StoredTimeout) -> DispatchRoute:
-    """A seat when the row stores a usable timeout and grace; else isolated."""
+def _shared_async_work(task_options: object, timeout: StoredTimeout) -> SeatWork:
+    """The work of a ``SHARED_ASYNC`` row: the task with its stored timeout
+    and grace, or the refusal of the first one that the worker cannot use.
+
+    ``task_options`` is the stored column as the claim returns it, and
+    ``timeout`` is ``read_stored_timeout`` of it. A row with no stored
+    timeout is refused with ``TimeoutValueInvalid``: the class needs one.
+    """
     match timeout:
         case TaskTimeout(ms=timeout_ms):
             pass
-        case NoTimeout() | OptionsUnreadable() | TimeoutValueInvalid():
-            return RunIsolated()
+        case NoTimeout():
+            return SeatRefusal(
+                refusal=TimeoutValueInvalid(
+                    reason='stored timeout_ms is absent for execution SHARED_ASYNC',
+                ),
+            )
+        case OptionsUnreadable() | TimeoutValueInvalid() | CancelGraceInvalid():
+            return SeatRefusal(refusal=timeout)
         case _ as unreachable:
             assert_never(unreachable)
     match _stored_cancel_grace_ms(task_options):
         case int() as grace_ms:
-            return RunShared(timeout_ms=timeout_ms, cancel_grace_ms=grace_ms)
-        case None:
-            return RunIsolated()
+            return SeatTask(timeout_ms=timeout_ms, cancel_grace_ms=grace_ms)
+        case OptionsUnreadable() | CancelGraceInvalid() as refusal:
+            return SeatRefusal(refusal=refusal)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _isolated_timeout(
+    execution: Execution,
+    task_options: object,
+    timeout: StoredTimeout,
+) -> StoredTimeout:
+    """The stored timeout that an isolated child applies to a row of class
+    ``execution``. A ``SHARED_ASYNC`` row gets the refusal of its seat work,
+    so its outcome does not depend on the kind of child that takes it."""
+    match execution:
+        case Execution.SHARED_ASYNC:
+            match _shared_async_work(task_options, timeout):
+                case SeatTask(timeout_ms=timeout_ms):
+                    return TaskTimeout(ms=timeout_ms)
+                case SeatRefusal(refusal=refusal):
+                    return refusal
+                case _ as unreachable:
+                    assert_never(unreachable)
+        case Execution.ISOLATED | Execution.SHARED_THREAD:
+            return timeout
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def dispatch_route(
@@ -114,9 +174,11 @@ def dispatch_route(
             assert_never(unreachable)
     match budget:
         case Execution.SHARED_ASYNC:
-            return _shared_or_isolated(task_options, timeout)
+            return RunShared(work=_shared_async_work(task_options, timeout))
         case Execution.ISOLATED:
-            return RunIsolated()
+            return RunIsolated(
+                timeout=_isolated_timeout(execution, task_options, timeout),
+            )
         case Execution.SHARED_THREAD:
             raise AssertionError(
                 f'a {execution.value} row was claimed into a SHARED_THREAD '

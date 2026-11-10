@@ -41,7 +41,7 @@ from horsies.core.models.tasks import (
     TaskResult,
 )
 from horsies.core.types.result import Err, Ok, Result, is_err
-from horsies.core.worker.child_protocol import RunFrame
+from horsies.core.worker.child_protocol import RunFrame, SeatWork
 from horsies.core.worker.dispatch_route import (
     RunIsolated,
     RunShared,
@@ -123,7 +123,7 @@ class DispatchMixin:
             task_id: str,
             queue_name: str,
             is_workflow_task: bool,
-            route: RunShared,
+            work: SeatWork,
             *,
             task_name: str,
             claimed_at: Optional[datetime],
@@ -459,16 +459,18 @@ class DispatchMixin:
 
         ``timeout`` is the stored timeout as the claim read it. A refusal is
         sent to the child, which sets the row RUNNING and fails the task with
-        WORKER_SERIALIZATION_ERROR before it resolves the task.
+        WORKER_SERIALIZATION_ERROR before it resolves the task. A
+        ``SHARED_ASYNC`` row without a usable stored timeout or grace is
+        refused the same way, by the child that its budget names.
         """
         slots = self._slots
         assert slots is not None, 'dispatch before the slot pool started'
 
         match dispatch_route(execution, self.cfg.claim_plan(), task_options, timeout):
-            case RunShared() as route:
+            case RunShared(work=work):
                 self._dispatch_shared(
                     slots,
-                    route,
+                    work,
                     task_id,
                     task_name,
                     args_json,
@@ -478,8 +480,10 @@ class DispatchMixin:
                     claimed_at,
                 )
                 return
-            case RunIsolated():
+            case RunIsolated(timeout=isolated_timeout):
                 pass
+            case _ as unreachable:
+                assert_never(unreachable)
         handle = slots.submit(
             RunFrame(
                 task_id=task_id,
@@ -488,7 +492,7 @@ class DispatchMixin:
                 kwargs_json=kwargs_json,
                 worker_id=self.worker_instance_id,
                 is_workflow_task=is_workflow_task,
-                timeout=timeout,
+                timeout=isolated_timeout,
                 claimed_at=claimed_at,
             ),
         )
@@ -500,7 +504,7 @@ class DispatchMixin:
                 task_id,
                 queue_name,
                 is_workflow_task,
-                timeout=timeout,
+                timeout=isolated_timeout,
                 task_name=task_name,
                 claimed_at=claimed_at,
             ),
@@ -511,7 +515,7 @@ class DispatchMixin:
     def _dispatch_shared(
         self,
         slots: SlotPool,
-        route: RunShared,
+        work: SeatWork,
         task_id: str,
         task_name: str,
         args_json: Optional[str],
@@ -521,7 +525,8 @@ class DispatchMixin:
         claimed_at: Optional[datetime],
     ) -> None:
         """Submit a ``SHARED_ASYNC`` row to the shared async children, and
-        spawn its finalizer. Never raises for a task."""
+        spawn its finalizer. ``work`` is the task with its deadline, or the
+        refusal that fails it. Never raises for a task."""
         handle = slots.submit_shared(
             SharedRunRequest(
                 task_id=task_id,
@@ -531,8 +536,7 @@ class DispatchMixin:
                 worker_id=self.worker_instance_id,
                 is_workflow_task=is_workflow_task,
                 claimed_at=claimed_at,
-                timeout_ms=route.timeout_ms,
-                cancel_grace_ms=route.cancel_grace_ms,
+                work=work,
             ),
         )
         self._spawn_background(
@@ -541,7 +545,7 @@ class DispatchMixin:
                 task_id,
                 queue_name,
                 is_workflow_task,
-                route,
+                work,
                 task_name=task_name,
                 claimed_at=claimed_at,
             ),

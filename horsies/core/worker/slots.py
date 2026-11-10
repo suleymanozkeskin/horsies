@@ -104,7 +104,10 @@ from horsies.core.worker.child_protocol import (
     RssUnreadable,
     RunFrame,
     SeatFinished,
+    SeatRefusal,
+    SeatTask,
     SeatTimedOut,
+    SeatWork,
     SharedAsyncChild,
     SharedResultFrame,
     SharedRunFrame,
@@ -274,8 +277,8 @@ SharedOutcome: TypeAlias = (
 class SharedRunRequest:
     """A ``SHARED_ASYNC`` task to run, before the pool numbers its run.
 
-    ``timeout_ms`` and ``cancel_grace_ms`` are within the bounds of
-    ``SharedRunFrame``.
+    The ``timeout_ms`` and ``cancel_grace_ms`` of a ``SeatTask`` are within
+    the bounds of ``SharedRunFrame``.
     """
 
     task_id: str
@@ -285,17 +288,22 @@ class SharedRunRequest:
     worker_id: str
     is_workflow_task: bool
     claimed_at: datetime | None
-    timeout_ms: int
-    cancel_grace_ms: int
+    work: SeatWork
 
     def __post_init__(self) -> None:
-        assert (
-            MIN_TASK_TIMEOUT_MS <= self.timeout_ms <= MAX_TASK_TIMEOUT_MS
-        ), f'timeout_ms {self.timeout_ms} of task {self.task_id} is out of bounds'
-        assert MIN_CANCEL_GRACE_MS <= self.cancel_grace_ms <= MAX_CANCEL_GRACE_MS, (
-            f'cancel_grace_ms {self.cancel_grace_ms} of task {self.task_id} is out '
-            'of bounds'
-        )
+        match self.work:
+            case SeatTask(timeout_ms=timeout_ms, cancel_grace_ms=cancel_grace_ms):
+                assert (
+                    MIN_TASK_TIMEOUT_MS <= timeout_ms <= MAX_TASK_TIMEOUT_MS
+                ), f'timeout_ms {timeout_ms} of task {self.task_id} is out of bounds'
+                assert MIN_CANCEL_GRACE_MS <= cancel_grace_ms <= MAX_CANCEL_GRACE_MS, (
+                    f'cancel_grace_ms {cancel_grace_ms} of task {self.task_id} is '
+                    'out of bounds'
+                )
+            case SeatRefusal():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
 
     def frame_for(self, dispatch: int) -> SharedRunFrame:
         """The run frame of run ``dispatch``."""
@@ -308,8 +316,7 @@ class SharedRunRequest:
             worker_id=self.worker_id,
             is_workflow_task=self.is_workflow_task,
             claimed_at=self.claimed_at,
-            timeout_ms=self.timeout_ms,
-            cancel_grace_ms=self.cancel_grace_ms,
+            work=self.work,
         )
 
 
@@ -2529,19 +2536,28 @@ class SlotPool:
 
     def _end_run(self, runs: SeatRuns, frame: SharedResultFrame) -> bool:
         """End the task of a result frame. False: the frame names no task in
-        flight, a protocol violation."""
+        flight, or reports a timeout of a run without a deadline, a protocol
+        violation."""
         run = runs.get(frame.dispatch)
         if run is None or run.handle.frame.task_id != frame.task_id:
             return False
-        _ = runs.remove(frame.dispatch)
-        self._release_held(run.held)
+        outcome: SeatTaskFinished | SeatDeadlineEnded
         match frame.end:
             case SeatFinished(ok=ok, result_json=result_json, failed_reason=reason):
-                run.handle.finish(SeatTaskFinished(ok, result_json, reason))
+                outcome = SeatTaskFinished(ok, result_json, reason)
             case SeatTimedOut():
-                run.handle.finish(SeatDeadlineEnded())
+                match run.handle.frame.work:
+                    case SeatTask():
+                        outcome = SeatDeadlineEnded()
+                    case SeatRefusal():
+                        return False
+                    case _ as unreachable:
+                        assert_never(unreachable)
             case _ as unreachable:
                 assert_never(unreachable)
+        _ = runs.remove(frame.dispatch)
+        self._release_held(run.held)
+        run.handle.finish(outcome)
         return True
 
     def _note_deadline(
@@ -2551,15 +2567,23 @@ class SlotPool:
         frame: DeadlineFiredFrame,
     ) -> bool:
         """Mark that the child cancelled a task at its deadline. False: the
-        frame names no task in flight, a protocol violation."""
+        frame names no task in flight, or a run without a deadline, a protocol
+        violation."""
         run = runs.get(frame.dispatch)
         if run is None or run.handle.frame.task_id != frame.task_id:
             return False
+        match run.handle.frame.work:
+            case SeatTask(timeout_ms=timeout_ms):
+                pass
+            case SeatRefusal():
+                return False
+            case _ as unreachable:
+                assert_never(unreachable)
         run.deadline = DeadlineReported()
         logger.info(
             'Task %s reached its timeout_ms=%s; child pid=%s cancelled it',
             frame.task_id,
-            run.handle.frame.timeout_ms,
+            timeout_ms,
             child.pid,
         )
         return True

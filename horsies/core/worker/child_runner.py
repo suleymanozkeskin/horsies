@@ -47,7 +47,9 @@ _ENGINE_KEY_WORKFLOW_CTX = '__h_workflow_ctx__'
 _ENGINE_KEY_WORKFLOW_META = '__h_workflow_meta__'
 _ENGINE_KEY_TASKRESULT_ENVELOPE = '__h_taskresult_envelope__'
 from horsies.core.models.tasks import (
+    MAX_CANCEL_GRACE_MS,
     MAX_TASK_TIMEOUT_MS,
+    MIN_CANCEL_GRACE_MS,
     MIN_TASK_TIMEOUT_MS,
     TaskResult,
     TaskError,
@@ -55,6 +57,7 @@ from horsies.core.models.tasks import (
     OutcomeCode,
 )
 from horsies.core.worker.stored_timeout import (
+    CancelGraceInvalid,
     NoTimeout,
     OptionsUnreadable,
     StoredTimeout,
@@ -129,7 +132,8 @@ def _stored_timeout_refusal_response(
     """Build a WORKER_SERIALIZATION_ERROR response for a stored timeout.
 
     The row is RUNNING when this runs, so the normal persist path fails the
-    task. `data` names the stored field that the worker cannot use.
+    task. `data` names the stored field that the worker cannot use. An
+    isolated child and a seat of a shared async child build the same response.
     """
     match refusal:
         case OptionsUnreadable(reason=reason):
@@ -140,6 +144,13 @@ def _stored_timeout_refusal_response(
                 'field': 'timeout_ms',
                 'min_ms': MIN_TASK_TIMEOUT_MS,
                 'max_ms': MAX_TASK_TIMEOUT_MS,
+            }
+        case CancelGraceInvalid(reason=reason):
+            data = {
+                'task_name': task_name,
+                'field': 'cancel_grace_ms',
+                'min_ms': MIN_CANCEL_GRACE_MS,
+                'max_ms': MAX_CANCEL_GRACE_MS,
             }
         case _ as unreachable:
             assert_never(unreachable)
@@ -1552,7 +1563,7 @@ def _run_task_entry(
         # A stored timeout that the worker cannot use fails the task before
         # it resolves the task, so no user code runs.
         match timeout:
-            case OptionsUnreadable() | TimeoutValueInvalid():
+            case OptionsUnreadable() | TimeoutValueInvalid() | CancelGraceInvalid():
                 return _stored_timeout_refusal_response(task_name, timeout)
             case NoTimeout() | TaskTimeout():
                 pass

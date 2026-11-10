@@ -27,6 +27,8 @@ A worker may run a task more isolated than its row says, never less. A worker wi
 
 A shared async child runs only `async def` tasks. When a deploy changed the function of a queued `SHARED_ASYNC` row to `def`, the worker writes `ISOLATED` on the row and returns it to the queue before any child takes it.
 
+Enqueue stores a `timeout_ms` and a `cancel_grace_ms` on every `SHARED_ASYNC` row. A row without a usable one (absent, out of bounds, not an int, or options that do not parse) fails with `WORKER_SERIALIZATION_ERROR` on every worker, after its RUNNING update and before the task resolves, as an isolated row with a refused stored timeout does. The task never runs, and the row does not return to the queue. Such a row comes only from a write outside enqueue.
+
 ## How To
 
 Declare the task. `timeout_ms` is required; `cancel_grace_ms` is optional.

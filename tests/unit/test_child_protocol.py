@@ -32,6 +32,8 @@ from horsies.core.worker.child_protocol import (
     DeadlineFiredFrame,
     IsolatedChild,
     SeatFinished,
+    SeatRefusal,
+    SeatTask,
     SeatTimedOut,
     SharedAsyncChild,
     SharedResultFrame,
@@ -81,10 +83,12 @@ from horsies.core.models.tasks import (
 from horsies.core.models.worker_profile import MAX_SEATS_PER_SHARED_ASYNC_CHILD
 from horsies.core.worker.task_loop import AsyncTaskPresence
 from horsies.core.worker.stored_timeout import (
+    CancelGraceInvalid,
     NoTimeout,
     OptionsUnreadable,
     StoredTimeout,
     TaskTimeout,
+    TimeoutRefusal,
     TimeoutValueInvalid,
 )
 
@@ -151,8 +155,7 @@ def _shared_run_frame(**changes: object) -> SharedRunFrame:
         worker_id='worker-1',
         is_workflow_task=False,
         claimed_at=datetime(2026, 11, 1, 12, 30, 15, 250, tzinfo=timezone.utc),
-        timeout_ms=30_000,
-        cancel_grace_ms=5_000,
+        work=SeatTask(timeout_ms=30_000, cancel_grace_ms=5_000),
     )
     return dataclasses.replace(frame, **changes)  # type: ignore[arg-type]
 
@@ -171,6 +174,19 @@ class TestSharedFrames:
 
     def test_shared_run_frame_round_trip(self) -> None:
         frame = _shared_run_frame()
+        meta, body = _split(encode_parent_frame(frame))
+        assert decode_parent_frame(meta, body) == Ok(frame)
+
+    @pytest.mark.parametrize(
+        'refusal',
+        [
+            OptionsUnreadable(reason='stored task_options do not parse: x'),
+            TimeoutValueInvalid(reason='stored timeout_ms is below 1000 ms'),
+            CancelGraceInvalid(reason='stored cancel_grace_ms is below 100 ms'),
+        ],
+    )
+    def test_a_refusal_round_trips(self, refusal: TimeoutRefusal) -> None:
+        frame = _shared_run_frame(work=SeatRefusal(refusal=refusal))
         meta, body = _split(encode_parent_frame(frame))
         assert decode_parent_frame(meta, body) == Ok(frame)
 
@@ -209,12 +225,46 @@ class TestSharedFrames:
             ('dispatch', 0),
             ('dispatch', True),
             ('dispatch', '7'),
-            ('timeout_ms', MIN_TASK_TIMEOUT_MS - 1),
-            ('timeout_ms', MAX_TASK_TIMEOUT_MS + 1),
-            ('timeout_ms', None),
-            ('cancel_grace_ms', MIN_CANCEL_GRACE_MS - 1),
-            ('cancel_grace_ms', MAX_CANCEL_GRACE_MS + 1),
-            ('cancel_grace_ms', 1.5),
+            ('work', None),
+            ('work', {'kind': 'unknown'}),
+            (
+                'work',
+                {
+                    'kind': 'task',
+                    'timeout_ms': MIN_TASK_TIMEOUT_MS - 1,
+                    'cancel_grace_ms': 5000,
+                },
+            ),
+            (
+                'work',
+                {
+                    'kind': 'task',
+                    'timeout_ms': MAX_TASK_TIMEOUT_MS + 1,
+                    'cancel_grace_ms': 5000,
+                },
+            ),
+            ('work', {'kind': 'task', 'timeout_ms': None, 'cancel_grace_ms': 5000}),
+            (
+                'work',
+                {
+                    'kind': 'task',
+                    'timeout_ms': 30000,
+                    'cancel_grace_ms': MIN_CANCEL_GRACE_MS - 1,
+                },
+            ),
+            (
+                'work',
+                {
+                    'kind': 'task',
+                    'timeout_ms': 30000,
+                    'cancel_grace_ms': MAX_CANCEL_GRACE_MS + 1,
+                },
+            ),
+            ('work', {'kind': 'task', 'timeout_ms': 30000, 'cancel_grace_ms': 1.5}),
+            ('work', {'kind': 'refusal', 'refusal': None}),
+            ('work', {'kind': 'refusal', 'refusal': {'kind': 'none'}}),
+            ('work', {'kind': 'refusal', 'refusal': {'kind': 'ms', 'ms': 30000}}),
+            ('work', {'kind': 'refusal', 'refusal': {'kind': 'grace_invalid'}}),
             ('task_id', None),
             ('claimed_at', 'not a date'),
             ('is_workflow_task', 0),
@@ -325,6 +375,7 @@ class TestParentFrames:
             TaskTimeout(ms=MAX_TASK_TIMEOUT_MS),
             OptionsUnreadable(reason='stored task_options do not parse'),
             TimeoutValueInvalid(reason='stored timeout_ms is a bool, not an int'),
+            CancelGraceInvalid(reason='stored cancel_grace_ms is a bool, not an int'),
         ],
     )
     def test_each_stored_timeout_form_round_trips(self, timeout: StoredTimeout) -> None:
@@ -532,6 +583,7 @@ class TestMalformedMetadata:
             ('timeout', {'kind': 'ms', 'ms': True}),
             ('timeout', {'kind': 'ms', 'ms': 1500.0}),
             ('timeout', {'kind': 'value_invalid'}),
+            ('timeout', {'kind': 'grace_invalid', 'reason': None}),
             ('timeout', {'kind': 'options_unreadable', 'reason': 5}),
             ('timeout', {'kind': 'later'}),
             ('claimed_at', 'not a date'),

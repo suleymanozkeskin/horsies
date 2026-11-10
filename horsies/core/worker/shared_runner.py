@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 import threading
 from collections.abc import Coroutine
-from typing import Any, Final
+from typing import Any, Final, assert_never
 
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
@@ -33,6 +33,8 @@ from horsies.core.worker.child_pool import open_shared_async_pool
 from horsies.core.worker.child_protocol import (
     BootFailedFrame,
     InitFrame,
+    SeatRefusal,
+    SeatTask,
     SharedRunFrame,
     WireResult,
 )
@@ -43,6 +45,7 @@ from horsies.core.worker.child_runner import (
     _encode_task_outcome,
     _prepare_task_call,
     _PreparedCall,
+    _stored_timeout_refusal_response,
     _task_exception_response,
 )
 from horsies.core.worker.current import get_current_app
@@ -176,9 +179,11 @@ async def run_seat_task(
     The steps of ``_run_task_entry``: the RUNNING transition with the first
     runner heartbeat (a stop before user code returns its wire tuple), the
     task call, the result encode, and the finalizing marker in ``finally``.
-    An exception of the body, a cancel among them, becomes
-    ``TASK_EXCEPTION``; the seat loop reports a cancel of its deadline as
-    the timeout. A cancel during the RUNNING transition or the marker
+    A ``SeatRefusal`` returns ``WORKER_SERIALIZATION_ERROR`` after the RUNNING
+    transition, before it resolves the task, as ``_run_task_entry`` does for
+    a refused stored timeout. An exception of the body, a cancel among them,
+    becomes ``TASK_EXCEPTION``; the seat loop reports a cancel of its deadline
+    as the timeout. A cancel during the RUNNING transition or the marker
     propagates, and the seat loop reports it.
     """
     logger.info(f'Starting task execution: {frame.task_name} ({frame.task_id})')
@@ -192,6 +197,13 @@ async def run_seat_task(
     if ownership_result is not None:
         return ownership_result
     try:
+        match frame.work:
+            case SeatRefusal(refusal=refusal):
+                return _stored_timeout_refusal_response(frame.task_name, refusal)
+            case SeatTask():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
         prepared = _prepare_task_call(
             frame.task_name,
             frame.args_json,

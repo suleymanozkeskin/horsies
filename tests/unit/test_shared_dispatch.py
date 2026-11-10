@@ -32,7 +32,13 @@ from horsies.core.models.worker_profile import (
 from horsies.core.worker.claim_plan import ClaimPlan, isolated_children_plan
 from horsies.core.types.result import Err, Ok
 from horsies.core.worker import finalize
-from horsies.core.worker.child_protocol import IsolatedChild, RssMb, SharedAsyncChild
+from horsies.core.worker.child_protocol import (
+    IsolatedChild,
+    RssMb,
+    SeatRefusal,
+    SeatTask,
+    SharedAsyncChild,
+)
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.dispatch_route import RunIsolated, RunShared, dispatch_route
 from horsies.core.worker.runtime import (
@@ -60,7 +66,14 @@ from horsies.core.worker.slots import (
     SharedRunRequest,
     SlotPool,
 )
-from horsies.core.worker.stored_timeout import NoTimeout, OptionsUnreadable, TaskTimeout
+from horsies.core.worker.stored_timeout import (
+    CancelGraceInvalid,
+    NoTimeout,
+    OptionsUnreadable,
+    StoredTimeout,
+    TaskTimeout,
+    TimeoutValueInvalid,
+)
 from horsies.core.worker.worker import Worker
 
 pytestmark = [pytest.mark.unit]
@@ -103,8 +116,7 @@ def _request(timeout_ms: int = MIN_TASK_TIMEOUT_MS) -> SharedRunRequest:
         worker_id='worker-1',
         is_workflow_task=False,
         claimed_at=CLAIMED_AT,
-        timeout_ms=timeout_ms,
-        cancel_grace_ms=DEFAULT_CANCEL_GRACE_MS,
+        work=SeatTask(timeout_ms=timeout_ms, cancel_grace_ms=DEFAULT_CANCEL_GRACE_MS),
     )
 
 
@@ -122,6 +134,60 @@ SPLIT_PLAN = ClaimPlan(
 )
 
 
+ONLY_SHARED_PLAN = ClaimPlan(budget_classes=frozenset({Execution.SHARED_ASYNC}))
+
+REFUSED_SHARED_ROWS = [
+    pytest.param(
+        SHARED_OPTIONS,
+        NoTimeout(),
+        TimeoutValueInvalid(
+            reason='stored timeout_ms is absent for execution SHARED_ASYNC',
+        ),
+        id='no-timeout',
+    ),
+    pytest.param(
+        '{not json',
+        OptionsUnreadable(reason='x'),
+        OptionsUnreadable(reason='x'),
+        id='unreadable-options',
+    ),
+    pytest.param(
+        SHARED_OPTIONS,
+        TimeoutValueInvalid(reason='y'),
+        TimeoutValueInvalid(reason='y'),
+        id='timeout-out-of-bounds',
+    ),
+    pytest.param(
+        _options(timeout_ms=2000, execution='SHARED_ASYNC', cancel_grace_ms=1),
+        TaskTimeout(ms=2000),
+        CancelGraceInvalid(reason='stored cancel_grace_ms is below 100 ms'),
+        id='grace-out-of-bounds',
+    ),
+    pytest.param(
+        _options(timeout_ms=2000, execution='SHARED_ASYNC', cancel_grace_ms='5'),
+        TaskTimeout(ms=2000),
+        CancelGraceInvalid(reason='stored cancel_grace_ms is a JSON str, not an int'),
+        id='grace-not-an-int',
+    ),
+    pytest.param(
+        _options(timeout_ms=2000, execution='SHARED_ASYNC'),
+        TaskTimeout(ms=2000),
+        CancelGraceInvalid(
+            reason='stored cancel_grace_ms is absent for execution SHARED_ASYNC',
+        ),
+        id='grace-absent',
+    ),
+    pytest.param(
+        None,
+        TaskTimeout(ms=2000),
+        CancelGraceInvalid(
+            reason='stored cancel_grace_ms is absent for execution SHARED_ASYNC',
+        ),
+        id='no-options',
+    ),
+]
+
+
 class TestRoute:
     def test_a_row_of_the_shared_async_budget_runs_on_a_seat(self) -> None:
         route = dispatch_route(
@@ -130,7 +196,9 @@ class TestRoute:
             SHARED_OPTIONS,
             TaskTimeout(ms=2000),
         )
-        assert route == RunShared(timeout_ms=2000, cancel_grace_ms=700)
+        assert route == RunShared(
+            work=SeatTask(timeout_ms=2000, cancel_grace_ms=700),
+        )
 
     def test_a_worker_with_no_shared_children_runs_it_isolated(self) -> None:
         route = dispatch_route(
@@ -139,49 +207,54 @@ class TestRoute:
             SHARED_OPTIONS,
             TaskTimeout(ms=2000),
         )
-        assert route == RunIsolated()
-
-    def test_an_isolated_row_runs_isolated(self) -> None:
-        route = dispatch_route(
-            Execution.ISOLATED,
-            SPLIT_PLAN,
-            _options(timeout_ms=2000),
-            TaskTimeout(ms=2000),
-        )
-        assert route == RunIsolated()
+        assert route == RunIsolated(timeout=TaskTimeout(ms=2000))
 
     @pytest.mark.parametrize(
-        ('options', 'timeout'),
-        [
-            (SHARED_OPTIONS, NoTimeout()),
-            ('{not json', OptionsUnreadable(reason='x')),
-            (
-                _options(timeout_ms=2000, execution='SHARED_ASYNC', cancel_grace_ms=1),
-                TaskTimeout(ms=2000),
-            ),
-            (_options(timeout_ms=2000, execution='SHARED_ASYNC'), TaskTimeout(ms=2000)),
-            (None, TaskTimeout(ms=2000)),
-        ],
-        ids=[
-            'no-timeout',
-            'unreadable-options',
-            'grace-out-of-bounds',
-            'grace-absent',
-            'no-options',
-        ],
+        'timeout',
+        [NoTimeout(), TaskTimeout(ms=2000), TimeoutValueInvalid(reason='y')],
+        ids=['no-timeout', 'timeout', 'refused-timeout'],
     )
-    def test_a_shared_row_with_no_usable_timeout_or_grace_runs_isolated(
+    def test_an_isolated_row_keeps_its_stored_timeout(
+        self,
+        timeout: StoredTimeout,
+    ) -> None:
+        route = dispatch_route(Execution.ISOLATED, SPLIT_PLAN, None, timeout)
+        assert route == RunIsolated(timeout=timeout)
+
+    @pytest.mark.parametrize(
+        'plan',
+        [SPLIT_PLAN, ONLY_SHARED_PLAN],
+        ids=['isolated-and-shared-children', 'shared-children-only'],
+    )
+    @pytest.mark.parametrize(('options', 'timeout', 'refusal'), REFUSED_SHARED_ROWS)
+    def test_a_shared_row_with_no_usable_timeout_or_grace_is_refused_on_a_seat(
+        self,
+        plan: ClaimPlan,
+        options: str | None,
+        timeout: StoredTimeout,
+        refusal: Any,
+    ) -> None:
+        route = dispatch_route(Execution.SHARED_ASYNC, plan, options, timeout)
+        assert route == RunShared(work=SeatRefusal(refusal=refusal))
+
+    @pytest.mark.parametrize(('options', 'timeout', 'refusal'), REFUSED_SHARED_ROWS)
+    def test_a_worker_with_no_shared_children_refuses_it_in_an_isolated_child(
         self,
         options: str | None,
-        timeout: Any,
+        timeout: StoredTimeout,
+        refusal: Any,
     ) -> None:
-        route = dispatch_route(Execution.SHARED_ASYNC, SPLIT_PLAN, options, timeout)
-        assert route == RunIsolated()
+        route = dispatch_route(
+            Execution.SHARED_ASYNC,
+            isolated_children_plan(),
+            options,
+            timeout,
+        )
+        assert route == RunIsolated(timeout=refusal)
 
     def test_a_class_that_the_worker_does_not_serve_is_a_defect(self) -> None:
-        only_shared = ClaimPlan(budget_classes=frozenset({Execution.SHARED_ASYNC}))
         with pytest.raises(AssertionError, match='does not serve'):
-            dispatch_route(Execution.ISOLATED, only_shared, None, NoTimeout())
+            dispatch_route(Execution.ISOLATED, ONLY_SHARED_PLAN, None, NoTimeout())
 
 
 @pytest.mark.asyncio
@@ -215,15 +288,14 @@ class TestDispatch:
             worker_id=worker.worker_instance_id,
             is_workflow_task=False,
             claimed_at=CLAIMED_AT,
-            timeout_ms=2000,
-            cancel_grace_ms=700,
+            work=SeatTask(timeout_ms=2000, cancel_grace_ms=700),
         )
         worker._finalize_shared_after.assert_called_once_with(
             worker._slots.submit_shared.return_value,
             'task-9',
             'io',
             False,
-            RunShared(timeout_ms=2000, cancel_grace_ms=700),
+            SeatTask(timeout_ms=2000, cancel_grace_ms=700),
             task_name='fetch',
             claimed_at=CLAIMED_AT,
         )
@@ -250,6 +322,63 @@ class TestDispatch:
         worker._slots.submit_shared.assert_not_called()
         assert worker._slots.submit.call_args.args[0].task_id == 'task-9'
 
+    @pytest.mark.parametrize(
+        'processes',
+        [1, 0],
+        ids=['isolated-and-shared-children', 'shared-children-only'],
+    )
+    async def test_a_refused_shared_row_goes_to_a_seat_on_either_shape(
+        self,
+        processes: int,
+    ) -> None:
+        """Never to an isolated child, and never back to the queue."""
+        worker = _worker(processes=processes)
+        worker._slots = MagicMock()
+        worker._spawn_background = MagicMock(side_effect=_close_coroutine)
+        worker._requeue_claimed_task = AsyncMock()
+        refusal = CancelGraceInvalid(
+            reason='stored cancel_grace_ms is absent for execution SHARED_ASYNC',
+        )
+
+        await worker._dispatch_one(
+            'task-9',
+            'fetch',
+            None,
+            '{}',
+            timeout=TaskTimeout(ms=2000),
+            claimed_at=CLAIMED_AT,
+            execution=Execution.SHARED_ASYNC,
+            task_options=_options(timeout_ms=2000, execution='SHARED_ASYNC'),
+        )
+
+        worker._slots.submit.assert_not_called()
+        worker._requeue_claimed_task.assert_not_awaited()
+        request = worker._slots.submit_shared.call_args.args[0]
+        assert request.work == SeatRefusal(refusal=refusal)
+
+    async def test_a_worker_with_no_shared_children_sends_the_refusal_isolated(
+        self,
+    ) -> None:
+        worker = _worker(NoSharedAsyncChildren())
+        worker._slots = MagicMock()
+        worker._spawn_background = MagicMock(side_effect=_close_coroutine)
+
+        await worker._dispatch_one(
+            'task-9',
+            'fetch',
+            None,
+            '{}',
+            timeout=NoTimeout(),
+            claimed_at=CLAIMED_AT,
+            execution=Execution.SHARED_ASYNC,
+            task_options=SHARED_OPTIONS,
+        )
+
+        worker._slots.submit_shared.assert_not_called()
+        assert worker._slots.submit.call_args.args[0].timeout == TimeoutValueInvalid(
+            reason='stored timeout_ms is absent for execution SHARED_ASYNC',
+        )
+
 
 @pytest.mark.asyncio
 class TestFinalizeShared:
@@ -266,7 +395,12 @@ class TestFinalizeShared:
         )
         return worker
 
-    async def _finalize(self, worker: Worker, outcome: Any) -> Any:
+    async def _finalize(
+        self,
+        worker: Worker,
+        outcome: Any,
+        work: SeatTask | SeatRefusal = SeatTask(timeout_ms=1500, cancel_grace_ms=500),
+    ) -> Any:
         handle = _handle(asyncio.get_running_loop())
         handle.finish(outcome)
         return await worker._finalize_shared_after(
@@ -274,7 +408,7 @@ class TestFinalizeShared:
             'task-1',
             'default',
             False,
-            RunShared(timeout_ms=1500, cancel_grace_ms=500),
+            work,
             task_name='fetch',
             claimed_at=CLAIMED_AT,
         )
@@ -316,6 +450,39 @@ class TestFinalizeShared:
 
         assert isinstance(result, Err)
         worker._recover_worker_future_failure.assert_awaited_once()  # type: ignore[attr-defined]
+
+    async def test_the_result_of_a_refusal_takes_the_path_of_an_isolated_result(
+        self,
+    ) -> None:
+        worker = self._worker_with_paths()
+        refusal = SeatRefusal(refusal=TimeoutValueInvalid(reason='y'))
+
+        await self._finalize(
+            worker,
+            SeatTaskFinished(True, '{"err":1}', 'StoredTimeoutRefused: y'),
+            refusal,
+        )
+
+        worker._finalize_task_result.assert_awaited_once_with(  # type: ignore[attr-defined]
+            'task-1',
+            True,
+            '{"err":1}',
+            'StoredTimeoutRefused: y',
+            queue_name='default',
+            is_workflow_task=False,
+            task_name='fetch',
+            claimed_at=CLAIMED_AT,
+        )
+
+    async def test_a_refusal_that_ends_at_a_deadline_is_a_defect(self) -> None:
+        """The pool refuses such a report, so it never reaches here."""
+        worker = self._worker_with_paths()
+        refusal = SeatRefusal(refusal=TimeoutValueInvalid(reason='y'))
+
+        with pytest.raises(AssertionError, match='deadline it does not have'):
+            await self._finalize(worker, SeatDeadlineEnded(), refusal)
+
+        worker._record_task_timeout.assert_not_awaited()  # type: ignore[attr-defined]
 
     async def test_a_lost_child_takes_crash_recovery(self) -> None:
         worker = self._worker_with_paths()
@@ -359,7 +526,7 @@ class TestBackstopTimer:
         outcome = await worker._await_shared_outcome(
             handle,
             'task-1',
-            RunShared(timeout_ms=1000, cancel_grace_ms=500),
+            SeatTask(timeout_ms=1000, cancel_grace_ms=500),
             CLAIMED_AT,
         )
 
@@ -382,7 +549,31 @@ class TestBackstopTimer:
         outcome = await worker._await_shared_outcome(
             handle,
             'task-1',
-            RunShared(timeout_ms=1000, cancel_grace_ms=500),
+            SeatTask(timeout_ms=1000, cancel_grace_ms=500),
+            CLAIMED_AT,
+        )
+
+        assert outcome == finished
+        worker._handle_shared_backstop.assert_not_awaited()
+
+    async def test_a_refusal_has_no_backstop(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No task code runs, so the parent waits for the outcome, as for an
+        isolated refusal; a backstop at the cut margin would fire at once."""
+        monkeypatch.setattr(finalize, 'SHARED_BACKSTOP_MARGIN_S', -100.0)
+        worker = _worker()
+        worker._handle_shared_backstop = AsyncMock()
+        handle = _handle(asyncio.get_running_loop())
+        handle.assigned.set_result(Assigned())
+        finished = SeatTaskFinished(True, '1', None)
+        asyncio.get_running_loop().call_later(0.1, handle.finish, finished)
+
+        outcome = await worker._await_shared_outcome(
+            handle,
+            'task-1',
+            SeatRefusal(refusal=TimeoutValueInvalid(reason='y')),
             CLAIMED_AT,
         )
 

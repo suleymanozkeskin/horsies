@@ -141,6 +141,11 @@ and there is no migration contract between pre-1.0 versions.
     until it ends or the worker stops.
   - A crash or a kill of a shared child ends every task in it, each through
     crash recovery after the worker saw the exit.
+  - A `SHARED_ASYNC` row without a usable stored `timeout_ms` or
+    `cancel_grace_ms` fails with `WORKER_SERIALIZATION_ERROR` on every
+    worker, after its RUNNING update and before the task resolves; the data
+    of the error names the field. It never runs, and it does not return to
+    the queue.
   - The RUNNING update with the first runner heartbeat and the finalizing
     marker of a shared task run on an async connection pool that the child
     opens on its loop, of `worker_child_pool_max_size` connections. The

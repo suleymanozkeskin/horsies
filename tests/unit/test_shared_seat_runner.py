@@ -10,6 +10,7 @@ are in ``test_shared_lifecycle``.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 from collections.abc import Iterator
 from datetime import datetime, timezone
@@ -25,13 +26,21 @@ from horsies.core.codec.typed import decode_task_result
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import (
+    MAX_CANCEL_GRACE_MS,
+    MIN_CANCEL_GRACE_MS,
     Execution,
     OperationalErrorCode,
     TaskError,
     TaskResult,
 )
 from horsies.core.worker import child_runner, shared_runner
-from horsies.core.worker.child_protocol import SharedRunFrame, WireResult
+from horsies.core.worker.child_protocol import (
+    SeatRefusal,
+    SeatTask,
+    SharedRunFrame,
+    WireResult,
+)
+from horsies.core.worker.stored_timeout import CancelGraceInvalid, TimeoutValueInvalid
 
 pytestmark = [pytest.mark.unit]
 
@@ -94,8 +103,7 @@ def _frame(task_name: str, kwargs: dict[str, Any] | None = None) -> SharedRunFra
         worker_id='worker-1',
         is_workflow_task=False,
         claimed_at=CLAIMED_AT,
-        timeout_ms=60_000,
-        cancel_grace_ms=1_000,
+        work=SeatTask(timeout_ms=60_000, cancel_grace_ms=1_000),
     )
 
 
@@ -153,6 +161,43 @@ def test_a_def_task_is_refused_before_it_runs(steps: _Steps) -> None:
         'the task is def, and a shared async child runs only async def tasks'
     )
     assert RAN == []
+
+
+def test_a_refusal_fails_the_task_after_running_and_before_resolve(
+    steps: _Steps,
+) -> None:
+    """The response of an isolated child for a refused stored timeout."""
+    refusal = CancelGraceInvalid(reason='stored cancel_grace_ms is below 100 ms')
+    frame = dataclasses.replace(
+        _frame('seat_double', {'x': 21}),
+        work=SeatRefusal(refusal=refusal),
+    )
+
+    wire = _run(frame)
+
+    assert wire == child_runner._stored_timeout_refusal_response('seat_double', refusal)
+    error = _result(wire, int).unwrap_err()
+    assert error.error_code == OperationalErrorCode.WORKER_SERIALIZATION_ERROR
+    assert error.data == {
+        'task_name': 'seat_double',
+        'field': 'cancel_grace_ms',
+        'min_ms': MIN_CANCEL_GRACE_MS,
+        'max_ms': MAX_CANCEL_GRACE_MS,
+    }
+    assert RAN == []
+    steps.confirm.assert_awaited_once()
+    steps.mark.assert_awaited_once()
+
+
+def test_a_refusal_after_a_stop_before_start_returns_the_stop(steps: _Steps) -> None:
+    steps.confirm.return_value = (False, '', 'CLAIM_LOST')
+    frame = dataclasses.replace(
+        _frame('seat_never'),
+        work=SeatRefusal(refusal=TimeoutValueInvalid(reason='y')),
+    )
+
+    assert _run(frame) == (False, '', 'CLAIM_LOST')
+    steps.mark.assert_not_awaited()
 
 
 def test_a_stop_before_start_runs_no_body_and_writes_no_marker(steps: _Steps) -> None:

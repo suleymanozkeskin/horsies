@@ -5,11 +5,16 @@ child for the ``def`` ready check, and two shared async children with 8 seats
 each. Many shared tasks run at once in those two children; a task that
 outruns its timeout is cancelled in its child and fails with
 ``TASK_TIMEOUT``, and its neighbours finish.
+
+A shared row whose stored timeout or cancel grace the worker cannot use fails
+once with ``WORKER_SERIALIZATION_ERROR``, on that profile and on
+``shared-only-1x4``, which has no isolated child.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Callable
 
 import pytest
@@ -17,7 +22,7 @@ from sqlalchemy import text
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.tasks import OutcomeCode
+from horsies.core.models.tasks import OperationalErrorCode, OutcomeCode
 from horsies.core.task_decorator import TaskHandle
 
 from tests.broker_resources_support import current_resources
@@ -26,7 +31,11 @@ from tests.e2e.helpers.db import wait_for_status
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.tasks import basic as basic_tasks
 from tests.e2e.tasks import shared_async_tasks
-from tests.e2e.tasks.profiles import SPLIT_SHARED_2X8, SPLIT_SHARED_SEATS
+from tests.e2e.tasks.profiles import (
+    SHARED_ONLY_1X4,
+    SPLIT_SHARED_2X8,
+    SPLIT_SHARED_SEATS,
+)
 
 DEFAULT_INSTANCE = 'tests.e2e.tasks.instance:app'
 RESULT_TIMEOUT_MS = 60_000
@@ -44,6 +53,25 @@ def _make_ready_check() -> Callable[[], bool]:
         return handle.get(timeout_ms=2000).is_ok()
 
     return _check
+
+
+def _make_shared_ready_check() -> Callable[[], bool]:
+    """A ready check that a worker with no isolated child can answer."""
+    handle: TaskHandle[str] | None = None
+
+    def _check() -> bool:
+        nonlocal handle
+        if handle is None:
+            handle = unwrap_send(shared_async_tasks.shared_sleep.send(seconds=0))
+        return handle.get(timeout_ms=2000).is_ok()
+
+    return _check
+
+
+READY_CHECKS: dict[str, Callable[[], Callable[[], bool]]] = {
+    SPLIT_SHARED_2X8: _make_ready_check,
+    SHARED_ONLY_1X4: _make_shared_ready_check,
+}
 
 
 async def _value(handle: TaskHandle[str]) -> str:
@@ -164,3 +192,70 @@ async def test_a_shared_task_sends_with_send_async(
             )
             assert_ok(result)
             assert result.unwrap() == x * 2
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+@pytest.mark.parametrize(
+    'profile',
+    [SPLIT_SHARED_2X8, SHARED_ONLY_1X4],
+    ids=['isolated-and-shared-children', 'shared-children-only'],
+)
+@pytest.mark.parametrize(
+    ('dropped_key', 'field'),
+    [('cancel_grace_ms', 'cancel_grace_ms'), ('timeout_ms', 'timeout_ms')],
+    ids=['no-grace', 'no-timeout'],
+)
+async def test_a_shared_row_with_unusable_options_fails_once(
+    broker: PostgresBroker,
+    profile: str,
+    dropped_key: str,
+    field: str,
+) -> None:
+    """The row is written while no worker runs, then its stored options lose
+    a key that a ``SHARED_ASYNC`` row needs. The worker fails it before the
+    task resolves; it never runs it, and never returns it to the queue."""
+    session_factory = current_resources(broker).session_factory
+    handle = unwrap_send(
+        await shared_async_tasks.shared_sleep.send_async(seconds=0),
+    )
+    async with session_factory() as session:
+        stored = (
+            await session.execute(
+                text('SELECT task_options FROM horsies_tasks WHERE id = :id'),
+                {'id': handle.task_id},
+            )
+        ).scalar_one()
+        options = json.loads(stored)
+        del options[dropped_key]
+        await session.execute(
+            text('UPDATE horsies_tasks SET task_options = :opts WHERE id = :id'),
+            {'opts': json.dumps(options), 'id': handle.task_id},
+        )
+        await session.commit()
+
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile=profile,
+        ready_check=READY_CHECKS[profile](),
+    ):
+        await wait_for_status(session_factory, handle.task_id, 'FAILED', timeout_s=30.0)
+
+    async with session_factory() as session:
+        row = (
+            await session.execute(
+                text(
+                    'SELECT error_code, result, retry_count FROM itest_task_rows '
+                    'WHERE id = :id',
+                ),
+                {'id': handle.task_id},
+            )
+        ).one()
+    match row.result:
+        case str() as text_value:
+            result = json.loads(text_value)
+        case decoded:
+            result = decoded
+    assert row.error_code == OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value
+    assert row.retry_count == 0
+    assert f'"field": "{field}"' in json.dumps(result)

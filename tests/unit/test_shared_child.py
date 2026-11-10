@@ -11,6 +11,7 @@ loop with real child processes is covered in ``test_slot_pool``.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import threading
 import time
 from collections.abc import Callable
@@ -28,6 +29,8 @@ from horsies.core.worker.child_protocol import (
     RssReading,
     RunFrame,
     SeatFinished,
+    SeatRefusal,
+    SeatTask,
     SeatTimedOut,
     SharedResultFrame,
     SharedRunFrame,
@@ -40,7 +43,7 @@ from horsies.core.worker.shared_child import (
     SeatLoop,
     bounded_result_frame,
 )
-from horsies.core.worker.stored_timeout import NoTimeout
+from horsies.core.worker.stored_timeout import NoTimeout, TimeoutValueInvalid
 
 pytestmark = [pytest.mark.unit]
 
@@ -106,8 +109,7 @@ def _frame(dispatch: int, task_name: str, timeout_ms: int = 60_000) -> SharedRun
         worker_id='worker-1',
         is_workflow_task=False,
         claimed_at=None,
-        timeout_ms=timeout_ms,
-        cancel_grace_ms=1000,
+        work=SeatTask(timeout_ms=timeout_ms, cancel_grace_ms=1000),
     )
 
 
@@ -322,6 +324,47 @@ class TestDeadline:
                 dispatch=1,
                 task_id='task-1',
                 end=SeatFinished(ok=True, result_json='3', failed_reason=None),
+                rss=RssMb(10.0),
+            ),
+        ]
+
+    def test_a_refusal_runs_with_no_deadline(
+        self,
+        exits: list[tuple[str, int]],
+    ) -> None:
+        """A refusal runs no task code: its seat holds no timer, and it ends
+        with its result, never with the timeout. ``exits`` keeps a defect exit
+        in the test process when the check fails."""
+        release = asyncio.Event()
+
+        async def refuse() -> str:
+            await release.wait()
+            return 'refused'
+
+        seat_loop, writer, _started = _seat_loop(1, {'refuse': refuse})
+        inbox = ParentFrameInbox()
+        refusal = dataclasses.replace(
+            _frame(1, 'refuse'),
+            work=SeatRefusal(refusal=TimeoutValueInvalid(reason='y')),
+        )
+
+        async def scenario() -> None:
+            serving = asyncio.ensure_future(seat_loop.serve(inbox))
+            inbox.put(refusal)
+            await _until(lambda: 1 in seat_loop._seats)
+            assert seat_loop._seats[1].deadline == shared_child._NoDeadline()
+            release.set()
+            await _until(lambda: len(_results(writer)) == 1)
+            inbox.put(StopFrame())
+            await asyncio.wait_for(serving, RUN_TIMEOUT_S)
+
+        asyncio.run(scenario())
+        assert exits == []
+        assert writer.frames == [
+            SharedResultFrame(
+                dispatch=1,
+                task_id='task-1',
+                end=SeatFinished(ok=True, result_json='refused', failed_reason=None),
                 rss=RssMb(10.0),
             ),
         ]

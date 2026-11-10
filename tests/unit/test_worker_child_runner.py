@@ -33,7 +33,9 @@ from horsies.core.codec.typed import decode_task_result
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import (
+    MAX_CANCEL_GRACE_MS,
     MAX_TASK_TIMEOUT_MS,
+    MIN_CANCEL_GRACE_MS,
     MIN_TASK_TIMEOUT_MS,
     OperationalErrorCode,
     OutcomeCode,
@@ -42,6 +44,7 @@ from horsies.core.models.tasks import (
 )
 from horsies.core.types.result import Err
 from horsies.core.worker.stored_timeout import (
+    CancelGraceInvalid,
     OptionsUnreadable,
     TimeoutRefusal,
     TimeoutValueInvalid,
@@ -2471,6 +2474,10 @@ _REFUSALS: list[tuple[TimeoutRefusal, str]] = [
         TimeoutValueInvalid(reason='stored timeout_ms is above the limit'),
         'timeout_ms',
     ),
+    (
+        CancelGraceInvalid(reason='stored cancel_grace_ms is below 100 ms'),
+        'cancel_grace_ms',
+    ),
 ]
 
 
@@ -2525,6 +2532,26 @@ class TestRunTaskEntryStoredTimeout:
             'field': 'timeout_ms',
             'min_ms': MIN_TASK_TIMEOUT_MS,
             'max_ms': MAX_TASK_TIMEOUT_MS,
+        }
+
+    def test_a_bad_grace_names_its_bounds(
+        self,
+        _run_entry_defaults: dict[str, Any],
+    ) -> None:
+        patches = _make_run_task_patches()
+
+        with _apply_patches(patches):
+            _, payload, _ = _run_task_entry(
+                **_run_entry_defaults,
+                timeout=CancelGraceInvalid(reason='stored cancel_grace_ms is absent'),
+            )
+
+        data = _parse_task_result(payload)['err']['data']
+        assert data == {
+            'task_name': 'my_task',
+            'field': 'cancel_grace_ms',
+            'min_ms': MIN_CANCEL_GRACE_MS,
+            'max_ms': MAX_CANCEL_GRACE_MS,
         }
 
 
