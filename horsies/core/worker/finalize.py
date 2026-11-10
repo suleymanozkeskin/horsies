@@ -114,6 +114,10 @@ from horsies.core.worker.runtime import (
     _RequeueOutcome,
     _RetryError,
 )
+from horsies.core.worker.shared_finalize import (
+    future_retry_data,
+    future_retry_write,
+)
 from horsies.core.worker.shared_stop import RetryPlacement
 from horsies.core.worker.stored_timeout import (
     CancelGraceInvalid,
@@ -260,6 +264,9 @@ class FinalizeMixin:
             task_id: str,
             reason: str,
             claimed_at: Optional[datetime] = None,
+            *,
+            failure_code: OperationalErrorCode = OperationalErrorCode.WORKER_CRASHED,
+            retry: RetryPlacement = RetryPlacement.SAME_CLASS,
         ) -> _RequeueOutcome: ...
         async def _should_retry_task(
             self, task_id: str, error: TaskError, session: AsyncSession
@@ -647,6 +654,7 @@ class FinalizeMixin:
             task_id,
             reason,
             claimed_at=claimed_at,
+            retry=retry,
         )
         return Err(
             self._make_finalize_error(
@@ -655,8 +663,12 @@ class FinalizeMixin:
                 message=reason,
                 retryable=requeue_outcome is _RequeueOutcome.DB_ERROR,
                 data={
+                    **future_retry_data(
+                        OperationalErrorCode.WORKER_CRASHED,
+                        retry,
+                        claimed_at,
+                    ),
                     'requeue_outcome': requeue_outcome.value,
-                    'claimed_at': claimed_at,
                 },
             )
         )
@@ -1682,12 +1694,15 @@ class FinalizeMixin:
             return
 
         claimed_at_raw = (err.data or {}).get('claimed_at')
+        failure_code, retry = future_retry_write(err.data)
         outcome = await self._recover_worker_future_failure(
             err.task_id,
             f'Retry after future-stage finalize error: {err.message}',
             claimed_at=(
                 claimed_at_raw if isinstance(claimed_at_raw, datetime) else None
             ),
+            failure_code=failure_code,
+            retry=retry,
         )
         if outcome in (
             _RequeueOutcome.REQUEUED,

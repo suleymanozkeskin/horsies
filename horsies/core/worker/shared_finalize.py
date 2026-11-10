@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Any, Optional, assert_never
 
 from horsies.core.logging import get_logger
 from horsies.core.models.tasks import OperationalErrorCode
-from horsies.core.types.result import Err, Result
+from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.child_protocol import SeatRefusal, SeatTask, SeatWork
 from horsies.core.worker.runtime import (
     _FINALIZE_STAGE_FUTURE,
@@ -154,9 +154,11 @@ class SharedKillFinalizeMixin:
         failure_code: OperationalErrorCode,
         retry: RetryPlacement,
     ) -> Result[None, _FinalizeError]:
-        """Fail or retry a killed run with ``failure_code``, as crash recovery
-        does. The result is a future-stage error, retryable only when the
-        write hit a database error, as for a lost child."""
+        """Fail or retry a killed run with ``failure_code``, through the
+        writer of crash recovery. ``Ok``: the row is written, or another
+        actor holds it. A database error is a retryable future-stage error
+        whose data keeps the code and the retry placement, so the retry of
+        the write (``future_retry_write``) writes the same verdict."""
         logger.warning('Task %s: %s', task_id, reason)
         requeue_outcome = await self._recover_worker_future_failure(
             task_id,
@@ -165,16 +167,50 @@ class SharedKillFinalizeMixin:
             failure_code=failure_code,
             retry=retry,
         )
-        return Err(
-            self._make_finalize_error(
-                task_id=task_id,
-                stage=_FINALIZE_STAGE_FUTURE,
-                message=reason,
-                retryable=requeue_outcome is _RequeueOutcome.DB_ERROR,
-                data={
-                    'failure_code': failure_code.value,
-                    'requeue_outcome': requeue_outcome.value,
-                    'claimed_at': claimed_at,
-                },
-            )
-        )
+        match requeue_outcome:
+            case (
+                _RequeueOutcome.REQUEUED
+                | _RequeueOutcome.TERMINAL_REPLAYED
+                | _RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED
+            ):
+                return Ok(None)
+            case _RequeueOutcome.DB_ERROR:
+                return Err(
+                    self._make_finalize_error(
+                        task_id=task_id,
+                        stage=_FINALIZE_STAGE_FUTURE,
+                        message=reason,
+                        retryable=True,
+                        data=future_retry_data(failure_code, retry, claimed_at),
+                    )
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
+
+
+def future_retry_data(
+    failure_code: OperationalErrorCode,
+    retry: RetryPlacement,
+    claimed_at: Optional[datetime],
+) -> dict[str, Any]:
+    """The data of a future-stage error whose retry must write
+    ``failure_code`` with ``retry``. Pure."""
+    return {
+        'failure_code': failure_code.value,
+        'retry': retry.value,
+        'claimed_at': claimed_at,
+    }
+
+
+def future_retry_write(
+    data: dict[str, Any] | None,
+) -> tuple[OperationalErrorCode, RetryPlacement]:
+    """The code and the retry placement that the retry of a future-stage
+    error writes: those that ``future_retry_data`` kept, else those of crash
+    recovery (``WORKER_CRASHED``, in its class). A kept value that is not a
+    member is a defect: ``ValueError``. Pure."""
+    match data:
+        case {'failure_code': str() as code, 'retry': str() as placement}:
+            return OperationalErrorCode(code), RetryPlacement(placement)
+        case _:
+            return OperationalErrorCode.WORKER_CRASHED, RetryPlacement.SAME_CLASS

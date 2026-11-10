@@ -69,6 +69,10 @@ from horsies.core.worker.slots import (
     SharedRunRequest,
     SlotPool,
 )
+from horsies.core.worker.shared_finalize import (
+    future_retry_data,
+    future_retry_write,
+)
 from horsies.core.worker.shared_stop import (
     BesideBlockedLoop,
     BlockedTheLoop,
@@ -584,11 +588,7 @@ class TestFinalizeKilledRun:
             BlockedTheLoop(blocked_ms=5100, where='app.py:7 in fetch'),
         )
 
-        match result:
-            case Err(err_value=error):
-                assert error.retryable is False
-            case Ok():
-                raise AssertionError(result)
+        assert result == Ok(None)
         writes.recovery.assert_awaited_once()
         assert writes.recovery.await_args is not None
         assert writes.recovery.await_args.kwargs == {
@@ -615,18 +615,59 @@ class TestFinalizeKilledRun:
         assert 'Task task-9 held the event loop' in writes.recovery.await_args.args[1]
 
     async def test_a_database_error_of_the_write_is_retryable(self) -> None:
+        """The error keeps the verdict, so its retry writes the same code in
+        the same class, not the crash code."""
         writes = _KillWrites()
         writes.recovery.return_value = _RequeueOutcome.DB_ERROR
 
         result = await writes.finalize(
-            BesideBlockedLoop(holder_task_id='task-9', blocked_ms=5100),
+            BlockedTheLoop(blocked_ms=5100, where='app.py:7 in fetch'),
         )
 
         match result:
             case Err(err_value=error):
                 assert error.retryable is True
+                assert future_retry_write(error.data) == (
+                    OperationalErrorCode.TASK_BLOCKED_LOOP,
+                    RetryPlacement.ISOLATED,
+                )
             case Ok():
                 raise AssertionError(result)
+
+    async def test_the_retry_of_a_failed_kill_write_writes_the_same_verdict(
+        self,
+    ) -> None:
+        writes = _KillWrites()
+        error = writes.worker._make_finalize_error(
+            task_id='task-1',
+            stage='future',
+            message='kill write failed',
+            retryable=True,
+            data=future_retry_data(
+                OperationalErrorCode.NEIGHBOUR_BLOCKED_LOOP,
+                RetryPlacement.SAME_CLASS,
+                CLAIMED_AT,
+            ),
+        )
+
+        await writes.worker._retry_finalize_future(error, 0.0)
+
+        assert writes.recovery.await_args is not None
+        assert writes.recovery.await_args.kwargs == {
+            'claimed_at': CLAIMED_AT,
+            'failure_code': OperationalErrorCode.NEIGHBOUR_BLOCKED_LOOP,
+            'retry': RetryPlacement.SAME_CLASS,
+        }
+
+    async def test_a_crash_error_retries_as_a_crash(self) -> None:
+        assert future_retry_write({'claimed_at': None}) == (
+            OperationalErrorCode.WORKER_CRASHED,
+            RetryPlacement.SAME_CLASS,
+        )
+        assert future_retry_write(None) == (
+            OperationalErrorCode.WORKER_CRASHED,
+            RetryPlacement.SAME_CLASS,
+        )
 
     async def test_a_refusal_past_a_deadline_is_a_defect(self) -> None:
         """A refusal has no deadline, so the slot never gives this verdict."""
