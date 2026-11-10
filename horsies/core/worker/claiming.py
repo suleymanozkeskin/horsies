@@ -153,6 +153,8 @@ class ClaimMixin:
             is_workflow_task: bool = True,
             timeout: StoredTimeout = NoTimeout(),
             claimed_at: Optional[datetime] = None,
+            *,
+            task_options: str | None,
         ) -> None: ...
 
     async def _claim_and_dispatch_all(self) -> ClaimPass:
@@ -240,6 +242,7 @@ class ClaimMixin:
                 bool(row.get('is_workflow_task', False)),
                 timeout=read_stored_timeout(row.get('task_options')),
                 claimed_at=row.get('claimed_at'),
+                task_options=row.get('task_options'),
             )
         return ClaimPass(
             claimed=len(claimed_rows),

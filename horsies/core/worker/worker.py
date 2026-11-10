@@ -28,7 +28,18 @@ from horsies.core.worker.config import WorkerConfig as WorkerConfig  # noqa: F40
 from horsies.core.worker.child_pool import (
     _initialize_worker_pool as _initialize_worker_pool,
 )  # noqa: F401
-from horsies.core.worker.child_protocol import InitFrame, IsolatedChild, RssMb
+from horsies.core.models.worker_profile import (
+    MemoryLimit,
+    NoMemoryLimit,
+    NoSharedAsyncChildren,
+    SharedAsyncChildren,
+)
+from horsies.core.worker.child_protocol import (
+    InitFrame,
+    IsolatedChild,
+    RssMb,
+    SharedAsyncChild,
+)
 from horsies.core.worker.runner_heartbeat import (
     FailClosedCause,
     PostgresBeatWriter,
@@ -161,6 +172,60 @@ from horsies.core.worker.runtime import (  # noqa: F401,E402
     _ReaperPassState as _ReaperPassState,
     _collect_psutil_metrics as _collect_psutil_metrics,
 )
+
+
+def _check_baseline_against(
+    baselines: tuple[ChildBaseline, ...],
+    threshold: int | None,
+    limit_name: str,
+) -> None:
+    """Fail or warn when these booted children crowd their memory limit.
+
+    ``threshold`` is the limit in MB, or None for no limit; ``limit_name``
+    names it in the messages. No children of a kind check nothing.
+
+    Raises:
+        MemoryBaselineExceedsThresholdError: a settled baseline RSS is at or
+            above ``threshold``.
+    """
+    if threshold is None or not baselines:
+        return
+    samples = [
+        baseline.rss.value for baseline in baselines if isinstance(baseline.rss, RssMb)
+    ]
+    if not samples:
+        logger.warning(
+            '%s=%sMB is set but child baseline RSS '
+            'was unreadable; skipping the startup baseline guard. Per-child '
+            'recycle is best-effort and will not fire while the per-task RSS '
+            'reader keeps failing the same way (fail-open).',
+            limit_name,
+            threshold,
+        )
+        return
+    max_baseline = max(samples)
+    if max_baseline >= threshold:
+        raise MemoryBaselineExceedsThresholdError(
+            f'child baseline {max_baseline:.0f}MB >= '
+            f'{limit_name} {threshold}MB; the app does not fit '
+            'this per-child budget — raise the budget or the threshold'
+        )
+    if max_baseline >= 0.8 * threshold:
+        logger.warning(
+            'Child baseline %.0fMB is within 80%% of '
+            '%s %sMB; little headroom for per-task '
+            'working set, so children may recycle frequently',
+            max_baseline,
+            limit_name,
+            threshold,
+        )
+    else:
+        logger.info(
+            'Child baseline %.0fMB vs %s %sMB',
+            max_baseline,
+            limit_name,
+            threshold,
+        )
 
 
 class Worker(
@@ -333,26 +398,44 @@ class Worker(
             max_tasks_per_child=self.cfg.max_tasks_per_child,
             max_memory_per_child_mb=self.cfg.max_memory_per_child_mb,
             child_preload=self.cfg.child_preload,
+            shared_async=self.cfg.shared_async,
         )
 
     def _pending_task_limit(self) -> int:
-        """The most tasks that may wait for a slot: twice the claim budget."""
+        """The most tasks that may wait for a slot or a seat: twice the claim
+        budget."""
         budget = max(
-            self.cfg.processes + self.cfg.prefetch_buffer,
+            self.cfg.seat_count() + self.cfg.prefetch_buffer,
             self.cfg.max_claim_per_worker,
         )
         return 2 * budget
 
     def _claim_slot_count(self) -> int:
-        """The slots that the claim budget counts: every slot that is not down.
+        """The tasks that the claim budget counts.
 
-        A slot that is down for a cause that can clear takes no task, so the
-        claim leaves it out. A claim pass before the slot pool exists is a
-        defect: ``AssertionError``.
+        The isolated slots that are not down, plus ``_shared_async_capacity``.
+        The claim takes rows of every class into one budget, and dispatch
+        routes each row to its kind of child. A slot that is down for a cause
+        that can clear takes no task, so the claim leaves it out. A claim pass
+        before the slot pool exists is a defect: ``AssertionError``.
         """
         match self._slots:
             case SlotPool() as pool:
-                return pool.slots_in_service()
+                return pool.slots_in_service() + self._shared_async_capacity()
+            case None:
+                raise AssertionError('a claim pass ran before the slot pool exists')
+
+    def _shared_async_capacity(self) -> int:
+        """The ``SHARED_ASYNC`` capacity of this worker, for the claim: the
+        seats of its shared async children in service
+        (``SlotPool.shared_async_capacity``). 0 for a worker with none.
+
+        A claim pass before the slot pool exists is a defect:
+        ``AssertionError``.
+        """
+        match self._slots:
+            case SlotPool() as pool:
+                return pool.shared_async_capacity()
             case None:
                 raise AssertionError('a claim pass ran before the slot pool exists')
 
@@ -397,7 +480,7 @@ class Worker(
                 logger.info(
                     'Worker child processes ready: %s/%s',
                     len(baselines),
-                    self.cfg.processes,
+                    self.cfg.processes + self.cfg.shared_async_children(),
                 )
                 self._check_memory_baseline(baselines)
                 self._runner_heartbeat = self._launch_runner_heartbeat(pool)
@@ -480,49 +563,44 @@ class Worker(
     def _check_memory_baseline(self, baselines: tuple[ChildBaseline, ...]) -> None:
         """Fail or warn when the booted child baseline crowds the threshold.
 
+        Each kind of child is compared with its own limit: isolated children
+        with ``max_memory_per_child_mb``, shared async children with the
+        memory limit of their recycle setting.
+
         Raises:
             MemoryBaselineExceedsThresholdError: a child's settled baseline RSS
-                is at or above ``max_memory_per_child_mb`` — the app does not
+                is at or above the memory limit of its kind — the app does not
                 fit this per-child budget, so recycling would fire every task.
         """
-        threshold = self.cfg.max_memory_per_child_mb
-        if threshold is None:
-            return
-        samples = [
-            baseline.rss.value
+        isolated = tuple(
+            baseline
             for baseline in baselines
-            if isinstance(baseline.rss, RssMb)
-        ]
-        if not samples:
-            logger.warning(
-                'max_memory_per_child_mb=%sMB is set but child baseline RSS '
-                'was unreadable; skipping the startup baseline guard. Per-child '
-                'recycle is best-effort and will not fire while the per-task RSS '
-                'reader keeps failing the same way (fail-open).',
-                threshold,
-            )
-            return
-        max_baseline = max(samples)
-        if max_baseline >= threshold:
-            raise MemoryBaselineExceedsThresholdError(
-                f'child baseline {max_baseline:.0f}MB >= '
-                f'max_memory_per_child_mb {threshold}MB; the app does not fit '
-                'this per-child budget — raise the budget or the threshold'
-            )
-        if max_baseline >= 0.8 * threshold:
-            logger.warning(
-                'Child baseline %.0fMB is within 80%% of '
-                'max_memory_per_child_mb %sMB; little headroom for per-task '
-                'working set, so children may recycle frequently',
-                max_baseline,
-                threshold,
-            )
-        else:
-            logger.info(
-                'Child baseline %.0fMB vs max_memory_per_child_mb %sMB',
-                max_baseline,
-                threshold,
-            )
+            if isinstance(baseline.child_kind, IsolatedChild)
+        )
+        _check_baseline_against(
+            isolated,
+            self.cfg.max_memory_per_child_mb,
+            'max_memory_per_child_mb',
+        )
+        match self.cfg.shared_async:
+            case SharedAsyncChildren(recycle=recycle):
+                match recycle.above:
+                    case MemoryLimit(mb=mb):
+                        shared_limit_mb: int | None = mb
+                    case NoMemoryLimit():
+                        shared_limit_mb = None
+            case NoSharedAsyncChildren():
+                shared_limit_mb = None
+        shared = tuple(
+            baseline
+            for baseline in baselines
+            if isinstance(baseline.child_kind, SharedAsyncChild)
+        )
+        _check_baseline_against(
+            shared,
+            shared_limit_mb,
+            'the shared async memory limit',
+        )
 
     def _stop_for_child_hook_failure(self, exc: ChildHookFailedError) -> None:
         """Stop the worker on a hook failure instead of restart-looping.
@@ -738,11 +816,13 @@ class Worker(
             max_claimed_effective = (
                 self.cfg.max_claim_per_worker
                 if self.cfg.max_claim_per_worker > 0
-                else self.cfg.processes
+                else self.cfg.seat_count()
             )
             logger.info(
-                'Concurrency config: processes=%s, cluster_wide_cap=%s, max_claim_per_worker=%s, max_claim_batch=%s',
+                'Concurrency config: processes=%s, shared_async_children=%s, seats=%s, cluster_wide_cap=%s, max_claim_per_worker=%s, max_claim_batch=%s',
                 self.cfg.processes,
+                self.cfg.shared_async_children(),
+                self.cfg.seat_count(),
                 (
                     self.cfg.cluster_wide_cap
                     if self.cfg.cluster_wide_cap is not None

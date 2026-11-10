@@ -1511,6 +1511,7 @@ class TestDispatchOne:
             True,
             timeout=TaskTimeout(ms=1000),
             claimed_at=claimed_at,
+            task_options=None,
         )
 
         frame = worker._slots.submit.call_args.args[0]
@@ -1543,6 +1544,7 @@ class TestDispatchOne:
             False,
             timeout=TaskTimeout(ms=1000),
             claimed_at=claimed_at,
+            task_options=None,
         )
 
         worker._finalize_after.assert_called_once_with(

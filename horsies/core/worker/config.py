@@ -159,6 +159,20 @@ class WorkerConfig:
             case NoSharedAsyncChildren():
                 return 0
 
+    def seat_count(self) -> int:
+        """The tasks that the children run at once: one per isolated child,
+        and the seats of each shared async child."""
+        from horsies.core.models.worker_profile import (
+            NoSharedAsyncChildren,
+            SharedAsyncChildren,
+        )
+
+        match self.shared_async:
+            case SharedAsyncChildren(count=count, seats=seats):
+                return self.processes + count * seats
+            case NoSharedAsyncChildren():
+                return self.processes
+
     def __post_init__(self) -> None:
         if self.processes < 0:
             raise ValueError(f'processes must be >= 0; got {self.processes}')

@@ -1,0 +1,503 @@
+"""The worker side of shared async tasks: routing, the finalize path, the
+backstop of a run, the capacity for the claim, and the memory guard.
+
+The slot pool is replaced where the test is about the worker's decisions; the
+pool itself is covered with real children in ``test_shared_slot_pool``.
+"""
+
+# pyright: reportPrivateUsage=false
+
+from __future__ import annotations
+
+import asyncio
+import json
+from collections.abc import Coroutine
+from datetime import datetime, timezone
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from horsies.core.models.tasks import (
+    DEFAULT_CANCEL_GRACE_MS,
+    MIN_TASK_TIMEOUT_MS,
+    Execution,
+)
+from horsies.core.models.worker_profile import (
+    MemoryLimit,
+    NoSharedAsyncChildren,
+    SharedAsyncChildren,
+    SharedRecycle,
+)
+from horsies.core.types.result import Err, Ok
+from horsies.core.worker import finalize
+from horsies.core.worker.child_protocol import IsolatedChild, RssMb, SharedAsyncChild
+from horsies.core.worker.config import WorkerConfig
+from horsies.core.worker.dispatch_route import RunIsolated, RunShared, dispatch_route
+from horsies.core.worker.runtime import (
+    MemoryBaselineExceedsThresholdError,
+    _AttemptEndUnknown,
+    _RequeueOutcome,
+    _TimeoutSettled,
+    _TimeoutWriteFailed,
+)
+from horsies.core.worker.slots import (
+    Assigned,
+    ChildBaseline,
+    ChildEnded,
+    ChildEndUnknown,
+    ChildLost,
+    DeadlineAcknowledged,
+    KilledBySignal,
+    LossCause,
+    NotDispatched,
+    NotRunCause,
+    SeatDeadlineEnded,
+    SeatTaskFinished,
+    SharedAnswered,
+    SharedHandle,
+    SharedRunRequest,
+    SlotPool,
+)
+from horsies.core.worker.stored_timeout import NoTimeout, OptionsUnreadable, TaskTimeout
+from horsies.core.worker.worker import Worker
+
+pytestmark = [pytest.mark.unit]
+
+CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
+SHARED = SharedAsyncChildren(count=2, seats=5)
+
+
+def _options(**fields: Any) -> str:
+    return json.dumps(fields)
+
+
+SHARED_OPTIONS = _options(
+    timeout_ms=2000,
+    execution=Execution.SHARED_ASYNC.value,
+    cancel_grace_ms=700,
+)
+
+
+def _worker(
+    shared_async: SharedAsyncChildren | NoSharedAsyncChildren = SHARED,
+    processes: int = 1,
+) -> Worker:
+    cfg = WorkerConfig(
+        dsn='postgresql+psycopg://u:p@localhost/db',
+        psycopg_dsn='postgresql://u:p@localhost/db',
+        queues=['default'],
+        processes=processes,
+        shared_async=shared_async,
+    )
+    return Worker(session_factory=MagicMock(), listener=MagicMock(), cfg=cfg)
+
+
+def _request(timeout_ms: int = MIN_TASK_TIMEOUT_MS) -> SharedRunRequest:
+    return SharedRunRequest(
+        task_id='task-1',
+        task_name='fetch',
+        args_json=None,
+        kwargs_json=None,
+        worker_id='worker-1',
+        is_workflow_task=False,
+        claimed_at=CLAIMED_AT,
+        timeout_ms=timeout_ms,
+        cancel_grace_ms=DEFAULT_CANCEL_GRACE_MS,
+    )
+
+
+def _close_coroutine(coro: Coroutine[Any, Any, Any], **_kwargs: object) -> None:
+    """Stands in for the spawn of a finalizer: the coroutine never runs."""
+    coro.close()
+
+
+def _handle(loop: asyncio.AbstractEventLoop) -> SharedHandle:
+    return SharedHandle(_request().frame_for(1), loop)
+
+
+class TestRoute:
+    def test_a_shared_async_row_runs_on_a_shared_child(self) -> None:
+        route = dispatch_route(SHARED_OPTIONS, TaskTimeout(ms=2000), SHARED)
+        assert route == RunShared(timeout_ms=2000, cancel_grace_ms=700)
+
+    def test_a_worker_with_no_shared_children_runs_it_isolated(self) -> None:
+        route = dispatch_route(
+            SHARED_OPTIONS, TaskTimeout(ms=2000), NoSharedAsyncChildren()
+        )
+        assert route == RunIsolated()
+
+    @pytest.mark.parametrize(
+        ('options', 'timeout'),
+        [
+            (_options(timeout_ms=2000, execution='ISOLATED'), TaskTimeout(ms=2000)),
+            (_options(timeout_ms=2000), TaskTimeout(ms=2000)),
+            (None, NoTimeout()),
+            (SHARED_OPTIONS, NoTimeout()),
+            ('{not json', OptionsUnreadable(reason='x')),
+            (
+                _options(
+                    timeout_ms=2000,
+                    execution='SHARED_ASYNC',
+                    cancel_grace_ms=1,
+                ),
+                TaskTimeout(ms=2000),
+            ),
+            (
+                _options(timeout_ms=2000, execution='SHARED_ASYNC'),
+                TaskTimeout(ms=2000),
+            ),
+        ],
+        ids=[
+            'isolated-class',
+            'no-class-key',
+            'no-options',
+            'no-timeout',
+            'unreadable-options',
+            'grace-out-of-bounds',
+            'grace-absent',
+        ],
+    )
+    def test_every_other_row_runs_isolated(
+        self, options: str | None, timeout: Any
+    ) -> None:
+        assert dispatch_route(options, timeout, SHARED) == RunIsolated()
+
+
+@pytest.mark.asyncio
+class TestDispatch:
+    async def test_a_shared_row_is_submitted_to_the_shared_children(self) -> None:
+        worker = _worker()
+        worker._slots = MagicMock()
+        worker._spawn_background = MagicMock()  # type: ignore[method-assign]
+        worker._finalize_shared_after = MagicMock()  # type: ignore[method-assign]
+
+        await worker._dispatch_one(
+            'task-9',
+            'fetch',
+            None,
+            '{}',
+            'io',
+            False,
+            timeout=TaskTimeout(ms=2000),
+            claimed_at=CLAIMED_AT,
+            task_options=SHARED_OPTIONS,
+        )
+
+        worker._slots.submit.assert_not_called()
+        request = worker._slots.submit_shared.call_args.args[0]
+        assert request == SharedRunRequest(
+            task_id='task-9',
+            task_name='fetch',
+            args_json=None,
+            kwargs_json='{}',
+            worker_id=worker.worker_instance_id,
+            is_workflow_task=False,
+            claimed_at=CLAIMED_AT,
+            timeout_ms=2000,
+            cancel_grace_ms=700,
+        )
+        worker._finalize_shared_after.assert_called_once_with(
+            worker._slots.submit_shared.return_value,
+            'task-9',
+            'io',
+            False,
+            RunShared(timeout_ms=2000, cancel_grace_ms=700),
+            task_name='fetch',
+            claimed_at=CLAIMED_AT,
+        )
+        assert worker._spawn_background.call_args.kwargs['finalizer'] is True
+
+    async def test_with_no_shared_children_the_row_runs_isolated(self) -> None:
+        worker = _worker(NoSharedAsyncChildren())
+        worker._slots = MagicMock()
+        worker._spawn_background = MagicMock(  # type: ignore[method-assign]
+            side_effect=_close_coroutine,
+        )
+
+        await worker._dispatch_one(
+            'task-9',
+            'fetch',
+            None,
+            '{}',
+            timeout=TaskTimeout(ms=2000),
+            claimed_at=CLAIMED_AT,
+            task_options=SHARED_OPTIONS,
+        )
+
+        worker._slots.submit_shared.assert_not_called()
+        assert worker._slots.submit.call_args.args[0].task_id == 'task-9'
+
+
+@pytest.mark.asyncio
+class TestFinalizeShared:
+    def _worker_with_paths(self) -> Worker:
+        worker = _worker()
+        worker._finalize_task_result = AsyncMock(return_value=Ok(None))  # type: ignore[method-assign]
+        worker._record_task_timeout = AsyncMock(return_value=_TimeoutSettled())  # type: ignore[method-assign]
+        worker._finalize_child_loss = AsyncMock(return_value=Ok(None))  # type: ignore[method-assign]
+        worker._requeue_claimed_task = AsyncMock(  # type: ignore[method-assign]
+            return_value=_RequeueOutcome.REQUEUED,
+        )
+        worker._recover_worker_future_failure = AsyncMock(  # type: ignore[method-assign]
+            return_value=_RequeueOutcome.REQUEUED,
+        )
+        return worker
+
+    async def _finalize(self, worker: Worker, outcome: Any) -> Any:
+        handle = _handle(asyncio.get_running_loop())
+        handle.finish(outcome)
+        return await worker._finalize_shared_after(
+            handle,
+            'task-1',
+            'default',
+            False,
+            RunShared(timeout_ms=1500, cancel_grace_ms=500),
+            task_name='fetch',
+            claimed_at=CLAIMED_AT,
+        )
+
+    async def test_a_result_takes_the_path_of_an_isolated_result(self) -> None:
+        worker = self._worker_with_paths()
+
+        await self._finalize(worker, SeatTaskFinished(True, '{"x":1}', None))
+
+        worker._finalize_task_result.assert_awaited_once_with(  # type: ignore[attr-defined]
+            'task-1',
+            True,
+            '{"x":1}',
+            None,
+            queue_name='default',
+            is_workflow_task=False,
+            task_name='fetch',
+            claimed_at=CLAIMED_AT,
+        )
+
+    async def test_a_reported_deadline_writes_the_timeout(self) -> None:
+        worker = self._worker_with_paths()
+
+        result = await self._finalize(worker, SeatDeadlineEnded())
+
+        assert result == Ok(None)
+        worker._record_task_timeout.assert_awaited_once_with(  # type: ignore[attr-defined]
+            'task-1',
+            1500,
+            CLAIMED_AT,
+        )
+        worker._recover_worker_future_failure.assert_not_awaited()  # type: ignore[attr-defined]
+
+    async def test_a_failed_timeout_write_takes_crash_recovery(self) -> None:
+        worker = self._worker_with_paths()
+        worker._record_task_timeout.return_value = _TimeoutWriteFailed()  # type: ignore[attr-defined]
+
+        result = await self._finalize(worker, SeatDeadlineEnded())
+
+        assert isinstance(result, Err)
+        worker._recover_worker_future_failure.assert_awaited_once()  # type: ignore[attr-defined]
+
+    async def test_a_lost_child_takes_crash_recovery(self) -> None:
+        worker = self._worker_with_paths()
+        lost = ChildLost(LossCause.CHILD_DIED, KilledBySignal(9), False, 42)
+
+        await self._finalize(worker, lost)
+
+        worker._finalize_child_loss.assert_awaited_once_with(  # type: ignore[attr-defined]
+            'task-1',
+            lost,
+            CLAIMED_AT,
+        )
+
+    async def test_a_task_that_reached_no_child_is_requeued(self) -> None:
+        worker = self._worker_with_paths()
+
+        await self._finalize(worker, NotDispatched(NotRunCause.POOL_STOPPING))
+
+        worker._requeue_claimed_task.assert_awaited_once()  # type: ignore[attr-defined]
+        worker._record_task_timeout.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+class TestBackstopTimer:
+    async def test_the_backstop_runs_after_the_deadline_and_the_grace(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The parent waits timeout + grace + margin; the margin is cut here so
+        the test waits 0.1 s."""
+        monkeypatch.setattr(finalize, 'SHARED_BACKSTOP_MARGIN_S', -1.4)
+        worker = _worker()
+        worker._handle_shared_backstop = AsyncMock(  # type: ignore[method-assign]
+            return_value=_TimeoutSettled(),
+        )
+        handle = _handle(asyncio.get_running_loop())
+        handle.assigned.set_result(Assigned())
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+
+        outcome = await worker._await_shared_outcome(
+            handle,
+            'task-1',
+            RunShared(timeout_ms=1000, cancel_grace_ms=500),
+            CLAIMED_AT,
+        )
+
+        assert outcome == _TimeoutSettled()
+        assert 0.05 <= loop.time() - started < 1.0
+        worker._handle_shared_backstop.assert_awaited_once_with(  # type: ignore[attr-defined]
+            handle,
+            'task-1',
+            1000,
+            CLAIMED_AT,
+        )
+
+    async def test_an_outcome_before_the_backstop_removes_the_timer(self) -> None:
+        worker = _worker()
+        worker._handle_shared_backstop = AsyncMock()  # type: ignore[method-assign]
+        handle = _handle(asyncio.get_running_loop())
+        finished = SeatTaskFinished(True, '1', None)
+        handle.finish(finished)
+
+        outcome = await worker._await_shared_outcome(
+            handle,
+            'task-1',
+            RunShared(timeout_ms=1000, cancel_grace_ms=500),
+            CLAIMED_AT,
+        )
+
+        assert outcome == finished
+        worker._handle_shared_backstop.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+class TestBackstopDecision:
+    async def _backstop(self, worker: Worker, kill: Any, handle: SharedHandle) -> Any:
+        handle.backstop_kill = AsyncMock(return_value=kill)  # type: ignore[method-assign]
+        return await worker._handle_shared_backstop(handle, 'task-1', 1000, CLAIMED_AT)
+
+    async def test_a_frozen_child_killed_and_seen_exiting_writes_the_timeout(
+        self,
+    ) -> None:
+        worker = _worker()
+        worker._record_task_timeout = AsyncMock(return_value=_TimeoutSettled())  # type: ignore[method-assign]
+
+        outcome = await self._backstop(
+            worker,
+            ChildEnded(pid=7, child_exit=KilledBySignal(9)),
+            _handle(asyncio.get_running_loop()),
+        )
+
+        assert outcome == _TimeoutSettled()
+        worker._record_task_timeout.assert_awaited_once_with('task-1', 1000, CLAIMED_AT)  # type: ignore[attr-defined]
+
+    async def test_no_exit_seen_writes_nothing(self) -> None:
+        worker = _worker()
+        worker._record_task_timeout = AsyncMock()  # type: ignore[method-assign]
+
+        outcome = await self._backstop(
+            worker,
+            ChildEndUnknown(pid=7),
+            _handle(asyncio.get_running_loop()),
+        )
+
+        assert outcome == _AttemptEndUnknown()
+        worker._record_task_timeout.assert_not_awaited()  # type: ignore[attr-defined]
+
+    async def test_a_live_child_is_not_killed_and_the_outcome_is_awaited(self) -> None:
+        worker = _worker()
+        worker._record_task_timeout = AsyncMock()  # type: ignore[method-assign]
+        handle = _handle(asyncio.get_running_loop())
+        asyncio.get_running_loop().call_later(
+            0.02,
+            handle.finish,
+            SeatDeadlineEnded(),
+        )
+
+        outcome = await self._backstop(worker, DeadlineAcknowledged(pid=7), handle)
+
+        assert outcome == SeatDeadlineEnded()
+        worker._record_task_timeout.assert_not_awaited()  # type: ignore[attr-defined]
+
+    async def test_a_run_that_already_ended_gives_its_outcome(self) -> None:
+        worker = _worker()
+        finished = SeatTaskFinished(True, '1', None)
+
+        outcome = await self._backstop(
+            worker,
+            SharedAnswered(finished),
+            _handle(asyncio.get_running_loop()),
+        )
+
+        assert outcome == finished
+
+    async def test_a_failed_write_after_the_kill_gives_the_loss_of_the_child(
+        self,
+    ) -> None:
+        worker = _worker()
+        worker._record_task_timeout = AsyncMock(return_value=_TimeoutWriteFailed())  # type: ignore[method-assign]
+        handle = _handle(asyncio.get_running_loop())
+        lost = ChildLost(LossCause.KILLED_BY_PARENT, KilledBySignal(9), False, 7)
+        handle.finish(lost)
+
+        outcome = await self._backstop(
+            worker,
+            ChildEnded(pid=7, child_exit=KilledBySignal(9)),
+            handle,
+        )
+
+        assert outcome == lost
+
+
+class TestCapacityAndConfig:
+    def test_the_claim_counts_isolated_slots_and_shared_capacity(self) -> None:
+        worker = _worker()
+        pool = MagicMock(spec=SlotPool)
+        pool.slots_in_service.return_value = 1
+        pool.shared_async_capacity.return_value = 7
+        worker._slots = pool
+
+        assert worker._shared_async_capacity() == 7
+        assert worker._claim_slot_count() == 8
+
+    def test_the_pool_config_carries_the_shared_children(self) -> None:
+        worker = _worker()
+        assert worker._slot_pool_config().shared_async == SHARED
+        assert worker._slot_pool_config().slots == 1
+
+    def test_the_pending_limit_counts_the_seats(self) -> None:
+        assert _worker()._pending_task_limit() == 2 * (1 + 2 * 5)
+
+    def test_a_worker_with_only_shared_children_is_valid(self) -> None:
+        worker = _worker(processes=0)
+        assert worker.cfg.seat_count() == 10
+
+    def test_a_worker_with_no_child_is_refused(self) -> None:
+        with pytest.raises(ValueError, match='at least one child'):
+            _worker(NoSharedAsyncChildren(), processes=0)
+
+
+class TestSharedMemoryBaseline:
+    def _worker(self, shared_mb: int | None) -> Worker:
+        recycle = (
+            SharedRecycle(above=MemoryLimit(mb=shared_mb))
+            if shared_mb is not None
+            else SharedRecycle()
+        )
+        return _worker(SharedAsyncChildren(count=1, seats=4, recycle=recycle))
+
+    def test_a_shared_baseline_at_its_limit_is_refused(self) -> None:
+        with pytest.raises(MemoryBaselineExceedsThresholdError, match='shared async'):
+            self._worker(100)._check_memory_baseline(
+                (ChildBaseline(1, RssMb(100.0), SharedAsyncChild(seats=4)),),
+            )
+
+    def test_the_shared_limit_does_not_apply_to_isolated_children(self) -> None:
+        self._worker(100)._check_memory_baseline(
+            (ChildBaseline(1, RssMb(500.0), IsolatedChild()),),
+        )
+
+    def test_the_isolated_limit_does_not_apply_to_shared_children(self) -> None:
+        worker = self._worker(None)
+        worker.cfg.max_memory_per_child_mb = 100
+        worker._check_memory_baseline(
+            (ChildBaseline(1, RssMb(500.0), SharedAsyncChild(seats=4)),),
+        )

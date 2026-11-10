@@ -2,9 +2,11 @@
 
 DispatchMixin submits claimed rows to the slot pool and contains child
 failures: requeue of a task that never reached a child, recovery of a task
-whose child was lost, and the timeout handler, which ends the attempt before it
-writes the ownership-guarded row. Worker-internal mixin: the ``TYPE_CHECKING``
-block declares the slice of ``Worker`` it relies on.
+whose child was lost, and the timeout handlers, which end the attempt before
+they write the ownership-guarded row. A ``SHARED_ASYNC`` row goes to a shared
+async child when the worker has one (``dispatch_route``). Worker-internal
+mixin: the ``TYPE_CHECKING`` block declares the slice of ``Worker`` it relies
+on.
 """
 
 # pyright: reportPrivateUsage=false
@@ -38,6 +40,11 @@ from horsies.core.models.tasks import (
 )
 from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.worker.child_protocol import RunFrame
+from horsies.core.worker.dispatch_route import (
+    RunIsolated,
+    RunShared,
+    dispatch_route,
+)
 from horsies.core.worker.runtime import (
     _AttemptEndUnknown,
     _FinalizeError,
@@ -52,9 +59,14 @@ from horsies.core.worker.slots import (
     ChildEnded,
     ChildEndUnknown,
     ChildLost,
+    DeadlineAcknowledged,
     ExitUnknown,
     NotDispatched,
     NothingToKill,
+    SharedAnswered,
+    SharedHandle,
+    SharedOutcome,
+    SharedRunRequest,
     SlotAnswered,
     SlotHandle,
     SlotOutcome,
@@ -102,6 +114,17 @@ class DispatchMixin:
             *,
             task_name: str,
             claimed_at: Optional[datetime] = None,
+        ) -> Result[None, _FinalizeError]: ...
+        async def _finalize_shared_after(
+            self,
+            handle: SharedHandle,
+            task_id: str,
+            queue_name: str,
+            is_workflow_task: bool,
+            route: RunShared,
+            *,
+            task_name: str,
+            claimed_at: Optional[datetime],
         ) -> Result[None, _FinalizeError]: ...
         async def _finalize_workflow_phase(
             self,
@@ -415,11 +438,15 @@ class DispatchMixin:
         is_workflow_task: bool = True,
         timeout: StoredTimeout = NoTimeout(),
         claimed_at: Optional[datetime] = None,
+        *,
+        task_options: str | None,
     ) -> None:
         """Submit to the slot pool and spawn the finalizer.
 
         Never raises for a task: the pool answers every submit, and the
-        finalizer handles that answer.
+        finalizer handles that answer. ``task_options`` is the stored column
+        of the row; with ``timeout`` it decides the kind of child that runs
+        the row (``dispatch_route``).
 
         ``claimed_at`` is the claim generation this dispatch was born from
         (the claim statement's RETURNING); it fences the child's ownership
@@ -433,6 +460,22 @@ class DispatchMixin:
         slots = self._slots
         assert slots is not None, 'dispatch before the slot pool started'
 
+        match dispatch_route(task_options, timeout, self.cfg.shared_async):
+            case RunShared() as route:
+                self._dispatch_shared(
+                    slots,
+                    route,
+                    task_id,
+                    task_name,
+                    args_json,
+                    kwargs_json,
+                    queue_name,
+                    is_workflow_task,
+                    claimed_at,
+                )
+                return
+            case RunIsolated():
+                pass
         handle = slots.submit(
             RunFrame(
                 task_id=task_id,
@@ -461,7 +504,117 @@ class DispatchMixin:
             finalizer=True,
         )
 
+    def _dispatch_shared(
+        self,
+        slots: SlotPool,
+        route: RunShared,
+        task_id: str,
+        task_name: str,
+        args_json: Optional[str],
+        kwargs_json: Optional[str],
+        queue_name: str,
+        is_workflow_task: bool,
+        claimed_at: Optional[datetime],
+    ) -> None:
+        """Submit a ``SHARED_ASYNC`` row to the shared async children, and
+        spawn its finalizer. Never raises for a task."""
+        handle = slots.submit_shared(
+            SharedRunRequest(
+                task_id=task_id,
+                task_name=task_name,
+                args_json=args_json,
+                kwargs_json=kwargs_json,
+                worker_id=self.worker_instance_id,
+                is_workflow_task=is_workflow_task,
+                claimed_at=claimed_at,
+                timeout_ms=route.timeout_ms,
+                cancel_grace_ms=route.cancel_grace_ms,
+            ),
+        )
+        self._spawn_background(
+            self._finalize_shared_after(
+                handle,
+                task_id,
+                queue_name,
+                is_workflow_task,
+                route,
+                task_name=task_name,
+                claimed_at=claimed_at,
+            ),
+            name=f'finalize-{task_id}',
+            finalizer=True,
+        )
+
     # ----- finalize (write back to DB + notify) -----
+
+    async def _handle_shared_backstop(
+        self,
+        handle: SharedHandle,
+        task_id: str,
+        timeout_ms: int,
+        claimed_at: Optional[datetime],
+    ) -> SharedOutcome | _TimeoutSettled | _AttemptEndUnknown:
+        """Act on a shared task with no end at its backstop time.
+
+        The child holds the deadline and reports it at once, so a child that
+        has not reported it by the backstop is frozen: ``backstop_kill``
+        kills it, bound to this run, and waits for its exit. Then, as for an
+        isolated timeout, TASK_TIMEOUT, the retry, the attempt row and phase 2
+        are written for this task, after the exit; every other task of that
+        child ends with the loss of the child, through crash recovery. A
+        child that reported the deadline is alive, and its task ignores its
+        cancel: nothing is killed, and the outcome comes when the task ends.
+
+        Returns the outcome to finalize: ``_TimeoutSettled`` (this task is
+        written), ``_AttemptEndUnknown`` (no exit seen: nothing is written,
+        the row is left to stale-task recovery), or the outcome of the run.
+        """
+        match await handle.backstop_kill(CHILD_KILL_WAIT_S):
+            case ChildEnded(pid=pid, child_exit=child_exit):
+                logger.warning(
+                    'Killed shared child pid=%s (%s): task %s reached timeout_ms=%s '
+                    'and the child did not report its deadline; every task of '
+                    'that child ends with it',
+                    pid,
+                    describe_exit(child_exit),
+                    task_id,
+                    timeout_ms,
+                )
+                match await self._record_task_timeout(task_id, timeout_ms, claimed_at):
+                    case _TimeoutSettled() as settled:
+                        return settled
+                    case _TimeoutWriteFailed():
+                        return await asyncio.shield(handle.outcome)
+                    case _ as unreachable:
+                        assert_never(unreachable)
+            case ChildEndUnknown(pid=pid):
+                logger.critical(
+                    'Shared child pid=%s of timed-out task %s did not exit %ss '
+                    'after SIGKILL; nothing is written, and its rows are left to '
+                    'stale-task recovery',
+                    pid,
+                    task_id,
+                    CHILD_KILL_WAIT_S,
+                )
+                return _AttemptEndUnknown()
+            case DeadlineAcknowledged(pid=pid):
+                logger.warning(
+                    'Task %s ignores the cancel of its timeout_ms=%s in shared '
+                    'child pid=%s; it keeps its seat until it ends or the worker '
+                    'stops',
+                    task_id,
+                    timeout_ms,
+                    pid,
+                )
+                return await asyncio.shield(handle.outcome)
+            case SharedAnswered(outcome=outcome):
+                return outcome
+            case NothingToKill():
+                raise AssertionError(
+                    f'backstop of task {task_id} ran before a child took it',
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
 
     async def _handle_task_timeout(
         self,
