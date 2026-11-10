@@ -148,11 +148,12 @@ Main process receives result from child:
 
 ## Shared Async Children
 
-A shared async child runs `SHARED_ASYNC` tasks of the claimed rows. It has three threads:
+A shared async child runs `SHARED_ASYNC` tasks of the claimed rows. It has four threads:
 
 - The control thread reads the frames of the worker. It hands each frame to the event loop, so EOF still means the worker is gone, whatever the loop does.
 - The main thread runs the event loop from the end of the start steps to the stop frame. A run frame starts its task at once on a free seat, as an asyncio task, while other tasks run.
 - The writer thread writes the frames of the child. The loop queues a frame and returns, so a worker that reads slowly never stops the loop.
+- The watchdog thread watches the event loop. When the loop has not turned for 5 seconds, it names the task that holds the loop, with the source line, and reports it to the worker through the writer thread.
 
 The start steps, after the import of the app and the `on_child_process_start` hooks: the child opens an async connection pool on its loop, runs the [`on_shared_async_child_start` hooks](child-process-hooks#shared-async-child-start-hooks), and sends its ready frame. Each task then runs on the loop: the RUNNING update with the first runner heartbeat, the task body, and the finalizing marker. Each write goes through the async pool, so no write of the child blocks the loop.
 
@@ -160,14 +161,16 @@ The worker places each `SHARED_ASYNC` task on the open shared child with the few
 
 | Case | Result |
 | ---- | ------ |
-| A task reaches `timeout_ms` | The child cancels it. When its coroutine has ended, the worker writes `TASK_TIMEOUT`, the retry and the next workflow step. Other tasks of the child continue |
+| A task reaches `timeout_ms` | The child cancels it. When its coroutine and the work that it started have ended, the worker writes `TASK_TIMEOUT`, the retry and the next workflow step. Other tasks of the child continue |
 | A task returns a value after its deadline fired | The outcome is `TASK_TIMEOUT` |
-| The child does not report a cancel by `timeout_ms + cancel_grace_ms + 5 s` | The child is frozen. The worker kills it: the timed-out task fails with `TASK_TIMEOUT`, and every other task of the child takes the crash path |
-| A task ignores its cancel, and the loop runs | The task keeps its seat until it ends or the worker stops |
-| The child crashes or is killed | Every task of the child takes the crash path, after the worker saw the exit. A new child starts |
+| A task is still alive `cancel_grace_ms` after its cancel | The child cancels it a second time, with the asyncio tasks that it started, in up to three rounds 0.1 s apart. The child takes no new task, and a new child replaces it when its tasks end |
+| A task is still alive after the cancel rounds | The task is stuck and keeps its seat. The worker kills the child when every task left in it is stuck; each fails with `TASK_TIMEOUT`, and its retry runs in an isolated child |
+| The event loop has not turned for 5 s | The worker kills the child at once. The task that held the loop fails with `TASK_BLOCKED_LOOP` and retries isolated; each other task before its deadline fails with `NEIGHBOUR_BLOCKED_LOOP`; a task past its deadline with `TASK_TIMEOUT` |
+| The child reports neither the second cancel nor the end of a task by `timeout_ms + cancel_grace_ms + 10 s` | C code holds the GIL in the child. The worker kills it: each task past its deadline fails with `TASK_TIMEOUT`, and every other task takes the crash path |
+| The child crashes | Every task of the child takes the crash path, after the worker saw the exit. A new child starts |
 | The child reaches a recycle limit | It takes no new task, its tasks finish, then it stops and a new child starts |
 
-At a stop the worker closes each shared child: it takes no new task, and it exits by stop frame when its tasks have ended. At the drain deadline the worker kills a shared child that still runs tasks, and each of them takes the crash path.
+At a stop the worker closes each shared child: it takes no new task, and it exits by stop frame when its tasks have ended. At the drain deadline the worker kills a shared child that still runs tasks: each of them past its deadline fails with `TASK_TIMEOUT`, and every other one takes the crash path.
 
 ## Child Process Initialization
 
