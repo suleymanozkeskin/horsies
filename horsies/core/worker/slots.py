@@ -1,7 +1,10 @@
 """Worker-owned child processes: one process and one private socket per slot.
 
-Each slot runs one task at a time. A crash, a timeout kill, or a bad frame
-reaches that slot only, because slots share no queue, lock, or pipe.
+An isolated slot runs one task at a time. A shared async slot runs up to its
+seats of ``SHARED_ASYNC`` tasks at once in one child, and places a new task
+on the open shared child with the fewest tasks. A crash, a timeout kill, or a
+bad frame reaches that slot only, because slots share no queue, lock, or
+pipe; in a shared slot it reaches every task of that child.
 
 Verdict rules. Every outcome comes from one of these, in this order:
 
@@ -46,11 +49,26 @@ from horsies.core.models.boot_failure import (
     describe_boot_cause,
 )
 from horsies.core.models.health import DownSlot
+from horsies.core.models.tasks import (
+    MAX_CANCEL_GRACE_MS,
+    MAX_TASK_TIMEOUT_MS,
+    MIN_CANCEL_GRACE_MS,
+    MIN_TASK_TIMEOUT_MS,
+)
+from horsies.core.models.worker_profile import (
+    MemoryLimit,
+    NoMemoryLimit,
+    NoSharedAsyncChildren,
+    NoTaskLimit,
+    SharedAsyncChildren,
+    TaskLimit,
+)
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
 from horsies.core.worker.config import ChildPreload
 from horsies.core.worker.live_dispatches import (
     Held,
+    HoldOutcome,
     LiveDispatches,
     RegistryClosed,
 )
@@ -69,6 +87,7 @@ from horsies.core.worker.child_protocol import (
     FRAME_HEADER,
     BootFailedFrame,
     ChildFrame,
+    ChildKind,
     FrameOverBound,
     InitFrame,
     LoopHoldsNoTask,
@@ -77,12 +96,21 @@ from horsies.core.worker.child_protocol import (
     NoTaskLoop,
     ParentFrame,
     ReadyFrame,
+    DeadlineFiredFrame,
     ResultFrame,
     RssMb,
     RssReading,
     TaskLoopReport,
     RssUnreadable,
     RunFrame,
+    SeatFinished,
+    SeatRefusal,
+    SeatTask,
+    SeatTimedOut,
+    SeatWork,
+    SharedAsyncChild,
+    SharedResultFrame,
+    SharedRunFrame,
     StopFrame,
     decode_child_frame,
     encode_parent_frame,
@@ -114,6 +142,11 @@ SLOT_DEFECT_LIMIT: Final = 3
 CHANNEL_LOST_GRACE_S: Final = 0.2
 DRAIN_QUIET_PASSES: Final = 3
 DRAIN_DEADLINE_S: Final = 5.0
+# A shared child reports a deadline that fired at once (DeadlineFiredFrame).
+# The parent checks a run that has not ended this long after its deadline and
+# its cancel grace: a child that has not reported the deadline by then has a
+# frozen loop or a frozen process, and the parent kills it.
+SHARED_BACKSTOP_MARGIN_S: Final = 5.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,6 +239,7 @@ class NotRunCause(str, Enum):
     POOL_STOPPING = 'worker is stopping'
     POOL_FAILED = 'no child could start'
     QUEUE_FULL = 'too many tasks wait for a slot'
+    NO_ISOLATED_CHILD = 'this worker has no isolated child'
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,6 +250,74 @@ class NotDispatched:
 
 
 SlotOutcome: TypeAlias = TaskFinished | ChildLost | NotDispatched
+
+
+@dataclass(frozen=True, slots=True)
+class SeatTaskFinished:
+    """The task of a seat ended before its deadline. ``ok`` has the
+    ``_run_task_entry`` meaning."""
+
+    ok: bool
+    result_json: str
+    failed_reason: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class SeatDeadlineEnded:
+    """The deadline of the task fired in the child, the child cancelled the
+    task, and its coroutine has ended. The outcome is the timeout."""
+
+
+SharedOutcome: TypeAlias = (
+    SeatTaskFinished | SeatDeadlineEnded | ChildLost | NotDispatched
+)
+
+
+@dataclass(frozen=True, slots=True)
+class SharedRunRequest:
+    """A ``SHARED_ASYNC`` task to run, before the pool numbers its run.
+
+    The ``timeout_ms`` and ``cancel_grace_ms`` of a ``SeatTask`` are within
+    the bounds of ``SharedRunFrame``.
+    """
+
+    task_id: str
+    task_name: str
+    args_json: str | None
+    kwargs_json: str | None
+    worker_id: str
+    is_workflow_task: bool
+    claimed_at: datetime | None
+    work: SeatWork
+
+    def __post_init__(self) -> None:
+        match self.work:
+            case SeatTask(timeout_ms=timeout_ms, cancel_grace_ms=cancel_grace_ms):
+                assert (
+                    MIN_TASK_TIMEOUT_MS <= timeout_ms <= MAX_TASK_TIMEOUT_MS
+                ), f'timeout_ms {timeout_ms} of task {self.task_id} is out of bounds'
+                assert MIN_CANCEL_GRACE_MS <= cancel_grace_ms <= MAX_CANCEL_GRACE_MS, (
+                    f'cancel_grace_ms {cancel_grace_ms} of task {self.task_id} is '
+                    'out of bounds'
+                )
+            case SeatRefusal():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def frame_for(self, dispatch: int) -> SharedRunFrame:
+        """The run frame of run ``dispatch``."""
+        return SharedRunFrame(
+            dispatch=dispatch,
+            task_id=self.task_id,
+            task_name=self.task_name,
+            args_json=self.args_json,
+            kwargs_json=self.kwargs_json,
+            worker_id=self.worker_id,
+            is_workflow_task=self.is_workflow_task,
+            claimed_at=self.claimed_at,
+            work=self.work,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,6 +373,98 @@ class Down:
 
 
 SlotState: TypeAlias = Starting | Idle | Busy | Retiring | Down
+
+
+class CloseReason(str, Enum):
+    """Why a shared child takes no new task."""
+
+    TASK_COUNT = 'the task limit per seat was reached'
+    MEMORY_LIMIT = 'the memory limit was reached'
+    POOL_STOPPING = 'the worker is stopping'
+
+
+@dataclass(frozen=True, slots=True)
+class DeadlineNotReported:
+    """The child has not reported that the deadline of this run fired."""
+
+
+@dataclass(frozen=True, slots=True)
+class DeadlineReported:
+    """The child reported that the deadline of this run fired, and that it
+    cancelled the task: its loop was alive at the deadline."""
+
+
+DeadlineReport: TypeAlias = DeadlineNotReported | DeadlineReported
+
+
+@dataclass(slots=True)
+class _SeatRun:
+    """One task in flight on a shared child. ``deadline`` changes once, to
+    ``DeadlineReported``."""
+
+    handle: SharedHandle
+    held: HoldOutcome
+    deadline: DeadlineReport
+
+
+class SeatRuns:
+    """The tasks in flight on one shared child, by dispatch number. At most
+    ``seats`` of them."""
+
+    def __init__(self, seats: int) -> None:
+        self.seats = seats
+        self._by_dispatch: dict[int, _SeatRun] = {}
+
+    def count(self) -> int:
+        return len(self._by_dispatch)
+
+    def free(self) -> int:
+        return self.seats - len(self._by_dispatch)
+
+    def add(self, dispatch: int, run: _SeatRun) -> None:
+        """Hold a new run. A full table or a number in use is a defect."""
+        assert self.free() > 0, f'run {dispatch} placed on a child with no free seat'
+        assert dispatch not in self._by_dispatch, f'run {dispatch} placed twice'
+        self._by_dispatch[dispatch] = run
+
+    def get(self, dispatch: int) -> _SeatRun | None:
+        return self._by_dispatch.get(dispatch)
+
+    def remove(self, dispatch: int) -> _SeatRun:
+        """Drop a run that ``get`` found. A missing number is a defect."""
+        return self._by_dispatch.pop(dispatch)
+
+    def drain(self) -> tuple[_SeatRun, ...]:
+        """Drop every run, and return them in dispatch order."""
+        runs = tuple(self._by_dispatch[key] for key in sorted(self._by_dispatch))
+        self._by_dispatch.clear()
+        return runs
+
+    def task_ids(self) -> tuple[str, ...]:
+        return tuple(
+            self._by_dispatch[key].handle.frame.task_id
+            for key in sorted(self._by_dispatch)
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class Open:
+    """The shared child is ready and takes tasks. ``runs`` holds the tasks in
+    flight."""
+
+    runs: SeatRuns
+
+
+@dataclass(frozen=True, slots=True)
+class Closing:
+    """The shared child takes no new task. Its tasks in flight finish, then
+    it retires and a new child boots."""
+
+    reason: CloseReason
+    runs: SeatRuns
+
+
+SharedSlotState: TypeAlias = Starting | Open | Closing | Retiring | Down
 
 
 @dataclass(frozen=True, slots=True)
@@ -409,10 +603,11 @@ class PoolStopped:
 
 @dataclass(frozen=True, slots=True)
 class ChildBaseline:
-    """A booted child's settled RSS, for the baseline memory guard."""
+    """A booted child's settled RSS, for the baseline memory guard of its kind."""
 
     pid: int
     rss: RssReading
+    child_kind: ChildKind
 
 
 @dataclass(frozen=True, slots=True)
@@ -454,6 +649,26 @@ KillWaitOutcome: TypeAlias = ChildEnded | ChildEndUnknown | SlotAnswered | Nothi
 
 
 @dataclass(frozen=True, slots=True)
+class SharedAnswered:
+    """The run already ended, so nothing was killed."""
+
+    outcome: SharedOutcome
+
+
+@dataclass(frozen=True, slots=True)
+class DeadlineAcknowledged:
+    """The child reported the deadline of this run: its loop was alive then,
+    and the task has not ended since. Nothing was killed."""
+
+    pid: int
+
+
+BackstopOutcome: TypeAlias = (
+    ChildEnded | ChildEndUnknown | SharedAnswered | DeadlineAcknowledged | NothingToKill
+)
+
+
+@dataclass(frozen=True, slots=True)
 class Assigned:
     """The task frame reached a child."""
 
@@ -476,6 +691,29 @@ class SlotPoolConfig:
     child_entry: tuple[str, ...] = CHILD_ENTRY
     child_preload: ChildPreload = ChildPreload.NONE
     preload_entry: tuple[str, ...] = PRELOAD_ENTRY
+    shared_async: SharedAsyncChildren | NoSharedAsyncChildren = field(
+        default_factory=NoSharedAsyncChildren,
+    )
+
+    def shared_slots(self) -> int:
+        """The number of shared async slots."""
+        match self.shared_async:
+            case SharedAsyncChildren(count=count):
+                return count
+            case NoSharedAsyncChildren():
+                return 0
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def seat_count(self) -> int:
+        """One seat per isolated slot, and the seats of each shared slot."""
+        match self.shared_async:
+            case SharedAsyncChildren(count=count, seats=seats):
+                return self.slots + count * seats
+            case NoSharedAsyncChildren():
+                return self.slots
+            case _ as unreachable:
+                assert_never(unreachable)
 
 
 def interpreter_flags() -> tuple[str, ...]:
@@ -620,6 +858,7 @@ class Child:
         self.killed_by_parent = False
         self.on_channel_closed: Callable[[], None] | None = None
         self.on_kill_sent: Callable[[], None] | None = None
+        self.on_frame: Callable[[], None] | None = None
 
     @classmethod
     async def start(
@@ -725,6 +964,8 @@ class Child:
         def on_frame(frame: ChildFrame) -> None:
             frames.append(frame)
             wake.set()
+            if closed[0].on_frame is not None:
+                closed[0].on_frame()
 
         def on_closed() -> None:
             closed[0].channel_closed = True
@@ -895,6 +1136,10 @@ class Child:
     def has_exited(self) -> bool:
         return self._exit.done()
 
+    def queued_frames(self) -> tuple[ChildFrame, ...]:
+        """The frames that arrived and that no ``await_frame`` took yet. Reads only."""
+        return tuple(self._frames)
+
     def notify_on_exit(self, callback: Callable[[], None]) -> None:
         """Run ``callback`` on the loop when the process ends."""
         self._exit.add_done_callback(lambda _: callback())
@@ -1005,6 +1250,87 @@ class SlotHandle:
         return NothingToKill()
 
 
+@dataclass(frozen=True, slots=True)
+class _SeatBinding:
+    """The child that runs a shared task, and its run there."""
+
+    child: Child
+    run: _SeatRun
+
+
+def _reported_in(frames: tuple[ChildFrame, ...], dispatch: int) -> bool:
+    """Whether a frame that the slot has not read yet reports this run: its
+    deadline, or its end."""
+    return any(
+        isinstance(frame, DeadlineFiredFrame | SharedResultFrame)
+        and frame.dispatch == dispatch
+        for frame in frames
+    )
+
+
+class SharedHandle:
+    """One submitted shared async task, as the caller sees it."""
+
+    def __init__(self, frame: SharedRunFrame, loop: asyncio.AbstractEventLoop) -> None:
+        self.frame = frame
+        self.assigned: asyncio.Future[Assigned | NotDispatched] = loop.create_future()
+        self.outcome: asyncio.Future[SharedOutcome] = loop.create_future()
+        self._binding: _SeatBinding | None = None
+
+    def bind(self, child: Child, run: _SeatRun) -> None:
+        """Pool only: the run frame was sent to this child."""
+        self._binding = _SeatBinding(child, run)
+        if not self.assigned.done():
+            self.assigned.set_result(Assigned())
+
+    def finish(self, outcome: SharedOutcome) -> None:
+        """Pool only: the run is over. Ends the binding."""
+        self._binding = None
+        if not self.assigned.done():
+            match outcome:
+                case NotDispatched() as not_run:
+                    self.assigned.set_result(not_run)
+                case SeatTaskFinished() | SeatDeadlineEnded() | ChildLost():
+                    self.assigned.set_result(Assigned())
+                case _ as unreachable:
+                    assert_never(unreachable)
+        if not self.outcome.done():
+            self.outcome.set_result(outcome)
+
+    async def backstop_kill(self, wait_s: float) -> BackstopOutcome:
+        """Kill the child of this run if it is frozen, then wait for its exit.
+
+        The child counts as frozen when the run is still on it and the child
+        has not reported its deadline, also not in a frame that the slot has
+        not read yet. The kill is bound to this run: a run that ended gives
+        ``SharedAnswered``, and no later kill can reach another run. The wait
+        follows the killed child, also after the slot ends the binding, and
+        ends after ``wait_s``. Every task of that child ends with it.
+        """
+        binding = self._binding
+        if binding is None:
+            if self.outcome.done() and not self.outcome.cancelled():
+                return SharedAnswered(self.outcome.result())
+            return NothingToKill()
+        child = binding.child
+        match binding.run.deadline:
+            case DeadlineReported():
+                return DeadlineAcknowledged(pid=child.pid)
+            case DeadlineNotReported():
+                if _reported_in(child.queued_frames(), self.frame.dispatch):
+                    return DeadlineAcknowledged(pid=child.pid)
+            case _ as unreachable:
+                assert_never(unreachable)
+        child.kill_for_caller()
+        match await child.wait_exit(wait_s):
+            case ExitedWith() | KilledBySignal() as child_exit:
+                return ChildEnded(pid=child.pid, child_exit=child_exit)
+            case ExitUnknown():
+                return ChildEndUnknown(pid=child.pid)
+            case _ as unreachable:
+                assert_never(unreachable)
+
+
 @dataclass(slots=True)
 class _Slot:
     index: int
@@ -1013,6 +1339,59 @@ class _Slot:
     child: Child | None = None
     handle: SlotHandle | None = None
     defects: int = 0
+
+    def init_for(self, template: InitFrame) -> InitFrame:
+        """The init frame of a child of this slot."""
+        return replace(template, process_name=f'{template.process_name}-{self.index}')
+
+
+@dataclass(slots=True)
+class _SharedSlot:
+    """A shared async slot. ``index`` is unique in the pool, after the
+    isolated slots."""
+
+    index: int
+    seats: int
+    state: SharedSlotState = field(default_factory=Starting)
+    wake: asyncio.Event = field(default_factory=asyncio.Event)
+    child: Child | None = None
+    defects: int = 0
+
+    def init_for(self, template: InitFrame) -> InitFrame:
+        """The init frame of a child of this slot: a shared async child."""
+        return replace(
+            template,
+            process_name=f'{template.process_name}-shared-{self.index}',
+            child_kind=SharedAsyncChild(seats=self.seats),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class OpenChildLoad:
+    """What placement reads of one shared slot: its index, the tasks in
+    flight on its child, and its seats."""
+
+    index: int
+    runs: int
+    seats: int
+
+
+@dataclass(frozen=True, slots=True)
+class NoSeatFree:
+    """No open shared child has a free seat."""
+
+
+def place_on_shared_child(loads: tuple[OpenChildLoad, ...]) -> int | NoSeatFree:
+    """The index of the open shared child with the fewest tasks in flight and
+    a free seat; the lowest index among equals. Pure.
+
+    Spreading tasks over the children keeps the tasks that one crash or one
+    kill ends few: about the tasks in flight divided by the children.
+    """
+    candidates = [load for load in loads if load.runs < load.seats]
+    if not candidates:
+        return NoSeatFree()
+    return min(candidates, key=lambda load: (load.runs, load.index)).index
 
 
 def outside_kill_delay_s(kills_in_a_row: int) -> float:
@@ -1067,6 +1446,72 @@ def boot_failure_of(
             assert_never(unreachable)
 
 
+def _shared_seat_counts(
+    shared_async: SharedAsyncChildren | NoSharedAsyncChildren,
+) -> tuple[int, ...]:
+    """The seats of each shared slot."""
+    match shared_async:
+        case SharedAsyncChildren(count=count, seats=seats):
+            return (seats,) * count
+        case NoSharedAsyncChildren():
+            return ()
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _shared_capacity_of(slot: _SharedSlot) -> int:
+    """The tasks that one shared slot can hold now; see
+    ``SlotPool.shared_async_capacity``."""
+    match slot.state:
+        case Starting() | Open() | Retiring():
+            return slot.seats
+        case Closing(runs=runs):
+            return runs.count()
+        case Down():
+            return 0
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _runs_of(state: SharedSlotState) -> SeatRuns:
+    """The tasks in flight of a shared slot in this state: an empty table for
+    a state that holds none."""
+    match state:
+        case Open(runs=runs) | Closing(runs=runs):
+            return runs
+        case Starting() | Retiring() | Down():
+            return SeatRuns(0)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def shared_recycle_reason(
+    shared_async: SharedAsyncChildren,
+    tasks_done: int,
+    rss: RssReading,
+) -> CloseReason | None:
+    """Why a shared child closes after a task, or None when it serves on.
+
+    ``tasks_done`` counts the tasks that ended on the child. The task limit is
+    ``after_per_seat.tasks × seats``. The memory limit compares the RSS that
+    the child reported with the task. Pure.
+    """
+    match shared_async.recycle.after_per_seat:
+        case TaskLimit(tasks=per_seat) if tasks_done >= per_seat * shared_async.seats:
+            return CloseReason.TASK_COUNT
+        case TaskLimit() | NoTaskLimit():
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
+    match shared_async.recycle.above, rss:
+        case MemoryLimit(mb=limit_mb), RssMb(value=value) if value >= limit_mb:
+            return CloseReason.MEMORY_LIMIT
+        case (MemoryLimit() | NoMemoryLimit(), RssMb() | RssUnreadable()):
+            return None
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def _in_service(state: SlotState) -> bool:
     """Whether a slot in this state counts in the claim budget."""
     match state:
@@ -1079,18 +1524,28 @@ def _in_service(state: SlotState) -> bool:
 
 
 class SlotPool:
-    """A FIFO in the parent and one coroutine per slot.
+    """A FIFO in the parent per kind of slot, and one coroutine per slot.
 
-    ``submit`` never blocks. The claim budget already bounds the FIFO, so
-    ``pending_limit`` is a backstop: past it a task is refused, not queued, and
-    its row returns to the queue through the caller.
+    ``submit`` and ``submit_shared`` never block. The claim budget already
+    bounds each FIFO, so ``pending_limit`` is a backstop: past it a task is
+    refused, not queued, and its row returns to the queue through the
+    caller. Isolated slots take tasks from their FIFO one at a time. A shared
+    task goes to the open shared child with the fewest tasks in flight and a
+    free seat (``place_on_shared_child``), at its submit, when a seat frees,
+    and when a shared child opens.
     """
 
     def __init__(self, config: SlotPoolConfig, pending_limit: int) -> None:
         self._config = config
         self._pending_limit = pending_limit
         self._pending: deque[SlotHandle] = deque()
+        self._shared_pending: deque[SharedHandle] = deque()
+        self._next_dispatch = 0
         self._slots = [_Slot(index) for index in range(config.slots)]
+        self._shared_slots = [
+            _SharedSlot(index=config.slots + offset, seats=seats)
+            for offset, seats in enumerate(_shared_seat_counts(config.shared_async))
+        ]
         self._tasks: list[asyncio.Task[None]] = []
         self._loop = asyncio.get_running_loop()
         self._stopping = False
@@ -1103,7 +1558,7 @@ class SlotPool:
         self._preload_watch: asyncio.Task[None] | None = None
         # Every child that has not exited, from any preload parent or ``exec``.
         self._live_pids: set[int] = set()
-        self._live_dispatches = LiveDispatches(config.slots)
+        self._live_dispatches = LiveDispatches(config.seat_count())
 
     async def start(
         self,
@@ -1124,7 +1579,7 @@ class SlotPool:
             self._record_failure(refused)
             return Err(refused)
         self._tasks = [
-            asyncio.ensure_future(self._serve_slot(slot)) for slot in self._slots
+            asyncio.ensure_future(self._serve_slot(slot)) for slot in self._all_slots()
         ]
         await asyncio.wait(
             {self._first_generation, self._failed, self._stop_requested},
@@ -1146,20 +1601,25 @@ class SlotPool:
         down = self.down_slots()
         if not down:
             return
+        total = len(self._all_slots())
         logger.warning(
             'Worker starts degraded: %s of %s slots serve; down: %s',
-            len(self._slots) - len(down),
-            len(self._slots),
+            total - len(down),
+            total,
             '; '.join(
                 f'slot {item.slot}: {describe_boot_cause(item.cause)}' for item in down
             ),
         )
 
     def submit(self, frame: RunFrame) -> SlotHandle:
-        """Queue a task. A pool that cannot take it answers ``NotDispatched`` at once."""
+        """Queue a task for an isolated slot. A pool that cannot take it
+        answers ``NotDispatched`` at once: also a pool with no isolated slot."""
         handle = SlotHandle(frame, self._loop)
         if self._stopping or self._failure is not None:
             handle.finish(NotDispatched(self._not_run_cause()))
+            return handle
+        if not self._slots:
+            handle.finish(NotDispatched(NotRunCause.NO_ISOLATED_CHILD))
             return handle
         if len(self._pending) >= self._pending_limit:
             logger.error(
@@ -1171,6 +1631,37 @@ class SlotPool:
             return handle
         self._pending.append(handle)
         self._wake_slots()
+        return handle
+
+    def submit_shared(
+        self,
+        request: SharedRunRequest,
+    ) -> SharedHandle:
+        """Queue a shared async task, and place it at once when a seat is free.
+
+        The pool numbers the run. A pool that cannot take it answers
+        ``NotDispatched`` at once. A pool with no shared slot is a defect of
+        the caller, which routes a task here only when the worker has shared
+        async children: ``AssertionError``.
+        """
+        assert (
+            self._shared_slots
+        ), 'a shared task was submitted to a pool with no shared slot'
+        self._next_dispatch += 1
+        handle = SharedHandle(request.frame_for(self._next_dispatch), self._loop)
+        if self._stopping or self._failure is not None:
+            handle.finish(NotDispatched(self._not_run_cause()))
+            return handle
+        if len(self._shared_pending) >= self._pending_limit:
+            logger.error(
+                'Refusing shared task %s: %s tasks already wait for a seat',
+                request.task_id,
+                len(self._shared_pending),
+            )
+            handle.finish(NotDispatched(NotRunCause.QUEUE_FULL))
+            return handle
+        self._shared_pending.append(handle)
+        self._place_shared()
         return handle
 
     async def _start_preload(self) -> PreloadRefused | None:
@@ -1279,16 +1770,31 @@ class SlotPool:
         return await asyncio.shield(self._failed)
 
     def states(self) -> tuple[SlotState, ...]:
-        """Return each slot's state, for health reports and tests."""
+        """Return the state of each isolated slot, for health reports and tests."""
         return tuple(slot.state for slot in self._slots)
 
+    def shared_states(self) -> tuple[SharedSlotState, ...]:
+        """Return the state of each shared slot, for health reports and tests."""
+        return tuple(slot.state for slot in self._shared_slots)
+
     def slots_in_service(self) -> int:
-        """Count the slots that the claim budget counts: every slot not ``Down``.
+        """Count the isolated slots that the claim budget counts: every one
+        not ``Down``.
 
         A slot that boots, serves, or retires counts, because it takes a task
         once its child is ready. Reads only.
         """
         return sum(1 for slot in self._slots if _in_service(slot.state))
+
+    def shared_async_capacity(self) -> int:
+        """The ``SHARED_ASYNC`` tasks that the shared slots can hold now.
+
+        Every seat of a slot that boots, is open, or retires counts: it takes
+        a task once its child is ready. A closing slot counts only the tasks
+        it still runs: its free seats take no task, and the claim counts its
+        running tasks as use. A slot that is down counts nothing. Reads only.
+        """
+        return sum(_shared_capacity_of(slot) for slot in self._shared_slots)
 
     def down_slots(self) -> tuple[DownSlot, ...]:
         """Each slot in ``Down``, in slot order, for the health report. Reads only."""
@@ -1300,9 +1806,13 @@ class SlotPool:
                 down_since=state.down_since,
                 failed_boots=state.failed_boots,
             )
-            for slot in self._slots
+            for slot in self._all_slots()
             if isinstance(state := slot.state, Down)
         )
+
+    def _all_slots(self) -> tuple[_Slot | _SharedSlot, ...]:
+        """Every slot of the pool, isolated first, in index order."""
+        return (*self._slots, *self._shared_slots)
 
     def _not_run_cause(self) -> NotRunCause:
         return (
@@ -1312,12 +1822,14 @@ class SlotPool:
         )
 
     def _wake_slots(self) -> None:
-        for slot in self._slots:
+        for slot in self._all_slots():
             slot.wake.set()
 
     def _release_pending(self) -> None:
         while self._pending:
             self._pending.popleft().finish(NotDispatched(self._not_run_cause()))
+        while self._shared_pending:
+            self._shared_pending.popleft().finish(NotDispatched(self._not_run_cause()))
 
     def _record_failure(self, failure: PoolFailure) -> None:
         if self._failure is not None:
@@ -1331,7 +1843,7 @@ class SlotPool:
         self._release_pending()
         self._wake_slots()
 
-    async def _serve_slot(self, slot: _Slot) -> None:
+    async def _serve_slot(self, slot: _Slot | _SharedSlot) -> None:
         """Keep one child alive on this slot until the pool stops or fails.
 
         A slot is a service loop. An unexpected exception here is a defect: it
@@ -1343,7 +1855,7 @@ class SlotPool:
             try:
                 match await self._boot_child(slot):
                     case Ok(child):
-                        await self._run_generation(slot, child)
+                        await self._run_generation_of(slot, child)
                     case Err(error):
                         self._end_after_boot_error(error)
                         return
@@ -1375,19 +1887,39 @@ class SlotPool:
             case _ as unreachable:
                 assert_never(unreachable)
 
-    async def _clear_slot(self, slot: _Slot) -> None:
-        """End this slot's child, and answer its task, after a defect."""
-        slot.state = Retiring()
-        child, slot.child = slot.child, None
-        handle, slot.handle = slot.handle, None
-        if child is not None:
-            await child.dispose_lost()
-        if handle is not None and child is not None:
-            handle.finish(child.lost_for(LossCause.SLOT_DEFECT))
+    async def _run_generation_of(self, slot: _Slot | _SharedSlot, child: Child) -> None:
+        match slot:
+            case _Slot():
+                await self._run_generation(slot, child)
+            case _SharedSlot():
+                await self._run_shared_generation(slot, child)
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    async def _clear_slot(self, slot: _Slot | _SharedSlot) -> None:
+        """End this slot's child, and answer its tasks, after a defect."""
+        match slot:
+            case _Slot():
+                slot.state = Retiring()
+                child, slot.child = slot.child, None
+                handle, slot.handle = slot.handle, None
+                if child is not None:
+                    await child.dispose_lost()
+                if handle is not None and child is not None:
+                    handle.finish(child.lost_for(LossCause.SLOT_DEFECT))
+            case _SharedSlot():
+                runs = _runs_of(slot.state)
+                slot.state = Retiring()
+                child, slot.child = slot.child, None
+                if child is not None:
+                    await child.dispose_lost()
+                    self._end_all_runs(runs, child.lost_for(LossCause.SLOT_DEFECT))
+            case _ as unreachable:
+                assert_never(unreachable)
 
     async def _boot_child(
         self,
-        slot: _Slot,
+        slot: _Slot | _SharedSlot,
     ) -> Result[Child, PoolFailure | PoolStopped]:
         """Start one ready child. The cause of each failed boot decides what follows.
 
@@ -1410,10 +1942,7 @@ class SlotPool:
         of ``slot_down_delay_s`` and ``outside_kill_delay_s`` pace them.
         """
         slot.state = Starting()
-        init = replace(
-            self._config.init,
-            process_name=f'{self._config.init.process_name}-{slot.index}',
-        )
+        init = slot.init_for(self._config.init)
         counted = 0
         outside_kills = 0
         while True:
@@ -1464,7 +1993,7 @@ class SlotPool:
 
     async def _boot_attempt(
         self,
-        slot: _Slot,
+        slot: _Slot | _SharedSlot,
         init: InitFrame,
     ) -> Result[Child, BootFailure | ChildHookFailed | PoolStopped]:
         """Start one child and wait for its ready frame, bounded.
@@ -1490,9 +2019,9 @@ class SlotPool:
         reply = await child.await_frame(CHILD_READY_TIMEOUT_S)
         match reply:
             case ReadyFrame(pid=pid, rss=rss):
-                self._note_ready(slot, ChildBaseline(pid=pid, rss=rss))
+                self._note_ready(slot, ChildBaseline(pid, rss, init.child_kind))
                 return Ok(child)
-            case ResultFrame():
+            case ResultFrame() | SharedResultFrame() | DeadlineFiredFrame():
                 failed = boot_failure_of(await child.discard_violating_child())
             case BootFailedFrame() | ChildLost() | WaitExpired():
                 failed = boot_failure_of(reply)
@@ -1504,7 +2033,11 @@ class SlotPool:
             return Err(PoolStopped())
         return Err(failed)
 
-    def _attempt_count(self, slot: _Slot, cause: BootFailureCause) -> _AttemptCount:
+    def _attempt_count(
+        self,
+        slot: _Slot | _SharedSlot,
+        cause: BootFailureCause,
+    ) -> _AttemptCount:
         """A cause that repeats counts. A cause that can clear counts only
         while every other slot is ``Down``."""
         match cause:
@@ -1523,7 +2056,7 @@ class SlotPool:
             ):
                 every_other_down = all(
                     isinstance(other.state, Down)
-                    for other in self._slots
+                    for other in self._all_slots()
                     if other is not slot
                 )
                 return (
@@ -1533,7 +2066,7 @@ class SlotPool:
                 assert_never(unreachable)
 
     def _record_failed_boot(
-        self, slot: _Slot, failed: BootFailure, counted: int
+        self, slot: _Slot | _SharedSlot, failed: BootFailure, counted: int
     ) -> float:
         """Set the slot state after a failed boot, log it, and return the wait
         before the next boot."""
@@ -1565,7 +2098,7 @@ class SlotPool:
 
     def _mark_down(
         self,
-        slot: _Slot,
+        slot: _Slot | _SharedSlot,
         cause: ClearableBootCause,
         detail: str,
         counted: int,
@@ -1581,7 +2114,7 @@ class SlotPool:
         match slot.state:
             case Down(down_since=since, failed_boots=failed_boots):
                 down = Down(cause, detail, since, failed_boots + 1)
-            case Starting() | Idle() | Busy() | Retiring():
+            case Starting() | Idle() | Busy() | Retiring() | Open() | Closing():
                 down = Down(cause, detail, datetime.now(timezone.utc), 1)
             case _ as unreachable:
                 assert_never(unreachable)
@@ -1601,7 +2134,7 @@ class SlotPool:
         self._check_first_generation()
         return delay_s
 
-    def _log_back_in_service(self, slot: _Slot) -> None:
+    def _log_back_in_service(self, slot: _Slot | _SharedSlot) -> None:
         match slot.state:
             case Down(cause=cause, failed_boots=failed_boots):
                 logger.warning(
@@ -1610,7 +2143,7 @@ class SlotPool:
                     failed_boots,
                     describe_boot_cause(cause),
                 )
-            case Starting() | Idle() | Busy() | Retiring():
+            case Starting() | Idle() | Busy() | Retiring() | Open() | Closing():
                 pass
             case _ as unreachable:
                 assert_never(unreachable)
@@ -1623,7 +2156,11 @@ class SlotPool:
             return_when=asyncio.FIRST_COMPLETED,
         )
 
-    def _kill_spares_the_attempt(self, slot: _Slot, cause: BootFailureCause) -> bool:
+    def _kill_spares_the_attempt(
+        self,
+        slot: _Slot | _SharedSlot,
+        cause: BootFailureCause,
+    ) -> bool:
         """Tell a SIGKILL from outside apart from a child that cannot boot.
 
         Such a kill says nothing about the code, so it must not stop a worker
@@ -1640,13 +2177,13 @@ class SlotPool:
             case _:
                 return False
 
-    def _another_child_serves(self, slot: _Slot) -> bool:
+    def _another_child_serves(self, slot: _Slot | _SharedSlot) -> bool:
         return any(
-            other is not slot and isinstance(other.state, Idle | Busy)
-            for other in self._slots
+            other is not slot and isinstance(other.state, Idle | Busy | Open | Closing)
+            for other in self._all_slots()
         )
 
-    def _note_ready(self, slot: _Slot, baseline: ChildBaseline) -> None:
+    def _note_ready(self, slot: _Slot | _SharedSlot, baseline: ChildBaseline) -> None:
         if self._first_generation.done():
             return
         self._baselines[slot.index] = baseline
@@ -1660,10 +2197,10 @@ class SlotPool:
         booted = len(self._baselines)
         down = sum(
             1
-            for slot in self._slots
+            for slot in self._all_slots()
             if slot.index not in self._baselines and isinstance(slot.state, Down)
         )
-        if booted > 0 and booted + down == self._config.slots:
+        if booted > 0 and booted + down == len(self._all_slots()):
             self._first_generation.set_result(None)
 
     async def _run_generation(self, slot: _Slot, child: Child) -> None:
@@ -1748,7 +2285,7 @@ class SlotPool:
         slot.handle = handle
         child.send(frame)
         handle.bind_child(child)
-        held = self._live_dispatches.hold(frame, child.pid)
+        held = self._live_dispatches.hold(frame, child.pid, seats=1)
         match held:
             case Held():
                 pass
@@ -1767,7 +2304,13 @@ class SlotPool:
                     answer.rss,
                     answer.task_loop,
                 )
-            case ResultFrame() | ReadyFrame() | BootFailedFrame():
+            case (
+                ResultFrame()
+                | ReadyFrame()
+                | BootFailedFrame()
+                | SharedResultFrame()
+                | DeadlineFiredFrame()
+            ):
                 outcome = await child.discard_violating_child()
             case ChildLost():
                 outcome = answer
@@ -1828,25 +2371,295 @@ class SlotPool:
             case _ as unreachable:
                 assert_never(unreachable)
 
-    def _kill_at_deadline(self, slot: _Slot) -> tuple[str, ...]:
-        if slot.handle is not None:
-            match slot.handle.kill():
-                case KillSent():
-                    return (slot.handle.frame.task_id,)
-                case NothingToKill():
-                    return ()
-                case _ as unreachable:
-                    assert_never(unreachable)
+    def _kill_at_deadline(self, slot: _Slot | _SharedSlot) -> tuple[str, ...]:
+        """Kill the child of a slot that still runs a task at the drain
+        deadline, or that still boots. Returns the ids of the tasks it held."""
+        match slot:
+            case _Slot():
+                if slot.handle is not None:
+                    match slot.handle.kill():
+                        case KillSent():
+                            return (slot.handle.frame.task_id,)
+                        case NothingToKill():
+                            return ()
+                        case _ as unreachable:
+                            assert_never(unreachable)
+            case _SharedSlot():
+                runs = _runs_of(slot.state)
+                if slot.child is not None and runs.count() > 0:
+                    task_ids = runs.task_ids()
+                    slot.child.kill_for_caller()
+                    return task_ids
+            case _ as unreachable:
+                assert_never(unreachable)
         if slot.child is not None and isinstance(slot.state, Starting | Down):
             slot.child.kill_group()
         return ()
 
+    # ----- shared async slots -----
+
+    def _shared_slot_at(self, index: int) -> _SharedSlot:
+        slot = self._shared_slots[index - self._config.slots]
+        assert slot.index == index, f'shared slot {index} is not at its place'
+        return slot
+
+    def _shared_loads(self) -> tuple[OpenChildLoad, ...]:
+        """The load of each open shared child that can take a task."""
+        loads: list[OpenChildLoad] = []
+        for slot in self._shared_slots:
+            match slot.state:
+                case Open(runs=runs) if (
+                    slot.child is not None and not self._child_cannot_serve(slot.child)
+                ):
+                    loads.append(OpenChildLoad(slot.index, runs.count(), runs.seats))
+                case Starting() | Open() | Closing() | Retiring() | Down():
+                    continue
+                case _ as unreachable:
+                    assert_never(unreachable)
+        return tuple(loads)
+
+    def _place_shared(self) -> None:
+        """Send queued shared tasks to open shared children with a free seat.
+
+        Each task goes to the open child with the fewest tasks in flight
+        (``place_on_shared_child``). A closing child, a child that the parent
+        killed or that exited, and every child of a stopping pool take none.
+        Sends without waiting: the transport buffers the frame.
+        """
+        while self._shared_pending:
+            match place_on_shared_child(self._shared_loads()):
+                case NoSeatFree():
+                    return
+                case int() as index:
+                    slot = self._shared_slot_at(index)
+            self._send_to_seat(slot, self._shared_pending.popleft())
+
+    def _send_to_seat(self, slot: _SharedSlot, handle: SharedHandle) -> None:
+        """Send one task to the open child of ``slot``, and hold it there.
+
+        The task is in the runner heartbeat registry from the send until the
+        slot reads its end. A closed registry means the worker failed closed:
+        the child is killed, because no heartbeat would cover its tasks.
+        """
+        child = slot.child
+        assert (
+            child is not None
+        ), f'shared slot {slot.index} placed a task with no child'
+        match slot.state:
+            case Open(runs=runs):
+                pass
+            case Starting() | Closing() | Retiring() | Down():
+                raise AssertionError(f'shared slot {slot.index} is not open')
+            case _ as unreachable:
+                assert_never(unreachable)
+        frame = handle.frame
+        child.send(frame)
+        held = self._live_dispatches.hold(frame, child.pid, seats=slot.seats)
+        run = _SeatRun(handle=handle, held=held, deadline=DeadlineNotReported())
+        runs.add(frame.dispatch, run)
+        handle.bind(child, run)
+        match held:
+            case Held():
+                pass
+            case RegistryClosed():
+                child.kill_for_caller()
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def _release_held(self, held: HoldOutcome) -> None:
+        match held:
+            case Held(ticket=ticket):
+                _ = self._live_dispatches.release(ticket)
+            case RegistryClosed():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def _end_all_runs(self, runs: SeatRuns, lost: ChildLost) -> None:
+        """Answer every task in flight of a lost child with its loss."""
+        for run in runs.drain():
+            self._release_held(run.held)
+            run.handle.finish(lost)
+
+    async def _run_shared_generation(self, slot: _SharedSlot, child: Child) -> None:
+        """Serve shared tasks on one child until it closes and drains, until it
+        is lost, or until the pool stops and its tasks end.
+
+        Reads each frame of the child as it arrives: a result ends its task
+        and frees its seat, and a deadline report marks its task. A frame that
+        names no task in flight, or a frame of another kind of child, is a
+        protocol violation: the child is killed, and every task of it ends
+        with the loss. A lost child ends every task of it with that loss.
+        """
+        runs = SeatRuns(slot.seats)
+        slot.state = Open(runs)
+        child.on_frame = slot.wake.set
+        self._place_shared()
+        tasks_done = 0
+        while True:
+            slot.wake.clear()
+            event = await child.await_frame(0)
+            match event:
+                case SharedResultFrame():
+                    if not self._end_run(runs, event):
+                        lost = await child.discard_violating_child()
+                        await self._lose_shared_child(slot, child, runs, lost)
+                        return
+                    tasks_done += 1
+                    slot.defects = 0
+                    self._close_after_task(slot, runs, tasks_done, event.rss)
+                    self._place_shared()
+                case DeadlineFiredFrame():
+                    if not self._note_deadline(child, runs, event):
+                        lost = await child.discard_violating_child()
+                        await self._lose_shared_child(slot, child, runs, lost)
+                        return
+                case ReadyFrame() | BootFailedFrame() | ResultFrame():
+                    lost = await child.discard_violating_child()
+                    await self._lose_shared_child(slot, child, runs, lost)
+                    return
+                case ChildLost():
+                    await self._lose_shared_child(slot, child, runs, event)
+                    return
+                case WaitExpired():
+                    if self._shared_child_drained(slot, runs):
+                        break
+                    await slot.wake.wait()
+                case _ as unreachable:
+                    assert_never(unreachable)
+        slot.state = Retiring()
+        if child.has_exited:
+            await child.dispose_lost()
+        else:
+            await child.retire()
+        slot.child = None
+
+    def _end_run(self, runs: SeatRuns, frame: SharedResultFrame) -> bool:
+        """End the task of a result frame. False: the frame names no task in
+        flight, or reports a timeout of a run without a deadline, a protocol
+        violation."""
+        run = runs.get(frame.dispatch)
+        if run is None or run.handle.frame.task_id != frame.task_id:
+            return False
+        outcome: SeatTaskFinished | SeatDeadlineEnded
+        match frame.end:
+            case SeatFinished(ok=ok, result_json=result_json, failed_reason=reason):
+                outcome = SeatTaskFinished(ok, result_json, reason)
+            case SeatTimedOut():
+                match run.handle.frame.work:
+                    case SeatTask():
+                        outcome = SeatDeadlineEnded()
+                    case SeatRefusal():
+                        return False
+                    case _ as unreachable:
+                        assert_never(unreachable)
+            case _ as unreachable:
+                assert_never(unreachable)
+        _ = runs.remove(frame.dispatch)
+        self._release_held(run.held)
+        run.handle.finish(outcome)
+        return True
+
+    def _note_deadline(
+        self,
+        child: Child,
+        runs: SeatRuns,
+        frame: DeadlineFiredFrame,
+    ) -> bool:
+        """Mark that the child cancelled a task at its deadline. False: the
+        frame names no task in flight, or a run without a deadline, a protocol
+        violation."""
+        run = runs.get(frame.dispatch)
+        if run is None or run.handle.frame.task_id != frame.task_id:
+            return False
+        match run.handle.frame.work:
+            case SeatTask(timeout_ms=timeout_ms):
+                pass
+            case SeatRefusal():
+                return False
+            case _ as unreachable:
+                assert_never(unreachable)
+        run.deadline = DeadlineReported()
+        logger.info(
+            'Task %s reached its timeout_ms=%s; child pid=%s cancelled it',
+            frame.task_id,
+            timeout_ms,
+            child.pid,
+        )
+        return True
+
+    def _close_after_task(
+        self,
+        slot: _SharedSlot,
+        runs: SeatRuns,
+        tasks_done: int,
+        rss: RssReading,
+    ) -> None:
+        """Close an open shared child that reached a recycle limit."""
+        match self._config.shared_async:
+            case SharedAsyncChildren() as shared_async:
+                pass
+            case NoSharedAsyncChildren():
+                raise AssertionError('a shared slot exists with no shared config')
+            case _ as unreachable:
+                assert_never(unreachable)
+        match slot.state:
+            case Open():
+                reason = shared_recycle_reason(shared_async, tasks_done, rss)
+                if reason is not None:
+                    logger.debug(
+                        'Closing shared child on slot %s: %s',
+                        slot.index,
+                        reason.value,
+                    )
+                    slot.state = Closing(reason, runs)
+            case Closing():
+                pass
+            case Starting() | Retiring() | Down():
+                raise AssertionError(
+                    f'shared slot {slot.index} read a result while not open'
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def _shared_child_drained(self, slot: _SharedSlot, runs: SeatRuns) -> bool:
+        """Close the child when the pool stops or fails. True: the child is
+        closed and runs no task, so it can retire."""
+        if (self._stopping or self._failure is not None) and isinstance(
+            slot.state,
+            Open,
+        ):
+            slot.state = Closing(CloseReason.POOL_STOPPING, runs)
+        return isinstance(slot.state, Closing) and runs.count() == 0
+
+    async def _lose_shared_child(
+        self,
+        slot: _SharedSlot,
+        child: Child,
+        runs: SeatRuns,
+        lost: ChildLost,
+    ) -> None:
+        """End every task of a lost shared child, then clean up the child."""
+        logger.warning(
+            'Lost shared child pid=%s on slot %s with %s task(s): %s',
+            child.pid,
+            slot.index,
+            runs.count(),
+            lost.describe(),
+        )
+        slot.state = Retiring()
+        self._end_all_runs(runs, lost)
+        await child.dispose_lost()
+        slot.child = None
+
     async def stop(self, drain_timeout_s: float) -> StopReport:
         """Stop the pool: release queued tasks, drain busy ones, then kill.
 
-        Idle children exit by stop frame. A task still running at the deadline
-        is killed with its session, and its handle gets ``ChildLost``. Cancels
-        no task early. Does not touch task rows.
+        Idle children exit by stop frame. A shared child closes: it takes no
+        new task, and it exits by stop frame when its tasks ended. A task still
+        running at the deadline is killed with its child's session, and its
+        handle gets ``ChildLost``; in a shared child, every task of the child
+        does. Cancels no task early. Does not touch task rows.
         """
         report = await self._stop_slots(drain_timeout_s)
         await self._stop_preload()
@@ -1867,7 +2680,7 @@ class SlotPool:
         if not self._stop_requested.done():
             self._stop_requested.set_result(None)
         self._release_pending()
-        for slot in self._slots:
+        for slot in self._all_slots():
             # A booting child holds no task, so it does not wait for the drain.
             # A slot that is down keeps that state while its next child boots.
             if slot.child is not None and isinstance(slot.state, Starting | Down):
@@ -1878,14 +2691,14 @@ class SlotPool:
         _, running = await asyncio.wait(self._tasks, timeout=drain_timeout_s)
         killed: list[str] = []
         if running:
-            for slot in self._slots:
+            for slot in self._all_slots():
                 killed.extend(self._kill_at_deadline(slot))
             _, stuck = await asyncio.wait(self._tasks, timeout=CHILD_KILL_WAIT_S)
             for task in stuck:
                 task.cancel()
             if stuck:
                 await asyncio.wait(stuck, timeout=CHILD_KILL_WAIT_S)
-            for slot in self._slots:
+            for slot in self._all_slots():
                 await self._clear_slot(slot)
         for task in self._tasks:
             if task.done() and not task.cancelled() and task.exception() is not None:

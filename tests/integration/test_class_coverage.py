@@ -12,6 +12,9 @@
 - The reaper pass logs an unserved stream: the test enters at
   ``_run_reaper_pass``, above the wiring.
 - Both reads use the claim index.
+- A worker of a real profile with shared async children writes its snapshot,
+  and both reads give its ``SHARED_ASYNC`` budget with the seats of its
+  shared children.
 
 Each test empties ``horsies_tasks`` and ``horsies_worker_states``: both reads
 cover the whole fleet.
@@ -40,6 +43,7 @@ from horsies.core.brokers.class_coverage_reads import (
 )
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import BrokerErrorCode
+from horsies.core.cli import execution_settings
 from horsies.core.models.class_coverage import (
     BudgetLoad,
     NoneDue,
@@ -52,10 +56,16 @@ from horsies.core.models.class_coverage import (
 )
 from horsies.core.models.health import WORKER_STATE_LIVE_WINDOW_S
 from horsies.core.models.recovery import RecoveryConfig
+from horsies.core.models.worker_profile import (
+    IsolatedChildren,
+    SharedAsyncChildren,
+    WorkerProfile,
+)
 from horsies.core.models.retention import RetentionConfig
 from horsies.core.models.tasks import Execution
 from horsies.core.types.result import Err, Ok
 from horsies.core.worker.runtime import _ReaperPassState
+from horsies.core.worker.slots import SlotPool
 from horsies.core.worker.worker import Worker, WorkerConfig
 from tests.broker_resources_support import current_resources
 
@@ -449,6 +459,87 @@ class TestClassReport:
                 assert 'ISOLATED' in error.message
             case Ok(report):
                 raise AssertionError(report)
+
+
+async def _snapshot_of_profile(broker: PostgresBroker, profile: WorkerProfile) -> str:
+    """Write the snapshot of a worker of ``profile`` on queue ``a``, through
+    ``_update_worker_state``, before its children start. Returns its id."""
+    settings = execution_settings(profile)
+    worker = Worker(
+        session_factory=current_resources(broker).session_factory,
+        listener=MagicMock(),
+        cfg=WorkerConfig(
+            dsn='unused',
+            psycopg_dsn='unused',
+            queues=['a'],
+            processes=settings.processes,
+            shared_async=settings.shared_async,
+        ),
+    )
+    worker._slots = SlotPool(worker._slot_pool_config(), pending_limit=1)
+    await worker._update_worker_state()
+    return worker.worker_instance_id
+
+
+@pytest.mark.usefixtures('empty_fleet')
+class TestRealSharedProfile:
+    async def test_the_report_gives_the_seats_of_the_shared_budget(
+        self,
+        broker: PostgresBroker,
+        session: AsyncSession,
+    ) -> None:
+        worker_id = await _snapshot_of_profile(
+            broker,
+            WorkerProfile(
+                isolated=IsolatedChildren(count=1),
+                shared_async=SharedAsyncChildren(count=2, seats=4),
+            ),
+        )
+        await _task(
+            session, queue='a', execution=ASYNC, status='RUNNING', owner=worker_id
+        )
+        await _task(session, queue='a', execution=ASYNC)
+
+        match await broker.get_class_report_async():
+            case Ok(report):
+                pass
+            case Err(error):
+                raise AssertionError(error.message)
+
+        (worker,) = report.workers
+        assert worker == WorkerClassLoad(
+            worker_id=worker_id,
+            snapshot_at=worker.snapshot_at,
+            budgets=(
+                BudgetLoad(ISOLATED, 1, (ISOLATED, THREAD), in_flight=0),
+                BudgetLoad(ASYNC, 8, (ASYNC,), in_flight=1),
+            ),
+        )
+        (stream,) = report.streams
+        assert stream.state == StreamServed(workers=1, capacity=8)
+
+    async def test_a_worker_with_only_shared_children_serves_only_shared_rows(
+        self,
+        broker: PostgresBroker,
+        session: AsyncSession,
+    ) -> None:
+        await _snapshot_of_profile(
+            broker,
+            WorkerProfile(shared_async=SharedAsyncChildren(count=1, seats=4)),
+        )
+        await _task(session, queue='a', execution=ISOLATED)
+        await _task(session, queue='a', execution=ASYNC)
+
+        match await broker.get_class_coverage_async():
+            case Ok(coverage):
+                pass
+            case Err(error):
+                raise AssertionError(error.message)
+
+        assert coverage.streams == (
+            StreamCoverage('a', ISOLATED, StreamUnserved()),
+            StreamCoverage('a', ASYNC, StreamServed(workers=1, capacity=4)),
+        )
 
 
 def _reaper_worker(broker: PostgresBroker) -> Worker:

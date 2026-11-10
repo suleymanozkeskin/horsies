@@ -100,6 +100,34 @@ def report() -> TaskResult[int, TaskError]:
 - Engines created lazily after the hook runs, raw psycopg clients outside any pool, and pools hidden in C extensions are out of reach — only app-side close-per-use helps there.
 - A sync hook cannot set pool policy for an async engine driven via `asyncio.run` inside a task; choose that policy at construction.
 
+## Shared async child start hooks
+
+`@app.on_shared_async_child_start` registers an `async def` function that runs once in every [shared async child](shared-async-tasks), on the event loop of that child, before the child takes its first task. Use it to build long-lived async clients: an HTTP client or an async database pool that it builds belongs to the loop that every task of the child uses.
+
+```python
+import asyncio
+
+from horsies import Execution, TaskError, TaskResult
+
+shared_state: dict[str, asyncio.AbstractEventLoop] = {}
+
+
+@app.on_shared_async_child_start
+async def remember_loop() -> None:
+    shared_state['loop'] = asyncio.get_running_loop()
+
+
+@app.task('loop_check', execution=Execution.SHARED_ASYNC, timeout_ms=5_000)
+async def loop_check() -> TaskResult[bool, TaskError]:
+    return TaskResult(ok=shared_state['loop'] is asyncio.get_running_loop())
+```
+
+- The hooks run after the `on_child_process_start` hooks and after the child opens its async connection pool, in registration order.
+- Each hook runs for at most 10 seconds. A hook that raises or runs longer ends the child and stops the worker, as for `on_child_process_start`. A hook that blocks the loop is ended by the same bound.
+- They run in every shared async child, also in a replacement child, so bodies must be idempotent.
+- Work that a hook starts and leaves running, such as a background task of a client, belongs to no task.
+- Isolated children do not run these hooks.
+
 ## API Reference
 
 ### `@app.on_child_process_start`
@@ -115,3 +143,17 @@ def report() -> TaskResult[int, TaskError]:
 ### `app.get_child_process_start_hooks() -> list[ChildProcessStartHook]`
 
 Snapshot of registered hooks in registration order.
+
+### `@app.on_shared_async_child_start`
+
+| Parameter | Type | Required | Description |
+| --------- | ---- | -------- | ----------- |
+| `fn` | `SharedAsyncChildStartHook` (`Callable[[], Coroutine[Any, Any, None]]`) | Yes | `async def` function with no arguments. Registered once per identity; duplicate registrations are ignored. |
+
+**Returns:** the function unchanged (usable as a decorator).
+
+**Raises:** `ConfigurationError` (`HRS-214`) — `fn` is not callable or is not an async function.
+
+### `app.get_shared_async_child_start_hooks() -> list[SharedAsyncChildStartHook]`
+
+Snapshot of registered shared async child start hooks in registration order.

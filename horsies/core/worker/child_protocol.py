@@ -30,13 +30,21 @@ from horsies.core.models.boot_failure import (
     describe_boot_cause,
     parse_boot_cause,
 )
-from horsies.core.models.tasks import MAX_TASK_TIMEOUT_MS, MIN_TASK_TIMEOUT_MS
+from horsies.core.models.tasks import (
+    MAX_CANCEL_GRACE_MS,
+    MAX_TASK_TIMEOUT_MS,
+    MIN_CANCEL_GRACE_MS,
+    MIN_TASK_TIMEOUT_MS,
+)
+from horsies.core.models.worker_profile import MAX_SEATS_PER_SHARED_ASYNC_CHILD
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.stored_timeout import (
+    CancelGraceInvalid,
     NoTimeout,
     OptionsUnreadable,
     StoredTimeout,
     TaskTimeout,
+    TimeoutRefusal,
     TimeoutValueInvalid,
 )
 
@@ -59,11 +67,31 @@ MAX_BOOT_DETAIL_CHARS: Final = 2000
 
 
 @dataclass(frozen=True, slots=True)
+class IsolatedChild:
+    """The child runs one task at a time, in ``RunFrame``s."""
+
+
+@dataclass(frozen=True, slots=True)
+class SharedAsyncChild:
+    """The child runs up to ``seats`` ``async def`` tasks at once, as
+    coroutines on its event loop, in ``SharedRunFrame``s.
+
+    ``seats`` is from 1 to ``MAX_SEATS_PER_SHARED_ASYNC_CHILD``.
+    """
+
+    seats: int
+
+
+ChildKind: TypeAlias = IsolatedChild | SharedAsyncChild
+
+
+@dataclass(frozen=True, slots=True)
 class InitFrame:
     """Parent to child, first frame: everything the child needs to boot.
 
     Carries the database URL here because argv is visible in ``ps``. The URL
-    holds a password, so it stays out of the repr.
+    holds a password, so it stays out of the repr. ``child_kind`` decides
+    which frames the child takes after its ready frame.
     """
 
     app_locator: str
@@ -78,6 +106,7 @@ class InitFrame:
     child_pool_max_size: int
     child_pool_check: bool
     process_name: str
+    child_kind: ChildKind
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +121,58 @@ class RunFrame:
     is_workflow_task: bool
     timeout: StoredTimeout
     claimed_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class SeatTask:
+    """Run the task on the seat, with a deadline.
+
+    The child starts the deadline when it starts the task: ``timeout_ms``
+    after that it cancels the task. ``cancel_grace_ms`` is the time the task
+    gets to stop after that cancel. ``timeout_ms`` is from
+    ``MIN_TASK_TIMEOUT_MS`` to ``MAX_TASK_TIMEOUT_MS``, and
+    ``cancel_grace_ms`` from ``MIN_CANCEL_GRACE_MS`` to ``MAX_CANCEL_GRACE_MS``.
+    """
+
+    timeout_ms: int
+    cancel_grace_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class SeatRefusal:
+    """Fail the task with ``refusal``: the stored timeout or cancel grace of
+    the row that the worker cannot use.
+
+    The seat sets the row RUNNING and returns ``WORKER_SERIALIZATION_ERROR``
+    before it resolves the task, as an isolated child does for a refused
+    stored timeout. No task code runs, so the run has no deadline.
+    """
+
+    refusal: TimeoutRefusal
+
+
+SeatWork: TypeAlias = SeatTask | SeatRefusal
+"""What a seat does with the task of a ``SharedRunFrame``."""
+
+
+@dataclass(frozen=True, slots=True)
+class SharedRunFrame:
+    """Parent to a shared async child: run one task on a free seat.
+
+    ``dispatch`` names this run in the pool, from 1, and each frame of the
+    child about it carries the same number. ``work`` is the task with its
+    deadline, or the refusal that fails it.
+    """
+
+    dispatch: int
+    task_id: str
+    task_name: str
+    args_json: str | None
+    kwargs_json: str | None
+    worker_id: str
+    is_workflow_task: bool
+    claimed_at: datetime | None
+    work: SeatWork
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,6 +286,47 @@ class ResultFrame:
 
 
 @dataclass(frozen=True, slots=True)
+class SeatFinished:
+    """The task ended before its deadline. The fields have the
+    ``_run_task_entry`` meaning, as in ``ResultFrame``."""
+
+    ok: bool
+    result_json: str
+    failed_reason: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class SeatTimedOut:
+    """The deadline of the task fired. The child cancelled the task, and its
+    coroutine has ended. Anything the task returned is dropped: the outcome
+    is the timeout."""
+
+
+SeatEnd: TypeAlias = SeatFinished | SeatTimedOut
+
+
+@dataclass(frozen=True, slots=True)
+class SharedResultFrame:
+    """Shared async child to parent: the task of run ``dispatch`` has ended,
+    and its seat is free. ``rss`` is the RSS of the child after it."""
+
+    dispatch: int
+    task_id: str
+    end: SeatEnd
+    rss: RssReading
+
+
+@dataclass(frozen=True, slots=True)
+class DeadlineFiredFrame:
+    """Shared async child to parent: the deadline of run ``dispatch`` fired,
+    and the child cancelled its task. The task has not ended yet: its
+    ``SharedResultFrame`` comes when it has."""
+
+    dispatch: int
+    task_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class PreloadReadyFrame:
     """Preload parent to worker: imports are done, so forks can start."""
 
@@ -232,8 +354,14 @@ class PreloadRefusedFrame:
     reason: str
 
 
-ParentFrame: TypeAlias = InitFrame | RunFrame | StopFrame
-ChildFrame: TypeAlias = ReadyFrame | BootFailedFrame | ResultFrame
+WireResult: TypeAlias = tuple[bool, str, str | None]
+"""What a child produced for one task run: whether it produced a task result
+(``ok``), that result as JSON, and the reason of a worker-level failure."""
+
+ParentFrame: TypeAlias = InitFrame | RunFrame | SharedRunFrame | StopFrame
+ChildFrame: TypeAlias = (
+    ReadyFrame | BootFailedFrame | ResultFrame | SharedResultFrame | DeadlineFiredFrame
+)
 PreloadFrame: TypeAlias = (
     PreloadReadyFrame | ChildForkedFrame | ForkFailedFrame | PreloadRefusedFrame
 )
@@ -329,11 +457,14 @@ def encode_parent_frame(frame: ParentFrame) -> EncodedFrame:
                     'child_pool_max_size': frame.child_pool_max_size,
                     'child_pool_check': frame.child_pool_check,
                     'process_name': frame.process_name,
+                    'child_kind': _child_kind_field(frame.child_kind),
                 },
                 b'',
             )
         case RunFrame():
             return _encode_run_frame(frame)
+        case SharedRunFrame():
+            return _encode_shared_run_frame(frame)
         case StopFrame():
             return _pack({'kind': 'stop'}, b'')
         case _ as unreachable:
@@ -360,6 +491,90 @@ def _encode_run_frame(frame: RunFrame) -> EncodedFrame:
             ),
         },
         (args or b'') + (kwargs or b''),
+    )
+
+
+def _arguments_body(
+    args_json: str | None,
+    kwargs_json: str | None,
+) -> tuple[dict[str, object], bytes]:
+    """The size fields and the body of the arguments of a run."""
+    args = args_json.encode('utf-8') if args_json is not None else None
+    kwargs = kwargs_json.encode('utf-8') if kwargs_json is not None else None
+    sizes: dict[str, object] = {
+        'args_bytes': None if args is None else len(args),
+        'kwargs_bytes': None if kwargs is None else len(kwargs),
+    }
+    return sizes, (args or b'') + (kwargs or b'')
+
+
+def _encode_shared_run_frame(frame: SharedRunFrame) -> EncodedFrame:
+    sizes, body = _arguments_body(frame.args_json, frame.kwargs_json)
+    return _pack(
+        {
+            'kind': 'shared_run',
+            'dispatch': frame.dispatch,
+            'task_id': frame.task_id,
+            'task_name': frame.task_name,
+            **sizes,
+            'worker_id': frame.worker_id,
+            'is_workflow_task': frame.is_workflow_task,
+            'claimed_at': (
+                None if frame.claimed_at is None else frame.claimed_at.isoformat()
+            ),
+            'work': _encode_seat_work(frame.work),
+        },
+        body,
+    )
+
+
+def _encode_seat_work(work: SeatWork) -> dict[str, object]:
+    match work:
+        case SeatTask(timeout_ms=timeout_ms, cancel_grace_ms=cancel_grace_ms):
+            return {
+                'kind': 'task',
+                'timeout_ms': timeout_ms,
+                'cancel_grace_ms': cancel_grace_ms,
+            }
+        case SeatRefusal(refusal=refusal):
+            return {'kind': 'refusal', 'refusal': _encode_timeout(refusal)}
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _child_kind_field(child_kind: ChildKind) -> dict[str, object]:
+    match child_kind:
+        case IsolatedChild():
+            return {'kind': 'isolated'}
+        case SharedAsyncChild(seats=seats):
+            return {'kind': 'shared_async', 'seats': seats}
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _encode_shared_result(frame: SharedResultFrame) -> EncodedFrame:
+    match frame.end:
+        case SeatFinished(ok=ok, result_json=result_json, failed_reason=reason):
+            end: dict[str, object] = {
+                'kind': 'finished',
+                'ok': ok,
+                'failed_reason': reason,
+            }
+            body = result_json.encode('utf-8')
+        case SeatTimedOut():
+            end = {'kind': 'timed_out'}
+            body = b''
+        case _ as unreachable:
+            assert_never(unreachable)
+    return _pack(
+        {
+            'kind': 'shared_result',
+            'dispatch': frame.dispatch,
+            'task_id': frame.task_id,
+            'end': end,
+            'rss_mb': _rss_field(frame.rss),
+        },
+        body,
     )
 
 
@@ -392,6 +607,13 @@ def encode_child_frame(frame: ChildFrame) -> EncodedFrame:
                     'task_loop': _task_loop_field(frame.task_loop),
                 },
                 frame.result_json.encode('utf-8'),
+            )
+        case SharedResultFrame():
+            return _encode_shared_result(frame)
+        case DeadlineFiredFrame(dispatch=dispatch, task_id=task_id):
+            return _pack(
+                {'kind': 'deadline_fired', 'dispatch': dispatch, 'task_id': task_id},
+                b'',
             )
         case _ as unreachable:
             assert_never(unreachable)
@@ -460,14 +682,16 @@ def _encode_timeout(timeout: StoredTimeout) -> dict[str, object]:
             return {'kind': 'options_unreadable', 'reason': reason}
         case TimeoutValueInvalid(reason=reason):
             return {'kind': 'value_invalid', 'reason': reason}
+        case CancelGraceInvalid(reason=reason):
+            return {'kind': 'grace_invalid', 'reason': reason}
         case _ as unreachable:
             assert_never(unreachable)
 
 
-def _decode_timeout(meta: Mapping[str, Any]) -> StoredTimeout:
-    value = meta.get('timeout')
+def _decode_timeout(meta: Mapping[str, Any], key: str = 'timeout') -> StoredTimeout:
+    value = meta.get(key)
     if not isinstance(value, dict):
-        raise _BadField('timeout')
+        raise _BadField(key)
     timeout = cast('Mapping[str, Any]', value)
     match timeout.get('kind'):
         case 'none':
@@ -485,8 +709,10 @@ def _decode_timeout(meta: Mapping[str, Any]) -> StoredTimeout:
             return OptionsUnreadable(reason=_text(timeout, 'reason'))
         case 'value_invalid':
             return TimeoutValueInvalid(reason=_text(timeout, 'reason'))
+        case 'grace_invalid':
+            return CancelGraceInvalid(reason=_text(timeout, 'reason'))
         case _:
-            raise _BadField('timeout.kind')
+            raise _BadField(f'{key}.kind')
 
 
 def _flag(meta: Mapping[str, Any], key: str) -> bool:
@@ -592,6 +818,40 @@ def _load_meta(meta_bytes: bytes) -> Mapping[str, Any]:
             raise _BadField(f'metadata is not JSON: {exc}')
 
 
+def _bounded_whole(meta: Mapping[str, Any], key: str, low: int, high: int) -> int:
+    value = _whole(meta, key)
+    if not low <= value <= high:
+        raise _BadField(key)
+    return value
+
+
+def _dispatch(meta: Mapping[str, Any]) -> int:
+    value = _whole(meta, 'dispatch')
+    if value < 1:
+        raise _BadField('dispatch')
+    return value
+
+
+def _child_kind(meta: Mapping[str, Any]) -> ChildKind:
+    value = meta.get('child_kind')
+    if not isinstance(value, dict):
+        raise _BadField('child_kind')
+    child_kind = cast('Mapping[str, Any]', value)
+    match child_kind.get('kind'):
+        case 'isolated':
+            return IsolatedChild()
+        case 'shared_async':
+            seats = _bounded_whole(
+                child_kind,
+                'seats',
+                1,
+                MAX_SEATS_PER_SHARED_ASYNC_CHILD,
+            )
+            return SharedAsyncChild(seats=seats)
+        case _:
+            raise _BadField('child_kind.kind')
+
+
 def _decode_init(meta: Mapping[str, Any]) -> InitFrame:
     connect_kwargs = meta.get('connect_kwargs')
     if not isinstance(connect_kwargs, dict):
@@ -609,6 +869,7 @@ def _decode_init(meta: Mapping[str, Any]) -> InitFrame:
         child_pool_max_size=_whole(meta, 'child_pool_max_size'),
         child_pool_check=_flag(meta, 'child_pool_check'),
         process_name=_text(meta, 'process_name'),
+        child_kind=_child_kind(meta),
     )
 
 
@@ -631,6 +892,75 @@ def _decode_run(meta: Mapping[str, Any], body: bytes) -> RunFrame:
     )
 
 
+def _decode_arguments(
+    meta: Mapping[str, Any],
+    body: bytes,
+) -> tuple[str | None, str | None]:
+    """The args and kwargs texts of a run, cut from the body by their sizes."""
+    args_bytes = _optional_whole(meta, 'args_bytes')
+    kwargs_bytes = _optional_whole(meta, 'kwargs_bytes')
+    args_end = args_bytes or 0
+    if args_end + (kwargs_bytes or 0) != len(body):
+        raise _BadField('args_bytes and kwargs_bytes do not match the body')
+    return (
+        None if args_bytes is None else body[:args_end].decode('utf-8'),
+        None if kwargs_bytes is None else body[args_end:].decode('utf-8'),
+    )
+
+
+def _decode_shared_run(meta: Mapping[str, Any], body: bytes) -> SharedRunFrame:
+    args_json, kwargs_json = _decode_arguments(meta, body)
+    claimed_at = _optional_text(meta, 'claimed_at')
+    return SharedRunFrame(
+        dispatch=_dispatch(meta),
+        task_id=_text(meta, 'task_id'),
+        task_name=_text(meta, 'task_name'),
+        args_json=args_json,
+        kwargs_json=kwargs_json,
+        worker_id=_text(meta, 'worker_id'),
+        is_workflow_task=_flag(meta, 'is_workflow_task'),
+        claimed_at=None if claimed_at is None else datetime.fromisoformat(claimed_at),
+        work=_decode_seat_work(meta),
+    )
+
+
+def _decode_seat_work(meta: Mapping[str, Any]) -> SeatWork:
+    value = meta.get('work')
+    if not isinstance(value, dict):
+        raise _BadField('work')
+    work = cast('Mapping[str, Any]', value)
+    match work.get('kind'):
+        case 'task':
+            return SeatTask(
+                timeout_ms=_bounded_whole(
+                    work,
+                    'timeout_ms',
+                    MIN_TASK_TIMEOUT_MS,
+                    MAX_TASK_TIMEOUT_MS,
+                ),
+                cancel_grace_ms=_bounded_whole(
+                    work,
+                    'cancel_grace_ms',
+                    MIN_CANCEL_GRACE_MS,
+                    MAX_CANCEL_GRACE_MS,
+                ),
+            )
+        case 'refusal':
+            return SeatRefusal(refusal=_refusal_of(_decode_timeout(work, 'refusal')))
+        case _:
+            raise _BadField('work.kind')
+
+
+def _refusal_of(timeout: StoredTimeout) -> TimeoutRefusal:
+    match timeout:
+        case OptionsUnreadable() | TimeoutValueInvalid() | CancelGraceInvalid():
+            return timeout
+        case NoTimeout() | TaskTimeout():
+            raise _BadField('work.refusal')
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def decode_parent_frame(
     meta_bytes: bytes,
     body: bytes,
@@ -644,12 +974,43 @@ def decode_parent_frame(
                 return Ok(_decode_init(meta))
             case 'run':
                 return Ok(_decode_run(meta, body))
+            case 'shared_run':
+                return Ok(_decode_shared_run(meta, body))
             case 'stop':
                 return Ok(StopFrame())
             case _:
                 return Err(MalformedFrame(f'unknown parent frame {kind!r}'))
     except (_BadField, ValueError, OverflowError, RecursionError) as exc:
         return Err(MalformedFrame(f'{type(exc).__name__}: {exc}'))
+
+
+def _seat_end(meta: Mapping[str, Any], body: bytes) -> SeatEnd:
+    value = meta.get('end')
+    if not isinstance(value, dict):
+        raise _BadField('end')
+    end = cast('Mapping[str, Any]', value)
+    match end.get('kind'):
+        case 'finished':
+            return SeatFinished(
+                ok=_flag(end, 'ok'),
+                result_json=body.decode('utf-8'),
+                failed_reason=_optional_text(end, 'failed_reason'),
+            )
+        case 'timed_out':
+            if body:
+                raise _BadField('a timed-out end carries no result')
+            return SeatTimedOut()
+        case _:
+            raise _BadField('end.kind')
+
+
+def _decode_shared_result(meta: Mapping[str, Any], body: bytes) -> SharedResultFrame:
+    return SharedResultFrame(
+        dispatch=_dispatch(meta),
+        task_id=_text(meta, 'task_id'),
+        end=_seat_end(meta, body),
+        rss=_rss(meta),
+    )
 
 
 def decode_child_frame(
@@ -674,6 +1035,15 @@ def decode_child_frame(
                         failed_reason=_optional_text(meta, 'failed_reason'),
                         rss=_rss(meta),
                         task_loop=_task_loop(meta),
+                    ),
+                )
+            case 'shared_result':
+                return Ok(_decode_shared_result(meta, body))
+            case 'deadline_fired':
+                return Ok(
+                    DeadlineFiredFrame(
+                        dispatch=_dispatch(meta),
+                        task_id=_text(meta, 'task_id'),
                     ),
                 )
             case _:

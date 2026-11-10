@@ -232,11 +232,13 @@ class HealthMixin:
                         'wid': self.worker_instance_id,
                         'host': socket.gethostname(),
                         'pid': os.getpid(),
-                        'procs': self.cfg.processes,
+                        'procs': (
+                            self.cfg.processes + self.cfg.shared_async_children()
+                        ),
                         'mcb': self.cfg.max_claim_batch,
                         'mcpw': self.cfg.max_claim_per_worker
                         if self.cfg.max_claim_per_worker > 0
-                        else self.cfg.processes,
+                        else self.cfg.seat_count(),
                         'cwc': self.cfg.cluster_wide_cap,
                         'queues': self.cfg.queues,
                         'qp': Jsonb(self.cfg.queue_priorities)
@@ -284,7 +286,7 @@ class HealthMixin:
                         'slots_down': Jsonb(slots_down_json(self._down_slots())),
                         'class_capacity': Jsonb(
                             class_capacity_json(
-                                self.cfg.claim_plan,
+                                self.cfg.claim_plan(),
                                 self._claim_capacity(),
                             )
                         ),

@@ -24,6 +24,7 @@ from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.tasks import (
     MAX_TASK_TIMEOUT_MS,
+    Execution,
     OperationalErrorCode,
     RetryPolicy,
     TaskError,
@@ -96,6 +97,9 @@ def _run_in_process(
         is_workflow_task: bool = True,
         timeout: StoredTimeout = NoTimeout(),
         claimed_at: datetime | None = None,
+        *,
+        execution: Execution,
+        task_options: str | None,
     ) -> None:
         seen.append(timeout)
         wire = _run_task_entry(

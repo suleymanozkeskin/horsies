@@ -9,10 +9,14 @@ from enum import Enum
 from typing import TYPE_CHECKING, Optional
 
 from horsies.core.defaults import MAX_CLAIM_RENEW_AGE_MS
-from horsies.core.worker.claim_plan import ClaimPlan, isolated_children_plan
+from horsies.core.worker.claim_plan import ClaimPlan, claim_plan_for_children
 
 if TYPE_CHECKING:
     from horsies.core.models.recovery import RecoveryConfig
+    from horsies.core.models.worker_profile import (
+        NoSharedAsyncChildren,
+        SharedAsyncChildren,
+    )
     from horsies.core.models.retention import RetentionConfig
     from horsies.core.models.resilience import WorkerResilienceConfig
 
@@ -27,6 +31,13 @@ def _default_str_int_dict() -> dict[str, int]:
 
 def _default_connect_kwargs() -> dict[str, object]:
     return {}
+
+
+def _no_shared_async_children() -> NoSharedAsyncChildren:
+    # Imported here: the profile module imports ChildPreload from this one.
+    from horsies.core.models.worker_profile import NoSharedAsyncChildren
+
+    return NoSharedAsyncChildren()
 
 
 class ChildPreload(str, Enum):
@@ -50,6 +61,8 @@ class WorkerConfig:
     queues: list[str]  # which queues to serve
     session_dsn: str = ''  # SQLAlchemy async URL for session features
     pgbouncer_transaction_mode: bool = False
+    # The isolated children. 0 is valid when the worker has shared async
+    # children.
     processes: int = os.cpu_count() or 2
     parent_pool_size: int = 3
     parent_max_overflow: int = 2
@@ -128,14 +141,52 @@ class WorkerConfig:
     # takes the crash path. Set it below the supervisor's stop window.
     drain_timeout_s: float = 300.0
     child_preload: ChildPreload = ChildPreload.LIBRARY
-    # Which budget claims the rows of each execution class, built once from
-    # the profile. The default is a worker that runs `processes` isolated
-    # children and no shared ones.
-    claim_plan: ClaimPlan = field(default_factory=isolated_children_plan)
+    # The shared async children of the worker profile, with their seats and
+    # their recycle limits.
+    shared_async: SharedAsyncChildren | NoSharedAsyncChildren = field(
+        default_factory=_no_shared_async_children,
+    )
+
+    def shared_async_children(self) -> int:
+        """The number of shared async children."""
+        from horsies.core.models.worker_profile import (
+            NoSharedAsyncChildren,
+            SharedAsyncChildren,
+        )
+
+        match self.shared_async:
+            case SharedAsyncChildren(count=count):
+                return count
+            case NoSharedAsyncChildren():
+                return 0
+
+    def claim_plan(self) -> ClaimPlan:
+        """Which budget claims the rows of each execution class: derived from
+        the children of this config (``claim_plan_for_children``)."""
+        return claim_plan_for_children(self.processes, self.shared_async_children())
+
+    def seat_count(self) -> int:
+        """The tasks that the children run at once: one per isolated child,
+        and the seats of each shared async child."""
+        from horsies.core.models.worker_profile import (
+            NoSharedAsyncChildren,
+            SharedAsyncChildren,
+        )
+
+        match self.shared_async:
+            case SharedAsyncChildren(count=count, seats=seats):
+                return self.processes + count * seats
+            case NoSharedAsyncChildren():
+                return self.processes
 
     def __post_init__(self) -> None:
-        if self.processes < 1:
-            raise ValueError(f'processes must be >= 1; got {self.processes}')
+        if self.processes < 0:
+            raise ValueError(f'processes must be >= 0; got {self.processes}')
+        if self.processes + self.shared_async_children() < 1:
+            raise ValueError(
+                'a worker needs at least one child: processes is 0 and there '
+                'are no shared async children'
+            )
         if not math.isfinite(self.drain_timeout_s) or self.drain_timeout_s <= 0:
             raise ValueError(
                 'drain_timeout_s must be a finite number of seconds above 0; '

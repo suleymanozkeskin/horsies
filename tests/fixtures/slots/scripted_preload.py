@@ -35,7 +35,7 @@ def _prepare(_init: InitFrame) -> BootFn:
 def main() -> None:
     preload_main.serve = _serve_with_socket  # type: ignore[assignment]
     ctrl = socket.socket(fileno=int(sys.argv[1]))
-    preload_main.run(ctrl, int(sys.argv[2]), _prepare, scripted_child._run)
+    preload_main.run(ctrl, int(sys.argv[2]), _prepare, scripted_child.RUNNERS)
 
 
 if __name__ == '__main__':

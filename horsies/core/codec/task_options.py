@@ -178,7 +178,7 @@ def _stored_grace_error(execution: Execution, raw: Json) -> str | None:
     """The cause when `cancel_grace_ms` does not fit the class, else None."""
     match execution:
         case Execution.SHARED_ASYNC:
-            return _shared_async_grace_error(raw)
+            return shared_async_grace_error(raw)
         case Execution.ISOLATED | Execution.SHARED_THREAD:
             match raw:
                 case None:
@@ -192,7 +192,7 @@ def _stored_grace_error(execution: Execution, raw: Json) -> str | None:
             assert_never(unreachable)
 
 
-def _shared_async_grace_error(raw: Json) -> str | None:
+def shared_async_grace_error(raw: Json) -> str | None:
     """The cause when a `SHARED_ASYNC` grace is not an int in the bounds."""
     match raw:
         case bool():

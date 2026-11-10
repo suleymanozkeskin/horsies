@@ -96,11 +96,15 @@ app = Horsies(AppConfig(
 horsies worker myapp.instance:app --profile default
 ```
 
+## Shared async children
+
+A profile can also start shared async children: `shared_async=SharedAsyncChildren(count=N, seats=K)`. Each one runs up to K tasks of `Execution.SHARED_ASYNC` at once, as coroutines. It is new in 0.7.0 and has no flag before it; a profile without it runs every task in isolated children, as 0.6.x did. See [Shared Async Tasks](../workers/shared-async-tasks).
+
 ## New validation
 
 These were not checked before 0.7.0, because the values were command-line flags:
 
-- `horsies check` validates every profile. A claim limit above the capacity of the worker (children plus `prefetch_buffer`) is refused with `HRS-218`; before, it had no effect.
+- `horsies check` validates every profile. A claim limit above the capacity of the worker (its seats plus `prefetch_buffer`; one seat per isolated child) is refused with `HRS-218`; before, it had no effect.
 - `horsies check --live` reports `HRS-219` when one worker of a profile can open more Postgres connections than the server has usable slots.
 - At boot the worker warns when the per-child memory limits add up to more than the memory that the worker can use: the container (cgroup) limit when it is below the host RAM, else the host RAM, and when one worker can open more connections than the server has usable slots.
 

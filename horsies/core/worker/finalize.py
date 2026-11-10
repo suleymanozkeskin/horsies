@@ -74,13 +74,20 @@ from horsies.core.models.tasks import (
     TaskResult,
 )
 from horsies.core.types.result import Err, Ok, Result, is_err
+from horsies.core.worker.child_protocol import SeatRefusal, SeatTask, SeatWork
 from horsies.core.worker.slots import (
+    SHARED_BACKSTOP_MARGIN_S,
     Assigned,
     ChildLost,
     ExitedWith,
     ExitUnknown,
     KilledBySignal,
     NotDispatched,
+    NotRunCause,
+    SeatDeadlineEnded,
+    SeatTaskFinished,
+    SharedHandle,
+    SharedOutcome,
     SlotHandle,
     SlotOutcome,
     TaskFinished,
@@ -106,6 +113,7 @@ from horsies.core.worker.runtime import (
     _RetryError,
 )
 from horsies.core.worker.stored_timeout import (
+    CancelGraceInvalid,
     NoTimeout,
     OptionsUnreadable,
     StoredTimeout,
@@ -217,6 +225,19 @@ class FinalizeMixin:
             timeout_ms: int,
             claimed_at: Optional[datetime] = None,
         ) -> _TimeoutOutcome: ...
+        async def _handle_shared_backstop(
+            self,
+            handle: SharedHandle,
+            task_id: str,
+            timeout_ms: int,
+            claimed_at: Optional[datetime],
+        ) -> SharedOutcome | _TimeoutSettled | _AttemptEndUnknown: ...
+        async def _record_task_timeout(
+            self,
+            task_id: str,
+            timeout_ms: int,
+            claimed_at: Optional[datetime],
+        ) -> _TimeoutSettled | _TimeoutWriteFailed: ...
         async def _requeue_claimed_task(
             self,
             task_id: str,
@@ -280,7 +301,12 @@ class FinalizeMixin:
         match timeout:
             case TaskTimeout(ms=timeout_ms):
                 pass
-            case NoTimeout() | OptionsUnreadable() | TimeoutValueInvalid():
+            case (
+                NoTimeout()
+                | OptionsUnreadable()
+                | TimeoutValueInvalid()
+                | CancelGraceInvalid()
+            ):
                 return await asyncio.shield(handle.outcome)
             case _ as unreachable:
                 assert_never(unreachable)
@@ -324,37 +350,19 @@ class FinalizeMixin:
             claimed_at,
         )
         match outcome:
-            case TaskFinished():
-                ok = outcome.ok
-                result_json_str = outcome.result_json
-                failed_reason = outcome.failed_reason
-            case NotDispatched(cause=cause):
-                requeued = await self._requeue_claimed_task(
+            case TaskFinished(ok=ok, result_json=result_json, failed_reason=reason):
+                return await self._finalize_task_result(
                     task_id,
-                    cause.value,
+                    ok,
+                    result_json,
+                    reason,
+                    queue_name=queue_name,
+                    is_workflow_task=is_workflow_task,
+                    task_name=task_name,
                     claimed_at=claimed_at,
                 )
-                if requeued is _RequeueOutcome.DB_ERROR:
-                    logger.critical(
-                        'Requeue DB_ERROR: task %s may remain orphaned CLAIMED '
-                        '(worker=%s, reason=%s)',
-                        task_id,
-                        self.worker_instance_id,
-                        cause.value,
-                    )
-                    return Err(
-                        self._make_finalize_error(
-                            task_id=task_id,
-                            stage=_FINALIZE_STAGE_FUTURE,
-                            message=f'Requeue failed: {cause.value}',
-                            retryable=True,
-                            data={
-                                'requeue_outcome': requeued.value,
-                                'claimed_at': claimed_at,
-                            },
-                        )
-                    )
-                return Ok(None)
+            case NotDispatched(cause=cause):
+                return await self._requeue_not_dispatched(task_id, cause, claimed_at)
             case ChildLost():
                 return await self._finalize_child_loss(task_id, outcome, claimed_at)
             case _TimeoutSettled() | _AttemptEndUnknown():
@@ -363,6 +371,63 @@ class FinalizeMixin:
                 return Ok(None)
             case _ as unreachable:
                 assert_never(unreachable)
+
+    async def _requeue_not_dispatched(
+        self,
+        task_id: str,
+        cause: NotRunCause,
+        claimed_at: Optional[datetime],
+    ) -> Result[None, _FinalizeError]:
+        """Return a claimed row that never reached a child to the queue.
+
+        A database error is a retryable future-stage error: the row may stay
+        CLAIMED until its lease ends.
+        """
+        requeued = await self._requeue_claimed_task(
+            task_id,
+            cause.value,
+            claimed_at=claimed_at,
+        )
+        if requeued is _RequeueOutcome.DB_ERROR:
+            logger.critical(
+                'Requeue DB_ERROR: task %s may remain orphaned CLAIMED '
+                '(worker=%s, reason=%s)',
+                task_id,
+                self.worker_instance_id,
+                cause.value,
+            )
+            return Err(
+                self._make_finalize_error(
+                    task_id=task_id,
+                    stage=_FINALIZE_STAGE_FUTURE,
+                    message=f'Requeue failed: {cause.value}',
+                    retryable=True,
+                    data={
+                        'requeue_outcome': requeued.value,
+                        'claimed_at': claimed_at,
+                    },
+                )
+            )
+        return Ok(None)
+
+    async def _finalize_task_result(
+        self,
+        task_id: str,
+        ok: bool,
+        result_json_str: str,
+        failed_reason: str | None,
+        *,
+        queue_name: str,
+        is_workflow_task: bool,
+        task_name: str,
+        claimed_at: Optional[datetime],
+    ) -> Result[None, _FinalizeError]:
+        """Persist the result that a child reported, then run phase 2.
+
+        ``ok`` has the ``_run_task_entry`` meaning. Phase 1 writes the
+        terminal row and its attempt, or the retry; phase 2 runs the workflow
+        step and the capacity wakes.
+        """
         now = datetime.now(timezone.utc)
 
         # Warn-only: results are never rejected over size (the work is
@@ -415,6 +480,154 @@ class FinalizeMixin:
         self._clear_finalize_retry_attempts(task_id, _FINALIZE_STAGE_PHASE1)
         self._clear_finalize_retry_attempts(task_id, _FINALIZE_STAGE_PHASE2)
         return Ok(None)
+
+    async def _await_shared_outcome(
+        self,
+        handle: SharedHandle,
+        task_id: str,
+        work: SeatWork,
+        claimed_at: Optional[datetime],
+    ) -> SharedOutcome | _TimeoutSettled | _AttemptEndUnknown:
+        """Wait for the end of a shared task, with one backstop timer.
+
+        The child holds the deadline of the task: it cancels the task at
+        ``timeout_ms`` and reports the end. The parent waits from the
+        placement until ``timeout_ms + cancel_grace_ms`` and
+        ``SHARED_BACKSTOP_MARGIN_S`` more; past that it hands the run to
+        ``_handle_shared_backstop``, which kills the child only when it is
+        frozen. The timer ends when the outcome arrives. A ``SeatRefusal``
+        runs no task code and has no deadline: the parent waits for its
+        outcome, as for an isolated refusal. Never raises for a task.
+        """
+        assigned = await asyncio.shield(handle.assigned)
+        match assigned:
+            case NotDispatched():
+                return assigned
+            case Assigned():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
+        match work:
+            case SeatTask(timeout_ms=timeout_ms, cancel_grace_ms=cancel_grace_ms):
+                pass
+            case SeatRefusal():
+                return await asyncio.shield(handle.outcome)
+            case _ as unreachable:
+                assert_never(unreachable)
+        backstop_s = (timeout_ms + cancel_grace_ms) / 1000.0 + SHARED_BACKSTOP_MARGIN_S
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(handle.outcome),
+                timeout=backstop_s,
+            )
+        except asyncio.TimeoutError:
+            return await self._handle_shared_backstop(
+                handle,
+                task_id,
+                timeout_ms,
+                claimed_at,
+            )
+
+    async def _finalize_shared_after(
+        self,
+        handle: SharedHandle,
+        task_id: str,
+        queue_name: str,
+        is_workflow_task: bool,
+        work: SeatWork,
+        *,
+        task_name: str,
+        claimed_at: Optional[datetime],
+    ) -> Result[None, _FinalizeError]:
+        """Finalize a shared task from its outcome.
+
+        A result takes the path of an isolated result; the result of a
+        ``SeatRefusal`` is its ``WORKER_SERIALIZATION_ERROR``. A deadline that
+        the child reported ended the task before its row moves: TASK_TIMEOUT,
+        the retry and phase 2 go through ``_record_task_timeout``, the writer
+        of isolated timeouts. The pool refuses a deadline report of a run
+        without a deadline, so a ``SeatRefusal`` never ends that way:
+        ``AssertionError``. A lost child takes crash recovery, which writes
+        only after the exit of the child was seen.
+        """
+        outcome = await self._await_shared_outcome(handle, task_id, work, claimed_at)
+        match outcome:
+            case SeatTaskFinished(ok=ok, result_json=result_json, failed_reason=reason):
+                return await self._finalize_task_result(
+                    task_id,
+                    ok,
+                    result_json,
+                    reason,
+                    queue_name=queue_name,
+                    is_workflow_task=is_workflow_task,
+                    task_name=task_name,
+                    claimed_at=claimed_at,
+                )
+            case SeatDeadlineEnded():
+                match work:
+                    case SeatTask(timeout_ms=timeout_ms):
+                        pass
+                    case SeatRefusal():
+                        raise AssertionError(
+                            f'the refused task {task_id} ended at a deadline it '
+                            'does not have',
+                        )
+                    case _ as unreachable:
+                        assert_never(unreachable)
+                return await self._finalize_shared_timeout(
+                    task_id,
+                    timeout_ms,
+                    claimed_at,
+                )
+            case NotDispatched(cause=cause):
+                return await self._requeue_not_dispatched(task_id, cause, claimed_at)
+            case ChildLost():
+                return await self._finalize_child_loss(task_id, outcome, claimed_at)
+            case _TimeoutSettled() | _AttemptEndUnknown():
+                return Ok(None)
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    async def _finalize_shared_timeout(
+        self,
+        task_id: str,
+        timeout_ms: int,
+        claimed_at: Optional[datetime],
+    ) -> Result[None, _FinalizeError]:
+        """Record the timeout of a shared task whose coroutine has ended.
+
+        A failed write takes crash recovery, as the timeout of an isolated
+        task does after its write failed: the recovery reads the row under
+        its lock and acts on its state.
+        """
+        match await self._record_task_timeout(task_id, timeout_ms, claimed_at):
+            case _TimeoutSettled():
+                return Ok(None)
+            case _TimeoutWriteFailed():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
+        reason = (
+            f'Task reached timeout_ms={timeout_ms} on a shared async child, and '
+            'the TASK_TIMEOUT write failed'
+        )
+        requeue_outcome = await self._recover_worker_future_failure(
+            task_id,
+            reason,
+            claimed_at=claimed_at,
+        )
+        return Err(
+            self._make_finalize_error(
+                task_id=task_id,
+                stage=_FINALIZE_STAGE_FUTURE,
+                message=reason,
+                retryable=requeue_outcome is _RequeueOutcome.DB_ERROR,
+                data={
+                    'requeue_outcome': requeue_outcome.value,
+                    'claimed_at': claimed_at,
+                },
+            )
+        )
 
     async def _finalize_child_loss(
         self,

@@ -91,6 +91,26 @@ class ClaimPlan:
         )
 
 
+def claim_plan_for_children(
+    isolated_children: int,
+    shared_async_children: int,
+) -> ClaimPlan:
+    """The plan of a worker that runs these children: an ``ISOLATED`` budget
+    when it runs isolated children, a ``SHARED_ASYNC`` budget when it runs
+    shared async children.
+
+    This is the one place that maps the children of a worker to budget
+    classes; ``ClaimMixin._capacity_in_service`` counts the capacity of each.
+    Both counts are 0 or more. Pure.
+    """
+    budgets: set[Execution] = set()
+    if isolated_children > 0:
+        budgets.add(Execution.ISOLATED)
+    if shared_async_children > 0:
+        budgets.add(Execution.SHARED_ASYNC)
+    return ClaimPlan(budget_classes=frozenset(budgets))
+
+
 def isolated_children_plan() -> ClaimPlan:
     """The plan of a worker that runs isolated children and no shared ones.
 

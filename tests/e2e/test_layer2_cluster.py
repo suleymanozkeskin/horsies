@@ -32,7 +32,7 @@ from tests.integration.history_seeding import (
     read_attempt_workers,
 )
 from tests.e2e.helpers.assertions import unwrap_send
-from tests.e2e.helpers.worker import run_worker, run_workers
+from tests.e2e.helpers.worker import run_worker, run_workers, worker_env
 from tests.e2e.tasks import basic as basic_tasks
 from tests.e2e.tasks import retry as retry_tasks
 from tests.e2e.tasks import queues_custom
@@ -1352,12 +1352,6 @@ async def test_softcap_owner_transition_after_worker_crash(
 # L2.18 – Requeue DB_ERROR + age-guard recovery
 # ---------------------------------------------------------------------------
 
-def _repo_root() -> str:
-    """Return the project repo root for PYTHONPATH."""
-    return os.path.dirname(
-        os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-    )
-
 
 def _start_fault_injected_worker() -> subprocess.Popen[str]:
     """Start a worker subprocess with INJECT_REQUEUE_DB_ERROR=1.
@@ -1367,8 +1361,7 @@ def _start_fault_injected_worker() -> subprocess.Popen[str]:
     loop stays alive so the claim lease keeps getting renewed — until
     the SQL age guard (max_claim_renew_age_ms) kicks in and stops renewal.
     """
-    env = os.environ.copy()
-    env['PYTHONPATH'] = _repo_root()
+    env = worker_env()
     env['INJECT_REQUEUE_DB_ERROR'] = '1'
 
     return subprocess.Popen(
@@ -1388,8 +1381,7 @@ def _start_fault_injected_worker() -> subprocess.Popen[str]:
 
 def _start_normal_worker() -> subprocess.Popen[str]:
     """Start a normal (non-injected) worker for the requeue-guard instance."""
-    env = os.environ.copy()
-    env['PYTHONPATH'] = _repo_root()
+    env = worker_env()
 
     return subprocess.Popen(
         [

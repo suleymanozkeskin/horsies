@@ -29,7 +29,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.tasks import Execution
-from horsies.core.worker.claim_plan import isolated_children_plan
 from horsies.core.worker.claiming import ClaimMixin, ClaimPass
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.row_class import RowClassMismatch
@@ -728,7 +727,6 @@ class TestWorkerStateCapacity:
             psycopg_dsn='unused',
             queues=[QUEUE],
             processes=3,
-            claim_plan=isolated_children_plan(),
         )
         worker = Worker(
             session_factory=current_resources(broker).session_factory,

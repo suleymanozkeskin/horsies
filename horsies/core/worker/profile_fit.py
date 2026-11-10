@@ -33,6 +33,8 @@ from horsies.core.models.worker_profile import (
     MemoryLimit,
     NoIsolatedChildren,
     NoMemoryLimit,
+    NoSharedAsyncChildren,
+    SharedAsyncChildren,
     WorkerProfile,
 )
 
@@ -267,25 +269,64 @@ class MemoryLimitsNotSet:
     exists."""
 
 
+def _mode_memory_mb(
+    count: int,
+    limit: MemoryLimit | NoMemoryLimit,
+) -> int | MemoryLimitsNotSet:
+    """The sum of the memory limits of ``count`` children of one mode."""
+    match limit:
+        case MemoryLimit(mb=mb):
+            return count * mb
+        case NoMemoryLimit():
+            return MemoryLimitsNotSet()
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _isolated_memory_mb(
+    isolated: IsolatedChildren | NoIsolatedChildren,
+) -> int | MemoryLimitsNotSet:
+    match isolated:
+        case IsolatedChildren(count=count, recycle=recycle):
+            return _mode_memory_mb(count, recycle.above)
+        case NoIsolatedChildren():
+            return 0
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _shared_async_memory_mb(
+    shared_async: SharedAsyncChildren | NoSharedAsyncChildren,
+) -> int | MemoryLimitsNotSet:
+    match shared_async:
+        case SharedAsyncChildren(count=count, recycle=recycle):
+            return _mode_memory_mb(count, recycle.above)
+        case NoSharedAsyncChildren():
+            return 0
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def compare_memory_limits(
     profile: WorkerProfile,
     machine: UsableMemory,
 ) -> MemoryLimitsFit | MemoryLimitsExceedMachine | MemoryLimitsNotSet:
     """Compare the sum over the children of their memory limits with the
-    memory that the worker can use."""
-    match profile.isolated:
-        case IsolatedChildren(count=count, recycle=recycle):
-            match recycle.above:
-                case MemoryLimit(mb=mb):
-                    total_mb = count * mb
-                case NoMemoryLimit():
-                    return MemoryLimitsNotSet()
-                case _ as unreachable_limit:
-                    assert_never(unreachable_limit)
-        case NoIsolatedChildren():
-            total_mb = 0
-        case _ as unreachable:
-            assert_never(unreachable)
+    memory that the worker can use.
+
+    The sum covers every mode. A mode with children and no memory limit has
+    no sum, so the profile has none: ``MemoryLimitsNotSet``.
+    """
+    total_mb = 0
+    for mode_mb in (
+        _isolated_memory_mb(profile.isolated),
+        _shared_async_memory_mb(profile.shared_async),
+    ):
+        match mode_mb:
+            case MemoryLimitsNotSet():
+                return mode_mb
+            case int():
+                total_mb += mode_mb
     if total_mb > machine.mb:
         return MemoryLimitsExceedMachine(total_mb=total_mb, machine_mb=machine.mb)
     return MemoryLimitsFit(total_mb=total_mb, machine_mb=machine.mb)
@@ -418,7 +459,7 @@ def compare_connections(
 
 
 CONNECTIONS_HELP: Final = (
-    'lower the isolated count or worker_child_pool_max_size, raise '
+    'lower the child counts or worker_child_pool_max_size, raise '
     'max_connections, or send the pooled connections through a transaction '
     'pooler (pgbouncer_transaction_mode=True)'
 )

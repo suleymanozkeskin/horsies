@@ -9,10 +9,72 @@ import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from typing import Callable, Generator, Sequence
+from typing import Callable, Final, Generator, Sequence
+
+import psutil
 
 
 ReadyCheck = Callable[[], bool]
+
+REPO_ROOT: Final = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
+"""The root of the checkout that these helpers belong to."""
+
+WORKER_OWNER_ENV: Final = 'HORSIES_E2E_WORKER_OWNER'
+"""Set on each worker that these helpers start, to ``REPO_ROOT``. The cleanup
+of stale workers kills only workers that carry this checkout's value, so the
+e2e runs of another checkout on the same machine keep their workers."""
+
+STALE_WORKER_TERM_WAIT_S: Final = 3
+"""Seconds that stale workers get to stop after SIGTERM, before SIGKILL."""
+
+
+def worker_env() -> dict[str, str]:
+    """The environment of a worker that these helpers start: the current
+    environment, the repo root on ``PYTHONPATH`` so absolute imports work,
+    and the owner marker of this checkout."""
+    env = os.environ.copy()
+    env['PYTHONPATH'] = REPO_ROOT
+    env[WORKER_OWNER_ENV] = REPO_ROOT
+    return env
+
+
+def _is_worker_command(cmdline: Sequence[str]) -> bool:
+    return 'horsies worker' in ' '.join(cmdline)
+
+
+def own_stale_worker_pids(owner: str = REPO_ROOT) -> list[int]:
+    """The pids of ``horsies worker`` processes whose environment holds
+    ``WORKER_OWNER_ENV`` equal to ``owner``.
+
+    A process whose environment cannot be read (another user's, or one that
+    exited) is not this checkout's worker and is left alone.
+    """
+    pids: list[int] = []
+    for process in psutil.process_iter():
+        try:
+            cmdline = process.cmdline()
+        except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
+            continue
+        if not _is_worker_command(cmdline):
+            continue
+        try:
+            environment = process.environ()
+        except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
+            continue
+        if environment.get(WORKER_OWNER_ENV) == owner:
+            pids.append(process.pid)
+    return pids
+
+
+def _signal_pids(pids: Sequence[int], signal_number: int) -> None:
+    for pid in pids:
+        try:
+            os.kill(pid, signal_number)
+        except (ProcessLookupError, PermissionError):
+            continue
+
 
 # Number of active run_worker/run_workers contexts created by this module.
 # Prevents stale-worker cleanup from killing intentionally running workers in
@@ -63,37 +125,28 @@ def _report_worker_log(proc: subprocess.Popen[str]) -> None:
 
 
 def kill_stale_workers() -> None:
-    """Kill any leftover horsies worker processes from previous tests.
+    """Kill leftover horsies workers that this checkout's helpers started.
 
     Workers started with start_new_session=True survive parent death and share
     queues, so a stale worker from a different app instance would pick up tasks
     it cannot resolve (WORKER_RESOLUTION_ERROR).
     Called automatically by run_worker / run_workers before starting new ones.
 
+    Only workers that carry this checkout's ``WORKER_OWNER_ENV`` are touched;
+    a worker of another checkout or another program keeps running.
+
     Strategy: graceful SIGTERM first (lets workers close DB connections),
-    then SIGKILL after 3s if needed.
+    then SIGKILL after ``STALE_WORKER_TERM_WAIT_S`` if needed.
     """
-    result = subprocess.run(
-        ['pgrep', '-f', 'horsies worker'],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        return  # no stale workers
-
-    # Graceful SIGTERM first
-    subprocess.run(['pkill', '-TERM', '-f', 'horsies worker'], capture_output=True)
-    for _ in range(3):
+    stale = own_stale_worker_pids()
+    if not stale:
+        return
+    _signal_pids(stale, signal.SIGTERM)
+    for _ in range(STALE_WORKER_TERM_WAIT_S):
         time.sleep(1)
-        check = subprocess.run(
-            ['pgrep', '-f', 'horsies worker'],
-            capture_output=True,
-        )
-        if check.returncode != 0:
-            return  # all gone
-
-    # Force SIGKILL if SIGTERM didn't work
-    subprocess.run(['pkill', '-9', '-f', 'horsies worker'], capture_output=True)
+        if not own_stale_worker_pids():
+            return
+    _signal_pids(own_stale_worker_pids(), signal.SIGKILL)
     time.sleep(1)
 
 
@@ -243,12 +296,7 @@ def run_worker(
         '--loglevel=warning',
     ]
 
-    # Set PYTHONPATH to repo root so absolute imports work
-    env = os.environ.copy()
-    repo_root = os.path.dirname(
-        os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-    )
-    env['PYTHONPATH'] = repo_root
+    env = worker_env()
 
     log_handle, log_path = _worker_log()
     proc: subprocess.Popen[str] = subprocess.Popen(
@@ -288,12 +336,7 @@ def run_workers(
 
     workers: list[subprocess.Popen[str]] = []
 
-    # Set PYTHONPATH to repo root so absolute imports work
-    env = os.environ.copy()
-    repo_root = os.path.dirname(
-        os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-    )
-    env['PYTHONPATH'] = repo_root
+    env = worker_env()
 
     cmd_base = [
         'uv',

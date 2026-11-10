@@ -29,6 +29,15 @@ from horsies.core.types.result import Err, Ok
 from horsies.core.worker import child_main
 from horsies.core.worker.child_main import _bounded_result
 from horsies.core.worker.child_protocol import (
+    DeadlineFiredFrame,
+    IsolatedChild,
+    SeatFinished,
+    SeatRefusal,
+    SeatTask,
+    SeatTimedOut,
+    SharedAsyncChild,
+    SharedResultFrame,
+    SharedRunFrame,
     FRAME_HEADER,
     MAX_BODY_BYTES,
     MAX_BOOT_DETAIL_CHARS,
@@ -65,13 +74,21 @@ from horsies.core.worker.child_protocol import (
     encode_preload_frame,
     parse_header,
 )
-from horsies.core.models.tasks import MAX_TASK_TIMEOUT_MS, MIN_TASK_TIMEOUT_MS
+from horsies.core.models.tasks import (
+    MAX_CANCEL_GRACE_MS,
+    MAX_TASK_TIMEOUT_MS,
+    MIN_CANCEL_GRACE_MS,
+    MIN_TASK_TIMEOUT_MS,
+)
+from horsies.core.models.worker_profile import MAX_SEATS_PER_SHARED_ASYNC_CHILD
 from horsies.core.worker.task_loop import AsyncTaskPresence
 from horsies.core.worker.stored_timeout import (
+    CancelGraceInvalid,
     NoTimeout,
     OptionsUnreadable,
     StoredTimeout,
     TaskTimeout,
+    TimeoutRefusal,
     TimeoutValueInvalid,
 )
 
@@ -110,6 +127,7 @@ def _init_frame() -> InitFrame:
         child_pool_max_size=2,
         child_pool_check=True,
         process_name='worker-child',
+        child_kind=IsolatedChild(),
     )
 
 
@@ -125,6 +143,195 @@ def _run_frame(**changes: object) -> RunFrame:
         claimed_at=datetime(2026, 11, 1, 12, 30, 15, 250, tzinfo=timezone.utc),
     )
     return dataclasses.replace(frame, **changes)  # type: ignore[arg-type]
+
+
+def _shared_run_frame(**changes: object) -> SharedRunFrame:
+    frame = SharedRunFrame(
+        dispatch=7,
+        task_id='task-1',
+        task_name='fetch',
+        args_json=None,
+        kwargs_json='{"url":"é"}',
+        worker_id='worker-1',
+        is_workflow_task=False,
+        claimed_at=datetime(2026, 11, 1, 12, 30, 15, 250, tzinfo=timezone.utc),
+        work=SeatTask(timeout_ms=30_000, cancel_grace_ms=5_000),
+    )
+    return dataclasses.replace(frame, **changes)  # type: ignore[arg-type]
+
+
+def _shared_result(end: SeatFinished | SeatTimedOut) -> SharedResultFrame:
+    return SharedResultFrame(dispatch=7, task_id='task-1', end=end, rss=RssMb(80.5))
+
+
+class TestSharedFrames:
+    def test_shared_init_frame_round_trip(self) -> None:
+        frame = dataclasses.replace(
+            _init_frame(), child_kind=SharedAsyncChild(seats=25)
+        )
+        meta, body = _split(encode_parent_frame(frame))
+        assert decode_parent_frame(meta, body) == Ok(frame)
+
+    def test_shared_run_frame_round_trip(self) -> None:
+        frame = _shared_run_frame()
+        meta, body = _split(encode_parent_frame(frame))
+        assert decode_parent_frame(meta, body) == Ok(frame)
+
+    @pytest.mark.parametrize(
+        'refusal',
+        [
+            OptionsUnreadable(reason='stored task_options do not parse: x'),
+            TimeoutValueInvalid(reason='stored timeout_ms is below 1000 ms'),
+            CancelGraceInvalid(reason='stored cancel_grace_ms is below 100 ms'),
+        ],
+    )
+    def test_a_refusal_round_trips(self, refusal: TimeoutRefusal) -> None:
+        frame = _shared_run_frame(work=SeatRefusal(refusal=refusal))
+        meta, body = _split(encode_parent_frame(frame))
+        assert decode_parent_frame(meta, body) == Ok(frame)
+
+    def test_shared_run_frame_without_claim_or_arguments(self) -> None:
+        frame = _shared_run_frame(claimed_at=None, kwargs_json=None)
+        meta, body = _split(encode_parent_frame(frame))
+        assert body == b''
+        assert decode_parent_frame(meta, body) == Ok(frame)
+
+    @pytest.mark.parametrize(
+        'end',
+        [
+            SeatFinished(ok=True, result_json='{"ok":"é"}', failed_reason=None),
+            SeatFinished(ok=False, result_json='', failed_reason='CLAIM_LOST'),
+            SeatTimedOut(),
+        ],
+    )
+    def test_shared_result_round_trip(self, end: SeatFinished | SeatTimedOut) -> None:
+        frame = _shared_result(end)
+        meta, body = _split(encode_child_frame(frame))
+        assert decode_child_frame(meta, body) == Ok(frame)
+
+    def test_a_timed_out_end_carries_no_body(self) -> None:
+        meta, body = _split(encode_child_frame(_shared_result(SeatTimedOut())))
+        assert body == b''
+        assert isinstance(decode_child_frame(meta, b'stray'), Err)
+
+    def test_deadline_fired_round_trip(self) -> None:
+        frame = DeadlineFiredFrame(dispatch=3, task_id='task-9')
+        meta, body = _split(encode_child_frame(frame))
+        assert decode_child_frame(meta, body) == Ok(frame)
+
+    @pytest.mark.parametrize(
+        ('key', 'value'),
+        [
+            ('dispatch', 0),
+            ('dispatch', True),
+            ('dispatch', '7'),
+            ('work', None),
+            ('work', {'kind': 'unknown'}),
+            (
+                'work',
+                {
+                    'kind': 'task',
+                    'timeout_ms': MIN_TASK_TIMEOUT_MS - 1,
+                    'cancel_grace_ms': 5000,
+                },
+            ),
+            (
+                'work',
+                {
+                    'kind': 'task',
+                    'timeout_ms': MAX_TASK_TIMEOUT_MS + 1,
+                    'cancel_grace_ms': 5000,
+                },
+            ),
+            ('work', {'kind': 'task', 'timeout_ms': None, 'cancel_grace_ms': 5000}),
+            (
+                'work',
+                {
+                    'kind': 'task',
+                    'timeout_ms': 30000,
+                    'cancel_grace_ms': MIN_CANCEL_GRACE_MS - 1,
+                },
+            ),
+            (
+                'work',
+                {
+                    'kind': 'task',
+                    'timeout_ms': 30000,
+                    'cancel_grace_ms': MAX_CANCEL_GRACE_MS + 1,
+                },
+            ),
+            ('work', {'kind': 'task', 'timeout_ms': 30000, 'cancel_grace_ms': 1.5}),
+            ('work', {'kind': 'refusal', 'refusal': None}),
+            ('work', {'kind': 'refusal', 'refusal': {'kind': 'none'}}),
+            ('work', {'kind': 'refusal', 'refusal': {'kind': 'ms', 'ms': 30000}}),
+            ('work', {'kind': 'refusal', 'refusal': {'kind': 'grace_invalid'}}),
+            ('task_id', None),
+            ('claimed_at', 'not a date'),
+            ('is_workflow_task', 0),
+        ],
+    )
+    def test_every_shared_run_field_is_checked(self, key: str, value: object) -> None:
+        meta, body = _split(encode_parent_frame(_shared_run_frame()))
+        fields = json.loads(meta)
+        fields[key] = value
+        assert isinstance(decode_parent_frame(json.dumps(fields).encode(), body), Err)
+
+    @pytest.mark.parametrize(
+        'child_kind',
+        [
+            None,
+            'isolated',
+            {'kind': 'unknown'},
+            {'kind': 'shared_async'},
+            {'kind': 'shared_async', 'seats': 0},
+            {'kind': 'shared_async', 'seats': MAX_SEATS_PER_SHARED_ASYNC_CHILD + 1},
+            {'kind': 'shared_async', 'seats': True},
+        ],
+    )
+    def test_the_child_kind_is_checked(self, child_kind: object) -> None:
+        meta, body = _split(encode_parent_frame(_init_frame()))
+        fields = json.loads(meta)
+        fields['child_kind'] = child_kind
+        assert isinstance(decode_parent_frame(json.dumps(fields).encode(), body), Err)
+
+    @pytest.mark.parametrize(
+        ('key', 'value'),
+        [
+            ('dispatch', -1),
+            ('task_id', 5),
+            ('end', None),
+            ('end', {'kind': 'unknown'}),
+            ('end', {'kind': 'finished', 'ok': 1, 'failed_reason': None}),
+            ('end', {'kind': 'finished', 'ok': True, 'failed_reason': 3}),
+            ('rss_mb', 'x'),
+        ],
+    )
+    def test_every_shared_result_field_is_checked(
+        self,
+        key: str,
+        value: object,
+    ) -> None:
+        end = SeatFinished(ok=True, result_json='x', failed_reason=None)
+        meta, body = _split(encode_child_frame(_shared_result(end)))
+        fields = json.loads(meta)
+        fields[key] = value
+        assert isinstance(decode_child_frame(json.dumps(fields).encode(), body), Err)
+
+    def test_a_shared_run_frame_is_refused_by_the_child_decoder(self) -> None:
+        meta, body = _split(encode_parent_frame(_shared_run_frame()))
+        assert isinstance(decode_child_frame(meta, body), Err)
+
+    def test_shared_run_frame_fields(self) -> None:
+        names = {field.name for field in dataclasses.fields(SharedRunFrame)}
+        wire = set(json.loads(_split(encode_parent_frame(_shared_run_frame()))[0]))
+        wire -= {'kind', 'args_bytes', 'kwargs_bytes'}
+        assert names - {'args_json', 'kwargs_json'} == wire
+
+    def test_shared_result_frame_fields(self) -> None:
+        names = {field.name for field in dataclasses.fields(SharedResultFrame)}
+        end = SeatFinished(ok=True, result_json='x', failed_reason=None)
+        wire = set(json.loads(_split(encode_child_frame(_shared_result(end)))[0]))
+        assert names - {'rss'} == wire - {'kind', 'rss_mb'}
 
 
 class TestParentFrames:
@@ -168,6 +375,7 @@ class TestParentFrames:
             TaskTimeout(ms=MAX_TASK_TIMEOUT_MS),
             OptionsUnreadable(reason='stored task_options do not parse'),
             TimeoutValueInvalid(reason='stored timeout_ms is a bool, not an int'),
+            CancelGraceInvalid(reason='stored cancel_grace_ms is a bool, not an int'),
         ],
     )
     def test_each_stored_timeout_form_round_trips(self, timeout: StoredTimeout) -> None:
@@ -375,6 +583,7 @@ class TestMalformedMetadata:
             ('timeout', {'kind': 'ms', 'ms': True}),
             ('timeout', {'kind': 'ms', 'ms': 1500.0}),
             ('timeout', {'kind': 'value_invalid'}),
+            ('timeout', {'kind': 'grace_invalid', 'reason': None}),
             ('timeout', {'kind': 'options_unreadable', 'reason': 5}),
             ('timeout', {'kind': 'later'}),
             ('claimed_at', 'not a date'),
@@ -554,14 +763,14 @@ class TestInitFrameRepr:
 
 class TestFailureReasonText:
     def test_a_long_reason_is_cut_and_framed(self) -> None:
-        wire = _bounded_result(_run_frame(), (True, 'kept', '\x00' * (2 << 20)))
+        wire = _bounded_result('add', (True, 'kept', '\x00' * (2 << 20)))
         assert wire[:2] == (True, 'kept')
         frame = ResultFrame('task-1', wire[0], wire[1], wire[2], RssUnreadable(), NoTaskLoop())
         meta, body = _split(encode_child_frame(frame))
         assert decode_child_frame(meta, body) == Ok(frame)
 
     def test_lone_surrogate_in_a_reason_can_be_framed(self) -> None:
-        wire = _bounded_result(_run_frame(), (False, '', 'bad \ud800 text'))
+        wire = _bounded_result('add', (False, '', 'bad \ud800 text'))
         frame = ResultFrame('task-1', wire[0], wire[1], wire[2], RssUnreadable(), NoTaskLoop())
         meta, body = _split(encode_child_frame(frame))
         assert decode_child_frame(meta, body) == Ok(frame)
@@ -571,7 +780,7 @@ class TestFailureReasonText:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(child_main, 'MAX_BODY_BYTES', 4)
-        ok, result_json, reason = _bounded_result(_run_frame(), (True, 'x' * 5, None))
+        ok, result_json, reason = _bounded_result('add', (True, 'x' * 5, None))
         assert ok is True
         assert 'WORKER_SERIALIZATION_ERROR' in result_json
         assert reason is not None and 'above the' in reason

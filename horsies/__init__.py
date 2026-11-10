@@ -4,7 +4,7 @@ from importlib.metadata import version as _pkg_version
 
 __version__: str = _pkg_version("horsies")
 
-from .core.app import Horsies, ChildProcessStartHook
+from .core.app import Horsies, ChildProcessStartHook, SharedAsyncChildStartHook
 from .core.models.app import AppConfig
 from .core.models.broker import PostgresConfig
 from .core.models.tasks import (
@@ -114,7 +114,10 @@ from .core.models.worker_profile import (
     MemoryLimit,
     NoIsolatedChildren,
     NoMemoryLimit,
+    NoSharedAsyncChildren,
     NoTaskLimit,
+    SharedAsyncChildren,
+    SharedRecycle,
     TaskLimit,
     WorkerProfile,
 )
@@ -233,6 +236,7 @@ __all__ = [
     # Core
     'Horsies',
     'ChildProcessStartHook',
+    'SharedAsyncChildStartHook',
     'AppConfig',
     'PostgresConfig',
     'TaskResult',
@@ -342,6 +346,9 @@ __all__ = [
     'IsolatedChildren',
     'NoIsolatedChildren',
     'IsolatedRecycle',
+    'SharedAsyncChildren',
+    'NoSharedAsyncChildren',
+    'SharedRecycle',
     'TaskLimit',
     'NoTaskLimit',
     'MemoryLimit',

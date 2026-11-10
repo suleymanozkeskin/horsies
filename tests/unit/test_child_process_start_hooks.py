@@ -7,6 +7,7 @@ recorder, since the real call would kill the pytest process.
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 from typing import Any
@@ -18,11 +19,12 @@ from horsies.core.app import Horsies
 from horsies.core.errors import ConfigurationError, ErrorCode
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.worker import child_runner
+from horsies.core.worker import child_runner, shared_runner
 from horsies.core.worker.child_runner import (
     CHILD_HOOK_FAILURE_EXIT_CODE,
     _run_child_start_hooks,
 )
+from horsies.core.worker.shared_runner import run_shared_async_start_hooks
 
 pytestmark = [pytest.mark.unit]
 
@@ -222,3 +224,127 @@ class TestRunChildStartHooks:
         # Give a cancelled-timer misfire a moment to surface before asserting.
         time.sleep(0.3)
         assert exit_codes == []
+
+
+class TestSharedAsyncHookRegistration:
+    def test_an_async_def_hook_is_registered(self) -> None:
+        app = _make_app()
+
+        @app.on_shared_async_child_start
+        async def open_client() -> None:
+            pass
+
+        assert app.get_shared_async_child_start_hooks() == [open_client]
+
+    def test_a_sync_hook_is_refused(self) -> None:
+        app = _make_app()
+
+        def sync_hook() -> None:
+            pass
+
+        with pytest.raises(ConfigurationError) as raised:
+            app.on_shared_async_child_start(sync_hook)  # type: ignore[arg-type]
+        assert raised.value.code == ErrorCode.CONFIG_INVALID_CHILD_HOOK
+        assert 'must be async def' in raised.value.message
+        assert app.get_shared_async_child_start_hooks() == []
+
+    def test_a_non_callable_is_refused(self) -> None:
+        app = _make_app()
+        with pytest.raises(ConfigurationError) as raised:
+            app.on_shared_async_child_start('nope')  # type: ignore[arg-type]
+        assert raised.value.code == ErrorCode.CONFIG_INVALID_CHILD_HOOK
+
+    def test_a_second_registration_of_one_hook_is_ignored(self) -> None:
+        app = _make_app()
+
+        async def open_client() -> None:
+            pass
+
+        app.on_shared_async_child_start(open_client)
+        app.on_shared_async_child_start(open_client)
+        assert app.get_shared_async_child_start_hooks() == [open_client]
+
+    def test_the_two_kinds_of_hooks_are_kept_apart(self) -> None:
+        app = _make_app()
+
+        async def open_client() -> None:
+            pass
+
+        app.on_shared_async_child_start(open_client)
+        assert app.get_child_process_start_hooks() == []
+
+
+class TestRunSharedAsyncHooks:
+    def _run_on_app(self, app: Horsies, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(shared_runner, 'get_current_app', lambda: app)
+        asyncio.run(run_shared_async_start_hooks())
+
+    def test_hooks_run_in_order_on_the_running_loop(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        app = _make_app()
+        seen: list[tuple[str, bool]] = []
+
+        async def first() -> None:
+            seen.append(('first', asyncio.get_running_loop().is_running()))
+
+        async def second() -> None:
+            await asyncio.sleep(0)
+            seen.append(('second', asyncio.get_running_loop().is_running()))
+
+        app.on_shared_async_child_start(first)
+        app.on_shared_async_child_start(second)
+        self._run_on_app(app, monkeypatch)
+
+        assert seen == [('first', True), ('second', True)]
+
+    def test_a_failing_hook_exits_173_and_skips_the_rest(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        app = _make_app()
+        calls: list[str] = []
+
+        def fake_exit(code: int) -> Any:
+            raise _ExitCalled(code)
+
+        monkeypatch.setattr(shared_runner.os, '_exit', fake_exit)
+
+        async def boom() -> None:
+            raise RuntimeError('client setup failed')
+
+        async def after() -> None:
+            calls.append('after')
+
+        app.on_shared_async_child_start(boom)
+        app.on_shared_async_child_start(after)
+        with pytest.raises(_ExitCalled) as raised:
+            self._run_on_app(app, monkeypatch)
+
+        assert raised.value.code == CHILD_HOOK_FAILURE_EXIT_CODE
+        assert calls == []
+
+    def test_a_hook_that_blocks_the_loop_trips_the_watchdog(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The bound holds also when the hook never yields to the loop."""
+        app = _make_app()
+        exit_codes: list[int] = []
+        exit_seen = threading.Event()
+
+        def recording_exit(code: int) -> None:
+            exit_codes.append(code)
+            exit_seen.set()
+
+        monkeypatch.setattr(child_runner.os, '_exit', recording_exit)
+        monkeypatch.setattr(child_runner, 'CHILD_HOOK_TIMEOUT_SECONDS', 0.1)
+
+        async def blocking_hook() -> None:
+            exit_seen.wait(timeout=5.0)
+
+        app.on_shared_async_child_start(blocking_hook)
+        self._run_on_app(app, monkeypatch)
+
+        assert exit_codes == [CHILD_HOOK_FAILURE_EXIT_CODE]

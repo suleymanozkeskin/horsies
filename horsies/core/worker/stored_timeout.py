@@ -6,6 +6,11 @@ is not dropped: the child sets the row RUNNING and returns
 `WORKER_SERIALIZATION_ERROR` before it resolves the task, so the normal
 persist path fails the task. The text of each refusal holds no stored value,
 because an int with more than 4300 digits cannot be converted to a string.
+
+A `SHARED_ASYNC` row also needs a stored `cancel_grace_ms`, and a stored
+timeout. `dispatch_route` reads those, and refuses a row without them with
+`TimeoutValueInvalid` or `CancelGraceInvalid`; `read_stored_timeout` never
+returns `CancelGraceInvalid`.
 """
 
 from __future__ import annotations
@@ -43,8 +48,17 @@ class TimeoutValueInvalid:
     reason: str
 
 
-type TimeoutRefusal = OptionsUnreadable | TimeoutValueInvalid
-"""A stored timeout that the worker cannot use. The task fails with it."""
+@dataclass(frozen=True, slots=True)
+class CancelGraceInvalid:
+    """The stored `cancel_grace_ms` of a `SHARED_ASYNC` row is not an int
+    from `MIN_CANCEL_GRACE_MS` to `MAX_CANCEL_GRACE_MS`."""
+
+    reason: str
+
+
+type TimeoutRefusal = OptionsUnreadable | TimeoutValueInvalid | CancelGraceInvalid
+"""A stored timeout, or the stored cancel grace of a `SHARED_ASYNC` row, that
+the worker cannot use. The task fails with it."""
 
 type StoredTimeout = NoTimeout | TaskTimeout | TimeoutRefusal
 """Everything a claimed row can store as its timeout."""

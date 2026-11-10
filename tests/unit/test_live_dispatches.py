@@ -58,7 +58,7 @@ def test_a_dispatch_carries_only_its_fence_and_its_child() -> None:
 def test_hold_records_the_task_its_generation_and_its_child() -> None:
     live = LiveDispatches(capacity=2)
 
-    ticket = _held(live.hold(_frame('task-a'), pid=101))
+    ticket = _held(live.hold(_frame('task-a'), pid=101, seats=1))
 
     assert live.snapshot() == (
         LiveDispatch(ticket=ticket, task_id='task-a', claimed_at=CLAIMED_AT, pid=101),
@@ -70,8 +70,8 @@ def test_two_generations_of_one_task_are_two_dispatches() -> None:
     live = LiveDispatches(capacity=2)
     later = datetime(2026, 11, 10, 9, 31, tzinfo=timezone.utc)
 
-    _held(live.hold(_frame('task-a'), pid=101))
-    _held(live.hold(_frame('task-a', claimed_at=later), pid=102))
+    _held(live.hold(_frame('task-a'), pid=101, seats=1))
+    _held(live.hold(_frame('task-a', claimed_at=later), pid=102, seats=1))
 
     assert [(d.pid, d.claimed_at) for d in live.snapshot()] == [
         (101, CLAIMED_AT),
@@ -81,7 +81,7 @@ def test_two_generations_of_one_task_are_two_dispatches() -> None:
 
 def test_release_removes_the_dispatch_once() -> None:
     live = LiveDispatches(capacity=1)
-    ticket = _held(live.hold(_frame('task-a'), pid=101))
+    ticket = _held(live.hold(_frame('task-a'), pid=101, seats=1))
 
     first = live.release(ticket)
     second = live.release(ticket)
@@ -93,8 +93,8 @@ def test_release_removes_the_dispatch_once() -> None:
 
 def test_release_child_removes_only_that_childs_dispatch() -> None:
     live = LiveDispatches(capacity=2)
-    _held(live.hold(_frame('task-a'), pid=101))
-    _held(live.hold(_frame('task-b'), pid=102))
+    _held(live.hold(_frame('task-a'), pid=101, seats=1))
+    _held(live.hold(_frame('task-b'), pid=102, seats=1))
 
     removed = live.release_child(101)
 
@@ -105,10 +105,10 @@ def test_release_child_removes_only_that_childs_dispatch() -> None:
 
 def test_a_child_can_hold_its_next_task_after_a_release() -> None:
     live = LiveDispatches(capacity=1)
-    ticket = _held(live.hold(_frame('task-a'), pid=101))
+    ticket = _held(live.hold(_frame('task-a'), pid=101, seats=1))
     _ = live.release(ticket)
 
-    second = _held(live.hold(_frame('task-b'), pid=101))
+    second = _held(live.hold(_frame('task-b'), pid=101, seats=1))
 
     assert second != ticket
     assert [d.task_id for d in live.snapshot()] == ['task-b']
@@ -116,33 +116,63 @@ def test_a_child_can_hold_its_next_task_after_a_release() -> None:
 
 def test_close_returns_what_is_held_and_refuses_later_holds() -> None:
     live = LiveDispatches(capacity=2)
-    _held(live.hold(_frame('task-a'), pid=101))
+    _held(live.hold(_frame('task-a'), pid=101, seats=1))
 
     closed = live.close()
 
     assert [d.task_id for d in closed] == ['task-a']
     assert live.snapshot() == ()
-    assert live.hold(_frame('task-b'), pid=102) == RegistryClosed()
+    assert live.hold(_frame('task-b'), pid=102, seats=1) == RegistryClosed()
     assert live.close() == ()
 
 
 def test_a_child_that_holds_a_task_cannot_take_another() -> None:
     live = LiveDispatches(capacity=2)
-    _held(live.hold(_frame('task-a'), pid=101))
+    _held(live.hold(_frame('task-a'), pid=101, seats=1))
 
-    with pytest.raises(AssertionError, match='while it holds another'):
-        live.hold(_frame('task-b'), pid=101)
+    with pytest.raises(AssertionError, match='holds 1 of its 1 seats'):
+        live.hold(_frame('task-b'), pid=101, seats=1)
 
 
-def test_more_dispatches_than_slots_is_a_defect() -> None:
+def test_a_shared_child_holds_one_task_per_seat() -> None:
+    live = LiveDispatches(capacity=3)
+    for name in ('task-a', 'task-b', 'task-c'):
+        _held(live.hold(_frame(name), pid=101, seats=3))
+
+    assert [d.pid for d in live.snapshot()] == [101, 101, 101]
+
+
+def test_a_shared_child_with_every_seat_held_cannot_take_another() -> None:
+    live = LiveDispatches(capacity=4)
+    _held(live.hold(_frame('task-a'), pid=101, seats=2))
+    _held(live.hold(_frame('task-b'), pid=101, seats=2))
+
+    with pytest.raises(AssertionError, match='holds 2 of its 2 seats'):
+        live.hold(_frame('task-c'), pid=101, seats=2)
+
+
+def test_release_child_removes_every_seat_of_a_shared_child() -> None:
+    """A kill of a shared child ends the heartbeats of all its tasks."""
+    live = LiveDispatches(capacity=4)
+    for name in ('task-a', 'task-b', 'task-c'):
+        _held(live.hold(_frame(name), pid=101, seats=3))
+    _held(live.hold(_frame('task-d'), pid=102, seats=1))
+
+    removed = live.release_child(101)
+
+    assert sorted(d.task_id for d in removed) == ['task-a', 'task-b', 'task-c']
+    assert [d.task_id for d in live.snapshot()] == ['task-d']
+
+
+def test_more_dispatches_than_seats_is_a_defect() -> None:
     live = LiveDispatches(capacity=1)
-    _held(live.hold(_frame('task-a'), pid=101))
+    _held(live.hold(_frame('task-a'), pid=101, seats=1))
 
-    with pytest.raises(AssertionError, match='more held tasks than the 1 slots'):
-        live.hold(_frame('task-b'), pid=102)
+    with pytest.raises(AssertionError, match='more held tasks than the 1 seats'):
+        live.hold(_frame('task-b'), pid=102, seats=1)
 
 
-def test_a_pool_has_at_least_one_slot() -> None:
+def test_a_pool_has_at_least_one_seat() -> None:
     with pytest.raises(AssertionError):
         LiveDispatches(capacity=0)
 
@@ -160,7 +190,7 @@ def test_snapshots_from_another_thread_see_whole_dispatches() -> None:
     reader = threading.Thread(target=read)
     reader.start()
     for index in range(2_000):
-        ticket = _held(live.hold(_frame(f'task-{index}'), pid=101))
+        ticket = _held(live.hold(_frame(f'task-{index}'), pid=101, seats=1))
         _ = live.release(ticket)
     stop.set()
     reader.join(5)

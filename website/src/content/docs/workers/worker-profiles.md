@@ -1,7 +1,7 @@
 ---
 title: Worker Profiles
-summary: Named worker settings in AppConfig - children, recycling, claim limits, drain timeout and preload - and what horsies check and worker boot validate.
-related: [worker-architecture, concurrency, ../cli, ../configuration/app-config, ../migrations/migration-to-0-7-0]
+summary: Named worker settings in AppConfig - isolated and shared async children, recycling, claim limits, drain timeout and preload - and what horsies check and worker boot validate.
+related: [worker-architecture, shared-async-tasks, concurrency, ../cli, ../configuration/app-config, ../migrations/migration-to-0-7-0]
 tags: [workers, profiles, configuration, concurrency, recycling, validation]
 ---
 
@@ -73,9 +73,30 @@ error[HRS-206]: --profile is required
 
 ## Execution Modes
 
-This release has one execution mode: isolated. An isolated child runs one task at a time in its own process. See [Worker Architecture](worker-architecture).
+A profile sets a number of children for each execution mode. A child never changes its mode.
 
-The number of children of a worker is the sum of the per-mode counts. There is no separate total.
+| Mode | Field | A child runs |
+|------|-------|--------------|
+| isolated | `isolated=IsolatedChildren(count=N)` | one task at a time, in its own process. See [Worker Architecture](worker-architecture) |
+| shared async | `shared_async=SharedAsyncChildren(count=N, seats=K)` | up to K `SHARED_ASYNC` tasks at once, as coroutines on one event loop. See [Shared Async Tasks](shared-async-tasks) |
+
+The number of children of a worker is the sum of the per-mode counts. There is no separate total. A profile with only shared async children is valid. A worker with no shared async children runs `SHARED_ASYNC` tasks in isolated children.
+
+```python
+from horsies import SharedAsyncChildren, SharedRecycle
+
+io_profile = WorkerProfile(
+    isolated=IsolatedChildren(count=2),
+    shared_async=SharedAsyncChildren(
+        count=4,
+        seats=25,
+        recycle=SharedRecycle(
+            after_per_seat=TaskLimit(tasks=200),
+            above=MemoryLimit(mb=2048),
+        ),
+    ),
+)
+```
 
 ## API Reference
 
@@ -83,12 +104,13 @@ The number of children of a worker is the sum of the per-mode counts. There is n
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `isolated` | `IsolatedChildren \| NoIsolatedChildren` | `NoIsolatedChildren()` | The isolated children. A profile needs at least one child |
+| `isolated` | `IsolatedChildren \| NoIsolatedChildren` | `NoIsolatedChildren()` | The isolated children |
+| `shared_async` | `SharedAsyncChildren \| NoSharedAsyncChildren` | `NoSharedAsyncChildren()` | The shared async children. A profile needs at least one child of either mode |
 | `claim` | `ClaimLimits` | `ClaimLimits()` | Limits on the tasks that the worker claims |
 | `drain_timeout` | `timedelta` | 300 seconds | How long a stopping worker waits for running tasks. Above 0, at most 24 hours. See [Graceful Shutdown](worker-architecture#graceful-shutdown) |
 | `preload` | `ChildPreload` | `ChildPreload.LIBRARY` | What a Linux worker imports once before it forks children. See [Preload Parent](worker-architecture#preload-parent) |
 
-`WorkerProfile.child_count()` returns the number of children of the profile.
+`WorkerProfile.child_count()` returns the number of children of the profile. `WorkerProfile.seat_count()` returns the tasks that they run at once: one per isolated child, and `seats` per shared async child.
 
 ### `IsolatedChildren`
 
@@ -108,9 +130,28 @@ The worker replaces a child with a new one when either limit is reached. Each ch
 | `after` | `TaskLimit \| NoTaskLimit` | `TaskLimit(tasks=100)` | Replace a child after it completes this many tasks |
 | `above` | `MemoryLimit \| NoMemoryLimit` | `NoMemoryLimit()` | Replace a child when its own RSS reaches this many MB |
 
+### `SharedAsyncChildren`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `count` | `int` | required | Number of shared async children, 1 to 1024 |
+| `seats` | `int` | required | Tasks that one child runs at once, 1 to 1000. A seat that waits on the network holds a socket, and a process often has a limit of 1024 open files |
+| `recycle` | `SharedRecycle` | `SharedRecycle()` | When a child is replaced |
+
+`NoSharedAsyncChildren()` states that the profile starts no shared async children.
+
+### `SharedRecycle`
+
+A shared async child that reaches a limit closes: it takes no new task, its running tasks finish, then it stops and a new child starts. See [Recycling](shared-async-tasks#recycling).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `after_per_seat` | `TaskLimit \| NoTaskLimit` | `TaskLimit(tasks=100)` | Replace a child after it completes `after_per_seat.tasks × seats` tasks |
+| `above` | `MemoryLimit \| NoMemoryLimit` | `NoMemoryLimit()` | Replace a child when its own RSS, read after each task, reaches this many MB |
+
 ### `ClaimLimits`
 
-The capacity of a worker is its number of children plus `AppConfig.prefetch_buffer`. A worker never holds more tasks than its capacity, so validation refuses a limit above it. See [Claiming Controls](concurrency#claiming-controls).
+The capacity of a worker is its number of seats (`seat_count()`) plus `AppConfig.prefetch_buffer`. A worker never holds more tasks than its capacity, so validation refuses a limit above it. See [Claiming Controls](concurrency#claiming-controls).
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -146,7 +187,7 @@ Validation runs in two places. `horsies check` validates every profile with the 
 | Bounds of each value (count, limits, drain timeout) | error `HRS-210` | error `HRS-210` | error: the app config does not build |
 | Profile name: 1 to 64 letters, digits, `_`, `.`, `-`; does not start with `.` or `-` | error `HRS-218` | error `HRS-218` | error: the app config does not build |
 | At least one child | error `HRS-218` | error `HRS-218` | error: the app config does not build |
-| Claim limit above the capacity | error `HRS-218` | error `HRS-218` | error: the app config does not build |
+| Claim limit above the capacity (seats plus `prefetch_buffer`) | error `HRS-218` | error `HRS-218` | error: the app config does not build |
 | `--profile` names a defined profile | not checked | not checked | error `HRS-206`, exit 1 |
 | Postgres connections of one worker against the server | not checked | error `HRS-219` | warning |
 | Sum of the per-child memory limits against the usable memory (container limit or host RAM) | not checked | not checked | warning |
@@ -176,7 +217,7 @@ worker_pool_size + worker_max_overflow   # parent pool
 + children × worker_child_pool_max_size  # child pools
 ```
 
-The worker process writes the runner heartbeats of its RUNNING tasks over one connection of its own. At the defaults, a profile of 8 children needs `3 + 2 + 2 + 1 + 8 × 2 = 24`.
+The worker process writes the runner heartbeats of its RUNNING tasks over one connection of its own. `children` counts both modes: an isolated child opens a sync pool, and a shared async child opens an async pool of the same size, whatever its seats. At the defaults, a profile of 8 children needs `3 + 2 + 2 + 1 + 8 × 2 = 24`.
 
 The server has `max_connections` minus `superuser_reserved_connections` minus `reserved_connections` (PostgreSQL 16 and later) usable slots. `horsies check --live` reports `HRS-219` for each profile above that number. At boot the worker reads the same settings before it builds its children and logs a warning. With `pgbouncer_transaction_mode=True` the pooled connections do not map to server connections, and nothing is compared. See [Remote PostgreSQL](../configuration/remote-postgres#connection-budget).
 
@@ -184,7 +225,9 @@ The comparison is for one worker. Several workers, producers and other clients s
 
 ### Memory
 
-At boot the worker compares `count × MemoryLimit.mb` with the memory that it can use, and logs a warning when the sum is above it. The worker starts in every case: a deployment can move between machine sizes. A profile with `NoMemoryLimit()` has no sum to compare.
+At boot the worker compares the sum of `count × MemoryLimit.mb` over the modes with the memory that it can use, and logs a warning when the sum is above it. The worker starts in every case: a deployment can move between machine sizes. A profile with a mode that has children and `NoMemoryLimit()` has no sum to compare.
+
+The memory limit of each mode is also compared with the measured baseline RSS of a booted child of that mode, and a limit at or below it refuses the start.
 
 The memory that the worker can use is the smaller of two values:
 

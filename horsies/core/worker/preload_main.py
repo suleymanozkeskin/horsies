@@ -33,15 +33,15 @@ from horsies.core.worker.child_main import (
     BAD_PARENT_FRAME_EXIT_CODE,
     PARENT_GONE_EXIT_CODE,
     BootFn,
-    RunTaskFn,
+    TaskRunners,
     bind_to_parent,
     boot_app,
     bounded_text,
     flush_output,
     ignore_stop_signals,
+    production_runners,
     read_init_frame,
     restore_parent_state,
-    run_child_task,
     serve,
 )
 from horsies.core.worker.child_protocol import (
@@ -71,6 +71,7 @@ LIBRARY_MODULES: Final[tuple[str, ...]] = (
     'horsies.core.app',
     'horsies.core.brokers.postgres',
     'horsies.core.worker.child_runner',
+    'horsies.core.worker.shared_runner',
 )
 
 PrepareFn = Callable[[InitFrame], BootFn]
@@ -169,12 +170,12 @@ def _run_child(
     child_fd: int,
     worker_pid: int,
     boot: BootFn,
-    run_task: RunTaskFn,
+    runners: TaskRunners,
 ) -> NoReturn:
     """Become a worker child. After a stop frame, ``serve`` ends the process."""
     os.setsid()
     _wait_for_reparent(worker_pid)
-    serve(socket.socket(fileno=child_fd), worker_pid, boot, run_task)
+    serve(socket.socket(fileno=child_fd), worker_pid, boot, runners)
 
 
 def _run_middle(
@@ -183,7 +184,7 @@ def _run_middle(
     write_end: int,
     worker_pid: int,
     boot: BootFn,
-    run_task: RunTaskFn,
+    runners: TaskRunners,
 ) -> NoReturn:
     """Fork the child, report its pid, and exit, which orphans the child."""
     try:
@@ -193,7 +194,7 @@ def _run_middle(
     if child == 0:
         ctrl.close()
         os.close(write_end)
-        _run_child(child_fd, worker_pid, boot, run_task)
+        _run_child(child_fd, worker_pid, boot, runners)
     try:
         os.write(write_end, str(child).encode('ascii'))
     finally:
@@ -205,7 +206,7 @@ def _fork_child(
     child_fd: int,
     worker_pid: int,
     boot: BootFn,
-    run_task: RunTaskFn,
+    runners: TaskRunners,
 ) -> PreloadFrame:
     """Run one double fork. Returns after the middle process is reaped."""
     # Anything buffered would otherwise print once more from each fork.
@@ -222,7 +223,7 @@ def _fork_child(
         return ForkFailedFrame(f'{type(exc).__name__}: {exc}')
     if middle == 0:
         os.close(read_end)
-        _run_middle(ctrl, child_fd, write_end, worker_pid, boot, run_task)
+        _run_middle(ctrl, child_fd, write_end, worker_pid, boot, runners)
     os.close(write_end)
     reported = os.read(read_end, 32)
     os.close(read_end)
@@ -236,7 +237,7 @@ def _serve_requests(
     ctrl: socket.socket,
     worker_pid: int,
     boot: BootFn,
-    run_task: RunTaskFn,
+    runners: TaskRunners,
 ) -> NoReturn:
     """Fork one child per request, until the worker closes the socket."""
     while True:
@@ -249,7 +250,7 @@ def _serve_requests(
         if message != SPAWN_REQUEST or len(fds) != 1:
             logger.critical('Worker sent a bad spawn request')
             os._exit(BAD_PARENT_FRAME_EXIT_CODE)
-        frame = _fork_child(ctrl, fds[0], worker_pid, boot, run_task)
+        frame = _fork_child(ctrl, fds[0], worker_pid, boot, runners)
         os.close(fds[0])
         _send_frame(ctrl, frame)
 
@@ -258,7 +259,7 @@ def run(
     ctrl: socket.socket,
     worker_pid: int,
     prepare: PrepareFn,
-    run_task: RunTaskFn,
+    runners: TaskRunners,
 ) -> NoReturn:
     """Prepare once, report, then serve spawn requests.
 
@@ -280,7 +281,7 @@ def run(
     gc.collect()
     gc.freeze()
     _send_frame(ctrl, PreloadReadyFrame(pid=os.getpid()))
-    _serve_requests(ctrl, worker_pid, boot, run_task)
+    _serve_requests(ctrl, worker_pid, boot, runners)
 
 
 def parse_arguments(argv: Sequence[str]) -> tuple[int, int, ChildPreload] | None:
@@ -304,9 +305,9 @@ def main(argv: Sequence[str]) -> NoReturn:
     ctrl = socket.socket(fileno=fd)
     match mode:
         case ChildPreload.LIBRARY:
-            run(ctrl, worker_pid, _prepare_library, run_child_task)
+            run(ctrl, worker_pid, _prepare_library, production_runners())
         case ChildPreload.APP:
-            run(ctrl, worker_pid, _prepare_app, run_child_task)
+            run(ctrl, worker_pid, _prepare_app, production_runners())
         case ChildPreload.NONE:
             sys.stderr.write('preload_main: mode none starts no preload parent\n')
             sys.exit(BAD_ARGUMENTS_EXIT_CODE)

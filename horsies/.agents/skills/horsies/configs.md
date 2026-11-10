@@ -83,7 +83,8 @@ from datetime import timedelta
 
 from horsies import (
     ChildPreload, ClaimLimits, IsolatedChildren, IsolatedRecycle,
-    MemoryLimit, NoTaskLimit, TaskLimit, WorkerProfile,
+    MemoryLimit, NoTaskLimit, SharedAsyncChildren, SharedRecycle, TaskLimit,
+    WorkerProfile,
 )
 
 worker_profiles = {
@@ -97,12 +98,21 @@ worker_profiles = {
         drain_timeout=timedelta(seconds=120),
         preload=ChildPreload.APP,
     ),
+    'io': WorkerProfile(
+        isolated=IsolatedChildren(count=2),
+        shared_async=SharedAsyncChildren(
+            count=4,
+            seats=25,
+            recycle=SharedRecycle(after_per_seat=TaskLimit(tasks=200)),
+        ),
+    ),
 }
 ```
 
 | Type | Field | Default | Bounds / meaning |
 |---|---|---|---|
-| `WorkerProfile` | `isolated` | `NoIsolatedChildren()` | `IsolatedChildren` or `NoIsolatedChildren`; at least one child is required |
+| `WorkerProfile` | `isolated` | `NoIsolatedChildren()` | `IsolatedChildren` or `NoIsolatedChildren` |
+| `WorkerProfile` | `shared_async` | `NoSharedAsyncChildren()` | `SharedAsyncChildren` or `NoSharedAsyncChildren`; at least one child of either mode is required |
 | `WorkerProfile` | `claim` | `ClaimLimits()` | Claim limits |
 | `WorkerProfile` | `drain_timeout` | `timedelta(seconds=300)` | Above 0, at most 24 h; then running children are killed |
 | `WorkerProfile` | `preload` | `ChildPreload.LIBRARY` | `LIBRARY`, `APP` or `NONE`; see [Child process model](#child-process-model) |
@@ -110,15 +120,27 @@ worker_profiles = {
 | `IsolatedChildren` | `recycle` | `IsolatedRecycle()` | See [Child process recycling](#child-process-recycling) |
 | `IsolatedRecycle` | `after` | `TaskLimit(tasks=100)` | `TaskLimit` or `NoTaskLimit` |
 | `IsolatedRecycle` | `above` | `NoMemoryLimit()` | `MemoryLimit(mb=N)` or `NoMemoryLimit` |
+| `SharedAsyncChildren` | `count` | required | 1-1024 children |
+| `SharedAsyncChildren` | `seats` | required | 1-1000 `SHARED_ASYNC` tasks at once per child |
+| `SharedAsyncChildren` | `recycle` | `SharedRecycle()` | When a shared child is replaced |
+| `SharedRecycle` | `after_per_seat` | `TaskLimit(tasks=100)` | Replace after `tasks × seats` tasks; `NoTaskLimit` |
+| `SharedRecycle` | `above` | `NoMemoryLimit()` | RSS limit of the child, read after each task |
 | `ClaimLimits` | `per_queue_per_pass` | `NoTaskLimit()` | Most tasks one claim pass takes from one queue |
 | `ClaimLimits` | `claimed_per_worker` | `NoTaskLimit()` | Most CLAIMED tasks the worker holds; no limit = capacity |
 | `TaskLimit` | `tasks` | required | 1-2,147,483,647 |
 | `MemoryLimit` | `mb` | required | 1-16,777,216 |
 
-The number of children is `WorkerProfile.child_count()`, the sum over modes.
-There is one mode, isolated. Boot also warns (never refuses) when `count × mb`
-is above the usable memory (container limit or host RAM), and when one worker can open more Postgres
-connections than the server has usable slots.
+The number of children is `WorkerProfile.child_count()`, the sum over modes;
+`WorkerProfile.seat_count()` is one per isolated child plus `seats` per shared
+async child, and the claim limits are checked against it plus
+`prefetch_buffer` (HRS-218). Two modes: isolated (one task per child) and
+shared async (up to `seats` `SHARED_ASYNC` tasks as coroutines per child, see
+the tasks skill). A worker with no shared async children runs `SHARED_ASYNC`
+tasks in isolated children. A shared child opens one async pool of
+`worker_child_pool_max_size`, so it counts as one child in HRS-219. Boot also
+warns (never refuses) when the sum over modes of `count × mb` is above the
+usable memory (container limit or host RAM), and when one worker can open more
+Postgres connections than the server has usable slots.
 
 Claim budgets per execution class. A worker has one budget for each class it
 runs children for; its capacity is the children (or shared seats) in service.
@@ -171,7 +193,20 @@ names = app.list_tasks()  # list[str]
 def reset_db_for_child() -> None: ...
 
 hooks = app.get_child_process_start_hooks()  # list[ChildProcessStartHook]
+
+# Per-shared-async-child hook: async zero-arg fn, runs on the event loop of
+# each shared async child, before its first task. Build long-lived async
+# clients here; isolated children do not run it.
+@app.on_shared_async_child_start
+async def open_clients() -> None: ...
+
+async_hooks = app.get_shared_async_child_start_hooks()  # list[SharedAsyncChildStartHook]
 ```
+
+`on_shared_async_child_start` rules: only `async def` (else `HRS-214`); runs
+after the `on_child_process_start` hooks and the child's async pool; same 10 s
+bound and fail-closed stop as the sync hooks (a hook that blocks the loop is
+also ended); work it leaves running belongs to no task.
 
 `on_child_process_start` rules: deduped by function identity; async functions
 rejected (`HRS-214`); hooks fire on every child start including replacement

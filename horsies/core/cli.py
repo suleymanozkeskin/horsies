@@ -44,14 +44,14 @@ from horsies.core.models.worker_profile import (
     MemoryLimit,
     NoIsolatedChildren,
     NoMemoryLimit,
+    NoSharedAsyncChildren,
     NoTaskLimit,
+    SharedAsyncChildren,
     TaskLimit,
     WorkerProfile,
     describe_worker_profile,
 )
-from horsies.core.models.tasks import Execution
 from horsies.core.scheduler import Scheduler
-from horsies.core.worker.claim_plan import ClaimPlan
 from horsies.core.worker.config import ChildPreload
 from horsies.core.worker.profile_fit import (
     CONNECTIONS_HELP,
@@ -518,6 +518,8 @@ class ExecutionSettings:
     ``WorkerConfig``, the slot pool and the claim function read 0 as no task
     limit and ``None`` as no memory limit. The profile has named variants
     for those; this is the one place that turns them into that encoding.
+    ``processes`` is the number of isolated children, 0 when the profile
+    has none. ``shared_async`` keeps its typed form.
     """
 
     processes: int
@@ -527,25 +529,7 @@ class ExecutionSettings:
     max_claim_per_worker: int
     drain_timeout_s: float
     child_preload: ChildPreload
-    claim_plan: ClaimPlan
-
-
-def claim_plan_for_profile(profile: WorkerProfile) -> ClaimPlan:
-    """The claim plan of a worker of ``profile``: its budget classes are the
-    classes that the profile starts children for.
-
-    This is the one place that maps the child settings of a profile to
-    budget classes. A profile setting that starts children of a shared class
-    adds that class here; ``ClaimMixin._capacity_in_service`` then needs
-    the arm that counts their seats.
-    """
-    match profile.isolated:
-        case IsolatedChildren():
-            return ClaimPlan(budget_classes=frozenset({Execution.ISOLATED}))
-        case NoIsolatedChildren():
-            return ClaimPlan(budget_classes=frozenset())
-        case _ as unreachable:
-            assert_never(unreachable)
+    shared_async: SharedAsyncChildren | NoSharedAsyncChildren
 
 
 def _tasks_or_zero(limit: TaskLimit | NoTaskLimit) -> int:
@@ -569,27 +553,38 @@ def _mb_or_none(limit: MemoryLimit | NoMemoryLimit) -> int | None:
 
 
 def execution_settings(profile: WorkerProfile) -> ExecutionSettings:
-    """Turn a validated profile into the settings of ``WorkerConfig``."""
+    """Turn a validated profile into the settings of ``WorkerConfig``.
+
+    A profile with no isolated children gives ``processes`` 0, no task
+    limit and no memory limit for isolated children. AppConfig validation
+    refuses a profile with no children of any mode, so such a profile here
+    is a defect: ``AssertionError``.
+    """
+    if profile.child_count() < 1:
+        raise AssertionError(
+            'AppConfig validation refuses a worker profile with no children',
+        )
     match profile.isolated:
-        case IsolatedChildren(recycle=recycle):
-            return ExecutionSettings(
-                processes=profile.child_count(),
-                max_tasks_per_child=_tasks_or_zero(recycle.after),
-                max_memory_per_child_mb=_mb_or_none(recycle.above),
-                max_claim_batch=_tasks_or_zero(profile.claim.per_queue_per_pass),
-                max_claim_per_worker=_tasks_or_zero(
-                    profile.claim.claimed_per_worker,
-                ),
-                drain_timeout_s=profile.drain_timeout.total_seconds(),
-                child_preload=profile.preload,
-                claim_plan=claim_plan_for_profile(profile),
-            )
+        case IsolatedChildren(count=count, recycle=recycle):
+            processes = count
+            max_tasks_per_child = _tasks_or_zero(recycle.after)
+            max_memory_per_child_mb = _mb_or_none(recycle.above)
         case NoIsolatedChildren():
-            raise AssertionError(
-                'AppConfig validation refuses a worker profile with no children',
-            )
+            processes = 0
+            max_tasks_per_child = 0
+            max_memory_per_child_mb = None
         case _ as unreachable:
             assert_never(unreachable)
+    return ExecutionSettings(
+        processes=processes,
+        max_tasks_per_child=max_tasks_per_child,
+        max_memory_per_child_mb=max_memory_per_child_mb,
+        max_claim_batch=_tasks_or_zero(profile.claim.per_queue_per_pass),
+        max_claim_per_worker=_tasks_or_zero(profile.claim.claimed_per_worker),
+        drain_timeout_s=profile.drain_timeout.total_seconds(),
+        child_preload=profile.preload,
+        shared_async=profile.shared_async,
+    )
 
 
 def _read_usable_memory(
@@ -864,7 +859,7 @@ def worker_command(args: argparse.Namespace) -> None:
         max_memory_per_child_mb=settings.max_memory_per_child_mb,
         drain_timeout_s=settings.drain_timeout_s,
         child_preload=settings.child_preload,
-        claim_plan=settings.claim_plan,
+        shared_async=settings.shared_async,
         recovery_config=app.config.recovery,
         retention_config=app.config.retention,
         resilience_config=app.config.resilience,

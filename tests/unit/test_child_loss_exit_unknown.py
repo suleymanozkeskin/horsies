@@ -25,7 +25,7 @@ import pytest_asyncio
 
 from horsies.core.types.result import Ok
 from horsies.core.worker import slots
-from horsies.core.worker.child_protocol import InitFrame, RunFrame
+from horsies.core.worker.child_protocol import InitFrame, IsolatedChild, RunFrame
 from horsies.core.worker.runtime import _RequeueOutcome
 from horsies.core.worker.slots import (
     Child,
@@ -85,6 +85,7 @@ def _init() -> InitFrame:
         child_pool_max_size=1,
         child_pool_check=False,
         process_name='test-child',
+        child_kind=IsolatedChild(),
     )
 
 
