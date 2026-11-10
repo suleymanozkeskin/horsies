@@ -44,7 +44,7 @@ config = AppConfig(
 | `finalizing_stale_threshold_ms` | `int` | 300,000 | Ms a completed child may remain in finalization handoff before recovery |
 | `crashed_worker_recovery_grace_ms` | `int` | 10,000 | Grace before recovering a workflow task whose underlying task is terminal but whose workflow progression was not applied; `0` disables |
 | `check_interval_ms` | `int` | 30,000 | How often to check for stale tasks |
-| `runner_heartbeat_interval_ms` | `int` | 30,000 | RUNNING task heartbeat frequency |
+| `runner_heartbeat_interval_ms` | `int` | 30,000 | How often the worker process writes the heartbeats of its RUNNING tasks |
 | `claimer_heartbeat_interval_ms` | `int` | 30,000 | CLAIMED task heartbeat frequency |
 | `worker_state_snapshot_interval_ms` | `int` | 30,000 | How often each worker persists a monitoring snapshot row to `horsies_worker_states` (1s–5min) |
 | `auto_terminate_orphaned_workflow_tasks` | `bool` | `True` | Terminate claimed tasks whose workflow node linkage no longer exists |
@@ -83,7 +83,10 @@ When a **regular** task is RUNNING but the runner heartbeat stops:
 - Otherwise: marked as FAILED with `WORKER_CRASHED` error
 
 `running_stale_threshold_ms` is based on missing runner heartbeats, not total
-task duration. Long tasks remain healthy as long as they continue heartbeating.
+task duration. Long tasks remain healthy as long as the worker writes their
+heartbeats. A worker that cannot write them for half of
+`running_stale_threshold_ms` kills its tasks and exits non-zero, so the reaper
+does not fail a task that still runs.
 After user code returns, the child marks the task as finalizing before the
 parent writes the terminal result. The reaper will not recover that task until
 `finalizing_stale_threshold_ms` has also elapsed.
@@ -163,7 +166,7 @@ and the ones with live nodes.
 Two heartbeat types:
 
 1. **Claimer heartbeat**: Sent by worker for CLAIMED tasks (not yet running)
-2. **Runner heartbeat**: Sent by child process for RUNNING tasks
+2. **Runner heartbeat**: Written by the worker process, from its own thread, for the RUNNING tasks that its children hold
 
 The reaper (running in each worker) checks for missing heartbeats.
 
@@ -180,14 +183,8 @@ The reaper (running in each worker) checks for missing heartbeats.
 
 ### For CPU-Heavy Tasks
 
-Long-running CPU tasks may block the heartbeat thread:
-
-```python
-RecoveryConfig(
-    runner_heartbeat_interval_ms=60_000,    # Heartbeat every minute
-    running_stale_threshold_ms=600_000,     # 10 minutes before considered stale
-)
-```
+A task that holds the GIL does not delay its runner heartbeats, because the
+worker process writes them. CPU-bound tasks need no extra margin.
 
 ### For Quick Tasks
 

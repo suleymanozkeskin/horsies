@@ -21,6 +21,7 @@ Each worker holds, under load:
 ```text
 worker_pool_size + worker_max_overflow   # coordinator engine
 + 2                                      # LISTEN connections (tasks, ping)
++ 1                                      # runner heartbeat connection
 + processes × worker_child_pool_max_size # per-child pools
 ```
 
@@ -28,7 +29,7 @@ At defaults (`worker_pool_size=3`, `worker_max_overflow=2`,
 `worker_child_pool_max_size=2`) with `--processes=8`:
 
 ```text
-3 + 2 + 2 + 8 × 2 = 23 connections per worker
+3 + 2 + 2 + 1 + 8 × 2 = 24 connections per worker
 ```
 
 Producers hold their own engine pool (`pool_size + max_overflow`, default

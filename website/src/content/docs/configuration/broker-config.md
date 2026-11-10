@@ -161,17 +161,19 @@ For direct PostgreSQL connections, budget a worker roughly as:
 ```
 worker_pool_size + worker_max_overflow
   + 2 session/LISTEN connections
+  + 1 runner heartbeat connection
   + processes * worker_child_pool_max_size
   + task-code database connections
 ```
 
 With the defaults and `--processes=8`, the framework ceiling is about
-`3 + 2 + 2 + 8 * 2 = 23` direct connections, before application task code.
+`3 + 2 + 2 + 1 + 8 * 2 = 24` direct connections, before application task code.
 Idle child processes keep no database connection by default because
 `worker_child_pool_min_size=0`; connections are opened lazily when task
-lifecycle work starts. Set `worker_child_pool_max_size=1` only after testing heartbeat and task
-lifecycle latency for your workload; `2` leaves one connection for task
-lifecycle work and one for heartbeat overlap.
+lifecycle work starts. A child uses one connection at a time, for the RUNNING
+update and the finalizing mark: the worker process writes the runner
+heartbeats over its own connection. So `worker_child_pool_max_size=1` is enough
+for the child's own work.
 
 When using PgBouncer transaction pooling, those client-side pool slots are
 multiplexed onto fewer server backends. Connections are still not safe to share
