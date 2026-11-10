@@ -123,11 +123,11 @@ and there is no migration contract between pre-1.0 versions.
     rule: `SHARED_ASYNC` needs an `async def` function (`HRS-107`),
     `SHARED_THREAD` needs a `def` function (`HRS-108`), both shared classes
     need `timeout_ms` (`HRS-109`), only `SHARED_ASYNC` takes `cancel_grace_ms`
-    (`HRS-110`), and `cancel_grace_ms` is from 100 to 60,000 ms (`HRS-111`).
+    (`HRS-110`), and `cancel_grace_ms` is from 100 to 10,000 ms (`HRS-111`).
     `horsies check` reports them. With `execution` written as a member, a
     type checker refuses the same declarations.
   - `cancel_grace_ms` is the time that a `SHARED_ASYNC` task gets to stop
-    after its cancel. A task that sets none gets 5,000 ms. The stored task
+    after its cancel. A task that sets none gets 1,000 ms. The stored task
     options hold the class (`"execution"`) and the grace in effect at send
     (`"cancel_grace_ms"`, null for the other classes).
   - Schema v54 adds `horsies_tasks.execution` (TEXT, NOT NULL, default

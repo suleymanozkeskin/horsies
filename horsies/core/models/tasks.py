@@ -545,16 +545,27 @@ libraries accept the same declarations.
 """
 
 MIN_CANCEL_GRACE_MS: Final = 100
-"""The smallest `cancel_grace_ms` of a `SHARED_ASYNC` task. Provisional."""
+"""The smallest `cancel_grace_ms` of a `SHARED_ASYNC` task.
 
-MAX_CANCEL_GRACE_MS: Final = 60_000
-"""The largest `cancel_grace_ms` of a `SHARED_ASYNC` task. Provisional."""
+A healthy cleanup after a cancel ended within 15.4 ms in the measured set
+(local network), so this is 6.5 times that. A lower value would send the
+second cancel into healthy cleanups and drop their connections.
+"""
 
-DEFAULT_CANCEL_GRACE_MS: Final = 5_000
+MAX_CANCEL_GRACE_MS: Final = 10_000
+"""The largest `cancel_grace_ms` of a `SHARED_ASYNC` task.
+
+The longest library cleanup with an end in the measured set took 10.0 s
+(psycopg 3.3.6 and later: a 5 s cancel request, then a 5 s drain). A larger
+grace changes no measured outcome; it only keeps a seat longer.
+"""
+
+DEFAULT_CANCEL_GRACE_MS: Final = 1_000
 """The `cancel_grace_ms` that a `SHARED_ASYNC` task gets when it sets none.
 
-Provisional. The task row stores the value in effect when the task was sent,
-so a change of this default does not change rows that are already queued.
+65 times the slowest healthy cleanup in the measured set. The task row
+stores the value in effect when the task was sent, so a change of this
+default does not change rows that are already queued.
 """
 
 

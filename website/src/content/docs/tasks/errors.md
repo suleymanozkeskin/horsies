@@ -530,7 +530,7 @@ The full list of reserved strings is available at runtime via `BUILTIN_CODE_REGI
 | HRS-108 | `TASK_SHARED_THREAD_REQUIRES_DEF` | `execution=Execution.SHARED_THREAD` on a function defined with `async def`. Define it with `def`, or use `SHARED_ASYNC` |
 | HRS-109 | `TASK_SHARED_EXECUTION_REQUIRES_TIMEOUT` | `SHARED_ASYNC` or `SHARED_THREAD` without `timeout_ms` |
 | HRS-110 | `TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC` | `cancel_grace_ms` with an execution class other than `SHARED_ASYNC` |
-| HRS-111 | `TASK_CANCEL_GRACE_OUT_OF_RANGE` | `cancel_grace_ms` outside `MIN_CANCEL_GRACE_MS` (100) to `MAX_CANCEL_GRACE_MS` (60,000) |
+| HRS-111 | `TASK_CANCEL_GRACE_OUT_OF_RANGE` | `cancel_grace_ms` outside `MIN_CANCEL_GRACE_MS` (100) to `MAX_CANCEL_GRACE_MS` (10,000) |
 
 ### Configuration (HRS-200-HRS-299)
 
