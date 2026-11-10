@@ -40,13 +40,15 @@ and there is no migration contract between pre-1.0 versions.
     loop a resource set, which it keeps until the child stops.
   - A task must await the work that it starts. When an async task ends and
     asyncio tasks that it started are still on the loop, the worker replaces
-    the child after that task, so no later task shares the loop with that
-    work. When the old child stops, it cancels that work and closes the
-    loop. This takes at most 5 seconds. A client that keeps its own
+    the child after that task. When the old child stops, it cancels that work
+    and closes the loop. This takes at most 5 seconds. A client that keeps its own
     background tasks on the loop causes a child replacement after each async
     task. The warning of the replacement names the coroutine of each task
     left, up to 10. A task that cancels a helper task in `finally` must also
-    await it.
+    await it. The check sees asyncio tasks only: a callback that
+    `loop.call_soon()` or `loop.call_later()` scheduled, and
+    `loop.run_in_executor()` work that the task did not await, cause no
+    replacement and can still run during a later task of the same child.
   - A thread of `asyncio.to_thread()` that still runs after that time does
     not hold the child: the child exits without waiting for it, and its
     `atexit` handlers do not run.

@@ -47,7 +47,8 @@ The loop runs only while an async task runs. A `def` task runs with no running e
 
 An async task must await the work that it starts:
 
-- When an async task ends and asyncio tasks that it started, for example with `asyncio.create_task()`, are still on the loop, the worker replaces the child after that task. The next task runs in a new child, so no task shares the loop with that work. When the old child stops, it cancels that work, within 5 seconds.
+- When an async task ends and asyncio tasks that it started, for example with `asyncio.create_task()`, are still on the loop, the worker replaces the child after that task. The next task runs in a new child. When the old child stops, it cancels that work, within 5 seconds.
+- The worker sees asyncio tasks only. A callback that `loop.call_soon()` or `loop.call_later()` scheduled, and work that `loop.run_in_executor()` started and the task did not await, cause no replacement. They can still run during a later task of the same child.
 - A client that keeps its own background tasks on the loop, for example a keepalive or a consumer task, causes a child replacement after each async task.
 - A thread that `asyncio.to_thread()` starts can outlive its task, for example when a timeout ends the wait for it. The thread is not an asyncio task, so it does not cause a replacement. When the worker stops the child, the child does not wait for that thread past the 5-second close: it exits, and its `atexit` handlers do not run.
 - The worker log names the coroutine of each asyncio task that was left, for up to 10 tasks, for example `Retiring child pid=4242: task <id> left 1 task(s) on its event loop: refresh_session`.

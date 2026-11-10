@@ -11,9 +11,11 @@ The loop runs only while an async task runs. Between tasks the loop is stopped
 and not closed. A sync task runs on the same thread with no running event
 loop, so it can call ``asyncio.run()`` and the sync send methods.
 
-A task must await the work that it starts. ``report`` counts what is still on
-the loop after a task, and the worker replaces a child that reports any, so no
-later task shares the loop with that work.
+A task must await the work that it starts. ``report`` counts the asyncio tasks
+that are still on the loop after a task, and the worker replaces a child that
+reports any. It sees asyncio tasks only: a callback that ``call_soon`` or
+``call_later`` scheduled, and executor work that the task did not await, are
+not counted, and they can still run during a later task of the same child.
 """
 
 from __future__ import annotations

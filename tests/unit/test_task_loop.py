@@ -443,6 +443,28 @@ class TestReport:
         task_loop.run(cancels_and_awaits())
         assert task_loop.report() == LoopHoldsNoTask()
 
+    def test_a_scheduled_callback_is_not_counted_and_runs_in_the_next_run(
+        self,
+        task_loop: TaskLoop,
+    ) -> None:
+        """The report sees asyncio tasks only, as the async task docs say."""
+        fired: list[str] = []
+
+        async def schedules_a_callback() -> None:
+            asyncio.get_running_loop().call_later(0.05, fired.append, 'fired')
+
+        async def later_task() -> None:
+            await asyncio.sleep(0.2)
+
+        task_loop.run(schedules_a_callback())
+        report = task_loop.report()
+        fired_before_the_later_task = list(fired)
+        task_loop.run(later_task())
+
+        assert report == LoopHoldsNoTask()
+        assert fired_before_the_later_task == []
+        assert fired == ['fired']
+
     def test_a_coroutine_with_no_qualname_is_named_by_its_task(self) -> None:
         task = SimpleNamespace(get_coro=object, get_name=lambda: 'Task-7')
         assert task_loop_module._coroutine_name(cast(Any, task)) == 'Task-7'

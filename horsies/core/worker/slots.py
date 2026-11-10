@@ -1267,8 +1267,8 @@ class SlotPool:
         the child takes another task."""
         match finished.task_loop:
             case LoopHoldsTasks() as leftover:
-                # No later task may share the loop with this work. The stop
-                # frame makes the child cancel it.
+                # No later task may run beside these asyncio tasks. The stop
+                # frame makes the child cancel them.
                 logger.warning(
                     'Retiring child pid=%s: task %s left %d task(s) on its event '
                     'loop: %s',
