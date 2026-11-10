@@ -16,6 +16,8 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable
+from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy import text
@@ -31,8 +33,10 @@ from tests.e2e.helpers.db import wait_for_status
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.tasks import basic as basic_tasks
 from tests.e2e.tasks import shared_async_tasks
+from tests.integration.history_seeding import AttemptRecord, read_attempts
 from tests.e2e.tasks.profiles import (
     SHARED_ONLY_1X4,
+    SPLIT_SHARED_1X4,
     SPLIT_SHARED_2X8,
     SPLIT_SHARED_SEATS,
 )
@@ -41,6 +45,8 @@ DEFAULT_INSTANCE = 'tests.e2e.tasks.instance:app'
 RESULT_TIMEOUT_MS = 60_000
 SLEEP_S = 1.5
 SLEEPERS = 12
+NEIGHBOUR_S = 5.0
+"""Long enough that the stuck task is reported stuck while it runs."""
 
 
 def _make_ready_check() -> Callable[[], bool]:
@@ -259,3 +265,110 @@ async def test_a_shared_row_with_unusable_options_fails_once(
     assert row.error_code == OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value
     assert row.retry_count == 0
     assert f'"field": "{field}"' in json.dumps(result)
+
+
+async def _isolated_pid() -> str:
+    handle = unwrap_send(await basic_tasks.pid_task.send_async())
+    result = await asyncio.to_thread(handle.get, timeout_ms=RESULT_TIMEOUT_MS)
+    assert_ok(result)
+    return str(result.unwrap())
+
+
+async def _row_and_attempts(
+    broker: PostgresBroker,
+    task_id: str,
+) -> tuple[Any, tuple[AttemptRecord, ...]]:
+    """The row of a task and its attempts, live or moved to history."""
+    async with current_resources(broker).session_factory() as session:
+        row = (
+            await session.execute(
+                text(
+                    'SELECT status, error_code, retry_count FROM itest_task_rows '
+                    'WHERE id = :id',
+                ),
+                {'id': task_id},
+            )
+        ).one()
+        attempts = await read_attempts(session, task_id)
+    return row, attempts
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_a_stuck_task_waits_for_its_neighbour_then_retries_isolated(
+    broker: PostgresBroker,
+    tmp_path: Path,
+) -> None:
+    """One shared child holds both tasks. The stuck task ignores every
+    cancel; its neighbour has more time and finishes. Only then is the child
+    killed: the stuck attempt fails with TASK_TIMEOUT, and its retry runs in
+    the isolated child."""
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile=SPLIT_SHARED_1X4,
+        ready_check=_make_ready_check(),
+    ):
+        isolated_pid = await _isolated_pid()
+        neighbour = unwrap_send(
+            await shared_async_tasks.shared_sleep.send_async(seconds=NEIGHBOUR_S),
+        )
+        stuck = unwrap_send(
+            await shared_async_tasks.shared_stuck_once.send_async(
+                marker=str(tmp_path / 'stuck'),
+            ),
+        )
+        neighbour_pid, _started, _ended = (await _value(neighbour)).split(':')
+        retry_pid = await _value(stuck)
+        row, attempts = await _row_and_attempts(broker, stuck.task_id)
+
+    first_attempt_pid = (tmp_path / 'stuck').read_text()
+    assert first_attempt_pid == neighbour_pid
+    assert retry_pid == isolated_pid
+    assert (row.status, row.retry_count) == ('COMPLETED', 1)
+    assert [(a.attempt, a.error_code, a.will_retry) for a in attempts[:1]] == [
+        (1, OutcomeCode.TASK_TIMEOUT.value, True),
+    ]
+    # Alone, the stuck task would be killed 2.4 s after its start. It was
+    # killed only after its neighbour, which ran NEIGHBOUR_S, had ended.
+    first = attempts[0]
+    assert first.finished_at is not None and first.started_at is not None
+    assert (first.finished_at - first.started_at).total_seconds() >= NEIGHBOUR_S - 1.0
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_a_blocked_loop_kills_the_child_and_names_the_culprit(
+    broker: PostgresBroker,
+    tmp_path: Path,
+) -> None:
+    """The culprit blocks the loop of the shared child for 30 s; the watchdog
+    reports it after the 5 s block limit. The culprit fails with
+    TASK_BLOCKED_LOOP and its retry runs in the isolated child. The neighbour
+    fails with NEIGHBOUR_BLOCKED_LOOP: its policy does not name that code."""
+    session_factory = current_resources(broker).session_factory
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile=SPLIT_SHARED_1X4,
+        ready_check=_make_ready_check(),
+    ):
+        isolated_pid = await _isolated_pid()
+        neighbour = unwrap_send(
+            await shared_async_tasks.shared_sleep.send_async(seconds=20.0),
+        )
+        await wait_for_status(session_factory, neighbour.task_id, 'RUNNING')
+        culprit = unwrap_send(
+            await shared_async_tasks.shared_blocks_once.send_async(
+                marker=str(tmp_path / 'blocks'),
+            ),
+        )
+        retry_pid = await _value(culprit)
+        await wait_for_status(session_factory, neighbour.task_id, 'FAILED')
+        culprit_row, culprit_attempts = await _row_and_attempts(broker, culprit.task_id)
+        neighbour_row, _attempts = await _row_and_attempts(broker, neighbour.task_id)
+
+    assert retry_pid == isolated_pid
+    assert (culprit_row.status, culprit_row.retry_count) == ('COMPLETED', 1)
+    first_attempt = culprit_attempts[0]
+    assert first_attempt.error_code == OperationalErrorCode.TASK_BLOCKED_LOOP.value
+    assert neighbour_row.error_code == OperationalErrorCode.NEIGHBOUR_BLOCKED_LOOP.value
+    assert neighbour_row.retry_count == 0

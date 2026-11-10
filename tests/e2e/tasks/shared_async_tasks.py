@@ -10,7 +10,7 @@ import asyncio
 import os
 import time
 
-from horsies.core.models.tasks import Execution, TaskError, TaskResult
+from horsies.core.models.tasks import Execution, RetryPolicy, TaskError, TaskResult
 from horsies.core.types.result import Err, Ok
 
 from tests.e2e.tasks.basic import simple_task
@@ -51,6 +51,52 @@ async def shared_hang() -> TaskResult[str, TaskError]:
     """Wait far past the timeout; the cancel at the deadline ends it."""
     await asyncio.sleep(3600)
     return TaskResult(ok='never')
+
+
+STOP_TIMEOUT_MS = 2_000
+"""The timeout of the tasks that do not stop: short, to keep the tests short."""
+
+
+def _first_attempt(marker: str) -> bool:
+    """True on the first call with ``marker``: the call creates the file."""
+    try:
+        with open(marker, 'x', encoding='ascii') as created:
+            created.write(str(os.getpid()))
+    except FileExistsError:
+        return False
+    return True
+
+
+@app.task(
+    task_name='e2e_shared_stuck_once',
+    execution=Execution.SHARED_ASYNC,
+    timeout_ms=STOP_TIMEOUT_MS,
+    cancel_grace_ms=100,
+    retry_policy=RetryPolicy.fixed([1], auto_retry_for=['TASK_TIMEOUT']),
+)
+async def shared_stuck_once(*, marker: str) -> TaskResult[str, TaskError]:
+    """The first attempt ignores every cancel; the retry returns its pid."""
+    if _first_attempt(marker):
+        while True:
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                continue
+    return TaskResult(ok=str(os.getpid()))
+
+
+@app.task(
+    task_name='e2e_shared_blocks_once',
+    execution=Execution.SHARED_ASYNC,
+    timeout_ms=30_000,
+    retry_policy=RetryPolicy.fixed([1], auto_retry_for=['TASK_BLOCKED_LOOP']),
+)
+async def shared_blocks_once(*, marker: str) -> TaskResult[str, TaskError]:
+    """The first attempt blocks the event loop past the block limit; the
+    retry returns its pid."""
+    if _first_attempt(marker):
+        time.sleep(30)
+    return TaskResult(ok=str(os.getpid()))
 
 
 @app.task(
