@@ -164,6 +164,7 @@ class ClaimMixin:
 
         # Cross-concern methods provided by sibling mixins / Worker.
         def _claim_slot_count(self) -> int: ...
+        def _shared_async_seats_in_service(self) -> int: ...
         async def _dispatch_one(
             self,
             task_id: str,
@@ -175,6 +176,7 @@ class ClaimMixin:
             timeout: StoredTimeout = NoTimeout(),
             claimed_at: Optional[datetime] = None,
             *,
+            execution: Execution,
             task_options: str | None,
         ) -> None: ...
 
@@ -231,6 +233,7 @@ class ClaimMixin:
                 bool(row.get('is_workflow_task', False)),
                 timeout=read_stored_timeout(row.get('task_options')),
                 claimed_at=row.get('claimed_at'),
+                execution=parse_row_class(str(row['id']), row['execution']),
                 task_options=row.get('task_options'),
             )
         return ClaimPass(
@@ -301,16 +304,18 @@ class ClaimMixin:
         """The children or seats of ``budget`` that take a task now.
 
         This is the one place that maps a budget class to the children that
-        serve it. A worker that starts children of a shared class adds the
-        arm of that class here, returning the seats of those children that
-        are in service, and adds the class to the plan's budget classes
-        (``claim_plan_for_profile`` in ``horsies/core/cli.py``). A plan with
-        a budget that no arm serves is a defect: ``AssertionError``.
+        serve it: the isolated slots that are not down for ``ISOLATED``, the
+        seats of the shared async children in service for ``SHARED_ASYNC``
+        (``_shared_async_seats_in_service``). The plan's budget classes come
+        from ``claim_plan_for_profile`` in ``horsies/core/cli.py``. A plan
+        with a budget that no arm serves is a defect: ``AssertionError``.
         """
         match budget:
             case Execution.ISOLATED:
                 return self._claim_slot_count()
-            case Execution.SHARED_ASYNC | Execution.SHARED_THREAD:
+            case Execution.SHARED_ASYNC:
+                return self._shared_async_seats_in_service()
+            case Execution.SHARED_THREAD:
                 raise AssertionError(
                     f'the claim plan has a {budget.value} budget, and this '
                     f'worker starts no {budget.value} children',

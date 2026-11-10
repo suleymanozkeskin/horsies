@@ -30,6 +30,7 @@ from horsies.core.models.tasks import Execution, TaskError, TaskResult
 from horsies.core.models.worker_profile import (
     IsolatedChildren,
     NoIsolatedChildren,
+    SharedAsyncChildren,
     WorkerProfile,
 )
 from horsies.core.worker.claim_plan import (
@@ -151,6 +152,21 @@ class TestPlanFromProfile:
         assert claim_plan_for_profile(profile) == ClaimPlan(
             budget_classes=frozenset(),
         )
+
+    def test_shared_async_children_give_a_shared_async_budget(self) -> None:
+        profile = WorkerProfile(
+            isolated=IsolatedChildren(count=1),
+            shared_async=SharedAsyncChildren(count=2, seats=10),
+        )
+        assert claim_plan_for_profile(profile) == ClaimPlan(
+            budget_classes=frozenset({ISOLATED, SHARED_ASYNC}),
+        )
+
+    def test_only_shared_async_children_serve_no_isolated_row(self) -> None:
+        profile = WorkerProfile(shared_async=SharedAsyncChildren(count=1, seats=4))
+        plan = claim_plan_for_profile(profile)
+        assert plan.budgets() == (SHARED_ASYNC,)
+        assert plan.unserved() == (ISOLATED, SHARED_THREAD)
 
     def test_the_worker_config_default_is_the_isolated_plan(self) -> None:
         cfg = WorkerConfig(dsn='x', psycopg_dsn='y', queues=['default'])
@@ -498,14 +514,26 @@ class TestClaimPassWithClasses:
 
 class TestCapacityHook:
     @pytest.mark.asyncio
-    @pytest.mark.parametrize('budget', [SHARED_ASYNC, SHARED_THREAD])
-    async def test_a_shared_budget_without_children_is_a_defect(
-        self,
-        budget: Execution,
-    ) -> None:
-        worker = _worker(claim_plan=ClaimPlan(budget_classes=frozenset({budget})))
-        with pytest.raises(AssertionError, match=f'{budget.value} budget'):
+    async def test_a_shared_thread_budget_is_a_defect(self) -> None:
+        """This worker starts no SHARED_THREAD children."""
+        worker = _worker(
+            claim_plan=ClaimPlan(budget_classes=frozenset({SHARED_THREAD})),
+        )
+        with pytest.raises(AssertionError, match='SHARED_THREAD budget'):
             worker._claim_capacity()
+
+    @pytest.mark.asyncio
+    async def test_the_shared_async_budget_counts_the_seats_in_service(self) -> None:
+        """Before boot every shared slot is starting, so every seat counts."""
+        worker = _worker(
+            processes=1,
+            shared_async=SharedAsyncChildren(count=2, seats=6),
+            claim_plan=ClaimPlan(budget_classes=frozenset({ISOLATED, SHARED_ASYNC})),
+        )
+        assert worker._claim_capacity() == (
+            BudgetCapacity(budget=ISOLATED, in_service=1),
+            BudgetCapacity(budget=SHARED_ASYNC, in_service=12),
+        )
 
     @pytest.mark.asyncio
     async def test_the_isolated_budget_counts_the_slots_in_service(self) -> None:

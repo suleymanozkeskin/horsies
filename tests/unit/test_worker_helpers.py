@@ -1512,6 +1512,7 @@ class TestDispatchOne:
             True,
             timeout=TaskTimeout(ms=1000),
             claimed_at=claimed_at,
+            execution=Execution.ISOLATED,
             task_options=None,
         )
 
@@ -1545,6 +1546,7 @@ class TestDispatchOne:
             False,
             timeout=TaskTimeout(ms=1000),
             claimed_at=claimed_at,
+            execution=Execution.ISOLATED,
             task_options=None,
         )
 

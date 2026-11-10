@@ -128,10 +128,12 @@ there is no migration contract between pre-1.0 versions.
   1024 and `seats` is 1 to 1000. A profile with only shared async children is
   valid. `SharedAsyncChildren`, `NoSharedAsyncChildren`, `SharedRecycle` and
   `SharedAsyncChildStartHook` are exported from `horsies`.
-  - A worker with shared async children runs each `SHARED_ASYNC` row on a
-    seat, and its isolated children never run one. A worker with none runs
-    `SHARED_ASYNC` rows in isolated children. A new task goes to the open
-    shared child with the fewest tasks in flight.
+  - A worker with shared async children claims `SHARED_ASYNC` rows into a
+    `SHARED_ASYNC` budget, whose capacity is the seats of its shared children
+    in service (a closing child counts only the tasks it still runs), and runs
+    each on a seat; its isolated children never run one. A worker with none
+    runs `SHARED_ASYNC` rows in isolated children. A new task goes to the
+    open shared child with the fewest tasks in flight.
   - The child holds the deadline of each task. At `timeout_ms` it cancels
     the task; when the coroutine has ended, the worker writes `TASK_TIMEOUT`,
     the retry and the workflow step, and the other tasks of the child
@@ -147,8 +149,8 @@ there is no migration contract between pre-1.0 versions.
     marker of a shared task run on an async connection pool that the child
     opens on its loop, of `worker_child_pool_max_size` connections. The
     child writes its frames from a thread, so a slow worker never stops the
-    loop. A shared child runs only `async def` tasks: a `SHARED_ASYNC` row
-    whose function is now `def` fails with `WORKER_RESOLUTION_ERROR`.
+    loop. A shared child runs only `async def` tasks; a row that reaches one
+    with a `def` function fails with `WORKER_RESOLUTION_ERROR`.
   - `@app.on_shared_async_child_start` registers an `async def` hook that
     runs on the loop of each shared async child before its first task, for
     long-lived async clients. Same 10 s bound and fail-closed stop as

@@ -540,17 +540,26 @@ def claim_plan_for_profile(profile: WorkerProfile) -> ClaimPlan:
     classes that the profile starts children for.
 
     This is the one place that maps the child settings of a profile to
-    budget classes. A profile setting that starts children of a shared class
-    adds that class here; ``ClaimMixin._capacity_in_service`` then needs
-    the arm that counts their seats.
+    budget classes: ``ISOLATED`` for isolated children, ``SHARED_ASYNC`` for
+    shared async children. ``ClaimMixin._capacity_in_service`` counts the
+    capacity of each.
     """
+    budgets: set[Execution] = set()
     match profile.isolated:
         case IsolatedChildren():
-            return ClaimPlan(budget_classes=frozenset({Execution.ISOLATED}))
+            budgets.add(Execution.ISOLATED)
         case NoIsolatedChildren():
-            return ClaimPlan(budget_classes=frozenset())
+            pass
         case _ as unreachable:
             assert_never(unreachable)
+    match profile.shared_async:
+        case SharedAsyncChildren():
+            budgets.add(Execution.SHARED_ASYNC)
+        case NoSharedAsyncChildren():
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
+    return ClaimPlan(budget_classes=frozenset(budgets))
 
 
 def _tasks_or_zero(limit: TaskLimit | NoTaskLimit) -> int:

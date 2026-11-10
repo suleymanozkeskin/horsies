@@ -379,13 +379,16 @@ from its profile, and logs it. The plan routes the rows of each class:
 - A worker with no isolated children claims no `ISOLATED` rows. It starts, and
   logs one line that names each class it does not serve.
 
-In this release a profile runs isolated children only, so a worker claims the
-rows of every class into its `ISOLATED` budget.
+A profile with `shared_async=SharedAsyncChildren(...)` has a `SHARED_ASYNC`
+budget; a profile with isolated children only claims the rows of every class
+into its `ISOLATED` budget. See [Shared Async Tasks](shared-async-tasks).
 
 The capacity of a budget is its children (`ISOLATED`) or seats (a shared
 class) that are in service: a [slot that is down](worker-architecture) does not
-count. The claim counts the use of each budget from the rows: this worker's
-RUNNING and live CLAIMED rows of the classes that the budget claims.
+count. A shared async child that closes counts only the tasks it still runs:
+its free seats take no task. The claim counts the use of each budget from the
+rows: this worker's RUNNING and live CLAIMED rows of the classes that the
+budget claims.
 
 The worker publishes each budget, its capacity, and the classes it claims in
 `horsies_worker_states.class_capacity`, with each state snapshot.
@@ -405,8 +408,9 @@ dispatched, and its child fails it as before.
 
 `ClaimLimits` in the [worker profile](worker-profiles) holds the claim limits.
 The capacity of a worker is the sum of the capacities of its budgets plus
-`prefetch_buffer`: it never holds more tasks than that. With isolated children
-only, the sum is the number of children. A limit above the capacity has no
+`prefetch_buffer`: it never holds more tasks than that. The sum is
+`WorkerProfile.seat_count()`: one per isolated child, and `seats` per shared
+async child. A limit above the capacity has no
 effect, so `AppConfig` validation refuses it (`HRS-218`).
 
 Both limits apply to the worker as a whole, across all budgets.

@@ -23,9 +23,9 @@ The deal is different from an isolated task. The tasks of a shared child share o
 | `SHARED_ASYNC` | a shared async child, on a seat | an isolated child, one task in the process |
 | `ISOLATED` | an isolated child | an isolated child |
 
-A worker may run a task more isolated than its row says, never less. A worker with no shared async children runs `SHARED_ASYNC` tasks in isolated children, with the usual kill at `timeout_ms`. An isolated child of a worker that has shared async children never runs a `SHARED_ASYNC` task.
+A worker may run a task more isolated than its row says, never less. A worker with no shared async children claims `SHARED_ASYNC` rows into its `ISOLATED` budget and runs them in isolated children, with the usual kill at `timeout_ms`. A worker with shared async children claims them into its `SHARED_ASYNC` budget, whose capacity is the seats of those children; its isolated children never run one. See [Budgets per Execution Class](concurrency#budgets-per-execution-class).
 
-A shared async child runs only `async def` tasks. A `SHARED_ASYNC` row whose function is now a `def` function in the worker's code fails with `WORKER_RESOLUTION_ERROR`.
+A shared async child runs only `async def` tasks. When a deploy changed the function of a queued `SHARED_ASYNC` row to `def`, the worker writes `ISOLATED` on the row and returns it to the queue before any child takes it.
 
 ## How To
 

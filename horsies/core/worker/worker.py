@@ -433,24 +433,24 @@ class Worker(
         return 2 * budget
 
     def _claim_slot_count(self) -> int:
-        """The tasks that the claim budget counts.
+        """The isolated slots that the ``ISOLATED`` budget counts: every one
+        that is not down.
 
-        The isolated slots that are not down, plus ``_shared_async_capacity``.
-        The claim takes rows of every class into one budget, and dispatch
-        routes each row to its kind of child. A slot that is down for a cause
-        that can clear takes no task, so the claim leaves it out. A claim pass
-        before the slot pool exists is a defect: ``AssertionError``.
+        A slot that is down for a cause that can clear takes no task, so the
+        claim leaves it out. A claim pass before the slot pool exists is a
+        defect: ``AssertionError``.
         """
         match self._slots:
             case SlotPool() as pool:
-                return pool.slots_in_service() + self._shared_async_capacity()
+                return pool.slots_in_service()
             case None:
                 raise AssertionError('a claim pass ran before the slot pool exists')
 
-    def _shared_async_capacity(self) -> int:
-        """The ``SHARED_ASYNC`` capacity of this worker, for the claim: the
-        seats of its shared async children in service
-        (``SlotPool.shared_async_capacity``). 0 for a worker with none.
+    def _shared_async_seats_in_service(self) -> int:
+        """The seats that the ``SHARED_ASYNC`` budget counts
+        (``SlotPool.shared_async_capacity``): every seat of a shared async
+        child that boots, is open or retires, and the tasks that a closing
+        child still runs. A child that is down counts nothing.
 
         A claim pass before the slot pool exists is a defect:
         ``AssertionError``.

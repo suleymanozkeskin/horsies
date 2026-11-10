@@ -23,12 +23,17 @@ from horsies.core.models.tasks import (
     MIN_TASK_TIMEOUT_MS,
     Execution,
 )
+from horsies.core.cli import claim_plan_for_profile
 from horsies.core.models.worker_profile import (
+    IsolatedChildren,
     MemoryLimit,
+    NoIsolatedChildren,
     NoSharedAsyncChildren,
     SharedAsyncChildren,
     SharedRecycle,
+    WorkerProfile,
 )
+from horsies.core.worker.claim_plan import ClaimPlan, isolated_children_plan
 from horsies.core.types.result import Err, Ok
 from horsies.core.worker import finalize
 from horsies.core.worker.child_protocol import IsolatedChild, RssMb, SharedAsyncChild
@@ -83,12 +88,19 @@ def _worker(
     shared_async: SharedAsyncChildren | NoSharedAsyncChildren = SHARED,
     processes: int = 1,
 ) -> Worker:
+    profile = WorkerProfile(
+        isolated=(
+            IsolatedChildren(count=processes) if processes else NoIsolatedChildren()
+        ),
+        shared_async=shared_async,
+    )
     cfg = WorkerConfig(
         dsn='postgresql+psycopg://u:p@localhost/db',
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=['default'],
         processes=processes,
         shared_async=shared_async,
+        claim_plan=claim_plan_for_profile(profile),
     )
     return Worker(session_factory=MagicMock(), listener=MagicMock(), cfg=cfg)
 
@@ -116,52 +128,71 @@ def _handle(loop: asyncio.AbstractEventLoop) -> SharedHandle:
     return SharedHandle(_request().frame_for(1), loop)
 
 
+SPLIT_PLAN = ClaimPlan(
+    budget_classes=frozenset({Execution.ISOLATED, Execution.SHARED_ASYNC}),
+)
+
+
 class TestRoute:
-    def test_a_shared_async_row_runs_on_a_shared_child(self) -> None:
-        route = dispatch_route(SHARED_OPTIONS, TaskTimeout(ms=2000), SHARED)
+    def test_a_row_of_the_shared_async_budget_runs_on_a_seat(self) -> None:
+        route = dispatch_route(
+            Execution.SHARED_ASYNC,
+            SPLIT_PLAN,
+            SHARED_OPTIONS,
+            TaskTimeout(ms=2000),
+        )
         assert route == RunShared(timeout_ms=2000, cancel_grace_ms=700)
 
     def test_a_worker_with_no_shared_children_runs_it_isolated(self) -> None:
         route = dispatch_route(
-            SHARED_OPTIONS, TaskTimeout(ms=2000), NoSharedAsyncChildren()
+            Execution.SHARED_ASYNC,
+            isolated_children_plan(),
+            SHARED_OPTIONS,
+            TaskTimeout(ms=2000),
+        )
+        assert route == RunIsolated()
+
+    def test_an_isolated_row_runs_isolated(self) -> None:
+        route = dispatch_route(
+            Execution.ISOLATED,
+            SPLIT_PLAN,
+            _options(timeout_ms=2000),
+            TaskTimeout(ms=2000),
         )
         assert route == RunIsolated()
 
     @pytest.mark.parametrize(
         ('options', 'timeout'),
         [
-            (_options(timeout_ms=2000, execution='ISOLATED'), TaskTimeout(ms=2000)),
-            (_options(timeout_ms=2000), TaskTimeout(ms=2000)),
-            (None, NoTimeout()),
             (SHARED_OPTIONS, NoTimeout()),
             ('{not json', OptionsUnreadable(reason='x')),
             (
-                _options(
-                    timeout_ms=2000,
-                    execution='SHARED_ASYNC',
-                    cancel_grace_ms=1,
-                ),
+                _options(timeout_ms=2000, execution='SHARED_ASYNC', cancel_grace_ms=1),
                 TaskTimeout(ms=2000),
             ),
-            (
-                _options(timeout_ms=2000, execution='SHARED_ASYNC'),
-                TaskTimeout(ms=2000),
-            ),
+            (_options(timeout_ms=2000, execution='SHARED_ASYNC'), TaskTimeout(ms=2000)),
+            (None, TaskTimeout(ms=2000)),
         ],
         ids=[
-            'isolated-class',
-            'no-class-key',
-            'no-options',
             'no-timeout',
             'unreadable-options',
             'grace-out-of-bounds',
             'grace-absent',
+            'no-options',
         ],
     )
-    def test_every_other_row_runs_isolated(
-        self, options: str | None, timeout: Any
+    def test_a_shared_row_with_no_usable_timeout_or_grace_runs_isolated(
+        self,
+        options: str | None,
+        timeout: Any,
     ) -> None:
-        assert dispatch_route(options, timeout, SHARED) == RunIsolated()
+        route = dispatch_route(Execution.SHARED_ASYNC, SPLIT_PLAN, options, timeout)
+        assert route == RunIsolated()
+
+    def test_a_class_that_the_worker_does_not_serve_is_a_defect(self) -> None:
+        only_shared = ClaimPlan(budget_classes=frozenset({Execution.SHARED_ASYNC}))
+        with pytest.raises(AssertionError, match='does not serve'):
+            dispatch_route(Execution.ISOLATED, only_shared, None, NoTimeout())
 
 
 @pytest.mark.asyncio
@@ -181,6 +212,7 @@ class TestDispatch:
             False,
             timeout=TaskTimeout(ms=2000),
             claimed_at=CLAIMED_AT,
+            execution=Execution.SHARED_ASYNC,
             task_options=SHARED_OPTIONS,
         )
 
@@ -222,6 +254,7 @@ class TestDispatch:
             '{}',
             timeout=TaskTimeout(ms=2000),
             claimed_at=CLAIMED_AT,
+            execution=Execution.SHARED_ASYNC,
             task_options=SHARED_OPTIONS,
         )
 
@@ -448,15 +481,18 @@ class TestBackstopDecision:
 
 
 class TestCapacityAndConfig:
-    def test_the_claim_counts_isolated_slots_and_shared_capacity(self) -> None:
+    def test_each_budget_counts_its_own_children(self) -> None:
         worker = _worker()
         pool = MagicMock(spec=SlotPool)
         pool.slots_in_service.return_value = 1
         pool.shared_async_capacity.return_value = 7
         worker._slots = pool
 
-        assert worker._shared_async_capacity() == 7
-        assert worker._claim_slot_count() == 8
+        assert worker._capacity_in_service(Execution.ISOLATED) == 1
+        assert worker._capacity_in_service(Execution.SHARED_ASYNC) == 7
+        assert [
+            (entry.budget, entry.in_service) for entry in worker._claim_capacity()
+        ] == [(Execution.ISOLATED, 1), (Execution.SHARED_ASYNC, 7)]
 
     def test_the_pool_config_carries_the_shared_children(self) -> None:
         worker = _worker()

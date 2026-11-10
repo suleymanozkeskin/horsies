@@ -4,7 +4,8 @@ DispatchMixin submits claimed rows to the slot pool and contains child
 failures: requeue of a task that never reached a child, recovery of a task
 whose child was lost, and the timeout handlers, which end the attempt before
 they write the ownership-guarded row. A ``SHARED_ASYNC`` row goes to a shared
-async child when the worker has one (``dispatch_route``). Worker-internal
+async child when the claim plan of the worker claimed it into the
+``SHARED_ASYNC`` budget (``dispatch_route``). Worker-internal
 mixin: the ``TYPE_CHECKING`` block declares the slice of ``Worker`` it relies
 on.
 """
@@ -33,6 +34,7 @@ from horsies.core.lifecycle.persistence import (
 )
 from horsies.core.logging import get_logger
 from horsies.core.models.tasks import (
+    Execution,
     OperationalErrorCode,
     OutcomeCode,
     TaskError,
@@ -439,14 +441,16 @@ class DispatchMixin:
         timeout: StoredTimeout = NoTimeout(),
         claimed_at: Optional[datetime] = None,
         *,
+        execution: Execution,
         task_options: str | None,
     ) -> None:
         """Submit to the slot pool and spawn the finalizer.
 
         Never raises for a task: the pool answers every submit, and the
-        finalizer handles that answer. ``task_options`` is the stored column
-        of the row; with ``timeout`` it decides the kind of child that runs
-        the row (``dispatch_route``).
+        finalizer handles that answer. ``execution`` is the class column of
+        the row, and ``task_options`` its stored options; with the claim plan
+        and ``timeout`` they decide the kind of child that runs the row
+        (``dispatch_route``).
 
         ``claimed_at`` is the claim generation this dispatch was born from
         (the claim statement's RETURNING); it fences the child's ownership
@@ -460,7 +464,7 @@ class DispatchMixin:
         slots = self._slots
         assert slots is not None, 'dispatch before the slot pool started'
 
-        match dispatch_route(task_options, timeout, self.cfg.shared_async):
+        match dispatch_route(execution, self.cfg.claim_plan, task_options, timeout):
             case RunShared() as route:
                 self._dispatch_shared(
                     slots,
