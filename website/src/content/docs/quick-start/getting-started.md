@@ -22,16 +22,30 @@ Create `instance.py`:
 
 ```python
 from pydantic import SecretStr
-from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError, JsonValue
+from horsies import (
+    Horsies,
+    AppConfig,
+    IsolatedChildren,
+    PostgresConfig,
+    TaskResult,
+    TaskError,
+    JsonValue,
+    WorkerProfile,
+)
 
 config = AppConfig(
     broker=PostgresConfig(
         database_url=SecretStr("postgresql+psycopg://user:password@localhost:5432/mydb"),
     ),
+    worker_profiles={
+        "default": WorkerProfile(isolated=IsolatedChildren(count=8)),
+    },
 )
 
 app = Horsies(config)
 ```
+
+`worker_profiles` holds the settings that a worker starts with. See [Worker Profiles](../../workers/worker-profiles).
 
 ## 2. Define Tasks
 
@@ -93,10 +107,10 @@ match process_data.send(data={"key": "value"}):
 ## 4. Run the Worker
 
 ```bash
-horsies worker instance:app --processes=8 --loglevel=INFO
+horsies worker instance:app --profile default --loglevel=INFO
 ```
 
-The worker connects to PostgreSQL, subscribes to notifications, claims tasks, executes them, and stores results.
+The worker starts the 8 children of the `default` profile, connects to PostgreSQL, subscribes to notifications, claims tasks, executes them, and stores results.
 
 ## 5. Async Usage
 

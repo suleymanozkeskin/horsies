@@ -7,7 +7,7 @@ and environment variables.
 
 Root configuration passed to `Horsies(config=AppConfig(...))`.
 Pydantic `BaseModel`, frozen after construction.
-Every config model (`AppConfig`, `PostgresConfig`, `RecoveryConfig`, `PayloadPolicy`, `CustomQueueConfig`, `RetentionConfig`, `WorkerResilienceConfig`, `ScheduleConfig`, `TaskSchedule` and the schedule patterns) refuses unknown keys: a misspelled field raises `ValidationError` with the type `extra_forbidden`.
+Every config model (`AppConfig`, `PostgresConfig`, `RecoveryConfig`, `PayloadPolicy`, `CustomQueueConfig`, `RetentionConfig`, `WorkerResilienceConfig`, `ScheduleConfig`, `TaskSchedule`, the schedule patterns, and the worker profile types) refuses unknown keys: a misspelled field raises `ValidationError` with the type `extra_forbidden`.
 
 ```python
 from pydantic import SecretStr
@@ -42,6 +42,7 @@ string validates at runtime, but strict type checkers reject it — wrap with
 | `exception_mapper` | `ExceptionMapper` | `{}` | Global exception-to-error-code mapping |
 | `default_unhandled_error_code` | `str` | `"UNHANDLED_EXCEPTION"` | Must be `UPPER_SNAKE_CASE` |
 | `resend_on_transient_err` | `bool` | `False` | Auto-retry transient ENQUEUE_FAILED |
+| `worker_profiles` | `dict[str, WorkerProfile]` | `{}` | Named worker settings; `horsies worker <app> --profile <name>` runs one. See [Worker profiles](#worker-profiles) |
 
 ### Validation Rules
 
@@ -64,6 +65,67 @@ string validates at runtime, but strict type checkers reject it — wrap with
 - Keys must be `BaseException` subclasses.
 - Values must match `^[A-Z][A-Z0-9_]*$`.
 - Values that look like exception class names (e.g., `"TimeoutError"`) are rejected.
+
+**Worker profiles (HRS-218):** every profile is checked, and each error names
+the profile and the field path, e.g. `worker_profiles['batch'].claim.claimed_per_worker`.
+- Name: 1-64 characters of letters, digits, `_`, `.`, `-`; not starting with `.` or `-`.
+- At least one child.
+- Each `ClaimLimits` `TaskLimit` at or below the capacity: children + `prefetch_buffer`.
+
+## Worker profiles
+
+A worker starts with `horsies worker <app> --profile <name>`. `--profile` is
+required; there is no default profile. A missing or unknown name exits 1 before
+the app check and before any child starts, and lists the defined names.
+
+```python
+from datetime import timedelta
+
+from horsies import (
+    ChildPreload, ClaimLimits, IsolatedChildren, IsolatedRecycle,
+    MemoryLimit, NoTaskLimit, TaskLimit, WorkerProfile,
+)
+
+worker_profiles = {
+    'default': WorkerProfile(isolated=IsolatedChildren(count=4)),
+    'batch': WorkerProfile(
+        isolated=IsolatedChildren(
+            count=8,
+            recycle=IsolatedRecycle(after=TaskLimit(tasks=500), above=MemoryLimit(mb=1024)),
+        ),
+        claim=ClaimLimits(per_queue_per_pass=TaskLimit(tasks=4), claimed_per_worker=NoTaskLimit()),
+        drain_timeout=timedelta(seconds=120),
+        preload=ChildPreload.APP,
+    ),
+}
+```
+
+| Type | Field | Default | Bounds / meaning |
+|---|---|---|---|
+| `WorkerProfile` | `isolated` | `NoIsolatedChildren()` | `IsolatedChildren` or `NoIsolatedChildren`; at least one child is required |
+| `WorkerProfile` | `claim` | `ClaimLimits()` | Claim limits |
+| `WorkerProfile` | `drain_timeout` | `timedelta(seconds=300)` | Above 0, at most 24 h; then running children are killed |
+| `WorkerProfile` | `preload` | `ChildPreload.LIBRARY` | `LIBRARY`, `APP` or `NONE`; see [Child process model](#child-process-model) |
+| `IsolatedChildren` | `count` | required | 1-1024 children, one task at a time each |
+| `IsolatedChildren` | `recycle` | `IsolatedRecycle()` | See [Child process recycling](#child-process-recycling) |
+| `IsolatedRecycle` | `after` | `TaskLimit(tasks=100)` | `TaskLimit` or `NoTaskLimit` |
+| `IsolatedRecycle` | `above` | `NoMemoryLimit()` | `MemoryLimit(mb=N)` or `NoMemoryLimit` |
+| `ClaimLimits` | `per_queue_per_pass` | `NoTaskLimit()` | Most tasks one claim pass takes from one queue |
+| `ClaimLimits` | `claimed_per_worker` | `NoTaskLimit()` | Most CLAIMED tasks the worker holds; no limit = capacity |
+| `TaskLimit` | `tasks` | required | 1-2,147,483,647 |
+| `MemoryLimit` | `mb` | required | 1-16,777,216 |
+
+The number of children is `WorkerProfile.child_count()`, the sum over modes.
+There is one mode, isolated. Boot also warns (never refuses) when `count × mb`
+is above the machine RAM, and when one worker can open more Postgres
+connections than the server has usable slots.
+
+Removed flags and their fields: `--processes` → `IsolatedChildren.count`;
+`--max-tasks-per-child` → `IsolatedRecycle.after`; `--max-memory-per-child-mb`
+→ `IsolatedRecycle.above`; `--max-claim-batch` → `ClaimLimits.per_queue_per_pass`;
+`--max-claim-per-worker` → `ClaimLimits.claimed_per_worker`; `--drain-timeout`
+→ `WorkerProfile.drain_timeout`; `--child-preload` → `WorkerProfile.preload`.
+Old `0` (no limit / auto) is `NoTaskLimit()`; old memory-off is `NoMemoryLimit()`.
 
 ## Horsies App Methods
 
@@ -192,9 +254,14 @@ budget for one worker is approximately:
 ```text
 worker_pool_size + worker_max_overflow
   + 2 listener/session connections
-  + processes * worker_child_pool_max_size
+  + children * worker_child_pool_max_size
   + task-code database connections
 ```
+
+`horsies check --live` compares this number (without task-code connections)
+for each worker profile with `max_connections` less the reserved slots and
+reports `HRS-219`; a worker logs the same comparison as a warning at boot.
+Nothing is compared with `pgbouncer_transaction_mode=True`.
 
 Child DB connections are lazy by default (`worker_child_pool_min_size=0`). A child
 inherits no database socket from the worker.
@@ -203,7 +270,7 @@ inherits no database socket from the worker.
 
 A worker owns one child process and one private socket per slot. On Linux a
 preload parent imports code once and forks each child. Other platforms start
-each child with `exec`. `--child-preload` selects the mode:
+each child with `exec`. `WorkerProfile.preload` (`ChildPreload`) selects the mode:
 
 | Mode | Imports before the fork | Effect |
 |---|---|---|
@@ -251,13 +318,13 @@ boto3, openai, google-genai, firebase-admin, and lxml, with 4 children, uses
 goes to production, run it on staging with real calls to every client library
 inside tasks. Passing the guard does not prove that a library works after a fork.
 
-Traps with preload. Check each one before you change `--child-preload`:
+Traps with preload. Check each one before you change `WorkerProfile.preload`:
 
 - **Import-time settings in `.env`:** `library` and `app` import psycopg,
   SQLAlchemy, and pydantic before the app runs, so `load_dotenv()` in the app is
   too late for `PSYCOPG_IMPL`. Put such a value in the process environment.
 - **Monkeypatching:** a patch that must run before those imports, such as
-  gevent, is too late. Use `--child-preload=none`.
+  gevent, is too late. Use `preload=ChildPreload.NONE`.
 - **Clients built at import (`app` only):** module code runs once, in the preload
   parent. Build a client in an `on_child_process_start` hook, which runs in every
   child after the fork.
@@ -270,39 +337,39 @@ Traps with preload. Check each one before you change `--child-preload`:
   library code, so an in-place package upgrade needs a restart.
 - **Counting children:** process-name greps such as `multiprocessing-fork` find
   nothing. A forked child shows `preload_main`, and there is one more process than
-  `--processes`.
+  the profile has children.
 - **`children_memory_mb`:** it sums RSS, so with preload it counts each shared page
   once per child and reads above real use. Use it to see one child grow, and read
   the container or cgroup total for the footprint.
-- **Stop window:** set `--drain-timeout` below the supervisor's stop window. The
-  default of 300 s is above Docker's 10 s, and above Kubernetes' 30 s.
+- **Stop window:** set `WorkerProfile.drain_timeout` below the supervisor's stop
+  window. The default of 300 s is above Docker's 10 s, and above Kubernetes' 30 s.
 
 ### Child process recycling
 
-Two knobs recycle worker children to bound memory. Recycling is per-child and
+Two limits in `IsolatedRecycle` recycle worker children to bound memory. Recycling is per-child and
 staggered: each child has its own counter/threshold and is replaced
 individually, never in lockstep. The worker decides, from the task count and
 the RSS in each result. On Linux a recycle is cheap: with 10,000 no-op tasks and
 8 children, `N=100` drains 803 tasks/s against 853 with recycling off, and with
 `exec` it drains 437 against 819.
 
-RSS counts pages shared with the preload parent. Set the memory knob against
+RSS counts pages shared with the preload parent. Set the memory limit against
 RSS, and use the cgroup total or PSS for the real footprint.
 
-**Count — `WorkerConfig.max_tasks_per_child`** (CLI `--max-tasks-per-child`,
-default `100`): recycle each child after N tasks, returning retained memory
-(allocator high-water, C-extension caches, leaks) to the OS.
+**Count — `IsolatedRecycle.after`** (default `TaskLimit(tasks=100)`): recycle
+each child after N tasks, returning retained memory (allocator high-water,
+C-extension caches, leaks) to the OS.
 
-- `100` (default): recycle every 100 tasks. No universal value — raise for
-  high-throughput / connection-constrained apps (each recycle rebuilds the
-  child DB pool), lower for memory-heavy tasks. Size against
+- `TaskLimit(tasks=100)` (default): recycle every 100 tasks. No universal value —
+  raise for high-throughput / connection-constrained apps (each recycle rebuilds
+  the child DB pool), lower for memory-heavy tasks. Size against
   `children_memory_mb` (below).
-- `0`: disabled — children live for the worker's lifetime.
-- `1`: each task runs in a new child.
+- `NoTaskLimit()`: disabled — children live for the worker's lifetime.
+- `TaskLimit(tasks=1)`: each task runs in a new child.
 
-**Memory — `WorkerConfig.max_memory_per_child_mb`** (CLI
-`--max-memory-per-child-mb`, default off/`None`): recycle a child once its own
-RSS is at or above N MB after a real task finishes. The child reports its RSS
+**Memory — `IsolatedRecycle.above`** (default `NoMemoryLimit()`): with
+`MemoryLimit(mb=N)`, recycle a child once its own RSS is at or above N MB after
+a real task finishes. The child reports its RSS
 with each result; the worker stops only that child and starts a new one in its
 slot.
 
@@ -312,7 +379,9 @@ slot.
   `gc.collect()`); the worker hard-fails if the threshold is at or below the
   warmed baseline (the app does not fit the per-child budget) and warns within
   80% of it.
-- Positive int only — no fixed floor, the baseline guard is the real floor.
+- `mb` from 1 to 16,777,216 — no fixed floor, the baseline guard is the real floor.
+- At boot the worker warns (and still starts) when `count × mb` is above the
+  RAM of the machine.
 
 **Using both (OR semantics).** When both are set, a child exits when *either*
 limit is reached. Recommended default for memory-quota deployments (containers,
@@ -320,20 +389,30 @@ PaaS dynos): memory as the primary guard, count as a high backstop for slow
 leaks / connection churn that do not surface as RSS in time, tuned from
 `children_memory_mb`:
 
-```bash
-horsies worker app.instance:app --processes=6 --max-tasks-per-child=500 --max-memory-per-child-mb=180
+```python
+both_limits = WorkerProfile(
+    isolated=IsolatedChildren(
+        count=6,
+        recycle=IsolatedRecycle(after=TaskLimit(tasks=500), above=MemoryLimit(mb=180)),
+    ),
+)
 ```
 
 Memory-only — disable count explicitly:
 
-```bash
-horsies worker app.instance:app --processes=6 --max-tasks-per-child=0 --max-memory-per-child-mb=180
+```python
+memory_only = WorkerProfile(
+    isolated=IsolatedChildren(
+        count=6,
+        recycle=IsolatedRecycle(after=NoTaskLimit(), above=MemoryLimit(mb=180)),
+    ),
+)
 ```
 
 Sizing: the per-child peak is `threshold + task_peak` (RSS is sampled after the
 task that crosses the threshold, so the child holds the threshold plus that
 task's working set), and children peak together. Budget `(threshold + task_peak)
-× processes + parent + headroom < quota`; tune from `children_memory_mb`.
+× count + parent + headroom < quota`; tune from `children_memory_mb`.
 Example — 1024 MB quota, 4 procs, ~80 MB task: threshold=300 → ~1249 MB peak
 (over quota); threshold=200 → ~719 MB peak (within quota).
 
@@ -780,7 +859,7 @@ Phases are fail-fast: errors in phase N stop later phases.
 
 | Phase | What | Errors |
 |---|---|---|
-| 1 — Config | `AppConfig` Pydantic validators (implicit — already validated at construction) | HRS-200–HRS-209, HRS-213, HRS-215, HRS-216 |
+| 1 — Config | `AppConfig` Pydantic validators, every worker profile (implicit — already validated at construction) | HRS-200–HRS-209, HRS-213, HRS-215, HRS-216, HRS-218 |
 | 2 — Imports | Import each discovered module | ImportError, HRS-210 |
 | 3 — Workflows | `WorkflowSpec` DAG validation during imports | HRS-001–HRS-031, HRS-033–HRS-038 |
 | 3.1 — Definitions | Validate imported `WorkflowDefinition` classes (each declares `definition_key`) | HRS-016 |
@@ -789,6 +868,7 @@ Phases are fail-fast: errors in phase N stop later phases.
 | 3.5 — Policies | Re-validate exception_mapper after imports | HRS-209 |
 | 3.6 — Schedules | Validate timezone, task registration, queue and kwargs wire contract of each enabled schedule (not run for workers) | — |
 | 4 — Broker | `SELECT 1` against PostgreSQL (`--live` only) | HRS-211, Connection error |
+| 4.1 — Worker connections | Each worker profile against `max_connections` less reserved slots (`--live` only; skipped with no profiles or with `pgbouncer_transaction_mode=True`) | HRS-219 |
 
 **Guarantee model:**
 - **Strong:** `@app.workflow_builder` functions are fully executed and validated.
@@ -812,22 +892,16 @@ Auto-discovery: exactly one `Horsies` instance → use it. Zero or multiple → 
 ### `horsies worker`
 
 ```bash
-horsies worker <module> [--processes N] [--loglevel LEVEL] [--max-claim-batch N] [--max-claim-per-worker N] [--max-tasks-per-child N] [--max-memory-per-child-mb N]
+horsies worker <module> --profile NAME [--loglevel LEVEL]
 ```
 
 | Flag | Default | Description |
 |---|---|---|
-| `--processes` | `1` | Worker process count |
+| `--profile` | required | Name of a profile in `AppConfig.worker_profiles`. See [Worker profiles](#worker-profiles) |
 | `--loglevel` | `INFO` | Log level |
-| `--max-claim-batch` | `0` | Max tasks per queue per claim pass; 0 = auto |
-| `--max-claim-per-worker` | `0` | Max claimed per worker; 0 = auto |
-| `--max-tasks-per-child` | `100` | Recycle a child after N tasks (`>= 1`, or `0` to disable). See [Child process recycling](#child-process-recycling) |
-| `--max-memory-per-child-mb` | _(off)_ | Recycle a child once its RSS reaches N MB; fails startup if N is at/below the warmed baseline. See [Child process recycling](#child-process-recycling) |
-| `--drain-timeout` | `300` | Seconds to wait for running tasks at shutdown (finite, `> 0`); then the worker kills their children. Set below the supervisor's stop window (Docker 10 s, Kubernetes 30 s, ECS 30 s, Heroku 30 s, Fly.io 5 s) |
-| `--child-preload` | `library` | What a Linux worker imports once before it forks children. `library`: library code. `app`: library and app, so children share module state; the worker refuses to start if the import leaves a Python thread or a socket. `none`: every child starts with `exec`. Other platforms always use `exec` |
 
-Startup: logging → import app → `app.check()` → schema init with retry → start processes.
-SIGTERM/SIGINT: graceful shutdown: stops claims, returns tasks that wait for a child to PENDING, waits up to `--drain-timeout` seconds for running tasks, then kills their children. On systemd set `KillMode=mixed`; in Docker use the exec form of `CMD`.
+Startup: logging → import app (builds `AppConfig`, validates every profile) → select `--profile` → `app.check()` → RAM warning → schema init with retry → connection warning → start children.
+SIGTERM/SIGINT: graceful shutdown: stops claims, returns tasks that wait for a child to PENDING, waits up to the profile's `drain_timeout` for running tasks, then kills their children. On systemd set `KillMode=mixed`; in Docker use the exec form of `CMD`.
 
 ### `horsies scheduler`
 
@@ -843,7 +917,7 @@ Requires `app.config.schedule` to be set and enabled. Same startup sequence as w
 horsies check <module> [--live] [--loglevel LEVEL]
 ```
 
-`--live` adds Phase 4 (broker connectivity). Default `--loglevel` is `WARNING`.
+`--live` adds Phase 4 (broker connectivity) and Phase 4.1 (worker connections). Default `--loglevel` is `WARNING`.
 
 ### `horsies web`
 
@@ -878,7 +952,8 @@ Copies the skill folder from the installed package to `DIR/horsies/`. `--target`
 | Code | Meaning |
 |---|---|
 | `0` | Success |
-| `1` | Error |
+| `1` | Error, including a missing or unknown `--profile` |
+| `2` | Argparse error, including a removed worker flag |
 
 ## Environment Variables
 
@@ -903,6 +978,9 @@ from horsies import (
     PayloadPolicy,
     # Recovery / Resilience
     RecoveryConfig, WorkerResilienceConfig,
+    # Worker profiles
+    WorkerProfile, IsolatedChildren, NoIsolatedChildren, IsolatedRecycle,
+    TaskLimit, NoTaskLimit, MemoryLimit, NoMemoryLimit, ClaimLimits, ChildPreload,
     # Scheduling
     ScheduleConfig, TaskSchedule,
     SchedulePattern,

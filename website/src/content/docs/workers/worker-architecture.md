@@ -33,7 +33,7 @@ A worker owns one child process per slot:
 
 - **Main process**: Coordinates claiming, dispatching, result handling
 - **Child processes**: Execute task code in isolation, one task at a time
-- **N children**: Configurable via `--processes` flag
+- **N children**: Set by `IsolatedChildren(count=N)` in the [worker profile](worker-profiles)
 
 Each child:
 
@@ -66,7 +66,7 @@ Each child holds one task, so a failure stays with that task.
 
 ```bash
 # In CLI
-horsies worker myapp.instance:app --processes=8
+horsies worker myapp.instance:app --profile default
 ```
 
 1. Load app from module
@@ -166,7 +166,7 @@ A child differs from a `multiprocessing` process:
 
 On Linux, a worker starts one extra process: the preload parent. It imports code once, then forks each child. A child then starts in milliseconds and shares those memory pages with the other children.
 
-`--child-preload` selects what it imports:
+`WorkerProfile.preload` selects what it imports:
 
 | Mode | Imports | Use it when |
 | ---- | ------- | ----------- |
@@ -176,8 +176,8 @@ On Linux, a worker starts one extra process: the preload parent. It imports code
 
 Conditions: 8 children, Linux, tasks that run pydantic, SQLAlchemy, and pandas (pandas app only), Postgres in the loop. Memory is the summed PSS of the children and the preload parent.
 
-| App | `--child-preload` | Next child, p50 | Memory |
-| --- | ----------------- | --------------- | ------ |
+| App | `preload` | Next child, p50 | Memory |
+| --- | --------- | --------------- | ------ |
 | Small | `none` | 618 ms | 461 MiB |
 | Small | `library` | 27 ms | 169 MiB |
 | Small | `app` | 20 ms | 151 MiB |
@@ -233,24 +233,26 @@ Both preload modes:
 
 ## Worker Configuration
 
-From `WorkerConfig`:
+`horsies worker` builds the internal `WorkerConfig` from the app config and the chosen [worker profile](worker-profiles):
 
-| Field | Description |
-| ----- | ----------- |
-| `dsn` | SQLAlchemy database URL |
-| `session_dsn` | Session-capable URL used for listener-capable operations |
-| `pgbouncer_transaction_mode` | Disables child-process prepared statements for PgBouncer transaction pooling |
-| `queues` | Queue names to process |
-| `processes` | Child process count |
-| `drain_timeout_s` | Seconds to wait for running tasks at shutdown |
-| `child_preload` | What the preload parent imports: `library`, `app`, or `none` |
-| `parent_pool_size` | Worker coordinator SQLAlchemy pool size |
-| `parent_max_overflow` | Worker coordinator overflow connections |
-| `child_pool_min_size` | Minimum per-child psycopg pool size |
-| `child_pool_max_size` | Maximum per-child psycopg pool size |
-| `max_claim_batch` | Max claims per queue per pass; `0` means auto-fill available capacity |
-| `max_claim_per_worker` | Total claim limit |
-| `app_locator` | Path to app instance |
+| Field | Source |
+| ----- | ------ |
+| `dsn` | `PostgresConfig.database_url` |
+| `session_dsn` | `PostgresConfig.session_database_url`, or `database_url` |
+| `pgbouncer_transaction_mode` | `PostgresConfig.pgbouncer_transaction_mode`. Disables child-process prepared statements for PgBouncer transaction pooling |
+| `queues` | The queues of the app |
+| `processes` | `WorkerProfile.child_count()`: the number of children |
+| `max_tasks_per_child` | `IsolatedRecycle.after` |
+| `max_memory_per_child_mb` | `IsolatedRecycle.above` |
+| `max_claim_batch` | `ClaimLimits.per_queue_per_pass` |
+| `max_claim_per_worker` | `ClaimLimits.claimed_per_worker` |
+| `drain_timeout_s` | `WorkerProfile.drain_timeout` |
+| `child_preload` | `WorkerProfile.preload` |
+| `parent_pool_size` | `PostgresConfig.worker_pool_size` |
+| `parent_max_overflow` | `PostgresConfig.worker_max_overflow` |
+| `child_pool_min_size` | `PostgresConfig.worker_child_pool_min_size` |
+| `child_pool_max_size` | `PostgresConfig.worker_child_pool_max_size` |
+| `app_locator` | The app locator of the command |
 | `imports` | Task module paths |
 
 Workers require PostgreSQL `LISTEN` for dispatch. When using transaction-pooled
@@ -269,12 +271,12 @@ On SIGTERM/SIGINT the worker:
 
 1. Stops new claims
 2. Returns tasks that wait for a child to `PENDING`, because they have not started
-3. Waits up to `--drain-timeout` seconds for running tasks (default 300)
+3. Waits up to the `drain_timeout` of the profile for running tasks (default 300 seconds)
 4. Kills the children that still run a task. Each of these tasks takes the [child crash](heartbeats-recovery#child-process-crash) path
 5. Waits for pending result writes
 6. Closes database connections
 
-Set `--drain-timeout` below the stop window of your supervisor, and leave a few seconds for result writes. If the supervisor kills the worker first, its running tasks wait for the reaper. At the deadline, the worker records each killed task at once. A task whose child does not exit within 30 seconds of the kill is left to stale-task recovery.
+Set `drain_timeout` below the stop window of your supervisor, and leave a few seconds for result writes. If the supervisor kills the worker first, its running tasks wait for the reaper. At the deadline, the worker records each killed task at once. A task whose child does not exit within 30 seconds of the kill is left to stale-task recovery.
 
 | Supervisor | Default stop window | Signal goes to |
 | ---------- | ------------------- | -------------- |
@@ -356,10 +358,10 @@ Run multiple worker processes for horizontal scaling:
 
 ```bash
 # On machine 1
-horsies worker myapp.instance:app --processes=8
+horsies worker myapp.instance:app --profile default
 
 # On machine 2
-horsies worker myapp.instance:app --processes=8
+horsies worker myapp.instance:app --profile default
 ```
 
 - Each worker claims independently
@@ -369,7 +371,7 @@ horsies worker myapp.instance:app --processes=8
 
 ## Things to Avoid
 
-**Don't build a client at import with `--child-preload=app`.** The client exists before the fork, and a client with native threads, such as gRPC, can hang in a child.
+**Don't build a client at import with `preload=ChildPreload.APP`.** The client exists before the fork, and a client with native threads, such as gRPC, can hang in a child.
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
@@ -392,14 +394,14 @@ def build_client() -> None:
 PSYCOPG_IMPL=binary
 
 # Correct: in the environment of the worker process
-PSYCOPG_IMPL=binary horsies worker myapp.instance:app
+PSYCOPG_IMPL=binary horsies worker myapp.instance:app --profile default
 ```
 
-Monkeypatching has the same limit: a patch that must run before those imports, such as gevent, is too late. Use `--child-preload=none`.
+Monkeypatching has the same limit: a patch that must run before those imports, such as gevent, is too late. Use `preload=ChildPreload.NONE`.
 
-**Don't expect a recycle to load new code with `--child-preload=app`.** A recycled child is a new fork of the same preload parent. Restart the worker.
+**Don't expect a recycle to load new code with `preload=ChildPreload.APP`.** A recycled child is a new fork of the same preload parent. Restart the worker.
 
-**Don't count children by process name.** A forked child shows the command line of the preload parent, and there is one more process than `--processes`. Read `processes` in [worker health](../monitoring/worker-health).
+**Don't count children by process name.** A forked child shows the command line of the preload parent, and there is one more process than the profile has children. Read `processes` in [worker health](../monitoring/worker-health).
 
 **Don't add `children_memory_mb` to get the real footprint.** It sums RSS, so with preload it counts each shared page once per child. Read the container or cgroup total.
 

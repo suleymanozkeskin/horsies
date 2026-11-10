@@ -52,11 +52,11 @@ connection path taxes every round trip. Deployment guidance:
 
 Drain throughput in tasks/s from first progress, median of 3 alternating runs. Conditions: 10,000 no-op tasks, 8 children, a 6 vCPU Linux VM, Postgres 18 on tmpfs. 36 runs, 0 failed tasks. No disk write cost is included, so compare the columns, not the absolute values.
 
-| Claim mode | `max_tasks_per_child` | `--child-preload=none` | `library` | `app` |
-| ---------- | --------------------- | ---------------------- | --------- | ----- |
-| Hard cap | 0 | 819 | 853 | 855 |
-| Hard cap | 100 (default) | 437 | 803 | 785 |
-| Prefetch 8 | 0 | 1,121 | 1,189 | 1,150 |
-| Prefetch 8 | 100 (default) | 484 | 1,032 | 1,058 |
+| Claim mode | `IsolatedRecycle.after` | `preload=none` | `library` | `app` |
+| ---------- | ----------------------- | -------------- | --------- | ----- |
+| Hard cap | `NoTaskLimit()` | 819 | 853 | 855 |
+| Hard cap | `TaskLimit(tasks=100)` (default) | 437 | 803 | 785 |
+| Prefetch 8 | `NoTaskLimit()` | 1,121 | 1,189 | 1,150 |
+| Prefetch 8 | `TaskLimit(tasks=100)` (default) | 484 | 1,032 | 1,058 |
 
 A recycle replaces one child, so its cost shows in the `max_tasks_per_child=100` rows.

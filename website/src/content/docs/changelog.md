@@ -58,6 +58,17 @@ there is no migration contract between pre-1.0 versions.
     `atexit` handlers do not run. The shutdown of the default executor gets
     at least 1 second, also when the cancel of left tasks used the first 5
     seconds, so an idle executor does not count as a running thread.
+- **`horsies check --live` compares every worker profile with the server
+  connection limit.** One worker can open its parent pool
+  (`worker_pool_size + worker_max_overflow`), 2 listener connections and
+  `worker_child_pool_max_size` for each child. A profile whose worker can
+  open more than `max_connections` less `superuser_reserved_connections`
+  and `reserved_connections` fails with `HRS-219`
+  (`CHECK_WORKER_CONNECTIONS`). With `pgbouncer_transaction_mode=True`
+  nothing is compared. At boot, before any child starts, a worker logs the
+  same comparison as a warning. It also warns when the per-child memory
+  limits of its profile add up to more than the RAM of the machine. It
+  starts in both cases.
 
 ### Changed
 
@@ -107,6 +118,24 @@ there is no migration contract between pre-1.0 versions.
   an `exception_mapper` or `default_unhandled_error_code` with that value
   fails `horsies check` with `HRS-212`. A process of an earlier version cannot
   decode an error stored with this code.
+- **Breaking: worker settings move from `horsies worker` flags into named
+  worker profiles.** `AppConfig.worker_profiles` maps a name to a
+  `WorkerProfile`, and `horsies worker <app> --profile <name>` is required.
+  There is no default profile: a missing or unknown name exits 1 before the
+  app check and before any child starts, and the message lists the defined
+  names. A profile holds `isolated=IsolatedChildren(count, recycle=
+  IsolatedRecycle(after, above))`, `claim=ClaimLimits(per_queue_per_pass,
+  claimed_per_worker)`, `drain_timeout` (a `timedelta`) and `preload`
+  (`ChildPreload`). A limit is `TaskLimit(tasks=N)` or `NoTaskLimit()`, and
+  `MemoryLimit(mb=N)` or `NoMemoryLimit()`, in place of `0` and `None`. The
+  number of children is the sum of the per-mode counts. `AppConfig`
+  validation checks every profile and names the profile and the field path
+  (`HRS-218`, `CONFIG_INVALID_WORKER_PROFILE`): a name that `--profile`
+  cannot carry, a profile with no children, and a claim limit above the
+  capacity of the worker (children plus `prefetch_buffer`), which before had
+  no effect. The bounds of the old flags still apply; new upper bounds are
+  1024 children, 2,147,483,647 tasks, 16,777,216 MB and a drain timeout of
+  24 hours. Migrating to 0.7.0 has the table from each flag to its field.
 
 ### Removed
 
@@ -114,6 +143,11 @@ there is no migration contract between pre-1.0 versions.
   raises it, because `@app.task()` accepts an `async def` function. The
   number is retired and is not used again. Remove the member from each
   `match` on `ErrorCode`.
+- **The `horsies worker` flags `--processes`, `--max-claim-batch`,
+  `--max-claim-per-worker`, `--max-tasks-per-child`,
+  `--max-memory-per-child-mb`, `--drain-timeout` and `--child-preload`.**
+  Each one exits 2 with a message that names the profile field that
+  replaces it. `--loglevel` and the app locator stay.
 
 ### Fixed
 

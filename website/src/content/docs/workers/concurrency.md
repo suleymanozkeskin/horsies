@@ -27,25 +27,29 @@ tags: [workers, concurrency, claiming, limits]
 │  │  ┌─────────────────────────────────────────────┐  │  │
 │  │  │  Per-Worker Concurrency                     │  │  │
 │  │  │  Max concurrent tasks per worker            │  │  │
-│  │  │  (equals --processes)                       │  │  │
+│  │  │  (equals the children of the profile)       │  │  │
 │  │  └─────────────────────────────────────────────┘  │  │
 │  └───────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────┘
 ```
 
-## Worker-Level: --processes
+## Worker-Level: Children
 
-Each worker runs N child processes:
+Each worker runs the children of its [worker profile](worker-profiles):
+
+```python
+eight_children = WorkerProfile(isolated=IsolatedChildren(count=8))
+```
 
 ```bash
-horsies worker myapp.instance:app --processes=8
+horsies worker myapp.instance:app --profile default
 ```
 
 - Limits concurrent task execution on this worker
-- Each process handles one task at a time
-- Default: 1
+- Each isolated child handles one task at a time
+- `count` is required, from 1 to 1024
 
-## Process Recycling: --max-tasks-per-child
+## Process Recycling
 
 Worker child processes are long-lived: created once, then reused for every task.
 Memory that a child does not return to the OS — heap high-water from allocator
@@ -53,21 +57,31 @@ fragmentation, C-extension caches, genuine leaks — accumulates for the child's
 lifetime. On memory-quota platforms (containers, PaaS dynos) this grows until the
 process is killed.
 
-`--max-tasks-per-child` recycles a child after it completes N tasks, returning
-its memory to the OS. **Default: 100.**
+`IsolatedRecycle.after` recycles a child after it completes N tasks, returning
+its memory to the OS. **Default: `TaskLimit(tasks=100)`.**
 
-```bash
-# Default is 100; raise it for high-throughput / connection-constrained apps
-horsies worker myapp.instance:app --processes=8 --max-tasks-per-child=500
+```python
+# The default is 100; raise it for high-throughput or connection-constrained apps
+recycle_after_500 = WorkerProfile(
+    isolated=IsolatedChildren(
+        count=8,
+        recycle=IsolatedRecycle(after=TaskLimit(tasks=500)),
+    ),
+)
 
 # Disable recycling entirely
-horsies worker myapp.instance:app --processes=8 --max-tasks-per-child=0
+no_recycling = WorkerProfile(
+    isolated=IsolatedChildren(
+        count=8,
+        recycle=IsolatedRecycle(after=NoTaskLimit()),
+    ),
+)
 ```
 
-- **Default `100`.** Tune it for your deployment — there is no universal value
-  (see [Choosing N](#choosing-n)).
-- `0` disables recycling: children live for the worker's lifetime.
-- `N` must be `>= 1`. With `N=1`, each task runs in a new child.
+- **Default `TaskLimit(tasks=100)`.** Tune it for your deployment — there is no
+  universal value (see [Choosing N](#choosing-n)).
+- `NoTaskLimit()` disables recycling: children live for the worker's lifetime.
+- `tasks` must be `>= 1`. With `TaskLimit(tasks=1)`, each task runs in a new child.
 
 ### Per-child and staggered
 
@@ -100,27 +114,39 @@ so size against the container or cgroup total.
 - A high N is a backstop for slow accumulation; a fast leak (large retention per
   task) needs a low N or a fix in the task code.
 
-## Memory Recycling: --max-memory-per-child-mb
+## Memory Recycling
 
-`--max-tasks-per-child` bounds task count, not memory. The recycle point that
+`IsolatedRecycle.after` bounds task count, not memory. The recycle point that
 keeps RSS under quota depends on a child's RSS, not its task count, so a fixed
 count under heterogeneous tasks recycles either too early or too late.
 
-`--max-memory-per-child-mb` recycles a child by its **own resident memory**: each
+`IsolatedRecycle.above` recycles a child by its **own resident memory**: each
 child reports its RSS with every result. When that value is at or above the
-threshold, the worker stops the child and starts a new one in that slot. Other
+limit, the worker stops the child and starts a new one in that slot. Other
 children and their in-flight tasks are untouched. **Disabled by default.**
 
-```bash
+```python
 # Recycle any child once its RSS reaches 200 MB
-horsies worker myapp.instance:app --processes=6 --max-memory-per-child-mb=200
+memory_recycling = WorkerProfile(
+    isolated=IsolatedChildren(
+        count=6,
+        recycle=IsolatedRecycle(above=MemoryLimit(mb=200)),
+    ),
+)
 
 # Combine with count recycling: a child recycles when either limit is reached
-horsies worker myapp.instance:app --processes=6 \
-  --max-tasks-per-child=500 --max-memory-per-child-mb=200
+count_and_memory = WorkerProfile(
+    isolated=IsolatedChildren(
+        count=6,
+        recycle=IsolatedRecycle(
+            after=TaskLimit(tasks=500),
+            above=MemoryLimit(mb=200),
+        ),
+    ),
+)
 ```
 
-- **Disabled by default** (`None`). Any positive value enables it.
+- **Disabled by default** (`NoMemoryLimit()`). `MemoryLimit(mb=N)` with `N >= 1` enables it.
 - It is a **retention guardrail, not a hard memory sandbox.** A task whose
   working set exceeds the threshold *while it is still running* is not
   interrupted; the recycle happens after it returns. Per-task peak memory is
@@ -146,35 +172,35 @@ Measure your warmed child baseline first, then leave headroom above it. As a
 reference, a minimal app warms a child to roughly 75 MB (CPython 3.13, Linux)
 before any per-task working set; your baseline is higher with a larger app and
 connection pool. RSS counts pages that a forked child shares with the preload
-parent, so read `--max-memory-per-child-mb` against RSS, and use the cgroup total or
+parent, so read `MemoryLimit.mb` against RSS, and use the cgroup total or
 PSS for the real footprint. Size for the dyno/container quota:
 
 ```
-(max_memory_per_child_mb + task_peak) × processes + parent RSS + DB/native/page-cache + margin
+(MemoryLimit.mb + task_peak) × count + parent RSS + DB/native/page-cache + margin
   < quota
 ```
 
 The per-child peak is **`threshold + task_peak`**, not the threshold alone: RSS
 is sampled *after* the task that crosses the threshold, so a child momentarily
 holds the threshold plus that task's working set. Children can peak at the same
-time, so multiply by `processes`. Raise headroom by lowering `--processes`, not
+time, so multiply by `count`. Raise headroom by lowering `count`, not
 by setting the threshold past the quota.
 
 Worked example — 1024 MB quota, 4 processes, ~80 MB task working set, ~90 MB
 parent + overhead:
 
-- `--max-memory-per-child-mb=300`: worst case `(300 + 80) × 4 + 90 ≈ 1610 MB`,
+- `MemoryLimit(mb=300)`: worst case `(300 + 80) × 4 + 90 ≈ 1610 MB`,
   over quota; peak RSS ~1249 MB — exceeds the 1024 MB quota (OOM-killed on a
   container, quota error on a PaaS). Each child stays bounded at ~300 MB; the
   breach is the process-count multiple, not a recycle failure.
-- `--max-memory-per-child-mb=200`: worst case `(200 + 30) × 4 + 90 ≈ 1010 MB`;
+- `MemoryLimit(mb=200)`: worst case `(200 + 30) × 4 + 90 ≈ 1010 MB`;
   peak RSS ~719 MB, mean ~657 MB — within quota.
 
-Solve for the threshold: `(quota − parent − margin) / processes − task_peak`, or
-keep a high threshold and lower `--processes`.
+Solve for the threshold: `(quota − parent − margin) / count − task_peak`, or
+keep a high threshold and lower `count`.
 
 Note that summing per-child RSS overcounts shared pages — the cgroup total is
-usually lower than `processes × child_rss` because shared libraries and mmap'd
+usually lower than `count × child_rss` because shared libraries and mmap'd
 pages are charged once. Use the `children_memory_mb` column in
 [worker health](../monitoring/worker-health) snapshots to observe real per-tree
 footprint while tuning. For large task results, prefer returning a reference (row
@@ -183,30 +209,44 @@ sampled at recycle time.
 
 ### Choosing: count, memory, or both
 
-The two recycle knobs combine with **OR** semantics — a child exits when *either*
+The two recycle limits combine with **OR** semantics — a child exits when *either*
 limit is reached:
 
-```bash
+```python
 # recycle at 500 tasks OR once RSS reaches 180 MB, whichever comes first
-horsies worker myapp.instance:app --processes=6 \
-  --max-tasks-per-child=500 --max-memory-per-child-mb=180
+either_limit = WorkerProfile(
+    isolated=IsolatedChildren(
+        count=6,
+        recycle=IsolatedRecycle(
+            after=TaskLimit(tasks=500),
+            above=MemoryLimit(mb=180),
+        ),
+    ),
+)
 ```
 
-- `--max-memory-per-child-mb` is the primary guard for memory-quota deployments
+- `above` is the primary guard for memory-quota deployments
   (containers, PaaS dynos): it tracks the RSS the quota charges.
-- `--max-tasks-per-child` is a secondary backstop — an age limit for slow
+- `after` is a secondary backstop — an age limit for slow
   accumulation, connection churn, or state that does not surface as RSS in time.
-  Set it high (e.g. `500`) rather than `0`.
+  Set it high (e.g. `TaskLimit(tasks=500)`) rather than `NoTaskLimit()`.
 - **Recommended default:** memory recycling on, count recycling high as a
   backstop, then tune the memory threshold from observed `children_memory_mb`
   under production-like load.
 
-To run **memory-only**, disable count recycling explicitly (otherwise its
-default `100` still applies):
+At boot the worker warns when `count × MemoryLimit.mb` is above the RAM of the
+machine. It starts in every case. See [Worker Profiles](worker-profiles#memory).
 
-```bash
-horsies worker myapp.instance:app --processes=6 \
-  --max-tasks-per-child=0 --max-memory-per-child-mb=180
+To run **memory-only**, disable count recycling explicitly (otherwise its
+default `TaskLimit(tasks=100)` still applies):
+
+```python
+memory_only = WorkerProfile(
+    isolated=IsolatedChildren(
+        count=6,
+        recycle=IsolatedRecycle(after=NoTaskLimit(), above=MemoryLimit(mb=180)),
+    ),
+)
 ```
 
 ## Queue-Level: max_concurrency
@@ -295,7 +335,7 @@ In production, task durations vary wildly. Without hard cap mode, a worker proce
 
 ### Soft Cap Mode (with Prefetch)
 
-When `prefetch_buffer > 0`, queue concurrency counts **RUNNING** tasks, allowing workers to prefetch beyond their running capacity. A worker's local budget still subtracts already-claimed rows so it cannot hold more than `processes + prefetch_buffer` in total:
+When `prefetch_buffer > 0`, queue concurrency counts **RUNNING** tasks, allowing workers to prefetch beyond their running capacity. A worker's local budget still subtracts already-claimed rows so it cannot hold more than its children + `prefetch_buffer` in total:
 
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
@@ -320,37 +360,48 @@ config = AppConfig(
 
 ## Claiming Controls
 
-### max_claim_batch
+`ClaimLimits` in the [worker profile](worker-profiles) holds the claim limits.
+The capacity of a worker is its number of children plus `prefetch_buffer`: it
+never holds more tasks than that. A limit above the capacity has no effect, so
+`AppConfig` validation refuses it (`HRS-218`).
 
-Limits claims per queue per claiming pass. The default is `0`, which means
+### per_queue_per_pass
+
+Limits claims per queue per claiming pass. The default is `NoTaskLimit()`:
 the worker claims up to the available local/global capacity for that queue.
-Set a positive value only when you want an explicit fairness cap per queue per
-pass. A pass under this cap that claims runs the next pass at once, because no
-`NOTIFY` announces work that the pass left.
+Set `TaskLimit(tasks=N)` only when you want an explicit fairness cap per queue
+per pass. A pass under this cap that claims runs the next pass at once,
+because no `NOTIFY` announces work that the pass left.
 
-```bash
-horsies worker myapp.instance:app --max-claim-batch=4
+```python
+fair_batches = WorkerProfile(
+    isolated=IsolatedChildren(count=8),
+    claim=ClaimLimits(per_queue_per_pass=TaskLimit(tasks=4)),
+)
 ```
 
-A positive cap prevents one worker from claiming all available tasks, ensuring
+A cap prevents one worker from claiming all available tasks, ensuring
 fairness in multi-worker deployments at the cost of more claim passes.
 
-### max_claim_per_worker
+### claimed_per_worker
 
 Limits total CLAIMED (not yet running) tasks per worker:
 
-```bash
-horsies worker myapp.instance:app --max-claim-per-worker=10
+```python
+few_claimed = WorkerProfile(
+    isolated=IsolatedChildren(count=8),
+    claim=ClaimLimits(claimed_per_worker=TaskLimit(tasks=4)),
+)
 ```
 
-**Default behavior** (when set to 0):
-- Hard cap mode (`prefetch_buffer=0`): defaults to `--processes`
-- Soft cap mode (`prefetch_buffer>0`): defaults to `--processes + prefetch_buffer`
+**Default behavior** (`NoTaskLimit()`): the capacity is the limit.
+- Hard cap mode (`prefetch_buffer=0`): the number of children
+- Soft cap mode (`prefetch_buffer>0`): the number of children + `prefetch_buffer`
 
-**Why this flag exists:**
+**Why this limit exists:**
 
-- **Safety valve**: Explicit hard ceiling per worker, independent of processes or prefetch. Useful for clamping unstable workers without changing app config.
-- **Multi-tenant clusters**: Some workers may be "lightweight" (low memory) and need lower in-flight limits even with many processes.
+- **Safety valve**: Explicit ceiling per worker below its capacity. Useful for clamping a profile without changing the app-wide `prefetch_buffer`.
+- **Multi-tenant clusters**: Some workers may be "lightweight" (low memory) and need lower in-flight limits even with many children.
 - **Testing and rollout**: Dial down claim pressure without changing global config or per-queue caps.
 - **Prevent runaway claiming**: In soft cap mode with high prefetch, limits how much a single worker can hoard.
 
@@ -386,11 +437,11 @@ hard_cap_mode = prefetch_buffer == 0
 
 if hard_cap_mode:
     in_flight_locally = count_running_and_claimed_for_worker()
-    local_budget = processes - in_flight_locally
+    local_budget = children - in_flight_locally
 else:
     running_locally = count_running_for_worker()
     claimed_locally = count_claimed_for_worker()
-    local_budget = processes + prefetch_buffer - running_locally - claimed_locally
+    local_budget = children + prefetch_buffer - running_locally - claimed_locally
 
 # Global budget (if cluster_wide_cap set)
 if cluster_wide_cap:
@@ -409,8 +460,8 @@ for queue in queues:
         else:
             in_flight_in_queue = count_running_in_queue(queue)
         queue_budget = queue.max_concurrency - in_flight_in_queue
-        if max_claim_batch > 0:
-            claim_count = min(budget, queue_budget, max_claim_batch)
+        if isinstance(per_queue_per_pass, TaskLimit):
+            claim_count = min(budget, queue_budget, per_queue_per_pass.tasks)
         else:
             claim_count = min(budget, queue_budget)
 ```
@@ -448,8 +499,10 @@ config = AppConfig(
 ```
 
 ```bash
-horsies worker myapp.instance:app --processes=8
+horsies worker myapp.instance:app --profile default
 ```
+
+The `default` profile holds `isolated=IsolatedChildren(count=8)`.
 
 ### Multi-Worker with Global Cap
 
@@ -464,12 +517,12 @@ config = AppConfig(
 
 ```bash
 # Machine 1
-horsies worker myapp.instance:app --processes=8
+horsies worker myapp.instance:app --profile default
 
 # Machine 2
-horsies worker myapp.instance:app --processes=8
+horsies worker myapp.instance:app --profile default
 
-# Total: 16 processes, but max 20 RUNNING tasks cluster-wide
+# Total: 16 children (8 each), but max 20 RUNNING tasks cluster-wide
 ```
 
 ### Priority Queues with Rate Limiting
@@ -490,11 +543,16 @@ config = AppConfig(
 
 ## Monitoring
 
-Worker logs concurrency config at startup:
+Worker logs its profile and concurrency config at startup:
 
 ```text
+Worker profile 'default': isolated=4 (recycle after 100 tasks, above no limit), claim per queue per pass: no limit, claimed per worker: no limit, drain_timeout=300s, preload=library
 Concurrency config: processes=4, cluster_wide_cap=20, max_claim_per_worker=4, max_claim_batch=0
 ```
+
+The second line uses the internal names: `processes` is the number of
+children, `max_claim_per_worker` is the effective `claimed_per_worker` limit,
+and `max_claim_batch=0` means `per_queue_per_pass=NoTaskLimit()`.
 
 ## Troubleshooting
 
@@ -508,8 +566,8 @@ Check:
 
 ### Uneven Distribution
 
-Use the default `max_claim_batch=0`, increase `max_claim_per_worker` when
-prefetching, or run more workers.
+Use the default `per_queue_per_pass=NoTaskLimit()`, raise or remove the
+`claimed_per_worker` limit when prefetching, or run more workers.
 
 ### Database Overload
 

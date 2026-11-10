@@ -42,7 +42,7 @@ uv run python -m showcase.acme.scenarios seed
 Start the three processes, each in its own terminal:
 
 ```bash
-uv run horsies worker showcase.acme.app:app --processes 12
+uv run horsies worker showcase.acme.app:app --profile default
 uv run horsies scheduler showcase.acme.app:app
 uv run horsies web showcase.acme.app:app --enable-actions
 ```

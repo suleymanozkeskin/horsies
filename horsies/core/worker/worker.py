@@ -988,5 +988,5 @@ class Worker(
 
 
 """
-horsies examples/instance.py worker --loglevel=info --processes=8 
+horsies worker examples/instance.py:app --profile default --loglevel=info
 """
