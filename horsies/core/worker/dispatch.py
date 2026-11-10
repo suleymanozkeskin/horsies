@@ -433,13 +433,6 @@ class DispatchMixin:
         slots = self._slots
         assert slots is not None, 'dispatch before the slot pool started'
 
-        # Get heartbeat interval from recovery config (milliseconds)
-        runner_heartbeat_interval_ms = 30_000  # default: 30 seconds
-        if self.cfg.recovery_config:
-            runner_heartbeat_interval_ms = (
-                self.cfg.recovery_config.runner_heartbeat_interval_ms
-            )
-
         handle = slots.submit(
             RunFrame(
                 task_id=task_id,
@@ -447,7 +440,6 @@ class DispatchMixin:
                 args_json=args_json,
                 kwargs_json=kwargs_json,
                 worker_id=self.worker_instance_id,
-                runner_heartbeat_interval_ms=runner_heartbeat_interval_ms,
                 is_workflow_task=is_workflow_task,
                 timeout=timeout,
                 claimed_at=claimed_at,
@@ -497,8 +489,9 @@ class DispatchMixin:
         - ``_AttemptEndUnknown``: no exit was seen, so the attempt may still
           have effects in flight. Nothing is written and phase 2 does not
           run. The row keeps its state for stale-task recovery: a RUNNING row
-          fails after ``running_stale_threshold_ms`` with no runner heartbeat,
-          and a CLAIMED row is claimed again when its lease ends. Logged at
+          fails after ``running_stale_threshold_ms`` with no runner heartbeat
+          (the kill ended its heartbeats), and a CLAIMED row is claimed again
+          when its lease ends. Logged at
           critical level with the task id and pid.
 
         Does not raise for an expected database failure. A handle that no

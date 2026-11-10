@@ -15,6 +15,7 @@ tags: [workers, architecture, child-processes]
 │  - Subscribes to NOTIFY channels                        │
 │  - Claims tasks from PostgreSQL                         │
 │  - Assigns tasks to child slots                         │
+│  - Writes runner heartbeats (own thread, not the loop)  │
 │  - Writes results back                                  │
 │                                                         │
 │  ┌─────────────────────────────────────────────────┐    │
@@ -31,7 +32,7 @@ tags: [workers, architecture, child-processes]
 
 A worker owns one child process per slot:
 
-- **Main process**: Coordinates claiming, dispatching, result handling
+- **Main process**: Coordinates claiming, dispatching, result handling, and writes the runner heartbeats of the running tasks
 - **Child processes**: Execute task code in isolation, one task at a time
 - **N children**: Set by `IsolatedChildren(count=N)` in the [worker profile](worker-profiles)
 
@@ -59,6 +60,8 @@ Each child holds one task, so a failure stays with that task.
 | A supervisor sends SIGTERM to every process | Running tasks continue, and the worker drains them |
 | A task forks a helper, then its child dies | The worker sees the death at once. The helper does not hide it |
 | A timeout fires as a task ends | The kill is bound to that task, so it cannot reach the next task. The killed child takes no next task |
+| A task holds the GIL in C code | Its runner heartbeats continue: the worker process writes them, so the reaper does not fail the task |
+| The worker cannot write runner heartbeats for half of `running_stale_threshold_ms`, or its heartbeat thread dies | With `auto_fail_stale_running` on, the worker kills every child that holds a task, stops, and exits non-zero. With it off, the worker logs it and runs on. See [When the Worker Cannot Write Heartbeats](heartbeats-recovery#when-the-worker-cannot-write-heartbeats) |
 
 ## Execution Flow
 
@@ -119,12 +122,13 @@ Key features:
 
 In child process:
 
-1. Resolve task from registry by name
-2. Deserialize arguments
-3. Start heartbeat thread
+1. Set the row RUNNING, with the first runner heartbeat in the same transaction
+2. Resolve task from registry by name
+3. Deserialize arguments
 4. Call task function. An `async def` task runs on the event loop that the child created at boot. The child keeps that loop until it stops, and the loop runs only while an async task runs. The result reports the asyncio tasks that are still on the loop after the task, and the worker retires a child that reports any
-5. Serialize result
-6. Stop heartbeat thread
+5. Mark the row finalizing, and serialize the result
+
+The child runs no heartbeat thread. While the child holds the task, a thread of the worker process writes its runner heartbeats. See [Heartbeats & Recovery](heartbeats-recovery#runner-heartbeat).
 
 ### 5. Result Handling
 
@@ -263,7 +267,9 @@ poll-only dispatch if `LISTEN` is unavailable.
 Child database pools are initialized inside the child process. Psycopg
 connections are not process-safe. A child starts with `exec`, so it inherits no
 parent database socket. Child DB connections remain lazy by default when
-`worker_child_pool_min_size=0`.
+`worker_child_pool_min_size=0`. A child uses one connection at a time: for the
+RUNNING update, and for the finalizing mark. The worker process holds one more
+connection, for the runner heartbeats.
 
 ## Graceful Shutdown
 

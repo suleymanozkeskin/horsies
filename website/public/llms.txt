@@ -168,7 +168,9 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - An async def task runs on the one event loop that its worker child keeps; the loop runs only while an async task runs; in an async task, send with send_async (the sync send returns TaskSendAsyncContext in a running loop)
 - An async def task must await the work it starts: asyncio tasks of it still on the loop when it ends make the worker replace the child after that task, and the child cancels them when it stops (within 5 s); a client that keeps its own background tasks on the loop causes a replacement after each async task; an asyncio.to_thread() thread is not a task and does not cause one; only asyncio tasks are seen: a loop.call_soon()/call_later() callback or loop.run_in_executor() work that the task did not await causes no replacement and can still run during a later task of the same child; a task that cancels a helper task in finally must also await it (helper.cancel(), then await asyncio.gather(helper, return_exceptions=True)); the retire warning names the coroutine of each task left, up to 10
 - A child creates its event loop at boot, before it reports ready, when the app has an async def task (an app with none gets no loop); when it cannot be created (for example EMFILE, or an event loop policy that raises), the child fails its boot and no task reaches it; after three failed child starts the worker exits non-zero so its supervisor restarts it
-- Options: task_name, queue_name, retry_policy, exception_mapper, default_unhandled_error_code, timeout_ms
+- Options: task_name, queue_name, retry_policy, exception_mapper, default_unhandled_error_code, timeout_ms, execution, cancel_grace_ms
+- execution: Execution.ISOLATED (default; def or async def, timeout_ms optional), Execution.SHARED_ASYNC (async def, timeout_ms required), Execution.SHARED_THREAD (def, timeout_ms required); every task row stores the class
+- cancel_grace_ms: SHARED_ASYNC only, 100 to 60000 ms, default 5000 ms; the stored options hold the value in effect at send
 - good_until is NOT accepted at definition time (raises HRS-102) — use .with_options(good_until=...) at send time
 - Returns TaskFunction[P, T] for a def function, AsyncTaskFunction[P, T] for an async def function
 
@@ -596,6 +598,11 @@ Task definition (HRS-100-HRS-199):
 - HRS-103 TASK_INVALID_QUEUE
 - HRS-104 TASK_PREDECORATED_NOT_SUPPORTED (the task function is pre-decorated: it has a __wrapped__ chain)
 - HRS-105 TASK_STRICT_SIGNATURE_VIOLATION
+- HRS-107 TASK_SHARED_ASYNC_REQUIRES_ASYNC_DEF (execution=SHARED_ASYNC on a def function)
+- HRS-108 TASK_SHARED_THREAD_REQUIRES_DEF (execution=SHARED_THREAD on an async def function)
+- HRS-109 TASK_SHARED_EXECUTION_REQUIRES_TIMEOUT (SHARED_ASYNC or SHARED_THREAD without timeout_ms)
+- HRS-110 TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC (cancel_grace_ms with a class other than SHARED_ASYNC)
+- HRS-111 TASK_CANCEL_GRACE_OUT_OF_RANGE (cancel_grace_ms outside 100 to 60000 ms)
 Config/broker (HRS-200-HRS-299):
 <!-- members: ErrorCode part -->
 - HRS-200 CONFIG_INVALID_QUEUE_MODE

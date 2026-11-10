@@ -500,6 +500,9 @@ class TaskInfo:
     - ``result_decoded``: ``True`` iff ``decoded_result`` was populated.
       Lets callers branch without comparing for ``None`` (which is also
       a valid ok-value for ``TaskResult[None, TaskError]``).
+
+    ``execution`` is the stored ``Execution`` of a live task. It is ``None``
+    for a task read from the history archive, which does not keep the class.
     """
 
     task_id: str
@@ -525,6 +528,7 @@ class TaskInfo:
     result_decoded: bool = False
     failed_reason: str | None = None
     attempts: list[TaskAttemptInfo] | None = None
+    execution: Execution | None = None
 
 
 MAX_RETRY_ATTEMPTS: Final = 20
@@ -539,6 +543,37 @@ MAX_TASK_TIMEOUT_MS: Final = 2**32 - 1
 About 49.7 days. It is the limit of the Rust port's `u32` field, so both
 libraries accept the same declarations.
 """
+
+MIN_CANCEL_GRACE_MS: Final = 100
+"""The smallest `cancel_grace_ms` of a `SHARED_ASYNC` task. Provisional."""
+
+MAX_CANCEL_GRACE_MS: Final = 60_000
+"""The largest `cancel_grace_ms` of a `SHARED_ASYNC` task. Provisional."""
+
+DEFAULT_CANCEL_GRACE_MS: Final = 5_000
+"""The `cancel_grace_ms` that a `SHARED_ASYNC` task gets when it sets none.
+
+Provisional. The task row stores the value in effect when the task was sent,
+so a change of this default does not change rows that are already queued.
+"""
+
+
+class Execution(str, Enum):
+    """How a worker runs a task. Each task row stores its class.
+
+    - `ISOLATED`: one task at a time in its own child process. The function
+      can be `def` or `async def`, and `timeout_ms` is optional. The default.
+    - `SHARED_ASYNC`: many `async def` tasks run as coroutines in one child
+      process. The task must set `timeout_ms`. `cancel_grace_ms` is the time
+      the task gets to stop after its cancel.
+    - `SHARED_THREAD`: many `def` tasks run on threads in one child process.
+      The task must set `timeout_ms`. A thread cannot be cancelled, so the
+      task cannot set `cancel_grace_ms`.
+    """
+
+    ISOLATED = 'ISOLATED'
+    SHARED_ASYNC = 'SHARED_ASYNC'
+    SHARED_THREAD = 'SHARED_THREAD'
 
 
 class RetryPolicy(BaseModel):
@@ -682,6 +717,13 @@ class TaskOptions(BaseModel):
             worker continue. The worker must start a new child, so timeouts
             are for exceptional hangs, not routine control flow. The value
             is from MIN_TASK_TIMEOUT_MS to MAX_TASK_TIMEOUT_MS.
+        execution: How a worker runs the task (`Execution`). The default is
+            `Execution.ISOLATED`.
+        cancel_grace_ms: The cancel grace that the task declares, or None
+            when it declares none. This model checks only the type. The task
+            decorator checks the class and the bounds
+            (MIN_CANCEL_GRACE_MS to MAX_CANCEL_GRACE_MS), and the stored
+            options hold the resolved value (see `serialize_task_options`).
     """
 
     model_config = ConfigDict(extra='forbid')
@@ -698,6 +740,8 @@ class TaskOptions(BaseModel):
             description='Execution time limit in milliseconds (1 s to about 49.7 days)',
         ),
     ] | None = None
+    execution: Execution = Execution.ISOLATED
+    cancel_grace_ms: int | None = None
 
     @field_validator('good_until')
     @classmethod

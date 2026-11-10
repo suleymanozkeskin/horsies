@@ -49,6 +49,7 @@ from horsies.core.history.archive.versions import archive_digest
 from horsies.core.history.reads.detail import HistoryTaskDetail
 from horsies.core.types.error_detail import NoCause
 from horsies.core.models.tasks import (
+    Execution,
     OperationalErrorCode,
     OutcomeCode,
     RetrievalCode,
@@ -514,6 +515,10 @@ class TestPostgresBrokerPgBouncerWiring:
                 'horsies.core.brokers.postgres.install_recovery_indexes',
                 new=AsyncMock(),
             ),
+            patch(
+                'horsies.core.brokers.postgres.install_claim_indexes',
+                new=AsyncMock(),
+            ),
             patch.object(
                 PostgresBroker,
                 '_activate_bounded_recovery',
@@ -574,6 +579,10 @@ class TestPostgresBrokerPgBouncerWiring:
             ),
             patch(
                 'horsies.core.brokers.postgres.install_recovery_indexes',
+                new=AsyncMock(),
+            ),
+            patch(
+                'horsies.core.brokers.postgres.install_claim_indexes',
                 new=AsyncMock(),
             ),
             patch.object(
@@ -641,6 +650,10 @@ class TestPostgresBrokerPgBouncerWiring:
             ),
             patch(
                 'horsies.core.brokers.postgres.install_recovery_indexes',
+                new=AsyncMock(),
+            ),
+            patch(
+                'horsies.core.brokers.postgres.install_claim_indexes',
                 new=AsyncMock(),
             ),
             patch.object(
@@ -3002,10 +3015,10 @@ class TestGetTaskInfoAsync:
         """Basic task (no optional includes) should return Ok(TaskInfo) with base fields."""
         broker = _make_broker()
         now = datetime.now(timezone.utc)
-        # 18 base columns: id, task_name, status, queue_name, priority,
+        # 19 base columns: id, task_name, status, queue_name, priority,
         # retry_count, max_retries, next_retry_at, sent_at, enqueued_at, claimed_at,
         # started_at, completed_at, failed_at, worker_hostname, worker_pid,
-        # worker_process_name, error_code
+        # worker_process_name, error_code, execution
         row = (
             'task-abc',
             'compute',
@@ -3025,6 +3038,7 @@ class TestGetTaskInfoAsync:
             9999,
             'worker-0',
             None,
+            'ISOLATED',
         )
         self._setup_task_info_session(broker, row=row)
 
@@ -3048,6 +3062,7 @@ class TestGetTaskInfoAsync:
         assert info.decoded_result is None
         assert info.result_decoded is False
         assert info.failed_reason is None
+        assert info.execution is Execution.ISOLATED
 
     @pytest.mark.asyncio
     async def test_include_result_populates_raw_result(self) -> None:
@@ -3062,7 +3077,7 @@ class TestGetTaskInfoAsync:
         broker = _make_broker()
         now = datetime.now(timezone.utc)
         result_json = '{"__h_task_result__":true,"ok":"hello","err":null}'
-        # 18 base + 1 result column
+        # 19 base + 1 result column
         row = (
             'task-abc',
             'compute',
@@ -3082,6 +3097,7 @@ class TestGetTaskInfoAsync:
             9999,
             'worker-0',
             None,
+            'ISOLATED',
             result_json,
         )
         self._setup_task_info_session(broker, row=row)
@@ -3105,7 +3121,7 @@ class TestGetTaskInfoAsync:
         """include_failed_reason=True should add failed_reason to Ok(TaskInfo)."""
         broker = _make_broker()
         now = datetime.now(timezone.utc)
-        # 18 base + 1 failed_reason column
+        # 19 base + 1 failed_reason column
         row = (
             'task-abc',
             'compute',
@@ -3125,6 +3141,7 @@ class TestGetTaskInfoAsync:
             9999,
             'worker-0',
             None,
+            'ISOLATED',
             'Worker crashed unexpectedly',
         )
         self._setup_task_info_session(broker, row=row)
@@ -3143,7 +3160,7 @@ class TestGetTaskInfoAsync:
         """include_result=True with NULL result in DB should return Ok(TaskInfo) with result=None."""
         broker = _make_broker()
         now = datetime.now(timezone.utc)
-        # 18 base + 1 result column (None)
+        # 19 base + 1 result column (None)
         row = (
             'task-abc',
             'compute',
@@ -3163,6 +3180,7 @@ class TestGetTaskInfoAsync:
             None,
             None,
             None,
+            'ISOLATED',
             None,
         )
         self._setup_task_info_session(broker, row=row)
@@ -3186,7 +3204,7 @@ class TestGetTaskInfoAsync:
             '{"error_code":{"__builtin_task_code__":"TASK_EXCEPTION"},'
             '"message":"fail","data":null,"exception":null}}'
         )
-        # 18 base + 1 result + 1 failed_reason
+        # 19 base + 1 result + 1 failed_reason
         row = (
             'task-abc',
             'compute',
@@ -3206,6 +3224,7 @@ class TestGetTaskInfoAsync:
             9999,
             'worker-0',
             'TASK_EXCEPTION',
+            'ISOLATED',
             result_json,
             'Something broke',
         )
@@ -3746,6 +3765,7 @@ class TestEnqueueInsertStatement:
             good_until=None,
             max_retries=0,
             task_options=None,
+            execution=Execution.SHARED_THREAD,
             enqueue_sha='sha',
             scoped_key_digest=None,
             cutover_values=cutover_values,
@@ -3803,6 +3823,14 @@ class TestEnqueueInsertStatement:
         )
         assert explicit['enqueued_at'] == explicit_ts
         assert explicit['enqueue_delay'] is None
+
+    def test_the_execution_class_binds_its_value(self) -> None:
+        params = self._params(
+            enqueued_at=None,
+            enqueue_delay_seconds=None,
+            cutover_values=self._cutover_values(inline=False),
+        )
+        assert params['execution'] == 'SHARED_THREAD'
 
     def test_declined_disposition_binds_null_inline_fields(self) -> None:
         params = self._params(

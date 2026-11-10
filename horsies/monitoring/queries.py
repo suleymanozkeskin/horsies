@@ -61,6 +61,7 @@ from horsies.core.models.task_pg import (
 )
 from horsies.core.models.tasks import (
     BUILTIN_CODE_REGISTRY,
+    Execution,
     ContractCode,
     OperationalErrorCode,
     OutcomeCode,
@@ -493,6 +494,7 @@ def _leaf_task(task: TaskModel) -> LeafTaskInfo:
         exec_s=exec_s,
         worker_hostname=task.worker_hostname,
         good_until=task.good_until,
+        execution=Execution(task.execution),
     )
 
 
@@ -562,6 +564,7 @@ def _history_leaf(detail: 'HistoryTaskDetail') -> LeafTaskInfo:
         exec_s=exec_s,
         worker_hostname=detail.last_worker_hostname,
         good_until=detail.good_until,
+        execution=None,
     )
 
 

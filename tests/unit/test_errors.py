@@ -547,6 +547,11 @@ class TestErrorCode:
             ErrorCode.TASK_INVALID_RETURN_TYPE,
             ErrorCode.TASK_INVALID_OPTIONS,
             ErrorCode.TASK_INVALID_QUEUE,
+            ErrorCode.TASK_SHARED_ASYNC_REQUIRES_ASYNC_DEF,
+            ErrorCode.TASK_SHARED_THREAD_REQUIRES_DEF,
+            ErrorCode.TASK_SHARED_EXECUTION_REQUIRES_TIMEOUT,
+            ErrorCode.TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC,
+            ErrorCode.TASK_CANCEL_GRACE_OUT_OF_RANGE,
         ]
         for code in task_codes:
             # HRS-100-HRS-199 range

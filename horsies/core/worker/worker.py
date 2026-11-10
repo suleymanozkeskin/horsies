@@ -29,6 +29,16 @@ from horsies.core.worker.child_pool import (
     _initialize_worker_pool as _initialize_worker_pool,
 )  # noqa: F401
 from horsies.core.worker.child_protocol import InitFrame, RssMb
+from horsies.core.worker.runner_heartbeat import (
+    FailClosedCause,
+    PostgresBeatWriter,
+    RunnerHeartbeat,
+    RunnerHeartbeatLostError,
+    beat_timing,
+    describe_fail_closed,
+    stale_running_recovery,
+)
+from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.worker.slots import (
     BootAttemptsExhausted,
     ChildBaseline,
@@ -52,7 +62,6 @@ from horsies.core.worker.child_runner import (  # noqa: F401
     _derive_sys_path_roots_from_file as _derive_sys_path_roots_from_file,
     _debug_imports_enabled as _debug_imports_enabled,
     _debug_imports_log as _debug_imports_log,
-    _heartbeat_worker as _heartbeat_worker,
 )
 from horsies.core.worker.sql import (  # noqa: F401
     CLAIM_SQL as CLAIM_SQL,
@@ -192,6 +201,8 @@ class Worker(
         # Created after preloading modules, so that import and validation
         # errors surface in the main process at startup.
         self._slots: SlotPool | None = None
+        # Writes the runner heartbeats of the pool's tasks; starts with it.
+        self._runner_heartbeat: RunnerHeartbeat | None = None
         self._stop = asyncio.Event()
         self._ping_queue: asyncio.Queue[Any] | None = None
         self._service_tasks: set[asyncio.Task[Any]] = set()
@@ -203,7 +214,10 @@ class Worker(
         self._capacity_released = asyncio.Event()
         self._finalize_retry_attempts: dict[tuple[str, str], int] = {}
         self._fatal_background_error: (
-            ChildStartFailedError | ServiceLoopDiedError | None
+            ChildStartFailedError
+            | ServiceLoopDiedError
+            | RunnerHeartbeatLostError
+            | None
         ) = None
 
     def request_stop(self) -> None:
@@ -385,6 +399,7 @@ class Worker(
                     self.cfg.processes,
                 )
                 self._check_memory_baseline(baselines)
+                self._runner_heartbeat = self._launch_runner_heartbeat(pool)
                 return
             case Err(failure):
                 pass
@@ -399,6 +414,45 @@ class Worker(
                 )
             case _ as unreachable:
                 assert_never(unreachable)
+
+    def _launch_runner_heartbeat(self, pool: SlotPool) -> RunnerHeartbeat:
+        """Start the threads that write the runner heartbeats of ``pool``'s tasks.
+
+        The heartbeat connection uses the children's database URL and connect
+        kwargs. It opens at the first beat, not here. The recovery config
+        decides here, once, whether beats that cannot land stop the worker:
+        only when this config's reaper fails stale RUNNING rows.
+        """
+        return RunnerHeartbeat.launch(
+            live=pool.live_dispatches,
+            writer=PostgresBeatWriter(
+                database_url=to_psycopg_url(self.cfg.dsn),
+                connect_kwargs=self.cfg.child_connect_kwargs,
+                worker_id=self.worker_instance_id,
+            ),
+            timing=beat_timing(self.cfg.recovery_config or RecoveryConfig()),
+            stale_running=stale_running_recovery(self.cfg.recovery_config),
+            loop=asyncio.get_running_loop(),
+            on_fail_closed=self._stop_for_lost_runner_heartbeat,
+        )
+
+    def _stop_for_lost_runner_heartbeat(self, cause: FailClosedCause) -> None:
+        """Stop the worker after its runner heartbeats failed closed. Runs on the loop.
+
+        The watchdog already killed every child that held a task.
+        ``run_forever`` raises the error after the stop, so the worker exits
+        non-zero.
+        """
+        self._fatal_background_error = RunnerHeartbeatLostError(
+            describe_fail_closed(cause),
+        )
+        self._stop.set()
+
+    async def _stop_runner_heartbeat(self) -> None:
+        """End the heartbeat threads, bounded. Call it after the children stopped."""
+        heartbeat, self._runner_heartbeat = self._runner_heartbeat, None
+        if heartbeat is not None:
+            await asyncio.to_thread(heartbeat.stop)
 
     async def _slot_failure_loop(self, pool: SlotPool) -> None:
         """Service loop: end the worker when no replacement child can start.
@@ -491,6 +545,8 @@ class Worker(
                 no shutdown requested; re-raising crashes the worker so the
                 supervisor restarts it instead of leaving a claiming worker
                 with dead heartbeat/reaper loops.
+            RunnerHeartbeatLostError: the runner heartbeats failed closed;
+                their watchdog killed the children that held tasks.
         """
         if self._fatal_background_error is not None:
             raise self._fatal_background_error
@@ -534,6 +590,7 @@ class Worker(
         pool, self._slots = self._slots, None
         if pool is not None:
             await pool.stop(0)
+        await self._stop_runner_heartbeat()
 
     async def _handle_retryable_start_error(
         self,
@@ -843,6 +900,9 @@ class Worker(
             clear_workflow_registry()
         except Exception as e:
             logger.error(f'Error clearing workflow registry: {e}')
+        # Last: the heartbeat covers the drain above, and its watchdog keeps
+        # the exit bound of a fail-closed stop until here.
+        await self._stop_runner_heartbeat()
         logger.info('Worker stopped')
 
     def _preload_modules_main(self) -> None:

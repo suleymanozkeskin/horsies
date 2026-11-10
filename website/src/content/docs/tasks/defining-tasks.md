@@ -239,6 +239,47 @@ The kill goes to the child and to the subprocesses in its session. Other tasks o
 
 The worker writes the timeout only after the child has exited. So a retry never runs next to the attempt that it replaces, and a workflow node that runs after a failure does not start while that attempt runs. If the child does not exit within 30 seconds of the kill, the worker writes nothing and logs at critical level. Then [stale-task recovery](/horsies/workers/heartbeats-recovery/) handles the task: a started task as a crashed worker's task, and a task that had not started when its claim lease ends.
 
+### Choose the Execution Class
+
+`execution` declares how a worker runs the task. The value is an `Execution` member, and the default is `Execution.ISOLATED`. Every task row stores the class.
+
+| `execution` | Runs | Function | `timeout_ms` | `cancel_grace_ms` |
+| ----------- | ---- | -------- | ------------ | ----------------- |
+| `Execution.ISOLATED` (default) | one task at a time in its own child process | `def` or `async def` | optional | not allowed |
+| `Execution.SHARED_ASYNC` | many tasks as coroutines in one child process | `async def` | required | optional |
+| `Execution.SHARED_THREAD` | many tasks on threads in one child process | `def` | required | not allowed |
+
+```python
+@app.task(
+    "fetch_quote",
+    execution=Execution.SHARED_ASYNC,
+    timeout_ms=10_000,
+    cancel_grace_ms=2_000,
+)
+async def fetch_quote(*, symbol: str) -> TaskResult[str, TaskError]:
+    ...
+
+
+@app.task("render_thumbnail", execution=Execution.SHARED_THREAD, timeout_ms=30_000)
+def render_thumbnail(*, image_id: str) -> TaskResult[str, TaskError]:
+    ...
+```
+
+`cancel_grace_ms` is the time that a `SHARED_ASYNC` task gets to stop after its cancel. A thread cannot be cancelled, so only `SHARED_ASYNC` takes it. The value is from `MIN_CANCEL_GRACE_MS` (100) to `MAX_CANCEL_GRACE_MS` (60,000). A `SHARED_ASYNC` task that sets none gets `DEFAULT_CANCEL_GRACE_MS` (5,000). The stored options of the task hold the value in effect when the task is sent, so a later change of the default does not change a queued task.
+
+`@app.task` refuses a declaration that breaks a rule with a `TaskDefinitionError`, one code per rule:
+
+<!-- members: ErrorCode subset -->
+| Code | Name | Rule |
+| ---- | ---- | ---- |
+| HRS-107 | `TASK_SHARED_ASYNC_REQUIRES_ASYNC_DEF` | `SHARED_ASYNC` needs an `async def` function |
+| HRS-108 | `TASK_SHARED_THREAD_REQUIRES_DEF` | `SHARED_THREAD` needs a `def` function |
+| HRS-109 | `TASK_SHARED_EXECUTION_REQUIRES_TIMEOUT` | `SHARED_ASYNC` and `SHARED_THREAD` need `timeout_ms` |
+| HRS-110 | `TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC` | only `SHARED_ASYNC` takes `cancel_grace_ms` |
+| HRS-111 | `TASK_CANCEL_GRACE_OUT_OF_RANGE` | `cancel_grace_ms` is from 100 to 60,000 |
+
+When a declaration breaks more than one rule, the first rule in this order is reported. A type checker refuses the same declarations when `execution` is written as a member: the overloads require `timeout_ms` for a shared class, take `cancel_grace_ms` only with `SHARED_ASYNC`, and the decorator that they return accepts only the function kind of the class. A class that is known only at run time requires `timeout_ms`, and the decorator checks the other rules at run time.
+
 ### Register Tasks for Workers
 
 ```python
@@ -292,6 +333,8 @@ def task_two() -> TaskResult[str, TaskError]:
 | `exception_mapper` | `dict[type[BaseException], str]` | No | Maps exception classes to error codes |
 | `default_unhandled_error_code` | `str` | No | Error code for unmapped exceptions (overrides global) |
 | `timeout_ms` | `int` | No | Execution time limit in milliseconds, from 1000 to `MAX_TASK_TIMEOUT_MS` (4,294,967,295), measured from the moment a child takes the task. On expiry the child process is killed and the task fails with `TASK_TIMEOUT` |
+| `execution` | `Execution` | No | How a worker runs the task: `ISOLATED` (default), `SHARED_ASYNC` or `SHARED_THREAD`. See [Choose the Execution Class](#choose-the-execution-class) |
+| `cancel_grace_ms` | `int` | No | `SHARED_ASYNC` only. The time to stop after a cancel, from 100 to 60,000 ms. Default 5,000 ms |
 
 **Returns:** For a `def` function, a `TaskFunction`: a direct call returns the `TaskResult`. For an `async def` function, an `AsyncTaskFunction`: a direct call returns a coroutine, and `await` gives the `TaskResult`. Both send with `.send()` / `.send_async()`.
 

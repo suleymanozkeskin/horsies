@@ -604,7 +604,6 @@ async def test_task_expired_workflow_task_advances_workflow_without_reaper(
         args_json=args_json,
         kwargs_json=kwargs_json,
         task_id=task_id,
-        database_url=database_url,
         master_worker_id=TEST_WORKER_ID,
         claimed_at=claimed_at,
         task_loop=TaskLoop(),

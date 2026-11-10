@@ -58,7 +58,7 @@ Workers run tasks in child processes that they own, rather than threads:
 - GIL contention is avoided for CPU-bound tasks
 - A crashed or timed-out task takes down only its own child
 - On Linux, children fork from a preload parent, so they start in milliseconds and share memory
-- Child processes send their own heartbeats
+- The worker process writes the runner heartbeats of its children's tasks, so a task that holds the GIL cannot stop them
 
 ### Type-Safe Results
 

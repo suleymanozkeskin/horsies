@@ -4,7 +4,6 @@ Sections:
 A. _serialization_error_response
 B. _debug_imports_log
 C. _child_initializer
-D. _heartbeat_worker
 E. _get_workflow_status_for_task
 F. _handle_workflow_stop_before_start (wildcard branch)
 I. _run_task_entry error paths
@@ -18,6 +17,7 @@ import asyncio
 import json
 import logging
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Generator
@@ -42,10 +42,7 @@ from horsies.core.models.tasks import (
 )
 from horsies.core.types.result import Err
 from horsies.core.worker.stored_timeout import (
-    NoTimeout,
     OptionsUnreadable,
-    StoredTimeout,
-    TaskTimeout,
     TimeoutRefusal,
     TimeoutValueInvalid,
 )
@@ -55,7 +52,6 @@ from horsies.core.worker.child_runner import (
     _debug_imports_log,
     _get_workflow_status_for_task,
     _handle_workflow_stop_before_start,
-    _heartbeat_worker,
     _run_task_entry,
     _serialization_error_response,
 )
@@ -559,78 +555,6 @@ class TestInitializeWorkerPoolConnectKwargs:
 
 
 # ===================================================================
-# D. _heartbeat_worker
-# ===================================================================
-
-
-@pytest.mark.unit
-class TestHeartbeatWorker:
-    """_heartbeat_worker loop and failure paths."""
-
-    def test_stops_on_event_set(self) -> None:
-        """Heartbeat thread exits without beating when stop_event is set.
-
-        The first heartbeat is inserted by the RUNNING transition
-        transaction, not by this thread, so a pre-stopped loop sends
-        nothing.
-        """
-        cursor = _FakeCursor()
-        conn = _FakeConn(cursor)
-        pool = _FakePool(conn)
-        stop = threading.Event()
-
-        with patch(
-            'horsies.core.worker.child_runner._get_worker_pool',
-            return_value=pool,
-        ):
-            stop.set()
-            _heartbeat_worker(
-                task_id='t-1',
-                database_url='unused',
-                stop_event=stop,
-                sender_worker_id='w-1',
-                heartbeat_interval_ms=100,
-            )
-
-        assert cursor.queries == []
-
-    def test_continues_after_send_failure(self) -> None:
-        """Heartbeat thread keeps trying after a transient send failure."""
-        stop = threading.Event()
-
-        call_count = 0
-
-        def _failing_pool() -> Any:
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                # First call succeeds (initial heartbeat)
-                cursor = _FakeCursor()
-                conn = _FakeConn(cursor)
-                return _FakePool(conn)
-            if call_count == 2:
-                raise RuntimeError('db down')
-            stop.set()
-            cursor = _FakeCursor()
-            conn = _FakeConn(cursor)
-            return _FakePool(conn)
-
-        with patch(
-            'horsies.core.worker.child_runner._get_worker_pool',
-            side_effect=_failing_pool,
-        ):
-            _heartbeat_worker(
-                task_id='t-1',
-                database_url='unused',
-                stop_event=stop,
-                sender_worker_id='w-1',
-                heartbeat_interval_ms=50,  # Short interval for fast test
-            )
-
-        assert call_count >= 3
-
-
-# ===================================================================
 # E. _get_workflow_status_for_task
 # ===================================================================
 
@@ -799,7 +723,6 @@ def _make_run_task_patches(
         'horsies.core.worker.child_runner._confirm_ownership_and_set_running': MagicMock(
             return_value=ownership,
         ),
-        'horsies.core.worker.child_runner._start_heartbeat_thread': MagicMock(),
     }
 
     mock_app = MagicMock()
@@ -834,9 +757,7 @@ def _run_entry_defaults() -> dict[str, Any]:
         'args_json': '[]',
         'kwargs_json': '{}',
         'task_id': 'tid-1',
-        'database_url': 'postgresql://localhost/test',
         'master_worker_id': 'w-1',
-        'runner_heartbeat_interval_ms': 100,
         'task_loop': TaskLoop(),
     }
 
@@ -2250,39 +2171,62 @@ class TestRunTaskEntryWorkflowHappyPaths:
     # model layer in test_workflow_handle_decode.py.)
 
 # ===================================================================
-# P. _start_heartbeat_thread
+# P. The child writes no runner heartbeat
 # ===================================================================
 
 
 @pytest.mark.unit
-class TestStartHeartbeatThread:
-    """_start_heartbeat_thread creates and starts a daemon thread."""
+class TestChildWritesNoRunnerHeartbeat:
+    """The worker process writes the runner heartbeats of a held task.
 
-    def test_creates_daemon_thread(self) -> None:
-        from horsies.core.worker.child_runner import _start_heartbeat_thread
+    The child writes only the first one, inside the RUNNING transition,
+    which is patched out here.
+    """
 
-        stop = threading.Event()
-        stop.set()  # Stop immediately
+    def test_no_heartbeat_thread_and_no_heartbeat_statement(
+        self,
+        _run_entry_defaults: dict[str, Any],
+    ) -> None:
+        names_during_run: list[str] = []
 
+        def body() -> TaskResult[str, TaskError]:
+            # Longer than two of the beat intervals the child used to have.
+            time.sleep(0.3)
+            names_during_run.extend(thread.name for thread in threading.enumerate())
+            return TaskResult(ok='done')
+
+        def call(*args: Any, **kwargs: Any) -> TaskResult[str, TaskError]:
+            return body()
+
+        task = MagicMock(side_effect=call)
+        task.task_body_kind = TaskBodyKind.DEF
+        task.task_ok_type = str
+        task._original_fn = body
+        app = MagicMock()
+        app.tasks.__getitem__ = MagicMock(return_value=task)
         cursor = _FakeCursor()
-        conn = _FakeConn(cursor)
-        pool = _FakePool(conn)
+        patches: dict[str, Any] = {
+            'horsies.core.worker.child_runner._confirm_ownership_and_set_running': MagicMock(
+                return_value=None,
+            ),
+            'horsies.core.worker.child_runner.get_current_app': MagicMock(
+                return_value=app,
+            ),
+            'horsies.core.worker.child_runner._get_worker_pool': MagicMock(
+                return_value=_FakePool(_FakeConn(cursor)),
+            ),
+        }
 
-        with patch(
-            'horsies.core.worker.child_runner._get_worker_pool',
-            return_value=pool,
-        ):
-            thread = _start_heartbeat_thread(
-                task_id='t-1',
-                database_url='unused',
-                heartbeat_stop_event=stop,
-                worker_id='w-1',
-                runner_heartbeat_interval_ms=100,
-            )
+        with _apply_patches(patches):
+            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
 
-        assert thread.daemon is True
-        assert 'heartbeat' in thread.name
-        thread.join(timeout=2)
+        assert (ok, reason) == (True, None)
+        assert _parse_task_result(payload)['ok'] == 'done'
+        assert names_during_run
+        assert not any(name.startswith('heartbeat') for name in names_during_run)
+        statements = [' '.join(sql.split()) for sql, _ in cursor.queries]
+        assert not any('horsies_heartbeats' in sql for sql in statements)
+        assert any('SET finalizing_at = NOW()' in sql for sql in statements)
 
 
 # ===================================================================
@@ -2582,29 +2526,6 @@ class TestRunTaskEntryStoredTimeout:
             'min_ms': MIN_TASK_TIMEOUT_MS,
             'max_ms': MAX_TASK_TIMEOUT_MS,
         }
-
-    @pytest.mark.parametrize(
-        ('timeout', 'deadline_ms'),
-        [
-            (NoTimeout(), None),
-            (TaskTimeout(ms=5_000), 5_000),
-            (OptionsUnreadable(reason='stored task_options do not parse'), None),
-            (TimeoutValueInvalid(reason='stored timeout_ms is a bool'), None),
-        ],
-    )
-    def test_only_a_task_timeout_gives_the_heartbeat_a_deadline(
-        self,
-        _run_entry_defaults: dict[str, Any],
-        timeout: StoredTimeout,
-        deadline_ms: int | None,
-    ) -> None:
-        patches = _make_run_task_patches()
-        heartbeat = patches['horsies.core.worker.child_runner._start_heartbeat_thread']
-
-        with _apply_patches(patches):
-            _run_task_entry(**_run_entry_defaults, timeout=timeout)
-
-        assert heartbeat.call_args.args[-1] == deadline_ms
 
 
 # ===================================================================

@@ -530,7 +530,6 @@ class TestWorkflowCtx:
             args_json=args_json,
             kwargs_json=kwargs_json,
             task_id=task_id,
-            database_url=database_url,
             master_worker_id='test-worker',
             task_loop=TaskLoop(),
         )
@@ -600,7 +599,6 @@ class TestWorkflowCtx:
             args_json=args_json,
             kwargs_json=kwargs_json,
             task_id=task_id,
-            database_url=database_url,
             master_worker_id='test-worker',
             task_loop=TaskLoop(),
         )
@@ -673,7 +671,6 @@ class TestWorkflowCtx:
             args_json=args_json,
             kwargs_json=kwargs_json,
             task_id=task_id,
-            database_url=database_url,
             master_worker_id='test-worker',
             task_loop=TaskLoop(),
         )
@@ -961,7 +958,6 @@ class TestWorkflowCtx:
             args_json=args_json,
             kwargs_json=modified_kwargs_json,
             task_id=task_id,
-            database_url=database_url,
             master_worker_id='test-worker',
             task_loop=TaskLoop(),
         )

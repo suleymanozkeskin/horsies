@@ -37,6 +37,8 @@ INSTANCE = 'tests.e2e.tasks.instance_child_isolation:app'
 PREFETCH_INSTANCE = 'tests.e2e.tasks.instance_child_isolation_prefetch:app'
 SLOW_START_S = 60.0
 FINISH_TIMEOUT_S = 40.0
+# Past running_stale_threshold_ms of the isolation instance (5 s).
+GIL_HOLD_S = 8
 
 
 @dataclass(slots=True)
@@ -272,6 +274,50 @@ async def test_child_stops_when_the_parent_dies(
         os.kill(parent, signal.SIGKILL)
 
         await _until(lambda: not _alive(child), timeout_s=5.0)
+
+
+async def _beats_from_the_worker_process(broker: PostgresBroker, task_id: str) -> int:
+    """Runner beats that the worker process wrote. The child's first beat
+    names the child pid in its sender id; the worker's beats name the worker."""
+    async with current_resources(broker).session_factory() as session:
+        count = await session.scalar(
+            text("""
+                SELECT COUNT(*) FROM horsies_heartbeats
+                WHERE task_id = CAST(:id AS uuid)
+                  AND role = 'runner'
+                  AND position(':' IN sender_id) = 0
+            """),
+            {'id': task_id},
+        )
+    assert isinstance(count, int)
+    return count
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_a_task_that_holds_the_gil_is_not_failed_as_stale(
+    isolation_broker: PostgresBroker,
+) -> None:
+    """The worker process writes runner heartbeats, so C code that holds the
+    child's GIL past running_stale_threshold_ms (5 s here) cannot stop them."""
+    with _worker(
+        INSTANCE,
+        children=1,
+        ready_check=_ready_check(isolation.healthcheck),
+        timeout=SLOW_START_S,
+    ):
+        handle = unwrap_send(await isolation.gil_hold.send_async(seconds=GIL_HOLD_S))
+        await wait_for_status(
+            current_resources(isolation_broker).session_factory,
+            handle.task_id,
+            'COMPLETED',
+            timeout_s=FINISH_TIMEOUT_S,
+        )
+
+        assert await _beats_from_the_worker_process(
+            isolation_broker,
+            handle.task_id,
+        ) >= GIL_HOLD_S // 2
 
 
 @pytest.mark.e2e

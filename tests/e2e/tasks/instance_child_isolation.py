@@ -5,6 +5,7 @@ Short heartbeat and stale settings, so recovery paths finish inside a test.
 
 from __future__ import annotations
 
+import ctypes
 import multiprocessing
 import os
 import subprocess
@@ -66,6 +67,13 @@ def wait_refused_in_child() -> TaskResult[bool, TaskError]:
 @app.task(task_name='e2e_isolation_sleep')
 def sleep_task(*, seconds: float) -> TaskResult[str, TaskError]:
     time.sleep(seconds)
+    return TaskResult(ok=str(os.getpid()))
+
+
+@app.task(task_name='e2e_isolation_gil_hold')
+def gil_hold(*, seconds: int) -> TaskResult[str, TaskError]:
+    """Hold this child's GIL in C code: no other thread of the child runs."""
+    ctypes.PyDLL(None).sleep(seconds)
     return TaskResult(ok=str(os.getpid()))
 
 

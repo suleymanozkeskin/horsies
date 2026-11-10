@@ -182,7 +182,6 @@ def _frame(task_name: str, argument: str | None = None) -> RunFrame:
         args_json=None,
         kwargs_json=argument,
         worker_id='worker-1',
-        runner_heartbeat_interval_ms=30_000,
         is_workflow_task=False,
         timeout=NoTimeout(),
         claimed_at=None,
@@ -2070,7 +2069,7 @@ async def main():
         10,
     )
     await pool.start()
-    pool.submit(RunFrame('t', {task!r}, None, None, 'w', 30000, False, None, None))
+    pool.submit(RunFrame('t', {task!r}, None, None, 'w', False, None, None))
     await asyncio.sleep(0.3)
     print(pool._slots[0].child.pid, flush=True)
     await asyncio.sleep(60)

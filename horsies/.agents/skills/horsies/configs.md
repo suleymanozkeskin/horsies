@@ -520,7 +520,7 @@ to `AppConfig.retention` — see RetentionConfig below.
 | `crashed_worker_recovery_grace_ms` | `int` | `10_000` | 0–1hr | Grace before recovering a terminal workflow task whose progression was not applied; `0` disables; not heartbeat-coupled |
 | `check_interval_ms` | `int` | `30_000` | 1s–10min | Reaper poll cadence |
 | `orphan_task_audit_interval_ms` | `int` | `60_000` | 1s–24hr | Ms between bounded orphan workflow-task audit pages; the audit runs only when `auto_terminate_orphaned_workflow_tasks` is `True` |
-| `runner_heartbeat_interval_ms` | `int` | `30_000` | 1s–2min | Heartbeat from running task process |
+| `runner_heartbeat_interval_ms` | `int` | `30_000` | 1s–2min | How often the worker process writes the heartbeats of its RUNNING tasks, from one thread that does not run on its event loop |
 | `claimer_heartbeat_interval_ms` | `int` | `30_000` | 1s–2min | Heartbeat for CLAIMED tasks |
 | `worker_state_snapshot_interval_ms` | `int` | `30_000` | 1s–5min | How often each worker inserts a monitoring snapshot row into `horsies_worker_states` |
 | `phase2_quarantine_after_attempts` | `int` | `25` | 3–1000 | Recovery passes an unresolvable workflow-progression row may retain before its evidence moves to the quarantine table and discovery stops retrying it. A persistent raise counts too, and at the bound the workflow fails closed |
@@ -555,10 +555,12 @@ The 2x factor ensures a task can miss one full heartbeat cycle without being inc
 
 Runs on `check_interval_ms` cadence:
 1. CLAIMED tasks without heartbeat for `claimed_stale_threshold_ms` → requeued to PENDING (if enabled).
-2. RUNNING tasks without heartbeat for `running_stale_threshold_ms` → retry on `WORKER_CRASHED` policy or mark FAILED (if enabled). Recent `finalizing_at` and live parent worker state suppress this recovery.
+2. RUNNING tasks without heartbeat for `running_stale_threshold_ms` → retry on `WORKER_CRASHED` policy or mark FAILED (if enabled). Recent `finalizing_at` suppresses this recovery.
 3. Retention pruning every `retention_sweep_interval_s` seconds (default 5 min): deletes old worker_state rows (`worker_state_retention_hours`) and terminal workflow rows with their workflow task rows (`terminal_record_retention_hours`). Heartbeat rows and terminal task records are not deleted here; partition maintenance drops their expired partitions every `partition_maintenance_interval_s` seconds (default 15 min). Deletes run in `retention_delete_batch_size`-row batches (default 500, one transaction each) under a 60s per-pass budget; a larger backlog drains across consecutive passes.
 
-**CPU/GIL-heavy tasks:** Increase `running_stale_threshold_ms`. GIL-bound tasks may not send heartbeats at the configured interval. Rule of thumb: >= 3–5x worst-case heartbeat gap. The stale threshold is based on missing runner heartbeats, not total task duration.
+**Runner heartbeats:** the worker process writes them for each RUNNING task whose child process runs and holds it, fenced on the worker and the claim generation; the child writes only the first one, in the RUNNING transaction. A task that holds the GIL does not delay them, so CPU-bound tasks need no extra margin. Beats end at the kill of the child, its exit, its finalizing mark, or the read of its result. The stale threshold is based on missing runner heartbeats, not total task duration.
+
+**Fail-closed exit:** with `auto_fail_stale_running=True` (default), if the heartbeat thread dies, or no heartbeat lands for half of `running_stale_threshold_ms`, the worker kills every child that holds a task, stops, and exits with code 1 (code 77 if it has not stopped within 120 s). So the reaper does not fail a task that still runs. Under a slow database, raise `running_stale_threshold_ms`. With `auto_fail_stale_running=False`, or no recovery config, no reaper fails a RUNNING row: the worker logs failed writes (at most once per 60 s) and keeps running.
 
 
 ## RetentionConfig
