@@ -187,6 +187,8 @@ class TestRerunEndToEnd:
             assert row.args == '[1,"x"]'
             assert row.kwargs == '{"k":"v"}'
             assert row.task_options == '{"timeout_ms":5}'
+            # Options written before the execution class have no key.
+            assert row.execution == 'ISOLATED'
             assert row.max_retries == 0
             assert row.is_workflow_task is False
             # Lineage, atomic pair.
@@ -207,6 +209,33 @@ class TestRerunEndToEnd:
 
             after = await history_row_bytes(connection, source)
             assert before == after
+
+    @pytest.mark.asyncio
+    async def test_a_rerun_keeps_the_execution_class_of_the_request(
+        self, terminalization_schema: HistorySchema
+    ) -> None:
+        payload = encode_input_envelope_v1(
+            args=[],
+            kwargs={'k': 'v'},
+            options={
+                'timeout_ms': 1000,
+                'execution': 'SHARED_THREAD',
+                'cancel_grace_ms': None,
+            },
+        )
+        async with terminalization_schema.engine.begin() as connection:
+            await prepare_move_storage(connection, CLASS_KEY, duration_days=CLASS_DAYS)
+            source = await seed_failed_source(connection, prepared_inline=payload)
+
+            outcome = await rerun_task(
+                connection,
+                RerunTask(source_task_id=source, deadline=None),
+                policy(),
+            )
+
+            assert isinstance(outcome, RerunEnqueued)
+            row = await live_row(connection, outcome.new_task_id)
+            assert row.execution == 'SHARED_THREAD'
 
     @pytest.mark.asyncio
     async def test_rerun_of_a_rerun_keeps_the_root(
@@ -316,6 +345,30 @@ class TestRerunEndToEnd:
 
 
 class TestTypedRefusals:
+    @pytest.mark.asyncio
+    async def test_an_invalid_stored_execution_is_input_corrupt(
+        self, terminalization_schema: HistorySchema
+    ) -> None:
+        payload = encode_input_envelope_v1(
+            args=[], kwargs={}, options={'execution': 'PARALLEL'}
+        )
+        async with terminalization_schema.engine.begin() as connection:
+            await prepare_move_storage(connection, CLASS_KEY, duration_days=CLASS_DAYS)
+            source = await seed_failed_source(connection, prepared_inline=payload)
+            count_tasks = text('SELECT count(*) FROM horsies_tasks')
+            before = (await connection.execute(count_tasks)).scalar_one()
+
+            outcome = await rerun_task(
+                connection,
+                RerunTask(source_task_id=source, deadline=None),
+                policy(),
+            )
+
+            assert isinstance(outcome, RerunInputCorrupt)
+            assert outcome.task_id == source
+            assert 'stored task options: execution is not one of' in outcome.detail
+            assert (await connection.execute(count_tasks)).scalar_one() == before
+
     @pytest.mark.asyncio
     async def test_live_source_refuses(
         self, terminalization_schema: HistorySchema

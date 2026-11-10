@@ -2251,3 +2251,235 @@ class TestOrderingIndexMigration:
             assert await self._ordering_index_count(engine, finite_leaf) == 1
         finally:
             await engine.dispose()
+
+
+class TestExecutionClassMigration:
+    """v54: horsies_tasks.execution, its CHECK, and the class claim index.
+
+    A database at v53 has no column. The upgrade adds it with the constant
+    default, so the rows it holds read ISOLATED, and so do the rows that a
+    process of an earlier version writes after it. The CHECK is guarded on
+    its definition and the index is rebuilt to its exact form, so a database
+    that holds either in another form gets the declared one.
+    """
+
+    CLAIM_INDEX = 'idx_horsies_tasks_claim_pending_class'
+    CLAIM_KEY = '(queue_name, execution, priority, enqueued_at, id)'
+
+    async def _rewind(self, engine: AsyncEngine, version: int) -> None:
+        async with engine.connect() as connection:
+            await connection.execute(
+                text('DELETE FROM horsies_schema_version WHERE version > :v'),
+                {'v': version},
+            )
+            await connection.execute(
+                text(
+                    'INSERT INTO horsies_schema_version (version) '
+                    'VALUES (:v) ON CONFLICT DO NOTHING'
+                ),
+                {'v': version},
+            )
+            await connection.commit()
+
+    async def _demote_to_v53(self, engine: AsyncEngine) -> None:
+        """Remove the index and the column; the CHECK goes with the column."""
+        async with engine.connect() as connection:
+            await connection.execute(
+                text(f'DROP INDEX IF EXISTS {self.CLAIM_INDEX}')
+            )
+            await connection.execute(
+                text('ALTER TABLE horsies_tasks DROP COLUMN IF EXISTS execution')
+            )
+            await connection.commit()
+        await self._rewind(engine, 53)
+
+    async def _insert_old_writer_row(self, engine: AsyncEngine) -> str:
+        """A PENDING row from a writer that does not name the column."""
+        task_id = str(uuid.uuid4())
+        async with engine.connect() as connection:
+            await connection.execute(
+                text("""
+                    INSERT INTO horsies_tasks
+                      (id, task_name, queue_name, priority, status,
+                       enqueued_at, claimed, is_workflow_task, enqueue_sha,
+                       created_at, updated_at, retry_count, max_retries,
+                       retention_class_key, command_fingerprint_version,
+                       command_fingerprint, retain_rerun_input,
+                       prepared_rerun_input_disposition)
+                    VALUES
+                      (CAST(:id AS uuid), 'old_writer', 'default', 100,
+                       'PENDING', now(), false, false, :sha, now(), now(),
+                       0, 0, 'standard_30d', 1,
+                       sha256(convert_to(:id, 'UTF8')), false,
+                       'DECLINED_BY_POLICY')
+                """),
+                {'id': task_id, 'sha': '0' * 64},
+            )
+            await connection.commit()
+        return task_id
+
+    async def _stored_class(self, engine: AsyncEngine, task_id: str) -> str:
+        async with engine.connect() as connection:
+            return str(
+                (
+                    await connection.execute(
+                        text(
+                            'SELECT execution FROM horsies_tasks '
+                            'WHERE id = CAST(:id AS uuid)'
+                        ),
+                        {'id': task_id},
+                    )
+                ).scalar_one()
+            )
+
+    async def _column_shape(self, engine: AsyncEngine) -> tuple[str, bool, str]:
+        """(type, not null, default) of horsies_tasks.execution."""
+        async with engine.connect() as connection:
+            row = (
+                await connection.execute(
+                    text("""
+                        SELECT format_type(a.atttypid, a.atttypmod) AS type,
+                               a.attnotnull AS not_null,
+                               pg_get_expr(d.adbin, d.adrelid) AS default_value
+                        FROM pg_attribute AS a
+                        LEFT JOIN pg_attrdef AS d
+                          ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+                        WHERE a.attrelid = 'horsies_tasks'::regclass
+                          AND a.attname = 'execution'
+                          AND NOT a.attisdropped
+                    """)
+                )
+            ).one()
+        return str(row.type), bool(row.not_null), str(row.default_value)
+
+    async def _check_shape(self, engine: AsyncEngine) -> tuple[str, bool]:
+        """(definition, validated) of ck_horsies_tasks_execution."""
+        async with engine.connect() as connection:
+            row = (
+                await connection.execute(
+                    text("""
+                        SELECT pg_get_constraintdef(oid) AS definition,
+                               convalidated
+                        FROM pg_constraint
+                        WHERE conrelid = 'horsies_tasks'::regclass
+                          AND conname = 'ck_horsies_tasks_execution'
+                    """)
+                )
+            ).one()
+        return str(row.definition), bool(row.convalidated)
+
+    async def _index_shape(self, engine: AsyncEngine) -> tuple[str, bool]:
+        """(definition, valid) of the class claim index."""
+        async with engine.connect() as connection:
+            row = (
+                await connection.execute(
+                    text("""
+                        SELECT pg_get_indexdef(i.indexrelid) AS definition,
+                               i.indisvalid AS valid
+                        FROM pg_index AS i
+                        WHERE i.indexrelid = to_regclass(:name)
+                          AND i.indrelid = 'horsies_tasks'::regclass
+                    """),
+                    {'name': self.CLAIM_INDEX},
+                )
+            ).one()
+        return str(row.definition), bool(row.valid)
+
+    async def _assert_declared_shape(self, engine: AsyncEngine) -> None:
+        assert await _stored_version(engine) == SCHEMA_VERSION
+        column_type, not_null, default_value = await self._column_shape(engine)
+        assert column_type == 'text'
+        assert not_null
+        assert "'ISOLATED'" in default_value
+        definition, validated = await self._check_shape(engine)
+        assert validated, 'a NOT VALID constraint proves nothing about old rows'
+        for value in ('ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD'):
+            assert f"'{value}'" in definition, definition
+        index_definition, valid = await self._index_shape(engine)
+        assert valid
+        assert self.CLAIM_KEY in index_definition, index_definition
+        assert "'PENDING'" in index_definition, index_definition
+
+    async def test_a_fresh_database_is_born_with_the_declared_shape(
+        self,
+        scratch_database: str,
+    ) -> None:
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            await self._assert_declared_shape(engine)
+        finally:
+            await engine.dispose()
+
+    async def test_a_v53_database_gains_the_column_the_check_and_the_index(
+        self,
+        scratch_database: str,
+    ) -> None:
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            await self._demote_to_v53(engine)
+            existing = await self._insert_old_writer_row(engine)
+
+            await _migrate(scratch_database)
+
+            await self._assert_declared_shape(engine)
+            assert await self._stored_class(engine, existing) == 'ISOLATED'
+            later = await self._insert_old_writer_row(engine)
+            assert await self._stored_class(engine, later) == 'ISOLATED'
+        finally:
+            await engine.dispose()
+
+    async def test_a_check_with_another_domain_is_replaced(
+        self,
+        scratch_database: str,
+    ) -> None:
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            async with engine.connect() as connection:
+                await connection.execute(
+                    text(
+                        'ALTER TABLE horsies_tasks '
+                        'DROP CONSTRAINT ck_horsies_tasks_execution'
+                    )
+                )
+                await connection.execute(
+                    text(
+                        'ALTER TABLE horsies_tasks '
+                        'ADD CONSTRAINT ck_horsies_tasks_execution '
+                        "CHECK (execution IN ('ISOLATED'))"
+                    )
+                )
+                await connection.commit()
+            await self._rewind(engine, 53)
+
+            await _migrate(scratch_database)
+
+            await self._assert_declared_shape(engine)
+        finally:
+            await engine.dispose()
+
+    async def test_a_claim_index_in_another_form_is_rebuilt(
+        self,
+        scratch_database: str,
+    ) -> None:
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            async with engine.connect() as connection:
+                await connection.execute(text(f'DROP INDEX {self.CLAIM_INDEX}'))
+                await connection.execute(
+                    text(
+                        f'CREATE INDEX {self.CLAIM_INDEX} '
+                        'ON horsies_tasks (queue_name, priority)'
+                    )
+                )
+                await connection.commit()
+            await self._rewind(engine, 53)
+
+            await _migrate(scratch_database)
+
+            await self._assert_declared_shape(engine)
+        finally:
+            await engine.dispose()

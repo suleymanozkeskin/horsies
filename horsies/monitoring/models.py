@@ -19,6 +19,7 @@ from datetime import datetime
 from pydantic import BaseModel
 
 from horsies.core.history.reads.detail import TaskAbsenceReason
+from horsies.core.models.tasks import Execution
 
 
 class ErrorCategory(str, enum.Enum):
@@ -61,6 +62,9 @@ class LeafTaskInfo(BaseModel):
     ``queue_s`` is dispatch-to-start wait; ``exec_s`` is start-to-finish run
     time. Both are split so queue wait is never conflated with run time, and
     both are ``None`` when the span cannot be determined.
+
+    ``execution`` is the stored ``Execution`` of a live task, and ``None``
+    for a task read from history, which does not keep the class.
     """
 
     task_id: str
@@ -77,6 +81,7 @@ class LeafTaskInfo(BaseModel):
     exec_s: int | None
     worker_hostname: str | None
     good_until: datetime | None
+    execution: Execution | None
 
 
 class StatusCount(BaseModel):
