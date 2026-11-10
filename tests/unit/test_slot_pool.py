@@ -29,6 +29,7 @@ import pytest_asyncio
 from horsies.core.types.result import Err, Ok
 from horsies.core.worker.config import ChildPreload
 from horsies.core.worker.child_protocol import (
+    ChildFrame,
     InitFrame,
     ResultFrame,
     RssUnreadable,
@@ -764,6 +765,29 @@ class TestKill:
         handle.kill()
         lost = await _outcome(handle)
         assert isinstance(lost, ChildLost) and lost.partial_frame
+
+    async def test_a_child_killed_after_its_result_takes_no_next_task(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        """The kill lands after the result frame arrived, before the slot read it."""
+        pool = await pool_factory()
+        first = pool.submit(_frame('sleep', '0.2'))
+        await asyncio.wait_for(first.assigned, 5)
+        child = pool._slots[0].child
+        assert child is not None
+        deliver = child._protocol._on_frame
+
+        def deliver_then_kill(frame: ChildFrame) -> None:
+            deliver(frame)
+            assert first.kill() == KillSent()
+
+        child._protocol._on_frame = deliver_then_kill
+        second = pool.submit(_frame('echo', 'x'))
+
+        assert isinstance(await _outcome(first), TaskFinished)
+        assert child.killed_by_parent
+        assert await _result_json(second) == 'x'
 
     async def test_a_lost_channel_needs_a_bound_like_any_hang(
         self,

@@ -78,6 +78,10 @@ and there is no migration contract between pre-1.0 versions.
   the task id and pid at critical level. Stale-task recovery then takes the
   task. Before, the worker wrote `WORKER_CRASHED` or scheduled a retry at
   once, so the retry could run next to a child that was still alive.
+- **A child that the worker killed takes no next task.** A kill can land
+  after the child's result arrived and before the worker read it. The worker
+  then gave the next queued task to the dying child, and that task was lost
+  and requeued. Now the worker starts a new child for it.
 - **The cycle check of a `WorkflowSpec` takes time linear in its nodes and
   dependencies.** It scanned every node for each node that it removed. On an
   Apple M2 with Python 3.13, a spec of 10,000 nodes took about 7.5 s to build,

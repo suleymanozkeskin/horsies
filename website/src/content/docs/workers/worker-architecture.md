@@ -58,7 +58,7 @@ Each child holds one task, so a failure stays with that task.
 | The worker dies | Each child stops at once, also while C code holds the GIL. A subprocess that a task started keeps running, because the child cannot act after a SIGKILL |
 | A supervisor sends SIGTERM to every process | Running tasks continue, and the worker drains them |
 | A task forks a helper, then its child dies | The worker sees the death at once. The helper does not hide it |
-| A timeout fires as a task ends | The kill is bound to that task, so it cannot reach the next task |
+| A timeout fires as a task ends | The kill is bound to that task, so it cannot reach the next task. The killed child takes no next task |
 
 ## Execution Flow
 

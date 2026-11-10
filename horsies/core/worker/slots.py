@@ -1260,11 +1260,18 @@ class SlotPool:
             await slot.wake.wait()
 
     def _child_cannot_serve(self, child: Child) -> bool:
+        """A child that the parent killed takes no task.
+
+        The kill can land after the child's result frame arrived and before
+        the slot read it. The slot then reports that result, and the child is
+        still dying, not yet seen as exited.
+        """
         return (
             self._stopping
             or self._failure is not None
             or child.has_exited
             or child.channel_closed
+            or child.killed_by_parent
         )
 
     async def _run_task(
