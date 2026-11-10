@@ -2310,7 +2310,7 @@ class TestExecutionClassMigration:
                       (CAST(:id AS uuid), 'old_writer', 'default', 100,
                        'PENDING', now(), false, false, :sha, now(), now(),
                        0, 0, 'standard_30d', 1,
-                       sha256(convert_to(:id, 'UTF8')), false,
+                       sha256(convert_to(CAST(:id AS text), 'UTF8')), false,
                        'DECLINED_BY_POLICY')
                 """),
                 {'id': task_id, 'sha': '0' * 64},
