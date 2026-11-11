@@ -217,7 +217,10 @@ there is no migration contract between pre-1.0 versions.
     another task. No other retry moves to an isolated child.
   - A crash of a shared child that the worker did not cause ends every task
     in it through crash recovery (`WORKER_CRASHED`, or its retry), after the
-    worker saw the exit.
+    worker saw the exit. A task that returned before its deadline, and whose
+    left work the child reported stuck, ends with what it returned at every
+    end of its child whose exit the worker saw, also at an out-of-memory kill
+    or a crash.
   - A `SHARED_ASYNC` row without a usable stored `timeout_ms` or
     `cancel_grace_ms` fails with `WORKER_SERIALIZATION_ERROR` on every
     worker, after its RUNNING update and before the task resolves; the data

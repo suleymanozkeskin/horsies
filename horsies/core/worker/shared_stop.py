@@ -30,7 +30,8 @@ The verdict of each run at such a kill, whose exit the worker saw
 A run whose coroutine returned before its deadline, and whose left work the
 child reported stuck, gets ``ReturnedBeforeKill`` at every kill by the
 worker instead: what it returned. The slot gives that verdict before it
-asks ``verdict_at_kill``.
+asks ``verdict_at_kill``. At another end of the child whose exit the worker
+saw, such a run also ends with what it returned.
 
 A kill with no named cause names no new culprit: only a run that was
 already the named culprit of a stuck stop retries isolated at it. A crash of

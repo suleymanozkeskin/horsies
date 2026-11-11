@@ -501,8 +501,9 @@ class LeftoverCancelReported:
 class LeftoverStuckReported:
     """The child reported that the work this run left after its return did
     not stop after its cancel rounds. ``returned`` is what the coroutine
-    returned before its deadline: the outcome of the run at a kill of its
-    child. The run has no time left, and it is no culprit."""
+    returned before its deadline: the outcome of the run at any end of its
+    child whose exit the worker saw. The run has no time left, and it is no
+    culprit."""
 
     returned: SeatFinished
 
@@ -1892,38 +1893,49 @@ def _outcome_at_loss(
     closer: RunCulprit | NoCloseCulprit,
     lost: ChildLost,
     now: float,
-) -> SeatKilled | ChildLost:
+) -> SeatKilled | SeatTaskFinished | ChildLost:
     """The outcome of a run of a lost shared child.
 
-    A kill by the worker whose exit was seen gives the verdict of
+    An exit not seen gives the loss: the attempt may still run. With the
+    exit seen, a run stuck only in the work that it left after its return
+    gets what it returned, whatever ended the child: ``ReturnedBeforeKill``
+    at a kill by the worker, ``SeatTaskFinished`` at any other end. For any
+    other run, a kill by the worker gives the verdict of
     ``verdict_at_kill``; a verdict of the crash path gives the loss. The
     named culprit of a stuck stop of the child (a run that the child
     reported stuck, or ``closer``, the run that closed the child at its
-    deadline) retries isolated at every such kill. A run stuck only in the
-    work that it left after its return gets what it returned
-    (``ReturnedBeforeKill``) at such a kill instead. A death that the worker
-    did not cause, and an exit not seen, give the loss.
+    deadline) retries isolated at every such kill. A death that the worker
+    did not cause gives the loss.
     """
-    match lost.cause, lost.child_exit:
-        case LossCause.KILLED_BY_PARENT, ExitedWith() | KilledBySignal() as child_exit:
+    match lost.child_exit:
+        case ExitedWith() | KilledBySignal() as child_exit:
             pass
-        case _:
+        case ExitUnknown():
             return lost
-    match run.deadline:
-        case LeftoverStuckReported(returned=returned):
+        case _ as unreachable:
+            assert_never(unreachable)
+    match run.deadline, lost.cause:
+        case LeftoverStuckReported(returned=returned), LossCause.KILLED_BY_PARENT:
             return SeatKilled(
                 verdict=ReturnedBeforeKill(returned),
                 pid=lost.pid,
                 child_exit=child_exit,
             )
-        case (
-            DeadlineNotReported()
-            | DeadlineReported()
-            | SecondCancelReported()
-            | StuckReported()
-            | LeftoverCancelReported()
-        ):
+        case LeftoverStuckReported(returned=returned), _:
+            return SeatTaskFinished(
+                returned.ok,
+                returned.result_json,
+                returned.failed_reason,
+            )
+        case _, LossCause.KILLED_BY_PARENT:
             pass
+        case _, (
+            LossCause.CHILD_DIED
+            | LossCause.CHANNEL_LOST
+            | LossCause.PROTOCOL_VIOLATION
+            | LossCause.SLOT_DEFECT
+        ):
+            return lost
         case _ as unreachable:
             assert_never(unreachable)
     verdict = verdict_at_kill(

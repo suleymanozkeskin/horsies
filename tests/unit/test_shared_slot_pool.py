@@ -53,6 +53,7 @@ from horsies.core.worker.child_protocol import (
 from horsies.core.worker.live_dispatches import RegistryClosed
 from horsies.core.worker.config import ChildPreload
 from horsies.core.worker.slots import (
+    ExitUnknown,
     CHILD_KILL_WAIT_S,
     Assigned,
     BootAttemptsExhausted,
@@ -819,6 +820,33 @@ class TestWorkLeftAfterAReturn:
 
         assert _returned_pid(await _outcome(stuck)) == neighbour_pid
 
+    async def test_an_outside_kill_keeps_what_a_stuck_run_returned(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        """A neighbour with time left keeps the child alive, and a SIGKILL
+        from outside ends it, as an out-of-memory kill does. The worker saw
+        the exit, so the stuck run ends with what it returned, and only the
+        neighbour takes the crash path."""
+        pool = await pool_factory(_config(1, 2))
+        neighbour = pool.submit_shared(_request('sleep', '30'))
+        await asyncio.wait_for(asyncio.shield(neighbour.assigned), OUTCOME_TIMEOUT_S)
+        stuck = pool.submit_shared(
+            _request('leave_ignoring_cancels', grace_ms=MIN_CANCEL_GRACE_MS)
+        )
+        await _until(lambda: _run_stuck_in_left_work(pool, stuck.frame.dispatch))
+        child = pool._shared_slots[0].child
+        assert child is not None
+
+        os.kill(child.pid, signal.SIGKILL)
+
+        assert await _outcome(stuck) == SeatTaskFinished(True, str(child.pid), None)
+        match await _outcome(neighbour):
+            case ChildLost(cause=LossCause.CHILD_DIED):
+                pass
+            case other:
+                raise AssertionError(other)
+
     async def test_the_backstop_leaves_a_live_child_whose_left_work_is_stuck(
         self,
         pool_factory: PoolFactory,
@@ -1344,12 +1372,68 @@ class TestReturnedRunAtAKill:
         assert outcome == SeatKilled(ReturnedBeforeKill(RETURNED), 7, KilledBySignal(9))
 
     @pytest.mark.asyncio(loop_scope='function')
-    async def test_a_crash_the_worker_did_not_cause_takes_the_crash_path(self) -> None:
-        lost = ChildLost(LossCause.CHILD_DIED, KilledBySignal(9), False, 7)
+    @pytest.mark.parametrize(
+        'cause',
+        [
+            LossCause.CHILD_DIED,
+            LossCause.CHANNEL_LOST,
+            LossCause.PROTOCOL_VIOLATION,
+            LossCause.SLOT_DEFECT,
+        ],
+    )
+    async def test_an_end_the_worker_did_not_cause_keeps_what_the_task_returned(
+        self,
+        cause: LossCause,
+    ) -> None:
+        """An out-of-memory kill or a crash in the left work: the exit was
+        seen, so the attempt has ended, and what the task returned is its
+        outcome, not the crash path."""
+        lost = ChildLost(cause, KilledBySignal(9), False, 7)
 
         outcome = _outcome_at_loss(
             NoNamedKill(),
             self._run(LeftoverStuckReported(RETURNED)),
+            NoCloseCulprit(),
+            lost,
+            time.monotonic(),
+        )
+
+        assert outcome == SeatTaskFinished(
+            RETURNED.ok,
+            RETURNED.result_json,
+            RETURNED.failed_reason,
+        )
+
+    @pytest.mark.asyncio(loop_scope='function')
+    @pytest.mark.parametrize(
+        'cause',
+        [LossCause.KILLED_BY_PARENT, LossCause.CHILD_DIED],
+    )
+    async def test_an_exit_not_seen_takes_the_crash_path(
+        self,
+        cause: LossCause,
+    ) -> None:
+        """The left work may still run, so nothing is written for the run."""
+        lost = ChildLost(cause, ExitUnknown(), False, 7)
+
+        outcome = _outcome_at_loss(
+            NoNamedKill(),
+            self._run(LeftoverStuckReported(RETURNED)),
+            NoCloseCulprit(),
+            lost,
+            time.monotonic(),
+        )
+
+        assert outcome == lost
+
+    @pytest.mark.asyncio(loop_scope='function')
+    async def test_a_crash_the_worker_did_not_cause_takes_the_crash_path(self) -> None:
+        """A run that had not returned has no outcome of its own."""
+        lost = ChildLost(LossCause.CHILD_DIED, KilledBySignal(9), False, 7)
+
+        outcome = _outcome_at_loss(
+            NoNamedKill(),
+            self._run(LeftoverCancelReported()),
             NoCloseCulprit(),
             lost,
             time.monotonic(),
