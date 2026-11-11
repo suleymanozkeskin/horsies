@@ -11,21 +11,28 @@ loop with real child processes is covered in ``test_slot_pool``.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import contextlib
 import contextvars
 import dataclasses
 import logging
+import socket
 import threading
 import time
 from collections.abc import Callable
 from typing import Any, NoReturn
+from unittest.mock import MagicMock
 
 import pytest
 
+from horsies.core.types.result import Ok, Result
 from horsies.core.worker import child_main, shared_child
 from horsies.core.worker.child_inbox import ParentFrameInbox
+from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
 from horsies.core.worker.child_protocol import (
+    BootFailedFrame,
     ChildFrame,
+    InitFrame,
     MAX_LEFTOVER_TASK_NAMES,
     DeadlineFiredFrame,
     LeftoverStuckFrame,
@@ -1245,6 +1252,97 @@ class TestTheMarkerAtTheEnd:
 
         assert [dispatch for dispatch, _window in seats.markers] == [1]
         assert _kinds(writer, 1) == ['SharedResultFrame']
+
+
+class TestTheStartOfTheLoop:
+    """``_live``, the real caller of the start steps, on a real loop: the
+    marks survive a start hook that sets its own default executor."""
+
+    def test_work_in_the_executor_of_a_hook_holds_the_run(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A run sends a call to the default executor and returns without
+        awaiting it. The start hook replaced that executor; the run still
+        ends only when the call ends, on a thread of the hook's executor."""
+        ran_on: list[str] = []
+
+        def sync_call() -> None:
+            ran_on.append(threading.current_thread().name)
+            time.sleep(0.3)
+
+        async def leave_a_call() -> int:
+            _ = asyncio.get_running_loop().run_in_executor(None, sync_call)
+            return 1
+
+        seats = _ScriptedSeats({'leave_a_call': leave_a_call})
+
+        class _HookSetsItsExecutor:
+            async def start(
+                self,
+                init: InitFrame,
+            ) -> Result[shared_child.StartedSeats, BootFailedFrame]:
+                _ = init
+                asyncio.get_running_loop().set_default_executor(
+                    concurrent.futures.ThreadPoolExecutor(
+                        max_workers=4,
+                        thread_name_prefix='hook-pool',
+                    ),
+                )
+                return Ok(seats)
+
+        monkeypatch.setattr(shared_child, '_read_rss', _rss)
+        writer = _RecordingWriter()
+        inbox = ParentFrameInbox()
+        took_s: list[float] = []
+        parent_end, child_end = socket.socketpair()
+
+        async def scenario() -> None:
+            living = asyncio.ensure_future(
+                shared_child._live(
+                    child_end,
+                    MagicMock(),
+                    inbox,
+                    1,
+                    _HookSetsItsExecutor(),
+                    writer,  # type: ignore[arg-type]
+                ),
+            )
+            await _until(lambda: any(isinstance(f, ReadyFrame) for f in writer.frames))
+            sent = time.monotonic()
+            inbox.put(_frame(1, 'leave_a_call', grace_ms=5_000))
+            await _until(lambda: len(_results(writer)) == 1)
+            took_s.append(time.monotonic() - sent)
+            inbox.put(StopFrame())
+            await asyncio.wait_for(living, RUN_TIMEOUT_S)
+
+        try:
+            asyncio.run(scenario())
+        finally:
+            parent_end.close()
+            child_end.close()
+
+        assert ran_on and ran_on[0].startswith('hook-pool')
+        assert took_s[0] >= 0.25
+        assert _results(writer)[0].end == SeatFinished(True, '1', None)
+
+    def test_a_default_executor_that_is_not_a_thread_pool_fails_the_start(
+        self,
+        exits: list[tuple[str, int]],
+    ) -> None:
+        async def scenario() -> None:
+            seat_loop = SeatLoop(1, _RecordingWriter(), _rss)  # type: ignore[arg-type]
+            seat_loop.install_marks()
+            loop = asyncio.get_running_loop()
+            loop._default_executor = None  # pyright: ignore[reportAttributeAccessIssue]
+            with pytest.raises(_Exited):
+                seat_loop.keep_marks_after_hooks()
+
+        asyncio.run(scenario())
+
+        [(message, code)] = exits
+        assert code == CHILD_HOOK_FAILURE_EXIT_CODE
+        assert 'NoneType, not a ThreadPoolExecutor' in message
 
 
 class TestParentDefects:

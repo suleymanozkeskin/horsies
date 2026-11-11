@@ -17,10 +17,13 @@ start carries no mark.
   Python 3.12 and 3.13);
 - the default executor of the loop records each work item submitted with a
   mark: ``asyncio.to_thread``, ``loop.run_in_executor(None, ...)`` and
-  ``loop.getaddrinfo``.
+  ``loop.getaddrinfo``. A start hook that sets a default executor of its own
+  keeps this: after the hooks, ``track_executor_after_hooks`` wraps that
+  executor (``TrackedHookExecutor``).
 
-Not seen: threads and processes that a task starts itself, and work in an
-executor that the task created.
+Not seen: threads and processes that a task starts itself, work in an
+executor that the task created, and ``anyio.to_thread.run_sync`` work, which
+anyio runs on worker threads of its own, not in the default executor.
 
 The record of the factory spares the scan: the end check of a run scans
 only when no recorded task of the run is alive (``ScanWhen.RECORD_EMPTY``),
@@ -139,6 +142,21 @@ class _MarkingTaskFactory:
         return built
 
 
+def _record_if_marked(
+    marked: MarkedWork,
+    future: concurrent.futures.Future[Any],
+) -> None:
+    """Record ``future`` under the mark in the context of the caller, if
+    any."""
+    match RUN_MARK.get():
+        case RunMark() as mark:
+            marked.record_item(mark, future)
+        case Unmarked():
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 class TrackedExecutor(concurrent.futures.ThreadPoolExecutor):
     """The default executor of a shared async child: a ``ThreadPoolExecutor``
     with the asyncio defaults that records each work item submitted with a
@@ -156,14 +174,67 @@ class TrackedExecutor(concurrent.futures.ThreadPoolExecutor):
         **kwargs: P.kwargs,
     ) -> concurrent.futures.Future[T]:
         future = super().submit(fn, *args, **kwargs)
-        match RUN_MARK.get():
-            case RunMark() as mark:
-                self._marked.record_item(mark, future)
-            case Unmarked():
-                pass
-            case _ as unreachable:
-                assert_never(unreachable)
+        _record_if_marked(self._marked, future)
         return future
+
+
+class TrackedHookExecutor(concurrent.futures.ThreadPoolExecutor):
+    """The default executor that a start hook set, wrapped: each work item
+    runs in ``inner``, and an item submitted with a mark is recorded. The
+    loop takes only a ``ThreadPoolExecutor`` as its default executor, so the
+    wrapper is one; it starts no thread of its own."""
+
+    def __init__(
+        self,
+        marked: MarkedWork,
+        inner: concurrent.futures.ThreadPoolExecutor,
+    ) -> None:
+        super().__init__(max_workers=1, thread_name_prefix='asyncio-unused')
+        self._marked = marked
+        self._inner = inner
+
+    def submit(
+        self,
+        fn: Callable[P, T],
+        /,
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> concurrent.futures.Future[T]:
+        future = self._inner.submit(fn, *args, **kwargs)
+        _record_if_marked(self._marked, future)
+        return future
+
+    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+        self._inner.shutdown(wait=wait, cancel_futures=cancel_futures)
+        super().shutdown(wait=wait, cancel_futures=cancel_futures)
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutorKept:
+    """The default executor of the loop is still the one ``install`` set."""
+
+
+@dataclass(frozen=True, slots=True)
+class HookExecutorTracked:
+    """A start hook set a default executor of its own, of type
+    ``executor_type``. It is wrapped in ``TrackedHookExecutor`` and stays
+    the executor that runs the work."""
+
+    executor_type: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutorNotThreadPool:
+    """The default executor of the loop is not a ``ThreadPoolExecutor``
+    (``executor_type``; ``NoneType`` when it was removed). The public API of
+    the loop refuses such a value, so code set the attribute of the loop
+    directly. Its work cannot be tracked."""
+
+    executor_type: str
+
+
+type ExecutorAfterHooks = ExecutorKept | HookExecutorTracked | ExecutorNotThreadPool
+"""The default executor of the loop after the start hooks."""
 
 
 class MarkedWork:
@@ -185,6 +256,9 @@ class MarkedWork:
     ) -> None:
         self._loop = loop
         self._on_item_done = on_item_done
+        # The default executor that records work items. It starts no thread
+        # before its first submit.
+        self._executor: concurrent.futures.ThreadPoolExecutor = TrackedExecutor(self)
         self._tasks: dict[RunMark, weakref.WeakSet[asyncio.Task[Any]]] = {}
         self._items: dict[RunMark, set[concurrent.futures.Future[Any]]] = {}
         self._items_lock = threading.Lock()
@@ -195,7 +269,28 @@ class MarkedWork:
         self._loop.set_task_factory(
             _MarkingTaskFactory(self._loop.get_task_factory(), self._record_task),
         )
-        self._loop.set_default_executor(TrackedExecutor(self))
+        self._loop.set_default_executor(self._executor)
+
+    def track_executor_after_hooks(self) -> ExecutorAfterHooks:
+        """Keep the work items of each run recorded after the start hooks.
+
+        A hook that set a default executor of its own (for more threads than
+        the asyncio default) replaced the one of ``install``: that executor
+        is wrapped (``TrackedHookExecutor``) and set again. Reads the
+        default executor from the attribute of the loop that
+        ``set_default_executor`` writes (asyncio's ``BaseEventLoop``). Call
+        it once, after the hooks and before the first run.
+        """
+        current: object = getattr(self._loop, '_default_executor', None)
+        match current:
+            case _ if current is self._executor:
+                return ExecutorKept()
+            case concurrent.futures.ThreadPoolExecutor():
+                self._executor = TrackedHookExecutor(self, current)
+                self._loop.set_default_executor(self._executor)
+                return HookExecutorTracked(executor_type=type(current).__qualname__)
+            case _:
+                return ExecutorNotThreadPool(executor_type=type(current).__qualname__)
 
     def open(self, mark: RunMark) -> None:
         """Start the records of a new run. A mark in use is a defect."""

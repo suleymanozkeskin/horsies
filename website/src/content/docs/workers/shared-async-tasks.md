@@ -229,6 +229,7 @@ A seat that waits on the network holds at least one socket, and a process has a 
 ## Limits
 
 - A cancel ends coroutines, not threads. A thread that a task started, in the default executor or by itself, runs on after the cancel. Threads and processes that a task starts itself are not seen as its work.
+- A call in the default executor is seen as the work of its task, also when an `on_shared_async_child_start` hook set a default executor of its own (`loop.set_default_executor()`): after the hooks the child wraps that executor, which still runs the calls. `anyio.to_thread.run_sync()` work is not seen: anyio runs it on worker threads of its own, so a task that returns while such a call runs ends at once, and the call runs on.
 - A stuck task keeps its seat until every task left in its child is stuck, or until the worker stops and its drain timeout kills the child.
 - The worker holds what a task returned only from the end of its left work, or from the report that this work is stuck. A kill of the child before then (a blocked loop, a frozen child, the drain timeout at a stop) gives that task the verdict of a task that has not returned: within the grace, `TASK_TIMEOUT` past its deadline and the crash path before it; in the cancel rounds, the crash path.
 - A blocked loop delays every timeout of the child until the block ends, or until the worker kills the child.

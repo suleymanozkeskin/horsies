@@ -116,10 +116,14 @@ from horsies.core.worker.child_protocol import (
     boot_failed_frame,
 )
 from horsies.core.worker.loop_watchdog import LoopWatchdog
+from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
 from horsies.core.worker.run_mark import (
     RUN_MARK,
     UNMARKED,
     AliveWork,
+    ExecutorKept,
+    ExecutorNotThreadPool,
+    HookExecutorTracked,
     MarkedWork,
     RunMark,
     ScanWhen,
@@ -500,7 +504,8 @@ class SeatLoop:
     Build it on the running task loop. ``seats`` is the most runs at once.
     ``read_rss`` reads the RSS of the child for each result frame.
     ``install_marks`` sets the task factory and the default executor that
-    mark the work of each run: call it once, before the start hooks.
+    mark the work of each run: call it once, before the start hooks, and
+    ``keep_marks_after_hooks`` once after them.
     """
 
     def __init__(
@@ -519,6 +524,33 @@ class SeatLoop:
     def install_marks(self) -> None:
         """Mark the work of each run from now on (``MarkedWork.install``)."""
         self._marked.install()
+
+    def keep_marks_after_hooks(self) -> None:
+        """Keep the work items of each run recorded after the start hooks
+        (``MarkedWork.track_executor_after_hooks``). A hook that set its own
+        default executor is logged; a default executor that is not a
+        ``ThreadPoolExecutor`` fails the start of the child as a failed hook
+        does, with ``CHILD_HOOK_FAILURE_EXIT_CODE``."""
+        match self._marked.track_executor_after_hooks():
+            case ExecutorKept():
+                pass
+            case HookExecutorTracked(executor_type=executor_type):
+                logger.info(
+                    'A start hook set the default executor of the loop '
+                    '(%s); the child tracks the work of each task in it',
+                    executor_type,
+                )
+            case ExecutorNotThreadPool(executor_type=executor_type):
+                _exit_for_defect(
+                    'the default executor of the loop is a '
+                    f'{executor_type}, not a ThreadPoolExecutor, after the '
+                    'on_shared_async_child_start hooks: the work of a task in '
+                    'it cannot be tracked. Set it with '
+                    'loop.set_default_executor()',
+                    CHILD_HOOK_FAILURE_EXIT_CODE,
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
 
     async def serve(self, inbox: ParentFrameInbox, started: StartedSeats) -> None:
         """Take frames from ``inbox`` until the stop frame. Returns then.
@@ -1165,9 +1197,11 @@ async def _live(
     program: SeatProgram,
     writer: FrameWriter,
 ) -> None:
-    """Mark the work of each run, start the seats, start the loop watchdog,
-    report ready, serve until the stop frame, then stop the watchdog and
-    the seats. Runs on the task loop for the whole life of the child."""
+    """Mark the work of each run, start the seats (the start hooks run
+    there), keep the marks of a default executor that a hook set, start the
+    loop watchdog, report ready, serve until the stop frame, then stop the
+    watchdog and the seats. Runs on the task loop for the whole life of the
+    child."""
     seat_loop = SeatLoop(seats, writer, _read_rss)
     seat_loop.install_marks()
     match await program.start(init):
@@ -1175,6 +1209,7 @@ async def _live(
             pass
         case Err(failed):
             fail_boot(sock, failed)
+    seat_loop.keep_marks_after_hooks()
     gc.collect()
     watchdog = LoopWatchdog(asyncio.get_running_loop(), writer.send)
     match watchdog.start():

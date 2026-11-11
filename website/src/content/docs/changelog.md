@@ -206,6 +206,13 @@ there is no migration contract between pre-1.0 versions.
     other task before its deadline fails with the new
     `NEIGHBOUR_BLOCKED_LOOP`, and runs again only when `auto_retry_for`
     names that code; a task past its deadline fails with `TASK_TIMEOUT`.
+  - A call in the default executor stays the work of its task when an
+    `on_shared_async_child_start` hook set a default executor of its own:
+    after the hooks the child wraps that executor, which still runs the
+    calls. A default executor that is not a `ThreadPoolExecutor` after the
+    hooks (set past `loop.set_default_executor()`) ends the child with the
+    exit code of a failed hook. `anyio.to_thread.run_sync()` work is not
+    seen as the work of its task.
   - The watching thread names a task only when that task held the loop for
     the whole block: once the loop has not turned for 0.2 s it reads the
     task that runs every 0.1 s, and at the report, and names it only when

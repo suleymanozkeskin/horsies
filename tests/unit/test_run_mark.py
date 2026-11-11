@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import contextvars
 import threading
 from collections.abc import Coroutine
@@ -13,6 +14,9 @@ import pytest
 from horsies.core.worker.run_mark import (
     RUN_MARK,
     UNMARKED,
+    ExecutorKept,
+    ExecutorNotThreadPool,
+    HookExecutorTracked,
     MarkedWork,
     RunMark,
     ScanWhen,
@@ -169,6 +173,74 @@ class TestMarkedWork:
             assert marked.alive(MARK, own, ScanWhen.ALWAYS).is_empty()
             gate.set()
             await own
+
+        _run(scenario())
+
+
+class TestTheExecutorAfterHooks:
+    """``track_executor_after_hooks``: a start hook that sets its own
+    default executor keeps the work of each run tracked."""
+
+    def test_the_executor_of_install_is_kept(self) -> None:
+        async def scenario() -> None:
+            loop = asyncio.get_running_loop()
+            marked = MarkedWork(loop, lambda _mark: None)
+            marked.install()
+
+            assert marked.track_executor_after_hooks() == ExecutorKept()
+
+        _run(scenario())
+
+    def test_the_executor_of_a_hook_is_wrapped_and_runs_the_work(self) -> None:
+        async def scenario() -> None:
+            loop = asyncio.get_running_loop()
+            marked = MarkedWork(loop, lambda _mark: None)
+            marked.install()
+            # An on_shared_async_child_start hook that wants more threads.
+            hook_pool = concurrent.futures.ThreadPoolExecutor(
+                max_workers=4,
+                thread_name_prefix='hook-pool',
+            )
+            loop.set_default_executor(hook_pool)
+
+            tracked = marked.track_executor_after_hooks()
+
+            assert tracked == HookExecutorTracked(executor_type='ThreadPoolExecutor')
+            marked.open(MARK)
+            release = threading.Event()
+            started = threading.Event()
+            ran_on: list[str] = []
+
+            def sync_call() -> None:
+                ran_on.append(threading.current_thread().name)
+                started.set()
+                release.wait(WAIT_S)
+
+            async def run_body() -> asyncio.Future[None]:
+                return loop.run_in_executor(None, sync_call)
+
+            own = loop.create_task(run_body(), context=_marked(MARK))
+            item = await own
+            await asyncio.to_thread(started.wait, WAIT_S)
+            assert marked.alive(MARK, own, ScanWhen.ALWAYS).executor_items == 1
+            release.set()
+            await item
+            assert ran_on[0].startswith('hook-pool')
+            while marked.alive(MARK, own, ScanWhen.ALWAYS).executor_items:
+                await asyncio.sleep(0.001)
+
+        _run(scenario())
+
+    def test_a_default_executor_that_is_not_a_thread_pool_is_reported(self) -> None:
+        async def scenario() -> None:
+            loop = asyncio.get_running_loop()
+            marked = MarkedWork(loop, lambda _mark: None)
+            marked.install()
+            loop._default_executor = None  # pyright: ignore[reportAttributeAccessIssue]
+
+            assert marked.track_executor_after_hooks() == ExecutorNotThreadPool(
+                executor_type='NoneType',
+            )
 
         _run(scenario())
 
