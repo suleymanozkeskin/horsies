@@ -630,13 +630,15 @@ there is no migration contract between pre-1.0 versions.
   interval above 120,000 ms made a live worker read as not live between its
   snapshots: the fleet check reported its streams as unserved, and the web UI
   marked it stale.
-- **horsies requires psycopg 3.3.6 or later.** The floor of `psycopg`, and
+- **horsies requires psycopg 3.3.7 or later.** The floor of `psycopg`, and
   of `psycopg-binary` and `psycopg-c` (the `pg-binary` and `pg-c` extras), is
-  3.3.6, up from 3.3.2. When a running query is interrupted by a cancelled
-  asyncio task, `KeyboardInterrupt` or `SystemExit`, psycopg 3.3.6 waits at
-  most 10 s: up to 5 s to send the cancel request and up to 5 s for the query
-  to end. Then it closes the connection. Before 3.3.6, psycopg waited for the
-  query to end with no limit. The 5 s limit on the cancel request needs
+  3.3.7, up from 3.3.2. When a running query is interrupted by a cancelled
+  asyncio task, `KeyboardInterrupt` or `SystemExit`, psycopg 3.3.6 and later
+  wait at most 10 s: up to 5 s to send the cancel request and up to 5 s for
+  the query to end. Then they close the connection. Before 3.3.6, psycopg
+  waited for the query to end with no limit. 3.3.7 also sends the cancel
+  request when the cancel connection is not ready at once; 3.3.6 skipped the
+  request in that case. The 5 s limit on the cancel request needs
   libpq 17 or later; with an older libpq, psycopg sends the cancel with a
   blocking call that has no limit. `psycopg-binary` bundles its own libpq.
 
