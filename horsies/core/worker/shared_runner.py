@@ -13,6 +13,7 @@ body, the finalizing marker. Every write goes through the async pool
 
 from __future__ import annotations
 
+import asyncio
 import os
 import threading
 from collections.abc import Callable, Coroutine
@@ -24,7 +25,6 @@ from psycopg_pool import AsyncConnectionPool
 from horsies.core.logging import get_logger
 from horsies.core.models.boot_failure import ChildPoolSetupFailed
 from horsies.core.models.tasks import TaskError, TaskResult
-from horsies.core.task_decorator import await_task_call_in_worker
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.child_main import (
     boot_failure_from_exception,
@@ -160,19 +160,52 @@ async def _seat_call_result(
     """Await the coroutine of an ``async def`` task call on the running loop.
 
     A ``CancelledError`` that leaves the coroutine goes through
-    ``map_exception``, the mapping of the task
-    (``await_task_call_in_worker``). A seat runs only ``async def`` tasks,
-    whose wrapper returns a coroutine; ``_prepare_task_call`` refused the
-    others. Another value is a defect: ``AssertionError``.
+    ``map_exception``, the mapping of the task, as in
+    ``await_task_call_in_worker``. A call that returns while a cancel
+    request is left on the seat task ends as a cancel too
+    (``_without_left_cancel``). A seat runs only ``async def`` tasks, whose
+    wrapper returns a coroutine; ``_prepare_task_call`` refused the others.
+    Another value is a defect: ``AssertionError``.
     """
     match called:
         case Coroutine():
-            return await await_task_call_in_worker(called, map_exception)
+            try:
+                out = await called
+            except asyncio.CancelledError as exc:
+                return map_exception(exc)
+            return _without_left_cancel(out, map_exception)
         case _:
             raise AssertionError(
                 f'task wrapper of {task_name!r} returned {type(called).__name__} '
                 'on a shared async seat',
             )
+
+
+def _without_left_cancel(
+    out: TaskResult[Any, TaskError],
+    map_exception: Callable[[BaseException], TaskResult[Any, TaskError]],
+) -> TaskResult[Any, TaskError]:
+    """Clear a cancel request that a returned call left on the seat task.
+
+    A body can cancel its own task (``asyncio.current_task().cancel()``, or
+    a ``call_later`` of that cancel) and return before an ``await`` takes
+    the cancel. The seat task would then end cancelled before its deadline.
+    The requests (``Task.cancelling()``) are cleared here, and the call
+    ends as a cancel of the body: ``map_exception`` maps a
+    ``CancelledError``, as for a cancel that reached the body at an
+    ``await``. A body that caught a cancel and did not call ``uncancel()``
+    leaves its request too, and ends the same way. A request of a deadline
+    cancel changes nothing: the seat loop ends that run with the timeout.
+    With no request left, ``out`` returns unchanged.
+    """
+    seat_task = asyncio.current_task()
+    assert seat_task is not None, 'a seat call runs in its seat task'
+    left_requests = seat_task.cancelling()
+    if left_requests == 0:
+        return out
+    for _ in range(left_requests):
+        _ = seat_task.uncancel()
+    return map_exception(asyncio.CancelledError())
 
 
 async def run_seat_task(

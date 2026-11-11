@@ -211,6 +211,10 @@ and there is no migration contract between pre-1.0 versions.
   - A crash of a shared child that the worker did not cause ends every task
     in it through crash recovery (`WORKER_CRASHED`, or its retry), after the
     worker saw the exit.
+  - A task that cancels its own asyncio task and returns before an `await`
+    takes the cancel ends as that cancel, through its exception mapper, as
+    a cancel that reaches the body at an `await` does. The request is
+    cleared, so the seat does not end cancelled, and the child serves on.
   - A `SHARED_ASYNC` row without a usable stored `timeout_ms` or
     `cancel_grace_ms` fails with `WORKER_SERIALIZATION_ERROR` on every
     worker, after its RUNNING update and before the task resolves; the data
