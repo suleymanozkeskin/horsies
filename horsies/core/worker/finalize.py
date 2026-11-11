@@ -273,6 +273,10 @@ class FinalizeMixin:
             killed: SeatKilled,
             work: SharedWork,
             claimed_at: Optional[datetime],
+            *,
+            queue_name: str,
+            is_workflow_task: bool,
+            task_name: str,
         ) -> Result[None, _FinalizeError]: ...
         async def _requeue_claimed_task(
             self,
@@ -595,8 +599,10 @@ class FinalizeMixin:
         run without a deadline, so a ``SeatRefusal`` never ends that way:
         ``AssertionError``. A child that the worker killed for another named
         cause or after the deadline of the run gives its verdict
-        (``_finalize_killed_run``). A lost child takes crash recovery, which
-        writes only after the exit of the child was seen.
+        (``_finalize_killed_run``); a run that returned before its deadline
+        and was stuck only in the work that it left writes what it returned.
+        A lost child takes crash recovery, which writes only after the exit
+        of the child was seen.
         """
         outcome = await self._await_shared_outcome(handle, task_id, work)
         match outcome:
@@ -631,6 +637,9 @@ class FinalizeMixin:
                     outcome,
                     work,
                     claimed_at,
+                    queue_name=queue_name,
+                    is_workflow_task=is_workflow_task,
+                    task_name=task_name,
                 )
             case NotDispatched(cause=cause):
                 return await self._requeue_not_dispatched(task_id, cause, claimed_at)

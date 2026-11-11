@@ -9,9 +9,12 @@ exit, so the attempt has ended before its row moves:
 - ``BlockedTheLoop``: ``TASK_BLOCKED_LOOP``, with its retry in an isolated
   child;
 - ``BesideBlockedLoop``: ``NEIGHBOUR_BLOCKED_LOOP``, with its retry in its
-  class.
+  class;
+- ``ReturnedBeforeKill``: what the task returned before its deadline,
+  through ``_finalize_task_result``, the writer of every result.
 
-The last two go through ``_recover_worker_future_failure``, the writer of
+``BlockedTheLoop`` and ``BesideBlockedLoop`` go through
+``_recover_worker_future_failure``, the writer of
 crash recovery: a row that is still CLAIMED (no user code ran) returns to
 the queue, and a RUNNING row gets its retry when its policy names the code,
 else fails with it. Worker-internal mixin: the ``TYPE_CHECKING`` block
@@ -29,6 +32,7 @@ from horsies.core.logging import get_logger
 from horsies.core.models.tasks import OperationalErrorCode
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.child_protocol import (
+    SeatFinished,
     SeatRefusal,
     SeatTask,
     SharedWork,
@@ -43,6 +47,7 @@ from horsies.core.worker.shared_stop import (
     BesideBlockedLoop,
     BlockedTheLoop,
     RetryPlacement,
+    ReturnedBeforeKill,
     TimedOutAtKill,
 )
 from horsies.core.worker.slots import SeatKilled, describe_exit
@@ -58,6 +63,18 @@ class SharedKillFinalizeMixin:
 
     if TYPE_CHECKING:
         # Cross-concern methods provided by sibling mixins.
+        async def _finalize_task_result(
+            self,
+            task_id: str,
+            ok: bool,
+            result_json_str: str,
+            failed_reason: str | None,
+            *,
+            queue_name: str,
+            is_workflow_task: bool,
+            task_name: str,
+            claimed_at: Optional[datetime],
+        ) -> Result[None, _FinalizeError]: ...
         async def _finalize_shared_timeout(
             self,
             task_id: str,
@@ -91,6 +108,10 @@ class SharedKillFinalizeMixin:
         killed: SeatKilled,
         work: SharedWork,
         claimed_at: Optional[datetime],
+        *,
+        queue_name: str,
+        is_workflow_task: bool,
+        task_name: str,
     ) -> Result[None, _FinalizeError]:
         """Write the verdict of a run whose child the worker killed and saw
         exit. A refusal has no deadline, so the slot never gives it
@@ -98,30 +119,10 @@ class SharedKillFinalizeMixin:
         killed_by = f'pid={killed.pid}, {describe_exit(killed.child_exit)}'
         match killed.verdict:
             case TimedOutAtKill(retry=retry):
-                match work:
-                    case (
-                        SeatTask(timeout_ms=timeout_ms)
-                        | ThreadSeatTask(timeout_ms=timeout_ms)
-                    ):
-                        pass
-                    case SeatRefusal():
-                        raise AssertionError(
-                            f'the refused task {task_id} was killed past a '
-                            'deadline it does not have',
-                        )
-                    case _ as unreachable:
-                        assert_never(unreachable)
-                logger.warning(
-                    'Task %s was past its timeout_ms=%s when the worker killed its '
-                    'shared child (%s); it fails with TASK_TIMEOUT, retry %s',
+                return await self._finalize_timed_out_at_kill(
                     task_id,
-                    timeout_ms,
                     killed_by,
-                    retry.value,
-                )
-                return await self._finalize_shared_timeout(
-                    task_id,
-                    timeout_ms,
+                    work,
                     claimed_at,
                     retry,
                 )
@@ -151,8 +152,69 @@ class SharedKillFinalizeMixin:
                     OperationalErrorCode.NEIGHBOUR_BLOCKED_LOOP,
                     RetryPlacement.SAME_CLASS,
                 )
+            case ReturnedBeforeKill(
+                returned=SeatFinished(
+                    ok=ok, result_json=result_json, failed_reason=failed
+                ),
+            ):
+                logger.debug(
+                    'Task %s returned before its deadline, and the worker killed '
+                    'its shared child (%s) while work that it left was stuck; '
+                    'what it returned is written',
+                    task_id,
+                    killed_by,
+                )
+                return await self._finalize_task_result(
+                    task_id,
+                    ok,
+                    result_json,
+                    failed,
+                    queue_name=queue_name,
+                    is_workflow_task=is_workflow_task,
+                    task_name=task_name,
+                    claimed_at=claimed_at,
+                )
             case _ as unreachable:
                 assert_never(unreachable)
+
+    async def _finalize_timed_out_at_kill(
+        self,
+        task_id: str,
+        killed_by: str,
+        work: SharedWork,
+        claimed_at: Optional[datetime],
+        retry: RetryPlacement,
+    ) -> Result[None, _FinalizeError]:
+        """Write ``TASK_TIMEOUT`` for a run that was past its deadline at the
+        kill of its child (``killed_by``). A refusal has no deadline:
+        ``AssertionError``."""
+        match work:
+            case (
+                SeatTask(timeout_ms=timeout_ms)
+                | ThreadSeatTask(timeout_ms=timeout_ms)
+            ):
+                pass
+            case SeatRefusal():
+                raise AssertionError(
+                    f'the refused task {task_id} was killed past a '
+                    'deadline it does not have',
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
+        logger.warning(
+            'Task %s was past its timeout_ms=%s when the worker killed its '
+            'shared child (%s); it fails with TASK_TIMEOUT, retry %s',
+            task_id,
+            timeout_ms,
+            killed_by,
+            retry.value,
+        )
+        return await self._finalize_shared_timeout(
+            task_id,
+            timeout_ms,
+            claimed_at,
+            retry,
+        )
 
     async def _fail_killed_run(
         self,

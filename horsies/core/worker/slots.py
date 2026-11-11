@@ -100,6 +100,8 @@ from horsies.core.worker.child_protocol import (
     ChildKind,
     FrameOverBound,
     InitFrame,
+    LeftoverCancelFrame,
+    LeftoverStuckFrame,
     LoopHoldsNoTask,
     LoopHoldsTasks,
     MalformedFrame,
@@ -144,6 +146,7 @@ from horsies.core.worker.shared_stop import (
     LoopHolderUnknown,
     NoNamedKill,
     RetryPlacement,
+    ReturnedBeforeKill,
     StopState,
     retry_placement,
     verdict_at_kill,
@@ -316,7 +319,10 @@ class SeatDeadlineEnded:
 @dataclass(frozen=True, slots=True)
 class SeatKilled:
     """The worker killed the child of this run for a named cause or after
-    its deadline, and saw its exit. ``verdict`` decides the outcome."""
+    its deadline, and saw its exit. ``verdict`` decides the outcome. A run
+    that returned before its deadline and was stuck only in the work that it
+    left gets ``ReturnedBeforeKill`` at every such kill, also at the kill
+    when no run in its child had time left."""
 
     verdict: KilledRunVerdict
     pid: int
@@ -456,6 +462,7 @@ class CloseReason(str, Enum):
     POOL_STOPPING = 'the worker is stopping'
     SECOND_CANCEL = 'a task needed a second cancel'
     LOOP_BLOCKED = 'a task blocked the event loop'
+    LEFTOVER_WORK = 'work that a task left after its return needed a cancel'
 
 
 @dataclass(frozen=True, slots=True)
@@ -481,17 +488,43 @@ class StuckReported:
     and its cancel rounds. The run is a culprit: its retry runs isolated."""
 
 
+@dataclass(frozen=True, slots=True)
+class LeftoverCancelReported:
+    """The child reported that the coroutine of this run returned before its
+    deadline, and that work it left was alive at the end of its cancel
+    grace: the child cancels that work in rounds. The deadline no longer
+    applies to the run, and the child is closed."""
+
+
+@dataclass(frozen=True, slots=True)
+class LeftoverStuckReported:
+    """The child reported that the work this run left after its return did
+    not stop after its cancel rounds. ``returned`` is what the coroutine
+    returned before its deadline: the outcome of the run at a kill of its
+    child. The run has no time left, and it is no culprit."""
+
+    returned: SeatFinished
+
+
 DeadlineReport: TypeAlias = (
-    DeadlineNotReported | DeadlineReported | SecondCancelReported | StuckReported
+    DeadlineNotReported
+    | DeadlineReported
+    | SecondCancelReported
+    | StuckReported
+    | LeftoverCancelReported
+    | LeftoverStuckReported
 )
+"""What the child reported about the stop of a run: the steps after its
+deadline, or the steps after a return that left work alive."""
 
 
 def _deadline_reported(report: DeadlineReport) -> bool:
-    """Whether the child reported that the deadline of a run passed."""
+    """Whether the child reported that the deadline of a run passed. A run
+    whose coroutine returned before its deadline has none that passed."""
     match report:
         case DeadlineReported() | SecondCancelReported() | StuckReported():
             return True
-        case DeadlineNotReported():
+        case DeadlineNotReported() | LeftoverCancelReported() | LeftoverStuckReported():
             return False
         case _ as unreachable:
             assert_never(unreachable)
@@ -501,20 +534,26 @@ def _out_of_time(kind: SharedChildKind, report: DeadlineReport) -> bool:
     """Whether a run has no time left. A run of a shared thread child has
     none once its deadline passed: a thread cannot be cancelled. A run of a
     shared async child has none once it is stuck: it did not stop after its
-    second cancel and its cancel rounds."""
+    second cancel and its cancel rounds, or the work that it left after its
+    return did not stop after its cancel rounds."""
     match kind, report:
         case SharedThreadChild(), (
             DeadlineNotReported()
             | DeadlineReported()
             | SecondCancelReported()
             | StuckReported()
+            | LeftoverCancelReported()
+            | LeftoverStuckReported()
         ):
             return _deadline_reported(report)
-        case SharedAsyncChild(), StuckReported():
+        case SharedAsyncChild(), StuckReported() | LeftoverStuckReported():
             return True
         case (
             SharedAsyncChild(),
-            DeadlineNotReported() | DeadlineReported() | SecondCancelReported(),
+            DeadlineNotReported()
+            | DeadlineReported()
+            | SecondCancelReported()
+            | LeftoverCancelReported(),
         ):
             return False
         case _ as unreachable:
@@ -524,9 +563,12 @@ def _out_of_time(kind: SharedChildKind, report: DeadlineReport) -> bool:
 @dataclass(slots=True)
 class _SeatRun:
     """One task in flight on a shared child. ``deadline`` moves forward, one
-    report at a time, in the order of the ``DeadlineReport`` members.
-    ``sent_at`` is the monotonic time of the send: the deadline of the run
-    in the child is ``timeout_ms`` after a start that is not earlier."""
+    report at a time: from ``DeadlineNotReported`` through the steps after
+    the deadline (``DeadlineReported``, ``SecondCancelReported``,
+    ``StuckReported``), or through the steps after a return that left work
+    (``LeftoverCancelReported``, ``LeftoverStuckReported``). ``sent_at`` is
+    the monotonic time of the send: the deadline of the run in the child is
+    ``timeout_ms`` after a start that is not earlier."""
 
     handle: SharedHandle
     held: HoldOutcome
@@ -594,9 +636,11 @@ class Open:
 @dataclass(frozen=True, slots=True)
 class Closing:
     """The shared child takes no new task. Its tasks in flight finish, then
-    it retires and a new child boots. A shared thread child closed at a
-    deadline (``ClosedAtDeadline``) is killed as soon as every task in
-    flight is past its deadline."""
+    it retires and a new child boots. A closing child is killed as soon as
+    no task in flight has time left (``SeatRuns.all_out_of_time``): a shared
+    thread child closed at a deadline (``ClosedAtDeadline``) once every task
+    in flight is past its deadline, a shared async child once every task in
+    flight is stuck."""
 
     reason: CloseReason | ClosedAtDeadline
     runs: SeatRuns
@@ -1403,11 +1447,18 @@ class _SeatBinding:
 def _due_step_reported(work: SharedWork, report: DeadlineReport) -> bool:
     """Whether the child reported the step of the stop of a run that is due
     at its backstop: the deadline of a thread task, the second cancel of an
-    async task. A refusal has no stop, so it reports none."""
+    async task. An async task that returned before its deadline has a
+    leftover cancel before then, which counts the same. A refusal has no
+    stop, so it reports none."""
     match work, report:
         case ThreadSeatTask(), _:
             return _deadline_reported(report)
-        case SeatTask(), SecondCancelReported() | StuckReported():
+        case SeatTask(), (
+            SecondCancelReported()
+            | StuckReported()
+            | LeftoverCancelReported()
+            | LeftoverStuckReported()
+        ):
             return True
         case SeatTask(), DeadlineNotReported() | DeadlineReported():
             return False
@@ -1428,7 +1479,12 @@ def _reported_in(
         case ThreadSeatTask():
             steps: tuple[type[ChildFrame], ...] = (DeadlineFiredFrame,)
         case SeatTask():
-            steps = (SecondCancelFrame, RunStuckFrame)
+            steps = (
+                SecondCancelFrame,
+                RunStuckFrame,
+                LeftoverCancelFrame,
+                LeftoverStuckFrame,
+            )
         case SeatRefusal():
             steps = ()
         case _ as unreachable:
@@ -1714,10 +1770,13 @@ def shared_recycle_reason(
 def _deadline_state(run: _SeatRun, now: float) -> DeadlineState:
     """Whether the deadline of a run passed: the child reported it, or
     ``timeout_ms`` passed since the send. The child starts the run after the
-    send, so its own deadline is not earlier."""
+    send, so its own deadline is not earlier. A run whose coroutine
+    returned before its deadline has no deadline that passed."""
     match run.deadline:
         case DeadlineReported() | SecondCancelReported() | StuckReported():
             return DeadlineState.PASSED
+        case LeftoverCancelReported() | LeftoverStuckReported():
+            return DeadlineState.PENDING
         case DeadlineNotReported():
             pass
         case _ as unreachable:
@@ -1733,8 +1792,14 @@ def _deadline_state(run: _SeatRun, now: float) -> DeadlineState:
             assert_never(unreachable)
 
 
-def _stop_state(run: _SeatRun) -> StopState:
-    match run.deadline:
+def _stop_state(
+    report: DeadlineNotReported
+    | DeadlineReported
+    | SecondCancelReported
+    | StuckReported,
+) -> StopState:
+    """Whether a run that ended at its timeout was reported stuck."""
+    match report:
         case StuckReported():
             return StopState.STUCK
         case DeadlineNotReported() | DeadlineReported() | SecondCancelReported():
@@ -1752,14 +1817,33 @@ def _outcome_at_loss(
     """The outcome of a run of a lost shared child.
 
     A kill by the worker whose exit was seen gives the verdict of
-    ``verdict_at_kill``; a verdict of the crash path gives the loss. A death
-    that the worker did not cause, and an exit not seen, give the loss.
+    ``verdict_at_kill``; a verdict of the crash path gives the loss. A run
+    stuck only in the work that it left after its return gets what it
+    returned (``ReturnedBeforeKill``) at such a kill instead. A death that
+    the worker did not cause, and an exit not seen, give the loss.
     """
     match lost.cause, lost.child_exit:
         case LossCause.KILLED_BY_PARENT, ExitedWith() | KilledBySignal() as child_exit:
             pass
         case _:
             return lost
+    match run.deadline:
+        case LeftoverStuckReported(returned=returned):
+            return SeatKilled(
+                verdict=ReturnedBeforeKill(returned),
+                pid=lost.pid,
+                child_exit=child_exit,
+            )
+        case (
+            DeadlineNotReported()
+            | DeadlineReported()
+            | SecondCancelReported()
+            | StuckReported()
+            | LeftoverCancelReported()
+        ):
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
     verdict = verdict_at_kill(
         kill,
         run.handle.frame.dispatch,
@@ -1775,15 +1859,19 @@ def _outcome_at_loss(
 def _killed_past_deadline(
     kind: SharedChildKind,
     run: _SeatRun,
-    closer: RunCulprit,
+    reason: CloseReason | ClosedAtDeadline,
     lost: ChildLost,
-) -> ChildKilledPastDeadlines | ChildLost:
+) -> ChildKilledPastDeadlines | SeatKilled | ChildLost:
     """The outcome of a run of a child killed when no run had time left.
 
     With the exit seen: ``ChildKilledPastDeadlines``, whose culprit retries
-    isolated. In a thread child the culprit is ``closer``, the run whose
-    deadline closed the child. In an async child each run left is stuck,
-    and each is the culprit of its own stop. With no exit seen: the loss.
+    isolated. In a thread child each run is past its deadline, and the
+    culprit is the run whose deadline closed the child (``reason``). In an
+    async child each run left is stuck: a run stuck after its deadline is
+    the culprit of its own stop, and a run stuck only in the work that it
+    left after its return gets what it returned (``ReturnedBeforeKill``).
+    Any other run had time left, so the kill rule did not hold: a defect.
+    With no exit seen: the loss.
     """
     match lost.child_exit:
         case ExitedWith() | KilledBySignal() as child_exit:
@@ -1792,14 +1880,25 @@ def _killed_past_deadline(
             return lost
         case _ as unreachable:
             assert_never(unreachable)
-    match kind, run.deadline:
-        case SharedAsyncChild(), StuckReported():
+    match kind, run.deadline, reason:
+        case SharedAsyncChild(), LeftoverStuckReported(returned=returned), _:
+            return SeatKilled(
+                verdict=ReturnedBeforeKill(returned),
+                pid=lost.pid,
+                child_exit=child_exit,
+            )
+        case SharedAsyncChild(), StuckReported(), _:
             culprit = RunCulprit(
                 dispatch=run.handle.frame.dispatch,
                 task_id=run.handle.frame.task_id,
             )
-        case (SharedAsyncChild() | SharedThreadChild()), _:
+        case SharedThreadChild(), _, ClosedAtDeadline(culprit=closer):
             culprit = closer
+        case ((SharedAsyncChild() | SharedThreadChild()), _, _):
+            raise AssertionError(
+                f'run {run.handle.frame.dispatch} had time left when its child '
+                f'was killed for having none ({run.deadline}, {reason})',
+            )
         case _ as unreachable:
             assert_never(unreachable)
     return ChildKilledPastDeadlines(lost.pid, child_exit, culprit)
@@ -1811,6 +1910,46 @@ def _describe_holder(holder: LoopHeldBy | LoopHolderUnknown) -> str:
             return f'task {task_id} held it'
         case LoopHolderUnknown():
             return 'code of no task held it'
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+type _StopReportFrame = (
+    SecondCancelFrame | RunStuckFrame | LeftoverCancelFrame | LeftoverStuckFrame
+)
+"""A frame that reports a step of the stop of a run of a shared async child."""
+
+
+def _log_second_cancel(frame: SecondCancelFrame, pid: int) -> None:
+    logger.warning(
+        'Task %s did not stop within its cancel_grace_ms; child pid=%s '
+        'sent a second cancel. The child takes no new task and is '
+        'replaced when its tasks end',
+        frame.task_id,
+        pid,
+    )
+
+
+def _log_run_stuck(stuck: RunStuckFrame, pid: int) -> None:
+    logger.warning(
+        'Task %s did not stop after its second cancel in child pid=%s '
+        '(%s asyncio task(s): %s; %s executor item(s)); the child is '
+        'killed when every task left in it is stuck',
+        stuck.task_id,
+        pid,
+        stuck.tasks,
+        ', '.join(stuck.names),
+        stuck.executor_items,
+    )
+
+
+def _describe_close(reason: CloseReason | ClosedAtDeadline) -> str:
+    """Why a shared child closed, for a log line."""
+    match reason:
+        case ClosedAtDeadline(culprit=culprit):
+            return f'task {culprit.task_id} closed it at its deadline'
+        case CloseReason():
+            return f'it closed because {reason.value}'
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -2359,6 +2498,8 @@ class SlotPool:
                 | DeadlineFiredFrame()
                 | SecondCancelFrame()
                 | RunStuckFrame()
+                | LeftoverCancelFrame()
+                | LeftoverStuckFrame()
                 | LoopBlockedFrame()
             ):
                 failed = boot_failure_of(await child.discard_violating_child())
@@ -2651,6 +2792,8 @@ class SlotPool:
                 | DeadlineFiredFrame()
                 | SecondCancelFrame()
                 | RunStuckFrame()
+                | LeftoverCancelFrame()
+                | LeftoverStuckFrame()
                 | LoopBlockedFrame()
             ):
                 outcome = await child.discard_violating_child()
@@ -2874,7 +3017,12 @@ class SlotPool:
                     self._close_at_deadline(slot, runs, event)
                     if await self._kill_past_deadlines(slot, child, runs):
                         return
-                case SecondCancelFrame() | RunStuckFrame():
+                case (
+                    SecondCancelFrame()
+                    | RunStuckFrame()
+                    | LeftoverCancelFrame()
+                    | LeftoverStuckFrame()
+                ):
                     if not self._note_stop_report(slot, child, runs, event):
                         lost = await child.discard_violating_child()
                         await self._lose_shared_child(slot, child, runs, lost)
@@ -2908,20 +3056,27 @@ class SlotPool:
 
     def _end_run(self, runs: SeatRuns, frame: SharedResultFrame) -> bool:
         """End the task of a result frame. False: the frame names no task in
-        flight, or reports a timeout of a run without a deadline, a protocol
-        violation."""
+        flight, or reports a timeout of a run without a deadline or of a run
+        that returned before its deadline, a protocol violation."""
         run = runs.get(frame.dispatch)
         if run is None or run.handle.frame.task_id != frame.task_id:
             return False
         outcome: SeatTaskFinished | SeatDeadlineEnded
-        match frame.end:
-            case SeatFinished(ok=ok, result_json=result_json, failed_reason=reason):
+        match frame.end, run.deadline:
+            case SeatFinished(ok=ok, result_json=result_json, failed_reason=reason), _:
                 outcome = SeatTaskFinished(ok, result_json, reason)
-            case SeatTimedOut():
+            case SeatTimedOut(), LeftoverCancelReported() | LeftoverStuckReported():
+                return False
+            case SeatTimedOut(), (
+                DeadlineNotReported()
+                | DeadlineReported()
+                | SecondCancelReported()
+                | StuckReported() as report
+            ):
                 match run.handle.frame.work:
                     case SeatTask() | ThreadSeatTask():
                         outcome = SeatDeadlineEnded(
-                            retry=retry_placement(_stop_state(run)),
+                            retry=retry_placement(_stop_state(report)),
                         )
                     case SeatRefusal():
                         return False
@@ -2971,12 +3126,14 @@ class SlotPool:
         slot: _SharedSlot,
         child: Child,
         runs: SeatRuns,
-        frame: SecondCancelFrame | RunStuckFrame,
+        frame: _StopReportFrame,
     ) -> bool:
-        """Record that a run needed its second cancel, or that it is stuck,
-        and close the child: no new task goes to it. A stuck report may
-        leave only stuck runs: then the child is killed. False: the frame
-        names no task in flight, or comes out of order, a protocol
+        """Record a step of the stop of a run, and close the child: no new
+        task goes to it. After a deadline: the second cancel, then the stuck
+        report. After a return that left work alive: the leftover cancel,
+        then the leftover stuck report. A stuck report may leave only stuck
+        runs: then the child is killed. False: the frame names no task in
+        flight, a run with no such step, or comes out of order, a protocol
         violation."""
         run = runs.get(frame.dispatch)
         if run is None or run.handle.frame.task_id != frame.task_id:
@@ -2989,31 +3146,42 @@ class SlotPool:
             case _ as unreachable:
                 assert_never(unreachable)
         match frame, run.deadline:
-            case SecondCancelFrame(), DeadlineReported():
+            case SecondCancelFrame() as second, DeadlineReported():
                 run.deadline = SecondCancelReported()
                 self._close_for_stop(slot, runs, CloseReason.SECOND_CANCEL)
-                logger.warning(
-                    'Task %s did not stop within its cancel_grace_ms; child pid=%s '
-                    'sent a second cancel. The child takes no new task and is '
-                    'replaced when its tasks end',
-                    frame.task_id,
-                    child.pid,
-                )
+                _log_second_cancel(second, child.pid)
             case RunStuckFrame() as stuck, SecondCancelReported():
                 run.deadline = StuckReported()
                 culprit = RunCulprit(dispatch=frame.dispatch, task_id=frame.task_id)
                 self._close_for_stop(slot, runs, ClosedAtDeadline(culprit))
-                logger.warning(
-                    'Task %s did not stop after its second cancel in child pid=%s '
-                    '(%s asyncio task(s): %s; %s executor item(s)); the child is '
-                    'killed when every task left in it is stuck',
+                _log_run_stuck(stuck, child.pid)
+            case LeftoverCancelFrame(), DeadlineNotReported():
+                run.deadline = LeftoverCancelReported()
+                self._close_for_stop(slot, runs, CloseReason.LEFTOVER_WORK)
+                logger.debug(
+                    'Closing shared child pid=%s on slot %s: %s (task %s)',
+                    child.pid,
+                    slot.index,
+                    CloseReason.LEFTOVER_WORK.value,
+                    frame.task_id,
+                )
+            case LeftoverStuckFrame(returned=returned), LeftoverCancelReported():
+                run.deadline = LeftoverStuckReported(returned)
+                logger.debug(
+                    'Task %s returned, and the work it left is stuck in child '
+                    'pid=%s; it ends with what it returned',
                     frame.task_id,
                     child.pid,
-                    stuck.tasks,
-                    ', '.join(stuck.names),
-                    stuck.executor_items,
                 )
-            case ((SecondCancelFrame() | RunStuckFrame()), _):
+            case (
+                (
+                    SecondCancelFrame()
+                    | RunStuckFrame()
+                    | LeftoverCancelFrame()
+                    | LeftoverStuckFrame()
+                ),
+                _,
+            ):
                 return False
             case _ as unreachable:
                 assert_never(unreachable)
@@ -3026,9 +3194,9 @@ class SlotPool:
         reason: CloseReason | ClosedAtDeadline,
     ) -> None:
         """Close the child because of the stop of a run: its free seats
-        leave the claim budget, and its runs finish in their own time. A
-        child closed at a deadline keeps that reason and its culprit: it is
-        killed once no run in it has time left (``_kill_past_deadlines``)."""
+        leave the claim budget, and its runs finish in their own time, until
+        no run in it has time left (``_kill_past_deadlines``). A child closed
+        at a deadline keeps that reason and its culprit."""
         match slot.state:
             case Closing(reason=ClosedAtDeadline()):
                 return
@@ -3180,21 +3348,22 @@ class SlotPool:
         child: Child,
         runs: SeatRuns,
     ) -> bool:
-        """Kill a shared child that closed at a deadline, once no task in
-        flight has time left (``SeatRuns.all_out_of_time``): every task of a
-        thread child is past its deadline, every task of an async child is
-        stuck. A child that another kill already reached is left to that
-        kill. True: the child was killed, and each of its tasks ended.
+        """Kill a closing shared child once no task in flight has time left
+        (``SeatRuns.all_out_of_time``): every task of a thread child is past
+        its deadline, every task of an async child is stuck. Each stuck
+        report closes the child, so such a child is always closing. A child
+        that another kill already reached is left to that kill. True: the
+        child was killed, and each of its tasks ended.
 
         The kill goes to the child with its session; the slot then reads the
         frames that the child wrote before its exit, bounded by
         ``CHILD_KILL_WAIT_S``. A result in them ends its task as usual. Each
-        task still in flight ends with ``ChildKilledPastDeadlines`` when the
-        exit was seen (``_killed_past_deadline``), and with the loss of the
-        child when it was not.
+        task still in flight ends with its outcome at this kill when the exit
+        was seen (``_killed_past_deadline``), and with the loss of the child
+        when it was not.
         """
         match slot.state:
-            case Closing(reason=ClosedAtDeadline(culprit=culprit)) if (
+            case Closing(reason=reason) if (
                 runs.all_out_of_time(slot.kind) and not child.killed_by_parent
             ):
                 pass
@@ -3204,17 +3373,17 @@ class SlotPool:
                 assert_never(unreachable)
         logger.warning(
             'Killing shared child pid=%s on slot %s: no task of its %s has time '
-            'left; task %s closed it',
+            'left; %s',
             child.pid,
             slot.index,
             runs.count(),
-            culprit.task_id,
+            _describe_close(reason),
         )
         child.kill_for_caller()
         lost = await self._read_until_exit(child, runs)
         for run in runs.drain():
             self._release_held(run.held)
-            run.handle.finish(_killed_past_deadline(slot.kind, run, culprit, lost))
+            run.handle.finish(_killed_past_deadline(slot.kind, run, reason, lost))
         slot.state = Retiring()
         await child.dispose_lost()
         slot.child = None
@@ -3234,6 +3403,8 @@ class SlotPool:
                     DeadlineFiredFrame()
                     | SecondCancelFrame()
                     | RunStuckFrame()
+                    | LeftoverCancelFrame()
+                    | LeftoverStuckFrame()
                     | LoopBlockedFrame()
                     | ReadyFrame()
                     | BootFailedFrame()

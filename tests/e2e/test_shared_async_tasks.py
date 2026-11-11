@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -372,3 +373,42 @@ async def test_a_blocked_loop_kills_the_child_and_names_the_culprit(
     assert first_attempt.error_code == OperationalErrorCode.TASK_BLOCKED_LOOP.value
     assert neighbour_row.error_code == OperationalErrorCode.NEIGHBOUR_BLOCKED_LOOP.value
     assert neighbour_row.retry_count == 0
+
+
+def _process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_a_client_opened_on_first_use_costs_a_restart_not_a_timeout(
+    broker: PostgresBroker,
+) -> None:
+    """Each task opens the client in a new child. The background task of the
+    client outlives the deadline, and the child cancels it after the grace:
+    the task completes with what it returned, and its child is replaced."""
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile=SPLIT_SHARED_1X4,
+        ready_check=_make_ready_check(),
+    ):
+        handles: list[TaskHandle[str]] = []
+        pids: list[str] = []
+        for _ in range(2):
+            handle = unwrap_send(
+                await shared_async_tasks.shared_lazy_client.send_async(),
+            )
+            handles.append(handle)
+            pids.append(await _value(handle))
+        rows = [await _row_and_attempts(broker, h.task_id) for h in handles]
+        first_child_alive = _process_alive(int(pids[0]))
+
+    assert pids[0] != pids[1]
+    assert not first_child_alive
+    for row, attempts in rows:
+        assert (row.status, row.error_code, row.retry_count) == ('COMPLETED', None, 0)
+        assert [(a.attempt, a.error_code) for a in attempts] == [(1, None)]

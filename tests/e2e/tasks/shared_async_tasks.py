@@ -99,6 +99,34 @@ async def shared_blocks_once(*, marker: str) -> TaskResult[str, TaskError]:
     return TaskResult(ok=str(os.getpid()))
 
 
+LAZY_CLIENT_TIMEOUT_MS = 1_000
+LAZY_CLIENT_GRACE_MS = 1_500
+"""The background task of the client outlives the deadline of the task that
+opened it, and is cancelled after the grace."""
+
+# The background task of a client opened on first use, in this child.
+_LAZY_CLIENT: list[asyncio.Task[None]] = []
+
+
+async def _keepalive() -> None:
+    while True:
+        await asyncio.sleep(0.05)
+
+
+@app.task(
+    task_name='e2e_shared_lazy_client',
+    execution=Execution.SHARED_ASYNC,
+    timeout_ms=LAZY_CLIENT_TIMEOUT_MS,
+    cancel_grace_ms=LAZY_CLIENT_GRACE_MS,
+)
+async def shared_lazy_client() -> TaskResult[str, TaskError]:
+    """Open a client on first use, not in the start hook: its background
+    task carries the mark of this task. Return the pid."""
+    if not _LAZY_CLIENT:
+        _LAZY_CLIENT.append(asyncio.get_running_loop().create_task(_keepalive()))
+    return TaskResult(ok=str(os.getpid()))
+
+
 @app.task(
     task_name='e2e_shared_hook_loop',
     execution=Execution.SHARED_ASYNC,
