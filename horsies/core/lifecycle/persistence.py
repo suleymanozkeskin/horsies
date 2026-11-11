@@ -24,6 +24,7 @@ from psycopg import AsyncCursor
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from ..history.terminalization.move import TASK_LOCK_SEED
 from ..logging import get_logger
 from .commands import (
     AbandonNodesOfPausedWorkflows,
@@ -204,6 +205,18 @@ _LOCKED_READ_MISS_SQL = text("""
 """)
 
 type LockedReadCommand = CompleteLockedTask | FailLockedTask
+
+# The task advisory lock, by the key every move function takes. A caller
+# whose transaction row-locks a task and then calls a move function runs this
+# first, in the same transaction: the advisory lock goes before any row lock
+# of the task. It waits while another transaction holds the lock, and is held
+# until the caller's transaction ends; on an autocommit connection it would
+# end with the statement, so it is used only inside a transaction.
+LOCK_TASK_SQL = text(f"""
+    SELECT pg_advisory_xact_lock(
+        hashtextextended(CAST(CAST(:task_id AS uuid) AS text), {TASK_LOCK_SEED})
+    )
+""")
 
 
 def call_for(command: ExecutableCommand) -> tuple[Any, dict[str, Any]]:

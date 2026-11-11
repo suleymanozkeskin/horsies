@@ -59,6 +59,7 @@ from horsies.core.models.tasks import (
     TaskError,
     TaskResult,
 )
+from horsies.core.lifecycle.persistence import LOCK_TASK_SQL
 from horsies.core.worker.sql import (
     LOCK_RUNNING_TASK_SQL,
     NOTIFY_TASK_QUEUE_SQL,
@@ -668,6 +669,7 @@ def _run_stale_failure(*, candidate: bool) -> Callable[[Connection, str], int]:
     invocation_for = _stale_failure_invocation(candidate=candidate)
 
     def run(connection: Connection, task_id: str) -> int:
+        connection.execute(LOCK_TASK_SQL, {'task_id': task_id})
         context = connection.execute(
             SELECT_STALE_TASK_FOR_UPDATE_SQL,
             {

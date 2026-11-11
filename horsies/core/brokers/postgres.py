@@ -89,7 +89,11 @@ from horsies.core.lifecycle.outcomes import (
     SourceStateConflict,
     TaskAbsent,
 )
-from horsies.core.lifecycle.persistence import apply_async, apply_batch_async
+from horsies.core.lifecycle.persistence import (
+    LOCK_TASK_SQL,
+    apply_async,
+    apply_batch_async,
+)
 from horsies.core.models.class_coverage import (
     ClassCoverage,
     ClassReadRefused,
@@ -3841,8 +3845,11 @@ class PostgresBroker:
 
         Two-phase approach:
         1. Lightweight scan: identify stale task IDs (no lock hold after scan).
-        2. Per-task processing: re-acquire FOR UPDATE lock, re-read fresh state,
-           then upsert attempt + transition — all within one transaction per task.
+        2. Per-task processing: take the task advisory lock, then the row
+           lock, re-read fresh state, then upsert attempt + transition — all
+           within one transaction per task. The advisory lock goes first, as
+           in every move function, so this transaction cannot deadlock with
+           a finalize of the same task.
 
         This avoids holding row locks across the entire batch while still
         preventing races with concurrent worker finalizers.
@@ -3892,9 +3899,11 @@ class PostgresBroker:
             for task_id in candidate_ids:
                 try:
                     async with resources.session_factory() as session:
-                        # Lock the row and re-read current state (fresh db_now).
-                        # If the row is no longer RUNNING, a worker finalized it
-                        # between scan and now — skip it.
+                        # Advisory lock, then lock the row and re-read current
+                        # state (fresh db_now). If the row is no longer
+                        # RUNNING, a worker finalized it between scan and now
+                        # — skip it.
+                        await session.execute(LOCK_TASK_SQL, {'task_id': task_id})
                         ctx_result = await session.execute(
                             SELECT_STALE_TASK_FOR_UPDATE_SQL,
                             {
