@@ -87,16 +87,23 @@ there is no migration contract between pre-1.0 versions.
     (every child or seat of the serving budgets is down) or `StreamUnserved()`.
     A worker is live while its latest snapshot is at most 120 seconds old
     (`WORKER_STATE_LIVE_WINDOW_S`, the threshold at which the web UI already
-    marked a worker stale). A live snapshot without readable budgets fails the
-    read and names the worker.
+    marked a worker stale). A live snapshot without `class_capacity`, from a
+    worker version that does not record its budgets, leaves that worker out:
+    it serves no stream, is not in `live_workers`, and `not_recorded` names
+    it (`ClassesNotRecorded(worker_id, snapshot_at)`, by worker id). A live
+    snapshot whose value is unreadable fails the read and names the worker.
   - Each reaper pass runs the check, one check interval after the worker
     starts. An unserved (queue, class) logs an error, one without capacity a
     warning; each worker logs one (queue, class) at most once per 5 minutes.
+    The workers left out log one warning per 5 minutes that names up to 10 of
+    them.
     This covers a shared task that went back to the queue as `ISOLATED` while
     no live worker has isolated children.
   - `get_class_report()` adds the wait of each stream's oldest due row
     (`OldestWaiting` or `NoneDue`) and, per live worker, each budget's
-    capacity, rows in flight and free capacity (`BudgetLoad`).
+    capacity, rows in flight and free capacity (`BudgetLoad`). It names the
+    workers left out in `not_recorded` too; `GET /api/workers/classes`
+    returns them in `not_recorded`.
   - Both reads probe `idx_horsies_tasks_claim_pending_class`: the check once
     per pending (queue, class), the report once per (queue, class, priority).
     Each read has a bound and fails closed at it.

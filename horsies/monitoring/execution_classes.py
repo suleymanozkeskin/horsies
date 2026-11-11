@@ -29,6 +29,7 @@ from horsies.core.models.health import (
 )
 from horsies.monitoring.models import (
     BudgetLoadInfo,
+    ClassesNotRecordedInfo,
     ClassReportInfo,
     DownSlotInfo,
     PendingStreamInfo,
@@ -74,6 +75,13 @@ def class_report_info(report: ClassReport) -> ClassReportInfo:
         live_window_s=WORKER_STATE_LIVE_WINDOW_S,
         streams=[_stream_info(stream) for stream in report.streams],
         workers=[_worker_info(worker) for worker in report.workers],
+        not_recorded=[
+            ClassesNotRecordedInfo(
+                worker_id=worker.worker_id,
+                snapshot_at=worker.snapshot_at,
+            )
+            for worker in report.not_recorded
+        ],
     )
 
 

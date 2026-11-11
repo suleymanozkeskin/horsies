@@ -46,6 +46,7 @@ from horsies.core.brokers.result_types import BrokerErrorCode
 from horsies.core.cli import execution_settings
 from horsies.core.models.class_coverage import (
     BudgetLoad,
+    ClassesNotRecorded,
     NoneDue,
     OldestWaiting,
     StreamCoverage,
@@ -317,25 +318,17 @@ class TestClassCoverage:
             case Err(error):
                 raise AssertionError(error.message)
 
-    @pytest.mark.parametrize(
-        ('class_capacity', 'cause'),
-        [
-            (None, 'has no class_capacity'),
-            (
-                {'EXCLUSIVE': {'capacity': 1, 'serves': []}},
-                'class_capacity is unreadable',
-            ),
-        ],
-        ids=['not-recorded', 'unreadable'],
-    )
-    async def test_a_live_snapshot_without_readable_budgets_fails_the_read(
+    async def test_a_live_snapshot_with_unreadable_budgets_fails_the_read(
         self,
         broker: PostgresBroker,
         session: AsyncSession,
-        class_capacity: object,
-        cause: str,
     ) -> None:
-        await _snapshot(session, 'w-odd', class_capacity, queues=['a'])
+        await _snapshot(
+            session,
+            'w-odd',
+            {'EXCLUSIVE': {'capacity': 1, 'serves': []}},
+            queues=['a'],
+        )
         await _task(session, queue='a', execution=ISOLATED)
 
         match await broker.get_class_coverage_async():
@@ -343,9 +336,35 @@ class TestClassCoverage:
                 assert error.code == BrokerErrorCode.MONITORING_QUERY_FAILED
                 assert error.retryable is False
                 assert 'w-odd' in error.message
-                assert cause in error.message
+                assert 'class_capacity is unreadable' in error.message
             case Ok(coverage):
                 raise AssertionError(coverage)
+
+    async def test_a_live_snapshot_without_budgets_is_left_out_and_named(
+        self,
+        broker: PostgresBroker,
+        session: AsyncSession,
+    ) -> None:
+        """A worker version that does not record its budgets wrote one live
+        snapshot. The check still reads: that worker serves no stream and is
+        named, and the recorded worker decides each stream."""
+        await _snapshot(session, 'w-old', None, queues=['a', 'b'])
+        await _snapshot(session, 'w-new', ASYNC_CHILDREN_ONLY, queues=['a'])
+        await _task(session, queue='a', execution=ISOLATED)
+        await _task(session, queue='a', execution=ASYNC)
+
+        match await broker.get_class_coverage_async():
+            case Ok(coverage):
+                pass
+            case Err(error):
+                raise AssertionError(error.message)
+
+        assert coverage.live_workers == 1
+        assert [worker.worker_id for worker in coverage.not_recorded] == ['w-old']
+        assert coverage.streams == (
+            StreamCoverage('a', ISOLATED, StreamUnserved()),
+            StreamCoverage('a', ASYNC, StreamServed(workers=1, capacity=40)),
+        )
 
 
 @pytest.mark.usefixtures('empty_fleet')
@@ -390,6 +409,33 @@ class TestClassReport:
         assert report.checked_at - oldest >= timedelta(seconds=300)
         assert isolated.state == StreamServed(workers=1, capacity=4)
         assert shared.wait == NoneDue(next_due)
+
+    async def test_a_live_snapshot_without_budgets_is_left_out_of_the_report(
+        self,
+        broker: PostgresBroker,
+        session: AsyncSession,
+    ) -> None:
+        """The worker that did not record its budgets holds a RUNNING row; the
+        report reads, names it, and shows no load for it."""
+        await _snapshot(session, 'w-old', None, queues=['a'])
+        await _snapshot(session, 'w-new', ISOLATED_CHILDREN, queues=['a'])
+        await _task(session, queue='a', execution=ISOLATED)
+        await _task(
+            session, queue='a', execution=ISOLATED, status='RUNNING', owner='w-old'
+        )
+
+        match await broker.get_class_report_async():
+            case Ok(report):
+                pass
+            case Err(error):
+                raise AssertionError(error.message)
+
+        assert [worker.worker_id for worker in report.workers] == ['w-new']
+        assert report.not_recorded == (
+            ClassesNotRecorded('w-old', report.not_recorded[0].snapshot_at),
+        )
+        (stream,) = report.streams
+        assert stream.state == StreamServed(workers=1, capacity=4)
 
     async def test_budget_load_counts_rows_as_the_claim_does(
         self,

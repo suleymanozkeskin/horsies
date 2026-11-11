@@ -165,6 +165,8 @@ if is_ok(result):
 
 A delayed send and a retry that waits for its interval are `PENDING` too, so they count before they are due.
 
+A live snapshot whose `class_capacity` is `ClassCapacityNotRecorded()` comes from a worker version that does not record its budgets, so the classes it serves are unknown. The check leaves that worker out of every stream, does not count it in `live_workers`, and names it in `ClassCoverage.not_recorded`: one `ClassesNotRecorded(worker_id, snapshot_at)` per worker, by worker id. A snapshot whose `class_capacity` is unreadable fails the read with `MONITORING_QUERY_FAILED` and names the worker.
+
 ### The worker logs it
 
 Each reaper pass runs the same check, one check interval after the worker starts. The worker logs an unserved stream at error level and a stream without capacity at warning level, for example:
@@ -173,7 +175,7 @@ Each reaper pass runs the same check, one check interval after the worker starts
 PENDING ISOLATED tasks on queue 'default' wait: no live worker serves this class. Start a worker with isolated children on this queue. A shared task that went back to the queue as ISOLATED also waits here.
 ```
 
-Each worker logs one stream at most once per 5 minutes (`CLASS_COVERAGE_LOG_INTERVAL_S`). A check that fails logs one warning per 5 minutes and changes nothing.
+Each worker logs one stream at most once per 5 minutes (`CLASS_COVERAGE_LOG_INTERVAL_S`). Live workers that the check left out log one warning per 5 minutes that names up to 10 of them. A check that fails logs one warning per 5 minutes and changes nothing.
 
 ### What to do
 
@@ -186,6 +188,7 @@ Each worker logs one stream at most once per 5 minutes (`CLASS_COVERAGE_LOG_INTE
 `get_class_report_async` returns the pending streams with the wait of their oldest due row and their coverage, and the budget load of each live worker.
 
 - `PendingStream.wait` is `OldestWaiting(enqueued_at, wait)` when at least one row is due, or `NoneDue(next_due_at)` when every row is due later. A row is due when its `enqueued_at` (its send time, or the time its retry became due) is at or before the read.
+- `ClassReport.workers` holds the live workers that recorded their budgets; `ClassReport.not_recorded` the live workers that did not, as in the check above. `GET /api/workers/classes` returns both.
 - `WorkerClassLoad.budgets` holds one `BudgetLoad` per budget: `capacity` and `serves` from the worker's latest snapshot, `in_flight` (the worker's `RUNNING` rows and `CLAIMED` rows with a live lease of the classes it serves, counted at the read, as the claim counts them) and `free` (`capacity - in_flight`, at least 0; a prefetch buffer can hold more rows than the capacity).
 
 ```python
