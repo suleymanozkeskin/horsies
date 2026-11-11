@@ -225,8 +225,7 @@ async def test_claim_streams_plan_on_the_class_indexes(
     }
     for name, plan in phases.items():
         assert (
-            plan.count('Index Scan using idx_horsies_tasks_claim_pending_class')
-            == 1
+            plan.count('Index Scan using idx_horsies_tasks_claim_pending_class') == 1
         ), (name, plan)
         assert (
             'idx_horsies_tasks_claim_expired_class' in plan
