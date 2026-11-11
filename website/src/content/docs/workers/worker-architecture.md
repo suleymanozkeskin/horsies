@@ -43,11 +43,13 @@ Each child:
 - Has its own session, so a kill also reaches the subprocesses of its task.
 - Has its own socket to the worker. Tasks and results move over it as JSON frames.
 
-Benefits:
+Benefits of isolated children:
 
 - GIL doesn't block concurrent task execution
 - A crash, a timeout, or an exit in one child affects only the task of that child
 - Memory isolation between tasks
+
+Shared children trade these for more tasks per process. See [Choosing an Execution Mode](execution-modes).
 
 ## Failure Isolation
 
@@ -305,9 +307,11 @@ Both preload modes:
 | `session_dsn` | `PostgresConfig.session_database_url`, or `database_url` |
 | `pgbouncer_transaction_mode` | `PostgresConfig.pgbouncer_transaction_mode`. Disables child-process prepared statements for PgBouncer transaction pooling |
 | `queues` | The queues of the app |
-| `processes` | `WorkerProfile.child_count()`: the number of children |
+| `processes` | `IsolatedChildren.count`: the number of isolated children, 0 with `NoIsolatedChildren()` |
 | `max_tasks_per_child` | `IsolatedRecycle.after` |
 | `max_memory_per_child_mb` | `IsolatedRecycle.above` |
+| `shared_async` | `WorkerProfile.shared_async` |
+| `shared_thread` | `WorkerProfile.shared_thread` |
 | `max_claim_batch` | `ClaimLimits.per_queue_per_pass` |
 | `max_claim_per_worker` | `ClaimLimits.claimed_per_worker` |
 | `drain_timeout_s` | `WorkerProfile.drain_timeout` |
@@ -327,8 +331,10 @@ poll-only dispatch if `LISTEN` is unavailable.
 Child database pools are initialized inside the child process. Psycopg
 connections are not process-safe. A child starts with `exec`, so it inherits no
 parent database socket. Child DB connections remain lazy by default when
-`worker_child_pool_min_size=0`. A child uses one connection at a time: for the
-RUNNING update, and for the finalizing mark. The worker process holds one more
+`worker_child_pool_min_size=0`. An isolated child uses one connection at a
+time: for the RUNNING update, and for the finalizing mark. The seats of a
+shared child share the pool of the child for the same writes. See
+[Connections](shared-thread-tasks#connections). The worker process holds one more
 connection, for the runner heartbeats.
 
 ## Graceful Shutdown

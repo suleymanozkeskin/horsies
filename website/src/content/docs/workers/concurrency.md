@@ -8,7 +8,7 @@ tags: [workers, concurrency, claiming, limits]
 ## Operational Notes
 
 - **Priority ordering:** Priority holds within one execution class. Each (queue, class) is its own claim stream in `(priority, enqueued_at, id)` order. A budget that claims more than one class reads the merge of their streams in that order. Two budgets do not compare priorities: a high-priority `SHARED_ASYNC` row does not take a seat from an `ISOLATED` row. Within the same priority, FIFO ordering uses `enqueued_at`. When many tasks share the same timestamp, ordering can appear non-deterministic.
-- **Soft-cap overshoot:** With `prefetch_buffer > 0`, queue concurrency counts only RUNNING tasks; buffered CLAIMED tasks are invisible to the cap and are dispatched without a re-check. A queue's RUNNING count can therefore exceed its nominal cap, the excess lasts for the duration of those tasks (not just the claim pass), and with multiple workers each pass grants against the same RUNNING snapshot — N workers can reach up to N × cap RUNNING, bounded by their aggregate process slots. Use hard cap mode (`prefetch_buffer = 0`) where the cap must hold strictly.
+- **Soft-cap overshoot:** With `prefetch_buffer > 0`, queue concurrency counts only RUNNING tasks; buffered CLAIMED tasks are invisible to the cap and are dispatched without a re-check. A queue's RUNNING count can therefore exceed its nominal cap, the excess lasts for the duration of those tasks (not just the claim pass), and with multiple workers each pass grants against the same RUNNING snapshot — N workers can reach up to N × cap RUNNING, bounded by their aggregate seats. Use hard cap mode (`prefetch_buffer = 0`) where the cap must hold strictly.
 - **Claim leases:** In soft-cap mode, claims can expire and be reclaimed. Workers must verify ownership before running user code.
 
 ## Concurrency Levels
@@ -27,7 +27,7 @@ tags: [workers, concurrency, claiming, limits]
 │  │  ┌─────────────────────────────────────────────┐  │  │
 │  │  │  Per-Worker Concurrency                     │  │  │
 │  │  │  Max concurrent tasks per worker            │  │  │
-│  │  │  (equals the children of the profile)       │  │  │
+│  │  │  (equals the seats of the profile)          │  │  │
 │  │  └─────────────────────────────────────────────┘  │  │
 │  └───────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────┘
@@ -337,7 +337,7 @@ In production, task durations vary wildly. Without hard cap mode, a worker proce
 
 ### Soft Cap Mode (with Prefetch)
 
-When `prefetch_buffer > 0`, queue concurrency counts **RUNNING** tasks, allowing workers to prefetch beyond their running capacity. A worker's local budget still subtracts already-claimed rows so it cannot hold more than its children + `prefetch_buffer` in total:
+When `prefetch_buffer > 0`, queue concurrency counts **RUNNING** tasks, allowing workers to prefetch beyond their running capacity. A worker's local budget still subtracts already-claimed rows so it cannot hold more than its seats + `prefetch_buffer` in total:
 
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
@@ -452,8 +452,8 @@ few_claimed = WorkerProfile(
 ```
 
 **Default behavior** (`NoTaskLimit()`): the capacity is the limit.
-- Hard cap mode (`prefetch_buffer=0`): the number of children
-- Soft cap mode (`prefetch_buffer>0`): the number of children + `prefetch_buffer`
+- Hard cap mode (`prefetch_buffer=0`): the seats of the profile (`seat_count()`)
+- Soft cap mode (`prefetch_buffer>0`): the seats of the profile + `prefetch_buffer`
 
 **Why this limit exists:**
 
@@ -621,13 +621,16 @@ config = AppConfig(
 Worker logs its profile and concurrency config at startup:
 
 ```text
-Worker profile 'default': isolated=4 (recycle after 100 tasks, above no limit), claim per queue per pass: no limit, claimed per worker: no limit, drain_timeout=300s, preload=library
-Concurrency config: processes=4, cluster_wide_cap=20, max_claim_per_worker=4, max_claim_batch=0
+Worker profile 'default': isolated=4 (recycle after 100 tasks, above no limit), shared_async=none, shared_thread=none, claim per queue per pass: no limit, claimed per worker: no limit, drain_timeout=300s, preload=library
+Concurrency config: processes=4, shared_async_children=0, shared_thread_children=0, seats=4, cluster_wide_cap=20, max_claim_per_worker=4, max_claim_batch=0
+Claim plan: ISOLATED -> ISOLATED budget, SHARED_ASYNC -> ISOLATED budget, SHARED_THREAD -> ISOLATED budget
 ```
 
 The second line uses the internal names: `processes` is the number of
-children, `max_claim_per_worker` is the effective `claimed_per_worker` limit,
-and `max_claim_batch=0` means `per_queue_per_pass=NoTaskLimit()`.
+isolated children, `seats` is `WorkerProfile.seat_count()`,
+`max_claim_per_worker` is the effective `claimed_per_worker` limit, and
+`max_claim_batch=0` means `per_queue_per_pass=NoTaskLimit()`. The third line
+is the [claim plan](#budgets-per-execution-class).
 
 ## Troubleshooting
 

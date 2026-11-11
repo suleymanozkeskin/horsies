@@ -170,10 +170,12 @@ With the defaults and a profile of 8 children, the framework ceiling is about
 `3 + 2 + 2 + 1 + 8 * 2 = 24` direct connections, before application task code.
 Idle child processes keep no database connection by default because
 `worker_child_pool_min_size=0`; connections are opened lazily when task
-lifecycle work starts. A child uses one connection at a time, for the RUNNING
-update and the finalizing mark: the worker process writes the runner
+lifecycle work starts. An isolated child uses one connection at a time, for the
+RUNNING update and the finalizing mark: the worker process writes the runner
 heartbeats over its own connection. So `worker_child_pool_max_size=1` is enough
-for the child's own work.
+for the own work of an isolated child. The seats of a shared child share one
+pool of `worker_child_pool_max_size` connections; see
+[Connections](../workers/shared-thread-tasks#connections) for its size.
 
 When using PgBouncer transaction pooling, those client-side pool slots are
 multiplexed onto fewer server backends. Connections are still not safe to share

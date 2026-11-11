@@ -157,7 +157,7 @@ Each shared thread child opens one sync connection pool of `worker_child_pool_ma
 
 - A deadline does not stop a thread. The kill of the child does, when no task in it has time left.
 - A task with a long timeout keeps a closed child, and the tasks past their deadline in it, alive until that timeout.
-- C code that holds the GIL stops every thread of the child, also the threads that report deadlines. Up to 5 seconds past a deadline the report is late; past that the worker kills the child.
+- C code that holds the GIL stops every thread of the child, also the thread that reports deadlines. The report of a deadline is then late. When it has not come by `timeout_ms + 10 seconds`, the worker kills the child.
 
 ## Things to Avoid
 

@@ -309,6 +309,7 @@ Workers wait up to the `drain_timeout` of their profile for running tasks. See [
 | 0 | Clean shutdown |
 | 1 | Error (check logs), including a missing or unknown `--profile` |
 | 2 | Invalid `horsies web` arguments, a removed worker flag, or an argparse error |
+| 77 | `horsies worker`: the worker could not write runner heartbeats, and it had not stopped 120 seconds after it started to stop. See [When the Worker Cannot Write Heartbeats](workers/heartbeats-recovery#when-the-worker-cannot-write-heartbeats) |
 
 ## Environment Variables
 
