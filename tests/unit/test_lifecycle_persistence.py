@@ -12,6 +12,7 @@ import pytest
 from horsies.core.lifecycle.commands import (
     AbandonOwnedNodes,
     CompleteLockedTask,
+    CompleteTaskFused,
     ExpireOwnedClaim,
 )
 from horsies.core.lifecycle.fences import (
@@ -30,6 +31,9 @@ from horsies.core.lifecycle.outcomes import (
     SourceStateConflict,
 )
 from horsies.core.lifecycle.persistence import (
+    FusedCompletionBatch,
+    _fused_outcomes,  # pyright: ignore[reportPrivateUsage]
+    _fused_statement,  # pyright: ignore[reportPrivateUsage]
     _log_outcome,  # pyright: ignore[reportPrivateUsage]
     _reconstruct_id_keyed_batch,  # pyright: ignore[reportPrivateUsage]
     apply_async,
@@ -94,7 +98,7 @@ def test_reconstructs_by_ordinal_instead_of_result_order() -> None:
     outcomes = _reconstruct_id_keyed_batch(
         [_outcome('two', 2), _outcome('one', 1)],
         expected_count=2,
-        command=_command(),
+        operation=type(_command()).__name__,
     )
 
     assert [outcome.task_id for outcome in outcomes] == ['one', 'two']
@@ -117,7 +121,7 @@ def test_rejects_an_invalid_ordinal_contract(
         _reconstruct_id_keyed_batch(
             outcomes,
             expected_count=2,
-            command=_command(),
+            operation=type(_command()).__name__,
         )
 
 
@@ -311,3 +315,41 @@ def test_batch_outcome_log_contains_only_that_tasks_expected_fence(
     assert "'worker_id': 'worker'" in message
     assert "'claimed_at':" in message
     assert 'other-task-must-not-repeat' not in message
+
+
+def _fused_command(task_id: str) -> CompleteTaskFused:
+    return CompleteTaskFused(
+        task_id=task_id,
+        fence=OwnedClaim(worker_id='worker-1', claimed_at=None),
+        result_json='{"ok":null}',
+        notify_channel='task_queue_default',
+        notify_payload=f'capacity:{task_id}',
+    )
+
+
+def test_a_batch_of_one_row_runs_the_single_fused_completion() -> None:
+    statement = _fused_statement(FusedCompletionBatch(commands=(_fused_command('a'),)))
+
+    assert 'horsies_complete_task_fused(' in str(statement.statement)
+    assert 'horsies_complete_tasks_fused(' not in str(statement.statement)
+    assert statement.parameters['task_id'] == 'a'
+
+
+def test_a_batch_of_several_rows_runs_the_batch_function() -> None:
+    statement = _fused_statement(
+        FusedCompletionBatch(commands=(_fused_command('a'), _fused_command('b'))),
+    )
+
+    assert 'horsies_complete_tasks_fused(' in str(statement.statement)
+    assert statement.parameters['task_ids'] == ['a', 'b']
+
+
+def test_the_single_fused_completion_answers_without_ordinality() -> None:
+    command = _fused_command('one')
+
+    outcomes = _fused_outcomes(
+        FusedCompletionBatch(commands=(command,)),
+        [_wire_row(task_id='one', outcome='APPLIED', observed_status='RUNNING')],
+    )
+
+    assert [outcome.task_id for outcome in outcomes] == ['one']

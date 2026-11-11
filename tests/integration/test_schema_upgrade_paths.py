@@ -1929,11 +1929,11 @@ class TestUpgradePaths:
         finally:
             await engine.dispose()
 
-    async def test_workflow_success_program_upgrade_from_56(
+    async def test_workflow_success_program_upgrade_from_57(
         self,
         scratch_database: str,
     ) -> None:
-        """A v56 database gets the success of a workflow task and its row
+        """A v57 database gets the success of a workflow task and its row
         type at v58; the function answers a call, and a second apply changes
         nothing."""
         await _migrate(scratch_database)
@@ -1955,14 +1955,15 @@ class TestUpgradePaths:
                 assert (await conn.execute(program_sql)).all() == []
                 assert (await conn.execute(type_sql)).scalar_one() == 0
                 await conn.execute(
-                    text('DELETE FROM horsies_schema_version WHERE version >= 57')
+                    text('DELETE FROM horsies_schema_version WHERE version >= 58')
                 )
                 await conn.execute(
                     text(
-                        'INSERT INTO horsies_schema_version(version) VALUES (56) '
+                        'INSERT INTO horsies_schema_version(version) VALUES (57) '
                         'ON CONFLICT DO NOTHING'
                     )
                 )
+            assert await _stored_version(engine) == 57
             await _migrate(scratch_database)
             async with engine.connect() as conn:
                 assert await _stored_version(engine) == SCHEMA_VERSION
@@ -3097,5 +3098,79 @@ class TestRetiredClaimIndexes:
 
             assert await _stored_version(engine) == SCHEMA_VERSION
             assert await self._present(engine) == set()
+        finally:
+            await engine.dispose()
+
+
+class TestBatchedCompletionMigration:
+    """v57: horsies_complete_tasks_fused, the batched plain-success completion.
+
+    A database at v56 has the fused completion and no batched one. The
+    upgrade installs it with the argument list of the fused completion, as
+    arrays.
+    """
+
+    SIGNATURE = (
+        'p_task_ids uuid[], p_worker_ids text[], '
+        'p_claimed_ats timestamp with time zone[], p_results text[], '
+        'p_notify_channels text[], p_notify_payloads text[]'
+    )
+
+    async def _batched_signatures(self, engine: AsyncEngine) -> list[str]:
+        async with engine.connect() as connection:
+            rows = (
+                await connection.execute(
+                    text("""
+                    SELECT pg_get_function_arguments(oid)
+                    FROM pg_proc
+                    WHERE proname = 'horsies_complete_tasks_fused'
+                      AND pronamespace = current_schema()::regnamespace
+                """)
+                )
+            ).all()
+        return [str(row[0]) for row in rows]
+
+    async def test_a_fresh_database_is_born_with_the_batched_completion(
+        self,
+        scratch_database: str,
+    ) -> None:
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            assert await _stored_version(engine) == SCHEMA_VERSION
+            assert await self._batched_signatures(engine) == [self.SIGNATURE]
+        finally:
+            await engine.dispose()
+
+    async def test_a_v56_database_gains_the_batched_completion(
+        self,
+        scratch_database: str,
+    ) -> None:
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            async with engine.connect() as connection:
+                await connection.execute(
+                    text(
+                        f'DROP FUNCTION horsies_complete_tasks_fused({self.SIGNATURE})'
+                    )
+                )
+                await connection.execute(
+                    text('DELETE FROM horsies_schema_version WHERE version > 56')
+                )
+                await connection.execute(
+                    text(
+                        'INSERT INTO horsies_schema_version(version) VALUES (56) '
+                        'ON CONFLICT DO NOTHING'
+                    )
+                )
+                await connection.commit()
+            assert await _stored_version(engine) == 56
+            assert await self._batched_signatures(engine) == []
+
+            await _migrate(scratch_database)
+
+            assert await _stored_version(engine) == SCHEMA_VERSION
+            assert await self._batched_signatures(engine) == [self.SIGNATURE]
         finally:
             await engine.dispose()

@@ -388,6 +388,9 @@ from horsies.core.models.tasks import Execution
 #      horsies_failed_attempt_outcome. horsies_lock_running_task is the
 #      locking read of a RUNNING task, with the advisory lock first. Both
 #      are dropped and created on every apply.
+# v57: horsies_complete_tasks_fused, the batched plain-success completion.
+#      It calls horsies_complete_task_fused once per row, in sorted task-id
+#      order, and returns each row at its input ordinality.
 # v58: horsies_finish_workflow_success writes the success of a RUNNING
 #      workflow task in one statement: the task advisory lock, the row lock
 #      under the full claim fence, the COMPLETED attempt row, and the move

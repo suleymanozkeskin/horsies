@@ -67,8 +67,16 @@ from horsies.core.lifecycle.outcomes import (
     SourceStateConflict,
     SuccessApplied,
     TaskAbsent,
+    TerminalizationOutcome,
 )
-from horsies.core.lifecycle.persistence import apply_in_autocommit
+from horsies.core.lifecycle.persistence import (
+    BatchCommitUnknown,
+    BatchRolledBack,
+    BatchWriteError,
+    FusedCompletionBatch,
+    apply_fused_batch_in_autocommit,
+    apply_in_autocommit,
+)
 from horsies.core.logging import get_logger
 from horsies.core.models.tasks import (
     BuiltInTaskCode,
@@ -181,6 +189,7 @@ if TYPE_CHECKING:
     from horsies.core.app import Horsies
     from horsies.core.brokers.postgres import PostgresBroker
     from horsies.core.worker.config import WorkerConfig
+    from horsies.core.worker.finalize_batch import FinalizeBatcher
 
 logger = get_logger('worker')
 
@@ -349,6 +358,7 @@ class FinalizeMixin:
         _app: Horsies | None
         _stop: asyncio.Event
         _finalize_retry_attempts: dict[tuple[str, FinalizeStage], int]
+        _finalize_batcher: FinalizeBatcher
 
         # Cross-concern methods provided by sibling mixins / Worker.
         async def _handle_task_timeout(
@@ -1247,40 +1257,14 @@ class FinalizeMixin:
                 assert_never(unreachable)
 
         if fused_command is not None:
-            # One statement in autocommit: Applied is committed when the call
-            # returns, and a refusal wrote nothing. A lost reply is a
-            # retryable error here; the replay classifies it.
-            try:
-                outcome = await apply_in_autocommit(self.sf, fused_command)
-                match outcome:
-                    case (
-                        Applied()
-                        | AlreadyApplied()
-                        | LostClaim()
-                        | SourceStateConflict()
-                        | TaskAbsent()
-                    ):
-                        return Ok(None)
-                    case _ as unreachable:
-                        assert_never(unreachable)
-            except Exception as exc:
-                return Err(
-                    self._make_finalize_error(
-                        task_id=task_id,
-                        stage=_FINALIZE_STAGE_PHASE1,
-                        message='Failed to persist terminal task state',
-                        retryable=is_retryable_connection_error(exc),
-                        data={
-                            'exception_type': type(exc).__name__,
-                            'exception': str(exc)[:500],
-                            'outcome': {
-                                'ok': ok,
-                                'result_json_str': result_json_str,
-                                'failed_reason': failed_reason,
-                            },
-                        },
-                    )
-                )
+            return await self._complete_plain_success(
+                fused_command,
+                outcome_data={
+                    'ok': ok,
+                    'result_json_str': result_json_str,
+                    'failed_reason': failed_reason,
+                },
+            )
 
         match (locked_command, report):
             case (CompleteLockedTask() as completion, ResultProduced()):
@@ -1370,6 +1354,96 @@ class FinalizeMixin:
                 return Ok(None)
             case _ as unreachable:
                 assert_never(unreachable)
+
+    async def _write_fused_batch(
+        self,
+        batch: FusedCompletionBatch,
+    ) -> Result[tuple[TerminalizationOutcome, ...], BatchWriteError]:
+        """Write ``batch`` on the worker pool. The write of the batcher."""
+        return await apply_fused_batch_in_autocommit(self.sf, batch)
+
+    async def _complete_plain_success(
+        self,
+        command: CompleteTaskFused,
+        *,
+        outcome_data: dict[str, Any],
+    ) -> Result[_PersistedTaskOutcome | None, _FinalizeError]:
+        """Write a plain success through the finalize batcher.
+
+        Returns after the statement of the row's batch returned: ``Applied``
+        is committed, and a refusal wrote nothing. A plain success has no
+        phase 2: its capacity NOTIFY commits with the row. ``outcome_data``
+        is the child outcome that a phase-1 retry replays.
+
+        Outcomes:
+            Ok(None): the row has its outcome (any of the five).
+            Err(PHASE1): ``BatchRolledBack`` (retryable when its cause may
+                clear), ``BatchCommitUnknown`` (retryable: the replay finds
+                the row ``AlreadyApplied`` when it committed), or a defect of
+                the batch write (retryable when it is a connection error).
+        """
+        try:
+            written = await self._finalize_batcher.complete(command)
+        except Exception as exc:
+            return Err(
+                self._make_finalize_error(
+                    task_id=command.task_id,
+                    stage=_FINALIZE_STAGE_PHASE1,
+                    message='Failed to persist terminal task state',
+                    retryable=is_retryable_connection_error(exc),
+                    data={
+                        'exception_type': type(exc).__name__,
+                        'exception': str(exc)[:500],
+                        'outcome': outcome_data,
+                    },
+                )
+            )
+        match written:
+            case Ok(outcome):
+                match outcome:
+                    case (
+                        Applied()
+                        | AlreadyApplied()
+                        | LostClaim()
+                        | SourceStateConflict()
+                        | TaskAbsent()
+                    ):
+                        return Ok(None)
+                    case _ as unreachable:
+                        assert_never(unreachable)
+            case Err(error):
+                return Err(
+                    self._batch_write_error(command.task_id, error, outcome_data)
+                )
+
+    def _batch_write_error(
+        self,
+        task_id: str,
+        error: BatchWriteError,
+        outcome_data: dict[str, Any],
+    ) -> _FinalizeError:
+        """The phase-1 error of a failed batch write of ``task_id``. Pure."""
+        match error:
+            case BatchRolledBack(cause=cause):
+                retryable = error.retryable
+                write_state = 'ROLLED_BACK'
+            case BatchCommitUnknown(cause=cause):
+                retryable = True
+                write_state = 'COMMIT_UNKNOWN'
+            case _ as unreachable:
+                assert_never(unreachable)
+        return self._make_finalize_error(
+            task_id=task_id,
+            stage=_FINALIZE_STAGE_PHASE1,
+            message='Failed to persist terminal task state',
+            retryable=retryable,
+            data={
+                'batch_write': write_state,
+                'exception_type': type(cause.error).__name__,
+                'exception': str(cause.error)[:500],
+                'outcome': outcome_data,
+            },
+        )
 
     async def _persist_failed_attempt(
         self,

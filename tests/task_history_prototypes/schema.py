@@ -77,6 +77,8 @@ _IDENTIFIER = re.compile(r'^[a-z][a-z0-9_]{0,62}$')
 # (horsies_finish_failed_attempt, horsies_lock_running_task,
 # horsies_failed_attempt_outcome). It changes no table, column or index of
 # horsies_tasks, so the cloned shape is unchanged and the base advances.
+# v57 adds the function horsies_complete_tasks_fused. It touches no table, and
+# no prototype names it, so the base advances.
 # v58 adds one function and one composite type
 # (horsies_finish_workflow_success, horsies_workflow_success_outcome). It
 # changes no table, column or index of horsies_tasks, so the cloned shape is
