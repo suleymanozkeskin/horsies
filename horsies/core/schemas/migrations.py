@@ -381,8 +381,11 @@ from horsies.core.models.tasks import Execution
 #      horsies_worker_states.class_capacity holds the capacity of each budget
 #      and the classes it serves. Nullable, no backfill: a row from an
 #      earlier worker did not record it.
+# v56: horsies_complete_tasks_fused, the batched plain-success completion.
+#      It calls horsies_complete_task_fused once per row, in sorted task-id
+#      order, and returns each row at its input ordinality.
 
-SCHEMA_VERSION = 55
+SCHEMA_VERSION = 56
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,

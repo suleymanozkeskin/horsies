@@ -1697,6 +1697,7 @@ class PostgresBroker:
     async def _activate_bounded_recovery(self, engine: AsyncEngine) -> None:
         from horsies.core.history.terminalization.move import (
             bounded_cancel_orphan_sweep_ddl,
+            completion_batch_replacement_ddl,
             pause_abandon_replacement_ddl,
             terminal_snapshot_replacement_ddl,
         )
@@ -1751,6 +1752,9 @@ class PostgresBroker:
                     await conn.execute(text(statement))
                 # v46: the update trigger cannot send task_done here.
                 await conn.execute(text(DROP_TASK_NOTIFY_UPDATE_TRIGGER_SQL))
+                # v56: the batched plain-success completion.
+                for statement in completion_batch_replacement_ddl():
+                    await conn.execute(text(statement))
             # v49: the writers hold the single-column history rules.
             await conn.execute(text(DROP_SINGLE_COLUMN_CHECKS_DDL))
             # v51: the task retention statistics have no reader.

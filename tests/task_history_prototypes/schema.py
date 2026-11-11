@@ -73,7 +73,9 @@ _IDENTIFIER = re.compile(r'^[a-z][a-z0-9_]{0,62}$')
 # the claim function pair, and adds horsies_worker_states.class_capacity. The
 # replay reads the deployed set, and the longest replayed name is 47 bytes.
 # The base advances.
-_EXPECTED_BASE_SCHEMA_VERSION = 55
+# v56 adds the function horsies_complete_tasks_fused. It touches no table, and
+# no prototype names it, so the base advances.
+_EXPECTED_BASE_SCHEMA_VERSION = 56
 
 
 @dataclass(frozen=True, slots=True)
