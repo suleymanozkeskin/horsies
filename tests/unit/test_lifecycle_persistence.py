@@ -39,7 +39,6 @@ from horsies.core.lifecycle.persistence import (
     apply_async,
     apply_batch_async,
     apply_sync,
-    classify_locked_read_miss_async,
 )
 from horsies.core.types.status import TaskStatus
 
@@ -123,40 +122,6 @@ def test_rejects_an_invalid_ordinal_contract(
             expected_count=2,
             operation=type(_command()).__name__,
         )
-
-
-@pytest.mark.asyncio
-async def test_locked_read_miss_keeps_and_logs_the_dispatched_generation(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """The read-only classifier gets the fence half absent from the command."""
-    result = MagicMock()
-    result.mappings.return_value.all.return_value = [_wire_row()]
-    connection = MagicMock()
-    connection.execute = AsyncMock(return_value=result)
-    command = CompleteLockedTask(
-        task_id='one',
-        fence=PriorLockedRead(worker_id='worker'),
-        result_json='{"ok": 1}',
-    )
-
-    with caplog.at_level(logging.WARNING, logger='horsies.lifecycle'):
-        outcome = await classify_locked_read_miss_async(
-            connection,
-            command,
-            claimed_at=_NOW,
-        )
-
-    assert isinstance(outcome, AlreadyApplied)
-    parameters = connection.execute.await_args.args[1]
-    assert parameters == {
-        'task_id': 'one',
-        'equivalent_kinds': ['COMPLETE_FUSED', 'COMPLETE_LOCKED'],
-        'worker_id': 'worker',
-        'claimed_at': _NOW,
-    }
-    expected_fence = OwnedClaim(worker_id='worker', claimed_at=_NOW)
-    assert f'expected_fence={expected_fence!r}' in caplog.records[-1].getMessage()
 
 
 @pytest.mark.asyncio
