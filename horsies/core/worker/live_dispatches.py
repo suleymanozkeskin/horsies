@@ -2,13 +2,15 @@
 
 The slot pool writes this registry on its event loop:
 
+- a child starts: ``register_kill_mark``;
 - a child takes a task: ``hold``. An isolated child holds one task, a
   shared async child up to its seats;
 - the attempt ends, because the slot read the child's answer: ``release``;
 - a kill goes to a child, or its exit is seen: ``release_child``.
 
 The runner heartbeat thread reads ``snapshot`` and writes one heartbeat for
-each held task. Its watchdog calls ``close`` when the worker fails closed.
+each held task. Its watchdog calls ``close`` when the worker fails closed,
+and ``run_kill_mark`` before it kills each child that held a task.
 
 One lock guards every read and every write. No caller holds it across I/O.
 This module does no I/O.
@@ -17,6 +19,7 @@ This module does no I/O.
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -87,8 +90,31 @@ class LiveDispatches:
         self._capacity = capacity
         self._lock = threading.Lock()
         self._by_ticket: dict[int, LiveDispatch] = {}
+        self._kill_marks: dict[int, Callable[[], None]] = {}
         self._next_ticket = 1
         self._state = _RegistryState.OPEN
+
+    def register_kill_mark(self, pid: int, mark: Callable[[], None]) -> None:
+        """Register ``mark`` for child ``pid``, which has started.
+
+        ``run_kill_mark`` runs it. ``release_child`` drops it, at a kill by
+        the slot pool or at the exit of the child.
+        """
+        with self._lock:
+            self._kill_marks[pid] = mark
+
+    def run_kill_mark(self, pid: int) -> None:
+        """Run the mark of child ``pid``: the heartbeat watchdog kills it next.
+
+        The mark records the kill as one by the worker, as a kill by the slot
+        pool is. It runs outside the lock, on the caller's thread. A child
+        whose mark was dropped already has a kill or an exit of its own, and
+        nothing runs.
+        """
+        with self._lock:
+            mark = self._kill_marks.get(pid)
+        if mark is not None:
+            mark()
 
     def hold(
         self,
@@ -149,7 +175,8 @@ class LiveDispatches:
         """Remove every dispatch that child ``pid`` holds, and return them.
 
         Called when a kill goes to the child and when its exit is seen. No
-        heartbeat covers these tasks after this call returns.
+        heartbeat covers these tasks after this call returns. Drops the kill
+        mark of the child.
         """
         with self._lock:
             removed = tuple(
@@ -157,6 +184,7 @@ class LiveDispatches:
             )
             for dispatch in removed:
                 del self._by_ticket[dispatch.ticket]
+            _ = self._kill_marks.pop(pid, None)
         return removed
 
     def snapshot(self) -> tuple[LiveDispatch, ...]:

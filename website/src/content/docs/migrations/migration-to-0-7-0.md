@@ -8,7 +8,7 @@ tags: [migration, 0.7.0, breaking-changes, worker, profiles, cli, schema, execut
 ## Upgrade order
 
 1. Install horsies 0.7.0 with psycopg 3.3.6 or later. See [Dependencies](#dependencies).
-2. Change the config: [worker profiles](#worker-settings-move-into-profiles) and [the snapshot interval](#worker_state_snapshot_interval_ms-is-at-most-60000-ms).
+2. Change the config: [worker profiles](#worker-settings-move-into-profiles), [the running stale threshold](#running_stale_threshold_ms-holds-one-heartbeat-interval-plus-2-s) and [the snapshot interval](#worker_state_snapshot_interval_ms-is-at-most-60000-ms).
 3. Change the code: [matches on error codes](#matches-on-error-codes), [result waits inside a task](#a-result-wait-inside-a-task-is-refused) and [workflow limits](#workflow-limits).
 4. Run `horsies check <app>`, and `horsies check <app> --live` against the target database. See [New validation](#new-validation).
 5. Stop every 0.6.x worker, then start the 0.7.0 processes. See [Stop 0.6.x workers first](#stop-06x-workers-first).
@@ -103,6 +103,19 @@ app = Horsies(AppConfig(
 horsies worker myapp.instance:app --profile default
 ```
 
+## `running_stale_threshold_ms` holds one heartbeat interval plus 2 s
+
+With `auto_fail_stale_running=True` (the default), a 0.7.0 worker stops when
+no runner heartbeat lands for half of `RecoveryConfig.running_stale_threshold_ms`.
+That half must hold one `runner_heartbeat_interval_ms` plus 2 s for the next
+heartbeat to land. So the threshold is at least
+`2 × (runner_heartbeat_interval_ms + 2,000 ms)`: 64,000 ms at the default
+30,000 ms interval. 0.6.x accepted `2 × runner_heartbeat_interval_ms`. A
+smaller value raises `ConfigurationError` with `HRS-204` when the config is
+built, and names the smallest valid value. With
+`auto_fail_stale_running=False`, the 0.6.x bound stays. See
+[When the Worker Cannot Write Heartbeats](/horsies/workers/heartbeats-recovery/#when-the-worker-cannot-write-heartbeats).
+
 ## `worker_state_snapshot_interval_ms` is at most 60,000 ms
 
 0.6.x accepted `RecoveryConfig.worker_state_snapshot_interval_ms` up to
@@ -151,8 +164,8 @@ See [Limits](/horsies/concepts/workflows/subworkflows/#66-limits).
 These were not checked before 0.7.0, because the values were command-line flags:
 
 - `horsies check` validates every profile. A claim limit above the capacity of the worker (its seats plus `prefetch_buffer`; one seat per isolated child) is refused with `HRS-218`; before, it had no effect.
-- `horsies check --live` reports `HRS-219` when one worker of a profile can open more Postgres connections than the server has usable slots.
-- At boot the worker warns when the per-child memory limits add up to more than the memory that the worker can use: the container (cgroup) limit when it is below the host RAM, else the host RAM, and when one worker can open more connections than the server has usable slots.
+- `horsies check --live` reports `HRS-219` when one worker of a profile opens more Postgres connections itself than the server has usable slots. The error also states what task code that sends adds: `worker_pool_size + worker_max_overflow` per child and per event loop that it sends from.
+- At boot the worker warns when the per-child memory limits add up to more than the memory that the worker can use: the container (cgroup) limit when it is below the host RAM, else the host RAM, and when one worker opens more connections itself than the server has usable slots.
 
 Each bound of the old flags still applies: at least one child, a task limit of at least 1, a memory limit of at least 1 MB, and a drain timeout above 0. New upper bounds: 1024 isolated children, 2,147,483,647 tasks for a task limit, 16,777,216 MB for a memory limit, and 24 hours for the drain timeout.
 
@@ -178,7 +191,9 @@ A 0.6.x process refuses a schema newer than its own when it sets up its schema: 
 | 2 | `horsies worker` | A removed worker flag | The flag was valid |
 | 1 | `horsies worker` | The worker cannot write runner heartbeats, with `auto_fail_stale_running=True` | The reaper failed the running tasks |
 | 77 | `horsies worker` | As above, and the worker has not stopped 120 seconds later | No such code |
-| 76 | worker child | A forked child that does not reparent to the worker | Code 74, which also meant a stop with executor threads left |
+| 74 | worker child | The child stopped while threads of the executor of its task loop still ran | Code 74 meant a forked child that does not reparent to the worker |
+| 75 | worker child | The child failed its boot, after it reported the cause | No such code |
+| 76 | worker child | A forked child that does not reparent to the worker | Code 74 |
 
 See [Exit Codes](/horsies/cli/#exit-codes).
 

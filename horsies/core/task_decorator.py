@@ -21,6 +21,7 @@ from typing import (
     TYPE_CHECKING,
     Optional,
     Any,
+    Never,
     assert_never,
     cast,
     overload,
@@ -1194,6 +1195,17 @@ class SharedThreadTaskDecorator(Protocol):
     ) -> TaskFunction[P, T]: ...
 
 
+class CancelGraceRefusedDecorator(Protocol):
+    """What `app.task(task_name, cancel_grace_ms=..., ...)` returns for a
+    literal class other than `SHARED_ASYNC`.
+
+    It accepts no function, so a type checker refuses the decoration. The
+    decorator refuses it at run time too (HRS-110).
+    """
+
+    def __call__(self, fn: Never, /) -> Never: ...
+
+
 class TaskSendOptions(Protocol[P, T]):
     """Per-send options for ad-hoc sends.
 
@@ -1654,13 +1666,18 @@ async def await_task_call_in_worker(
     a body that cancels its own task. So the worker maps that
     `CancelledError` through the exception mappers as well. A cancel that
     the worker sends at a deadline is mapped the same way here; the worker
-    then drops the result and records `TASK_TIMEOUT`. `KeyboardInterrupt`
-    and `GeneratorExit` propagate. The direct call outside a worker does
-    not change.
+    then drops the result and records `TASK_TIMEOUT`.
+
+    A `GeneratorExit` that leaves the body goes through the exception
+    mappers too, as it does for a `def` body. The direct call lets it pass,
+    so that `close()` on a suspended call ends it. A `close()` of this
+    coroutine still ends it: the mapped result returns into `close()`,
+    which drops it, and no code runs after it. `KeyboardInterrupt`
+    propagates. The direct call outside a worker does not change.
     """
     try:
         return await called
-    except asyncio.CancelledError as exc:
+    except (asyncio.CancelledError, GeneratorExit) as exc:
         return map_exception(exc)
 
 

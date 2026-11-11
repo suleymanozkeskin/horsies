@@ -27,8 +27,8 @@ there is no migration contract between pre-1.0 versions.
   - A direct call of an async task returns a coroutine of the `TaskResult`.
     The return check and the exception mappers are the same as for a `def`
     task. In a worker, a `CancelledError` of a body that cancelled its own
-    task goes through the exception mappers too; the direct call lets it
-    pass.
+    task, and a `GeneratorExit` that the body raises, go through the
+    exception mappers too; the direct call lets them pass.
   - `TaskNode.fn`, `.node()` and the task registry take both kinds.
   - An `async def` function that uses `yield` is refused with `HRS-101`, as
     a generator function is.
@@ -112,19 +112,24 @@ there is no migration contract between pre-1.0 versions.
     worker's down slots (`GET /api/workers/classes`; `WorkerStateInfo` gains
     `slot_health` and `down_slots`).
 - **`horsies check --live` compares every worker profile with the server
-  connection limit.** One worker can open its parent pool
+  connection limit.** One worker opens its parent pool
   (`worker_pool_size + worker_max_overflow`), 2 listener connections, 1
   runner heartbeat connection and `worker_child_pool_max_size` for each
-  child. A profile whose worker can
-  open more than `max_connections` less `superuser_reserved_connections`
+  child. A profile whose worker opens
+  more than `max_connections` less `superuser_reserved_connections`
   and `reserved_connections` fails with `HRS-219`
-  (`CHECK_WORKER_CONNECTIONS`). With `pgbouncer_transaction_mode=True`
+  (`CHECK_WORKER_CONNECTIONS`). Task code that sends opens the app's broker
+  in its child, `worker_pool_size + worker_max_overflow` for each event loop
+  it sends from. The comparison does not count it; the error and the boot
+  log state it, with one sending loop per child. With `pgbouncer_transaction_mode=True`
   nothing is compared. At boot, before any child starts, a worker logs the
   same comparison as a warning. It also warns when the per-child memory
   limits of its profile add up to more than the memory that it can use: the
   container (cgroup v2 or v1) memory limit when that is below the host RAM,
-  else the host RAM. The warning names the source. It starts in both
-  cases.
+  else the host RAM. The cgroup is the one that `/proc/self/cgroup` names,
+  and its limit is the smallest on the path from it up to the mount point,
+  so a systemd `MemoryMax` and a container seen with `--cgroupns=host`
+  count. The warning names the source. It starts in both cases.
 
 - **Each task declares its execution class, and each task row stores it.**
   `@app.task(..., execution=...)` takes an `Execution` member:
@@ -138,7 +143,9 @@ there is no migration contract between pre-1.0 versions.
     need `timeout_ms` (`HRS-109`), only `SHARED_ASYNC` takes `cancel_grace_ms`
     (`HRS-110`), and `cancel_grace_ms` is from 100 to 10,000 ms (`HRS-111`).
     `horsies check` reports them. With `execution` written as a member, a
-    type checker refuses the same declarations.
+    type checker refuses the same declarations. A class known only at run
+    time needs `timeout_ms` and takes `cancel_grace_ms`; the decorator checks
+    it at run time.
   - `cancel_grace_ms` is the time that a `SHARED_ASYNC` task gets to stop
     after its cancel. A task that sets none gets 1,000 ms. The stored task
     options hold the class (`"execution"`) and the grace in effect at send
@@ -236,7 +243,9 @@ there is no migration contract between pre-1.0 versions.
   - `@app.on_shared_async_child_start` registers an `async def` hook that
     runs on the loop of each shared async child before its first task, for
     long-lived async clients. Same 10 s bound and fail-closed stop as
-    `on_child_process_start`.
+    `on_child_process_start`. It also accepts an object whose `__call__` is
+    `async def`, a function with an awaitable return annotation, and a
+    lambda; it refuses another callable with `HRS-214`.
   - Recycling counts per seat: a shared child closes after
     `after_per_seat.tasks × seats` tasks (default 100 per seat) or when its
     RSS after a task reaches `above`. A closing child takes no new task, its
@@ -328,6 +337,14 @@ there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **Breaking: worker child exit codes 74 to 76.** In 0.6.x, 74 meant only a
+  forked child that does not reparent to the worker. In 0.7.0:
+  - 74: a child that stopped while threads of the executor of its task loop
+    still ran. It leaves without waiting for them. New.
+  - 75: a child that failed its boot, after it reported the cause. New.
+  - 76: a forked child that does not reparent to the worker. It was 74.
+  A worker that cannot write runner heartbeats and has not stopped 120 s
+  after it started to stop exits with 77, also new.
 - **Breaking: the claim function takes a budget per execution class.**
   `horsies_claim` takes `p_budgets` and `p_routes` in place of `p_processes`.
   It returns a `row_kind` column: one `'CLAIMED'` row per task it took, with
@@ -468,7 +485,10 @@ there is no migration contract between pre-1.0 versions.
   `running_stale_threshold_ms`, the worker logs the cause at critical level,
   kills every child that holds a task, stops, and exits with code 1. It exits
   with code 77 if it has not stopped 120 s later. A failed write is tried
-  again within that half. Before, the reaper failed such tasks with
+  again within that half. The half counts from when the last heartbeat
+  landed. After a heartbeat whose write took almost the whole half, the
+  worker stops 0.5 s before `running_stale_threshold_ms` has passed from the
+  start of that write, because the reaper may count from there. Before, the reaper failed such tasks with
   `WORKER_CRASHED` while they still ran, and a retry could run next to them.
   A killed task takes the child crash path, or stale-task recovery when the
   database cannot be reached. With `auto_fail_stale_running=False`, or no
@@ -508,6 +528,18 @@ there is no migration contract between pre-1.0 versions.
   - The task of such a slot keeps the row that the earlier scheduler wrote:
     it runs with no timeout, no retries, and as `ISOLATED`. Later slots carry
     the task's options.
+- **Breaking: with `auto_fail_stale_running=True`,
+  `RecoveryConfig.running_stale_threshold_ms` is at least
+  `2 × (runner_heartbeat_interval_ms + 2,000 ms)`.** The worker stops when no
+  runner heartbeat lands for half of the threshold. Heartbeats land one
+  interval apart, plus the time the next one takes to land, so that half must
+  hold one interval plus 2 s. A smaller value raises `ConfigurationError`
+  with `HRS-204` (`CONFIG_INVALID_RECOVERY`); the message names both fields
+  and the smallest valid value. Before, the bound was
+  `2 × runner_heartbeat_interval_ms`. At that bound the half was one interval,
+  and the worker stopped and killed its tasks while every heartbeat landed.
+  With `auto_fail_stale_running=False`, the bound stays
+  `2 × runner_heartbeat_interval_ms`.
 - **Breaking: `RecoveryConfig.worker_state_snapshot_interval_ms` is at most
   60,000 ms.** A worker is live while its latest snapshot is at most
   `WORKER_STATE_LIVE_WINDOW_S` (120) seconds old. The cap is half of that
@@ -543,9 +575,6 @@ there is no migration contract between pre-1.0 versions.
 
 ### Fixed
 
-- **A forked child that does not reparent to the worker exits with code 76.**
-  It exited with 74, which a child also uses after a stop with executor
-  threads left, so one exit code named two causes.
 - **A timed-out task's row moves only after its child has exited.** At the
   deadline the worker kills the child, waits up to 30 s for its exit, and
   only then writes `TASK_TIMEOUT`, the retry and the attempt row, or requeues

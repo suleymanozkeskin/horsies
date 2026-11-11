@@ -674,20 +674,15 @@ def _log_connection_limit(
     match compare_connections(selected.profile, broker, limit):
         case ConnectionsExceedServer() as exceed:
             logger.warning(
-                'Worker profile %r: %s. %s. To fix: %s',
+                'Worker profile %r: %s. %s; %s. To fix: %s',
                 selected.name,
                 exceed.describe(),
                 exceed.need.formula(),
+                exceed.need.task_sends_note(),
                 CONNECTIONS_HELP,
             )
-        case ConnectionsFit(need=need, limit=server_limit):
-            logger.info(
-                'Worker profile %r: one worker can open %s Postgres '
-                'connections of %s usable on the server',
-                selected.name,
-                need.total(),
-                server_limit.usable(),
-            )
+        case ConnectionsFit() as fit:
+            logger.info('Worker profile %r: %s', selected.name, fit.describe())
         case _ as unreachable:
             assert_never(unreachable)
 
