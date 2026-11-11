@@ -1150,7 +1150,7 @@ class TestUpgradePaths:
     async def test_claim_programs_upgrade_from_38(
         self, scratch_database: str,
     ) -> None:
-        """A v38 database receives the v39 claim pair and the lookup."""
+        """A v38 database receives the current claim pair and the lookup."""
         await _migrate(scratch_database)
         engine = _engine(scratch_database)
         broker = PostgresBroker(PostgresConfig(database_url=SecretStr(scratch_database)))
@@ -1158,7 +1158,8 @@ class TestUpgradePaths:
             async with engine.begin() as conn:
                 await conn.execute(text(
                     'DROP FUNCTION horsies_claim_candidates('
-                    'integer, jsonb, jsonb, jsonb, jsonb, integer, text, bigint)'
+                    'integer, jsonb, jsonb, jsonb, jsonb, jsonb, jsonb, '
+                    'integer, text, bigint)'
                 ))
                 await conn.execute(text(
                     'DROP FUNCTION horsies_find_non_runnable_workflow_tasks(uuid[])'
@@ -1185,8 +1186,10 @@ class TestUpgradePaths:
                     )
                 """))).tuples().all())
                 assert installed == {
-                    'horsies_claim': '',
-                    'horsies_claim_candidates': 'plan_cache_mode=force_generic_plan',
+                    'horsies_claim': 'jit=off',
+                    'horsies_claim_candidates': (
+                        'plan_cache_mode=force_generic_plan,jit=off'
+                    ),
                     'horsies_find_non_runnable_workflow_tasks': (
                         'plan_cache_mode=force_generic_plan'
                     ),
