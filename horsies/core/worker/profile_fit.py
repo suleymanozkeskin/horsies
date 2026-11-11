@@ -29,7 +29,6 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.worker_profile import (
     IsolatedChildren,
     MemoryLimit,
@@ -598,7 +597,8 @@ class WorkerConnectionNeed:
     """The Postgres connections of one worker, by part.
 
     ``total`` counts the connections that the worker opens itself: its
-    pool, its listener, its runner heartbeat connection, and the pool of
+    pool (``parent_pool``, the resolved ``WorkerProfile.pool``, with no
+    overflow), its listener, its runner heartbeat connection, and the pool of
     each child, by mode (``child_pools``: one entry for each mode with
     children, in the order isolated, shared async, shared thread). Task
     code that sends through the app opens the app's broker in its child: a
@@ -634,7 +634,7 @@ class WorkerConnectionNeed:
 
     def formula(self) -> str:
         terms = [
-            f'parent pool {self.parent_pool}',
+            f'parent pool max_size {self.parent_pool}',
             f'listener {self.listener}',
             f'runner heartbeat {self.runner_heartbeat}',
             *(pools.term() for pools in self.child_pools),
@@ -709,19 +709,17 @@ def _shared_thread_pools(
             assert_never(unreachable)
 
 
-def worker_connection_need(
-    profile: WorkerProfile,
-    broker: PostgresConfig,
-) -> WorkerConnectionNeed:
+def worker_connection_need(profile: WorkerProfile) -> WorkerConnectionNeed:
     """The connections of one worker of this profile.
 
-    Each child of a mode opens a pool of up to the resolved
-    ``pool.max_size`` of that mode, and task code that sends opens up to
-    the ``task_send_pool`` of that mode for each event loop it sends from.
+    The worker process opens a pool of up to the resolved ``pool.max_size``
+    of the profile, with no overflow. Each child of a mode opens a pool of
+    up to the resolved ``pool.max_size`` of that mode, and task code that
+    sends opens up to the ``task_send_pool`` of that mode for each event
+    loop it sends from. ``PostgresConfig`` sizes none of these.
     """
-    parent = broker.worker_runtime_config()
     return WorkerConnectionNeed(
-        parent_pool=parent.pool_size + parent.max_overflow,
+        parent_pool=profile.resolved_parent_pool(),
         listener=LISTENER_CONNECTIONS_PER_WORKER,
         runner_heartbeat=RUNNER_HEARTBEAT_CONNECTIONS_PER_WORKER,
         child_pools=(
@@ -767,22 +765,22 @@ class ConnectionsExceedServer:
 
 def compare_connections(
     profile: WorkerProfile,
-    broker: PostgresConfig,
     limit: ServerConnectionLimit,
 ) -> ConnectionsFit | ConnectionsExceedServer:
     """Compare the connections that one worker opens itself with the usable
     server slots. Task code that sends is not compared: whether it sends,
     and from how many event loops, is known only at run time."""
-    need = worker_connection_need(profile, broker)
+    need = worker_connection_need(profile)
     if need.total() > limit.usable():
         return ConnectionsExceedServer(need=need, limit=limit)
     return ConnectionsFit(need=need, limit=limit)
 
 
 CONNECTIONS_HELP: Final = (
-    'lower the child counts or the pool max_size of a mode (isolated.pool, '
-    'shared_async.pool, shared_thread.pool), raise max_connections, or send '
-    'the pooled connections through a transaction pooler '
-    '(pgbouncer_transaction_mode=True)'
+    'lower the child counts, the pool max_size of a mode (isolated.pool, '
+    'shared_async.pool, shared_thread.pool) or the parent pool max_size '
+    '(pool=ParentPool(max_size=PoolSize(connections=N))), raise '
+    'max_connections, or send the pooled connections through a transaction '
+    'pooler (pgbouncer_transaction_mode=True)'
 )
 """What to change when a profile needs more connections than the server has."""

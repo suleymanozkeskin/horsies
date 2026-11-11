@@ -253,7 +253,6 @@ class TestReaperCoverageCheck:
             psycopg_dsn='postgresql://u:p@localhost/db',
             queues=['default'],
             parent_pool_size=1,
-            parent_max_overflow=0,
             recovery_config=RecoveryConfig(check_interval_ms=7_000),
         )
         worker = Worker(session_factory=MagicMock(), listener=MagicMock(), cfg=cfg)

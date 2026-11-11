@@ -21,6 +21,8 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.child_sizing import (
     DEFAULT_TASK_SEND_POOL_CONNECTIONS,
+    PARENT_POOL_CONNECTIONS_FLOOR,
+    parent_pool_connections,
     shared_async_pool_connections,
     shared_thread_pool_connections,
 )
@@ -30,6 +32,7 @@ from horsies.core.models.worker_profile import (
     IsolatedRecycle,
     MemoryLimit,
     NoIsolatedChildren,
+    ParentPool,
     PoolSize,
     SharedAsyncChildren,
     SharedPool,
@@ -527,10 +530,9 @@ class TestConnectionNeed:
     def test_parent_pool_listener_heartbeat_and_child_pools(self) -> None:
         need = worker_connection_need(
             WorkerProfile(isolated=IsolatedChildren(count=8)),
-            _broker(),
         )
         assert need == WorkerConnectionNeed(
-            parent_pool=3 + 2,
+            parent_pool=PARENT_POOL_CONNECTIONS_FLOOR,
             listener=LISTENER_CONNECTIONS_PER_WORKER,
             runner_heartbeat=RUNNER_HEARTBEAT_CONNECTIONS_PER_WORKER,
             child_pools=(
@@ -564,7 +566,6 @@ class TestConnectionNeed:
                 ),
                 shared_thread=SharedThreadChildren(count=1, seats=4),
             ),
-            _broker(pool_size=30, max_overflow=30),
         )
 
         assert [pools.task_send_pool for pools in need.child_pools] == [3, 7, 2]
@@ -607,7 +608,7 @@ class TestConnectionNeed:
         ``app.get_broker()`` there opens exactly the per-loop term that the
         check counts for that kind."""
         broker_config = _broker(pool_size=30, max_overflow=30)
-        need = worker_connection_need(profile, broker_config)
+        need = worker_connection_need(profile)
         [pools] = need.child_pools
         app = Horsies(AppConfig(broker=broker_config))
         app.set_role('worker')
@@ -623,7 +624,7 @@ class TestConnectionNeed:
         profile = WorkerProfile(isolated=IsolatedChildren(count=8))
         limit = ServerConnectionLimit(max_connections=100, reserved=3)
 
-        outcome = compare_connections(profile, _broker(), limit)
+        outcome = compare_connections(profile, limit)
 
         assert isinstance(outcome, ConnectionsFit)
         assert outcome.describe() == (
@@ -644,7 +645,6 @@ class TestConnectionNeed:
                 shared_async=SharedAsyncChildren(count=3, seats=200),
                 shared_thread=SharedThreadChildren(count=4, seats=64),
             ),
-            _broker(),
         )
         async_pool = shared_async_pool_connections(200)
         thread_pool = shared_thread_pool_connections(64)
@@ -655,8 +655,9 @@ class TestConnectionNeed:
             ModePools(ChildMode.SHARED_THREAD, 4, thread_pool, task_send_pool=send),
         )
         assert need.children() == 9
+        assert need.parent_pool == parent_pool_connections(2 + 3 * 200 + 4 * 64)
         assert need.total() == (
-            3 + 2 + 2 + 1 + 2 * 2 + 3 * async_pool + 4 * thread_pool
+            need.parent_pool + 2 + 1 + 2 * 2 + 3 * async_pool + 4 * thread_pool
         )
 
     def test_a_set_pool_size_is_counted_as_set(self) -> None:
@@ -677,19 +678,17 @@ class TestConnectionNeed:
                     pool=SharedPool(max_size=PoolSize(connections=1)),
                 ),
             ),
-            _broker(),
         )
         assert [(pools.mode, pools.per_child) for pools in need.child_pools] == [
             (ChildMode.ISOLATED, 5),
             (ChildMode.SHARED_ASYNC, 7),
             (ChildMode.SHARED_THREAD, 1),
         ]
-        assert need.total() == 3 + 2 + 2 + 1 + 2 * 5 + 1 * 7 + 3 * 1
+        assert need.total() == 20 + 2 + 1 + 2 * 5 + 1 * 7 + 3 * 1
 
     def test_a_mode_without_children_has_no_term(self) -> None:
         need = worker_connection_need(
             WorkerProfile(shared_thread=SharedThreadChildren(count=2, seats=8)),
-            _broker(),
         )
         thread_pool = shared_thread_pool_connections(8)
         assert need.child_pools == (
@@ -701,7 +700,7 @@ class TestConnectionNeed:
             ),
         )
         assert need.formula() == (
-            'parent pool 5 + listener 2 + runner heartbeat 1 + 2 shared thread '
+            'parent pool max_size 5 + listener 2 + runner heartbeat 1 + 2 shared thread '
             f'children x shared_thread.pool max_size {thread_pool} = '
             f'{8 + 2 * thread_pool}'
         )
@@ -721,22 +720,34 @@ class TestConnectionNeed:
                     pool=SharedPool(max_size=PoolSize(connections=6)),
                 ),
             ),
-            _broker(),
         )
         assert need.formula() == (
-            'parent pool 5 + listener 2 + runner heartbeat 1 + 4 isolated '
+            'parent pool max_size 5 + listener 2 + runner heartbeat 1 + 4 isolated '
             'children x isolated.pool max_size 2 + 2 shared async children x '
             'shared_async.pool max_size 3 + 1 shared thread children x '
             'shared_thread.pool max_size 6 = 28'
         )
         assert need.task_sends() == 7 * DEFAULT_TASK_SEND_POOL_CONNECTIONS
 
-    def test_parent_pool_inherits_pool_size_when_worker_pool_is_none(self) -> None:
+    def test_the_parent_pool_derived_from_the_seats_is_counted(self) -> None:
+        """One shared async child of 1000 seats: the worker process derives
+        a pool of 20 from the seats, and the check counts all of it."""
         need = worker_connection_need(
-            WorkerProfile(isolated=IsolatedChildren(count=1)),
-            _broker(worker_pool_size=None, worker_max_overflow=None),
+            WorkerProfile(shared_async=SharedAsyncChildren(count=1, seats=1000)),
         )
-        assert need.parent_pool == 5 + 10
+        assert need.parent_pool == 20
+        assert need.total() == 20 + 2 + 1 + 1 * shared_async_pool_connections(1000)
+        assert need.formula().startswith('parent pool max_size 20 + listener 2')
+
+    def test_a_set_parent_pool_is_counted_as_set(self) -> None:
+        need = worker_connection_need(
+            WorkerProfile(
+                shared_async=SharedAsyncChildren(count=1, seats=1000),
+                pool=ParentPool(max_size=PoolSize(connections=40)),
+            ),
+        )
+        assert need.parent_pool == 40
+        assert need.total() == 40 + 2 + 1 + shared_async_pool_connections(1000)
 
     def test_usable_slots_never_go_below_zero(self) -> None:
         assert ServerConnectionLimit(max_connections=3, reserved=5).usable() == 0
@@ -744,7 +755,7 @@ class TestConnectionNeed:
     def test_need_above_usable_exceeds(self) -> None:
         profile = WorkerProfile(isolated=IsolatedChildren(count=8))
         limit = ServerConnectionLimit(max_connections=26, reserved=3)
-        outcome = compare_connections(profile, _broker(), limit)
+        outcome = compare_connections(profile, limit)
         assert isinstance(outcome, ConnectionsExceedServer)
         assert outcome.describe() == (
             'one worker opens up to 24 Postgres connections itself, not '
@@ -755,7 +766,7 @@ class TestConnectionNeed:
     def test_need_equal_to_usable_fits(self) -> None:
         profile = WorkerProfile(isolated=IsolatedChildren(count=8))
         limit = ServerConnectionLimit(max_connections=27, reserved=3)
-        assert isinstance(compare_connections(profile, _broker(), limit), ConnectionsFit)
+        assert isinstance(compare_connections(profile, limit), ConnectionsFit)
 
 
 def _app(
@@ -790,7 +801,7 @@ class TestCheckLiveWorkerConnections:
             'usable slots (max_connections 30 - reserved 3)'
         )
         assert errors[0].notes == [
-            'parent pool 5 + listener 2 + runner heartbeat 1 + 20 isolated '
+            'parent pool max_size 5 + listener 2 + runner heartbeat 1 + 20 isolated '
             'children x isolated.pool max_size 2 = 48',
             'not counted: task code that sends opens a pool of the '
             'task_send_pool of its child kind in its child, for each event '

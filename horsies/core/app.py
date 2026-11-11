@@ -255,14 +255,13 @@ def _no_location(error: _E) -> _E:
 
 def _worker_connection_errors(
     profiles: Mapping[str, WorkerProfile],
-    broker_config: PostgresConfig,
     limit: ServerConnectionLimit,
 ) -> list[HorsiesError]:
     """One error for each profile that needs more connections than the
     server has usable slots, in name order."""
     errors: list[HorsiesError] = []
     for name in sorted(profiles):
-        match compare_connections(profiles[name], broker_config, limit):
+        match compare_connections(profiles[name], limit):
             case ConnectionsExceedServer() as exceed:
                 errors.append(
                     _no_location(
@@ -1471,7 +1470,7 @@ class Horsies:
                     )
                 ]
             case ServerConnectionLimit() as limit:
-                return _worker_connection_errors(profiles, broker_config, limit)
+                return _worker_connection_errors(profiles, limit)
             case _ as unreachable:
                 assert_never(unreachable)
 
