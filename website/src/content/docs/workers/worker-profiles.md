@@ -1,7 +1,7 @@
 ---
 title: Worker Profiles
 summary: Named worker settings in AppConfig - isolated, shared async and shared thread children, recycling, claim limits, drain timeout and preload - and what horsies check and worker boot validate.
-related: [worker-architecture, shared-async-tasks, shared-thread-tasks, concurrency, ../cli, ../configuration/app-config, ../migrations/migration-to-0-7-0]
+related: [execution-modes, worker-architecture, shared-async-tasks, shared-thread-tasks, concurrency, ../cli, ../configuration/app-config, ../migrations/migration-to-0-7-0]
 tags: [workers, profiles, configuration, concurrency, recycling, validation]
 ---
 
@@ -73,7 +73,7 @@ error[HRS-206]: --profile is required
 
 ## Execution Modes
 
-A profile sets a number of children for each execution mode. A child never changes its mode.
+A profile sets a number of children for each execution mode. A child never changes its mode. To choose a mode for a task, see [Choosing an Execution Mode](execution-modes).
 
 | Mode | Field | A child runs |
 |------|-------|--------------|

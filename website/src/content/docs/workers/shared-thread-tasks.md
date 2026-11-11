@@ -1,7 +1,7 @@
 ---
 title: Shared Thread Tasks
 summary: SHARED_THREAD tasks run on threads, many at once, in shared thread children - when threads help (measured), what runs where, the timeout and the kill, the rules for task authors, recycling and sizing.
-related: [worker-profiles, worker-architecture, shared-async-tasks, ../tasks/defining-tasks]
+related: [execution-modes, worker-profiles, worker-architecture, shared-async-tasks, ../tasks/defining-tasks]
 tags: [workers, threads, shared-thread, execution, timeouts, concurrency, free-threading]
 ---
 
