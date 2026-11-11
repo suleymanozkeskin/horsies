@@ -32,7 +32,6 @@ from horsies.core.logging import get_logger
 from horsies.core.models.tasks import OperationalErrorCode
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.child_protocol import (
-    SeatFinished,
     SeatRefusal,
     SeatTask,
     SharedWork,
@@ -152,11 +151,7 @@ class SharedKillFinalizeMixin:
                     OperationalErrorCode.NEIGHBOUR_BLOCKED_LOOP,
                     RetryPlacement.SAME_CLASS,
                 )
-            case ReturnedBeforeKill(
-                returned=SeatFinished(
-                    ok=ok, result_json=result_json, failed_reason=failed
-                ),
-            ):
+            case ReturnedBeforeKill(returned=returned):
                 logger.debug(
                     'Task %s returned before its deadline, and the worker killed '
                     'its shared child (%s) while work that it left was stuck; '
@@ -166,9 +161,9 @@ class SharedKillFinalizeMixin:
                 )
                 return await self._finalize_task_result(
                     task_id,
-                    ok,
-                    result_json,
-                    failed,
+                    returned.ok,
+                    returned.result_json,
+                    returned.failed_reason,
                     queue_name=queue_name,
                     is_workflow_task=is_workflow_task,
                     task_name=task_name,
