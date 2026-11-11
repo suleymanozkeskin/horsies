@@ -9,9 +9,11 @@ Linux. On macOS the same verdicts are covered through SIGKILL and ``os._exit``.
 from __future__ import annotations
 
 import asyncio
+import errno
 import logging
 import os
 import random
+import resource
 import signal
 import socket
 import subprocess
@@ -799,6 +801,101 @@ class TestDownSlots:
         await asyncio.wait_for(pool.stop(30), 10)
 
         assert all(task.done() for task in pool._tasks)
+
+    async def test_a_parent_out_of_descriptors_takes_only_the_replacing_slot_down(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The worker parent is at its descriptor limit when slot 1 replaces
+        a child, so the socket pair of the replacement fails with EMFILE.
+        The cause can clear: the slot is down, no defect is counted, and the
+        slot returns to service when descriptors are free again."""
+        monkeypatch.setattr(slots, 'SLOT_DOWN_FIRST_DELAY_S', 0.05)
+        pool = await _started_pool(_config(2))
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        try:
+            replaced = pool._slots[1].child
+            assert replaced is not None
+            resource.setrlimit(resource.RLIMIT_NOFILE, (NO_NEW_DESCRIPTOR_LIMIT, hard))
+            try:
+                os.kill(replaced.pid, signal.SIGKILL)
+                await _until(lambda: isinstance(pool.states()[1], Down))
+            finally:
+                resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+            match pool.states()[1]:
+                case Down(cause=cause, detail=detail):
+                    assert cause == SHORT_OF_DESCRIPTORS
+                    assert detail == EMFILE_DETAIL
+                case other:
+                    raise AssertionError(other)
+            assert pool._failure is None
+            assert pool._slots[1].defects == 0
+            await _until(lambda: isinstance(pool.states()[1], Idle))
+            assert pool.slots_in_service() == 2
+            assert pool._failure is None
+        finally:
+            await pool.stop(0)
+
+
+# Descriptors 0, 1 and 2 stay open. Each new descriptor gets a number at or
+# above this soft limit, so the OS refuses it with EMFILE.
+NO_NEW_DESCRIPTOR_LIMIT = 3
+
+
+class _RefusedBuffers:
+    """A socket whose buffer size the OS refuses."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def setsockopt(self, *_args: object) -> None:
+        raise OSError(errno.ENOBUFS, 'No buffer space available')
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class TestSocketPair:
+    """The socket pair of a new child follows the errno rule of a boot step."""
+
+    @pytest.mark.parametrize(
+        ('number', 'cause'),
+        [
+            (errno.EMFILE, ResourceShortage(ShortageErrno.EMFILE)),
+            (errno.ENFILE, ResourceShortage(ShortageErrno.ENFILE)),
+            (errno.EOPNOTSUPP, SpawnFailed()),
+        ],
+        ids=['emfile', 'enfile', 'eopnotsupp'],
+    )
+    def test_a_refused_pair_names_its_cause(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        number: int,
+        cause: ResourceShortage | SpawnFailed,
+    ) -> None:
+        def refuse() -> tuple[socket.socket, socket.socket]:
+            raise OSError(number, os.strerror(number))
+
+        monkeypatch.setattr(socket, 'socketpair', refuse)
+
+        assert slots._socket_pair() == Err(
+            BootFailure(cause, f'OSError: [Errno {number}] {os.strerror(number)}'),
+        )
+
+    def test_a_refused_buffer_size_closes_both_sockets(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        pair = (_RefusedBuffers(), _RefusedBuffers())
+        monkeypatch.setattr(socket, 'socketpair', lambda: pair)
+
+        match slots._socket_pair():
+            case Err(BootFailure(cause=SpawnFailed(), detail=detail)):
+                assert detail.startswith(f'OSError: [Errno {errno.ENOBUFS}]')
+            case other:
+                raise AssertionError(other)
+        assert [sock.closed for sock in pair] == [True, True]
 
 
 VALID_APP = """

@@ -116,6 +116,24 @@ class SpawnFailed:
     """
 
 
+def shortage_or[StepCause](
+    exc: BaseException,
+    step_cause: StepCause,
+) -> ResourceShortage | StepCause:
+    """Name the cause of an exception that a boot step raised.
+
+    An ``OSError`` whose errno is in ``CLEARABLE_ERRNOS`` is a
+    ``ResourceShortage``, which can clear. Any other exception is
+    ``step_cause``, the cause of that step. Only the exception itself is
+    read, not its ``__cause__``. Pure.
+    """
+    match exc:
+        case OSError(errno=int() as number) if number in CLEARABLE_ERRNOS:
+            return ResourceShortage(CLEARABLE_ERRNOS[number])
+        case _:
+            return step_cause
+
+
 ReportedBootCause: TypeAlias = (
     AppLoadFailed
     | ChildPoolSetupFailed

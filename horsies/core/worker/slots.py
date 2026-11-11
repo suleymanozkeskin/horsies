@@ -48,6 +48,7 @@ from horsies.core.models.boot_failure import (
     ThreadStartRefused,
     cut_text,
     describe_boot_cause,
+    shortage_or,
 )
 from horsies.core.models.health import DownSlot
 from horsies.core.models.tasks import (
@@ -1012,13 +1013,37 @@ class FrameProtocol(asyncio.BufferedProtocol):
         self._on_closed()
 
 
-def _socket_pair() -> tuple[socket.socket, socket.socket]:
-    """Return a new (parent, child) pair with large buffers."""
-    parent_sock, child_sock = socket.socketpair()
-    for sock in (parent_sock, child_sock):
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, SOCKET_BUFFER_BYTES)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, SOCKET_BUFFER_BYTES)
-    return parent_sock, child_sock
+def spawn_failure(exc: OSError) -> BootFailure:
+    """Name the cause of an ``OSError`` of a step that starts a child in the
+    parent: ``ResourceShortage`` for an errno in ``CLEARABLE_ERRNOS``, else
+    ``SpawnFailed``. Pure."""
+    return boot_failure(shortage_or(exc, SpawnFailed()), f'{type(exc).__name__}: {exc}')
+
+
+def _socket_pair() -> Result[tuple[socket.socket, socket.socket], BootFailure]:
+    """Return a new (parent, child) pair with large buffers.
+
+    ``Err``: the OS refused the pair or a buffer size (``spawn_failure``).
+    No socket of this call is left open then.
+    """
+    try:
+        parent_sock, child_sock = socket.socketpair()
+    except OSError as exc:
+        return Err(spawn_failure(exc))
+    try:
+        for sock in (parent_sock, child_sock):
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, SOCKET_BUFFER_BYTES)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, SOCKET_BUFFER_BYTES)
+    except OSError as exc:
+        parent_sock.close()
+        child_sock.close()
+        return Err(spawn_failure(exc))
+    return Ok((parent_sock, child_sock))
+
+
+@dataclass(frozen=True, slots=True)
+class _NoForkedChild:
+    """The preload parent gave no child, so the start uses ``exec``."""
 
 
 class Child:
@@ -1062,14 +1087,22 @@ class Child:
         parent-death signal fires when the spawning thread ends. Does not wait
         for the child to be ready.
 
-        ``Err``: the OS refused the ``exec`` spawn. The cause is always
-        ``SpawnFailed``, and no process or socket is left.
+        ``Err``: the OS refused the socket pair of the child or the ``exec``
+        spawn. The cause is ``SpawnFailed``, or ``ResourceShortage`` for an
+        errno in ``CLEARABLE_ERRNOS`` (``spawn_failure``). No process or
+        socket is left.
         """
         registry = set[int]() if live_pids is None else live_pids
         if preload is not None:
-            forked = await cls._start_forked(init, preload, registry)
-            if forked is not None:
-                return Ok(forked)
+            match await cls._start_forked(init, preload, registry):
+                case Child() as forked:
+                    return Ok(forked)
+                case BootFailure() as failed:
+                    return Err(failed)
+                case _NoForkedChild():
+                    pass
+                case _ as unreachable:
+                    assert_never(unreachable)
         return await cls._start_exec(config, init, registry)
 
     @classmethod
@@ -1078,13 +1111,18 @@ class Child:
         init: InitFrame,
         preload: PreloadParent,
         registry: set[int],
-    ) -> 'Child | None':
-        """Return a forked child, or None.
+    ) -> 'Child | _NoForkedChild | BootFailure':
+        """Return a forked child, ``_NoForkedChild`` when the preload parent
+        gave none, or the ``BootFailure`` of a socket pair that the OS refused.
 
         After a failure this socket pair must not be used again: a forked child
         may exist and hold it. Closing our end gives that child EOF.
         """
-        parent_sock, child_sock = _socket_pair()
+        match _socket_pair():
+            case Ok((parent_sock, child_sock)):
+                pass
+            case Err(failed):
+                return failed
         try:
             reply = await preload.fork_child(child_sock, registry)
         finally:
@@ -1095,7 +1133,7 @@ class Child:
             case Err(down):
                 parent_sock.close()
                 logger.warning('Preload parent gave no child: %s', down.detail)
-                return None
+                return _NoForkedChild()
 
     @classmethod
     async def _start_exec(
@@ -1104,7 +1142,11 @@ class Child:
         init: InitFrame,
         registry: set[int],
     ) -> Result['Child', BootFailure]:
-        parent_sock, child_sock = _socket_pair()
+        match _socket_pair():
+            case Ok((parent_sock, child_sock)):
+                pass
+            case Err(failed):
+                return Err(failed)
         try:
             process = await asyncio.create_subprocess_exec(
                 sys.executable,
