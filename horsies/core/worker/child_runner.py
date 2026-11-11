@@ -520,6 +520,7 @@ def _child_initializer(
     loglevel: int,
     database_url: str,
     pool: ResolvedPool,
+    task_send_pool: int,
     connect_kwargs: Mapping[str, object] | None = None,
 ) -> None:
     """Child-process bootstrap: locate the app, import tasks, open the pool.
@@ -531,7 +532,13 @@ def _child_initializer(
             not raise — _run_child_start_hooks exits the child with
             CHILD_HOOK_FAILURE_EXIT_CODE (fail-closed).
     """
-    app = import_app_for_child(app_locator, imports, sys_path_roots, loglevel)
+    app = import_app_for_child(
+        app_locator,
+        imports,
+        sys_path_roots,
+        loglevel,
+        task_send_pool,
+    )
     finish_child_start(app, database_url, connect_kwargs, pool)
 
 
@@ -540,8 +547,14 @@ def import_app_for_child(
     imports: Sequence[str],
     sys_path_roots: Sequence[str],
     loglevel: int,
+    task_send_pool: int,
 ) -> Horsies:
     """Locate the app and import its task modules. Opens no connection.
+
+    Before the imports, the app takes the worker role and the task-send
+    pool of the kind of the child (``task_send_pool`` connections, 1 or
+    more), so a broker that an import or a task builds through
+    ``app.get_broker()`` opens that pool.
 
     A preload parent runs this before it forks, so children share the result.
 
@@ -572,6 +585,7 @@ def import_app_for_child(
     app = _locate_app(app_locator)  # uses import_by_path -> loads as 'instance'
     _discard_inherited_broker(app)
     app.set_role('worker')
+    app.set_task_send_pool(task_send_pool)
     set_current_app(app)
 
     # Suppress accidental sends while importing modules for discovery

@@ -38,6 +38,7 @@ from horsies.core.errors import (
 )
 from horsies.core.logging import get_logger
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.child_sizing import DEFAULT_TASK_SEND_POOL_CONNECTIONS
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.models.worker_profile import (
     IsolatedChildren,
@@ -524,14 +525,16 @@ class ExecutionSettings:
     for those; this is the one place that turns them into that encoding.
     ``processes`` is the number of isolated children, 0 when the profile
     has none. ``isolated_pool`` is the pool of each isolated child, the
-    default ``IsolatedPool`` when there are none. ``shared_async`` and
-    ``shared_thread`` keep their typed form.
+    default ``IsolatedPool`` when there are none; ``isolated_task_send_pool``
+    is the task-send pool of each isolated child, the default when there are
+    none. ``shared_async`` and ``shared_thread`` keep their typed form.
     """
 
     processes: int
     max_tasks_per_child: int
     max_memory_per_child_mb: int | None
     isolated_pool: ResolvedPool
+    isolated_task_send_pool: int
     max_claim_batch: int
     max_claim_per_worker: int
     drain_timeout_s: float
@@ -564,7 +567,8 @@ def execution_settings(profile: WorkerProfile) -> ExecutionSettings:
     """Turn a validated profile into the settings of ``WorkerConfig``.
 
     A profile with no isolated children gives ``processes`` 0, no task
-    limit, no memory limit and the default pool for isolated children. AppConfig validation
+    limit, no memory limit and the default pool and task-send pool for
+    isolated children. AppConfig validation
     refuses a profile with no children of any mode, so such a profile here
     is a defect: ``AssertionError``.
     """
@@ -578,11 +582,13 @@ def execution_settings(profile: WorkerProfile) -> ExecutionSettings:
             max_tasks_per_child = _tasks_or_zero(recycle.after)
             max_memory_per_child_mb = _mb_or_none(recycle.above)
             isolated_pool = isolated.resolved_pool()
+            isolated_task_send_pool = isolated.task_send_pool.connections
         case NoIsolatedChildren():
             processes = 0
             max_tasks_per_child = 0
             max_memory_per_child_mb = None
             isolated_pool = IsolatedPool().resolved()
+            isolated_task_send_pool = DEFAULT_TASK_SEND_POOL_CONNECTIONS
         case _ as unreachable:
             assert_never(unreachable)
     return ExecutionSettings(
@@ -590,6 +596,7 @@ def execution_settings(profile: WorkerProfile) -> ExecutionSettings:
         max_tasks_per_child=max_tasks_per_child,
         max_memory_per_child_mb=max_memory_per_child_mb,
         isolated_pool=isolated_pool,
+        isolated_task_send_pool=isolated_task_send_pool,
         max_claim_batch=_tasks_or_zero(profile.claim.per_queue_per_pass),
         max_claim_per_worker=_tasks_or_zero(profile.claim.claimed_per_worker),
         drain_timeout_s=profile.drain_timeout.total_seconds(),
@@ -846,6 +853,7 @@ def worker_command(args: argparse.Namespace) -> None:
         parent_pool_size=worker_postgres_config.pool_size,
         parent_max_overflow=worker_postgres_config.max_overflow,
         isolated_pool=settings.isolated_pool,
+        isolated_task_send_pool=settings.isolated_task_send_pool,
         child_connect_kwargs=postgres_config.pooled_connect_args,
         queues=queues,
         processes=settings.processes,

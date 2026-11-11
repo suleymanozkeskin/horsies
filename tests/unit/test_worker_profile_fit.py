@@ -20,6 +20,7 @@ from horsies.core.errors import ErrorCode
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.child_sizing import (
+    DEFAULT_TASK_SEND_POOL_CONNECTIONS,
     shared_async_pool_connections,
     shared_thread_pool_connections,
 )
@@ -532,48 +533,89 @@ class TestConnectionNeed:
             parent_pool=3 + 2,
             listener=LISTENER_CONNECTIONS_PER_WORKER,
             runner_heartbeat=RUNNER_HEARTBEAT_CONNECTIONS_PER_WORKER,
-            child_pools=(ModePools(ChildMode.ISOLATED, children=8, per_child=2),),
-            task_broker_per_loop=3 + 2,
+            child_pools=(
+                ModePools(
+                    ChildMode.ISOLATED,
+                    children=8,
+                    per_child=2,
+                    task_send_pool=DEFAULT_TASK_SEND_POOL_CONNECTIONS,
+                ),
+            ),
         )
         assert LISTENER_CONNECTIONS_PER_WORKER == 2
         assert RUNNER_HEARTBEAT_CONNECTIONS_PER_WORKER == 1
         assert need.total() == 24
 
-    def test_task_sends_add_the_worker_broker_pool_per_child(self) -> None:
-        """A child builds the app's broker from the worker runtime config: a
-        task that sends opens worker_pool_size + worker_max_overflow
-        connections in its child, for each event loop that it sends from."""
+    def test_task_sends_add_the_task_send_pool_of_each_kind(self) -> None:
+        """A task that sends opens the task_send_pool of its child kind in
+        its child, for each event loop that it sends from. Each kind counts
+        its own setting, and the producer pool of PostgresConfig plays no
+        part."""
         need = worker_connection_need(
-            WorkerProfile(shared_async=SharedAsyncChildren(count=8, seats=50)),
-            _broker(worker_pool_size=4, worker_max_overflow=3),
+            WorkerProfile(
+                isolated=IsolatedChildren(
+                    count=2,
+                    task_send_pool=PoolSize(connections=3),
+                ),
+                shared_async=SharedAsyncChildren(
+                    count=8,
+                    seats=50,
+                    task_send_pool=PoolSize(connections=7),
+                ),
+                shared_thread=SharedThreadChildren(count=1, seats=4),
+            ),
+            _broker(pool_size=30, max_overflow=30),
         )
 
-        assert need.task_broker_per_loop == 4 + 3
-        assert need.task_sends() == 8 * (4 + 3)
-        assert need.with_task_sends() == need.total() + 8 * (4 + 3)
+        assert [pools.task_send_pool for pools in need.child_pools] == [3, 7, 2]
+        assert need.task_sends() == 2 * 3 + 8 * 7 + 1 * 2
+        assert need.with_task_sends() == need.total() + 64
         assert need.task_sends_note() == (
-            'not counted: task code that sends opens a pool of '
-            'worker_pool_size + worker_max_overflow = 7 connections in its '
-            'child for each event loop that it sends from; with one such loop '
-            f'in each child, 8 x 7 = 56 more, {need.total() + 56} in all'
+            'not counted: task code that sends opens a pool of the '
+            'task_send_pool of its child kind in its child, for each event '
+            'loop that it sends from; with one such loop in each child, 2 '
+            'isolated children x isolated.task_send_pool 3 + 8 shared async '
+            'children x shared_async.task_send_pool 7 + 1 shared thread '
+            'children x shared_thread.task_send_pool 2 = 64 more, '
+            f'{need.total() + 64} in all'
         )
 
-    def test_the_task_send_pool_is_the_pool_of_the_broker_of_a_child(self) -> None:
-        """A child sets the worker role at start, so ``app.get_broker()``
-        there builds its engines from the worker runtime config."""
-        broker_config = _broker(worker_pool_size=4, worker_max_overflow=3)
+    @pytest.mark.parametrize(
+        'profile',
+        [
+            WorkerProfile(
+                isolated=IsolatedChildren(
+                    count=1,
+                    task_send_pool=PoolSize(connections=4),
+                ),
+            ),
+            WorkerProfile(
+                shared_async=SharedAsyncChildren(
+                    count=1,
+                    seats=10,
+                    task_send_pool=PoolSize(connections=6),
+                ),
+            ),
+            WorkerProfile(shared_thread=SharedThreadChildren(count=1, seats=10)),
+        ],
+    )
+    def test_the_task_send_term_is_the_pool_of_the_broker_of_a_child(
+        self,
+        profile: WorkerProfile,
+    ) -> None:
+        """A child sets the task-send pool of its kind at start, so
+        ``app.get_broker()`` there opens exactly the per-loop term that the
+        check counts for that kind."""
+        broker_config = _broker(pool_size=30, max_overflow=30)
+        need = worker_connection_need(profile, broker_config)
+        [pools] = need.child_pools
         app = Horsies(AppConfig(broker=broker_config))
         app.set_role('worker')
+        app.set_task_send_pool(pools.task_send_pool)
         broker = app.get_broker()
         try:
-            need = worker_connection_need(
-                WorkerProfile(isolated=IsolatedChildren(count=1)),
-                broker_config,
-            )
-            assert (
-                broker.config.pool_size + broker.config.max_overflow
-                == need.task_broker_per_loop
-            )
+            assert broker.config.max_overflow == 0
+            assert broker.config.pool_size == pools.task_send_pool
         finally:
             _ = broker.close()
 
@@ -587,9 +629,9 @@ class TestConnectionNeed:
         assert outcome.describe() == (
             'one worker opens up to 24 Postgres connections itself, of 97 usable '
             'on the server; not counted: task code that sends opens a pool of '
-            'worker_pool_size + worker_max_overflow = 5 connections in its child '
-            'for each event loop that it sends from; with one such loop in each '
-            'child, 8 x 5 = 40 more, 64 in all'
+            'the task_send_pool of its child kind in its child, for each event '
+            'loop that it sends from; with one such loop in each child, 8 '
+            'isolated children x isolated.task_send_pool 2 = 16 more, 40 in all'
         )
 
     def test_each_mode_counts_its_own_resolved_pool_max(self) -> None:
@@ -606,10 +648,11 @@ class TestConnectionNeed:
         )
         async_pool = shared_async_pool_connections(200)
         thread_pool = shared_thread_pool_connections(64)
+        send = DEFAULT_TASK_SEND_POOL_CONNECTIONS
         assert need.child_pools == (
-            ModePools(ChildMode.ISOLATED, children=2, per_child=2),
-            ModePools(ChildMode.SHARED_ASYNC, children=3, per_child=async_pool),
-            ModePools(ChildMode.SHARED_THREAD, children=4, per_child=thread_pool),
+            ModePools(ChildMode.ISOLATED, 2, 2, task_send_pool=send),
+            ModePools(ChildMode.SHARED_ASYNC, 3, async_pool, task_send_pool=send),
+            ModePools(ChildMode.SHARED_THREAD, 4, thread_pool, task_send_pool=send),
         )
         assert need.children() == 9
         assert need.total() == (
@@ -650,7 +693,12 @@ class TestConnectionNeed:
         )
         thread_pool = shared_thread_pool_connections(8)
         assert need.child_pools == (
-            ModePools(ChildMode.SHARED_THREAD, children=2, per_child=thread_pool),
+            ModePools(
+                ChildMode.SHARED_THREAD,
+                children=2,
+                per_child=thread_pool,
+                task_send_pool=DEFAULT_TASK_SEND_POOL_CONNECTIONS,
+            ),
         )
         assert need.formula() == (
             'parent pool 5 + listener 2 + runner heartbeat 1 + 2 shared thread '
@@ -681,7 +729,7 @@ class TestConnectionNeed:
             'shared_async.pool max_size 3 + 1 shared thread children x '
             'shared_thread.pool max_size 6 = 28'
         )
-        assert need.task_sends() == 7 * 5
+        assert need.task_sends() == 7 * DEFAULT_TASK_SEND_POOL_CONNECTIONS
 
     def test_parent_pool_inherits_pool_size_when_worker_pool_is_none(self) -> None:
         need = worker_connection_need(
@@ -744,10 +792,11 @@ class TestCheckLiveWorkerConnections:
         assert errors[0].notes == [
             'parent pool 5 + listener 2 + runner heartbeat 1 + 20 isolated '
             'children x isolated.pool max_size 2 = 48',
-            'not counted: task code that sends opens a pool of worker_pool_size '
-            '+ worker_max_overflow = 5 connections in its child for each event '
-            'loop that it sends from; with one such loop in each child, 20 x 5 '
-            '= 100 more, 148 in all',
+            'not counted: task code that sends opens a pool of the '
+            'task_send_pool of its child kind in its child, for each event '
+            'loop that it sends from; with one such loop in each child, 20 '
+            'isolated children x isolated.task_send_pool 2 = 40 more, 88 in '
+            'all',
         ]
         assert errors[0].location is None
 

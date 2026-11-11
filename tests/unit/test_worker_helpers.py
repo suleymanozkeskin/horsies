@@ -1838,21 +1838,21 @@ class TestMemoryBaselineGuard:
 
     def test_no_threshold_skips_the_guard(self) -> None:
         self._worker(None)._check_memory_baseline(
-            (ChildBaseline(1, RssMb(9999.0), IsolatedChild(pool=_POOL)),)
+            (ChildBaseline(1, RssMb(9999.0), IsolatedChild(pool=_POOL, task_send_pool=2)),)
         )
 
     def test_baseline_at_the_threshold_is_refused(self) -> None:
         with pytest.raises(MemoryBaselineExceedsThresholdError, match='100MB'):
             self._worker(100)._check_memory_baseline(
                 (
-                    ChildBaseline(1, RssMb(50.0), IsolatedChild(pool=_POOL)),
-                    ChildBaseline(2, RssMb(100.0), IsolatedChild(pool=_POOL)),
+                    ChildBaseline(1, RssMb(50.0), IsolatedChild(pool=_POOL, task_send_pool=2)),
+                    ChildBaseline(2, RssMb(100.0), IsolatedChild(pool=_POOL, task_send_pool=2)),
                 ),
             )
 
     def test_baseline_below_the_threshold_passes(self) -> None:
         self._worker(100)._check_memory_baseline(
-            (ChildBaseline(1, RssMb(10.0), IsolatedChild(pool=_POOL)),)
+            (ChildBaseline(1, RssMb(10.0), IsolatedChild(pool=_POOL, task_send_pool=2)),)
         )
 
     def test_unreadable_rss_warns_and_passes(
@@ -1861,7 +1861,7 @@ class TestMemoryBaselineGuard:
     ) -> None:
         with caplog.at_level(logging.WARNING, logger='horsies.worker'):
             self._worker(100)._check_memory_baseline(
-                (ChildBaseline(1, RssUnreadable(), IsolatedChild(pool=_POOL)),),
+                (ChildBaseline(1, RssUnreadable(), IsolatedChild(pool=_POOL, task_send_pool=2)),),
             )
         assert 'unreadable' in caplog.text
 

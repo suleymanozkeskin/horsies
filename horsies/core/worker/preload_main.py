@@ -103,7 +103,9 @@ def _prepare_app(init: InitFrame) -> BootFn:
     """Import the library and the app. Children then share module state.
 
     A child still runs the normal boot: the import cache makes that step
-    cheap, and each child still runs its own hooks and opens its own pool.
+    cheap, and each child still runs its own hooks, opens its own pool and
+    sets the task-send pool of its own kind. A broker that an import built
+    here, with the task-send pool of ``init``, is discarded in each child.
     """
     from horsies.core.worker.child_runner import import_app_for_child
 
@@ -113,6 +115,7 @@ def _prepare_app(init: InitFrame) -> BootFn:
         list(init.imports),
         list(init.sys_path_roots),
         init.loglevel,
+        init.child_kind.task_send_pool,
     )
     return boot
 

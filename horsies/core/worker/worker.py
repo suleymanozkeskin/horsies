@@ -436,7 +436,10 @@ class Worker(
                 database_url=to_psycopg_url(self.cfg.dsn),
                 connect_kwargs=self.cfg.child_connect_kwargs,
                 process_name='horsies-child',
-                child_kind=IsolatedChild(pool=self.cfg.isolated_pool),
+                child_kind=IsolatedChild(
+                    pool=self.cfg.isolated_pool,
+                    task_send_pool=self.cfg.isolated_task_send_pool,
+                ),
             ),
             max_tasks_per_child=self.cfg.max_tasks_per_child,
             max_memory_per_child_mb=self.cfg.max_memory_per_child_mb,

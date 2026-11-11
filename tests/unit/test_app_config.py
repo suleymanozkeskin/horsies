@@ -1352,26 +1352,57 @@ class TestFormatSchedulePattern:
 class TestGetBrokerErrorHandling:
     """Regression tests for Horsies.get_broker() error wrapping (HRS-211)."""
 
-    def test_worker_role_get_broker_uses_worker_pool_profile(self) -> None:
-        """Worker app brokers should not use producer-sized pool defaults."""
+    def test_a_worker_child_opens_the_task_send_pool_of_its_kind(self) -> None:
+        """A worker child sets its task-send pool at start: the app broker
+        of its task code opens exactly that many, not the producer pool."""
         from horsies import Horsies
 
         config = PostgresConfig(
-            database_url='postgresql+psycopg://user:pass@localhost/db',
+            database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
             pool_size=30,
             max_overflow=30,
-            worker_pool_size=3,
-            worker_max_overflow=2,
         )
         app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, broker=config))
         app.set_role('worker')
+        app.set_task_send_pool(4)
 
         with patch('horsies.core.app.PostgresBroker') as mock_broker_cls:
             app.get_broker()
 
         broker_config = mock_broker_cls.call_args.args[0]
-        assert broker_config.pool_size == 3
-        assert broker_config.max_overflow == 2
+        assert (broker_config.pool_size, broker_config.max_overflow) == (4, 0)
+        assert broker_config.database_url == config.database_url
+
+    @pytest.mark.parametrize('role', ['producer', 'scheduler', 'worker'])
+    def test_without_a_task_send_pool_the_broker_opens_the_config_pool(
+        self,
+        role: str,
+    ) -> None:
+        """A producer, the scheduler, and the worker process itself keep the
+        pool of PostgresConfig: the worker role alone does not resize it."""
+        from horsies import Horsies
+
+        config = PostgresConfig(
+            database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+            pool_size=30,
+            max_overflow=30,
+        )
+        app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, broker=config))
+        app.set_role(role)
+
+        with patch('horsies.core.app.PostgresBroker') as mock_broker_cls:
+            app.get_broker()
+
+        broker_config = mock_broker_cls.call_args.args[0]
+        assert (broker_config.pool_size, broker_config.max_overflow) == (30, 30)
+
+    @pytest.mark.parametrize('connections', [0, -1])
+    def test_a_task_send_pool_below_one_is_a_defect(self, connections: int) -> None:
+        from horsies import Horsies
+
+        app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, broker=BROKER))
+        with pytest.raises(AssertionError, match='connections must be >= 1'):
+            app.set_task_send_pool(connections)
 
     def test_non_horsies_error_wrapped_as_broker_init_failed(self) -> None:
         """Non-HorsiesError exceptions are wrapped with BROKER_INIT_FAILED."""

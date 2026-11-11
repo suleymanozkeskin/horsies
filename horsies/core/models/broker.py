@@ -298,6 +298,21 @@ class PostgresConfig(BaseModel):
             'hide_parameters': True,
         }
 
+    def with_exact_pool(self, connections: int) -> 'PostgresConfig':
+        """A copy whose engine pool holds up to ``connections`` connections
+        with no overflow: ``pool_size = connections``, ``max_overflow = 0``.
+
+        The worker process opens its pool with the resolved
+        ``WorkerProfile.pool``; a worker child opens the broker of its task
+        code with the ``task_send_pool`` of its kind. ``connections`` is 1
+        or more, from a validated profile. Below 1 is a defect:
+        ``AssertionError``.
+        """
+        assert connections >= 1, f'connections must be >= 1; got {connections}'
+        return self.model_copy(
+            update={'pool_size': connections, 'max_overflow': 0},
+        )
+
     def worker_runtime_config(self) -> 'PostgresConfig':
         """Return a broker config with worker-specific parent pool sizing."""
         updates: dict[str, int] = {}

@@ -48,6 +48,7 @@ from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.models.child_sizing import (
+    DEFAULT_TASK_SEND_POOL_CONNECTIONS,
     shared_async_executor_threads,
     shared_async_pool_connections,
 )
@@ -1933,6 +1934,7 @@ class TestRunWorkerCoroutine:
                         max_size=PoolSize(connections=3),
                         check=False,
                     ),
+                    task_send_pool=PoolSize(connections=4),
                 ),
                 drain_timeout=timedelta(seconds=7.5),
                 preload=ChildPreload.APP,
@@ -1981,6 +1983,7 @@ class TestRunWorkerCoroutine:
             max_size=3,
             check=False,
         )
+        assert worker_cfg.isolated_task_send_pool == 4
         assert mock_worker_cls.call_args.kwargs == {'broker': broker}
         mock_worker.run_forever.assert_awaited_once()
         broker.close_async.assert_awaited_once()
@@ -2530,6 +2533,7 @@ class TestExecutionSettings:
                         max_size=PoolSize(connections=3),
                         check=False,
                     ),
+                    task_send_pool=PoolSize(connections=5),
                 ),
                 claim=ClaimLimits(
                     per_queue_per_pass=TaskLimit(tasks=2),
@@ -2544,6 +2548,7 @@ class TestExecutionSettings:
             max_tasks_per_child=25,
             max_memory_per_child_mb=768,
             isolated_pool=ResolvedPool(min_size=1, max_size=3, check=False),
+            isolated_task_send_pool=5,
             max_claim_batch=2,
             max_claim_per_worker=4,
             drain_timeout_s=45.0,
@@ -2568,6 +2573,7 @@ class TestExecutionSettings:
         assert settings.max_tasks_per_child == 0
         assert settings.max_memory_per_child_mb is None
         assert settings.isolated_pool == IsolatedPool().resolved()
+        assert settings.isolated_task_send_pool == DEFAULT_TASK_SEND_POOL_CONNECTIONS
 
     def test_no_limit_variants_become_the_no_limit_encoding(self) -> None:
         settings = execution_settings(
@@ -2924,7 +2930,9 @@ class TestBootConnectionFit:
             'connections itself, not counting task code; the server has 27 '
             'usable slots',
         )
-        assert '20 x 5 = 100 more, 148 in all' in warnings[0]
+        assert (
+            '20 isolated children x isolated.task_send_pool 2 = 40 more, 88 in all'
+        ) in warnings[0]
 
     async def test_a_profile_within_the_limit_does_not_warn(
         self,

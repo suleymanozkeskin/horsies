@@ -78,9 +78,12 @@ MAX_BLOCKED_WHERE_CHARS: Final = 500
 @dataclass(frozen=True, slots=True)
 class IsolatedChild:
     """The child runs one task at a time, in ``RunFrame``s, and opens the
-    sync connection pool ``pool``."""
+    sync connection pool ``pool``. Task code that sends opens the app's
+    broker with a pool of ``task_send_pool`` connections, from 1 to
+    ``MAX_CHILD_POOL_CONNECTIONS``."""
 
     pool: ResolvedPool
+    task_send_pool: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,28 +91,34 @@ class SharedAsyncChild:
     """The child runs up to ``seats`` ``async def`` tasks at once, as
     coroutines on its event loop, in ``SharedRunFrame``s. It opens the async
     connection pool ``pool``, and its loop has a default executor of
-    ``executor_threads`` threads.
+    ``executor_threads`` threads. Task code that sends opens the app's
+    broker with a pool of ``task_send_pool`` connections.
 
     ``seats`` is from 1 to ``MAX_SEATS_PER_SHARED_ASYNC_CHILD``;
-    ``executor_threads`` is from 1 to ``MAX_EXECUTOR_THREADS``.
+    ``executor_threads`` is from 1 to ``MAX_EXECUTOR_THREADS``;
+    ``task_send_pool`` is from 1 to ``MAX_CHILD_POOL_CONNECTIONS``.
     """
 
     seats: int
     pool: ResolvedPool
     executor_threads: int
+    task_send_pool: int
 
 
 @dataclass(frozen=True, slots=True)
 class SharedThreadChild:
     """The child runs up to ``seats`` ``def`` tasks at once, each on a thread
     of its own, in ``SharedRunFrame``s, and opens the sync connection pool
-    ``pool``, which its seat threads share.
+    ``pool``, which its seat threads share. Task code that sends opens the
+    app's broker with a pool of ``task_send_pool`` connections.
 
-    ``seats`` is from 1 to ``MAX_SEATS_PER_SHARED_THREAD_CHILD``.
+    ``seats`` is from 1 to ``MAX_SEATS_PER_SHARED_THREAD_CHILD``;
+    ``task_send_pool`` is from 1 to ``MAX_CHILD_POOL_CONNECTIONS``.
     """
 
     seats: int
     pool: ResolvedPool
+    task_send_pool: int
 
 
 SharedChildKind: TypeAlias = SharedAsyncChild | SharedThreadChild
@@ -125,7 +134,7 @@ class InitFrame:
     Carries the database URL here because argv is visible in ``ps``. The URL
     holds a password, so it stays out of the repr. ``child_kind`` decides
     which frames the child takes after its ready frame, and carries the
-    connection pool of the child.
+    connection pool of the child and the task-send pool of its task code.
     """
 
     app_locator: str
@@ -784,20 +793,35 @@ def _pool_field(pool: ResolvedPool) -> dict[str, object]:
 
 def _child_kind_field(child_kind: ChildKind) -> dict[str, object]:
     match child_kind:
-        case IsolatedChild(pool=pool):
-            return {'kind': 'isolated', 'pool': _pool_field(pool)}
-        case SharedAsyncChild(seats=seats, pool=pool, executor_threads=threads):
+        case IsolatedChild(pool=pool, task_send_pool=task_send_pool):
+            return {
+                'kind': 'isolated',
+                'pool': _pool_field(pool),
+                'task_send_pool': task_send_pool,
+            }
+        case SharedAsyncChild(
+            seats=seats,
+            pool=pool,
+            executor_threads=threads,
+            task_send_pool=task_send_pool,
+        ):
             return {
                 'kind': 'shared_async',
                 'seats': seats,
                 'pool': _pool_field(pool),
                 'executor_threads': threads,
+                'task_send_pool': task_send_pool,
             }
-        case SharedThreadChild(seats=seats, pool=pool):
+        case SharedThreadChild(
+            seats=seats,
+            pool=pool,
+            task_send_pool=task_send_pool,
+        ):
             return {
                 'kind': 'shared_thread',
                 'seats': seats,
                 'pool': _pool_field(pool),
+                'task_send_pool': task_send_pool,
             }
         case _ as unreachable:
             assert_never(unreachable)
@@ -1215,6 +1239,12 @@ def _child_pool(child_kind: Mapping[str, Any]) -> ResolvedPool:
     )
 
 
+def _task_send_pool(child_kind: Mapping[str, Any]) -> int:
+    """The task-send pool of a child kind: from 1 to
+    ``MAX_CHILD_POOL_CONNECTIONS`` connections."""
+    return _bounded_whole(child_kind, 'task_send_pool', 1, MAX_CHILD_POOL_CONNECTIONS)
+
+
 def _child_kind(meta: Mapping[str, Any]) -> ChildKind:
     value = meta.get('child_kind')
     if not isinstance(value, dict):
@@ -1222,7 +1252,10 @@ def _child_kind(meta: Mapping[str, Any]) -> ChildKind:
     child_kind = cast('Mapping[str, Any]', value)
     match child_kind.get('kind'):
         case 'isolated':
-            return IsolatedChild(pool=_child_pool(child_kind))
+            return IsolatedChild(
+                pool=_child_pool(child_kind),
+                task_send_pool=_task_send_pool(child_kind),
+            )
         case 'shared_async':
             seats = _bounded_whole(
                 child_kind,
@@ -1240,6 +1273,7 @@ def _child_kind(meta: Mapping[str, Any]) -> ChildKind:
                 seats=seats,
                 pool=_child_pool(child_kind),
                 executor_threads=threads,
+                task_send_pool=_task_send_pool(child_kind),
             )
         case 'shared_thread':
             seats = _bounded_whole(
@@ -1248,7 +1282,11 @@ def _child_kind(meta: Mapping[str, Any]) -> ChildKind:
                 1,
                 MAX_SEATS_PER_SHARED_THREAD_CHILD,
             )
-            return SharedThreadChild(seats=seats, pool=_child_pool(child_kind))
+            return SharedThreadChild(
+                seats=seats,
+                pool=_child_pool(child_kind),
+                task_send_pool=_task_send_pool(child_kind),
+            )
         case _:
             raise _BadField('child_kind.kind')
 

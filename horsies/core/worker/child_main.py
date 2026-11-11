@@ -765,6 +765,7 @@ def boot_app(init: InitFrame) -> Result[AsyncTaskPresence, BootFailedFrame]:
             list(init.imports),
             list(init.sys_path_roots),
             init.loglevel,
+            init.child_kind.task_send_pool,
         )
     except Exception as exc:
         return Err(boot_failure_from_exception(exc, AppLoadFailed()))

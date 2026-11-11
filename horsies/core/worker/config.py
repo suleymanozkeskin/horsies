@@ -9,6 +9,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Optional
 
 from horsies.core.defaults import MAX_CLAIM_RENEW_AGE_MS
+from horsies.core.models.child_sizing import DEFAULT_TASK_SEND_POOL_CONNECTIONS
 from horsies.core.worker.claim_plan import ClaimPlan, claim_plan_for_children
 
 if TYPE_CHECKING:
@@ -85,6 +86,10 @@ class WorkerConfig:
     # The connection pool of each isolated child. The pool of each shared
     # child comes from its setting in shared_async or shared_thread.
     isolated_pool: ResolvedPool = field(default_factory=_default_isolated_pool)
+    # The connections of the pool that task code opens in an isolated child
+    # when it sends. Each shared kind carries its own in shared_async or
+    # shared_thread.
+    isolated_task_send_pool: int = DEFAULT_TASK_SEND_POOL_CONNECTIONS
     # psycopg connect kwargs for each child-pool connection (TCP keepalives,
     # plus prepare_threshold=None under PgBouncer transaction mode). Built
     # from PostgresConfig.pooled_connect_args.

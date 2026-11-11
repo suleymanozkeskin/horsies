@@ -42,6 +42,18 @@ async def shared_sleep(*, seconds: float) -> TaskResult[str, TaskError]:
     return TaskResult(ok=f'{os.getpid()}:{started}:{time.time()}')
 
 
+@app.task(
+    task_name='e2e_shared_task_send_pool',
+    execution=Execution.SHARED_ASYNC,
+    timeout_ms=30_000,
+)
+async def shared_task_send_pool() -> TaskResult[str, TaskError]:
+    """The pool of the app broker that task code in this child opens when it
+    sends: ``pool_size:max_overflow``."""
+    config = app.get_broker().config
+    return TaskResult(ok=f'{config.pool_size}:{config.max_overflow}')
+
+
 HELD_EXECUTOR_CALLS = 8
 """The default executor calls that ``e2e_shared_executor_threads`` holds at
 once: more than any executor size that the e2e profiles set."""
