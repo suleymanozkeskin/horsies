@@ -216,23 +216,26 @@ async def test_claim_streams_plan_on_the_class_indexes(
             'p_lock_keys': '[]',
         },
     )
-    candidates = next(
-        plan for plan in plans.split('duration:') if 'WITH queue_room' in plan
-    )
-    # Phase 1 reads each pending stream; phase 2 locks from it.
-    assert (
-        candidates.count('Index Scan using idx_horsies_tasks_claim_pending_class')
-        == 2
-    ), candidates
-    assert (
-        'idx_horsies_tasks_claim_expired_class' in candidates
-        or 'idx_horsies_tasks_claim_expired ' in candidates
-    ), candidates
-    for absent in (
-        'Seq Scan on horsies_tasks',
-        'idx_horsies_tasks_enqueued_at',
-        'idx_horsies_tasks_task_name',
-        'idx_horsies_tasks_claim_pending ',
-        'idx_horsies_tasks_claim_expired_ordered',
-    ):
-        assert absent not in candidates, (absent, candidates)
+    statements = plans.split('duration:')
+    # Phase 1 (horsies_claim_plan) reads the head of each stream; phase 2
+    # (horsies_claim_candidates) locks the planned rows from the same streams.
+    phases = {
+        'plan': next(plan for plan in statements if 'SELECT s.queue_slot' in plan),
+        'take': next(plan for plan in statements if 'WITH planned AS' in plan),
+    }
+    for name, plan in phases.items():
+        assert (
+            plan.count('Index Scan using idx_horsies_tasks_claim_pending_class') == 1
+        ), (name, plan)
+        assert (
+            'idx_horsies_tasks_claim_expired_class' in plan
+            or 'idx_horsies_tasks_claim_expired ' in plan
+        ), (name, plan)
+        for absent in (
+            'Seq Scan on horsies_tasks',
+            'idx_horsies_tasks_enqueued_at',
+            'idx_horsies_tasks_task_name',
+            'idx_horsies_tasks_claim_pending ',
+            'idx_horsies_tasks_claim_expired_ordered',
+        ):
+            assert absent not in plan, (name, absent, plan)

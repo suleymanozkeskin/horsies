@@ -369,7 +369,7 @@ async def claim_once(broker: PostgresBroker, worker_id: str) -> list[str]:
     async with current_resources(broker).session_factory() as session:
         rows = (await session.execute(HORSIES_CLAIM_SQL, params)).fetchall()
         await session.commit()
-    return [str(row[0]) for row in rows]
+    return [str(row.id) for row in rows if row.row_kind == 'CLAIMED']
 
 
 # --------------------------------------------------------------------------- #

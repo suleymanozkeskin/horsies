@@ -568,8 +568,8 @@ class TestWorkerReads:
                     [
                         {
                             'slot': 1,
-                            'cause': {'kind': 'spawn_failed'},
-                            'detail': 'OSError: fork failed',
+                            'cause': {'kind': 'resource_shortage', 'errno': 'EMFILE'},
+                            'detail': 'OSError: [Errno 24] Too many open files',
                             'down_since': '2026-11-10T12:00:00+00:00',
                             'failed_boots': 2,
                         },
@@ -592,8 +592,8 @@ class TestWorkerReads:
         assert worker['down_slots'] == [
             {
                 'slot': 1,
-                'cause': 'the OS refused to start the child process',
-                'detail': 'OSError: fork failed',
+                'cause': 'the OS ran short of a resource (EMFILE)',
+                'detail': 'OSError: [Errno 24] Too many open files',
                 'down_since': '2026-11-10T12:00:00Z',
                 'failed_boots': 2,
             },
