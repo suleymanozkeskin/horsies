@@ -26,6 +26,7 @@ from psycopg_pool import AsyncConnectionPool
 from horsies.core.logging import get_logger
 from horsies.core.models.boot_failure import ChildPoolSetupFailed
 from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.task_decorator import await_task_call_in_worker
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.child_main import (
     boot_failure_from_exception,
@@ -175,21 +176,28 @@ async def _seat_call_result(
 ) -> TaskResult[Any, TaskError]:
     """Await the coroutine of an ``async def`` task call on the running loop.
 
-    A ``CancelledError`` that leaves the coroutine goes through
-    ``map_exception``, the mapping of the task, as in
-    ``await_task_call_in_worker``. A call that returns while a cancel
-    request is left on the seat task ends as a cancel too
+    ``await_task_call_in_worker`` maps each exception that it takes from
+    the body (a ``CancelledError``, a ``GeneratorExit``) through
+    ``map_exception``, the mapping of the task. A call that returned while a
+    cancel request is left on the seat task ends as a cancel too
     (``_without_left_cancel``). A seat runs only ``async def`` tasks, whose
     wrapper returns a coroutine; ``_prepare_task_call`` refused the others.
     Another value is a defect: ``AssertionError``.
     """
     match called:
         case Coroutine():
-            try:
-                out = await called
-            except asyncio.CancelledError as exc:
+            mapped: list[BaseException] = []
+
+            def map_and_note(exc: BaseException) -> TaskResult[Any, TaskError]:
+                mapped.append(exc)
                 return map_exception(exc)
-            return _without_left_cancel(out, map_exception)
+
+            out = await await_task_call_in_worker(called, map_and_note)
+            match mapped:
+                case []:
+                    return _without_left_cancel(out, map_exception)
+                case _:
+                    return out
         case _:
             raise AssertionError(
                 f'task wrapper of {task_name!r} returned {type(called).__name__} '

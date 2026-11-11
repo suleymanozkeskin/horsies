@@ -144,6 +144,16 @@ async def seat_cancels_itself_and_returns() -> TaskResult[int, TaskError]:
     return TaskResult(ok=1)
 
 
+@APP.task(
+    task_name='seat_raises_generator_exit',
+    execution=Execution.SHARED_ASYNC,
+    timeout_ms=1000,
+    exception_mapper={GeneratorExit: 'GENERATOR_EXIT_OF_BODY'},
+)
+async def seat_raises_generator_exit() -> TaskResult[int, TaskError]:
+    raise GeneratorExit
+
+
 RELEASE: list[asyncio.Event] = []
 """The event that the work of ``seat_leaves_work`` and ``seat_left_work_ignores_cancel``
 waits for. Each test that runs them puts a fresh one, on its own loop."""
@@ -379,6 +389,15 @@ def test_a_body_that_cancels_its_own_task_goes_through_the_mapper(
 
     error = _result(wire, int).unwrap_err()
     assert error.error_code == 'CANCELLED_BY_BODY'
+
+
+def test_a_generator_exit_of_the_body_goes_through_the_mapper(steps: _Steps) -> None:
+    """The seat maps what ``await_task_call_in_worker`` maps: a
+    ``GeneratorExit`` that leaves the body as well."""
+    wire = _set_running(_run(_frame('seat_raises_generator_exit')))
+
+    error = _result(wire, int).unwrap_err()
+    assert error.error_code == 'GENERATOR_EXIT_OF_BODY'
 
 
 class TestTheMarkerOfASeat:
