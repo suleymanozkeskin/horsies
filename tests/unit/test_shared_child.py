@@ -26,7 +26,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from horsies.core.types.result import Ok, Result
-from horsies.core.worker import child_main, shared_child
+from horsies.core.worker import child_main, run_mark, shared_child
 from horsies.core.worker.child_inbox import ParentFrameInbox
 from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
 from horsies.core.worker.child_protocol import (
@@ -1108,6 +1108,55 @@ class TestWorkLeftAfterAReturn:
         assert len(lines) == 1
         assert lines[0].message.count('sleep') == MAX_LEFTOVER_TASK_NAMES
         assert f'and {extra} more' in lines[0].message
+
+
+class TestTheCostOfTheEndChecks:
+    def test_runs_that_return_in_one_turn_share_one_scan(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """20 runs return in one turn, beside 200 live tasks of no run: the
+        end of each needs the live tasks of its run, and they share one
+        scan of the loop, not one each."""
+        scans: list[int] = []
+        all_tasks = asyncio.all_tasks
+
+        def counted(
+            loop: asyncio.AbstractEventLoop | None = None,
+        ) -> set[asyncio.Task[Any]]:
+            scans.append(1)
+            return all_tasks(loop)
+
+        monkeypatch.setattr(run_mark.asyncio, 'all_tasks', counted)
+        release = asyncio.Event()
+        runs = 20
+
+        async def wait_for_release() -> int:
+            await release.wait()
+            return 1
+
+        seat_loop, writer, started = _seat_loop(runs, {'wait': wait_for_release})
+        inbox = ParentFrameInbox()
+
+        async def scenario() -> None:
+            idle = asyncio.Event()
+            background = [
+                asyncio.get_running_loop().create_task(idle.wait()) for _ in range(200)
+            ]
+            serving = asyncio.ensure_future(seat_loop.serve(inbox))
+            for dispatch in range(1, runs + 1):
+                inbox.put(_frame(dispatch, 'wait'))
+            await _until(lambda: len(started.started) == runs)
+            scans.clear()
+            release.set()
+            await _until(lambda: len(_results(writer)) == runs)
+            assert len(scans) <= 2, scans
+            inbox.put(StopFrame())
+            await asyncio.wait_for(serving, RUN_TIMEOUT_S)
+            idle.set()
+            await asyncio.gather(*background)
+
+        asyncio.run(scenario())
 
 
 class TestTheMarkerAtTheEnd:

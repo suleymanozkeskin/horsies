@@ -314,3 +314,116 @@ class TestTheScan:
             await asyncio.gather(recorded, direct)
 
         _run(scenario())
+
+
+class TestTheScanOfATurn:
+    """The end checks of one loop turn share one scan of the live tasks."""
+
+    def _counted_scans(self, monkeypatch: pytest.MonkeyPatch) -> list[int]:
+        scans: list[int] = []
+        all_tasks = asyncio.all_tasks
+
+        def counted(
+            loop: asyncio.AbstractEventLoop | None = None,
+        ) -> set[asyncio.Task[Any]]:
+            scans.append(1)
+            return all_tasks(loop)
+
+        monkeypatch.setattr(run_mark.asyncio, 'all_tasks', counted)
+        return scans
+
+    def test_the_end_checks_of_one_turn_scan_once(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """50 runs end in one turn, while 200 tasks of other runs live: the
+        end checks of the 50 cost one scan, and each finds its own left
+        task. The next turn scans again."""
+        scans = self._counted_scans(monkeypatch)
+
+        async def scenario() -> None:
+            loop = asyncio.get_running_loop()
+            marked = MarkedWork(loop, lambda _mark: None)
+            marked.install()
+            gate = asyncio.Event()
+            others = [
+                loop.create_task(gate.wait(), context=_marked(RunMark(1000 + n, 'x')))
+                for n in range(200)
+            ]
+            runs: list[tuple[RunMark, asyncio.Task[Any], asyncio.Task[Any]]] = []
+            for dispatch in range(1, 51):
+                mark = RunMark(dispatch=dispatch, task_id=f'task-{dispatch}')
+                marked.open(mark)
+
+                async def run_body() -> asyncio.Task[Any]:
+                    # Built directly: only a scan finds it.
+                    return asyncio.Task(gate.wait(), loop=loop)
+
+                own = loop.create_task(run_body(), context=_marked(mark))
+                runs.append((mark, own, await own))
+            scans.clear()
+
+            for mark, own, left in runs:
+                assert marked.alive(mark, own, ScanWhen.TURN).tasks == frozenset({left})
+            for mark, own, _left in runs:
+                assert not marked.alive(mark, own, ScanWhen.RECORD_EMPTY).is_empty()
+            assert scans == [1]
+
+            await asyncio.sleep(0)
+            mark, own, left = runs[0]
+            assert marked.alive(mark, own, ScanWhen.TURN).tasks == frozenset({left})
+            assert scans == [1, 1]
+            gate.set()
+            await asyncio.gather(*others, *(left for _m, _o, left in runs))
+
+        _run(scenario())
+
+    def test_a_task_built_after_the_scan_is_found_at_the_next_turn(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        scans = self._counted_scans(monkeypatch)
+
+        async def scenario() -> None:
+            loop = asyncio.get_running_loop()
+            marked = MarkedWork(loop, lambda _mark: None)
+            marked.install()
+            marked.open(MARK)
+            gate = asyncio.Event()
+            own = loop.create_task(asyncio.sleep(0), context=_marked(MARK))
+            await own
+            assert marked.alive(MARK, own, ScanWhen.RECORD_EMPTY).is_empty()
+            direct = _marked(MARK).run(asyncio.Task, gate.wait(), loop=loop)
+
+            await asyncio.sleep(0)
+
+            assert marked.alive(MARK, own, ScanWhen.RECORD_EMPTY).tasks == frozenset(
+                {direct},
+            )
+            assert len(scans) == 2
+            gate.set()
+            await direct
+
+        _run(scenario())
+
+    def test_a_cancel_round_scans_at_each_call(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        scans = self._counted_scans(monkeypatch)
+
+        async def scenario() -> None:
+            loop = asyncio.get_running_loop()
+            marked = MarkedWork(loop, lambda _mark: None)
+            marked.install()
+            marked.open(MARK)
+            own = loop.create_task(asyncio.sleep(0), context=_marked(MARK))
+            await own
+            scans.clear()
+
+            for _ in range(3):
+                assert marked.alive(MARK, own, ScanWhen.ALWAYS).is_empty()
+
+            assert scans == [1, 1, 1]
+
+        _run(scenario())

@@ -172,7 +172,8 @@ there is no migration contract between pre-1.0 versions.
     library (found by a task factory and by a scan of the live tasks, so a
     task built with `asyncio.Task(...)` counts too), and its calls in the
     default executor. The child reports the end only then, so a retry never
-    runs next to work of the attempt that it replaces.
+    runs next to work of the attempt that it replaces. The end checks of
+    one loop turn share one scan of the live tasks.
   - A task that returns before its deadline (a value, or an exception that
     its exception mapper turns into a result) while such work is alive
     keeps what it returned: its deadline no longer applies. The child waits

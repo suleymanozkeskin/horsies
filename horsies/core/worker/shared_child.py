@@ -698,7 +698,7 @@ class SeatLoop:
         the run is what the coroutine returned in both cases."""
         seat = self._seats[dispatch]
         _exit_for_end_defect(seat, seat.task)
-        alive = self._marked.alive(seat.mark, seat.task, ScanWhen.ALWAYS)
+        alive = self._marked.alive(seat.mark, seat.task, ScanWhen.TURN)
         if alive.is_empty():
             self._report_end(dispatch, seat)
             return
