@@ -34,7 +34,7 @@ At defaults (`worker_pool_size=3`, `worker_max_overflow=2`,
 
 Producers hold their own engine pool (`pool_size + max_overflow`, default
 5 + 10) per resource set: one set for each event loop that makes broker calls,
-plus one for sync calls (see [Broker Config](broker-config#event-loops)).
+plus one for sync calls (see [Broker Config](/horsies/configuration/broker-config/#event-loops)).
 
 Size against the server's effective capacity, not its nominal
 `max_connections`: subtract superuser-reserved slots and any connections
@@ -49,7 +49,7 @@ FATAL: remaining connection slots are reserved for roles with the SUPERUSER attr
 ```
 
 Workers retry through this, but tasks claimed during the outage wait for
-[recovery](../workers/heartbeats-recovery) instead of completing promptly.
+[recovery](/horsies/workers/heartbeats-recovery/) instead of completing promptly.
 If this appears in worker logs, the deployment needs a pooler or fewer
 direct consumers.
 
@@ -78,7 +78,7 @@ config = AppConfig(
 
 Direct slots consumed per worker drop to the 2 `LISTEN` connections;
 everything else multiplexes over the pooler's server pool. See
-[PgBouncer Troubleshooting](../troubleshooting/pgbouncer) for
+[PgBouncer Troubleshooting](/horsies/troubleshooting/pgbouncer/) for
 provider-specific endpoints and failure modes.
 
 Transaction pooling taxes per-worker throughput: a server connection is
@@ -110,7 +110,7 @@ config = AppConfig(
 
 At 33ms RTT this raises drain throughput roughly 2–3× over the default.
 Soft-cap semantics and fairness trade-offs are covered in
-[Concurrency](../workers/concurrency).
+[Concurrency](/horsies/workers/concurrency/).
 
 ## Health Checks at High RTT
 
@@ -142,7 +142,7 @@ Without checks, a connection that died while idle surfaces as a failed
 first statement instead of a transparent reconnect. Coordinator
 operations retry through the worker's resilience machinery; a failed
 pre-execution transition leaves the task `CLAIMED` until the
-[reaper](../workers/heartbeats-recovery) requeues it
+[reaper](/horsies/workers/heartbeats-recovery/) requeues it
 (`claimed_stale_threshold_ms`, default 120s). Keep the checks enabled for
 workers that sit idle for long stretches behind NAT or load balancers
 that kill idle connections — those are the deployments where stale

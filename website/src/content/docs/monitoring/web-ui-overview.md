@@ -11,8 +11,8 @@ JSON API under `/api` and the single-page app that consumes it. The dashboard
 reads through `horsies.monitoring`, a query package in core that needs no extra.
 
 The UI is read-only unless a deployment enables actions. See
-[Deployment & Authentication](web-ui-deployment) for how to turn them on and
-[Action Semantics](action-semantics) for what each action does.
+[Deployment & Authentication](/horsies/monitoring/web-ui-deployment/) for how to turn them on and
+[Action Semantics](/horsies/monitoring/action-semantics/) for what each action does.
 
 ## Installation
 
@@ -74,7 +74,7 @@ The selected run and open node are URL search parameters (`?run=&node=`).
   fleet warning above the table names each (queue, class) that no live worker
   serves (red) or whose serving workers have no child in service (amber), and
   what to start or check. See
-  [Does a live worker serve every pending class?](worker-health#does-a-live-worker-serve-every-pending-class)
+  [Does a live worker serve every pending class?](/horsies/monitoring/worker-health/#does-a-live-worker-serve-every-pending-class)
 - Per-worker cards with running/claimed counts, queues, CPU and memory, and
   uptime. A worker whose snapshot is older than 120 seconds is marked stale.
   Stale workers collapse into a separate group. A live worker's card shows
@@ -149,7 +149,7 @@ Actions are off by default. When a deployment enables them, four are available:
 
 Semantics are exact and, in two places, surprising: cancelling a RUNNING task
 does not stop the process, and cancelling a workflow leaves executing nodes
-draining. [Action Semantics](action-semantics) states each one as a
+draining. [Action Semantics](/horsies/monitoring/action-semantics/) states each one as a
 condition-to-result table. The UI states the same caveats in its confirmation
 dialogs.
 
@@ -171,5 +171,5 @@ mismatch — the affordances are absent rather than shown-and-disabled.
 - No date-range filters.
 - No node-level workflow actions, and no workflow restart: no such primitive
   exists.
-- No way to kill a running task process. See [Action Semantics](action-semantics).
+- No way to kill a running task process. See [Action Semantics](/horsies/monitoring/action-semantics/).
 - The response models are exported and typed, and unstable before 1.0.

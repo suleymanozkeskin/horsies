@@ -32,7 +32,7 @@ app = Horsies(config)
 | `payload` | `PayloadPolicy` | defaults | Payload-size guardrail (warn/reject thresholds) |
 | `recovery` | `RecoveryConfig` | defaults | Crash recovery settings |
 | `resilience` | `WorkerResilienceConfig` | defaults | Worker retry/backoff and notify polling |
-| `retention` | `RetentionConfig` | defaults | Record lifetime and partition coverage; see [Retention Config](retention-config) |
+| `retention` | `RetentionConfig` | defaults | Record lifetime and partition coverage; see [Retention Config](/horsies/configuration/retention-config/) |
 | `schedule` | `ScheduleConfig` | `None` | Scheduled task configuration |
 | `exception_mapper` | `ExceptionMapper` | `ExceptionMapper()` | Maps exceptions to `TaskError` codes |
 | `default_unhandled_error_code` | `str` | `"UNHANDLED_EXCEPTION"` | Error code for uncaught exceptions |
@@ -172,7 +172,7 @@ config = AppConfig(
 )
 ```
 
-See [Recovery Config](recovery-config.md) for all options.
+See [Recovery Config](/horsies/configuration/recovery-config/) for all options.
 
 ## Resilience Configuration
 
@@ -233,13 +233,13 @@ See [Scheduler Overview](../../scheduling/scheduler-overview) for details.
 - `claim_lease_ms` is required when `prefetch_buffer > 0`
 - `claim_lease_ms` is optional when `prefetch_buffer = 0` (overrides the default 60s lease)
 - `cluster_wide_cap` cannot be combined with `prefetch_buffer > 0`
-- Each worker profile has a valid name, at least one child, and claim limits at or below its capacity (children + `prefetch_buffer`). Each error names the profile and the field path (`ConfigurationError` `HRS-218`). Every profile is validated, not only the one a worker starts with
+- Each worker profile has a valid name, at least one child, and claim limits at or below its capacity (seats + `prefetch_buffer`; one seat per isolated child). Each error names the profile and the field path (`ConfigurationError` `HRS-218`). Every profile is validated, not only the one a worker starts with
 
 Multiple validation errors within the same phase are collected and reported together (compiler-style), rather than stopping at the first error.
 
 ## Startup Validation (`app.check()`)
 
-Use `app.check()` to run phased validation before starting a worker or scheduler. This is the programmatic equivalent of the [`horsies check`](../cli#horsies-check) CLI command.
+Use `app.check()` to run phased validation before starting a worker or scheduler. This is the programmatic equivalent of the [`horsies check`](/horsies/cli/#horsies-check) CLI command.
 
 ```python
 errors = app.check(live=True)
@@ -282,7 +282,7 @@ horsies check myapp.instance:app --live  # Phases 1-6.1
 
 ### `@app.workflow_builder`
 
-Register workflow builder functions for check-phase validation. For full API reference and examples, see [Workflow API — @app.workflow_builder](../concepts/workflows/workflow-api#appworkflow_builder).
+Register workflow builder functions for check-phase validation. For full API reference and examples, see [Workflow API — @app.workflow_builder](/horsies/concepts/workflows/workflow-api/#appworkflow_builder).
 
 ### Guarantee Model
 

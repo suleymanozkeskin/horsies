@@ -278,8 +278,8 @@ and there is no migration contract between pre-1.0 versions.
     children never take a class that has children of its own.
   - Any other class is not claimed. The worker still starts, and logs one
     line that names those classes.
-  - In this release a profile runs isolated children only, so every class is
-    claimed into the `ISOLATED` budget.
+  - A profile with isolated children only claims every class into the
+    `ISOLATED` budget.
   - Priority holds within one class. Each (queue, class) is its own claim
     stream in `(priority, enqueued_at, id)` order, and a budget of several
     classes reads their merge in that order.
@@ -392,11 +392,12 @@ and there is no migration contract between pre-1.0 versions.
   stopped at both with no finding. Through a node with `waits_for`, the results
   of its dependencies decide the depth, so the check does not report the
   nesting, and the engine applies the limit at run time.
-- **An exhaustive `match` on `OperationalErrorCode` needs a
-  `SUBWORKFLOW_DEPTH_LIMIT_REACHED` case.** The code string is now reserved:
-  an `exception_mapper` or `default_unhandled_error_code` with that value
+- **An exhaustive `match` on `OperationalErrorCode` needs
+  `SUBWORKFLOW_DEPTH_LIMIT_REACHED`, `TASK_BLOCKED_LOOP` and
+  `NEIGHBOUR_BLOCKED_LOOP` cases.** The code strings are now reserved: an
+  `exception_mapper` or `default_unhandled_error_code` with one of these values
   fails `horsies check` with `HRS-212`. A process of an earlier version cannot
-  decode an error stored with this code.
+  decode an error stored with one of these codes.
 - **The worker process writes the runner heartbeats of its RUNNING tasks.**
   One thread of the worker, not on its event loop, writes one statement per
   `runner_heartbeat_interval_ms` for the tasks that its children hold. A row

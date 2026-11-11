@@ -134,7 +134,9 @@ Yes — and read the version number as an API-contract statement, not an engine-
 
 ## What happens to other tasks when one task crashes or hangs?
 
-Nothing. Each task runs in its own child process, and the worker talks to each child over its own socket. A crash, an out-of-memory kill, or a timeout kill ends that child only. The other tasks finish, and the slot gets a new child. See [Failure Isolation](../workers/worker-architecture#failure-isolation).
+Nothing, for a task with `Execution.ISOLATED` (the default). Each such task runs in its own child process, and the worker talks to each child over its own socket. A crash, an out-of-memory kill, or a timeout kill ends that child only. The other tasks finish, and the slot gets a new child. See [Failure Isolation](../workers/worker-architecture#failure-isolation).
+
+A task with `Execution.SHARED_ASYNC` or `Execution.SHARED_THREAD` shares its child process with other tasks. A crash of that process ends every task in it. See [Choosing an Execution Mode](../workers/execution-modes).
 
 ## How much memory does a worker use?
 

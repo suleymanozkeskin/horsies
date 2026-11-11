@@ -9,6 +9,7 @@ tags: [quickstart, configuration]
 
 - PostgreSQL 14+
 - Python 3.13+
+- libpq 17+ for a time limit on the cancel request of an interrupted query. The `horsies[pg-binary]` extra bundles its own libpq. See [psycopg and libpq](/horsies/configuration/broker-config/#psycopg-and-libpq)
 
 ## Installation
 

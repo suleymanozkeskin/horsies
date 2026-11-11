@@ -57,7 +57,7 @@ def add_numbers(*, a: int, b: int) -> TaskResult[int, TaskError]:
 ```
 
 Every task must return `TaskResult[T, TaskError]`.
-A task function is `def` or `async def`. A worker child runs one task at a time, and an `async def` task runs on the one event loop that the child keeps. In an `async def` task, send with `.send_async()`: the sync `.send()` returns `Err(TaskSendAsyncContext)` in a running event loop. See `tasks.md`, Async tasks.
+A task function is `def` or `async def`. With `execution=Execution.ISOLATED` (the default), a worker child runs one task at a time, and an `async def` task runs on the one event loop that the child keeps. `Execution.SHARED_ASYNC` (`async def`) and `Execution.SHARED_THREAD` (`def`) run many tasks in one child, as coroutines or on threads, and need `timeout_ms`. See `tasks.md`, Shared async tasks and Shared thread tasks, and the docs page `workers/execution-modes` to choose. In an `async def` task, send with `.send_async()`: the sync `.send()` returns `Err(TaskSendAsyncContext)` in a running event loop. See `tasks.md`, Async tasks.
 Use `TaskResult(ok=value)` for success, `TaskResult(err=TaskError(...))` for failure.
 
 Register task modules for worker discovery:
@@ -385,8 +385,9 @@ profiles = {
 DAG, builders, policies, optional live DB check and worker connection check).
 Worker and scheduler also run check at startup.
 
-A worker owns one child and one socket per slot, so a crash or a timeout affects
-only that task. On Linux a preload parent forks each child: a new child takes
+A worker owns one child and one socket per slot. An isolated child holds one
+task, so a crash or a timeout affects only that task; a crash of a shared child
+ends every task in it. On Linux a preload parent forks each child: a new child takes
 milliseconds, and children share memory. Before you change `WorkerProfile.preload`,
 read the traps under "Child process model" in `configs.md`: `app` mode changes
 what runs at import, and a recycle no longer reloads your code.

@@ -1,7 +1,7 @@
 ---
 title: Shared Thread Tasks
 summary: SHARED_THREAD tasks run on threads, many at once, in shared thread children - when threads help (measured), what runs where, the timeout and the kill, the rules for task authors, recycling and sizing.
-related: [worker-profiles, worker-architecture, shared-async-tasks, ../tasks/defining-tasks]
+related: [execution-modes, worker-profiles, worker-architecture, shared-async-tasks, ../tasks/defining-tasks]
 tags: [workers, threads, shared-thread, execution, timeouts, concurrency, free-threading]
 ---
 
@@ -25,7 +25,7 @@ Threads share one process, so a thread task costs less memory and less start tim
 - A third-party C extension without free-threading support can turn the GIL back on in a free-threaded build.
 - Threads that wait in sync I/O (a sync database or HTTP client) were not measured. Such a wait releases the GIL, so the threads wait at the same time.
 
-Use a shared thread task for `def` code that waits in a sync client, or that calls C code that releases the GIL, such as hashing, compression or image work. Use [Shared Async Tasks](shared-async-tasks) for code that has an async client. Keep `Execution.ISOLATED` (the default) for CPU work in pure Python on a standard build, and for tasks that must not share a process with other tasks.
+Use a shared thread task for `def` code that waits in a sync client, or that calls C code that releases the GIL, such as hashing, compression or image work. Use [Shared Async Tasks](/horsies/workers/shared-async-tasks/) for code that has an async client. Keep `Execution.ISOLATED` (the default) for CPU work in pure Python on a standard build, and for tasks that must not share a process with other tasks.
 
 ## What Runs Where
 
@@ -35,7 +35,7 @@ Use a shared thread task for `def` code that waits in a sync client, or that cal
 | `SHARED_THREAD` | a shared thread child, on a seat thread | an isolated child, one task in the process |
 | `ISOLATED` | an isolated child | an isolated child |
 
-A worker may run a task more isolated than its row says, never less. A worker with no shared thread children claims `SHARED_THREAD` rows into its `ISOLATED` budget and runs them in isolated children, with the usual kill at `timeout_ms`. A worker with shared thread children claims them into its `SHARED_THREAD` budget, whose capacity is the seats of those children; its isolated children and its shared async children never run one. See [Budgets per Execution Class](concurrency#budgets-per-execution-class).
+A worker may run a task more isolated than its row says, never less. A worker with no shared thread children claims `SHARED_THREAD` rows into its `ISOLATED` budget and runs them in isolated children, with the usual kill at `timeout_ms`. A worker with shared thread children claims them into its `SHARED_THREAD` budget, whose capacity is the seats of those children; its isolated children and its shared async children never run one. See [Budgets per Execution Class](/horsies/workers/concurrency/#budgets-per-execution-class).
 
 A shared thread child runs only `def` tasks. When a deploy changed the function of a queued `SHARED_THREAD` row to `async def`, the worker writes `ISOLATED` on the row and returns it to the queue before any child takes it.
 
@@ -90,7 +90,7 @@ Start a worker with a profile that has shared thread children:
 horsies worker myapp.instance:app --profile files
 ```
 
-This worker runs `ISOLATED` tasks in 2 isolated children and `SHARED_THREAD` tasks on 2 × 4 = 8 seats. See [Worker Profiles](worker-profiles#sharedthreadchildren) for the fields.
+This worker runs `ISOLATED` tasks in 2 isolated children and `SHARED_THREAD` tasks on 2 × 4 = 8 seats. See [Worker Profiles](/horsies/workers/worker-profiles/#sharedthreadchildren) for the fields.
 
 ## The Timeout
 
@@ -151,13 +151,25 @@ A new task goes to the open shared thread child with the fewest tasks in flight,
 
 ## Connections
 
-Each shared thread child opens one sync connection pool of `worker_child_pool_max_size` connections, as an isolated child does, whatever its seats. Its seat threads share that pool for the RUNNING update and the finalizing marker of each task, and a thread waits up to 30 seconds for a free connection. Each task holds a connection only for those two short writes, so a pool smaller than the seats is enough for most tasks. See [Connections](worker-profiles#connections).
+Each shared thread child opens one sync connection pool of `worker_child_pool_max_size` connections (default 2), as an isolated child does, whatever its seats. Its seat threads share that pool for two writes of each task: the RUNNING update at its start, and the finalizing marker at its end. The worker process writes the runner heartbeats over its own connection. See [Connections](/horsies/workers/worker-profiles/#connections).
+
+A seat thread waits up to 30 seconds for a free connection. A thread that gets none in that time does not run its task: the task stays claimed, and its claim lease returns it to the queue.
+
+Size the pool from the writes, not from the seats:
+
+- Each write holds one connection for its transaction: a few database round trips.
+- Connections in use, on average = tasks per second of the child × 2 writes × the time of one write.
+- Example: a child that ends 20 tasks per second, with 10 ms per write, uses 20 × 2 × 0.01 = 0.4 connections on average. The default of 2 is enough.
+- Example: the same child against a remote database, with 50 ms per write, uses 2 connections on average. The default pool is then full, and seat threads wait for each other. Set `worker_child_pool_max_size` to 4 or more.
+- Keep the pool above the average. As the average comes near the pool size, the waits grow.
+
+`worker_child_pool_max_size` applies to every child of the worker, isolated and shared. Each added connection counts once per child in the connection budget of the worker.
 
 ## Limits
 
 - A deadline does not stop a thread. The kill of the child does, when no task in it has time left.
 - A task with a long timeout keeps a closed child, and the tasks past their deadline in it, alive until that timeout.
-- C code that holds the GIL stops every thread of the child, also the threads that report deadlines. Up to 5 seconds past a deadline the report is late; past that the worker kills the child.
+- C code that holds the GIL stops every thread of the child, also the thread that reports deadlines. The report of a deadline is then late. When it has not come by `timeout_ms + 10 seconds`, the worker kills the child.
 
 ## Things to Avoid
 

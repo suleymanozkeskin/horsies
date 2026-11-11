@@ -116,6 +116,7 @@ export default defineConfig({
 					label: 'Workers',
 					items: [
 						{ label: 'Worker Architecture', slug: 'workers/worker-architecture' },
+						{ label: 'Choosing an Execution Mode', slug: 'workers/execution-modes' },
 						{ label: 'Worker Profiles', slug: 'workers/worker-profiles' },
 						{ label: 'Shared Async Tasks', slug: 'workers/shared-async-tasks' },
 						{ label: 'Shared Thread Tasks', slug: 'workers/shared-thread-tasks' },

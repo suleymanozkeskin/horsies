@@ -1,7 +1,7 @@
 ---
 title: Shared Async Tasks
 summary: SHARED_ASYNC tasks run as coroutines, many at once, in shared async children - what runs where, the timeout (cancel, second cancel, close, kill), a blocked event loop, the rules for task authors, recycling and sizing.
-related: [worker-profiles, worker-architecture, child-process-hooks, ../tasks/defining-tasks]
+related: [execution-modes, worker-profiles, worker-architecture, child-process-hooks, ../tasks/defining-tasks]
 tags: [workers, async, shared-async, execution, timeouts, cancellation, concurrency]
 ---
 
@@ -23,7 +23,7 @@ The deal is different from an isolated task. The tasks of a shared child share o
 | `SHARED_ASYNC` | a shared async child, on a seat | an isolated child, one task in the process |
 | `ISOLATED` | an isolated child | an isolated child |
 
-A worker may run a task more isolated than its row says, never less. A worker with no shared async children claims `SHARED_ASYNC` rows into its `ISOLATED` budget and runs them in isolated children, with the usual kill at `timeout_ms`. A worker with shared async children claims them into its `SHARED_ASYNC` budget, whose capacity is the seats of those children; its isolated children never run one. See [Budgets per Execution Class](concurrency#budgets-per-execution-class).
+A worker may run a task more isolated than its row says, never less. A worker with no shared async children claims `SHARED_ASYNC` rows into its `ISOLATED` budget and runs them in isolated children, with the usual kill at `timeout_ms`. A worker with shared async children claims them into its `SHARED_ASYNC` budget, whose capacity is the seats of those children; its isolated children never run one. See [Budgets per Execution Class](/horsies/workers/concurrency/#budgets-per-execution-class).
 
 A shared async child runs only `async def` tasks. When a deploy changed the function of a queued `SHARED_ASYNC` row to `def`, the worker writes `ISOLATED` on the row and returns it to the queue before any child takes it.
 
@@ -80,7 +80,7 @@ Start a worker with a profile that has shared async children:
 horsies worker myapp.instance:app --profile io
 ```
 
-This worker runs `ISOLATED` tasks in 2 isolated children and `SHARED_ASYNC` tasks on 4 × 25 = 100 seats. See [Worker Profiles](worker-profiles#sharedasyncchildren) for the fields.
+This worker runs `ISOLATED` tasks in 2 isolated children and `SHARED_ASYNC` tasks on 4 × 25 = 100 seats. See [Worker Profiles](/horsies/workers/worker-profiles/#sharedasyncchildren) for the fields.
 
 ### Keep a client for the life of the child
 
@@ -104,7 +104,7 @@ async def get_status(*, url: str) -> TaskResult[int, TaskError]:
     return TaskResult(ok=response.status_code)
 ```
 
-See [Child-Process Hooks](child-process-hooks#shared-async-child-start-hooks).
+See [Child-Process Hooks](/horsies/workers/child-process-hooks/#shared-async-child-start-hooks).
 
 ## The Timeout
 
@@ -132,7 +132,7 @@ What a cancel does to common libraries, measured on one shared child (CPython 3.
 | `asyncio.to_thread()` with a sync client | the thread runs on | the thread runs on: it ends only by the client's own timeout |
 | DNS lookup with a resolver that does not answer | the lookup thread runs on, 9.7 s with glibc defaults | the thread runs on |
 
-Notes: a pause of the database container stood in for a server that stops answering; the kernel still accepted TCP connections. Networks that drop packets, TLS and remote servers add round trips to each cleanup step, and were not measured.
+Notes: a pause of the database container stood in for a server that stops answering; the kernel still accepted TCP connections. Networks that drop packets, TLS and remote servers add round trips to each cleanup step, and were not measured. The psycopg row used `psycopg-binary` 3.3.8, with its bundled libpq 18.6. With a libpq older than 17, psycopg sends its cancel request from a thread with no limit, and the attempt ends only when that thread returns. See [psycopg and libpq](/horsies/configuration/broker-config/#psycopg-and-libpq).
 
 The worker keeps one timer per task, at `timeout_ms + cancel_grace_ms + 10 seconds`. The child reports the second cancel at T + G, so a child that has reported neither the second cancel nor the end by then is frozen: C code holds the GIL, and nothing in the child can run. The worker kills that child. Each task in it that is past its deadline fails with `TASK_TIMEOUT`; every other task takes the crash path (`WORKER_CRASHED`, or a retry when its policy names that code). No task is named as the cause, so no retry moves to an isolated child.
 
@@ -209,7 +209,7 @@ A seat that waits on the network holds at least one socket, and a process has a 
 - A stuck task keeps its seat until every task left in its child is stuck, or until the worker stops and its drain timeout kills the child.
 - A blocked loop delays every timeout of the child until the block ends, or until the worker kills the child.
 - A refusal (a row whose stored timeout or grace the worker cannot use) runs no task code. A child that still holds one 120 seconds after its placement is frozen or waits on a database that does not answer; the worker kills it, and the refusal takes the crash path.
-- Each shared async child opens one async connection pool of `worker_child_pool_max_size` connections, as an isolated child opens one sync pool. See [Connections](worker-profiles#connections).
+- Each shared async child opens one async connection pool of `worker_child_pool_max_size` connections, as an isolated child opens one sync pool. Its seats share that pool for the RUNNING update and the finalizing marker of each task, and wait up to 30 seconds for a free connection. Size it as for [shared thread children](/horsies/workers/shared-thread-tasks/#connections). See [Connections](/horsies/workers/worker-profiles/#connections).
 
 ## Things to Avoid
 

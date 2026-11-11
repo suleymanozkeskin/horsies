@@ -248,7 +248,7 @@ info = broker.get_task_info("task-uuid", include_result=True)  # sync
 
 **Monitoring** (async only): `get_stale_tasks()`, `get_expired_tasks()`, `mark_stale_tasks_as_failed()`, `requeue_stale_claimed()`. See website docs `monitoring/broker-methods` for full signatures.
 
-**Health/liveness** (app, async + sync): `ping_database_async()` (DatabasePing latency), `ping_workers_async(target_worker_id=None, timeout_seconds=2.0, min_responses=None)` (list[WorkerPong] — active ping-pong; min_responses=1 = fast liveness gate, returns on first reply), `list_worker_states_async()` / `get_worker_state_async(worker_id)` / `get_worker_state_history_async(worker_id, limit=None)` (WorkerStateSnapshot, includes idle workers). `get_class_coverage_async()` (ClassCoverage — fleet check: each (queue, class) with PENDING rows is StreamServed / StreamWithoutCapacity / StreamUnserved by live workers; the reaper logs unserved at error), `get_class_report_async()` (ClassReport — oldest wait per pending (queue, class), budget capacity/in_flight/free per live worker). Replaces the retired `get_worker_stats()`. `WorkerStateSnapshot.memory_usage_mb` is the parent process only; `children_memory_mb` is the summed RSS of executor children (the memory-quota driver — use it to size `max_tasks_per_child` / `max_memory_per_child_mb`). See website docs `monitoring/worker-health`. 
+**Health/liveness** (app, async + sync): `ping_database_async()` (DatabasePing latency), `ping_workers_async(target_worker_id=None, timeout_seconds=2.0, min_responses=None)` (list[WorkerPong] — active ping-pong; min_responses=1 = fast liveness gate, returns on first reply), `list_worker_states_async()` / `get_worker_state_async(worker_id)` / `get_worker_state_history_async(worker_id, limit=None)` (WorkerStateSnapshot, includes idle workers). `get_class_coverage_async()` (ClassCoverage — fleet check: each (queue, class) with PENDING rows is StreamServed / StreamWithoutCapacity / StreamUnserved by live workers; the reaper logs unserved at error), `get_class_report_async()` (ClassReport — oldest wait per pending (queue, class), budget capacity/in_flight/free per live worker). Replaces the retired `get_worker_stats()`. `WorkerStateSnapshot.memory_usage_mb` is the parent process only; `children_memory_mb` is the summed RSS of executor children (the memory-quota driver — use it to size `IsolatedRecycle.after` / `IsolatedRecycle.above`, and `SharedRecycle` for shared children). See website docs `monitoring/worker-health`. 
 
 ## PostgresConfig
 
@@ -286,6 +286,20 @@ config = PostgresConfig(
 | `echo` | `bool` | `False` | Echo SQL (debug only); bound values are not shown |
 
 Driver must be psycopg3 (async). `postgresql+psycopg2://` is rejected.
+
+psycopg >= 3.3.6 bounds the wait after an interrupted query (a cancelled asyncio
+task, `KeyboardInterrupt`, `SystemExit`): a cancel request of at most 5 s, then
+at most 5 s for the query, then it closes the connection. The 5 s limit on the
+cancel request needs libpq 17+; with an older libpq the request has no limit (in
+async code it runs in a default-executor thread, which a shared async attempt
+waits for). `horsies[pg-binary]` bundles its own libpq; `psycopg.pq.version()`
+reads the loaded version (`170000` = 17.0).
+
+The seats of a shared child share the child pool (`worker_child_pool_max_size`,
+default 2) for the RUNNING update and the finalizing marker; a seat waits up to
+30 s for a connection, and a seat that gets none leaves its task claimed until
+the claim lease returns it. Average connections in use = tasks per second of
+the child x 2 writes x time of one write; keep the pool above it.
 
 `tcp_keepalives` (default on) keeps idle pooled sockets warm so a server-side
 or middlebox idle-reap is detected and recycled at the socket layer instead of

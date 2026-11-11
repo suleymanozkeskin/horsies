@@ -54,9 +54,10 @@ Unlike Celery (which typically uses Redis or RabbitMQ), horsies uses PostgreSQL 
 
 Workers run tasks in child processes that they own, rather than threads:
 
-- Each task runs in an isolated child process
+- By default, each task runs in an isolated child process
 - GIL contention is avoided for CPU-bound tasks
-- A crashed or timed-out task takes down only its own child
+- A crashed or timed-out isolated task takes down only its own child
+- A task can opt in to a shared child, which runs many tasks as coroutines or on threads. See [Choosing an Execution Mode](../../workers/execution-modes)
 - On Linux, children fork from a preload parent, so they start in milliseconds and share memory
 - The worker process writes the runner heartbeats of its children's tasks, so a task that holds the GIL cannot stop them
 

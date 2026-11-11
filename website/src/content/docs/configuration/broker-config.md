@@ -29,14 +29,14 @@ broker = PostgresConfig(
 | `worker_max_overflow` | `int \| None` | 2 | Worker coordinator overflow; `None` inherits `max_overflow` |
 | `worker_child_pool_min_size` | `int` | 0 | Minimum connections kept by each child worker process |
 | `worker_child_pool_max_size` | `int` | 2 | Maximum connections allowed per child worker process |
-| `worker_child_pool_check` | `bool` | `True` | Health-check child pool connections on checkout; see [Remote PostgreSQL](remote-postgres) |
+| `worker_child_pool_check` | `bool` | `True` | Health-check child pool connections on checkout; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
 | `pool_timeout` | `int` | 30 | Seconds to wait for connection |
-| `pool_pre_ping` | `bool` | `True` | Pre-ping connections before use; see [Remote PostgreSQL](remote-postgres) |
-| `tcp_keepalives` | `bool` | `True` | Enable libpq TCP keepalives on broker and child-process connections; see [Remote PostgreSQL](remote-postgres) |
+| `pool_pre_ping` | `bool` | `True` | Pre-ping connections before use; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
+| `tcp_keepalives` | `bool` | `True` | Enable libpq TCP keepalives on broker and child-process connections; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
 | `tcp_keepalives_idle` | `int` | 30 | Idle seconds before the first keepalive probe (libpq `keepalives_idle`) |
 | `tcp_keepalives_interval` | `int` | 10 | Seconds between keepalive probes (libpq `keepalives_interval`) |
 | `tcp_keepalives_count` | `int` | 3 | Unacknowledged probes before the connection is dropped (libpq `keepalives_count`) |
-| `tcp_user_timeout_ms` | `int` | 30000 | Milliseconds that sent data may stay unacknowledged before the connection is closed (libpq `tcp_user_timeout`); `0` uses the operating system default; see [Remote PostgreSQL](remote-postgres) |
+| `tcp_user_timeout_ms` | `int` | 30000 | Milliseconds that sent data may stay unacknowledged before the connection is closed (libpq `tcp_user_timeout`); `0` uses the operating system default; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
 | `retain_rerun_input_default` | `bool` | `False` | App-level default for rerun-input retention at enqueue; a per-task value overrides it |
 | `echo` | `bool` | `False` | Echo SQL statements to logs. Bound values are not shown |
 | `pool_recycle` | `int` | 1800 | Recycle connections after N seconds |
@@ -53,6 +53,26 @@ Components:
 - `user:password` - Credentials
 - `host:port` - Server location (default port: 5432)
 - `database` - Database name
+
+## psycopg and libpq
+
+horsies needs psycopg 3.3.6 or later. The install sets where the libpq of psycopg comes from:
+
+| Install | psycopg loads |
+|---------|---------------|
+| `horsies` | the libpq of the system |
+| `horsies[pg-binary]` | the libpq that `psycopg-binary` bundles |
+| `horsies[pg-c]` | the libpq of the system, through `psycopg-c` |
+
+When a cancelled asyncio task, `KeyboardInterrupt` or `SystemExit` interrupts a running query, psycopg:
+
+1. Sends a cancel request to the server, for at most 5 seconds.
+2. Waits for the query to end, for at most 5 seconds.
+3. Closes the connection, when the query has not ended.
+
+The 5-second limit of step 1 needs libpq 17 or later. With an older libpq, the cancel request has no limit, and in async code psycopg sends it from a thread of the default executor. The 5-second limit of step 2 applies with every libpq. Read the version that psycopg loaded with `psycopg.pq.version()`: libpq 17.0 reads `170000`.
+
+In a [shared async child](/horsies/workers/shared-async-tasks/#the-timeout), that thread is work of the task: the attempt ends only when the cancel request returns. A second cancel does not stop a thread.
 
 ## Examples
 
@@ -170,10 +190,12 @@ With the defaults and a profile of 8 children, the framework ceiling is about
 `3 + 2 + 2 + 1 + 8 * 2 = 24` direct connections, before application task code.
 Idle child processes keep no database connection by default because
 `worker_child_pool_min_size=0`; connections are opened lazily when task
-lifecycle work starts. A child uses one connection at a time, for the RUNNING
-update and the finalizing mark: the worker process writes the runner
+lifecycle work starts. An isolated child uses one connection at a time, for the
+RUNNING update and the finalizing mark: the worker process writes the runner
 heartbeats over its own connection. So `worker_child_pool_max_size=1` is enough
-for the child's own work.
+for the own work of an isolated child. The seats of a shared child share one
+pool of `worker_child_pool_max_size` connections; see
+[Connections](/horsies/workers/shared-thread-tasks/#connections) for its size.
 
 When using PgBouncer transaction pooling, those client-side pool slots are
 multiplexed onto fewer server backends. Connections are still not safe to share

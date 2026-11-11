@@ -25,12 +25,12 @@ horsies worker <module> --profile NAME [OPTIONS]
 
 | Option | Default | Description |
 | ------ | ------- | ----------- |
-| `--profile NAME` | (required) | Name of the worker profile in `AppConfig.worker_profiles`. The profile holds the settings of the worker: children, recycling, claim limits, drain timeout and preload. See [Worker Profiles](workers/worker-profiles) |
+| `--profile NAME` | (required) | Name of the worker profile in `AppConfig.worker_profiles`. The profile holds the settings of the worker: children, recycling, claim limits, drain timeout and preload. See [Worker Profiles](/horsies/workers/worker-profiles/) |
 | `--loglevel LEVEL` | INFO | DEBUG, INFO, WARNING, ERROR, CRITICAL |
 
 There is no default profile. A missing or unknown `--profile` exits with code 1 before the app check and before any child starts. The message lists the defined profile names.
 
-The flags `--processes`, `--max-claim-batch`, `--max-claim-per-worker`, `--max-tasks-per-child`, `--max-memory-per-child-mb`, `--drain-timeout` and `--child-preload` were removed in 0.7.0. Each one exits with code 2 and names the profile field that replaces it. See [Migrating to 0.7.0](migrations/migration-to-0-7-0).
+The flags `--processes`, `--max-claim-batch`, `--max-claim-per-worker`, `--max-tasks-per-child`, `--max-memory-per-child-mb`, `--drain-timeout` and `--child-preload` were removed in 0.7.0. Each one exits with code 2 and names the profile field that replaces it. See [Migrating to 0.7.0](/horsies/migrations/migration-to-0-7-0/).
 
 **Examples:**
 
@@ -48,7 +48,7 @@ horsies worker myapp.instance:app --profile default --loglevel=DEBUG
 horsies worker app/configs/instance.py:app --profile default
 ```
 
-At boot, before any child starts, the worker logs the settings of the profile, and warns when the per-child memory limits add up to more than the memory that the worker can use (the container limit, or the host RAM), or when one worker can open more Postgres connections than the server has usable slots. See [Validation](workers/worker-profiles#validation).
+At boot, before any child starts, the worker logs the settings of the profile, and warns when the per-child memory limits add up to more than the memory that the worker can use (the container limit, or the host RAM), or when one worker can open more Postgres connections than the server has usable slots. See [Validation](/horsies/workers/worker-profiles/#validation).
 
 ### horsies scheduler
 
@@ -86,7 +86,7 @@ Validate configuration, task registration, workflow structure, and optionally br
 
 For details on validation phases, `@app.workflow_builder`, the guarantee model, and CI usage, see [Startup Validation](../configuration/app-config#startup-validation-appcheck).
 
-`horsies check` validates every worker profile of the app, and each error names the profile and the field path (`HRS-218`). With `--live`, a profile whose worker can open more Postgres connections than the server has usable slots is an error (`HRS-219`). See [Worker Profiles](workers/worker-profiles#validation).
+`horsies check` validates every worker profile of the app, and each error names the profile and the field path (`HRS-218`). With `--live`, a profile whose worker can open more Postgres connections than the server has usable slots is an error (`HRS-219`). See [Worker Profiles](/horsies/workers/worker-profiles/#validation).
 
 ```bash
 horsies check <module> [OPTIONS]
@@ -300,7 +300,7 @@ Both commands handle graceful shutdown:
 | `SIGTERM` | Graceful shutdown |
 | `SIGINT` (Ctrl+C) | Graceful shutdown |
 
-Workers wait up to the `drain_timeout` of their profile for running tasks. See [Graceful Shutdown](workers/worker-architecture#graceful-shutdown).
+Workers wait up to the `drain_timeout` of their profile for running tasks. See [Graceful Shutdown](/horsies/workers/worker-architecture/#graceful-shutdown).
 
 ## Exit Codes
 
@@ -309,6 +309,7 @@ Workers wait up to the `drain_timeout` of their profile for running tasks. See [
 | 0 | Clean shutdown |
 | 1 | Error (check logs), including a missing or unknown `--profile` |
 | 2 | Invalid `horsies web` arguments, a removed worker flag, or an argparse error |
+| 77 | `horsies worker`: the worker could not write runner heartbeats, and it had not stopped 120 seconds after it started to stop. See [When the Worker Cannot Write Heartbeats](/horsies/workers/heartbeats-recovery/#when-the-worker-cannot-write-heartbeats) |
 
 ## Environment Variables
 
