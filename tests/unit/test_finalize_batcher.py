@@ -717,3 +717,34 @@ async def test_a_surge_flusher_leaves_a_partial_batch_to_the_steady_flushers() -
     write.release(1)
     write.release(3)
     _ = await asyncio.wait_for(asyncio.gather(*held, *waiting), OUTER_BOUND_S)
+
+
+def _surge_tasks() -> list[asyncio.Task[object]]:
+    return [
+        task
+        for task in asyncio.all_tasks()
+        if task.get_name() == 'finalize-batch-flusher-surge'
+    ]
+
+
+@pytest.mark.asyncio
+async def test_no_surge_flusher_is_created_while_less_than_a_full_batch_waits() -> None:
+    """A submit while the steady flushers write creates no task for a surge
+    flusher until a full batch waits."""
+    write = _ScriptedWrite(gated=True)
+    batcher = FinalizeBatcher(write, max_queued_rows=QUEUE_BOUND, max_flushers=4)
+    held = [await _submit_alone(batcher, task_id) for task_id in ('a', 'b')]
+    calls = [
+        asyncio.create_task(batcher.complete(_command(f'w{index}')))
+        for index in range(FUSED_BATCH_MAX_ROWS - 1)
+    ]
+    await asyncio.sleep(0)
+
+    assert _surge_tasks() == []
+
+    calls.append(asyncio.create_task(batcher.complete(_command('last'))))
+    await asyncio.sleep(0)
+
+    assert len(_surge_tasks()) == 1
+    write.release()
+    _ = await asyncio.wait_for(asyncio.gather(*held, *calls), OUTER_BOUND_S)
