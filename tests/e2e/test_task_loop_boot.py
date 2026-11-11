@@ -44,8 +44,9 @@ INSTANCE = 'tests.e2e.tasks.instance_task_loop_boot:app'
 SYNC_ONLY_INSTANCE = 'tests.e2e.tasks.instance_task_loop_boot_sync_only:app'
 RESULT_TIMEOUT_MS = 30_000
 WORKER_EXIT_TIMEOUT_S = 60.0
+# EMFILE at the creation of the loop is a resource shortage, which can clear.
 LOOP_CAUSE = (
-    'the child could not create the event loop for async tasks: '
+    'the OS ran short of a resource (EMFILE): '
     'OSError: [Errno 24] Too many open files'
 )
 SNAPSHOT_POLLS: Final = 40
