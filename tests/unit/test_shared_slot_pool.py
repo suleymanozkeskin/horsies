@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import subprocess
 import sys
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -34,6 +35,7 @@ from horsies.core.models.worker_profile import (
 from horsies.core.types.result import Err, Ok
 from horsies.core.worker.child_protocol import (
     BlockingRun,
+    ChildFrame,
     DeadlineFiredFrame,
     LeftoverCancelFrame,
     LeftoverStuckFrame,
@@ -88,11 +90,13 @@ from horsies.core.worker.slots import (
     SharedRunRequest,
     SlotPool,
     SlotPoolConfig,
+    StuckAcknowledged,
     NoCloseCulprit,
     _SeatRun,
     _due_step_reported,
     _outcome_at_loss,
     _reported_in,
+    _stuck_reported_in,
     place_on_shared_child,
     shared_recycle_reason,
 )
@@ -1481,6 +1485,142 @@ class TestReturnedRunAtAKill:
         """The slot has not read the report yet: the child is alive."""
         assert _reported_in(SeatTask(1000, 100), (frame,), 1) is True
         assert _reported_in(SeatTask(1000, 100), (frame,), 2) is False
+
+
+def _stopped(pid: int) -> bool:
+    """Whether the process is stopped by a signal: ``ps`` reports state T."""
+    state = subprocess.run(
+        ['ps', '-o', 'stat=', '-p', str(pid)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return state.stdout.strip().startswith('T')
+
+
+def _deadline_of(pool: SlotPool, dispatch: int) -> DeadlineReport | None:
+    """The report of run ``dispatch`` on the one shared slot, or None when
+    the slot holds no such run."""
+    run = _runs_of_slot(pool).get(dispatch)
+    return None if run is None else run.deadline
+
+
+def _runs_of_slot(pool: SlotPool) -> SeatRuns:
+    match pool.shared_states():
+        case (Open(runs=runs),) | (Closing(runs=runs),):
+            return runs
+        case _:
+            return SeatRuns(0)
+
+
+@pytest.mark.asyncio(loop_scope='function')
+class TestFrozenAfterTheLastCancel:
+    """A shared async child that freezes right after it reports the last
+    cancel of a run: the stuck check never runs, so no stuck report and no
+    end come. The second backstop kills it."""
+
+    @pytest.mark.parametrize(
+        ('operation', 'timeout_ms', 'reported'),
+        [
+            ('freeze_at_second_cancel', SHORT_TIMEOUT_MS, SecondCancelReported()),
+            ('leave_freezing_at_cancel', LONG_TIMEOUT_MS, LeftoverCancelReported()),
+        ],
+        ids=['second-cancel', 'leftover-cancel'],
+    )
+    async def test_the_stuck_backstop_kills_a_child_frozen_after_its_last_cancel(
+        self,
+        pool_factory: PoolFactory,
+        operation: str,
+        timeout_ms: int,
+        reported: DeadlineReport,
+    ) -> None:
+        pool = await pool_factory(_config(1, 2))
+        handle = pool.submit_shared(
+            _request(operation, timeout_ms=timeout_ms, grace_ms=MIN_CANCEL_GRACE_MS),
+        )
+        await _until(lambda: _deadline_of(pool, handle.frame.dispatch) == reported)
+        child = pool._shared_slots[0].child
+        assert child is not None
+        await _until(lambda: _stopped(child.pid))
+
+        first = await handle.backstop_kill(CHILD_KILL_WAIT_S)
+        second = await handle.stuck_backstop_kill(CHILD_KILL_WAIT_S)
+
+        assert first == DeadlineAcknowledged(pid=child.pid)
+        assert second == ChildEnded(
+            pid=child.pid,
+            child_exit=KilledBySignal(signal.SIGKILL),
+        )
+        assert not _alive(child.pid)
+        match await _outcome(handle):
+            case SeatKilled(verdict=verdict):
+                # The second cancel of the run passed its deadline.
+                assert reported == SecondCancelReported()
+                assert verdict == TimedOutAtKill(RetryPlacement.SAME_CLASS)
+            case ChildLost(cause=LossCause.KILLED_BY_PARENT):
+                # The child had not sent what the run returned yet.
+                assert reported == LeftoverCancelReported()
+            case other:
+                raise AssertionError(other)
+
+    async def test_a_stuck_run_keeps_its_seat_at_the_stuck_backstop(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        """The child reported the run stuck, so it is alive: nothing is
+        killed, and the kill comes when every run left in it is stuck."""
+        pool = await pool_factory(_config(1, 2))
+        neighbour = pool.submit_shared(_request('sleep', '30'))
+        await asyncio.wait_for(asyncio.shield(neighbour.assigned), OUTCOME_TIMEOUT_S)
+        stuck = pool.submit_shared(
+            _request(
+                'ignore_every_cancel',
+                timeout_ms=SHORT_TIMEOUT_MS,
+                grace_ms=MIN_CANCEL_GRACE_MS,
+            ),
+        )
+        await _until(
+            lambda: _deadline_of(pool, stuck.frame.dispatch) == StuckReported(),
+        )
+
+        outcome = await stuck.stuck_backstop_kill(CHILD_KILL_WAIT_S)
+
+        match outcome:
+            case StuckAcknowledged(pid=pid):
+                assert _alive(pid)
+            case other:
+                raise AssertionError(other)
+        assert not stuck.outcome.done()
+
+
+class TestStuckStepReported:
+    """The stuck backstop leaves a child alive that reported the run stuck,
+    or its end, also in a frame that the slot has not read yet."""
+
+    @pytest.mark.parametrize(
+        ('frame', 'dispatch', 'reported'),
+        [
+            (RunStuckFrame(1, 't', 1, 0, ('x',)), 1, True),
+            (LeftoverStuckFrame(1, 't', 1, 0, ('x',), RETURNED), 1, True),
+            (SecondCancelFrame(1, 't'), 1, False),
+            (LeftoverCancelFrame(1, 't'), 1, False),
+            (RunStuckFrame(1, 't', 1, 0, ('x',)), 2, False),
+        ],
+        ids=[
+            'stuck',
+            'leftover-stuck',
+            'second-cancel',
+            'leftover-cancel',
+            'other-run',
+        ],
+    )
+    def test_a_queued_stuck_report_answers_the_stuck_backstop(
+        self,
+        frame: ChildFrame,
+        dispatch: int,
+        reported: bool,
+    ) -> None:
+        assert _stuck_reported_in((frame,), dispatch) is reported
 
 
 class TestNamedCulpritAtAKill:

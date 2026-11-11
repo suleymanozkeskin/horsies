@@ -525,6 +525,46 @@ async def _wait_forever() -> None:
     _ = await asyncio.Event().wait()
 
 
+# The time that a freezing operation gives the writer thread to send the
+# report of the cancel, before it stops the process.
+FREEZE_AFTER_REPORT_S = 0.2
+
+
+def _freeze() -> None:
+    """Stop the whole process after the report of the cancel left it, as C
+    code that holds the GIL stops every thread."""
+    time.sleep(FREEZE_AFTER_REPORT_S)
+    os.kill(os.getpid(), signal.SIGSTOP)
+
+
+async def _freeze_at_second_cancel() -> str:
+    """Live through the cancel at the deadline, then freeze at the second
+    cancel, before the stuck check."""
+    try:
+        await asyncio.sleep(3600)
+    except asyncio.CancelledError:
+        pass
+    try:
+        await asyncio.sleep(3600)
+    except asyncio.CancelledError:
+        _freeze()
+    return str(os.getpid())
+
+
+async def _freeze_when_cancelled() -> None:
+    try:
+        await asyncio.sleep(3600)
+    except asyncio.CancelledError:
+        _freeze()
+
+
+async def _leave_freezing_at_cancel() -> str:
+    """Start a task that freezes the process when the child cancels it, and
+    return at once."""
+    _kept_tasks.append(asyncio.get_running_loop().create_task(_freeze_when_cancelled()))
+    return str(os.getpid())
+
+
 async def _leave_ignoring_cancels() -> str:
     """Start a task that ignores every cancel, and return at once."""
     _kept_tasks.append(asyncio.get_running_loop().create_task(_ignore_cancel()))
@@ -609,6 +649,10 @@ async def _seat_run(frame: SharedRunFrame) -> WireResult:
             return True, _lazy_client(), None
         case 'ignore_every_cancel':
             return True, await _ignore_every_cancel(), None
+        case 'freeze_at_second_cancel':
+            return True, await _freeze_at_second_cancel(), None
+        case 'leave_freezing_at_cancel':
+            return True, await _leave_freezing_at_cancel(), None
         case 'start_ticker':
             # An empty context carries no run mark, as a task that a start
             # hook creates: the run ends while the ticker runs on.

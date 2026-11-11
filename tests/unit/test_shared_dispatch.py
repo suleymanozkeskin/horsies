@@ -32,6 +32,7 @@ from horsies.core.models.worker_profile import (
 )
 from horsies.core.worker.claim_plan import ClaimPlan, isolated_children_plan
 from horsies.core.types.result import Err, Ok, Result
+from horsies.core.worker import dispatch as dispatch_module
 from horsies.core.worker import finalize
 from horsies.core.worker.child_protocol import (
     IsolatedChild,
@@ -40,6 +41,7 @@ from horsies.core.worker.child_protocol import (
     SeatRefusal,
     SeatTask,
     SharedAsyncChild,
+    ThreadSeatTask,
 )
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.dispatch_route import RunIsolated, RunShared, dispatch_route
@@ -69,6 +71,7 @@ from horsies.core.worker.slots import (
     SharedHandle,
     SharedRunRequest,
     SlotPool,
+    StuckAcknowledged,
 )
 from horsies.core.worker.shared_finalize import (
     future_retry_data,
@@ -801,6 +804,11 @@ class TestBackstopTimer:
         worker._handle_shared_backstop.assert_not_awaited()
 
 
+# A wait that the code under test must end by itself fails the test past this
+# time, instead of hanging it.
+OUTCOME_BOUND_S = 5.0
+
+
 @pytest.mark.asyncio
 class TestBackstopDecision:
     WORK = SeatTask(timeout_ms=1000, cancel_grace_ms=500)
@@ -869,6 +877,78 @@ class TestBackstopDecision:
         )
 
         assert outcome == finished
+
+    async def test_a_child_silent_after_the_acknowledged_cancel_gets_the_stuck_backstop(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The child reported the second cancel, then froze: no stuck report
+        and no end come. The stuck backstop kills it, and the slot verdict
+        is the outcome."""
+        monkeypatch.setattr(dispatch_module, 'SHARED_STUCK_BACKSTOP_S', 0.01)
+        worker = _worker()
+        handle = _handle(asyncio.get_running_loop())
+        killed = SeatKilled(
+            verdict=TimedOutAtKill(retry=RetryPlacement.SAME_CLASS),
+            pid=7,
+            child_exit=KilledBySignal(9),
+        )
+
+        async def kill_the_frozen_child(_wait_s: float) -> ChildEnded:
+            handle.finish(killed)
+            return ChildEnded(pid=7, child_exit=KilledBySignal(9))
+
+        stuck_backstop = AsyncMock(side_effect=kill_the_frozen_child)
+        handle.stuck_backstop_kill = stuck_backstop
+
+        outcome = await asyncio.wait_for(
+            self._backstop(worker, DeadlineAcknowledged(pid=7), handle),
+            OUTCOME_BOUND_S,
+        )
+
+        assert outcome == killed
+        stuck_backstop.assert_awaited_once()
+
+    async def test_a_stuck_report_leaves_the_run_on_its_seat(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(dispatch_module, 'SHARED_STUCK_BACKSTOP_S', 0.01)
+        worker = _worker()
+        handle = _handle(asyncio.get_running_loop())
+        ended = SeatDeadlineEnded(retry=RetryPlacement.ISOLATED)
+        handle.stuck_backstop_kill = AsyncMock(return_value=StuckAcknowledged(pid=7))
+        asyncio.get_running_loop().call_later(0.05, handle.finish, ended)
+
+        outcome = await asyncio.wait_for(
+            self._backstop(worker, DeadlineAcknowledged(pid=7), handle),
+            OUTCOME_BOUND_S,
+        )
+
+        assert outcome == ended
+
+    async def test_a_thread_run_has_no_stuck_backstop(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A thread cannot be cancelled: after its deadline report the run
+        waits for its end or for the kill of its child."""
+        monkeypatch.setattr(dispatch_module, 'SHARED_STUCK_BACKSTOP_S', 0.01)
+        worker = _worker()
+        handle = _handle(asyncio.get_running_loop())
+        handle.backstop_kill = AsyncMock(return_value=DeadlineAcknowledged(pid=7))
+        stuck_backstop = AsyncMock()
+        handle.stuck_backstop_kill = stuck_backstop
+        ended = SeatDeadlineEnded(retry=RetryPlacement.SAME_CLASS)
+        asyncio.get_running_loop().call_later(0.05, handle.finish, ended)
+
+        outcome = await asyncio.wait_for(
+            worker._handle_shared_backstop(handle, 'task-1', ThreadSeatTask(1000)),
+            OUTCOME_BOUND_S,
+        )
+
+        assert outcome == ended
+        stuck_backstop.assert_not_awaited()
 
 
 class TestCapacityAndConfig:

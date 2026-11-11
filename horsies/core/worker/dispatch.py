@@ -69,6 +69,7 @@ from horsies.core.worker.runtime import (
 )
 from horsies.core.worker.slots import (
     CHILD_KILL_WAIT_S,
+    SHARED_STUCK_BACKSTOP_S,
     ChildEnded,
     ChildEndUnknown,
     ChildLost,
@@ -81,6 +82,7 @@ from horsies.core.worker.slots import (
     SharedOutcome,
     SharedRunRequest,
     SlotAnswered,
+    StuckAcknowledged,
     SlotHandle,
     SlotOutcome,
     SlotPool,
@@ -637,8 +639,7 @@ class DispatchMixin:
         then answers each run of the child by its verdict (``shared_stop``):
         this run, past its deadline, ``TASK_TIMEOUT``; a refusal, the crash
         path. A child that reported the step is alive: nothing is killed
-        here, and the outcome comes when the run ends or the slot kills the
-        child.
+        here, and ``_await_after_acknowledged`` waits for the outcome.
 
         Returns the outcome to finalize, or ``_AttemptEndUnknown`` (no exit
         seen: nothing is written, the row is left to stale-task recovery).
@@ -680,12 +681,81 @@ class DispatchMixin:
                     task_id,
                     pid,
                 )
-                return await asyncio.shield(handle.outcome)
+                return await self._await_after_acknowledged(handle, task_id, work)
             case SharedAnswered(outcome=outcome):
                 return outcome
             case NothingToKill():
                 raise AssertionError(
                     f'backstop of task {task_id} ran before a child took it',
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    async def _await_after_acknowledged(
+        self,
+        handle: SharedHandle,
+        task_id: str,
+        work: SharedWork,
+    ) -> SharedOutcome | _AttemptEndUnknown:
+        """Wait for the outcome of a run whose child reported the due step of
+        its stop at the backstop.
+
+        A run of a shared async task has one more step: within
+        ``STUCK_REPORT_DELAY_S`` of that cancel the child reports it stuck,
+        or it ends, and a blocked loop is reported within the block limit. A
+        child that has done neither ``SHARED_STUCK_BACKSTOP_S`` later froze
+        after its report: ``stuck_backstop_kill`` kills it, bound to this
+        run, and the slot answers each run of the child by its verdict. A
+        stuck run waits for the kill of its child when every run left in it
+        is stuck. A thread task and a refusal have no such step: the outcome
+        comes when the run ends or the slot kills the child.
+
+        Returns the outcome to finalize, or ``_AttemptEndUnknown`` (no exit
+        seen: nothing is written).
+        """
+        match work:
+            case SeatTask():
+                pass
+            case ThreadSeatTask() | SeatRefusal():
+                return await asyncio.shield(handle.outcome)
+            case _ as unreachable:
+                assert_never(unreachable)
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(handle.outcome),
+                timeout=SHARED_STUCK_BACKSTOP_S,
+            )
+        except asyncio.TimeoutError:
+            pass
+        match await handle.stuck_backstop_kill(CHILD_KILL_WAIT_S):
+            case ChildEnded(pid=pid, child_exit=child_exit):
+                logger.warning(
+                    'Killed shared child pid=%s (%s): the child reported the '
+                    'last cancel of task %s, then neither the task stuck nor its '
+                    'end within %ss; every task of that child ends with it',
+                    pid,
+                    describe_exit(child_exit),
+                    task_id,
+                    SHARED_STUCK_BACKSTOP_S,
+                )
+                return await asyncio.shield(handle.outcome)
+            case ChildEndUnknown(pid=pid):
+                logger.critical(
+                    'Shared child pid=%s of task %s did not exit %ss after '
+                    'SIGKILL; nothing is written, and its rows are left to '
+                    'stale-task recovery',
+                    pid,
+                    task_id,
+                    CHILD_KILL_WAIT_S,
+                )
+                return _AttemptEndUnknown()
+            case StuckAcknowledged():
+                return await asyncio.shield(handle.outcome)
+            case SharedAnswered(outcome=outcome):
+                return outcome
+            case NothingToKill():
+                raise AssertionError(
+                    f'stuck backstop of task {task_id} ran before a child took it',
                 )
             case _ as unreachable:
                 assert_never(unreachable)

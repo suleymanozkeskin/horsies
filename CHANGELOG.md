@@ -206,7 +206,12 @@ and there is no migration contract between pre-1.0 versions.
     names that code; a task past its deadline fails with `TASK_TIMEOUT`.
   - The worker kills a child that has reported neither the second cancel
     nor the end of a task `timeout_ms + cancel_grace_ms + 10 s` after its
-    placement: C code holds the GIL in it. A child that still holds a
+    placement: C code holds the GIL in it. A child that reported that cancel,
+    or the cancel of the work that a task left after its return, and then
+    reports neither the task stuck nor its end by `timeout_ms +
+    cancel_grace_ms + 20.3 s` after its placement (the first check, then
+    0.3 s for the cancel rounds and the stuck check, and the same 10 s
+    margin) froze after the report, and is killed as well. A child that still holds a
     refusal 130 s after its placement is killed as well: the writes of a
     refusal end within 120 s (two attempts of the RUNNING update, each at
     most 30 s for a connection and 10 s for its statements, and the

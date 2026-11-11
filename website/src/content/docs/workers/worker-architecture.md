@@ -170,6 +170,7 @@ The worker places each `SHARED_ASYNC` task on the open shared child with the few
 | A task is still alive after the cancel rounds | The task is stuck and keeps its seat. The worker kills the child when every task left in it is stuck; each fails with `TASK_TIMEOUT`, and its retry runs in an isolated child |
 | The event loop has not turned for 5 s | The worker kills the child at once. The task that held the loop fails with `TASK_BLOCKED_LOOP` and retries isolated; each other task before its deadline fails with `NEIGHBOUR_BLOCKED_LOOP`; a task past its deadline with `TASK_TIMEOUT` |
 | The child reports neither the second cancel nor the end of a task by `timeout_ms + cancel_grace_ms + 10 s` | C code holds the GIL in the child. The worker kills it: each task past its deadline fails with `TASK_TIMEOUT`, and every other task takes the crash path. A task that the child reported stuck retries in an isolated child |
+| The child reported the second cancel of a task, or the cancel of the work that a task left, then reports neither the task stuck nor its end by `timeout_ms + cancel_grace_ms + 20.3 s` | The child froze after its report. The worker kills it, with the same outcomes as in the row above |
 | The child crashes | Every task of the child takes the crash path, after the worker saw the exit. A task that returned before its deadline, and whose left work the child reported stuck, ends with what it returned. A new child starts |
 | The child reaches a recycle limit | It takes no new task, its tasks finish, then it stops and a new child starts |
 

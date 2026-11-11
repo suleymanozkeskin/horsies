@@ -137,6 +137,10 @@ from horsies.core.worker.child_protocol import (
     parse_header,
 )
 from horsies.core.worker.loop_watchdog import LOOP_BLOCK_LIMIT_MS
+from horsies.core.worker.shared_child import (
+    CANCEL_ROUND_INTERVAL_S,
+    EXTRA_CANCEL_ROUNDS,
+)
 from horsies.core.worker.shared_lifecycle import REFUSAL_WRITES_BOUND_S
 from horsies.core.worker.shared_stop import (
     BlockedLoopKill,
@@ -187,6 +191,16 @@ DRAIN_DEADLINE_S: Final = 5.0
 # kills it. The margin is past the block limit, so a block that the watchdog
 # can report is reported first, with its culprit.
 SHARED_BACKSTOP_MARGIN_S: Final = LOOP_BLOCK_LIMIT_MS / 1000 + 5.0
+# After a shared async child reports the second cancel of a run, or the cancel
+# of the work that a run left after its return, it sends EXTRA_CANCEL_ROUNDS
+# more cancel rounds CANCEL_ROUND_INTERVAL_S apart, and reports the run stuck
+# CANCEL_ROUND_INTERVAL_S after the last one, unless the run ended.
+STUCK_REPORT_DELAY_S: Final = (EXTRA_CANCEL_ROUNDS + 1) * CANCEL_ROUND_INTERVAL_S
+# The parent checks such a run again this long after its first backstop found
+# that cancel reported. A child that has reported neither the stuck run nor
+# its end by then is frozen, and the parent kills it. The margin is past the
+# block limit, as for the first backstop.
+SHARED_STUCK_BACKSTOP_S: Final = STUCK_REPORT_DELAY_S + SHARED_BACKSTOP_MARGIN_S
 # A refusal runs only the RUNNING transition and the finalizing marker. In a
 # shared async child their bounds add up to REFUSAL_WRITES_BOUND_S, so a
 # database that does not answer ends the writes first and kills no child. A
@@ -863,6 +877,20 @@ class DeadlineAcknowledged:
 
 BackstopOutcome: TypeAlias = (
     ChildEnded | ChildEndUnknown | SharedAnswered | DeadlineAcknowledged | NothingToKill
+)
+
+
+@dataclass(frozen=True, slots=True)
+class StuckAcknowledged:
+    """The child reported that this run is stuck, or reported its end: its
+    loop was alive after the cancel rounds. Nothing was killed: the run ends,
+    or the child is killed when every run left in it is stuck."""
+
+    pid: int
+
+
+StuckBackstopOutcome: TypeAlias = (
+    ChildEnded | ChildEndUnknown | SharedAnswered | StuckAcknowledged | NothingToKill
 )
 
 
@@ -1552,6 +1580,45 @@ def _reported_in(
     )
 
 
+def _stuck_step_reported(report: DeadlineReport) -> bool:
+    """Whether the child reported a run of a shared async child stuck, after
+    its second cancel or after the cancel of the work that it left."""
+    match report:
+        case StuckReported() | LeftoverStuckReported():
+            return True
+        case (
+            DeadlineNotReported()
+            | DeadlineReported()
+            | SecondCancelReported()
+            | LeftoverCancelReported()
+        ):
+            return False
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _stuck_reported_in(frames: tuple[ChildFrame, ...], dispatch: int) -> bool:
+    """Whether a frame that the slot has not read yet reports this run stuck,
+    or its end."""
+    return any(
+        isinstance(frame, (RunStuckFrame, LeftoverStuckFrame, SharedResultFrame))
+        and frame.dispatch == dispatch
+        for frame in frames
+    )
+
+
+async def _kill_and_wait(child: Child, wait_s: float) -> ChildEnded | ChildEndUnknown:
+    """Kill ``child`` with its session and wait up to ``wait_s`` for its exit."""
+    child.kill_for_caller()
+    match await child.wait_exit(wait_s):
+        case ExitedWith() | KilledBySignal() as child_exit:
+            return ChildEnded(pid=child.pid, child_exit=child_exit)
+        case ExitUnknown():
+            return ChildEndUnknown(pid=child.pid)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 class SharedHandle:
     """One submitted shared async task, as the caller sees it."""
 
@@ -1601,9 +1668,7 @@ class SharedHandle:
         """
         binding = self._binding
         if binding is None:
-            if self.outcome.done() and not self.outcome.cancelled():
-                return SharedAnswered(self.outcome.result())
-            return NothingToKill()
+            return self._answer_unbound()
         child = binding.child
         if _due_step_reported(self.frame.work, binding.run.deadline) or _reported_in(
             self.frame.work,
@@ -1611,14 +1676,49 @@ class SharedHandle:
             self.frame.dispatch,
         ):
             return DeadlineAcknowledged(pid=child.pid)
-        child.kill_for_caller()
-        match await child.wait_exit(wait_s):
-            case ExitedWith() | KilledBySignal() as child_exit:
-                return ChildEnded(pid=child.pid, child_exit=child_exit)
-            case ExitUnknown():
-                return ChildEndUnknown(pid=child.pid)
+        return await _kill_and_wait(child, wait_s)
+
+    async def stuck_backstop_kill(self, wait_s: float) -> StuckBackstopOutcome:
+        """Kill the child of this async run if it froze after the cancel that
+        ``backstop_kill`` found reported, then wait for its exit.
+
+        After the second cancel, or the cancel of the work that the run
+        left, the child reports the run stuck within
+        ``STUCK_REPORT_DELAY_S`` unless it ends, and its watchdog reports a
+        blocked loop within the block limit. The caller calls this
+        ``SHARED_STUCK_BACKSTOP_S`` after ``DeadlineAcknowledged``. The child
+        counts as frozen when the run is still on it and the child has
+        reported neither the stuck run nor its end, also not in a frame that
+        the slot has not read yet. The kill is bound to this run, as in
+        ``backstop_kill``. Only a run of a ``SeatTask`` has this step: any
+        other work is a caller defect, ``AssertionError``.
+        """
+        match self.frame.work:
+            case SeatTask():
+                pass
+            case ThreadSeatTask() | SeatRefusal():
+                raise AssertionError(
+                    f'run {self.frame.dispatch} has no stuck step to wait for',
+                )
             case _ as unreachable:
                 assert_never(unreachable)
+        binding = self._binding
+        if binding is None:
+            return self._answer_unbound()
+        child = binding.child
+        if _stuck_step_reported(binding.run.deadline) or _stuck_reported_in(
+            child.queued_frames(),
+            self.frame.dispatch,
+        ):
+            return StuckAcknowledged(pid=child.pid)
+        return await _kill_and_wait(child, wait_s)
+
+    def _answer_unbound(self) -> SharedAnswered | NothingToKill:
+        """Report a handle that no child holds: the run ended, or it never
+        reached a child. A cancelled outcome has no answer."""
+        if self.outcome.done() and not self.outcome.cancelled():
+            return SharedAnswered(self.outcome.result())
+        return NothingToKill()
 
 
 @dataclass(slots=True)
