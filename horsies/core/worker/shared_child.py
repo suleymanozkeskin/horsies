@@ -32,8 +32,8 @@ ends the deadline of the run. The end is then what the coroutine returned,
 whatever happens to that work:
 
 - R (the return): wait up to ``cancel_grace_ms`` for that work.
-- R + G, when that work is alive: report ``LeftoverCancelFrame``, and cancel
-  it in the cancel rounds above. The parent closes the child: cancelled code
+- R + G, when that work is alive: report ``LeftoverCancelFrame``, with what
+  the coroutine returned, and cancel it in the cancel rounds above. The parent closes the child: cancelled code
   can leave broken state in the process.
 - When that work is still alive one interval after the last round: report
   ``LeftoverStuckFrame``, with what the coroutine returned. The run keeps its
@@ -256,7 +256,7 @@ class _WriterStop:
     """The writer thread ends after the frames before this one."""
 
 
-type FrameWithResult = SharedResultFrame | LeftoverStuckFrame
+type FrameWithResult = SharedResultFrame | LeftoverCancelFrame | LeftoverStuckFrame
 """A child frame that carries what the task of a run returned."""
 
 
@@ -284,6 +284,12 @@ def bounded_result_frame(task_name: str, frame: FrameWithResult) -> FrameWithRes
     match frame:
         case SharedResultFrame():
             return _bounded_shared_result(task_name, frame)
+        case LeftoverCancelFrame(returned=returned):
+            return LeftoverCancelFrame(
+                dispatch=frame.dispatch,
+                task_id=frame.task_id,
+                returned=_bounded_finished(task_name, returned),
+            )
         case LeftoverStuckFrame(returned=returned):
             return LeftoverStuckFrame(
                 dispatch=frame.dispatch,
@@ -730,8 +736,13 @@ class SeatLoop:
             self._check_end(dispatch)
             return
         seat.stop = _LeftoverCancel(left)
-        self._writer.send(
-            LeftoverCancelFrame(dispatch=dispatch, task_id=seat.frame.task_id),
+        self._writer.send_result(
+            seat.frame.task_name,
+            LeftoverCancelFrame(
+                dispatch=dispatch,
+                task_id=seat.frame.task_id,
+                returned=_returned_end(seat),
+            ),
         )
         self._cancel_round(dispatch, 0)
 

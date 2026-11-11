@@ -28,13 +28,14 @@ import pytest
 from horsies.core.types.result import Ok, Result
 from horsies.core.worker import child_main, run_mark, shared_child
 from horsies.core.worker.child_inbox import ParentFrameInbox
-from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
+from horsies.core.worker.child_main import MAX_FAILED_REASON_CHARS
 from horsies.core.worker.child_protocol import (
     BootFailedFrame,
     ChildFrame,
     InitFrame,
     MAX_LEFTOVER_TASK_NAMES,
     DeadlineFiredFrame,
+    LeftoverCancelFrame,
     LeftoverStuckFrame,
     ReadyFrame,
     RssMb,
@@ -50,6 +51,7 @@ from horsies.core.worker.child_protocol import (
     StopFrame,
     WireResult,
 )
+from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
 from horsies.core.worker.shared_child import (
     FRAMES_PER_SEAT,
     FrameWithResult,
@@ -1110,6 +1112,30 @@ class TestWorkLeftAfterAReturn:
         assert f'and {extra} more' in lines[0].message
 
 
+class TestTheLeftoverCancelReport:
+    def test_the_report_carries_what_the_task_returned(self) -> None:
+        """The worker writes what a task returned at any kill once it holds
+        it: the leftover cancel report gives it at the end of the grace."""
+
+        async def leave() -> int:
+            async def holds_on() -> None:
+                await asyncio.Event().wait()
+
+            _ = asyncio.get_running_loop().create_task(holds_on())
+            return 1
+
+        writer = _run_to_end(
+            {'leave': leave},
+            [_frame(1, 'leave', grace_ms=GRACE_MS)],
+            _results_of(1),
+        )
+
+        [report] = [
+            frame for frame in writer.frames if isinstance(frame, LeftoverCancelFrame)
+        ]
+        assert report.returned == SeatFinished(True, '1', None)
+
+
 class TestTheCostOfTheEndChecks:
     def test_runs_that_return_in_one_turn_share_one_scan(
         self,
@@ -1525,6 +1551,25 @@ class TestFrameWriter:
 
 
 class TestBoundedResultFrame:
+    def test_a_leftover_cancel_report_cuts_a_long_failure_reason(self) -> None:
+        frame = LeftoverCancelFrame(
+            dispatch=1,
+            task_id='t',
+            returned=SeatFinished(
+                ok=False,
+                result_json='',
+                failed_reason='r' * (MAX_FAILED_REASON_CHARS + 10),
+            ),
+        )
+
+        bounded = bounded_result_frame('x', frame)
+
+        assert isinstance(bounded, LeftoverCancelFrame)
+        assert bounded.returned.failed_reason == (
+            'r' * MAX_FAILED_REASON_CHARS
+            + f' [cut from {MAX_FAILED_REASON_CHARS + 10} characters]'
+        )
+
     def test_a_timed_out_end_passes_unchanged(self) -> None:
         frame = SharedResultFrame(
             dispatch=1,

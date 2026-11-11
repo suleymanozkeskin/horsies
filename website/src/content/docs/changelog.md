@@ -183,9 +183,11 @@ there is no migration contract between pre-1.0 versions.
     its tasks end. Work still alive 0.3 s after that cancel is stuck: the
     task keeps its seat, the worker kills the child when every task left in
     it is stuck, and then writes what the task returned, with no
-    `TASK_TIMEOUT` and no retry in an isolated child. Each task that opens a
-    client on first use, outside `on_shared_async_child_start`, so costs one
-    child restart. The child logs one line for each task that left work:
+    `TASK_TIMEOUT` and no retry in an isolated child. The report of that
+    cancel carries what the task returned, so from then on any kill of the
+    child whose exit the worker saw writes what the task returned. Each
+    task that opens a client on first use, outside
+    `on_shared_async_child_start`, so costs one child restart. The child logs one line for each task that left work:
     the coroutine names of that work, up to 10, and whether it ended within
     the grace, was cancelled, or was stuck.
   - The child holds the deadline of each task. At `timeout_ms` it cancels

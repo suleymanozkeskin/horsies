@@ -493,7 +493,10 @@ class LeftoverCancelReported:
     """The child reported that the coroutine of this run returned before its
     deadline, and that work it left was alive at the end of its cancel
     grace: the child cancels that work in rounds. The deadline no longer
-    applies to the run, and the child is closed."""
+    applies to the run, and the child is closed. ``returned`` is what the
+    coroutine returned: the outcome of the run at a kill of its child."""
+
+    returned: SeatFinished
 
 
 @dataclass(frozen=True, slots=True)
@@ -1818,9 +1821,10 @@ def _outcome_at_loss(
 
     A kill by the worker whose exit was seen gives the verdict of
     ``verdict_at_kill``; a verdict of the crash path gives the loss. A run
-    stuck only in the work that it left after its return gets what it
-    returned (``ReturnedBeforeKill``) at such a kill instead. A death that
-    the worker did not cause, and an exit not seen, give the loss.
+    whose coroutine returned, and whose left work the child reported in its
+    cancel rounds or stuck, gets what it returned (``ReturnedBeforeKill``)
+    at such a kill instead. A death that the worker did not cause, and an
+    exit not seen, give the loss.
     """
     match lost.cause, lost.child_exit:
         case LossCause.KILLED_BY_PARENT, ExitedWith() | KilledBySignal() as child_exit:
@@ -1828,7 +1832,10 @@ def _outcome_at_loss(
         case _:
             return lost
     match run.deadline:
-        case LeftoverStuckReported(returned=returned):
+        case (
+            LeftoverCancelReported(returned=returned)
+            | LeftoverStuckReported(returned=returned)
+        ):
             return SeatKilled(
                 verdict=ReturnedBeforeKill(returned),
                 pid=lost.pid,
@@ -1839,7 +1846,6 @@ def _outcome_at_loss(
             | DeadlineReported()
             | SecondCancelReported()
             | StuckReported()
-            | LeftoverCancelReported()
         ):
             pass
         case _ as unreachable:
@@ -3155,8 +3161,8 @@ class SlotPool:
                 culprit = RunCulprit(dispatch=frame.dispatch, task_id=frame.task_id)
                 self._close_for_stop(slot, runs, ClosedAtDeadline(culprit))
                 _log_run_stuck(stuck, child.pid)
-            case LeftoverCancelFrame(), DeadlineNotReported():
-                run.deadline = LeftoverCancelReported()
+            case LeftoverCancelFrame(returned=returned), DeadlineNotReported():
+                run.deadline = LeftoverCancelReported(returned)
                 self._close_for_stop(slot, runs, CloseReason.LEFTOVER_WORK)
                 logger.debug(
                     'Closing shared child pid=%s on slot %s: %s (task %s)',
