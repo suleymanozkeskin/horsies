@@ -196,6 +196,11 @@ type MarkerWindow = MarkerBeforeDeadline | MarkerWithoutDeadline
 """The time that the end report of a run may wait for its finalizing marker."""
 
 
+@dataclass(frozen=True, slots=True)
+class NoMarker:
+    """The end of a run writes no finalizing marker."""
+
+
 class StartedSeats(Protocol):
     """The seats of a shared async child after its start steps."""
 
@@ -454,11 +459,6 @@ class _DeadlineAt:
 @dataclass(frozen=True, slots=True)
 class _NoDeadline:
     """The run of a ``SeatRefusal``: no task code runs, so no deadline."""
-
-
-@dataclass(frozen=True, slots=True)
-class _NoMarker:
-    """The end of a run writes no finalizing marker."""
 
 
 class _LeftWorkEnd(Enum):
@@ -884,7 +884,7 @@ class SeatLoop:
                 assert_never(unreachable)
         end = _end_of(seat)
         match end, _marker_window(seat, self._loop.time()):
-            case _, _NoMarker():
+            case _, NoMarker():
                 self._send_end(dispatch, seat, end)
             case SeatFinished() as finished, (
                 MarkerBeforeDeadline()
@@ -1046,7 +1046,7 @@ def _returned_end(seat: _Seat) -> SeatFinished:
             assert_never(unreachable)
 
 
-def _marker_window(seat: _Seat, now: float) -> MarkerWindow | _NoMarker:
+def _marker_window(seat: _Seat, now: float) -> MarkerWindow | NoMarker:
     """Whether the end report of a run that ended waits for its finalizing
     marker, and for how long. ``now`` is the time on the clock of the loop.
 
@@ -1072,7 +1072,7 @@ def _marker_window(seat: _Seat, now: float) -> MarkerWindow | _NoMarker:
             | _LeftoverCancel()
             | _LeftoverStuck()
         ):
-            return _NoMarker()
+            return NoMarker()
         case _Finalizing():
             raise AssertionError(
                 f'run {seat.frame.dispatch} asked for a second marker',
@@ -1081,13 +1081,13 @@ def _marker_window(seat: _Seat, now: float) -> MarkerWindow | _NoMarker:
             assert_never(unreachable)
     match _seat_return(seat), seat.deadline:
         case StoppedBeforeRunning(), _:
-            return _NoMarker()
+            return NoMarker()
         case SetRunning(), _NoDeadline():
             return MarkerWithoutDeadline()
         case SetRunning(), _DeadlineAt(at=at) if at > now:
             return MarkerBeforeDeadline(seconds=at - now)
         case SetRunning(), _DeadlineAt():
-            return _NoMarker()
+            return NoMarker()
         case _ as unreachable:
             assert_never(unreachable)
 

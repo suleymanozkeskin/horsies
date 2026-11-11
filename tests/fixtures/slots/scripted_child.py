@@ -703,9 +703,12 @@ def _thread_seat_run(frame: SharedRunFrame) -> WireResult:
 
 
 class _ScriptedThreadSeats:
-    def run(self, frame: SharedRunFrame, work: ThreadSeatWork) -> WireResult:
+    def run(self, frame: SharedRunFrame, work: ThreadSeatWork) -> SeatReturn:
         _ = work
-        return _thread_seat_run(frame)
+        return SetRunning(_thread_seat_run(frame))
+
+    def mark_finalizing(self, frame: SharedRunFrame, window: MarkerWindow) -> None:
+        _ = frame, window
 
 
 RUNNERS = TaskRunners(

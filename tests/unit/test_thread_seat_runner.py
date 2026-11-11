@@ -41,6 +41,13 @@ from horsies.core.worker.child_protocol import (
     ThreadSeatWork,
     WireResult,
 )
+from horsies.core.worker.shared_child import (
+    MarkerBeforeDeadline,
+    MarkerWithoutDeadline,
+    SeatReturn,
+    SetRunning,
+    StoppedBeforeRunning,
+)
 from horsies.core.worker.stored_timeout import TimeoutValueInvalid
 
 pytestmark = [pytest.mark.unit]
@@ -120,9 +127,9 @@ def fresh_marks() -> Iterator[None]:
     yield
 
 
-def _run(frame: SharedRunFrame, work: ThreadSeatWork | None = None) -> WireResult:
+def _run(frame: SharedRunFrame, work: ThreadSeatWork | None = None) -> SeatReturn:
     """Run on a thread named as a seat, as the child does."""
-    results: list[WireResult] = []
+    results: list[SeatReturn] = []
 
     def body() -> None:
         with patch.object(child_runner, 'get_current_app', MagicMock(return_value=APP)):
@@ -142,6 +149,12 @@ def _run(frame: SharedRunFrame, work: ThreadSeatWork | None = None) -> WireResul
     return results[0]
 
 
+def _set_running(seat_return: SeatReturn) -> WireResult:
+    """The wire of a run that set its row RUNNING."""
+    assert isinstance(seat_return, SetRunning), seat_return
+    return seat_return.wire
+
+
 def _result(wire: WireResult, ok_type: Any) -> TaskResult[Any, TaskError]:
     ok, payload, _reason = wire
     assert ok is True
@@ -149,16 +162,18 @@ def _result(wire: WireResult, ok_type: Any) -> TaskResult[Any, TaskError]:
 
 
 def test_a_def_task_runs_on_the_seat_thread(steps: _Steps) -> None:
-    wire = _run(_frame('thread_double', {'x': 21}))
+    """The run ends at the result: the seat writes the marker after the run
+    table fixed the end, not the run itself."""
+    wire = _set_running(_run(_frame('thread_double', {'x': 21})))
 
     assert _result(wire, int).unwrap() == 42
     assert RAN == ['horsies-seat-0']
     steps.confirm.assert_called_once_with('task-1', 'worker-1', False, CLAIMED_AT)
-    steps.mark.assert_called_once_with('task-1', 'worker-1', CLAIMED_AT)
+    steps.mark.assert_not_called()
 
 
 def test_an_async_def_task_is_refused_before_it_runs(steps: _Steps) -> None:
-    wire = _run(_frame('thread_async'))
+    wire = _set_running(_run(_frame('thread_async')))
 
     error = _result(wire, int).unwrap_err()
     assert error.error_code == OperationalErrorCode.WORKER_RESOLUTION_ERROR
@@ -167,7 +182,6 @@ def test_an_async_def_task_is_refused_before_it_runs(steps: _Steps) -> None:
         == 'the task is async def, and a shared thread child runs only def tasks'
     )
     assert RAN == []
-    steps.mark.assert_called_once()
 
 
 def test_a_refusal_fails_the_task_after_running_and_before_resolve(
@@ -181,7 +195,7 @@ def test_a_refusal_fails_the_task_after_running_and_before_resolve(
         work=SeatRefusal(refusal=refusal),
     )
 
-    wire = _run(frame)
+    wire = _set_running(_run(frame))
 
     assert wire == child_runner._stored_timeout_refusal_response(
         'thread_double', refusal
@@ -196,28 +210,58 @@ def test_a_refusal_fails_the_task_after_running_and_before_resolve(
     }
     assert RAN == []
     steps.confirm.assert_called_once()
-    steps.mark.assert_called_once()
 
 
-def test_a_stop_before_start_runs_no_body_and_writes_no_marker(steps: _Steps) -> None:
+def test_a_stop_before_start_runs_no_body_and_reports_no_running_row(
+    steps: _Steps,
+) -> None:
     steps.confirm.return_value = (False, '', 'CLAIM_LOST')
 
-    assert _run(_frame('thread_never')) == (False, '', 'CLAIM_LOST')
+    assert _run(_frame('thread_never')) == StoppedBeforeRunning(
+        (False, '', 'CLAIM_LOST'),
+    )
     assert RAN == []
     steps.mark.assert_not_called()
 
 
-def test_a_task_that_raises_is_mapped_and_writes_the_marker(steps: _Steps) -> None:
-    wire = _run(_frame('thread_raises'))
+def test_a_task_that_raises_is_mapped(steps: _Steps) -> None:
+    wire = _set_running(_run(_frame('thread_raises')))
 
     error = _result(wire, int).unwrap_err()
     assert error.error_code == OperationalErrorCode.UNHANDLED_EXCEPTION
-    steps.mark.assert_called_once()
 
 
 def test_an_unknown_task_is_a_resolution_error(steps: _Steps) -> None:
-    wire = _run(_frame('not_registered'))
+    wire = _set_running(_run(_frame('not_registered')))
 
     error = _result(wire, int).unwrap_err()
     assert error.error_code == OperationalErrorCode.WORKER_RESOLUTION_ERROR
-    steps.mark.assert_called_once()
+
+
+class TestTheMarkerOfAThreadSeat:
+    """``mark_thread_seat_finalizing``: the marker after the return, with
+    the wait for a pooled connection bounded by the deadline of the run."""
+
+    def test_a_run_with_a_deadline_waits_for_a_connection_until_it(
+        self,
+        steps: _Steps,
+    ) -> None:
+        thread_runner.mark_thread_seat_finalizing(
+            _frame('thread_double'),
+            MarkerBeforeDeadline(seconds=0.25),
+        )
+
+        steps.mark.assert_called_once_with(
+            'task-1',
+            'worker-1',
+            CLAIMED_AT,
+            connection_wait_s=0.25,
+        )
+
+    def test_a_refusal_keeps_the_wait_of_the_pool(self, steps: _Steps) -> None:
+        thread_runner.mark_thread_seat_finalizing(
+            _frame('thread_double'),
+            MarkerWithoutDeadline(),
+        )
+
+        steps.mark.assert_called_once_with('task-1', 'worker-1', CLAIMED_AT)

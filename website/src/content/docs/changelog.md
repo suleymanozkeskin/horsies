@@ -292,6 +292,14 @@ there is no migration contract between pre-1.0 versions.
     the RUNNING update and the finalizing marker, and wait up to 30 s for a
     connection. A thread child runs only `def` tasks; a row that reaches one
     with an `async def` function fails with `WORKER_RESOLUTION_ERROR`.
+  - The outcome of a thread task is fixed when it returns, and a task that
+    returned has no deadline left. The seat then writes the finalizing
+    marker, only for a task that returned before its deadline, and waits for
+    a pooled connection for it at most until that deadline. A task that
+    timed out gets no marker: the child reports its end at once, and the
+    runner heartbeats of the worker cover the row until the worker reads
+    it. A marker that waits for a connection no longer turns a returned
+    value into `TASK_TIMEOUT`.
   - Recycling is per seat, as for shared async children. The claim limit
     check (`HRS-218`), the connection check (`HRS-219`), the memory warning
     and the boot memory guard count the thread children.

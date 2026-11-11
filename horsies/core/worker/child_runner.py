@@ -170,6 +170,7 @@ from horsies.core.logging import get_logger
 from horsies.core.process_role import mark_process_runs_task_bodies
 from horsies.core.worker.current import get_current_app, set_current_app
 from horsies.core.worker.child_pool import (
+    CHILD_POOL_CONNECTION_WAIT_S,
     _get_worker_pool,
     _initialize_worker_pool,
 )
@@ -966,6 +967,8 @@ def _mark_task_finalizing(
     task_id: str,
     worker_id: str,
     claimed_at: Optional[datetime],
+    *,
+    connection_wait_s: float = CHILD_POOL_CONNECTION_WAIT_S,
 ) -> None:
     """Mark a completed child result as waiting for parent finalization.
 
@@ -976,11 +979,13 @@ def _mark_task_finalizing(
     The worker's runner heartbeat skips a row that carries the marker, so
     the beats of the attempt end here, also while the worker's event loop
     has not read the result. The marker is best effort: a skipped or failed
-    write is logged only.
+    write is logged only. The wait for a pooled connection is bounded by
+    ``connection_wait_s``; a shared thread seat passes the time left before
+    the deadline of its run.
     """
     try:
         pool = _get_worker_pool()
-        with pool.connection() as conn:
+        with pool.connection(timeout=connection_wait_s) as conn:
             cursor = conn.cursor()
             cursor.execute(
                 MARK_FINALIZING_SQL,

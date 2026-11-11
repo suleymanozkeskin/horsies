@@ -101,6 +101,8 @@ The shared thread child holds the deadline of each of its tasks. It starts the d
 3. A task in the child that still has time left runs on, to its end or to its own deadline.
 4. A task that ends by itself after its deadline fails with `TASK_TIMEOUT`, also when it returns a value.
 
+The outcome of a task is fixed when it returns: what it returned before its deadline, or `TASK_TIMEOUT` after it. A task that returned has no deadline left, so the finalizing marker that follows cannot turn its value into a timeout. That marker is written only for a task that returned before its deadline, and the seat waits for a pooled connection for it at most until that deadline. A task that timed out gets no marker: the child reports its end at once, and the runner heartbeats of the worker cover the row until the worker reads that end.
+
 The attempt ends before its row moves, so a retry never runs next to the attempt that it replaces. A timeout is terminal by default; add `"TASK_TIMEOUT"` to `auto_retry_for` for a retry.
 
 The worker keeps one more timer per task, at `timeout_ms + 10 seconds`. A child reports each deadline at once, so a child that has not reported the deadline by then is frozen: C code holds the GIL, and no thread of the child runs. The worker kills that child. Each task in it that is past its deadline fails with `TASK_TIMEOUT`, and every other task takes the crash path (`WORKER_CRASHED`, or a retry when its policy names that code). The worker cannot tell which thread held the GIL, so it names no culprit.
@@ -151,7 +153,7 @@ A new task goes to the open shared thread child with the fewest tasks in flight,
 
 ## Connections
 
-Each shared thread child opens one sync connection pool of `worker_child_pool_max_size` connections (default 2), as an isolated child does, whatever its seats. Its seat threads share that pool for two writes of each task: the RUNNING update at its start, and the finalizing marker at its end. The worker process writes the runner heartbeats over its own connection. See [Connections](/horsies/workers/worker-profiles/#connections).
+Each shared thread child opens one sync connection pool of `worker_child_pool_max_size` connections (default 2), as an isolated child does, whatever its seats. Its seat threads share that pool for two writes of each task: the RUNNING update at its start, and the finalizing marker at its end (only for a task that returned before its deadline). The worker process writes the runner heartbeats over its own connection. See [Connections](/horsies/workers/worker-profiles/#connections).
 
 A seat thread waits up to 30 seconds for a free connection. A thread that gets none in that time does not run its task: the task stays claimed, and its claim lease returns it to the queue.
 
