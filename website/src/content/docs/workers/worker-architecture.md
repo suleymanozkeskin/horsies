@@ -177,6 +177,37 @@ with the defaults (`PostgresConfig.worker_pool_pre_ping=False`).
 - At a stop, the batcher closes after the finalizers: it writes the queued
   rows, for at most 10 seconds.
 
+A workflow task is written in two phases, each with its own commit, so an
+error in phase 2 never undoes phase 1.
+
+- Phase 1, a success: one statement in autocommit
+  (`horsies_finish_workflow_success`). It takes the task advisory lock, then
+  the row lock under the claim generation, writes the attempt, and moves the
+  row to the history with the phase-2 record of its node. It sends no wake.
+  A failure, a timeout or a crash is the read of the retry facts and one
+  call of `horsies_finish_failed_attempt`.
+- Phase 2: one transaction that holds the workflow row lock from its first
+  statement to its COMMIT. The first statement writes the node, deletes its
+  phase-2 record, and sends the capacity wake of the task's queue, which the
+  COMMIT delivers. The engine then applies the failure policy, promotes the
+  dependents (the task of each promoted node is inserted and linked in one
+  statement per node, all in one round trip) and checks the completion of
+  the workflow.
+- A lost reply in phase 1 is a retryable error. The run that retries it
+  finds the task already applied, reads the stored result, and runs phase 2.
+  A worker that stops between the phases leaves the phase-2 record, and the
+  recovery pass runs phase 2.
+
+Round trips with the defaults (`worker_pool_pre_ping=False`; one more per
+phase with it on):
+
+| Finalize of a workflow task | Phase 1 | Phase 2 |
+|---|---|---|
+| Success, promotes its dependents | 1 | 9 |
+| Success, the last node of the workflow | 1 | 8 |
+| Failure, its dependent is skipped (`on_error=FAIL`) | 2 | 12 |
+| Failure, the last node of the workflow (`on_error=FAIL`) | 2 | 9 |
+
 ## Shared Async Children
 
 A shared async child runs `SHARED_ASYNC` tasks of the claimed rows. It has four threads:

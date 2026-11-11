@@ -149,6 +149,8 @@ autocommit, so a check doubles their round trips. At the defaults:
 | Finalize of a plain task that succeeded (attempt, history row, capacity wake) | worker | 1 |
 | Failure of a task, a timeout or a crash: the read of the retry facts, then the attempt with the retry or the history row (and the capacity wake of a plain task) | worker | 2 |
 | Failure that is never retried: a worker-level failure, a result that does not decode | worker | 1 |
+| Success of a workflow task, phase 1 (attempt, history row, phase-2 record of the node) | worker | 1 |
+| Phase 2 of a workflow task (node, dependents, workflow completion, capacity wake) | worker | 8 to 12, in one transaction; see [Worker Architecture](/horsies/workers/worker-architecture/#5-result-handling) |
 | Claim pass (`horsies_claim`) | worker | 1 |
 | Wake of a retry that comes due | worker | 1 |
 | RUNNING update of a plain task, with its first runner heartbeat | child | 1 |

@@ -1,6 +1,6 @@
 ---
 title: Database Schema
-summary: PostgreSQL tables for live tasks, the task-history archive, heartbeats, worker states, and schedules (schema v57).
+summary: PostgreSQL tables for live tasks, the task-history archive, heartbeats, worker states, and schedules (schema v58).
 related: [../../configuration/broker-config, ../../migrations/migration-to-0-5-0]
 tags: [internals, database, schema, PostgreSQL, task-history]
 ---
@@ -125,7 +125,9 @@ Per-attempt execution history **for live tasks**. One row per finished
 attempt, written atomically with the task state transition. A failed attempt
 of a RUNNING task (a task error, a timeout, a crash) is written by one call
 of `horsies_finish_failed_attempt`, with its retry or its terminal failure;
-`will_retry` is true only when that call wrote the retry. At
+`will_retry` is true only when that call wrote the retry. The COMPLETED
+attempt of a workflow task is written by one call of
+`horsies_finish_workflow_success`, with the move of the task. At
 terminalization the attempts are archived into the history record's
 snapshot and the live rows are deleted — the snapshot is the attempt
 history's only home from then on.
@@ -229,7 +231,7 @@ credentials accordingly.
 
 Tables are created by the broker's first initialization and evolved by
 the versioned migration chain (`horsies_schema_version` records the installed
-version; the current schema is v57). The exact version and the
+version; the current schema is v58). The exact version and the
 `task_history_v1_validated_v1` row in `horsies_cutover_state` are both required
 after an offline upgrade; the integer watermark and the legacy
 `task_history_v1` row do not attest stage-6 validation. Creation is protected
