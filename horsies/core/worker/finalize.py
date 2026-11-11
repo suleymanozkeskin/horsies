@@ -229,6 +229,34 @@ class _Phase1Input:
     failed_reason: str | None
 
 
+async def _write_completed_attempt(
+    s: AsyncSession,
+    task_id: str,
+    ctx_row: Any,
+) -> None:
+    """Write the COMPLETED attempt row from the locked context row, in the
+    session's transaction. Database errors raise."""
+    db_now = ctx_row.db_now
+    await s.execute(
+        UPSERT_TASK_ATTEMPT_SQL,
+        {
+            'task_id': task_id,
+            'attempt': ctx_row.retry_count + 1,
+            'outcome': 'COMPLETED',
+            'will_retry': False,
+            'started_at': ctx_row.started_at or db_now,
+            'finished_at': db_now,
+            'error_code': None,
+            'error_message': None,
+            'failed_reason': None,
+            'worker_id': ctx_row.claimed_by_worker_id,
+            'worker_hostname': ctx_row.worker_hostname,
+            'worker_pid': ctx_row.worker_pid,
+            'worker_process_name': ctx_row.worker_process_name,
+        },
+    )
+
+
 def _phase2_of_a_replay(
     loaded: Result[_PersistedTaskOutcome, _FinalizeError],
 ) -> Result[_PersistedTaskOutcome | None, _FinalizeError]:
@@ -1358,25 +1386,7 @@ class FinalizeMixin:
                         completion,
                         claimed_at,
                     )
-                db_now = ctx_row.db_now
-                await s.execute(
-                    UPSERT_TASK_ATTEMPT_SQL,
-                    {
-                        'task_id': task_id,
-                        'attempt': ctx_row.retry_count + 1,
-                        'outcome': 'COMPLETED',
-                        'will_retry': False,
-                        'started_at': ctx_row.started_at or db_now,
-                        'finished_at': db_now,
-                        'error_code': None,
-                        'error_message': None,
-                        'failed_reason': None,
-                        'worker_id': ctx_row.claimed_by_worker_id,
-                        'worker_hostname': ctx_row.worker_hostname,
-                        'worker_pid': ctx_row.worker_pid,
-                        'worker_process_name': ctx_row.worker_process_name,
-                    },
-                )
+                await _write_completed_attempt(s, task_id, ctx_row)
                 outcome = await apply_async(await s.connection(), completion)
                 match outcome:
                     case Applied():
