@@ -188,7 +188,8 @@ there is no migration contract between pre-1.0 versions.
     library (found by a task factory and by a scan of the live tasks, so a
     task built with `asyncio.Task(...)` counts too), and its calls in the
     default executor. The child reports the end only then, so a retry never
-    runs next to work of the attempt that it replaces.
+    runs next to work of the attempt that it replaces. The end checks of
+    one loop turn share one scan of the live tasks.
   - A task that returns before its deadline (a value, or an exception that
     its exception mapper turns into a result) while such work is alive
     keeps what it returned: its deadline no longer applies. The child waits
@@ -198,9 +199,11 @@ there is no migration contract between pre-1.0 versions.
     its tasks end. Work still alive 0.3 s after that cancel is stuck: the
     task keeps its seat, the worker kills the child when every task left in
     it is stuck, and then writes what the task returned, with no
-    `TASK_TIMEOUT` and no retry in an isolated child. Each task that opens a
-    client on first use, outside `on_shared_async_child_start`, so costs one
-    child restart. The child logs one line for each task that left work:
+    `TASK_TIMEOUT` and no retry in an isolated child. The report of that
+    cancel carries what the task returned, so from then on any kill of the
+    child whose exit the worker saw writes what the task returned. Each
+    task that opens a client on first use, outside
+    `on_shared_async_child_start`, so costs one child restart. The child logs one line for each task that left work:
     the coroutine names of that work, up to 10, and whether it ended within
     the grace, was cancelled, or was stuck.
   - The child holds the deadline of each task. At `timeout_ms` it cancels
@@ -222,6 +225,19 @@ there is no migration contract between pre-1.0 versions.
     other task before its deadline fails with the new
     `NEIGHBOUR_BLOCKED_LOOP`, and runs again only when `auto_retry_for`
     names that code; a task past its deadline fails with `TASK_TIMEOUT`.
+  - A call in the default executor stays the work of its task when an
+    `on_shared_async_child_start` hook set a default executor of its own:
+    after the hooks the child wraps that executor, which still runs the
+    calls. A default executor that is not a `ThreadPoolExecutor` after the
+    hooks (set past `loop.set_default_executor()`) ends the child with the
+    exit code of a failed hook. `anyio.to_thread.run_sync()` work is not
+    seen as the work of its task.
+  - The watching thread names a task only when that task held the loop for
+    the whole block: once the loop has not turned for 0.2 s it reads the
+    task that runs every 0.1 s, and at the report, and names it only when
+    every reading saw the same task. Many short steps of several tasks in
+    one turn name no task: each task before its deadline then takes the
+    crash path, as for code of no task.
   - The worker kills a child that has reported neither the second cancel
     nor the end of a task `timeout_ms + cancel_grace_ms + 10 s` after its
     placement: C code holds the GIL in it. A child that reported that cancel,
@@ -229,10 +245,10 @@ there is no migration contract between pre-1.0 versions.
     reports neither the task stuck nor its end by `timeout_ms +
     cancel_grace_ms + 20.3 s` after its placement (the first check, then
     0.3 s for the cancel rounds and the stuck check, and the same 10 s
-    margin) froze after the report, and is killed as well. A child that still holds a
-    refusal 130 s after its placement is killed as well: the writes of a
-    refusal end within 120 s (two attempts of the RUNNING update, each at
-    most 30 s for a connection and 10 s for its statements, and the
+    margin) froze after the report, and is killed as well. A child that
+    still holds a refusal 130 s after its placement is killed as well: the
+    writes of a refusal end within 120 s (two attempts of the RUNNING update,
+    each at most 30 s for a connection and 10 s for its statements, and the
     finalizing marker, each with 10 s for a cancelled write to end), and the
     block limit with its margin comes after them. At these kills a
     task past its deadline fails with `TASK_TIMEOUT`, and every other task
@@ -243,9 +259,24 @@ there is no migration contract between pre-1.0 versions.
   - A crash of a shared child that the worker did not cause ends every task
     in it through crash recovery (`WORKER_CRASHED`, or its retry), after the
     worker saw the exit. A task that returned before its deadline, and whose
-    left work the child reported stuck, ends with what it returned at every
-    end of its child whose exit the worker saw, also at an out-of-memory kill
-    or a crash.
+    left work the child reported in its cancel rounds or stuck, ends with
+    what it returned at every end of its child whose exit the worker saw,
+    also at an out-of-memory kill or a crash.
+  - A task that cancels its own asyncio task and returns before an `await`
+    takes the cancel ends as that cancel, through its exception mapper, as
+    a cancel that reaches the body at an `await` does. The request is
+    cleared, so the seat does not end cancelled, and the child serves on.
+  - The child writes the finalizing marker of a task when its attempt ends:
+    after its coroutine and the work that it started, and only when the
+    task returned before its deadline and that work ended within the grace.
+    The child reports the end after the marker, and waits for it at most
+    until the deadline of the task. A task that timed out, or whose work
+    needed a cancel, gets no marker: the child reports its end at once, and
+    the runner heartbeats of the worker cover the row until the worker reads
+    that end. So the heartbeats of a row never stop while work of its
+    attempt still runs, a marker that waits for a pooled connection never
+    turns a returned value into `TASK_TIMEOUT`, and no marker uses the
+    cancel grace of a task.
   - A `SHARED_ASYNC` row without a usable stored `timeout_ms` or
     `cancel_grace_ms` fails with `WORKER_SERIALIZATION_ERROR` on every
     worker, after its RUNNING update and before the task resolves; the data
@@ -319,6 +350,19 @@ there is no migration contract between pre-1.0 versions.
     the RUNNING update and the finalizing marker, and wait up to 30 s for a
     connection. A thread child runs only `def` tasks; a row that reaches one
     with an `async def` function fails with `WORKER_RESOLUTION_ERROR`.
+  - The outcome of a thread task is fixed when it returns, and a task that
+    returned has no deadline left. The seat then writes the finalizing
+    marker, only for a task that returned before its deadline, and waits for
+    a pooled connection for it at most until that deadline. A task that
+    timed out gets no marker: the child reports its end at once, and the
+    runner heartbeats of the worker cover the row until the worker reads
+    it. A marker that waits for a connection never turns a returned value
+    into `TASK_TIMEOUT`.
+  - A seat thread whose task reaches its deadline while the thread waits
+    for a pooled connection does not start the task: right before the
+    RUNNING update it reads the deadline of the run, and the row stays
+    `CLAIMED`. The child reports the deadline, and the worker returns the
+    row to the queue with no `TASK_TIMEOUT`.
   - Recycling is per seat, as for shared async children. The claim limit
     check (`HRS-218`), the connection check (`HRS-219`), the memory warning
     and the boot memory guard count the thread children.

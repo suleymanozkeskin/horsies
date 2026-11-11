@@ -406,10 +406,14 @@ class LeftoverCancelFrame:
     ``cancel_grace_ms`` after that return. The child cancels that work in
     rounds, as after a second cancel. Cancelled code can leave broken state
     in the process. The run has not ended yet: its ``SharedResultFrame``
-    comes when that work has ended, with what the coroutine returned."""
+    comes when that work has ended, with what the coroutine returned.
+
+    ``returned`` is what the coroutine returned: the outcome of the run at a
+    kill of its child from here on, as for ``LeftoverStuckFrame``."""
 
     dispatch: int
     task_id: str
+    returned: SeatFinished
 
 
 @dataclass(frozen=True, slots=True)
@@ -778,10 +782,15 @@ def encode_child_frame(frame: ChildFrame) -> EncodedFrame:
                 {'kind': 'second_cancel', 'dispatch': dispatch, 'task_id': task_id},
                 b'',
             )
-        case LeftoverCancelFrame(dispatch=dispatch, task_id=task_id):
+        case LeftoverCancelFrame(dispatch=dispatch, task_id=task_id, returned=returned):
             return _pack(
-                {'kind': 'leftover_cancel', 'dispatch': dispatch, 'task_id': task_id},
-                b'',
+                {
+                    'kind': 'leftover_cancel',
+                    'dispatch': dispatch,
+                    'task_id': task_id,
+                    'returned': _finished_field(returned),
+                },
+                returned.result_json.encode('utf-8'),
             )
         case RunStuckFrame() | LeftoverStuckFrame() | LoopBlockedFrame():
             return _encode_stop_report(frame)
@@ -1279,6 +1288,20 @@ def _decode_run_stuck(meta: Mapping[str, Any]) -> RunStuckFrame:
     )
 
 
+def _decode_leftover_cancel(
+    meta: Mapping[str, Any],
+    body: bytes,
+) -> LeftoverCancelFrame:
+    returned = _end_meta(meta, 'returned')
+    if returned.get('kind') != 'finished':
+        raise _BadField('returned.kind')
+    return LeftoverCancelFrame(
+        dispatch=_dispatch(meta),
+        task_id=_text(meta, 'task_id'),
+        returned=_finished(returned, body),
+    )
+
+
 def _decode_leftover_stuck(meta: Mapping[str, Any], body: bytes) -> LeftoverStuckFrame:
     returned = _end_meta(meta, 'returned')
     if returned.get('kind') != 'finished':
@@ -1374,12 +1397,7 @@ def decode_child_frame(
             case 'run_stuck':
                 return Ok(_decode_run_stuck(meta))
             case 'leftover_cancel':
-                return Ok(
-                    LeftoverCancelFrame(
-                        dispatch=_dispatch(meta),
-                        task_id=_text(meta, 'task_id'),
-                    ),
-                )
+                return Ok(_decode_leftover_cancel(meta, body))
             case 'leftover_stuck':
                 return Ok(_decode_leftover_stuck(meta, body))
             case 'loop_blocked':

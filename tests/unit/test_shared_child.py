@@ -11,23 +11,31 @@ loop with real child processes is covered in ``test_slot_pool``.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import contextlib
 import contextvars
 import dataclasses
 import logging
+import socket
 import threading
 import time
 from collections.abc import Callable
 from typing import Any, NoReturn
+from unittest.mock import MagicMock
 
 import pytest
 
-from horsies.core.worker import child_main, shared_child
+from horsies.core.types.result import Ok, Result
+from horsies.core.worker import child_main, run_mark, shared_child
 from horsies.core.worker.child_inbox import ParentFrameInbox
+from horsies.core.worker.child_main import MAX_FAILED_REASON_CHARS
 from horsies.core.worker.child_protocol import (
+    BootFailedFrame,
     ChildFrame,
+    InitFrame,
     MAX_LEFTOVER_TASK_NAMES,
     DeadlineFiredFrame,
+    LeftoverCancelFrame,
     LeftoverStuckFrame,
     ReadyFrame,
     RssMb,
@@ -43,11 +51,18 @@ from horsies.core.worker.child_protocol import (
     StopFrame,
     WireResult,
 )
+from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
 from horsies.core.worker.shared_child import (
     FRAMES_PER_SEAT,
     FrameWithResult,
     FrameWriter,
+    MarkerBeforeDeadline,
+    MarkerWindow,
+    MarkerWithoutDeadline,
     SeatLoop,
+    SeatReturn,
+    SetRunning,
+    StoppedBeforeRunning,
     bounded_result_frame,
 )
 from horsies.core.worker.stored_timeout import NoTimeout, TimeoutValueInvalid
@@ -91,16 +106,31 @@ class _RecordingWriter:
 
 
 class _ScriptedSeats:
-    """Each run awaits the behavior registered for its task name."""
+    """Each run awaits the behavior registered for its task name, and sets
+    its row RUNNING, but a task named in ``not_running``. Each marker is
+    recorded with its window, then awaits ``marker`` when one is set."""
 
     def __init__(self, behaviors: dict[str, Callable[[], Any]]) -> None:
         self._behaviors = behaviors
         self.started: list[int] = []
+        self.not_running: set[str] = set()
+        self.markers: list[tuple[int, MarkerWindow]] = []
+        self.marker: Callable[[MarkerWindow], Any] | None = None
 
-    async def run(self, frame: SharedRunFrame) -> WireResult:
+    async def run(self, frame: SharedRunFrame) -> SeatReturn:
         self.started.append(frame.dispatch)
         value = await self._behaviors[frame.task_name]()
-        return True, str(value), None
+        wire: WireResult = (True, str(value), None)
+        if frame.task_name in self.not_running:
+            return StoppedBeforeRunning(wire)
+        return SetRunning(wire)
+
+    async def mark_finalizing(
+        self, frame: SharedRunFrame, window: MarkerWindow
+    ) -> None:
+        self.markers.append((frame.dispatch, window))
+        if self.marker is not None:
+            await self.marker(window)
 
     async def stop(self) -> None:
         return None
@@ -973,7 +1003,7 @@ class TestWorkLeftAfterAReturn:
         def deadline_first(
             seat_loop: SeatLoop,
             dispatch: int,
-            task: asyncio.Task[WireResult],
+            task: asyncio.Task[SeatReturn],
         ) -> None:
             seat = seat_loop._seats.get(dispatch)
             if seat is not None and seat.stop is shared_child._Stop.BEFORE_DEADLINE:
@@ -1080,6 +1110,314 @@ class TestWorkLeftAfterAReturn:
         assert len(lines) == 1
         assert lines[0].message.count('sleep') == MAX_LEFTOVER_TASK_NAMES
         assert f'and {extra} more' in lines[0].message
+
+
+class TestTheLeftoverCancelReport:
+    def test_the_report_carries_what_the_task_returned(self) -> None:
+        """The worker writes what a task returned at any kill once it holds
+        it: the leftover cancel report gives it at the end of the grace."""
+
+        async def leave() -> int:
+            async def holds_on() -> None:
+                await asyncio.Event().wait()
+
+            _ = asyncio.get_running_loop().create_task(holds_on())
+            return 1
+
+        writer = _run_to_end(
+            {'leave': leave},
+            [_frame(1, 'leave', grace_ms=GRACE_MS)],
+            _results_of(1),
+        )
+
+        [report] = [
+            frame for frame in writer.frames if isinstance(frame, LeftoverCancelFrame)
+        ]
+        assert report.returned == SeatFinished(True, '1', None)
+
+
+class TestTheCostOfTheEndChecks:
+    def test_runs_that_return_in_one_turn_share_one_scan(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """20 runs return in one turn, beside 200 live tasks of no run: the
+        end of each needs the live tasks of its run, and they share one
+        scan of the loop, not one each."""
+        scans: list[int] = []
+        all_tasks = asyncio.all_tasks
+
+        def counted(
+            loop: asyncio.AbstractEventLoop | None = None,
+        ) -> set[asyncio.Task[Any]]:
+            scans.append(1)
+            return all_tasks(loop)
+
+        monkeypatch.setattr(run_mark.asyncio, 'all_tasks', counted)
+        release = asyncio.Event()
+        runs = 20
+
+        async def wait_for_release() -> int:
+            await release.wait()
+            return 1
+
+        seat_loop, writer, started = _seat_loop(runs, {'wait': wait_for_release})
+        inbox = ParentFrameInbox()
+
+        async def scenario() -> None:
+            idle = asyncio.Event()
+            background = [
+                asyncio.get_running_loop().create_task(idle.wait()) for _ in range(200)
+            ]
+            serving = asyncio.ensure_future(seat_loop.serve(inbox))
+            for dispatch in range(1, runs + 1):
+                inbox.put(_frame(dispatch, 'wait'))
+            await _until(lambda: len(started.started) == runs)
+            scans.clear()
+            release.set()
+            await _until(lambda: len(_results(writer)) == runs)
+            assert len(scans) <= 2, scans
+            inbox.put(StopFrame())
+            await asyncio.wait_for(serving, RUN_TIMEOUT_S)
+            idle.set()
+            await asyncio.gather(*background)
+
+        asyncio.run(scenario())
+
+
+class TestTheMarkerAtTheEnd:
+    """The finalizing marker of a run comes at its end, after its coroutine
+    and its marked work, and before its end report. Only a run that set its
+    row RUNNING and ended without a cancel writes it, within the time left
+    before its deadline."""
+
+    def _serve(
+        self,
+        seats: _ScriptedSeats,
+        frames: list[SharedRunFrame],
+        between: Callable[[SeatLoop, _RecordingWriter], Any] | None = None,
+    ) -> _RecordingWriter:
+        harness = _Harness(len(frames), seats)
+        inbox = ParentFrameInbox()
+
+        async def scenario() -> None:
+            serving = asyncio.ensure_future(harness.serve(inbox))
+            for frame in frames:
+                inbox.put(frame)
+            if between is not None:
+                await _until(lambda: bool(harness.built))
+                await between(harness.built[0], harness.writer)
+            await _until(lambda: len(_results(harness.writer)) == len(frames))
+            inbox.put(StopFrame())
+            await asyncio.wait_for(serving, RUN_TIMEOUT_S)
+
+        asyncio.run(scenario())
+        return harness.writer
+
+    def test_the_window_is_the_time_left_before_the_deadline(self) -> None:
+        async def quick() -> int:
+            return 1
+
+        seats = _ScriptedSeats({'quick': quick})
+
+        self._serve(seats, [_frame(1, 'quick', timeout_ms=2_000)])
+
+        [(dispatch, window)] = seats.markers
+        assert dispatch == 1
+        assert isinstance(window, MarkerBeforeDeadline)
+        assert 1.5 < window.seconds <= 2.0
+
+    def test_the_end_report_follows_the_marker_and_the_run_keeps_its_seat(
+        self,
+    ) -> None:
+        release = asyncio.Event()
+
+        async def quick() -> int:
+            return 1
+
+        async def held_marker(_window: MarkerWindow) -> None:
+            await release.wait()
+
+        seats = _ScriptedSeats({'quick': quick})
+        seats.marker = held_marker
+
+        async def between(seat_loop: SeatLoop, writer: _RecordingWriter) -> None:
+            await _until(lambda: len(seats.markers) == 1)
+            await asyncio.sleep(0.05)
+            assert _results(writer) == []
+            assert isinstance(seat_loop._seats[1].stop, shared_child._Finalizing)
+            release.set()
+
+        writer = self._serve(seats, [_frame(1, 'quick')], between)
+
+        assert _kinds(writer, 1) == ['SharedResultFrame']
+        assert _results(writer)[0].end == SeatFinished(True, '1', None)
+
+    def test_a_refusal_writes_its_marker_without_a_deadline(self) -> None:
+        async def refuse() -> str:
+            return 'refused'
+
+        seats = _ScriptedSeats({'refuse': refuse})
+        refusal = dataclasses.replace(
+            _frame(1, 'refuse'),
+            work=SeatRefusal(refusal=TimeoutValueInvalid(reason='y')),
+        )
+
+        self._serve(seats, [refusal])
+
+        assert seats.markers == [(1, MarkerWithoutDeadline())]
+
+    def test_a_run_that_stopped_before_running_writes_no_marker(self) -> None:
+        async def lost() -> str:
+            return 'claim lost'
+
+        seats = _ScriptedSeats({'lost': lost})
+        seats.not_running.add('lost')
+
+        writer = self._serve(seats, [_frame(1, 'lost')])
+
+        assert seats.markers == []
+        assert _results(writer)[0].end == SeatFinished(True, 'claim lost', None)
+
+    def test_a_run_that_timed_out_writes_no_marker(self) -> None:
+        async def hang() -> int:
+            await asyncio.Event().wait()
+            return 0
+
+        seats = _ScriptedSeats({'hang': hang})
+
+        writer = self._serve(
+            seats,
+            [_frame(1, 'hang', timeout_ms=DEADLINE_MS, grace_ms=GRACE_MS)],
+        )
+
+        assert seats.markers == []
+        assert _kinds(writer, 1) == ['DeadlineFiredFrame', 'SharedResultFrame']
+
+    def test_a_return_whose_work_needed_a_cancel_writes_no_marker(self) -> None:
+        """The run keeps what it returned, but its stop reached the cancel
+        rounds: it reports its end at once."""
+
+        async def leave() -> int:
+            async def holds_on() -> None:
+                await asyncio.Event().wait()
+
+            _ = asyncio.get_running_loop().create_task(holds_on())
+            return 1
+
+        seats = _ScriptedSeats({'leave': leave})
+
+        writer = self._serve(
+            seats,
+            [_frame(1, 'leave', grace_ms=GRACE_MS)],
+        )
+
+        assert seats.markers == []
+        assert _kinds(writer, 1) == ['LeftoverCancelFrame', 'SharedResultFrame']
+        assert _results(writer)[0].end == SeatFinished(True, '1', None)
+
+    def test_a_return_whose_work_ended_in_the_grace_writes_the_marker(self) -> None:
+        async def leave() -> int:
+            _ = asyncio.get_running_loop().create_task(asyncio.sleep(0.05))
+            return 1
+
+        seats = _ScriptedSeats({'leave': leave})
+
+        writer = self._serve(seats, [_frame(1, 'leave', grace_ms=2_000)])
+
+        assert [dispatch for dispatch, _window in seats.markers] == [1]
+        assert _kinds(writer, 1) == ['SharedResultFrame']
+
+
+class TestTheStartOfTheLoop:
+    """``_live``, the real caller of the start steps, on a real loop: the
+    marks survive a start hook that sets its own default executor."""
+
+    def test_work_in_the_executor_of_a_hook_holds_the_run(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A run sends a call to the default executor and returns without
+        awaiting it. The start hook replaced that executor; the run still
+        ends only when the call ends, on a thread of the hook's executor."""
+        ran_on: list[str] = []
+
+        def sync_call() -> None:
+            ran_on.append(threading.current_thread().name)
+            time.sleep(0.3)
+
+        async def leave_a_call() -> int:
+            _ = asyncio.get_running_loop().run_in_executor(None, sync_call)
+            return 1
+
+        seats = _ScriptedSeats({'leave_a_call': leave_a_call})
+
+        class _HookSetsItsExecutor:
+            async def start(
+                self,
+                init: InitFrame,
+            ) -> Result[shared_child.StartedSeats, BootFailedFrame]:
+                _ = init
+                asyncio.get_running_loop().set_default_executor(
+                    concurrent.futures.ThreadPoolExecutor(
+                        max_workers=4,
+                        thread_name_prefix='hook-pool',
+                    ),
+                )
+                return Ok(seats)
+
+        monkeypatch.setattr(shared_child, '_read_rss', _rss)
+        writer = _RecordingWriter()
+        inbox = ParentFrameInbox()
+        took_s: list[float] = []
+        parent_end, child_end = socket.socketpair()
+
+        async def scenario() -> None:
+            living = asyncio.ensure_future(
+                shared_child._live(
+                    child_end,
+                    MagicMock(),
+                    inbox,
+                    1,
+                    _HookSetsItsExecutor(),
+                    writer,  # type: ignore[arg-type]
+                ),
+            )
+            await _until(lambda: any(isinstance(f, ReadyFrame) for f in writer.frames))
+            sent = time.monotonic()
+            inbox.put(_frame(1, 'leave_a_call', grace_ms=5_000))
+            await _until(lambda: len(_results(writer)) == 1)
+            took_s.append(time.monotonic() - sent)
+            inbox.put(StopFrame())
+            await asyncio.wait_for(living, RUN_TIMEOUT_S)
+
+        try:
+            asyncio.run(scenario())
+        finally:
+            parent_end.close()
+            child_end.close()
+
+        assert ran_on and ran_on[0].startswith('hook-pool')
+        assert took_s[0] >= 0.25
+        assert _results(writer)[0].end == SeatFinished(True, '1', None)
+
+    def test_a_default_executor_that_is_not_a_thread_pool_fails_the_start(
+        self,
+        exits: list[tuple[str, int]],
+    ) -> None:
+        async def scenario() -> None:
+            seat_loop = SeatLoop(1, _RecordingWriter(), _rss)  # type: ignore[arg-type]
+            seat_loop.install_marks()
+            loop = asyncio.get_running_loop()
+            loop._default_executor = None  # pyright: ignore[reportAttributeAccessIssue]
+            with pytest.raises(_Exited):
+                seat_loop.keep_marks_after_hooks()
+
+        asyncio.run(scenario())
+
+        [(message, code)] = exits
+        assert code == CHILD_HOOK_FAILURE_EXIT_CODE
+        assert 'NoneType, not a ThreadPoolExecutor' in message
 
 
 class TestParentDefects:
@@ -1213,6 +1551,25 @@ class TestFrameWriter:
 
 
 class TestBoundedResultFrame:
+    def test_a_leftover_cancel_report_cuts_a_long_failure_reason(self) -> None:
+        frame = LeftoverCancelFrame(
+            dispatch=1,
+            task_id='t',
+            returned=SeatFinished(
+                ok=False,
+                result_json='',
+                failed_reason='r' * (MAX_FAILED_REASON_CHARS + 10),
+            ),
+        )
+
+        bounded = bounded_result_frame('x', frame)
+
+        assert isinstance(bounded, LeftoverCancelFrame)
+        assert bounded.returned.failed_reason == (
+            'r' * MAX_FAILED_REASON_CHARS
+            + f' [cut from {MAX_FAILED_REASON_CHARS + 10} characters]'
+        )
+
     def test_a_timed_out_end_passes_unchanged(self) -> None:
         frame = SharedResultFrame(
             dispatch=1,
