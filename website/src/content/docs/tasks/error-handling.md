@@ -9,7 +9,7 @@ tags: [tasks, errors, TaskResult, patterns]
 
 Handle errors explicitly through dedicated handlers or explicit returns. Avoid raising exceptions - they break control flow and obscure error paths.
 
-For exhaustive error code reference, see [errors](errors.md).
+For exhaustive error code reference, see [errors](/horsies/tasks/errors/).
 
 This document means to be a pattern guide rather than definitive way to handle your errors.
 Adjust to your needs.
@@ -195,7 +195,7 @@ match spec.start():
         raise RuntimeError(f"Start failed: {start_err.code}")
 ```
 
-This pattern only runs when the downstream task actually executes. With `join="all"` and `allow_failed_deps=False` (default), any failed or skipped dependency causes the task to be SKIPPED, so this guard code never runs. With `join="any"` or `join="quorum"`, the task can still run if the success threshold is met. See [Workflow Semantics](../concepts/workflows/workflow-semantics) for default join rules and failure propagation.
+This pattern only runs when the downstream task actually executes. With `join="all"` and `allow_failed_deps=False` (default), any failed or skipped dependency causes the task to be SKIPPED, so this guard code never runs. With `join="any"` or `join="quorum"`, the task can still run if the success threshold is met. See [Workflow Semantics](/horsies/concepts/workflows/workflow-semantics/) for default join rules and failure propagation.
 
 ### Handle Errors with Explicit Returns
 

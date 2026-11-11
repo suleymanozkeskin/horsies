@@ -15,7 +15,7 @@ operators acting at once do not corrupt anything: one CAS matches and the other
 returns 409 with the status it actually found.
 
 Actions are disabled unless the deployment enables them. See
-[Deployment & Authentication](web-ui-deployment).
+[Deployment & Authentication](/horsies/monitoring/web-ui-deployment/).
 
 ## Task cancel
 

@@ -79,7 +79,7 @@ opts.schedule(60, name="alice", count=3)                # delayed
 await opts.schedule_async(60, name="alice", count=3)    # delayed, async
 ```
 
-For workflow nodes, use `.node(good_until=...)` instead — see [Typed Node Builder](../concepts/workflows/typed-node-builder).
+For workflow nodes, use `.node(good_until=...)` instead — see [Typed Node Builder](/horsies/concepts/workflows/typed-node-builder/).
 
 ### Keep a Terminal Record Forever
 
@@ -399,11 +399,11 @@ Use `is_ok(result)` / `is_err(result)` from `horsies` as type-narrowing guards.
 
 ### `TaskSendError`
 
-A union with one frozen variant per `TaskSendErrorCode` member; each variant has only the fields of its failure. The variants, their fields and `NoCause` are in the [Errors Reference](./errors#tasksenderror).
+A union with one frozen variant per `TaskSendErrorCode` member; each variant has only the fields of its failure. The variants, their fields and `NoCause` are in the [Errors Reference](/horsies/tasks/errors/#tasksenderror).
 
 ### `TaskSendErrorCode`
 
-The codes, and which of them the retry methods accept, are in the [Errors Reference](./errors#tasksenderrorcode).
+The codes, and which of them the retry methods accept, are in the [Errors Reference](/horsies/tasks/errors/#tasksenderrorcode).
 
 ### `TaskHandle[T]`
 

@@ -71,7 +71,7 @@ TaskNode(fn=validate_order, node_id="validate_order")
 TaskNode(fn=validate_order)  # becomes "order_processing:0"
 ```
 
-For type-safe node construction with static arguments, see [Typed Node Builder](../concepts/workflows/typed-node-builder).
+For type-safe node construction with static arguments, see [Typed Node Builder](/horsies/concepts/workflows/typed-node-builder/).
 
 ## Declarative Workflow
 

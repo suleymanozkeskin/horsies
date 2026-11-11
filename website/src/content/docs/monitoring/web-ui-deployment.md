@@ -195,7 +195,7 @@ SSE subscriber and closes at shutdown. Its subscriptions are held for the app's
 lifetime, so there is no per-request LISTEN churn.
 
 Size the pool for the number of concurrent dashboard viewers, and read
-[PgBouncer Troubleshooting](../troubleshooting/pgbouncer) before pointing the
+[PgBouncer Troubleshooting](/horsies/troubleshooting/pgbouncer/) before pointing the
 monitoring app at a transaction-pooled URL.
 
 ### PgBouncer
