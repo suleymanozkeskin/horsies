@@ -99,9 +99,9 @@ def _worker(recovery: RecoveryConfig | None = RecoveryConfig()) -> Worker:
             recovery_config=recovery,
         ),
     )
-    worker._finalize_task_result = AsyncMock(return_value=Ok(None))  # type: ignore[method-assign]
-    worker._recover_worker_future_failure = AsyncMock()  # type: ignore[method-assign]
-    worker._record_task_timeout = AsyncMock()  # type: ignore[method-assign]
+    worker._finalize_task_result = AsyncMock(return_value=Ok(None))
+    worker._recover_worker_future_failure = AsyncMock()
+    worker._record_task_timeout = AsyncMock()
     return worker
 
 
