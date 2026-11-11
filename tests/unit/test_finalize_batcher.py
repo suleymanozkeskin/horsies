@@ -674,3 +674,46 @@ def test_the_worker_bounds_its_flushers_by_its_pool(pool: int) -> None:
     batcher = worker._finalize_batcher  # pyright: ignore[reportPrivateUsage]
 
     assert batcher.max_flushers == pool
+
+
+class _GatedPerWrite:
+    """A batch write whose every call waits for its own release."""
+
+    def __init__(self) -> None:
+        self.batches: list[tuple[str, ...]] = []
+        self._gates: list[asyncio.Event] = []
+
+    def release(self, call: int) -> None:
+        self._gates[call].set()
+
+    async def __call__(self, batch: FusedCompletionBatch) -> WriteResult:
+        self.batches.append(tuple(command.task_id for command in batch.commands))
+        gate = asyncio.Event()
+        self._gates.append(gate)
+        await gate.wait()
+        return _all_applied(batch)
+
+
+@pytest.mark.asyncio
+async def test_a_surge_flusher_leaves_a_partial_batch_to_the_steady_flushers() -> None:
+    """The steady flushers stay busy; the surge flusher finishes its full
+    batch and ends: the 10 rows left wait for a steady flusher."""
+    write = _GatedPerWrite()
+    batcher = FinalizeBatcher(write, max_queued_rows=QUEUE_BOUND, max_flushers=3)
+    held = [await _submit_alone(batcher, task_id) for task_id in ('a', 'b')]
+    waiting = await _submit_together(
+        batcher,
+        [f'w{index}' for index in range(FUSED_BATCH_MAX_ROWS + 10)],
+    )
+    assert [len(batch) for batch in write.batches] == [1, 1, FUSED_BATCH_MAX_ROWS]
+
+    write.release(2)
+    await _settle()
+
+    assert [len(batch) for batch in write.batches] == [1, 1, FUSED_BATCH_MAX_ROWS]
+    write.release(0)
+    await _settle()
+    assert [len(batch) for batch in write.batches] == [1, 1, FUSED_BATCH_MAX_ROWS, 10]
+    write.release(1)
+    write.release(3)
+    _ = await asyncio.wait_for(asyncio.gather(*held, *waiting), OUTER_BOUND_S)
