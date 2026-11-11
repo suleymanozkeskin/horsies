@@ -225,7 +225,6 @@ async def _finalize_once(
         task_id,
         persisted.result,
         queue_name=persisted.queue_name,
-        is_workflow_task=True,
         task_name=persisted.task_name,
     )
     phase2 = proxy.stop_recording()

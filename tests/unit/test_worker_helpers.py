@@ -25,6 +25,7 @@ import logging
 from horsies.core.worker.finalize import (
     _Phase1Input,
     _PersistedTaskOutcome,
+    _PlainTaskDone,
     _finalize_data_for_log,
 )
 from horsies.core.worker.runtime import (
@@ -2364,13 +2365,11 @@ _SENTINEL_TASK_RESULT = MagicMock(name='TaskResult')
 def _persisted_outcome(
     *,
     queue_name: str = 'default',
-    is_workflow_task: bool = True,
 ) -> _PersistedTaskOutcome:
     return _PersistedTaskOutcome(
         result=_SENTINEL_TASK_RESULT,
         task_name='loaded_task',
         queue_name=queue_name,
-        is_workflow_task=is_workflow_task,
     )
 
 
@@ -2573,7 +2572,6 @@ class TestRetryFinalizePhase1:
             err.task_id,
             _SENTINEL_TASK_RESULT,
             queue_name='default',
-            is_workflow_task=True,
             task_name='loaded_task',
         )
         assert key_p1 not in worker._finalize_retry_attempts
@@ -2585,12 +2583,7 @@ class TestRetryFinalizePhase1:
         worker = _make_worker()
         worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
         worker._persist_task_terminal_state = AsyncMock(  # type: ignore[assignment]
-            return_value=Ok(
-                _persisted_outcome(
-                    queue_name='persisted-queue',
-                    is_workflow_task=True,
-                )
-            ),
+            return_value=Ok(_persisted_outcome(queue_name='persisted-queue')),
         )
         worker._finalize_workflow_phase = AsyncMock(  # type: ignore[assignment]
             return_value=Ok(None),
@@ -2619,7 +2612,6 @@ class TestRetryFinalizePhase1:
             err.task_id,
             _SENTINEL_TASK_RESULT,
             queue_name='persisted-queue',
-            is_workflow_task=True,
             task_name='loaded_task',
         )
 
@@ -2791,7 +2783,6 @@ class TestRetryFinalizePhase2:
             err.task_id,
             _SENTINEL_TASK_RESULT,
             queue_name='default',
-            is_workflow_task=True,
             task_name='loaded_task',
         )
         assert key not in worker._finalize_retry_attempts
@@ -2802,12 +2793,7 @@ class TestRetryFinalizePhase2:
         worker = _make_worker()
         worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
         worker._load_persisted_task_result = AsyncMock(  # type: ignore[assignment]
-            return_value=Ok(
-                _persisted_outcome(
-                    queue_name='critical',
-                    is_workflow_task=False,
-                )
-            ),
+            return_value=Ok(_persisted_outcome(queue_name='critical')),
         )
         worker._finalize_workflow_phase = AsyncMock(  # type: ignore[assignment]
             return_value=Ok(None),
@@ -2827,10 +2813,28 @@ class TestRetryFinalizePhase2:
             err.task_id,
             _SENTINEL_TASK_RESULT,
             queue_name='critical',
-            is_workflow_task=False,
             # Reloaded row name wins over error-data context.
             task_name='loaded_task',
         )
+
+    @pytest.mark.asyncio
+    async def test_a_plain_task_owes_no_phase_two(self) -> None:
+        """A reloaded plain task got its wake from the statement that ended
+        it: phase 2 does not run, and its retry count is cleared."""
+        worker = _make_worker()
+        worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
+        worker._load_persisted_task_result = AsyncMock(  # type: ignore[assignment]
+            return_value=Ok(_PlainTaskDone()),
+        )
+        worker._finalize_workflow_phase = AsyncMock()  # type: ignore[assignment]
+        err = self._make_err()
+        key = (err.task_id, _FINALIZE_STAGE_PHASE2)
+        worker._finalize_retry_attempts[key] = 3
+
+        await worker._retry_finalize_phase2(err, 0.0)
+
+        worker._finalize_workflow_phase.assert_not_awaited()
+        assert key not in worker._finalize_retry_attempts
 
     # --- U-3k: _finalize_workflow fails → delegates ---
 
@@ -5970,7 +5974,6 @@ class TestPersistTerminalStateFusedPath:
         assert persisted is not None and persisted.result.is_ok()
         assert persisted.task_name == 'persisted_task'
         assert persisted.queue_name == 'persisted_queue'
-        assert persisted.is_workflow_task is True
         assert finish.await_args.args[1] == FinishWorkflowSuccess(
             task_id='task-1',
             fence=OwnedClaim(worker_id=worker.worker_instance_id, claimed_at=claimed_at),
