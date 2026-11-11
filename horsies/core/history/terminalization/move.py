@@ -89,6 +89,9 @@ EXPIRE_PENDING_FUNCTION: Final = 'horsies_expire_pending_tasks'
 FINISH_FAILED_ATTEMPT_FUNCTION: Final = 'horsies_finish_failed_attempt'
 FAILED_ATTEMPT_OUTCOME_TYPE: Final = 'horsies_failed_attempt_outcome'
 LOCK_RUNNING_TASK_FUNCTION: Final = 'horsies_lock_running_task'
+"""The locking read of a RUNNING task (schema v56). Its one caller, the
+success of a workflow task, became ``horsies_finish_workflow_success`` at
+v58, and an upgrade to v58 drops it. Kept as a name for that drop."""
 FINISH_WORKFLOW_SUCCESS_FUNCTION: Final = 'horsies_finish_workflow_success'
 WORKFLOW_SUCCESS_OUTCOME_TYPE: Final = 'horsies_workflow_success_outcome'
 
@@ -1225,53 +1228,6 @@ BEGIN
         NULL::text, NULL::jsonb,
         v_retry_disposition, NULL::integer, v_next_retry_at, v_good_until,
         v_ctx.is_workflow_task, v_ctx.queue_name::text, v_ctx.task_name::text;
-END
-$function$
-"""
-
-
-def _lock_running_task_ddl() -> str:
-    """The locking read of a RUNNING task, advisory lock first.
-
-    Returns the attempt context of the row this claim generation holds, or
-    no row. The caller writes in the same transaction; the move functions it
-    calls take the same advisory lock again, which is free.
-    """
-    return f"""
-CREATE FUNCTION {LOCK_RUNNING_TASK_FUNCTION}(
-    p_task_id uuid,
-    p_worker_id text,
-    p_claimed_at timestamptz
-)
-RETURNS TABLE (
-    task_name varchar,
-    retry_count integer,
-    started_at timestamptz,
-    claimed_by_worker_id varchar,
-    worker_hostname varchar,
-    worker_pid integer,
-    worker_process_name varchar,
-    queue_name varchar,
-    is_workflow_task boolean,
-    db_now timestamptz
-)
-LANGUAGE plpgsql
-AS $function$
-BEGIN
-    PERFORM pg_advisory_xact_lock(
-        hashtextextended(p_task_id::text, {TASK_LOCK_SEED})
-    );
-    RETURN QUERY
-    SELECT t.task_name::varchar, t.retry_count, t.started_at,
-           t.claimed_by_worker_id::varchar, t.worker_hostname::varchar,
-           t.worker_pid, t.worker_process_name::varchar,
-           t.queue_name::varchar, t.is_workflow_task, clock_timestamp()
-    FROM {LIVE_TASKS} t
-    WHERE t.id = p_task_id
-      AND t.status = 'RUNNING'
-      AND t.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
-      AND (p_claimed_at IS NULL OR t.claimed_at = p_claimed_at)
-    FOR UPDATE OF t;
 END
 $function$
 """
@@ -2693,21 +2649,12 @@ def completion_family_fragments() -> tuple[str, ...]:
         _move_ddl(),
         _complete_locked_ddl(),
         _complete_fused_ddl(),
-        _lock_running_task_ddl(),
     )
 
 
 def failed_attempt_teardown() -> tuple[str, ...]:
-    """Drop the failed-attempt finish and the locking read of a RUNNING task.
-
-    The outcome-type cascade drops the finish. The locking read returns a
-    table, so it is dropped by its signature.
-    """
-    return (
-        f'DROP TYPE IF EXISTS {FAILED_ATTEMPT_OUTCOME_TYPE} CASCADE',
-        f'DROP FUNCTION IF EXISTS {LOCK_RUNNING_TASK_FUNCTION}'
-        '(uuid, text, timestamptz)',
-    )
+    """Drop the failed-attempt finish. The outcome-type cascade drops it."""
+    return (f'DROP TYPE IF EXISTS {FAILED_ATTEMPT_OUTCOME_TYPE} CASCADE',)
 
 
 def workflow_success_fragments() -> tuple[str, ...]:
@@ -2716,26 +2663,30 @@ def workflow_success_fragments() -> tuple[str, ...]:
 
 
 def workflow_success_teardown() -> tuple[str, ...]:
-    """Drop the success of a workflow task. The outcome-type cascade drops
-    the function."""
-    return (f'DROP TYPE IF EXISTS {WORKFLOW_SUCCESS_OUTCOME_TYPE} CASCADE',)
+    """Drop the success of a workflow task, and the locking read of a
+    RUNNING task that it replaced.
+
+    The outcome-type cascade drops the function. The locking read returns a
+    table, so it is dropped by its signature.
+    """
+    return (
+        f'DROP TYPE IF EXISTS {WORKFLOW_SUCCESS_OUTCOME_TYPE} CASCADE',
+        f'DROP FUNCTION IF EXISTS {LOCK_RUNNING_TASK_FUNCTION}'
+        '(uuid, text, timestamptz)',
+    )
 
 
 def workflow_success_program_ddl() -> tuple[str, ...]:
     """Schema v58 on an installed move program, idempotent: the success of
-    a workflow task, dropped and created again."""
+    a workflow task, dropped and created again, and the locking read of a
+    RUNNING task, dropped."""
     return (*workflow_success_teardown(), *workflow_success_fragments())
 
 
 def failed_attempt_program_ddl() -> tuple[str, ...]:
     """Schema v56 on an installed move program, idempotent: the
-    failed-attempt finish and the locking read of a RUNNING task, dropped
-    and created again."""
-    return (
-        *failed_attempt_teardown(),
-        *failed_attempt_fragments(),
-        _lock_running_task_ddl(),
-    )
+    failed-attempt finish, dropped and created again."""
+    return (*failed_attempt_teardown(), *failed_attempt_fragments())
 
 
 def completion_batch_fragments() -> tuple[str, ...]:

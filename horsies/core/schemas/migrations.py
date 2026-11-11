@@ -397,7 +397,8 @@ from horsies.core.models.tasks import Execution
 #      with kind COMPLETE_LOCKED, which writes the phase-2 record of the
 #      node. It sends no capacity NOTIFY; phase 2 sends it. Its row type
 #      is horsies_workflow_success_outcome. Both are dropped and created on
-#      every apply.
+#      every apply. horsies_lock_running_task (v56) is dropped: its one
+#      caller was the success of a workflow task.
 
 SCHEMA_VERSION = 58
 

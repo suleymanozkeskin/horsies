@@ -415,12 +415,12 @@ class TestProgram:
         )
 
         assert type_at < function_at
-        assert any(
+        assert not any(
             f'CREATE FUNCTION {LOCK_RUNNING_TASK_FUNCTION}' in fragment
             for fragment in fragments
         )
 
-    def test_teardown_drops_both_programs(self) -> None:
+    def test_teardown_drops_the_finish_and_the_retired_locking_read(self) -> None:
         statements = teardown_statements()
 
         assert (
@@ -434,4 +434,4 @@ class TestProgram:
         drops = [index for index, s in enumerate(statements) if s.startswith('DROP')]
         creates = [index for index, s in enumerate(statements) if 'CREATE' in s]
         assert max(drops) < min(creates)
-        assert len(creates) == 3
+        assert len(creates) == 2

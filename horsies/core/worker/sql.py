@@ -502,18 +502,6 @@ DELETE_ORPHANED_RECOVERY_FAILURES_SQL = text("""
     )
 """)
 
-# The locking read of a RUNNING task of this claim generation: the task
-# advisory lock first, then the row lock (horsies_lock_running_task). No row:
-# the claim does not hold the row RUNNING.
-LOCK_RUNNING_TASK_SQL = text("""
-    SELECT task_name, retry_count, started_at, claimed_by_worker_id,
-           worker_hostname, worker_pid, worker_process_name,
-           queue_name, is_workflow_task, db_now
-    FROM horsies_lock_running_task(
-        CAST(:id AS uuid), CAST(:wid AS TEXT), CAST(:claimed_at AS TIMESTAMPTZ)
-    )
-""")
-
 UPSERT_TASK_ATTEMPT_SQL = text("""
     INSERT INTO horsies_task_attempts (
         task_id, attempt, outcome, will_retry,

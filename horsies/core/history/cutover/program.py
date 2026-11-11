@@ -167,10 +167,10 @@ def teardown_statements() -> tuple[str, ...]:
     The outcome-type CASCADE removes every terminalization operation
     returning it, the failed-attempt outcome type removes the
     failed-attempt finish, and the workflow-success outcome type removes
-    the success of a workflow task; the remaining drops name the locking
-    read of a RUNNING task, the encoder, the phase-2 programs (by their
-    cascade roots), the transcode state, the relocation ledger, and the
-    uuid-bound non-runnable workflow lookup.
+    the success of a workflow task; the remaining drops name the retired
+    locking read of a RUNNING task, the encoder, the phase-2 programs (by
+    their cascade roots), the transcode state, the relocation ledger, and
+    the uuid-bound non-runnable workflow lookup.
     """
     return (
         'DROP TYPE IF EXISTS horsies_terminalization_outcome CASCADE',

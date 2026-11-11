@@ -15,6 +15,7 @@ from horsies.core.history.cutover.program import (
 )
 from horsies.core.history.terminalization.move import (
     FINISH_WORKFLOW_SUCCESS_FUNCTION,
+    LOCK_RUNNING_TASK_FUNCTION,
     WORKFLOW_SUCCESS_OUTCOME_TYPE,
     WORKFLOW_SUCCESS_OUTCOME_TYPE_DDL,
     workflow_success_fragments,
@@ -278,6 +279,12 @@ class TestProgram:
             f'DROP TYPE IF EXISTS {WORKFLOW_SUCCESS_OUTCOME_TYPE} CASCADE'
             in teardown_statements()
         )
+
+    def test_the_upgrade_drops_the_retired_locking_read(self) -> None:
+        assert (
+            f'DROP FUNCTION IF EXISTS {LOCK_RUNNING_TASK_FUNCTION}'
+            '(uuid, text, timestamptz)'
+        ) in workflow_success_program_ddl()
 
     def test_the_upgrade_drops_before_it_creates(self) -> None:
         statements = workflow_success_program_ddl()
