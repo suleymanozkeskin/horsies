@@ -4,7 +4,8 @@
   return; the rest stay claimable by other workers while it is open.
 - Rows come back in the global dispatch rank (queue priority, task
   priority, enqueue time, id), across the pending and expired arms.
-- Candidate selection reuses a generic plan; the parent does not.
+- Candidate selection (the plan and the take) reuses a generic plan; the
+  parent does not.
 - The bounded non-runnable lookup returns what the plain join returns.
 """
 
@@ -255,7 +256,9 @@ async def test_only_candidate_selection_forces_a_generic_plan(
                     text("""
             SELECT proname, coalesce(array_to_string(proconfig, ','), '')
             FROM pg_proc
-            WHERE proname IN ('horsies_claim', 'horsies_claim_candidates')
+            WHERE proname IN (
+                'horsies_claim', 'horsies_claim_plan', 'horsies_claim_candidates'
+            )
         """)
                 )
             )
@@ -266,6 +269,7 @@ async def test_only_candidate_selection_forces_a_generic_plan(
     # the statement on every pass.
     assert settings == {
         'horsies_claim': 'jit=off',
+        'horsies_claim_plan': 'plan_cache_mode=force_generic_plan,jit=off',
         'horsies_claim_candidates': 'plan_cache_mode=force_generic_plan,jit=off',
     }
 

@@ -27,8 +27,8 @@ there is no migration contract between pre-1.0 versions.
   - A direct call of an async task returns a coroutine of the `TaskResult`.
     The return check and the exception mappers are the same as for a `def`
     task. In a worker, a `CancelledError` of a body that cancelled its own
-    task goes through the exception mappers too; the direct call lets it
-    pass.
+    task, and a `GeneratorExit` that the body raises, go through the
+    exception mappers too; the direct call lets them pass.
   - `TaskNode.fn`, `.node()` and the task registry take both kinds.
   - An `async def` function that uses `yield` is refused with `HRS-101`, as
     a generator function is.
@@ -87,16 +87,23 @@ there is no migration contract between pre-1.0 versions.
     (every child or seat of the serving budgets is down) or `StreamUnserved()`.
     A worker is live while its latest snapshot is at most 120 seconds old
     (`WORKER_STATE_LIVE_WINDOW_S`, the threshold at which the web UI already
-    marked a worker stale). A live snapshot without readable budgets fails the
-    read and names the worker.
+    marked a worker stale). A live snapshot without `class_capacity`, from a
+    worker version that does not record its budgets, leaves that worker out:
+    it serves no stream, is not in `live_workers`, and `not_recorded` names
+    it (`ClassesNotRecorded(worker_id, snapshot_at)`, by worker id). A live
+    snapshot whose value is unreadable fails the read and names the worker.
   - Each reaper pass runs the check, one check interval after the worker
     starts. An unserved (queue, class) logs an error, one without capacity a
     warning; each worker logs one (queue, class) at most once per 5 minutes.
+    The workers left out log one warning per 5 minutes that names up to 10 of
+    them.
     This covers a shared task that went back to the queue as `ISOLATED` while
     no live worker has isolated children.
   - `get_class_report()` adds the wait of each stream's oldest due row
     (`OldestWaiting` or `NoneDue`) and, per live worker, each budget's
-    capacity, rows in flight and free capacity (`BudgetLoad`).
+    capacity, rows in flight and free capacity (`BudgetLoad`). It names the
+    workers left out in `not_recorded` too; `GET /api/workers/classes`
+    returns them in `not_recorded`.
   - Both reads probe `idx_horsies_tasks_claim_pending_class`: the check once
     per pending (queue, class), the report once per (queue, class, priority).
     Each read has a bound and fails closed at it.
@@ -105,19 +112,24 @@ there is no migration contract between pre-1.0 versions.
     worker's down slots (`GET /api/workers/classes`; `WorkerStateInfo` gains
     `slot_health` and `down_slots`).
 - **`horsies check --live` compares every worker profile with the server
-  connection limit.** One worker can open its parent pool
+  connection limit.** One worker opens its parent pool
   (`worker_pool_size + worker_max_overflow`), 2 listener connections, 1
   runner heartbeat connection and `worker_child_pool_max_size` for each
-  child. A profile whose worker can
-  open more than `max_connections` less `superuser_reserved_connections`
+  child. A profile whose worker opens
+  more than `max_connections` less `superuser_reserved_connections`
   and `reserved_connections` fails with `HRS-219`
-  (`CHECK_WORKER_CONNECTIONS`). With `pgbouncer_transaction_mode=True`
+  (`CHECK_WORKER_CONNECTIONS`). Task code that sends opens the app's broker
+  in its child, `worker_pool_size + worker_max_overflow` for each event loop
+  it sends from. The comparison does not count it; the error and the boot
+  log state it, with one sending loop per child. With `pgbouncer_transaction_mode=True`
   nothing is compared. At boot, before any child starts, a worker logs the
   same comparison as a warning. It also warns when the per-child memory
   limits of its profile add up to more than the memory that it can use: the
   container (cgroup v2 or v1) memory limit when that is below the host RAM,
-  else the host RAM. The warning names the source. It starts in both
-  cases.
+  else the host RAM. The cgroup is the one that `/proc/self/cgroup` names,
+  and its limit is the smallest on the path from it up to the mount point,
+  so a systemd `MemoryMax` and a container seen with `--cgroupns=host`
+  count. The warning names the source. It starts in both cases.
 
 - **Each task declares its execution class, and each task row stores it.**
   `@app.task(..., execution=...)` takes an `Execution` member:
@@ -131,7 +143,9 @@ there is no migration contract between pre-1.0 versions.
     need `timeout_ms` (`HRS-109`), only `SHARED_ASYNC` takes `cancel_grace_ms`
     (`HRS-110`), and `cancel_grace_ms` is from 100 to 10,000 ms (`HRS-111`).
     `horsies check` reports them. With `execution` written as a member, a
-    type checker refuses the same declarations.
+    type checker refuses the same declarations. A class known only at run
+    time needs `timeout_ms` and takes `cancel_grace_ms`; the decorator checks
+    it at run time.
   - `cancel_grace_ms` is the time that a `SHARED_ASYNC` task gets to stop
     after its cancel. A task that sets none gets 1,000 ms. The stored task
     options hold the class (`"execution"`) and the grace in effect at send
@@ -260,7 +274,9 @@ there is no migration contract between pre-1.0 versions.
   - `@app.on_shared_async_child_start` registers an `async def` hook that
     runs on the loop of each shared async child before its first task, for
     long-lived async clients. Same 10 s bound and fail-closed stop as
-    `on_child_process_start`.
+    `on_child_process_start`. It also accepts an object whose `__call__` is
+    `async def`, a function with an awaitable return annotation, and a
+    lambda; it refuses another callable with `HRS-214`.
   - Recycling counts per seat: a shared child closes after
     `after_per_seat.tasks × seats` tasks (default 100 per seat) or when its
     RSS after a task reaches `above`. A closing child takes no new task, its
@@ -349,8 +365,11 @@ there is no migration contract between pre-1.0 versions.
   - `ClaimLimits.per_queue_per_pass`, `ClaimLimits.claimed_per_worker`, the
     queue caps and `cluster_wide_cap` apply to the worker as a whole. In soft
     cap mode each budget, and the worker, may hold `prefetch_buffer` rows
-    more than its capacity. The capacity that `HRS-218` compares with is the
-    sum of the budgets plus `prefetch_buffer`.
+    more than its capacity. A budget whose capacity in service is 0 (every
+    child or seat of it is down) gets no prefetch, and neither does a worker
+    whose budgets are all at 0: their rows stay for a worker with seats. The
+    capacity that `HRS-218` compares with is the sum of the budgets plus
+    `prefetch_buffer`.
   - A claimed row of a shared class whose task, as this worker registered it,
     has another class (for example `SHARED_ASYNC` on the row, and the
     function is now `def`) is written `ISOLATED` and returned to `PENDING`,
@@ -362,28 +381,60 @@ there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **Breaking: worker child exit codes 74 to 76.** In 0.6.x, 74 meant only a
+  forked child that does not reparent to the worker. In 0.7.0:
+  - 74: a child that stopped while threads of the executor of its task loop
+    still ran. It leaves without waiting for them. New.
+  - 75: a child that failed its boot, after it reported the cause. New.
+  - 76: a forked child that does not reparent to the worker. It was 74.
+  A worker that cannot write runner heartbeats and has not stopped 120 s
+  after it started to stop exits with 77, also new.
 - **Breaking: the claim function takes a budget per execution class.**
-  `horsies_claim` takes `p_budgets` and `p_routes` in place of `p_processes`,
-  and returns each row's `execution`. Schema v55 drops the earlier signature,
-  so a 0.6.x worker fails every claim pass after a 0.7.0 process migrates.
+  `horsies_claim` takes `p_budgets` and `p_routes` in place of `p_processes`.
+  It returns a `row_kind` column: one `'CLAIMED'` row per task it took, with
+  the row's `execution`, and one `'SHORT'` row when it took fewer rows than
+  it chose, with that count in `short_by`. Schema v55 drops the earlier
+  signature, so a 0.6.x worker fails every claim pass after a 0.7.0 process
+  migrates.
   Stop every 0.6.x worker before the first 0.7.0 worker starts.
-  - A claim pass reads the head of each (queue, class) stream without locks,
-    then takes the rows it needs from each stream with `FOR UPDATE SKIP
-    LOCKED`. It locks only the rows it takes. Before, a pass over two queues
-    of equal priority could lock up to its batch in each queue and return
-    one batch.
+  - A claim pass reads the head of each (queue, class) stream without locks:
+    its pending rows and its rows with an expired lease, in one order. One
+    walk over all heads in rank order (queue priority, priority,
+    `enqueued_at`, id) takes a row when its queue, its budget and the pass
+    each have room left, so a row that one limit drops takes no room that
+    another class could use. The pass then takes the chosen rows from each
+    stream with `FOR UPDATE SKIP LOCKED`. It locks only the rows it takes.
+    Before, a pass over two queues of equal priority could lock up to its
+    batch in each queue and return one batch.
+  - A row that another claim holds at the take is skipped, and the stream
+    goes on to its next row. When a pass takes fewer rows than it chose,
+    because another transaction held or took them, the worker runs the next
+    pass at once, as no `NOTIFY` announces the rows that remain. At most 3
+    such passes run in a row; after that the worker waits for its next
+    wake.
   - v55 builds `idx_horsies_tasks_claim_expired_class` on `(queue_name,
     execution, priority, enqueued_at, id)` over CLAIMED rows concurrently,
     and drops `idx_horsies_tasks_claim_pending` and
-    `idx_horsies_tasks_claim_expired_ordered` concurrently. Each claim stream
+    `idx_horsies_tasks_claim_expired_ordered` concurrently after its version
+    row commits, so an upgrade that fails leaves the earlier claim function
+    the indexes it reads. Each claim stream
     is one range of `idx_horsies_tasks_claim_pending_class` or of the new
     index. With 50,000 expired leases in one queue, the expired stream of a
     class with no rows reads 142 buffers on the new index and 7,848 on the
     unclassed one.
-  - Both claim functions run with `jit = off`. Their generic plan passed
+  - The claim functions `horsies_claim`, `horsies_claim_plan` and
+    `horsies_claim_candidates` run with `jit = off`. Their generic plan passed
     `jit_above_cost`, so a server with JIT compiled the statement on every
     pass: 26 to 47 ms per pass against 0.7 to 1.8 ms of work, at a 90,000-row
     backlog on PostgreSQL 17.
+- **A schema upgrade keeps each claim and recovery index whose form
+  matches.** An index whose catalog form matches its declaration is kept. One
+  of another form, or an invalid one, is built concurrently under a temporary
+  name; then one transaction renames the old index away and the new one to
+  its name, and the old one is dropped concurrently. Running workers keep an
+  index of that name throughout. Before, each upgrade dropped the recovery
+  indexes and built them again, and the scans that read them ran without
+  them meanwhile.
 - **Breaking: a slot that cannot start a child for a cause that can clear no
   longer stops the worker.** A child that fails its start now reports the
   cause to the worker before it exits.
@@ -478,7 +529,10 @@ there is no migration contract between pre-1.0 versions.
   `running_stale_threshold_ms`, the worker logs the cause at critical level,
   kills every child that holds a task, stops, and exits with code 1. It exits
   with code 77 if it has not stopped 120 s later. A failed write is tried
-  again within that half. Before, the reaper failed such tasks with
+  again within that half. The half counts from when the last heartbeat
+  landed. After a heartbeat whose write took almost the whole half, the
+  worker stops 0.5 s before `running_stale_threshold_ms` has passed from the
+  start of that write, because the reaper may count from there. Before, the reaper failed such tasks with
   `WORKER_CRASHED` while they still ran, and a retry could run next to them.
   A killed task takes the child crash path, or stale-task recovery when the
   database cannot be reached. With `auto_fail_stale_running=False`, or no
@@ -518,6 +572,18 @@ there is no migration contract between pre-1.0 versions.
   - The task of such a slot keeps the row that the earlier scheduler wrote:
     it runs with no timeout, no retries, and as `ISOLATED`. Later slots carry
     the task's options.
+- **Breaking: with `auto_fail_stale_running=True`,
+  `RecoveryConfig.running_stale_threshold_ms` is at least
+  `2 × (runner_heartbeat_interval_ms + 2,000 ms)`.** The worker stops when no
+  runner heartbeat lands for half of the threshold. Heartbeats land one
+  interval apart, plus the time the next one takes to land, so that half must
+  hold one interval plus 2 s. A smaller value raises `ConfigurationError`
+  with `HRS-204` (`CONFIG_INVALID_RECOVERY`); the message names both fields
+  and the smallest valid value. Before, the bound was
+  `2 × runner_heartbeat_interval_ms`. At that bound the half was one interval,
+  and the worker stopped and killed its tasks while every heartbeat landed.
+  With `auto_fail_stale_running=False`, the bound stays
+  `2 × runner_heartbeat_interval_ms`.
 - **Breaking: `RecoveryConfig.worker_state_snapshot_interval_ms` is at most
   60,000 ms.** A worker is live while its latest snapshot is at most
   `WORKER_STATE_LIVE_WINDOW_S` (120) seconds old. The cap is half of that
@@ -553,9 +619,6 @@ there is no migration contract between pre-1.0 versions.
 
 ### Fixed
 
-- **A forked child that does not reparent to the worker exits with code 76.**
-  It exited with 74, which a child also uses after a stop with executor
-  threads left, so one exit code named two causes.
 - **A timed-out task's row moves only after its child has exited.** At the
   deadline the worker kills the child, waits up to 30 s for its exit, and
   only then writes `TASK_TIMEOUT`, the retry and the attempt row, or requeues

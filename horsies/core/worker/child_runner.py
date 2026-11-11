@@ -1171,8 +1171,9 @@ def _task_call_result(
 
     The call of a ``def`` task returns its result. The call of an
     ``async def`` task returns a coroutine, which runs on ``task_loop``; the
-    child opened that loop at boot. A ``CancelledError`` that leaves that
-    coroutine goes through ``map_exception``, the mapping of the task
+    child opened that loop at boot. A ``CancelledError`` or a
+    ``GeneratorExit`` that leaves that coroutine goes through
+    ``map_exception``, the mapping of the task
     (``await_task_call_in_worker``). Other exceptions from that run
     propagate. The wrapper returns one of the two, so another value is a
     defect in the library: ``AssertionError``.

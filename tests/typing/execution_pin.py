@@ -5,8 +5,11 @@ not collect it (no ``test_`` prefix), and nothing imports it. A
 ``SHARED_ASYNC`` declaration needs ``timeout_ms`` and decorates only an
 ``async def`` function; a ``SHARED_THREAD`` declaration needs ``timeout_ms``,
 takes no ``cancel_grace_ms``, and decorates only a ``def`` function;
-``ISOLATED`` (the default) takes both kinds and no grace. A class known only
-at run time needs ``timeout_ms``. Each wrong use below has an ignore comment,
+``ISOLATED`` (the default) takes both kinds and no grace. A grace with a
+literal class other than ``SHARED_ASYNC`` gives a decorator that takes no
+function. A class known only at run time needs ``timeout_ms`` and may take
+``cancel_grace_ms``: the decorator checks both at run time (``HRS-110``).
+Each wrong use below has an ignore comment,
 and the config makes an unneeded ignore comment an error. So an overload set
 that accepts one of these uses fails the check.
 """
@@ -46,6 +49,15 @@ def register(app: Horsies, chosen: Execution) -> None:
     def chosen_at_run_time(*, value: int) -> TaskResult[int, TaskError]:
         return TaskResult(ok=value)
 
+    @app.task(
+        'pin_chosen_grace',
+        execution=chosen,
+        timeout_ms=5_000,
+        cancel_grace_ms=1_000,
+    )
+    async def chosen_with_grace(*, value: int) -> TaskResult[int, TaskError]:
+        return TaskResult(ok=value)
+
     pending = assert_type(
         shared_async(value=1),
         Coroutine[Any, Any, TaskResult[int, TaskError]],
@@ -54,8 +66,9 @@ def register(app: Horsies, chosen: Execution) -> None:
     as_async: AsyncTaskFunction[..., int] = shared_async_grace
     as_isolated: AsyncTaskFunction[..., int] = isolated
     as_chosen: TaskFunction[..., int] = chosen_at_run_time
+    as_chosen_grace: AsyncTaskFunction[..., int] = chosen_with_grace
     as_sync: TaskFunction[..., int] = shared_async  # pyright: ignore[reportAssignmentType]
-    del pending, as_async, as_isolated, as_chosen, as_sync
+    del pending, as_async, as_isolated, as_chosen, as_chosen_grace, as_sync
 
     @app.task(
         'pin_bad_async_on_def', execution=Execution.SHARED_ASYNC, timeout_ms=5_000
@@ -75,15 +88,23 @@ def register(app: Horsies, chosen: Execution) -> None:
 
     @app.task(
         'pin_bad_thread_grace',
-        execution=Execution.SHARED_THREAD,  # pyright: ignore[reportArgumentType]
+        execution=Execution.SHARED_THREAD,
         timeout_ms=5_000,
         cancel_grace_ms=1_000,
-    )
+    )  # pyright: ignore[reportArgumentType, reportUntypedFunctionDecorator]
     def thread_with_grace(*, value: int) -> TaskResult[int, TaskError]:
         return TaskResult(ok=value)
 
-    @app.task('pin_bad_isolated_grace', cancel_grace_ms=1_000)  # pyright: ignore[reportCallIssue, reportUntypedFunctionDecorator]
+    @app.task('pin_bad_isolated_grace', cancel_grace_ms=1_000)  # pyright: ignore[reportArgumentType, reportUntypedFunctionDecorator]
     def isolated_with_grace(*, value: int) -> TaskResult[int, TaskError]:
+        return TaskResult(ok=value)
+
+    @app.task(
+        'pin_bad_explicit_isolated_grace',
+        execution=Execution.ISOLATED,
+        cancel_grace_ms=1_000,
+    )  # pyright: ignore[reportArgumentType, reportUntypedFunctionDecorator]
+    async def explicit_isolated_with_grace(*, value: int) -> TaskResult[int, TaskError]:
         return TaskResult(ok=value)
 
     @app.task('pin_bad_chosen_no_timeout', execution=chosen)  # pyright: ignore[reportArgumentType]
@@ -96,5 +117,6 @@ def register(app: Horsies, chosen: Execution) -> None:
         shared_without_timeout,
         thread_with_grace,
         isolated_with_grace,
+        explicit_isolated_with_grace,
         chosen_without_timeout,
     )

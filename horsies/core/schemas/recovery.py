@@ -10,7 +10,7 @@ import re
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, TypeAlias, assert_never
 
 from sqlalchemy import text
 
@@ -73,31 +73,41 @@ CREATE TABLE IF NOT EXISTS horsies_workflow_recovery_failures (
 
 @dataclass(frozen=True)
 class RecoveryIndex:
-    """One fixed recovery index and its expected owner."""
+    """One fixed recovery index and its expected owner.
+
+    ``definition`` is the text of the index after ``ON <table>``: its key,
+    its INCLUDE columns and its predicate.
+    """
 
     name: str
     table: str
-    create_sql: str
+    definition: str
+
+    @property
+    def create_sql(self) -> str:
+        """The statement that builds the index under its name, concurrently."""
+        return self.build_sql(self.name)
+
+    def build_sql(self, index_name: str) -> str:
+        """The statement that builds this index under ``index_name``,
+        concurrently."""
+        return (
+            f'CREATE INDEX CONCURRENTLY {_safe_index_name(index_name)} '
+            f'ON {self.table} {self.definition}'
+        )
 
 
 RECOVERY_INDEXES = (
     RecoveryIndex(
         name='idx_horsies_workflows_running_recovery_scan',
         table='horsies_workflows',
-        create_sql=(
-            'CREATE INDEX CONCURRENTLY '
-            'idx_horsies_workflows_running_recovery_scan '
-            'ON horsies_workflows (created_at, id) INCLUDE (name) '
-            "WHERE status = 'RUNNING'"
-        ),
+        definition="(created_at, id) INCLUDE (name) WHERE status = 'RUNNING'",
     ),
     RecoveryIndex(
         name='idx_horsies_tasks_orphan_recovery_scan',
         table='horsies_tasks',
-        create_sql=(
-            'CREATE INDEX CONCURRENTLY '
-            'idx_horsies_tasks_orphan_recovery_scan '
-            'ON horsies_tasks (created_at, id) '
+        definition=(
+            '(created_at, id) '
             'WHERE is_workflow_task = TRUE '
             "AND status IN ('CLAIMED', 'PENDING')"
         ),
@@ -105,10 +115,8 @@ RECOVERY_INDEXES = (
     RecoveryIndex(
         name='idx_horsies_workflow_tasks_nonterminal',
         table='horsies_workflow_tasks',
-        create_sql=(
-            'CREATE INDEX CONCURRENTLY '
-            'idx_horsies_workflow_tasks_nonterminal '
-            'ON horsies_workflow_tasks (workflow_id) '
+        definition=(
+            '(workflow_id) '
             "WHERE status IN ('PENDING', 'READY', 'ENQUEUED', 'RUNNING')"
         ),
     ),
@@ -118,17 +126,19 @@ RECOVERY_INDEXES = (
     RecoveryIndex(
         name='idx_horsies_history_catalog_active',
         table='horsies_task_history_leaf_catalog',
-        create_sql=(
-            'CREATE INDEX CONCURRENTLY '
-            'idx_horsies_history_catalog_active '
-            'ON horsies_task_history_leaf_catalog (class_key, upper_anchor) '
-            'WHERE dropped_at IS NULL'
-        ),
+        definition='(class_key, upper_anchor) WHERE dropped_at IS NULL',
     ),
 )
 
 _INDEX_NAME = re.compile(r'^[a-z][a-z0-9_]*$')
+# An index on its way out: renamed from its name, then dropped concurrently.
 _CLAIM_PREFIX = 'horsies_recovery_index_claim_'
+# An index under construction: built concurrently, then renamed to its name.
+_BUILD_PREFIX = 'horsies_recovery_index_build_'
+# The declared form of an index, built on a temporary copy of its table's
+# columns inside the transaction that compares it, and dropped at commit.
+_EXPECTED_TABLE = 'horsies_expected_index'
+_EXPECTED_INDEX = 'horsies_expected_index_idx'
 _index_inspection_pause: Callable[[RecoveryIndex], Awaitable[None]] | None = None
 
 _INDEX_RELATION_STATE_SQL = text("""
@@ -143,7 +153,8 @@ SELECT relation.relname
 FROM pg_class AS relation
 JOIN pg_index AS index_state ON index_state.indexrelid = relation.oid
 WHERE index_state.indrelid = to_regclass(:table_name)
-  AND relation.relname LIKE 'horsies_recovery_index_claim\\_%' ESCAPE '\\'
+  AND (relation.relname LIKE 'horsies_recovery_index_claim\\_%' ESCAPE '\\'
+       OR relation.relname LIKE 'horsies_recovery_index_build\\_%' ESCAPE '\\')
 """)
 
 
@@ -171,11 +182,36 @@ def _safe_index_name(name: str) -> str:
     return name
 
 
-async def _claim_existing_index(
+@dataclass(frozen=True, slots=True)
+class IndexAbsent:
+    """No relation has the name of the index."""
+
+
+@dataclass(frozen=True, slots=True)
+class IndexMatches:
+    """The table owns an index of the name, valid and of the declared form."""
+
+
+@dataclass(frozen=True, slots=True)
+class IndexDiffers:
+    """The table owns an index of the name of another form, or an invalid one."""
+
+
+IndexState: TypeAlias = IndexAbsent | IndexMatches | IndexDiffers
+
+
+async def _inspect_index(
     engine: 'AsyncEngine',
     index: RecoveryIndex,
-) -> str | None:
-    """Rename an expected canonical index and recheck its owner."""
+) -> IndexState:
+    """Whether the table owns an index of the name, and whether it has the
+    declared form (``_INDEX_FORMS_MATCH_SQL``).
+
+    Changes nothing that outlives the transaction: the declared form is built
+    on a temporary table that drops at commit. Raises ``RuntimeError`` when a
+    relation other than ``index.table`` owns the name. Database errors
+    propagate.
+    """
     async with engine.begin() as connection:
         owner = await _relation_owner(
             connection,
@@ -186,20 +222,72 @@ async def _claim_existing_index(
             await _index_inspection_pause(index)
         match owner:
             case None:
-                return None
+                return IndexAbsent()
             case False:
                 raise RuntimeError(
-                    f'{index.name} belongs to a relation other than '
-                    f'{index.table}'
+                    f'{index.name} belongs to a relation other than {index.table}'
                 )
             case True:
                 pass
+        await connection.execute(
+            text(
+                f'CREATE TEMP TABLE {_EXPECTED_TABLE} (LIKE {index.table}) '
+                'ON COMMIT DROP'
+            )
+        )
+        await connection.execute(
+            text(
+                f'CREATE INDEX {_EXPECTED_INDEX} ON {_EXPECTED_TABLE} '
+                f'{index.definition}'
+            )
+        )
+        matches = (
+            await connection.execute(
+                _INDEX_FORMS_MATCH_SQL,
+                {
+                    'expected_index': _EXPECTED_INDEX,
+                    'index_name': index.name,
+                    'table_name': index.table,
+                },
+            )
+        ).scalar_one()
+        return IndexMatches() if bool(matches) else IndexDiffers()
 
+
+async def _swap_in_built_index(
+    engine: 'AsyncEngine',
+    index: RecoveryIndex,
+    build_name: str,
+) -> str:
+    """Rename the index of the name to a claim name and the built index to the
+    name, in one transaction. Returns the claim name, which the caller drops.
+
+    Readers of the table see the old index or the built one under the name,
+    never neither. Raises ``RuntimeError`` when the table no longer owns an
+    index of the name; nothing is renamed then, and the built index keeps its
+    build name for ``_remove_abandoned_claims``. Database errors propagate.
+    """
+    async with engine.begin() as connection:
+        owner = await _relation_owner(
+            connection,
+            index_name=index.name,
+            table_name=index.table,
+        )
+        match owner:
+            case True:
+                pass
+            case None | False:
+                raise RuntimeError(
+                    f'{index.name} is no longer an index of {index.table} '
+                    'while the migration replaced it'
+                )
         claim_name = f'{_CLAIM_PREFIX}{uuid.uuid4().hex}'
-        await connection.execute(text(
-            f'ALTER INDEX IF EXISTS {_safe_index_name(index.name)} '
-            f'RENAME TO {_safe_index_name(claim_name)}'
-        ))
+        await connection.execute(
+            text(
+                f'ALTER INDEX {_safe_index_name(index.name)} '
+                f'RENAME TO {_safe_index_name(claim_name)}'
+            )
+        )
         claimed_owner = await _relation_owner(
             connection,
             index_name=claim_name,
@@ -209,7 +297,31 @@ async def _claim_existing_index(
             raise RuntimeError(
                 f'{index.name} changed owner while the migration claimed it'
             )
+        await connection.execute(
+            text(
+                f'ALTER INDEX {_safe_index_name(build_name)} '
+                f'RENAME TO {_safe_index_name(index.name)}'
+            )
+        )
         return claim_name
+
+
+async def _replace_index(
+    engine: 'AsyncEngine',
+    index: RecoveryIndex,
+) -> None:
+    """Build the declared index under a build name, swap it in under the
+    name (``_swap_in_built_index``), and drop the old one concurrently.
+
+    The table keeps an index of the name throughout. A failure leaves the
+    old index under the name, or under a claim name next to the new one;
+    ``_remove_abandoned_claims`` drops the leftover on a later install.
+    Database errors propagate.
+    """
+    build_name = f'{_BUILD_PREFIX}{uuid.uuid4().hex}'
+    await _create_index_concurrently(engine, index, build_name)
+    claim_name = await _swap_in_built_index(engine, index, build_name)
+    await _drop_index_concurrently(engine, claim_name)
 
 
 async def _autocommit(connection: 'AsyncConnection') -> 'AsyncConnection':
@@ -230,10 +342,11 @@ async def _drop_index_concurrently(
 async def _create_index_concurrently(
     engine: 'AsyncEngine',
     index: RecoveryIndex,
+    index_name: str,
 ) -> None:
     async with engine.connect() as connection:
         connection = await _autocommit(connection)
-        await connection.execute(text(index.create_sql))
+        await connection.execute(text(index.build_sql(index_name)))
 
 
 async def _remove_abandoned_claims(
@@ -249,7 +362,7 @@ async def _remove_abandoned_claims(
         ).all()
     for row in rows:
         claim_name = str(row[0])
-        if not claim_name.startswith(_CLAIM_PREFIX):
+        if not claim_name.startswith((_CLAIM_PREFIX, _BUILD_PREFIX)):
             raise RuntimeError(f'unexpected recovery index claim: {claim_name}')
         await _drop_index_concurrently(engine, claim_name)
 
@@ -258,17 +371,32 @@ async def _install_exact_indexes(
     engine: 'AsyncEngine',
     indexes: tuple[RecoveryIndex, ...],
 ) -> None:
-    """Drop each index of that name, then build it, outside a transaction."""
+    """Give each index its declared form under its name, outside a
+    transaction.
+
+    An index of the declared form is kept. An absent one is built
+    concurrently under its name. One of another form, or an invalid one, is
+    replaced (``_replace_index``), so readers keep an index of the name. Then
+    each claim or build name left on the table by an interrupted install is
+    dropped. Raises ``RuntimeError`` when another relation owns a name.
+    Database errors propagate.
+    """
     for index in indexes:
-        claim_name = await _claim_existing_index(engine, index)
-        if claim_name is not None:
-            await _drop_index_concurrently(engine, claim_name)
-        await _create_index_concurrently(engine, index)
+        match await _inspect_index(engine, index):
+            case IndexMatches():
+                pass
+            case IndexAbsent():
+                await _create_index_concurrently(engine, index, index.name)
+            case IndexDiffers():
+                await _replace_index(engine, index)
+            case _ as unreachable:
+                assert_never(unreachable)
         await _remove_abandoned_claims(engine, index)
 
 
 async def install_recovery_indexes(engine: 'AsyncEngine') -> None:
-    """Install the exact indexes outside a transaction."""
+    """Install the exact recovery indexes outside a transaction
+    (``_install_exact_indexes``)."""
     await _install_exact_indexes(engine, RECOVERY_INDEXES)
 
 
@@ -295,11 +423,7 @@ class ClaimIndex:
         return RecoveryIndex(
             name=self.name,
             table='horsies_tasks',
-            create_sql=(
-                f'CREATE INDEX CONCURRENTLY {self.name} '
-                f'ON horsies_tasks {_CLAIM_INDEX_KEY} '
-                f"WHERE status = '{self.status}'"
-            ),
+            definition=f"{_CLAIM_INDEX_KEY} WHERE status = '{self.status}'",
         )
 
 
@@ -316,9 +440,10 @@ CLAIM_INDEXES: Final[tuple[RecoveryIndex, ...]] = tuple(
 async def install_claim_indexes(engine: 'AsyncEngine') -> None:
     """Install the exact claim indexes outside a transaction.
 
-    Like the recovery indexes, an index of the same name is dropped and
-    built again, so its definition is exact after every schema upgrade.
-    Database errors propagate.
+    As for the recovery indexes (``_install_exact_indexes``): an index of the
+    declared form is kept, and one of another form is replaced while an index
+    of its name stays on horsies_tasks, so running claims keep their index
+    across a schema upgrade. Database errors propagate.
     """
     await _install_exact_indexes(engine, CLAIM_INDEXES)
 
@@ -326,8 +451,10 @@ async def install_claim_indexes(engine: 'AsyncEngine') -> None:
 _INDEX_SHAPE_SQL: Final = """jsonb_build_object(
                'method', am.amname, 'valid', i.indisvalid,
                'ready', i.indisready, 'live', i.indislive,
-               'unique', i.indisunique, 'key_count', i.indnkeyatts,
+               'unique', i.indisunique, 'exclusion', i.indisexclusion,
+               'immediate', i.indimmediate, 'key_count', i.indnkeyatts,
                'attribute_count', i.indnatts,
+               'has_expressions', i.indexprs IS NOT NULL,
                'columns', (
                    SELECT jsonb_agg(pg_get_indexdef(i.indexrelid, n, FALSE)
                                     ORDER BY n)
@@ -338,6 +465,26 @@ _INDEX_SHAPE_SQL: Final = """jsonb_build_object(
                'options', to_jsonb(i.indoption::smallint[]),
                'predicate', pg_get_expr(i.indpred, i.indrelid)
            )"""
+
+
+# Whether the index of the name on the table has the form of the expected
+# index; false when the table owns no index of the name.
+_INDEX_FORMS_MATCH_SQL = text(f"""
+SELECT (
+    SELECT {_INDEX_SHAPE_SQL}
+    FROM pg_index AS i
+    JOIN pg_class AS ic ON ic.oid = i.indexrelid
+    JOIN pg_am AS am ON am.oid = ic.relam
+    WHERE ic.oid = to_regclass(:expected_index)
+) IS NOT DISTINCT FROM (
+    SELECT {_INDEX_SHAPE_SQL}
+    FROM pg_index AS i
+    JOIN pg_class AS ic ON ic.oid = i.indexrelid
+    JOIN pg_am AS am ON am.oid = ic.relam
+    WHERE ic.oid = to_regclass(:index_name)
+      AND i.indrelid = to_regclass(:table_name)
+)
+""")
 
 
 def _claim_index_check(spec: ClaimIndex, position: int) -> str:

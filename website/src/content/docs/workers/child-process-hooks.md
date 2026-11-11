@@ -148,11 +148,18 @@ Snapshot of registered hooks in registration order.
 
 | Parameter | Type | Required | Description |
 | --------- | ---- | -------- | ----------- |
-| `fn` | `SharedAsyncChildStartHook` (`Callable[[], Coroutine[Any, Any, None]]`) | Yes | `async def` function with no arguments. Registered once per identity; duplicate registrations are ignored. |
+| `fn` | `SharedAsyncChildStartHook` (`Callable[[], Coroutine[Any, Any, None]]`) | Yes | A callable with no arguments whose call returns a coroutine. Registered once per identity; duplicate registrations are ignored. |
 
 **Returns:** the function unchanged (usable as a decorator).
 
-**Raises:** `ConfigurationError` (`HRS-214`) — `fn` is not callable or is not an async function.
+**Raises:** `ConfigurationError` (`HRS-214`) — `fn` is not callable, or the registration can read that its call does not return a coroutine.
+
+The registration does not call `fn`. It accepts:
+
+- an `async def` function;
+- an object whose `__call__` is `async def`;
+- a function, or an object whose `__call__` is a function, whose return annotation is an awaitable type, such as `Coroutine[Any, Any, None]`;
+- a lambda, which can be neither `async def` nor annotated. The child awaits its value; when that value is not awaitable, the hook fails when the child starts, and the worker stops.
 
 ### `app.get_shared_async_child_start_hooks() -> list[SharedAsyncChildStartHook]`
 

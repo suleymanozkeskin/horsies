@@ -1411,6 +1411,24 @@ class TestWorkerStateSnapshotInterval:
         with pytest.raises(ConfigurationError, match='above the cap of 100000ms'):
             module.RecoveryConfig(worker_state_snapshot_interval_ms=100_001)
 
+    @pytest.mark.parametrize(
+        'interval_ms',
+        [10**20, 10**5_000],
+        ids=['21 digits', 'above the int text limit'],
+    )
+    def test_a_huge_value_is_refused_with_its_size(self, interval_ms: int) -> None:
+        """Python refuses to turn an int of more than 4,300 digits into text:
+        the refusal shows the size of the value, and stays HRS-204."""
+        with pytest.raises(ConfigurationError) as exc_info:
+            RecoveryConfig(worker_state_snapshot_interval_ms=interval_ms)
+
+        error = exc_info.value
+        assert error.code == ErrorCode.CONFIG_INVALID_RECOVERY
+        assert error.message == (
+            'worker_state_snapshot_interval_ms has more than 20 digits, above '
+            'the cap of 60000ms'
+        )
+
     @pytest.mark.parametrize('interval_ms', [60_001, 120_000, 300_000])
     def test_above_cap_refused_with_field_value_cap_and_reason(
         self,

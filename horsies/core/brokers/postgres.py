@@ -512,6 +512,7 @@ from horsies.core.schemas.migrations import (
     ADD_TERMINALIZATION_KIND_COLUMN_SQL,
     BACKFILL_TERMINAL_AT_SQL,
     CREATE_CLAIM_CANDIDATES_FUNCTION_SQL,
+    CREATE_CLAIM_PLAN_FUNCTION_SQL,
     CREATE_CLAIM_FUNCTION_SQL,
     CREATE_OUTCOME_TYPE_SQL,
     CREATE_TERMINALIZATION_FUNCTIONS_SQL,
@@ -1671,13 +1672,16 @@ class PostgresBroker:
             # v54: the class-keyed pending claim index.
             # v55: the class-keyed expired claim index.
             await install_claim_indexes(engine)
+            await self._activate_bounded_recovery(engine)
+            # After the version row commits, so a failed upgrade leaves the
+            # earlier claim function the indexes it reads:
             # v43: drop the task retention indexes that no query reads.
             # v45: drop the workflow-node indexes that the workflow-scoped
             # indexes make redundant.
-            # v55: drop the claim indexes that have no class in their key,
-            # after the class-keyed ones exist.
+            # v55: drop the claim indexes that have no class in their key.
+            # A removal that fails here leaves those indexes until the next
+            # schema upgrade, which runs it again.
             await remove_retired_indexes(engine)
-            await self._activate_bounded_recovery(engine)
 
     async def _add_task_execution_column(self, engine: AsyncEngine) -> None:
         """Add horsies_tasks.execution and its value domain (v54), in one
@@ -1714,9 +1718,11 @@ class PostgresBroker:
             await conn.execute(VALIDATE_CLAIM_INDEXES_SQL)
             # v55 on a database already past the v35 apply path: the claim
             # pair before v55 has other signatures, so it is dropped by its
-            # exact argument types, and the current pair is installed.
+            # exact argument types, and the current claim functions are
+            # installed.
             for drop_claim_function in DROP_PREVIOUS_CLAIM_FUNCTIONS_SQL:
                 await conn.execute(drop_claim_function)
+            await conn.execute(CREATE_CLAIM_PLAN_FUNCTION_SQL)
             await conn.execute(CREATE_CLAIM_CANDIDATES_FUNCTION_SQL)
             await conn.execute(CREATE_CLAIM_FUNCTION_SQL)
             uuid_identity = bool(
@@ -1874,6 +1880,7 @@ class PostgresBroker:
             # Migration (v55): per-class budgets; the earlier signatures go.
             for drop_claim_function in DROP_PREVIOUS_CLAIM_FUNCTIONS_SQL:
                 await conn.execute(drop_claim_function)
+            await conn.execute(CREATE_CLAIM_PLAN_FUNCTION_SQL)
             await conn.execute(CREATE_CLAIM_CANDIDATES_FUNCTION_SQL)
             await conn.execute(CREATE_CLAIM_FUNCTION_SQL)
 
@@ -3744,10 +3751,11 @@ class PostgresBroker:
         A worker is live while its latest snapshot is at most
         ``WORKER_STATE_LIVE_WINDOW_S`` old. It serves a (queue, class) when
         the queue is one of its queues and one of its budgets serves the
-        class. Reads only. ``Err(MONITORING_QUERY_FAILED)``: a database or
-        network error, a live snapshot whose ``class_capacity`` is
-        unreadable or missing, or a read that reached its bound
-        (``retryable`` is ``False`` for the last three).
+        class. A live worker whose snapshot has no ``class_capacity`` is left
+        out and named in ``ClassCoverage.not_recorded``. Reads only.
+        ``Err(MONITORING_QUERY_FAILED)``: a database or network error, a live
+        snapshot whose ``class_capacity`` is unreadable, or a read that
+        reached its bound (``retryable`` is ``False`` for the last two).
         ``Err(EVENT_LOOP_LIMIT)``: nothing ran. A code defect raises.
         """
         match await self.select_resources():
@@ -3774,9 +3782,11 @@ class PostgresBroker:
         """Pending streams with the wait of their oldest due row and their
         coverage, and the budget load of each live worker.
 
-        Reads only. ``Err(MONITORING_QUERY_FAILED)``: as
-        ``get_class_coverage_async``, or a live worker holds rows of a class
-        that its recorded budgets do not serve.
+        A live worker whose snapshot has no ``class_capacity`` is left out
+        and named in ``ClassReport.not_recorded``. Reads only.
+        ``Err(MONITORING_QUERY_FAILED)``: as ``get_class_coverage_async``, or
+        a live worker holds rows of a class that its recorded budgets do not
+        serve.
         """
         match await self.select_resources():
             case Err(loop_limit):

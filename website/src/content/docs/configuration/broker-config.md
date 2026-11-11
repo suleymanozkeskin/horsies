@@ -278,6 +278,7 @@ A process can open this once per set:
 | Sync calls only, or async calls from one loop only | 1 |
 | ASGI app with async endpoints and sync calls in a thread pool | 2 |
 | pytest run with a session-scoped broker and function-scoped async tests | 2 (session loop, current test loop), plus 1 when tests make sync calls |
+| Worker child whose task code sends | 1 for the sync tasks (the runner loop), plus 1 for the async tasks (the task loop) |
 
 ### Things to Avoid
 

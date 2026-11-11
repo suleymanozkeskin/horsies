@@ -2,8 +2,8 @@
 
 Each outcome of each function has a test: a stream is served, served
 without capacity, or unserved; a stream waits or has no due row; a live
-snapshot reads, is missing its budgets, or is unreadable; a worker's rows
-fit its budgets or do not.
+snapshot reads, is missing its budgets (the worker is left out and named),
+or is unreadable; a worker's rows fit its budgets or do not.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import pytest
 
 from horsies.core.models.class_coverage import (
     BudgetLoad,
+    ClassesNotRecorded,
     ClassReadRefused,
     LiveWorker,
     NoneDue,
@@ -147,13 +148,10 @@ class TestLiveWorker:
             ),
         )
 
-    def test_a_snapshot_without_budgets_is_refused_with_the_worker_named(self) -> None:
-        match live_worker('w-old', AT, ['a'], None):
-            case Err(ClassReadRefused(reason=reason)):
-                assert 'w-old' in reason
-                assert 'no class_capacity' in reason
-            case other:
-                raise AssertionError(other)
+    def test_a_snapshot_without_budgets_is_a_worker_left_out(self) -> None:
+        assert live_worker('w-old', AT, ['a'], None) == Ok(
+            ClassesNotRecorded('w-old', AT),
+        )
 
     def test_an_unreadable_snapshot_is_refused_with_the_worker_named(self) -> None:
         match live_worker('w-bad', AT, ['a'], {'EXCLUSIVE': {}}):
@@ -214,6 +212,7 @@ class TestClassCoverage:
         coverage = class_coverage(
             AT,
             workers,
+            [],
             [('b', ISOLATED), ('a', THREAD), ('a', ISOLATED)],
         )
 
@@ -226,9 +225,31 @@ class TestClassCoverage:
         )
 
     def test_no_pending_row_gives_no_stream(self) -> None:
-        coverage = class_coverage(AT, [], [])
+        coverage = class_coverage(AT, [], [], [])
         assert coverage.streams == ()
         assert coverage.live_workers == 0
+        assert coverage.not_recorded == ()
+
+    def test_workers_left_out_serve_no_stream_and_are_named_in_id_order(
+        self,
+    ) -> None:
+        not_recorded = [
+            ClassesNotRecorded('w-old-2', AT),
+            ClassesNotRecorded('w-old-1', AT),
+        ]
+        coverage = class_coverage(
+            AT,
+            [_async_only_worker('w1', 2, {'a'})],
+            not_recorded,
+            [('a', ISOLATED)],
+        )
+
+        assert coverage.live_workers == 1
+        assert coverage.not_recorded == (
+            ClassesNotRecorded('w-old-1', AT),
+            ClassesNotRecorded('w-old-2', AT),
+        )
+        assert coverage.streams == (StreamCoverage('a', ISOLATED, StreamUnserved()),)
 
 
 @pytest.mark.unit
@@ -239,7 +260,7 @@ class TestClassReport:
             StreamHead('a', ISOLATED, AT - timedelta(seconds=50)),
             StreamHead('a', ASYNC, AT + timedelta(seconds=60)),
         ]
-        match class_report(AT, [_async_only_worker('w1', 3, {'a'})], heads, {}):
+        match class_report(AT, [_async_only_worker('w1', 3, {'a'})], [], heads, {}):
             case Ok(report):
                 pass
             case Err(refused):
@@ -260,7 +281,7 @@ class TestClassReport:
     def test_workers_come_in_worker_id_order_with_their_rows(self) -> None:
         workers = [_isolated_worker('w2', 2, {'a'}), _isolated_worker('w1', 4, {'a'})]
         in_flight = {('w1', ISOLATED): 3, ('w2', THREAD): 1}
-        match class_report(AT, workers, [], in_flight):
+        match class_report(AT, workers, [], [], in_flight):
             case Ok(report):
                 pass
             case Err(refused):
@@ -274,5 +295,21 @@ class TestClassReport:
 
     def test_rows_that_no_budget_serves_refuse_the_report(self) -> None:
         workers = [_async_only_worker('w1', 3, {'a'})]
-        result = class_report(AT, workers, [], {('w1', ISOLATED): 1})
+        result = class_report(AT, workers, [], [], {('w1', ISOLATED): 1})
         assert isinstance(result, Err)
+
+    def test_workers_left_out_are_named_and_carry_no_load(self) -> None:
+        match class_report(
+            AT,
+            [_isolated_worker('w1', 2, {'a'})],
+            [ClassesNotRecorded('w-old', AT)],
+            [],
+            {},
+        ):
+            case Ok(report):
+                pass
+            case Err(refused):
+                raise AssertionError(refused)
+
+        assert [worker.worker_id for worker in report.workers] == ['w1']
+        assert report.not_recorded == (ClassesNotRecorded('w-old', AT),)

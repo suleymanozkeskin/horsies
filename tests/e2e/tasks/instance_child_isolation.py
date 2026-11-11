@@ -31,7 +31,9 @@ config = AppConfig(
     recovery=RecoveryConfig(
         runner_heartbeat_interval_ms=1_000,
         claimer_heartbeat_interval_ms=1_000,
-        running_stale_threshold_ms=5_000,
+        # The smallest threshold with auto_fail_stale_running on:
+        # 2 x (runner_heartbeat_interval_ms + 2 s).
+        running_stale_threshold_ms=6_000,
         finalizing_stale_threshold_ms=5_000,
         check_interval_ms=1_000,
     ),

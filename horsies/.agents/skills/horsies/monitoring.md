@@ -137,7 +137,7 @@ list_schedules(broker)
   `Execution`), `capacity` (children or seats in service) and `serves` (the
   classes whose rows it claims). Empty `budgets`: the worker serves no class.
 - Fleet check: `app.get_class_coverage_async()` →
-  `ClassCoverage(checked_at, live_workers, streams)`. One `StreamCoverage`
+  `ClassCoverage(checked_at, live_workers, not_recorded, streams)`. One `StreamCoverage`
   per (queue, class) with PENDING rows; `state` is
   `StreamServed(workers, capacity)`, `StreamWithoutCapacity(workers)` (every
   serving child or seat is down) or `StreamUnserved()` (no live worker has
@@ -147,17 +147,22 @@ list_schedules(broker)
   running worker stays live when a snapshot write is late by up to half the
   window. Each reaper pass runs it and
   logs unserved at error, without-capacity at warning, once per 5 min per
-  (queue, class) per worker. Fix unserved `ISOLATED` with a worker that has
+  (queue, class) per worker. A live snapshot with no `class_capacity` (a
+  worker version that does not record budgets) leaves that worker out:
+  `not_recorded` holds `ClassesNotRecorded(worker_id, snapshot_at)` by id, it
+  is not in `live_workers`, and the reaper names it in one warning per 5 min.
+  Fix unserved `ISOLATED` with a worker that has
   isolated children (shared rows go back to the queue as `ISOLATED` when
   their task's class changed); a shared class with children of that class or
   isolated children.
 - `app.get_class_report_async()` → `ClassReport(checked_at, streams,
-  workers)`. `PendingStream.wait` is `OldestWaiting(enqueued_at, wait)` or
+  workers, not_recorded)`. `PendingStream.wait` is `OldestWaiting(enqueued_at, wait)` or
   `NoneDue(next_due_at)`; `WorkerClassLoad.budgets` holds `BudgetLoad(budget,
   capacity, serves, in_flight)` with `.free` = `max(0, capacity -
   in_flight)`. Both reads fail with `MONITORING_QUERY_FAILED`
-  (`retryable=False`) when a live snapshot has no or unreadable
-  `class_capacity`, naming the worker. Web: `GET /api/workers/classes`.
+  (`retryable=False`) when a live snapshot has an unreadable
+  `class_capacity`, naming the worker. Web: `GET /api/workers/classes`
+  (`not_recorded` lists the left-out workers).
 - A snapshot's `recovery_config` embeds three health payloads:
   `partition_coverage` (coverage-ensure outcome; fails before fewer than two
   future partitions remain), `partition_pruning`
