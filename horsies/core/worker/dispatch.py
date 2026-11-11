@@ -466,13 +466,17 @@ class DispatchMixin:
     async def _replay_committed_terminalization(self, task_id: str) -> None:
         """Replay phase 2 from the terminal row this claim committed.
 
-        Total: a failed load or phase 2 goes to the finalize retry handler.
+        A plain task owes nothing: the failed-attempt finish sent its
+        capacity wake in the statement that committed. Total: a failed load
+        or phase 2 goes to the finalize retry handler.
         """
         load_r = await self._load_persisted_task_result(task_id)
         if is_err(load_r):
             await self._handle_finalize_error(load_r.err_value)
             return
         persisted = load_r.ok_value
+        if not persisted.is_workflow_task:
+            return
         phase2_r = await self._finalize_workflow_phase(
             task_id,
             persisted.result,

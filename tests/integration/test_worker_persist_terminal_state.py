@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -823,6 +824,51 @@ async def test_workflow_phase1_replay_loads_the_persisted_result(
     assert kind == 'COMPLETE_LOCKED'
     # The move archives the attempts and purges the live rows, so the
     # snapshot is where the one attempt now lives.
+    assert len(await read_attempt_history(session, task_id)) == 1
+
+
+@pytest.mark.parametrize('is_workflow_task', [False, True], ids=['plain', 'workflow'])
+@pytest.mark.asyncio(loop_scope='function')
+async def test_failure_phase1_replay_after_a_lost_reply(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+    is_workflow_task: bool,
+) -> None:
+    """A second phase 1 of a committed failure writes nothing. A plain task
+    owes no phase 2 (its wake was sent by the committed write); a workflow
+    task gets the persisted result for its phase 2."""
+    generation = datetime.now(timezone.utc) - timedelta(seconds=1)
+    task_id = await _insert_running_task(
+        session,
+        is_workflow_task=is_workflow_task,
+        claimed_at=generation,
+    )
+    worker = _make_worker(engine)
+    result_json = _serialize_err('TRANSIENT', 'failed once')
+
+    async def phase1() -> Any:
+        return await worker._persist_task_terminal_state(
+            task_id=task_id,
+            now=NOW,
+            ok=True,
+            result_json_str=result_json,
+            failed_reason=None,
+            task_name='persist_terminal_test',
+            queue_name='default',
+            is_workflow_task=is_workflow_task,
+            claimed_at=generation,
+        )
+
+    first = await phase1()
+    replay = await phase1()
+
+    assert is_ok(first) and is_ok(replay)
+    if is_workflow_task:
+        assert first.ok_value is not None and replay.ok_value is not None
+        assert replay.ok_value.result.unwrap_err().message == 'failed once'
+    else:
+        assert (first.ok_value, replay.ok_value) == (None, None)
     assert len(await read_attempt_history(session, task_id)) == 1
 
 

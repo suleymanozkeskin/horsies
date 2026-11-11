@@ -229,6 +229,22 @@ class _Phase1Input:
     failed_reason: str | None
 
 
+def _phase2_of_a_replay(
+    loaded: Result[_PersistedTaskOutcome, _FinalizeError],
+) -> Result[_PersistedTaskOutcome | None, _FinalizeError]:
+    """What phase 2 still owes after a replay of a committed failure. Pure.
+
+    The failed-attempt finish sent the capacity wake of a plain task in the
+    statement that committed, so a plain task owes nothing; a workflow task
+    owes its phase 2.
+    """
+    match loaded:
+        case Ok(ok_value=persisted) if not persisted.is_workflow_task:
+            return Ok(None)
+        case Ok() | Err():
+            return loaded
+
+
 def _attempt_failure_of(
     report: WorkerLevelFailure | ResultUndecodable | ErrorProduced,
 ) -> AttemptFailure:
@@ -1549,7 +1565,9 @@ class FinalizeMixin:
                 self._wake_when_retry_due(outcome, retry)
                 return Ok(None)
             case AlreadyApplied(task_id=task_id):
-                return await self._load_persisted_task_result(task_id, session=s)
+                return _phase2_of_a_replay(
+                    await self._load_persisted_task_result(task_id, session=s),
+                )
             case LostClaim() | SourceStateConflict() | TaskAbsent():
                 return Ok(None)
             case _ as unreachable:

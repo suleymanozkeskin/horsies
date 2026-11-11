@@ -308,6 +308,7 @@ async def test_future_failure_retry_replays_committed_terminal_phase(
         session,
         worker_id=worker.worker_instance_id,
         max_retries=0,
+        is_workflow_task=True,
     )
 
     first = await worker._recover_worker_future_failure(task_id, 'process died')
@@ -324,6 +325,30 @@ async def test_future_failure_retry_replays_committed_terminal_phase(
     )
     # The replay must add no attempt to the one the first call committed,
     # counted wherever the move left it.
+    assert len(await read_attempts(session, task_id)) == 1
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_future_failure_replay_of_a_plain_task_sends_no_second_wake(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """The committed write sent the capacity wake of a plain task, so its
+    replay runs no phase 2 and adds no attempt."""
+    worker = _make_worker(engine)
+    task_id = await _insert_owned_running_task(
+        session,
+        worker_id=worker.worker_instance_id,
+        max_retries=0,
+    )
+
+    first = await worker._recover_worker_future_failure(task_id, 'process died')
+    replay = await worker._recover_worker_future_failure(task_id, 'process died')
+
+    assert first is _RequeueOutcome.REQUEUED
+    assert replay is _RequeueOutcome.TERMINAL_REPLAYED
+    worker._finalize_workflow_phase.assert_not_awaited()  # type: ignore[attr-defined]
     assert len(await read_attempts(session, task_id)) == 1
 
 
