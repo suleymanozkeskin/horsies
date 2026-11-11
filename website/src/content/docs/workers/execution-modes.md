@@ -37,7 +37,7 @@ A worker gives a task more isolation than its row asks for, never less. A worker
 
 A shared async seat is one coroutine on the event loop of the child. A seat that waits costs no process and no thread. It holds at least one socket while it waits, and the process has a limit of open files (`ulimit -n`, often 1024). `seats` is at most 1000 per child.
 
-What a cancel did to common clients. Conditions: one shared async child, CPython 3.13, a local network, 30 runs per case. A paused database container stood in for a server that stops answering.
+The list below shows what a cancel did to common clients. Conditions: one shared async child, CPython 3.13, a local network, 30 runs per case. A paused database container stood in for a server that stops answering.
 
 - A healthy server: httpx, aiohttp, psycopg, asyncpg and SQLAlchemy ended within 16 ms of the first cancel.
 - httpx and aiohttp, against a server that does not answer or stops mid-body: ended within 6 ms of the first cancel. One run took 64 ms, during a stall of the host.
@@ -45,7 +45,7 @@ What a cancel did to common clients. Conditions: one shared async child, CPython
 - asyncpg, against a server that stops answering: did not end after the first cancel. The second cancel ended a connection within 1 ms. A pool needed one more cancel round, about 0.1 s.
 - `asyncio.to_thread()` and a DNS lookup: no cancel stopped the thread. It ran until the client timeout or the resolver gave up (9.7 s with glibc defaults).
 
-The child sends the second cancel at `timeout_ms + cancel_grace_ms`, then two more rounds. The full table is in [The Timeout](/horsies/workers/shared-async-tasks/#the-timeout).
+When the task is still alive at `timeout_ms + cancel_grace_ms`, the child sends the second cancel, then two more rounds. The full table is in [The Timeout](/horsies/workers/shared-async-tasks/#the-timeout).
 
 A cancel of one task did not slow the other tasks of the loop. Conditions: one event loop with 25 tasks; 24 tasks sent HTTP requests to a server with a 100 ms delay through one shared `httpx.AsyncClient`; one task ran one of 13 cancel cases, among them servers that stop answering; 10 runs per case, about 26,500 requests per case. Result: the request latency of the 24 tasks stayed within 0.6 ms (p50) and 1.6 ms (p99) of runs with no cancelled task.
 
