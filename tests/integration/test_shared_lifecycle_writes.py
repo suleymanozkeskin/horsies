@@ -10,7 +10,9 @@ real terminalization functions, on such a pool.
 
 from __future__ import annotations
 
+import asyncio
 import os
+import time
 import uuid
 from collections.abc import AsyncGenerator
 from datetime import datetime, timedelta, timezone
@@ -25,7 +27,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.tasks import OutcomeCode
+from horsies.core.worker import shared_lifecycle
 from horsies.core.worker.child_pool import open_shared_async_pool
+from horsies.core.worker.child_runner import _PRE_START_CONFIRM_ATTEMPTS
 from horsies.core.worker.shared_lifecycle import (
     confirm_until_not_resumed,
     mark_task_finalizing,
@@ -152,6 +156,59 @@ async def test_the_running_update_writes_the_first_beat_and_the_marker_follows(
     assert await _runner_beats(session, task_id) == [f'{WORKER_ID}:{os.getpid()}']
     assert marked.finalizing_at is not None
     assert marked.finalizing_by_worker_id == WORKER_ID
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_a_running_update_that_waits_on_a_row_lock_ends_at_its_bound(
+    session: AsyncSession,
+    shared_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    clean_workflow_tables: None,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another session holds the row lock. Each attempt of the RUNNING
+    transition ends at its bound: the run stops before user code with
+    OWNERSHIP_UNCONFIRMED, the row stays CLAIMED, and the pool serves the
+    next write once the lock is gone."""
+    monkeypatch.setattr(shared_lifecycle, 'RUNNING_ATTEMPT_TIMEOUT_S', 0.5)
+    claimed_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    task_id = await _seed_claimed_task(session, claimed_at=claimed_at)
+    await session.execute(
+        text('SELECT id FROM horsies_tasks WHERE id = CAST(:id AS uuid) FOR UPDATE'),
+        {'id': task_id},
+    )
+    started = time.monotonic()
+
+    try:
+        result = await asyncio.wait_for(
+            confirm_until_not_resumed(
+                shared_pool,
+                task_id,
+                WORKER_ID,
+                False,
+                claimed_at,
+            ),
+            timeout=10.0,
+        )
+    finally:
+        await session.rollback()
+    elapsed_s = time.monotonic() - started
+
+    assert result == (False, '', 'OWNERSHIP_UNCONFIRMED')
+    assert elapsed_s < _PRE_START_CONFIRM_ATTEMPTS * (
+        0.5 + shared_lifecycle.CANCELLED_WRITE_END_S
+    )
+    assert (await _row(session, task_id)).status == 'CLAIMED'
+    assert await _runner_beats(session, task_id) == []
+    assert (
+        await confirm_until_not_resumed(
+            shared_pool,
+            task_id,
+            WORKER_ID,
+            False,
+            claimed_at,
+        )
+        is None
+    )
 
 
 @pytest.mark.asyncio(loop_scope='function')

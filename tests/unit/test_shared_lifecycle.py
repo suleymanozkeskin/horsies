@@ -31,8 +31,10 @@ from horsies.core.lifecycle.outcomes import (
     SourceStateConflict,
 )
 from horsies.core.models.tasks import OutcomeCode
-from horsies.core.worker import shared_lifecycle
+from horsies.core.worker import shared_lifecycle, slots
+from horsies.core.worker.child_pool import SHARED_POOL_CONNECTION_WAIT_S
 from horsies.core.worker.child_runner import (
+    _PRE_START_CONFIRM_ATTEMPTS,
     MARK_FINALIZING_SQL,
     RESET_PAUSED_NODE_SQL,
     SKIP_CANCELLED_NODE_SQL,
@@ -45,6 +47,8 @@ from horsies.core.worker.child_runner import (
 pytestmark = [pytest.mark.unit]
 
 CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
+# A test of a bound fails, not hangs, when the bound is gone.
+OUTER_BOUND_S = 5.0
 
 
 class _Row(tuple[Any, ...]):
@@ -190,6 +194,76 @@ class TestSetRunning:
                 await run
 
         asyncio.run(cancel_it())
+
+    def test_a_transition_that_hangs_ends_at_its_bound(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """An UPDATE that waits on a row lock, or a server that does not
+        answer, ends each attempt at its bound with OWNERSHIP_UNCONFIRMED:
+        the run stops before user code, and the refusal backstop of the
+        parent never fires for it."""
+
+        class _HangingCursor(_Cursor):
+            async def execute(self, sql: str, params: tuple[Any, ...]) -> None:
+                await asyncio.Event().wait()
+
+        monkeypatch.setattr(shared_lifecycle, 'RUNNING_ATTEMPT_TIMEOUT_S', 0.05)
+        pool = _Pool(*(_Conn(_HangingCursor([])) for _ in range(2)))
+
+        async def run() -> tuple[Any, float]:
+            loop = asyncio.get_running_loop()
+            started = loop.time()
+            result = await asyncio.wait_for(
+                shared_lifecycle.confirm_until_not_resumed(
+                    _pool(pool),
+                    'task-1',
+                    'worker-1',
+                    False,
+                    CLAIMED_AT,
+                ),
+                OUTER_BOUND_S,
+            )
+            return result, loop.time() - started
+
+        result, elapsed_s = asyncio.run(run())
+
+        assert result == (False, '', 'OWNERSHIP_UNCONFIRMED')
+        assert elapsed_s < 1.0
+        assert 'did not finish within' in caplog.text
+
+
+class TestRefusalBound:
+    """The refusal backstop of the parent follows from the bounds of the
+    writes that a refusal makes in the child."""
+
+    def test_the_writes_of_a_refusal_have_a_named_bound(self) -> None:
+        attempt_s = (
+            shared_lifecycle.RUNNING_ATTEMPT_TIMEOUT_S
+            + shared_lifecycle.CANCELLED_WRITE_END_S
+        )
+        marker_s = (
+            shared_lifecycle.FINALIZING_MARKER_TIMEOUT_S
+            + shared_lifecycle.CANCELLED_WRITE_END_S
+        )
+
+        assert shared_lifecycle.REFUSAL_WRITES_BOUND_S == (
+            _PRE_START_CONFIRM_ATTEMPTS * attempt_s + marker_s
+        )
+        assert shared_lifecycle.RUNNING_ATTEMPT_TIMEOUT_S == (
+            SHARED_POOL_CONNECTION_WAIT_S
+            + shared_lifecycle.RUNNING_STATEMENTS_TIMEOUT_S
+        )
+
+    def test_the_refusal_backstop_comes_after_the_writes_and_a_block_report(
+        self,
+    ) -> None:
+        """A refusal that its writes end in time never meets the backstop,
+        and a blocked loop is reported first, with its culprit."""
+        assert slots.SHARED_REFUSAL_BACKSTOP_S == (
+            shared_lifecycle.REFUSAL_WRITES_BOUND_S + slots.SHARED_BACKSTOP_MARGIN_S
+        )
 
 
 class TestMissedStart:

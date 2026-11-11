@@ -207,7 +207,11 @@ and there is no migration contract between pre-1.0 versions.
   - The worker kills a child that has reported neither the second cancel
     nor the end of a task `timeout_ms + cancel_grace_ms + 10 s` after its
     placement: C code holds the GIL in it. A child that still holds a
-    refusal 120 s after its placement is killed as well. At these kills a
+    refusal 130 s after its placement is killed as well: the writes of a
+    refusal end within 120 s (two attempts of the RUNNING update, each at
+    most 30 s for a connection and 10 s for its statements, and the
+    finalizing marker, each with 10 s for a cancelled write to end), and the
+    block limit with its margin comes after them. At these kills a
     task past its deadline fails with `TASK_TIMEOUT`, and every other task
     takes the crash path. A task that the child reported stuck keeps its
     retry in an isolated child at every kill by the worker whose exit it
@@ -226,10 +230,14 @@ and there is no migration contract between pre-1.0 versions.
     the queue.
   - The RUNNING update with the first runner heartbeat and the finalizing
     marker of a shared task run on an async connection pool that the child
-    opens on its loop, of `worker_child_pool_max_size` connections. The
-    child writes its frames from a thread, so a slow worker never stops the
-    loop. A shared child runs only `async def` tasks; a row that reaches one
-    with a `def` function fails with `WORKER_RESOLUTION_ERROR`.
+    opens on its loop, of `worker_child_pool_max_size` connections. An
+    attempt of the RUNNING update that does not end within 40 s (30 s for a
+    connection, 10 s for its statements, for example an UPDATE that waits on
+    a row lock) ends with `OWNERSHIP_UNCONFIRMED`: the task does not start,
+    and its row stays `CLAIMED` until its lease ends. The child writes its
+    frames from a thread, so a slow worker never stops the loop. A shared
+    child runs only `async def` tasks; a row that reaches one with a `def`
+    function fails with `WORKER_RESOLUTION_ERROR`.
   - `@app.on_shared_async_child_start` registers an `async def` hook that
     runs on the loop of each shared async child before its first task, for
     long-lived async clients. Same 10 s bound and fail-closed stop as

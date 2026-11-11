@@ -44,6 +44,7 @@ from horsies.core.lifecycle.outcomes import (
 from horsies.core.lifecycle.persistence import apply_psycopg_async
 from horsies.core.logging import get_logger
 from horsies.core.models.tasks import OutcomeCode, TaskError, TaskResult
+from horsies.core.worker.child_pool import SHARED_POOL_CONNECTION_WAIT_S
 from horsies.core.worker.child_protocol import WireResult
 from horsies.core.worker.child_runner import (
     CLAIM_STILL_STARTABLE_SQL,
@@ -64,6 +65,34 @@ FINALIZING_MARKER_TIMEOUT_S: Final = 10.0
 """The longest time a seat waits to write the finalizing marker. The marker
 is best effort: past this time the seat logs and reports its end, and the
 runner heartbeat of the task ends when the parent reads that end."""
+
+RUNNING_STATEMENTS_TIMEOUT_S: Final = 10.0
+"""The longest time that the statements of one attempt of the RUNNING
+transition take once the attempt holds its connection: the UPDATE and, when
+it matched no row, the statements that find which guard fired. An UPDATE
+that waits on a row lock, or a server that does not answer, ends here."""
+
+RUNNING_ATTEMPT_TIMEOUT_S: Final = (
+    SHARED_POOL_CONNECTION_WAIT_S + RUNNING_STATEMENTS_TIMEOUT_S
+)
+"""The bound of one attempt of the RUNNING transition: the wait for a pooled
+connection and the statements. Past it the attempt ends with
+``OWNERSHIP_UNCONFIRMED``."""
+
+CANCELLED_WRITE_END_S: Final = 10.0
+"""The longest time that a write which a bound cancelled takes to end:
+psycopg asks the server to cancel the statement and waits for the reply,
+each for at most 5 s, before the cancel leaves the write."""
+
+REFUSAL_WRITES_BOUND_S: Final = (
+    _PRE_START_CONFIRM_ATTEMPTS * (RUNNING_ATTEMPT_TIMEOUT_S + CANCELLED_WRITE_END_S)
+    + FINALIZING_MARKER_TIMEOUT_S
+    + CANCELLED_WRITE_END_S
+)
+"""The longest time that the writes of a run take in a shared async child
+before it reports a refusal: each attempt of the RUNNING transition and the
+finalizing marker, each with the end of a cancelled write. The refusal
+backstop of the parent (``slots.SHARED_REFUSAL_BACKSTOP_S``) comes after it."""
 
 
 async def _get_workflow_status_for_task(
@@ -301,35 +330,64 @@ async def _confirm_ownership_and_set_running(
     """Set the row RUNNING with its first runner heartbeat. None: started.
 
     Same contract as the sync function of this name in ``child_runner``. An
-    ``Exception`` (database, pool wait) becomes ``OWNERSHIP_UNCONFIRMED``.
-    A cancel of the calling task propagates: the transaction rolls back when
-    the connection returns to the pool, or it committed before the cancel.
+    ``Exception`` (database, pool wait) becomes ``OWNERSHIP_UNCONFIRMED``,
+    and so does an attempt that runs past ``RUNNING_ATTEMPT_TIMEOUT_S``: the
+    bound cancels its write. A cancelled write rolls back when the
+    connection returns to the pool, or it committed before the cancel, as
+    after a database error. A cancel of the calling task propagates.
     """
     try:
-        async with pool.connection() as conn:
-            cursor = conn.cursor(row_factory=namedtuple_row)
-            await cursor.execute(
-                set_running_sql(is_workflow_task),
-                set_running_params(task_id, worker_id, is_workflow_task, claimed_at),
+        async with asyncio.timeout(RUNNING_ATTEMPT_TIMEOUT_S):
+            return await _set_running_on_a_connection(
+                pool,
+                task_id,
+                worker_id,
+                is_workflow_task,
+                claimed_at,
             )
-            if await cursor.fetchone() is None:
-                return await _after_missed_start(
-                    cursor,
-                    conn,
-                    task_id,
-                    worker_id,
-                    is_workflow_task,
-                    claimed_at,
-                )
-            if is_workflow_task:
-                node_refused = await _start_workflow_node(cursor, conn, task_id)
-                if node_refused is not None:
-                    return node_refused
-            await conn.commit()
-        return None
+    except TimeoutError:
+        logger.error(
+            'Failed to transition task %s to RUNNING: the attempt did not '
+            'finish within %ss',
+            task_id,
+            RUNNING_ATTEMPT_TIMEOUT_S,
+        )
+        return (False, '', 'OWNERSHIP_UNCONFIRMED')
     except Exception as e:
         logger.error(f'Failed to transition task {task_id} to RUNNING: {e}')
         return (False, '', 'OWNERSHIP_UNCONFIRMED')
+
+
+async def _set_running_on_a_connection(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    task_id: str,
+    worker_id: str,
+    is_workflow_task: bool,
+    claimed_at: datetime | None,
+) -> WireResult | None | _WorkflowResumedBeforeStart:
+    """One attempt of ``_confirm_ownership_and_set_running``, unbounded.
+    Raises what the pool and the statements raise."""
+    async with pool.connection() as conn:
+        cursor = conn.cursor(row_factory=namedtuple_row)
+        await cursor.execute(
+            set_running_sql(is_workflow_task),
+            set_running_params(task_id, worker_id, is_workflow_task, claimed_at),
+        )
+        if await cursor.fetchone() is None:
+            return await _after_missed_start(
+                cursor,
+                conn,
+                task_id,
+                worker_id,
+                is_workflow_task,
+                claimed_at,
+            )
+        if is_workflow_task:
+            node_refused = await _start_workflow_node(cursor, conn, task_id)
+            if node_refused is not None:
+                return node_refused
+        await conn.commit()
+    return None
 
 
 async def confirm_until_not_resumed(
