@@ -40,16 +40,24 @@ Each worker opens up to this many client connections to the pooled
 `database_url`:
 
 ```text
-worker_pool_size + worker_max_overflow                  # parent pool
+pool max_size                                           # pool of the worker process
 + 1                                                     # runner heartbeat
 + isolated children × isolated.pool max_size            # isolated child pools
 + shared async children × shared_async.pool max_size    # shared async child pools
 + shared thread children × shared_thread.pool max_size  # shared thread child pools
 ```
 
-The 2 listener connections go to `session_database_url`, not through
-PgBouncer. Each `max_size` is the resolved value of its mode; see
+Task code that sends through the app adds the `task_send_pool` of its child
+kind for each event loop that it sends from, also to the pooled
+`database_url`. The 2 listener connections go to `session_database_url`, not
+through PgBouncer. Each `max_size` is the resolved value; see
 [Connections](/horsies/workers/worker-profiles/#connections).
+
+A larger pool of the worker process adds client connections, not server
+connections: a client holds a server connection only from `BEGIN` to
+`COMMIT`. If `default_pool_size` is below the server connections that the
+workers use at once, the wait for a connection moves from the pool of the
+worker process to PgBouncer, and the larger pool gives no gain.
 
 - Set `max_client_conn` to at least the sum of this number over all workers,
   plus the producers and the other clients of the pooled URL.

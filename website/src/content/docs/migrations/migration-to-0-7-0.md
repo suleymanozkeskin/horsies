@@ -138,6 +138,39 @@ single_connection_profile = WorkerProfile(
 )
 ```
 
+## The worker pool moves into profiles
+
+`PostgresConfig.worker_pool_size` and `worker_max_overflow` are removed. In 0.6.x they sized the pool of the worker process (`3 + 2` by default), and every worker child copied them for the broker of its task code. In 0.7.0 two profile fields replace them:
+
+| 0.6.x `PostgresConfig` field | Default | 0.7.0 profile field |
+|------------------------------|---------|---------------------|
+| `worker_pool_size=N`, `worker_max_overflow=M` (worker process) | `3`, `2` | `WorkerProfile(pool=ParentPool(max_size=PoolSize(connections=N + M)))`; the default `PoolSizeFromSeats()` derives the size from the seats of the profile, 5 to 20 connections |
+| `worker_pool_size=N`, `worker_max_overflow=M` (task code that sends, in a child) | `3`, `2` | `task_send_pool=PoolSize(connections=N + M)` on `IsolatedChildren`, `SharedAsyncChildren` or `SharedThreadChildren`; default 2 |
+
+The pool of the worker process has no overflow: it holds at most `max_size` connections, and the connection check counts it exactly. The task-send pool of each child has no overflow either. The producer pool (`pool_size`, `max_overflow`) is unchanged and does not apply in a worker child. In the worker process, `app.get_broker()` opens the producer pool; the worker process does its own work on `WorkerProfile.pool`.
+
+A config that still sets a removed field fails when it is built, with every such field in one report:
+
+```text
+error[HRS-213]: worker_pool_size was removed in 0.7.0
+   = note: the worker process opens its pool with the resolved pool.max_size of its worker profile
+   = note: task code in a worker child that sends opens the task_send_pool of its child kind, not this pool
+
+   = help:
+        set the pool of the worker process in AppConfig.worker_profiles: WorkerProfile(pool=ParentPool(max_size=PoolSize(connections=N))); the default, PoolSizeFromSeats(), derives it from the seats of the profile
+```
+
+A 0.6.x config with `worker_pool_size=8` and `worker_max_overflow=2`, and the 0.7.0 profile:
+
+```python
+from horsies import ParentPool
+
+ten_connection_profile = WorkerProfile(
+    isolated=IsolatedChildren(count=8),
+    pool=ParentPool(max_size=PoolSize(connections=10)),
+)
+```
+
 ## `running_stale_threshold_ms` holds one heartbeat interval plus 2 s
 
 With `auto_fail_stale_running=True` (the default), a 0.7.0 worker stops when
@@ -199,11 +232,11 @@ See [Limits](/horsies/concepts/workflows/subworkflows/#66-limits).
 These were not checked before 0.7.0, because the values were command-line flags:
 
 - `horsies check` validates every profile. A claim limit above the capacity of the worker (its seats plus `prefetch_buffer`; one seat per isolated child) is refused with `HRS-218`; before, it had no effect.
-- `horsies check --live` reports `HRS-219` when one worker of a profile opens more Postgres connections itself than the server has usable slots. Each child counts the resolved `pool.max_size` of its mode. The error also states what task code that sends adds: `worker_pool_size + worker_max_overflow` per child and per event loop that it sends from.
+- `horsies check --live` reports `HRS-219` when one worker of a profile opens more Postgres connections itself than the server has usable slots. The worker process counts the resolved `pool.max_size` of the profile, and each child the resolved `pool.max_size` of its mode. The error also states what task code that sends adds: the `task_send_pool` of each child kind, per child and per event loop that it sends from.
 - `horsies check` refuses a child pool whose `min_size` is above its resolved `max_size` with `HRS-218`. In 0.6.x the same bound on `worker_child_pool_min_size` raised `HRS-213`.
 - At boot the worker warns when the per-child memory limits add up to more than the memory that the worker can use: the container (cgroup) limit when it is below the host RAM, else the host RAM, and when one worker opens more connections itself than the server has usable slots.
 
-Each bound of the old flags still applies: at least one child, a task limit of at least 1, a memory limit of at least 1 MB, and a drain timeout above 0. New upper bounds: 1024 isolated children, 2,147,483,647 tasks for a task limit, 16,777,216 MB for a memory limit, 24 hours for the drain timeout, and 1000 connections for a child pool.
+Each bound of the old flags still applies: at least one child, a task limit of at least 1, a memory limit of at least 1 MB, and a drain timeout above 0. New upper bounds: 1024 isolated children, 2,147,483,647 tasks for a task limit, 16,777,216 MB for a memory limit, 24 hours for the drain timeout, and 1000 connections for a child pool, a task-send pool and the pool of the worker process.
 
 See [Worker Profiles](/horsies/workers/worker-profiles/) for every field and for the validation table.
 

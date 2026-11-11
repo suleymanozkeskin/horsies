@@ -114,12 +114,14 @@ worker_profiles = {
 | `WorkerProfile` | `isolated` | `NoIsolatedChildren()` | `IsolatedChildren` or `NoIsolatedChildren` |
 | `WorkerProfile` | `shared_async` | `NoSharedAsyncChildren()` | `SharedAsyncChildren` or `NoSharedAsyncChildren` |
 | `WorkerProfile` | `shared_thread` | `NoSharedThreadChildren()` | `SharedThreadChildren` or `NoSharedThreadChildren`; at least one child of any mode is required |
+| `WorkerProfile` | `pool` | `ParentPool()` | The pool of the worker process, which writes the outcome of each task; no overflow |
 | `WorkerProfile` | `claim` | `ClaimLimits()` | Claim limits |
 | `WorkerProfile` | `drain_timeout` | `timedelta(seconds=300)` | Above 0, at most 24 h; then running children are killed |
 | `WorkerProfile` | `preload` | `ChildPreload.LIBRARY` | `LIBRARY`, `APP` or `NONE`; see [Child process model](#child-process-model) |
 | `IsolatedChildren` | `count` | required | 1-1024 children, one task at a time each |
 | `IsolatedChildren` | `recycle` | `IsolatedRecycle()` | See [Child process recycling](#child-process-recycling) |
 | `IsolatedChildren` | `pool` | `IsolatedPool()` | The sync connection pool of each child |
+| `IsolatedChildren` | `task_send_pool` | `PoolSize(connections=2)` | Pool of the app broker that task code opens in each child when it sends, per event loop; no overflow |
 | `IsolatedRecycle` | `after` | `TaskLimit(tasks=100)` | `TaskLimit` or `NoTaskLimit` |
 | `IsolatedRecycle` | `above` | `NoMemoryLimit()` | `MemoryLimit(mb=N)` or `NoMemoryLimit` |
 | `SharedAsyncChildren` | `count` | required | 1-1024 children |
@@ -127,16 +129,19 @@ worker_profiles = {
 | `SharedAsyncChildren` | `recycle` | `SharedRecycle()` | When a shared child is replaced |
 | `SharedAsyncChildren` | `pool` | `SharedPool()` | The async connection pool of each child, shared by its seats |
 | `SharedAsyncChildren` | `executor` | `ExecutorThreadsFromSeats()` | Threads of the default executor of the loop: `ExecutorThreads(threads=N)` (1-256) or derived from the seats; a start hook that sets its own default executor wins |
+| `SharedAsyncChildren` | `task_send_pool` | `PoolSize(connections=2)` | As for `IsolatedChildren`; the seats share it |
 | `SharedThreadChildren` | `count` | required | 1-1024 children |
 | `SharedThreadChildren` | `seats` | required | 1-256 `SHARED_THREAD` tasks at once per child, one OS thread each |
 | `SharedThreadChildren` | `recycle` | `SharedRecycle()` | When a shared child is replaced |
 | `SharedThreadChildren` | `pool` | `SharedPool()` | The sync connection pool of each child, shared by its seat threads |
+| `SharedThreadChildren` | `task_send_pool` | `PoolSize(connections=2)` | As for `IsolatedChildren`; the seat threads share it |
 | `IsolatedPool` | `min_size` | `0` | 0-1000 connections kept open; 0 opens on first use |
 | `IsolatedPool` | `max_size` | `PoolSize(connections=2)` | `PoolSize(connections=N)`, 1-1000 |
 | `IsolatedPool` | `check` | `True` | Check each connection on checkout; one round trip each, turn off with `pool_pre_ping` on high-RTT links |
 | `SharedPool` | `min_size` | `0` | 0-1000 connections kept open |
 | `SharedPool` | `max_size` | `PoolSizeFromSeats()` | `PoolSize(connections=N)` or derived from the seats |
 | `SharedPool` | `check` | `True` | As for `IsolatedPool` |
+| `ParentPool` | `max_size` | `PoolSizeFromSeats()` | `PoolSize(connections=N)` or derived from the seats of the whole profile |
 | `SharedRecycle` | `after_per_seat` | `TaskLimit(tasks=100)` | Replace after `tasks × seats` tasks; `NoTaskLimit` |
 | `SharedRecycle` | `above` | `NoMemoryLimit()` | RSS limit of the child, read after each task |
 | `ClaimLimits` | `per_queue_per_pass` | `NoTaskLimit()` | Most tasks one claim pass takes from one queue |
@@ -157,9 +162,17 @@ counts the resolved `pool.max_size` of its mode in HRS-219. A derived size is
 `min(cap, max(floor, ceil(seats / seats_per_unit)))` with per-kind constants in
 `horsies.core.models.child_sizing` (shared async pool: 10 seats per
 connection, cap 10; shared thread pool: 4 seats per connection, cap 10; floor
-2; shared async executor: 1 seat per thread, floor 2, cap 32). A `min_size`
+2; shared async executor: 1 seat per thread, floor 2, cap 32). The pool of the
+worker process (`WorkerProfile.pool`) derives from `seat_count()`: 10 seats per
+connection, floor 5, cap 20 (provisional constants); it has no overflow and
+counts in HRS-219 as `parent pool max_size N`. Set
+`pool=ParentPool(max_size=PoolSize(connections=N))` for a high RTT or many
+failures, retries or workflow nodes. Task code that sends opens the
+`task_send_pool` of its child kind (default 2) per event loop; HRS-219 states
+it but does not compare it. A `min_size`
 above the resolved `max_size` fails with HRS-218. The worker start log line
-states the resolved pool of each kind and the executor threads. Boot also
+states the resolved pool and task_send_pool of each kind, the executor
+threads, and the resolved pool of the worker process. Boot also
 warns (never refuses) when the sum over modes of `count × mb` is above the
 usable memory (container limit or host RAM), and when one worker opens more
 Postgres connections itself than the server has usable slots.
@@ -289,8 +302,6 @@ config = PostgresConfig(
 | `pool_size` | `int` | `5` | Connection pool size (raise for high-throughput producers) |
 | `max_overflow` | `int` | `10` | Extra connections beyond pool_size |
 | `retain_rerun_input_default` | `bool` | `False` | App-level default for enqueue-time rerun-input retention; a per-task value overrides it and the resolved value is snapshotted at enqueue. A task enqueued without a retained input cannot be rerun later |
-| `worker_pool_size` | `int \| None` | `3` | Worker coordinator pool size; `None` inherits `pool_size` |
-| `worker_max_overflow` | `int \| None` | `2` | Worker coordinator overflow; `None` inherits `max_overflow` |
 | `pool_timeout` | `int` | `30` | Seconds to wait for a connection |
 | `pool_recycle` | `int` | `1800` | Seconds before connections are recycled |
 | `pool_pre_ping` | `bool` | `True` | Pre-ping connections before use |
@@ -305,8 +316,11 @@ Driver must be psycopg3 (async). `postgresql+psycopg2://` is rejected.
 
 `worker_child_pool_min_size`, `worker_child_pool_max_size` and
 `worker_child_pool_check` were removed in 0.7.0: each child kind has its own
-`pool` in the worker profile (`IsolatedPool`, `SharedPool`). A config that sets
-one fails at build with HRS-213, and the help names the replacement.
+`pool` in the worker profile (`IsolatedPool`, `SharedPool`). `worker_pool_size`
+and `worker_max_overflow` were removed too: the worker process opens
+`WorkerProfile.pool`, and task code in a child the `task_send_pool` of its
+kind. A config that sets one fails at build with HRS-213, and the help names
+the replacement.
 
 horsies requires psycopg >= 3.3.7. psycopg >= 3.3.6 bounds the wait after an interrupted query (a cancelled asyncio
 task, `KeyboardInterrupt`, `SystemExit`): a cancel request of at most 5 s, then
@@ -341,14 +355,13 @@ broker engines, each child-process pool, and the LISTEN/NOTIFY listener. A
 long query is not affected: the sent query is acknowledged while the client
 waits for the result.
 
-Worker processes use a separate connection profile by default. The worker
-coordinator uses `worker_pool_size + worker_max_overflow`; each child process
-creates its own psycopg pool bounded by the `pool` of its kind
-(`min_size..max_size`). Direct Postgres budget for one worker is
-approximately:
+Workers do not use `pool_size` and `max_overflow`. The worker process opens
+the resolved `WorkerProfile.pool` with no overflow; each child process creates
+its own psycopg pool bounded by the `pool` of its kind (`min_size..max_size`).
+Direct Postgres budget for one worker is approximately:
 
 ```text
-worker_pool_size + worker_max_overflow
+pool max_size (the pool of the worker process)
   + 2 listener/session connections
   + 1 runner heartbeat connection (the worker process writes the beats)
   + isolated children * isolated.pool max_size
@@ -358,7 +371,7 @@ worker_pool_size + worker_max_overflow
 ```
 
 Task code that sends through the app opens the app's broker in its child: a
-pool of `worker_pool_size + worker_max_overflow` for each event loop it sends
+pool of the `task_send_pool` of its child kind for each event loop it sends
 from (the broker's runner loop for sync tasks, the child's task loop for async
 tasks). `horsies check --live` compares the number without task-code
 connections for each worker profile with `max_connections` less the reserved

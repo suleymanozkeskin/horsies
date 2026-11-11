@@ -589,7 +589,8 @@ class ParentPool(BaseModel):
     """The connection pool of the worker process, the parent of the children.
 
     The worker process claims tasks and writes the outcome of each task
-    through this pool; its heartbeat, health and reaper loops share it. It
+    through this pool; its claimer heartbeat, health and reaper loops share
+    it. The runner heartbeats use a connection of their own. It
     holds at most ``max_size`` connections and has no overflow
     (``pool_size = max_size``, ``max_overflow = 0``), so the connection
     check counts it exactly.
