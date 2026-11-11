@@ -22,7 +22,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Any, Final, assert_never
+from typing import Any, assert_never
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
@@ -49,6 +49,7 @@ from horsies.core.lifecycle.outcomes import (
 )
 from horsies.core.logging import get_logger
 from horsies.core.types.status import TaskAttemptOutcome
+from horsies.core.utils.db import AUTOCOMMIT_EXECUTION_OPTIONS
 from horsies.core.utils.retry import (
     admitted_retry_policy,
     calculate_retry_delay,
@@ -57,8 +58,6 @@ from horsies.core.worker.shared_stop import RetryPlacement
 from horsies.core.worker.sql import READ_IN_FLIGHT_ATTEMPT_SQL
 
 logger = get_logger('lifecycle')
-
-_AUTOCOMMIT: Final[dict[str, Any]] = {'isolation_level': 'AUTOCOMMIT'}
 
 FINISH_FAILED_ATTEMPT_SQL = text(f"""
     SELECT * FROM {FINISH_FAILED_ATTEMPT_FUNCTION}(
@@ -105,9 +104,13 @@ async def autocommit_connection(session: AsyncSession) -> AsyncConnection:
     Each statement on it commits alone: no BEGIN and no COMMIT round trip.
     The session close sends nothing, and the pool gives the connection back
     to the next session in transaction mode. Use it only for statements that
-    are each complete alone.
+    are each complete alone. ``run_in_autocommit`` runs one such statement
+    per checkout; a failure write runs the unlocked read, the finish (or the
+    requeue of a CLAIMED row) on one checkout.
     """
-    return await session.connection(execution_options=_AUTOCOMMIT)
+    return await session.connection(
+        execution_options=dict(AUTOCOMMIT_EXECUTION_OPTIONS),
+    )
 
 
 async def read_in_flight_attempt(
