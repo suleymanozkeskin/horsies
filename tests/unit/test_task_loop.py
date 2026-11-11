@@ -819,6 +819,8 @@ class TestEndLeftWork:
             steps.append('second')
 
         async def first() -> None:
+            # Start the second task after the wait for the left work began.
+            await asyncio.sleep(SHORT_GRACE_S / 8)
             kept.append(asyncio.get_running_loop().create_task(second()))
             steps.append('first')
 
