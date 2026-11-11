@@ -157,6 +157,8 @@ A task can return before its deadline while work that it started is still alive:
 
 For each task that left work, the child logs one line: the task name, the task id, the number of the run, the coroutine names of that work (at most 10), the executor calls, and how the work ended (within the grace, cancelled, or stuck).
 
+An `async def` task in an isolated child follows the same order for the asyncio tasks that it left, with a grace of 1 second, and its child is replaced after each such task. See [Async Tasks](/horsies/tasks/defining-tasks/#async-tasks).
+
 A client that a task opens on first use, in module state, starts its background tasks (a keepalive, a pool refill) in the context of that task. They count as the work of that task, and they are still alive when it returns, so the child cancels them and is replaced. The next child opens the client again in its first task and is replaced again: each task that opens such a client costs one child restart. The other tasks of the closing child use a client whose background work was cancelled. Open such a client in an `on_shared_async_child_start` hook instead: work that a start hook starts belongs to no task (see [Keep a client for the life of the child](#keep-a-client-for-the-life-of-the-child)).
 
 ## A Blocked Event Loop

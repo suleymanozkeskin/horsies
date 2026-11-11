@@ -45,15 +45,21 @@ With `Execution.ISOLATED` (the default), a worker child runs one task at a time,
 
 The loop runs only while an async task runs. A `def` task runs with no running event loop, so it can call `asyncio.run()`. While the child runs a `def` task or waits for its next task, the timers of a module-level async client, for example a keepalive or a pool maintenance task, do not run.
 
-An async task must await the work that it starts:
+An async task must await the work that it starts. When the body of an async task returns (a value, or an exception that the task maps to a result) and asyncio tasks that it started, for example with `asyncio.create_task()`, are still on the loop:
 
-- When an async task ends and asyncio tasks that it started, for example with `asyncio.create_task()`, are still on the loop, the worker replaces the child after that task. The next task runs in a new child. When the old child stops, it cancels that work, within 5 seconds.
-- The worker sees asyncio tasks only. A callback that `loop.call_soon()` or `loop.call_later()` scheduled, and work that `loop.run_in_executor()` started and the task did not await, cause no replacement. They can still run during a later task of the same child.
-- A client that keeps its own background tasks on the loop, for example a keepalive or a consumer task, causes a child replacement after each async task.
-- A thread that `asyncio.to_thread()` starts can outlive its task, for example when a timeout ends the wait for it. The thread is not an asyncio task, so it does not cause a replacement. When the worker stops the child, the child does not wait for that thread past the close, which takes at most 7 seconds: it exits, and its `atexit` handlers do not run. An idle executor thread does not count: the close of the async generators and the shutdown of the executor each get at least 1 second, also when the cancel of left tasks used the first 5 seconds.
-- The worker log names the coroutine of each asyncio task that was left, for up to 10 tasks, for example `Retiring child pid=4242: task <id> left 1 task(s) on its event loop: refresh_session`.
+1. The child waits up to 1 second for that work, also for the asyncio tasks that it starts meanwhile.
+2. Work that is still alive gets a cancel, and two more cancels 0.1 seconds apart.
+3. When the work has ended, the worker writes what the task returned. Only then do the retry and the next workflow node start, so they never run next to that work. The worker then replaces the child, and the next task runs in a new child: cancelled code can leave broken state in the process.
+4. Work that is still alive 0.3 seconds after the first cancel, for example a task that catches every cancel, is stuck. The worker kills the child, and writes what the task returned after it saw the exit. A child that reports neither the end of the work nor that it is stuck within 11.3 seconds of the return, for example because that work blocks the event loop, is killed the same way. When the exit is not seen within 30 seconds of the kill, the rule of a timeout kill applies (see [Set an Execution Timeout](#set-an-execution-timeout)).
 
-A task that cancels a helper task in `finally` must also await it. `cancel()` only asks the helper to stop. A helper that awaits while it stops, for example to close a session, is still on the loop when the task ends, and the worker replaces the child. Await the helper after the cancel:
+The return ends the deadline of the task: `timeout_ms` bounds the body, and what the task returned stands while the child waits for the work. The outcome is never `TASK_TIMEOUT` then. A crash of the child in that wait also keeps what the task returned, once the worker saw the exit.
+
+- The worker sees asyncio tasks only. A callback that `loop.call_soon()` or `loop.call_later()` scheduled, and work that `loop.run_in_executor()` started and the task did not await, are not waited for and cause no replacement. They can still run during a later task of the same child.
+- A client that keeps its own background tasks on the loop, for example a keepalive or a consumer task, delays the outcome of each async task by about 1 second, and causes a child replacement after it.
+- A thread that `asyncio.to_thread()` starts can outlive its task, for example when a timeout ends the wait for it. The thread is not an asyncio task, so it is not waited for and does not cause a replacement. When the worker stops the child, the child does not wait for that thread past the close, which takes at most 7 seconds: it exits, and its `atexit` handlers do not run. An idle executor thread does not count: the close of the async generators and the shutdown of the executor each get at least 1 second.
+- The worker logs one line for each task that left work: the task, the coroutine of each asyncio task that was left, for up to 10 tasks, and how that work ended, for example `Task watch_price (<id>) returned and left 1 task(s) on the event loop of child pid=4242 (refresh_session); that work ended within 1.0s; the outcome is what the task returned, and the child is replaced`.
+
+A task that cancels a helper task in `finally` must also await it. `cancel()` only asks the helper to stop. A helper that awaits while it stops, for example to close a session, is still on the loop when the task returns: the outcome waits for it, and the worker replaces the child. Await the helper after the cancel:
 
 ```python
 async def refresh_session() -> None:
@@ -223,7 +229,7 @@ def resize_video(*, video_id: str) -> TaskResult[str, TaskError]:
     ...
 ```
 
-On expiry, the worker kills the child process, waits for it to exit, and then fails the task with `TASK_TIMEOUT`. A result that reaches the worker after the deadline does not change this. If the deadline elapses before user code starts, the task is requeued instead. Timeouts are terminal by default; opt into retries by adding `"TASK_TIMEOUT"` to `auto_retry_for`:
+On expiry, the worker kills the child process, waits for it to exit, and then fails the task with `TASK_TIMEOUT`. A result that reaches the worker after the deadline does not change this. An `async def` body that returned before the deadline is not timed out while the child waits for the asyncio tasks that it left (see [Async Tasks](#async-tasks)). If the deadline elapses before user code starts, the task is requeued instead. Timeouts are terminal by default; opt into retries by adding `"TASK_TIMEOUT"` to `auto_retry_for`:
 
 ```python
 @app.task(
