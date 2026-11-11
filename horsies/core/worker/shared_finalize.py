@@ -39,6 +39,7 @@ from horsies.core.worker.child_protocol import (
 )
 from horsies.core.worker.runtime import (
     CrashRecoveryCode,
+    FinalizeStage,
     _FINALIZE_STAGE_FUTURE,
     _FinalizeError,
     _RequeueOutcome,
@@ -95,7 +96,7 @@ class SharedKillFinalizeMixin:
             self,
             *,
             task_id: str,
-            stage: str,
+            stage: FinalizeStage,
             message: str,
             retryable: bool,
             data: dict[str, Any] | None = None,

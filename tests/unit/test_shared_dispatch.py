@@ -693,7 +693,7 @@ class TestFinalizeKilledRun:
         writes = _KillWrites()
         error = writes.worker._make_finalize_error(
             task_id='task-1',
-            stage='future',
+            stage=_FINALIZE_STAGE_FUTURE,
             message='kill write failed',
             retryable=True,
             data=future_retry_data(

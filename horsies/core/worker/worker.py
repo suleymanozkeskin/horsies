@@ -176,6 +176,7 @@ from horsies.core.worker.shared_finalize import (  # noqa: E402
     SharedKillFinalizeMixin as SharedKillFinalizeMixin,
 )
 from horsies.core.worker.runtime import (  # noqa: F401,E402
+    FinalizeStage as FinalizeStage,
     _FINALIZE_STAGE_PHASE1 as _FINALIZE_STAGE_PHASE1,
     _FINALIZE_STAGE_PHASE2 as _FINALIZE_STAGE_PHASE2,
     _FINALIZE_STAGE_FUTURE as _FINALIZE_STAGE_FUTURE,
@@ -321,7 +322,7 @@ class Worker(
         # before start), so the claim loop also waits on this local wake.
         # Releases coalesce: the loop clears it before each claim pass.
         self._capacity_released = asyncio.Event()
-        self._finalize_retry_attempts: dict[tuple[str, str], int] = {}
+        self._finalize_retry_attempts: dict[tuple[str, FinalizeStage], int] = {}
         self._fatal_background_error: (
             ChildStartFailedError
             | ServiceLoopDiedError

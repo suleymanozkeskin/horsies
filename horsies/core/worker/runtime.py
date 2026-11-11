@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import random
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import Any, Literal, Optional, TypeAlias
 
 from horsies.core.logging import get_logger
@@ -22,6 +22,7 @@ logger = get_logger('worker')
 # Underscore names are deliberate: these are worker-internal symbols whose
 # privacy boundary is the worker package, not this module.
 __all__ = [
+    'FinalizeStage',
     '_FINALIZE_STAGE_PHASE1',
     '_FINALIZE_STAGE_PHASE2',
     '_FINALIZE_STAGE_FUTURE',
@@ -52,14 +53,30 @@ __all__ = [
     'MemoryBaselineExceedsThresholdError',
 ]
 
-_FINALIZE_STAGE_PHASE1 = 'phase1_persist'
-_FINALIZE_STAGE_PHASE2 = 'phase2_workflow'
-_FINALIZE_STAGE_FUTURE = 'future'
-_FINALIZE_STAGE_PARENT = 'parent_propagation'
-# The TASK_TIMEOUT write of an attempt that has ended, after it failed. Its
-# retries run that write again; when they all fail, crash recovery writes the
-# row with TASK_TIMEOUT.
-_FINALIZE_STAGE_TIMEOUT = 'timeout_write'
+
+class FinalizeStage(StrEnum):
+    """The step of a finalize that failed, and that its retry runs again.
+    The values are the stage names of the logs and of the retry keys."""
+
+    PHASE1 = 'phase1_persist'
+    """The write of the outcome of the task to its row."""
+    PHASE2 = 'phase2_workflow'
+    """The workflow step after the outcome was written."""
+    FUTURE = 'future'
+    """Crash recovery, or a write through its writer."""
+    PARENT = 'parent_propagation'
+    """The end of a child workflow, passed to its parent."""
+    TIMEOUT = 'timeout_write'
+    """The TASK_TIMEOUT write of an attempt that has ended. Its retries run
+    that write again; when they all fail, crash recovery writes the row with
+    TASK_TIMEOUT."""
+
+
+_FINALIZE_STAGE_PHASE1 = FinalizeStage.PHASE1
+_FINALIZE_STAGE_PHASE2 = FinalizeStage.PHASE2
+_FINALIZE_STAGE_FUTURE = FinalizeStage.FUTURE
+_FINALIZE_STAGE_PARENT = FinalizeStage.PARENT
+_FINALIZE_STAGE_TIMEOUT = FinalizeStage.TIMEOUT
 _FINALIZE_FUTURE_MAX_RETRIES = 3
 _FINALIZE_TIMEOUT_MAX_RETRIES = 3
 _FINALIZE_PHASE1_MAX_RETRIES = 3
@@ -105,7 +122,7 @@ class _RetryBackoff:
 class _FinalizeError:
     error_code: BuiltInTaskCode | str
     message: str
-    stage: str
+    stage: FinalizeStage
     task_id: str
     retryable: bool = False
     data: dict[str, Any] | None = None

@@ -104,6 +104,7 @@ from horsies.core.worker.slots import (
 from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.worker.runtime import (
     CrashRecoveryCode,
+    FinalizeStage,
     _AttemptEndUnknown,
     _TimeoutOutcome,
     _TimeoutSettled,
@@ -238,6 +239,23 @@ def _shared_timeout_ms(task_id: str, work: SharedWork) -> int:
             assert_never(unreachable)
 
 
+def _max_retries_of(stage: FinalizeStage) -> int:
+    """The bound of the finalize retries of ``stage``. Pure."""
+    match stage:
+        case FinalizeStage.FUTURE:
+            return _FINALIZE_FUTURE_MAX_RETRIES
+        case FinalizeStage.TIMEOUT:
+            return _FINALIZE_TIMEOUT_MAX_RETRIES
+        case FinalizeStage.PHASE1:
+            return _FINALIZE_PHASE1_MAX_RETRIES
+        case FinalizeStage.PHASE2:
+            return _FINALIZE_PHASE2_MAX_RETRIES
+        case FinalizeStage.PARENT:
+            return _FINALIZE_PARENT_MAX_RETRIES
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 class FinalizeMixin:
     """Two-phase finalize pipeline with bounded stage retries."""
 
@@ -249,7 +267,7 @@ class FinalizeMixin:
         worker_instance_id: str
         _app: Horsies | None
         _stop: asyncio.Event
-        _finalize_retry_attempts: dict[tuple[str, str], int]
+        _finalize_retry_attempts: dict[tuple[str, FinalizeStage], int]
 
         # Cross-concern methods provided by sibling mixins / Worker.
         async def _handle_task_timeout(
@@ -799,7 +817,7 @@ class FinalizeMixin:
         self,
         *,
         task_id: str,
-        stage: str,
+        stage: FinalizeStage,
         message: str,
         retryable: bool,
         data: dict[str, Any] | None = None,
@@ -890,7 +908,11 @@ class FinalizeMixin:
             claimed_at_raw if isinstance(claimed_at_raw, datetime) else None,
         )
 
-    def _clear_finalize_retry_attempts(self, task_id: str, stage: str) -> None:
+    def _clear_finalize_retry_attempts(
+        self,
+        task_id: str,
+        stage: FinalizeStage,
+    ) -> None:
         self._finalize_retry_attempts.pop((task_id, stage), None)
 
     async def _persist_task_terminal_state(
@@ -1662,10 +1684,13 @@ class FinalizeMixin:
 
         Total: ``err`` is ``Any`` because the background-task done-callback
         hands over an untyped ``Err`` payload; the isinstance guard is the
-        boundary defense. Retry coroutines are spawned on the running loop
-        (done-callbacks only execute while the loop runs, so there is no
-        closed-loop raise window); their failures terminate at the
-        done-callback.
+        boundary defense. Each ``FinalizeStage`` has its retry bound
+        (``_max_retries_of``) and its retry (``_spawn_finalize_retry``).
+        After the last retry of a TASK_TIMEOUT write, crash recovery writes
+        the row (``_recover_timed_out_row``). Retry coroutines are spawned on
+        the running loop (done-callbacks only execute while the loop runs, so
+        there is no closed-loop raise window); their failures terminate at
+        the done-callback.
         """
         if not isinstance(err, _FinalizeError):
             logger.error(
@@ -1675,22 +1700,7 @@ class FinalizeMixin:
 
         stage = err.stage
         task_id = err.task_id
-        if stage == _FINALIZE_STAGE_FUTURE:
-            max_attempts = _FINALIZE_FUTURE_MAX_RETRIES
-        elif stage == _FINALIZE_STAGE_TIMEOUT:
-            max_attempts = _FINALIZE_TIMEOUT_MAX_RETRIES
-        elif stage == _FINALIZE_STAGE_PHASE1:
-            max_attempts = _FINALIZE_PHASE1_MAX_RETRIES
-        elif stage == _FINALIZE_STAGE_PHASE2:
-            max_attempts = _FINALIZE_PHASE2_MAX_RETRIES
-        elif stage == _FINALIZE_STAGE_PARENT:
-            max_attempts = _FINALIZE_PARENT_MAX_RETRIES
-        else:
-            logger.error(
-                f'Finalize error ({task_id}) stage={stage}: {err.message}; data={_finalize_data_for_log(err.data)}'
-            )
-            return
-
+        max_attempts = _max_retries_of(stage)
         key = (task_id, stage)
         attempts = self._finalize_retry_attempts.get(key, 0)
 
@@ -1713,12 +1723,7 @@ class FinalizeMixin:
                 f'{err.message}; data={_finalize_data_for_log(err.data)}'
             )
             self._clear_finalize_retry_attempts(task_id, stage)
-            if stage == _FINALIZE_STAGE_TIMEOUT:
-                self._spawn_background(
-                    self._recover_timed_out_row(err),
-                    name=f'finalize-timeout-recovery-{task_id}',
-                    finalizer=True,
-                )
+            self._after_the_last_retry(err)
             return
 
         attempt_no = attempts + 1
@@ -1731,37 +1736,49 @@ class FinalizeMixin:
             f'Finalize retry scheduled for task {task_id} stage={stage} '
             f'({attempt_no}/{max_attempts}) in {delay:.1f}s: {err.message}'
         )
+        self._spawn_finalize_retry(err, delay)
 
-        if stage == _FINALIZE_STAGE_FUTURE:
-            self._spawn_background(
-                self._retry_finalize_future(err, delay),
-                name=f'finalize-retry-future-{task_id}',
-                finalizer=True,
-            )
-        elif stage == _FINALIZE_STAGE_TIMEOUT:
-            self._spawn_background(
-                self._retry_finalize_timeout(err, delay),
-                name=f'finalize-retry-timeout-{task_id}',
-                finalizer=True,
-            )
-        elif stage == _FINALIZE_STAGE_PHASE1:
-            self._spawn_background(
-                self._retry_finalize_phase1(err, delay),
-                name=f'finalize-retry-phase1-{task_id}',
-                finalizer=True,
-            )
-        elif stage == _FINALIZE_STAGE_PARENT:
-            self._spawn_background(
-                self._retry_finalize_parent(err, delay),
-                name=f'finalize-retry-parent-{task_id}',
-                finalizer=True,
-            )
-        else:
-            self._spawn_background(
-                self._retry_finalize_phase2(err, delay),
-                name=f'finalize-retry-phase2-{task_id}',
-                finalizer=True,
-            )
+    def _after_the_last_retry(self, err: _FinalizeError) -> None:
+        """Hand the row of a TASK_TIMEOUT write whose retries all failed to
+        crash recovery. The other stages end with the log of the caller."""
+        match err.stage:
+            case FinalizeStage.TIMEOUT:
+                self._spawn_background(
+                    self._recover_timed_out_row(err),
+                    name=f'finalize-timeout-recovery-{err.task_id}',
+                    finalizer=True,
+                )
+            case (
+                FinalizeStage.FUTURE
+                | FinalizeStage.PHASE1
+                | FinalizeStage.PHASE2
+                | FinalizeStage.PARENT
+            ):
+                return
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def _spawn_finalize_retry(self, err: _FinalizeError, delay_s: float) -> None:
+        """Spawn the retry of the stage of ``err`` after ``delay_s``."""
+        retry: Coroutine[Any, Any, None]
+        match err.stage:
+            case FinalizeStage.FUTURE:
+                retry, label = self._retry_finalize_future(err, delay_s), 'future'
+            case FinalizeStage.TIMEOUT:
+                retry, label = self._retry_finalize_timeout(err, delay_s), 'timeout'
+            case FinalizeStage.PHASE1:
+                retry, label = self._retry_finalize_phase1(err, delay_s), 'phase1'
+            case FinalizeStage.PARENT:
+                retry, label = self._retry_finalize_parent(err, delay_s), 'parent'
+            case FinalizeStage.PHASE2:
+                retry, label = self._retry_finalize_phase2(err, delay_s), 'phase2'
+            case _ as unreachable:
+                assert_never(unreachable)
+        self._spawn_background(
+            retry,
+            name=f'finalize-retry-{label}-{err.task_id}',
+            finalizer=True,
+        )
 
     async def _retry_finalize_future(self, err: _FinalizeError, delay_s: float) -> None:
         """Retry requeue after a child future failed before producing an outcome.

@@ -10,6 +10,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from collections.abc import Coroutine
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -26,6 +27,7 @@ from horsies.core.worker.finalize import (
     _finalize_data_for_log,
 )
 from horsies.core.worker.runtime import (
+    FinalizeStage,
     _FINALIZE_STAGE_TIMEOUT,
     _AttemptEndUnknown,
     _TimeoutSettled,
@@ -1940,7 +1942,7 @@ class TestLeaseRenewalAgeGuard:
 
 def _make_finalize_error(
     *,
-    stage: str = _FINALIZE_STAGE_PHASE1,
+    stage: FinalizeStage = _FINALIZE_STAGE_PHASE1,
     task_id: str = 'task-fe-1',
     retryable: bool = True,
     message: str = 'test error',
@@ -1982,22 +1984,53 @@ class TestHandleFinalizeError:
         assert worker._spawn_background.call_count == 0
         assert worker._finalize_retry_attempts == {}
 
-    # --- U-2b: unknown stage ---
+    # --- U-2b: each stage has its retry route ---
 
     @pytest.mark.asyncio
-    async def test_unknown_stage_logs_and_returns(
+    @pytest.mark.parametrize(
+        ('stage', 'label'),
+        [
+            (FinalizeStage.FUTURE, 'future'),
+            (FinalizeStage.TIMEOUT, 'timeout'),
+            (FinalizeStage.PHASE1, 'phase1'),
+            (FinalizeStage.PHASE2, 'phase2'),
+            (FinalizeStage.PARENT, 'parent'),
+        ],
+    )
+    async def test_each_stage_spawns_its_own_retry(
         self,
-        caplog: pytest.LogCaptureFixture,
+        stage: FinalizeStage,
+        label: str,
     ) -> None:
-        """Unknown stage value → logs error with stage info, returns."""
+        """The stages are a closed type: each one has a retry, and a stage
+        name that is not a member cannot reach the handler."""
         worker = _make_worker()
-        worker._spawn_background = MagicMock()  # type: ignore[assignment]
-        err = _make_finalize_error(stage='phase99_unknown')
-        with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
-            await worker._handle_finalize_error(err)
 
-        assert 'phase99_unknown' in caplog.text
-        assert worker._spawn_background.call_count == 0
+        def close_retry(
+            coroutine: Coroutine[Any, Any, None],
+            **_kwargs: object,
+        ) -> None:
+            coroutine.close()
+
+        spawn = MagicMock(side_effect=close_retry)
+        worker._spawn_background = spawn  # type: ignore[assignment]
+
+        await worker._handle_finalize_error(  # pyright: ignore[reportPrivateUsage]
+            _make_finalize_error(stage=stage),
+        )
+
+        assert spawn.call_args.kwargs['name'] == f'finalize-retry-{label}-task-fe-1'
+        attempts = worker._finalize_retry_attempts  # pyright: ignore[reportPrivateUsage]
+        assert attempts == {('task-fe-1', stage): 1}
+
+    def test_the_stages_are_the_closed_set_of_retry_routes(self) -> None:
+        assert {stage.value for stage in FinalizeStage} == {
+            'phase1_persist',
+            'phase2_workflow',
+            'future',
+            'parent_propagation',
+            'timeout_write',
+        }
 
     # --- U-2c: non-retryable error ---
 
@@ -2272,17 +2305,16 @@ class TestFinalizeErrorLogOmitsResult:
     @pytest.mark.parametrize(
         ('stage', 'retryable', 'prior_attempts'),
         [
-            ('phase99_unknown', True, 0),
             (_FINALIZE_STAGE_PHASE1, False, 0),
             (_FINALIZE_STAGE_PHASE1, True, _FINALIZE_PHASE1_MAX_RETRIES),
         ],
-        ids=['unknown_stage', 'not_reattempted', 'retries_exhausted'],
+        ids=['not_reattempted', 'retries_exhausted'],
     )
     @pytest.mark.asyncio
     async def test_log_line_has_result_length_not_result(
         self,
         caplog: pytest.LogCaptureFixture,
-        stage: str,
+        stage: FinalizeStage,
         retryable: bool,
         prior_attempts: int,
     ) -> None:
