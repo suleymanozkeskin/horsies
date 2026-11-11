@@ -168,8 +168,21 @@ and there is no migration contract between pre-1.0 versions.
     library (found by a task factory and by a scan of the live tasks, so a
     task built with `asyncio.Task(...)` counts too), and its calls in the
     default executor. The child reports the end only then, so a retry never
-    runs next to work of the attempt that it replaces. A task that returns
-    but leaves work alive past its deadline fails with `TASK_TIMEOUT`.
+    runs next to work of the attempt that it replaces.
+  - A task that returns before its deadline (a value, or an exception that
+    its exception mapper turns into a result) while such work is alive
+    keeps what it returned: its deadline no longer applies. The child waits
+    up to `cancel_grace_ms` for that work. Work still alive then is
+    cancelled in the cancel rounds below, and the child closes (the new
+    `CloseReason.LEFTOVER_WORK`): it takes no new task and is replaced when
+    its tasks end. Work still alive 0.3 s after that cancel is stuck: the
+    task keeps its seat, the worker kills the child when every task left in
+    it is stuck, and then writes what the task returned, with no
+    `TASK_TIMEOUT` and no retry in an isolated child. Each task that opens a
+    client on first use, outside `on_shared_async_child_start`, so costs one
+    child restart. The child logs one line for each task that left work:
+    the coroutine names of that work, up to 10, and whether it ended within
+    the grace, was cancelled, or was stuck.
   - The child holds the deadline of each task. At `timeout_ms` it cancels
     the task; when the attempt has ended, the worker writes `TASK_TIMEOUT`,
     the retry and the workflow step, and the other tasks of the child

@@ -35,6 +35,8 @@ from horsies.core.types.result import Err, Ok
 from horsies.core.worker.child_protocol import (
     BlockingRun,
     DeadlineFiredFrame,
+    LeftoverCancelFrame,
+    LeftoverStuckFrame,
     LoopBlockedFrame,
     RunStuckFrame,
     SecondCancelFrame,
@@ -42,6 +44,7 @@ from horsies.core.worker.child_protocol import (
     IsolatedChild,
     RssMb,
     RssUnreadable,
+    SeatFinished,
     SeatRefusal,
     SeatTask,
     SeatTimedOut,
@@ -63,6 +66,9 @@ from horsies.core.worker.slots import (
     DeadlineNotReported,
     DeadlineReport,
     DeadlineReported,
+    LeftoverCancelReported,
+    LeftoverStuckReported,
+    LossCause,
     SecondCancelReported,
     Down,
     KilledBySignal,
@@ -82,6 +88,9 @@ from horsies.core.worker.slots import (
     SlotPool,
     SlotPoolConfig,
     _SeatRun,
+    _due_step_reported,
+    _outcome_at_loss,
+    _reported_in,
     place_on_shared_child,
     shared_recycle_reason,
 )
@@ -90,8 +99,11 @@ from horsies.core.worker.shared_stop import (
     BesideBlockedLoop,
     BlockedLoopKill,
     BlockedTheLoop,
+    LoopHeldBy,
     LoopHolderUnknown,
+    NoNamedKill,
     RetryPlacement,
+    ReturnedBeforeKill,
     TimedOutAtKill,
 )
 from horsies.core.worker.stored_timeout import TimeoutValueInvalid
@@ -107,6 +119,7 @@ LONG_TIMEOUT_MS = 60_000
 SHORT_TIMEOUT_MS = MIN_TASK_TIMEOUT_MS
 PAST_SHORT_DEADLINE_S = SHORT_TIMEOUT_MS / 1000 + 0.5
 GRACE_MS = 1_000
+RETURNED = SeatFinished(ok=True, result_json='"returned"', failed_reason=None)
 PoolFactory = Callable[..., Awaitable[SlotPool]]
 
 
@@ -697,6 +710,165 @@ class TestTheStopOfARun:
         assert time.monotonic() - started >= 0.8
 
 
+def _closed_for_left_work(pool: SlotPool) -> bool:
+    match pool.shared_states():
+        case (Closing(reason=CloseReason.LEFTOVER_WORK),):
+            return True
+        case _:
+            return False
+
+
+def _returned_pid(outcome: SharedOutcome) -> str:
+    """The pid that a run returned, after its child was killed while the
+    work it left was stuck."""
+    match outcome:
+        case SeatKilled(
+            verdict=ReturnedBeforeKill(returned=SeatFinished(ok=True, result_json=pid)),
+            child_exit=KilledBySignal(signal_number=number),
+        ):
+            assert number == signal.SIGKILL
+            return pid
+        case other:
+            raise AssertionError(other)
+
+
+@pytest.mark.asyncio(loop_scope='function')
+class TestWorkLeftAfterAReturn:
+    """A task returned before its deadline while work that it started was
+    alive. Its outcome is what it returned; a cancel of that work replaces
+    the child, and work that survives the cancel rounds is killed with the
+    child when no task in it has time left."""
+
+    async def test_work_that_ends_within_the_grace_keeps_the_child_open(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        """The work outlives the 1 s deadline and ends within the grace:
+        the deadline no longer applies after the return."""
+        pool = await pool_factory(_config(1, 1))
+        handle = pool.submit_shared(
+            _request(
+                'leave_marked_task',
+                '1.5',
+                timeout_ms=SHORT_TIMEOUT_MS,
+                grace_ms=3_000,
+            )
+        )
+
+        pid = await _value(handle)
+
+        assert await _value(pool.submit_shared(_request('pid'))) == pid
+
+    async def test_work_cancelled_after_the_grace_keeps_the_result_and_closes_the_child(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        pool = await pool_factory(_config(1, 1))
+        handle = pool.submit_shared(
+            _request('leave_until_cancelled', grace_ms=MIN_CANCEL_GRACE_MS)
+        )
+
+        first_pid = await _value(handle)
+
+        replacement = await _value(pool.submit_shared(_request('pid')))
+        assert replacement != first_pid
+        assert not _alive(int(first_pid))
+
+    @pytest.mark.parametrize(
+        ('operation', 'argument'),
+        [('leave_ignoring_cancels', None), ('leave_thread', '30')],
+    )
+    async def test_stuck_work_alone_is_killed_and_the_result_kept(
+        self,
+        pool_factory: PoolFactory,
+        operation: str,
+        argument: str | None,
+    ) -> None:
+        """Alone in its child, a run whose work is stuck leaves no run with
+        time: the child is killed at once, and the run ends with what it
+        returned, not with a timeout."""
+        pool = await pool_factory(_config(1, 1))
+        handle = pool.submit_shared(
+            _request(operation, argument, grace_ms=MIN_CANCEL_GRACE_MS)
+        )
+
+        pid = _returned_pid(await _outcome(handle))
+
+        assert not _alive(int(pid))
+        assert pool.live_dispatches.snapshot() == ()
+        assert await _value(pool.submit_shared(_request('pid'))) != pid
+
+    async def test_stuck_work_waits_for_a_neighbour_with_time(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        """The neighbour runs to its own end; only then is the child killed,
+        and the stuck run ends with what it returned."""
+        pool = await pool_factory(_config(1, 2))
+        neighbour = pool.submit_shared(_request('sleep', '2.5'))
+        await asyncio.wait_for(asyncio.shield(neighbour.assigned), OUTCOME_TIMEOUT_S)
+        stuck = pool.submit_shared(
+            _request('leave_ignoring_cancels', grace_ms=MIN_CANCEL_GRACE_MS)
+        )
+        await _until(lambda: _closed_for_left_work(pool))
+        await _until(lambda: _run_stuck_in_left_work(pool, stuck.frame.dispatch))
+        assert not stuck.outcome.done()
+
+        neighbour_pid = await _value(neighbour)
+
+        assert _returned_pid(await _outcome(stuck)) == neighbour_pid
+
+    async def test_the_backstop_leaves_a_live_child_whose_left_work_is_stuck(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        pool = await pool_factory(_config(1, 2))
+        neighbour = pool.submit_shared(_request('sleep', '30'))
+        await asyncio.wait_for(asyncio.shield(neighbour.assigned), OUTCOME_TIMEOUT_S)
+        stuck = pool.submit_shared(
+            _request('leave_ignoring_cancels', grace_ms=MIN_CANCEL_GRACE_MS)
+        )
+        await _until(lambda: _run_stuck_in_left_work(pool, stuck.frame.dispatch))
+
+        outcome = await stuck.backstop_kill(CHILD_KILL_WAIT_S)
+
+        assert isinstance(outcome, DeadlineAcknowledged)
+        assert _alive(outcome.pid)
+        assert not stuck.outcome.done()
+
+    async def test_a_client_opened_on_first_use_costs_a_restart_not_a_timeout(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        """Each new child opens the client again in its first task, whose
+        mark its background task carries: each such task ends with its
+        result, and its child is replaced."""
+        pool = await pool_factory(_config(1, 1))
+
+        pids = [
+            await _value(
+                pool.submit_shared(
+                    _request('lazy_client', grace_ms=MIN_CANCEL_GRACE_MS),
+                ),
+            )
+            for _ in range(2)
+        ]
+
+        assert pids[0] != pids[1]
+        assert not _alive(int(pids[0]))
+
+
+def _run_stuck_in_left_work(pool: SlotPool, dispatch: int) -> bool:
+    """Whether the run ``dispatch`` of the one shared slot is reported stuck
+    in the work that it left after its return."""
+    match pool.shared_states():
+        case (Closing(runs=runs),):
+            run = runs.get(dispatch)
+            return run is not None and isinstance(run.deadline, LeftoverStuckReported)
+        case _:
+            return False
+
+
 @pytest.mark.asyncio(loop_scope='function')
 class TestBlockedLoop:
     async def test_the_watchdog_names_the_culprit_and_the_child_is_killed(
@@ -998,12 +1170,21 @@ class TestStopReportOrder:
             (DeadlineNotReported(), SecondCancelFrame(1, '')),
             (DeadlineReported(), RunStuckFrame(1, '', 1, 0, ('x',))),
             (StuckReported(), SecondCancelFrame(1, '')),
+            (DeadlineReported(), LeftoverCancelFrame(1, '')),
+            (LeftoverCancelReported(), LeftoverCancelFrame(1, '')),
+            (DeadlineNotReported(), LeftoverStuckFrame(1, '', 1, 0, ('x',), RETURNED)),
+            (SecondCancelReported(), LeftoverStuckFrame(1, '', 1, 0, ('x',), RETURNED)),
+            (LeftoverCancelReported(), SecondCancelFrame(1, '')),
+            (LeftoverCancelReported(), RunStuckFrame(1, '', 1, 0, ('x',))),
         ],
     )
     async def test_a_report_out_of_order_is_refused(
         self,
         deadline: DeadlineReport,
-        report: SecondCancelFrame | RunStuckFrame,
+        report: SecondCancelFrame
+        | RunStuckFrame
+        | LeftoverCancelFrame
+        | LeftoverStuckFrame,
     ) -> None:
         pool, runs, child = self._run_at(deadline)
         frame = replace(report, task_id=runs.task_ids()[0])
@@ -1064,6 +1245,53 @@ class TestStopReportOrder:
         assert handle.outcome.result() == SeatDeadlineEnded(retry=retry)
 
     @pytest.mark.asyncio(loop_scope='function')
+    async def test_a_leftover_cancel_closes_the_child_and_kills_nothing(self) -> None:
+        pool, runs, child = self._run_at(DeadlineNotReported())
+        frame = LeftoverCancelFrame(dispatch=1, task_id=runs.task_ids()[0])
+
+        assert pool._note_stop_report(pool._shared_slots[0], child, runs, frame)
+        assert runs.get(1).deadline == LeftoverCancelReported()  # type: ignore[union-attr]
+        assert pool.shared_states() == (Closing(CloseReason.LEFTOVER_WORK, runs),)
+        child.kill_for_caller.assert_not_called()
+
+    @pytest.mark.asyncio(loop_scope='function')
+    async def test_a_leftover_stuck_report_keeps_what_the_task_returned(self) -> None:
+        pool, runs, child = self._run_at(LeftoverCancelReported())
+        frame = LeftoverStuckFrame(
+            dispatch=1,
+            task_id=runs.task_ids()[0],
+            tasks=1,
+            executor_items=0,
+            names=('keepalive',),
+            returned=RETURNED,
+        )
+
+        assert pool._note_stop_report(pool._shared_slots[0], child, runs, frame)
+        assert runs.get(1).deadline == LeftoverStuckReported(RETURNED)  # type: ignore[union-attr]
+        assert runs.all_out_of_time(pool._shared_slots[0].kind)
+
+    @pytest.mark.asyncio(loop_scope='function')
+    @pytest.mark.parametrize(
+        'deadline',
+        [LeftoverCancelReported(), LeftoverStuckReported(RETURNED)],
+    )
+    async def test_a_returned_run_ends_with_its_result_and_never_with_a_timeout(
+        self,
+        deadline: DeadlineReport,
+    ) -> None:
+        pool, runs, _child = self._run_at(deadline)
+        handle = runs.get(1).handle  # type: ignore[union-attr]
+        timed_out = SharedResultFrame(1, runs.task_ids()[0], SeatTimedOut(), RssMb(1.0))
+        finished = replace(timed_out, end=RETURNED)
+
+        assert pool._end_run(runs, timed_out) is False
+        assert runs.count() == 1
+        assert pool._end_run(runs, finished) is True
+        assert handle.outcome.result() == SeatTaskFinished(
+            True, RETURNED.result_json, None
+        )
+
+    @pytest.mark.asyncio(loop_scope='function')
     async def test_a_blocked_loop_report_of_a_finished_run_names_no_culprit(
         self,
     ) -> None:
@@ -1078,6 +1306,93 @@ class TestStopReportOrder:
         assert pool._kill_for_blocked_loop(pool._shared_slots[0], child, runs, frame)
         assert runs.kill == BlockedLoopKill(LoopHolderUnknown(), 5000, 'x')
         child.kill_for_caller.assert_called_once()
+
+
+class TestReturnedRunAtAKill:
+    """The outcome of a run whose coroutine returned before its deadline,
+    at an end of its child that the worker did not plan for that run."""
+
+    def _run(self, deadline: DeadlineReport) -> _SeatRun:
+        handle = SharedHandle(_request('echo').frame_for(1), asyncio.get_running_loop())
+        # Placed long ago: by the clock, the deadline of the run has passed.
+        return _SeatRun(handle, RegistryClosed(), deadline, time.monotonic() - 3600)
+
+    @pytest.mark.asyncio(loop_scope='function')
+    @pytest.mark.parametrize(
+        'kill',
+        [
+            NoNamedKill(),
+            BlockedLoopKill(LoopHeldBy(dispatch=1, task_id='t'), 5000, 'x'),
+            BlockedLoopKill(LoopHolderUnknown(), 5000, 'x'),
+        ],
+    )
+    async def test_stuck_left_work_keeps_what_the_task_returned_at_any_kill(
+        self,
+        kill: NoNamedKill | BlockedLoopKill,
+    ) -> None:
+        lost = ChildLost(LossCause.KILLED_BY_PARENT, KilledBySignal(9), False, 7)
+
+        outcome = _outcome_at_loss(
+            kill,
+            self._run(LeftoverStuckReported(RETURNED)),
+            lost,
+            time.monotonic(),
+        )
+
+        assert outcome == SeatKilled(ReturnedBeforeKill(RETURNED), 7, KilledBySignal(9))
+
+    @pytest.mark.asyncio(loop_scope='function')
+    async def test_a_crash_the_worker_did_not_cause_takes_the_crash_path(self) -> None:
+        lost = ChildLost(LossCause.CHILD_DIED, KilledBySignal(9), False, 7)
+
+        outcome = _outcome_at_loss(
+            NoNamedKill(),
+            self._run(LeftoverStuckReported(RETURNED)),
+            lost,
+            time.monotonic(),
+        )
+
+        assert outcome == lost
+
+    @pytest.mark.asyncio(loop_scope='function')
+    async def test_work_in_its_cancel_rounds_is_not_past_a_deadline(self) -> None:
+        """The child has not sent what the task returned yet, so a kill
+        with no named cause takes the crash path, never the timeout."""
+        lost = ChildLost(LossCause.KILLED_BY_PARENT, KilledBySignal(9), False, 7)
+
+        outcome = _outcome_at_loss(
+            NoNamedKill(),
+            self._run(LeftoverCancelReported()),
+            lost,
+            time.monotonic(),
+        )
+
+        assert outcome == lost
+
+    @pytest.mark.parametrize(
+        'deadline',
+        [LeftoverCancelReported(), LeftoverStuckReported(RETURNED)],
+    )
+    def test_a_leftover_report_answers_the_backstop(
+        self,
+        deadline: DeadlineReport,
+    ) -> None:
+        assert _due_step_reported(SeatTask(1000, 100), deadline) is True
+
+    @pytest.mark.parametrize(
+        'frame',
+        [
+            LeftoverCancelFrame(dispatch=1, task_id='t'),
+            LeftoverStuckFrame(1, 't', 1, 0, ('x',), RETURNED),
+        ],
+    )
+    def test_a_queued_leftover_report_answers_the_backstop(
+        self,
+        frame: LeftoverCancelFrame | LeftoverStuckFrame,
+    ) -> None:
+        """The slot has not read the report yet: the child is alive."""
+        assert _reported_in(SeatTask(1000, 100), (frame,), 1) is True
+        assert _reported_in(SeatTask(1000, 100), (frame,), 2) is False
 
 
 IDLE_CPU_PROBE_S = 1.0

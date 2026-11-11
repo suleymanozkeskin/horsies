@@ -18,14 +18,22 @@ import pytest
 from sqlalchemy import Row, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from horsies.core.models.tasks import Execution, OperationalErrorCode, OutcomeCode
-from horsies.core.worker.child_protocol import SeatTask
+from horsies.core.codec.error_payload import serialize_error_payload
+from horsies.core.models.tasks import (
+    Execution,
+    OperationalErrorCode,
+    OutcomeCode,
+    TaskError,
+    TaskResult,
+)
+from horsies.core.worker.child_protocol import SeatFinished, SeatTask
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.shared_stop import (
     BesideBlockedLoop,
     BlockedTheLoop,
     KilledRunVerdict,
     RetryPlacement,
+    ReturnedBeforeKill,
     TimedOutAtKill,
 )
 from horsies.core.worker.slots import (
@@ -40,6 +48,7 @@ from horsies.core.worker.slots import (
 from horsies.core.worker.thread_slots import RunCulprit
 from horsies.core.worker.worker import Worker
 from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.history_seeding import read_attempts
 
 pytestmark = [pytest.mark.integration]
 
@@ -329,3 +338,56 @@ async def test_a_neighbour_whose_code_had_not_started_returns_to_the_queue(
         0,
         'SHARED_ASYNC',
     )
+
+
+def _returned_error(error_code: str) -> ReturnedBeforeKill:
+    """The run returned this error before its deadline; the work that it
+    left was stuck when the worker killed its child."""
+    payload = serialize_error_payload(
+        TaskResult(err=TaskError(error_code=error_code, message='upstream down')),
+    )
+    return ReturnedBeforeKill(
+        returned=SeatFinished(ok=True, result_json=payload, failed_reason=None),
+    )
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_a_run_that_returned_before_the_kill_writes_what_it_returned(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """The policy retries timeouts: the run is no timeout, so it fails with
+    the code that it returned, and runs no more."""
+    task_id = await _insert_shared_task(session, ['TASK_TIMEOUT'])
+
+    await _finalize(_worker(engine), task_id, _killed(_returned_error('UPSTREAM_DOWN')))
+
+    row = await _terminal_row(session, task_id)
+    assert (row.status, row.error_code) == ('FAILED', 'UPSTREAM_DOWN')
+    session.expire_all()
+    attempts = await read_attempts(session, task_id)
+    assert [(a.attempt, a.will_retry, a.error_code) for a in attempts] == [
+        (1, False, 'UPSTREAM_DOWN'),
+    ]
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_the_retry_of_a_run_that_returned_before_the_kill_stays_in_its_class(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """The run is no culprit: its retry is not moved to an isolated child."""
+    task_id = await _insert_shared_task(session, ['UPSTREAM_DOWN'])
+
+    await _finalize(_worker(engine), task_id, _killed(_returned_error('UPSTREAM_DOWN')))
+
+    row = await _row(session, task_id)
+    assert (row.status, row.retry_count, row.execution) == (
+        'PENDING',
+        1,
+        'SHARED_ASYNC',
+    )
+    attempt = await _attempt(session, task_id)
+    assert (attempt.will_retry, attempt.error_code) == (True, 'UPSTREAM_DOWN')

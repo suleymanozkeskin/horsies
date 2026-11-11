@@ -3,7 +3,9 @@
 A shared child that has no task with time left is killed by the close and
 kill path of the slot pool (``ChildKilledPastDeadlines``): every task of a
 thread child is past its deadline, every task of an async child is stuck.
-Its culprit retries isolated (``culprit_retry``). The worker also kills a
+Its culprit retries isolated (``culprit_retry``). A task of an async child
+that returned before its deadline, and is stuck only in the work that it
+left, is no culprit: it gets ``ReturnedBeforeKill``. The worker also kills a
 shared child for these causes:
 
 - ``BlockedLoopKill``: the watchdog of an async child reported that the
@@ -22,6 +24,11 @@ The verdict of each run at such a kill, whose exit the worker saw
   watchdog named the run that blocked it: ``NEIGHBOUR_BLOCKED_LOOP``;
 - any other run: the crash path (``WORKER_CRASHED``, or its retry).
 
+A run whose coroutine returned before its deadline, and whose left work the
+child reported stuck, gets ``ReturnedBeforeKill`` at every kill by the
+worker instead: what it returned. The slot gives that verdict before it
+asks ``verdict_at_kill``.
+
 A kill with no named cause isolates no run, and neither does a crash of the
 child that the worker did not cause. Pure.
 """
@@ -32,6 +39,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import assert_never
 
+from horsies.core.worker.child_protocol import SeatFinished
 from horsies.core.worker.thread_slots import RunCulprit
 
 
@@ -119,7 +127,19 @@ class BesideBlockedLoop:
     blocked_ms: int
 
 
-type KilledRunVerdict = TimedOutAtKill | BlockedTheLoop | BesideBlockedLoop
+@dataclass(frozen=True, slots=True)
+class ReturnedBeforeKill:
+    """The coroutine of this run returned ``returned`` before its deadline,
+    and the work that it left did not stop after its cancel rounds. The
+    outcome is what it returned: the run is no timeout culprit, and no retry
+    moves to an isolated child."""
+
+    returned: SeatFinished
+
+
+type KilledRunVerdict = (
+    TimedOutAtKill | BlockedTheLoop | BesideBlockedLoop | ReturnedBeforeKill
+)
 
 
 @dataclass(frozen=True, slots=True)

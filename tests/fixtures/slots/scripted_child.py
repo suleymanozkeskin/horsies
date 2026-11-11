@@ -77,6 +77,9 @@ from horsies.core.worker.task_loop import AsyncTaskPresence, TaskLoop
 _sock: socket.socket
 # The loop holds only weak references to its tasks.
 _kept_tasks: list[asyncio.Task[None]] = []
+_left_items: list[asyncio.Future[None]] = []
+# The background task of the client that ``lazy_client`` opens on first use.
+_lazy_clients: list[asyncio.Task[None]] = []
 # Strong references, so that a freed loop cannot pass its id to a new one.
 _seen_loops: list[asyncio.AbstractEventLoop] = []
 
@@ -495,6 +498,43 @@ async def _leave_direct_task(seconds: float) -> str:
     return str(os.getpid())
 
 
+async def _leave_until_cancelled() -> str:
+    """Start a task that waits until it is cancelled, and return at once."""
+    _kept_tasks.append(asyncio.get_running_loop().create_task(_wait_forever()))
+    return str(os.getpid())
+
+
+async def _wait_forever() -> None:
+    _ = await asyncio.Event().wait()
+
+
+async def _leave_ignoring_cancels() -> str:
+    """Start a task that ignores every cancel, and return at once."""
+    _kept_tasks.append(asyncio.get_running_loop().create_task(_ignore_cancel()))
+    return str(os.getpid())
+
+
+def _leave_thread(seconds: float) -> str:
+    """Start a sync call in the default executor and do not await it."""
+    loop = asyncio.get_running_loop()
+    _left_items.append(loop.run_in_executor(None, time.sleep, seconds))
+    return str(os.getpid())
+
+
+async def _keepalive() -> None:
+    while True:
+        await asyncio.sleep(0.05)
+
+
+def _lazy_client() -> str:
+    """Open a client on first use in this process, as a task that does not
+    use the start hook: its background task carries the mark of the task
+    that opened it. Return the pid."""
+    if not _lazy_clients:
+        _lazy_clients.append(asyncio.get_running_loop().create_task(_keepalive()))
+    return str(os.getpid())
+
+
 async def _thread_outlives_cancel(seconds: float) -> str:
     """Wait for a sync call in the default executor; a cancel ends the
     coroutine, and the thread runs on."""
@@ -542,6 +582,14 @@ async def _seat_run(frame: SharedRunFrame) -> WireResult:
             return True, await _leave_direct_task(float(argument)), None
         case 'thread_outlives_cancel':
             return True, await _thread_outlives_cancel(float(argument)), None
+        case 'leave_until_cancelled':
+            return True, await _leave_until_cancelled(), None
+        case 'leave_ignoring_cancels':
+            return True, await _leave_ignoring_cancels(), None
+        case 'leave_thread':
+            return True, _leave_thread(float(argument)), None
+        case 'lazy_client':
+            return True, _lazy_client(), None
         case 'ignore_every_cancel':
             return True, await _ignore_every_cancel(), None
         case 'start_ticker':

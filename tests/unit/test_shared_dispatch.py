@@ -36,6 +36,7 @@ from horsies.core.worker import finalize
 from horsies.core.worker.child_protocol import (
     IsolatedChild,
     RssMb,
+    SeatFinished,
     SeatRefusal,
     SeatTask,
     SharedAsyncChild,
@@ -77,6 +78,7 @@ from horsies.core.worker.shared_stop import (
     BesideBlockedLoop,
     BlockedTheLoop,
     RetryPlacement,
+    ReturnedBeforeKill,
     TimedOutAtKill,
 )
 from horsies.core.worker.stored_timeout import (
@@ -538,12 +540,17 @@ class _KillWrites:
         self.worker = _worker()
         self.timeout = AsyncMock(return_value=_TimeoutSettled())
         self.recovery = AsyncMock(return_value=_RequeueOutcome.REQUEUED)
+        self.result = AsyncMock(return_value=Ok(None))
         self.worker._record_task_timeout = self.timeout
         self.worker._recover_worker_future_failure = self.recovery
+        self.worker._finalize_task_result = self.result
 
     async def finalize(
         self,
-        verdict: TimedOutAtKill | BlockedTheLoop | BesideBlockedLoop,
+        verdict: TimedOutAtKill
+        | BlockedTheLoop
+        | BesideBlockedLoop
+        | ReturnedBeforeKill,
         work: SeatTask | SeatRefusal = SeatTask(timeout_ms=1500, cancel_grace_ms=500),
     ) -> Result[None, _FinalizeError]:
         handle = _handle(asyncio.get_running_loop())
@@ -613,6 +620,28 @@ class TestFinalizeKilledRun:
             'retry': RetryPlacement.SAME_CLASS,
         }
         assert 'Task task-9 held the event loop' in writes.recovery.await_args.args[1]
+
+    async def test_a_run_that_returned_before_the_kill_writes_its_result(self) -> None:
+        """The work that the run left was stuck; the run itself returned in
+        time: no timeout, no crash recovery, and no isolated retry."""
+        writes = _KillWrites()
+        returned = SeatFinished(ok=True, result_json='{"x":1}', failed_reason=None)
+
+        result = await writes.finalize(ReturnedBeforeKill(returned=returned))
+
+        assert result == Ok(None)
+        writes.result.assert_awaited_once_with(
+            'task-1',
+            True,
+            '{"x":1}',
+            None,
+            queue_name='default',
+            is_workflow_task=False,
+            task_name='fetch',
+            claimed_at=CLAIMED_AT,
+        )
+        writes.timeout.assert_not_awaited()
+        writes.recovery.assert_not_awaited()
 
     async def test_a_database_error_of_the_write_is_retryable(self) -> None:
         """The error keeps the verdict, so its retry writes the same code in

@@ -14,6 +14,7 @@ import asyncio
 import contextlib
 import contextvars
 import dataclasses
+import logging
 import threading
 import time
 from collections.abc import Callable
@@ -25,7 +26,9 @@ from horsies.core.worker import child_main, shared_child
 from horsies.core.worker.child_inbox import ParentFrameInbox
 from horsies.core.worker.child_protocol import (
     ChildFrame,
+    MAX_LEFTOVER_TASK_NAMES,
     DeadlineFiredFrame,
+    LeftoverStuckFrame,
     ReadyFrame,
     RssMb,
     RssReading,
@@ -42,6 +45,7 @@ from horsies.core.worker.child_protocol import (
 )
 from horsies.core.worker.shared_child import (
     FRAMES_PER_SEAT,
+    FrameWithResult,
     FrameWriter,
     SeatLoop,
     bounded_result_frame,
@@ -82,7 +86,7 @@ class _RecordingWriter:
     def send(self, frame: ChildFrame) -> None:
         self.frames.append(frame)
 
-    def send_result(self, task_name: str, frame: SharedResultFrame) -> None:
+    def send_result(self, task_name: str, frame: FrameWithResult) -> None:
         self.frames.append(frame)
 
 
@@ -728,11 +732,12 @@ class TestTheStopOfARun:
         assert _kinds(writer, 1)[-1] == 'SharedResultFrame'
         assert _results(writer)[0].end == SeatTimedOut()
 
-    def test_a_task_left_after_its_return_past_the_deadline_is_the_timeout(
+    def test_work_left_after_a_return_that_outlives_the_deadline_keeps_the_result(
         self,
     ) -> None:
-        """The body returned, but its marked work outlived T: the attempt had
-        not ended, so the outcome is the timeout."""
+        """The body returned before T, and its marked work outlived T: the
+        deadline no longer applies. The work is cancelled after the grace,
+        and the run ends with what the body returned."""
 
         async def leave_forever() -> int:
             _ = asyncio.get_running_loop().create_task(asyncio.Event().wait())
@@ -744,12 +749,8 @@ class TestTheStopOfARun:
             _results_of(1),
         )
 
-        assert _kinds(writer, 1) == [
-            'DeadlineFiredFrame',
-            'SecondCancelFrame',
-            'SharedResultFrame',
-        ]
-        assert _results(writer)[0].end == SeatTimedOut()
+        assert _kinds(writer, 1) == ['LeftoverCancelFrame', 'SharedResultFrame']
+        assert _results(writer)[0].end == SeatFinished(True, '1', None)
 
     def test_the_stop_of_one_run_leaves_its_neighbour_running(self) -> None:
         release = asyncio.Event()
@@ -790,6 +791,295 @@ class TestTheStopOfARun:
         ends = {frame.dispatch: frame.end for frame in _results(writer)}
         assert ends == {1: SeatTimedOut(), 2: SeatFinished(True, '5', None)}
         assert _kinds(writer, 2) == ['SharedResultFrame']
+
+
+def _left_work_lines(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [
+        record
+        for record in caplog.records
+        if record.name == 'horsies.worker'
+        and 'returned and left work' in record.message
+    ]
+
+
+async def _swallow_every_cancel(stop: threading.Event) -> None:
+    """Ignore each cancel until ``stop`` is set, bounded by ``RUN_TIMEOUT_S``."""
+    give_up_at = time.monotonic() + RUN_TIMEOUT_S
+    while not stop.is_set() and time.monotonic() < give_up_at:
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.sleep(0.01)
+
+
+class TestWorkLeftAfterAReturn:
+    """A coroutine returned before its deadline while marked work was alive:
+    the run ends with what it returned, after that work ended, was
+    cancelled, or was reported stuck."""
+
+    def test_work_that_ends_within_the_grace_keeps_the_result(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level(logging.INFO, logger='horsies')
+
+        async def flush_later() -> None:
+            await asyncio.sleep(0.05)
+
+        async def leave() -> int:
+            _ = asyncio.get_running_loop().create_task(flush_later())
+            return 1
+
+        writer = _run_to_end(
+            {'leave': leave},
+            [_frame(1, 'leave', grace_ms=2_000)],
+            _results_of(1),
+        )
+
+        assert _kinds(writer, 1) == ['SharedResultFrame']
+        assert _results(writer)[0].end == SeatFinished(True, '1', None)
+        lines = _left_work_lines(caplog)
+        assert len(lines) == 1
+        assert lines[0].levelno == logging.INFO
+        assert 'ended within the cancel grace' in lines[0].message
+        assert 'flush_later' in lines[0].message
+        assert 'leave (task-1, run 1)' in lines[0].message
+
+    def test_work_alive_after_the_grace_is_cancelled_and_the_result_kept(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        cancelled = asyncio.Event()
+
+        async def keepalive() -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        async def leave() -> int:
+            _ = asyncio.get_running_loop().create_task(keepalive())
+            return 1
+
+        writer = _run_to_end(
+            {'leave': leave},
+            [_frame(1, 'leave', grace_ms=GRACE_MS)],
+            _results_of(1),
+        )
+
+        assert cancelled.is_set()
+        assert _kinds(writer, 1) == ['LeftoverCancelFrame', 'SharedResultFrame']
+        assert _results(writer)[0].end == SeatFinished(True, '1', None)
+        lines = _left_work_lines(caplog)
+        assert [line.levelno for line in lines] == [logging.WARNING]
+        assert 'was cancelled after the cancel grace' in lines[0].message
+        assert 'keepalive' in lines[0].message
+
+    def test_work_that_swallows_every_cancel_is_stuck_with_the_returned_outcome(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        stop = threading.Event()
+
+        async def leave() -> int:
+            _ = asyncio.get_running_loop().create_task(_swallow_every_cancel(stop))
+            return 1
+
+        def stuck_then_released(writer: _RecordingWriter) -> bool:
+            if any(isinstance(frame, LeftoverStuckFrame) for frame in writer.frames):
+                stop.set()
+            return len(_results(writer)) == 1
+
+        writer = _run_to_end(
+            {'leave': leave},
+            [_frame(1, 'leave', grace_ms=GRACE_MS)],
+            stuck_then_released,
+        )
+
+        assert _kinds(writer, 1) == [
+            'LeftoverCancelFrame',
+            'LeftoverStuckFrame',
+            'SharedResultFrame',
+        ]
+        stuck = next(f for f in writer.frames if isinstance(f, LeftoverStuckFrame))
+        assert stuck.returned == SeatFinished(True, '1', None)
+        assert (stuck.tasks, stuck.executor_items) == (1, 0)
+        assert stuck.names == ('_swallow_every_cancel',)
+        assert _results(writer)[0].end == SeatFinished(True, '1', None)
+        lines = _left_work_lines(caplog)
+        assert [line.levelno for line in lines] == [logging.WARNING]
+        assert 'did not stop after the cancel rounds' in lines[0].message
+
+    def test_an_executor_thread_left_after_the_return_is_stuck(self) -> None:
+        release = threading.Event()
+
+        async def leave_thread() -> int:
+            _ = asyncio.get_running_loop().run_in_executor(
+                None,
+                release.wait,
+                RUN_TIMEOUT_S,
+            )
+            return 1
+
+        def stuck_then_released(writer: _RecordingWriter) -> bool:
+            if any(isinstance(frame, LeftoverStuckFrame) for frame in writer.frames):
+                release.set()
+            return len(_results(writer)) == 1
+
+        writer = _run_to_end(
+            {'thread': leave_thread},
+            [_frame(1, 'thread', grace_ms=GRACE_MS)],
+            stuck_then_released,
+        )
+
+        stuck = next(f for f in writer.frames if isinstance(f, LeftoverStuckFrame))
+        assert (stuck.tasks, stuck.executor_items, stuck.names) == (0, 1, ())
+        assert stuck.returned == SeatFinished(True, '1', None)
+        assert _results(writer)[0].end == SeatFinished(True, '1', None)
+
+    def test_the_deadline_does_not_fire_after_the_return(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The work ends past T and within the grace after the return: no
+        deadline report, and the run keeps what it returned. A deadline timer
+        left armed would fire on a run past that step, which the loop logs
+        as an error."""
+
+        async def flush_past_the_deadline() -> None:
+            await asyncio.sleep(0.15)
+
+        async def leave() -> int:
+            _ = asyncio.get_running_loop().create_task(flush_past_the_deadline())
+            return 1
+
+        writer = _run_to_end(
+            {'leave': leave},
+            [_frame(1, 'leave', timeout_ms=30, grace_ms=2_000)],
+            _results_of(1),
+        )
+
+        assert _kinds(writer, 1) == ['SharedResultFrame']
+        assert _results(writer)[0].end == SeatFinished(True, '1', None)
+        assert [r.message for r in caplog.records if r.levelno >= logging.ERROR] == []
+
+    def test_a_deadline_that_finds_the_coroutine_returned_keeps_the_result(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The deadline fires after the coroutine returned and before its
+        done callback ran: the coroutine returned in time."""
+        original_finish = SeatLoop._finish
+
+        def deadline_first(
+            seat_loop: SeatLoop,
+            dispatch: int,
+            task: asyncio.Task[WireResult],
+        ) -> None:
+            seat = seat_loop._seats.get(dispatch)
+            if seat is not None and seat.stop is shared_child._Stop.BEFORE_DEADLINE:
+                shared_child._cancel_timer(seat)
+                seat_loop._fire(dispatch)
+            original_finish(seat_loop, dispatch, task)
+
+        monkeypatch.setattr(SeatLoop, '_finish', deadline_first)
+
+        async def leave() -> int:
+            _ = asyncio.get_running_loop().create_task(asyncio.sleep(0.05))
+            return 1
+
+        writer = _run_to_end(
+            {'leave': leave},
+            [_frame(1, 'leave', grace_ms=2_000)],
+            _results_of(1),
+        )
+
+        assert _kinds(writer, 1) == ['SharedResultFrame']
+        assert _results(writer)[0].end == SeatFinished(True, '1', None)
+
+    def test_a_neighbour_runs_on_while_the_work_of_a_return_is_cancelled(
+        self,
+    ) -> None:
+        release = asyncio.Event()
+
+        async def leave() -> int:
+            _ = asyncio.get_running_loop().create_task(asyncio.Event().wait())
+            return 1
+
+        async def hold() -> int:
+            await release.wait()
+            return 5
+
+        harness, writer, _started = _seat_loop(2, {'leave': leave, 'hold': hold})
+        inbox = ParentFrameInbox()
+
+        async def scenario() -> None:
+            serving = asyncio.ensure_future(harness.serve(inbox))
+            inbox.put(_frame(1, 'leave', grace_ms=GRACE_MS))
+            inbox.put(_frame(2, 'hold'))
+            await _until(lambda: len(_results(writer)) == 1)
+            assert _results(writer)[0].dispatch == 1
+            release.set()
+            await _until(lambda: len(_results(writer)) == 2)
+            inbox.put(StopFrame())
+            await asyncio.wait_for(serving, RUN_TIMEOUT_S)
+
+        asyncio.run(scenario())
+        ends = {frame.dispatch: frame.end for frame in _results(writer)}
+        assert ends == {
+            1: SeatFinished(True, '1', None),
+            2: SeatFinished(True, '5', None),
+        }
+        assert _kinds(writer, 2) == ['SharedResultFrame']
+
+    def test_a_refusal_that_leaves_work_waits_for_it_with_no_grace(
+        self,
+        exits: list[tuple[str, int]],
+    ) -> None:
+        """A refusal has no deadline and no cancel grace: its run waits for
+        its marked work, and nothing is cancelled."""
+
+        async def flush_later() -> None:
+            await asyncio.sleep(0.3)
+
+        async def refuse() -> str:
+            _ = asyncio.get_running_loop().create_task(flush_later())
+            return 'refused'
+
+        refusal = dataclasses.replace(
+            _frame(1, 'refuse'),
+            work=SeatRefusal(refusal=TimeoutValueInvalid(reason='y')),
+        )
+        started = time.monotonic()
+        writer = _run_to_end({'refuse': refuse}, [refusal], _results_of(1))
+
+        assert exits == []
+        assert time.monotonic() - started >= 0.3
+        assert _kinds(writer, 1) == ['SharedResultFrame']
+        assert _results(writer)[0].end == SeatFinished(True, 'refused', None)
+
+    def test_the_log_line_names_the_work_within_its_bound(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level(logging.INFO, logger='horsies')
+        extra = 2
+
+        async def leave_many() -> int:
+            loop = asyncio.get_running_loop()
+            for _ in range(MAX_LEFTOVER_TASK_NAMES + extra):
+                _ = loop.create_task(asyncio.sleep(0.05))
+            return 1
+
+        _ = _run_to_end(
+            {'many': leave_many},
+            [_frame(1, 'many', grace_ms=2_000)],
+            _results_of(1),
+        )
+
+        lines = _left_work_lines(caplog)
+        assert len(lines) == 1
+        assert lines[0].message.count('sleep') == MAX_LEFTOVER_TASK_NAMES
+        assert f'and {extra} more' in lines[0].message
 
 
 class TestParentDefects:

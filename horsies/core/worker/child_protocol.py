@@ -400,6 +400,40 @@ class RunStuckFrame:
 
 
 @dataclass(frozen=True, slots=True)
+class LeftoverCancelFrame:
+    """Shared async child to parent: the coroutine of run ``dispatch``
+    returned before its deadline, and work with its mark was still alive
+    ``cancel_grace_ms`` after that return. The child cancels that work in
+    rounds, as after a second cancel. Cancelled code can leave broken state
+    in the process. The run has not ended yet: its ``SharedResultFrame``
+    comes when that work has ended, with what the coroutine returned."""
+
+    dispatch: int
+    task_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class LeftoverStuckFrame:
+    """Shared async child to parent: the work that run ``dispatch`` left
+    after its return did not stop after its cancel rounds.
+
+    ``returned`` is what the coroutine of the run returned before its
+    deadline. ``tasks``, ``executor_items`` and ``names`` count and name the
+    work still alive, as in ``RunStuckFrame``; the task of the run has
+    ended, so ``tasks`` counts only the work. ``tasks + executor_items`` is
+    at least 1. The run keeps its seat until that work ends or the child is
+    killed.
+    """
+
+    dispatch: int
+    task_id: str
+    tasks: int
+    executor_items: int
+    names: tuple[str, ...]
+    returned: SeatFinished
+
+
+@dataclass(frozen=True, slots=True)
 class BlockingRun:
     """The run whose work held the event loop: the task of run ``dispatch``
     or a task with its mark."""
@@ -473,6 +507,8 @@ ChildFrame: TypeAlias = (
     | DeadlineFiredFrame
     | SecondCancelFrame
     | RunStuckFrame
+    | LeftoverCancelFrame
+    | LeftoverStuckFrame
     | LoopBlockedFrame
 )
 PreloadFrame: TypeAlias = (
@@ -669,15 +705,20 @@ def _child_kind_field(child_kind: ChildKind) -> dict[str, object]:
             assert_never(unreachable)
 
 
+def _finished_field(finished: SeatFinished) -> dict[str, object]:
+    """The metadata of a finished end. Its result travels in the body."""
+    return {
+        'kind': 'finished',
+        'ok': finished.ok,
+        'failed_reason': finished.failed_reason,
+    }
+
+
 def _encode_shared_result(frame: SharedResultFrame) -> EncodedFrame:
     match frame.end:
-        case SeatFinished(ok=ok, result_json=result_json, failed_reason=reason):
-            end: dict[str, object] = {
-                'kind': 'finished',
-                'ok': ok,
-                'failed_reason': reason,
-            }
-            body = result_json.encode('utf-8')
+        case SeatFinished() as finished:
+            end = _finished_field(finished)
+            body = finished.result_json.encode('utf-8')
         case SeatTimedOut():
             end = {'kind': 'timed_out'}
             body = b''
@@ -737,7 +778,12 @@ def encode_child_frame(frame: ChildFrame) -> EncodedFrame:
                 {'kind': 'second_cancel', 'dispatch': dispatch, 'task_id': task_id},
                 b'',
             )
-        case RunStuckFrame() | LoopBlockedFrame():
+        case LeftoverCancelFrame(dispatch=dispatch, task_id=task_id):
+            return _pack(
+                {'kind': 'leftover_cancel', 'dispatch': dispatch, 'task_id': task_id},
+                b'',
+            )
+        case RunStuckFrame() | LeftoverStuckFrame() | LoopBlockedFrame():
             return _encode_stop_report(frame)
         case _ as unreachable:
             assert_never(unreachable)
@@ -753,7 +799,9 @@ def _culprit_field(culprit: LoopCulprit) -> dict[str, object]:
             assert_never(unreachable)
 
 
-def _encode_stop_report(frame: RunStuckFrame | LoopBlockedFrame) -> EncodedFrame:
+def _encode_stop_report(
+    frame: RunStuckFrame | LeftoverStuckFrame | LoopBlockedFrame,
+) -> EncodedFrame:
     match frame:
         case RunStuckFrame():
             return _pack(
@@ -766,6 +814,19 @@ def _encode_stop_report(frame: RunStuckFrame | LoopBlockedFrame) -> EncodedFrame
                     'names': list(frame.names),
                 },
                 b'',
+            )
+        case LeftoverStuckFrame(returned=returned):
+            return _pack(
+                {
+                    'kind': 'leftover_stuck',
+                    'dispatch': frame.dispatch,
+                    'task_id': frame.task_id,
+                    'tasks': frame.tasks,
+                    'executor_items': frame.executor_items,
+                    'names': list(frame.names),
+                    'returned': _finished_field(returned),
+                },
+                returned.result_json.encode('utf-8'),
             )
         case LoopBlockedFrame():
             return _pack(
@@ -1163,18 +1224,27 @@ def decode_parent_frame(
         return Err(MalformedFrame(f'{type(exc).__name__}: {exc}'))
 
 
-def _seat_end(meta: Mapping[str, Any], body: bytes) -> SeatEnd:
-    value = meta.get('end')
+def _end_meta(meta: Mapping[str, Any], key: str) -> Mapping[str, Any]:
+    value = meta.get(key)
     if not isinstance(value, dict):
-        raise _BadField('end')
-    end = cast('Mapping[str, Any]', value)
+        raise _BadField(key)
+    return cast('Mapping[str, Any]', value)
+
+
+def _finished(end: Mapping[str, Any], body: bytes) -> SeatFinished:
+    """A finished end: its fields in ``end``, its result in ``body``."""
+    return SeatFinished(
+        ok=_flag(end, 'ok'),
+        result_json=body.decode('utf-8'),
+        failed_reason=_optional_text(end, 'failed_reason'),
+    )
+
+
+def _seat_end(meta: Mapping[str, Any], body: bytes) -> SeatEnd:
+    end = _end_meta(meta, 'end')
     match end.get('kind'):
         case 'finished':
-            return SeatFinished(
-                ok=_flag(end, 'ok'),
-                result_json=body.decode('utf-8'),
-                failed_reason=_optional_text(end, 'failed_reason'),
-            )
+            return _finished(end, body)
         case 'timed_out':
             if body:
                 raise _BadField('a timed-out end carries no result')
@@ -1183,7 +1253,9 @@ def _seat_end(meta: Mapping[str, Any], body: bytes) -> SeatEnd:
             raise _BadField('end.kind')
 
 
-def _decode_run_stuck(meta: Mapping[str, Any]) -> RunStuckFrame:
+def _stuck_work(meta: Mapping[str, Any]) -> tuple[int, int, tuple[str, ...]]:
+    """The tasks, the executor items and the names of a stuck report, each
+    within its bound. At least one task or item is alive."""
     tasks = _whole(meta, 'tasks')
     executor_items = _whole(meta, 'executor_items')
     if tasks < 0 or executor_items < 0 or tasks + executor_items < 1:
@@ -1193,12 +1265,32 @@ def _decode_run_stuck(meta: Mapping[str, Any]) -> RunStuckFrame:
         raise _BadField('names')
     if any(len(name) > MAX_LEFTOVER_NAME_CHARS for name in names):
         raise _BadField('names')
+    return tasks, executor_items, names
+
+
+def _decode_run_stuck(meta: Mapping[str, Any]) -> RunStuckFrame:
+    tasks, executor_items, names = _stuck_work(meta)
     return RunStuckFrame(
         dispatch=_dispatch(meta),
         task_id=_text(meta, 'task_id'),
         tasks=tasks,
         executor_items=executor_items,
         names=names,
+    )
+
+
+def _decode_leftover_stuck(meta: Mapping[str, Any], body: bytes) -> LeftoverStuckFrame:
+    returned = _end_meta(meta, 'returned')
+    if returned.get('kind') != 'finished':
+        raise _BadField('returned.kind')
+    tasks, executor_items, names = _stuck_work(meta)
+    return LeftoverStuckFrame(
+        dispatch=_dispatch(meta),
+        task_id=_text(meta, 'task_id'),
+        tasks=tasks,
+        executor_items=executor_items,
+        names=names,
+        returned=_finished(returned, body),
     )
 
 
@@ -1281,6 +1373,15 @@ def decode_child_frame(
                 )
             case 'run_stuck':
                 return Ok(_decode_run_stuck(meta))
+            case 'leftover_cancel':
+                return Ok(
+                    LeftoverCancelFrame(
+                        dispatch=_dispatch(meta),
+                        task_id=_text(meta, 'task_id'),
+                    ),
+                )
+            case 'leftover_stuck':
+                return Ok(_decode_leftover_stuck(meta, body))
             case 'loop_blocked':
                 return Ok(_decode_loop_blocked(meta))
             case _:

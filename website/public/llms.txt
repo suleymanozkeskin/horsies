@@ -780,7 +780,7 @@ Each entry: Title -- summary -> URL
 - Worker Architecture -- worker-owned child processes -> /horsies/workers/worker-architecture/
 - Choosing an Execution Mode -- ISOLATED, SHARED_ASYNC or SHARED_THREAD by the work of a task, measured conditions and results, timeouts and crashes per mode, author rules, profile examples -> /horsies/workers/execution-modes/
 - Worker Profiles -- named worker settings in AppConfig, --profile, check and boot validation -> /horsies/workers/worker-profiles/
-- Shared Async Tasks -- SHARED_ASYNC tasks as coroutines on seats of a shared async child, the timeout sequence, the blocked loop, author rules -> /horsies/workers/shared-async-tasks/
+- Shared Async Tasks -- SHARED_ASYNC tasks as coroutines on seats of a shared async child, the timeout sequence, a return that leaves work alive, the blocked loop, author rules -> /horsies/workers/shared-async-tasks/
 - Shared Thread Tasks -- SHARED_THREAD tasks on seat threads of a shared thread child, when threads help, the timeout and the kill, pool sizing -> /horsies/workers/shared-thread-tasks/
 - Concurrency -- worker/queue/cluster limits -> /horsies/workers/concurrency/
 - Heartbeats & Recovery -- crash detection -> /horsies/workers/heartbeats-recovery/

@@ -33,6 +33,8 @@ from horsies.core.worker.child_protocol import (
     BlockingRun,
     CulpritUnknown,
     DeadlineFiredFrame,
+    LeftoverCancelFrame,
+    LeftoverStuckFrame,
     LoopBlockedFrame,
     RunStuckFrame,
     SecondCancelFrame,
@@ -475,6 +477,91 @@ class TestSharedFrames:
         end = SeatFinished(ok=True, result_json='x', failed_reason=None)
         wire = set(json.loads(_split(encode_child_frame(_shared_result(end)))[0]))
         assert names - {'rss'} == wire - {'kind', 'rss_mb'}
+
+
+_RETURNED = SeatFinished(ok=True, result_json='{"x":1}', failed_reason=None)
+
+
+def _leftover_stuck(returned: SeatFinished = _RETURNED) -> LeftoverStuckFrame:
+    return LeftoverStuckFrame(
+        dispatch=3,
+        task_id='task-9',
+        tasks=2,
+        executor_items=1,
+        names=('keepalive', 'refill'),
+        returned=returned,
+    )
+
+
+class TestLeftoverFrames:
+    """The reports of a run that returned before its deadline and left work."""
+
+    def test_the_leftover_cancel_round_trips(self) -> None:
+        frame = LeftoverCancelFrame(dispatch=3, task_id='task-9')
+        meta, body = _split(encode_child_frame(frame))
+        assert body == b''
+        assert decode_child_frame(meta, body) == Ok(frame)
+
+    @pytest.mark.parametrize(
+        'returned',
+        [
+            SeatFinished(ok=True, result_json='{"x":1}', failed_reason=None),
+            SeatFinished(
+                ok=False,
+                result_json='',
+                failed_reason='WorkerResolutionError',
+            ),
+        ],
+    )
+    def test_the_leftover_stuck_report_round_trips_with_what_the_task_returned(
+        self,
+        returned: SeatFinished,
+    ) -> None:
+        frame = _leftover_stuck(returned)
+        meta, body = _split(encode_child_frame(frame))
+        assert body == returned.result_json.encode()
+        assert decode_child_frame(meta, body) == Ok(frame)
+
+    def test_a_leftover_stuck_report_of_executor_items_only_round_trips(self) -> None:
+        frame = dataclasses.replace(_leftover_stuck(), tasks=0, names=())
+        meta, body = _split(encode_child_frame(frame))
+        assert decode_child_frame(meta, body) == Ok(frame)
+
+    @pytest.mark.parametrize(
+        ('key', 'value'),
+        [
+            ('returned', None),
+            ('returned', {'kind': 'timed_out'}),
+            ('returned', {'kind': 'finished', 'ok': 1, 'failed_reason': None}),
+            ('returned', {'kind': 'finished', 'ok': True, 'failed_reason': 3}),
+            ('tasks', -1),
+            ('executor_items', True),
+            ('names', ['a']),
+            ('names', ['a', 'x' * (MAX_LEFTOVER_NAME_CHARS + 1)]),
+            ('dispatch', 0),
+            ('task_id', None),
+        ],
+    )
+    def test_every_leftover_stuck_field_is_checked(
+        self,
+        key: str,
+        value: object,
+    ) -> None:
+        meta, body = _split(encode_child_frame(_leftover_stuck()))
+        fields = json.loads(meta)
+        fields[key] = value
+        assert isinstance(decode_child_frame(json.dumps(fields).encode(), body), Err)
+
+    def test_nothing_alive_is_no_stuck_report(self) -> None:
+        meta, body = _split(encode_child_frame(_leftover_stuck()))
+        fields = json.loads(meta)
+        fields.update(tasks=0, executor_items=0, names=[])
+        assert isinstance(decode_child_frame(json.dumps(fields).encode(), body), Err)
+
+    def test_leftover_stuck_frame_fields(self) -> None:
+        names = {field.name for field in dataclasses.fields(LeftoverStuckFrame)}
+        wire = set(json.loads(_split(encode_child_frame(_leftover_stuck()))[0]))
+        assert names == wire - {'kind'}
 
 
 class TestParentFrames:

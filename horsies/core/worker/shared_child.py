@@ -26,6 +26,22 @@ The child holds the deadline of each task. The stop of a run, in order:
   round: report ``RunStuckFrame``. The run keeps its seat. The parent
   closes the child, and kills it when every run left in it is stuck.
 
+A coroutine that returns before its deadline (a value, or an exception that
+the mapper of the task turned into a result) while marked work is alive
+ends the deadline of the run. The end is then what the coroutine returned,
+whatever happens to that work:
+
+- R (the return): wait up to ``cancel_grace_ms`` for that work.
+- R + G, when that work is alive: report ``LeftoverCancelFrame``, and cancel
+  it in the cancel rounds above. The parent closes the child: cancelled code
+  can leave broken state in the process.
+- When that work is still alive one interval after the last round: report
+  ``LeftoverStuckFrame``, with what the coroutine returned. The run keeps its
+  seat; the parent kills the child when every run left in it is stuck.
+
+One log line names the work that each such run left, and how it ended: within
+the grace, after a cancel, or stuck.
+
 A ``LoopWatchdog`` thread reports a loop that has not turned for the block
 limit (``LoopBlockedFrame``); the parent kills the child at once.
 
@@ -73,6 +89,8 @@ from horsies.core.worker.child_protocol import (
     ChildFrame,
     DeadlineFiredFrame,
     InitFrame,
+    LeftoverCancelFrame,
+    LeftoverStuckFrame,
     ReadyFrame,
     RssReading,
     RunFrame,
@@ -91,14 +109,22 @@ from horsies.core.worker.child_protocol import (
     boot_failed_frame,
 )
 from horsies.core.worker.loop_watchdog import LoopWatchdog
-from horsies.core.worker.run_mark import RUN_MARK, MarkedWork, RunMark, ScanWhen
+from horsies.core.worker.run_mark import (
+    RUN_MARK,
+    AliveWork,
+    MarkedWork,
+    RunMark,
+    ScanWhen,
+)
 from horsies.core.worker.task_loop import TaskLoop, _coroutine_name
 
 logger = get_logger('worker')
 
 FRAMES_PER_SEAT: Final = 4
 """The most frames that one run gives: a deadline report, a second cancel
-report, a stuck report, and a result."""
+report, a stuck report, and a result. A run that returned before its
+deadline gives at most a leftover cancel report, a leftover stuck report,
+and a result."""
 
 FRAMES_PER_CHILD: Final = 2
 """The frames of a child outside its runs: the ready frame, and one report of
@@ -164,28 +190,56 @@ class _WriterStop:
     """The writer thread ends after the frames before this one."""
 
 
+type FrameWithResult = SharedResultFrame | LeftoverStuckFrame
+"""A child frame that carries what the task of a run returned."""
+
+
 @dataclass(frozen=True, slots=True)
 class _ResultToWrite:
-    """A result frame, and the name of its task for the size bound."""
+    """A frame with a result, and the name of its task for the size bound."""
 
     task_name: str
-    frame: SharedResultFrame
+    frame: FrameWithResult
 
 
-def bounded_result_frame(task_name: str, frame: SharedResultFrame) -> SharedResultFrame:
-    """Make a result frame safe to write: a result too large to store becomes
-    a typed failure, and a long failure reason is cut, as for an isolated
-    child. A timed-out end has no result and passes unchanged. Pure."""
-    match frame.end:
-        case SeatFinished(ok=ok, result_json=result_json, failed_reason=reason):
-            bounded_ok, bounded_json, bounded_reason = _bounded_result(
-                task_name,
-                (ok, result_json, reason),
+def _bounded_finished(task_name: str, finished: SeatFinished) -> SeatFinished:
+    """A result too large to store becomes a typed failure, and a long
+    failure reason is cut, as for an isolated child. Pure."""
+    ok, result_json, failed_reason = _bounded_result(
+        task_name,
+        (finished.ok, finished.result_json, finished.failed_reason),
+    )
+    return SeatFinished(ok, result_json, failed_reason)
+
+
+def bounded_result_frame(task_name: str, frame: FrameWithResult) -> FrameWithResult:
+    """Make a frame with a result safe to write (``_bounded_finished``). A
+    timed-out end has no result and passes unchanged. Pure."""
+    match frame:
+        case SharedResultFrame():
+            return _bounded_shared_result(task_name, frame)
+        case LeftoverStuckFrame(returned=returned):
+            return LeftoverStuckFrame(
+                dispatch=frame.dispatch,
+                task_id=frame.task_id,
+                tasks=frame.tasks,
+                executor_items=frame.executor_items,
+                names=frame.names,
+                returned=_bounded_finished(task_name, returned),
             )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _bounded_shared_result(
+    task_name: str, frame: SharedResultFrame
+) -> SharedResultFrame:
+    match frame.end:
+        case SeatFinished() as finished:
             return SharedResultFrame(
                 dispatch=frame.dispatch,
                 task_id=frame.task_id,
-                end=SeatFinished(bounded_ok, bounded_json, bounded_reason),
+                end=_bounded_finished(task_name, finished),
                 rss=frame.rss,
             )
         case SeatTimedOut():
@@ -232,8 +286,8 @@ class FrameWriter:
         """Queue one frame. Never blocks."""
         self._put(frame)
 
-    def send_result(self, task_name: str, frame: SharedResultFrame) -> None:
-        """Queue one result frame of task ``task_name``. Never blocks."""
+    def send_result(self, task_name: str, frame: FrameWithResult) -> None:
+        """Queue one frame with a result of task ``task_name``. Never blocks."""
         self._put(_ResultToWrite(task_name, frame))
 
     def _put(self, item: ChildFrame | _ResultToWrite) -> None:
@@ -263,13 +317,73 @@ class FrameWriter:
 
 class _Stop(Enum):
     """How far the stop of a run went. A run with a deadline moves forward
-    through these, one step at a time; a refusal stays ``NO_DEADLINE``."""
+    through these, one step at a time; a refusal stays ``NO_DEADLINE``. A
+    run whose coroutine returned before its deadline with marked work alive
+    leaves ``BEFORE_DEADLINE`` for the leftover steps instead."""
 
     NO_DEADLINE = 'no_deadline'
     BEFORE_DEADLINE = 'before_deadline'
     CANCELLED = 'cancelled'
     SECOND_CANCEL = 'second_cancel'
     STUCK = 'stuck'
+
+
+@dataclass(frozen=True, slots=True)
+class _LeftWork:
+    """The marked work of a run that was alive when its coroutine returned:
+    ``tasks`` asyncio tasks, the coroutine names of up to
+    ``MAX_LEFTOVER_TASK_NAMES`` of them in ``names``, sorted, and
+    ``executor_items`` work items in the default executor."""
+
+    tasks: int
+    names: tuple[str, ...]
+    executor_items: int
+
+    def describe(self) -> str:
+        """The work as text, for the log line of the run."""
+        left_out = self.tasks - len(self.names)
+        match left_out:
+            case 0:
+                named = ', '.join(self.names) or 'none'
+            case _:
+                named = f'{", ".join(self.names)}, and {left_out} more'
+        return f'asyncio tasks: {named}; executor items: {self.executor_items}'
+
+
+@dataclass(frozen=True, slots=True)
+class _LeftoverGrace:
+    """The coroutine returned before its deadline while ``left`` was alive.
+    The run waits up to its cancel grace for that work."""
+
+    left: _LeftWork
+
+
+@dataclass(frozen=True, slots=True)
+class _LeftoverCancel:
+    """The work that the run left was alive at the end of its cancel grace:
+    the child cancels it in rounds."""
+
+    left: _LeftWork
+
+
+@dataclass(frozen=True, slots=True)
+class _LeftoverStuck:
+    """The work that the run left was alive after the last cancel round."""
+
+    left: _LeftWork
+
+
+type _RunStop = _Stop | _LeftoverGrace | _LeftoverCancel | _LeftoverStuck
+"""The step of the stop of a run: on the deadline path (``_Stop``), or on
+the path of the work that a run left after its return."""
+
+
+class _LeftWorkEnd(Enum):
+    """How the work that a run left after its return ended, for its log line."""
+
+    IN_GRACE = 'ended within the cancel grace'
+    CANCELLED = 'was cancelled after the cancel grace'
+    STUCK = 'did not stop after the cancel rounds'
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,7 +403,7 @@ class _Seat:
     frame: SharedRunFrame
     mark: RunMark
     task: asyncio.Task[WireResult]
-    stop: _Stop
+    stop: _RunStop
     timer: asyncio.TimerHandle | _NoTimer
     watched: set[asyncio.Task[Any]]
 
@@ -415,18 +529,18 @@ class SeatLoop:
         """The deadline of run ``dispatch`` (T): cancel its task, report the
         cancel, and start the cancel grace.
 
-        A run whose coroutine and marked work already ended keeps its
-        result: a pending callback reports it.
+        A coroutine that already returned returned before its deadline, also
+        when its done callback has not run yet: the run takes the path of a
+        return (``_returned``) and keeps what it returned.
         """
         seat = self._seats[dispatch]
         assert seat.stop is _Stop.BEFORE_DEADLINE, f'run {dispatch} fired twice'
-        if self._ended(seat):
-            seat.timer = _NoTimer()
-            self._check_end(dispatch)
+        seat.timer = _NoTimer()
+        if seat.task.done():
+            self._returned(dispatch)
             return
         seat.stop = _Stop.CANCELLED
-        if not seat.task.done():
-            seat.task.cancel()
+        seat.task.cancel()
         self._writer.send(
             DeadlineFiredFrame(dispatch=dispatch, task_id=seat.frame.task_id),
         )
@@ -450,10 +564,56 @@ class SeatLoop:
         )
         self._cancel_round(dispatch, 0)
 
+    def _returned(self, dispatch: int) -> None:
+        """The coroutine of run ``dispatch`` returned before its deadline
+        (R). A cancel or an exception that escaped the seat runner is a
+        defect. With no marked work alive, report the end. Else end the
+        deadline, and wait up to the cancel grace for that work. The end of
+        the run is what the coroutine returned in both cases."""
+        seat = self._seats[dispatch]
+        _exit_for_end_defect(seat, seat.task)
+        alive = self._marked.alive(seat.mark, seat.task, ScanWhen.ALWAYS)
+        if alive.is_empty():
+            self._report_end(dispatch, seat)
+            return
+        _cancel_timer(seat)
+        seat.stop = _LeftoverGrace(_left_work(alive))
+        seat.timer = self._loop.call_later(
+            _grace_s(seat.frame),
+            self._leftover_grace_over,
+            dispatch,
+        )
+        self._watch(dispatch, seat, alive.tasks)
+
+    def _leftover_grace_over(self, dispatch: int) -> None:
+        """The cancel grace after the return of run ``dispatch`` ran out
+        (R + G). When the work that it left is alive: report it, and cancel
+        that work in the cancel rounds."""
+        seat = self._seats[dispatch]
+        seat.timer = _NoTimer()
+        match seat.stop:
+            case _LeftoverGrace(left=left):
+                pass
+            case _Stop() | _LeftoverCancel() | _LeftoverStuck():
+                raise AssertionError(
+                    f'the leftover grace of run {dispatch} ended at step {seat.stop}',
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
+        if self._ended(seat):
+            self._check_end(dispatch)
+            return
+        seat.stop = _LeftoverCancel(left)
+        self._writer.send(
+            LeftoverCancelFrame(dispatch=dispatch, task_id=seat.frame.task_id),
+        )
+        self._cancel_round(dispatch, 0)
+
     def _cancel_round(self, dispatch: int, rounds_sent: int) -> None:
-        """Cancel the task of the run and the marked tasks alive now. The
-        rounds after the second cancel are bounded by
-        ``EXTRA_CANCEL_ROUNDS``; the stuck check follows the last one."""
+        """Cancel the task of the run, when it has not ended, and the marked
+        tasks alive now. The rounds after the second cancel, or after the
+        leftover cancel, are bounded by ``EXTRA_CANCEL_ROUNDS``; the stuck
+        check follows the last one."""
         seat = self._seats[dispatch]
         alive = self._marked.alive(seat.mark, seat.task, ScanWhen.ALWAYS)
         if seat.task.done() and alive.is_empty():
@@ -481,7 +641,9 @@ class SeatLoop:
 
     def _declare_stuck(self, dispatch: int) -> None:
         """After the last cancel round: report a run that is still alive as
-        stuck. It keeps its seat until it ends or the child is killed."""
+        stuck. It keeps its seat until it ends or the child is killed. A run
+        that returned before its deadline reports what it returned
+        (``LeftoverStuckFrame``)."""
         seat = self._seats[dispatch]
         seat.timer = _NoTimer()
         alive = self._marked.alive(seat.mark, seat.task, ScanWhen.ALWAYS)
@@ -490,17 +652,47 @@ class SeatLoop:
         if not tasks and alive.executor_items == 0:
             self._check_end(dispatch)
             return
-        seat.stop = _Stop.STUCK
-        names = sorted(_coroutine_name(task) for task in tasks)
-        self._writer.send(
-            RunStuckFrame(
-                dispatch=dispatch,
-                task_id=seat.frame.task_id,
-                tasks=len(tasks),
-                executor_items=alive.executor_items,
-                names=tuple(names[:MAX_LEFTOVER_TASK_NAMES]),
-            ),
-        )
+        names = tuple(sorted(_coroutine_name(task) for task in tasks))
+        bounded_names = names[:MAX_LEFTOVER_TASK_NAMES]
+        match seat.stop:
+            case _Stop.SECOND_CANCEL:
+                seat.stop = _Stop.STUCK
+                self._writer.send(
+                    RunStuckFrame(
+                        dispatch=dispatch,
+                        task_id=seat.frame.task_id,
+                        tasks=len(tasks),
+                        executor_items=alive.executor_items,
+                        names=bounded_names,
+                    ),
+                )
+            case _LeftoverCancel(left=left):
+                seat.stop = _LeftoverStuck(left)
+                _log_left_work(seat.frame, left, _LeftWorkEnd.STUCK)
+                self._writer.send_result(
+                    seat.frame.task_name,
+                    LeftoverStuckFrame(
+                        dispatch=dispatch,
+                        task_id=seat.frame.task_id,
+                        tasks=len(tasks),
+                        executor_items=alive.executor_items,
+                        names=bounded_names,
+                        returned=_returned_end(seat),
+                    ),
+                )
+            case (
+                _Stop.NO_DEADLINE
+                | _Stop.BEFORE_DEADLINE
+                | _Stop.CANCELLED
+                | _Stop.STUCK
+                | _LeftoverGrace()
+                | _LeftoverStuck()
+            ):
+                raise AssertionError(
+                    f'run {dispatch} reached the stuck check at step {seat.stop}',
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
 
     def _watch(
         self,
@@ -532,20 +724,28 @@ class SeatLoop:
             self._check_end(mark.dispatch)
 
     def _finish(self, dispatch: int, task: asyncio.Task[WireResult]) -> None:
-        """The task of run ``dispatch`` has ended. Before its deadline, a
-        cancel or an exception that escaped the seat runner is a defect. A
-        step of the stop can report the run before this callback runs."""
+        """The task of run ``dispatch`` has ended. Before its deadline it
+        returned (``_returned``); for a refusal, a cancel or an exception
+        that escaped the seat runner is a defect. A step of the stop can
+        report the run, or take the path of the return, before this
+        callback runs."""
         seat = self._seats.get(dispatch)
         if seat is None:
             return
         match seat.stop:
-            case _Stop.NO_DEADLINE | _Stop.BEFORE_DEADLINE:
+            case _Stop.NO_DEADLINE:
                 _exit_for_end_defect(seat, task)
+                self._check_end(dispatch)
+            case _Stop.BEFORE_DEADLINE:
+                self._returned(dispatch)
             case _Stop.CANCELLED | _Stop.SECOND_CANCEL | _Stop.STUCK:
+                self._check_end(dispatch)
+            case _LeftoverGrace() | _LeftoverCancel() | _LeftoverStuck():
+                # The deadline found the coroutine returned and took the
+                # path of the return; that path reports the end.
                 pass
             case _ as unreachable:
                 assert_never(unreachable)
-        self._check_end(dispatch)
 
     def _check_end(self, dispatch: int) -> None:
         """Report the end of run ``dispatch`` when its coroutine has ended
@@ -558,15 +758,24 @@ class SeatLoop:
         if not alive.is_empty():
             self._watch(dispatch, seat, alive.tasks)
             return
-        match seat.timer:
-            case asyncio.TimerHandle():
-                seat.timer.cancel()
-            case _NoTimer():
+        self._report_end(dispatch, seat)
+
+    def _report_end(self, dispatch: int, seat: _Seat) -> None:
+        """Free the seat of a run whose coroutine and marked work ended, and
+        report its end. A run that left work after its return logs how that
+        work ended; a stuck report logged it already."""
+        _cancel_timer(seat)
+        del self._seats[dispatch]
+        self._marked.close(seat.mark)
+        match seat.stop:
+            case _LeftoverGrace(left=left):
+                _log_left_work(seat.frame, left, _LeftWorkEnd.IN_GRACE)
+            case _LeftoverCancel(left=left):
+                _log_left_work(seat.frame, left, _LeftWorkEnd.CANCELLED)
+            case _Stop() | _LeftoverStuck():
                 pass
             case _ as unreachable:
                 assert_never(unreachable)
-        del self._seats[dispatch]
-        self._marked.close(seat.mark)
         self._writer.send_result(
             seat.frame.task_name,
             SharedResultFrame(
@@ -636,20 +845,85 @@ def _exit_for_end_defect(seat: _Seat, task: asyncio.Task[WireResult]) -> None:
 def _end_of(seat: _Seat) -> SeatEnd:
     """The end of a run whose coroutine and marked work ended. After a
     deadline that fired, the end is the timeout, also when the task returned
-    a value."""
+    a value. A coroutine that returned before its deadline ends the run with
+    what it returned, also when the work that it left needed a cancel."""
     match seat.stop:
         case _Stop.CANCELLED | _Stop.SECOND_CANCEL | _Stop.STUCK:
             return SeatTimedOut()
-        case _Stop.NO_DEADLINE | _Stop.BEFORE_DEADLINE:
-            _exit_for_end_defect(seat, seat.task)
-            ok, result_json, failed_reason = seat.task.result()
-            return SeatFinished(
-                ok=ok,
-                result_json=result_json,
-                failed_reason=failed_reason,
+        case (
+            _Stop.NO_DEADLINE
+            | _Stop.BEFORE_DEADLINE
+            | _LeftoverGrace()
+            | _LeftoverCancel()
+            | _LeftoverStuck()
+        ):
+            return _returned_end(seat)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _returned_end(seat: _Seat) -> SeatFinished:
+    """What the coroutine of a run returned. A cancel or an exception that
+    escaped the seat runner is a defect: the process ends."""
+    _exit_for_end_defect(seat, seat.task)
+    ok, result_json, failed_reason = seat.task.result()
+    return SeatFinished(ok=ok, result_json=result_json, failed_reason=failed_reason)
+
+
+def _cancel_timer(seat: _Seat) -> None:
+    """Cancel the pending step of the stop of a run, if any."""
+    match seat.timer:
+        case asyncio.TimerHandle():
+            seat.timer.cancel()
+        case _NoTimer():
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
+    seat.timer = _NoTimer()
+
+
+def _left_work(alive: AliveWork) -> _LeftWork:
+    """The work that a run left, named for its log line, bounded by
+    ``MAX_LEFTOVER_TASK_NAMES``."""
+    names = sorted(_coroutine_name(task) for task in alive.tasks)
+    return _LeftWork(
+        tasks=len(alive.tasks),
+        names=tuple(names[:MAX_LEFTOVER_TASK_NAMES]),
+        executor_items=alive.executor_items,
+    )
+
+
+def _log_left_work(frame: SharedRunFrame, left: _LeftWork, end: _LeftWorkEnd) -> None:
+    """One log line for a run that returned before its deadline and left
+    work: the task, the run, that work, and how it ended."""
+    match end:
+        case _LeftWorkEnd.IN_GRACE:
+            level = logging.INFO
+            then = 'the outcome is what the task returned'
+        case _LeftWorkEnd.CANCELLED:
+            level = logging.WARNING
+            then = (
+                'the outcome is what the task returned, and the child is '
+                'replaced: cancelled code can leave broken state in it'
+            )
+        case _LeftWorkEnd.STUCK:
+            level = logging.WARNING
+            then = (
+                'the outcome is what the task returned, and the child is '
+                'killed when no task in it has time left'
             )
         case _ as unreachable:
             assert_never(unreachable)
+    logger.log(
+        level,
+        'Task %s (%s, run %s) returned and left work that %s (%s); %s',
+        frame.task_name,
+        frame.task_id,
+        frame.dispatch,
+        end.value,
+        left.describe(),
+        then,
+    )
 
 
 def _wake_from_thread(loop: asyncio.AbstractEventLoop, arrived: asyncio.Event) -> None:
