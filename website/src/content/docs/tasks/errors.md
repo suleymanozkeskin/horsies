@@ -552,12 +552,12 @@ The full list of reserved strings is available at runtime via `BUILTIN_CODE_REGI
 | HRS-210 | `MODULE_EXEC_ERROR` | Module raised an error during import |
 | HRS-211 | `BROKER_INIT_FAILED` | Broker failed to initialize |
 | HRS-212 | `CHECK_RESERVED_CODE_COLLISION` | User config value collides with a reserved built-in error code |
-| HRS-213 | `CONFIG_INVALID_BROKER_POOL` | Invalid worker pool bounds: `worker_pool_size` below 1, `worker_max_overflow` below 0, `worker_child_pool_min_size` below 0, `worker_child_pool_max_size` below 1, or a minimum above the maximum |
+| HRS-213 | `CONFIG_INVALID_BROKER_POOL` | Invalid worker pool bounds: `worker_pool_size` below 1 or `worker_max_overflow` below 0. Also a `PostgresConfig` that sets `worker_child_pool_min_size`, `worker_child_pool_max_size` or `worker_child_pool_check`, removed in 0.7.0; the help names the `pool` field of each child kind that replaces it |
 | HRS-214 | `CONFIG_INVALID_CHILD_HOOK` | `on_child_process_start` received a value that is not callable, or an async function |
 | HRS-215 | `CONFIG_INVALID_KEEPALIVE` | Invalid TCP keepalive settings: a keepalive value below 1 while `tcp_keepalives` is on, or a negative `tcp_user_timeout_ms` |
 | HRS-216 | `CONFIG_INVALID_RETENTION` | Invalid retention configuration |
 | HRS-217 | `CHECK_LIVE_ASYNC_CONTEXT` | `check(live=True)` was called on a thread that runs an event loop; the live check did not run |
-| HRS-218 | `CONFIG_INVALID_WORKER_PROFILE` | A worker profile in `AppConfig.worker_profiles` is not valid: a name a `--profile` argument cannot carry, a profile with no children, or a claim limit above the capacity of the worker. The message names the profile and the field path |
+| HRS-218 | `CONFIG_INVALID_WORKER_PROFILE` | A worker profile in `AppConfig.worker_profiles` is not valid: a name a `--profile` argument cannot carry, a profile with no children, a claim limit above the capacity of the worker, or a child pool whose `min_size` is above its resolved `max_size`. The message names the profile and the field path |
 | HRS-219 | `CHECK_WORKER_CONNECTIONS` | `check(live=True)`: one worker of a profile opens more Postgres connections itself than the server has usable slots (the error also states what task code that sends adds), or the server limit could not be read |
 
 ### Registry (HRS-300-HRS-399)

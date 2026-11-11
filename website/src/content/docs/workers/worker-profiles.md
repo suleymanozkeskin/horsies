@@ -1,8 +1,8 @@
 ---
 title: Worker Profiles
-summary: Named worker settings in AppConfig - isolated, shared async and shared thread children, recycling, claim limits, drain timeout and preload - and what horsies check and worker boot validate.
+summary: Named worker settings in AppConfig - isolated, shared async and shared thread children, recycling, connection pools, claim limits, drain timeout and preload - and what horsies check and worker boot validate.
 related: [execution-modes, worker-architecture, shared-async-tasks, shared-thread-tasks, concurrency, ../cli, ../configuration/app-config, ../migrations/migration-to-0-7-0]
-tags: [workers, profiles, configuration, concurrency, recycling, validation]
+tags: [workers, profiles, configuration, concurrency, recycling, connections, validation]
 ---
 
 # Worker Profiles
@@ -99,6 +99,64 @@ io_profile = WorkerProfile(
 )
 ```
 
+## Connection Pools and the Default Executor
+
+Each child opens one connection pool for its own writes: the RUNNING update at the start of a task and the finalizing marker at its end. Each child kind has its own `pool` setting. The seats of a shared child share its pool.
+
+| Child kind | Setting | Default `max_size` |
+|------------|---------|--------------------|
+| isolated | `IsolatedChildren.pool: IsolatedPool` | `PoolSize(connections=2)` |
+| shared async | `SharedAsyncChildren.pool: SharedPool` | `PoolSizeFromSeats()` |
+| shared thread | `SharedThreadChildren.pool: SharedPool` | `PoolSizeFromSeats()` |
+
+A shared async child also sizes the default executor of its event loop (`asyncio.to_thread()`, `loop.run_in_executor(None, ...)`) with `SharedAsyncChildren.executor`. The default is `ExecutorThreadsFromSeats()`. An `on_shared_async_child_start` hook that sets a default executor of its own (`loop.set_default_executor()`) replaces it, and that executor keeps its own size.
+
+```python
+from horsies import (
+    ExecutorThreads,
+    IsolatedPool,
+    PoolSize,
+    SharedPool,
+    SharedThreadChildren,
+)
+
+remote_profile = WorkerProfile(
+    isolated=IsolatedChildren(
+        count=4,
+        pool=IsolatedPool(max_size=PoolSize(connections=1), check=False),
+    ),
+    shared_async=SharedAsyncChildren(
+        count=2,
+        seats=100,
+        pool=SharedPool(min_size=2, max_size=PoolSize(connections=8)),
+        executor=ExecutorThreads(threads=16),
+    ),
+    shared_thread=SharedThreadChildren(count=1, seats=16),
+)
+```
+
+The worker logs the resolved values of each kind in its start line:
+
+```text
+Worker profile 'remote': isolated=4 (recycle after 100 tasks, above no limit; pool 0 to 1 connections, check off), shared_async=2x100 seats (recycle after 100 tasks per seat, above no limit; pool 2 to 8 connections, check on; executor 16 threads), shared_thread=1x16 seats (recycle after 100 tasks per seat, above no limit; pool 0 to 4 connections, derived from seats, check on), ...
+```
+
+### Sizes Derived from the Seats
+
+`PoolSizeFromSeats()` and `ExecutorThreadsFromSeats()` derive a size from the seats of the child:
+
+```text
+size = min(cap, max(floor, ceil(seats / seats_per_unit)))
+```
+
+| Size | `seats_per_unit` | `floor` | `cap` |
+|------|------------------|---------|-------|
+| Shared async pool `max_size` | 10 | 2 | 10 |
+| Shared thread pool `max_size` | 4 | 2 | 10 |
+| Shared async default executor threads | 1 | 2 | 32 |
+
+For example, a shared async child with 25 seats opens a pool of up to `ceil(25 / 10) = 3` connections and a default executor of 25 threads. A child with 500 seats stops at the caps: 10 connections and 32 threads.
+
 ## API Reference
 
 ### `WorkerProfile`
@@ -120,6 +178,7 @@ io_profile = WorkerProfile(
 |-------|------|---------|-------------|
 | `count` | `int` | required | Number of isolated children, 1 to 1024 |
 | `recycle` | `IsolatedRecycle` | `IsolatedRecycle()` | When a child is replaced |
+| `pool` | `IsolatedPool` | `IsolatedPool()` | The connection pool of each child |
 
 `NoIsolatedChildren()` states that the profile starts no isolated children.
 
@@ -139,6 +198,8 @@ The worker replaces a child with a new one when either limit is reached. Each ch
 | `count` | `int` | required | Number of shared async children, 1 to 1024 |
 | `seats` | `int` | required | Tasks that one child runs at once, 1 to 1000. A seat that waits on the network holds a socket, and a process often has a limit of 1024 open files |
 | `recycle` | `SharedRecycle` | `SharedRecycle()` | When a child is replaced |
+| `pool` | `SharedPool` | `SharedPool()` | The async connection pool of each child, shared by its seats |
+| `executor` | `ExecutorThreads \| ExecutorThreadsFromSeats` | `ExecutorThreadsFromSeats()` | The threads of the default executor of the event loop of each child |
 
 `NoSharedAsyncChildren()` states that the profile starts no shared async children.
 
@@ -149,6 +210,7 @@ The worker replaces a child with a new one when either limit is reached. Each ch
 | `count` | `int` | required | Number of shared thread children, 1 to 1024 |
 | `seats` | `int` | required | Tasks that one child runs at once, 1 to 256. Each seat is an OS thread with a stack of its own |
 | `recycle` | `SharedRecycle` | `SharedRecycle()` | When a child is replaced |
+| `pool` | `SharedPool` | `SharedPool()` | The sync connection pool of each child, shared by its seat threads |
 
 `NoSharedThreadChildren()` states that the profile starts no shared thread children.
 
@@ -160,6 +222,24 @@ A shared child that reaches a limit closes: it takes no new task, its running ta
 |-------|------|---------|-------------|
 | `after_per_seat` | `TaskLimit \| NoTaskLimit` | `TaskLimit(tasks=100)` | Replace a child after it completes `after_per_seat.tasks × seats` tasks |
 | `above` | `MemoryLimit \| NoMemoryLimit` | `NoMemoryLimit()` | Replace a child when its own RSS, read after each task, reaches this many MB |
+
+### `IsolatedPool`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `min_size` | `int` | `0` | Connections that the pool keeps open, 0 to 1000. With 0, a connection opens at its first use |
+| `max_size` | `PoolSize` | `PoolSize(connections=2)` | The most connections of the pool |
+| `check` | `bool` | `True` | Check each connection when a write takes it from the pool: one database round trip per checkout. See [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
+
+### `SharedPool`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `min_size` | `int` | `0` | Connections that the pool keeps open, 0 to 1000. With 0, a connection opens at its first use |
+| `max_size` | `PoolSize \| PoolSizeFromSeats` | `PoolSizeFromSeats()` | The most connections of the pool. See [Sizes Derived from the Seats](#sizes-derived-from-the-seats) |
+| `check` | `bool` | `True` | Check each connection when a write takes it from the pool, as for `IsolatedPool` |
+
+Validation refuses a `min_size` above the resolved `max_size` of the pool.
 
 ### `ClaimLimits`
 
@@ -179,6 +259,15 @@ The capacity of a worker is its number of seats (`seat_count()`) plus `AppConfig
 | `MemoryLimit` | `mb: int` | 1 to 16,777,216 | A limit of `mb` MB of resident memory (RSS) |
 | `NoMemoryLimit` | none | none | No limit on the resident memory of a child |
 
+### Sizes
+
+| Type | Field | Bounds | Meaning |
+|------|-------|--------|---------|
+| `PoolSize` | `connections: int` | 1 to 1000 | A pool of at most `connections` connections. Each connection holds a socket, and a process often has a limit of 1024 open files |
+| `PoolSizeFromSeats` | none | none | A pool size derived from the seats of the child |
+| `ExecutorThreads` | `threads: int` | 1 to 256 | A default executor of `threads` threads. Each thread has a stack of its own |
+| `ExecutorThreadsFromSeats` | none | none | A default executor size derived from the seats of the child |
+
 ### `ChildPreload`
 
 <!-- members: ChildPreload -->
@@ -196,10 +285,11 @@ Validation runs in two places. `horsies check` validates every profile with the 
 
 | Check | `horsies check` | `horsies check --live` | Worker boot |
 |-------|-----------------|------------------------|-------------|
-| Bounds of each value (count, limits, drain timeout) | error `HRS-210` | error `HRS-210` | error: the app config does not build |
+| Bounds of each value (count, limits, pool sizes, executor threads, drain timeout) | error `HRS-210` | error `HRS-210` | error: the app config does not build |
 | Profile name: 1 to 64 letters, digits, `_`, `.`, `-`; does not start with `.` or `-` | error `HRS-218` | error `HRS-218` | error: the app config does not build |
 | At least one child | error `HRS-218` | error `HRS-218` | error: the app config does not build |
 | Claim limit above the capacity (seats plus `prefetch_buffer`) | error `HRS-218` | error `HRS-218` | error: the app config does not build |
+| Pool `min_size` above the resolved `max_size` | error `HRS-218` | error `HRS-218` | error: the app config does not build |
 | `--profile` names a defined profile | not checked | not checked | error `HRS-206`, exit 1 |
 | Postgres connections of one worker against the server | not checked | error `HRS-219` | warning |
 | Sum of the per-child memory limits against the usable memory (container limit or host RAM) | not checked | not checked | warning |
@@ -223,13 +313,19 @@ error[HRS-218]: worker_profiles['batch'].claim.claimed_per_worker: 10 tasks is a
 One worker opens this many Postgres connections itself:
 
 ```text
-worker_pool_size + worker_max_overflow   # parent pool
-+ 2                                      # listener
-+ 1                                      # runner heartbeat
-+ children × worker_child_pool_max_size  # child pools
+worker_pool_size + worker_max_overflow                  # parent pool
++ 2                                                     # listener
++ 1                                                     # runner heartbeat
++ isolated children × isolated.pool max_size            # isolated child pools
++ shared async children × shared_async.pool max_size    # shared async child pools
++ shared thread children × shared_thread.pool max_size  # shared thread child pools
 ```
 
-The worker process writes the runner heartbeats of its RUNNING tasks over one connection of its own. `children` counts every mode: an isolated child opens a sync pool, a shared async child opens an async pool of the same size, and a shared thread child opens a sync pool of the same size that its seat threads share, whatever its seats. At the defaults, a profile of 8 children needs `3 + 2 + 2 + 1 + 8 × 2 = 24`.
+The worker process writes the runner heartbeats of its RUNNING tasks over one connection of its own. Each `max_size` is the resolved value of its mode: a `PoolSize`, or the size that `PoolSizeFromSeats()` derives from the seats. An isolated child and a shared thread child open a sync pool; a shared async child opens an async pool. At the defaults, a profile of 8 isolated children needs `3 + 2 + 2 + 1 + 8 × 2 = 24`. A profile of 2 isolated children, 2 shared async children with 50 seats and 1 shared thread child with 16 seats needs `3 + 2 + 2 + 1 + 2 × 2 + 2 × 5 + 1 × 4 = 26`. Each `HRS-219` error and the boot log state the formula of the profile, one term per mode:
+
+```text
+parent pool 5 + listener 2 + runner heartbeat 1 + 2 isolated children x isolated.pool max_size 2 + 2 shared async children x shared_async.pool max_size 5 + 1 shared thread children x shared_thread.pool max_size 4 = 26
+```
 
 Task code that sends through the app opens more. It opens the app's broker in its child, with a pool of `worker_pool_size + worker_max_overflow` connections for each event loop that it sends from:
 
@@ -239,7 +335,7 @@ Task code that sends through the app opens more. It opens the app's broker in it
 
 With one sending loop in each child, 8 children at the defaults add `8 × 5 = 40`, so `64` in all. The comparison below does not count these connections, because only the run time shows whether a task sends. Each `HRS-219` error and the boot log state them next to the compared number.
 
-The server has `max_connections` minus `superuser_reserved_connections` minus `reserved_connections` (PostgreSQL 16 and later) usable slots. `horsies check --live` reports `HRS-219` for each profile whose worker opens more than that number itself. At boot the worker reads the same settings before it builds its children and logs a warning. With `pgbouncer_transaction_mode=True` the pooled connections do not map to server connections, and nothing is compared. See [Remote PostgreSQL](/horsies/configuration/remote-postgres/#connection-budget).
+The server has `max_connections` minus `superuser_reserved_connections` minus `reserved_connections` (PostgreSQL 16 and later) usable slots. `horsies check --live` reports `HRS-219` for each profile whose worker opens more than that number itself. At boot the worker reads the same settings before it builds its children and logs a warning. With `pgbouncer_transaction_mode=True` the pooled connections do not map to server connections, and nothing is compared; see [PgBouncer pool size](/horsies/troubleshooting/pgbouncer/#pool-size) for the PgBouncer side. See [Remote PostgreSQL](/horsies/configuration/remote-postgres/#connection-budget).
 
 The comparison is for one worker. Several workers, producers and other clients share the same slots.
 
@@ -286,4 +382,4 @@ claim_at_capacity = WorkerProfile(
 
 ## Migrating from Worker Flags
 
-The worker flags `--processes`, `--max-claim-batch`, `--max-claim-per-worker`, `--max-tasks-per-child`, `--max-memory-per-child-mb`, `--drain-timeout` and `--child-preload` are removed. Each one exits with a message that names the profile field that replaces it. See [Migrating to 0.7.0](/horsies/migrations/migration-to-0-7-0/) for the table.
+The worker flags `--processes`, `--max-claim-batch`, `--max-claim-per-worker`, `--max-tasks-per-child`, `--max-memory-per-child-mb`, `--drain-timeout` and `--child-preload` are removed. Each one exits with a message that names the profile field that replaces it. The `PostgresConfig` fields `worker_child_pool_min_size`, `worker_child_pool_max_size` and `worker_child_pool_check` are removed: the `pool` of each child kind replaces them, and a config that still sets one fails with `HRS-213`. See [Migrating to 0.7.0](/horsies/migrations/migration-to-0-7-0/) for the tables.
