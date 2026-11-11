@@ -159,7 +159,9 @@ A client that a task opens on first use, in module state, starts its background 
 
 ## A Blocked Event Loop
 
-Every task of the child runs on one event loop. A thread in the child, not on the loop, watches it. When the loop has not turned for 5 seconds (the block limit), that thread names the task that holds the loop, with the source line, and reports it to the worker. The worker kills the child at once: no task of a blocked loop can move, and no deadline can act during the block.
+Every task of the child runs on one event loop. A thread in the child, not on the loop, watches it. When the loop has not turned for 5 seconds (the block limit), that thread reports the block to the worker, with the source line that the loop runs and the task that held the loop, when one task did. The worker kills the child at once: no task of a blocked loop can move, and no deadline can act during the block.
+
+The thread names a task only when that task held the loop for the whole block. Once the loop has not turned for 0.2 seconds, the thread reads the task that runs at each check, every 0.1 seconds, and at the report. When every reading saw the same task, that task is named. Many short steps of several tasks in one turn (for example 25 tasks that each parse a large response for 60 ms after one upstream answered them all) name no task.
 
 | Task | Outcome |
 | ---- | ------- |
@@ -168,7 +170,7 @@ Every task of the child runs on one event loop. A thread in the child, not on th
 | another task, past its deadline | `TASK_TIMEOUT` |
 | another task, before its deadline | `NEIGHBOUR_BLOCKED_LOOP` |
 
-Each code retries only when `auto_retry_for` names it: a neighbour is not retried for free, because its side effects may already have happened. When the loop runs code of no task (a callback, or work of a start hook), no task is named: each task before its deadline takes the crash path. C code that holds the GIL stops the watching thread as well, so no report comes; the timer of the worker above ends that child, and no task is named.
+Each code retries only when `auto_retry_for` names it: a neighbour is not retried for free, because its side effects may already have happened. When the loop runs code of no task (a callback, or work of a start hook), or when no one task held it for the whole block, no task is named: each task before its deadline takes the crash path. C code that holds the GIL stops the watching thread as well, so no report comes; the timer of the worker above ends that child, and no task is named.
 
 The block limit is 7.4 times the longest common burst of CPU work measured on one call: 674 ms for a backtracking `re.findall` over 10 MB of text. A full garbage collection of about one million objects took 258 ms, and `json.loads` of 10 MB took 118 ms. During a block no timer of the loop runs, so each deadline in the child can be late by up to the block limit.
 

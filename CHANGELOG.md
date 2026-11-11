@@ -202,6 +202,12 @@ and there is no migration contract between pre-1.0 versions.
     other task before its deadline fails with the new
     `NEIGHBOUR_BLOCKED_LOOP`, and runs again only when `auto_retry_for`
     names that code; a task past its deadline fails with `TASK_TIMEOUT`.
+  - The watching thread names a task only when that task held the loop for
+    the whole block: once the loop has not turned for 0.2 s it reads the
+    task that runs every 0.1 s, and at the report, and names it only when
+    every reading saw the same task. Many short steps of several tasks in
+    one turn name no task: each task before its deadline then takes the
+    crash path, as for code of no task.
   - The worker kills a child that has reported neither the second cancel
     nor the end of a task `timeout_ms + cancel_grace_ms + 10 s` after its
     placement: C code holds the GIL in it. A child that still holds a
