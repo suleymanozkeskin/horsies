@@ -46,24 +46,45 @@ there is no migration contract between pre-1.0 versions.
     limit of 5 open caller loops (`EVENT_LOOP_LIMIT`), as the broker's sync
     runner loop does not. An async task that calls the broker gives the task
     loop a resource set, which it keeps until the child stops.
-  - A task must await the work that it starts. When an async task ends and
-    asyncio tasks that it started are still on the loop, the worker replaces
-    the child after that task. When the old child stops, it cancels that work
-    and closes the loop. This takes at most 7 seconds. A client that keeps its
-    own background tasks on the loop causes a child replacement after each
-    async task. The warning of the replacement names the coroutine of each task
-    left, up to 10. A task that cancels a helper task in `finally` must also
-    await it. The check sees asyncio tasks only: a callback that
-    `loop.call_soon()` or `loop.call_later()` scheduled, and
-    `loop.run_in_executor()` work that the task did not await, cause no
-    replacement and can still run during a later task of the same child.
-  - A thread of `asyncio.to_thread()` that still runs after that time does
-    not hold the child: the child exits without waiting for it, and its
-    `atexit` handlers do not run. The close of the async generators and the
-    shutdown of the default executor each get at least 1 second, also when
-    the cancel of left tasks used the first 5 seconds. So the `finally` of an
-    open async generator runs, and an idle executor does not count as a
-    running thread.
+  - A task must await the work that it starts. When the body of an async
+    task returns (a value, or an exception that its exception mapper turns
+    into a result) and asyncio tasks that it started are still on the loop,
+    the child waits up to 1 second for them (`ISOLATED_LEFTOVER_GRACE_S`;
+    an isolated task has no grace option), then cancels the work that is
+    alive in three rounds 0.1 s apart. The worker writes what the task
+    returned only after that work ended, and only then the retry and the
+    next workflow step, so they never run next to that work. The worker
+    then replaces the child: cancelled code can leave broken state in it.
+    The return ends the deadline: `timeout_ms` bounds the body, and the
+    outcome is never `TASK_TIMEOUT` in this wait. Work still alive 0.3 s
+    after the first cancel is stuck: the worker kills the child and writes
+    what the task returned after it saw the exit. A child that reports
+    neither the end of that work nor that it is stuck within 26.3 s of the
+    return, and a child that ends in the wait, also end with what the task
+    returned once the exit was seen; no exit seen within 30 s of a kill
+    follows the rule of a timeout kill. The child writes the finalizing
+    marker of the row only after that work ended, and not at all for work
+    that did not stop, so the worker beats the row while the work runs and
+    the reaper does not fail it, also with small stale thresholds. A client
+    that keeps its own background tasks on the loop delays the outcome of
+    each async task by
+    about 1 second and causes a child replacement after it. The worker logs
+    one line for each task that left work: the coroutine of each task left,
+    up to 10, and how that work ended. A task that cancels a helper task in
+    `finally` must also await it. The check sees asyncio tasks only: a
+    callback that `loop.call_soon()` or `loop.call_later()` scheduled, and
+    `loop.run_in_executor()` work that the task did not await, are not
+    waited for, cause no replacement, and can still run during a later task
+    of the same child.
+  - When the worker stops a child, the child cancels what is left on its
+    loop and closes the loop, in at most 7 seconds. A thread of
+    `asyncio.to_thread()` that still runs after that time does not hold the
+    child: the child exits without waiting for it, and its `atexit` handlers
+    do not run. The close of the async generators and the shutdown of the
+    default executor each get at least 1 second, also when the cancel of
+    left tasks used the first 5 seconds. So the `finally` of an open async
+    generator runs, and an idle executor does not count as a running
+    thread.
 - **The worker state names the slots that are down.**
   `WorkerStateSnapshot.slot_health` is `AllSlotsServing()`,
   `SlotsDown(slots)`, or `SlotHealthNotRecorded()` for a snapshot that a

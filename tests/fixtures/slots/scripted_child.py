@@ -76,6 +76,11 @@ from horsies.core.worker.shared_child import (
     StartedSeats,
 )
 from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE, StartCheck
+from horsies.core.worker.run_return import (
+    IsolatedMarkerWindow,
+    RunReturn,
+    StoppedBeforeRunning,
+)
 from horsies.core.utils.loop_runner import in_running_event_loop
 from horsies.core.worker import loop_watchdog as loop_watchdog_module
 from horsies.core.worker import task_loop as task_loop_module
@@ -299,6 +304,60 @@ async def _leave_pending(path: str) -> str:
     return str(os.getpid())
 
 
+async def _write_after(path: str, seconds: float, text: str) -> None:
+    """Write ``text`` to ``path`` after ``seconds``, as work that ends."""
+    await asyncio.sleep(seconds)
+    with open(path, 'w', encoding='ascii') as target:
+        target.write(text)
+
+
+async def _leave_task(work: Coroutine[Any, Any, None]) -> str:
+    """Start ``work`` as a task, and return the pid without awaiting it."""
+    _kept_tasks.append(asyncio.get_running_loop().create_task(work))
+    await asyncio.sleep(0)
+    return str(os.getpid())
+
+
+async def _block_the_loop() -> None:
+    """Hold the loop thread once the child waits for this work, so no cancel
+    round can run. The sleep first lets the body return and the child send
+    its return."""
+    await asyncio.sleep(0.05)
+    time.sleep(3600)
+
+
+async def _exit_soon(code: int) -> None:
+    """End the process while the child waits for this work."""
+    await asyncio.sleep(0.05)
+    os._exit(code)
+
+
+async def _sys_exit_beside_a_thread(code: int) -> None:
+    """Raise ``SystemExit`` while a non-daemon thread runs, as left work."""
+    await asyncio.sleep(0.05)
+    threading.Thread(target=time.sleep, args=(60,)).start()
+    sys.exit(code)
+
+
+def _leftover_run(name: str, argument: str, task_loop: TaskLoop) -> WireResult:
+    """The runs whose body returns and leaves work on the task loop."""
+    match name:
+        case 'leave_ending':
+            # The work ends within the grace: it writes 'ended' to the path.
+            work = _write_after(argument, 0.2, 'ended')
+        case 'leave_stubborn':
+            work = _ignore_cancel()
+        case 'leave_blocking':
+            work = _block_the_loop()
+        case 'leave_exiting':
+            work = _exit_soon(int(argument))
+        case 'leave_sys_exit':
+            work = _sys_exit_beside_a_thread(int(argument))
+        case _:
+            raise AssertionError(name)
+    return True, _run_async(task_loop, _leave_task(work)), None
+
+
 async def _async_pid() -> str:
     """Await all the work it starts, so the loop holds nothing after it."""
     await asyncio.get_running_loop().create_task(asyncio.sleep(0))
@@ -360,6 +419,14 @@ def _run(frame: RunFrame, init: InitFrame, task_loop: TaskLoop) -> WireResult:
             return True, type(task_loop.state).__name__, None
         case 'leave_pending':
             return True, _run_async(task_loop, _leave_pending(argument)), None
+        case (
+            'leave_ending'
+            | 'leave_stubborn'
+            | 'leave_blocking'
+            | 'leave_exiting'
+            | 'leave_sys_exit'
+        ):
+            return _leftover_run(frame.task_name, argument, task_loop)
         case 'idle_executor_beside_a_stubborn_task':
             pid = _run_async(task_loop, _idle_executor_beside_a_stubborn_task())
             return True, pid, None
@@ -778,8 +845,53 @@ class _ScriptedThreadSeats:
         _ = frame, window
 
 
+# The runs whose argument is a path: the scripted marker records each
+# marker write next to that path.
+_MARKED_RUNS = frozenset(
+    {
+        'leave_ending',
+        'leave_pending',
+        'leave_stubborn',
+        'marker_probe',
+        'marker_probe_async',
+        'stopped_run',
+    },
+)
+
+
+def _run_isolated(frame: RunFrame, init: InitFrame, task_loop: TaskLoop) -> RunReturn:
+    """A scripted run. ``stopped_run`` ends as a run that never set its row
+    RUNNING; every other run set it."""
+    match frame.task_name:
+        case 'stopped_run':
+            return StoppedBeforeRunning((True, 'stopped', 'CLAIM_LOST'))
+        case 'marker_probe':
+            return SetRunning(_pid_result())
+        case 'marker_probe_async':
+            return SetRunning((True, _run_async(task_loop, _async_pid()), None))
+        case _:
+            return SetRunning(_run(frame, init, task_loop))
+
+
+def _mark_finalizing(frame: RunFrame, window: IsolatedMarkerWindow) -> None:
+    """Record a marker write of a run in ``_MARKED_RUNS``: one line in
+    ``<argument>.marks`` with the window, and what the file at the argument
+    holds at that moment (``absent`` when there is none)."""
+    if frame.task_name not in _MARKED_RUNS or not frame.kwargs_json:
+        return
+    path = frame.kwargs_json
+    try:
+        with open(path, encoding='ascii') as work_marker:
+            state = work_marker.read()
+    except FileNotFoundError:
+        state = 'absent'
+    with open(f'{path}.marks', 'a', encoding='ascii') as marks:
+        marks.write(f'{type(window).__name__} {state}\n')
+
+
 RUNNERS = TaskRunners(
-    run_task=_run,
+    run_task=_run_isolated,
+    mark_finalizing=_mark_finalizing,
     seats=_ScriptedSeatProgram(),
     threads=_ScriptedThreadSeats(),
 )

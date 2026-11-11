@@ -112,10 +112,13 @@ from horsies.core.worker.child_protocol import (
     SharedRunFrame,
     StopFrame,
     ThreadSeatTask,
-    WireResult,
     boot_failed_frame,
 )
 from horsies.core.worker.loop_watchdog import LoopWatchdog
+from horsies.core.worker.run_return import (
+    SetRunning as SetRunning,
+    StoppedBeforeRunning as StoppedBeforeRunning,
+)
 from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
 from horsies.core.worker.run_mark import (
     RUN_MARK,
@@ -128,7 +131,12 @@ from horsies.core.worker.run_mark import (
     RunMark,
     ScanWhen,
 )
-from horsies.core.worker.task_loop import TaskLoop, _coroutine_name
+from horsies.core.worker.task_loop import (
+    CANCEL_ROUND_INTERVAL_S,
+    EXTRA_CANCEL_ROUNDS,
+    TaskLoop,
+    _coroutine_name,
+)
 
 logger = get_logger('worker')
 
@@ -142,40 +150,12 @@ FRAMES_PER_CHILD: Final = 2
 """The frames of a child outside its runs: the ready frame, and one report of
 a blocked loop."""
 
-EXTRA_CANCEL_ROUNDS: Final = 2
-"""The cancel rounds after the second cancel. In the measured set one more
-round 0.1 s after the second cancel ended every asyncio leftover within
-106 ms: an asyncpg pool refill task, and SQLAlchemy closes that turn their
-first cancel into a bounded cleanup of their own."""
-
-CANCEL_ROUND_INTERVAL_S: Final = 0.1
-"""The time between two cancel rounds, and from the last round to the stuck
-check."""
-
 WRITER_CLOSE_TIMEOUT_S: Final = 1.0
 """The longest wait for the writer thread at the stop. The parent read every
 result before it sent the stop frame, so the queue is empty then."""
 
 CHILD_DEFECT_EXIT_CODE: Final = 1
 """A defect inside the child, as when a task escapes the task runner."""
-
-
-@dataclass(frozen=True, slots=True)
-class SetRunning:
-    """The run set its row RUNNING, then ended with ``wire``: the body ran,
-    or a refusal or a resolve error ended it after the RUNNING update. The
-    end of the run writes the finalizing marker when one is due."""
-
-    wire: WireResult
-
-
-@dataclass(frozen=True, slots=True)
-class StoppedBeforeRunning:
-    """The run ended with ``wire`` before it set its row RUNNING: a lost
-    claim, an expiry, a stopped workflow, or a failed RUNNING update. No
-    marker follows."""
-
-    wire: WireResult
 
 
 type SeatReturn = SetRunning | StoppedBeforeRunning

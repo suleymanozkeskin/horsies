@@ -32,10 +32,15 @@ from horsies.core.worker.child_main import _bounded_result
 from horsies.core.worker.child_protocol import (
     MAX_BLOCKED_WHERE_CHARS,
     BlockingRun,
+    BodyReturnedFrame,
     CulpritUnknown,
     DeadlineFiredFrame,
     LeftoverCancelFrame,
     LeftoverStuckFrame,
+    LeftWorkEnd,
+    LeftWorkEndedFrame,
+    LeftWorkStuckFrame,
+    NoLeftWork,
     LoopBlockedFrame,
     RunStuckFrame,
     SecondCancelFrame,
@@ -75,7 +80,6 @@ from horsies.core.worker.child_protocol import (
     RssUnreadable,
     RunFrame,
     StopFrame,
-    TaskLoopReport,
     boot_failed_frame,
     decode_child_frame,
     decode_parent_frame,
@@ -595,6 +599,171 @@ class TestLeftoverFrames:
         assert names == wire - {'kind'}
 
 
+_LEFT_AT_THE_BOUNDS = LoopHoldsTasks(
+    count=MAX_LEFTOVER_TASK_NAMES + 5,
+    names=('n' * MAX_LEFTOVER_NAME_CHARS,) * MAX_LEFTOVER_TASK_NAMES,
+)
+
+
+def _body_returned(
+    returned: SeatFinished = _RETURNED,
+    left: LoopHoldsTasks = LoopHoldsTasks(count=2, names=('flush', 'keepalive')),
+) -> BodyReturnedFrame:
+    return BodyReturnedFrame(task_id='task-9', returned=returned, left=left)
+
+
+# Malformed forms of a field that counts and names asyncio tasks on a loop.
+_BAD_HELD: tuple[object, ...] = (
+    None,
+    {'names': ['a']},
+    {'count': 0, 'names': []},
+    {'count': True, 'names': ['a']},
+    {'count': '2', 'names': ['a', 'b']},
+    {'count': 1},
+    {'count': 1, 'names': 'a'},
+    {'count': 1, 'names': [1]},
+    {'count': 2, 'names': ['a']},
+    {'count': 1, 'names': ['a', 'b']},
+    {
+        'count': MAX_LEFTOVER_TASK_NAMES + 1,
+        'names': ['a'] * (MAX_LEFTOVER_TASK_NAMES + 1),
+    },
+    {'count': 1, 'names': ['n' * (MAX_LEFTOVER_NAME_CHARS + 1)]},
+)
+
+
+class TestLeftWorkFrames:
+    """The reports of an isolated run whose body returned with work left on
+    its task loop."""
+
+    @pytest.mark.parametrize(
+        'returned',
+        [
+            SeatFinished(ok=True, result_json='{"é":1}', failed_reason=None),
+            SeatFinished(ok=False, result_json='', failed_reason='WORKFLOW_STOPPED'),
+        ],
+    )
+    @pytest.mark.parametrize(
+        'left',
+        [LoopHoldsTasks(count=1, names=('flush',)), _LEFT_AT_THE_BOUNDS],
+        ids=['one', 'at-the-bounds'],
+    )
+    def test_the_return_round_trips_with_what_the_body_returned(
+        self,
+        returned: SeatFinished,
+        left: LoopHoldsTasks,
+    ) -> None:
+        frame = _body_returned(returned, left)
+        meta, body = _split(encode_child_frame(frame))
+        assert body == returned.result_json.encode('utf-8')
+        assert decode_child_frame(meta, body) == Ok(frame)
+
+    @pytest.mark.parametrize('end', list(LeftWorkEnd))
+    @pytest.mark.parametrize('rss', [RssMb(7.5), RssUnreadable()])
+    def test_the_end_of_left_work_round_trips(
+        self,
+        end: LeftWorkEnd,
+        rss: RssMb | RssUnreadable,
+    ) -> None:
+        frame = LeftWorkEndedFrame(task_id='task-9', end=end, rss=rss)
+        meta, body = _split(encode_child_frame(frame))
+        assert body == b''
+        assert decode_child_frame(meta, body) == Ok(frame)
+
+    @pytest.mark.parametrize(
+        'still',
+        [LoopHoldsTasks(count=1, names=('flush',)), _LEFT_AT_THE_BOUNDS],
+        ids=['one', 'at-the-bounds'],
+    )
+    def test_the_stuck_report_round_trips(self, still: LoopHoldsTasks) -> None:
+        frame = LeftWorkStuckFrame(task_id='task-9', still=still)
+        meta, body = _split(encode_child_frame(frame))
+        assert body == b''
+        assert decode_child_frame(meta, body) == Ok(frame)
+
+    @pytest.mark.parametrize(
+        ('key', 'value'),
+        [
+            ('task_id', None),
+            ('returned', None),
+            ('returned', {'kind': 'timed_out'}),
+            ('returned', {'kind': 'finished', 'ok': 1, 'failed_reason': None}),
+            ('returned', {'kind': 'finished', 'ok': True, 'failed_reason': 3}),
+            *(('left', value) for value in _BAD_HELD),
+        ],
+    )
+    def test_every_return_field_is_checked(self, key: str, value: object) -> None:
+        meta, body = _split(encode_child_frame(_body_returned()))
+        fields = json.loads(meta)
+        fields[key] = value
+        assert isinstance(decode_child_frame(json.dumps(fields).encode(), body), Err)
+
+    @pytest.mark.parametrize(
+        ('key', 'value'),
+        [
+            ('task_id', None),
+            ('end', None),
+            ('end', 'stuck'),
+            ('rss_mb', 'x'),
+            ('rss_mb', True),
+        ],
+    )
+    def test_every_end_field_is_checked(self, key: str, value: object) -> None:
+        frame = LeftWorkEndedFrame(
+            task_id='task-9', end=LeftWorkEnd.IN_GRACE, rss=RssMb(1.0)
+        )
+        meta, body = _split(encode_child_frame(frame))
+        fields = json.loads(meta)
+        fields[key] = value
+        assert isinstance(decode_child_frame(json.dumps(fields).encode(), body), Err)
+
+    @pytest.mark.parametrize(
+        ('key', 'value'),
+        [('task_id', None), *(('still', value) for value in _BAD_HELD)],
+    )
+    def test_every_stuck_field_is_checked(self, key: str, value: object) -> None:
+        frame = LeftWorkStuckFrame(task_id='task-9', still=LoopHoldsTasks(1, ('a',)))
+        meta, body = _split(encode_child_frame(frame))
+        fields = json.loads(meta)
+        fields[key] = value
+        assert isinstance(decode_child_frame(json.dumps(fields).encode(), body), Err)
+
+    @pytest.mark.parametrize(
+        'frame',
+        [
+            LeftWorkEndedFrame(
+                task_id='task-9', end=LeftWorkEnd.CANCELLED, rss=RssMb(1.0)
+            ),
+            LeftWorkStuckFrame(task_id='task-9', still=LoopHoldsTasks(1, ('a',))),
+        ],
+    )
+    def test_a_report_after_the_return_carries_no_result(
+        self,
+        frame: LeftWorkEndedFrame | LeftWorkStuckFrame,
+    ) -> None:
+        meta, _ = _split(encode_child_frame(frame))
+        assert isinstance(decode_child_frame(meta, b'{"x":1}'), Err)
+
+    @pytest.mark.parametrize(
+        'frame',
+        [
+            _body_returned(),
+            LeftWorkEndedFrame(
+                task_id='task-9', end=LeftWorkEnd.IN_GRACE, rss=RssMb(1.0)
+            ),
+            LeftWorkStuckFrame(task_id='task-9', still=LoopHoldsTasks(1, ('a',))),
+        ],
+        ids=['return', 'end', 'stuck'],
+    )
+    def test_each_field_goes_on_the_wire(
+        self,
+        frame: BodyReturnedFrame | LeftWorkEndedFrame | LeftWorkStuckFrame,
+    ) -> None:
+        names = {field.name for field in dataclasses.fields(frame)}
+        wire = set(json.loads(_split(encode_child_frame(frame))[0]))
+        assert names - {'rss'} == wire - {'kind', 'rss_mb'}
+
+
 class TestParentFrames:
     def test_init_frame_round_trip(self) -> None:
         frame = _init_frame()
@@ -673,23 +842,15 @@ class TestChildFrames:
     @pytest.mark.parametrize('result_json', ['', '{"é":1}'])
     @pytest.mark.parametrize(
         'task_loop',
-        [
-            NoTaskLoop(),
-            LoopHoldsNoTask(),
-            LoopHoldsTasks(count=3, names=('a', 'b', 'Client._keepalive')),
-            LoopHoldsTasks(
-                count=MAX_LEFTOVER_TASK_NAMES + 5,
-                names=('n' * MAX_LEFTOVER_NAME_CHARS,) * MAX_LEFTOVER_TASK_NAMES,
-            ),
-        ],
-        ids=['no-task-loop', 'empty', 'held', 'held-at-the-bounds'],
+        [NoTaskLoop(), LoopHoldsNoTask()],
+        ids=['no-task-loop', 'empty'],
     )
     def test_result_frame_round_trip(
         self,
         ok: bool,
         failed_reason: str | None,
         result_json: str,
-        task_loop: TaskLoopReport,
+        task_loop: NoLeftWork,
     ) -> None:
         frame = ResultFrame('task-1', ok, result_json, failed_reason, RssMb(3.0), task_loop)
         meta, body = _split(encode_child_frame(frame))
@@ -891,31 +1052,9 @@ class TestMalformedMetadata:
             ('rss_mb', True),
             ('task_loop', None),
             ('task_loop', {'kind': 'unknown'}),
-            ('task_loop', {'kind': 'held', 'names': ['a']}),
-            ('task_loop', {'kind': 'held', 'count': 0, 'names': []}),
-            ('task_loop', {'kind': 'held', 'count': True, 'names': ['a']}),
-            ('task_loop', {'kind': 'held', 'count': '2', 'names': ['a', 'b']}),
-            ('task_loop', {'kind': 'held', 'count': 1}),
-            ('task_loop', {'kind': 'held', 'count': 1, 'names': 'a'}),
-            ('task_loop', {'kind': 'held', 'count': 1, 'names': [1]}),
-            ('task_loop', {'kind': 'held', 'count': 2, 'names': ['a']}),
-            ('task_loop', {'kind': 'held', 'count': 1, 'names': ['a', 'b']}),
-            (
-                'task_loop',
-                {
-                    'kind': 'held',
-                    'count': MAX_LEFTOVER_TASK_NAMES + 1,
-                    'names': ['a'] * (MAX_LEFTOVER_TASK_NAMES + 1),
-                },
-            ),
-            (
-                'task_loop',
-                {
-                    'kind': 'held',
-                    'count': 1,
-                    'names': ['n' * (MAX_LEFTOVER_NAME_CHARS + 1)],
-                },
-            ),
+            # A result frame is the end of a run that left no work: work on
+            # the loop travels in BodyReturnedFrame.
+            ('task_loop', {'kind': 'held', 'count': 1, 'names': ['a']}),
             ('task_loop', {'kind': 'unavailable', 'detail': 'OSError'}),
         ],
     )
@@ -998,17 +1137,14 @@ class TestFieldCoverage:
 
     def test_result_frame_fields(self) -> None:
         names = {field.name for field in dataclasses.fields(ResultFrame)}
-        held = LoopHoldsTasks(count=1, names=('a',))
-        frame = ResultFrame('t', True, 'x', None, RssMb(1.0), held)
+        frame = ResultFrame('t', True, 'x', None, RssMb(1.0), LoopHoldsNoTask())
         wire = set(json.loads(_split(encode_child_frame(frame))[0]))
         assert names - {'result_json', 'rss'} == wire - {'kind', 'rss_mb'}
 
     def test_leftover_report_fields(self) -> None:
         names = {field.name for field in dataclasses.fields(LoopHoldsTasks)}
-        held = LoopHoldsTasks(count=1, names=('a',))
-        frame = ResultFrame('t', True, 'x', None, RssMb(1.0), held)
-        wire = json.loads(_split(encode_child_frame(frame))[0])['task_loop']
-        assert names == set(wire) - {'kind'}
+        wire = json.loads(_split(encode_child_frame(_body_returned()))[0])['left']
+        assert names == set(wire)
 
     def test_boot_failed_frame_fields(self) -> None:
         names = {field.name for field in dataclasses.fields(BootFailedFrame)}

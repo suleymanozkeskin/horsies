@@ -67,6 +67,15 @@ from horsies.core.worker.stored_timeout import (
     TimeoutRefusal,
     TimeoutValueInvalid,
 )
+from horsies.core.worker.child_protocol import WireResult
+from horsies.core.worker.run_return import (
+    IsolatedMarkerWindow,
+    MarkerAfterLeftWork,
+    MarkerAtReturn,
+    RunReturn,
+    SetRunning,
+    StoppedBeforeRunning,
+)
 from horsies.core.worker.task_loop import (
     AsyncTaskPresence,
     LoopClosed,
@@ -141,6 +150,26 @@ type StatementsLimit = StatementsBound | StatementsUnbounded
 CANCEL_REQUEST_TIMEOUT_S: Final = 5.0
 """The longest wait for the server to take a cancel request of a bounded
 write (``StatementsBound``)."""
+
+LEFT_WORK_MARKER_CONNECTION_WAIT_S: Final = 5.0
+"""The longest wait for a pooled connection of the finalizing marker of an
+isolated run whose task left work on its task loop (``MarkerAfterLeftWork``).
+A marker that gets no connection in time is skipped: the runner heartbeats of
+the worker cover the row until it reads the end of the run."""
+
+LEFT_WORK_MARKER_STATEMENTS_S: Final = 5.0
+"""The longest time that the statement of that marker takes once it holds
+its connection."""
+
+LEFT_WORK_MARKER_BOUND_S: Final = (
+    LEFT_WORK_MARKER_CONNECTION_WAIT_S
+    + LEFT_WORK_MARKER_STATEMENTS_S
+    + CANCEL_REQUEST_TIMEOUT_S
+)
+"""The longest time that the marker after left work takes: the wait for a
+connection, the statement, and the cancel request of a statement past its
+bound. The backstop of the parent after the return of such a run
+(``slots.ISOLATED_LEFTOVER_BACKSTOP_S``) counts it."""
 
 
 def _cancel_running_statement(conn: Connection[Any]) -> None:
@@ -1154,6 +1183,36 @@ def _mark_task_finalizing(
         )
 
 
+def mark_isolated_run_finalizing(
+    task_id: str,
+    worker_id: str,
+    claimed_at: Optional[datetime],
+    window: IsolatedMarkerWindow,
+) -> None:
+    """Write the finalizing marker of an isolated run that set its row
+    RUNNING and has ended (``_mark_task_finalizing``).
+
+    ``MarkerAtReturn``: the bounds of the pool, as the marker at the return
+    always had. ``MarkerAfterLeftWork``: the wait for a connection is
+    ``LEFT_WORK_MARKER_CONNECTION_WAIT_S``, and the statement
+    ``LEFT_WORK_MARKER_STATEMENTS_S``. A failed, late or skipped write is
+    logged only: nothing escapes.
+    """
+    match window:
+        case MarkerAtReturn():
+            _mark_task_finalizing(task_id, worker_id, claimed_at)
+        case MarkerAfterLeftWork():
+            _mark_task_finalizing(
+                task_id,
+                worker_id,
+                claimed_at,
+                connection_wait_s=LEFT_WORK_MARKER_CONNECTION_WAIT_S,
+                statements=StatementsBound(LEFT_WORK_MARKER_STATEMENTS_S),
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def async_task_presence(app: Horsies) -> AsyncTaskPresence:
     """Whether the registry of ``app`` holds an ``async def`` task function.
 
@@ -1692,11 +1751,14 @@ def _run_task_entry(
     claimed_at: Optional[datetime] = None,
     *,
     task_loop: TaskLoop,
-) -> Tuple[bool, str, Optional[str]]:
-    """
-    Child-process entry.
-    Returns:
-      (ok, serialized_task_result_json, worker_failure_reason)
+) -> RunReturn:
+    """Run one task in an isolated child, up to its wire tuple.
+
+    Returns the wire tuple ``(ok, serialized_task_result_json,
+    worker_failure_reason)`` in ``SetRunning`` when the run set its row
+    RUNNING, and in ``StoppedBeforeRunning`` when the ownership confirm
+    ended it first (a lost claim, an expiry, a stopped workflow, a failed
+    RUNNING update).
 
     An ``async def`` task runs on ``task_loop``, the one loop of this child.
     A ``def`` task runs on this thread with no running event loop.
@@ -1712,6 +1774,10 @@ def _run_task_entry(
     ``except BaseException`` and folds everything into the wire tuple. The
     pre-try steps (preflight, ownership confirm) return wire tuples
     themselves.
+
+    Writes no finalizing marker: the child writes it when the run has
+    ended, after the work that the task left on its task loop
+    (``child_main.mark_child_task_finalizing``).
 
     The child writes the first runner heartbeat, in the RUNNING transition.
     The worker process writes the later ones while this child holds the
@@ -1734,14 +1800,36 @@ def _run_task_entry(
         case None:
             pass
         case tuple():
-            return ownership_result
+            return StoppedBeforeRunning(ownership_result)
         case DeadlineBeforeStart():
             raise AssertionError(
                 'an isolated child checks no deadline before its RUNNING update',
             )
         case _ as unreachable:
             assert_never(unreachable)
+    return SetRunning(
+        _run_isolated_after_running(
+            task_name,
+            args_json,
+            kwargs_json,
+            task_id,
+            timeout,
+            task_loop,
+        ),
+    )
 
+
+def _run_isolated_after_running(
+    task_name: str,
+    args_json: Optional[str],
+    kwargs_json: Optional[str],
+    task_id: str,
+    timeout: StoredTimeout,
+    task_loop: TaskLoop,
+) -> WireResult:
+    """The steps of an isolated run after its RUNNING update: the stored
+    timeout check, the resolve, the call and the result encode. Any
+    exception becomes ``TASK_EXCEPTION``."""
     try:
         # A stored timeout that the worker cannot use fails the task before
         # it resolves the task, so no user code runs.
@@ -1775,12 +1863,6 @@ def _run_task_entry(
 
     except BaseException as e:
         return _task_exception_response(task_name, e)
-
-    finally:
-        # Mark finalizing so the reaper does not mistake a completed child
-        # for a crashed child while the parent writes the durable terminal
-        # state. The worker's runner heartbeat stops at this marker.
-        _mark_task_finalizing(task_id, master_worker_id, claimed_at)
 
 
 _CHILD_RUNNER_ENTRYPOINTS = (_child_initializer, _run_task_entry)

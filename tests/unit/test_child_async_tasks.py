@@ -50,6 +50,7 @@ from horsies.core.worker.task_loop import (
     LoopOpen,
     TaskLoop,
 )
+from tests.fixtures.run_return import wire_of
 
 pytestmark = [pytest.mark.unit]
 
@@ -117,14 +118,16 @@ def _runner(
                     child_runner, 'get_current_app', MagicMock(return_value=app)
                 ),
             )
-            return child_runner._run_task_entry(
-                task_name=task_name,
-                args_json='[]',
-                kwargs_json=json.dumps(kwargs or {}),
-                task_id='task-id',
-                master_worker_id='worker',
-                is_workflow_task=False,
-                task_loop=task_loop,
+            return wire_of(
+                child_runner._run_task_entry(
+                    task_name=task_name,
+                    args_json='[]',
+                    kwargs_json=json.dumps(kwargs or {}),
+                    task_id='task-id',
+                    master_worker_id='worker',
+                    is_workflow_task=False,
+                    task_loop=task_loop,
+                )
             )
 
     return run

@@ -68,7 +68,10 @@ from horsies.core.models.worker_profile import (
     TaskLimit,
 )
 from horsies.core.types.result import Err, Ok, Result
-from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
+from horsies.core.worker.child_runner import (
+    CHILD_HOOK_FAILURE_EXIT_CODE,
+    LEFT_WORK_MARKER_BOUND_S,
+)
 from horsies.core.worker.config import ChildPreload
 from horsies.core.worker.live_dispatches import (
     Held,
@@ -95,6 +98,7 @@ from horsies.core.worker.thread_slots import (
 from horsies.core.worker.child_protocol import (
     FRAME_HEADER,
     BlockingRun,
+    BodyReturnedFrame,
     BootFailedFrame,
     CulpritUnknown,
     ChildFrame,
@@ -103,6 +107,9 @@ from horsies.core.worker.child_protocol import (
     InitFrame,
     LeftoverCancelFrame,
     LeftoverStuckFrame,
+    LeftWorkEnd,
+    LeftWorkEndedFrame,
+    LeftWorkStuckFrame,
     LoopHoldsNoTask,
     LoopHoldsTasks,
     MalformedFrame,
@@ -137,9 +144,10 @@ from horsies.core.worker.child_protocol import (
     parse_header,
 )
 from horsies.core.worker.loop_watchdog import LOOP_BLOCK_LIMIT_MS
-from horsies.core.worker.shared_child import (
+from horsies.core.worker.task_loop import (
     CANCEL_ROUND_INTERVAL_S,
     EXTRA_CANCEL_ROUNDS,
+    ISOLATED_LEFTOVER_GRACE_S,
 )
 from horsies.core.worker.shared_lifecycle import REFUSAL_WRITES_BOUND_S
 from horsies.core.worker.thread_runner import THREAD_REFUSAL_WRITES_BOUND_S
@@ -202,6 +210,20 @@ STUCK_REPORT_DELAY_S: Final = (EXTRA_CANCEL_ROUNDS + 1) * CANCEL_ROUND_INTERVAL_
 # its end by then is frozen, and the parent kills it. The margin is past the
 # block limit, as for the first backstop.
 SHARED_STUCK_BACKSTOP_S: Final = STUCK_REPORT_DELAY_S + SHARED_BACKSTOP_MARGIN_S
+# After an isolated child reports that the body of a task returned with work
+# left on its task loop, it waits up to ISOLATED_LEFTOVER_GRACE_S for that
+# work, then cancels it in the rounds of STUCK_REPORT_DELAY_S, writes the
+# finalizing marker of a run whose work ended (LEFT_WORK_MARKER_BOUND_S), and
+# reports how the work ended. Code of that work that holds the loop delays
+# the report. The parent kills a child that has reported nothing this long
+# after the return. The margin is that of a shared child: a hold of the loop
+# shorter than the block limit, and 5 s more, passes.
+ISOLATED_LEFTOVER_BACKSTOP_S: Final = (
+    ISOLATED_LEFTOVER_GRACE_S
+    + STUCK_REPORT_DELAY_S
+    + LEFT_WORK_MARKER_BOUND_S
+    + SHARED_BACKSTOP_MARGIN_S
+)
 # A refusal runs only the RUNNING transition and the finalizing marker. Their
 # bounds add up to REFUSAL_WRITES_BOUND_S in a shared async child and to
 # THREAD_REFUSAL_WRITES_BOUND_S in a shared thread child, so a database that
@@ -275,6 +297,9 @@ class TaskFinished:
     """The child reported a result. ``ok`` has the ``_run_task_entry`` meaning.
 
     ``rss`` and ``task_loop`` decide whether the child takes another task.
+    ``task_loop`` is what the task loop held when the body returned:
+    ``LoopHoldsTasks`` means that the task left work there, and that the
+    child reported the end of that work before this outcome.
     """
 
     ok: bool
@@ -315,7 +340,22 @@ class NotDispatched:
     cause: NotRunCause
 
 
-SlotOutcome: TypeAlias = TaskFinished | ChildLost | NotDispatched
+@dataclass(frozen=True, slots=True)
+class LostAfterReturn:
+    """The body of the task returned ``returned`` with work left on its task
+    loop, and its child then ended before it reported that this work ended:
+    the worker killed it (the work did not stop after the cancel rounds, the
+    child reported nothing within ``ISOLATED_LEFTOVER_BACKSTOP_S``, or the
+    worker stopped), or it ended by itself. ``lost`` says how.
+
+    With the exit of the child seen, the outcome is ``returned``. With no
+    exit seen, the attempt may still have effects in flight."""
+
+    returned: SeatFinished
+    lost: ChildLost
+
+
+SlotOutcome: TypeAlias = TaskFinished | ChildLost | NotDispatched | LostAfterReturn
 
 
 @dataclass(frozen=True, slots=True)
@@ -862,7 +902,31 @@ class SlotAnswered:
     outcome: SlotOutcome
 
 
-KillWaitOutcome: TypeAlias = ChildEnded | ChildEndUnknown | SlotAnswered | NothingToKill
+@dataclass(frozen=True, slots=True)
+class ReturnNotSeen:
+    """The pool has not read that the body of the task returned with work
+    left on its task loop."""
+
+
+@dataclass(frozen=True, slots=True)
+class ReturnSeen:
+    """The pool read that the body of the task returned ``returned`` with
+    ``left`` on its task loop (``BodyReturnedFrame``). The deadline of the
+    task no longer applies: ``returned`` is the outcome of the task, also
+    when its child ends before the work ends. At a deadline kill, nothing was
+    killed."""
+
+    returned: SeatFinished
+    left: LoopHoldsTasks
+
+
+type BodyReturn = ReturnNotSeen | ReturnSeen
+"""Whether the pool read that the body of a task returned with work left."""
+
+
+KillWaitOutcome: TypeAlias = (
+    ChildEnded | ChildEndUnknown | SlotAnswered | NothingToKill | ReturnSeen
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1483,6 +1547,7 @@ class SlotHandle:
         self.outcome: asyncio.Future[SlotOutcome] = loop.create_future()
         self._child: Child | None = None
         self._last_child: Child | None = None
+        self._return: BodyReturn = ReturnNotSeen()
 
     def bind_child(self, child: Child) -> None:
         """Pool only: the task frame was sent to this child."""
@@ -1491,6 +1556,32 @@ class SlotHandle:
         if not self.assigned.done():
             self.assigned.set_result(Assigned())
 
+    def note_return(self, seen: ReturnSeen) -> None:
+        """Pool only: the child reported that the body of the task returned
+        with work left on its task loop. From here a deadline kill kills
+        nothing, and a loss of the child keeps what the body returned. A
+        second report is a defect of the pool: ``AssertionError``."""
+        match self._return:
+            case ReturnNotSeen():
+                self._return = seen
+            case ReturnSeen():
+                raise AssertionError(
+                    f'the return of task {self.frame.task_id} was noted twice',
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def loss_outcome(self, lost: ChildLost) -> ChildLost | LostAfterReturn:
+        """The outcome of this task when its child ended with no result:
+        ``LostAfterReturn`` after a return that left work, else ``lost``."""
+        match self._return:
+            case ReturnNotSeen():
+                return lost
+            case ReturnSeen(returned=returned):
+                return LostAfterReturn(returned=returned, lost=lost)
+            case _ as unreachable:
+                assert_never(unreachable)
+
     def finish(self, outcome: SlotOutcome) -> None:
         """Pool only: the task's slot work is over."""
         self._child = None
@@ -1498,7 +1589,7 @@ class SlotHandle:
             match outcome:
                 case NotDispatched() as not_run:
                     self.assigned.set_result(not_run)
-                case TaskFinished() | ChildLost():
+                case TaskFinished() | ChildLost() | LostAfterReturn():
                     self.assigned.set_result(Assigned())
                 case _ as unreachable:
                     assert_never(unreachable)
@@ -1521,12 +1612,23 @@ class SlotHandle:
     async def kill_and_wait(self, wait_s: float) -> KillWaitOutcome:
         """Kill the child only while it holds this task, then wait for its exit.
 
-        The kill is the one that ``kill`` sends. The wait follows the child
-        that got the kill, also after the slot ends the binding, and it ends
-        after ``wait_s``. Does not resolve ``outcome``: the slot still does
-        that. A handle with no child gives ``SlotAnswered`` when the slot
-        finished it, and ``NothingToKill`` when no slot took it yet.
+        This is the kill at the deadline of the task. The kill is the one
+        that ``kill`` sends. The wait follows the child that got the kill,
+        also after the slot ends the binding, and it ends after ``wait_s``.
+        Does not resolve ``outcome``: the slot still does that. A handle
+        whose return the pool read gives ``ReturnSeen`` and kills nothing:
+        the body returned before this kill. The check and the kill run in
+        one step of the event loop. A handle with no child gives
+        ``SlotAnswered`` when the slot finished it, and ``NothingToKill``
+        when no slot took it yet.
         """
+        match self._return:
+            case ReturnSeen() as seen:
+                return seen
+            case ReturnNotSeen():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
         child = self._child
         if child is None:
             return self._answer_without_child()
@@ -1639,6 +1741,191 @@ def _stuck_reported_in(frames: tuple[ChildFrame, ...], dispatch: int) -> bool:
         isinstance(frame, (RunStuckFrame, LeftoverStuckFrame, SharedResultFrame))
         and frame.dispatch == dispatch
         for frame in frames
+    )
+
+
+async def _read_answer(
+    child: Child,
+    handle: SlotHandle,
+) -> TaskFinished | ChildLost | LostAfterReturn:
+    """Read the answer of an isolated child to the task of ``handle``.
+
+    A ``ResultFrame`` is the outcome. A ``BodyReturnedFrame`` holds what the
+    body returned: the handle notes it, and ``_end_after_return`` waits for
+    the end of the work that the task left. Any other frame, or a frame of
+    another task, is a protocol violation: the child is killed. Never raises
+    for a task.
+    """
+    frame = handle.frame
+    answer = await child.await_frame(None)
+    match answer:
+        case ResultFrame(task_id=task_id) if task_id == frame.task_id:
+            return TaskFinished(
+                answer.ok,
+                answer.result_json,
+                answer.failed_reason,
+                answer.rss,
+                answer.task_loop,
+            )
+        case BodyReturnedFrame(task_id=task_id) if task_id == frame.task_id:
+            seen = ReturnSeen(returned=answer.returned, left=answer.left)
+            handle.note_return(seen)
+            return await _end_after_return(child, frame, seen)
+        case (
+            ResultFrame()
+            | BodyReturnedFrame()
+            | LeftWorkEndedFrame()
+            | LeftWorkStuckFrame()
+            | ReadyFrame()
+            | BootFailedFrame()
+            | SharedResultFrame()
+            | DeadlineFiredFrame()
+            | SecondCancelFrame()
+            | RunStuckFrame()
+            | LeftoverCancelFrame()
+            | LeftoverStuckFrame()
+            | LoopBlockedFrame()
+        ):
+            return await child.discard_violating_child()
+        case ChildLost():
+            return answer
+        case WaitExpired():
+            raise AssertionError('an unbounded wait cannot expire')
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+async def _end_after_return(
+    child: Child,
+    frame: RunFrame,
+    seen: ReturnSeen,
+) -> TaskFinished | LostAfterReturn:
+    """Wait for the end of the work that the task of ``frame`` left on its
+    task loop, after its body returned (``seen``). Logs one line for the run.
+
+    - ``LeftWorkEndedFrame``: ``TaskFinished`` with what the body returned,
+      and ``seen.left`` as the loop report, so the child is replaced.
+    - ``LeftWorkStuckFrame``, or no report within
+      ``ISOLATED_LEFTOVER_BACKSTOP_S``: the child is killed with its session,
+      and the wait for its exit is bounded by ``CHILD_KILL_WAIT_S``:
+      ``LostAfterReturn``.
+    - The child ended, or sent another frame (killed as a violation):
+      ``LostAfterReturn``.
+
+    Never raises for a task.
+    """
+    answer = await child.await_frame(ISOLATED_LEFTOVER_BACKSTOP_S)
+    match answer:
+        case LeftWorkEndedFrame(task_id=task_id, end=end) if task_id == frame.task_id:
+            _log_left_work(frame, child.pid, seen.left, _ended_text(end))
+            return TaskFinished(
+                seen.returned.ok,
+                seen.returned.result_json,
+                seen.returned.failed_reason,
+                answer.rss,
+                seen.left,
+            )
+        case LeftWorkStuckFrame(task_id=task_id) if task_id == frame.task_id:
+            _log_left_work(
+                frame,
+                child.pid,
+                seen.left,
+                'did not stop after the cancel rounds '
+                f'({answer.still.count} task(s) alive: {answer.still.names_text()}); '
+                'the worker kills the child, and writes what the task returned '
+                'after its exit',
+            )
+            lost = await _kill_child(child)
+        case WaitExpired():
+            _log_left_work(
+                frame,
+                child.pid,
+                seen.left,
+                'was not reported ended or stuck within '
+                f'{ISOLATED_LEFTOVER_BACKSTOP_S}s; the worker kills the child, and '
+                'writes what the task returned after its exit',
+            )
+            lost = await _kill_child(child)
+        case ChildLost():
+            lost = answer
+            _log_left_work(frame, child.pid, seen.left, _lost_text(lost))
+        case (
+            LeftWorkEndedFrame()
+            | LeftWorkStuckFrame()
+            | ResultFrame()
+            | BodyReturnedFrame()
+            | ReadyFrame()
+            | BootFailedFrame()
+            | SharedResultFrame()
+            | DeadlineFiredFrame()
+            | SecondCancelFrame()
+            | RunStuckFrame()
+            | LeftoverCancelFrame()
+            | LeftoverStuckFrame()
+            | LoopBlockedFrame()
+        ):
+            lost = await child.discard_violating_child()
+            _log_left_work(frame, child.pid, seen.left, _lost_text(lost))
+        case _ as unreachable:
+            assert_never(unreachable)
+    return LostAfterReturn(returned=seen.returned, lost=lost)
+
+
+async def _kill_child(child: Child) -> ChildLost:
+    """Kill ``child`` with its session, wait up to ``CHILD_KILL_WAIT_S`` for
+    its exit, and describe its end. ``ExitUnknown`` when it did not exit."""
+    child.kill_for_caller()
+    _ = await child.wait_exit(CHILD_KILL_WAIT_S)
+    return child.lost_for(LossCause.KILLED_BY_PARENT)
+
+
+def _ended_text(end: LeftWorkEnd) -> str:
+    """How the work that a task left ended, for its log line."""
+    match end:
+        case LeftWorkEnd.IN_GRACE:
+            return (
+                'ended with no cancel; the outcome is what the task returned, '
+                'and the child is replaced'
+            )
+        case LeftWorkEnd.CANCELLED:
+            return (
+                f'was alive {ISOLATED_LEFTOVER_GRACE_S}s after the return and '
+                'ended after a cancel; the outcome is what the task returned, '
+                'and the child is replaced: cancelled code can leave broken '
+                'state in it'
+            )
+
+
+def _lost_text(lost: ChildLost) -> str:
+    """The end of a child that ended while work that a task left was alive."""
+    match lost.child_exit:
+        case ExitedWith() | KilledBySignal():
+            return (
+                f'was alive when the child ended ({lost.describe()}); the outcome '
+                'is what the task returned'
+            )
+        case ExitUnknown():
+            return (
+                f'was alive when the child ended ({lost.describe()}); no exit '
+                'was seen, so the row waits for that exit or for stale-task '
+                'recovery'
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _log_left_work(frame: RunFrame, pid: int, left: LoopHoldsTasks, end: str) -> None:
+    """The one log line of a run whose body returned with work left on its
+    task loop: the task, the names of that work, and how it ended."""
+    logger.warning(
+        'Task %s (%s) returned and left %d task(s) on the event loop of child '
+        'pid=%s (%s); that work %s',
+        frame.task_name,
+        frame.task_id,
+        left.count,
+        pid,
+        left.names_text(),
+        end,
     )
 
 
@@ -2663,7 +2950,9 @@ class SlotPool:
                 if child is not None:
                     await child.dispose_lost()
                 if handle is not None and child is not None:
-                    handle.finish(child.lost_for(LossCause.SLOT_DEFECT))
+                    handle.finish(
+                        handle.loss_outcome(child.lost_for(LossCause.SLOT_DEFECT)),
+                    )
             case _SharedSlot():
                 runs = _runs_of(slot.state)
                 closer = _close_culprit(slot.state)
@@ -2797,6 +3086,9 @@ class SlotPool:
                 return Ok(child)
             case (
                 ResultFrame()
+                | BodyReturnedFrame()
+                | LeftWorkEndedFrame()
+                | LeftWorkStuckFrame()
                 | SharedResultFrame()
                 | DeadlineFiredFrame()
                 | SecondCancelFrame()
@@ -3021,6 +3313,14 @@ class SlotPool:
                     await child.dispose_lost()
                     slot.child = None
                     return
+                case LostAfterReturn():
+                    # The body returned, so the task finished; the line of
+                    # the run names how its child ended.
+                    slot.defects = 0
+                    slot.state = Retiring()
+                    await child.dispose_lost()
+                    slot.child = None
+                    return
                 case _ as unreachable:
                     assert_never(unreachable)
         slot.state = Retiring()
@@ -3062,7 +3362,7 @@ class SlotPool:
         slot: _Slot,
         child: Child,
         handle: SlotHandle,
-    ) -> TaskFinished | ChildLost:
+    ) -> TaskFinished | ChildLost | LostAfterReturn:
         """Run one task and finish its handle. The state stays ``Busy`` until then.
 
         The task is in the runner heartbeat registry from the send until the
@@ -3082,36 +3382,7 @@ class SlotPool:
                 child.kill_for_caller()
             case _ as unreachable:
                 assert_never(unreachable)
-        answer = await child.await_frame(None)
-        outcome: TaskFinished | ChildLost
-        match answer:
-            case ResultFrame(task_id=task_id) if task_id == frame.task_id:
-                outcome = TaskFinished(
-                    answer.ok,
-                    answer.result_json,
-                    answer.failed_reason,
-                    answer.rss,
-                    answer.task_loop,
-                )
-            case (
-                ResultFrame()
-                | ReadyFrame()
-                | BootFailedFrame()
-                | SharedResultFrame()
-                | DeadlineFiredFrame()
-                | SecondCancelFrame()
-                | RunStuckFrame()
-                | LeftoverCancelFrame()
-                | LeftoverStuckFrame()
-                | LoopBlockedFrame()
-            ):
-                outcome = await child.discard_violating_child()
-            case ChildLost():
-                outcome = answer
-            case WaitExpired():
-                raise AssertionError('an unbounded wait cannot expire')
-            case _ as unreachable:
-                assert_never(unreachable)
+        outcome = await _read_answer(child, handle)
         slot.handle = None
         match held:
             case Held(ticket=ticket):
@@ -3133,16 +3404,15 @@ class SlotPool:
         """Read the task loop report of a finished task, and decide whether
         the child takes another task."""
         match finished.task_loop:
-            case LoopHoldsTasks() as leftover:
-                # No later task may run beside these asyncio tasks. The stop
-                # frame makes the child cancel them.
-                logger.warning(
-                    'Retiring child pid=%s: task %s left %d task(s) on its event '
-                    'loop: %s',
+            case LoopHoldsTasks():
+                # The child ended the work that the task left, by a cancel
+                # when it outlived the grace. Cancelled code can leave broken
+                # state, so no later task runs in this child. The line of the
+                # run names that work.
+                logger.debug(
+                    'Retiring child pid=%s: task %s left work on its event loop',
                     child.pid,
                     handle.frame.task_id,
-                    leftover.count,
-                    leftover.names_text(),
                 )
                 return _ChildAfterTask.RETIRE
             case NoTaskLoop() | LoopHoldsNoTask():
@@ -3349,7 +3619,14 @@ class SlotPool:
                         lost = await child.discard_violating_child()
                         await self._lose_shared_child(slot, child, runs, lost)
                         return
-                case ReadyFrame() | BootFailedFrame() | ResultFrame():
+                case (
+                    ReadyFrame()
+                    | BootFailedFrame()
+                    | ResultFrame()
+                    | BodyReturnedFrame()
+                    | LeftWorkEndedFrame()
+                    | LeftWorkStuckFrame()
+                ):
                     lost = await child.discard_violating_child()
                     await self._lose_shared_child(slot, child, runs, lost)
                     return
@@ -3724,6 +4001,9 @@ class SlotPool:
                     | ReadyFrame()
                     | BootFailedFrame()
                     | ResultFrame()
+                    | BodyReturnedFrame()
+                    | LeftWorkEndedFrame()
+                    | LeftWorkStuckFrame()
                 ):
                     continue
                 case ChildLost() as lost:

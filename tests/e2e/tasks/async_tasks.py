@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import tempfile
 from typing import Any
 
 from pydantic import BaseModel
@@ -152,4 +153,73 @@ spec_mixed_chain = app.workflow(
     tasks=[node_mixed_source, node_mixed_async, node_mixed_sink],
     output=node_mixed_sink,
     definition_key='tests.e2e.tasks.async_tasks.e2e_async_mixed_chain.v1',
+)
+
+
+# =============================================================================
+# An isolated async task that starts work and returns without awaiting it.
+# =============================================================================
+
+LEFT_WORK_SECONDS = 0.5
+"""How long the left work runs: less than the 1 s that the child waits."""
+
+LEFT_WORK_MARKER = os.path.join(
+    tempfile.gettempdir(),
+    'horsies-e2e-isolated-left-work.marker',
+)
+"""The left work writes ``ended`` here when it ends. The test removes the
+file before it starts the task."""
+
+# The loop holds only weak references to its tasks.
+_LEFT_WORK: list[asyncio.Task[None]] = []
+
+
+async def _write_marker_later(path: str) -> None:
+    await asyncio.sleep(LEFT_WORK_SECONDS)
+    with open(path, 'w', encoding='ascii') as marker:
+        marker.write('ended')
+
+
+@app.task(task_name='e2e_async_leaves_work')
+async def async_leaves_work(*, marker_path: str) -> TaskResult[str, TaskError]:
+    """Start work that writes the marker later, and return the pid without
+    awaiting it."""
+    _LEFT_WORK.append(
+        asyncio.get_running_loop().create_task(_write_marker_later(marker_path)),
+    )
+    return TaskResult(ok=str(os.getpid()))
+
+
+@app.task(task_name='e2e_read_marker')
+def read_marker(
+    *,
+    marker_path: str,
+    upstream: TaskResult[str, TaskError],
+) -> TaskResult[str, TaskError]:
+    """Return what the marker holds when this task runs, or ``absent``."""
+    if upstream.is_err():
+        return TaskResult(err=upstream.err_value)
+    try:
+        with open(marker_path, encoding='ascii') as marker:
+            return TaskResult(ok=marker.read())
+    except FileNotFoundError:
+        return TaskResult(ok='absent')
+
+
+node_left_work = TaskNode(
+    fn=async_leaves_work,
+    kwargs={'marker_path': LEFT_WORK_MARKER},
+)
+node_after_left_work = TaskNode(
+    fn=read_marker,
+    waits_for=[node_left_work],
+    args_from={'upstream': node_left_work},
+    kwargs={'marker_path': LEFT_WORK_MARKER},
+)
+
+spec_left_work = app.workflow(
+    name='e2e_async_left_work',
+    tasks=[node_left_work, node_after_left_work],
+    output=node_after_left_work,
+    definition_key='tests.e2e.tasks.async_tasks.e2e_async_left_work.v1',
 )

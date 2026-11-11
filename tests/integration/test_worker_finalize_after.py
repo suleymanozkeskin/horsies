@@ -37,13 +37,16 @@ from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.current import set_current_app
 from horsies.core.worker.runtime import _RequeueOutcome
+from horsies.core.worker.child_protocol import SeatFinished
 from horsies.core.worker.slots import (
     ChildLost,
     KilledBySignal,
     LossCause,
+    LostAfterReturn,
     NotDispatched,
     NotRunCause,
 )
+from horsies.core.worker.stored_timeout import TaskTimeout
 from horsies.core.worker.task_loop import TaskLoop
 from horsies.core.worker.worker import (
     Worker,
@@ -64,6 +67,7 @@ from tests.integration.conftest import (
 )
 from tests.broker_resources_support import listener_of
 from tests.fixtures.slots.handles import finished_handle, task_finished_handle
+from tests.fixtures.run_return import wire_of
 
 pytestmark = [pytest.mark.integration]
 
@@ -466,6 +470,50 @@ async def test_child_lost_marks_non_retryable_running_task_failed(
 
 
 @pytest.mark.asyncio(loop_scope='function')
+async def test_a_child_lost_after_the_return_writes_what_the_body_returned(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """The body returned with work left on its task loop, and its child was
+    killed because that work did not stop. The row gets what the body
+    returned, not WORKER_CRASHED and not TASK_TIMEOUT."""
+    worker = _make_worker(engine)
+    task_id = await _insert_owned_running_task(session, worker.worker_instance_id)
+    returned = SeatFinished(
+        ok=True, result_json=_serialize_ok('kept'), failed_reason=None
+    )
+    killed = ChildLost(
+        cause=LossCause.KILLED_BY_PARENT,
+        child_exit=KilledBySignal(9),
+        partial_frame=False,
+        pid=4242,
+    )
+
+    result = await worker._finalize_after(
+        finished_handle(LostAfterReturn(returned=returned, lost=killed)),
+        task_id,
+        timeout=TaskTimeout(ms=1_000),
+        task_name='finalize_after_owned_test',
+    )
+
+    assert result == Ok(None)
+    row = (
+        await session.execute(
+            text("""
+                SELECT status, error_code, result
+                FROM itest_task_rows
+                WHERE id = CAST(:id AS uuid)
+            """),
+            {'id': task_id},
+        )
+    ).fetchone()
+    assert row is not None
+    assert (row.status, row.error_code) == ('COMPLETED', None)
+    assert row.result == returned.result_json
+
+
+@pytest.mark.asyncio(loop_scope='function')
 async def test_not_dispatched_returns_the_claimed_row_to_pending(
     engine: AsyncEngine,
     session: AsyncSession,
@@ -599,14 +647,16 @@ async def test_task_expired_workflow_task_advances_workflow_without_reaper(
     set_current_app(app)
     database_url = listener_of(broker).database_url
     _initialize_worker_pool(database_url)
-    wire = _run_task_entry(
-        task_name=task_name,
-        args_json=args_json,
-        kwargs_json=kwargs_json,
-        task_id=task_id,
-        master_worker_id=TEST_WORKER_ID,
-        claimed_at=claimed_at,
-        task_loop=TaskLoop(),
+    wire = wire_of(
+        _run_task_entry(
+            task_name=task_name,
+            args_json=args_json,
+            kwargs_json=kwargs_json,
+            task_id=task_id,
+            master_worker_id=TEST_WORKER_ID,
+            claimed_at=claimed_at,
+            task_loop=TaskLoop(),
+        )
     )
     assert wire == (False, '', 'TASK_EXPIRED')
     # The child self-expired the row before the parent finalizes.

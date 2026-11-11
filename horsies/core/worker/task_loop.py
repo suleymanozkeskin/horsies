@@ -12,10 +12,12 @@ and not closed. A sync task runs on the same thread with no running event
 loop, so it can call ``asyncio.run()`` and the sync send methods.
 
 A task must await the work that it starts. ``report`` counts the asyncio tasks
-that are still on the loop after a task, and the worker replaces a child that
-reports any. It sees asyncio tasks only: a callback that ``call_soon`` or
-``call_later`` scheduled, and executor work that the task did not await, are
-not counted, and they can still run during a later task of the same child.
+that are still on the loop after a task. When the body of a task returned
+with such tasks on the loop, ``end_left_work`` ends them before the child
+reports the end of the run, and the worker replaces the child. It sees
+asyncio tasks only: a callback that ``call_soon`` or ``call_later`` scheduled,
+and executor work that the task did not await, are not counted, and they can
+still run during a later task of the same child.
 """
 
 from __future__ import annotations
@@ -39,6 +41,7 @@ from horsies.core.utils.task_loop_registry import register_task_loop, unregister
 from horsies.core.worker.child_protocol import (
     MAX_LEFTOVER_NAME_CHARS,
     MAX_LEFTOVER_TASK_NAMES,
+    LeftWorkEnd,
     LoopHoldsNoTask,
     LoopHoldsTasks,
     NoTaskLoop,
@@ -61,6 +64,24 @@ ASYNCGEN_SHUTDOWN_MIN_TIMEOUT_S: Final = 1.0
 # when the earlier steps used up LOOP_CLOSE_TIMEOUT_S. An idle executor shuts
 # down well within it, so it is not reported as threads left.
 EXECUTOR_SHUTDOWN_MIN_TIMEOUT_S: Final = 1.0
+
+EXTRA_CANCEL_ROUNDS: Final = 2
+"""The cancel rounds after the first cancel of work that must stop: after
+the second cancel of a shared async run, after the leftover cancel of a
+shared async run, and after the first cancel of the work that an isolated
+task left. In the measured set one more round 0.1 s after the second cancel
+ended every asyncio leftover within 106 ms: an asyncpg pool refill task, and
+SQLAlchemy closes that turn their first cancel into a bounded cleanup of
+their own."""
+
+CANCEL_ROUND_INTERVAL_S: Final = 0.1
+"""The time between two cancel rounds, and from the last round to the stuck
+check."""
+
+ISOLATED_LEFTOVER_GRACE_S: Final = 1.0
+"""How long an isolated child waits for the asyncio tasks that a task left on
+its loop when its body returned, before it cancels them. An isolated task has
+no ``cancel_grace_ms``: this bound is the same for every task."""
 
 R = TypeVar('R')
 
@@ -147,8 +168,22 @@ class LoopClosed:
 type LoopState = LoopNotCreated | LoopOpen | LoopClosed
 
 
+@dataclass(frozen=True, slots=True)
+class LeftWorkStuck:
+    """The work that a task left on the loop did not stop after the cancel
+    rounds. ``still`` counts and names the asyncio tasks that are alive."""
+
+    still: LoopHoldsTasks
+
+
+type LeftWorkOutcome = LeftWorkEnd | LeftWorkStuck
+"""How ``TaskLoop.end_left_work`` ended: the work ended within the grace or
+after a cancel (``LeftWorkEnd``), or it is stuck."""
+
+
 class _CloseStep(Enum):
-    """How one step of the loop close ended."""
+    """How one bounded wait on the loop ended: the awaited work ended, or the
+    time ran out first."""
 
     ENDED = 'ended'
     PAST_DEADLINE = 'past_deadline'
@@ -236,6 +271,39 @@ class TaskLoop:
             case _ as unreachable:
                 assert_never(unreachable)
 
+    def end_left_work(self) -> LeftWorkOutcome:
+        """End the asyncio tasks that a task left on the loop when its body
+        returned. Runs the loop until they ended, bounded, then stops it.
+
+        Waits up to ``ISOLATED_LEFTOVER_GRACE_S`` for every task on the loop,
+        also the tasks that they start meanwhile: ``LeftWorkEnd.IN_GRACE``.
+        Then cancels each task alive, and again in ``EXTRA_CANCEL_ROUNDS``
+        more rounds ``CANCEL_ROUND_INTERVAL_S`` apart; the tasks alive one
+        interval after the last round are stuck (``LeftWorkStuck``). Work
+        that ended after a cancel gives ``LeftWorkEnd.CANCELLED``. Ends
+        asyncio tasks only: a scheduled callback and executor work stay.
+        Takes at most the grace and ``EXTRA_CANCEL_ROUNDS + 1`` intervals
+        while the loop turns; code that holds the loop delays it.
+
+        Call it between runs, on the thread that runs them, while the loop
+        holds tasks. A call while an event loop runs on this thread, or while
+        the loop is not open, is a defect in the caller: ``AssertionError``.
+        """
+        if in_running_event_loop():
+            raise AssertionError(
+                'TaskLoop.end_left_work was called while an event loop runs '
+                'on this thread',
+            )
+        match self._state:
+            case LoopOpen(loop=loop):
+                return loop.run_until_complete(_end_left_work())
+            case LoopNotCreated() | LoopClosed():
+                raise AssertionError(
+                    f'TaskLoop.end_left_work was called in {type(self._state).__name__}',
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
+
     def close(self) -> ExecutorAfterClose:
         """Cancel the tasks left on the loop, then close the loop.
 
@@ -278,6 +346,52 @@ def _leftover_report(
         count=len(leftover),
         names=tuple(names[:MAX_LEFTOVER_TASK_NAMES]),
     )
+
+
+def _tasks_left() -> set[asyncio.Task[Any]]:
+    """The tasks on the running loop that are not done, except the caller."""
+    current = asyncio.current_task()
+    return {task for task in asyncio.all_tasks() if task is not current}
+
+
+async def _all_ended_by(until: float) -> _CloseStep:
+    """Wait until no other task is on the loop, or until ``until`` on the
+    clock of the loop, whichever is first. A task that starts while the wait
+    runs is waited for too. The time bounds the wait."""
+    loop = asyncio.get_running_loop()
+    while True:
+        left = _tasks_left()
+        if not left:
+            return _CloseStep.ENDED
+        remaining = until - loop.time()
+        if remaining <= 0:
+            return _CloseStep.PAST_DEADLINE
+        _ = await asyncio.wait(left, timeout=remaining)
+
+
+async def _end_left_work() -> LeftWorkOutcome:
+    """The steps of ``TaskLoop.end_left_work``, on the loop."""
+    loop = asyncio.get_running_loop()
+    match await _all_ended_by(loop.time() + ISOLATED_LEFTOVER_GRACE_S):
+        case _CloseStep.ENDED:
+            return LeftWorkEnd.IN_GRACE
+        case _CloseStep.PAST_DEADLINE:
+            pass
+    for _round in range(EXTRA_CANCEL_ROUNDS + 1):
+        for task in _tasks_left():
+            _ = task.cancel()
+        match await _all_ended_by(loop.time() + CANCEL_ROUND_INTERVAL_S):
+            case _CloseStep.ENDED:
+                return LeftWorkEnd.CANCELLED
+            case _CloseStep.PAST_DEADLINE:
+                pass
+    match _leftover_report(_tasks_left()):
+        case LoopHoldsNoTask():
+            return LeftWorkEnd.CANCELLED
+        case LoopHoldsTasks() as still:
+            return LeftWorkStuck(still)
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _coroutine_name(task: asyncio.Task[Any]) -> str:

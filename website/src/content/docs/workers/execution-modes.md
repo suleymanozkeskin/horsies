@@ -100,6 +100,7 @@ Keep a task `ISOLATED` when one of these is true:
 | ----- | ---------- | -------------- | --------------- |
 | The task reaches `timeout_ms` | The worker kills the child and the subprocesses in its session | The child cancels the task: `asyncio.CancelledError` at its next `await` | The child reports the deadline and takes no new task. The task runs on, because a thread cannot be cancelled |
 | After that | `TASK_TIMEOUT`, after the child has exited | `TASK_TIMEOUT`, after the coroutine and the work that it started have ended. Still alive `cancel_grace_ms` later: a second cancel, and the child takes no new task. Still alive 0.3 s after the second cancel: the task is stuck | `TASK_TIMEOUT`, after the worker kills the child. The kill comes when no task in the child has time left |
+| The task returns while asyncio tasks that it started are alive | `async def` only. The child waits up to 1 s for them, then cancels them in three rounds 0.1 s apart. The worker writes what the task returned after they ended, and replaces the child. Still alive after the rounds: the worker kills the child, and writes what the task returned after the exit | The child waits up to `cancel_grace_ms` for them, then cancels them in three rounds 0.1 s apart and takes no new task. The worker writes what the task returned after they ended. Still alive after the rounds: the task is stuck, and keeps what it returned | Does not apply: a `def` task has no event loop |
 | The task blocks the process | Nothing else is affected | A loop that has not turned for 5 s: the worker kills the child at once. The task fails with `TASK_BLOCKED_LOOP`, each other task before its deadline with `NEIGHBOUR_BLOCKED_LOOP` | C code that holds the GIL stops every thread. When the child has not reported the deadline by `timeout_ms + 10 s`, the worker kills it |
 | The child crashes | That task fails with `WORKER_CRASHED` | Every task in the child fails with `WORKER_CRASHED` | Every task in the child fails with `WORKER_CRASHED` |
 
@@ -112,7 +113,7 @@ Each mode adds rules to [Defining Tasks](/horsies/tasks/defining-tasks/). The pa
 `ISOLATED`:
 
 - Set `timeout_ms` as a hang backstop above the normal runtime.
-- In an `async def` task, await the asyncio tasks that it starts. See [Async Tasks](/horsies/tasks/defining-tasks/#async-tasks).
+- In an `async def` task, await the asyncio tasks that it starts. Work left on the loop delays the outcome by up to 1.3 s and costs a child restart. See [Async Tasks](/horsies/tasks/defining-tasks/#async-tasks).
 
 `SHARED_ASYNC` ([Rules for Task Authors](/horsies/workers/shared-async-tasks/#rules-for-task-authors)):
 

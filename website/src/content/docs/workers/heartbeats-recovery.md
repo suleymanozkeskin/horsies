@@ -38,7 +38,7 @@ The statement beats a row only when all of these are true:
 - The child marked no result as finalizing on the row
 - The child process runs: it did not exit, and the worker sent it no kill
 
-So the beats of a task end when the worker kills its child (for example at `timeout_ms`), when the child exits, when the child marks its result, and when the worker reads the result.
+So the beats of a task end when the worker kills its child (for example at `timeout_ms`), when the child exits, when the child marks its result, and when the worker reads the result. An `async def` task in an isolated child that returns while asyncio tasks that it started still run is marked only after that work ended, so its beats cover that work (see [Async Tasks](/horsies/tasks/defining-tasks/#async-tasks)).
 
 ### When the Worker Cannot Write Heartbeats
 

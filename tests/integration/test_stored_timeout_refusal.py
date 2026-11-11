@@ -54,6 +54,7 @@ from tests.integration.conftest import (
     make_workflow_spec,
     start_ok,
 )
+from tests.fixtures.run_return import wire_of
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
 
@@ -102,16 +103,18 @@ def _run_in_process(
         task_options: str | None,
     ) -> None:
         seen.append(timeout)
-        wire = _run_task_entry(
-            task_name=task_name,
-            args_json=args_json,
-            kwargs_json=kwargs_json,
-            task_id=task_id,
-            master_worker_id=worker.worker_instance_id,
-            is_workflow_task=is_workflow_task,
-            timeout=timeout,
-            claimed_at=claimed_at,
-            task_loop=TaskLoop(),
+        wire = wire_of(
+            _run_task_entry(
+                task_name=task_name,
+                args_json=args_json,
+                kwargs_json=kwargs_json,
+                task_id=task_id,
+                master_worker_id=worker.worker_instance_id,
+                is_workflow_task=is_workflow_task,
+                timeout=timeout,
+                claimed_at=claimed_at,
+                task_loop=TaskLoop(),
+            )
         )
         result = await worker._finalize_after(
             task_finished_handle(wire[0], wire[1], wire[2]),

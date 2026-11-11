@@ -32,6 +32,7 @@ import sys
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING, Final, NoReturn, assert_never
 
 from horsies.core.codec.error_payload import serialize_error_payload
@@ -49,11 +50,15 @@ from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.child_protocol import (
     FRAME_HEADER,
     MAX_BODY_BYTES,
+    BodyReturnedFrame,
     BootFailedFrame,
     ChildFrame,
     FrameOverBound,
     InitFrame,
     IsolatedChild,
+    LeftWorkEnd,
+    LeftWorkEndedFrame,
+    LeftWorkStuckFrame,
     LoopHoldsNoTask,
     LoopHoldsTasks,
     NoTaskLoop,
@@ -64,6 +69,7 @@ from horsies.core.worker.child_protocol import (
     RssReading,
     RssUnreadable,
     RunFrame,
+    SeatFinished,
     SharedAsyncChild,
     SharedRunFrame,
     SharedThreadChild,
@@ -75,12 +81,22 @@ from horsies.core.worker.child_protocol import (
     parse_header,
 )
 from horsies.core.worker.child_inbox import ParentFrameInbox
+from horsies.core.worker.run_return import (
+    IsolatedMarkerWindow,
+    MarkerAfterLeftWork,
+    MarkerAtReturn,
+    RunReturn,
+    SetRunning,
+    StoppedBeforeRunning,
+)
 from horsies.core.worker.runtime import _read_current_rss_mb
 from horsies.core.worker.task_loop import (
     AsyncTaskPresence,
     ExecutorAfterClose,
     ExecutorShutDown,
     ExecutorThreadsLeft,
+    LeftWorkOutcome,
+    LeftWorkStuck,
     LoopCreateFailed,
     TaskLoop,
 )
@@ -109,16 +125,23 @@ _PR_SET_PDEATHSIG: Final = 1
 # A boot step returns whether the booted app has an ``async def`` task, or the
 # frame that reports why it failed.
 BootFn = Callable[[InitFrame], Result[AsyncTaskPresence, BootFailedFrame]]
-RunTaskFn = Callable[[RunFrame, InitFrame, TaskLoop], WireResult]
+# Runs one task of an isolated child, up to its wire tuple, and writes no
+# finalizing marker.
+RunTaskFn = Callable[[RunFrame, InitFrame, TaskLoop], RunReturn]
+# Writes the finalizing marker of an isolated run that set its row RUNNING
+# and has ended. Logs a failed write; nothing escapes.
+MarkFinalizingFn = Callable[[RunFrame, IsolatedMarkerWindow], None]
 
 
 @dataclass(frozen=True, slots=True)
 class TaskRunners:
     """How a child runs tasks: ``run_task`` runs one task of an isolated
-    child, ``seats`` runs the seats of a shared async child, and ``threads``
-    runs one task on a seat of a shared thread child."""
+    child and ``mark_finalizing`` writes its finalizing marker, ``seats``
+    runs the seats of a shared async child, and ``threads`` runs one task on
+    a seat of a shared thread child."""
 
     run_task: RunTaskFn
+    mark_finalizing: MarkFinalizingFn
     seats: SeatProgram
     threads: ThreadSeatProgram
 
@@ -287,7 +310,7 @@ def _run_or_exit(
     frame: RunFrame,
     init: InitFrame,
     task_loop: TaskLoop,
-) -> WireResult:
+) -> RunReturn:
     """Run one task. Anything that escapes ends this process at once.
 
     A normal exit would wait for every non-daemon thread that the task started,
@@ -305,27 +328,154 @@ def _run_or_exit(
         os._exit(1)
 
 
-def _refuse_run_on_a_child_to_retire(task_loop: TaskLoop, frame: RunFrame) -> None:
-    """Exit loud when the task loop report says this child must be retired.
+class _AfterRun(Enum):
+    """Whether an isolated child may take another task after a run."""
 
-    The child reports work left on its loop in its result frame, and the
-    parent retires the child. So a run frame here is a defect in the parent.
+    SERVES = 'serves'
+    """The run left no asyncio task on the task loop."""
+
+    TO_RETIRE = 'to_retire'
+    """The body of the run returned with asyncio tasks on the task loop. The
+    child ended them, or reported them stuck, and the parent replaces it:
+    cancelled code can leave broken state in the process."""
+
+
+def _refuse_run_on_a_child_to_retire(after_run: _AfterRun, frame: RunFrame) -> None:
+    """Exit loud when an earlier run of this child left work on its loop.
+
+    The child reports that work (``BodyReturnedFrame``), and the parent
+    replaces the child. So a run frame here is a defect in the parent.
     """
-    match task_loop.report():
-        case NoTaskLoop() | LoopHoldsNoTask():
+    match after_run:
+        case _AfterRun.SERVES:
             return
-        case LoopHoldsTasks() as leftover:
+        case _AfterRun.TO_RETIRE:
             logger.critical(
-                'Parent sent task %s to a child whose task loop holds %d task(s) '
-                'of an earlier task (%s); such a child must be retired',
+                'Parent sent task %s to a child where an earlier task left work '
+                'on the task loop; such a child must be retired',
                 frame.task_id,
-                leftover.count,
-                leftover.names_text(),
+            )
+            flush_output()
+            os._exit(BAD_PARENT_FRAME_EXIT_CODE)
+
+
+def _end_left_work_or_exit(task_loop: TaskLoop, frame: RunFrame) -> LeftWorkOutcome:
+    """Run ``TaskLoop.end_left_work``. Anything that escapes it ends this
+    process at once, as for the run itself (``_run_or_exit``).
+
+    A ``SystemExit`` or ``KeyboardInterrupt`` that the left work raises
+    leaves the loop. A normal exit would wait for every non-daemon thread
+    that the task started, with no bound. The parent sees this exit, and
+    writes what the body returned.
+    """
+    try:
+        return task_loop.end_left_work()
+    except SystemExit as exc:
+        flush_output()
+        os._exit(exc.code if isinstance(exc.code, int) else 1)
+    except BaseException:
+        logger.critical(
+            'Work that task %s left on the task loop escaped it',
+            frame.task_id,
+            exc_info=True,
+        )
+        flush_output()
+        os._exit(1)
+
+
+def _report_run(
+    sock: socket.socket,
+    frame: RunFrame,
+    returned: RunReturn,
+    task_loop: TaskLoop,
+    mark_finalizing: MarkFinalizingFn,
+) -> _AfterRun:
+    """Report the end of one run of an isolated child to the parent.
+
+    The finalizing marker is the last write of a run that set its row
+    RUNNING (``SetRunning``), and it is written only when the run has ended:
+
+    - No asyncio task left on the task loop: the marker (``MarkerAtReturn``),
+      then one ``ResultFrame``, as before.
+    - Tasks left: ``BodyReturnedFrame`` with what the body returned at once,
+      then ``TaskLoop.end_left_work``. Work that ended gives the marker
+      (``MarkerAfterLeftWork``), then ``LeftWorkEndedFrame``. Work that did
+      not stop gives ``LeftWorkStuckFrame`` and no marker: the parent kills
+      the child, and its runner heartbeats cover the row until the exit.
+
+    A run that stopped before its RUNNING update (``StoppedBeforeRunning``)
+    writes no marker. The wire tuple is bounded here (``_bounded_result``).
+    A parent that is gone ends the process (``_send_child_frame``).
+    """
+    match returned:
+        case SetRunning(wire=wire) | StoppedBeforeRunning(wire=wire):
+            ok, result_json, failed_reason = _bounded_result(frame.task_name, wire)
+        case _ as unreachable:
+            assert_never(unreachable)
+    match task_loop.report():
+        case NoTaskLoop() | LoopHoldsNoTask() as nothing_left:
+            _mark_when_set_running(frame, returned, MarkerAtReturn(), mark_finalizing)
+            _send_child_frame(
+                sock,
+                ResultFrame(
+                    task_id=frame.task_id,
+                    ok=ok,
+                    result_json=result_json,
+                    failed_reason=failed_reason,
+                    rss=_read_rss(),
+                    task_loop=nothing_left,
+                ),
+            )
+            return _AfterRun.SERVES
+        case LoopHoldsTasks() as left:
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
+    _send_child_frame(
+        sock,
+        BodyReturnedFrame(
+            task_id=frame.task_id,
+            returned=SeatFinished(ok, result_json, failed_reason),
+            left=left,
+        ),
+    )
+    match _end_left_work_or_exit(task_loop, frame):
+        case LeftWorkEnd() as end:
+            _mark_when_set_running(
+                frame,
+                returned,
+                MarkerAfterLeftWork(),
+                mark_finalizing,
+            )
+            _send_child_frame(
+                sock,
+                LeftWorkEndedFrame(task_id=frame.task_id, end=end, rss=_read_rss()),
+            )
+        case LeftWorkStuck(still=still):
+            _send_child_frame(
+                sock,
+                LeftWorkStuckFrame(task_id=frame.task_id, still=still),
             )
         case _ as unreachable:
             assert_never(unreachable)
-    flush_output()
-    os._exit(BAD_PARENT_FRAME_EXIT_CODE)
+    return _AfterRun.TO_RETIRE
+
+
+def _mark_when_set_running(
+    frame: RunFrame,
+    returned: RunReturn,
+    window: IsolatedMarkerWindow,
+    mark_finalizing: MarkFinalizingFn,
+) -> None:
+    """Write the finalizing marker of a run that set its row RUNNING. A run
+    that stopped before its RUNNING update has no marker."""
+    match returned:
+        case SetRunning():
+            mark_finalizing(frame, window)
+        case StoppedBeforeRunning():
+            return
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def boot_failure_from_exception(
@@ -523,7 +673,7 @@ def serve(
     task_loop = _boot_or_exit(sock, init, boot, work)
     match init.child_kind:
         case IsolatedChild():
-            _serve_isolated(sock, init, work, task_loop, runners.run_task)
+            _serve_isolated(sock, init, work, task_loop, runners)
         case SharedAsyncChild(seats=seats):
             from horsies.core.worker.shared_child import serve_shared
 
@@ -541,34 +691,30 @@ def _serve_isolated(
     init: InitFrame,
     work: ParentFrameInbox,
     task_loop: TaskLoop,
-    run_task: RunTaskFn,
+    runners: TaskRunners,
 ) -> NoReturn:
     """Run tasks one at a time until the stop frame, then end the process.
 
-    Every task of the child gets ``task_loop``. Each result frame reports the
-    state of that loop. The stop frame closes it, bounded by
-    ``LOOP_CLOSE_TIMEOUT_S``, and ``exit_after_stop`` ends the process.
+    Every task of the child gets ``task_loop``. ``runners.run_task`` runs
+    each task, and ``_report_run`` reports the end of the run after the work
+    that the task left on that loop ended, with the finalizing marker of
+    ``runners.mark_finalizing`` as its last write. The stop frame closes the
+    loop, bounded by ``LOOP_CLOSE_TIMEOUT_S``, and ``exit_after_stop`` ends
+    the process.
     """
     gc.collect()
     _send_child_frame(sock, ReadyFrame(pid=os.getpid(), rss=_read_rss()))
+    after_run = _AfterRun.SERVES
     while True:
         match work.get():
             case RunFrame() as frame:
-                _refuse_run_on_a_child_to_retire(task_loop, frame)
-                ok, result_json, failed_reason = _bounded_result(
-                    frame.task_name,
-                    _run_or_exit(run_task, frame, init, task_loop),
-                )
-                _send_child_frame(
+                _refuse_run_on_a_child_to_retire(after_run, frame)
+                after_run = _report_run(
                     sock,
-                    ResultFrame(
-                        task_id=frame.task_id,
-                        ok=ok,
-                        result_json=result_json,
-                        failed_reason=failed_reason,
-                        rss=_read_rss(),
-                        task_loop=task_loop.report(),
-                    ),
+                    frame,
+                    _run_or_exit(runners.run_task, frame, init, task_loop),
+                    task_loop,
+                    runners.mark_finalizing,
                 )
             case SharedRunFrame():
                 logger.critical('Parent sent a shared run frame to an isolated child')
@@ -642,7 +788,9 @@ def boot_app(init: InitFrame) -> Result[AsyncTaskPresence, BootFailedFrame]:
     return Ok(async_task_presence(app))
 
 
-def run_child_task(frame: RunFrame, init: InitFrame, task_loop: TaskLoop) -> WireResult:
+def run_child_task(frame: RunFrame, init: InitFrame, task_loop: TaskLoop) -> RunReturn:
+    """Run the task of ``frame`` (``child_runner._run_task_entry``). Writes
+    no finalizing marker."""
     from horsies.core.worker.child_runner import _run_task_entry
 
     return _run_task_entry(
@@ -658,15 +806,34 @@ def run_child_task(frame: RunFrame, init: InitFrame, task_loop: TaskLoop) -> Wir
     )
 
 
+def mark_child_task_finalizing(
+    frame: RunFrame,
+    window: IsolatedMarkerWindow,
+) -> None:
+    """Write the finalizing marker of the isolated run of ``frame``, which
+    set its row RUNNING and has ended
+    (``child_runner.mark_isolated_run_finalizing``)."""
+    from horsies.core.worker.child_runner import mark_isolated_run_finalizing
+
+    mark_isolated_run_finalizing(
+        frame.task_id,
+        frame.worker_id,
+        frame.claimed_at,
+        window,
+    )
+
+
 def production_runners() -> TaskRunners:
-    """The runners of a worker child: ``run_child_task`` for an isolated
-    child, the Postgres seat program for a shared async child, and the
-    Postgres thread seats for a shared thread child."""
+    """The runners of a worker child: ``run_child_task`` and
+    ``mark_child_task_finalizing`` for an isolated child, the Postgres seat
+    program for a shared async child, and the Postgres thread seats for a
+    shared thread child."""
     from horsies.core.worker.shared_runner import PostgresSeatProgram
     from horsies.core.worker.thread_runner import PostgresThreadSeats
 
     return TaskRunners(
         run_task=run_child_task,
+        mark_finalizing=mark_child_task_finalizing,
         seats=PostgresSeatProgram(),
         threads=PostgresThreadSeats(),
     )

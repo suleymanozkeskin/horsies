@@ -2,13 +2,15 @@
 
 A worker child keeps one event loop for its whole life. An async task runs
 on that loop, and the loop runs only while an async task runs. A timeout
-kills the child, as for a `def` task.
+kills the child, as for a `def` task. A task that returns while asyncio tasks
+that it started still run completes only after they ended.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
 from collections.abc import Callable
 
 import pytest
@@ -178,3 +180,80 @@ async def test_an_async_task_timeout_kills_its_child_and_the_worker_survives(
             unwrap_send(await async_tasks.async_loop_report.send_async()),
         )
         assert follow_up.endswith(':1')
+
+
+def _remove_left_work_marker() -> None:
+    try:
+        os.remove(async_tasks.LEFT_WORK_MARKER)
+    except FileNotFoundError:
+        return
+
+
+def _left_work_marker() -> str:
+    try:
+        with open(async_tasks.LEFT_WORK_MARKER, encoding='ascii') as marker:
+            return marker.read()
+    except FileNotFoundError:
+        return 'absent'
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_an_async_task_completes_only_after_the_work_it_left_ended(
+    broker: PostgresBroker,
+) -> None:
+    """The task returns and leaves work that ends 0.5 s later. The row is
+    COMPLETED only after that work wrote its marker, and the next task runs
+    in a new child."""
+    _remove_left_work_marker()
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
+        handle = unwrap_send(
+            await async_tasks.async_leaves_work.send_async(
+                marker_path=async_tasks.LEFT_WORK_MARKER,
+            ),
+        )
+        await wait_for_status(
+            current_resources(broker).session_factory,
+            handle.task_id,
+            'COMPLETED',
+            timeout_s=20.0,
+            poll_interval=0.02,
+        )
+        marker_at_completed = _left_work_marker()
+        left_work_pid = await _result_of(handle)
+        follow_up = await _result_of(
+            unwrap_send(await async_tasks.async_loop_report.send_async()),
+        )
+
+    assert marker_at_completed == 'ended'
+    assert follow_up.split(':')[0] != left_work_pid
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_a_workflow_successor_starts_after_the_work_its_upstream_left(
+    broker: PostgresBroker,
+) -> None:
+    """Two children, so the successor could start at once in the other one.
+    It reads the marker that the left work of its upstream writes."""
+    _remove_left_work_marker()
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-2',
+        ready_check=_make_ready_check(),
+    ):
+        handle = await start_ok_in_thread(async_tasks.spec_left_work)
+        status = await wait_for_workflow_completion(
+            current_resources(broker).session_factory,
+            handle.workflow_id,
+            timeout_s=30.0,
+        )
+        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
+
+    assert status == 'COMPLETED'
+    assert_ok(result)
+    assert result.unwrap() == 'ended'
