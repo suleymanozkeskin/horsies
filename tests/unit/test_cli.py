@@ -2688,7 +2688,7 @@ class TestWorkerStartLog:
             shared_thread=SharedThreadChildren(
                 count=1,
                 seats=8,
-                pool=SharedPool(max_size=PoolSize(connections=5), check=False),
+                pool=SharedPool(max_size=PoolSize(connections=5), check=True),
             ),
         )
         with caplog.at_level(logging.INFO, logger='horsies'):
@@ -2701,15 +2701,15 @@ class TestWorkerStartLog:
             if r.getMessage().startswith("Worker profile 'default': isolated=")
         ]
         assert 'isolated=2 (' in line
-        assert 'pool 0 to 2 connections, check on)' in line
+        assert 'pool 0 to 2 connections, check off)' in line
         assert (
             f'pool 0 to {shared_async_pool_connections(25)} connections, '
-            'derived from seats, check on; '
+            'derived from seats, check off; '
             f'executor {shared_async_executor_threads(25)} threads, derived '
             'from seats)'
         ) in line
         assert 'shared_thread=1x8 seats' in line
-        assert 'pool 0 to 5 connections, check off)' in line
+        assert 'pool 0 to 5 connections, check on)' in line
 
 
 @pytest.mark.unit

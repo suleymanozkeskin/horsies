@@ -37,6 +37,7 @@ from horsies.core.worker.child_pool import (
     SHARED_POOL_CONNECTION_WAIT_S,
 )
 from horsies.core.worker.child_runner import (
+    BEGIN_SQL,
     CANCEL_REQUEST_TIMEOUT_S,
     _PRE_START_CONFIRM_ATTEMPTS,
     MARK_FINALIZING_SQL,
@@ -74,7 +75,7 @@ class _Cursor:
         self._rows = list(rows)
         self.rowcount = 1
 
-    async def execute(self, sql: str, params: tuple[Any, ...]) -> None:
+    async def execute(self, sql: str, params: tuple[Any, ...] = ()) -> None:
         self.queries.append((sql, params))
 
     async def fetchone(self) -> Any:
@@ -155,7 +156,9 @@ class TestSetRunning:
 
         assert _confirm(_Pool(conn), is_workflow_task=True) is None
 
+        # The pool is in autocommit: the transaction opens before the update.
         assert [sql for sql, _ in cursor.queries] == [
+            BEGIN_SQL,
             set_running_sql(True),
             START_WORKFLOW_NODE_SQL,
         ]
@@ -170,6 +173,7 @@ class TestSetRunning:
             '',
             'WORKFLOW_CHECK_FAILED',
         )
+        assert cursor.queries[0] == (BEGIN_SQL, ())
         assert (conn.commits, conn.rollbacks) == (0, 1)
 
     def test_a_pool_error_is_ownership_unconfirmed(self) -> None:
@@ -179,7 +183,7 @@ class TestSetRunning:
         """The deadline of the seat must end the run, not become a result."""
 
         class _HangingCursor(_Cursor):
-            async def execute(self, sql: str, params: tuple[Any, ...]) -> None:
+            async def execute(self, sql: str, params: tuple[Any, ...] = ()) -> None:
                 await asyncio.Event().wait()
 
         async def cancel_it() -> None:
@@ -210,7 +214,7 @@ class TestSetRunning:
         parent never fires for it."""
 
         class _HangingCursor(_Cursor):
-            async def execute(self, sql: str, params: tuple[Any, ...]) -> None:
+            async def execute(self, sql: str, params: tuple[Any, ...] = ()) -> None:
                 await asyncio.Event().wait()
 
         monkeypatch.setattr(shared_lifecycle, 'RUNNING_ATTEMPT_TIMEOUT_S', 0.05)
@@ -423,7 +427,8 @@ class TestFinalizingMarker:
                 ('worker-1', 'task-1', 'worker-1', CLAIMED_AT, CLAIMED_AT),
             ),
         ]
-        assert conn.commits == 1
+        # One statement on an autocommit connection: no transaction to end.
+        assert (conn.commits, conn.rollbacks) == (0, 0)
 
     def test_a_failed_marker_is_logged_and_does_not_raise(
         self,
@@ -445,7 +450,7 @@ class TestFinalizingMarker:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         class _HangingCursor(_Cursor):
-            async def execute(self, sql: str, params: tuple[Any, ...]) -> None:
+            async def execute(self, sql: str, params: tuple[Any, ...] = ()) -> None:
                 await asyncio.Event().wait()
 
         monkeypatch.setattr(shared_lifecycle, 'FINALIZING_MARKER_TIMEOUT_S', 0.05)
