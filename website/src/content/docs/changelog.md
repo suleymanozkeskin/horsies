@@ -580,10 +580,14 @@ there is no migration contract between pre-1.0 versions.
   batches.** Schema v56 adds `horsies_complete_tasks_fused`: one statement
   calls `horsies_complete_task_fused` once per row, in task-id order, so each
   row keeps its claim-generation check, attempt row, history move and capacity
-  wake. A batch holds up to 64 rows and is one round trip; at most 2 batch
-  statements of a worker run at once, each on a connection of the worker pool.
-  - There is no timer. A lone row is written at once; the rows that come while
-    both statements run form the next batch.
+  wake. A batch holds up to 64 rows and is one round trip; a batch of one row
+  runs `horsies_complete_task_fused` itself.
+  - There is no timer. Two flushers write whenever rows wait, each on a
+    connection of the worker pool. A lone row is written at once; the rows
+    that come while both flushers write form the next batch.
+  - When a full batch of 64 rows waits while both flushers write, one more
+    flusher starts, up to the size of the worker pool. It writes full batches
+    only.
   - A finalizer ends, and frees its seat, only after the statement of its
     batch returned.
   - A row that the server refuses (for example, no history partition for its

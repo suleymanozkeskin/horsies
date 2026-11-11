@@ -8,13 +8,19 @@ batcher writes the queued rows with one statement per batch
 
 Flush rule, with no timer:
 
-- A submit starts a flusher when fewer than ``FINALIZE_BATCH_FLUSHERS`` run.
-- A flusher takes every queued row, up to ``FUSED_BATCH_MAX_ROWS``, writes
-  them, and takes again. It ends when the queue is empty.
+- A submit starts a steady flusher when fewer than ``FINALIZE_BATCH_FLUSHERS``
+  run. A steady flusher takes every queued row, up to ``FUSED_BATCH_MAX_ROWS``,
+  writes them, and takes again. It ends when the queue is empty.
+- A submit that leaves a full batch (``FUSED_BATCH_MAX_ROWS`` rows) waiting
+  starts a surge flusher, while fewer than ``max_flushers`` flushers run in
+  all. A surge flusher writes full batches only, and ends when less than a full
+  batch waits.
 
-So a lone row is written at once, and the rows that arrive while every flusher
-writes form the next batch. A worker frees a seat only after the commit of its
-row, so a timer would hold every seat longer.
+So a lone row is written at once, and the rows that arrive while the steady
+flushers write form the next batch. A worker frees a seat only after the
+commit of its row, so a timer would hold every seat longer. More steady
+flushers would make each batch smaller and add commits; a surge flusher adds a
+statement only when the batch cannot grow, so it never makes a batch smaller.
 
 An answer resolves only after the statement of its batch returned: an
 ``Applied`` row is committed when its finalizer sees it, and the finalizer ends
@@ -46,8 +52,8 @@ from horsies.core.utils.db import StatementRefused
 logger = get_logger('worker')
 
 FINALIZE_BATCH_FLUSHERS: Final = 2
-"""The most batch statements of one worker in flight at once. Each one holds
-one connection of the worker pool while it runs."""
+"""The steady flushers: they write whenever rows wait. Each one holds one
+connection of the worker pool while it writes."""
 
 FINALIZE_BATCH_CLOSE_TIMEOUT_S: Final = 10.0
 """How long ``FinalizeBatcher.close`` waits for the flushers to write the
@@ -62,6 +68,14 @@ type FusedBatchWrite = Callable[
     Awaitable[Result[tuple[TerminalizationOutcome, ...], BatchWriteError]],
 ]
 """Writes one batch: ``apply_fused_batch_in_autocommit`` on a pool."""
+
+
+class FlusherRole(Enum):
+    """STEADY writes whenever rows wait. SURGE writes only while a full batch
+    waits."""
+
+    STEADY = 'STEADY'
+    SURGE = 'SURGE'
 
 
 class BatcherState(Enum):
@@ -116,18 +130,32 @@ class FinalizeBatcher:
     Each row in flight submits once, and its finalizer waits for the answer
     before anything else, so the queue never holds more rows than the worker
     has in flight. ``max_queued_rows`` bounds it; a full queue is a defect.
+
+    ``max_flushers`` bounds the flushers of both roles together: the size of
+    the worker pool. The steady flushers are ``FINALIZE_BATCH_FLUSHERS``, or
+    ``max_flushers`` when it is smaller.
     """
 
-    def __init__(self, write: FusedBatchWrite, *, max_queued_rows: int) -> None:
+    def __init__(
+        self,
+        write: FusedBatchWrite,
+        *,
+        max_queued_rows: int,
+        max_flushers: int,
+    ) -> None:
         if max_queued_rows < 1:
             raise ValueError(f'max_queued_rows must be positive, got {max_queued_rows}')
+        if max_flushers < 1:
+            raise ValueError(f'max_flushers must be positive, got {max_flushers}')
         self._write = write
         self._max_queued_rows = max_queued_rows
+        self._steady_bound = min(FINALIZE_BATCH_FLUSHERS, max_flushers)
+        self._surge_bound = max_flushers - self._steady_bound
         self._queue: deque[_QueuedRow] = deque()
-        # The count decides whether a submit starts a flusher. A flusher
-        # lowers it in its last synchronous step, so a submit never sees a
-        # flusher that already ended. The set is for ``close``.
-        self._running_flushers = 0
+        # The counts decide whether a submit starts a flusher. A flusher
+        # lowers its count in its last synchronous step, so a submit never
+        # sees a flusher that already ended. The set is for ``close``.
+        self._running: dict[FlusherRole, int] = dict.fromkeys(FlusherRole, 0)
         self._flushers: set[asyncio.Task[None]] = set()
         self._rows_in_flight = 0
         self._state = BatcherState.OPEN
@@ -135,6 +163,11 @@ class FinalizeBatcher:
     @property
     def state(self) -> BatcherState:
         return self._state
+
+    @property
+    def max_flushers(self) -> int:
+        """The most flushers of both roles that run at once."""
+        return self._steady_bound + self._surge_bound
 
     async def complete(self, command: CompleteTaskFused) -> BatchRowResult:
         """Queue ``command`` and return the answer for its row.
@@ -161,7 +194,7 @@ class FinalizeBatcher:
         return await answer
 
     def _enqueue(self, row: _QueuedRow) -> None:
-        """Queue ``row`` and start a flusher when fewer than the bound run."""
+        """Queue ``row`` and start the flusher that the flush rule asks for."""
         match self._state:
             case BatcherState.OPEN:
                 pass
@@ -179,37 +212,54 @@ class FinalizeBatcher:
                 'submits once'
             )
         self._queue.append(row)
-        if self._running_flushers < FINALIZE_BATCH_FLUSHERS:
-            self._running_flushers += 1
-            flusher = asyncio.create_task(
-                self._flush_until_empty(),
-                name='finalize-batch-flusher',
-            )
-            self._flushers.add(flusher)
-            flusher.add_done_callback(self._flusher_ended)
+        if self._running[FlusherRole.STEADY] < self._steady_bound:
+            self._start_flusher(FlusherRole.STEADY)
+        elif (
+            self._running[FlusherRole.SURGE] < self._surge_bound
+            and len(self._queue) >= FUSED_BATCH_MAX_ROWS
+        ):
+            self._start_flusher(FlusherRole.SURGE)
 
-    async def _flush_until_empty(self) -> None:
-        """Write batches until the queue is empty.
+    def _start_flusher(self, role: FlusherRole) -> None:
+        self._running[role] += 1
+        flusher = asyncio.create_task(
+            self._flush(role),
+            name=f'finalize-batch-flusher-{role.value.lower()}',
+        )
+        self._flushers.add(flusher)
+        flusher.add_done_callback(self._flusher_ended)
+
+    async def _flush(self, role: FlusherRole) -> None:
+        """Write batches while the flush rule of ``role`` finds one.
 
         Each round takes at most ``FUSED_BATCH_MAX_ROWS`` rows and answers
         every one of them; the queue holds at most ``max_queued_rows``.
         """
         try:
-            while rows := self._take_batch():
+            while rows := self._take_batch(role):
                 self._rows_in_flight += len(rows)
                 try:
                     await self._write_and_answer(rows)
                 finally:
                     self._rows_in_flight -= len(rows)
         finally:
-            self._running_flushers -= 1
+            self._running[role] -= 1
 
-    def _take_batch(self) -> tuple[_QueuedRow, ...]:
+    def _take_batch(self, role: FlusherRole) -> tuple[_QueuedRow, ...]:
         """Take the queued rows, oldest first, up to ``FUSED_BATCH_MAX_ROWS``.
 
-        A row whose task id the batch already holds stays queued, first in
-        line, for the next batch: the statement refuses a repeated id.
+        A surge flusher takes nothing when less than a full batch waits. A row
+        whose task id the batch already holds stays queued, first in line, for
+        the next batch: the statement refuses a repeated id.
         """
+        match role:
+            case FlusherRole.STEADY:
+                pass
+            case FlusherRole.SURGE:
+                if len(self._queue) < FUSED_BATCH_MAX_ROWS:
+                    return ()
+            case _ as unreachable:
+                assert_never(unreachable)
         taken: list[_QueuedRow] = []
         task_ids: set[str] = set()
         skipped: list[_QueuedRow] = []
@@ -288,7 +338,7 @@ class FinalizeBatcher:
         if flusher.cancelled():
             return
         error = flusher.exception()
-        if error is None or self._running_flushers > 0:
+        if error is None or sum(self._running.values()) > 0:
             return
         logger.critical(
             'Finalize batch flusher died with %d rows queued: %r',

@@ -592,10 +592,12 @@ async def apply_fused_batch_in_autocommit(
 ) -> Result[tuple[TerminalizationOutcome, ...], BatchWriteError]:
     """Write a batch of plain-success completions as one statement.
 
-    One round trip in autocommit (``run_in_autocommit_result``). The
-    statement is atomic: every ``Applied`` row committed with it, and a
-    refused row (``AlreadyApplied``, ``LostClaim``, ``SourceStateConflict``,
-    ``TaskAbsent``) wrote nothing.
+    One round trip in autocommit (``run_in_autocommit_result``). A batch of
+    one row runs ``horsies_complete_task_fused`` itself; a batch of several
+    runs ``horsies_complete_tasks_fused``, which calls that function once per
+    row. The statement is atomic: every ``Applied`` row committed with it,
+    and a refused row (``AlreadyApplied``, ``LostClaim``,
+    ``SourceStateConflict``, ``TaskAbsent``) wrote nothing.
 
     Outcomes:
         Ok(outcomes): one outcome per command, in input order; the outcome at
@@ -609,20 +611,12 @@ async def apply_fused_batch_in_autocommit(
             ordinality, an outcome for another task). These are defects; the
             rows of the statement committed or wrote nothing.
     """
-    statement = SingleStatement(
-        statement=_COMPLETE_TASKS_FUSED_SQL,
-        parameters=_fused_batch_parameters(batch),
-    )
-    match await run_in_autocommit_result(session_factory, statement):
+    match await run_in_autocommit_result(session_factory, _fused_statement(batch)):
         case Ok(rows):
             pass
         case Err(failure):
             return Err(_batch_write_error(failure))
-    outcomes = _reconstruct_id_keyed_batch(
-        [decode_outcome_row(row) for row in rows.mappings()],
-        expected_count=len(batch.commands),
-        operation=FusedCompletionBatch.__name__,
-    )
+    outcomes = _fused_outcomes(batch, rows.mappings())
     for command, outcome in zip(batch.commands, outcomes, strict=True):
         if outcome.task_id != command.task_id:
             raise RuntimeError(
@@ -631,6 +625,40 @@ async def apply_fused_batch_in_autocommit(
             )
         _log_outcome(command, outcome)
     return Ok(tuple(outcomes))
+
+
+def _fused_statement(batch: FusedCompletionBatch) -> SingleStatement:
+    """The statement of ``batch``: the single fused completion for one row,
+    the batch function for several. Pure."""
+    match batch.commands:
+        case (command,):
+            statement, parameters = call_for(command)
+            return SingleStatement(statement=statement, parameters=parameters)
+        case _:
+            return SingleStatement(
+                statement=_COMPLETE_TASKS_FUSED_SQL,
+                parameters=_fused_batch_parameters(batch),
+            )
+
+
+def _fused_outcomes(
+    batch: FusedCompletionBatch,
+    rows: Sequence[Mapping[str, Any]],
+) -> list[TerminalizationOutcome]:
+    """Decode the rows of the statement of ``batch``, in input order.
+
+    The single fused completion answers one row with no ordinality; the
+    batch function answers one row per input at its ordinality.
+    """
+    match batch.commands:
+        case (command,):
+            return [decode_outcome_row(_single_row(rows, command))]
+        case _:
+            return _reconstruct_id_keyed_batch(
+                [decode_outcome_row(row) for row in rows],
+                expected_count=len(batch.commands),
+                operation=FusedCompletionBatch.__name__,
+            )
 
 
 async def classify_locked_read_miss_async(

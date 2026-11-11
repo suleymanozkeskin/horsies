@@ -153,15 +153,19 @@ Main process receives result from child:
 
 A plain task that succeeded is written in a batch. Its finalizer hands the
 outcome to the finalize batcher of the worker process and waits for the answer
-of its own row. One statement in autocommit (`horsies_complete_tasks_fused`)
-writes up to 64 rows. For each row, in task-id order, it checks the claim
-generation, writes the attempt, moves the row to the history, and wakes the
-workers of the queue. That is one database round trip per batch with the
-defaults (`PostgresConfig.worker_pool_pre_ping=False`).
+of its own row. One statement in autocommit writes up to 64 rows
+(`horsies_complete_tasks_fused`; a batch of one row runs
+`horsies_complete_task_fused` itself). For each row, in task-id order, it
+checks the claim generation, writes the attempt, moves the row to the history,
+and wakes the workers of the queue. That is one database round trip per batch
+with the defaults (`PostgresConfig.worker_pool_pre_ping=False`).
 
-- The batcher has no timer. At most 2 batch statements run at once, each on a
+- The batcher has no timer. Two flushers write whenever rows wait, each on a
   connection of the worker pool. A lone row is written at once. The rows that
-  come while both statements run form the next batch.
+  come while both flushers write form the next batch.
+- When a full batch of 64 rows waits while both flushers write, one more
+  flusher starts, up to the size of the worker pool. Such a flusher writes full
+  batches only, so it never makes a batch smaller.
 - A finalizer ends, and frees its seat, only after the statement of its batch
   returned. So a seat is free only after the commit of its row.
 - A row that the server refuses (for example a row whose retention class has

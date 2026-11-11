@@ -330,10 +330,12 @@ class Worker(
         self._capacity_released = asyncio.Event()
         self._finalize_retry_attempts: dict[tuple[str, FinalizeStage], int] = {}
         # Writes the plain-success outcomes in batches. Its flushers start on
-        # the first row; ``stop`` closes it after the finalizer drain.
+        # the first row, at most one per connection of the worker pool;
+        # ``stop`` closes it after the finalizer drain.
         self._finalize_batcher = FinalizeBatcher(
             self._write_fused_batch,
             max_queued_rows=self._pending_task_limit(),
+            max_flushers=self.cfg.parent_pool_size,
         )
         self._fatal_background_error: (
             ChildStartFailedError

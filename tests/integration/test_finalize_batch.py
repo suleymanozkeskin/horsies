@@ -114,6 +114,7 @@ async def _open_worker(database_url: str) -> ProxiedWorker:
     worker._finalize_batcher = FinalizeBatcher(
         worker._write_fused_batch,
         max_queued_rows=QUEUE_ROOM,
+        max_flushers=worker.cfg.parent_pool_size,
     )
     return opened
 
@@ -322,6 +323,24 @@ async def _batch_backend_waiting(session: AsyncSession) -> int:
     raise AssertionError('no batch statement waits on a lock')
 
 
+async def _waiting_writer_query(session: AsyncSession) -> str:
+    """The text of the fused completion statement that waits on a lock."""
+    for _ in range(WAIT_POLLS):
+        query = await session.scalar(
+            text("""
+                SELECT query FROM pg_stat_activity
+                WHERE query LIKE '%horsies_complete_task%fused(%'
+                  AND wait_event_type = 'Lock'
+                  AND pid <> pg_backend_pid()
+            """)
+        )
+        await session.commit()
+        if isinstance(query, str):
+            return query
+        await asyncio.sleep(WAIT_POLL_S)
+    raise AssertionError('no fused completion statement waits on a lock')
+
+
 def _phase1_error(result: Result[None, _FinalizeError]) -> _FinalizeError:
     match result:
         case Err(error):
@@ -458,6 +477,28 @@ async def test_a_replay_of_a_whole_batch_is_already_applied_and_writes_nothing(
     assert await _capacity_payloads(listener, session) == []
     for task_id in task_ids:
         assert len(await read_attempts(session, task_id)) == 1
+
+
+async def test_a_lone_row_runs_the_single_fused_completion(
+    direct: ProxiedWorker,
+    session: AsyncSession,
+    blocker: psycopg.AsyncConnection[Any],
+    recorded: _RecordedBatches,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """A batch of one row sends ``horsies_complete_task_fused`` itself, not
+    the batch function."""
+    task_id, claimed_at = await insert_task(session, status='RUNNING')
+    await _hold_task_lock(blocker, task_id)
+    finalizing = asyncio.create_task(_finalize(direct.worker, task_id, claimed_at))
+    query = await _waiting_writer_query(session)
+    await _release_task_lock(blocker, task_id)
+
+    assert await asyncio.wait_for(finalizing, OUTER_BOUND_S) == Ok(None)
+    assert 'horsies_complete_task_fused(' in query
+    assert 'horsies_complete_tasks_fused(' not in query
+    assert recorded.batches == [(task_id,)]
+    assert recorded.outcomes() == {task_id: [Applied]}
 
 
 # ---------------------------------------------------------------------------
