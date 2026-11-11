@@ -42,6 +42,30 @@ holds the heartbeat statement, a reconnect, and the wake-up of the
 heartbeat thread."""
 
 
+SHOWN_VALUE_DIGITS_MAX: Final = 20
+"""The most digits of a refused value that a refusal message shows. Python
+refuses to turn an int of more than 4,300 digits into text, so a message
+that formats the value as given can fail itself."""
+
+
+def _snapshot_interval_above_cap(interval_ms: int) -> str:
+    """The refusal message of a snapshot interval above the cap.
+
+    It names the value, or its size when the value has more than
+    ``SHOWN_VALUE_DIGITS_MAX`` digits. The comparison needs no text.
+    """
+    cap_ms = WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS
+    if interval_ms < 10**SHOWN_VALUE_DIGITS_MAX:
+        return (
+            f'worker_state_snapshot_interval_ms={interval_ms}ms is above '
+            f'the cap of {cap_ms}ms'
+        )
+    return (
+        f'worker_state_snapshot_interval_ms has more than {SHOWN_VALUE_DIGITS_MAX} '
+        f'digits, above the cap of {cap_ms}ms'
+    )
+
+
 def fail_closed_threshold_floor_ms(runner_heartbeat_interval_ms: int) -> int:
     """Smallest `running_stale_threshold_ms` with `auto_fail_stale_running` on.
 
@@ -443,10 +467,7 @@ class RecoveryConfig(BaseModel):
         interval_ms = self.worker_state_snapshot_interval_ms
         if interval_ms > WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS:
             raise ConfigurationError(
-                message=(
-                    f'worker_state_snapshot_interval_ms={interval_ms}ms is above '
-                    f'the cap of {WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS}ms'
-                ),
+                message=_snapshot_interval_above_cap(interval_ms),
                 code=ErrorCode.CONFIG_INVALID_RECOVERY,
                 notes=[
                     'the cap is half the live window '
