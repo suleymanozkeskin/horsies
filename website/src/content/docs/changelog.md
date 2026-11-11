@@ -377,7 +377,9 @@ there is no migration contract between pre-1.0 versions.
     logs one line per failed attempt with the slot, the cause and the next
     wait. The slot returns to service when a child starts.
   - When every slot is down, a failed start for a cause that can clear
-    counts an attempt, so a worker that serves no task stops after three.
+    counts an attempt, so a worker that serves no task stops after three in
+    a row. A failed start while another slot is in service starts the count
+    again.
     A worker with 1 process has no other slot, so each of its failed starts
     counts.
   - At the first start, the worker starts degraded when at least one child

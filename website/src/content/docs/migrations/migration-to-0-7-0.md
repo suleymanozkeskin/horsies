@@ -206,7 +206,7 @@ Sends of an `@app.task` function write valid options. This affects only code tha
 
 ### A child that cannot start does not always stop the worker
 
-A child that fails its start for a cause that can clear takes only its slot down: `EMFILE`, `ENFILE`, `ENOMEM` or `EAGAIN` in a start step (the spawn and the event loop among them), or a thread that the OS refuses. The worker runs on degraded, and starts a new child for the slot after a growing wait. In 0.6.x each such failure counted one of three attempts, and the third stopped the worker. A worker with every slot down still stops after three failed starts. Read `WorkerStateSnapshot.slot_health` to see the slots that are down. See [Child Start Failures](/horsies/workers/worker-architecture/#child-start-failures).
+A child that fails its start for a cause that can clear takes only its slot down: `EMFILE`, `ENFILE`, `ENOMEM` or `EAGAIN` in a start step (the spawn and the event loop among them), or a thread that the OS refuses. The worker runs on degraded, and starts a new child for the slot after a growing wait. In 0.6.x each such failure counted one of three attempts, and the third stopped the worker. A worker with every slot down still stops after three failed starts in a row. Read `WorkerStateSnapshot.slot_health` to see the slots that are down. See [Child Start Failures](/horsies/workers/worker-architecture/#child-start-failures).
 
 ### The worker process writes the runner heartbeats
 

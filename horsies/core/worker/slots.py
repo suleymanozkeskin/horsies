@@ -728,10 +728,12 @@ class ChildHookFailed:
 
 @dataclass(frozen=True, slots=True)
 class BootAttemptsExhausted:
-    """``attempts`` counted boot attempts ended before the child was ready.
+    """``attempts`` consecutive counted boot attempts ended before the child
+    was ready.
 
     ``cause`` and ``detail`` are those of the last attempt. An attempt
-    counts when its cause repeats, or when every other slot is down.
+    counts when its cause repeats, or when every other slot is down. An
+    attempt that another slot in service spares starts the count again.
     """
 
     attempts: int
@@ -772,7 +774,8 @@ def describe_pool_failure(failure: PoolFailure) -> str:
 
 
 class _AttemptCount(Enum):
-    """Whether a failed boot uses one of ``CHILD_BOOT_ATTEMPTS``."""
+    """Whether a failed boot uses one of ``CHILD_BOOT_ATTEMPTS``. A spared
+    boot ends the run of counted boots: only consecutive ones add up."""
 
     COUNTS = 'counts'
     SPARED = 'spared'
@@ -2502,7 +2505,9 @@ class SlotPool:
         - A cause that can clear puts the slot in ``Down``, and the slot boots
           again after ``slot_down_delay_s``. It counts only while every other
           slot is ``Down`` too: a worker where no slot can serve must fail
-          where its supervisor sees it.
+          where its supervisor sees it. When another slot is in service, the
+          attempt is spared and the count starts again, so only consecutive
+          counted attempts reach the bound.
         - A SIGKILL from outside does not count while another child serves
           (``_kill_spares_the_attempt``).
         - A failed start hook fails the pool at once.
@@ -2551,7 +2556,7 @@ class SlotPool:
                 case _AttemptCount.COUNTS:
                     counted += 1
                 case _AttemptCount.SPARED:
-                    pass
+                    counted = 0
             delay_s = self._record_failed_boot(slot, failed, counted)
             if counted >= CHILD_BOOT_ATTEMPTS:
                 return Err(BootAttemptsExhausted(counted, failed.cause, failed.detail))

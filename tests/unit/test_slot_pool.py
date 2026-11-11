@@ -890,6 +890,55 @@ class TestDownSlots:
         finally:
             await pool.stop(0)
 
+    async def test_only_consecutive_counted_attempts_reach_the_bound(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Slot 1 is short of descriptors on every boot. Slot 0 is down for
+        two of those boots, serves for five, then is down again. The five
+        spared boots start the count again, so the pool fails at the third
+        counted boot in a row, not at the first boot of the second window."""
+        slot_0_down = Down(
+            SHORT_OF_DESCRIPTORS,
+            EMFILE_DETAIL,
+            datetime.now(timezone.utc),
+            1,
+        )
+        slot_0_at_boot = ['down'] * 2 + ['idle'] * 5 + ['down'] * 3
+        pool = SlotPool(_config(2), pending_limit=10)
+        slot_0, slot_1 = pool._slots
+        pool._first_generation.set_result(None)
+        boots: list[int] = []
+
+        async def short_of_descriptors(
+            _slot: object,
+            _init: object,
+        ) -> Err[BootFailure]:
+            match slot_0_at_boot[len(boots)]:
+                case 'down':
+                    slot_0.state = slot_0_down
+                case _:
+                    slot_0.state = Idle()
+            boots.append(len(boots) + 1)
+            return Err(BootFailure(SHORT_OF_DESCRIPTORS, EMFILE_DETAIL))
+
+        async def no_wait(_delay_s: float) -> None:
+            return None
+
+        monkeypatch.setattr(pool, '_boot_attempt', short_of_descriptors)
+        monkeypatch.setattr(pool, '_pause', no_wait)
+
+        result = await pool._boot_child(slot_1)
+
+        assert result == Err(
+            BootAttemptsExhausted(
+                CHILD_BOOT_ATTEMPTS,
+                SHORT_OF_DESCRIPTORS,
+                EMFILE_DETAIL,
+            ),
+        )
+        assert boots == list(range(1, len(slot_0_at_boot) + 1))
+
 
 # Descriptors 0, 1 and 2 stay open. Each new descriptor gets a number at or
 # above this soft limit, so the OS refuses it with EMFILE.

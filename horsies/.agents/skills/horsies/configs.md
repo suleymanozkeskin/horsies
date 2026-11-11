@@ -387,7 +387,8 @@ Failures stay with one task:
   start step, the spawn and the event loop among them, or a refused thread)
   takes only that slot down: it takes no task, the claim budget leaves it out, and it
   boots again after 1, 2, 4 ... up to 60 s. It uses an attempt only when every
-  other slot is down too. The worker starts degraded when one child is ready
+  other slot is down too; a failed boot while another slot is in service
+  starts the count again, so only 3 attempts in a row stop the worker. The worker starts degraded when one child is ready
   and each other slot is down. `WorkerStateSnapshot.slot_health` names the
   slots that are down (`SlotsDown`).
 - An outside SIGKILL of a booting replacement child uses no attempt while

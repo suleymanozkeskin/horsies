@@ -393,9 +393,9 @@ A child that cannot start reports the cause of the failure to the worker, before
 
 A child that dies with no report names no cause, so the worker counts it as a cause that repeats. The worker cannot tell a crash that clears from a crash in the code. Counting it stops a worker whose code crashes at every start, instead of keeping a slot down with no end.
 
-- After three counted attempts, the worker exits non-zero, so that its supervisor restarts it. This also applies when other children serve tasks.
+- After three counted attempts in a row, the worker exits non-zero, so that its supervisor restarts it. This also applies when other children serve tasks.
 - A slot that is down takes no task, and the claim budget leaves it out: a worker with 4 processes and 1 slot down claims as a worker with 3 processes. The worker starts a new child for that slot after 1 second, then 2, 4, up to 60 seconds between attempts. Each failed attempt logs one line with the slot, the cause, and the next wait. The slot returns to service when a child starts.
-- A cause that can clear counts an attempt only when every other slot is down too. A worker that serves no task must fail where its supervisor can see it. A worker with 1 process has no other slot, so each of its failed attempts counts.
+- A cause that can clear counts an attempt only when every other slot is down too. A worker that serves no task must fail where its supervisor can see it. A failed attempt that does not count, because another slot is in service, starts the count again. A worker with 1 process has no other slot, so each of its failed attempts counts.
 - At the first start, the worker starts when each slot has a ready child or is down, and at least one child is ready. Its [worker state](/horsies/monitoring/worker-health/#which-slots-are-down) names the slots that are down. When no child starts, the worker exits non-zero.
 - An outside SIGKILL of a booting replacement child, such as an out-of-memory kill, does not count an attempt while another child is serving: the worker waits up to 5 seconds and starts another. A kill during the first start counts, and so does a kill when no other child is serving.
 
