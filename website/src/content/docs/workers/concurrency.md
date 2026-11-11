@@ -443,7 +443,7 @@ fairness in multi-worker deployments at the cost of more claim passes.
 
 ### claimed_per_worker
 
-Limits total CLAIMED (not yet running) tasks per worker:
+Limits total CLAIMED (not yet running) tasks per worker. It counts the CLAIMED rows of every class, so rows that one class prefetched can stop the claims of another class whose seats are free:
 
 ```python
 few_claimed = WorkerProfile(
