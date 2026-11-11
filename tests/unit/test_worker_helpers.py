@@ -1838,21 +1838,21 @@ class TestMemoryBaselineGuard:
 
     def test_no_threshold_skips_the_guard(self) -> None:
         self._worker(None)._check_memory_baseline(
-            (ChildBaseline(1, RssMb(9999.0), IsolatedChild(pool=_POOL)),)
+            (ChildBaseline(1, RssMb(9999.0), IsolatedChild(pool=_POOL, task_send_pool=2)),)
         )
 
     def test_baseline_at_the_threshold_is_refused(self) -> None:
         with pytest.raises(MemoryBaselineExceedsThresholdError, match='100MB'):
             self._worker(100)._check_memory_baseline(
                 (
-                    ChildBaseline(1, RssMb(50.0), IsolatedChild(pool=_POOL)),
-                    ChildBaseline(2, RssMb(100.0), IsolatedChild(pool=_POOL)),
+                    ChildBaseline(1, RssMb(50.0), IsolatedChild(pool=_POOL, task_send_pool=2)),
+                    ChildBaseline(2, RssMb(100.0), IsolatedChild(pool=_POOL, task_send_pool=2)),
                 ),
             )
 
     def test_baseline_below_the_threshold_passes(self) -> None:
         self._worker(100)._check_memory_baseline(
-            (ChildBaseline(1, RssMb(10.0), IsolatedChild(pool=_POOL)),)
+            (ChildBaseline(1, RssMb(10.0), IsolatedChild(pool=_POOL, task_send_pool=2)),)
         )
 
     def test_unreadable_rss_warns_and_passes(
@@ -1861,7 +1861,7 @@ class TestMemoryBaselineGuard:
     ) -> None:
         with caplog.at_level(logging.WARNING, logger='horsies.worker'):
             self._worker(100)._check_memory_baseline(
-                (ChildBaseline(1, RssUnreadable(), IsolatedChild(pool=_POOL)),),
+                (ChildBaseline(1, RssUnreadable(), IsolatedChild(pool=_POOL, task_send_pool=2)),),
             )
         assert 'unreadable' in caplog.text
 
@@ -4381,7 +4381,8 @@ class TestReaperMatchArms:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """When worker.broker is absent, reaper constructs a worker-sized temp broker."""
+        """When worker.broker is absent, reaper constructs a temp broker with
+        the parent pool and no overflow."""
         worker = _make_reaper_worker(
             monkeypatch,
             auto_requeue=True,
@@ -4394,7 +4395,7 @@ class TestReaperMatchArms:
         created = worker._test_created_brokers  # type: ignore[attr-defined]
         assert len(created) == 1
         assert created[0].config.pool_size == worker.cfg.parent_pool_size
-        assert created[0].config.max_overflow == worker.cfg.parent_max_overflow
+        assert created[0].config.max_overflow == 0
         created[0].close_async.assert_awaited_once()
 
     # --- U-6f: loop-level exception → logged, continues ---
@@ -5455,20 +5456,19 @@ class TestHandlePing:
 class TestReaperGatePoolCapacity:
     """The advisory gate needs two coordinator connections (gate + pass).
 
-    Regression: with parent_pool_size=1, max_overflow=0 the gate session
-    owned the pool's only connection while the pass body blocked on a
-    second checkout until pool timeout, every interval. Capacity below two
+    Regression: with a parent pool of 1 connection (no overflow) the gate
+    session owned the pool's only connection while the pass body blocked on
+    a second checkout until pool timeout, every interval. Capacity below two
     must run passes ungated (SKIP LOCKED keeps concurrent passes safe).
     """
 
     @staticmethod
-    def _capacity_worker(pool_size: int, max_overflow: int) -> Worker:
+    def _capacity_worker(pool_size: int) -> Worker:
         cfg = WorkerConfig(
             dsn='postgresql+psycopg://u:p@localhost/db',
             psycopg_dsn='postgresql://u:p@localhost/db',
             queues=['default'],
             parent_pool_size=pool_size,
-            parent_max_overflow=max_overflow,
             recovery_config=RecoveryConfig(check_interval_ms=1_000),
         )
         return Worker(
@@ -5478,10 +5478,10 @@ class TestReaperGatePoolCapacity:
         )
 
     def test_gate_disabled_for_single_connection_pool(self) -> None:
-        assert self._capacity_worker(1, 0)._reaper_gate_enabled() is False
+        assert self._capacity_worker(1)._reaper_gate_enabled() is False
 
-    def test_gate_enabled_with_overflow_headroom(self) -> None:
-        assert self._capacity_worker(1, 1)._reaper_gate_enabled() is True
+    def test_gate_enabled_with_two_connections(self) -> None:
+        assert self._capacity_worker(2)._reaper_gate_enabled() is True
 
     def test_gate_enabled_at_defaults(self) -> None:
         worker = _make_worker()
@@ -5490,7 +5490,7 @@ class TestReaperGatePoolCapacity:
     @pytest.mark.asyncio
     async def test_single_connection_pool_runs_pass_ungated(self) -> None:
         """Capacity 1: the pass runs without ever opening a gate session."""
-        worker = self._capacity_worker(1, 0)
+        worker = self._capacity_worker(1)
         worker.broker = MagicMock()  # temp_broker = self.broker, no real engine
         attach_resources(worker.broker, fake_resources())
 
@@ -5507,7 +5507,7 @@ class TestReaperGatePoolCapacity:
     @pytest.mark.asyncio
     async def test_two_connection_pool_gates_the_pass(self) -> None:
         """Capacity 2: the gate session is opened and the held lock runs the pass."""
-        worker = self._capacity_worker(1, 1)
+        worker = self._capacity_worker(2)
         worker.broker = MagicMock()
         attach_resources(worker.broker, fake_resources())
 
@@ -5543,7 +5543,6 @@ class TestReaperResourceSelection:
             psycopg_dsn='postgresql://u:p@localhost/db',
             queues=['default'],
             parent_pool_size=1,
-            parent_max_overflow=0,
             recovery_config=RecoveryConfig(check_interval_ms=1_000),
         )
         return Worker(session_factory=MagicMock(), listener=MagicMock(), cfg=cfg)

@@ -498,8 +498,9 @@ class TestLiveBrokerConnectivityCheck:
         mock_session.execute.assert_awaited_once()
         mock_engine.dispose.assert_awaited_once()
 
-    def test_live_check_does_not_pass_worker_pool_fields_to_engine(self) -> None:
-        """Worker-specific broker fields are not SQLAlchemy engine kwargs."""
+    def test_live_check_engine_opens_the_producer_pool(self) -> None:
+        """The live check reads through the pool that PostgresConfig sets; a
+        worker pool is a profile setting, never an engine kwarg here."""
         app = _make_app()
 
         mock_engine = mock.MagicMock()
@@ -524,8 +525,10 @@ class TestLiveBrokerConnectivityCheck:
 
         assert errors == []
         engine_kwargs = mock_create_engine.call_args.kwargs
-        assert 'worker_pool_size' not in engine_kwargs
-        assert 'worker_max_overflow' not in engine_kwargs
+        assert (engine_kwargs['pool_size'], engine_kwargs['max_overflow']) == (
+            app.config.broker.pool_size,
+            app.config.broker.max_overflow,
+        )
 
     def test_live_check_reports_connectivity_error_without_touching_broker(self) -> None:
         """Connectivity failures map to BROKER_INVALID_URL and still dispose engine."""

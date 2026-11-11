@@ -86,6 +86,7 @@ def _init() -> InitFrame:
         process_name='test-child',
         child_kind=IsolatedChild(
             pool=ResolvedPool(min_size=0, max_size=1, check=False),
+            task_send_pool=2,
         ),
     )
 

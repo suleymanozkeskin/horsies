@@ -48,6 +48,8 @@ from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.models.child_sizing import (
+    DEFAULT_TASK_SEND_POOL_CONNECTIONS,
+    parent_pool_connections,
     shared_async_executor_threads,
     shared_async_pool_connections,
 )
@@ -61,6 +63,7 @@ from horsies.core.models.worker_profile import (
     NoSharedAsyncChildren,
     NoSharedThreadChildren,
     NoTaskLimit,
+    ParentPool,
     PoolSize,
     ResolvedPool,
     SharedAsyncChildren,
@@ -1977,7 +1980,9 @@ class TestRunWorkerCoroutine:
                         max_size=PoolSize(connections=3),
                         check=False,
                     ),
+                    task_send_pool=PoolSize(connections=4),
                 ),
+                pool=ParentPool(max_size=PoolSize(connections=9)),
                 drain_timeout=timedelta(seconds=7.5),
                 preload=ChildPreload.APP,
             ),
@@ -2002,7 +2007,7 @@ class TestRunWorkerCoroutine:
                 'horsies.core.cli.PostgresBroker',
                 autospec=True,
                 side_effect=[schema_broker, broker],
-            ),
+            ) as mock_broker_cls,
             patch('horsies.core.cli.asyncio.run', side_effect=capture_run),
         ):
             worker_command(args)
@@ -2011,20 +2016,25 @@ class TestRunWorkerCoroutine:
             assert len(captured_coro) == 1
             await captured_coro[0]
 
-        # Assert
+        # Assert: the schema broker and the worker broker open the parent
+        # pool of the profile, with no overflow, not the producer pool.
+        assert [
+            (call.args[0].pool_size, call.args[0].max_overflow)
+            for call in mock_broker_cls.call_args_list
+        ] == [(9, 0), (9, 0)]
         schema_broker.ensure_schema_initialized.assert_awaited_once()
         schema_broker.close_async.assert_awaited_once()
         mock_worker_cls.assert_called_once()
         worker_cfg = mock_worker_cls.call_args.args[2]
         assert worker_cfg.drain_timeout_s == 7.5
         assert worker_cfg.child_preload is ChildPreload.APP
-        assert worker_cfg.parent_pool_size == 3
-        assert worker_cfg.parent_max_overflow == 2
+        assert worker_cfg.parent_pool_size == 9
         assert worker_cfg.isolated_pool == ResolvedPool(
             min_size=1,
             max_size=3,
             check=False,
         )
+        assert worker_cfg.isolated_task_send_pool == 4
         assert mock_worker_cls.call_args.kwargs == {'broker': broker}
         mock_worker.run_forever.assert_awaited_once()
         broker.close_async.assert_awaited_once()
@@ -2574,6 +2584,7 @@ class TestExecutionSettings:
                         max_size=PoolSize(connections=3),
                         check=False,
                     ),
+                    task_send_pool=PoolSize(connections=5),
                 ),
                 claim=ClaimLimits(
                     per_queue_per_pass=TaskLimit(tasks=2),
@@ -2584,10 +2595,12 @@ class TestExecutionSettings:
             ),
         )
         assert settings == ExecutionSettings(
+            parent_pool=parent_pool_connections(6),
             processes=6,
             max_tasks_per_child=25,
             max_memory_per_child_mb=768,
             isolated_pool=ResolvedPool(min_size=1, max_size=3, check=False),
+            isolated_task_send_pool=5,
             max_claim_batch=2,
             max_claim_per_worker=4,
             drain_timeout_s=45.0,
@@ -2595,6 +2608,28 @@ class TestExecutionSettings:
             shared_async=NoSharedAsyncChildren(),
             shared_thread=NoSharedThreadChildren(),
         )
+
+    @pytest.mark.parametrize(
+        ('profile', 'parent_pool'),
+        [
+            (WorkerProfile(isolated=IsolatedChildren(count=8)), 5),
+            (WorkerProfile(shared_async=SharedAsyncChildren(count=1, seats=100)), 10),
+            (WorkerProfile(shared_async=SharedAsyncChildren(count=2, seats=500)), 20),
+            (
+                WorkerProfile(
+                    shared_async=SharedAsyncChildren(count=2, seats=500),
+                    pool=ParentPool(max_size=PoolSize(connections=3)),
+                ),
+                3,
+            ),
+        ],
+    )
+    def test_the_parent_pool_is_the_resolved_profile_pool(
+        self,
+        profile: WorkerProfile,
+        parent_pool: int,
+    ) -> None:
+        assert execution_settings(profile).parent_pool == parent_pool
 
     def test_shared_async_children_keep_their_typed_form(self) -> None:
         shared = SharedAsyncChildren(count=3, seats=20)
@@ -2612,6 +2647,7 @@ class TestExecutionSettings:
         assert settings.max_tasks_per_child == 0
         assert settings.max_memory_per_child_mb is None
         assert settings.isolated_pool == IsolatedPool().resolved()
+        assert settings.isolated_task_send_pool == DEFAULT_TASK_SEND_POOL_CONNECTIONS
 
     def test_no_limit_variants_become_the_no_limit_encoding(self) -> None:
         settings = execution_settings(
@@ -2675,8 +2711,9 @@ def _memory_profile(count: int, mb: int) -> WorkerProfile:
 
 @pytest.mark.unit
 class TestWorkerStartLog:
-    """The start log line of the worker states the resolved pool of each
-    child kind and the executor size of the shared async children."""
+    """The start log line of the worker states the resolved pool and the
+    task-send pool of each child kind, the executor size of the shared async
+    children, and the resolved pool of the worker process."""
 
     def test_the_resolved_sizes_of_each_kind_are_logged(
         self,
@@ -2701,15 +2738,38 @@ class TestWorkerStartLog:
             if r.getMessage().startswith("Worker profile 'default': isolated=")
         ]
         assert 'isolated=2 (' in line
-        assert 'pool 0 to 2 connections, check off)' in line
+        assert (
+            'pool 0 to 2 connections, check off; task_send_pool 2 connections)'
+        ) in line
         assert (
             f'pool 0 to {shared_async_pool_connections(25)} connections, '
             'derived from seats, check off; '
             f'executor {shared_async_executor_threads(25)} threads, derived '
-            'from seats)'
+            'from seats; task_send_pool 2 connections)'
         ) in line
         assert 'shared_thread=1x8 seats' in line
-        assert 'pool 0 to 5 connections, check on)' in line
+        assert (
+            'pool 0 to 5 connections, check on; task_send_pool 2 connections)'
+        ) in line
+        assert ', pool=5 connections (derived from 35 seats), ' in line
+
+    def test_a_set_parent_pool_is_logged_without_its_origin(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        profile = WorkerProfile(
+            isolated=IsolatedChildren(count=2),
+            pool=ParentPool(max_size=PoolSize(connections=12)),
+        )
+        with caplog.at_level(logging.INFO, logger='horsies'):
+            _ = _start_worker_with(profile, MachineMemory(mb=4096))
+
+        [line] = [
+            r.getMessage()
+            for r in caplog.records
+            if r.getMessage().startswith("Worker profile 'default': isolated=")
+        ]
+        assert ', pool=12 connections, claim per queue per pass: ' in line
 
 
 @pytest.mark.unit
@@ -2944,7 +3004,9 @@ class TestBootConnectionFit:
             'connections itself, not counting task code; the server has 27 '
             'usable slots',
         )
-        assert '20 x 5 = 100 more, 148 in all' in warnings[0]
+        assert (
+            '20 isolated children x isolated.task_send_pool 2 = 40 more, 88 in all'
+        ) in warnings[0]
 
     async def test_a_profile_within_the_limit_does_not_warn(
         self,

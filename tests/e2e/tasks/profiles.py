@@ -21,8 +21,8 @@ adds to it), so every name below exists in every instance.
 - ``thread-only-1x4``: no isolated child, and 1 shared thread child with 4
   seats. It runs only ``SHARED_THREAD`` tasks.
 - ``set-pools-1-1x4-1x4``: 1 isolated child, 1 shared async child and 1
-  shared thread child with 4 seats each, and a pool and an executor size
-  set for each kind (``SET_POOLS``).
+  shared thread child with 4 seats each, a pool, a task-send pool and an
+  executor size set for each kind, and a parent pool (``SET_POOLS``).
 
 The child isolation instances add ``isolated-N-<preload>`` and
 ``drain-1s-<preload>`` for each ``ChildPreload`` mode, so each of their tests
@@ -43,6 +43,7 @@ from horsies.core.models.worker_profile import (
     MemoryLimit,
     NoIsolatedChildren,
     NoTaskLimit,
+    ParentPool,
     PoolSize,
     SharedAsyncChildren,
     SharedPool,
@@ -84,6 +85,15 @@ SET_POOLS_THREAD_BOUNDS: Final = (1, 4)
 SET_POOLS_EXECUTOR_THREADS: Final = 3
 """The default executor size of the shared async child of
 ``set-pools-1-1x4-1x4``: below its 4 seats and below every default."""
+SET_POOLS_ISOLATED_TASK_SEND_POOL: Final = 3
+SET_POOLS_ASYNC_TASK_SEND_POOL: Final = 4
+SET_POOLS_THREAD_TASK_SEND_POOL: Final = 6
+"""The task-send pool of each kind of ``set-pools-1-1x4-1x4``: one value
+per kind, each different from the default and from the producer pool of the
+e2e instances."""
+SET_POOLS_PARENT_POOL: Final = 7
+"""The parent pool of ``set-pools-1-1x4-1x4``: different from the size that
+its 9 seats derive."""
 
 
 def isolated_profile_name(count: int) -> str:
@@ -158,12 +168,14 @@ E2E_WORKER_PROFILES: Final[dict[str, WorkerProfile]] = {
                 max_size=PoolSize(connections=SET_POOLS_ISOLATED_BOUNDS[1]),
                 check=False,
             ),
+            task_send_pool=PoolSize(connections=SET_POOLS_ISOLATED_TASK_SEND_POOL),
         ),
         shared_async=SharedAsyncChildren(
             count=1,
             seats=4,
             pool=SharedPool(max_size=PoolSize(connections=5)),
             executor=ExecutorThreads(threads=SET_POOLS_EXECUTOR_THREADS),
+            task_send_pool=PoolSize(connections=SET_POOLS_ASYNC_TASK_SEND_POOL),
         ),
         shared_thread=SharedThreadChildren(
             count=1,
@@ -172,7 +184,9 @@ E2E_WORKER_PROFILES: Final[dict[str, WorkerProfile]] = {
                 min_size=SET_POOLS_THREAD_BOUNDS[0],
                 max_size=PoolSize(connections=SET_POOLS_THREAD_BOUNDS[1]),
             ),
+            task_send_pool=PoolSize(connections=SET_POOLS_THREAD_TASK_SEND_POOL),
         ),
+        pool=ParentPool(max_size=PoolSize(connections=SET_POOLS_PARENT_POOL)),
     ),
 }
 """The profiles that every e2e app instance defines."""

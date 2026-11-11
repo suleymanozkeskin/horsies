@@ -28,6 +28,7 @@ from horsies.core.codec import JsonValue, encode_task_result
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.child_sizing import parent_pool_connections
 from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.types.result import Err, Ok
@@ -106,12 +107,13 @@ async def open_proxied_worker(
     *,
     pre_ping: bool = False,
 ) -> ProxiedWorker:
-    """A worker whose engine is the one the CLI builds for ``database_url``,
-    with ``worker_pool_pre_ping=pre_ping``. No listener, no schema check."""
+    """A worker whose engine is the one the CLI builds for ``database_url``
+    and a profile of one isolated child, with ``worker_pool_pre_ping=pre_ping``.
+    No listener, no schema check."""
     config = PostgresConfig(
         database_url=SecretStr(database_url),
         worker_pool_pre_ping=pre_ping,
-    ).worker_process_config()
+    ).worker_process_config(parent_pool_connections(1))
     broker = PostgresBroker(config, assume_initialized=True)
     match await broker.select_resources():
         case Ok(resources):

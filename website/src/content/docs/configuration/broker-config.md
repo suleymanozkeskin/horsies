@@ -25,8 +25,6 @@ broker = PostgresConfig(
 | `pgbouncer_transaction_mode` | `bool` | `False` | Disable prepared statements for transaction-pooled PgBouncer |
 | `pool_size` | `int` | 5 | Connection pool size (raise for high-throughput producers) |
 | `max_overflow` | `int` | 10 | Additional connections beyond pool_size |
-| `worker_pool_size` | `int \| None` | 3 | Worker coordinator pool size; `None` inherits `pool_size` |
-| `worker_max_overflow` | `int \| None` | 2 | Worker coordinator overflow; `None` inherits `max_overflow` |
 | `pool_timeout` | `int` | 30 | Seconds to wait for connection |
 | `pool_pre_ping` | `bool` | `True` | Pre-ping connections before use, in every engine but the one of the worker process; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
 | `worker_pool_pre_ping` | `bool` | `False` | Pre-ping the connections of the worker process before use. Off: the worker sends a one-statement write in one round trip, and a dead pooled connection fails its first statement with a connection error that the worker retries; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/#health-checks-at-high-rtt) |
@@ -39,7 +37,7 @@ broker = PostgresConfig(
 | `echo` | `bool` | `False` | Echo SQL statements to logs. Bound values are not shown |
 | `pool_recycle` | `int` | 1800 | Recycle connections after N seconds |
 
-The connection pool of each child is not a `PostgresConfig` field: each child kind has its own `pool` in the worker profile. See [Connection Pools and the Default Executor](/horsies/workers/worker-profiles/#connection-pools-and-the-default-executor). `worker_child_pool_min_size`, `worker_child_pool_max_size` and `worker_child_pool_check` were removed in 0.7.0; a config that sets one fails with `HRS-213`, and the error names the `pool` field that replaces it.
+The pools of a worker are not `PostgresConfig` fields. Each child kind has its own `pool` and `task_send_pool` in the worker profile, and the worker process has `WorkerProfile.pool`. See [Connection Pools and the Default Executor](/horsies/workers/worker-profiles/#connection-pools-and-the-default-executor). `worker_child_pool_min_size`, `worker_child_pool_max_size`, `worker_child_pool_check`, `worker_pool_size` and `worker_max_overflow` were removed in 0.7.0; a config that sets one fails with `HRS-213`, and the error names the profile field that replaces it.
 
 ## Connection URL Format
 
@@ -166,9 +164,9 @@ The broker uses SQLAlchemy's async connection pool:
 ### Sizing Guidelines
 
 `pool_size` and `max_overflow` size the general broker used by producers,
-web processes, schedulers, and app-level APIs. Workers use the smaller
-`worker_pool_size` and `worker_max_overflow` profile by default so an idle or
-moderately loaded worker does not reserve a web-sized pool.
+web processes, schedulers, and app-level APIs. They do not size the pools of a
+worker: the worker process opens `WorkerProfile.pool`, and task code in a worker
+child opens the `task_send_pool` of its child kind.
 
 | Deployment | pool_size | max_overflow |
 |------------|-----------|--------------|
@@ -179,20 +177,21 @@ moderately loaded worker does not reserve a web-sized pool.
 For direct PostgreSQL connections, budget a worker roughly as:
 
 ```
-worker_pool_size + worker_max_overflow
+pool max_size (the pool of the worker process)
   + 2 session/LISTEN connections
   + 1 runner heartbeat connection
   + isolated children * isolated.pool max_size
   + shared async children * shared_async.pool max_size
   + shared thread children * shared_thread.pool max_size
-  + task-code database connections
+  + task code that sends: children * task_send_pool of their kind, per event loop
 ```
 
-Each `max_size` is the resolved value of its mode: a `PoolSize`, or the size
-that `PoolSizeFromSeats()` derives from the seats; see
+Each `max_size` is the resolved value: a `PoolSize`, or the size that
+`PoolSizeFromSeats()` derives from the seats; see
 [Connections](/horsies/workers/worker-profiles/#connections). With the defaults
 and a profile of 8 isolated children, the framework ceiling is about
-`3 + 2 + 2 + 1 + 8 * 2 = 24` direct connections, before application task code.
+`5 + 2 + 1 + 8 * 2 = 24` direct connections, and `8 * 2 = 16` more when every
+child sends from one event loop.
 Idle child processes keep no database connection by default because the
 `min_size` of each pool is 0; connections are opened lazily when task
 lifecycle work starts. An isolated child uses one connection at a time, for the

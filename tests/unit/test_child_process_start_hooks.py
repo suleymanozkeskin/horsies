@@ -59,6 +59,7 @@ def _seat_init() -> InitFrame:
             seats=1,
             pool=_SEAT_POOL,
             executor_threads=2,
+            task_send_pool=2,
         ),
     )
 

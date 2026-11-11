@@ -102,7 +102,7 @@ from horsies.core.worker.stored_timeout import (
 from horsies.core.worker.worker import Worker
 
 _POOL = ResolvedPool(min_size=0, max_size=2, check=True)
-_ASYNC_KIND = SharedAsyncChild(seats=4, pool=_POOL, executor_threads=4)
+_ASYNC_KIND = SharedAsyncChild(seats=4, pool=_POOL, executor_threads=4, task_send_pool=2)
 
 pytestmark = [pytest.mark.unit]
 
@@ -1167,7 +1167,7 @@ class TestSharedMemoryBaseline:
 
     def test_the_shared_limit_does_not_apply_to_isolated_children(self) -> None:
         self._worker(100)._check_memory_baseline(
-            (ChildBaseline(1, RssMb(500.0), IsolatedChild(pool=_POOL)),),
+            (ChildBaseline(1, RssMb(500.0), IsolatedChild(pool=_POOL, task_send_pool=2)),),
         )
 
     def test_the_isolated_limit_does_not_apply_to_shared_children(self) -> None:

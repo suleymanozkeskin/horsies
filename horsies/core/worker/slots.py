@@ -2180,14 +2180,15 @@ def boot_failure_of(
 def _async_child_kinds(
     shared_async: SharedAsyncChildren | NoSharedAsyncChildren,
 ) -> tuple[SharedAsyncChild, ...]:
-    """The kind of each shared async slot, with the resolved pool and
-    default executor size of its child."""
+    """The kind of each shared async slot, with the resolved pool, default
+    executor size and task-send pool of its child."""
     match shared_async:
         case SharedAsyncChildren(count=count, seats=seats) as children:
             kind = SharedAsyncChild(
                 seats=seats,
                 pool=children.resolved_pool(),
                 executor_threads=children.resolved_executor_threads(),
+                task_send_pool=children.task_send_pool.connections,
             )
             return (kind,) * count
         case NoSharedAsyncChildren():
@@ -2199,11 +2200,15 @@ def _async_child_kinds(
 def _thread_child_kinds(
     shared_thread: SharedThreadChildren | NoSharedThreadChildren,
 ) -> tuple[SharedThreadChild, ...]:
-    """The kind of each shared thread slot, with the resolved pool of its
-    child."""
+    """The kind of each shared thread slot, with the resolved pool and the
+    task-send pool of its child."""
     match shared_thread:
         case SharedThreadChildren(count=count, seats=seats) as children:
-            kind = SharedThreadChild(seats=seats, pool=children.resolved_pool())
+            kind = SharedThreadChild(
+                seats=seats,
+                pool=children.resolved_pool(),
+                task_send_pool=children.task_send_pool.connections,
+            )
             return (kind,) * count
         case NoSharedThreadChildren():
             return ()

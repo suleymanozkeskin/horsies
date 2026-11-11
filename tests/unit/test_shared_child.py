@@ -81,6 +81,7 @@ def _kind(seats: int, executor_threads: int) -> SharedAsyncChild:
         seats=seats,
         pool=ResolvedPool(min_size=0, max_size=2, check=True),
         executor_threads=executor_threads,
+        task_send_pool=2,
     )
 
 pytestmark = [pytest.mark.unit]
@@ -1465,6 +1466,7 @@ class TestTheStartOfTheLoop:
             seats=1,
             pool=ResolvedPool(min_size=1, max_size=5, check=False),
             executor_threads=SIZED_EXECUTOR_THREADS,
+            task_send_pool=2,
         )
 
         async def scenario() -> None:
