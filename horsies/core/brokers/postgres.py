@@ -1697,6 +1697,7 @@ class PostgresBroker:
     async def _activate_bounded_recovery(self, engine: AsyncEngine) -> None:
         from horsies.core.history.terminalization.move import (
             bounded_cancel_orphan_sweep_ddl,
+            failed_attempt_program_ddl,
             pause_abandon_replacement_ddl,
             terminal_snapshot_replacement_ddl,
         )
@@ -1748,6 +1749,10 @@ class PostgresBroker:
                 for statement in duplicate_guard_fragments():
                     await conn.execute(text(statement))
                 for statement in terminal_snapshot_replacement_ddl():
+                    await conn.execute(text(statement))
+                # v56: the failed-attempt finish and the locking read of a
+                # RUNNING task, both with the advisory lock first.
+                for statement in failed_attempt_program_ddl():
                     await conn.execute(text(statement))
                 # v46: the update trigger cannot send task_done here.
                 await conn.execute(text(DROP_TASK_NOTIFY_UPDATE_TRIGGER_SQL))
