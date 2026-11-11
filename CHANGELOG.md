@@ -323,6 +323,14 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **Breaking: worker child exit codes 74 to 76.** In 0.6.x, 74 meant only a
+  forked child that does not reparent to the worker. In 0.7.0:
+  - 74: a child that stopped while threads of the executor of its task loop
+    still ran. It leaves without waiting for them. New.
+  - 75: a child that failed its boot, after it reported the cause. New.
+  - 76: a forked child that does not reparent to the worker. It was 74.
+  A worker that cannot write runner heartbeats and has not stopped 120 s
+  after it started to stop exits with 77, also new.
 - **Breaking: the claim function takes a budget per execution class.**
   `horsies_claim` takes `p_budgets` and `p_routes` in place of `p_processes`,
   and returns each row's `execution`. Schema v55 drops the earlier signature,
@@ -529,9 +537,6 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Fixed
 
-- **A forked child that does not reparent to the worker exits with code 76.**
-  It exited with 74, which a child also uses after a stop with executor
-  threads left, so one exit code named two causes.
 - **A timed-out task's row moves only after its child has exited.** At the
   deadline the worker kills the child, waits up to 30 s for its exit, and
   only then writes `TASK_TIMEOUT`, the retry and the attempt row, or requeues

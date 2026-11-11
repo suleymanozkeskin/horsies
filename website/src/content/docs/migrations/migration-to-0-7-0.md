@@ -191,7 +191,9 @@ A 0.6.x process refuses a schema newer than its own when it sets up its schema: 
 | 2 | `horsies worker` | A removed worker flag | The flag was valid |
 | 1 | `horsies worker` | The worker cannot write runner heartbeats, with `auto_fail_stale_running=True` | The reaper failed the running tasks |
 | 77 | `horsies worker` | As above, and the worker has not stopped 120 seconds later | No such code |
-| 76 | worker child | A forked child that does not reparent to the worker | Code 74, which also meant a stop with executor threads left |
+| 74 | worker child | The child stopped while threads of the executor of its task loop still ran | Code 74 meant a forked child that does not reparent to the worker |
+| 75 | worker child | The child failed its boot, after it reported the cause | No such code |
+| 76 | worker child | A forked child that does not reparent to the worker | Code 74 |
 
 See [Exit Codes](/horsies/cli/#exit-codes).
 
