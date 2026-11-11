@@ -28,6 +28,11 @@ from enum import Enum
 from typing import Any, Final, TypeVar, assert_never
 
 from horsies.core.logging import get_logger
+from horsies.core.models.boot_failure import (
+    ResourceShortage,
+    TaskLoopCreateFailed,
+    shortage_or,
+)
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.utils.loop_runner import in_running_event_loop
 from horsies.core.utils.task_loop_registry import register_task_loop, unregister_task_loop
@@ -79,11 +84,17 @@ class LoopCreateFailed:
     process at its file descriptor limit (EMFILE) gets this, and so does an
     event loop policy that raises. The child gets it at boot, before it
     reports ready, so no task reached it.
+
+    ``cause`` follows the errno rule of a boot step (``shortage_or``): an
+    ``OSError`` with an errno in ``CLEARABLE_ERRNOS`` is a
+    ``ResourceShortage``, which can clear; any other exception is
+    ``TaskLoopCreateFailed``, which repeats.
     Retry condition: the child fails its boot, and the worker starts a new
-    child for the next boot attempt. That attempt succeeds once the process
-    has descriptors free.
+    child for the next boot attempt. A ``ResourceShortage`` attempt succeeds
+    once the process has the resource free.
     """
 
+    cause: ResourceShortage | TaskLoopCreateFailed
     error_name: str
     detail: str
 
@@ -287,7 +298,7 @@ def _coroutine_name(task: asyncio.Task[Any]) -> str:
 
 def _new_loop() -> Result[asyncio.AbstractEventLoop, LoopCreateFailed]:
     """Create an event loop. An ``Exception`` from the creation becomes
-    ``LoopCreateFailed``, with its type and message.
+    ``LoopCreateFailed``, with its cause, type and message.
 
     ``asyncio.new_event_loop()`` runs the runtime the child depends on: the
     event loop policy, which user code can set, and the OS, which can refuse
@@ -303,7 +314,11 @@ def _new_loop() -> Result[asyncio.AbstractEventLoop, LoopCreateFailed]:
     try:
         loop = asyncio.new_event_loop()
     except Exception as exc:
-        failed = LoopCreateFailed(error_name=type(exc).__name__, detail=str(exc))
+        failed = LoopCreateFailed(
+            cause=shortage_or(exc, TaskLoopCreateFailed()),
+            error_name=type(exc).__name__,
+            detail=str(exc),
+        )
         logger.error('%s', failed.describe())
         return Err(failed)
     register_task_loop(loop)

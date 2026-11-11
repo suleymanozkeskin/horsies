@@ -40,7 +40,6 @@ from horsies.core.models.boot_failure import (
     AppLoadFailed,
     ChildPoolSetupFailed,
     ReportedBootCause,
-    TaskLoopCreateFailed,
     ThreadStartRefused,
     ThreadStartRefusedError,
     shortage_or,
@@ -384,9 +383,10 @@ def open_task_loop_at_boot(
     """Return the task loop of this child, open when its app has an
     ``async def`` task, and not created when it has none.
 
-    ``Err``: the loop could not be created, so the cause is
-    ``TaskLoopCreateFailed``. The caller fails the boot before the ready
-    frame, so no task reaches this child.
+    ``Err``: the loop could not be created. The cause is that of
+    ``LoopCreateFailed``: ``ResourceShortage`` for an errno in
+    ``CLEARABLE_ERRNOS``, else ``TaskLoopCreateFailed``. The caller fails the
+    boot before the ready frame, so no task reaches this child.
     """
     task_loop = TaskLoop()
     match presence:
@@ -401,7 +401,7 @@ def open_task_loop_at_boot(
 
 
 def _loop_create_failure(failed: LoopCreateFailed) -> BootFailedFrame:
-    return boot_failed_frame(TaskLoopCreateFailed(), failed.error_name, failed.detail)
+    return boot_failed_frame(failed.cause, failed.error_name, failed.detail)
 
 
 def fail_boot(sock: socket.socket, failed: BootFailedFrame) -> NoReturn:

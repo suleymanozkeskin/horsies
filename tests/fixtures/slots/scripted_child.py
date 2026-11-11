@@ -15,9 +15,10 @@ program is replaced: each run is a scripted ``def`` call on the seat thread
 
 Each boot that passes reports an app with ``async def`` tasks, so ``serve``
 creates the task loop, except the ``no_async`` modes. The ``loop_*`` modes make
-that creation raise ``OSError(EMFILE)``. The ``report_*`` and ``short_*`` modes
-return a boot failure frame with a named cause, as ``child_main.boot_app``
-does.
+that creation raise ``OSError(EMFILE)``, except ``loop_policy_refuses_on_slot``,
+whose policy raises ``NotImplementedError`` in one slot. The ``report_*`` and
+``short_*`` modes return a boot failure frame with a named cause, as
+``child_main.boot_app`` does.
 """
 
 # pyright: reportPrivateUsage=false
@@ -92,6 +93,10 @@ def _no_descriptors() -> asyncio.AbstractEventLoop:
     raise OSError(errno.EMFILE, 'Too many open files')
 
 
+def _policy_refuses() -> asyncio.AbstractEventLoop:
+    raise NotImplementedError('this policy cannot build a loop here')
+
+
 def _boot_mark(path: str) -> int:
     """Add one mark for this boot. Return the marks so far, this one included."""
     with open(path, 'a+', encoding='ascii') as marks:
@@ -110,6 +115,10 @@ def _loop_boot(mode: str, argument: str, init: InitFrame) -> AsyncTaskPresence:
             return AsyncTaskPresence.NO_ASYNC_TASK
         case 'loop_create_fails':
             asyncio.new_event_loop = _no_descriptors
+        case 'loop_policy_refuses_on_slot':
+            # Only the slot named in the argument has a policy that raises.
+            if _slot_index(init) == int(argument):
+                asyncio.new_event_loop = _policy_refuses
         case 'loop_fails_first':
             # The first boots cannot create the loop, then boots pass.
             if _boot_mark(argument) <= int(init.imports[0]):
@@ -186,6 +195,7 @@ def _boot(init: InitFrame) -> Result[AsyncTaskPresence, BootFailedFrame]:
             'no_async'
             | 'no_async_no_descriptors'
             | 'loop_create_fails'
+            | 'loop_policy_refuses_on_slot'
             | 'loop_fails_first'
             | 'loop_fails_after_first'
         ):

@@ -1112,7 +1112,7 @@ class TestBootFailureFromException:
             ),
         )
 
-    def test_a_loop_that_cannot_be_created_is_task_loop_create_failed(
+    def test_a_loop_short_of_descriptors_is_a_resource_shortage(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -1123,10 +1123,36 @@ class TestBootFailureFromException:
         result = child_main.open_task_loop_at_boot(AsyncTaskPresence.HAS_ASYNC_TASKS)
         assert result == Err(
             boot_failed_frame(
-                TaskLoopCreateFailed(),
+                ResourceShortage(ShortageErrno.EMFILE),
                 'OSError',
                 '[Errno 24] Too many open files',
             ),
+        )
+
+    @pytest.mark.parametrize(
+        'error',
+        [
+            NotImplementedError('this policy cannot build a loop here'),
+            RuntimeError('the event loop policy refuses'),
+            OSError(errno.ENOENT, 'No such file or directory'),
+        ],
+        ids=['policy-not-implemented', 'policy-runtime', 'enoent'],
+    )
+    def test_a_loop_that_fails_the_same_way_each_boot_is_task_loop_create_failed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        error: Exception,
+    ) -> None:
+        """An event loop policy that raises, or an errno outside the table,
+        fails every boot the same way, so the cause repeats."""
+
+        def refuses() -> object:
+            raise error
+
+        monkeypatch.setattr(asyncio, 'new_event_loop', refuses)
+        result = child_main.open_task_loop_at_boot(AsyncTaskPresence.HAS_ASYNC_TASKS)
+        assert result == Err(
+            boot_failed_frame(TaskLoopCreateFailed(), type(error).__name__, str(error)),
         )
 
     def test_an_app_with_no_async_task_gets_no_loop(self) -> None:

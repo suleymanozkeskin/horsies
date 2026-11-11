@@ -93,9 +93,11 @@ class ResourceShortage:
 @dataclass(frozen=True, slots=True)
 class TaskLoopCreateFailed:
     """The app has an ``async def`` task, and the child could not create the
-    event loop for it.
+    event loop for it, for a cause other than an errno in
+    ``CLEARABLE_ERRNOS``: for example an event loop policy that raises.
 
-    This cause can clear.
+    The same code and settings fail again, so this cause repeats. An errno in
+    ``CLEARABLE_ERRNOS`` is a ``ResourceShortage`` instead.
     """
 
 
@@ -126,10 +128,14 @@ class ThreadStartRefusedError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class SpawnFailed:
-    """The OS refused to start the child process, or a forked child did not
-    reach the worker in time. The worker parent sees this cause, not the child.
+    """The OS refused to start the child process with an errno outside
+    ``CLEARABLE_ERRNOS``, for example ``ENOENT`` or ``EACCES`` for the
+    interpreter, or a forked child did not reach the worker in time. The
+    worker parent sees this cause, not the child.
 
-    This cause can clear.
+    The worker cannot tell that the next start differs, so this cause
+    repeats. An errno in ``CLEARABLE_ERRNOS`` is a ``ResourceShortage``
+    instead.
     """
 
 
@@ -158,9 +164,7 @@ ReportedBootCause: TypeAlias = (
     | TaskLoopCreateFailed
     | ThreadStartRefused
 )
-ClearableBootCause: TypeAlias = (
-    ResourceShortage | TaskLoopCreateFailed | ThreadStartRefused | SpawnFailed
-)
+ClearableBootCause: TypeAlias = ResourceShortage | ThreadStartRefused
 ModelBootCause: TypeAlias = ReportedBootCause | SpawnFailed
 
 

@@ -30,12 +30,14 @@ and there is no migration contract between pre-1.0 versions.
     a generator function is.
   - A child whose app has an `async def` task creates its event loop at
     boot, before it reports ready. A child whose app has none creates no
-    loop. When the loop cannot be created, for example with EMFILE or an
-    event loop policy that raises, the child fails its boot, and no task
-    reaches it. That cause can clear, so only that slot is down (see the
-    change to child start failures below). The log names the slot and the
-    cause, for example `Slot 1 is down: the child could not create the event
-    loop for async tasks: OSError: [Errno 24] Too many open files`.
+    loop. When the loop cannot be created, the child fails its boot, and no
+    task reaches it. An `OSError` with `EMFILE`, `ENFILE`, `ENOMEM` or
+    `EAGAIN` can clear, so only that slot is down (see the change to child
+    start failures below). The log names the slot and the cause, for example
+    `Slot 1 is down: the OS ran short of a resource (EMFILE): OSError:
+    [Errno 24] Too many open files`. Any other failure, such as an event loop
+    policy that raises, repeats (`TaskLoopCreateFailed`) and counts one of
+    three attempts.
   - The task loop of a worker child does not count against the broker's
     limit of 5 open caller loops (`EVENT_LOOP_LIMIT`), as the broker's sync
     runner loop does not. An async task that calls the broker gives the task
@@ -62,9 +64,9 @@ and there is no migration contract between pre-1.0 versions.
   `WorkerStateSnapshot.slot_health` is `AllSlotsServing()`,
   `SlotsDown(slots)`, or `SlotHealthNotRecorded()` for a snapshot that a
   worker without this field wrote. Each `DownSlot` holds the slot index, the
-  cause (`ResourceShortage(errno_name)`, `TaskLoopCreateFailed()`,
-  `ThreadStartRefused()` or `SpawnFailed()`), the error text of the last
-  failed start (at most 2400 characters), `down_since`, and `failed_boots`.
+  cause (`ResourceShortage(errno_name)` or `ThreadStartRefused()`), the
+  error text of the last failed start (at most 2400 characters),
+  `down_since`, and `failed_boots`.
   `list_worker_states()`, `get_worker_state()` and
   `get_worker_state_history()` return it. A stored value of another shape
   fails the read with `MONITORING_QUERY_FAILED`. Schema v53 adds the column
@@ -350,17 +352,21 @@ and there is no migration contract between pre-1.0 versions.
   cause to the worker before it exits.
   - A cause that is the same on every attempt still counts one of three
     attempts, and the third stops the worker: the app or a task module does
-    not import, the child connection pool cannot be set up, the child dies
-    with no report, or it is not ready within 120 seconds. A failed
-    `on_child_process_start` hook still stops the worker at once.
+    not import, the child connection pool cannot be set up, the event loop
+    for `async def` tasks cannot be created for a cause other than the
+    errno values below (for example an event loop policy that raises), the
+    OS refuses the spawn with another errno (for example `ENOENT` or
+    `EACCES` for the interpreter), a forked child does not reach the worker
+    in 5 seconds, the child dies with no report, or it is not ready within
+    120 seconds. A failed `on_child_process_start` hook still stops the
+    worker at once.
   - A cause that can clear takes only that slot down: `OSError` with
-    `EMFILE`, `ENFILE`, `ENOMEM` or `EAGAIN` in a start step, an event loop
-    for `async def` tasks that cannot be created, a thread that the OS
-    refuses at the start (the control thread, the watchdog of a start hook, a
-    thread of the connection pool), or a spawn that the OS refuses. Before,
-    each of these used an attempt, and the worker stopped after three, also
-    while other children served tasks. A spawn refusal stopped the worker at
-    once.
+    `EMFILE`, `ENFILE`, `ENOMEM` or `EAGAIN` in a start step of the child or
+    of the worker (the socket pair of the child, the spawn, the event loop),
+    or a thread that the OS refuses at the start (the control thread, the
+    watchdog of a start hook, a thread of the connection pool). Before, each
+    of these used an attempt, and the worker stopped after three, also while
+    other children served tasks. A spawn refusal stopped the worker at once.
   - A slot that is down takes no task, and the claim passes only the slots
     that are not down as the worker's process count. The worker starts a new
     child for that slot after 1 second, then 2, 4, up to 60 seconds, and

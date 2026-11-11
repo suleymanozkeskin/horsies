@@ -670,7 +670,12 @@ class NotReadyInTime:
 
 
 RepeatingBootCause: TypeAlias = (
-    AppLoadFailed | ChildPoolSetupFailed | LostBeforeReady | NotReadyInTime
+    AppLoadFailed
+    | ChildPoolSetupFailed
+    | TaskLoopCreateFailed
+    | SpawnFailed
+    | LostBeforeReady
+    | NotReadyInTime
 )
 BootFailureCause: TypeAlias = RepeatingBootCause | ClearableBootCause
 
@@ -1161,7 +1166,7 @@ class Child:
             )
         except OSError as exc:
             parent_sock.close()
-            return Err(boot_failure(SpawnFailed(), f'{type(exc).__name__}: {exc}'))
+            return Err(spawn_failure(exc))
         finally:
             child_sock.close()
         return Ok(await cls._attach_registered(process, parent_sock, init, registry))
@@ -2623,16 +2628,13 @@ class SlotPool:
             case (
                 AppLoadFailed()
                 | ChildPoolSetupFailed()
+                | TaskLoopCreateFailed()
+                | SpawnFailed()
                 | LostBeforeReady()
                 | NotReadyInTime()
             ):
                 return _AttemptCount.COUNTS
-            case (
-                ResourceShortage()
-                | TaskLoopCreateFailed()
-                | ThreadStartRefused()
-                | SpawnFailed()
-            ):
+            case ResourceShortage() | ThreadStartRefused():
                 every_other_down = all(
                     isinstance(other.state, Down)
                     for other in self._all_slots()
@@ -2650,16 +2652,13 @@ class SlotPool:
         """Set the slot state after a failed boot, log it, and return the wait
         before the next boot."""
         match failed.cause:
-            case (
-                ResourceShortage()
-                | TaskLoopCreateFailed()
-                | ThreadStartRefused()
-                | SpawnFailed()
-            ):
+            case ResourceShortage() | ThreadStartRefused():
                 return self._mark_down(slot, failed.cause, failed.detail, counted)
             case (
                 AppLoadFailed()
                 | ChildPoolSetupFailed()
+                | TaskLoopCreateFailed()
+                | SpawnFailed()
                 | LostBeforeReady()
                 | NotReadyInTime()
             ):

@@ -76,11 +76,11 @@ async def watch_price(*, symbol: str) -> TaskResult[float, TaskError]:
         await asyncio.gather(helper, return_exceptions=True)
 ```
 
-A child creates its event loop at boot, before it reports ready, when the app has at least one `async def` task. A child of an app with no `async def` task creates no loop. When the loop cannot be created, for example because the process has no file descriptor left or an event loop policy raises:
+A child creates its event loop at boot, before it reports ready, when the app has at least one `async def` task. A child of an app with no `async def` task creates no loop. When the loop cannot be created:
 
 - The child fails its boot, and no task reaches it.
-- The cause can clear, so the slot is down: it takes no task, and the worker starts a new child for it after a growing wait. Other children continue. When every slot is down, the worker exits non-zero after three failed attempts, so its supervisor restarts it. See [Child Start Failures](/horsies/workers/worker-architecture/#child-start-failures).
-- The log names the slot and the cause, for example `Slot 1 is down: the child could not create the event loop for async tasks: OSError: [Errno 24] Too many open files`.
+- An `OSError` with `EMFILE`, `ENFILE`, `ENOMEM` or `EAGAIN` (the process has no file descriptor left, for example) can clear, so the slot is down: it takes no task, and the worker starts a new child for it after a growing wait. Other children continue. When every slot is down, the worker exits non-zero after three failed attempts, so its supervisor restarts it. The log names the slot and the cause, for example `Slot 1 is down: the OS ran short of a resource (EMFILE): OSError: [Errno 24] Too many open files`.
+- Any other failure, such as an event loop policy that raises, is the same on every start, so it repeats (`TaskLoopCreateFailed`): each failed start counts one of three attempts, also while other children serve, and the third stops the worker. See [Child Start Failures](/horsies/workers/worker-architecture/#child-start-failures).
 
 In an async task, send with `.send_async()` or `.schedule_async()`. The sync `.send()` and `.schedule()` refuse a running event loop: they return `Err(TaskSendAsyncContext)` and enqueue nothing. See [Sending Tasks](/horsies/tasks/sending-tasks/).
 

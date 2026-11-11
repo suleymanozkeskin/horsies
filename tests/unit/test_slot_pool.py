@@ -243,9 +243,7 @@ def _alive(pid: int) -> bool:
 
 
 EMFILE_DETAIL = 'OSError: [Errno 24] Too many open files'
-EMFILE_LOOP_DETAIL = (
-    f'the child could not create the event loop for async tasks: {EMFILE_DETAIL}'
-)
+EMFILE_DOWN_TEXT = f'the OS ran short of a resource (EMFILE): {EMFILE_DETAIL}'
 
 
 async def _until(predicate: Callable[[], bool], timeout_s: float = 10.0) -> None:
@@ -421,7 +419,7 @@ class TestBoot:
         try:
             frame = await child.await_frame(OUTCOME_TIMEOUT_S)
             assert frame == BootFailedFrame(
-                cause=TaskLoopCreateFailed(),
+                cause=ResourceShortage(ShortageErrno.EMFILE),
                 error_name='OSError',
                 detail='[Errno 24] Too many open files',
             )
@@ -436,7 +434,7 @@ class TestBoot:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """The cause can clear, but no other slot can serve, so each failed
+        """EMFILE can clear, but no other slot can serve, so each failed
         boot counts, and the log line of each names the slot, the cause, the
         count and the next wait."""
         monkeypatch.setattr(slots, 'SLOT_DOWN_FIRST_DELAY_S', 0.01)
@@ -448,7 +446,7 @@ class TestBoot:
         assert started == Err(
             BootAttemptsExhausted(
                 attempts=CHILD_BOOT_ATTEMPTS,
-                cause=TaskLoopCreateFailed(),
+                cause=ResourceShortage(ShortageErrno.EMFILE),
                 detail=EMFILE_DETAIL,
             ),
         )
@@ -458,7 +456,7 @@ class TestBoot:
             if record.getMessage().startswith('Slot 0 is down')
         ]
         assert down_lines == [
-            f'Slot 0 is down: {EMFILE_LOOP_DETAIL}. Failed boots: {number}, '
+            f'Slot 0 is down: {EMFILE_DOWN_TEXT}. Failed boots: {number}, '
             f'counted attempts: {number}/{CHILD_BOOT_ATTEMPTS}. '
             f'Next boot in {slots.slot_down_delay_s(number):.1f}s'
             for number in range(1, CHILD_BOOT_ATTEMPTS + 1)
@@ -518,18 +516,18 @@ class TestBoot:
 
             assert failure == BootAttemptsExhausted(
                 attempts=CHILD_BOOT_ATTEMPTS,
-                cause=TaskLoopCreateFailed(),
+                cause=ResourceShortage(ShortageErrno.EMFILE),
                 detail=EMFILE_DETAIL,
             )
             assert await _outcome(waiting) == NotDispatched(NotRunCause.POOL_FAILED)
         finally:
             await pool.stop(0)
 
-    async def test_a_spawn_failure_is_a_cause_that_can_clear(
+    async def test_a_spawn_of_a_missing_interpreter_counts(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The only slot cannot spawn, so its failed spawns count."""
+        """ENOENT is not in the errno table, so the cause repeats."""
         monkeypatch.setattr(slots, 'SLOT_DOWN_FIRST_DELAY_S', 0.01)
         pool = SlotPool(_config(), pending_limit=10)
         real_executable = sys.executable
@@ -549,6 +547,61 @@ class TestBoot:
         finally:
             sys.executable = real_executable
         await pool.stop(0)
+
+    async def test_a_missing_interpreter_stops_the_worker_while_another_slot_serves(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Slot 1 replaces its child after the interpreter path went away.
+        ENOENT fails every spawn the same way, so the failed spawns count
+        although slot 0 serves, and the pool fails instead of keeping slot 1
+        down for the life of the worker."""
+        monkeypatch.setattr(slots, 'CHILD_BOOT_RETRY_DELAY_S', 0.01)
+        pool = await _started_pool(_config(2, child_entry=(SCRIPTED_CHILD,)))
+        try:
+            replaced = pool._slots[1].child
+            assert replaced is not None
+            monkeypatch.setattr(sys, 'executable', '/nonexistent/python')
+            os.kill(replaced.pid, signal.SIGKILL)
+
+            failure = await asyncio.wait_for(pool.wait_failed(), OUTCOME_TIMEOUT_S)
+            monkeypatch.undo()
+
+            match failure:
+                case BootAttemptsExhausted(
+                    attempts=slots.CHILD_BOOT_ATTEMPTS,
+                    cause=SpawnFailed(),
+                    detail=detail,
+                ):
+                    assert detail.startswith('FileNotFoundError:')
+                case other:
+                    raise AssertionError(other)
+        finally:
+            await pool.stop(0)
+
+    async def test_a_loop_policy_that_raises_stops_the_worker_while_another_slot_serves(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The event loop policy of slot 1 raises on every boot. That cause
+        repeats, so its failed boots count although slot 0 serves."""
+        monkeypatch.setattr(slots, 'CHILD_BOOT_RETRY_DELAY_S', 0.01)
+        pool = SlotPool(
+            _config(2, init=_init('loop_policy_refuses_on_slot:1')),
+            pending_limit=10,
+        )
+        try:
+            started = await asyncio.wait_for(pool.start(), OUTCOME_TIMEOUT_S)
+
+            assert started == Err(
+                BootAttemptsExhausted(
+                    attempts=CHILD_BOOT_ATTEMPTS,
+                    cause=TaskLoopCreateFailed(),
+                    detail='NotImplementedError: this policy cannot build a loop here',
+                ),
+            )
+        finally:
+            await pool.stop(0)
 
     async def test_child_program_receives_socket_and_parent_pid(self) -> None:
         child_entry = ('-c', 'import sys; sys.exit(0 if len(sys.argv) == 3 else 9)')

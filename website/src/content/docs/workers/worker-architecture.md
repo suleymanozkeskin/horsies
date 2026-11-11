@@ -385,11 +385,11 @@ A child that cannot start reports the cause of the failure to the worker, before
 | The child connection pool cannot be set up, for example a URL that does not parse (`ChildPoolSetupFailed`) | Repeats | Counts an attempt |
 | The child dies with no report: a crash in native code, `os._exit()` in app code (`LostBeforeReady`) | Repeats | Counts an attempt |
 | No ready report within 120 seconds (`NotReadyInTime`) | Repeats | Counts an attempt |
+| The child cannot create its event loop for `async def` tasks for a cause other than the errno values below, for example an event loop policy that raises (`TaskLoopCreateFailed`) | Repeats | Counts an attempt |
+| The OS refuses to start the child process with another errno, for example `ENOENT` or `EACCES` for the interpreter, or a forked child does not reach the worker in 5 seconds (`SpawnFailed`) | Repeats | Counts an attempt |
 | An `on_child_process_start` [hook](/horsies/workers/child-process-hooks/) fails | Repeats | Stops the worker at once |
-| A boot step fails with `OSError` `EMFILE`, `ENFILE`, `ENOMEM` or `EAGAIN` (`ResourceShortage`) | Can clear | Takes the slot down |
-| The child cannot create its event loop for `async def` tasks (`TaskLoopCreateFailed`) | Can clear | Takes the slot down |
+| A start step of the child or of the worker (the socket pair, the spawn, the event loop) fails with `OSError` `EMFILE`, `ENFILE`, `ENOMEM` or `EAGAIN` (`ResourceShortage`) | Can clear | Takes the slot down |
 | The OS refuses a thread that the child starts at boot: the control thread, the watchdog of a start hook, a thread of the connection pool (`ThreadStartRefused`) | Can clear | Takes the slot down |
-| The OS refuses to start the child process (`SpawnFailed`) | Can clear | Takes the slot down |
 
 A child that dies with no report names no cause, so the worker counts it as a cause that repeats. The worker cannot tell a crash that clears from a crash in the code. Counting it stops a worker whose code crashes at every start, instead of keeping a slot down with no end.
 

@@ -127,9 +127,9 @@ list_schedules(broker)
   `get_class_report_async`.
 - A snapshot's `slot_health` is `AllSlotsServing()`, `SlotsDown(slots)` (the
   worker is degraded) or `SlotHealthNotRecorded()` (a worker version without
-  the field). Each `DownSlot` has `slot`, `cause` (`ResourceShortage(errno_name)`,
-  `TaskLoopCreateFailed()`, `ThreadStartRefused()`, `SpawnFailed()`), `detail`
-  (at most 2400 characters), `down_since` and `failed_boots`. A slot is down
+  the field). Each `DownSlot` has `slot`, `cause` (`ResourceShortage(errno_name)`
+  or `ThreadStartRefused()`), `detail` (at most 2400 characters),
+  `down_since` and `failed_boots`. A slot is down
   when its child start failed for a cause that can clear; it takes no task and
   boots again after a growing wait. Match all three variants.
 - A snapshot's `class_capacity` is `ClassBudgets(budgets)` or
