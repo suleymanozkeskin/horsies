@@ -351,6 +351,7 @@ config = AppConfig(
 **Behavior:**
 - Prefetch allowed: workers can claim tasks ahead of execution
 - Lease expiry: prefetched claims expire and can be reclaimed by other workers
+- No prefetch without capacity: a budget whose children or seats are all down (capacity in service 0) claims no row, and neither does a worker whose budgets are all at 0. Its rows stay for a worker with seats.
 - Soft limit: RUNNING tasks can exceed the cap — buffered CLAIMED tasks don't count against it and dispatch without a re-check, so the excess persists while those tasks run and scales with worker count (see [Soft-cap overshoot](#operational-notes))
 
 **Important:** `cluster_wide_cap` and `prefetch_buffer > 0` cannot be combined. If you need a global cap, use hard cap mode.
@@ -511,12 +512,19 @@ hard_cap_mode = prefetch_buffer == 0
 extra = 0 if hard_cap_mode else prefetch_buffer
 
 # One budget per budget class of the claim plan
+# A budget with no capacity in service gets no prefetch.
 for budget in budgets:
     in_flight = count_running_and_claimed_for_worker(budget.classes)
-    budget.available = budget.capacity + extra - in_flight
+    if budget.capacity == 0:
+        budget.available = 0
+    else:
+        budget.available = budget.capacity + extra - in_flight
 
 capacity = sum(budget.capacity for budget in budgets)
-local_budget = capacity + extra - count_running_and_claimed_for_worker()
+if capacity == 0:
+    local_budget = 0
+else:
+    local_budget = capacity + extra - count_running_and_claimed_for_worker()
 
 # Global budget (if cluster_wide_cap set)
 if cluster_wide_cap:

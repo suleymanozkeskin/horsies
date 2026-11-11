@@ -402,6 +402,56 @@ class TestBudgets:
             'SHARED_ASYNC': 1,
         }
 
+    async def test_a_budget_with_no_capacity_in_service_gets_no_prefetch(
+        self,
+        clean_workflow_tables: None,
+        broker: PostgresBroker,
+        session: AsyncSession,
+    ) -> None:
+        """Every SHARED_ASYNC seat is down (capacity 0) and prefetch is 3. The
+        async rows rank first and stay for a worker with seats; the ISOLATED
+        budget of 1 still prefetches 3."""
+        for _ in range(5):
+            await _seed(session, execution='SHARED_ASYNC', priority=1)
+            await _seed(session, execution='ISOLATED', priority=2)
+        await session.commit()
+
+        claimed = await _claim(
+            broker,
+            _params(
+                worker_id=_worker_id(),
+                budgets={'ISOLATED': 1, 'SHARED_ASYNC': 0},
+                routes=ISOLATED_AND_ASYNC_ROUTES,
+                prefetch_buffer=3,
+            ),
+        )
+
+        assert Counter(execution for _, execution in claimed) == {'ISOLATED': 4}
+
+    async def test_a_worker_with_no_capacity_in_service_claims_nothing(
+        self,
+        clean_workflow_tables: None,
+        broker: PostgresBroker,
+        session: AsyncSession,
+    ) -> None:
+        """Every child of the worker is down: prefetch takes no row."""
+        for _ in range(3):
+            await _seed(session, execution='SHARED_ASYNC')
+            await _seed(session, execution='ISOLATED')
+        await session.commit()
+
+        claimed = await _claim(
+            broker,
+            _params(
+                worker_id=_worker_id(),
+                budgets={'ISOLATED': 0, 'SHARED_ASYNC': 0},
+                routes=ISOLATED_AND_ASYNC_ROUTES,
+                prefetch_buffer=2,
+            ),
+        )
+
+        assert claimed == []
+
     async def test_a_route_to_a_budget_that_is_not_passed_is_refused(
         self,
         clean_workflow_tables: None,

@@ -301,8 +301,11 @@ and there is no migration contract between pre-1.0 versions.
   - `ClaimLimits.per_queue_per_pass`, `ClaimLimits.claimed_per_worker`, the
     queue caps and `cluster_wide_cap` apply to the worker as a whole. In soft
     cap mode each budget, and the worker, may hold `prefetch_buffer` rows
-    more than its capacity. The capacity that `HRS-218` compares with is the
-    sum of the budgets plus `prefetch_buffer`.
+    more than its capacity. A budget whose capacity in service is 0 (every
+    child or seat of it is down) gets no prefetch, and neither does a worker
+    whose budgets are all at 0: their rows stay for a worker with seats. The
+    capacity that `HRS-218` compares with is the sum of the budgets plus
+    `prefetch_buffer`.
   - A claimed row of a shared class whose task, as this worker registered it,
     has another class (for example `SHARED_ASYNC` on the row, and the
     function is now `def`) is written `ISOLATED` and returned to `PENDING`,

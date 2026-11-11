@@ -581,7 +581,11 @@ ANALYZE_EXPRESSION_INDEXED_TABLES_SQL = text("""
 # This worker's RUNNING and live CLAIMED rows count against the budget that
 # their class routes to. The capacity of the worker is the sum over its
 # budgets. In soft cap mode each budget, and the worker, may hold
-# p_prefetch_buffer rows more than its capacity. p_max_claim_per_worker,
+# p_prefetch_buffer rows more than its capacity. A budget whose capacity in
+# service is 0 (every child or seat of it is down) gets no prefetch, and
+# neither does a worker whose budgets all have capacity 0: such a worker
+# would hold rows that no child of it can run, while other workers have
+# seats for them. p_max_claim_per_worker,
 # p_max_claim_batch, the queue caps and p_cluster_wide_cap keep their meaning
 # for the worker as a whole.
 #
@@ -717,7 +721,10 @@ BEGIN
         RETURN;
     END IF;
 
-    v_local_available := GREATEST(0, v_capacity + v_extra - v_my_in_flight);
+    -- A worker with no capacity in service gets no prefetch.
+    v_local_available := CASE
+        WHEN v_capacity = 0 THEN 0
+        ELSE GREATEST(0, v_capacity + v_extra - v_my_in_flight) END;
 
     IF p_cluster_wide_cap IS NOT NULL THEN
         v_global_remaining := GREATEST(0, p_cluster_wide_cap - v_global_in_flight);
@@ -731,10 +738,13 @@ BEGIN
         RETURN;
     END IF;
 
+    -- A budget with no capacity in service gets no prefetch.
     SELECT COALESCE(jsonb_object_agg(
                b.budget_class,
-               GREATEST(0, b.capacity::int + v_extra
-                   - COALESCE((v_budget_counts ->> b.budget_class)::int, 0))
+               CASE WHEN b.capacity::int = 0 THEN 0
+                   ELSE GREATEST(0, b.capacity::int + v_extra
+                       - COALESCE((v_budget_counts ->> b.budget_class)::int, 0))
+                   END
            ), '{}'::jsonb)
     INTO v_available
     FROM jsonb_each_text(p_budgets) AS b(budget_class, capacity);
