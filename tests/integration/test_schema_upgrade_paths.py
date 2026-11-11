@@ -1884,7 +1884,7 @@ class TestUpgradePaths:
                 )
             await _migrate(scratch_database)
             async with engine.connect() as conn:
-                assert await _stored_version(engine) == SCHEMA_VERSION == 56
+                assert await _stored_version(engine) == SCHEMA_VERSION
                 installed = (await conn.execute(program_sql)).all()
                 assert (await conn.execute(type_sql)).scalar_one() == 1
             # The installed body runs: a partial retry request is refused
@@ -3087,6 +3087,12 @@ class TestBatchedCompletionMigration:
                 )
                 await connection.execute(
                     text('DELETE FROM horsies_schema_version WHERE version > 56')
+                )
+                await connection.execute(
+                    text(
+                        'INSERT INTO horsies_schema_version(version) VALUES (56) '
+                        'ON CONFLICT DO NOTHING'
+                    )
                 )
                 await connection.commit()
             assert await _stored_version(engine) == 56
