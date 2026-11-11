@@ -242,7 +242,9 @@ and there is no migration contract between pre-1.0 versions.
     shared child. The claim limit check (`HRS-218`) compares with it plus
     `prefetch_buffer`; the connection check (`HRS-219`) and the memory
     warning count the shared children; the boot memory guard compares each
-    mode's limit with the baseline of a child of that mode.
+    mode's limit with the baseline of a child of that mode. A mode whose
+    children were all down at the start is compared when its first child
+    becomes ready, and a breach then stops the worker non-zero.
 
 - **Shared thread children run `SHARED_THREAD` tasks, many at once.**
   `WorkerProfile.shared_thread` takes `SharedThreadChildren(count, seats,

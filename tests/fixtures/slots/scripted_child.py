@@ -169,6 +169,12 @@ def _report_boot(
             # The first boots are short of descriptors, then boots pass.
             if _boot_mark(argument) <= int(init.imports[0]):
                 return Err(_SHORT_OF_DESCRIPTORS)
+        case 'short_first_on_slot':
+            # The slot in imports[0] is short of descriptors for its first
+            # imports[1] boots, then its boots pass.
+            if _slot_index(init) == int(init.imports[0]):
+                if _boot_mark(argument) <= int(init.imports[1]):
+                    return Err(_SHORT_OF_DESCRIPTORS)
         case 'short_after_first':
             # The first boots pass, then the next boots are short of descriptors.
             seen = _boot_mark(argument)
@@ -206,6 +212,7 @@ def _boot(init: InitFrame) -> Result[AsyncTaskPresence, BootFailedFrame]:
             | 'short_always'
             | 'short_on_slot'
             | 'short_first'
+            | 'short_first_on_slot'
             | 'short_after_first'
             | 'short_then_hang'
         ):

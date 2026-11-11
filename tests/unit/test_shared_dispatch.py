@@ -13,7 +13,7 @@ import asyncio
 import json
 from collections.abc import Coroutine
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -928,3 +928,62 @@ class TestSharedMemoryBaseline:
         worker._check_memory_baseline(
             (ChildBaseline(1, RssMb(500.0), SharedAsyncChild(seats=4)),),
         )
+
+
+class _NewKindBaselines:
+    """The pool side of the guard of a kind that was down at the first
+    start: each baseline once, then no more."""
+
+    def __init__(self, *baselines: ChildBaseline) -> None:
+        self._baselines: asyncio.Queue[ChildBaseline] = asyncio.Queue()
+        for baseline in baselines:
+            self._baselines.put_nowait(baseline)
+
+    async def wait_new_kind_baseline(self) -> ChildBaseline:
+        return await self._baselines.get()
+
+
+class TestNewKindBaselineGuard:
+    """Every shared async slot was down at the first start, so its kind had
+    no baseline then. Its first ready child gets the guard."""
+
+    def _worker(self) -> Worker:
+        recycle = SharedRecycle(above=MemoryLimit(mb=100))
+        return _worker(SharedAsyncChildren(count=1, seats=4, recycle=recycle))
+
+    @pytest.mark.asyncio
+    async def test_a_late_baseline_at_its_limit_stops_the_worker(self) -> None:
+        worker = self._worker()
+        pool = _NewKindBaselines(
+            ChildBaseline(1, RssMb(100.0), SharedAsyncChild(seats=4)),
+        )
+
+        await asyncio.wait_for(
+            worker._new_kind_baseline_loop(cast(SlotPool, pool)),
+            5.0,
+        )
+
+        assert worker._stop.is_set()
+        match worker._fatal_background_error:
+            case MemoryBaselineExceedsThresholdError() as error:
+                assert 'shared async' in str(error)
+            case other:
+                raise AssertionError(other)
+
+    @pytest.mark.asyncio
+    async def test_a_late_baseline_under_its_limit_keeps_the_worker(self) -> None:
+        worker = self._worker()
+        pool = _NewKindBaselines(
+            ChildBaseline(1, RssMb(50.0), SharedAsyncChild(seats=4)),
+        )
+        guard = asyncio.ensure_future(
+            worker._new_kind_baseline_loop(cast(SlotPool, pool)),
+        )
+
+        await asyncio.sleep(0.05)
+
+        assert not guard.done()
+        assert not worker._stop.is_set()
+        assert worker._fatal_background_error is None
+        guard.cancel()
+        await asyncio.gather(guard, return_exceptions=True)

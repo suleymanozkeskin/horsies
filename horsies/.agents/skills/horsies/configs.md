@@ -467,7 +467,9 @@ slot.
 - Startup **baseline guard**: each child samples its settled baseline RSS (after
   `gc.collect()`); the worker hard-fails if the threshold is at or below the
   warmed baseline (the app does not fit the per-child budget) and warns within
-  80% of it.
+  80% of it. A kind whose slots were all down at the start is checked when its
+  first child becomes ready; a breach then stops the worker (drain, exit
+  non-zero).
 - `mb` from 1 to 16,777,216 — no fixed floor, the baseline guard is the real floor.
 - At boot the worker warns (and still starts) when `count × mb` is above the
   usable memory: the cgroup limit (v2 `/sys/fs/cgroup/memory.max`, else v1

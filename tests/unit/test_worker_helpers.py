@@ -3516,6 +3516,56 @@ class TestStartupRegistersEveryClassItRuns:
 
 
 @pytest.mark.unit
+class TestStartGuardsKindsDownAtTheFirstStart:
+    """A kind whose slots were all down at the first start has no baseline
+    then. The test enters at ``worker.start()``: the guard of such a kind
+    runs only when the start spawns its loop as a service of the worker."""
+
+    @pytest.mark.asyncio
+    async def test_the_start_spawns_the_new_kind_baseline_loop(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from horsies.core.history.maintenance import coverage as coverage_module
+
+        async def _ensured(*_args: Any, **_kwargs: Any) -> Any:
+            return coverage_module.CoverageEnsured(
+                created_history_leaves=0,
+                created_heartbeat_leaves=0,
+                republished=False,
+                absent_leaves=(),
+                heartbeat_covered_now=True,
+                history_covered_through=datetime(2026, 1, 2, tzinfo=timezone.utc),
+                heartbeats_covered_through=datetime(2026, 1, 1, 1, tzinfo=timezone.utc),
+            )
+
+        monkeypatch.setattr(
+            coverage_module, 'ensure_startup_coverage_in_database', _ensured
+        )
+        worker = _make_worker()
+        worker.broker = MagicMock()
+        attach_resources(worker.broker, fake_resources())
+        worker.broker.validate_worker_database_paths = AsyncMock()
+        worker._preload_modules_main = MagicMock()  # type: ignore[assignment]
+        _stub_slot_start(worker)
+        worker.listener.start = AsyncMock(return_value=Ok(None))
+        worker.listener.listen_many = AsyncMock(return_value=Ok(None))
+        worker.listener.listen = AsyncMock(return_value=Ok(asyncio.Queue[object]()))
+        spawn = MagicMock()
+        worker._spawn_background = spawn  # type: ignore[assignment]
+
+        await worker.start()
+
+        calls = {call.kwargs['name']: call for call in spawn.call_args_list}
+        for call in spawn.call_args_list:
+            call.args[0].close()
+        watch = calls['new-kind-baseline-watch']
+        assert watch.kwargs['service'] is True
+        loop = Worker._new_kind_baseline_loop  # pyright: ignore[reportPrivateUsage]
+        assert watch.args[0].cr_code is loop.__code__
+
+
+@pytest.mark.unit
 class TestWorkerStartupCoverageOutcome:
     """The worker distinguishes fatal coverage from contained reports."""
 

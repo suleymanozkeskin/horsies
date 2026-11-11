@@ -2102,6 +2102,14 @@ class SlotPool:
         self._failure: PoolFailure | None = None
         self._failed: asyncio.Future[PoolFailure] = self._loop.create_future()
         self._baselines: dict[int, ChildBaseline] = {}
+        kinds = self._child_kinds()
+        assert kinds, 'a slot pool has at least one slot'
+        # The kinds whose baseline went to the memory guard: through ``start``
+        # for the first generation, through ``wait_new_kind_baseline`` after.
+        self._kinds_with_baseline: set[ChildKind] = set()
+        self._new_kind_baselines: asyncio.Queue[ChildBaseline] = asyncio.Queue(
+            maxsize=len(kinds),
+        )
         self._stop_requested: asyncio.Future[None] = self._loop.create_future()
         self._first_generation: asyncio.Future[None] = self._loop.create_future()
         self._preload: PreloadParent | None = None
@@ -2328,6 +2336,23 @@ class SlotPool:
     async def wait_failed(self) -> PoolFailure:
         """Wait until no replacement child can start. Fatal to the worker."""
         return await asyncio.shield(self._failed)
+
+    async def wait_new_kind_baseline(self) -> ChildBaseline:
+        """Wait for the baseline of the first ready child of a kind that had no
+        ready child in the first generation, for the baseline memory guard of
+        that kind. Each kind comes at most once; a kind of the first
+        generation never comes, as ``start`` returned its baselines."""
+        return await self._new_kind_baselines.get()
+
+    def _child_kinds(self) -> frozenset[ChildKind]:
+        """The kind of the children of each slot of the pool."""
+        isolated = (self._config.init.child_kind,) if self._slots else ()
+        return frozenset(
+            (
+                *isolated,
+                *(slot.kind for slot in (*self._shared_slots, *self._thread_slots)),
+            ),
+        )
 
     def states(self) -> tuple[SlotState, ...]:
         """Return the state of each isolated slot, for health reports and tests."""
@@ -2767,10 +2792,22 @@ class SlotPool:
         )
 
     def _note_ready(self, slot: _Slot | _SharedSlot, baseline: ChildBaseline) -> None:
-        if self._first_generation.done():
+        """Note the baseline of a ready child for the baseline memory guard.
+
+        In the first generation it goes to the result of ``start``. After it,
+        the first ready child of a kind with no baseline yet goes to
+        ``wait_new_kind_baseline``, once per kind: all slots of that kind were
+        down at the first start. Any other child adds nothing.
+        """
+        if not self._first_generation.done():
+            self._baselines[slot.index] = baseline
+            self._kinds_with_baseline.add(baseline.child_kind)
+            self._check_first_generation()
             return
-        self._baselines[slot.index] = baseline
-        self._check_first_generation()
+        if baseline.child_kind in self._kinds_with_baseline:
+            return
+        self._kinds_with_baseline.add(baseline.child_kind)
+        self._new_kind_baselines.put_nowait(baseline)
 
     def _check_first_generation(self) -> None:
         """The first generation is in once every slot booted once or is
