@@ -112,6 +112,7 @@ from horsies.core.worker.slots import (
 )
 from horsies.core.utils.db import (
     SingleStatement,
+    autocommit_connection,
     is_retryable_connection_error,
     run_in_autocommit,
 )
@@ -145,7 +146,6 @@ from horsies.core.worker.failed_attempt import (
     NoRetry,
     RetryRequest,
     RunningAttempt,
-    autocommit_connection,
     finish_failed_attempt,
     finish_for,
     read_in_flight_attempt,

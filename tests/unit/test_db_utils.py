@@ -18,6 +18,7 @@ from horsies.core.utils.db import (
     AUTOCOMMIT_EXECUTION_OPTIONS,
     SingleStatement,
     StatementRows,
+    autocommit_connection,
     is_dbapi_disconnect,
     is_retryable_connection_error,
     run_in_autocommit,
@@ -199,3 +200,21 @@ class TestRunInAutocommit:
         connection.execute.assert_awaited_once_with(statement, {'value': 1})
         assert AUTOCOMMIT_EXECUTION_OPTIONS == {'isolation_level': 'AUTOCOMMIT'}
         assert rows == StatementRows(columns=('outcome',), rows=(('APPLIED',),))
+
+
+@pytest.mark.unit
+class TestAutocommitConnection:
+    @pytest.mark.asyncio
+    async def test_it_asks_the_session_for_an_autocommit_connection(self) -> None:
+        """Several statements on one checkout, each its own transaction: the
+        session's connection with the one autocommit setting."""
+        connection = AsyncMock()
+        session = AsyncMock()
+        session.connection = AsyncMock(return_value=connection)
+
+        got = await autocommit_connection(session)
+
+        assert got is connection
+        session.connection.assert_awaited_once_with(
+            execution_options=dict(AUTOCOMMIT_EXECUTION_OPTIONS),
+        )

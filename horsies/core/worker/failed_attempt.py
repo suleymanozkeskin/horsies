@@ -12,8 +12,9 @@ function then takes the task advisory lock and the row lock under the full
 fence, with the retry count that was read as part of the fence, and writes
 the attempt row with the retry or the terminal failure.
 
-Both statements run in autocommit (``autocommit_connection``). Each is atomic
-alone, and the fence is the only link between them.
+Both statements run on one autocommit checkout
+(``horsies.core.utils.db.autocommit_connection``). Each is atomic alone, and
+the fence is the only link between them.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ from enum import Enum
 from typing import Any, assert_never
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from horsies.core.history.terminalization.move import (
     FINISH_FAILED_ATTEMPT_FUNCTION,
@@ -49,7 +50,6 @@ from horsies.core.lifecycle.outcomes import (
 )
 from horsies.core.logging import get_logger
 from horsies.core.types.status import TaskAttemptOutcome
-from horsies.core.utils.db import AUTOCOMMIT_EXECUTION_OPTIONS
 from horsies.core.utils.retry import (
     admitted_retry_policy,
     calculate_retry_delay,
@@ -96,21 +96,6 @@ class AttemptNotHeld:
 
 
 type InFlightAttempt = RunningAttempt | ClaimedAttempt | AttemptNotHeld
-
-
-async def autocommit_connection(session: AsyncSession) -> AsyncConnection:
-    """The connection of a session that has not begun, in autocommit.
-
-    Each statement on it commits alone: no BEGIN and no COMMIT round trip.
-    The session close sends nothing, and the pool gives the connection back
-    to the next session in transaction mode. Use it only for statements that
-    are each complete alone. ``run_in_autocommit`` runs one such statement
-    per checkout; a failure write runs the unlocked read, the finish (or the
-    requeue of a CLAIMED row) on one checkout.
-    """
-    return await session.connection(
-        execution_options=dict(AUTOCOMMIT_EXECUTION_OPTIONS),
-    )
 
 
 async def read_in_flight_attempt(

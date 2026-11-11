@@ -1,6 +1,17 @@
 # horsies/core/utils/db.py
 """Shared database helpers: transient error classification, engine hooks,
-and the one way to run a statement in autocommit (``run_in_autocommit``)."""
+and the worker's two ways to write without a transaction.
+
+Autocommit has one owner, this module, and one setting
+(``AUTOCOMMIT_EXECUTION_OPTIONS``). Two forms use it:
+
+- ``run_in_autocommit``: one statement on one checkout. It returns the rows
+  of the statement, read in full before the connection goes back.
+- ``autocommit_connection``: several statements on one checkout. Each
+  statement commits alone; nothing makes them commit together.
+
+A write whose statements must commit together runs in a transaction, never
+in one of these forms."""
 
 from __future__ import annotations
 
@@ -17,7 +28,12 @@ from sqlalchemy.exc import (
     OperationalError as SAOperationalError,
     TimeoutError as SATimeoutError,
 )
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+)
 
 
 def register_identity_text_reads(engine: AsyncEngine) -> None:
@@ -134,7 +150,31 @@ AUTOCOMMIT_EXECUTION_OPTIONS: Final[Mapping[str, str]] = {
     'isolation_level': 'AUTOCOMMIT',
 }
 """The SQLAlchemy execution options of a connection that runs each
-statement as its own transaction."""
+statement as its own transaction. ``autocommit_connection`` is the only
+reader."""
+
+
+async def autocommit_connection(session: AsyncSession) -> AsyncConnection:
+    """The connection of a session that has not begun, in autocommit.
+
+    Contract: several statements without a transaction. Each statement on
+    the connection commits when it ends: no BEGIN and no COMMIT round trip.
+    Nothing makes two statements commit together, so a caller sends a
+    statement only when it is complete alone. The fence of a later statement
+    is the only link to an earlier one; the failed-attempt write is the
+    example: an unlocked read, then a fenced write.
+
+    The session close sends nothing, and the pool gives the connection back
+    to the next session in the engine's isolation level. The locks that a
+    statement takes end with the statement.
+
+    Raises:
+        Exception: what the pool raises for the checkout: a pool timeout or
+            a connection error.
+    """
+    return await session.connection(
+        execution_options=dict(AUTOCOMMIT_EXECUTION_OPTIONS),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,11 +223,13 @@ async def run_in_autocommit(
 ) -> StatementRows:
     """Run one statement as its own transaction and return its rows.
 
-    Postgres commits the statement when it ends: no BEGIN and no COMMIT is
-    sent, so the call is one round trip, plus the pool pre-ping when the
-    engine has it on. The locks that the statement takes end with it. Use
-    it only for a write that is complete in one statement: a write that
-    needs a second statement to commit with it runs in a transaction.
+    Contract: one statement per checkout. Postgres commits the statement
+    when it ends: no BEGIN and no COMMIT is sent, so the call is one round
+    trip, plus the pool pre-ping when the engine has it on. The locks that
+    the statement takes end with it. Use it only for a write that is
+    complete in one statement: a write that needs a second statement to
+    commit with it runs in a transaction. The connection comes from
+    ``autocommit_connection``.
 
     The connection goes back to the pool in the engine's isolation level:
     SQLAlchemy resets it on return and sends nothing for that.
@@ -203,9 +245,7 @@ async def run_in_autocommit(
             its replay.
     """
     async with session_factory() as session:
-        connection = await session.connection(
-            execution_options=dict(AUTOCOMMIT_EXECUTION_OPTIONS),
-        )
+        connection = await autocommit_connection(session)
         result = await connection.execute(
             statement.statement,
             dict(statement.parameters),

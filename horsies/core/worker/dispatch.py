@@ -45,6 +45,7 @@ from horsies.core.models.tasks import (
     TaskResult,
 )
 from horsies.core.types.result import Result, is_err
+from horsies.core.utils.db import autocommit_connection
 from horsies.core.worker.child_protocol import (
     RunFrame,
     SeatRefusal,
@@ -62,7 +63,6 @@ from horsies.core.worker.failed_attempt import (
     NoRetry,
     RetryRequest,
     RunningAttempt,
-    autocommit_connection,
     finish_failed_attempt,
     finish_for,
     read_in_flight_attempt,

@@ -41,6 +41,7 @@ from horsies.core.lifecycle.outcomes import (
     TaskAbsent,
 )
 from horsies.core.types.status import TaskStatus
+from horsies.core.utils.db import autocommit_connection
 from horsies.core.worker.failed_attempt import (
     AttemptFailure,
     AttemptFailureKind,
@@ -48,7 +49,6 @@ from horsies.core.worker.failed_attempt import (
     NoRetry,
     RetryAfter,
     RetryRequest,
-    autocommit_connection,
     finish_failed_attempt,
 )
 from horsies.core.worker.shared_stop import RetryPlacement
