@@ -35,6 +35,7 @@ from horsies.core.lifecycle.outcomes import (
 from horsies.core.lifecycle.persistence import apply_batch_async
 from horsies.core.logging import get_logger
 from horsies.core.models.tasks import Execution
+from horsies.core.utils.db import SingleStatement, run_in_autocommit
 from horsies.core.worker.claim_plan import (
     BudgetCapacity,
     budgets_json,
@@ -277,16 +278,19 @@ class ClaimMixin:
         """
         # TIER 1: the per-pass critical section (advisory-lock acquisition + cap
         # counts + budget math + windowed claim) is one server-side statement
-        # (horsies_claim). The xact-scoped advisory lock is held only across that
-        # statement plus this transaction's COMMIT — never across a client round
-        # trip, so a stalled worker cannot freeze the cluster mid-pass. Budget
-        # and cap semantics are computed in-function; see
-        # schemas/migrations.py::horsies_claim.
-        params = self._claim_params()
-        async with self.sf() as s:
-            res = await s.execute(HORSIES_CLAIM_SQL, params)
-            claim_rows = read_claim_rows(list(res.keys()), res.fetchall())
-            await s.commit()
+        # (horsies_claim). It runs in autocommit, as its own transaction, so
+        # the xact-scoped advisory lock ends with the statement — never held
+        # across a client round trip, so a stalled worker cannot freeze the
+        # cluster mid-pass. Budget and cap semantics are computed in-function;
+        # see schemas/migrations.py::horsies_claim.
+        claim_result = await run_in_autocommit(
+            self.sf,
+            SingleStatement(
+                statement=HORSIES_CLAIM_SQL,
+                parameters=self._claim_params(),
+            ),
+        )
+        claim_rows = read_claim_rows(claim_result.columns, claim_result.rows)
 
         claimed_rows = claim_rows.tasks
         if not claimed_rows:

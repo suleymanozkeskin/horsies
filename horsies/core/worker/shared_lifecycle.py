@@ -9,9 +9,10 @@ that an isolated child makes on a sync connection in ``child_runner``:
 - the finalizing marker after the task body.
 
 They run the same SQL text, from the constants in ``child_runner``, on a
-psycopg ``AsyncConnectionPool`` that the child opens on its loop. Each function
-mirrors the sync function of the same name in ``child_runner``: a change to
-the behavior of one is a change to both.
+psycopg ``AsyncConnectionPool`` that the child opens on its loop. The pool is
+in autocommit (``child_pool``): a one-statement write is its own transaction.
+Each function mirrors the sync function of the same name in ``child_runner``:
+a change to the behavior of one is a change to both.
 """
 
 # pyright: reportPrivateUsage=false
@@ -47,6 +48,7 @@ from horsies.core.models.tasks import OutcomeCode, TaskError, TaskResult
 from horsies.core.worker.child_pool import SHARED_POOL_CONNECTION_WAIT_S
 from horsies.core.worker.child_protocol import WireResult
 from horsies.core.worker.child_runner import (
+    BEGIN_SQL,
     CLAIM_STILL_STARTABLE_SQL,
     MARK_FINALIZING_SQL,
     RESET_PAUSED_NODE_SQL,
@@ -320,6 +322,19 @@ async def _start_workflow_node(
     return (False, '', 'WORKFLOW_CHECK_FAILED')
 
 
+async def _begin_when_workflow(
+    cursor: AsyncCursor[Any],
+    is_workflow_task: bool,
+) -> None:
+    """Open the transaction of the RUNNING transition of a workflow task.
+    Same contract as the sync function of this name in ``child_runner``."""
+    match is_workflow_task:
+        case True:
+            await cursor.execute(BEGIN_SQL)
+        case False:
+            pass
+
+
 async def _confirm_ownership_and_set_running(
     pool: AsyncConnectionPool[AsyncConnection[Any]],
     task_id: str,
@@ -369,6 +384,7 @@ async def _set_running_on_a_connection(
     Raises what the pool and the statements raise."""
     async with pool.connection() as conn:
         cursor = conn.cursor(row_factory=namedtuple_row)
+        await _begin_when_workflow(cursor, is_workflow_task)
         await cursor.execute(
             set_running_sql(is_workflow_task),
             set_running_params(task_id, worker_id, is_workflow_task, claimed_at),
@@ -440,13 +456,14 @@ async def mark_task_finalizing(
     try:
         async with asyncio.timeout(FINALIZING_MARKER_TIMEOUT_S):
             async with pool.connection() as conn:
+                # One statement on an autocommit connection: committed when
+                # it returns.
                 cursor = conn.cursor()
                 await cursor.execute(
                     MARK_FINALIZING_SQL,
                     (worker_id, task_id, worker_id, claimed_at, claimed_at),
                 )
                 marked_rows = cursor.rowcount
-                await conn.commit()
     except Exception as exc:
         logger.warning('Failed to mark task %s finalizing: %s', task_id, exc)
         return

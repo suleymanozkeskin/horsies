@@ -433,6 +433,8 @@ def _session(
         return result
 
     session.execute = AsyncMock(side_effect=_execute)
+    # The claim runs on the session's autocommit connection.
+    session.connection = AsyncMock(return_value=session)
     return session
 
 

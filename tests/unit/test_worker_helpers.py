@@ -3425,6 +3425,7 @@ class TestClaimPass:
         result.fetchall.return_value = rows
         session = AsyncMock()
         session.execute = AsyncMock(return_value=result)
+        session.connection = AsyncMock(return_value=session)
         factory = MagicMock()
         factory.return_value.__aenter__ = AsyncMock(return_value=session)
         factory.return_value.__aexit__ = AsyncMock(return_value=False)
@@ -3448,6 +3449,7 @@ class TestClaimPass:
         result.fetchall.return_value = [_claimed_row('id-1'), _short_row(2)]
         session = AsyncMock()
         session.execute = AsyncMock(return_value=result)
+        session.connection = AsyncMock(return_value=session)
         factory = MagicMock()
         factory.return_value.__aenter__ = AsyncMock(return_value=session)
         factory.return_value.__aexit__ = AsyncMock(return_value=False)
@@ -3481,6 +3483,7 @@ class TestClaimPass:
         result.fetchall.return_value = [_short_row(2)]
         session = AsyncMock()
         session.execute = AsyncMock(return_value=result)
+        session.connection = AsyncMock(return_value=session)
         factory = MagicMock()
         factory.return_value.__aenter__ = AsyncMock(return_value=session)
         factory.return_value.__aexit__ = AsyncMock(return_value=False)
@@ -3501,6 +3504,7 @@ class TestClaimPass:
         result.fetchall.return_value = []
         session = AsyncMock()
         session.execute = AsyncMock(return_value=result)
+        session.connection = AsyncMock(return_value=session)
         factory = MagicMock()
         factory.return_value.__aenter__ = AsyncMock(return_value=session)
         factory.return_value.__aexit__ = AsyncMock(return_value=False)
@@ -3529,6 +3533,7 @@ class TestClaimPass:
         result.fetchall.return_value = []
         session = AsyncMock()
         session.execute = AsyncMock(return_value=result)
+        session.connection = AsyncMock(return_value=session)
         factory = MagicMock()
         factory.return_value.__aenter__ = AsyncMock(return_value=session)
         factory.return_value.__aexit__ = AsyncMock(return_value=False)
@@ -5791,7 +5796,7 @@ class TestPersistTerminalStateFusedPath:
         worker, session = _make_session_worker(fetchone_results=[])
 
         with patch(
-            'horsies.core.worker.finalize.apply_async',
+            'horsies.core.worker.finalize.apply_in_autocommit',
             AsyncMock(return_value=_applied(TerminalizationKind.COMPLETE_FUSED)),
         ) as apply:
             result = await worker._persist_task_terminal_state(
@@ -5807,22 +5812,28 @@ class TestPersistTerminalStateFusedPath:
 
         assert result.ok_value is None
         apply.assert_awaited_once()
+        assert apply.await_args is not None
+        assert apply.await_args.args[0] is worker.sf
         command = apply.await_args.args[1]
         assert isinstance(command, CompleteTaskFused)
         assert command.task_id == 'task-1'
         assert command.result_json == _OK_WIRE
         assert command.notify_channel == 'task_queue_q1'
         assert command.notify_payload == 'capacity:task-1'
+        # One statement in autocommit: no transaction of a session.
         session.execute.assert_not_awaited()
-        session.commit.assert_awaited_once()
+        session.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_fused_row_gone_skips_without_commit(self) -> None:
-        """Status/ownership changed → Ok(None), nothing committed."""
+    async def test_a_refused_fused_call_is_ok_with_nothing_to_roll_back(
+        self,
+    ) -> None:
+        """Status/ownership changed → Ok(None); the refused call wrote
+        nothing, so no transaction ends."""
         worker, session = _make_session_worker(fetchone_results=[])
 
         with patch(
-            'horsies.core.worker.finalize.apply_async',
+            'horsies.core.worker.finalize.apply_in_autocommit',
             AsyncMock(return_value=_lost_claim()),
         ):
             result = await worker._persist_task_terminal_state(
@@ -5838,7 +5849,7 @@ class TestPersistTerminalStateFusedPath:
 
         assert result.ok_value is None
         session.commit.assert_not_awaited()
-        session.rollback.assert_awaited_once()
+        session.rollback.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_workflow_ok_result_returns_persisted_routing_facts(self) -> None:

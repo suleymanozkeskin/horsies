@@ -95,10 +95,10 @@ RETURNING t.id, t.task_name, t.args, t.kwargs, t.queue_name, t.is_workflow_task,
 # ---------- Worker SQL constants ----------
 
 # TIER 1: one server-side call performs lock acquisition + cap counts + the
-# windowed claim (see horsies_claim, schemas/migrations.py). The advisory lock
-# is held only across this one statement plus the caller's COMMIT — never across
-# a client round trip. Replaces the per-pass lock loop + counts + per-queue
-# CLAIM_SQL loop.
+# windowed claim (see horsies_claim, schemas/migrations.py). The caller runs it
+# in autocommit, so the advisory lock is held only for this one statement —
+# never across a client round trip. Replaces the per-pass lock loop + counts +
+# per-queue CLAIM_SQL loop.
 HORSIES_CLAIM_SQL = text("""
     SELECT row_kind, id, task_name, args, kwargs, queue_name, is_workflow_task,
            task_options, claimed_at, execution, short_by

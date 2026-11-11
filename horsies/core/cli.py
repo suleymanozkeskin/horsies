@@ -793,7 +793,7 @@ def worker_command(args: argparse.Namespace) -> None:
     # child workers.
     try:
         postgres_config = app.config.broker
-        worker_postgres_config = postgres_config.worker_runtime_config()
+        worker_postgres_config = postgres_config.worker_process_config()
     except HorsiesError as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)

@@ -4,14 +4,24 @@ from __future__ import annotations
 
 import pytest
 
+from unittest.mock import AsyncMock, MagicMock
+
 from psycopg import InterfaceError, OperationalError
+from sqlalchemy import text
 from sqlalchemy.exc import (
     DBAPIError,
     OperationalError as SAOperationalError,
     TimeoutError as SATimeoutError,
 )
 
-from horsies.core.utils.db import is_dbapi_disconnect, is_retryable_connection_error
+from horsies.core.utils.db import (
+    AUTOCOMMIT_EXECUTION_OPTIONS,
+    SingleStatement,
+    StatementRows,
+    is_dbapi_disconnect,
+    is_retryable_connection_error,
+    run_in_autocommit,
+)
 
 
 def _make_dbapi_error(
@@ -129,3 +139,63 @@ class TestIsRetryableConnectionError:
         from psycopg.errors import DeadlockDetected
 
         assert is_retryable_connection_error(DeadlockDetected('boom')) is True
+
+
+@pytest.mark.unit
+class TestSingleStatement:
+    """``SingleStatement`` is the one input of ``run_in_autocommit``."""
+
+    def test_a_statement_without_a_bound_parameter_is_refused(self) -> None:
+        """psycopg sends such a text as a simple query, which can carry two
+        statements."""
+        with pytest.raises(ValueError, match='no bound parameter'):
+            SingleStatement(statement=text('SELECT 1'), parameters={})
+
+    def test_a_statement_with_a_bound_parameter_is_kept(self) -> None:
+        statement = SingleStatement(
+            statement=text('SELECT :value'),
+            parameters={'value': 1},
+        )
+
+        assert statement.parameters == {'value': 1}
+
+
+@pytest.mark.unit
+class TestStatementRows:
+    def test_each_row_maps_its_columns_to_its_values(self) -> None:
+        rows = StatementRows(columns=('a', 'b'), rows=((1, 2), (3, 4)))
+
+        assert rows.mappings() == [{'a': 1, 'b': 2}, {'a': 3, 'b': 4}]
+
+    def test_no_rows_maps_to_no_mappings(self) -> None:
+        assert StatementRows(columns=('a',), rows=()).mappings() == []
+
+
+@pytest.mark.unit
+class TestRunInAutocommit:
+    @pytest.mark.asyncio
+    async def test_it_runs_one_statement_on_an_autocommit_connection(self) -> None:
+        result = MagicMock()
+        result.returns_rows = True
+        result.keys.return_value = ['outcome']
+        result.fetchall.return_value = [('APPLIED',)]
+        connection = AsyncMock()
+        connection.execute = AsyncMock(return_value=result)
+        session = AsyncMock()
+        session.connection = AsyncMock(return_value=connection)
+        factory = MagicMock()
+        factory.return_value.__aenter__ = AsyncMock(return_value=session)
+        factory.return_value.__aexit__ = AsyncMock(return_value=False)
+        statement = text('SELECT :value')
+
+        rows = await run_in_autocommit(
+            factory,
+            SingleStatement(statement=statement, parameters={'value': 1}),
+        )
+
+        session.connection.assert_awaited_once_with(
+            execution_options=dict(AUTOCOMMIT_EXECUTION_OPTIONS),
+        )
+        connection.execute.assert_awaited_once_with(statement, {'value': 1})
+        assert AUTOCOMMIT_EXECUTION_OPTIONS == {'isolation_level': 'AUTOCOMMIT'}
+        assert rows == StatementRows(columns=('outcome',), rows=(('APPLIED',),))

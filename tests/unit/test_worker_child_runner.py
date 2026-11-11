@@ -21,7 +21,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Generator
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pydantic import BaseModel, SecretStr, field_validator
@@ -555,9 +555,14 @@ class TestInitializeWorkerPoolConnectKwargs:
                 connect_kwargs=connect_kwargs,
             )
 
-        assert mock_pool.call_args.kwargs['kwargs'] == connect_kwargs
+        assert mock_pool.call_args.kwargs['kwargs'] == {
+            **connect_kwargs,
+            'autocommit': True,
+        }
 
-    def test_no_connect_kwargs_yields_empty_pool_kwargs(self) -> None:
+    def test_no_connect_kwargs_yields_an_autocommit_pool(self) -> None:
+        """Every connection of a child pool is in autocommit, and the
+        checkout check is off unless asked for."""
         from horsies.core.worker.child_pool import _initialize_worker_pool
 
         with self._reset_pool(), patch(
@@ -567,7 +572,28 @@ class TestInitializeWorkerPoolConnectKwargs:
         ):
             _initialize_worker_pool('postgresql://localhost/test')
 
-        assert mock_pool.call_args.kwargs['kwargs'] == {}
+        assert mock_pool.call_args.kwargs['kwargs'] == {'autocommit': True}
+        assert mock_pool.call_args.kwargs['check'] is None
+
+    @pytest.mark.asyncio
+    async def test_the_shared_async_pool_is_an_autocommit_pool(self) -> None:
+        from horsies.core.worker.child_pool import open_shared_async_pool
+
+        with patch('horsies.core.worker.child_pool.AsyncConnectionPool') as mock_pool:
+            mock_pool.return_value.open = AsyncMock()
+            _ = await open_shared_async_pool(
+                'postgresql://localhost/test',
+                connect_kwargs={'keepalives': 1},
+                min_size=0,
+                max_size=2,
+                check_on_checkout=False,
+            )
+
+        assert mock_pool.call_args.kwargs['kwargs'] == {
+            'keepalives': 1,
+            'autocommit': True,
+        }
+        assert mock_pool.call_args.kwargs['check'] is None
 
     def test_a_refused_pool_thread_is_a_refused_thread_start(
         self,
