@@ -3891,7 +3891,7 @@ Schema migrates from v2 to v7 automatically on first broker start.
   healthy fleet answers in milliseconds; only a degraded fleet pays the
   timeout. Removes the latency floor for high-frequency `/health` probes.
   Pongs are de-duplicated by `worker_id`. See
-  [Worker & Database Health](/monitoring/worker-health/).
+  [Worker & Database Health](/horsies/monitoring/worker-health/).
 
 ## 0.1.4 — 2026-06-02
 
@@ -3914,7 +3914,7 @@ timeseries (including idle workers). It retires the untyped `get_worker_stats`.
   `app.list_worker_states_async()` (latest snapshot per worker, including idle
   workers), `get_worker_state_async(worker_id)`, and
   `get_worker_state_history_async(worker_id, limit=None)` returning
-  `WorkerStateSnapshot`. See [Worker & Database Health](/monitoring/worker-health/).
+  `WorkerStateSnapshot`. See [Worker & Database Health](/horsies/monitoring/worker-health/).
 - New exports: `DatabasePing`, `WorkerPong`, `WorkerStateSnapshot`.
 - New broker error codes: `DB_PING_FAILED`, `WORKER_PING_FAILED`.
 
@@ -3937,7 +3937,7 @@ cannot express — without cron strings.
   minute-offset staggering that `IntervalSchedule` cannot express, with no cron
   strings. The day-of-month vs day-of-week ambiguity is explicit through
   `EitherDay` (OR) and `BothDays` (AND). See
-  [Schedule Patterns](./scheduling/schedule-patterns). New exports: `CronSchedule`,
+  [Schedule Patterns](/horsies/scheduling/schedule-patterns/). New exports: `CronSchedule`,
   `Month`, `CronEvery`, `CronStep`, `CronValues`, `CronRange`, `CronEnumValues`,
   `CronEnumRange`, `CronEnumStep`, `DaySelector`, `EveryDay`, `ByMonthDay`,
   `ByWeekday`, `EitherDay`, `BothDays`.
@@ -3951,7 +3951,7 @@ workflow, worker, scheduler, and broker correctness bugs found in the
 2026-05-24 audit.
 
 For mechanical, copy-paste upgrade steps, see the
-[Migrating to 0.1.2](./migrations/migration-to-0-1-2) guide.
+[Migrating to 0.1.2](/horsies/migrations/migration-to-0-1-2/) guide.
 
 ### Breaking Changes
 
