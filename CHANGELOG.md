@@ -278,8 +278,8 @@ and there is no migration contract between pre-1.0 versions.
     children never take a class that has children of its own.
   - Any other class is not claimed. The worker still starts, and logs one
     line that names those classes.
-  - In this release a profile runs isolated children only, so every class is
-    claimed into the `ISOLATED` budget.
+  - A profile with isolated children only claims every class into the
+    `ISOLATED` budget.
   - Priority holds within one class. Each (queue, class) is its own claim
     stream in `(priority, enqueued_at, id)` order, and a budget of several
     classes reads their merge in that order.
