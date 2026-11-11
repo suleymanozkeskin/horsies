@@ -1,20 +1,23 @@
 # horsies/core/utils/db.py
-"""Shared helpers for classifying transient database errors."""
+"""Shared database helpers: transient error classification, engine hooks,
+and the one way to run a statement in autocommit (``run_in_autocommit``)."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Final
 
 from psycopg import InterfaceError, OperationalError
 from psycopg.types.string import TextLoader
-from sqlalchemy import event
+from sqlalchemy import TextClause, event
 from sqlalchemy.exc import (
     DBAPIError,
     OperationalError as SAOperationalError,
     TimeoutError as SATimeoutError,
 )
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 
 def register_identity_text_reads(engine: AsyncEngine) -> None:
@@ -125,3 +128,89 @@ def is_retryable_connection_error(exc: BaseException) -> bool:
             return True
         case _:
             return False
+
+
+AUTOCOMMIT_EXECUTION_OPTIONS: Final[Mapping[str, str]] = {
+    'isolation_level': 'AUTOCOMMIT',
+}
+"""The SQLAlchemy execution options of a connection that runs each
+statement as its own transaction."""
+
+
+@dataclass(frozen=True, slots=True)
+class SingleStatement:
+    """One SQL statement and its bound parameters.
+
+    ``run_in_autocommit`` sends it with one execute call. psycopg sends a
+    statement that has bound parameters with the extended query protocol, and
+    Postgres refuses a text with a second command there ("cannot insert
+    multiple commands into a prepared statement"). Without parameters psycopg
+    sends a simple query, which can carry several commands, so construction
+    refuses an empty parameter mapping.
+
+    Raises:
+        ValueError: ``parameters`` is empty. The statements are library
+            constants, so this is a defect of the caller.
+    """
+
+    statement: TextClause
+    parameters: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        if not self.parameters:
+            raise ValueError(
+                'SingleStatement has no bound parameter: psycopg would send '
+                'it as a simple query, which can carry several statements',
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class StatementRows:
+    """The rows of one statement, read in full before its connection went
+    back to the pool. ``columns`` names the values of each row, in order."""
+
+    columns: tuple[str, ...]
+    rows: tuple[tuple[Any, ...], ...]
+
+    def mappings(self) -> list[dict[str, Any]]:
+        """Each row as a mapping from column name to value."""
+        return [dict(zip(self.columns, row, strict=True)) for row in self.rows]
+
+
+async def run_in_autocommit(
+    session_factory: async_sessionmaker[AsyncSession],
+    statement: SingleStatement,
+) -> StatementRows:
+    """Run one statement as its own transaction and return its rows.
+
+    Postgres commits the statement when it ends: no BEGIN and no COMMIT is
+    sent, so the call is one round trip, plus the pool pre-ping when the
+    engine has it on. The locks that the statement takes end with it. Use
+    it only for a write that is complete in one statement: a write that
+    needs a second statement to commit with it runs in a transaction.
+
+    The connection goes back to the pool in the engine's isolation level:
+    SQLAlchemy resets it on return and sends nothing for that.
+
+    The statement must return rows (a SELECT, or a write with RETURNING);
+    one that does not is a defect of the caller (``AssertionError``).
+
+    Raises:
+        Exception: what the pool and the driver raise: a pool timeout, a
+            connection error, a statement error. A connection error after
+            the statement was sent leaves its outcome unknown: it may have
+            committed, as after a lost COMMIT reply. The caller classifies
+            its replay.
+    """
+    async with session_factory() as session:
+        connection = await session.connection(
+            execution_options=dict(AUTOCOMMIT_EXECUTION_OPTIONS),
+        )
+        result = await connection.execute(
+            statement.statement,
+            dict(statement.parameters),
+        )
+        assert result.returns_rows, 'run_in_autocommit needs a statement with rows'
+        columns = tuple(str(key) for key in result.keys())
+        rows = tuple(tuple(row) for row in result.fetchall())
+    return StatementRows(columns=columns, rows=rows)

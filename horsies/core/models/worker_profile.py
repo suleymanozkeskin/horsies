@@ -275,9 +275,12 @@ class IsolatedPool(BaseModel):
       first use.
     - ``max_size``: the most connections of the pool.
     - ``check``: check each connection when a write takes it from the pool.
-      Each check is a database round trip; turn it off on high-RTT links
-      where the per-statement retry handling already covers stale
-      connections.
+      Off by default. Each check is a database round trip, and a write of
+      the child is one statement in autocommit, so a check doubles its round
+      trips. With it off, a dead pooled connection fails the write that takes
+      it: the RUNNING update ends as ``OWNERSHIP_UNCONFIRMED`` and the claim
+      lease returns the task; a lost finalizing marker is logged, and the
+      runner heartbeats of the worker cover the row.
 
     AppConfig validation refuses a ``min_size`` above ``max_size``.
     """
@@ -292,7 +295,7 @@ class IsolatedPool(BaseModel):
     )
     max_size: PoolSize = Field(default_factory=_default_isolated_pool_size)
     check: bool = Field(
-        default=True,
+        default=False,
         description='Check each connection on checkout',
     )
 
@@ -330,7 +333,7 @@ class SharedPool(BaseModel):
     )
     max_size: PoolSizeSetting = Field(default_factory=PoolSizeFromSeats)
     check: bool = Field(
-        default=True,
+        default=False,
         description='Check each connection on checkout',
     )
 
@@ -593,7 +596,8 @@ class ParentPool(BaseModel):
     it. The runner heartbeats use a connection of their own. It
     holds at most ``max_size`` connections and has no overflow
     (``pool_size = max_size``, ``max_overflow = 0``), so the connection
-    check counts it exactly.
+    check counts it exactly. ``PostgresConfig.worker_pool_pre_ping`` sets its
+    pre-ping.
 
     - ``max_size``: ``PoolSize(connections=N)``, or ``PoolSizeFromSeats()``
       to derive it from the seats of the profile: one connection for each

@@ -41,6 +41,7 @@ class PostgresConfig(BaseModel):
         'session_database_url',
         'pgbouncer_transaction_mode',
         'retain_rerun_input_default',
+        'worker_pool_pre_ping',
         'tcp_keepalives',
         'tcp_keepalives_idle',
         'tcp_keepalives_interval',
@@ -64,6 +65,20 @@ class PostgresConfig(BaseModel):
     )
     pool_pre_ping: bool = Field(
         default=True, description='Whether to pre-ping the database connection pool'
+    )
+    # The pre-ping of the worker process's engine (worker_process_config).
+    # The worker sends most of its writes as one statement in autocommit:
+    # one round trip each. A pre-ping adds a round trip to each
+    # checkout. With it off, a dead pooled connection shows at the first
+    # statement instead, as a connection error: finalize retries its phase
+    # and classifies the replay, the claim loop retries the pass. TCP
+    # keepalives and tcp_user_timeout_ms still apply.
+    worker_pool_pre_ping: bool = Field(
+        default=False,
+        description=(
+            'Whether the worker process pre-pings its pooled connections; '
+            'pool_pre_ping applies to other engines'
+        ),
     )
     # Producer-side defaults match SQLAlchemy's (5 + 10). The previous
     # 30 + 30 let a single enqueue-only producer pin up to 60 server
@@ -295,16 +310,26 @@ class PostgresConfig(BaseModel):
     def with_exact_pool(self, connections: int) -> 'PostgresConfig':
         """A copy whose engine pool holds up to ``connections`` connections
         with no overflow: ``pool_size = connections``, ``max_overflow = 0``.
+        Every other field, ``pool_pre_ping`` included, is kept.
 
-        The worker process opens its pool with the resolved
-        ``WorkerProfile.pool``; a worker child opens the broker of its task
-        code with the ``task_send_pool`` of its kind. ``connections`` is 1
-        or more, from a validated profile. Below 1 is a defect:
-        ``AssertionError``.
+        A worker child opens the broker of its task code with the
+        ``task_send_pool`` of its kind, a producer engine that keeps
+        ``pool_pre_ping``. ``connections`` is 1 or more, from a validated
+        profile. Below 1 is a defect: ``AssertionError``.
         """
         assert connections >= 1, f'connections must be >= 1; got {connections}'
         return self.model_copy(
             update={'pool_size': connections, 'max_overflow': 0},
+        )
+
+    def worker_process_config(self, parent_pool: int) -> 'PostgresConfig':
+        """The broker config of the worker process: a pool of up to
+        ``parent_pool`` connections with no overflow (``with_exact_pool``),
+        the resolved ``WorkerProfile.pool``, and ``worker_pool_pre_ping`` as
+        its pre-ping. ``parent_pool`` is 1 or more. Below 1 is a defect:
+        ``AssertionError``."""
+        return self.with_exact_pool(parent_pool).model_copy(
+            update={'pool_pre_ping': self.worker_pool_pre_ping},
         )
 
 

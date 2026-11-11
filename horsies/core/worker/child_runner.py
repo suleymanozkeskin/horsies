@@ -134,9 +134,9 @@ type StartCheck = StartAllowed | DeadlineBeforeStart
 @dataclass(frozen=True, slots=True)
 class StatementsBound:
     """The statements of one write, once it holds its connection, run at most
-    ``seconds``. A timer then cancels the statement that runs; the
-    transaction aborts, so every later statement of the write fails at
-    once, and the write ends with its error path."""
+    ``seconds``. A timer then cancels the statement that runs; it raises, and
+    the write ends with its error path. In a transaction of the write, the
+    transaction aborts with it."""
 
     seconds: float
 
@@ -760,6 +760,10 @@ START_WORKFLOW_NODE_SQL: Final[LiteralString] = """
                     SELECT EXISTS (SELECT 1 FROM linked) AS node_linked
                     """
 
+BEGIN_SQL: Final[LiteralString] = 'BEGIN'
+"""Opens a transaction on a connection of a child pool, which is in
+autocommit (``child_pool``)."""
+
 MARK_FINALIZING_SQL: Final[LiteralString] = """
                 UPDATE horsies_tasks
                 SET finalizing_at = NOW(),
@@ -784,6 +788,28 @@ def set_running_sql(is_workflow_task: bool) -> LiteralString:
             )
         case False:
             return _SET_RUNNING_HEAD_SQL + _SET_RUNNING_TAIL_SQL
+
+
+def _begin_when_workflow(cursor: Cursor[Any], is_workflow_task: bool) -> None:
+    """Open the transaction of the RUNNING transition of a workflow task.
+
+    The pool of a child is in autocommit. The transition of a plain task is
+    one statement, its own transaction, and its miss path runs one function
+    that writes only when it applies: nothing is opened. A workflow task also
+    writes its node (``START_WORKFLOW_NODE_SQL``); a node that is not linked
+    must undo the row update, and the abandon or cancel of a node on a miss
+    writes two statements that commit together. So a workflow task sends
+    ``BEGIN_SQL`` before the update, and each branch ends the transaction
+    with ``commit()`` or ``rollback()``.
+
+    Raises:
+        Exception: what the driver raises for the BEGIN.
+    """
+    match is_workflow_task:
+        case True:
+            cursor.execute(BEGIN_SQL)
+        case False:
+            pass
 
 
 def set_running_params(
@@ -1064,6 +1090,7 @@ def _confirm_ownership_and_set_running(
                 case _ as unreachable:
                     assert_never(unreachable)
             cursor = conn.cursor(row_factory=namedtuple_row)
+            _begin_when_workflow(cursor, is_workflow_task)
             # The first runner heartbeat is part of the transition: the row can
             # never be observed RUNNING without heartbeat coverage, and a
             # transition that does not apply inserts no beat. The worker
@@ -1172,13 +1199,14 @@ def _mark_task_finalizing(
             pool.connection(timeout=connection_wait_s) as conn,
             _statements_within(conn, statements),
         ):
+            # One statement on an autocommit connection: committed when it
+            # returns.
             cursor = conn.cursor()
             cursor.execute(
                 MARK_FINALIZING_SQL,
                 (worker_id, task_id, worker_id, claimed_at, claimed_at),
             )
             marked_rows = cursor.rowcount
-            conn.commit()
     except Exception as exc:
         logger.warning('Failed to mark task %s finalizing: %s', task_id, exc)
         return

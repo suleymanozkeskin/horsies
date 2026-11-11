@@ -137,10 +137,10 @@ worker_profiles = {
 | `SharedThreadChildren` | `task_send_pool` | `PoolSize(connections=2)` | As for `IsolatedChildren`; the seat threads share it |
 | `IsolatedPool` | `min_size` | `0` | 0-1000 connections kept open; 0 opens on first use |
 | `IsolatedPool` | `max_size` | `PoolSize(connections=2)` | `PoolSize(connections=N)`, 1-1000 |
-| `IsolatedPool` | `check` | `True` | Check each connection on checkout; one round trip each, turn off with `pool_pre_ping` on high-RTT links |
+| `IsolatedPool` | `check` | `False` | Check each connection on checkout: one round trip each. Each child write is one statement in autocommit; with the check off a dead connection fails that write (RUNNING update: `OWNERSHIP_UNCONFIRMED`, the lease returns the task) |
 | `SharedPool` | `min_size` | `0` | 0-1000 connections kept open |
 | `SharedPool` | `max_size` | `PoolSizeFromSeats()` | `PoolSize(connections=N)` or derived from the seats |
-| `SharedPool` | `check` | `True` | As for `IsolatedPool` |
+| `SharedPool` | `check` | `False` | As for `IsolatedPool` |
 | `ParentPool` | `max_size` | `PoolSizeFromSeats()` | `PoolSize(connections=N)` or derived from the seats of the whole profile |
 | `SharedRecycle` | `after_per_seat` | `TaskLimit(tasks=100)` | Replace after `tasks × seats` tasks; `NoTaskLimit` |
 | `SharedRecycle` | `above` | `NoMemoryLimit()` | RSS limit of the child, read after each task |
@@ -304,7 +304,8 @@ config = PostgresConfig(
 | `retain_rerun_input_default` | `bool` | `False` | App-level default for enqueue-time rerun-input retention; a per-task value overrides it and the resolved value is snapshotted at enqueue. A task enqueued without a retained input cannot be rerun later |
 | `pool_timeout` | `int` | `30` | Seconds to wait for a connection |
 | `pool_recycle` | `int` | `1800` | Seconds before connections are recycled |
-| `pool_pre_ping` | `bool` | `True` | Pre-ping connections before use |
+| `pool_pre_ping` | `bool` | `True` | Pre-ping connections before use, in every engine but the worker process's |
+| `worker_pool_pre_ping` | `bool` | `False` | Pre-ping the worker process's connections. Off: a one-statement write is one round trip, and a dead connection fails its first statement as a retryable connection error |
 | `tcp_keepalives` | `bool` | `True` | Enable libpq TCP keepalives on broker and child-process connections |
 | `tcp_keepalives_idle` | `int` | `30` | Idle seconds before the first keepalive probe (libpq `keepalives_idle`) |
 | `tcp_keepalives_interval` | `int` | `10` | Seconds between keepalive probes (libpq `keepalives_interval`) |
@@ -330,6 +331,11 @@ async code it runs in a default-executor thread, which a shared async attempt
 waits for). `horsies[pg-binary]` bundles its own libpq; `psycopg.pq.version()`
 reads the loaded version (`170000` = 17.0).
 
+Every connection of a child pool is in autocommit. The RUNNING update of a
+plain task and the finalizing marker are one statement each: one round trip
+with the checkout check off. The RUNNING update of a workflow task and the
+start of its node run in one transaction (BEGIN, update, node, COMMIT).
+
 The seats of a shared child share the pool of the child (`SharedPool`, derived
 from the seats by default) for the RUNNING update and the finalizing marker; a
 seat waits up to
@@ -339,8 +345,9 @@ the child x 2 writes x time of one write; keep the pool above it.
 
 `tcp_keepalives` (default on) keeps idle pooled sockets warm so a server-side
 or middlebox idle-reap is detected and recycled at the socket layer instead of
-surfacing as a mid-query `OperationalError`. `pool_pre_ping` and `pool_recycle`
-are checkout-time guards and cannot catch a connection that dies in-flight. The
+surfacing as a mid-query `OperationalError`. `pool_pre_ping`,
+`worker_pool_pre_ping` and `pool_recycle` are checkout-time guards and cannot
+catch a connection that dies in-flight. The
 keepalives apply to the broker engine pool and each child-process pool; the
 LISTEN/NOTIFY listener sets its own keepalives independently. Without them, the
 OS idle default (often 7200s) outlives a pooler's idle-reap window — e.g.

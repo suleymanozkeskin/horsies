@@ -688,7 +688,7 @@ class TestNewKindBaseline:
 
             assert late.child_kind == SharedThreadChild(
                 seats=1,
-                pool=ResolvedPool(min_size=0, max_size=2, check=True),
+                pool=ResolvedPool(min_size=0, max_size=2, check=False),
                 task_send_pool=2,
             )
             first = pool._thread_slots[0].child

@@ -801,9 +801,9 @@ def worker_command(args: argparse.Namespace) -> None:
     # app.get_broker() here: user apps may also use a larger producer/web broker
     # pool, and any broker opened before child forking must not be inherited by
     # child workers. The pool of the worker process is the resolved
-    # WorkerProfile.pool, with no overflow.
+    # WorkerProfile.pool, with no overflow and the worker pre-ping.
     postgres_config = app.config.broker
-    worker_postgres_config = postgres_config.with_exact_pool(settings.parent_pool)
+    worker_postgres_config = postgres_config.worker_process_config(settings.parent_pool)
 
     # Get queues from app config
     queues: list[str] = app.get_valid_queue_names()

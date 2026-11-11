@@ -29,7 +29,7 @@ Written by the worker process for the RUNNING tasks that its children hold:
 
 - Indicates that the task's child process runs it
 - One thread of the worker writes one statement per `runner_heartbeat_interval_ms` for all of these tasks. The thread does not run on the worker's event loop
-- The child writes the first beat, in the transaction that sets the row RUNNING
+- The child writes the first beat, in the statement that sets the row RUNNING
 - Task code cannot stop it: C code that holds the GIL in a child does not reach the worker process
 
 The statement beats a row only when all of these are true:

@@ -1913,6 +1913,51 @@ class TestRunWorkerCoroutine:
     @patch('horsies.core.cli.to_psycopg_url', autospec=True, return_value='psycopg://x')
     @patch('horsies.core.cli.setup_logging', autospec=True)
     @patch('horsies.core.cli.discover_app', autospec=True)
+    async def test_the_worker_brokers_take_the_worker_pre_ping(
+        self,
+        mock_discover: MagicMock,
+        _mock_logging: MagicMock,
+        _mock_url: MagicMock,
+        _mock_banner: MagicMock,
+        mock_worker_cls: MagicMock,
+    ) -> None:
+        """The worker process builds its brokers with ``worker_pool_pre_ping``
+        (off by default); ``pool_pre_ping`` stays on for the other engines."""
+        app = _make_mock_app()
+        app.config.worker_profiles = {
+            'default': WorkerProfile(isolated=IsolatedChildren(count=1)),
+        }
+        mock_discover.return_value = (app, 'app', 'my.mod', '/project')
+        mock_worker = MagicMock()
+        mock_worker.run_forever = AsyncMock()
+        mock_worker_cls.return_value = mock_worker
+        captured_coro: list[Any] = []
+
+        def capture_run(coro: Any) -> None:
+            captured_coro.append(coro)
+            raise KeyboardInterrupt
+
+        with (
+            patch(
+                'horsies.core.cli.PostgresBroker',
+                autospec=True,
+                side_effect=[_make_mock_broker(), _make_mock_broker()],
+            ) as broker_cls,
+            patch('horsies.core.cli.asyncio.run', side_effect=capture_run),
+        ):
+            worker_command(_make_worker_namespace())
+            assert len(captured_coro) == 1
+            await captured_coro[0]
+
+        configs = [call.args[0] for call in broker_cls.call_args_list]
+        assert [config.pool_pre_ping for config in configs] == [False, False]
+        assert app.config.broker.pool_pre_ping is True
+
+    @patch('horsies.core.cli.Worker', autospec=True)
+    @patch('horsies.core.cli.print_banner', autospec=True)
+    @patch('horsies.core.cli.to_psycopg_url', autospec=True, return_value='psycopg://x')
+    @patch('horsies.core.cli.setup_logging', autospec=True)
+    @patch('horsies.core.cli.discover_app', autospec=True)
     async def test_run_worker_coroutine_success(
         self,
         mock_discover: MagicMock,
@@ -2680,7 +2725,7 @@ class TestWorkerStartLog:
             shared_thread=SharedThreadChildren(
                 count=1,
                 seats=8,
-                pool=SharedPool(max_size=PoolSize(connections=5), check=False),
+                pool=SharedPool(max_size=PoolSize(connections=5), check=True),
             ),
         )
         with caplog.at_level(logging.INFO, logger='horsies'):
@@ -2694,17 +2739,17 @@ class TestWorkerStartLog:
         ]
         assert 'isolated=2 (' in line
         assert (
-            'pool 0 to 2 connections, check on; task_send_pool 2 connections)'
+            'pool 0 to 2 connections, check off; task_send_pool 2 connections)'
         ) in line
         assert (
             f'pool 0 to {shared_async_pool_connections(25)} connections, '
-            'derived from seats, check on; '
+            'derived from seats, check off; '
             f'executor {shared_async_executor_threads(25)} threads, derived '
             'from seats; task_send_pool 2 connections)'
         ) in line
         assert 'shared_thread=1x8 seats' in line
         assert (
-            'pool 0 to 5 connections, check off; task_send_pool 2 connections)'
+            'pool 0 to 5 connections, check on; task_send_pool 2 connections)'
         ) in line
         assert ', pool=5 connections (derived from 35 seats), ' in line
 

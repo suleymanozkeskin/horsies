@@ -108,7 +108,7 @@ async def test_each_kind_gets_the_resolved_pool_of_its_setting() -> None:
             pool=ResolvedPool(
                 min_size=1,
                 max_size=shared_async_pool_connections(25),
-                check=True,
+                check=False,
             ),
             executor_threads=6,
             task_send_pool=DEFAULT_TASK_SEND_POOL_CONNECTIONS,
@@ -118,7 +118,7 @@ async def test_each_kind_gets_the_resolved_pool_of_its_setting() -> None:
             pool=ResolvedPool(
                 min_size=0,
                 max_size=shared_thread_pool_connections(8),
-                check=True,
+                check=False,
             ),
             task_send_pool=DEFAULT_TASK_SEND_POOL_CONNECTIONS,
         ),
@@ -143,7 +143,7 @@ async def test_every_child_of_a_kind_gets_the_same_pool() -> None:
         pool=ResolvedPool(
             min_size=0,
             max_size=shared_async_pool_connections(40),
-            check=True,
+            check=False,
         ),
         executor_threads=shared_async_executor_threads(40),
         task_send_pool=DEFAULT_TASK_SEND_POOL_CONNECTIONS,
@@ -156,9 +156,9 @@ async def test_every_child_of_a_kind_gets_the_same_pool() -> None:
     assert kinds == [async_kind, async_kind, async_kind, thread_kind, thread_kind]
 
 
-async def test_the_isolated_default_is_a_pool_of_two() -> None:
+async def test_the_isolated_default_is_a_pool_of_two_without_a_check() -> None:
     isolated_kind = IsolatedChild(
-        pool=ResolvedPool(min_size=0, max_size=2, check=True),
+        pool=ResolvedPool(min_size=0, max_size=2, check=False),
         task_send_pool=DEFAULT_TASK_SEND_POOL_CONNECTIONS,
     )
     kinds = _kinds_of_children(_worker(_config(processes=2)))
@@ -194,6 +194,6 @@ async def test_the_preload_template_carries_the_isolated_task_send_pool() -> Non
     cfg = _config(processes=0, isolated_task_send_pool=4, **_ONE_ASYNC_CHILD)
     template = _worker(cfg)._slot_pool_config().init  # pyright: ignore[reportPrivateUsage]
     assert _over_the_wire(template) == IsolatedChild(
-        pool=ResolvedPool(min_size=0, max_size=2, check=True),
+        pool=ResolvedPool(min_size=0, max_size=2, check=False),
         task_send_pool=4,
     )

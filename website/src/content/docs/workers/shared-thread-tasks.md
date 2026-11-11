@@ -159,7 +159,7 @@ A seat thread waits up to 30 seconds for a free connection. A thread that gets n
 
 The pool size that the seats give is a default. The connections that a child uses come from its writes. To size the pool from the writes, set `pool=SharedPool(max_size=PoolSize(connections=N))`:
 
-- Each write holds one connection for its transaction: a few database round trips.
+- Each write holds one connection for one statement in autocommit: one database round trip, and one more when the `check` of the pool is on. The RUNNING update of a workflow task holds it for a transaction of four round trips.
 - Connections in use, on average = tasks per second of the child × 2 writes × the time of one write.
 - Example: a child that ends 20 tasks per second, with 10 ms per write, uses 20 × 2 × 0.01 = 0.4 connections on average. A pool of 2 is enough.
 - Example: the same child against a remote database, with 50 ms per write, uses 2 connections on average. A pool of 2 is then full, and seat threads wait for each other. Set `max_size=PoolSize(connections=4)` or more.

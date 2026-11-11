@@ -142,12 +142,12 @@ remote_profile = WorkerProfile(
 The worker logs the resolved values of each kind, and the resolved pool of the worker process, in its start line:
 
 ```text
-Worker profile 'remote': isolated=4 (recycle after 100 tasks, above no limit; pool 0 to 1 connections, check off; task_send_pool 2 connections), shared_async=2x100 seats (recycle after 100 tasks per seat, above no limit; pool 2 to 8 connections, check on; executor 16 threads; task_send_pool 2 connections), shared_thread=1x16 seats (recycle after 100 tasks per seat, above no limit; pool 0 to 4 connections, derived from seats, check on; task_send_pool 2 connections), pool=20 connections (derived from 220 seats), ...
+Worker profile 'remote': isolated=4 (recycle after 100 tasks, above no limit; pool 0 to 1 connections, check off; task_send_pool 2 connections), shared_async=2x100 seats (recycle after 100 tasks per seat, above no limit; pool 2 to 8 connections, check off; executor 16 threads; task_send_pool 2 connections), shared_thread=1x16 seats (recycle after 100 tasks per seat, above no limit; pool 0 to 4 connections, derived from seats, check off; task_send_pool 2 connections), pool=20 connections (derived from 220 seats), ...
 ```
 
 ### The Task-Send Pool
 
-Task code that sends through the app (`task.send()`, `app.get_broker()`) opens the app's broker in its child. That broker holds up to `task_send_pool.connections` connections, with no overflow, for each event loop that the task code sends from. Each child kind has its own `task_send_pool: PoolSize`. The default is `PoolSize(connections=2)` for every kind. The pool of `PostgresConfig` (`pool_size`, `max_overflow`) does not apply in a child.
+Task code that sends through the app (`task.send()`, `app.get_broker()`) opens the app's broker in its child. That broker holds up to `task_send_pool.connections` connections, with no overflow, for each event loop that the task code sends from. Each child kind has its own `task_send_pool: PoolSize`. The default is `PoolSize(connections=2)` for every kind. The pool of `PostgresConfig` (`pool_size`, `max_overflow`) does not apply in a child; its `pool_pre_ping` does.
 
 - A sync task sends from the runner loop of the broker. The seat threads of a shared thread child share that loop, and so they share one pool.
 - An async task sends from the task loop of its child. The seats of a shared async child share that loop, and so they share one pool.
@@ -169,7 +169,7 @@ fanout_profile = WorkerProfile(
 
 The worker process opens one pool of its own. It writes the outcome of each task through it, and its claim passes, claimer heartbeats, health replies and reaper share it. The runner heartbeats use a connection of their own. A task whose child has returned stays RUNNING until the worker process gets a connection of this pool and commits the outcome, so a pool that is too small holds finished tasks.
 
-`WorkerProfile.pool` takes a `ParentPool(max_size)`. The pool holds at most `max_size` connections and has no overflow (`pool_size = max_size`, `max_overflow = 0`), so the connection check counts it exactly. The default, `PoolSizeFromSeats()`, derives the size from the seats of the whole profile; see [Sizes Derived from the Seats](#sizes-derived-from-the-seats).
+`WorkerProfile.pool` takes a `ParentPool(max_size)`. The pool holds at most `max_size` connections and has no overflow (`pool_size = max_size`, `max_overflow = 0`), so the connection check counts it exactly. `PostgresConfig.worker_pool_pre_ping` sets its pre-ping. The default, `PoolSizeFromSeats()`, derives the size from the seats of the whole profile; see [Sizes Derived from the Seats](#sizes-derived-from-the-seats).
 
 ```python
 from horsies import ParentPool
@@ -282,7 +282,7 @@ A shared child that reaches a limit closes: it takes no new task, its running ta
 |-------|------|---------|-------------|
 | `min_size` | `int` | `0` | Connections that the pool keeps open, 0 to 1000. With 0, a connection opens at its first use |
 | `max_size` | `PoolSize` | `PoolSize(connections=2)` | The most connections of the pool |
-| `check` | `bool` | `True` | Check each connection when a write takes it from the pool: one database round trip per checkout. See [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
+| `check` | `bool` | `False` | Check each connection when a write takes it from the pool: one database round trip per checkout. Each connection is in autocommit, and a write of the child is one statement, so the check doubles its round trips. Off, a dead connection fails the write that takes it. See [Remote PostgreSQL](/horsies/configuration/remote-postgres/#health-checks-at-high-rtt) |
 
 ### `SharedPool`
 
@@ -290,7 +290,7 @@ A shared child that reaches a limit closes: it takes no new task, its running ta
 |-------|------|---------|-------------|
 | `min_size` | `int` | `0` | Connections that the pool keeps open, 0 to 1000. With 0, a connection opens at its first use |
 | `max_size` | `PoolSize \| PoolSizeFromSeats` | `PoolSizeFromSeats()` | The most connections of the pool. See [Sizes Derived from the Seats](#sizes-derived-from-the-seats) |
-| `check` | `bool` | `True` | Check each connection when a write takes it from the pool, as for `IsolatedPool` |
+| `check` | `bool` | `False` | Check each connection when a write takes it from the pool, as for `IsolatedPool` |
 
 Validation refuses a `min_size` above the resolved `max_size` of the pool.
 

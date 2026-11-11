@@ -72,6 +72,54 @@ class TestPostgresConfigPgBouncer:
         assert config.pool_size == 5
         assert config.max_overflow == 10
 
+    def test_sqlalchemy_engine_kwargs_exclude_the_worker_pre_ping(self) -> None:
+        config = PostgresConfig(
+            database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+        )
+
+        assert 'worker_pool_pre_ping' not in config.sqlalchemy_engine_kwargs()
+
+    def test_the_worker_process_does_not_pre_ping_by_default(self) -> None:
+        """The worker's writes are one statement in autocommit; a pre-ping
+        would double their round trips. Producer engines keep theirs, also
+        the one that task code in a child sends with (the task-send pool)."""
+        config = PostgresConfig(
+            database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+        )
+
+        assert config.worker_pool_pre_ping is False
+        assert config.sqlalchemy_engine_kwargs()['pool_pre_ping'] is True
+        child_send = config.with_exact_pool(2).sqlalchemy_engine_kwargs()
+        assert child_send['pool_pre_ping'] is True
+        worker = config.worker_process_config(7)
+        assert worker.sqlalchemy_engine_kwargs()['pool_pre_ping'] is False
+        assert (worker.pool_size, worker.max_overflow) == (7, 0)
+
+    def test_the_worker_process_pre_pings_when_set(self) -> None:
+        config = PostgresConfig(
+            database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+            pool_pre_ping=False,
+            worker_pool_pre_ping=True,
+        )
+
+        assert config.sqlalchemy_engine_kwargs()['pool_pre_ping'] is False
+        child_send = config.with_exact_pool(2).sqlalchemy_engine_kwargs()
+        assert child_send['pool_pre_ping'] is False
+        worker = config.worker_process_config(7)
+        assert worker.sqlalchemy_engine_kwargs()['pool_pre_ping'] is True
+        assert (worker.pool_size, worker.max_overflow) == (7, 0)
+
+    @pytest.mark.parametrize('parent_pool', [0, -1])
+    def test_a_worker_process_pool_below_one_is_a_defect(
+        self,
+        parent_pool: int,
+    ) -> None:
+        config = PostgresConfig(
+            database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+        )
+        with pytest.raises(AssertionError, match='connections must be >= 1'):
+            config.worker_process_config(parent_pool)
+
     @pytest.mark.parametrize('value', [3, 0, None])
     @pytest.mark.parametrize(
         ('field', 'note'),
@@ -1444,6 +1492,9 @@ class TestGetBrokerErrorHandling:
         broker_config = mock_broker_cls.call_args.args[0]
         assert (broker_config.pool_size, broker_config.max_overflow) == (4, 0)
         assert broker_config.database_url == config.database_url
+        # A producer engine: it keeps pool_pre_ping, not worker_pool_pre_ping.
+        assert (config.pool_pre_ping, config.worker_pool_pre_ping) == (True, False)
+        assert broker_config.pool_pre_ping is True
 
     @pytest.mark.parametrize('role', ['producer', 'scheduler', 'worker'])
     def test_without_a_task_send_pool_the_broker_opens_the_config_pool(

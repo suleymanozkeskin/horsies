@@ -438,8 +438,8 @@ there is no migration contract between pre-1.0 versions.
   loop of each shared async child (`asyncio.to_thread`,
   `loop.run_in_executor(None, ...)`). An `on_shared_async_child_start` hook
   that sets its own default executor still replaces it.
-  - Defaults: an isolated child keeps a pool of 0 to 2 connections, checked
-    on checkout. A shared child derives its pool `max_size`, and a shared
+  - Defaults: an isolated child keeps a pool of 0 to 2 connections, with
+    no checkout check. A shared child derives its pool `max_size`, and a shared
     async child its executor threads, from its seats:
     `min(cap, max(floor, ceil(seats / seats_per_unit)))`, with constants of
     each kind in `horsies.core.models.child_sizing`. A derived pool has at
@@ -465,8 +465,8 @@ there is no migration contract between pre-1.0 versions.
   `ParentPool(max_size)` whose `max_size` is `PoolSize(connections=N)` or
   `PoolSizeFromSeats()`, the default. The worker process claims tasks and
   writes the outcome of each task through this pool. It opens with
-  `pool_size = max_size` and `max_overflow = 0`, so the connection check
-  counts it exactly.
+  `pool_size = max_size`, `max_overflow = 0` and the pre-ping of
+  `worker_pool_pre_ping`, so the connection check counts it exactly.
   - The default derives the size from the seats of the whole profile:
     `min(20, max(5, ceil(seat_count() / 10)))`, with the provisional
     constants `PARENT_POOL_CONNECTIONS_CAP`, `PARENT_POOL_CONNECTIONS_FLOOR`
@@ -478,7 +478,8 @@ there is no migration contract between pre-1.0 versions.
     take `task_send_pool: PoolSize`, default `PoolSize(connections=2)`.
     Task code that sends through the app (`app.get_broker()`) opens the
     app's broker in its child with that many connections and no overflow,
-    for each event loop that it sends from. The child sets it before it
+    for each event loop that it sends from. That broker keeps
+    `pool_pre_ping`. The child sets it before it
     imports its task modules, so a broker that an import builds opens it
     too. The pool of `PostgresConfig` does not apply in a child. In every
     other process, the worker process included, `app.get_broker()` opens the
@@ -540,6 +541,41 @@ there is no migration contract between pre-1.0 versions.
     `jit_above_cost`, so a server with JIT compiled the statement on every
     pass: 26 to 47 ms per pass against 0.7 to 1.8 ms of work, at a 90,000-row
     backlog on PostgreSQL 17.
+- **Breaking: the worker and its children send a one-statement write in one
+  round trip.** The write runs in autocommit, as its own transaction, with no
+  pre-ping, no BEGIN and no COMMIT. A write that needs several statements to
+  commit together keeps its transaction.
+  - Worker process: the finalize of a plain task that succeeded
+    (`horsies_complete_task_fused`: attempt, history row and capacity wake in
+    one call) is 1 round trip, before 4 (pre-ping, BEGIN, the call,
+    COMMIT). The claim statement, the orphan cancel, the capacity wake in
+    phase 2 of a plain task and the wake of a retry that comes due are 1
+    round trip each, before 4 each.
+  - `PostgresConfig.worker_pool_pre_ping` (default `False`) sets the
+    pre-ping of the worker process's engine. `pool_pre_ping` (default
+    `True`) applies to the other engines only: producers, the web UI, and
+    the engine that task code in a child sends with. Set
+    `worker_pool_pre_ping=True` to keep the pre-ping of 0.6.x.
+  - With the pre-ping off, a pooled connection that died while idle fails
+    the first statement. The finalize returns a retryable connection error
+    and runs again on a new connection; a statement whose reply was lost is
+    classified on that run (`AlreadyApplied`) and is not applied twice. The
+    claim loop retries a pass that failed with a connection error.
+  - Child pools: every connection is in autocommit. The RUNNING update of a
+    plain task, with its first runner heartbeat, and the finalizing marker
+    are 1 round trip each, before 4 each with the checkout check (3
+    without). The RUNNING update of a workflow task and the start of its
+    node run in one transaction: BEGIN, update, node, COMMIT.
+  - `IsolatedPool.check` and `SharedPool.check` default to `False` (they
+    were `True`). A dead pooled connection then fails the write that takes
+    it: the RUNNING update ends as `OWNERSHIP_UNCONFIRMED` and the claim
+    lease returns the task; a failed finalizing marker is logged. Set
+    `check=True` on the `pool` of a kind to check each checkout.
+  - The advisory lock of `horsies_claim` ends with the claim statement. It
+    was held until the COMMIT one round trip later.
+  - A failed capacity wake in phase 2 of a plain task is a phase-2 error:
+    a connection error is retried, as for a workflow task. It was dropped
+    before.
 - **A schema upgrade keeps each claim and recovery index whose form
   matches.** An index whose catalog form matches its declaration is kept. One
   of another form, or an invalid one, is built concurrently under a temporary

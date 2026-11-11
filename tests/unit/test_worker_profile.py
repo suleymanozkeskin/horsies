@@ -518,19 +518,19 @@ class TestChildPoolMinSizeBounds:
 
 
 class TestChildPoolDefaults:
-    def test_an_isolated_child_keeps_a_pool_of_two(self) -> None:
-        """The isolated default is unchanged from 0.6: lazy, at most 2,
-        checked on checkout."""
+    def test_an_isolated_child_keeps_a_pool_of_two_without_a_check(self) -> None:
+        """Lazy, at most 2. No checkout check: each write of the child is one
+        statement in autocommit, and a check would double its round trips."""
         assert DEFAULT_ISOLATED_POOL_CONNECTIONS == 2
         assert IsolatedChildren(count=1).pool == IsolatedPool(
             min_size=0,
             max_size=PoolSize(connections=2),
-            check=True,
+            check=False,
         )
         assert IsolatedChildren(count=1).resolved_pool() == ResolvedPool(
             min_size=0,
             max_size=2,
-            check=True,
+            check=False,
         )
 
     def test_a_shared_async_child_derives_its_sizes_from_its_seats(self) -> None:
@@ -538,7 +538,7 @@ class TestChildPoolDefaults:
         assert children.pool == SharedPool(
             min_size=0,
             max_size=PoolSizeFromSeats(),
-            check=True,
+            check=False,
         )
         assert children.executor == ExecutorThreadsFromSeats()
 
@@ -547,7 +547,7 @@ class TestChildPoolDefaults:
         assert children.pool == SharedPool(
             min_size=0,
             max_size=PoolSizeFromSeats(),
-            check=True,
+            check=False,
         )
 
 
@@ -628,7 +628,7 @@ class TestChildPoolResolution:
         assert children.resolved_pool() == ResolvedPool(
             min_size=0,
             max_size=shared_thread_pool_connections(seats),
-            check=True,
+            check=False,
         )
 
     def test_a_set_pool_size_is_kept_whatever_the_seats(self) -> None:
@@ -1100,7 +1100,7 @@ class TestDescribeWorkerProfile:
         )
         assert describe_worker_profile(profile) == (
             'isolated=8 (recycle after no limit, above 1024 MB; pool 0 to 2 '
-            'connections, check on; task_send_pool 2 connections), '
+            'connections, check off; task_send_pool 2 connections), '
             'shared_async=none, shared_thread=none, '
             'pool=5 connections (derived from 8 seats), '
             'claim per queue per pass: 4 tasks, claimed per worker: no limit, '
@@ -1122,7 +1122,7 @@ class TestDescribeWorkerProfile:
             'shared_async=3x25 seats (recycle after 40 tasks per seat, '
             'above 2048 MB; '
             f'pool 0 to {shared_async_pool_connections(25)} connections, '
-            'derived from seats, check on; '
+            'derived from seats, check off; '
             f'executor {shared_async_executor_threads(25)} threads, derived '
             'from seats; task_send_pool 2 connections), '
         ) in describe_worker_profile(profile)
@@ -1142,7 +1142,7 @@ class TestDescribeWorkerProfile:
             'shared_thread=2x8 seats (recycle after no limit per seat, '
             'above 1024 MB; '
             f'pool 0 to {shared_thread_pool_connections(8)} connections, '
-            'derived from seats, check on; task_send_pool 2 connections), '
+            'derived from seats, check off; task_send_pool 2 connections), '
         ) in describe_worker_profile(profile)
 
     def test_set_sizes_are_named_without_their_origin(self) -> None:
@@ -1161,7 +1161,11 @@ class TestDescribeWorkerProfile:
             shared_async=SharedAsyncChildren(
                 count=1,
                 seats=50,
-                pool=SharedPool(min_size=2, max_size=PoolSize(connections=9)),
+                pool=SharedPool(
+                    min_size=2,
+                    max_size=PoolSize(connections=9),
+                    check=True,
+                ),
                 executor=ExecutorThreads(threads=7),
                 task_send_pool=PoolSize(connections=5),
             ),
