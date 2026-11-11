@@ -611,6 +611,8 @@ exception_mapper={
 
 Only invoked for unhandled exceptions. If the task returns `TaskResult(err=...)` explicitly, the mapper is never called.
 
+A `KeyboardInterrupt` is never mapped. In a worker, every other exception of a `def` or an `async def` body is mapped, `GeneratorExit` and `CancelledError` included. A direct call of an `async def` task outside a worker lets `GeneratorExit` pass, and a `CancelledError` while its asyncio task has a cancel request.
+
 ### Validation
 
 - Keys must be `BaseException` subclasses (not instances, not strings)

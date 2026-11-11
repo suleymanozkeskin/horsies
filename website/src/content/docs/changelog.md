@@ -27,8 +27,8 @@ there is no migration contract between pre-1.0 versions.
   - A direct call of an async task returns a coroutine of the `TaskResult`.
     The return check and the exception mappers are the same as for a `def`
     task. In a worker, a `CancelledError` of a body that cancelled its own
-    task goes through the exception mappers too; the direct call lets it
-    pass.
+    task, and a `GeneratorExit` that the body raises, go through the
+    exception mappers too; the direct call lets them pass.
   - `TaskNode.fn`, `.node()` and the task registry take both kinds.
   - An `async def` function that uses `yield` is refused with `HRS-101`, as
     a generator function is.
