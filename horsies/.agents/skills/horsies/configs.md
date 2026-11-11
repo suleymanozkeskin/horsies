@@ -287,6 +287,20 @@ config = PostgresConfig(
 
 Driver must be psycopg3 (async). `postgresql+psycopg2://` is rejected.
 
+psycopg >= 3.3.6 bounds the wait after an interrupted query (a cancelled asyncio
+task, `KeyboardInterrupt`, `SystemExit`): a cancel request of at most 5 s, then
+at most 5 s for the query, then it closes the connection. The 5 s limit on the
+cancel request needs libpq 17+; with an older libpq the request has no limit (in
+async code it runs in a default-executor thread, which a shared async attempt
+waits for). `horsies[pg-binary]` bundles its own libpq; `psycopg.pq.version()`
+reads the loaded version (`170000` = 17.0).
+
+The seats of a shared child share the child pool (`worker_child_pool_max_size`,
+default 2) for the RUNNING update and the finalizing marker; a seat waits up to
+30 s for a connection, and a seat that gets none leaves its task claimed until
+the claim lease returns it. Average connections in use = tasks per second of
+the child x 2 writes x time of one write; keep the pool above it.
+
 `tcp_keepalives` (default on) keeps idle pooled sockets warm so a server-side
 or middlebox idle-reap is detected and recycled at the socket layer instead of
 surfacing as a mid-query `OperationalError`. `pool_pre_ping` and `pool_recycle`

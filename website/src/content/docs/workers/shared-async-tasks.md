@@ -132,7 +132,7 @@ What a cancel does to common libraries, measured on one shared child (CPython 3.
 | `asyncio.to_thread()` with a sync client | the thread runs on | the thread runs on: it ends only by the client's own timeout |
 | DNS lookup with a resolver that does not answer | the lookup thread runs on, 9.7 s with glibc defaults | the thread runs on |
 
-Notes: a pause of the database container stood in for a server that stops answering; the kernel still accepted TCP connections. Networks that drop packets, TLS and remote servers add round trips to each cleanup step, and were not measured.
+Notes: a pause of the database container stood in for a server that stops answering; the kernel still accepted TCP connections. Networks that drop packets, TLS and remote servers add round trips to each cleanup step, and were not measured. The psycopg row used `psycopg-binary` 3.3.8, with its bundled libpq 18.6. With a libpq older than 17, psycopg sends its cancel request from a thread with no limit, and the attempt ends only when that thread returns. See [psycopg and libpq](../configuration/broker-config#psycopg-and-libpq).
 
 The worker keeps one timer per task, at `timeout_ms + cancel_grace_ms + 10 seconds`. The child reports the second cancel at T + G, so a child that has reported neither the second cancel nor the end by then is frozen: C code holds the GIL, and nothing in the child can run. The worker kills that child. Each task in it that is past its deadline fails with `TASK_TIMEOUT`; every other task takes the crash path (`WORKER_CRASHED`, or a retry when its policy names that code). No task is named as the cause, so no retry moves to an isolated child.
 
@@ -209,7 +209,7 @@ A seat that waits on the network holds at least one socket, and a process has a 
 - A stuck task keeps its seat until every task left in its child is stuck, or until the worker stops and its drain timeout kills the child.
 - A blocked loop delays every timeout of the child until the block ends, or until the worker kills the child.
 - A refusal (a row whose stored timeout or grace the worker cannot use) runs no task code. A child that still holds one 120 seconds after its placement is frozen or waits on a database that does not answer; the worker kills it, and the refusal takes the crash path.
-- Each shared async child opens one async connection pool of `worker_child_pool_max_size` connections, as an isolated child opens one sync pool. See [Connections](worker-profiles#connections).
+- Each shared async child opens one async connection pool of `worker_child_pool_max_size` connections, as an isolated child opens one sync pool. Its seats share that pool for the RUNNING update and the finalizing marker of each task, and wait up to 30 seconds for a free connection. Size it as for [shared thread children](shared-thread-tasks#connections). See [Connections](worker-profiles#connections).
 
 ## Things to Avoid
 

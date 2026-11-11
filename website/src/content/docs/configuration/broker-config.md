@@ -54,6 +54,26 @@ Components:
 - `host:port` - Server location (default port: 5432)
 - `database` - Database name
 
+## psycopg and libpq
+
+horsies needs psycopg 3.3.6 or later. The install sets where the libpq of psycopg comes from:
+
+| Install | psycopg loads |
+|---------|---------------|
+| `horsies` | the libpq of the system |
+| `horsies[pg-binary]` | the libpq that `psycopg-binary` bundles |
+| `horsies[pg-c]` | the libpq of the system, through `psycopg-c` |
+
+When a cancelled asyncio task, `KeyboardInterrupt` or `SystemExit` interrupts a running query, psycopg:
+
+1. Sends a cancel request to the server, for at most 5 seconds.
+2. Waits for the query to end, for at most 5 seconds.
+3. Closes the connection, when the query has not ended.
+
+The 5-second limit of step 1 needs libpq 17 or later. With an older libpq, the cancel request has no limit, and in async code psycopg sends it from a thread of the default executor. The 5-second limit of step 2 applies with every libpq. Read the version that psycopg loaded with `psycopg.pq.version()`: libpq 17.0 reads `170000`.
+
+In a [shared async child](../workers/shared-async-tasks#the-timeout), that thread is work of the task: the attempt ends only when the cancel request returns. A second cancel does not stop a thread.
+
 ## Examples
 
 ### Local Development

@@ -151,7 +151,19 @@ A new task goes to the open shared thread child with the fewest tasks in flight,
 
 ## Connections
 
-Each shared thread child opens one sync connection pool of `worker_child_pool_max_size` connections, as an isolated child does, whatever its seats. Its seat threads share that pool for the RUNNING update and the finalizing marker of each task, and a thread waits up to 30 seconds for a free connection. Each task holds a connection only for those two short writes, so a pool smaller than the seats is enough for most tasks. See [Connections](worker-profiles#connections).
+Each shared thread child opens one sync connection pool of `worker_child_pool_max_size` connections (default 2), as an isolated child does, whatever its seats. Its seat threads share that pool for two writes of each task: the RUNNING update at its start, and the finalizing marker at its end. The worker process writes the runner heartbeats over its own connection. See [Connections](worker-profiles#connections).
+
+A seat thread waits up to 30 seconds for a free connection. A thread that gets none in that time does not run its task: the task stays claimed, and its claim lease returns it to the queue.
+
+Size the pool from the writes, not from the seats:
+
+- Each write holds one connection for its transaction: a few database round trips.
+- Connections in use, on average = tasks per second of the child × 2 writes × the time of one write.
+- Example: a child that ends 20 tasks per second, with 10 ms per write, uses 20 × 2 × 0.01 = 0.4 connections on average. The default of 2 is enough.
+- Example: the same child against a remote database, with 50 ms per write, uses 2 connections on average. The default pool is then full, and seat threads wait for each other. Set `worker_child_pool_max_size` to 4 or more.
+- Keep the pool above the average. As the average comes near the pool size, the waits grow.
+
+`worker_child_pool_max_size` applies to every child of the worker, isolated and shared. Each added connection counts once per child in the connection budget of the worker.
 
 ## Limits
 
