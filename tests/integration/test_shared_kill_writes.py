@@ -48,6 +48,7 @@ from horsies.core.worker.slots import (
 from horsies.core.worker.thread_slots import RunCulprit
 from horsies.core.worker.worker import Worker
 from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.history_seeding import read_attempts
 
 pytestmark = [pytest.mark.integration]
 
@@ -364,8 +365,11 @@ async def test_a_run_that_returned_before_the_kill_writes_what_it_returned(
 
     row = await _terminal_row(session, task_id)
     assert (row.status, row.error_code) == ('FAILED', 'UPSTREAM_DOWN')
-    attempt = await _attempt(session, task_id)
-    assert (attempt.will_retry, attempt.error_code) == (False, 'UPSTREAM_DOWN')
+    session.expire_all()
+    attempts = await read_attempts(session, task_id)
+    assert [(a.attempt, a.will_retry, a.error_code) for a in attempts] == [
+        (1, False, 'UPSTREAM_DOWN'),
+    ]
 
 
 @pytest.mark.asyncio(loop_scope='function')
