@@ -5,6 +5,8 @@ that name from ``AppConfig.worker_profiles``. A profile states:
 
 - how many children the worker runs for each execution mode,
 - when a child is replaced (recycled),
+- the connection pool of each child, and the default executor of a shared
+  async child,
 - how many tasks the worker claims,
 - how long a stopping worker waits for running tasks,
 - what a Linux worker imports before it forks children.
@@ -21,21 +23,30 @@ The number of children of a worker is the sum of the counts of its modes; no
 separate total exists. A child never changes its mode.
 
 Each value is bounded where it is built. The checks that need more than one
-value (at least one child, claim limits against capacity) run in
-``AppConfig`` validation, which knows the profile name and reports the field
-path, for example ``worker_profiles['batch'].claim.claimed_per_worker``.
+value (at least one child, claim limits against capacity, the ``min_size`` of
+a child pool against its resolved ``max_size``) run in ``AppConfig``
+validation, which knows the profile name and reports the field path, for
+example ``worker_profiles['batch'].claim.claimed_per_worker``.
 """
 
 from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import timedelta
+from enum import Enum
 from typing import Annotated, Final, Literal, Union, assert_never
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from horsies.core.errors import ConfigurationError, ErrorCode
+from horsies.core.models.child_sizing import (
+    DEFAULT_ISOLATED_POOL_CONNECTIONS,
+    shared_async_executor_threads,
+    shared_async_pool_connections,
+    shared_thread_pool_connections,
+)
 from horsies.core.worker.config import ChildPreload
 
 MAX_ISOLATED_CHILDREN: Final = 1024
@@ -71,6 +82,20 @@ default on Linux with glibc, 512 KiB on macOS. 256 seats reserve 2 GiB of
 address space in one child on Linux. More threads than CPUs add no
 throughput to CPU work; seats above the CPU count help only tasks that wait
 in sync I/O.
+"""
+
+MAX_CHILD_POOL_CONNECTIONS: Final = 1000
+"""The most connections in the connection pool of one child.
+
+Each connection holds a socket, and the common default limit of open files
+of one process is 1024 (``ulimit -n``).
+"""
+
+MAX_EXECUTOR_THREADS: Final = 256
+"""The most threads in the default executor of one shared async child.
+
+Each thread has a stack of its own: 8 MiB of address space by default on
+Linux with glibc. 256 threads reserve 2 GiB of address space in one child.
 """
 
 DEFAULT_RECYCLE_AFTER_TASKS: Final = 100
@@ -144,6 +169,171 @@ MemoryLimitSetting = Annotated[
 ]
 
 
+class PoolSize(BaseModel):
+    """A pool of at most ``connections`` connections, from 1 to
+    ``MAX_CHILD_POOL_CONNECTIONS``."""
+
+    model_config = ConfigDict(extra='forbid', frozen=True)
+
+    kind: Literal['pool_size'] = 'pool_size'
+    connections: int = Field(
+        ge=1,
+        le=MAX_CHILD_POOL_CONNECTIONS,
+        description='Most connections in the pool',
+    )
+
+
+class PoolSizeFromSeats(BaseModel):
+    """The most connections of the pool follow the seats of the child:
+    ``min(cap, max(2, ceil(seats / seats_per_connection)))``, with the
+    ``seats_per_connection`` and ``cap`` of the kind of the child
+    (``horsies.core.models.child_sizing``)."""
+
+    model_config = ConfigDict(extra='forbid', frozen=True)
+
+    kind: Literal['pool_size_from_seats'] = 'pool_size_from_seats'
+
+
+SharedPoolSizeSetting = Annotated[
+    Union[PoolSize, PoolSizeFromSeats],
+    Field(discriminator='kind'),
+]
+
+
+class ExecutorThreads(BaseModel):
+    """A default executor of ``threads`` threads, from 1 to
+    ``MAX_EXECUTOR_THREADS``."""
+
+    model_config = ConfigDict(extra='forbid', frozen=True)
+
+    kind: Literal['executor_threads'] = 'executor_threads'
+    threads: int = Field(
+        ge=1,
+        le=MAX_EXECUTOR_THREADS,
+        description='Threads of the default executor',
+    )
+
+
+class ExecutorThreadsFromSeats(BaseModel):
+    """The threads of the default executor follow the seats of the child:
+    ``min(cap, max(2, ceil(seats / seats_per_thread)))``
+    (``horsies.core.models.child_sizing``)."""
+
+    model_config = ConfigDict(extra='forbid', frozen=True)
+
+    kind: Literal['executor_threads_from_seats'] = 'executor_threads_from_seats'
+
+
+ExecutorThreadsSetting = Annotated[
+    Union[ExecutorThreads, ExecutorThreadsFromSeats],
+    Field(discriminator='kind'),
+]
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedPool:
+    """The connection pool of one child as it opens: from ``min_size`` to
+    ``max_size`` connections, and a check of each connection on checkout
+    when ``check`` is true.
+
+    ``0 <= min_size <= max_size <= MAX_CHILD_POOL_CONNECTIONS`` and
+    ``max_size >= 1``: AppConfig validation refuses a profile that resolves
+    to other values.
+    """
+
+    min_size: int
+    max_size: int
+    check: bool
+
+
+def _default_isolated_pool_size() -> PoolSize:
+    return PoolSize(connections=DEFAULT_ISOLATED_POOL_CONNECTIONS)
+
+
+class IsolatedPool(BaseModel):
+    """The connection pool that each isolated child opens.
+
+    - ``min_size``: connections that the pool keeps open, from 0 to
+      ``MAX_CHILD_POOL_CONNECTIONS``. With 0, a connection opens at its
+      first use.
+    - ``max_size``: the most connections of the pool.
+    - ``check``: check each connection when a write takes it from the pool.
+      Each check is a database round trip; turn it off on high-RTT links
+      where the per-statement retry handling already covers stale
+      connections.
+
+    AppConfig validation refuses a ``min_size`` above ``max_size``.
+    """
+
+    model_config = ConfigDict(extra='forbid', frozen=True)
+
+    min_size: int = Field(
+        default=0,
+        ge=0,
+        le=MAX_CHILD_POOL_CONNECTIONS,
+        description='Connections that the pool keeps open',
+    )
+    max_size: PoolSize = Field(default_factory=_default_isolated_pool_size)
+    check: bool = Field(
+        default=True,
+        description='Check each connection on checkout',
+    )
+
+    def resolved(self) -> ResolvedPool:
+        """The pool as each isolated child opens it."""
+        return ResolvedPool(
+            min_size=self.min_size,
+            max_size=self.max_size.connections,
+            check=self.check,
+        )
+
+
+class SharedPool(BaseModel):
+    """The connection pool that each shared child opens. Its seats share it.
+
+    - ``min_size``: connections that the pool keeps open, from 0 to
+      ``MAX_CHILD_POOL_CONNECTIONS``. With 0, a connection opens at its
+      first use.
+    - ``max_size``: the most connections of the pool: ``PoolSize``, or
+      ``PoolSizeFromSeats()`` to derive it from the seats of the child.
+    - ``check``: check each connection when a write takes it from the pool,
+      as for ``IsolatedPool``.
+
+    AppConfig validation refuses a ``min_size`` above the resolved
+    ``max_size``.
+    """
+
+    model_config = ConfigDict(extra='forbid', frozen=True)
+
+    min_size: int = Field(
+        default=0,
+        ge=0,
+        le=MAX_CHILD_POOL_CONNECTIONS,
+        description='Connections that the pool keeps open',
+    )
+    max_size: SharedPoolSizeSetting = Field(default_factory=PoolSizeFromSeats)
+    check: bool = Field(
+        default=True,
+        description='Check each connection on checkout',
+    )
+
+    def resolved(self, from_seats: int) -> ResolvedPool:
+        """The pool as each shared child opens it. ``from_seats`` is the
+        size that the kind of the child derives from its seats."""
+        match self.max_size:
+            case PoolSize(connections=connections):
+                max_size = connections
+            case PoolSizeFromSeats():
+                max_size = from_seats
+            case _ as unreachable:
+                assert_never(unreachable)
+        return ResolvedPool(
+            min_size=self.min_size,
+            max_size=max_size,
+            check=self.check,
+        )
+
+
 def _default_recycle_after() -> TaskLimit:
     return TaskLimit(tasks=DEFAULT_RECYCLE_AFTER_TASKS)
 
@@ -169,7 +359,8 @@ class IsolatedRecycle(BaseModel):
 
 class IsolatedChildren(BaseModel):
     """``count`` isolated children: each runs one task at a time in its own
-    process. ``count`` is from 1 to ``MAX_ISOLATED_CHILDREN``."""
+    process, and opens the connection pool ``pool``. ``count`` is from 1 to
+    ``MAX_ISOLATED_CHILDREN``."""
 
     model_config = ConfigDict(extra='forbid', frozen=True)
 
@@ -180,6 +371,11 @@ class IsolatedChildren(BaseModel):
         description='Number of isolated children',
     )
     recycle: IsolatedRecycle = Field(default_factory=IsolatedRecycle)
+    pool: IsolatedPool = Field(default_factory=IsolatedPool)
+
+    def resolved_pool(self) -> ResolvedPool:
+        """The pool that each child opens."""
+        return self.pool.resolved()
 
 
 class NoIsolatedChildren(BaseModel):
@@ -230,6 +426,12 @@ class SharedAsyncChildren(BaseModel):
     a free seat takes the next task at once. ``count`` is from 1 to
     ``MAX_SHARED_ASYNC_CHILDREN``; ``seats`` is from 1 to
     ``MAX_SEATS_PER_SHARED_ASYNC_CHILD``.
+
+    Each child opens the async connection pool ``pool``, which its seats
+    share. ``executor`` sizes the default executor of its event loop
+    (``asyncio.to_thread``, ``loop.run_in_executor(None, ...)``). An
+    ``on_shared_async_child_start`` hook that sets a default executor of its
+    own replaces it.
     """
 
     model_config = ConfigDict(extra='forbid', frozen=True)
@@ -246,6 +448,24 @@ class SharedAsyncChildren(BaseModel):
         description='Tasks that one child runs at once',
     )
     recycle: SharedRecycle = Field(default_factory=SharedRecycle)
+    pool: SharedPool = Field(default_factory=SharedPool)
+    executor: ExecutorThreadsSetting = Field(
+        default_factory=ExecutorThreadsFromSeats,
+    )
+
+    def resolved_pool(self) -> ResolvedPool:
+        """The pool that each child opens."""
+        return self.pool.resolved(shared_async_pool_connections(self.seats))
+
+    def resolved_executor_threads(self) -> int:
+        """The threads of the default executor of each child."""
+        match self.executor:
+            case ExecutorThreads(threads=threads):
+                return threads
+            case ExecutorThreadsFromSeats():
+                return shared_async_executor_threads(self.seats)
+            case _ as unreachable:
+                assert_never(unreachable)
 
 
 class NoSharedAsyncChildren(BaseModel):
@@ -269,7 +489,8 @@ class SharedThreadChildren(BaseModel):
     ``Execution.SHARED_THREAD`` at once, each on a thread of its own, and a
     free seat takes the next task at once. ``count`` is from 1 to
     ``MAX_SHARED_THREAD_CHILDREN``; ``seats`` is from 1 to
-    ``MAX_SEATS_PER_SHARED_THREAD_CHILD``.
+    ``MAX_SEATS_PER_SHARED_THREAD_CHILD``. Each child opens the sync
+    connection pool ``pool``, which its seat threads share.
     """
 
     model_config = ConfigDict(extra='forbid', frozen=True)
@@ -286,6 +507,11 @@ class SharedThreadChildren(BaseModel):
         description='Tasks that one child runs at once',
     )
     recycle: SharedRecycle = Field(default_factory=SharedRecycle)
+    pool: SharedPool = Field(default_factory=SharedPool)
+
+    def resolved_pool(self) -> ResolvedPool:
+        """The pool that each child opens. Its seat threads share it."""
+        return self.pool.resolved(shared_thread_pool_connections(self.seats))
 
 
 class NoSharedThreadChildren(BaseModel):
@@ -450,13 +676,62 @@ def _describe_memory_limit(limit: MemoryLimit | NoMemoryLimit) -> str:
             assert_never(unreachable)
 
 
+class _SizeOrigin(Enum):
+    """Where a resolved size of a child comes from."""
+
+    PROFILE = 'profile'
+    SEATS = 'seats'
+
+
+def _origin_text(origin: _SizeOrigin) -> str:
+    match origin:
+        case _SizeOrigin.PROFILE:
+            return ''
+        case _SizeOrigin.SEATS:
+            return ', derived from seats'
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _describe_pool(pool: ResolvedPool, origin: _SizeOrigin) -> str:
+    """The resolved pool of one child, and where its max size comes from."""
+    check = 'on' if pool.check else 'off'
+    return (
+        f'pool {pool.min_size} to {pool.max_size} connections'
+        f'{_origin_text(origin)}, check {check}'
+    )
+
+
+def _shared_pool_origin(pool: SharedPool) -> _SizeOrigin:
+    match pool.max_size:
+        case PoolSize():
+            return _SizeOrigin.PROFILE
+        case PoolSizeFromSeats():
+            return _SizeOrigin.SEATS
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _executor_origin(
+    executor: ExecutorThreads | ExecutorThreadsFromSeats,
+) -> _SizeOrigin:
+    match executor:
+        case ExecutorThreads():
+            return _SizeOrigin.PROFILE
+        case ExecutorThreadsFromSeats():
+            return _SizeOrigin.SEATS
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def _describe_isolated(isolated: IsolatedChildren | NoIsolatedChildren) -> str:
     match isolated:
         case IsolatedChildren(count=count, recycle=recycle):
             return (
                 f'isolated={count} (recycle after '
                 f'{_describe_task_limit(recycle.after)}, above '
-                f'{_describe_memory_limit(recycle.above)})'
+                f'{_describe_memory_limit(recycle.above)}; '
+                f'{_describe_pool(isolated.resolved_pool(), _SizeOrigin.PROFILE)})'
             )
         case NoIsolatedChildren():
             return 'isolated=none'
@@ -469,10 +744,16 @@ def _describe_shared_async(
 ) -> str:
     match shared_async:
         case SharedAsyncChildren(count=count, seats=seats, recycle=recycle):
+            pool = _describe_pool(
+                shared_async.resolved_pool(),
+                _shared_pool_origin(shared_async.pool),
+            )
             return (
                 f'shared_async={count}x{seats} seats (recycle after '
                 f'{_describe_task_limit(recycle.after_per_seat)} per seat, '
-                f'above {_describe_memory_limit(recycle.above)})'
+                f'above {_describe_memory_limit(recycle.above)}; {pool}; '
+                f'executor {shared_async.resolved_executor_threads()} threads'
+                f'{_origin_text(_executor_origin(shared_async.executor))})'
             )
         case NoSharedAsyncChildren():
             return 'shared_async=none'
@@ -485,10 +766,14 @@ def _describe_shared_thread(
 ) -> str:
     match shared_thread:
         case SharedThreadChildren(count=count, seats=seats, recycle=recycle):
+            pool = _describe_pool(
+                shared_thread.resolved_pool(),
+                _shared_pool_origin(shared_thread.pool),
+            )
             return (
                 f'shared_thread={count}x{seats} seats (recycle after '
                 f'{_describe_task_limit(recycle.after_per_seat)} per seat, '
-                f'above {_describe_memory_limit(recycle.above)})'
+                f'above {_describe_memory_limit(recycle.above)}; {pool})'
             )
         case NoSharedThreadChildren():
             return 'shared_thread=none'
@@ -631,14 +916,100 @@ def profile_claim_errors(
     return errors
 
 
+def _pool_size_note(pool: SharedPool, seats: int, max_size: int) -> str:
+    """Where the max size of a shared pool comes from."""
+    match pool.max_size:
+        case PoolSize(connections=connections):
+            return f'max_size=PoolSize(connections={connections})'
+        case PoolSizeFromSeats():
+            return (
+                f'max_size=PoolSizeFromSeats() resolves to {max_size} '
+                f'connections for {seats} seats'
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _pool_bounds_errors(
+    path: str,
+    pool: ResolvedPool,
+    size_note: str,
+) -> list[ConfigurationError]:
+    """Refuse a pool whose ``min_size`` is above its resolved ``max_size``."""
+    if pool.min_size <= pool.max_size:
+        return []
+    return [
+        _profile_error(
+            f'{path}.min_size: {pool.min_size} is above the pool max_size '
+            f'({pool.max_size})',
+            [
+                size_note,
+                'a pool keeps min_size connections open and never opens '
+                'more than max_size',
+            ],
+            f'set min_size to {pool.max_size} or less, or set '
+            f'max_size=PoolSize(connections={pool.min_size}) or more',
+        ),
+    ]
+
+
+def profile_pool_errors(name: str, profile: WorkerProfile) -> list[ConfigurationError]:
+    """Refuse a child pool whose ``min_size`` is above its resolved
+    ``max_size``, for each mode with children."""
+    errors: list[ConfigurationError] = []
+    match profile.isolated:
+        case IsolatedChildren(pool=pool) as isolated:
+            errors.extend(
+                _pool_bounds_errors(
+                    f'{profile_path(name)}.isolated.pool',
+                    isolated.resolved_pool(),
+                    f'max_size=PoolSize(connections={pool.max_size.connections})',
+                ),
+            )
+        case NoIsolatedChildren():
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
+    match profile.shared_async:
+        case SharedAsyncChildren(pool=pool, seats=seats) as shared_async:
+            resolved = shared_async.resolved_pool()
+            errors.extend(
+                _pool_bounds_errors(
+                    f'{profile_path(name)}.shared_async.pool',
+                    resolved,
+                    _pool_size_note(pool, seats, resolved.max_size),
+                ),
+            )
+        case NoSharedAsyncChildren():
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
+    match profile.shared_thread:
+        case SharedThreadChildren(pool=pool, seats=seats) as shared_thread:
+            resolved = shared_thread.resolved_pool()
+            errors.extend(
+                _pool_bounds_errors(
+                    f'{profile_path(name)}.shared_thread.pool',
+                    resolved,
+                    _pool_size_note(pool, seats, resolved.max_size),
+                ),
+            )
+        case NoSharedThreadChildren():
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
+    return errors
+
+
 def worker_profiles_shape_errors(
     profiles: Mapping[str, WorkerProfile],
 ) -> list[ConfigurationError]:
-    """The name and children errors of every profile, in name order."""
+    """The name, children and pool errors of every profile, in name order."""
     errors: list[ConfigurationError] = []
     for name in sorted(profiles):
         errors.extend(profile_name_errors(name))
         errors.extend(profile_children_errors(name, profiles[name]))
+        errors.extend(profile_pool_errors(name, profiles[name]))
     return errors
 
 
