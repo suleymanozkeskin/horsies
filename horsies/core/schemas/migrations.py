@@ -388,8 +388,11 @@ from horsies.core.models.tasks import Execution
 #      horsies_failed_attempt_outcome. horsies_lock_running_task is the
 #      locking read of a RUNNING task, with the advisory lock first. Both
 #      are dropped and created on every apply.
+# v57: horsies_complete_tasks_fused, the batched plain-success completion.
+#      It calls horsies_complete_task_fused once per row, in sorted task-id
+#      order, and returns each row at its input ordinality.
 
-SCHEMA_VERSION = 56
+SCHEMA_VERSION = 57
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,

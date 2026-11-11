@@ -45,6 +45,12 @@ from horsies.core.worker.child_protocol import (
     SharedAsyncChild,
     SharedThreadChild,
 )
+from horsies.core.worker.finalize_batch import (
+    FINALIZE_BATCH_CLOSE_TIMEOUT_S,
+    FinalizeBatcher,
+    FlushersCancelled,
+    FlushersDrained,
+)
 from horsies.core.worker.runner_heartbeat import (
     FailClosedCause,
     PostgresBeatWriter,
@@ -316,6 +322,14 @@ class Worker(
         # Releases coalesce: the loop clears it before each claim pass.
         self._capacity_released = asyncio.Event()
         self._finalize_retry_attempts: dict[tuple[str, FinalizeStage], int] = {}
+        # Writes the plain-success outcomes in batches. Its flushers start on
+        # the first row, at most one per connection of the worker pool;
+        # ``stop`` closes it after the finalizer drain.
+        self._finalize_batcher = FinalizeBatcher(
+            self._write_fused_batch,
+            max_queued_rows=self._pending_task_limit(),
+            max_flushers=self.cfg.parent_pool_size,
+        )
         self._fatal_background_error: (
             ChildStartFailedError
             | ServiceLoopDiedError
@@ -1068,6 +1082,10 @@ class Worker(
                 await asyncio.gather(*done, return_exceptions=True)
             self._finalizer_tasks.clear()
 
+        # After the finalizers: a finalizer that the drain cancelled leaves
+        # its row in the batcher, and the batch of that row is still written.
+        await self._close_finalize_batcher()
+
         # Close the Postgres listener after finalizers so completion NOTIFYs
         # and result waits drain through normally.
         try:
@@ -1086,6 +1104,23 @@ class Worker(
         # the exit bound of a fail-closed stop until here.
         await self._stop_runner_heartbeat()
         logger.info('Worker stopped')
+
+    async def _close_finalize_batcher(self) -> None:
+        """Close the finalize batcher, and log the rows that its close
+        timeout left unwritten. Never raises."""
+        match await self._finalize_batcher.close(FINALIZE_BATCH_CLOSE_TIMEOUT_S):
+            case FlushersDrained():
+                return
+            case FlushersCancelled(rows_in_flight=in_flight, rows_unsent=unsent):
+                logger.warning(
+                    'Worker stop cancelled the finalize batch writes after '
+                    '%.0fs: %s rows in a cancelled statement (commit unknown), '
+                    '%s rows not sent. Stale RUNNING recovery fails each row '
+                    'that did not commit.',
+                    FINALIZE_BATCH_CLOSE_TIMEOUT_S,
+                    in_flight,
+                    unsent,
+                )
 
     def _preload_modules_main(self) -> None:
         """Import the app and all task modules in the main process.

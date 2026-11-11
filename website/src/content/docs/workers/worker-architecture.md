@@ -151,11 +151,31 @@ Main process receives result from child:
 3. Update task status (COMPLETED or FAILED)
 4. Send NOTIFY for result waiters
 
-A plain task that succeeded takes one statement, in autocommit: it checks the
-claim generation, writes the attempt, moves the row to the history, and wakes
-the workers of the queue. That is one database round trip with the defaults
-(`PostgresConfig.worker_pool_pre_ping=False`). A lost reply is a retryable
-error, and the run that retries it finds the task already applied.
+A plain task that succeeded is written in a batch. Its finalizer hands the
+outcome to the finalize batcher of the worker process and waits for the answer
+of its own row. One statement in autocommit writes up to 64 rows
+(`horsies_complete_tasks_fused`; a batch of one row runs
+`horsies_complete_task_fused` itself). For each row, in task-id order, it
+checks the claim generation, writes the attempt, moves the row to the history,
+and wakes the workers of the queue. That is one database round trip per batch
+with the defaults (`PostgresConfig.worker_pool_pre_ping=False`).
+
+- The batcher has no timer. Two flushers write whenever rows wait, each on a
+  connection of the worker pool. A lone row is written at once. The rows that
+  come while both flushers write form the next batch.
+- When a full batch of 64 rows waits while both flushers write, one more
+  flusher starts, up to the size of the worker pool. Such a flusher writes full
+  batches only, so it never makes a batch smaller.
+- A finalizer ends, and frees its seat, only after the statement of its batch
+  returned. So a seat is free only after the commit of its row.
+- A row that the server refuses (for example a row whose retention class has
+  no history partition) refuses the whole statement, and no row of it commits.
+  The batcher then writes each row of that batch alone, once: the other rows
+  commit, and the refused row takes a phase-1 error.
+- A lost reply is a retryable error for each row of the batch. The run that
+  retries a row finds it already applied when the batch committed.
+- At a stop, the batcher closes after the finalizers: it writes the queued
+  rows, for at most 10 seconds.
 
 ## Shared Async Children
 

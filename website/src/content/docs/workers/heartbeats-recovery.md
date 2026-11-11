@@ -122,6 +122,14 @@ When a RUNNING task has no recent runner heartbeat:
 duration. A task can run longer than the threshold while its child holds it and
 the worker writes its runner heartbeats.
 
+A worker that stops after a task returned and before the outcome of the task
+committed loses that outcome. This is the case for an outcome that waits for a
+connection or for its batch, and for a batch statement that did not commit.
+The row stays RUNNING with its finalizing mark, and the reaper treats it as a
+crashed attempt after `finalizing_stale_threshold_ms`: `WORKER_CRASHED`, with a
+retry when the retry policy allows it. The body of the task ran, so its side
+effects happened.
+
 ### Child Process Crash
 
 Each task runs in its own child process. When a child exits abnormally (a segfault in a C extension, a kill by the operating system such as an out-of-memory kill, `os._exit()` in task code, or the kill after `timeout_ms`), the worker detects this at once, without waiting for heartbeats. It recovers the task of that child and starts a new child in that slot:

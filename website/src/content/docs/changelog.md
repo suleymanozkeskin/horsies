@@ -602,6 +602,29 @@ there is no migration contract between pre-1.0 versions.
     `check=True` on the `pool` of a kind to check each checkout.
   - The advisory lock of `horsies_claim` ends with the claim statement. It
     was held until the COMMIT one round trip later.
+- **The worker process writes the outcomes of plain tasks that succeeded in
+  batches.** Schema v57 adds `horsies_complete_tasks_fused`: one statement
+  calls `horsies_complete_task_fused` once per row, in task-id order, so each
+  row keeps its claim-generation check, attempt row, history move and capacity
+  wake. A batch holds up to 64 rows and is one round trip; a batch of one row
+  runs `horsies_complete_task_fused` itself.
+  - There is no timer. Two flushers write whenever rows wait, each on a
+    connection of the worker pool. A lone row is written at once; the rows
+    that come while both flushers write form the next batch.
+  - When a full batch of 64 rows waits while both flushers write, one more
+    flusher starts, up to the size of the worker pool. It writes full batches
+    only.
+  - A finalizer ends, and frees its seat, only after the statement of its
+    batch returned.
+  - A row that the server refuses (for example, no history partition for its
+    retention class) refuses the whole statement. The batch is then written
+    row by row, once each: the other rows commit, and the refused row takes a
+    phase-1 error. A lost reply or a broken connection is a retryable error
+    for each row of the batch; the retry finds a committed row already
+    applied.
+  - At a stop, the batcher closes after the finalizers and writes the queued
+    rows, for at most 10 seconds. A row that it does not write stays RUNNING
+    and goes to stale RUNNING recovery.
 - **A schema upgrade keeps each claim and recovery index whose form
   matches.** An index whose catalog form matches its declaration is kept. One
   of another form, or an invalid one, is built concurrently under a temporary

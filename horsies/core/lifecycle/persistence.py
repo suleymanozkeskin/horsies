@@ -17,8 +17,9 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, LiteralString, assert_never, cast
+from typing import Any, Final, LiteralString, assert_never, cast
 
 from psycopg import AsyncCursor
 from sqlalchemy import text
@@ -26,7 +27,17 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionm
 
 from ..history.terminalization.move import TASK_LOCK_SEED
 from ..logging import get_logger
-from ..utils.db import SingleStatement, run_in_autocommit
+from ..types.result import Err, Ok, Result
+from ..utils.db import (
+    AutocommitFailure,
+    NotSent,
+    OutcomeUnknown,
+    SingleStatement,
+    StatementRefused,
+    is_retryable_connection_error,
+    run_in_autocommit,
+    run_in_autocommit_result,
+)
 from .commands import (
     AbandonNodesOfPausedWorkflows,
     AbandonOwnedNode,
@@ -113,6 +124,14 @@ _COMPLETE_TASK_FUSED_SQL = text("""
         CAST(:task_id AS uuid), :worker_id,
         CAST(:claimed_at AS TIMESTAMPTZ), :result,
         :notify_channel, :notify_payload
+    )
+""")
+
+_COMPLETE_TASKS_FUSED_SQL = text("""
+    SELECT * FROM horsies_complete_tasks_fused(
+        CAST(:task_ids AS uuid[]), CAST(:worker_ids AS TEXT[]),
+        CAST(:claimed_ats AS TIMESTAMPTZ[]), CAST(:results AS TEXT[]),
+        CAST(:notify_channels AS TEXT[]), CAST(:notify_payloads AS TEXT[])
     )
 """)
 
@@ -398,7 +417,7 @@ async def apply_batch_async(
             ordered_outcomes = _reconstruct_id_keyed_batch(
                 outcomes,
                 expected_count=len(fence.claim_generations),
-                command=command,
+                operation=type(command).__name__,
             )
         case (
             ExpirePendingTasks()
@@ -418,24 +437,22 @@ def _reconstruct_id_keyed_batch(
     outcomes: Sequence[TerminalizationOutcome],
     *,
     expected_count: int,
-    command: AbandonOwnedNodes | CancelOwnedNodes,
+    operation: str,
 ) -> list[TerminalizationOutcome]:
     """Verify the ordinal contract and restore caller input order.
 
     SQL result order is never trusted, even though the functions order their
     rows. The exact ordinal set proves there is one answer per input and no
     duplicate answer before the adapter gives the outcomes to its caller.
+    ``operation`` names the batch in the error.
     """
     by_ordinal: dict[int, TerminalizationOutcome] = {}
     for outcome in outcomes:
         if outcome.ordinality is None:
-            raise RuntimeError(
-                f'{type(command).__name__} returned a row without ordinality'
-            )
+            raise RuntimeError(f'{operation} returned a row without ordinality')
         if outcome.ordinality in by_ordinal:
             raise RuntimeError(
-                f'{type(command).__name__} returned duplicate ordinality '
-                f'{outcome.ordinality}'
+                f'{operation} returned duplicate ordinality {outcome.ordinality}'
             )
         by_ordinal[outcome.ordinality] = outcome
 
@@ -443,7 +460,7 @@ def _reconstruct_id_keyed_batch(
     actual = set(by_ordinal)
     if actual != expected:
         raise RuntimeError(
-            f'{type(command).__name__} ordinal set does not match its input: '
+            f'{operation} ordinal set does not match its input: '
             f'expected={sorted(expected)} actual={sorted(actual)}'
         )
     return [by_ordinal[ordinal] for ordinal in range(1, expected_count + 1)]
@@ -490,6 +507,171 @@ async def apply_in_autocommit(
     outcome = decode_outcome_row(_single_row(rows.mappings(), command))
     _log_outcome(command, outcome)
     return outcome
+
+
+FUSED_BATCH_MAX_ROWS: Final = 64
+"""The most rows of one batched plain-success statement. Each row holds its
+task's advisory lock and row lock until the statement ends, so this bounds the
+locks and the server time of one statement."""
+
+
+@dataclass(frozen=True, slots=True)
+class FusedCompletionBatch:
+    """Plain-success completions that one statement writes, in input order.
+
+    Each command keeps its own fence, result and NOTIFY: the statement
+    (``horsies_complete_tasks_fused``) runs ``horsies_complete_task_fused``
+    once per row, in sorted task-id order.
+
+    Raises:
+        ValueError: no command, more than ``FUSED_BATCH_MAX_ROWS``, or a task
+            id twice. The statement refuses a repeated id; a repeat means two
+            writes of one row in one statement.
+    """
+
+    commands: tuple[CompleteTaskFused, ...]
+
+    def __post_init__(self) -> None:
+        if not 1 <= len(self.commands) <= FUSED_BATCH_MAX_ROWS:
+            raise ValueError(
+                f'a fused completion batch holds 1 to {FUSED_BATCH_MAX_ROWS} '
+                f'commands, got {len(self.commands)}'
+            )
+        task_ids = [command.task_id for command in self.commands]
+        if len(set(task_ids)) != len(task_ids):
+            raise ValueError(
+                f'a fused completion batch names a task id twice: {task_ids}'
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class BatchRolledBack:
+    """No row of the batch changed.
+
+    ``cause`` is ``NotSent`` (the pool or the connect failed) or
+    ``StatementRefused`` (the driver or the server refused the statement; a
+    row that raises refuses the whole statement).
+    """
+
+    cause: NotSent | StatementRefused
+
+    @property
+    def retryable(self) -> bool:
+        """Whether the cause may clear: a connection error, a pool timeout,
+        or a transient server error such as a deadlock."""
+        return is_retryable_connection_error(self.cause.error)
+
+
+@dataclass(frozen=True, slots=True)
+class BatchCommitUnknown:
+    """The connection broke after the statement was sent. Each row may have
+    committed or not; a replay of a row classifies it (``AlreadyApplied``
+    when it committed)."""
+
+    cause: OutcomeUnknown
+
+
+type BatchWriteError = BatchRolledBack | BatchCommitUnknown
+
+
+def _batch_write_error(failure: AutocommitFailure) -> BatchWriteError:
+    """The batch error of a failed autocommit run. Pure."""
+    match failure:
+        case NotSent() | StatementRefused():
+            return BatchRolledBack(cause=failure)
+        case OutcomeUnknown():
+            return BatchCommitUnknown(cause=failure)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _fused_batch_parameters(batch: FusedCompletionBatch) -> dict[str, object]:
+    """The arrays of ``horsies_complete_tasks_fused``: one element per
+    command, in input order, for each parameter of the single function."""
+    commands = batch.commands
+    return {
+        'task_ids': [command.task_id for command in commands],
+        'worker_ids': [command.fence.worker_id for command in commands],
+        'claimed_ats': [command.fence.claimed_at for command in commands],
+        'results': [command.result_json for command in commands],
+        'notify_channels': [command.notify_channel for command in commands],
+        'notify_payloads': [command.notify_payload for command in commands],
+    }
+
+
+async def apply_fused_batch_in_autocommit(
+    session_factory: async_sessionmaker[AsyncSession],
+    batch: FusedCompletionBatch,
+) -> Result[tuple[TerminalizationOutcome, ...], BatchWriteError]:
+    """Write a batch of plain-success completions as one statement.
+
+    One round trip in autocommit (``run_in_autocommit_result``). A batch of
+    one row runs ``horsies_complete_task_fused`` itself; a batch of several
+    runs ``horsies_complete_tasks_fused``, which calls that function once per
+    row. The statement is atomic: every ``Applied`` row committed with it,
+    and a refused row (``AlreadyApplied``, ``LostClaim``,
+    ``SourceStateConflict``, ``TaskAbsent``) wrote nothing.
+
+    Outcomes:
+        Ok(outcomes): one outcome per command, in input order; the outcome at
+            position i is the outcome of the task of command i.
+        Err(BatchRolledBack): no row changed.
+        Err(BatchCommitUnknown): the commit of each row is unknown.
+
+    Raises:
+        OutcomeDecodeError, RuntimeError: the rows break the contract of the
+            statement (a row that does not decode, a missing or repeated
+            ordinality, an outcome for another task). These are defects; the
+            rows of the statement committed or wrote nothing.
+    """
+    match await run_in_autocommit_result(session_factory, _fused_statement(batch)):
+        case Ok(rows):
+            pass
+        case Err(failure):
+            return Err(_batch_write_error(failure))
+    outcomes = _fused_outcomes(batch, rows.mappings())
+    for command, outcome in zip(batch.commands, outcomes, strict=True):
+        if outcome.task_id != command.task_id:
+            raise RuntimeError(
+                f'{FusedCompletionBatch.__name__} answered task '
+                f'{outcome.task_id} at the position of task {command.task_id}'
+            )
+        _log_outcome(command, outcome)
+    return Ok(tuple(outcomes))
+
+
+def _fused_statement(batch: FusedCompletionBatch) -> SingleStatement:
+    """The statement of ``batch``: the single fused completion for one row,
+    the batch function for several. Pure."""
+    match batch.commands:
+        case (command,):
+            statement, parameters = call_for(command)
+            return SingleStatement(statement=statement, parameters=parameters)
+        case _:
+            return SingleStatement(
+                statement=_COMPLETE_TASKS_FUSED_SQL,
+                parameters=_fused_batch_parameters(batch),
+            )
+
+
+def _fused_outcomes(
+    batch: FusedCompletionBatch,
+    rows: Sequence[Mapping[str, Any]],
+) -> list[TerminalizationOutcome]:
+    """Decode the rows of the statement of ``batch``, in input order.
+
+    The single fused completion answers one row with no ordinality; the
+    batch function answers one row per input at its ordinality.
+    """
+    match batch.commands:
+        case (command,):
+            return [decode_outcome_row(_single_row(rows, command))]
+        case _:
+            return _reconstruct_id_keyed_batch(
+                [decode_outcome_row(row) for row in rows],
+                expected_count=len(batch.commands),
+                operation=FusedCompletionBatch.__name__,
+            )
 
 
 async def classify_locked_read_miss_async(

@@ -5718,11 +5718,22 @@ class TestPhase1ErrorReplay:
 
 from horsies.core.lifecycle.commands import (
     CompleteLockedTask,
-    CompleteTaskFused,
 )
 from horsies.core.lifecycle.operations import TerminalizationKind
 from horsies.core.lifecycle.outcomes import Applied, LostClaim, ObservedTaskState
+from horsies.core.lifecycle.persistence import (
+    BatchCommitUnknown,
+    BatchRolledBack,
+    BatchWriteError,
+    FusedCompletionBatch,
+)
+from horsies.core.types.result import Result
 from horsies.core.types.status import TaskStatus
+from horsies.core.utils.db import NotSent, OutcomeUnknown, StatementRefused
+import psycopg
+from sqlalchemy.exc import IntegrityError as SAIntegrityError
+from sqlalchemy.exc import OperationalError as SAOperationalError
+from sqlalchemy.exc import TimeoutError as SATimeoutError
 
 _OK_WIRE = '{"__h_task_result__":true,"ok":"hello","err":null}'
 _STOPPED_WIRE = (
@@ -5789,32 +5800,40 @@ def _lost_claim() -> LostClaim:
 class TestPersistTerminalStateFusedPath:
     """Plain-task ok results take the one-statement fused path."""
 
+    @staticmethod
+    async def _persist_plain_ok(worker: Worker) -> Result[Any, _FinalizeError]:
+        return await worker._persist_task_terminal_state(
+            task_id='task-1',
+            now=datetime.now(timezone.utc),
+            ok=True,
+            result_json_str=_OK_WIRE,
+            failed_reason=None,
+            task_name='my_task',
+            queue_name='q1',
+            is_workflow_task=False,
+        )
+
     @pytest.mark.asyncio
     async def test_plain_ok_result_uses_fused_statement(self) -> None:
-        """Plain task + ok result → single fused statement, Ok(None)."""
+        """Plain task + ok result → the fused command, written by the batch
+        write of the finalize batcher on the worker pool, Ok(None)."""
         worker, session = _make_session_worker(fetchone_results=[])
 
         with patch(
-            'horsies.core.worker.finalize.apply_in_autocommit',
-            AsyncMock(return_value=_applied(TerminalizationKind.COMPLETE_FUSED)),
+            'horsies.core.worker.finalize.apply_fused_batch_in_autocommit',
+            AsyncMock(
+                return_value=Ok((_applied(TerminalizationKind.COMPLETE_FUSED),)),
+            ),
         ) as apply:
-            result = await worker._persist_task_terminal_state(
-                task_id='task-1',
-                now=datetime.now(timezone.utc),
-                ok=True,
-                result_json_str=_OK_WIRE,
-                failed_reason=None,
-                task_name='my_task',
-                queue_name='q1',
-                is_workflow_task=False,
-            )
+            result = await self._persist_plain_ok(worker)
 
         assert result.ok_value is None
         apply.assert_awaited_once()
         assert apply.await_args is not None
         assert apply.await_args.args[0] is worker.sf
-        command = apply.await_args.args[1]
-        assert isinstance(command, CompleteTaskFused)
+        batch = apply.await_args.args[1]
+        assert isinstance(batch, FusedCompletionBatch)
+        (command,) = batch.commands
         assert command.task_id == 'task-1'
         assert command.result_json == _OK_WIRE
         assert command.notify_channel == 'task_queue_q1'
@@ -5832,23 +5851,82 @@ class TestPersistTerminalStateFusedPath:
         worker, session = _make_session_worker(fetchone_results=[])
 
         with patch(
-            'horsies.core.worker.finalize.apply_in_autocommit',
-            AsyncMock(return_value=_lost_claim()),
+            'horsies.core.worker.finalize.apply_fused_batch_in_autocommit',
+            AsyncMock(return_value=Ok((_lost_claim(),))),
         ):
-            result = await worker._persist_task_terminal_state(
-                task_id='task-1',
-                now=datetime.now(timezone.utc),
-                ok=True,
-                result_json_str=_OK_WIRE,
-                failed_reason=None,
-                task_name='my_task',
-                queue_name='q1',
-                is_workflow_task=False,
-            )
+            result = await self._persist_plain_ok(worker)
 
         assert result.ok_value is None
         session.commit.assert_not_awaited()
         session.rollback.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ('error', 'retryable', 'write_state'),
+        [
+            (
+                BatchRolledBack(
+                    cause=NotSent(error=SATimeoutError('QueuePool limit reached')),
+                ),
+                True,
+                'ROLLED_BACK',
+            ),
+            (
+                BatchRolledBack(
+                    cause=StatementRefused(
+                        error=SAIntegrityError(
+                            'SELECT', {}, psycopg.IntegrityError('no partition'),
+                        ),
+                    ),
+                ),
+                False,
+                'ROLLED_BACK',
+            ),
+            (
+                BatchCommitUnknown(
+                    cause=OutcomeUnknown(
+                        error=SAOperationalError(
+                            'SELECT',
+                            {},
+                            psycopg.OperationalError('server closed the connection'),
+                            connection_invalidated=True,
+                        ),
+                    ),
+                ),
+                True,
+                'COMMIT_UNKNOWN',
+            ),
+        ],
+        ids=['not_sent', 'refused', 'commit_unknown'],
+    )
+    async def test_a_failed_batch_write_is_a_phase1_error_with_the_outcome(
+        self,
+        error: BatchWriteError,
+        retryable: bool,
+        write_state: str,
+    ) -> None:
+        """The error keeps the child outcome, so the phase-1 retry replays it."""
+        worker, _session = _make_session_worker(fetchone_results=[])
+
+        with patch(
+            'horsies.core.worker.finalize.apply_fused_batch_in_autocommit',
+            AsyncMock(return_value=Err(error)),
+        ):
+            result = await self._persist_plain_ok(worker)
+
+        match result:
+            case Err(finalize_error):
+                assert finalize_error.stage is FinalizeStage.PHASE1
+                assert finalize_error.retryable is retryable
+                assert finalize_error.data is not None
+                assert finalize_error.data['batch_write'] == write_state
+                assert finalize_error.data['outcome'] == {
+                    'ok': True,
+                    'result_json_str': _OK_WIRE,
+                    'failed_reason': None,
+                }
+            case Ok(value):
+                raise AssertionError(f'expected a phase-1 error, got Ok({value!r})')
 
     @pytest.mark.asyncio
     async def test_workflow_ok_result_returns_persisted_routing_facts(self) -> None:

@@ -79,6 +79,7 @@ CANCEL_CANCELLED_SWEEP_FUNCTION: Final = (
 CANCEL_ORPHAN_FUNCTION: Final = 'horsies_cancel_owned_orphan'
 COMPLETE_LOCKED_FUNCTION: Final = 'horsies_complete_locked_task'
 COMPLETE_FUSED_FUNCTION: Final = 'horsies_complete_task_fused'
+COMPLETE_FUSED_BATCH_FUNCTION: Final = 'horsies_complete_tasks_fused'
 FAIL_LOCKED_FUNCTION: Final = 'horsies_fail_locked_task'
 FAIL_STALE_FUNCTION: Final = 'horsies_fail_stale_task'
 
@@ -736,6 +737,86 @@ BEGIN
         v_terminal_at, '{kind}'::text,
         'RUNNING'::text, v_ctx.claimed_by_worker_id, v_ctx.claimed_at,
         NULL::text, NULL::jsonb;
+END
+$function$
+"""
+
+
+def _complete_fused_batch_ddl() -> str:
+    """Many plain-success completions in one statement.
+
+    Each array holds one argument of ``horsies_complete_task_fused`` per
+    row, in the order of its parameters. The function calls that function
+    once per row, in sorted task-id order, and returns its row with
+    ``ordinality`` set to the row's input position. So each row keeps the
+    single function's advisory lock, fence, attempt row, move, NOTIFY,
+    miss classification and stored kind.
+
+    Sorted task-id order is the order of every id-keyed batch: two batches
+    cannot wait on each other in a cycle. The function takes no lock of
+    its own.
+
+    A row that raises aborts the whole statement: no row of it commits.
+    The function has no per-row EXCEPTION block, because each would open
+    a subtransaction.
+    """
+    return f"""
+CREATE FUNCTION {COMPLETE_FUSED_BATCH_FUNCTION}(
+    p_task_ids uuid[],
+    p_worker_ids text[],
+    p_claimed_ats timestamptz[],
+    p_results text[],
+    p_notify_channels text[],
+    p_notify_payloads text[]
+)
+RETURNS SETOF {OUTCOME_TYPE}
+LANGUAGE plpgsql
+AS $function$
+DECLARE
+    v_item record;
+    v_row {OUTCOME_TYPE};
+BEGIN
+    IF p_task_ids IS NULL OR p_worker_ids IS NULL OR p_claimed_ats IS NULL
+       OR p_results IS NULL OR p_notify_channels IS NULL
+       OR p_notify_payloads IS NULL THEN
+        RAISE EXCEPTION 'batch arrays must be non-NULL'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF cardinality(p_worker_ids) <> cardinality(p_task_ids)
+       OR cardinality(p_claimed_ats) <> cardinality(p_task_ids)
+       OR cardinality(p_results) <> cardinality(p_task_ids)
+       OR cardinality(p_notify_channels) <> cardinality(p_task_ids)
+       OR cardinality(p_notify_payloads) <> cardinality(p_task_ids) THEN
+        RAISE EXCEPTION 'batch array lengths differ'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    -- count(DISTINCT) skips NULL, so a NULL id fails this check too.
+    IF cardinality(p_task_ids) <> (
+        SELECT count(DISTINCT u.task_id) FROM unnest(p_task_ids) AS u(task_id)
+    ) THEN
+        RAISE EXCEPTION 'batch task ids must be distinct and non-NULL'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    FOR v_item IN
+        SELECT u.task_id, u.worker_id, u.claimed_at, u.result,
+               u.notify_channel, u.notify_payload, u.ordinality
+        FROM unnest(
+            p_task_ids, p_worker_ids, p_claimed_ats, p_results,
+            p_notify_channels, p_notify_payloads
+        ) WITH ORDINALITY AS u(
+            task_id, worker_id, claimed_at, result,
+            notify_channel, notify_payload, ordinality
+        )
+        ORDER BY u.task_id
+    LOOP
+        SELECT * INTO STRICT v_row
+        FROM {COMPLETE_FUSED_FUNCTION}(
+            v_item.task_id, v_item.worker_id, v_item.claimed_at,
+            v_item.result, v_item.notify_channel, v_item.notify_payload
+        );
+        v_row.ordinality := v_item.ordinality;
+        RETURN NEXT v_row;
+    END LOOP;
 END
 $function$
 """
@@ -2511,3 +2592,17 @@ def failed_attempt_program_ddl() -> tuple[str, ...]:
         *failed_attempt_fragments(),
         _lock_running_task_ddl(),
     )
+
+
+def completion_batch_fragments() -> tuple[str, ...]:
+    """The batched plain-success completion. It calls the fused completion,
+    so it installs after ``completion_family_fragments``."""
+    return (_complete_fused_batch_ddl(),)
+
+
+def completion_batch_replacement_ddl() -> tuple[str, ...]:
+    """The batched plain-success completion, as CREATE OR REPLACE.
+
+    Schema v57 installs it on a uuid database whose program predates it.
+    """
+    return tuple(_create_or_replace(ddl) for ddl in completion_batch_fragments())

@@ -19,11 +19,15 @@ from horsies.core.history.maintenance.gate import (
 from horsies.core.history.terminalization.live_cutover import (
     LIVE_CUTOVER_COLUMNS_DDL,
 )
+from horsies.core.history.cutover.program import installation_fragments
 from horsies.core.history.terminalization.move import (
     ATTEMPT_ENCODER_DDL,
     ATTEMPT_ENCODER_FUNCTION,
+    COMPLETE_FUSED_FUNCTION,
     KIND_PROJECTIONS,
     cancellation_family_fragments,
+    completion_batch_fragments,
+    completion_batch_replacement_ddl,
     completion_family_fragments,
     disposition_case_expression,
     disposition_if_chain,
@@ -705,3 +709,70 @@ class TestTighteningRendering:
         for name, _ in cutover_column_definitions():
             assert f'ADD COLUMN {name} ' in final
             assert f'ADD COLUMN IF NOT EXISTS {name} ' in transitional
+
+
+class TestBatchedFusedCompletion:
+    """The batched plain-success completion is a loop over the fused
+    completion: each row keeps that function's lock, fence, move and kind."""
+
+    BODY = completion_batch_fragments()[0]
+
+    def test_each_row_calls_the_fused_completion_with_its_own_arguments(
+        self,
+    ) -> None:
+        assert (
+            f'FROM {COMPLETE_FUSED_FUNCTION}(\n'
+            '            v_item.task_id, v_item.worker_id, v_item.claimed_at,\n'
+            '            v_item.result, v_item.notify_channel, v_item.notify_payload\n'
+            '        );'
+        ) in self.BODY
+        assert 'SELECT * INTO STRICT v_row' in self.BODY
+
+    def test_rows_run_in_sorted_task_id_order_at_their_input_ordinality(
+        self,
+    ) -> None:
+        assert 'WITH ORDINALITY' in self.BODY
+        loop = self.BODY.index('FOR v_item IN')
+        assert self.BODY.index('ORDER BY u.task_id', loop) < self.BODY.index(
+            'LOOP', loop
+        )
+        assert 'v_row.ordinality := v_item.ordinality;' in self.BODY
+
+    def test_the_function_takes_no_lock_and_no_subtransaction_of_its_own(
+        self,
+    ) -> None:
+        assert 'pg_advisory_xact_lock' not in self.BODY
+        assert 'FOR UPDATE' not in self.BODY
+        assert 'EXCEPTION\n' not in self.BODY.split('BEGIN', 1)[1].replace(
+            'RAISE EXCEPTION',
+            '',
+        )
+
+    def test_the_arrays_are_checked_before_any_row_runs(self) -> None:
+        loop = self.BODY.index('FOR v_item IN')
+        for check in (
+            "'batch arrays must be non-NULL'",
+            "'batch array lengths differ'",
+            "'batch task ids must be distinct and non-NULL'",
+        ):
+            assert self.BODY.index(check) < loop
+
+    def test_the_program_installs_it_after_the_fused_completion(self) -> None:
+        fragments = installation_fragments()
+        fused = next(
+            index
+            for index, fragment in enumerate(fragments)
+            if f'CREATE FUNCTION {COMPLETE_FUSED_FUNCTION}(' in fragment
+        )
+        batched = fragments.index(self.BODY)
+        assert fused < batched
+
+    def test_the_v56_replacement_is_the_same_function_as_create_or_replace(
+        self,
+    ) -> None:
+        (replacement,) = completion_batch_replacement_ddl()
+        assert replacement == self.BODY.replace(
+            'CREATE FUNCTION',
+            'CREATE OR REPLACE FUNCTION',
+            1,
+        )

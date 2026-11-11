@@ -1,8 +1,9 @@
 """Outcomes of the one-statement writes that run in autocommit.
 
-The fused completion runs as its own transaction (``apply_in_autocommit``).
-These tests pin what the transaction used to guarantee and what the caller
-relies on:
+The fused completion runs as its own transaction (``apply_in_autocommit``);
+the worker writes it through the batched statement of the finalize batcher
+(``apply_fused_batch_in_autocommit``). These tests pin what the transaction
+used to guarantee and what the caller relies on:
 
 - ``Applied`` is committed with its attempt, its history row and its
   capacity NOTIFY.
@@ -40,7 +41,12 @@ from horsies.core.lifecycle.outcomes import (
     LostClaim,
     TerminalizationOutcome,
 )
-from horsies.core.lifecycle.persistence import AutocommitCommand, apply_in_autocommit
+from horsies.core.lifecycle.persistence import (
+    BatchWriteError,
+    FusedCompletionBatch,
+    apply_fused_batch_in_autocommit,
+    apply_in_autocommit,
+)
 from horsies.core.models.tasks import Execution, TaskResult
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.utils.db import (
@@ -170,8 +176,8 @@ async def _attempt_count(session: AsyncSession, task_id: str) -> int:
 
 
 class _RecordedOutcomes:
-    """Calls the real ``apply_in_autocommit`` of finalize and keeps what each
-    call returned."""
+    """Calls the real batch write of finalize and keeps the outcome of each
+    row that a write returned."""
 
     def __init__(self) -> None:
         self.outcomes: list[TerminalizationOutcome] = []
@@ -179,17 +185,21 @@ class _RecordedOutcomes:
     async def __call__(
         self,
         session_factory: Any,
-        command: AutocommitCommand,
-    ) -> TerminalizationOutcome:
-        outcome = await apply_in_autocommit(session_factory, command)
-        self.outcomes.append(outcome)
-        return outcome
+        batch: FusedCompletionBatch,
+    ) -> Result[tuple[TerminalizationOutcome, ...], BatchWriteError]:
+        written = await apply_fused_batch_in_autocommit(session_factory, batch)
+        match written:
+            case Ok(outcomes):
+                self.outcomes.extend(outcomes)
+            case Err():
+                pass
+        return written
 
 
 @pytest.fixture
 def recorded(monkeypatch: pytest.MonkeyPatch) -> _RecordedOutcomes:
     recording = _RecordedOutcomes()
-    monkeypatch.setattr(finalize_module, 'apply_in_autocommit', recording)
+    monkeypatch.setattr(finalize_module, 'apply_fused_batch_in_autocommit', recording)
     return recording
 
 
