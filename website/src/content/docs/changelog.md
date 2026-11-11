@@ -625,8 +625,8 @@ there is no migration contract between pre-1.0 versions.
   - At a stop, the batcher closes after the finalizers and writes the queued
     rows, for at most 10 seconds. A row that it does not write stays RUNNING
     and goes to stale RUNNING recovery.
-- **The success of a workflow task is one statement, and its phase 2 two
-  statements shorter (schema v58).** `horsies_finish_workflow_success` takes
+- **The success of a workflow task is one statement (schema v58), and its
+  phase 2 is shorter.** `horsies_finish_workflow_success` takes
   the task advisory lock, then the row lock under the claim fence (worker and
   claimed_at), writes the COMPLETED attempt row, and moves the task to the
   history with the phase-2 record of its node, in autocommit. It sends no
@@ -637,11 +637,16 @@ there is no migration contract between pre-1.0 versions.
   - phase 1 of a success: 1 round trip, before 5 (BEGIN, the locking read,
     the attempt row, `horsies_complete_locked_task`, COMMIT);
   - phase 2, one transaction under the workflow row lock: a node that
-    promotes its dependents 9, before 11; the last node of a workflow 8,
+    promotes its dependents 8, before 11; the last node of a workflow 7,
     before 9; a failed node whose dependent is skipped 12, before 13; a
-    failed last node 9, before 10. The capacity wake is part of the node
+    failed last node 8, before 10. The capacity wake is part of the node
     write, and the insert of each promoted task links its node in the same
-    statement.
+    statement. The node write also returns whether a node of the workflow
+    waits for the node: a node that no node waits for does not read its
+    dependents. The dependencies of a workflow are written once, when it
+    starts. One update moves a promoted dependent from PENDING to ENQUEUED,
+    where a READY write and an ENQUEUED write did; the committed rows, their
+    timestamps and the NOTIFYs are the same.
   - `horsies_lock_running_task` (schema v56) is dropped: its one caller was
     this success.
   - A row that is not a workflow task is refused (SQLSTATE 22023) with no
