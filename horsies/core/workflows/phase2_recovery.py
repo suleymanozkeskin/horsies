@@ -59,6 +59,7 @@ from horsies.core.models.tasks import (
 )
 from horsies.core.types.result import is_err
 from horsies.core.workflows.engine import (
+    NodeMayHaveDependents,
     apply_node_progression,
     node_status_for_terminal_task,
 )
@@ -301,7 +302,8 @@ async def _apply_progression(
     The consumption function has already written the node and returned
     the progression context; the engine owns everything after that, and
     the in-process completion path enters the same body with the same
-    arguments.
+    arguments. The consumption function does not return whether the node
+    has dependents, so the progression reads them.
     """
     workflow_id = disposition.workflow_id
     if workflow_id is None or disposition.task_index is None:
@@ -328,6 +330,7 @@ async def _apply_progression(
         workflow_status=disposition.workflow_status,
         depth=disposition.workflow_depth,
         root_workflow_id=disposition.root_workflow_id,
+        dependents=NodeMayHaveDependents(),
     )
 
 

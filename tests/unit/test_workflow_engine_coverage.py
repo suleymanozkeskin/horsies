@@ -1249,7 +1249,7 @@ class TestOnWorkflowTaskComplete:
                 return _one_result(SimpleNamespace(
                     workflow_id='wf-1', task_index=0, wf_status='PAUSED',
                     depth=0, root_workflow_id='wf-1', on_error='fail',
-                    cas_won=True,
+                    cas_won=True, has_dependents=True,
                 ))
             return _one_result(SimpleNamespace())
 
@@ -1268,6 +1268,58 @@ class TestOnWorkflowTaskComplete:
             )
         mock_proc.assert_not_awaited()
         mock_check.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        ('has_dependents', 'reads_dependents'),
+        [(True, True), (False, False)],
+        ids=['has_dependents', 'no_dependents'],
+    )
+    @pytest.mark.asyncio
+    async def test_the_dependents_are_read_only_for_a_node_that_has_some(
+        self,
+        has_dependents: bool,
+        reads_dependents: bool,
+    ) -> None:
+        """``has_dependents`` of the node write decides whether the
+        dependents are processed; the completion check runs either way."""
+
+        async def _dispatch(stmt: Any, params: Any) -> MagicMock:
+            if stmt is COMPLETE_WORKFLOW_TASK_SQL:
+                return _one_result(
+                    SimpleNamespace(
+                        workflow_id='wf-1',
+                        task_index=0,
+                        wf_status='RUNNING',
+                        depth=0,
+                        root_workflow_id='wf-1',
+                        on_error='fail',
+                        cas_won=True,
+                        has_dependents=has_dependents,
+                    )
+                )
+            return _one_result(SimpleNamespace())
+
+        session = AsyncMock()
+        session.execute = AsyncMock(side_effect=_dispatch)
+        with (
+            patch(
+                'horsies.core.workflows.engine._process_dependents',
+                new=AsyncMock(),
+            ) as mock_proc,
+            patch(
+                'horsies.core.workflows.engine.check_workflow_completion',
+                new=AsyncMock(),
+            ) as mock_check,
+        ):
+            await on_workflow_task_complete(
+                session,
+                'task-1',
+                TaskResult(ok='done'),
+                None,
+                task_name='task-a',
+            )
+        assert mock_proc.await_count == (1 if reads_dependents else 0)
+        mock_check.assert_awaited_once()
 
 
     @pytest.mark.parametrize(

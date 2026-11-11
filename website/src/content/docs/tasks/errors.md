@@ -46,7 +46,7 @@ Errors from task execution, broker, and worker internals.
 | `WORKER_RESOLUTION_ERROR` | Failed to resolve task by name | No |
 | `WORKER_SERIALIZATION_ERROR` | Failed to serialize/deserialize task data: the stored arguments, or a stored timeout (or the stored cancel grace of a `SHARED_ASYNC` row) that the worker cannot use. No user code ran. A stored-data cause does not clear on a retry | Yes, if in `auto_retry_for` |
 | `RESULT_DESERIALIZATION_ERROR` | A stored result or a stored workflow error is corrupt or could not be deserialized | No |
-| `WORKFLOW_ENQUEUE_FAILED` | Workflow node failed after READY->ENQUEUED transition during enqueue/build | No |
+| `WORKFLOW_ENQUEUE_FAILED` | Workflow node failed after it went to ENQUEUED, while its task was built or enqueued | No |
 | `SUBWORKFLOW_LOAD_FAILED` | Subworkflow definition could not be loaded | No |
 | `WORKFLOW_RECOVERY_LIMIT_REACHED` | Workflow recovery raised a persistent error in `workflow_recovery_failure_limit` reaper passes, so the workflow failed closed | No |
 | `SUBWORKFLOW_DEPTH_LIMIT_REACHED` | The engine did not start a child workflow, because its depth would pass 32 | No |

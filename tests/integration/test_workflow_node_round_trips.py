@@ -12,7 +12,8 @@ SQL text. The worker's engine is the one the CLI builds, with
 
 Shapes: ``chain`` is A -> B (phase 2 of A promotes B), ``fanout`` is A with
 ``FANOUT`` dependents (phase 2 of A promotes all of them with the statements
-of ``chain``), ``single`` is A alone (phase 2 of A completes the workflow).
+of ``chain``), ``single`` is A alone (phase 2 of A completes the workflow;
+A has no dependents, so phase 2 does not read them).
 """
 
 from __future__ import annotations
@@ -66,6 +67,9 @@ FAILURE_PHASE1: Final = (
 NODE_WRITE: Final = 'WITH woken AS ( SELECT pg_notify('
 """The node write, which sends the capacity wake of the task's queue."""
 DEPENDENTS: Final = 'SELECT d.task_index, d.dependencies'
+PROMOTION: Final = 'UPDATE horsies_workflow_tasks wt SET status = CASE'
+"""The promotion write: PENDING to ENQUEUED, or to READY for a skip-on-ready
+node, which the next statement skips."""
 COMPLETION_CHECK: Final = 'SELECT w.status, w.completed_at, w.error'
 FIRST_FAILURE: Final = 'SELECT task_name, result FROM horsies_workflow_tasks'
 PHASE2: Final[dict[tuple[str, bool], tuple[str, ...]]] = {
@@ -73,9 +77,8 @@ PHASE2: Final[dict[tuple[str, bool], tuple[str, ...]]] = {
         'BEGIN',
         NODE_WRITE,
         DEPENDENTS,
-        "UPDATE horsies_workflow_tasks SET status = 'READY'",
+        PROMOTION,
         'SELECT task_index, task_name, status, result',
-        "UPDATE horsies_workflow_tasks wt SET status = 'ENQUEUED'",
         'WITH inserted AS ( INSERT INTO horsies_tasks',
         COMPLETION_CHECK,
         'COMMIT',
@@ -84,9 +87,8 @@ PHASE2: Final[dict[tuple[str, bool], tuple[str, ...]]] = {
         'BEGIN',
         NODE_WRITE,
         DEPENDENTS,
-        "UPDATE horsies_workflow_tasks SET status = 'READY'",
+        PROMOTION,
         'SELECT task_index, task_name, status, result',
-        "UPDATE horsies_workflow_tasks wt SET status = 'ENQUEUED'",
         'WITH inserted AS ( INSERT INTO horsies_tasks',
         COMPLETION_CHECK,
         'COMMIT',
@@ -94,7 +96,6 @@ PHASE2: Final[dict[tuple[str, bool], tuple[str, ...]]] = {
     ('single', True): (
         'BEGIN',
         NODE_WRITE,
-        DEPENDENTS,
         COMPLETION_CHECK,
         'SELECT task_index, dependencies FROM horsies_workflow_tasks',
         'SELECT node_id, task_index, task_name, status, result',
@@ -107,7 +108,7 @@ PHASE2: Final[dict[tuple[str, bool], tuple[str, ...]]] = {
         FIRST_FAILURE,
         'UPDATE horsies_workflows SET error',
         DEPENDENTS,
-        "UPDATE horsies_workflow_tasks SET status = 'READY'",
+        PROMOTION,
         "UPDATE horsies_workflow_tasks SET status = 'SKIPPED'",
         DEPENDENTS,
         COMPLETION_CHECK,
@@ -120,7 +121,6 @@ PHASE2: Final[dict[tuple[str, bool], tuple[str, ...]]] = {
         NODE_WRITE,
         FIRST_FAILURE,
         'UPDATE horsies_workflows SET error',
-        DEPENDENTS,
         COMPLETION_CHECK,
         FIRST_FAILURE,
         "UPDATE horsies_workflows SET status = 'FAILED'",

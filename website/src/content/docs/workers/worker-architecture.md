@@ -188,11 +188,13 @@ error in phase 2 never undoes phase 1.
   call of `horsies_finish_failed_attempt`.
 - Phase 2: one transaction that holds the workflow row lock from its first
   statement to its COMMIT. The first statement writes the node, deletes its
-  phase-2 record, and sends the capacity wake of the task's queue, which the
-  COMMIT delivers. The engine then applies the failure policy, promotes the
-  dependents (the task of each promoted node is inserted and linked in one
-  statement per node, all in one round trip) and checks the completion of
-  the workflow.
+  phase-2 record, sends the capacity wake of the task's queue, which the
+  COMMIT delivers, and returns whether a node of the workflow waits for this
+  node. The engine then applies the failure policy, promotes the dependents
+  and checks the completion of the workflow. A node that no node waits for
+  does not read its dependents. One update moves the promoted dependents
+  from PENDING to ENQUEUED, and the task of each one is inserted and linked
+  in one statement per node, all in one round trip.
 - A lost reply in phase 1 is a retryable error. The run that retries it
   finds the task already applied, reads the stored result, and runs phase 2.
   A worker that stops between the phases leaves the phase-2 record, and the
@@ -203,10 +205,10 @@ phase with it on):
 
 | Finalize of a workflow task | Phase 1 | Phase 2 |
 |---|---|---|
-| Success, promotes its dependents | 1 | 9 |
-| Success, the last node of the workflow | 1 | 8 |
+| Success, promotes its dependents | 1 | 8 |
+| Success, the last node of the workflow | 1 | 7 |
 | Failure, its dependent is skipped (`on_error=FAIL`) | 2 | 12 |
-| Failure, the last node of the workflow (`on_error=FAIL`) | 2 | 9 |
+| Failure, the last node of the workflow (`on_error=FAIL`) | 2 | 8 |
 
 ## Shared Async Children
 

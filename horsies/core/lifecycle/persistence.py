@@ -18,7 +18,6 @@ import logging
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any, Final, LiteralString, assert_never, cast
 
 from psycopg import AsyncCursor
@@ -65,7 +64,7 @@ from .fences import (
     TerminalFence,
     WorkerOwned,
 )
-from .operations import equivalence_class_of, function_name_of, kind_of
+from .operations import function_name_of
 from .outcomes import (
     AlreadyApplied,
     Applied,
@@ -223,15 +222,6 @@ _CANCEL_NODES_OF_CANCELLED_WORKFLOW_SQL = text("""
         CAST(:workflow_ids AS uuid[])
     )
 """)
-
-_LOCKED_READ_MISS_SQL = text("""
-    SELECT * FROM horsies_terminalization_miss(
-        CAST(:task_id AS uuid), CAST(:equivalent_kinds AS TEXT[]),
-        :worker_id, CAST(:claimed_at AS TIMESTAMPTZ)
-    )
-""")
-
-type LockedReadCommand = CompleteLockedTask | FailLockedTask
 
 # The task advisory lock, by the key every move function takes. A caller
 # whose transaction row-locks a task and then calls a move function runs this
@@ -674,49 +664,6 @@ def _fused_outcomes(
             )
 
 
-async def classify_locked_read_miss_async(
-    connection: AsyncConnection,
-    command: LockedReadCommand,
-    *,
-    claimed_at: datetime | None,
-) -> TerminalizationOutcome:
-    """Classify a failed generation-fenced locking read without mutating.
-
-    ``CompleteLockedTask`` and ``FailLockedTask`` intentionally carry only the
-    worker half of their fence: their generation was already checked by the
-    caller's ``SELECT ... FOR UPDATE``. If that read matched nothing, invoking
-    the operation function would be unsafe — the same worker may already own a
-    newer generation. The database's shared miss classifier accepts the full
-    dispatched generation and distinguishes an idempotent replay from that
-    lost claim while keeping terminal-before-fence ordering identical to every
-    operation function.
-    """
-    requested_kind = kind_of(command)
-    parameters = {
-        'task_id': command.task_id,
-        'equivalent_kinds': [
-            kind.value
-            for kind in sorted(
-                equivalence_class_of(requested_kind),
-                key=lambda member: member.value,
-            )
-        ],
-        'worker_id': command.fence.worker_id,
-        'claimed_at': claimed_at,
-    }
-    result = await connection.execute(_LOCKED_READ_MISS_SQL, parameters)
-    outcome = decode_outcome_row(_single_row(result.mappings().all(), command))
-    _log_outcome(
-        command,
-        outcome,
-        expected_fence=OwnedClaim(
-            worker_id=command.fence.worker_id,
-            claimed_at=claimed_at,
-        ),
-    )
-    return outcome
-
-
 def apply_sync(
     cursor: Any,
     command: ExecutableCommand,
@@ -763,10 +710,8 @@ async def apply_psycopg_async(
 def _log_outcome(
     command: TerminalizationCommand,
     outcome: TerminalizationOutcome,
-    *,
-    expected_fence: TerminalFence | None = None,
 ) -> None:
-    """Emit the operation, expected fence, and locked observation together.
+    """Emit the operation, its fence, and the locked observation together.
 
     Applied transitions are debug-level steady-state traffic. Every refusal or
     replay is warning-level because its evidence is the only race diagnosis
@@ -804,40 +749,10 @@ def _log_outcome(
             evidence = None
         case _ as unreachable:
             assert_never(unreachable)
-    command_fence = fence_of(command)
-    match expected_fence:
-        case (
-            CallerHoldsRowLock()
-            | PriorLockedRead()
-            | WorkerOwned()
-            | OwnedClaim()
-            | OwnedClaimBatch()
-        ):
-            fence_type = type(expected_fence).__name__
-            logged_expected_fence = expected_fence
-        case None:
-            match command_fence:
-                case OwnedClaimBatch(
-                    worker_id=worker_id,
-                    claim_generations=claims,
-                ):
-                    generation_by_task = dict(claims)
-                    fence_type = OwnedClaimBatch.__name__
-                    logged_expected_fence: object | None = {
-                        'worker_id': worker_id,
-                        'claimed_at': generation_by_task.get(outcome.task_id),
-                    }
-                case None:
-                    fence_type = None
-                    logged_expected_fence = None
-                case (
-                    CallerHoldsRowLock()
-                    | PriorLockedRead()
-                    | WorkerOwned()
-                    | OwnedClaim()
-                ):
-                    fence_type = type(command_fence).__name__
-                    logged_expected_fence = command_fence
+    fence_type, logged_expected_fence = _logged_fence(
+        fence_of(command),
+        outcome.task_id,
+    )
     logger.log(
         level,
         'terminalization operation=%s function=%s outcome=%s task_id=%s '
@@ -854,6 +769,27 @@ def _log_outcome(
         observed,
         evidence,
     )
+
+
+def _logged_fence(
+    fence: TerminalFence | None,
+    task_id: str,
+) -> tuple[str | None, object | None]:
+    """The fence of a command as the outcome log shows it: its type name and
+    its value. A batch fence shows only the worker and the claim generation
+    of ``task_id``. Pure."""
+    match fence:
+        case OwnedClaimBatch(worker_id=worker_id, claim_generations=claims):
+            return OwnedClaimBatch.__name__, {
+                'worker_id': worker_id,
+                'claimed_at': dict(claims).get(task_id),
+            }
+        case None:
+            return None, None
+        case CallerHoldsRowLock() | PriorLockedRead() | WorkerOwned() | OwnedClaim():
+            return type(fence).__name__, fence
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _single_row(
