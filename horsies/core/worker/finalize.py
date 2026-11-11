@@ -64,6 +64,7 @@ from horsies.core.lifecycle.outcomes import (
 )
 from horsies.core.lifecycle.persistence import (
     apply_async,
+    apply_in_autocommit,
     classify_locked_read_miss_async,
 )
 from horsies.core.logging import get_logger
@@ -104,7 +105,11 @@ from horsies.core.worker.slots import (
     SlotOutcome,
     TaskFinished,
 )
-from horsies.core.utils.db import is_retryable_connection_error
+from horsies.core.utils.db import (
+    SingleStatement,
+    is_retryable_connection_error,
+    run_in_autocommit,
+)
 from horsies.core.worker.runtime import (
     CrashRecoveryCode,
     FinalizeStage,
@@ -1144,24 +1149,19 @@ class FinalizeMixin:
                 return load_r
             case ApplyTerminalization(command=CancelOwnedOrphan() as command):
                 try:
-                    async with self.sf() as s:
-                        outcome = await apply_async(
-                            await s.connection(),
-                            command,
-                        )
-                        match outcome:
-                            case Applied():
-                                terminated = True
-                            case (
-                                AlreadyApplied()
-                                | LostClaim()
-                                | SourceStateConflict()
-                                | TaskAbsent()
-                            ):
-                                terminated = False
-                            case _ as unreachable:
-                                assert_never(unreachable)
-                        await s.commit()
+                    outcome = await apply_in_autocommit(self.sf, command)
+                    match outcome:
+                        case Applied():
+                            terminated = True
+                        case (
+                            AlreadyApplied()
+                            | LostClaim()
+                            | SourceStateConflict()
+                            | TaskAbsent()
+                        ):
+                            terminated = False
+                        case _ as unreachable:
+                            assert_never(unreachable)
                 except Exception as exc:
                     return Err(
                         self._make_finalize_error(
@@ -1209,25 +1209,22 @@ class FinalizeMixin:
                 assert_never(unreachable)
 
         if fused_command is not None:
+            # One statement in autocommit: Applied is committed when the call
+            # returns, and a refusal wrote nothing. A lost reply is a
+            # retryable error here; the replay classifies it.
             try:
-                async with self.sf() as s:
-                    outcome = await apply_async(
-                        await s.connection(),
-                        fused_command,
-                    )
-                    match outcome:
-                        case Applied():
-                            await s.commit()
-                        case (
-                            AlreadyApplied()
-                            | LostClaim()
-                            | SourceStateConflict()
-                            | TaskAbsent()
-                        ):
-                            await s.rollback()
-                        case _ as unreachable:
-                            assert_never(unreachable)
-                    return Ok(None)
+                outcome = await apply_in_autocommit(self.sf, fused_command)
+                match outcome:
+                    case (
+                        Applied()
+                        | AlreadyApplied()
+                        | LostClaim()
+                        | SourceStateConflict()
+                        | TaskAbsent()
+                    ):
+                        return Ok(None)
+                    case _ as unreachable:
+                        assert_never(unreachable)
             except Exception as exc:
                 return Err(
                     self._make_finalize_error(
@@ -1487,12 +1484,19 @@ class FinalizeMixin:
     ) -> Result[None, _FinalizeError]:
         """Phase 2 of finalization: workflow advancement and worker wake notifications.
 
+        A plain task has only the wake (``_wake_queue_after_plain_task``).
         Parent propagation queued by the completion check is driven AFTER
         this transaction commits, one fresh transaction per ancestor level
         (_drive_parent_propagations) — the pre-denest in-transaction
         recursion accumulated FOR UPDATE locks root-ward across the chain.
         """
         from horsies.core.workflows.engine import pop_pending_parent_propagations
+
+        match is_workflow_task:
+            case False:
+                return await self._wake_queue_after_plain_task(task_id, queue_name)
+            case True:
+                pass
 
         pending_propagations: list[str] = []
         try:
@@ -1523,19 +1527,11 @@ class FinalizeMixin:
                 pending_propagations = pop_pending_parent_propagations(s)
         except Exception as exc:
             return Err(
-                self._make_finalize_error(
-                    task_id=task_id,
-                    stage=_FINALIZE_STAGE_PHASE2,
-                    message='Workflow finalize phase failed after task terminal state persisted',
-                    retryable=is_retryable_connection_error(exc),
-                    data={
-                        'task_id': task_id,
-                        'phase': 'finalize_phase_2',
-                        'queue_name': queue_name or 'default',
-                        'is_workflow_task': is_workflow_task,
-                        'exception_type': type(exc).__name__,
-                        'exception': str(exc)[:500],
-                    },
+                self._phase2_error(
+                    task_id,
+                    queue_name,
+                    is_workflow_task=is_workflow_task,
+                    exc=exc,
                 )
             )
 
@@ -1546,6 +1542,65 @@ class FinalizeMixin:
         if pending_propagations:
             await self._drive_parent_propagations(pending_propagations)
         return Ok(None)
+
+    async def _wake_queue_after_plain_task(
+        self,
+        task_id: str,
+        queue_name: str,
+    ) -> Result[None, _FinalizeError]:
+        """Phase 2 of a plain task: wake the workers of its queue to claim.
+
+        One statement in autocommit (``run_in_autocommit``). A failure is a
+        phase-2 error with the classification of every phase-2 error: a
+        connection error is retryable, and the retry sends the wake again.
+        The terminal state of the task is already committed either way.
+        """
+        try:
+            _ = await run_in_autocommit(
+                self.sf,
+                SingleStatement(
+                    statement=NOTIFY_TASK_QUEUE_SQL,
+                    parameters={
+                        'c2': f'task_queue_{queue_name or "default"}',
+                        'p': f'capacity:{task_id}',
+                    },
+                ),
+            )
+        except Exception as exc:
+            return Err(
+                self._phase2_error(
+                    task_id,
+                    queue_name,
+                    is_workflow_task=False,
+                    exc=exc,
+                )
+            )
+        return Ok(None)
+
+    def _phase2_error(
+        self,
+        task_id: str,
+        queue_name: str,
+        *,
+        is_workflow_task: bool,
+        exc: Exception,
+    ) -> _FinalizeError:
+        """The phase-2 error of ``exc``: retryable when it is a transient
+        connection error."""
+        return self._make_finalize_error(
+            task_id=task_id,
+            stage=_FINALIZE_STAGE_PHASE2,
+            message='Workflow finalize phase failed after task terminal state persisted',
+            retryable=is_retryable_connection_error(exc),
+            data={
+                'task_id': task_id,
+                'phase': 'finalize_phase_2',
+                'queue_name': queue_name or 'default',
+                'is_workflow_task': is_workflow_task,
+                'exception_type': type(exc).__name__,
+                'exception': str(exc)[:500],
+            },
+        )
 
     async def _load_persisted_task_result(
         self,
