@@ -27,6 +27,7 @@ from horsies.core.models.tasks import (
     OutcomeCode,
 )
 from horsies.core.models.worker_profile import (
+    ResolvedPool,
     MemoryLimit,
     NoSharedAsyncChildren,
     SharedAsyncChildren,
@@ -99,6 +100,9 @@ from horsies.core.worker.stored_timeout import (
     TimeoutValueInvalid,
 )
 from horsies.core.worker.worker import Worker
+
+_POOL = ResolvedPool(min_size=0, max_size=2, check=True)
+_ASYNC_KIND = SharedAsyncChild(seats=4, pool=_POOL, executor_threads=4)
 
 pytestmark = [pytest.mark.unit]
 
@@ -1158,19 +1162,19 @@ class TestSharedMemoryBaseline:
     def test_a_shared_baseline_at_its_limit_is_refused(self) -> None:
         with pytest.raises(MemoryBaselineExceedsThresholdError, match='shared async'):
             self._worker(100)._check_memory_baseline(
-                (ChildBaseline(1, RssMb(100.0), SharedAsyncChild(seats=4)),),
+                (ChildBaseline(1, RssMb(100.0), _ASYNC_KIND),),
             )
 
     def test_the_shared_limit_does_not_apply_to_isolated_children(self) -> None:
         self._worker(100)._check_memory_baseline(
-            (ChildBaseline(1, RssMb(500.0), IsolatedChild()),),
+            (ChildBaseline(1, RssMb(500.0), IsolatedChild(pool=_POOL)),),
         )
 
     def test_the_isolated_limit_does_not_apply_to_shared_children(self) -> None:
         worker = self._worker(None)
         worker.cfg.max_memory_per_child_mb = 100
         worker._check_memory_baseline(
-            (ChildBaseline(1, RssMb(500.0), SharedAsyncChild(seats=4)),),
+            (ChildBaseline(1, RssMb(500.0), _ASYNC_KIND),),
         )
 
 
@@ -1199,7 +1203,7 @@ class TestNewKindBaselineGuard:
     async def test_a_late_baseline_at_its_limit_stops_the_worker(self) -> None:
         worker = self._worker()
         pool = _NewKindBaselines(
-            ChildBaseline(1, RssMb(100.0), SharedAsyncChild(seats=4)),
+            ChildBaseline(1, RssMb(100.0), _ASYNC_KIND),
         )
 
         await asyncio.wait_for(
@@ -1218,7 +1222,7 @@ class TestNewKindBaselineGuard:
     async def test_a_late_baseline_under_its_limit_keeps_the_worker(self) -> None:
         worker = self._worker()
         pool = _NewKindBaselines(
-            ChildBaseline(1, RssMb(50.0), SharedAsyncChild(seats=4)),
+            ChildBaseline(1, RssMb(50.0), _ASYNC_KIND),
         )
         guard = asyncio.ensure_future(
             worker._new_kind_baseline_loop(cast(SlotPool, pool)),

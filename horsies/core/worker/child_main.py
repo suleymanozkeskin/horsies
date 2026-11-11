@@ -674,10 +674,10 @@ def serve(
     match init.child_kind:
         case IsolatedChild():
             _serve_isolated(sock, init, work, task_loop, runners)
-        case SharedAsyncChild(seats=seats):
+        case SharedAsyncChild() as kind:
             from horsies.core.worker.shared_child import serve_shared
 
-            serve_shared(sock, init, work, task_loop, seats, runners.seats)
+            serve_shared(sock, init, work, task_loop, kind, runners.seats)
         case SharedThreadChild(seats=seats):
             from horsies.core.worker.thread_child import serve_thread
 
@@ -770,14 +770,12 @@ def boot_app(init: InitFrame) -> Result[AsyncTaskPresence, BootFailedFrame]:
         return Err(boot_failure_from_exception(exc, AppLoadFailed()))
     try:
         match init.child_kind:
-            case IsolatedChild() | SharedThreadChild():
+            case IsolatedChild(pool=pool) | SharedThreadChild(pool=pool):
                 finish_child_start(
                     app,
                     init.database_url,
                     dict(init.connect_kwargs),
-                    init.child_pool_min_size,
-                    init.child_pool_max_size,
-                    init.child_pool_check,
+                    pool,
                 )
             case SharedAsyncChild():
                 finish_shared_child_start(app)

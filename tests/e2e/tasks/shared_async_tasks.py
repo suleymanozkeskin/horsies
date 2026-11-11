@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 import time
 
 from horsies.core.models.tasks import Execution, RetryPolicy, TaskError, TaskResult
@@ -39,6 +40,38 @@ async def shared_sleep(*, seconds: float) -> TaskResult[str, TaskError]:
     started = time.time()
     await asyncio.sleep(seconds)
     return TaskResult(ok=f'{os.getpid()}:{started}:{time.time()}')
+
+
+HELD_EXECUTOR_CALLS = 8
+"""The default executor calls that ``e2e_shared_executor_threads`` holds at
+once: more than any executor size that the e2e profiles set."""
+
+
+@app.task(
+    task_name='e2e_shared_executor_threads',
+    execution=Execution.SHARED_ASYNC,
+    timeout_ms=30_000,
+)
+async def shared_executor_threads() -> TaskResult[int, TaskError]:
+    """The threads that run ``HELD_EXECUTOR_CALLS`` calls of the default
+    executor, each held until all are sent: the size of that executor."""
+    names: set[str] = set()
+    lock = threading.Lock()
+    release = threading.Event()
+
+    def held_call() -> None:
+        with lock:
+            names.add(threading.current_thread().name)
+        _ = release.wait(10.0)
+
+    loop = asyncio.get_running_loop()
+    pending = [
+        loop.run_in_executor(None, held_call) for _ in range(HELD_EXECUTOR_CALLS)
+    ]
+    await asyncio.sleep(0.2)
+    release.set()
+    _ = await asyncio.gather(*pending)
+    return TaskResult(ok=len(names))
 
 
 @app.task(

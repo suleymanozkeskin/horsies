@@ -32,6 +32,7 @@ from horsies.core.codec.json_io import SerializationError, loads_json
 from horsies.core.codec.typed import decode_task_result
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.worker_profile import ResolvedPool
 from horsies.core.models.tasks import (
     MAX_CANCEL_GRACE_MS,
     MAX_TASK_TIMEOUT_MS,
@@ -272,6 +273,7 @@ class TestChildInitializer:
             sys_path_roots=[],
             loglevel=20,
             database_url='postgresql://localhost/test',
+            pool=ResolvedPool(min_size=0, max_size=2, check=True),
         )
 
         mock_set_level.assert_called_once_with(20)
@@ -310,10 +312,8 @@ class TestChildInitializer:
             sys_path_roots=[],
             loglevel=20,
             database_url='postgresql://localhost/test',
+            pool=ResolvedPool(min_size=0, max_size=1, check=False),
             connect_kwargs={'keepalives': 1, 'prepare_threshold': None},
-            child_pool_min_size=0,
-            child_pool_max_size=1,
-            child_pool_check=False,
         )
 
         mock_init_pool.assert_called_once_with(
@@ -352,6 +352,7 @@ class TestChildInitializer:
             sys_path_roots=[],
             loglevel=20,
             database_url='postgresql://localhost/test',
+            pool=ResolvedPool(min_size=0, max_size=2, check=True),
         )
 
         inherited_broker.discard_inherited_resources.assert_called_once_with()
@@ -383,6 +384,7 @@ class TestChildInitializer:
                 sys_path_roots=[],
                 loglevel=20,
                 database_url='postgresql://localhost/test',
+                pool=ResolvedPool(min_size=0, max_size=2, check=True),
             )
         mock_init_pool.assert_not_called()
 
@@ -411,6 +413,7 @@ class TestChildInitializer:
                 sys_path_roots=[],
                 loglevel=20,
                 database_url='postgresql://localhost/test',
+                pool=ResolvedPool(min_size=0, max_size=2, check=True),
             )
         mock_init_pool.assert_not_called()
 
@@ -439,6 +442,7 @@ class TestChildInitializer:
                 sys_path_roots=[],
                 loglevel=20,
                 database_url='postgresql://localhost/test',
+                pool=ResolvedPool(min_size=0, max_size=2, check=True),
             )
 
     @patch('horsies.core.worker.child_runner._initialize_worker_pool')
@@ -469,6 +473,7 @@ class TestChildInitializer:
             sys_path_roots=[],
             loglevel=20,
             database_url='postgresql://localhost/test',
+            pool=ResolvedPool(min_size=0, max_size=2, check=True),
         )
         # /tmp/tasks.py should be imported via import_by_path, not import_module
         assert mock_import_path.called
@@ -504,6 +509,7 @@ class TestChildInitializer:
             sys_path_roots=[],
             loglevel=20,
             database_url='postgresql://localhost/test',
+            pool=ResolvedPool(min_size=0, max_size=2, check=True),
         )
         # import_by_path should NOT be called because samefile returns True
         mock_import_path.assert_not_called()

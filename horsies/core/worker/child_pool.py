@@ -4,7 +4,9 @@ An isolated child and a shared thread child open a sync pool
 (``_initialize_worker_pool``); the seat threads of a shared thread child share
 it. A shared async child opens an async pool on its event loop instead
 (``open_shared_async_pool``): its lifecycle writes must not block the loop.
-Each has the size of ``PostgresConfig.worker_child_pool_*``.
+Each has the bounds of the ``pool`` of the child kind in the worker profile
+(``IsolatedChildren.pool``, ``SharedAsyncChildren.pool``,
+``SharedThreadChildren.pool``), which the parent sends in the init frame.
 """
 
 from __future__ import annotations

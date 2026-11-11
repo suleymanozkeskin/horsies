@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from horsies.core.models.worker_profile import (
         NoSharedAsyncChildren,
         NoSharedThreadChildren,
+        ResolvedPool,
         SharedAsyncChildren,
         SharedThreadChildren,
     )
@@ -33,6 +34,13 @@ def _default_str_int_dict() -> dict[str, int]:
 
 def _default_connect_kwargs() -> dict[str, object]:
     return {}
+
+
+def _default_isolated_pool() -> ResolvedPool:
+    # Imported here: the profile module imports ChildPreload from this one.
+    from horsies.core.models.worker_profile import IsolatedPool
+
+    return IsolatedPool().resolved()
 
 
 def _no_shared_async_children() -> NoSharedAsyncChildren:
@@ -74,9 +82,9 @@ class WorkerConfig:
     processes: int = os.cpu_count() or 2
     parent_pool_size: int = 3
     parent_max_overflow: int = 2
-    child_pool_min_size: int = 0
-    child_pool_max_size: int = 2
-    child_pool_check: bool = True
+    # The connection pool of each isolated child. The pool of each shared
+    # child comes from its setting in shared_async or shared_thread.
+    isolated_pool: ResolvedPool = field(default_factory=_default_isolated_pool)
     # psycopg connect kwargs for each child-pool connection (TCP keepalives,
     # plus prepare_threshold=None under PgBouncer transaction mode). Built
     # from PostgresConfig.pooled_connect_args.

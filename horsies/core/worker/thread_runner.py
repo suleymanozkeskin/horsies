@@ -2,7 +2,7 @@
 
 A shared thread child boots as an isolated child does (``child_main.boot_app``):
 the app import, the ``on_child_process_start`` hooks, and the sync connection
-pool of the child, with the sizes of ``PostgresConfig.worker_child_pool_*``.
+pool of the child, with the bounds of ``SharedThreadChildren.pool``.
 Every seat thread writes through that pool, and waits for a connection at
 most ``CHILD_POOL_CONNECTION_WAIT_S``. ``run_thread_seat_task`` runs one task
 on the calling seat thread: the RUNNING transition and the task body, with

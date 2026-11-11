@@ -46,11 +46,13 @@ from horsies.core.worker.child_protocol import (
     SeatRefusal,
     SeatTask,
     SeatTimedOut,
+    SharedAsyncChild,
     SharedResultFrame,
     SharedRunFrame,
     StopFrame,
     WireResult,
 )
+from horsies.core.models.worker_profile import ResolvedPool
 from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
 from horsies.core.worker.shared_child import (
     FRAMES_PER_SEAT,
@@ -66,6 +68,20 @@ from horsies.core.worker.shared_child import (
     bounded_result_frame,
 )
 from horsies.core.worker.stored_timeout import NoTimeout, TimeoutValueInvalid
+
+EXECUTOR_THREADS = 4
+"""The size of the default executor of a test child."""
+
+SIZED_EXECUTOR_THREADS = 3
+"""A default executor size below the calls that one test run holds."""
+
+
+def _kind(seats: int, executor_threads: int) -> SharedAsyncChild:
+    return SharedAsyncChild(
+        seats=seats,
+        pool=ResolvedPool(min_size=0, max_size=2, check=True),
+        executor_threads=executor_threads,
+    )
 
 pytestmark = [pytest.mark.unit]
 
@@ -171,7 +187,7 @@ class _Harness:
         self.built: list[SeatLoop] = []
 
     async def serve(self, inbox: ParentFrameInbox) -> None:
-        seat_loop = SeatLoop(self.seats, self.writer, _rss)  # type: ignore[arg-type]
+        seat_loop = SeatLoop(self.seats, EXECUTOR_THREADS, self.writer, _rss)  # type: ignore[arg-type]
         seat_loop.install_marks()
         self.built.append(seat_loop)
         await seat_loop.serve(inbox, self.started)
@@ -1356,8 +1372,9 @@ class TestTheStartOfTheLoop:
             async def start(
                 self,
                 init: InitFrame,
+                pool: ResolvedPool,
             ) -> Result[shared_child.StartedSeats, BootFailedFrame]:
-                _ = init
+                _ = init, pool
                 asyncio.get_running_loop().set_default_executor(
                     concurrent.futures.ThreadPoolExecutor(
                         max_workers=4,
@@ -1378,7 +1395,7 @@ class TestTheStartOfTheLoop:
                     child_end,
                     MagicMock(),
                     inbox,
-                    1,
+                    _kind(seats=1, executor_threads=EXECUTOR_THREADS),
                     _HookSetsItsExecutor(),
                     writer,  # type: ignore[arg-type]
                 ),
@@ -1401,12 +1418,88 @@ class TestTheStartOfTheLoop:
         assert took_s[0] >= 0.25
         assert _results(writer)[0].end == SeatFinished(True, '1', None)
 
+    def test_the_kind_sizes_the_executor_and_the_pool_of_the_start(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``_live`` sizes the default executor of the loop with
+        ``executor_threads`` of the kind, and gives the start steps the pool
+        of the kind. A run that holds more calls in the executor than it has
+        threads runs only that many at once."""
+        calls = 2 * SIZED_EXECUTOR_THREADS
+        ran_on: set[str] = set()
+        release = threading.Event()
+        lock = threading.Lock()
+
+        def sync_call() -> None:
+            with lock:
+                ran_on.add(threading.current_thread().name)
+            _ = release.wait(RUN_TIMEOUT_S)
+
+        async def hold_calls() -> int:
+            loop = asyncio.get_running_loop()
+            pending = [loop.run_in_executor(None, sync_call) for _ in range(calls)]
+            await asyncio.sleep(0.1)
+            release.set()
+            await asyncio.gather(*pending)
+            return len(pending)
+
+        seats = _ScriptedSeats({'hold_calls': hold_calls})
+        pools: list[ResolvedPool] = []
+
+        class _RecordsThePool:
+            async def start(
+                self,
+                init: InitFrame,
+                pool: ResolvedPool,
+            ) -> Result[shared_child.StartedSeats, BootFailedFrame]:
+                _ = init
+                pools.append(pool)
+                return Ok(seats)
+
+        monkeypatch.setattr(shared_child, '_read_rss', _rss)
+        writer = _RecordingWriter()
+        inbox = ParentFrameInbox()
+        parent_end, child_end = socket.socketpair()
+        kind = SharedAsyncChild(
+            seats=1,
+            pool=ResolvedPool(min_size=1, max_size=5, check=False),
+            executor_threads=SIZED_EXECUTOR_THREADS,
+        )
+
+        async def scenario() -> None:
+            living = asyncio.ensure_future(
+                shared_child._live(
+                    child_end,
+                    MagicMock(),
+                    inbox,
+                    kind,
+                    _RecordsThePool(),
+                    writer,  # type: ignore[arg-type]
+                ),
+            )
+            await _until(lambda: any(isinstance(f, ReadyFrame) for f in writer.frames))
+            inbox.put(_frame(1, 'hold_calls', grace_ms=5_000))
+            await _until(lambda: len(_results(writer)) == 1)
+            inbox.put(StopFrame())
+            await asyncio.wait_for(living, RUN_TIMEOUT_S)
+
+        try:
+            asyncio.run(scenario())
+        finally:
+            parent_end.close()
+            child_end.close()
+
+        assert pools == [ResolvedPool(min_size=1, max_size=5, check=False)]
+        assert _results(writer)[0].end == SeatFinished(True, str(calls), None)
+        assert len(ran_on) == SIZED_EXECUTOR_THREADS
+
     def test_a_default_executor_that_is_not_a_thread_pool_fails_the_start(
         self,
         exits: list[tuple[str, int]],
     ) -> None:
         async def scenario() -> None:
-            seat_loop = SeatLoop(1, _RecordingWriter(), _rss)  # type: ignore[arg-type]
+            seat_loop = SeatLoop(1, EXECUTOR_THREADS, _RecordingWriter(), _rss)  # type: ignore[arg-type]
             seat_loop.install_marks()
             loop = asyncio.get_running_loop()
             loop._default_executor = None  # pyright: ignore[reportAttributeAccessIssue]

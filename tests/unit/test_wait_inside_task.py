@@ -29,6 +29,7 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import RetrievalCode, TaskError, TaskResult
 from horsies.core.models.workflow.handle import WorkflowHandle
+from horsies.core.models.worker_profile import ResolvedPool
 from horsies.core.process_role import (
     ProcessRole,
     mark_process_runs_task_bodies,
@@ -296,7 +297,9 @@ def test_a_child_start_marks_its_process_before_the_start_hooks(
             '_initialize_worker_pool',
         ),
     ):
-        child_runner.finish_child_start(app, UNREACHABLE_URL, None, 0, 2, True)
+        child_runner.finish_child_start(
+            app, UNREACHABLE_URL, None, ResolvedPool(0, 2, True)
+        )
 
     assert roles_seen_by_hooks == [ProcessRole.RUNS_TASK_BODIES]
     assert process_role() is ProcessRole.RUNS_TASK_BODIES

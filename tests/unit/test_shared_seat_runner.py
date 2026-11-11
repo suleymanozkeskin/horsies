@@ -62,6 +62,9 @@ from horsies.core.worker.shared_child import (
 )
 from horsies.core.worker.stored_timeout import CancelGraceInvalid, TimeoutValueInvalid
 
+EXECUTOR_THREADS = 4
+"""The size of the default executor of a test child."""
+
 pytestmark = [pytest.mark.unit]
 
 CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
@@ -555,7 +558,12 @@ def _on_seat_loop(seats: int, scenario: _Scenario) -> _RecordingWriter:
     inbox = ParentFrameInbox()
 
     async def serve() -> None:
-        seat_loop = shared_child.SeatLoop(seats, writer, lambda: RssMb(1.0))  # type: ignore[arg-type]
+        seat_loop = shared_child.SeatLoop(
+            seats,
+            EXECUTOR_THREADS,
+            writer,  # type: ignore[arg-type]
+            lambda: RssMb(1.0),
+        )
         seat_loop.install_marks()
         serving = asyncio.ensure_future(seat_loop.serve(inbox, _RealSeatRunner()))
         try:

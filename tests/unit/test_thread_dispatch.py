@@ -20,6 +20,7 @@ import pytest
 
 from horsies.core.models.tasks import MIN_TASK_TIMEOUT_MS, Execution
 from horsies.core.models.worker_profile import (
+    ResolvedPool,
     MemoryLimit,
     NoSharedThreadChildren,
     SharedRecycle,
@@ -73,6 +74,9 @@ from horsies.core.worker.stored_timeout import (
 from horsies.core.worker.shared_stop import RetryPlacement
 from horsies.core.worker.thread_slots import RunCulprit, ThreadRunRequest
 from horsies.core.worker.worker import Worker
+
+_POOL = ResolvedPool(min_size=0, max_size=2, check=True)
+_THREAD_KIND = SharedThreadChild(seats=4, pool=_POOL)
 
 pytestmark = [pytest.mark.unit]
 
@@ -487,12 +491,15 @@ class TestThreadMemoryBaseline:
     def test_a_thread_baseline_at_its_limit_is_refused(self) -> None:
         with pytest.raises(MemoryBaselineExceedsThresholdError, match='shared thread'):
             self._worker()._check_memory_baseline(
-                (ChildBaseline(1, RssMb(100.0), SharedThreadChild(seats=4)),),
+                (ChildBaseline(1, RssMb(100.0), _THREAD_KIND),),
             )
 
     @pytest.mark.parametrize(
         'kind',
-        [IsolatedChild(), SharedAsyncChild(seats=4)],
+        [
+            IsolatedChild(pool=_POOL),
+            SharedAsyncChild(seats=4, pool=_POOL, executor_threads=4),
+        ],
         ids=['isolated', 'shared-async'],
     )
     def test_the_thread_limit_applies_to_thread_children_only(

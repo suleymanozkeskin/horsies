@@ -24,6 +24,7 @@ import pytest_asyncio
 from horsies.core.models.boot_failure import ResourceShortage
 from horsies.core.models.tasks import MIN_TASK_TIMEOUT_MS
 from horsies.core.models.worker_profile import (
+    ResolvedPool,
     MemoryLimit,
     NoTaskLimit,
     SharedAsyncChildren,
@@ -99,11 +100,10 @@ def _init(app_locator: str = 'ok') -> InitFrame:
         loglevel=30,
         database_url='postgresql://unused',
         connect_kwargs={},
-        child_pool_min_size=0,
-        child_pool_max_size=1,
-        child_pool_check=False,
         process_name='test-child',
-        child_kind=IsolatedChild(),
+        child_kind=IsolatedChild(
+            pool=ResolvedPool(min_size=0, max_size=1, check=False),
+        ),
     )
 
 
@@ -675,7 +675,7 @@ class TestNewKindBaseline:
             match await asyncio.wait_for(pool.start(), OUTCOME_TIMEOUT_S):
                 case Ok(baselines):
                     assert [baseline.child_kind for baseline in baselines] == [
-                        IsolatedChild(),
+                        init.child_kind,
                     ]
                 case Err(failure):
                     raise AssertionError(failure)
@@ -685,7 +685,10 @@ class TestNewKindBaseline:
                 OUTCOME_TIMEOUT_S,
             )
 
-            assert late.child_kind == SharedThreadChild(seats=1)
+            assert late.child_kind == SharedThreadChild(
+                seats=1,
+                pool=ResolvedPool(min_size=0, max_size=2, check=True),
+            )
             first = pool._thread_slots[0].child
             isolated = pool._slots[0].child
             assert first is not None and late.pid == first.pid

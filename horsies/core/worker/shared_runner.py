@@ -28,6 +28,7 @@ from horsies.core.models.boot_failure import (
     ThreadStartRefusedError,
 )
 from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.worker_profile import ResolvedPool
 from horsies.core.task_decorator import await_task_call_in_worker
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.child_main import (
@@ -107,8 +108,13 @@ class PostgresSeats:
 class PostgresSeatProgram:
     """The seat program of a worker's shared async child."""
 
-    async def start(self, init: InitFrame) -> Result[StartedSeats, BootFailedFrame]:
-        """Open the async pool, then run the async start hooks.
+    async def start(
+        self,
+        init: InitFrame,
+        pool: ResolvedPool,
+    ) -> Result[StartedSeats, BootFailedFrame]:
+        """Open the async pool with the bounds of ``pool``, then run the async
+        start hooks.
 
         ``Err``: the pool could not be set up (``ChildPoolSetupFailed``, or a
         ``ResourceShortage`` for an errno that can clear), or the OS refused
@@ -116,12 +122,12 @@ class PostgresSeatProgram:
         hangs ends the process with ``CHILD_HOOK_FAILURE_EXIT_CODE``.
         """
         try:
-            pool = await open_shared_async_pool(
+            async_pool = await open_shared_async_pool(
                 init.database_url,
                 connect_kwargs=init.connect_kwargs,
-                min_size=init.child_pool_min_size,
-                max_size=init.child_pool_max_size,
-                check_on_checkout=init.child_pool_check,
+                min_size=pool.min_size,
+                max_size=pool.max_size,
+                check_on_checkout=pool.check,
             )
         except Exception as exc:
             return Err(boot_failure_from_exception(exc, ChildPoolSetupFailed()))
@@ -129,7 +135,7 @@ class PostgresSeatProgram:
             await run_shared_async_start_hooks()
         except ThreadStartRefusedError as exc:
             return Err(boot_failure_from_exception(exc, ChildPoolSetupFailed()))
-        return Ok(PostgresSeats(pool))
+        return Ok(PostgresSeats(async_pool))
 
 
 async def run_shared_async_start_hooks() -> None:

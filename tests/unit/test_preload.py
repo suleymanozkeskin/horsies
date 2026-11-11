@@ -26,6 +26,7 @@ import pytest_asyncio
 
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker import preload, preload_main, slots
+from horsies.core.models.worker_profile import ResolvedPool
 from horsies.core.worker.child_protocol import (
     IsolatedChild,
     ChildForkedFrame,
@@ -87,11 +88,10 @@ def _init(app_locator: str = 'ok') -> InitFrame:
         loglevel=30,
         database_url='postgresql://user:secret@localhost/none',
         connect_kwargs={},
-        child_pool_min_size=0,
-        child_pool_max_size=1,
-        child_pool_check=False,
         process_name='horsies-child',
-        child_kind=IsolatedChild(),
+        child_kind=IsolatedChild(
+            pool=ResolvedPool(min_size=0, max_size=1, check=False),
+        ),
     )
 
 

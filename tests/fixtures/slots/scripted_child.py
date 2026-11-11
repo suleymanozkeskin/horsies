@@ -69,6 +69,7 @@ from horsies.core.worker.child_protocol import (
     encode_parent_frame,
 )
 from horsies.core.worker.thread_child import ThreadSeatReturn
+from horsies.core.models.worker_profile import ResolvedPool
 from horsies.core.worker.shared_child import (
     MarkerWindow,
     SeatReturn,
@@ -781,7 +782,12 @@ class _ScriptedSeatProgram:
     """Starts with no pool. ``seat_start_fails`` and ``seat_hook_fails`` are
     the two ways a start fails."""
 
-    async def start(self, init: InitFrame) -> Result[StartedSeats, BootFailedFrame]:
+    async def start(
+        self,
+        init: InitFrame,
+        pool: ResolvedPool,
+    ) -> Result[StartedSeats, BootFailedFrame]:
+        _ = pool
         mode, _, _argument = init.app_locator.partition(':')
         match mode:
             case 'seat_start_fails':

@@ -78,6 +78,7 @@ from horsies.core.models.boot_failure import (
     TaskLoopCreateFailed,
 )
 from horsies.core.models.health import DownSlot, SlotsDown, parse_slot_health
+from horsies.core.models.worker_profile import ResolvedPool
 from horsies.core.worker.child_protocol import (
     IsolatedChild,
     NoTaskLoop,
@@ -117,6 +118,8 @@ from tests.broker_resources_support import (
     fake_resources,
     resources_of,
 )
+
+_POOL = ResolvedPool(min_size=0, max_size=2, check=True)
 
 
 def _empty_workflow_recovery_report() -> SimpleNamespace:
@@ -1835,21 +1838,21 @@ class TestMemoryBaselineGuard:
 
     def test_no_threshold_skips_the_guard(self) -> None:
         self._worker(None)._check_memory_baseline(
-            (ChildBaseline(1, RssMb(9999.0), IsolatedChild()),)
+            (ChildBaseline(1, RssMb(9999.0), IsolatedChild(pool=_POOL)),)
         )
 
     def test_baseline_at_the_threshold_is_refused(self) -> None:
         with pytest.raises(MemoryBaselineExceedsThresholdError, match='100MB'):
             self._worker(100)._check_memory_baseline(
                 (
-                    ChildBaseline(1, RssMb(50.0), IsolatedChild()),
-                    ChildBaseline(2, RssMb(100.0), IsolatedChild()),
+                    ChildBaseline(1, RssMb(50.0), IsolatedChild(pool=_POOL)),
+                    ChildBaseline(2, RssMb(100.0), IsolatedChild(pool=_POOL)),
                 ),
             )
 
     def test_baseline_below_the_threshold_passes(self) -> None:
         self._worker(100)._check_memory_baseline(
-            (ChildBaseline(1, RssMb(10.0), IsolatedChild()),)
+            (ChildBaseline(1, RssMb(10.0), IsolatedChild(pool=_POOL)),)
         )
 
     def test_unreadable_rss_warns_and_passes(
@@ -1858,7 +1861,7 @@ class TestMemoryBaselineGuard:
     ) -> None:
         with caplog.at_level(logging.WARNING, logger='horsies.worker'):
             self._worker(100)._check_memory_baseline(
-                (ChildBaseline(1, RssUnreadable(), IsolatedChild()),),
+                (ChildBaseline(1, RssUnreadable(), IsolatedChild(pool=_POOL)),),
             )
         assert 'unreadable' in caplog.text
 

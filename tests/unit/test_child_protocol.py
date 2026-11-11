@@ -12,6 +12,7 @@ import queue
 import socket
 import threading
 from datetime import datetime, timezone
+from typing import Final
 
 import pytest
 
@@ -26,7 +27,7 @@ from horsies.core.models.boot_failure import (
     ThreadStartRefused,
     ThreadStartRefusedError,
 )
-from horsies.core.types.result import Err, Ok
+from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker import child_main
 from horsies.core.worker.child_main import _bounded_result
 from horsies.core.worker.child_protocol import (
@@ -74,6 +75,7 @@ from horsies.core.worker.child_protocol import (
     PreloadFrame,
     PreloadReadyFrame,
     PreloadRefusedFrame,
+    ParentFrame,
     ReadyFrame,
     ResultFrame,
     RssMb,
@@ -96,8 +98,11 @@ from horsies.core.models.tasks import (
     MIN_TASK_TIMEOUT_MS,
 )
 from horsies.core.models.worker_profile import (
+    MAX_CHILD_POOL_CONNECTIONS,
+    MAX_EXECUTOR_THREADS,
     MAX_SEATS_PER_SHARED_ASYNC_CHILD,
     MAX_SEATS_PER_SHARED_THREAD_CHILD,
+    ResolvedPool,
 )
 from horsies.core.worker.task_loop import AsyncTaskPresence
 from horsies.core.worker.stored_timeout import (
@@ -131,6 +136,23 @@ def _split(encoded: EncodedFrame) -> tuple[bytes, bytes]:
             raise AssertionError(over)
 
 
+_POOL_FIELD: Final = {'min_size': 0, 'max_size': 2, 'check': True}
+_ASYNC_REST: Final = {'pool': _POOL_FIELD, 'executor_threads': 4}
+_VALID_KINDS: Final = [
+    {'kind': 'isolated', 'pool': _POOL_FIELD},
+    {'kind': 'shared_async', 'seats': 4, **_ASYNC_REST},
+    {'kind': 'shared_thread', 'seats': 4, 'pool': _POOL_FIELD},
+]
+
+
+def _decoded_kind(child_kind: object) -> Result[ParentFrame, MalformedFrame]:
+    """Decode the init frame with ``child_kind`` in place of its own."""
+    meta, body = _split(encode_parent_frame(_init_frame()))
+    fields = json.loads(meta)
+    fields['child_kind'] = child_kind
+    return decode_parent_frame(json.dumps(fields).encode(), body)
+
+
 def _init_frame() -> InitFrame:
     return InitFrame(
         app_locator='app.module:app',
@@ -141,11 +163,10 @@ def _init_frame() -> InitFrame:
         loglevel=20,
         database_url='postgresql://user:secret@db/app',
         connect_kwargs={'keepalives': 1, 'prepare_threshold': None},
-        child_pool_min_size=0,
-        child_pool_max_size=2,
-        child_pool_check=True,
         process_name='worker-child',
-        child_kind=IsolatedChild(),
+        child_kind=IsolatedChild(
+            pool=ResolvedPool(min_size=0, max_size=2, check=True),
+        ),
     )
 
 
@@ -186,7 +207,10 @@ class TestThreadFrames:
     def test_thread_init_frame_round_trip(self) -> None:
         frame = dataclasses.replace(
             _init_frame(),
-            child_kind=SharedThreadChild(seats=MAX_SEATS_PER_SHARED_THREAD_CHILD),
+            child_kind=SharedThreadChild(
+                seats=MAX_SEATS_PER_SHARED_THREAD_CHILD,
+                pool=ResolvedPool(min_size=1, max_size=8, check=False),
+            ),
         )
         meta, body = _split(encode_parent_frame(frame))
         assert decode_parent_frame(meta, body) == Ok(frame)
@@ -216,10 +240,14 @@ class TestThreadFrames:
     @pytest.mark.parametrize(
         'child_kind',
         [
-            {'kind': 'shared_thread'},
-            {'kind': 'shared_thread', 'seats': 0},
-            {'kind': 'shared_thread', 'seats': MAX_SEATS_PER_SHARED_THREAD_CHILD + 1},
-            {'kind': 'shared_thread', 'seats': '4'},
+            {'kind': 'shared_thread', 'pool': _POOL_FIELD},
+            {'kind': 'shared_thread', 'seats': 0, 'pool': _POOL_FIELD},
+            {
+                'kind': 'shared_thread',
+                'seats': MAX_SEATS_PER_SHARED_THREAD_CHILD + 1,
+                'pool': _POOL_FIELD,
+            },
+            {'kind': 'shared_thread', 'seats': '4', 'pool': _POOL_FIELD},
         ],
     )
     def test_the_thread_child_kind_is_checked(self, child_kind: object) -> None:
@@ -232,7 +260,12 @@ class TestThreadFrames:
 class TestSharedFrames:
     def test_shared_init_frame_round_trip(self) -> None:
         frame = dataclasses.replace(
-            _init_frame(), child_kind=SharedAsyncChild(seats=25)
+            _init_frame(),
+            child_kind=SharedAsyncChild(
+                seats=25,
+                pool=ResolvedPool(min_size=0, max_size=3, check=True),
+                executor_threads=25,
+            ),
         )
         meta, body = _split(encode_parent_frame(frame))
         assert decode_parent_frame(meta, body) == Ok(frame)
@@ -347,10 +380,14 @@ class TestSharedFrames:
             None,
             'isolated',
             {'kind': 'unknown'},
-            {'kind': 'shared_async'},
-            {'kind': 'shared_async', 'seats': 0},
-            {'kind': 'shared_async', 'seats': MAX_SEATS_PER_SHARED_ASYNC_CHILD + 1},
-            {'kind': 'shared_async', 'seats': True},
+            {'kind': 'shared_async', **_ASYNC_REST},
+            {'kind': 'shared_async', 'seats': 0, **_ASYNC_REST},
+            {
+                'kind': 'shared_async',
+                'seats': MAX_SEATS_PER_SHARED_ASYNC_CHILD + 1,
+                **_ASYNC_REST,
+            },
+            {'kind': 'shared_async', 'seats': True, **_ASYNC_REST},
         ],
     )
     def test_the_child_kind_is_checked(self, child_kind: object) -> None:
@@ -358,6 +395,71 @@ class TestSharedFrames:
         fields = json.loads(meta)
         fields['child_kind'] = child_kind
         assert isinstance(decode_parent_frame(json.dumps(fields).encode(), body), Err)
+
+
+class TestChildKindPool:
+    """The pool of each child kind, and the executor size of a shared async
+    child, on the wire."""
+
+    @pytest.mark.parametrize('kind', _VALID_KINDS)
+    def test_a_complete_kind_decodes(self, kind: dict[str, object]) -> None:
+        """The control of the refusals below: each valid shape decodes."""
+        match _decoded_kind(kind):
+            case Ok(InitFrame(child_kind=child_kind)):
+                assert child_kind.pool == ResolvedPool(0, 2, True)
+            case other:
+                raise AssertionError(other)
+
+    @pytest.mark.parametrize('kind', _VALID_KINDS)
+    @pytest.mark.parametrize(
+        'pool',
+        [
+            None,
+            'pool',
+            {'max_size': 2, 'check': True},
+            {'min_size': -1, 'max_size': 2, 'check': True},
+            {'min_size': MAX_CHILD_POOL_CONNECTIONS + 1, 'max_size': 2, 'check': True},
+            {'min_size': 0, 'check': True},
+            {'min_size': 0, 'max_size': 0, 'check': True},
+            {'min_size': 0, 'max_size': MAX_CHILD_POOL_CONNECTIONS + 1, 'check': True},
+            {'min_size': 0, 'max_size': True, 'check': True},
+            {'min_size': 0, 'max_size': 2},
+            {'min_size': 0, 'max_size': 2, 'check': 1},
+        ],
+    )
+    def test_the_pool_is_checked(
+        self,
+        kind: dict[str, object],
+        pool: object,
+    ) -> None:
+        assert isinstance(_decoded_kind({**kind, 'pool': pool}), Err)
+
+    @pytest.mark.parametrize('threads', [None, 0, MAX_EXECUTOR_THREADS + 1, '4', True])
+    def test_the_executor_threads_are_checked(self, threads: object) -> None:
+        kind = {'kind': 'shared_async', 'seats': 4, **_ASYNC_REST}
+        assert isinstance(_decoded_kind({**kind, 'executor_threads': threads}), Err)
+
+    @pytest.mark.parametrize('threads', [1, MAX_EXECUTOR_THREADS])
+    def test_the_executor_bounds_are_accepted(self, threads: int) -> None:
+        kind = {'kind': 'shared_async', 'seats': 4, **_ASYNC_REST}
+        match _decoded_kind({**kind, 'executor_threads': threads}):
+            case Ok(InitFrame(child_kind=SharedAsyncChild(executor_threads=got))):
+                assert got == threads
+            case other:
+                raise AssertionError(other)
+
+    def test_a_min_size_above_max_size_is_left_to_the_pool(self) -> None:
+        """The pool of the child refuses it when it opens, as a pool setup
+        failure that the boot reports."""
+        kind = {
+            'kind': 'isolated',
+            'pool': {'min_size': 2, 'max_size': 1, 'check': False},
+        }
+        match _decoded_kind(kind):
+            case Ok(InitFrame(child_kind=IsolatedChild(pool=pool))):
+                assert pool == ResolvedPool(2, 1, False)
+            case other:
+                raise AssertionError(other)
 
     @pytest.mark.parametrize(
         ('key', 'value'),
@@ -1030,9 +1132,6 @@ class TestMalformedMetadata:
             ('loglevel', '20'),
             ('database_url', None),
             ('connect_kwargs', []),
-            ('child_pool_min_size', None),
-            ('child_pool_max_size', False),
-            ('child_pool_check', 0),
             ('process_name', None),
         ],
     )

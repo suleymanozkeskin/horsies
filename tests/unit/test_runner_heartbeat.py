@@ -36,6 +36,7 @@ from horsies.core.models.recovery import (
 )
 from horsies.core.types.result import Err, Ok
 from horsies.core.worker import runner_heartbeat
+from horsies.core.models.worker_profile import ResolvedPool
 from horsies.core.worker.child_protocol import InitFrame, IsolatedChild, RunFrame
 from horsies.core.worker.config import ChildPreload, WorkerConfig
 from horsies.core.worker.live_dispatches import (
@@ -369,11 +370,10 @@ def _init() -> InitFrame:
         loglevel=30,
         database_url='postgresql://unused',
         connect_kwargs={},
-        child_pool_min_size=0,
-        child_pool_max_size=1,
-        child_pool_check=False,
         process_name='test-child',
-        child_kind=IsolatedChild(),
+        child_kind=IsolatedChild(
+            pool=ResolvedPool(min_size=0, max_size=1, check=False),
+        ),
     )
 
 
