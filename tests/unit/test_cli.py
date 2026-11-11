@@ -61,6 +61,7 @@ from horsies.core.models.worker_profile import (
     NoSharedAsyncChildren,
     NoSharedThreadChildren,
     NoTaskLimit,
+    ParentPool,
     PoolSize,
     ResolvedPool,
     SharedAsyncChildren,
@@ -2630,8 +2631,9 @@ def _memory_profile(count: int, mb: int) -> WorkerProfile:
 
 @pytest.mark.unit
 class TestWorkerStartLog:
-    """The start log line of the worker states the resolved pool of each
-    child kind and the executor size of the shared async children."""
+    """The start log line of the worker states the resolved pool and the
+    task-send pool of each child kind, the executor size of the shared async
+    children, and the resolved pool of the worker process."""
 
     def test_the_resolved_sizes_of_each_kind_are_logged(
         self,
@@ -2656,15 +2658,38 @@ class TestWorkerStartLog:
             if r.getMessage().startswith("Worker profile 'default': isolated=")
         ]
         assert 'isolated=2 (' in line
-        assert 'pool 0 to 2 connections, check on)' in line
+        assert (
+            'pool 0 to 2 connections, check on; task_send_pool 2 connections)'
+        ) in line
         assert (
             f'pool 0 to {shared_async_pool_connections(25)} connections, '
             'derived from seats, check on; '
             f'executor {shared_async_executor_threads(25)} threads, derived '
-            'from seats)'
+            'from seats; task_send_pool 2 connections)'
         ) in line
         assert 'shared_thread=1x8 seats' in line
-        assert 'pool 0 to 5 connections, check off)' in line
+        assert (
+            'pool 0 to 5 connections, check off; task_send_pool 2 connections)'
+        ) in line
+        assert ', pool=5 connections (derived from 35 seats), ' in line
+
+    def test_a_set_parent_pool_is_logged_without_its_origin(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        profile = WorkerProfile(
+            isolated=IsolatedChildren(count=2),
+            pool=ParentPool(max_size=PoolSize(connections=12)),
+        )
+        with caplog.at_level(logging.INFO, logger='horsies'):
+            _ = _start_worker_with(profile, MachineMemory(mb=4096))
+
+        [line] = [
+            r.getMessage()
+            for r in caplog.records
+            if r.getMessage().startswith("Worker profile 'default': isolated=")
+        ]
+        assert ', pool=12 connections, claim per queue per pass: ' in line
 
 
 @pytest.mark.unit

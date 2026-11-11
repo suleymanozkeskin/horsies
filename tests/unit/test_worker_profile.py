@@ -20,6 +20,9 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.child_sizing import (
     DEFAULT_ISOLATED_POOL_CONNECTIONS,
+    DEFAULT_TASK_SEND_POOL_CONNECTIONS,
+    PARENT_POOL_CONNECTIONS_FLOOR,
+    parent_pool_connections,
     shared_async_executor_threads,
     shared_async_pool_connections,
     shared_thread_pool_connections,
@@ -51,6 +54,7 @@ from horsies.core.models.worker_profile import (
     NoSharedAsyncChildren,
     NoSharedThreadChildren,
     NoTaskLimit,
+    ParentPool,
     PoolSize,
     PoolSizeFromSeats,
     ResolvedPool,
@@ -375,6 +379,7 @@ class TestNamedVariants:
             PoolSizeFromSeats(),
             IsolatedPool(),
             SharedPool(),
+            ParentPool(),
             ExecutorThreads(threads=1),
             ExecutorThreadsFromSeats(),
         ],
@@ -441,6 +446,7 @@ class TestNamedVariants:
             'ChildPreload',
             'IsolatedPool',
             'SharedPool',
+            'ParentPool',
             'PoolSize',
             'PoolSizeFromSeats',
             'ExecutorThreads',
@@ -661,6 +667,145 @@ class TestChildPoolResolution:
             max_size=5,
             check=False,
         )
+
+
+class TestParentPool:
+    """``WorkerProfile.pool``: the pool of the worker process. Its default
+    derives the size from the seats of the profile."""
+
+    def test_the_default_derives_from_the_seats(self) -> None:
+        assert WorkerProfile().pool == ParentPool(max_size=PoolSizeFromSeats())
+
+    @pytest.mark.parametrize(
+        ('data', 'expected'),
+        [
+            ({'kind': 'pool_size', 'connections': 12}, PoolSize(connections=12)),
+            ({'kind': 'pool_size_from_seats'}, PoolSizeFromSeats()),
+        ],
+    )
+    def test_the_size_parses_by_kind(
+        self,
+        data: dict[str, Any],
+        expected: PoolSize | PoolSizeFromSeats,
+    ) -> None:
+        profile = WorkerProfile.model_validate({'pool': {'max_size': data}})
+        assert profile.pool.max_size == expected
+
+    def test_an_unknown_field_is_refused(self) -> None:
+        with pytest.raises(ValidationError, match='max_overflow'):
+            ParentPool.model_validate({'max_overflow': 2})
+
+    @pytest.mark.parametrize(
+        ('profile', 'seats'),
+        [
+            (WorkerProfile(isolated=IsolatedChildren(count=8)), 8),
+            (WorkerProfile(isolated=IsolatedChildren(count=64)), 64),
+            (
+                WorkerProfile(shared_async=SharedAsyncChildren(count=1, seats=100)),
+                100,
+            ),
+            (
+                WorkerProfile(shared_async=SharedAsyncChildren(count=1, seats=1000)),
+                1000,
+            ),
+            (
+                WorkerProfile(
+                    isolated=IsolatedChildren(count=2),
+                    shared_async=SharedAsyncChildren(count=3, seats=40),
+                    shared_thread=SharedThreadChildren(count=2, seats=16),
+                ),
+                2 + 120 + 32,
+            ),
+        ],
+    )
+    def test_a_size_from_seats_counts_every_seat_of_the_profile(
+        self,
+        profile: WorkerProfile,
+        seats: int,
+    ) -> None:
+        assert profile.seat_count() == seats
+        assert profile.resolved_parent_pool() == parent_pool_connections(seats)
+
+    def test_the_examples_of_the_rule(self) -> None:
+        """64 isolated: 7; one async child of 100 seats: 10; one of 1000
+        seats: 20; one thread child of 256 seats: 20."""
+        assert [
+            profile.resolved_parent_pool()
+            for profile in (
+                WorkerProfile(isolated=IsolatedChildren(count=64)),
+                WorkerProfile(shared_async=SharedAsyncChildren(count=1, seats=100)),
+                WorkerProfile(shared_async=SharedAsyncChildren(count=1, seats=1000)),
+                WorkerProfile(shared_thread=SharedThreadChildren(count=1, seats=256)),
+            )
+        ] == [7, 10, 20, 20]
+
+    def test_a_set_size_is_kept_whatever_the_seats(self) -> None:
+        pool = ParentPool(max_size=PoolSize(connections=3))
+        profiles = [
+            WorkerProfile(isolated=IsolatedChildren(count=count), pool=pool)
+            for count in (1, 500)
+        ]
+        assert [profile.resolved_parent_pool() for profile in profiles] == [3, 3]
+
+    def test_a_set_size_can_go_above_the_derived_cap(self) -> None:
+        pool = ParentPool(max_size=PoolSize(connections=MAX_CHILD_POOL_CONNECTIONS))
+        profile = WorkerProfile(isolated=IsolatedChildren(count=1), pool=pool)
+        assert profile.resolved_parent_pool() == MAX_CHILD_POOL_CONNECTIONS
+
+    def test_a_profile_with_no_children_resolves_to_the_floor(self) -> None:
+        assert WorkerProfile().resolved_parent_pool() == PARENT_POOL_CONNECTIONS_FLOOR
+
+
+class TestTaskSendPool:
+    """``task_send_pool`` of each child kind: the pool that task code opens
+    in a child when it sends."""
+
+    @pytest.mark.parametrize(
+        'children',
+        [
+            IsolatedChildren(count=1),
+            SharedAsyncChildren(count=1, seats=1000),
+            SharedThreadChildren(count=1, seats=256),
+        ],
+    )
+    def test_each_kind_defaults_to_the_fixed_size(
+        self,
+        children: IsolatedChildren | SharedAsyncChildren | SharedThreadChildren,
+    ) -> None:
+        """The default does not follow the seats or the parent pool."""
+        assert DEFAULT_TASK_SEND_POOL_CONNECTIONS == 2
+        assert children.task_send_pool == PoolSize(
+            connections=DEFAULT_TASK_SEND_POOL_CONNECTIONS,
+        )
+
+    @pytest.mark.parametrize(
+        ('kind', 'fields'),
+        [
+            (IsolatedChildren, {'count': 1}),
+            (SharedAsyncChildren, {'count': 1, 'seats': 4}),
+            (SharedThreadChildren, {'count': 1, 'seats': 4}),
+        ],
+    )
+    def test_a_set_size_parses_from_a_dict(
+        self,
+        kind: type[IsolatedChildren | SharedAsyncChildren | SharedThreadChildren],
+        fields: dict[str, Any],
+    ) -> None:
+        children = kind.model_validate(
+            {**fields, 'task_send_pool': {'kind': 'pool_size', 'connections': 6}},
+        )
+        assert children.task_send_pool == PoolSize(connections=6)
+
+    def test_a_size_from_seats_is_refused(self) -> None:
+        """The task-send pool has a stated size: no variant derives it."""
+        with pytest.raises(ValidationError, match='pool_size'):
+            SharedAsyncChildren.model_validate(
+                {
+                    'count': 1,
+                    'seats': 4,
+                    'task_send_pool': {'kind': 'pool_size_from_seats'},
+                },
+            )
 
 
 class TestAppConfigPoolChecks:
@@ -955,8 +1100,9 @@ class TestDescribeWorkerProfile:
         )
         assert describe_worker_profile(profile) == (
             'isolated=8 (recycle after no limit, above 1024 MB; pool 0 to 2 '
-            'connections, check on), '
+            'connections, check on; task_send_pool 2 connections), '
             'shared_async=none, shared_thread=none, '
+            'pool=5 connections (derived from 8 seats), '
             'claim per queue per pass: 4 tasks, claimed per worker: no limit, '
             'drain_timeout=90s, preload=app'
         )
@@ -978,7 +1124,7 @@ class TestDescribeWorkerProfile:
             f'pool 0 to {shared_async_pool_connections(25)} connections, '
             'derived from seats, check on; '
             f'executor {shared_async_executor_threads(25)} threads, derived '
-            'from seats), '
+            'from seats; task_send_pool 2 connections), '
         ) in describe_worker_profile(profile)
 
     def test_shared_thread_children_are_named(self) -> None:
@@ -996,7 +1142,7 @@ class TestDescribeWorkerProfile:
             'shared_thread=2x8 seats (recycle after no limit per seat, '
             'above 1024 MB; '
             f'pool 0 to {shared_thread_pool_connections(8)} connections, '
-            'derived from seats, check on), '
+            'derived from seats, check on; task_send_pool 2 connections), '
         ) in describe_worker_profile(profile)
 
     def test_set_sizes_are_named_without_their_origin(self) -> None:
@@ -1010,32 +1156,49 @@ class TestDescribeWorkerProfile:
                     max_size=PoolSize(connections=4),
                     check=False,
                 ),
+                task_send_pool=PoolSize(connections=3),
             ),
             shared_async=SharedAsyncChildren(
                 count=1,
                 seats=50,
                 pool=SharedPool(min_size=2, max_size=PoolSize(connections=9)),
                 executor=ExecutorThreads(threads=7),
+                task_send_pool=PoolSize(connections=5),
             ),
             shared_thread=SharedThreadChildren(
                 count=1,
                 seats=6,
                 pool=SharedPool(max_size=PoolSize(connections=3), check=False),
+                task_send_pool=PoolSize(connections=1),
             ),
+            pool=ParentPool(max_size=PoolSize(connections=11)),
         )
         described = describe_worker_profile(profile)
         assert (
             'isolated=1 (recycle after 100 tasks, above no limit; pool 1 to 4 '
-            'connections, check off), '
+            'connections, check off; task_send_pool 3 connections), '
         ) in described
         assert (
             'shared_async=1x50 seats (recycle after 100 tasks per seat, above '
-            'no limit; pool 2 to 9 connections, check on; executor 7 threads), '
+            'no limit; pool 2 to 9 connections, check on; executor 7 threads; '
+            'task_send_pool 5 connections), '
         ) in described
         assert (
             'shared_thread=1x6 seats (recycle after 100 tasks per seat, above '
-            'no limit; pool 0 to 3 connections, check off), '
+            'no limit; pool 0 to 3 connections, check off; task_send_pool 1 '
+            'connections), '
         ) in described
+        assert ', pool=11 connections, claim per queue per pass: ' in described
 
     def test_no_isolated_children(self) -> None:
         assert describe_worker_profile(WorkerProfile()).startswith('isolated=none, ')
+
+    def test_the_parent_pool_names_the_seats_that_it_derives_from(self) -> None:
+        profile = WorkerProfile(
+            isolated=IsolatedChildren(count=4),
+            shared_async=SharedAsyncChildren(count=2, seats=100),
+        )
+        assert (
+            ', shared_thread=none, pool=20 connections (derived from 204 '
+            'seats), claim per queue per pass: '
+        ) in describe_worker_profile(profile)
