@@ -357,6 +357,14 @@ there is no migration contract between pre-1.0 versions.
     `jit_above_cost`, so a server with JIT compiled the statement on every
     pass: 26 to 47 ms per pass against 0.7 to 1.8 ms of work, at a 90,000-row
     backlog on PostgreSQL 17.
+- **A schema upgrade keeps each claim and recovery index whose form
+  matches.** An index whose catalog form matches its declaration is kept. One
+  of another form, or an invalid one, is built concurrently under a temporary
+  name; then one transaction renames the old index away and the new one to
+  its name, and the old one is dropped concurrently. Running workers keep an
+  index of that name throughout. Before, each upgrade dropped the recovery
+  indexes and built them again, and the scans that read them ran without
+  them meanwhile.
 - **Breaking: a slot that cannot start a child for a cause that can clear no
   longer stops the worker.** A child that fails its start now reports the
   cause to the worker before it exits.
