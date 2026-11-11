@@ -30,6 +30,7 @@ class PostgresConfig(BaseModel):
         'retain_rerun_input_default',
         'worker_pool_size',
         'worker_max_overflow',
+        'worker_pool_pre_ping',
         'tcp_keepalives',
         'tcp_keepalives_idle',
         'tcp_keepalives_interval',
@@ -53,6 +54,20 @@ class PostgresConfig(BaseModel):
     )
     pool_pre_ping: bool = Field(
         default=True, description='Whether to pre-ping the database connection pool'
+    )
+    # The pre-ping of the worker process's engine (worker_process_config).
+    # The worker sends most of its writes as one statement in autocommit:
+    # one round trip each. A pre-ping adds a round trip to each
+    # checkout. With it off, a dead pooled connection shows at the first
+    # statement instead, as a connection error: finalize retries its phase
+    # and classifies the replay, the claim loop retries the pass. TCP
+    # keepalives and tcp_user_timeout_ms still apply.
+    worker_pool_pre_ping: bool = Field(
+        default=False,
+        description=(
+            'Whether the worker process pre-pings its pooled connections; '
+            'pool_pre_ping applies to other engines'
+        ),
     )
     # Producer-side defaults match SQLAlchemy's (5 + 10). The previous
     # 30 + 30 let a single enqueue-only producer pin up to 60 server
@@ -306,6 +321,16 @@ class PostgresConfig(BaseModel):
         if self.worker_max_overflow is not None:
             updates['max_overflow'] = self.worker_max_overflow
         return self.model_copy(update=updates)
+
+    def worker_process_config(self) -> 'PostgresConfig':
+        """Return the broker config of the worker process: the pool sizing
+        of ``worker_runtime_config``, and ``worker_pool_pre_ping`` as its
+        pre-ping. Task code in a worker child sends through
+        ``worker_runtime_config``, a producer engine that keeps
+        ``pool_pre_ping``."""
+        return self.worker_runtime_config().model_copy(
+            update={'pool_pre_ping': self.worker_pool_pre_ping},
+        )
 
 
 def _moved_child_pool_field_error(name: str, pool_argument: str) -> ConfigurationError:
