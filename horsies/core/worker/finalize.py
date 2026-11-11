@@ -1619,15 +1619,17 @@ class FinalizeMixin:
 
                 # Proactively wake workers of this queue to re-check
                 # capacity/backlog (workers no longer listen on task_new).
-                try:
-                    payload = f'capacity:{task_id}'
-                    await s.execute(
-                        NOTIFY_TASK_QUEUE_SQL,
-                        {'c2': f'task_queue_{queue_name or "default"}', 'p': payload},
-                    )
-                except Exception:
-                    # Non-fatal if NOTIFY fails; workflow state is already persisted.
-                    pass
+                # The wake is a statement of this transaction: when it fails
+                # on the server, the transaction is aborted and its commit
+                # would roll the workflow writes back without an error, so a
+                # failure goes to the phase-2 error below, never past it.
+                await s.execute(
+                    NOTIFY_TASK_QUEUE_SQL,
+                    {
+                        'c2': f'task_queue_{queue_name or "default"}',
+                        'p': f'capacity:{task_id}',
+                    },
+                )
 
                 # Trigger automatically sends NOTIFY on UPDATE; commit to flush NOTIFYs
                 await s.commit()
