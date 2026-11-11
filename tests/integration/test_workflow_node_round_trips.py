@@ -67,6 +67,9 @@ FAILURE_PHASE1: Final = (
 NODE_WRITE: Final = 'WITH woken AS ( SELECT pg_notify('
 """The node write, which sends the capacity wake of the task's queue."""
 DEPENDENTS: Final = 'SELECT d.task_index, d.dependencies'
+PROMOTION: Final = 'UPDATE horsies_workflow_tasks wt SET status = CASE'
+"""The promotion write: PENDING to ENQUEUED, or to READY for a skip-on-ready
+node, which the next statement skips."""
 COMPLETION_CHECK: Final = 'SELECT w.status, w.completed_at, w.error'
 FIRST_FAILURE: Final = 'SELECT task_name, result FROM horsies_workflow_tasks'
 PHASE2: Final[dict[tuple[str, bool], tuple[str, ...]]] = {
@@ -74,9 +77,8 @@ PHASE2: Final[dict[tuple[str, bool], tuple[str, ...]]] = {
         'BEGIN',
         NODE_WRITE,
         DEPENDENTS,
-        "UPDATE horsies_workflow_tasks SET status = 'READY'",
+        PROMOTION,
         'SELECT task_index, task_name, status, result',
-        "UPDATE horsies_workflow_tasks wt SET status = 'ENQUEUED'",
         'WITH inserted AS ( INSERT INTO horsies_tasks',
         COMPLETION_CHECK,
         'COMMIT',
@@ -85,9 +87,8 @@ PHASE2: Final[dict[tuple[str, bool], tuple[str, ...]]] = {
         'BEGIN',
         NODE_WRITE,
         DEPENDENTS,
-        "UPDATE horsies_workflow_tasks SET status = 'READY'",
+        PROMOTION,
         'SELECT task_index, task_name, status, result',
-        "UPDATE horsies_workflow_tasks wt SET status = 'ENQUEUED'",
         'WITH inserted AS ( INSERT INTO horsies_tasks',
         COMPLETION_CHECK,
         'COMMIT',
@@ -107,7 +108,7 @@ PHASE2: Final[dict[tuple[str, bool], tuple[str, ...]]] = {
         FIRST_FAILURE,
         'UPDATE horsies_workflows SET error',
         DEPENDENTS,
-        "UPDATE horsies_workflow_tasks SET status = 'READY'",
+        PROMOTION,
         "UPDATE horsies_workflow_tasks SET status = 'SKIPPED'",
         DEPENDENTS,
         COMPLETION_CHECK,

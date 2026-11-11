@@ -74,9 +74,8 @@ from horsies.core.workflows.sql import (
     COUNT_CTX_TERMINAL_DEPS_SQL,
     ENQUEUE_SUBWORKFLOW_TASK_SQL,
     ENQUEUE_WORKFLOW_TASK_SQL,
-    ENQUEUE_WORKFLOW_TASKS_BATCH_SQL,
     GET_DEPENDENTS_EVAL_SQL,
-    MARK_TASKS_READY_BATCH_SQL,
+    PROMOTE_DEPENDENTS_BATCH_SQL,
     REVERT_ENQUEUED_TO_READY_BATCH_SQL,
     SKIP_PENDING_TASKS_BATCH_SQL,
     SKIP_READY_TASKS_BATCH_SQL,
@@ -2138,16 +2137,17 @@ async def _promote_dependents_level(
       2. join/skip classification in Python — including the skip-on-ready
          branch (join='all', failed deps, not allow_failed_deps), decided
          BEFORE any enqueue so those nodes never get task rows,
-      3. batched PENDING->SKIPPED / PENDING->READY / READY->SKIPPED CAS
-         writes (per-row CAS preserved; CAS losers drop out via RETURNING),
+      3. batched PENDING->SKIPPED CAS write, then one promotion write
+         (PENDING->ENQUEUED for the nodes to enqueue, PENDING->READY for
+         the skip-on-ready ones) RETURNING the insert payloads — strictly
+         before any horsies_tasks INSERT, so a node that did not move never
+         gets a task row — then the READY->SKIPPED CAS write (per-row CAS
+         preserved; CAS losers drop out via RETURNING),
       4. one grouped dependency-results read for the union of dep sets,
-      5. batched READY->ENQUEUED CAS RETURNING the insert payloads —
-         strictly before any horsies_tasks INSERT, so a missed guard can
-         never orphan a task row,
-      6. per-row payload build in Python via the shared builder; a node
+      5. per-row payload build in Python via the shared builder; a node
          whose build fails diverts to ``_fail_enqueued_task`` (per-node
          failure isolation, same as the sequential path),
-      7. one executemany of the task INSERT with the node LINK, one
+      6. one executemany of the task INSERT with the node LINK, one
          statement per node, in one round trip.
 
     SubWorkflowNode and workflow_ctx_from dependents take the per-node
@@ -2176,14 +2176,14 @@ async def _promote_dependents_level(
         newly_skipped.extend(r.task_index for r in res.fetchall())
 
     if plan.enqueue or plan.skip_after_ready:
-        marked = await _mark_ready_dependents(session, workflow_id, plan)
-        newly_skipped.extend(marked.skipped)
-        if marked.enqueue:
-            await _enqueue_ready_dependents(
+        promoted = await _write_promotions(session, workflow_id, plan)
+        newly_skipped.extend(promoted.skipped)
+        if promoted.enqueued:
+            await _enqueue_promoted(
                 session,
                 broker,
                 workflow_id,
-                list(marked.enqueue),
+                promoted.enqueued,
                 plan.dependencies,
             )
 
@@ -2343,37 +2343,56 @@ def _evaluate_join(
 
 
 @dataclass(frozen=True, slots=True)
-class _MarkedReady:
-    """The plain task dependents of a level after the READY write."""
+class _Promoted:
+    """The plain task dependents of a level after the promotion write."""
 
-    enqueue: tuple[int, ...]
-    """The nodes of ``_LevelPlan.enqueue`` that the READY write moved."""
+    enqueued: tuple[Any, ...]
+    """The rows that went to ENQUEUED, with the payload of their task."""
     skipped: tuple[int, ...]
     """The nodes of ``_LevelPlan.skip_after_ready`` that went to SKIPPED."""
 
 
-async def _mark_ready_dependents(
+async def _write_promotions(
     session: AsyncSession,
     workflow_id: str,
     plan: _LevelPlan,
-) -> _MarkedReady:
-    """Move the plain task dependents of a level to READY, then the
-    skip-on-ready ones to SKIPPED.
+) -> _Promoted:
+    """Promote the plain task dependents of a level.
 
-    Two statements: one READY write over both sets (a row that is no longer
-    PENDING drops out of its RETURNING), then one SKIPPED write over the
-    skip-on-ready rows that it moved. Does not commit.
+    Two statements. ``PROMOTE_DEPENDENTS_BATCH_SQL`` moves the PENDING rows
+    of ``plan.enqueue`` to ENQUEUED and those of ``plan.skip_after_ready``
+    to READY (every row to READY while the workflow is not RUNNING); a row
+    that is no longer PENDING drops out of its RETURNING. Then one SKIPPED
+    write over the skip-on-ready rows that it moved. Does not commit.
+
+    Raises:
+        AssertionError: the promotion write returned a status it does not
+            write. This is a defect.
     """
-    skip_after_ready = set(plan.skip_after_ready)
-    res = await session.execute(
-        MARK_TASKS_READY_BATCH_SQL,
-        {
-            'wf_id': workflow_id,
-            'idxs': sorted({*plan.enqueue, *plan.skip_after_ready}),
-        },
-    )
-    ready_won = {r.task_index for r in res.fetchall()}
-    ready_to_skip = sorted(skip_after_ready & ready_won)
+    rows = (
+        await session.execute(
+            PROMOTE_DEPENDENTS_BATCH_SQL,
+            {
+                'wf_id': workflow_id,
+                'idxs': sorted({*plan.enqueue, *plan.skip_after_ready}),
+                'enqueue_idxs': list(plan.enqueue),
+            },
+        )
+    ).fetchall()
+    enqueued: list[Any] = []
+    ready: set[int] = set()
+    for row in rows:
+        match row.status:
+            case 'ENQUEUED':
+                enqueued.append(row)
+            case 'READY':
+                ready.add(row.task_index)
+            case status:
+                raise AssertionError(
+                    f'promotion write returned status {status!r} for node '
+                    f'{row.task_index} of workflow {workflow_id}'
+                )
+    ready_to_skip = sorted(ready & set(plan.skip_after_ready))
     skipped: list[int] = []
     if ready_to_skip:
         res = await session.execute(
@@ -2381,29 +2400,25 @@ async def _mark_ready_dependents(
             {'wf_id': workflow_id, 'idxs': ready_to_skip},
         )
         skipped = [r.task_index for r in res.fetchall()]
-    return _MarkedReady(
-        enqueue=tuple(sorted(ready_won - skip_after_ready)),
-        skipped=tuple(skipped),
-    )
+    return _Promoted(enqueued=tuple(enqueued), skipped=tuple(skipped))
 
 
-async def _enqueue_ready_dependents(
+async def _enqueue_promoted(
     session: AsyncSession,
     broker: 'PostgresBroker | None',
     workflow_id: str,
-    enqueue_indexes: list[int],
+    enqueued: tuple[Any, ...],
     deps_by_index: Mapping[int, tuple[int, ...]],
 ) -> None:
-    """Enqueue the READY plain task dependents of a level.
+    """Insert the task of each node that the promotion write enqueued.
 
-    One read of the dependency results, the READY -> ENQUEUED write that
-    returns the insert payloads (before any task insert, so a node that
-    does not move gets no task row), the build of each payload, then one
-    executemany of the insert with its link. A node whose build fails is
-    failed alone. When that failure pauses the workflow
-    (``on_error=PAUSE``), the nodes of the level that were not inserted go
-    back to READY and no task row is inserted. Does not commit.
+    One read of the dependency results, the build of each payload from the
+    row of the promotion write, then one executemany of the insert with its
+    link. A node whose build fails is failed alone. When that failure pauses
+    the workflow (``on_error=PAUSE``), the nodes of the level that were not
+    inserted go back to READY and no task row is inserted. Does not commit.
     """
+    enqueue_indexes = [row.task_index for row in enqueued]
     dep_union = sorted({dep for idx in enqueue_indexes for dep in deps_by_index[idx]})
     dep_results, dep_task_names, dep_definition_keys = await get_dependency_results(
         session,
@@ -2411,18 +2426,12 @@ async def _enqueue_ready_dependents(
         dep_union,
         app=broker.app if broker is not None else None,
     )
-    cas_rows = (
-        await session.execute(
-            ENQUEUE_WORKFLOW_TASKS_BATCH_SQL,
-            {'wf_id': workflow_id, 'idxs': enqueue_indexes},
-        )
-    ).fetchall()
 
     built = await _build_level_inserts(
         session,
         broker,
         workflow_id,
-        cas_rows,
+        enqueued,
         dep_results=dep_results,
         dep_task_names=dep_task_names,
         dep_definition_keys=dep_definition_keys,
