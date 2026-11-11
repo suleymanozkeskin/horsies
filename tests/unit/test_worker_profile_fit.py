@@ -365,10 +365,64 @@ class TestConnectionNeed:
             runner_heartbeat=RUNNER_HEARTBEAT_CONNECTIONS_PER_WORKER,
             children=8,
             per_child=2,
+            task_broker_per_loop=3 + 2,
         )
         assert LISTENER_CONNECTIONS_PER_WORKER == 2
         assert RUNNER_HEARTBEAT_CONNECTIONS_PER_WORKER == 1
         assert need.total() == 24
+
+    def test_task_sends_add_the_worker_broker_pool_per_child(self) -> None:
+        """A child builds the app's broker from the worker runtime config: a
+        task that sends opens worker_pool_size + worker_max_overflow
+        connections in its child, for each event loop that it sends from."""
+        need = worker_connection_need(
+            WorkerProfile(shared_async=SharedAsyncChildren(count=8, seats=50)),
+            _broker(worker_pool_size=4, worker_max_overflow=3),
+        )
+
+        assert need.task_broker_per_loop == 4 + 3
+        assert need.task_sends() == 8 * (4 + 3)
+        assert need.with_task_sends() == need.total() + 8 * (4 + 3)
+        assert need.task_sends_note() == (
+            'not counted: task code that sends opens a pool of '
+            'worker_pool_size + worker_max_overflow = 7 connections in its '
+            'child for each event loop that it sends from; with one such loop '
+            f'in each child, 8 x 7 = 56 more, {need.total() + 56} in all'
+        )
+
+    def test_the_task_send_pool_is_the_pool_of_the_broker_of_a_child(self) -> None:
+        """A child sets the worker role at start, so ``app.get_broker()``
+        there builds its engines from the worker runtime config."""
+        broker_config = _broker(worker_pool_size=4, worker_max_overflow=3)
+        app = Horsies(AppConfig(broker=broker_config))
+        app.set_role('worker')
+        broker = app.get_broker()
+        try:
+            need = worker_connection_need(
+                WorkerProfile(isolated=IsolatedChildren(count=1)),
+                broker_config,
+            )
+            assert (
+                broker.config.pool_size + broker.config.max_overflow
+                == need.task_broker_per_loop
+            )
+        finally:
+            _ = broker.close()
+
+    def test_a_fit_states_what_task_code_adds(self) -> None:
+        profile = WorkerProfile(isolated=IsolatedChildren(count=8))
+        limit = ServerConnectionLimit(max_connections=100, reserved=3)
+
+        outcome = compare_connections(profile, _broker(), limit)
+
+        assert isinstance(outcome, ConnectionsFit)
+        assert outcome.describe() == (
+            'one worker opens up to 24 Postgres connections itself, of 97 usable '
+            'on the server; not counted: task code that sends opens a pool of '
+            'worker_pool_size + worker_max_overflow = 5 connections in its child '
+            'for each event loop that it sends from; with one such loop in each '
+            'child, 8 x 5 = 40 more, 64 in all'
+        )
 
     def test_shared_async_children_open_a_child_pool_each(self) -> None:
         """A shared async child opens its async pool with the size of a
@@ -411,8 +465,9 @@ class TestConnectionNeed:
         outcome = compare_connections(profile, _broker(), limit)
         assert isinstance(outcome, ConnectionsExceedServer)
         assert outcome.describe() == (
-            'one worker can open 24 Postgres connections; the server has 23 '
-            'usable slots (max_connections 26 - reserved 3)'
+            'one worker opens up to 24 Postgres connections itself, not '
+            'counting task code; the server has 23 usable slots '
+            '(max_connections 26 - reserved 3)'
         )
 
     def test_need_equal_to_usable_fits(self) -> None:
@@ -448,13 +503,17 @@ class TestCheckLiveWorkerConnections:
 
         assert [error.code for error in errors] == [ErrorCode.CHECK_WORKER_CONNECTIONS]
         assert errors[0].message == (
-            "worker_profiles['big']: one worker can open 48 Postgres "
-            'connections; the server has 27 usable slots (max_connections 30 '
-            '- reserved 3)'
+            "worker_profiles['big']: one worker opens up to 48 Postgres "
+            'connections itself, not counting task code; the server has 27 '
+            'usable slots (max_connections 30 - reserved 3)'
         )
         assert errors[0].notes == [
             'parent pool 5 + listener 2 + runner heartbeat 1 + 20 children x '
             'worker_child_pool_max_size 2 = 48',
+            'not counted: task code that sends opens a pool of worker_pool_size '
+            '+ worker_max_overflow = 5 connections in its child for each event '
+            'loop that it sends from; with one such loop in each child, 20 x 5 '
+            '= 100 more, 148 in all',
         ]
         assert errors[0].location is None
 

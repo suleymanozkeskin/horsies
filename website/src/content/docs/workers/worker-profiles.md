@@ -220,7 +220,7 @@ error[HRS-218]: worker_profiles['batch'].claim.claimed_per_worker: 10 tasks is a
 
 ### Connections
 
-One worker can open this many Postgres connections:
+One worker opens this many Postgres connections itself:
 
 ```text
 worker_pool_size + worker_max_overflow   # parent pool
@@ -231,7 +231,15 @@ worker_pool_size + worker_max_overflow   # parent pool
 
 The worker process writes the runner heartbeats of its RUNNING tasks over one connection of its own. `children` counts every mode: an isolated child opens a sync pool, a shared async child opens an async pool of the same size, and a shared thread child opens a sync pool of the same size that its seat threads share, whatever its seats. At the defaults, a profile of 8 children needs `3 + 2 + 2 + 1 + 8 × 2 = 24`.
 
-The server has `max_connections` minus `superuser_reserved_connections` minus `reserved_connections` (PostgreSQL 16 and later) usable slots. `horsies check --live` reports `HRS-219` for each profile above that number. At boot the worker reads the same settings before it builds its children and logs a warning. With `pgbouncer_transaction_mode=True` the pooled connections do not map to server connections, and nothing is compared. See [Remote PostgreSQL](/horsies/configuration/remote-postgres/#connection-budget).
+Task code that sends through the app opens more. It opens the app's broker in its child, with a pool of `worker_pool_size + worker_max_overflow` connections for each event loop that it sends from:
+
+- A sync task sends from the broker's runner loop.
+- An async task sends from the task loop of its child.
+- An isolated child that runs both kinds opens two pools.
+
+With one sending loop in each child, 8 children at the defaults add `8 × 5 = 40`, so `64` in all. The comparison below does not count these connections, because only the run time shows whether a task sends. Each `HRS-219` error and the boot log state them next to the compared number.
+
+The server has `max_connections` minus `superuser_reserved_connections` minus `reserved_connections` (PostgreSQL 16 and later) usable slots. `horsies check --live` reports `HRS-219` for each profile whose worker opens more than that number itself. At boot the worker reads the same settings before it builds its children and logs a warning. With `pgbouncer_transaction_mode=True` the pooled connections do not map to server connections, and nothing is compared. See [Remote PostgreSQL](/horsies/configuration/remote-postgres/#connection-budget).
 
 The comparison is for one worker. Several workers, producers and other clients share the same slots.
 

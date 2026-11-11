@@ -189,7 +189,10 @@ def _worker_connection_errors(
                         ConfigurationError(
                             message=f'{profile_path(name)}: {exceed.describe()}',
                             code=ErrorCode.CHECK_WORKER_CONNECTIONS,
-                            notes=[exceed.need.formula()],
+                            notes=[
+                                exceed.need.formula(),
+                                exceed.need.task_sends_note(),
+                            ],
                             help_text=CONNECTIONS_HELP,
                         )
                     )
@@ -1272,9 +1275,10 @@ class Horsies:
     def _check_worker_connections(self) -> list[HorsiesError]:
         """Compare each worker profile with the server connection limit.
 
-        One worker of a profile can open its parent pool, its listener and
-        the pools of its children at once. A profile that needs more
-        connections than the server has usable slots is an error here; the
+        One worker of a profile opens its parent pool, its listener, its
+        runner heartbeat connection and the pools of its children. A profile
+        whose worker opens more than the server has usable slots is an error
+        here; each error also states what task code that sends adds. The
         worker itself only warns at boot. With no profiles, or through a
         transaction pooler, nothing is read. Runs after the connectivity
         phase, so the server answered a moment before.

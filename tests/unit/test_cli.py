@@ -2831,9 +2831,11 @@ class TestBootConnectionFit:
         warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
         assert len(warnings) == 1
         assert warnings[0].startswith(
-            "Worker profile 'default': one worker can open 48 Postgres "
-            'connections; the server has 27 usable slots',
+            "Worker profile 'default': one worker opens up to 48 Postgres "
+            'connections itself, not counting task code; the server has 27 '
+            'usable slots',
         )
+        assert '20 x 5 = 100 more, 148 in all' in warnings[0]
 
     async def test_a_profile_within_the_limit_does_not_warn(
         self,

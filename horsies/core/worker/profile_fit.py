@@ -7,9 +7,10 @@ static profile validation in ``AppConfig`` cannot check them:
   worker can use: the cgroup limit of its container when that is below the
   host RAM, else the host RAM. The worker logs a warning when the sum is
   above it, and starts: a deployment can move between machine sizes.
-- The Postgres connections that one worker can open against the
+- The Postgres connections that one worker opens itself against the
   ``max_connections`` of the server, less the reserved slots. A worker
-  logs a warning at boot; ``horsies check --live`` reports an error.
+  logs a warning at boot; ``horsies check --live`` reports an error. Task
+  code that sends opens more, and each message states how many.
 
 The readers do I/O and return a closed outcome. The comparisons are pure.
 """
@@ -396,13 +397,22 @@ async def read_server_connection_limit(
 
 @dataclass(frozen=True, slots=True)
 class WorkerConnectionNeed:
-    """The Postgres connections that one worker can open, by part."""
+    """The Postgres connections of one worker, by part.
+
+    ``total`` counts the connections that the worker opens itself: its
+    pool, its listener, its runner heartbeat connection, and the pool of
+    each child. Task code that sends through the app opens the app's
+    broker in its child: a pool of ``task_broker_per_loop`` connections for
+    each event loop that it sends from. ``total`` does not count those.
+    ``with_task_sends`` counts one such loop in each child.
+    """
 
     parent_pool: int
     listener: int
     runner_heartbeat: int
     children: int
     per_child: int
+    task_broker_per_loop: int
 
     def total(self) -> int:
         return (
@@ -412,6 +422,13 @@ class WorkerConnectionNeed:
             + self.children * self.per_child
         )
 
+    def task_sends(self) -> int:
+        """The connections that task code adds with one sending loop per child."""
+        return self.children * self.task_broker_per_loop
+
+    def with_task_sends(self) -> int:
+        return self.total() + self.task_sends()
+
     def formula(self) -> str:
         return (
             f'parent pool {self.parent_pool} + listener {self.listener} + '
@@ -420,12 +437,28 @@ class WorkerConnectionNeed:
             f'{self.per_child} = {self.total()}'
         )
 
+    def task_sends_note(self) -> str:
+        """What ``total`` does not count, with its size for this profile."""
+        return (
+            'not counted: task code that sends opens a pool of '
+            f'worker_pool_size + worker_max_overflow = {self.task_broker_per_loop} '
+            'connections in its child for each event loop that it sends from; '
+            f'with one such loop in each child, {self.children} x '
+            f'{self.task_broker_per_loop} = {self.task_sends()} more, '
+            f'{self.with_task_sends()} in all'
+        )
+
 
 def worker_connection_need(
     profile: WorkerProfile,
     broker: PostgresConfig,
 ) -> WorkerConnectionNeed:
-    """The connections that one worker of this profile can open at most."""
+    """The connections of one worker of this profile.
+
+    A child builds the app's broker from the worker runtime config, as the
+    worker process does, so a pool of task code has the size of the parent
+    pool.
+    """
     parent = broker.worker_runtime_config()
     return WorkerConnectionNeed(
         parent_pool=parent.pool_size + parent.max_overflow,
@@ -433,31 +466,40 @@ def worker_connection_need(
         runner_heartbeat=RUNNER_HEARTBEAT_CONNECTIONS_PER_WORKER,
         children=profile.child_count(),
         per_child=broker.worker_child_pool_max_size,
+        task_broker_per_loop=parent.pool_size + parent.max_overflow,
     )
 
 
 @dataclass(frozen=True, slots=True)
 class ConnectionsFit:
-    """One worker of the profile fits in the usable slots of the server."""
-
-    need: WorkerConnectionNeed
-    limit: ServerConnectionLimit
-
-
-@dataclass(frozen=True, slots=True)
-class ConnectionsExceedServer:
-    """One worker of the profile can open more connections than the server
-    has usable slots."""
+    """The connections that one worker of the profile opens itself fit in the
+    usable slots of the server. Task code that sends is not compared."""
 
     need: WorkerConnectionNeed
     limit: ServerConnectionLimit
 
     def describe(self) -> str:
         return (
-            f'one worker can open {self.need.total()} Postgres connections; '
-            f'the server has {self.limit.usable()} usable slots '
-            f'(max_connections {self.limit.max_connections} - reserved '
-            f'{self.limit.reserved})'
+            f'one worker opens up to {self.need.total()} Postgres connections '
+            f'itself, of {self.limit.usable()} usable on the server; '
+            f'{self.need.task_sends_note()}'
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ConnectionsExceedServer:
+    """The connections that one worker of the profile opens itself are more
+    than the usable slots of the server."""
+
+    need: WorkerConnectionNeed
+    limit: ServerConnectionLimit
+
+    def describe(self) -> str:
+        return (
+            f'one worker opens up to {self.need.total()} Postgres connections '
+            f'itself, not counting task code; the server has '
+            f'{self.limit.usable()} usable slots (max_connections '
+            f'{self.limit.max_connections} - reserved {self.limit.reserved})'
         )
 
 
@@ -466,7 +508,9 @@ def compare_connections(
     broker: PostgresConfig,
     limit: ServerConnectionLimit,
 ) -> ConnectionsFit | ConnectionsExceedServer:
-    """Compare the connections of one worker with the usable server slots."""
+    """Compare the connections that one worker opens itself with the usable
+    server slots. Task code that sends is not compared: whether it sends,
+    and from how many event loops, is known only at run time."""
     need = worker_connection_need(profile, broker)
     if need.total() > limit.usable():
         return ConnectionsExceedServer(need=need, limit=limit)

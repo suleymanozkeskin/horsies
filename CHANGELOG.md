@@ -101,13 +101,16 @@ and there is no migration contract between pre-1.0 versions.
     worker's down slots (`GET /api/workers/classes`; `WorkerStateInfo` gains
     `slot_health` and `down_slots`).
 - **`horsies check --live` compares every worker profile with the server
-  connection limit.** One worker can open its parent pool
+  connection limit.** One worker opens its parent pool
   (`worker_pool_size + worker_max_overflow`), 2 listener connections, 1
   runner heartbeat connection and `worker_child_pool_max_size` for each
-  child. A profile whose worker can
-  open more than `max_connections` less `superuser_reserved_connections`
+  child. A profile whose worker opens
+  more than `max_connections` less `superuser_reserved_connections`
   and `reserved_connections` fails with `HRS-219`
-  (`CHECK_WORKER_CONNECTIONS`). With `pgbouncer_transaction_mode=True`
+  (`CHECK_WORKER_CONNECTIONS`). Task code that sends opens the app's broker
+  in its child, `worker_pool_size + worker_max_overflow` for each event loop
+  it sends from. The comparison does not count it; the error and the boot
+  log state it, with one sending loop per child. With `pgbouncer_transaction_mode=True`
   nothing is compared. At boot, before any child starts, a worker logs the
   same comparison as a warning. It also warns when the per-child memory
   limits of its profile add up to more than the memory that it can use: the

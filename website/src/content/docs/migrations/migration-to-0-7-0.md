@@ -164,8 +164,8 @@ See [Limits](/horsies/concepts/workflows/subworkflows/#66-limits).
 These were not checked before 0.7.0, because the values were command-line flags:
 
 - `horsies check` validates every profile. A claim limit above the capacity of the worker (its seats plus `prefetch_buffer`; one seat per isolated child) is refused with `HRS-218`; before, it had no effect.
-- `horsies check --live` reports `HRS-219` when one worker of a profile can open more Postgres connections than the server has usable slots.
-- At boot the worker warns when the per-child memory limits add up to more than the memory that the worker can use: the container (cgroup) limit when it is below the host RAM, else the host RAM, and when one worker can open more connections than the server has usable slots.
+- `horsies check --live` reports `HRS-219` when one worker of a profile opens more Postgres connections itself than the server has usable slots. The error also states what task code that sends adds: `worker_pool_size + worker_max_overflow` per child and per event loop that it sends from.
+- At boot the worker warns when the per-child memory limits add up to more than the memory that the worker can use: the container (cgroup) limit when it is below the host RAM, else the host RAM, and when one worker opens more connections itself than the server has usable slots.
 
 Each bound of the old flags still applies: at least one child, a task limit of at least 1, a memory limit of at least 1 MB, and a drain timeout above 0. New upper bounds: 1024 isolated children, 2,147,483,647 tasks for a task limit, 16,777,216 MB for a memory limit, and 24 hours for the drain timeout.
 

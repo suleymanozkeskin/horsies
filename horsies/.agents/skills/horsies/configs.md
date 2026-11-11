@@ -145,8 +145,8 @@ class in isolated children. A shared async child opens one async pool, and a
 shared thread child one sync pool that its seat threads share, each of
 `worker_child_pool_max_size`, so each counts as one child in HRS-219. Boot also
 warns (never refuses) when the sum over modes of `count × mb` is above the
-usable memory (container limit or host RAM), and when one worker can open more
-Postgres connections than the server has usable slots.
+usable memory (container limit or host RAM), and when one worker opens more
+Postgres connections itself than the server has usable slots.
 
 Claim budgets per execution class. A worker has one budget for each class it
 runs children for; its capacity is the children (or shared seats) in service.
@@ -333,9 +333,14 @@ worker_pool_size + worker_max_overflow
   + task-code database connections
 ```
 
-`horsies check --live` compares this number (without task-code connections)
-for each worker profile with `max_connections` less the reserved slots and
-reports `HRS-219`; a worker logs the same comparison as a warning at boot.
+Task code that sends through the app opens the app's broker in its child: a
+pool of `worker_pool_size + worker_max_overflow` for each event loop it sends
+from (the broker's runner loop for sync tasks, the child's task loop for async
+tasks). `horsies check --live` compares the number without task-code
+connections for each worker profile with `max_connections` less the reserved
+slots and reports `HRS-219`; the error states the task-send term with one
+sending loop per child. A worker logs the same comparison at boot, as a
+warning when it is above the usable slots.
 Nothing is compared with `pgbouncer_transaction_mode=True`.
 
 Child DB connections are lazy by default (`worker_child_pool_min_size=0`). A child
