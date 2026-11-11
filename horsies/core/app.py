@@ -1,5 +1,5 @@
 # app/core/app.py
-from collections.abc import Coroutine
+from collections.abc import Awaitable, Coroutine
 from typing import (
     Literal,
     Optional,
@@ -11,6 +11,7 @@ from typing import (
     Any,
     Union,
     cast,
+    get_origin,
 )
 from horsies.core.models.app import AppConfig
 from horsies.core.models.queues import QueueMode
@@ -55,6 +56,7 @@ from horsies.core.errors import (
 import inspect
 import os
 import threading
+import types
 import importlib
 import glob
 import sys
@@ -105,6 +107,7 @@ from horsies.core.worker.profile_fit import (
 if TYPE_CHECKING:
     from horsies.core.task_decorator import (
         AsyncTaskFunction,
+        CancelGraceRefusedDecorator,
         SharedAsyncTaskDecorator,
         SharedThreadTaskDecorator,
         TaskDecorator,
@@ -132,6 +135,68 @@ ChildProcessStartHook = Callable[[], None]
 # Zero-argument coroutine function run once per shared async child, on the
 # event loop of that child, before its first task.
 SharedAsyncChildStartHook = Callable[[], Coroutine[Any, Any, None]]
+
+
+@dataclass(frozen=True, slots=True)
+class _HookReturnsCoroutine:
+    """The call of the hook returns a coroutine: an ``async def`` function,
+    an object whose ``__call__`` is ``async def``, or a function whose return
+    annotation is an awaitable type."""
+
+
+@dataclass(frozen=True, slots=True)
+class _HookIsLambda:
+    """A lambda, which can be neither ``async def`` nor annotated. The child
+    awaits its value, and a value that is not awaitable fails the hook when
+    the child starts."""
+
+
+@dataclass(frozen=True, slots=True)
+class _HookIsSync:
+    """The call of the hook runs its body with no event loop."""
+
+
+type _SharedAsyncHookKind = _HookReturnsCoroutine | _HookIsLambda | _HookIsSync
+
+
+def _returns_awaitable(fn: Callable[..., object]) -> bool:
+    """Whether the return annotation of ``fn`` is an awaitable type.
+
+    An annotation that is missing or does not resolve counts as not
+    awaitable. Does not call ``fn``.
+    """
+    try:
+        annotation = inspect.signature(fn, eval_str=True).return_annotation
+    except (NameError, TypeError, ValueError, SyntaxError, AttributeError):
+        return False
+    origin = get_origin(annotation) or annotation
+    return isinstance(origin, type) and issubclass(origin, Awaitable)
+
+
+def _shared_async_hook_kind(fn: object) -> _SharedAsyncHookKind:
+    """Whether the call of ``fn`` returns a coroutine, read without a call.
+
+    A call at registration could run a sync body in the process that imports
+    the app, so only the function, its ``__call__`` and its return
+    annotation are read.
+    """
+    if inspect.iscoroutinefunction(fn):
+        return _HookReturnsCoroutine()
+    if inspect.isgeneratorfunction(fn) or inspect.isasyncgenfunction(fn):
+        return _HookIsSync()
+    match fn:
+        case types.FunctionType() if fn.__name__ == '<lambda>':
+            return _HookIsLambda()
+        case types.FunctionType() | types.MethodType():
+            target: Callable[..., object] = fn
+        case _:
+            target = type(fn).__call__
+            if inspect.iscoroutinefunction(target):
+                return _HookReturnsCoroutine()
+    if _returns_awaitable(target):
+        return _HookReturnsCoroutine()
+    return _HookIsSync()
+
 
 # Sentinel attribute name stamped on functions decorated with @app.workflow_builder
 _BUILDER_ATTR = '__horsies_workflow_builder__'
@@ -322,6 +387,13 @@ class Horsies:
         bodies must be idempotent. Work that a hook starts and leaves
         running, such as a background task of a client, belongs to no task.
         Isolated children do not run these hooks.
+
+        Accepted, read without a call: an ``async def`` function, an object
+        whose ``__call__`` is ``async def``, a function or an object whose
+        ``__call__`` has an awaitable return annotation, and a lambda. A
+        lambda cannot be checked here; when its value is not awaitable, the
+        hook fails when the child starts. Any other callable is refused with
+        ``HRS-214``.
         """
         if not callable(fn):
             raise ConfigurationError(
@@ -330,20 +402,24 @@ class Horsies:
                 notes=[f'got {type(fn).__name__!r}'],
                 help_text='register a zero-argument async def function',
             )
-        if not inspect.iscoroutinefunction(fn):
-            raise ConfigurationError(
-                message='on_shared_async_child_start hooks must be async def',
-                code=ErrorCode.CONFIG_INVALID_CHILD_HOOK,
-                notes=[
-                    f"hook '{getattr(fn, '__name__', repr(fn))}' is not an async "
-                    'function',
-                    'the hook runs on the event loop of the shared async child',
-                ],
-                help_text=(
-                    'use an async def function; for setup with no event loop, '
-                    'use on_child_process_start'
-                ),
-            )
+        match _shared_async_hook_kind(fn):
+            case _HookReturnsCoroutine() | _HookIsLambda():
+                pass
+            case _HookIsSync():
+                raise ConfigurationError(
+                    message='on_shared_async_child_start hooks must be async def',
+                    code=ErrorCode.CONFIG_INVALID_CHILD_HOOK,
+                    notes=[
+                        f"hook '{getattr(fn, '__name__', repr(fn))}' is not an "
+                        'async function, and its return annotation is not '
+                        'awaitable',
+                        'the hook runs on the event loop of the shared async child',
+                    ],
+                    help_text=(
+                        'use an async def function; for setup with no event '
+                        'loop, use on_child_process_start'
+                    ),
+                )
         if all(existing is not fn for existing in self._shared_async_child_start_hooks):
             self._shared_async_child_start_hooks.append(fn)
         return fn
@@ -403,8 +479,11 @@ class Horsies:
         self, task_name: str, func: Callable[P, 'TaskResult[T, TaskError]']
     ) -> 'TaskFunction[P, T]': ...
 
+    # The last overload also accepts a literal SHARED_ASYNC with
+    # cancel_grace_ms, and its return type accepts more function kinds than
+    # this one. A type checker picks this overload first for the literal.
     @overload
-    def task(
+    def task(  # pyright: ignore[reportOverlappingOverload]
         self,
         task_name: str,
         *,
@@ -434,6 +513,24 @@ class Horsies:
         default_unhandled_error_code: Optional[str] = None,
     ) -> 'SharedThreadTaskDecorator': ...
 
+    # cancel_grace_ms with a literal class other than SHARED_ASYNC: the
+    # returned decorator takes no function, so the decoration is refused.
+    # The last overload also accepts these arguments, for a class known at
+    # run time; a type checker picks this overload first for the literal.
+    @overload
+    def task(  # pyright: ignore[reportOverlappingOverload]
+        self,
+        task_name: str,
+        *,
+        execution: Literal[Execution.SHARED_THREAD],
+        timeout_ms: int,
+        cancel_grace_ms: int,
+        queue_name: Optional[str] = None,
+        retry_policy: Optional['RetryPolicy'] = None,
+        exception_mapper: Optional['ExceptionMapper'] = None,
+        default_unhandled_error_code: Optional[str] = None,
+    ) -> 'CancelGraceRefusedDecorator': ...
+
     @overload
     def task(
         self,
@@ -447,8 +544,23 @@ class Horsies:
         execution: Literal[Execution.ISOLATED] = Execution.ISOLATED,
     ) -> 'TaskDecorator': ...
 
+    @overload
+    def task(  # pyright: ignore[reportOverlappingOverload]
+        self,
+        task_name: str,
+        *,
+        cancel_grace_ms: int,
+        queue_name: Optional[str] = None,
+        retry_policy: Optional['RetryPolicy'] = None,
+        exception_mapper: Optional['ExceptionMapper'] = None,
+        default_unhandled_error_code: Optional[str] = None,
+        timeout_ms: Optional[int] = None,
+        execution: Literal[Execution.ISOLATED] = Execution.ISOLATED,
+    ) -> 'CancelGraceRefusedDecorator': ...
+
     # A class known only at run time: timeout_ms is required, because a
-    # shared class needs it. The decorator checks the rules at run time.
+    # shared class needs it. cancel_grace_ms is accepted, because the class
+    # may be SHARED_ASYNC. The decorator checks the rules at run time.
     @overload
     def task(
         self,
@@ -456,6 +568,7 @@ class Horsies:
         *,
         execution: Execution,
         timeout_ms: int,
+        cancel_grace_ms: Optional[int] = None,
         queue_name: Optional[str] = None,
         retry_policy: Optional['RetryPolicy'] = None,
         exception_mapper: Optional['ExceptionMapper'] = None,
@@ -476,6 +589,7 @@ class Horsies:
         'TaskDecorator',
         'SharedAsyncTaskDecorator',
         'SharedThreadTaskDecorator',
+        'CancelGraceRefusedDecorator',
     ]:
         """
         Decorator to register a task with this app.

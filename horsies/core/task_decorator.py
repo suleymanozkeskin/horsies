@@ -21,6 +21,7 @@ from typing import (
     TYPE_CHECKING,
     Optional,
     Any,
+    Never,
     assert_never,
     cast,
     overload,
@@ -1192,6 +1193,17 @@ class SharedThreadTaskDecorator(Protocol):
         fn: Callable[P, TaskResult[T, TaskError]],
         /,
     ) -> TaskFunction[P, T]: ...
+
+
+class CancelGraceRefusedDecorator(Protocol):
+    """What `app.task(task_name, cancel_grace_ms=..., ...)` returns for a
+    literal class other than `SHARED_ASYNC`.
+
+    It accepts no function, so a type checker refuses the decoration. The
+    decorator refuses it at run time too (HRS-110).
+    """
+
+    def __call__(self, fn: Never, /) -> Never: ...
 
 
 class TaskSendOptions(Protocol[P, T]):

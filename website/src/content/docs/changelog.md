@@ -134,7 +134,9 @@ there is no migration contract between pre-1.0 versions.
     need `timeout_ms` (`HRS-109`), only `SHARED_ASYNC` takes `cancel_grace_ms`
     (`HRS-110`), and `cancel_grace_ms` is from 100 to 10,000 ms (`HRS-111`).
     `horsies check` reports them. With `execution` written as a member, a
-    type checker refuses the same declarations.
+    type checker refuses the same declarations. A class known only at run
+    time needs `timeout_ms` and takes `cancel_grace_ms`; the decorator checks
+    it at run time.
   - `cancel_grace_ms` is the time that a `SHARED_ASYNC` task gets to stop
     after its cancel. A task that sets none gets 1,000 ms. The stored task
     options hold the class (`"execution"`) and the grace in effect at send
@@ -232,7 +234,9 @@ there is no migration contract between pre-1.0 versions.
   - `@app.on_shared_async_child_start` registers an `async def` hook that
     runs on the loop of each shared async child before its first task, for
     long-lived async clients. Same 10 s bound and fail-closed stop as
-    `on_child_process_start`.
+    `on_child_process_start`. It also accepts an object whose `__call__` is
+    `async def`, a function with an awaitable return annotation, and a
+    lambda; it refuses another callable with `HRS-214`.
   - Recycling counts per seat: a shared child closes after
     `after_per_seat.tasks × seats` tasks (default 100 per seat) or when its
     RSS after a task reaches `above`. A closing child takes no new task, its

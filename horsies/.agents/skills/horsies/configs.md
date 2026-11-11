@@ -209,7 +209,10 @@ async def open_clients() -> None: ...
 async_hooks = app.get_shared_async_child_start_hooks()  # list[SharedAsyncChildStartHook]
 ```
 
-`on_shared_async_child_start` rules: only `async def` (else `HRS-214`); runs
+`on_shared_async_child_start` rules: the call must return a coroutine, read
+without a call: an `async def` function, an object with an `async def`
+`__call__`, a function with an awaitable return annotation, or a lambda
+(checked when the child awaits it); anything else is `HRS-214`; runs
 after the `on_child_process_start` hooks and the child's async pool; same 10 s
 bound and fail-closed stop as the sync hooks (a hook that blocks the loop is
 also ended); work it leaves running belongs to no task.
