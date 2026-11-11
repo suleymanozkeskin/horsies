@@ -323,11 +323,15 @@ there is no migration contract between pre-1.0 versions.
   and returns each row's `execution`. Schema v55 drops the earlier signature,
   so a 0.6.x worker fails every claim pass after a 0.7.0 process migrates.
   Stop every 0.6.x worker before the first 0.7.0 worker starts.
-  - A claim pass reads the head of each (queue, class) stream without locks,
-    then takes the rows it needs from each stream with `FOR UPDATE SKIP
-    LOCKED`. It locks only the rows it takes. Before, a pass over two queues
-    of equal priority could lock up to its batch in each queue and return
-    one batch.
+  - A claim pass reads the head of each (queue, class) stream without locks:
+    its pending rows and its rows with an expired lease, in one order. One
+    walk over all heads in rank order (queue priority, priority,
+    `enqueued_at`, id) takes a row when its queue, its budget and the pass
+    each have room left, so a row that one limit drops takes no room that
+    another class could use. The pass then takes the chosen rows from each
+    stream with `FOR UPDATE SKIP LOCKED`. It locks only the rows it takes.
+    Before, a pass over two queues of equal priority could lock up to its
+    batch in each queue and return one batch.
   - v55 builds `idx_horsies_tasks_claim_expired_class` on `(queue_name,
     execution, priority, enqueued_at, id)` over CLAIMED rows concurrently,
     and drops `idx_horsies_tasks_claim_pending` and
@@ -336,7 +340,8 @@ there is no migration contract between pre-1.0 versions.
     index. With 50,000 expired leases in one queue, the expired stream of a
     class with no rows reads 142 buffers on the new index and 7,848 on the
     unclassed one.
-  - Both claim functions run with `jit = off`. Their generic plan passed
+  - The claim functions `horsies_claim`, `horsies_claim_plan` and
+    `horsies_claim_candidates` run with `jit = off`. Their generic plan passed
     `jit_above_cost`, so a server with JIT compiled the statement on every
     pass: 26 to 47 ms per pass against 0.7 to 1.8 ms of work, at a 90,000-row
     backlog on PostgreSQL 17.

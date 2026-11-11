@@ -480,9 +480,12 @@ LIMIT :take
 
 The pass has two steps in one statement:
 
-1. Read the head of each stream, without locks, and count the rows to take
-   from each stream within the queue caps, the batch limit, each budget, and
-   the worker budget.
+1. Read the head of each stream without locks: its pending rows and its rows
+   with an expired lease, in one order. Walk all heads in rank order (queue
+   priority, priority, `enqueued_at`, id), and take a row when its queue (cap
+   and batch limit), its budget and the worker budget each have room left. A
+   row that one limit drops uses no room of the others. Count the rows to
+   take from each stream.
 2. Take that many rows from each stream with `FOR UPDATE SKIP LOCKED`.
 
 Key behaviors:
@@ -538,7 +541,9 @@ for queue in queues:
             claim_count = min(worker_budget, queue_budget)
 
 # Each budget takes at most budget.available rows of the classes it claims,
-# and the pass takes at most worker_budget rows in all.
+# and the pass takes at most worker_budget rows in all. One walk in rank
+# order takes a row when its queue, its budget and the pass have room left;
+# a row that one limit drops uses no room of the others.
 ```
 
 ## Advisory Locks

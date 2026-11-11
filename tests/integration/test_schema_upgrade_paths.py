@@ -1181,12 +1181,16 @@ class TestUpgradePaths:
                     SELECT proname, coalesce(array_to_string(proconfig, ','), '')
                     FROM pg_proc
                     WHERE proname IN (
-                        'horsies_claim', 'horsies_claim_candidates',
+                        'horsies_claim', 'horsies_claim_plan',
+                        'horsies_claim_candidates',
                         'horsies_find_non_runnable_workflow_tasks'
                     )
                 """))).tuples().all())
                 assert installed == {
                     'horsies_claim': 'jit=off',
+                    'horsies_claim_plan': (
+                        'plan_cache_mode=force_generic_plan,jit=off'
+                    ),
                     'horsies_claim_candidates': (
                         'plan_cache_mode=force_generic_plan,jit=off'
                     ),
@@ -2493,7 +2497,7 @@ class TestPerClassClaimMigration:
 
     A database at v54 has the claim pair of one process count, the claim
     indexes without a class, and no class_capacity column. The upgrade drops
-    the earlier signatures, installs the current pair, builds the
+    the earlier signatures, installs the current claim functions, builds the
     class-keyed expired index, drops the two indexes without a class, and
     adds the column.
     """
@@ -2521,6 +2525,7 @@ class TestPerClassClaimMigration:
     V55_CANDIDATES_ARGS = (
         'integer, jsonb, jsonb, jsonb, jsonb, jsonb, jsonb, integer, text, bigint'
     )
+    V55_PLAN_ARGS = 'integer, jsonb, jsonb, jsonb, jsonb, jsonb, jsonb, integer'
 
     async def _demote_to_v54(self, engine: AsyncEngine) -> None:
         """Rebuild the v54 shape: old signatures, old indexes, no column."""
@@ -2565,7 +2570,10 @@ class TestPerClassClaimMigration:
                 await connection.execute(text("""
                     SELECT proname::text, oidvectortypes(proargtypes)
                     FROM pg_proc
-                    WHERE proname IN ('horsies_claim', 'horsies_claim_candidates')
+                    WHERE proname IN (
+                        'horsies_claim', 'horsies_claim_plan',
+                        'horsies_claim_candidates'
+                    )
                       AND pronamespace = current_schema()::regnamespace
                 """))
             ).all()
@@ -2603,6 +2611,7 @@ class TestPerClassClaimMigration:
         assert await _stored_version(engine) == SCHEMA_VERSION
         assert await self._signatures(engine) == {
             ('horsies_claim', self.V55_CLAIM_ARGS),
+            ('horsies_claim_plan', self.V55_PLAN_ARGS),
             ('horsies_claim_candidates', self.V55_CANDIDATES_ARGS),
         }
         definitions = await self._index_definitions(engine)

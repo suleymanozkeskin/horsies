@@ -372,8 +372,10 @@ from horsies.core.models.tasks import Execution
 #      (each served class to the budget class that claims it) in place of
 #      p_processes, and returns each row's execution; the earlier signatures
 #      of the claim pair are dropped. Each (queue, class) is its own claim
-#      stream. idx_horsies_tasks_claim_expired_class (queue_name, execution,
-#      priority, enqueued_at, id) over CLAIMED rows is built concurrently;
+#      stream; horsies_claim_plan chooses the rows of a pass in one walk over
+#      the heads of all streams. idx_horsies_tasks_claim_expired_class
+#      (queue_name, execution, priority, enqueued_at, id) over CLAIMED rows
+#      is built concurrently;
 #      idx_horsies_tasks_claim_pending and
 #      idx_horsies_tasks_claim_expired_ordered are dropped concurrently.
 #      horsies_worker_states.class_capacity holds the capacity of each budget
@@ -588,6 +590,8 @@ ANALYZE_EXPRESSION_INDEXED_TABLES_SQL = text("""
 #     enqueued_at, id) order. Priority holds within one class only.
 #   - A budget that serves more than one class reads the merge of their
 #     streams in that order.
+#   - One walk in rank order takes each row whose queue, budget and pass
+#     have room left (horsies_claim_plan).
 #   - Distinct queue priorities: queue priority dominates.
 #   - EQUAL queue priorities: the equal-priority band is pooled and ordered by
 #     task priority, then FIFO. Pinned by tests/integration/test_claim_function.py.
@@ -753,23 +757,147 @@ $func$;
 # automatic planning: forcing a generic plan on the in-flight accounting
 # makes it slower under a large in-flight population.
 #
-# Both functions run with jit = off. The generic plan does not know the
+# The three functions run with jit = off. The generic plan does not know the
 # LIMIT of each stream, so its cost estimate passes jit_above_cost, and a
 # server with JIT compiles the statement on every pass: 28.8 ms for 0.3 ms
-# of work with the v54 pair, 630 ms with this pair, both at a 90,000-row
-# backlog on PostgreSQL 17.
+# of work with the v54 pair, 630 ms with the first v55 pair, both at a
+# 90,000-row backlog on PostgreSQL 17.
 #
-# v55: two phases in one statement, so a claim locks only the rows it takes.
-#   1. Read, without locks, the head of each (queue, class) stream, pending
-#      and expired, each bounded by the queue's room and the budget's
-#      available rows. Trim by the queue cap and batch limit, then by each
-#      budget, then by p_total, each in rank order. Count the rows to take
-#      from each stream.
-#   2. Take that many rows from each stream with FOR UPDATE SKIP LOCKED. A
-#      row that another claim holds is skipped and the walk goes on, so
-#      priority holds within each stream also under contention.
+# v55: two phases, so a claim locks only the rows it takes.
+#   1. horsies_claim_plan reads, without locks, the head of each (queue,
+#      class) stream: the pending and expired rows of the stream merged in
+#      (priority, enqueued_at, id) order, at most as many as the queue's room
+#      and the budget's available rows allow. One walk over all heads in
+#      rank order takes a row when its queue, its budget and the pass each
+#      have room left, and counts the row against all three. A row that one
+#      limit drops counts against none. It returns the rows to take from each
+#      stream and arm.
+#   2. horsies_claim_candidates takes that many rows from each stream and
+#      arm with FOR UPDATE SKIP LOCKED. A row that another claim holds is
+#      skipped and the walk goes on, so priority holds within each stream
+#      also under contention.
+# A stream takes a prefix of its rows: once one of its limits has no room,
+# no later row of the stream is taken. So the head of a stream, bounded by
+# its queue's room and its budget's available rows, holds every row that the
+# walk can take from it.
 # Every stream is one ordered range of idx_horsies_tasks_claim_pending_class
 # (pending) or idx_horsies_tasks_claim_expired_class (expired).
+CREATE_CLAIM_PLAN_FUNCTION_SQL = text("""
+CREATE OR REPLACE FUNCTION horsies_claim_plan(
+    p_total integer,
+    p_available jsonb,
+    p_routes jsonb,
+    p_queues jsonb,
+    p_queue_priority jsonb,
+    p_queue_max_concurrency jsonb,
+    p_queue_counts jsonb,
+    p_max_claim_batch integer
+)
+RETURNS TABLE(queue_name text, row_class text, arm text, take integer)
+LANGUAGE plpgsql
+SET plan_cache_mode = force_generic_plan
+SET jit = off
+AS $plan$
+#variable_conflict use_column
+DECLARE
+    -- Room left in each queue (by position in p_queues), in each budget
+    -- (by position in v_budgets), and in the pass.
+    v_queue_room int[];
+    v_budgets text[];
+    v_budget_room int[];
+    v_total_room int := p_total;
+    v_picked_queue text[] := ARRAY[]::text[];
+    v_picked_class text[] := ARRAY[]::text[];
+    v_picked_arm text[] := ARRAY[]::text[];
+    v_row record;
+BEGIN
+    SELECT array_agg(LEAST(
+               p_total,
+               CASE WHEN p_queue_max_concurrency ? q.name THEN
+                   GREATEST(0, (p_queue_max_concurrency ->> q.name)::int
+                       - COALESCE((p_queue_counts ->> q.name)::int, 0))
+                   ELSE p_total END,
+               CASE WHEN p_max_claim_batch > 0 THEN p_max_claim_batch
+                   ELSE p_total END
+           ) ORDER BY q.slot)
+    INTO v_queue_room
+    FROM jsonb_array_elements_text(p_queues) WITH ORDINALITY AS q(name, slot);
+
+    SELECT array_agg(b.budget_class ORDER BY b.budget_class),
+           array_agg(b.available::int ORDER BY b.budget_class)
+    INTO v_budgets, v_budget_room
+    FROM jsonb_each_text(p_available) AS b(budget_class, available);
+
+    FOR v_row IN
+        SELECT s.queue_slot, s.budget_slot, s.queue_name, s.row_class, c.arm
+        FROM (
+            SELECT q.slot::int AS queue_slot, q.name AS queue_name,
+                   COALESCE((p_queue_priority ->> q.name)::int, 100) AS qprio,
+                   r.row_class, b.budget_slot,
+                   LEAST(v_queue_room[q.slot::int],
+                         v_budget_room[b.budget_slot]) AS head
+            FROM jsonb_array_elements_text(p_queues) WITH ORDINALITY AS q(name, slot)
+            CROSS JOIN jsonb_each_text(p_routes) AS r(row_class, budget_class)
+            CROSS JOIN LATERAL (
+                SELECT array_position(v_budgets, r.budget_class) AS budget_slot
+            ) b
+            WHERE LEAST(v_queue_room[q.slot::int],
+                        v_budget_room[b.budget_slot]) > 0
+        ) s
+        CROSS JOIN LATERAL (
+            SELECT m.arm, m.priority, m.enqueued_at, m.id
+            FROM (
+                (SELECT 'PENDING'::text AS arm, t.priority, t.enqueued_at, t.id
+                 FROM horsies_tasks t
+                 WHERE t.queue_name = s.queue_name
+                   AND t.execution = s.row_class
+                   AND t.status = 'PENDING'
+                   AND t.enqueued_at <= now()
+                   AND (t.next_retry_at IS NULL OR t.next_retry_at <= now())
+                   AND (t.good_until IS NULL OR t.good_until > now())
+                 ORDER BY t.priority ASC, t.enqueued_at ASC, t.id ASC
+                 LIMIT s.head)
+                UNION ALL
+                (SELECT 'EXPIRED'::text AS arm, t.priority, t.enqueued_at, t.id
+                 FROM horsies_tasks t
+                 WHERE t.queue_name = s.queue_name
+                   AND t.execution = s.row_class
+                   AND t.status = 'CLAIMED'
+                   AND t.claim_expires_at IS NOT NULL
+                   AND t.claim_expires_at < now()
+                   AND t.enqueued_at <= now()
+                   AND (t.next_retry_at IS NULL OR t.next_retry_at <= now())
+                   AND (t.good_until IS NULL OR t.good_until > now())
+                 ORDER BY t.priority ASC, t.enqueued_at ASC, t.id ASC
+                 LIMIT s.head)
+            ) m
+            ORDER BY m.priority ASC, m.enqueued_at ASC, m.id ASC
+            LIMIT s.head
+        ) c
+        ORDER BY s.qprio ASC, c.priority ASC, c.enqueued_at ASC, c.id ASC
+    LOOP
+        EXIT WHEN v_total_room = 0;
+        CONTINUE WHEN v_queue_room[v_row.queue_slot] = 0
+            OR v_budget_room[v_row.budget_slot] = 0;
+        v_queue_room[v_row.queue_slot] := v_queue_room[v_row.queue_slot] - 1;
+        v_budget_room[v_row.budget_slot] := v_budget_room[v_row.budget_slot] - 1;
+        v_total_room := v_total_room - 1;
+        v_picked_queue := v_picked_queue || v_row.queue_name;
+        v_picked_class := v_picked_class || v_row.row_class;
+        v_picked_arm := v_picked_arm || v_row.arm;
+    END LOOP;
+
+    RETURN QUERY
+    SELECT p.queue_name, p.row_class, p.arm, count(*)::int
+    FROM unnest(v_picked_queue, v_picked_class, v_picked_arm)
+        AS p(queue_name, row_class, arm)
+    GROUP BY p.queue_name, p.row_class, p.arm;
+END;
+$plan$;
+""")
+
+# Phase 2 of the claim (see horsies_claim_plan). Rows come back in rank
+# order: queue priority, task priority, enqueued_at, id.
 CREATE_CLAIM_CANDIDATES_FUNCTION_SQL = text("""
 CREATE OR REPLACE FUNCTION horsies_claim_candidates(
     p_total integer,
@@ -799,112 +927,30 @@ SET plan_cache_mode = force_generic_plan
 SET jit = off
 AS $candidates$
 #variable_conflict use_column
+DECLARE
+    v_queue text[];
+    v_class text[];
+    v_arm text[];
+    v_take int[];
 BEGIN
+    SELECT COALESCE(array_agg(p.queue_name), ARRAY[]::text[]),
+           COALESCE(array_agg(p.row_class), ARRAY[]::text[]),
+           COALESCE(array_agg(p.arm), ARRAY[]::text[]),
+           COALESCE(array_agg(p.take), ARRAY[]::int[])
+    INTO v_queue, v_class, v_arm, v_take
+    FROM horsies_claim_plan(
+        p_total, p_available, p_routes, p_queues, p_queue_priority,
+        p_queue_max_concurrency, p_queue_counts, p_max_claim_batch
+    ) AS p;
+    IF cardinality(v_take) = 0 THEN
+        RETURN;
+    END IF;
+
     RETURN QUERY
-    WITH queue_room AS (
-        -- The most rows that this pass takes from each queue.
-        SELECT qn.name AS queue_name,
-               COALESCE((p_queue_priority ->> qn.name)::int, 100) AS qprio,
-               LEAST(
-                   p_total,
-                   CASE WHEN p_queue_max_concurrency ? qn.name THEN
-                       GREATEST(0,
-                           (p_queue_max_concurrency ->> qn.name)::int
-                           - COALESCE((p_queue_counts ->> qn.name)::int, 0))
-                       ELSE p_total END,
-                   CASE WHEN p_max_claim_batch > 0 THEN p_max_claim_batch
-                       ELSE p_total END
-               ) AS room
-        FROM jsonb_array_elements_text(p_queues) AS qn(name)
-    ),
-    streams AS (
-        -- One stream per (queue, served class); head bounds its read.
-        SELECT q.queue_name, q.qprio, q.room, r.row_class, r.budget_class,
-               LEAST(q.room, (p_available ->> r.budget_class)::int) AS head
-        FROM queue_room q
-        CROSS JOIN jsonb_each_text(p_routes) AS r(row_class, budget_class)
-        WHERE LEAST(q.room, (p_available ->> r.budget_class)::int) > 0
-    ),
-    seen AS (
-        SELECT s.queue_name, s.qprio, s.room, s.row_class, s.budget_class,
-               'PENDING'::text AS arm, c.id, c.priority, c.enqueued_at
-        FROM streams s
-        CROSS JOIN LATERAL (
-            SELECT t.id, t.priority, t.enqueued_at
-            FROM horsies_tasks t
-            WHERE t.queue_name = s.queue_name
-              AND t.execution = s.row_class
-              AND t.status = 'PENDING'
-              AND t.enqueued_at <= now()
-              AND (t.next_retry_at IS NULL OR t.next_retry_at <= now())
-              AND (t.good_until IS NULL OR t.good_until > now())
-            ORDER BY t.priority ASC, t.enqueued_at ASC, t.id ASC
-            LIMIT s.head
-        ) c
-        UNION ALL
-        SELECT s.queue_name, s.qprio, s.room, s.row_class, s.budget_class,
-               'EXPIRED'::text AS arm, c.id, c.priority, c.enqueued_at
-        FROM streams s
-        CROSS JOIN LATERAL (
-            SELECT t.id, t.priority, t.enqueued_at
-            FROM horsies_tasks t
-            WHERE t.queue_name = s.queue_name
-              AND t.execution = s.row_class
-              AND t.status = 'CLAIMED'
-              AND t.claim_expires_at IS NOT NULL
-              AND t.claim_expires_at < now()
-              AND t.enqueued_at <= now()
-              AND (t.next_retry_at IS NULL OR t.next_retry_at <= now())
-              AND (t.good_until IS NULL OR t.good_until > now())
-            ORDER BY t.priority ASC, t.enqueued_at ASC, t.id ASC
-            LIMIT s.head
-        ) c
-    ),
-    queue_kept AS (
-        SELECT k.queue_name, k.qprio, k.row_class, k.budget_class, k.arm,
-               k.id, k.priority, k.enqueued_at
-        FROM (
-            SELECT seen.*,
-                   row_number() OVER (
-                       PARTITION BY seen.queue_name
-                       ORDER BY seen.priority ASC, seen.enqueued_at ASC,
-                                seen.id ASC
-                   ) AS rn_q
-            FROM seen
-        ) k
-        WHERE k.rn_q <= k.room
-    ),
-    budget_kept AS (
-        SELECT k.queue_name, k.qprio, k.row_class, k.arm,
-               k.id, k.priority, k.enqueued_at
-        FROM (
-            SELECT queue_kept.*,
-                   row_number() OVER (
-                       PARTITION BY queue_kept.budget_class
-                       ORDER BY queue_kept.qprio ASC, queue_kept.priority ASC,
-                                queue_kept.enqueued_at ASC, queue_kept.id ASC
-                   ) AS rn_b
-            FROM queue_kept
-        ) k
-        WHERE k.rn_b <= (p_available ->> k.budget_class)::int
-    ),
-    picked AS (
-        SELECT k.queue_name, k.row_class, k.arm
-        FROM (
-            SELECT budget_kept.*,
-                   row_number() OVER (
-                       ORDER BY budget_kept.qprio ASC, budget_kept.priority ASC,
-                                budget_kept.enqueued_at ASC, budget_kept.id ASC
-                   ) AS rn
-            FROM budget_kept
-        ) k
-        WHERE k.rn <= p_total
-    ),
-    planned AS (
-        SELECT picked.queue_name, picked.row_class, picked.arm,
-               COUNT(*)::int AS take
-        FROM picked
-        GROUP BY picked.queue_name, picked.row_class, picked.arm
+    WITH planned AS (
+        SELECT p.queue_name, p.row_class, p.arm, p.take
+        FROM unnest(v_queue, v_class, v_arm, v_take)
+            AS p(queue_name, row_class, arm, take)
     ),
     -- FOR UPDATE is not allowed on UNION operands, so each arm locks in its
     -- own CTE.
@@ -967,12 +1013,11 @@ BEGIN
                   t.kwargs, t.queue_name, t.is_workflow_task, t.task_options,
                   t.claimed_at, t.execution, t.priority, t.enqueued_at
     )
-    -- Dispatch order is the rank of the claimed rows.
     SELECT u.id, u.task_name, u.args, u.kwargs, u.queue_name,
            u.is_workflow_task, u.task_options, u.claimed_at, u.execution
     FROM updated u
-    JOIN queue_room q ON q.queue_name = u.queue_name
-    ORDER BY q.qprio ASC, u.priority ASC, u.enqueued_at ASC, u.task_key ASC;
+    ORDER BY COALESCE((p_queue_priority ->> u.queue_name)::int, 100) ASC,
+             u.priority ASC, u.enqueued_at ASC, u.task_key ASC;
 END;
 $candidates$;
 """)

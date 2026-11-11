@@ -512,6 +512,7 @@ from horsies.core.schemas.migrations import (
     ADD_TERMINALIZATION_KIND_COLUMN_SQL,
     BACKFILL_TERMINAL_AT_SQL,
     CREATE_CLAIM_CANDIDATES_FUNCTION_SQL,
+    CREATE_CLAIM_PLAN_FUNCTION_SQL,
     CREATE_CLAIM_FUNCTION_SQL,
     CREATE_OUTCOME_TYPE_SQL,
     CREATE_TERMINALIZATION_FUNCTIONS_SQL,
@@ -1714,9 +1715,11 @@ class PostgresBroker:
             await conn.execute(VALIDATE_CLAIM_INDEXES_SQL)
             # v55 on a database already past the v35 apply path: the claim
             # pair before v55 has other signatures, so it is dropped by its
-            # exact argument types, and the current pair is installed.
+            # exact argument types, and the current claim functions are
+            # installed.
             for drop_claim_function in DROP_PREVIOUS_CLAIM_FUNCTIONS_SQL:
                 await conn.execute(drop_claim_function)
+            await conn.execute(CREATE_CLAIM_PLAN_FUNCTION_SQL)
             await conn.execute(CREATE_CLAIM_CANDIDATES_FUNCTION_SQL)
             await conn.execute(CREATE_CLAIM_FUNCTION_SQL)
             uuid_identity = bool(
@@ -1874,6 +1877,7 @@ class PostgresBroker:
             # Migration (v55): per-class budgets; the earlier signatures go.
             for drop_claim_function in DROP_PREVIOUS_CLAIM_FUNCTIONS_SQL:
                 await conn.execute(drop_claim_function)
+            await conn.execute(CREATE_CLAIM_PLAN_FUNCTION_SQL)
             await conn.execute(CREATE_CLAIM_CANDIDATES_FUNCTION_SQL)
             await conn.execute(CREATE_CLAIM_FUNCTION_SQL)
 
