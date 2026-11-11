@@ -7,7 +7,8 @@ import concurrent.futures
 import contextvars
 import threading
 from collections.abc import Coroutine
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, assert_never
 
 import pytest
 
@@ -25,6 +26,9 @@ from horsies.core.worker.run_mark import (
 )
 from horsies.core.worker import run_mark
 
+EXECUTOR_THREADS = 4
+"""The size of the default executor of a test child."""
+
 pytestmark = [pytest.mark.unit]
 
 WAIT_S = 5.0
@@ -40,6 +44,60 @@ def _marked(mark: RunMark) -> contextvars.Context:
 
 def _run(scenario: Coroutine[Any, Any, None]) -> None:
     asyncio.run(asyncio.wait_for(scenario, WAIT_S))
+
+
+@dataclass(frozen=True, slots=True)
+class _HookSetsExecutor:
+    """A start hook sets a default executor of ``threads`` threads."""
+
+    threads: int
+
+
+@dataclass(frozen=True, slots=True)
+class _NoHookExecutor:
+    """No start hook sets a default executor."""
+
+
+def _threads_of_held_calls(
+    executor_threads: int,
+    hook: _HookSetsExecutor | _NoHookExecutor,
+    calls: int,
+) -> set[str]:
+    """The names of the threads that run ``calls`` calls of the default
+    executor, each held until every call is submitted."""
+    names: set[str] = set()
+    lock = threading.Lock()
+    release = threading.Event()
+
+    def held_call() -> None:
+        with lock:
+            names.add(threading.current_thread().name)
+        _ = release.wait(WAIT_S)
+
+    async def scenario() -> None:
+        loop = asyncio.get_running_loop()
+        marked = MarkedWork(loop, lambda _mark: None, executor_threads)
+        marked.install()
+        match hook:
+            case _HookSetsExecutor(threads=threads):
+                loop.set_default_executor(
+                    concurrent.futures.ThreadPoolExecutor(
+                        max_workers=threads,
+                        thread_name_prefix='hook-pool',
+                    ),
+                )
+                _ = marked.track_executor_after_hooks()
+            case _NoHookExecutor():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
+        pending = [loop.run_in_executor(None, held_call) for _ in range(calls)]
+        await asyncio.sleep(0.05)
+        release.set()
+        _ = await asyncio.gather(*pending)
+
+    _run(scenario())
+    return names
 
 
 class TestTheMark:
@@ -69,7 +127,7 @@ class TestMarkedWork:
     def test_the_factory_and_the_scan_find_every_live_task_of_a_run(self) -> None:
         async def scenario() -> None:
             loop = asyncio.get_running_loop()
-            marked = MarkedWork(loop, lambda _mark: None)
+            marked = MarkedWork(loop, lambda _mark: None, EXECUTOR_THREADS)
             marked.install()
             marked.open(MARK)
             marked.open(OTHER)
@@ -98,7 +156,7 @@ class TestMarkedWork:
         async def scenario() -> None:
             loop = asyncio.get_running_loop()
             ended: list[RunMark] = []
-            marked = MarkedWork(loop, ended.append)
+            marked = MarkedWork(loop, ended.append, EXECUTOR_THREADS)
             marked.install()
             marked.open(MARK)
             release = threading.Event()
@@ -127,16 +185,25 @@ class TestMarkedWork:
     def test_the_default_executor_is_tracked(self) -> None:
         async def scenario() -> None:
             loop = asyncio.get_running_loop()
-            marked = MarkedWork(loop, lambda _mark: None)
+            marked = MarkedWork(loop, lambda _mark: None, EXECUTOR_THREADS)
             marked.install()
             assert isinstance(loop._default_executor, TrackedExecutor)  # pyright: ignore[reportAttributeAccessIssue,reportUnknownMemberType]
 
         _run(scenario())
 
+    @pytest.mark.parametrize('threads', [1, 3])
+    def test_the_default_executor_has_the_given_threads(self, threads: int) -> None:
+        """Calls that wait for each other run on at most ``executor_threads``
+        threads: each submit finds no idle thread and starts one, up to the
+        size."""
+        names = _threads_of_held_calls(threads, _NoHookExecutor(), calls=6)
+        assert len(names) == threads
+        assert all(name.startswith('asyncio') for name in names)
+
     def test_work_of_a_closed_run_is_not_recorded(self) -> None:
         async def scenario() -> None:
             loop = asyncio.get_running_loop()
-            marked = MarkedWork(loop, lambda _mark: None)
+            marked = MarkedWork(loop, lambda _mark: None, EXECUTOR_THREADS)
             marked.install()
             marked.open(MARK)
             marked.close(MARK)
@@ -163,7 +230,7 @@ class TestMarkedWork:
                 return task
 
             loop.set_task_factory(factory)
-            marked = MarkedWork(loop, lambda _mark: None)
+            marked = MarkedWork(loop, lambda _mark: None, EXECUTOR_THREADS)
             marked.install()
             marked.open(MARK)
             gate = asyncio.Event()
@@ -184,7 +251,7 @@ class TestTheExecutorAfterHooks:
     def test_the_executor_of_install_is_kept(self) -> None:
         async def scenario() -> None:
             loop = asyncio.get_running_loop()
-            marked = MarkedWork(loop, lambda _mark: None)
+            marked = MarkedWork(loop, lambda _mark: None, EXECUTOR_THREADS)
             marked.install()
 
             assert marked.track_executor_after_hooks() == ExecutorKept()
@@ -194,7 +261,7 @@ class TestTheExecutorAfterHooks:
     def test_the_executor_of_a_hook_is_wrapped_and_runs_the_work(self) -> None:
         async def scenario() -> None:
             loop = asyncio.get_running_loop()
-            marked = MarkedWork(loop, lambda _mark: None)
+            marked = MarkedWork(loop, lambda _mark: None, EXECUTOR_THREADS)
             marked.install()
             # An on_shared_async_child_start hook that wants more threads.
             hook_pool = concurrent.futures.ThreadPoolExecutor(
@@ -231,10 +298,18 @@ class TestTheExecutorAfterHooks:
 
         _run(scenario())
 
+    def test_the_executor_of_a_hook_keeps_its_own_threads(self) -> None:
+        """A start hook that sets its own default executor wins over
+        ``executor_threads``: the calls run on its threads, as many as it
+        has."""
+        names = _threads_of_held_calls(2, _HookSetsExecutor(threads=5), calls=6)
+        assert len(names) == 5
+        assert all(name.startswith('hook-pool') for name in names)
+
     def test_a_default_executor_that_is_not_a_thread_pool_is_reported(self) -> None:
         async def scenario() -> None:
             loop = asyncio.get_running_loop()
-            marked = MarkedWork(loop, lambda _mark: None)
+            marked = MarkedWork(loop, lambda _mark: None, EXECUTOR_THREADS)
             marked.install()
             loop._default_executor = None  # pyright: ignore[reportAttributeAccessIssue]
 
@@ -265,7 +340,7 @@ class TestTheScan:
 
         async def scenario() -> None:
             loop = asyncio.get_running_loop()
-            marked = MarkedWork(loop, lambda _mark: None)
+            marked = MarkedWork(loop, lambda _mark: None, EXECUTOR_THREADS)
             marked.install()
             marked.open(MARK)
             gate = asyncio.Event()
@@ -291,7 +366,7 @@ class TestTheScan:
 
         async def scenario() -> None:
             loop = asyncio.get_running_loop()
-            marked = MarkedWork(loop, lambda _mark: None)
+            marked = MarkedWork(loop, lambda _mark: None, EXECUTOR_THREADS)
             marked.install()
             marked.open(MARK)
             gate = asyncio.Event()
@@ -343,7 +418,7 @@ class TestTheScanOfATurn:
 
         async def scenario() -> None:
             loop = asyncio.get_running_loop()
-            marked = MarkedWork(loop, lambda _mark: None)
+            marked = MarkedWork(loop, lambda _mark: None, EXECUTOR_THREADS)
             marked.install()
             gate = asyncio.Event()
             others = [
@@ -386,7 +461,7 @@ class TestTheScanOfATurn:
 
         async def scenario() -> None:
             loop = asyncio.get_running_loop()
-            marked = MarkedWork(loop, lambda _mark: None)
+            marked = MarkedWork(loop, lambda _mark: None, EXECUTOR_THREADS)
             marked.install()
             marked.open(MARK)
             gate = asyncio.Event()
@@ -414,7 +489,7 @@ class TestTheScanOfATurn:
 
         async def scenario() -> None:
             loop = asyncio.get_running_loop()
-            marked = MarkedWork(loop, lambda _mark: None)
+            marked = MarkedWork(loop, lambda _mark: None, EXECUTOR_THREADS)
             marked.install()
             marked.open(MARK)
             own = loop.create_task(asyncio.sleep(0), context=_marked(MARK))

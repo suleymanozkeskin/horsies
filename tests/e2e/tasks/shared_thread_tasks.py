@@ -12,6 +12,9 @@ import threading
 import time
 
 from horsies.core.models.tasks import Execution, TaskError, TaskResult
+from horsies.core.worker.child_pool import (
+    _get_worker_pool,  # pyright: ignore[reportPrivateUsage]
+)
 
 from tests.e2e.tasks.instance import app
 
@@ -31,6 +34,18 @@ def thread_sleep(*, seconds: float) -> TaskResult[str, TaskError]:
     time.sleep(seconds)
     name = threading.current_thread().name
     return TaskResult(ok=f'{os.getpid()}:{name}:{started}:{time.time()}')
+
+
+@app.task(
+    task_name='e2e_thread_pool_bounds',
+    execution=Execution.SHARED_THREAD,
+    timeout_ms=30_000,
+)
+def thread_pool_bounds() -> TaskResult[str, TaskError]:
+    """The bounds of the sync pool that the seat threads of the child share:
+    ``min_size:max_size``."""
+    pool = _get_worker_pool()
+    return TaskResult(ok=f'{pool.min_size}:{pool.max_size}')
 
 
 @app.task(

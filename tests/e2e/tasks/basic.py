@@ -17,6 +17,9 @@ from horsies.core.models.tasks import (
     TaskResult,
 )
 from horsies.core.types.result import is_err, is_ok
+from horsies.core.worker.child_pool import (
+    _get_worker_pool,  # pyright: ignore[reportPrivateUsage]
+)
 
 from tests.e2e.tasks.instance import app
 
@@ -28,6 +31,14 @@ _RETAINED_BUFFERS: list[bytearray] = []
 @app.task(task_name='e2e_healthcheck')
 def healthcheck() -> TaskResult[str, TaskError]:
     return TaskResult(ok='ready')
+
+
+@app.task(task_name='e2e_child_pool_bounds')
+def child_pool_bounds() -> TaskResult[str, TaskError]:
+    """The bounds of the sync pool of the child that runs the task:
+    ``min_size:max_size``."""
+    pool = _get_worker_pool()
+    return TaskResult(ok=f'{pool.min_size}:{pool.max_size}')
 
 
 @app.task(task_name='e2e_simple')

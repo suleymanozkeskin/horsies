@@ -137,8 +137,8 @@ there is no migration contract between pre-1.0 versions.
 - **`horsies check --live` compares every worker profile with the server
   connection limit.** One worker opens its parent pool
   (`worker_pool_size + worker_max_overflow`), 2 listener connections, 1
-  runner heartbeat connection and `worker_child_pool_max_size` for each
-  child. A profile whose worker opens
+  runner heartbeat connection and the resolved `pool.max_size` of its mode
+  for each child. A profile whose worker opens
   more than `max_connections` less `superuser_reserved_connections`
   and `reserved_connections` fails with `HRS-219`
   (`CHECK_WORKER_CONNECTIONS`). Task code that sends opens the app's broker
@@ -306,7 +306,7 @@ there is no migration contract between pre-1.0 versions.
     the queue.
   - The RUNNING update with the first runner heartbeat and the finalizing
     marker of a shared task run on an async connection pool that the child
-    opens on its loop, of `worker_child_pool_max_size` connections. An
+    opens on its loop, sized by `SharedAsyncChildren.pool`. An
     attempt of the RUNNING update that does not end within 40 s (30 s for a
     connection, 10 s for its statements, for example an UPDATE that waits on
     a row lock) ends with `OWNERSHIP_UNCONFIRMED`: the task does not start,
@@ -367,8 +367,8 @@ there is no migration contract between pre-1.0 versions.
   - A `SHARED_THREAD` row without a usable stored `timeout_ms` fails with
     `WORKER_SERIALIZATION_ERROR` on every worker, also on an isolated child,
     after its RUNNING update and before the task resolves.
-  - A thread child boots as an isolated child does and opens one sync pool of
-    `worker_child_pool_max_size` connections; its seat threads share it for
+  - A thread child boots as an isolated child does and opens one sync pool,
+    sized by `SharedThreadChildren.pool`; its seat threads share it for
     the RUNNING update and the finalizing marker, and wait up to 30 s for a
     connection. A thread child runs only `def` tasks; a row that reaches one
     with an `async def` function fails with `WORKER_RESOLUTION_ERROR`.
@@ -426,6 +426,39 @@ there is no migration contract between pre-1.0 versions.
   - Schema v55 adds `horsies_worker_states.class_capacity` (`jsonb`,
     nullable, no backfill): each budget class with its `capacity` and the
     classes it `serves`.
+
+- **Each child kind has its own connection pool, and a shared async child
+  sizes its default executor.** `IsolatedChildren.pool` takes an
+  `IsolatedPool(min_size, max_size=PoolSize(connections=N), check)`;
+  `SharedAsyncChildren.pool` and `SharedThreadChildren.pool` take a
+  `SharedPool(min_size, max_size, check)` whose `max_size` is
+  `PoolSize(connections=N)` or `PoolSizeFromSeats()`.
+  `SharedAsyncChildren.executor` takes `ExecutorThreads(threads=N)` or
+  `ExecutorThreadsFromSeats()`, and sizes the default executor of the event
+  loop of each shared async child (`asyncio.to_thread`,
+  `loop.run_in_executor(None, ...)`). An `on_shared_async_child_start` hook
+  that sets its own default executor still replaces it.
+  - Defaults: an isolated child keeps a pool of 0 to 2 connections, checked
+    on checkout. A shared child derives its pool `max_size`, and a shared
+    async child its executor threads, from its seats:
+    `min(cap, max(floor, ceil(seats / seats_per_unit)))`, with constants of
+    each kind in `horsies.core.models.child_sizing`. A derived pool has at
+    least 2 connections.
+  - Bounds: `PoolSize.connections` is 1 to 1000, `min_size` is 0 to 1000,
+    and `ExecutorThreads.threads` is 1 to 256. A `min_size` above the
+    resolved `max_size` fails `horsies check` with `HRS-218` and names the
+    field path, for example `worker_profiles['batch'].shared_async.pool.min_size`.
+  - The connection check (`HRS-219`) and the boot warning count each child
+    with the resolved `pool.max_size` of its mode, one term per mode:
+    `parent pool 5 + listener 2 + runner heartbeat 1 + 4 isolated children x
+    isolated.pool max_size 2 + 2 shared async children x shared_async.pool
+    max_size 5 = 26`.
+  - The start log line of the worker states the resolved pool of each kind
+    and the executor threads of the shared async children, with `derived
+    from seats` for a derived size.
+  - `IsolatedPool`, `SharedPool`, `PoolSize`, `PoolSizeFromSeats`,
+    `ExecutorThreads` and `ExecutorThreadsFromSeats` are exported from
+    `horsies`.
 
 ### Changed
 
@@ -674,6 +707,12 @@ there is no migration contract between pre-1.0 versions.
   `--max-memory-per-child-mb`, `--drain-timeout` and `--child-preload`.**
   Each one exits 2 with a message that names the profile field that
   replaces it. `--loglevel` and the app locator stay.
+- **`PostgresConfig.worker_child_pool_min_size`, `worker_child_pool_max_size`
+  and `worker_child_pool_check`.** The `pool` of each child kind in a worker
+  profile replaces them. A config that still sets one fails when it is built
+  with `HRS-213` (`CONFIG_INVALID_BROKER_POOL`), and the help names the
+  replacement, for example `IsolatedChildren(pool=IsolatedPool(min_size=N))`.
+  Every such field is reported at once.
 
 ### Fixed
 

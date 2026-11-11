@@ -48,6 +48,7 @@ _ENGINE_KEY_WORKFLOW_CTX = '__h_workflow_ctx__'
 _ENGINE_KEY_WORKFLOW_META = '__h_workflow_meta__'
 _ENGINE_KEY_TASKRESULT_ENVELOPE = '__h_taskresult_envelope__'
 from horsies.core.models.boot_failure import ThreadStartRefusedError
+from horsies.core.models.worker_profile import ResolvedPool
 from horsies.core.models.tasks import (
     MAX_CANCEL_GRACE_MS,
     MAX_TASK_TIMEOUT_MS,
@@ -518,10 +519,8 @@ def _child_initializer(
     sys_path_roots: Sequence[str],
     loglevel: int,
     database_url: str,
+    pool: ResolvedPool,
     connect_kwargs: Mapping[str, object] | None = None,
-    child_pool_min_size: int = 0,
-    child_pool_max_size: int = 2,
-    child_pool_check: bool = True,
 ) -> None:
     """Child-process bootstrap: locate the app, import tasks, open the pool.
 
@@ -533,14 +532,7 @@ def _child_initializer(
             CHILD_HOOK_FAILURE_EXIT_CODE (fail-closed).
     """
     app = import_app_for_child(app_locator, imports, sys_path_roots, loglevel)
-    finish_child_start(
-        app,
-        database_url,
-        connect_kwargs,
-        child_pool_min_size,
-        child_pool_max_size,
-        child_pool_check,
-    )
+    finish_child_start(app, database_url, connect_kwargs, pool)
 
 
 def import_app_for_child(
@@ -610,11 +602,11 @@ def finish_child_start(
     app: Horsies,
     database_url: str,
     connect_kwargs: Mapping[str, object] | None,
-    child_pool_min_size: int,
-    child_pool_max_size: int,
-    child_pool_check: bool,
+    pool: ResolvedPool,
 ) -> None:
     """Run the per-child steps. Each child runs these itself, after any fork.
+
+    The sync connection pool of the child opens with the bounds of ``pool``.
 
     Raises:
         Exception: a pool setup failure propagates to the caller. A failing
@@ -632,9 +624,9 @@ def finish_child_start(
     _initialize_worker_pool(
         database_url,
         connect_kwargs=connect_kwargs,
-        min_size=child_pool_min_size,
-        max_size=child_pool_max_size,
-        check_on_checkout=child_pool_check,
+        min_size=pool.min_size,
+        max_size=pool.max_size,
+        check_on_checkout=pool.check,
     )
     logger.debug(f'[child {os.getpid()}] Connection pool initialized')
 

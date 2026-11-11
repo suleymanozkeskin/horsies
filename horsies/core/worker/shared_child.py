@@ -108,12 +108,14 @@ from horsies.core.worker.child_protocol import (
     SeatRefusal,
     SeatTask,
     SeatTimedOut,
+    SharedAsyncChild,
     SharedResultFrame,
     SharedRunFrame,
     StopFrame,
     ThreadSeatTask,
     boot_failed_frame,
 )
+from horsies.core.models.worker_profile import ResolvedPool
 from horsies.core.worker.loop_watchdog import LoopWatchdog
 from horsies.core.worker.run_return import (
     SetRunning as SetRunning,
@@ -214,8 +216,13 @@ class StartedSeats(Protocol):
 class SeatProgram(Protocol):
     """How a shared async child starts its seats, on its task loop."""
 
-    async def start(self, init: InitFrame) -> Result[StartedSeats, BootFailedFrame]:
+    async def start(
+        self,
+        init: InitFrame,
+        pool: ResolvedPool,
+    ) -> Result[StartedSeats, BootFailedFrame]:
         """Run the start steps on the task loop, before the ready frame.
+        ``pool`` is the connection pool of the child.
 
         ``Err``: the boot fails with this frame. A start hook that fails
         ends the process itself, as at the sync boot.
@@ -488,6 +495,7 @@ class SeatLoop:
     """The runs of one shared async child, on its task loop.
 
     Build it on the running task loop. ``seats`` is the most runs at once.
+    ``executor_threads`` is the size of the default executor of the loop.
     ``read_rss`` reads the RSS of the child for each result frame.
     ``install_marks`` sets the task factory and the default executor that
     mark the work of each run: call it once, before the start hooks, and
@@ -497,6 +505,7 @@ class SeatLoop:
     def __init__(
         self,
         seats: int,
+        executor_threads: int,
         writer: FrameWriter,
         read_rss: Callable[[], RssReading],
     ) -> None:
@@ -504,7 +513,7 @@ class SeatLoop:
         self._writer = writer
         self._read_rss = read_rss
         self._loop = asyncio.get_running_loop()
-        self._marked = MarkedWork(self._loop, self._item_done)
+        self._marked = MarkedWork(self._loop, self._item_done, executor_threads)
         self._seats: dict[int, _Seat] = {}
 
     def install_marks(self) -> None:
@@ -1184,7 +1193,7 @@ async def _live(
     sock: socket.socket,
     init: InitFrame,
     work: ParentFrameInbox,
-    seats: int,
+    kind: SharedAsyncChild,
     program: SeatProgram,
     writer: FrameWriter,
 ) -> None:
@@ -1193,9 +1202,9 @@ async def _live(
     loop watchdog, report ready, serve until the stop frame, then stop the
     watchdog and the seats. Runs on the task loop for the whole life of the
     child."""
-    seat_loop = SeatLoop(seats, writer, _read_rss)
+    seat_loop = SeatLoop(kind.seats, kind.executor_threads, writer, _read_rss)
     seat_loop.install_marks()
-    match await program.start(init):
+    match await program.start(init, kind.pool):
         case Ok(started):
             pass
         case Err(failed):
@@ -1219,10 +1228,13 @@ def serve_shared(
     init: InitFrame,
     work: ParentFrameInbox,
     task_loop: TaskLoop,
-    seats: int,
+    kind: SharedAsyncChild,
     program: SeatProgram,
 ) -> NoReturn:
     """Run a shared async child from its start steps to its exit.
+
+    ``kind`` gives the seats, the connection pool and the default executor
+    size of the child.
 
     ``task_loop`` is open. The writer thread starts first; a refused thread
     fails the boot (``ThreadStartRefused``). The marks of the runs are set
@@ -1234,14 +1246,14 @@ def serve_shared(
     """
     writer = FrameWriter(
         functools.partial(_send_child_frame, sock),
-        capacity=FRAMES_PER_SEAT * seats + FRAMES_PER_CHILD,
+        capacity=FRAMES_PER_SEAT * kind.seats + FRAMES_PER_CHILD,
     )
     match writer.start():
         case Ok():
             pass
         case Err(failed):
             fail_boot(sock, failed)
-    task_loop.run(_live(sock, init, work, seats, program, writer))
+    task_loop.run(_live(sock, init, work, kind, program, writer))
     executor = task_loop.close()
     writer.close(WRITER_CLOSE_TIMEOUT_S)
     exit_after_stop(executor)

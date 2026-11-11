@@ -19,14 +19,19 @@ pooler, and the configuration that recovers throughput at high RTT.
 Each worker holds, under load:
 
 ```text
-worker_pool_size + worker_max_overflow   # coordinator engine
-+ 2                                      # LISTEN connections (tasks, ping)
-+ 1                                      # runner heartbeat connection
-+ children × worker_child_pool_max_size  # per-child pools
+worker_pool_size + worker_max_overflow                  # coordinator engine
++ 2                                                     # LISTEN connections (tasks, ping)
++ 1                                                     # runner heartbeat connection
++ isolated children × isolated.pool max_size            # isolated child pools
++ shared async children × shared_async.pool max_size    # shared async child pools
++ shared thread children × shared_thread.pool max_size  # shared thread child pools
 ```
 
-At defaults (`worker_pool_size=3`, `worker_max_overflow=2`,
-`worker_child_pool_max_size=2`) with a profile of 8 children:
+Each `max_size` is the resolved value of its mode: a `PoolSize`, or the size
+that `PoolSizeFromSeats()` derives from the seats of a shared child (see
+[Sizes Derived from the Seats](/horsies/workers/worker-profiles/#sizes-derived-from-the-seats)).
+At defaults (`worker_pool_size=3`, `worker_max_overflow=2`, an isolated pool
+`max_size` of 2) with a profile of 8 isolated children:
 
 ```text
 3 + 2 + 2 + 1 + 8 × 2 = 24 connections per worker
@@ -83,6 +88,8 @@ config = AppConfig(
 
 Direct slots consumed per worker drop to the 2 `LISTEN` connections;
 everything else multiplexes over the pooler's server pool. See
+[PgBouncer pool size](/horsies/troubleshooting/pgbouncer/#pool-size) for
+`default_pool_size` and `max_client_conn`, and
 [PgBouncer Troubleshooting](/horsies/troubleshooting/pgbouncer/) for
 provider-specific endpoints and failure modes.
 
@@ -125,21 +132,38 @@ one round trip each:
 | Setting | Default | Scope |
 |---------|---------|-------|
 | `pool_pre_ping` | `True` | coordinator and producer engines |
-| `worker_child_pool_check` | `True` | per-child psycopg pools |
+| `check` of `IsolatedPool` and `SharedPool` | `True` | the pool of each child, per child kind in the worker profile |
 
 On a low-latency network the cost is unmeasurable. At 30ms+ RTT the
 checks consume roughly 20% of the per-task statement budget. Disable both
 for busy remote workers:
 
 ```python
-from horsies import AppConfig, PostgresConfig
+from horsies import (
+    AppConfig,
+    IsolatedChildren,
+    IsolatedPool,
+    PostgresConfig,
+    SharedAsyncChildren,
+    SharedPool,
+    WorkerProfile,
+)
 
 config = AppConfig(
     broker=PostgresConfig(
         database_url=SecretStr(os.environ['DATABASE_URL']),
         pool_pre_ping=False,
-        worker_child_pool_check=False,
     ),
+    worker_profiles={
+        'remote': WorkerProfile(
+            isolated=IsolatedChildren(count=8, pool=IsolatedPool(check=False)),
+            shared_async=SharedAsyncChildren(
+                count=2,
+                seats=50,
+                pool=SharedPool(check=False),
+            ),
+        ),
+    },
 )
 ```
 
@@ -155,7 +179,7 @@ connections actually occur.
 
 ## TCP Keepalives for Idle Pooled Connections
 
-`pool_pre_ping` and `worker_child_pool_check` are checkout-time guards: they
+`pool_pre_ping` and the `check` of each child pool are checkout-time guards: they
 detect a dead connection *before* a query runs, not one that dies in-flight.
 An idle pooled connection reaped server-side between checkouts surfaces as a
 mid-query `OperationalError` on the next claim or heartbeat — absorbed by the

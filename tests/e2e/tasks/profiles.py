@@ -20,6 +20,9 @@ adds to it), so every name below exists in every instance.
   children with 4 seats each.
 - ``thread-only-1x4``: no isolated child, and 1 shared thread child with 4
   seats. It runs only ``SHARED_THREAD`` tasks.
+- ``set-pools-1-1x4-1x4``: 1 isolated child, 1 shared async child and 1
+  shared thread child with 4 seats each, and a pool and an executor size
+  set for each kind (``SET_POOLS``).
 
 The child isolation instances add ``isolated-N-<preload>`` and
 ``drain-1s-<preload>`` for each ``ChildPreload`` mode, so each of their tests
@@ -33,12 +36,16 @@ from typing import Final
 
 from horsies.core.models.worker_profile import (
     ClaimLimits,
+    ExecutorThreads,
     IsolatedChildren,
+    IsolatedPool,
     IsolatedRecycle,
     MemoryLimit,
     NoIsolatedChildren,
     NoTaskLimit,
+    PoolSize,
     SharedAsyncChildren,
+    SharedPool,
     SharedThreadChildren,
     TaskLimit,
     WorkerProfile,
@@ -67,6 +74,16 @@ SPLIT_THREAD_2X4: Final = 'split-isolated-1-thread-2x4'
 SPLIT_THREAD_SEATS: Final = 4
 """The seats of each shared thread child of ``split-isolated-1-thread-2x4``."""
 THREAD_ONLY_1X4: Final = 'thread-only-1x4'
+SET_POOLS: Final = 'set-pools-1-1x4-1x4'
+SET_POOLS_ISOLATED_BOUNDS: Final = (1, 3)
+"""``min_size`` and ``max_size`` of the isolated pool of
+``set-pools-1-1x4-1x4``."""
+SET_POOLS_THREAD_BOUNDS: Final = (1, 4)
+"""``min_size`` and ``max_size`` of the shared thread pool of
+``set-pools-1-1x4-1x4``."""
+SET_POOLS_EXECUTOR_THREADS: Final = 3
+"""The default executor size of the shared async child of
+``set-pools-1-1x4-1x4``: below its 4 seats and below every default."""
 
 
 def isolated_profile_name(count: int) -> str:
@@ -132,6 +149,30 @@ E2E_WORKER_PROFILES: Final[dict[str, WorkerProfile]] = {
     SPLIT_SHARED_1X4: WorkerProfile(
         isolated=IsolatedChildren(count=1),
         shared_async=SharedAsyncChildren(count=1, seats=4),
+    ),
+    SET_POOLS: WorkerProfile(
+        isolated=IsolatedChildren(
+            count=1,
+            pool=IsolatedPool(
+                min_size=SET_POOLS_ISOLATED_BOUNDS[0],
+                max_size=PoolSize(connections=SET_POOLS_ISOLATED_BOUNDS[1]),
+                check=False,
+            ),
+        ),
+        shared_async=SharedAsyncChildren(
+            count=1,
+            seats=4,
+            pool=SharedPool(max_size=PoolSize(connections=5)),
+            executor=ExecutorThreads(threads=SET_POOLS_EXECUTOR_THREADS),
+        ),
+        shared_thread=SharedThreadChildren(
+            count=1,
+            seats=4,
+            pool=SharedPool(
+                min_size=SET_POOLS_THREAD_BOUNDS[0],
+                max_size=PoolSize(connections=SET_POOLS_THREAD_BOUNDS[1]),
+            ),
+        ),
     ),
 }
 """The profiles that every e2e app instance defines."""

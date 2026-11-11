@@ -27,9 +27,6 @@ broker = PostgresConfig(
 | `max_overflow` | `int` | 10 | Additional connections beyond pool_size |
 | `worker_pool_size` | `int \| None` | 3 | Worker coordinator pool size; `None` inherits `pool_size` |
 | `worker_max_overflow` | `int \| None` | 2 | Worker coordinator overflow; `None` inherits `max_overflow` |
-| `worker_child_pool_min_size` | `int` | 0 | Minimum connections kept by each child worker process |
-| `worker_child_pool_max_size` | `int` | 2 | Maximum connections allowed per child worker process |
-| `worker_child_pool_check` | `bool` | `True` | Health-check child pool connections on checkout; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
 | `pool_timeout` | `int` | 30 | Seconds to wait for connection |
 | `pool_pre_ping` | `bool` | `True` | Pre-ping connections before use; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
 | `tcp_keepalives` | `bool` | `True` | Enable libpq TCP keepalives on broker and child-process connections; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
@@ -40,6 +37,8 @@ broker = PostgresConfig(
 | `retain_rerun_input_default` | `bool` | `False` | App-level default for rerun-input retention at enqueue; a per-task value overrides it |
 | `echo` | `bool` | `False` | Echo SQL statements to logs. Bound values are not shown |
 | `pool_recycle` | `int` | 1800 | Recycle connections after N seconds |
+
+The connection pool of each child is not a `PostgresConfig` field: each child kind has its own `pool` in the worker profile. See [Connection Pools and the Default Executor](/horsies/workers/worker-profiles/#connection-pools-and-the-default-executor). `worker_child_pool_min_size`, `worker_child_pool_max_size` and `worker_child_pool_check` were removed in 0.7.0; a config that sets one fails with `HRS-213`, and the error names the `pool` field that replaces it.
 
 ## Connection URL Format
 
@@ -182,20 +181,26 @@ For direct PostgreSQL connections, budget a worker roughly as:
 worker_pool_size + worker_max_overflow
   + 2 session/LISTEN connections
   + 1 runner heartbeat connection
-  + children * worker_child_pool_max_size
+  + isolated children * isolated.pool max_size
+  + shared async children * shared_async.pool max_size
+  + shared thread children * shared_thread.pool max_size
   + task-code database connections
 ```
 
-With the defaults and a profile of 8 children, the framework ceiling is about
+Each `max_size` is the resolved value of its mode: a `PoolSize`, or the size
+that `PoolSizeFromSeats()` derives from the seats; see
+[Connections](/horsies/workers/worker-profiles/#connections). With the defaults
+and a profile of 8 isolated children, the framework ceiling is about
 `3 + 2 + 2 + 1 + 8 * 2 = 24` direct connections, before application task code.
-Idle child processes keep no database connection by default because
-`worker_child_pool_min_size=0`; connections are opened lazily when task
+Idle child processes keep no database connection by default because the
+`min_size` of each pool is 0; connections are opened lazily when task
 lifecycle work starts. An isolated child uses one connection at a time, for the
 RUNNING update and the finalizing mark: the worker process writes the runner
-heartbeats over its own connection. So `worker_child_pool_max_size=1` is enough
-for the own work of an isolated child. The seats of a shared child share one
-pool of `worker_child_pool_max_size` connections; see
-[Connections](/horsies/workers/shared-thread-tasks/#connections) for its size.
+heartbeats over its own connection. So
+`IsolatedPool(max_size=PoolSize(connections=1))` is enough for the own work of
+an isolated child. The seats of a shared child share the pool of their child;
+see [Connections](/horsies/workers/shared-thread-tasks/#connections) for its
+size.
 
 When using PgBouncer transaction pooling, those client-side pool slots are
 multiplexed onto fewer server backends. Connections are still not safe to share

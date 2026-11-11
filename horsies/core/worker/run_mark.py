@@ -188,11 +188,11 @@ def _record_if_marked(
 
 class TrackedExecutor(concurrent.futures.ThreadPoolExecutor):
     """The default executor of a shared async child: a ``ThreadPoolExecutor``
-    with the asyncio defaults that records each work item submitted with a
-    mark, from the context of the caller."""
+    of ``max_workers`` threads that records each work item submitted with a
+    mark, from the context of the caller. ``max_workers`` is 1 or more."""
 
-    def __init__(self, marked: MarkedWork) -> None:
-        super().__init__(thread_name_prefix='asyncio')
+    def __init__(self, marked: MarkedWork, max_workers: int) -> None:
+        super().__init__(max_workers=max_workers, thread_name_prefix='asyncio')
         self._marked = marked
 
     def submit(
@@ -270,9 +270,10 @@ class MarkedWork:
     """The live work of each open run of one shared async child, by mark.
 
     ``loop`` is the task loop of the child. ``on_item_done`` runs on that
-    loop when a work item of a run ends. ``install`` sets the task factory
-    and the default executor of the loop: call it once, before the start
-    hooks and the first run. ``open`` and ``close`` bound the life of a
+    loop when a work item of a run ends. ``executor_threads`` is the size of
+    the default executor that ``install`` sets. ``install`` sets the task
+    factory and the default executor of the loop: call it once, before the
+    start hooks and the first run. ``open`` and ``close`` bound the life of a
     run's records. Every method but ``record_item`` runs on the loop's
     thread; ``record_item`` and the end of a work item may run on any
     thread, and one lock guards the work items.
@@ -282,12 +283,16 @@ class MarkedWork:
         self,
         loop: asyncio.AbstractEventLoop,
         on_item_done: Callable[[RunMark], None],
+        executor_threads: int,
     ) -> None:
         self._loop = loop
         self._on_item_done = on_item_done
         # The default executor that records work items. It starts no thread
         # before its first submit.
-        self._executor: concurrent.futures.ThreadPoolExecutor = TrackedExecutor(self)
+        self._executor: concurrent.futures.ThreadPoolExecutor = TrackedExecutor(
+            self,
+            executor_threads,
+        )
         self._tasks: dict[RunMark, weakref.WeakSet[asyncio.Task[Any]]] = {}
         self._items: dict[RunMark, set[concurrent.futures.Future[Any]]] = {}
         self._items_lock = threading.Lock()
@@ -304,10 +309,11 @@ class MarkedWork:
     def track_executor_after_hooks(self) -> ExecutorAfterHooks:
         """Keep the work items of each run recorded after the start hooks.
 
-        A hook that set a default executor of its own (for more threads than
-        the asyncio default) replaced the one of ``install``: that executor
-        is wrapped (``TrackedHookExecutor``) and set again. Reads the
-        default executor from the attribute of the loop that
+        A hook that set a default executor of its own (for a size other
+        than ``executor_threads``) replaced the one of ``install``: that
+        executor is wrapped (``TrackedHookExecutor``) and set again, and it
+        keeps its own size. Reads the default executor from the attribute
+        of the loop that
         ``set_default_executor`` writes (asyncio's ``BaseEventLoop``). Call
         it once, after the hooks and before the first run.
         """

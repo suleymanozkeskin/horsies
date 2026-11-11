@@ -1,7 +1,7 @@
 ---
 title: PgBouncer Troubleshooting
-summary: Fix PgBouncer transaction pooling issues with Horsies and Syce.
-related: [../configuration/broker-config, ../monitoring/syce-overview, ../tasks/errors]
+summary: Fix PgBouncer transaction pooling issues with Horsies and Syce, and size the PgBouncer pool for the workers.
+related: [../configuration/broker-config, ../configuration/remote-postgres, ../workers/worker-profiles, ../monitoring/syce-overview, ../tasks/errors]
 tags: [troubleshooting, pgbouncer, planetscale, postgres]
 ---
 
@@ -26,6 +26,38 @@ config = AppConfig(
 Managed providers, such as PlanetScale Postgres, may show separate pooled and
 direct connection strings. Verify the current ports and URLs in your provider
 dashboard or docs before copying them into Horsies.
+
+## Pool Size
+
+With `pgbouncer_transaction_mode=True`, `horsies check --live` and the worker
+boot do not compare connections with the server (`HRS-219`): a client
+connection to PgBouncer holds a server connection only during a transaction.
+PgBouncer opens at most `default_pool_size` server connections for each
+database and user pair. A transaction that finds them all in use waits in
+PgBouncer.
+
+Each worker opens up to this many client connections to the pooled
+`database_url`:
+
+```text
+worker_pool_size + worker_max_overflow                  # parent pool
++ 1                                                     # runner heartbeat
++ isolated children × isolated.pool max_size            # isolated child pools
++ shared async children × shared_async.pool max_size    # shared async child pools
++ shared thread children × shared_thread.pool max_size  # shared thread child pools
+```
+
+The 2 listener connections go to `session_database_url`, not through
+PgBouncer. Each `max_size` is the resolved value of its mode; see
+[Connections](/horsies/workers/worker-profiles/#connections).
+
+- Set `max_client_conn` to at least the sum of this number over all workers,
+  plus the producers and the other clients of the pooled URL.
+- A `default_pool_size` equal to that sum never makes a transaction wait in
+  PgBouncer. A smaller value uses fewer server connections, and a
+  transaction waits when every server connection is in use.
+
+<!-- PLACEHOLDER default_pool_size rule: replace this comment with the measured rule for default_pool_size. -->
 
 ## Error: session_database_url required
 

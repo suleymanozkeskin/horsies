@@ -526,8 +526,6 @@ class TestLiveBrokerConnectivityCheck:
         engine_kwargs = mock_create_engine.call_args.kwargs
         assert 'worker_pool_size' not in engine_kwargs
         assert 'worker_max_overflow' not in engine_kwargs
-        assert 'worker_child_pool_min_size' not in engine_kwargs
-        assert 'worker_child_pool_max_size' not in engine_kwargs
 
     def test_live_check_reports_connectivity_error_without_touching_broker(self) -> None:
         """Connectivity failures map to BROKER_INVALID_URL and still dispose engine."""

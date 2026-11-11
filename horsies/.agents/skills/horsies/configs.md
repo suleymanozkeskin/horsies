@@ -119,14 +119,24 @@ worker_profiles = {
 | `WorkerProfile` | `preload` | `ChildPreload.LIBRARY` | `LIBRARY`, `APP` or `NONE`; see [Child process model](#child-process-model) |
 | `IsolatedChildren` | `count` | required | 1-1024 children, one task at a time each |
 | `IsolatedChildren` | `recycle` | `IsolatedRecycle()` | See [Child process recycling](#child-process-recycling) |
+| `IsolatedChildren` | `pool` | `IsolatedPool()` | The sync connection pool of each child |
 | `IsolatedRecycle` | `after` | `TaskLimit(tasks=100)` | `TaskLimit` or `NoTaskLimit` |
 | `IsolatedRecycle` | `above` | `NoMemoryLimit()` | `MemoryLimit(mb=N)` or `NoMemoryLimit` |
 | `SharedAsyncChildren` | `count` | required | 1-1024 children |
 | `SharedAsyncChildren` | `seats` | required | 1-1000 `SHARED_ASYNC` tasks at once per child |
 | `SharedAsyncChildren` | `recycle` | `SharedRecycle()` | When a shared child is replaced |
+| `SharedAsyncChildren` | `pool` | `SharedPool()` | The async connection pool of each child, shared by its seats |
+| `SharedAsyncChildren` | `executor` | `ExecutorThreadsFromSeats()` | Threads of the default executor of the loop: `ExecutorThreads(threads=N)` (1-256) or derived from the seats; a start hook that sets its own default executor wins |
 | `SharedThreadChildren` | `count` | required | 1-1024 children |
 | `SharedThreadChildren` | `seats` | required | 1-256 `SHARED_THREAD` tasks at once per child, one OS thread each |
 | `SharedThreadChildren` | `recycle` | `SharedRecycle()` | When a shared child is replaced |
+| `SharedThreadChildren` | `pool` | `SharedPool()` | The sync connection pool of each child, shared by its seat threads |
+| `IsolatedPool` | `min_size` | `0` | 0-1000 connections kept open; 0 opens on first use |
+| `IsolatedPool` | `max_size` | `PoolSize(connections=2)` | `PoolSize(connections=N)`, 1-1000 |
+| `IsolatedPool` | `check` | `True` | Check each connection on checkout; one round trip each, turn off with `pool_pre_ping` on high-RTT links |
+| `SharedPool` | `min_size` | `0` | 0-1000 connections kept open |
+| `SharedPool` | `max_size` | `PoolSizeFromSeats()` | `PoolSize(connections=N)` or derived from the seats |
+| `SharedPool` | `check` | `True` | As for `IsolatedPool` |
 | `SharedRecycle` | `after_per_seat` | `TaskLimit(tasks=100)` | Replace after `tasks × seats` tasks; `NoTaskLimit` |
 | `SharedRecycle` | `above` | `NoMemoryLimit()` | RSS limit of the child, read after each task |
 | `ClaimLimits` | `per_queue_per_pass` | `NoTaskLimit()` | Most tasks one claim pass takes from one queue |
@@ -142,8 +152,14 @@ child, and the claim limits are checked against it plus `prefetch_buffer`
 `seats` `SHARED_THREAD` tasks per child, one seat thread each); see the tasks
 skill. A worker with no shared children of a class runs the tasks of that
 class in isolated children. A shared async child opens one async pool, and a
-shared thread child one sync pool that its seat threads share, each of
-`worker_child_pool_max_size`, so each counts as one child in HRS-219. Boot also
+shared thread child one sync pool that its seat threads share; each child
+counts the resolved `pool.max_size` of its mode in HRS-219. A derived size is
+`min(cap, max(floor, ceil(seats / seats_per_unit)))` with per-kind constants in
+`horsies.core.models.child_sizing` (shared async pool: 10 seats per
+connection, cap 10; shared thread pool: 4 seats per connection, cap 10; floor
+2; shared async executor: 1 seat per thread, floor 2, cap 32). A `min_size`
+above the resolved `max_size` fails with HRS-218. The worker start log line
+states the resolved pool of each kind and the executor threads. Boot also
 warns (never refuses) when the sum over modes of `count × mb` is above the
 usable memory (container limit or host RAM), and when one worker opens more
 Postgres connections itself than the server has usable slots.
@@ -275,9 +291,6 @@ config = PostgresConfig(
 | `retain_rerun_input_default` | `bool` | `False` | App-level default for enqueue-time rerun-input retention; a per-task value overrides it and the resolved value is snapshotted at enqueue. A task enqueued without a retained input cannot be rerun later |
 | `worker_pool_size` | `int \| None` | `3` | Worker coordinator pool size; `None` inherits `pool_size` |
 | `worker_max_overflow` | `int \| None` | `2` | Worker coordinator overflow; `None` inherits `max_overflow` |
-| `worker_child_pool_min_size` | `int` | `0` | Minimum connections kept by each child worker process |
-| `worker_child_pool_max_size` | `int` | `2` | Maximum connections allowed per child worker process |
-| `worker_child_pool_check` | `bool` | `True` | Health-check child pool connections on checkout; one round trip per checkout, disable alongside `pool_pre_ping` on high-RTT links |
 | `pool_timeout` | `int` | `30` | Seconds to wait for a connection |
 | `pool_recycle` | `int` | `1800` | Seconds before connections are recycled |
 | `pool_pre_ping` | `bool` | `True` | Pre-ping connections before use |
@@ -290,6 +303,11 @@ config = PostgresConfig(
 
 Driver must be psycopg3 (async). `postgresql+psycopg2://` is rejected.
 
+`worker_child_pool_min_size`, `worker_child_pool_max_size` and
+`worker_child_pool_check` were removed in 0.7.0: each child kind has its own
+`pool` in the worker profile (`IsolatedPool`, `SharedPool`). A config that sets
+one fails at build with HRS-213, and the help names the replacement.
+
 horsies requires psycopg >= 3.3.7. psycopg >= 3.3.6 bounds the wait after an interrupted query (a cancelled asyncio
 task, `KeyboardInterrupt`, `SystemExit`): a cancel request of at most 5 s, then
 at most 5 s for the query, then it closes the connection. The 5 s limit on the
@@ -298,8 +316,9 @@ async code it runs in a default-executor thread, which a shared async attempt
 waits for). `horsies[pg-binary]` bundles its own libpq; `psycopg.pq.version()`
 reads the loaded version (`170000` = 17.0).
 
-The seats of a shared child share the child pool (`worker_child_pool_max_size`,
-default 2) for the RUNNING update and the finalizing marker; a seat waits up to
+The seats of a shared child share the pool of the child (`SharedPool`, derived
+from the seats by default) for the RUNNING update and the finalizing marker; a
+seat waits up to
 30 s for a connection, and a seat that gets none leaves its task claimed until
 the claim lease returns it. Average connections in use = tasks per second of
 the child x 2 writes x time of one write; keep the pool above it.
@@ -324,15 +343,17 @@ waits for the result.
 
 Worker processes use a separate connection profile by default. The worker
 coordinator uses `worker_pool_size + worker_max_overflow`; each child process
-creates its own psycopg pool bounded by
-`worker_child_pool_min_size..worker_child_pool_max_size`. Direct Postgres
-budget for one worker is approximately:
+creates its own psycopg pool bounded by the `pool` of its kind
+(`min_size..max_size`). Direct Postgres budget for one worker is
+approximately:
 
 ```text
 worker_pool_size + worker_max_overflow
   + 2 listener/session connections
   + 1 runner heartbeat connection (the worker process writes the beats)
-  + children * worker_child_pool_max_size
+  + isolated children * isolated.pool max_size
+  + shared async children * shared_async.pool max_size
+  + shared thread children * shared_thread.pool max_size
   + task-code database connections
 ```
 
@@ -344,9 +365,11 @@ connections for each worker profile with `max_connections` less the reserved
 slots and reports `HRS-219`; the error states the task-send term with one
 sending loop per child. A worker logs the same comparison at boot, as a
 warning when it is above the usable slots.
-Nothing is compared with `pgbouncer_transaction_mode=True`.
+Nothing is compared with `pgbouncer_transaction_mode=True`; then each worker
+opens the sum above less the 2 listener connections as clients of the pooler,
+and PgBouncer `max_client_conn` must hold the sum over workers.
 
-Child DB connections are lazy by default (`worker_child_pool_min_size=0`). A child
+Child DB connections are lazy by default (`min_size=0` in each pool). A child
 inherits no database socket from the worker.
 
 ### Child process model

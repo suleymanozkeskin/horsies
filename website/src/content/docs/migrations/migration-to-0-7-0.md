@@ -1,6 +1,6 @@
 ---
 title: Migrating to 0.7.0
-summary: What to change to upgrade from 0.6.x to 0.7.0, in upgrade order - psycopg 3.3.7, worker profiles in place of worker flags, the snapshot interval cap, new error code cases, result waits inside a task, workflow limits, a stop of every 0.6.x worker before schema v55, exit codes, and the changes in behaviour after the upgrade.
+summary: What to change to upgrade from 0.6.x to 0.7.0, in upgrade order - psycopg 3.3.7, worker profiles in place of worker flags, child pools per child kind in place of the PostgresConfig child pool fields, the snapshot interval cap, new error code cases, result waits inside a task, workflow limits, a stop of every 0.6.x worker before schema v55, exit codes, and the changes in behaviour after the upgrade.
 related: [../changelog, ../workers/worker-profiles, ../workers/execution-modes, ../cli, ../configuration/recovery-config, migration-to-0-6-0]
 tags: [migration, 0.7.0, breaking-changes, worker, profiles, cli, schema, execution]
 ---
@@ -8,7 +8,7 @@ tags: [migration, 0.7.0, breaking-changes, worker, profiles, cli, schema, execut
 ## Upgrade order
 
 1. Install horsies 0.7.0 with psycopg 3.3.7 or later. See [Dependencies](#dependencies).
-2. Change the config: [worker profiles](#worker-settings-move-into-profiles), [the running stale threshold](#running_stale_threshold_ms-holds-one-heartbeat-interval-plus-2-s) and [the snapshot interval](#worker_state_snapshot_interval_ms-is-at-most-60000-ms).
+2. Change the config: [worker profiles](#worker-settings-move-into-profiles), [child pools](#child-pools-move-into-profiles), [the running stale threshold](#running_stale_threshold_ms-holds-one-heartbeat-interval-plus-2-s) and [the snapshot interval](#worker_state_snapshot_interval_ms-is-at-most-60000-ms).
 3. Change the code: [matches on error codes](#matches-on-error-codes), [result waits inside a task](#a-result-wait-inside-a-task-is-refused) and [workflow limits](#workflow-limits).
 4. Run `horsies check <app>`, and `horsies check <app> --live` against the target database. See [New validation](#new-validation).
 5. Stop every 0.6.x worker, then start the 0.7.0 processes. See [Stop 0.6.x workers first](#stop-06x-workers-first).
@@ -103,6 +103,41 @@ app = Horsies(AppConfig(
 horsies worker myapp.instance:app --profile default
 ```
 
+## Child pools move into profiles
+
+`PostgresConfig.worker_child_pool_min_size`, `worker_child_pool_max_size` and `worker_child_pool_check` are removed. In 0.6.x one value applied to every child. In 0.7.0 each child kind has its own `pool` in the worker profile.
+
+| 0.6.x `PostgresConfig` field | Default | 0.7.0 profile field |
+|------------------------------|---------|---------------------|
+| `worker_child_pool_min_size=N` | `0` | `IsolatedChildren(pool=IsolatedPool(min_size=N))`, `SharedAsyncChildren(pool=SharedPool(min_size=N))`, `SharedThreadChildren(pool=SharedPool(min_size=N))` |
+| `worker_child_pool_max_size=N` | `2` | `IsolatedChildren(pool=IsolatedPool(max_size=PoolSize(connections=N)))`, `SharedAsyncChildren(pool=SharedPool(max_size=PoolSize(connections=N)))`, `SharedThreadChildren(pool=SharedPool(max_size=PoolSize(connections=N)))` |
+| `worker_child_pool_check=False` | `True` | `IsolatedChildren(pool=IsolatedPool(check=False))`, `SharedAsyncChildren(pool=SharedPool(check=False))`, `SharedThreadChildren(pool=SharedPool(check=False))` |
+
+The isolated defaults are the 0.6.x defaults: 0 to 2 connections, checked on checkout. A shared child derives its pool size from its seats by default (`PoolSizeFromSeats()`); see [Sizes Derived from the Seats](/horsies/workers/worker-profiles/#sizes-derived-from-the-seats).
+
+A config that still sets a removed field fails when it is built, with every such field in one report:
+
+```text
+error[HRS-213]: worker_child_pool_max_size was removed in 0.7.0
+   = note: each child kind of a worker profile has its own connection pool
+
+   = help:
+        set the pool of each child kind in AppConfig.worker_profiles: IsolatedChildren(pool=IsolatedPool(max_size=PoolSize(connections=N))), SharedAsyncChildren(pool=SharedPool(max_size=PoolSize(connections=N))) or SharedThreadChildren(pool=SharedPool(max_size=PoolSize(connections=N)))
+```
+
+A 0.6.x config with `worker_child_pool_max_size=1` and `worker_child_pool_check=False`, and the 0.7.0 profile:
+
+```python
+from horsies import IsolatedPool, PoolSize
+
+single_connection_profile = WorkerProfile(
+    isolated=IsolatedChildren(
+        count=8,
+        pool=IsolatedPool(max_size=PoolSize(connections=1), check=False),
+    ),
+)
+```
+
 ## `running_stale_threshold_ms` holds one heartbeat interval plus 2 s
 
 With `auto_fail_stale_running=True` (the default), a 0.7.0 worker stops when
@@ -164,10 +199,11 @@ See [Limits](/horsies/concepts/workflows/subworkflows/#66-limits).
 These were not checked before 0.7.0, because the values were command-line flags:
 
 - `horsies check` validates every profile. A claim limit above the capacity of the worker (its seats plus `prefetch_buffer`; one seat per isolated child) is refused with `HRS-218`; before, it had no effect.
-- `horsies check --live` reports `HRS-219` when one worker of a profile opens more Postgres connections itself than the server has usable slots. The error also states what task code that sends adds: `worker_pool_size + worker_max_overflow` per child and per event loop that it sends from.
+- `horsies check --live` reports `HRS-219` when one worker of a profile opens more Postgres connections itself than the server has usable slots. Each child counts the resolved `pool.max_size` of its mode. The error also states what task code that sends adds: `worker_pool_size + worker_max_overflow` per child and per event loop that it sends from.
+- `horsies check` refuses a child pool whose `min_size` is above its resolved `max_size` with `HRS-218`. In 0.6.x the same bound on `worker_child_pool_min_size` raised `HRS-213`.
 - At boot the worker warns when the per-child memory limits add up to more than the memory that the worker can use: the container (cgroup) limit when it is below the host RAM, else the host RAM, and when one worker opens more connections itself than the server has usable slots.
 
-Each bound of the old flags still applies: at least one child, a task limit of at least 1, a memory limit of at least 1 MB, and a drain timeout above 0. New upper bounds: 1024 isolated children, 2,147,483,647 tasks for a task limit, 16,777,216 MB for a memory limit, and 24 hours for the drain timeout.
+Each bound of the old flags still applies: at least one child, a task limit of at least 1, a memory limit of at least 1 MB, and a drain timeout above 0. New upper bounds: 1024 isolated children, 2,147,483,647 tasks for a task limit, 16,777,216 MB for a memory limit, 24 hours for the drain timeout, and 1000 connections for a child pool.
 
 See [Worker Profiles](/horsies/workers/worker-profiles/) for every field and for the validation table.
 

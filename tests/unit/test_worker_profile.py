@@ -18,11 +18,19 @@ from horsies.core.errors import (
 )
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.child_sizing import (
+    DEFAULT_ISOLATED_POOL_CONNECTIONS,
+    shared_async_executor_threads,
+    shared_async_pool_connections,
+    shared_thread_pool_connections,
+)
 from horsies.core.models.worker_profile import (
     DEFAULT_DRAIN_TIMEOUT,
     DEFAULT_RECYCLE_AFTER_TASKS,
     DEFAULT_RECYCLE_AFTER_TASKS_PER_SEAT,
+    MAX_CHILD_POOL_CONNECTIONS,
     MAX_DRAIN_TIMEOUT,
+    MAX_EXECUTOR_THREADS,
     MAX_ISOLATED_CHILDREN,
     MAX_MEMORY_LIMIT_MB,
     MAX_SEATS_PER_SHARED_ASYNC_CHILD,
@@ -32,7 +40,10 @@ from horsies.core.models.worker_profile import (
     MAX_TASK_LIMIT,
     PROFILE_NAME_MAX_LENGTH,
     ClaimLimits,
+    ExecutorThreads,
+    ExecutorThreadsFromSeats,
     IsolatedChildren,
+    IsolatedPool,
     IsolatedRecycle,
     MemoryLimit,
     NoIsolatedChildren,
@@ -40,7 +51,11 @@ from horsies.core.models.worker_profile import (
     NoSharedAsyncChildren,
     NoSharedThreadChildren,
     NoTaskLimit,
+    PoolSize,
+    PoolSizeFromSeats,
+    ResolvedPool,
     SharedAsyncChildren,
+    SharedPool,
     SharedRecycle,
     SharedThreadChildren,
     TaskLimit,
@@ -356,6 +371,12 @@ class TestNamedVariants:
             NoSharedThreadChildren(),
             ClaimLimits(),
             WorkerProfile(),
+            PoolSize(connections=1),
+            PoolSizeFromSeats(),
+            IsolatedPool(),
+            SharedPool(),
+            ExecutorThreads(threads=1),
+            ExecutorThreadsFromSeats(),
         ],
     )
     def test_every_profile_type_is_frozen(self, model: BaseModel) -> None:
@@ -418,9 +439,343 @@ class TestNamedVariants:
             'NoMemoryLimit',
             'ClaimLimits',
             'ChildPreload',
+            'IsolatedPool',
+            'SharedPool',
+            'PoolSize',
+            'PoolSizeFromSeats',
+            'ExecutorThreads',
+            'ExecutorThreadsFromSeats',
         ):
             assert name in horsies.__all__
             assert getattr(horsies, name) is not None
+
+
+class TestPoolSizeBounds:
+    @pytest.mark.parametrize('connections', [0, -1])
+    def test_below_one_is_refused(self, connections: int) -> None:
+        with pytest.raises(ValidationError, match='greater than or equal to 1'):
+            PoolSize(connections=connections)
+
+    @pytest.mark.parametrize('connections', [1, 2, MAX_CHILD_POOL_CONNECTIONS])
+    def test_one_to_max_is_accepted(self, connections: int) -> None:
+        assert PoolSize(connections=connections).connections == connections
+
+    def test_above_max_is_refused(self) -> None:
+        with pytest.raises(ValidationError, match='less than or equal to'):
+            PoolSize(connections=MAX_CHILD_POOL_CONNECTIONS + 1)
+
+    def test_connections_are_required(self) -> None:
+        with pytest.raises(ValidationError, match='connections'):
+            PoolSize.model_validate({})
+
+
+class TestExecutorThreadsBounds:
+    @pytest.mark.parametrize('threads', [0, -1])
+    def test_below_one_is_refused(self, threads: int) -> None:
+        with pytest.raises(ValidationError, match='greater than or equal to 1'):
+            ExecutorThreads(threads=threads)
+
+    @pytest.mark.parametrize('threads', [1, 32, MAX_EXECUTOR_THREADS])
+    def test_one_to_max_is_accepted(self, threads: int) -> None:
+        assert ExecutorThreads(threads=threads).threads == threads
+
+    def test_above_max_is_refused(self) -> None:
+        with pytest.raises(ValidationError, match='less than or equal to'):
+            ExecutorThreads(threads=MAX_EXECUTOR_THREADS + 1)
+
+
+class TestChildPoolMinSizeBounds:
+    @pytest.mark.parametrize('pool_type', [IsolatedPool, SharedPool])
+    def test_below_zero_is_refused(
+        self,
+        pool_type: type[IsolatedPool] | type[SharedPool],
+    ) -> None:
+        with pytest.raises(ValidationError, match='greater than or equal to 0'):
+            pool_type(min_size=-1)
+
+    @pytest.mark.parametrize('pool_type', [IsolatedPool, SharedPool])
+    @pytest.mark.parametrize('min_size', [0, 1, MAX_CHILD_POOL_CONNECTIONS])
+    def test_zero_to_max_is_accepted(
+        self,
+        pool_type: type[IsolatedPool] | type[SharedPool],
+        min_size: int,
+    ) -> None:
+        assert pool_type(min_size=min_size).min_size == min_size
+
+    @pytest.mark.parametrize('pool_type', [IsolatedPool, SharedPool])
+    def test_above_max_is_refused(
+        self,
+        pool_type: type[IsolatedPool] | type[SharedPool],
+    ) -> None:
+        with pytest.raises(ValidationError, match='less than or equal to'):
+            pool_type(min_size=MAX_CHILD_POOL_CONNECTIONS + 1)
+
+
+class TestChildPoolDefaults:
+    def test_an_isolated_child_keeps_a_pool_of_two(self) -> None:
+        """The isolated default is unchanged from 0.6: lazy, at most 2,
+        checked on checkout."""
+        assert DEFAULT_ISOLATED_POOL_CONNECTIONS == 2
+        assert IsolatedChildren(count=1).pool == IsolatedPool(
+            min_size=0,
+            max_size=PoolSize(connections=2),
+            check=True,
+        )
+        assert IsolatedChildren(count=1).resolved_pool() == ResolvedPool(
+            min_size=0,
+            max_size=2,
+            check=True,
+        )
+
+    def test_a_shared_async_child_derives_its_sizes_from_its_seats(self) -> None:
+        children = SharedAsyncChildren(count=1, seats=40)
+        assert children.pool == SharedPool(
+            min_size=0,
+            max_size=PoolSizeFromSeats(),
+            check=True,
+        )
+        assert children.executor == ExecutorThreadsFromSeats()
+
+    def test_a_shared_thread_child_derives_its_pool_from_its_seats(self) -> None:
+        children = SharedThreadChildren(count=1, seats=40)
+        assert children.pool == SharedPool(
+            min_size=0,
+            max_size=PoolSizeFromSeats(),
+            check=True,
+        )
+
+
+class TestChildPoolVariants:
+    @pytest.mark.parametrize(
+        ('data', 'expected'),
+        [
+            ({'kind': 'pool_size', 'connections': 3}, PoolSize(connections=3)),
+            ({'kind': 'pool_size_from_seats'}, PoolSizeFromSeats()),
+        ],
+    )
+    def test_a_shared_pool_size_parses_by_kind(
+        self,
+        data: dict[str, Any],
+        expected: PoolSize | PoolSizeFromSeats,
+    ) -> None:
+        assert SharedPool.model_validate({'max_size': data}).max_size == expected
+
+    def test_an_isolated_pool_has_no_size_from_seats(self) -> None:
+        """An isolated child has one seat: its pool size is always stated."""
+        with pytest.raises(ValidationError, match='pool_size'):
+            IsolatedPool.model_validate({'max_size': {'kind': 'pool_size_from_seats'}})
+
+    @pytest.mark.parametrize(
+        ('data', 'expected'),
+        [
+            (
+                {'kind': 'executor_threads', 'threads': 8},
+                ExecutorThreads(threads=8),
+            ),
+            ({'kind': 'executor_threads_from_seats'}, ExecutorThreadsFromSeats()),
+        ],
+    )
+    def test_the_executor_parses_by_kind(
+        self,
+        data: dict[str, Any],
+        expected: ExecutorThreads | ExecutorThreadsFromSeats,
+    ) -> None:
+        children = SharedAsyncChildren.model_validate(
+            {'count': 1, 'seats': 4, 'executor': data},
+        )
+        assert children.executor == expected
+
+    def test_a_shared_thread_child_has_no_executor_field(self) -> None:
+        with pytest.raises(ValidationError, match='executor'):
+            SharedThreadChildren.model_validate(
+                {
+                    'count': 1,
+                    'seats': 4,
+                    'executor': {'kind': 'executor_threads', 'threads': 8},
+                },
+            )
+
+
+class TestChildPoolResolution:
+    @pytest.mark.parametrize(
+        'seats',
+        [1, 9, 10, 11, 95, MAX_SEATS_PER_SHARED_ASYNC_CHILD],
+    )
+    def test_a_shared_async_pool_from_seats_is_derived(self, seats: int) -> None:
+        children = SharedAsyncChildren(
+            count=1,
+            seats=seats,
+            pool=SharedPool(min_size=1, check=False),
+        )
+        assert children.resolved_pool() == ResolvedPool(
+            min_size=1,
+            max_size=shared_async_pool_connections(seats),
+            check=False,
+        )
+
+    @pytest.mark.parametrize(
+        'seats',
+        [1, 3, 4, 5, 39, MAX_SEATS_PER_SHARED_THREAD_CHILD],
+    )
+    def test_a_shared_thread_pool_from_seats_is_derived(self, seats: int) -> None:
+        children = SharedThreadChildren(count=1, seats=seats)
+        assert children.resolved_pool() == ResolvedPool(
+            min_size=0,
+            max_size=shared_thread_pool_connections(seats),
+            check=True,
+        )
+
+    def test_a_set_pool_size_is_kept_whatever_the_seats(self) -> None:
+        pool = SharedPool(max_size=PoolSize(connections=17))
+        assert (
+            SharedAsyncChildren(count=1, seats=1, pool=pool).resolved_pool().max_size
+            == 17
+        )
+        assert (
+            SharedThreadChildren(count=1, seats=200, pool=pool).resolved_pool().max_size
+            == 17
+        )
+
+    @pytest.mark.parametrize(
+        'seats',
+        [1, 2, 31, 32, 33, MAX_SEATS_PER_SHARED_ASYNC_CHILD],
+    )
+    def test_the_executor_from_seats_is_derived(self, seats: int) -> None:
+        children = SharedAsyncChildren(count=1, seats=seats)
+        assert children.resolved_executor_threads() == shared_async_executor_threads(
+            seats,
+        )
+
+    def test_a_set_executor_size_is_kept(self) -> None:
+        children = SharedAsyncChildren(
+            count=1,
+            seats=500,
+            executor=ExecutorThreads(threads=3),
+        )
+        assert children.resolved_executor_threads() == 3
+
+    def test_an_isolated_pool_resolves_to_its_set_values(self) -> None:
+        pool = IsolatedPool(min_size=2, max_size=PoolSize(connections=5), check=False)
+        assert IsolatedChildren(count=1, pool=pool).resolved_pool() == ResolvedPool(
+            min_size=2,
+            max_size=5,
+            check=False,
+        )
+
+
+class TestAppConfigPoolChecks:
+    """A pool whose ``min_size`` is above its resolved ``max_size`` is
+    refused with the profile name and the field path."""
+
+    def test_an_isolated_min_size_above_max_size_names_the_path(self) -> None:
+        profile = WorkerProfile(
+            isolated=IsolatedChildren(count=1, pool=IsolatedPool(min_size=3)),
+        )
+        with pytest.raises(ConfigurationError) as exc_info:
+            _app_config({'p': profile})
+
+        error = exc_info.value
+        assert error.code == ErrorCode.CONFIG_INVALID_WORKER_PROFILE
+        assert error.message == (
+            "worker_profiles['p'].isolated.pool.min_size: 3 is above the pool "
+            'max_size (2)'
+        )
+        assert error.notes == [
+            'max_size=PoolSize(connections=2)',
+            'a pool keeps min_size connections open and never opens more than '
+            'max_size',
+        ]
+        assert error.help_text == (
+            'set min_size to 2 or less, or set max_size=PoolSize(connections=3) '
+            'or more'
+        )
+
+    def test_a_min_size_equal_to_max_size_is_accepted(self) -> None:
+        profile = WorkerProfile(
+            isolated=IsolatedChildren(
+                count=1,
+                pool=IsolatedPool(min_size=2, max_size=PoolSize(connections=2)),
+            ),
+        )
+        assert _app_config({'p': profile}).worker_profiles == {'p': profile}
+
+    def test_a_shared_async_min_size_above_the_derived_size_names_the_seats(
+        self,
+    ) -> None:
+        derived = shared_async_pool_connections(1)
+        profile = WorkerProfile(
+            shared_async=SharedAsyncChildren(
+                count=1,
+                seats=1,
+                pool=SharedPool(min_size=derived + 1),
+            ),
+        )
+        with pytest.raises(ConfigurationError) as exc_info:
+            _app_config({'p': profile})
+
+        error = exc_info.value
+        assert error.code == ErrorCode.CONFIG_INVALID_WORKER_PROFILE
+        assert error.message == (
+            f"worker_profiles['p'].shared_async.pool.min_size: {derived + 1} is "
+            f'above the pool max_size ({derived})'
+        )
+        assert error.notes[0] == (
+            f'max_size=PoolSizeFromSeats() resolves to {derived} connections '
+            'for 1 seats'
+        )
+
+    def test_a_shared_async_min_size_at_the_derived_size_is_accepted(self) -> None:
+        derived = shared_async_pool_connections(1)
+        profile = WorkerProfile(
+            shared_async=SharedAsyncChildren(
+                count=1,
+                seats=1,
+                pool=SharedPool(min_size=derived),
+            ),
+        )
+        assert _app_config({'p': profile}).worker_profiles == {'p': profile}
+
+    def test_a_shared_thread_min_size_above_a_set_size_names_the_path(self) -> None:
+        profile = WorkerProfile(
+            shared_thread=SharedThreadChildren(
+                count=1,
+                seats=4,
+                pool=SharedPool(min_size=5, max_size=PoolSize(connections=4)),
+            ),
+        )
+        with pytest.raises(ConfigurationError) as exc_info:
+            _app_config({'p': profile})
+
+        assert exc_info.value.message == (
+            "worker_profiles['p'].shared_thread.pool.min_size: 5 is above the "
+            'pool max_size (4)'
+        )
+        assert exc_info.value.notes[0] == 'max_size=PoolSize(connections=4)'
+
+    def test_each_mode_is_reported_at_once(self) -> None:
+        profile = WorkerProfile(
+            isolated=IsolatedChildren(count=1, pool=IsolatedPool(min_size=3)),
+            shared_async=SharedAsyncChildren(
+                count=1,
+                seats=4,
+                pool=SharedPool(min_size=6, max_size=PoolSize(connections=5)),
+            ),
+            shared_thread=SharedThreadChildren(
+                count=1,
+                seats=4,
+                pool=SharedPool(min_size=6, max_size=PoolSize(connections=5)),
+            ),
+        )
+        with pytest.raises(MultipleValidationErrors) as exc_info:
+            _app_config({'p': profile})
+
+        assert [
+            error.message.split(':')[0] for error in _errors_of(exc_info.value)
+        ] == [
+            "worker_profiles['p'].isolated.pool.min_size",
+            "worker_profiles['p'].shared_async.pool.min_size",
+            "worker_profiles['p'].shared_thread.pool.min_size",
+        ]
 
 
 class TestAppConfigProfileChecks:
@@ -599,7 +954,8 @@ class TestDescribeWorkerProfile:
             preload=ChildPreload.APP,
         )
         assert describe_worker_profile(profile) == (
-            'isolated=8 (recycle after no limit, above 1024 MB), '
+            'isolated=8 (recycle after no limit, above 1024 MB; pool 0 to 2 '
+            'connections, check on), '
             'shared_async=none, shared_thread=none, '
             'claim per queue per pass: 4 tasks, claimed per worker: no limit, '
             'drain_timeout=90s, preload=app'
@@ -618,7 +974,11 @@ class TestDescribeWorkerProfile:
         )
         assert (
             'shared_async=3x25 seats (recycle after 40 tasks per seat, '
-            'above 2048 MB), '
+            'above 2048 MB; '
+            f'pool 0 to {shared_async_pool_connections(25)} connections, '
+            'derived from seats, check on; '
+            f'executor {shared_async_executor_threads(25)} threads, derived '
+            'from seats), '
         ) in describe_worker_profile(profile)
 
     def test_shared_thread_children_are_named(self) -> None:
@@ -634,8 +994,48 @@ class TestDescribeWorkerProfile:
         )
         assert (
             'shared_thread=2x8 seats (recycle after no limit per seat, '
-            'above 1024 MB), '
+            'above 1024 MB; '
+            f'pool 0 to {shared_thread_pool_connections(8)} connections, '
+            'derived from seats, check on), '
         ) in describe_worker_profile(profile)
+
+    def test_set_sizes_are_named_without_their_origin(self) -> None:
+        """The start log shows the resolved values of each kind; a size set
+        in the profile carries no "derived from seats"."""
+        profile = WorkerProfile(
+            isolated=IsolatedChildren(
+                count=1,
+                pool=IsolatedPool(
+                    min_size=1,
+                    max_size=PoolSize(connections=4),
+                    check=False,
+                ),
+            ),
+            shared_async=SharedAsyncChildren(
+                count=1,
+                seats=50,
+                pool=SharedPool(min_size=2, max_size=PoolSize(connections=9)),
+                executor=ExecutorThreads(threads=7),
+            ),
+            shared_thread=SharedThreadChildren(
+                count=1,
+                seats=6,
+                pool=SharedPool(max_size=PoolSize(connections=3), check=False),
+            ),
+        )
+        described = describe_worker_profile(profile)
+        assert (
+            'isolated=1 (recycle after 100 tasks, above no limit; pool 1 to 4 '
+            'connections, check off), '
+        ) in described
+        assert (
+            'shared_async=1x50 seats (recycle after 100 tasks per seat, above '
+            'no limit; pool 2 to 9 connections, check on; executor 7 threads), '
+        ) in described
+        assert (
+            'shared_thread=1x6 seats (recycle after 100 tasks per seat, above '
+            'no limit; pool 0 to 3 connections, check off), '
+        ) in described
 
     def test_no_isolated_children(self) -> None:
         assert describe_worker_profile(WorkerProfile()).startswith('isolated=none, ')

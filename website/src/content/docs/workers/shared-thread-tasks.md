@@ -153,19 +153,19 @@ A new task goes to the open shared thread child with the fewest tasks in flight,
 
 ## Connections
 
-Each shared thread child opens one sync connection pool of `worker_child_pool_max_size` connections (default 2), as an isolated child does, whatever its seats. Its seat threads share that pool for two writes of each task: the RUNNING update at its start, and the finalizing marker at its end (only for a task that returned before its deadline). The worker process writes the runner heartbeats over its own connection. See [Connections](/horsies/workers/worker-profiles/#connections).
+Each shared thread child opens one sync connection pool, sized by `SharedThreadChildren.pool`. By default its `max_size` is derived from the seats (`PoolSizeFromSeats()`); see [Sizes Derived from the Seats](/horsies/workers/worker-profiles/#sizes-derived-from-the-seats). Its seat threads share that pool for two writes of each task: the RUNNING update at its start, and the finalizing marker at its end (only for a task that returned before its deadline). The worker process writes the runner heartbeats over its own connection. See [Connections](/horsies/workers/worker-profiles/#connections).
 
 A seat thread waits up to 30 seconds for a free connection. A thread that gets none in that time does not run its task: the task stays claimed, and its claim lease returns it to the queue. A thread whose task reaches its deadline during that wait does not start the task either: the child reports the deadline, the task stays claimed, and the worker returns it to the queue with no `TASK_TIMEOUT`.
 
-Size the pool from the writes, not from the seats:
+The pool size that the seats give is a default. The connections that a child uses come from its writes. To size the pool from the writes, set `pool=SharedPool(max_size=PoolSize(connections=N))`:
 
 - Each write holds one connection for its transaction: a few database round trips.
 - Connections in use, on average = tasks per second of the child × 2 writes × the time of one write.
-- Example: a child that ends 20 tasks per second, with 10 ms per write, uses 20 × 2 × 0.01 = 0.4 connections on average. The default of 2 is enough.
-- Example: the same child against a remote database, with 50 ms per write, uses 2 connections on average. The default pool is then full, and seat threads wait for each other. Set `worker_child_pool_max_size` to 4 or more.
+- Example: a child that ends 20 tasks per second, with 10 ms per write, uses 20 × 2 × 0.01 = 0.4 connections on average. A pool of 2 is enough.
+- Example: the same child against a remote database, with 50 ms per write, uses 2 connections on average. A pool of 2 is then full, and seat threads wait for each other. Set `max_size=PoolSize(connections=4)` or more.
 - Keep the pool above the average. As the average comes near the pool size, the waits grow.
 
-`worker_child_pool_max_size` applies to every child of the worker, isolated and shared. Each added connection counts once per child in the connection budget of the worker.
+Each child kind has its own pool setting: `IsolatedChildren.pool`, `SharedAsyncChildren.pool` and `SharedThreadChildren.pool`. Each added connection counts once per child of that kind in the connection budget of the worker.
 
 ## Limits
 

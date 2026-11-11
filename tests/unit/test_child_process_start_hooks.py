@@ -20,7 +20,8 @@ from horsies.core.app import Horsies
 from horsies.core.errors import ConfigurationError, ErrorCode
 from horsies.core.models.app import AppConfig
 from horsies.core.models.boot_failure import ThreadStartRefused, ThreadStartRefusedError
-from horsies.core.types.result import Err
+from horsies.core.types.result import Err, Ok
+from horsies.core.models.worker_profile import ResolvedPool
 from horsies.core.worker.child_protocol import (
     InitFrame,
     SharedAsyncChild,
@@ -37,6 +38,10 @@ from horsies.core.worker.shared_runner import run_shared_async_start_hooks
 pytestmark = [pytest.mark.unit]
 
 
+_SEAT_POOL = ResolvedPool(min_size=0, max_size=1, check=False)
+"""A pool that opens with no connection."""
+
+
 def _seat_init() -> InitFrame:
     """The init frame of a shared async child whose pool opens with no
     connection."""
@@ -49,11 +54,12 @@ def _seat_init() -> InitFrame:
         loglevel=30,
         database_url='postgresql://user:pass@localhost/db',
         connect_kwargs={},
-        child_pool_min_size=0,
-        child_pool_max_size=1,
-        child_pool_check=False,
         process_name='test-child',
-        child_kind=SharedAsyncChild(seats=1),
+        child_kind=SharedAsyncChild(
+            seats=1,
+            pool=_SEAT_POOL,
+            executor_threads=2,
+        ),
     )
 
 
@@ -411,7 +417,9 @@ class TestRunSharedAsyncHooks:
 
         monkeypatch.setattr(threading.Thread, 'start', refuse)
 
-        started = asyncio.run(shared_runner.PostgresSeatProgram().start(_seat_init()))
+        started = asyncio.run(
+            shared_runner.PostgresSeatProgram().start(_seat_init(), _SEAT_POOL),
+        )
 
         assert started == Err(
             boot_failed_frame(
@@ -422,6 +430,37 @@ class TestRunSharedAsyncHooks:
             ),
         )
         assert calls == []
+
+    def test_the_async_pool_opens_with_the_pool_of_the_kind(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The start opens the async pool of the child with the bounds and
+        the check of the pool that the parent sent for its kind."""
+        monkeypatch.setattr(shared_runner, 'get_current_app', _make_app)
+        opened: list[dict[str, object]] = []
+
+        async def record_open(database_url: str, **kwargs: object) -> object:
+            opened.append({'database_url': database_url, **kwargs})
+            return object()
+
+        monkeypatch.setattr(shared_runner, 'open_shared_async_pool', record_open)
+        pool = ResolvedPool(min_size=2, max_size=7, check=False)
+
+        started = asyncio.run(
+            shared_runner.PostgresSeatProgram().start(_seat_init(), pool),
+        )
+
+        assert isinstance(started, Ok)
+        assert opened == [
+            {
+                'database_url': 'postgresql://user:pass@localhost/db',
+                'connect_kwargs': {},
+                'min_size': 2,
+                'max_size': 7,
+                'check_on_checkout': False,
+            },
+        ]
 
     def test_hooks_run_in_order_on_the_running_loop(
         self,

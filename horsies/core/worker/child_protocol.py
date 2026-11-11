@@ -38,8 +38,11 @@ from horsies.core.models.tasks import (
     MIN_TASK_TIMEOUT_MS,
 )
 from horsies.core.models.worker_profile import (
+    MAX_CHILD_POOL_CONNECTIONS,
+    MAX_EXECUTOR_THREADS,
     MAX_SEATS_PER_SHARED_ASYNC_CHILD,
     MAX_SEATS_PER_SHARED_THREAD_CHILD,
+    ResolvedPool,
 )
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.stored_timeout import (
@@ -74,29 +77,39 @@ MAX_BLOCKED_WHERE_CHARS: Final = 500
 
 @dataclass(frozen=True, slots=True)
 class IsolatedChild:
-    """The child runs one task at a time, in ``RunFrame``s."""
+    """The child runs one task at a time, in ``RunFrame``s, and opens the
+    sync connection pool ``pool``."""
+
+    pool: ResolvedPool
 
 
 @dataclass(frozen=True, slots=True)
 class SharedAsyncChild:
     """The child runs up to ``seats`` ``async def`` tasks at once, as
-    coroutines on its event loop, in ``SharedRunFrame``s.
+    coroutines on its event loop, in ``SharedRunFrame``s. It opens the async
+    connection pool ``pool``, and its loop has a default executor of
+    ``executor_threads`` threads.
 
-    ``seats`` is from 1 to ``MAX_SEATS_PER_SHARED_ASYNC_CHILD``.
+    ``seats`` is from 1 to ``MAX_SEATS_PER_SHARED_ASYNC_CHILD``;
+    ``executor_threads`` is from 1 to ``MAX_EXECUTOR_THREADS``.
     """
 
     seats: int
+    pool: ResolvedPool
+    executor_threads: int
 
 
 @dataclass(frozen=True, slots=True)
 class SharedThreadChild:
     """The child runs up to ``seats`` ``def`` tasks at once, each on a thread
-    of its own, in ``SharedRunFrame``s.
+    of its own, in ``SharedRunFrame``s, and opens the sync connection pool
+    ``pool``, which its seat threads share.
 
     ``seats`` is from 1 to ``MAX_SEATS_PER_SHARED_THREAD_CHILD``.
     """
 
     seats: int
+    pool: ResolvedPool
 
 
 SharedChildKind: TypeAlias = SharedAsyncChild | SharedThreadChild
@@ -111,7 +124,8 @@ class InitFrame:
 
     Carries the database URL here because argv is visible in ``ps``. The URL
     holds a password, so it stays out of the repr. ``child_kind`` decides
-    which frames the child takes after its ready frame.
+    which frames the child takes after its ready frame, and carries the
+    connection pool of the child.
     """
 
     app_locator: str
@@ -122,9 +136,6 @@ class InitFrame:
     loglevel: int
     database_url: str = field(repr=False)
     connect_kwargs: Mapping[str, object]
-    child_pool_min_size: int
-    child_pool_max_size: int
-    child_pool_check: bool
     process_name: str
     child_kind: ChildKind
 
@@ -675,9 +686,6 @@ def encode_parent_frame(frame: ParentFrame) -> EncodedFrame:
                     'loglevel': frame.loglevel,
                     'database_url': frame.database_url,
                     'connect_kwargs': dict(frame.connect_kwargs),
-                    'child_pool_min_size': frame.child_pool_min_size,
-                    'child_pool_max_size': frame.child_pool_max_size,
-                    'child_pool_check': frame.child_pool_check,
                     'process_name': frame.process_name,
                     'child_kind': _child_kind_field(frame.child_kind),
                 },
@@ -766,14 +774,31 @@ def _encode_seat_work(work: SharedWork) -> dict[str, object]:
             assert_never(unreachable)
 
 
+def _pool_field(pool: ResolvedPool) -> dict[str, object]:
+    return {
+        'min_size': pool.min_size,
+        'max_size': pool.max_size,
+        'check': pool.check,
+    }
+
+
 def _child_kind_field(child_kind: ChildKind) -> dict[str, object]:
     match child_kind:
-        case IsolatedChild():
-            return {'kind': 'isolated'}
-        case SharedAsyncChild(seats=seats):
-            return {'kind': 'shared_async', 'seats': seats}
-        case SharedThreadChild(seats=seats):
-            return {'kind': 'shared_thread', 'seats': seats}
+        case IsolatedChild(pool=pool):
+            return {'kind': 'isolated', 'pool': _pool_field(pool)}
+        case SharedAsyncChild(seats=seats, pool=pool, executor_threads=threads):
+            return {
+                'kind': 'shared_async',
+                'seats': seats,
+                'pool': _pool_field(pool),
+                'executor_threads': threads,
+            }
+        case SharedThreadChild(seats=seats, pool=pool):
+            return {
+                'kind': 'shared_thread',
+                'seats': seats,
+                'pool': _pool_field(pool),
+            }
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -1175,6 +1200,21 @@ def _dispatch(meta: Mapping[str, Any]) -> int:
     return value
 
 
+def _child_pool(child_kind: Mapping[str, Any]) -> ResolvedPool:
+    """The pool of a child kind: ``min_size`` from 0 and ``max_size`` from 1,
+    each up to ``MAX_CHILD_POOL_CONNECTIONS``. The pool of the child refuses
+    a ``min_size`` above ``max_size`` when it opens."""
+    value = child_kind.get('pool')
+    if not isinstance(value, dict):
+        raise _BadField('child_kind.pool')
+    pool = cast('Mapping[str, Any]', value)
+    return ResolvedPool(
+        min_size=_bounded_whole(pool, 'min_size', 0, MAX_CHILD_POOL_CONNECTIONS),
+        max_size=_bounded_whole(pool, 'max_size', 1, MAX_CHILD_POOL_CONNECTIONS),
+        check=_flag(pool, 'check'),
+    )
+
+
 def _child_kind(meta: Mapping[str, Any]) -> ChildKind:
     value = meta.get('child_kind')
     if not isinstance(value, dict):
@@ -1182,7 +1222,7 @@ def _child_kind(meta: Mapping[str, Any]) -> ChildKind:
     child_kind = cast('Mapping[str, Any]', value)
     match child_kind.get('kind'):
         case 'isolated':
-            return IsolatedChild()
+            return IsolatedChild(pool=_child_pool(child_kind))
         case 'shared_async':
             seats = _bounded_whole(
                 child_kind,
@@ -1190,7 +1230,17 @@ def _child_kind(meta: Mapping[str, Any]) -> ChildKind:
                 1,
                 MAX_SEATS_PER_SHARED_ASYNC_CHILD,
             )
-            return SharedAsyncChild(seats=seats)
+            threads = _bounded_whole(
+                child_kind,
+                'executor_threads',
+                1,
+                MAX_EXECUTOR_THREADS,
+            )
+            return SharedAsyncChild(
+                seats=seats,
+                pool=_child_pool(child_kind),
+                executor_threads=threads,
+            )
         case 'shared_thread':
             seats = _bounded_whole(
                 child_kind,
@@ -1198,7 +1248,7 @@ def _child_kind(meta: Mapping[str, Any]) -> ChildKind:
                 1,
                 MAX_SEATS_PER_SHARED_THREAD_CHILD,
             )
-            return SharedThreadChild(seats=seats)
+            return SharedThreadChild(seats=seats, pool=_child_pool(child_kind))
         case _:
             raise _BadField('child_kind.kind')
 
@@ -1216,9 +1266,6 @@ def _decode_init(meta: Mapping[str, Any]) -> InitFrame:
         loglevel=_whole(meta, 'loglevel'),
         database_url=_text(meta, 'database_url'),
         connect_kwargs=cast('Mapping[str, object]', connect_kwargs),
-        child_pool_min_size=_whole(meta, 'child_pool_min_size'),
-        child_pool_max_size=_whole(meta, 'child_pool_max_size'),
-        child_pool_check=_flag(meta, 'child_pool_check'),
         process_name=_text(meta, 'process_name'),
         child_kind=_child_kind(meta),
     )

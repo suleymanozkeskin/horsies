@@ -48,6 +48,7 @@ from horsies.core.worker.child_main import (
 )
 from horsies.core.worker.config import ChildPreload
 from horsies.core.worker.preload_main import REPARENT_FAILED_EXIT_CODE
+from horsies.core.models.worker_profile import ResolvedPool
 from horsies.core.worker.child_protocol import (
     BodyReturnedFrame,
     BootFailedFrame,
@@ -158,11 +159,10 @@ def _init(app_locator: str = 'ok', imports: tuple[str, ...] = ()) -> InitFrame:
         loglevel=30,
         database_url='postgresql://unused',
         connect_kwargs={},
-        child_pool_min_size=0,
-        child_pool_max_size=1,
-        child_pool_check=False,
         process_name='test-child',
-        child_kind=IsolatedChild(),
+        child_kind=IsolatedChild(
+            pool=ResolvedPool(min_size=0, max_size=1, check=False),
+        ),
     )
 
 
@@ -1089,8 +1089,9 @@ class TestRealChildBootCauses:
         app_file.write_text(VALID_APP)
         init = replace(
             _init(f'{app_file}:app'),
-            child_pool_min_size=2,
-            child_pool_max_size=1,
+            child_kind=IsolatedChild(
+                pool=ResolvedPool(min_size=2, max_size=1, check=False),
+            ),
         )
 
         assert await self._start(app_file, init) == Err(
@@ -2581,7 +2582,11 @@ class TestStopDuringBoot:
 
     async def test_a_replaced_child_does_not_count_as_another_slot(self) -> None:
         pool = SlotPool(_config(2), pending_limit=10)
-        baseline = ChildBaseline(pid=1, rss=RssUnreadable(), child_kind=IsolatedChild())
+        baseline = ChildBaseline(
+            pid=1,
+            rss=RssUnreadable(),
+            child_kind=IsolatedChild(pool=ResolvedPool(0, 2, True)),
+        )
         pool._note_ready(pool._slots[0], baseline)
         pool._note_ready(pool._slots[0], baseline)
         assert not pool._first_generation.done()
@@ -2711,14 +2716,15 @@ class TestPoolFailure:
 PARENT_PROGRAM = """
 import asyncio, os, sys, time
 sys.path[:0] = {paths!r}
+from horsies.core.models.worker_profile import ResolvedPool
 from horsies.core.worker.child_protocol import InitFrame, IsolatedChild, RunFrame
 from horsies.core.worker.config import ChildPreload
 from horsies.core.worker.slots import SlotPool, SlotPoolConfig
 
 async def main():
     init = InitFrame(
-        'ok', (), (), tuple(sys.path), ('p',), 30, 'x', {{}}, 0, 1, False, 'c',
-        IsolatedChild(),
+        'ok', (), (), tuple(sys.path), ('p',), 30, 'x', {{}}, 'c',
+        IsolatedChild(ResolvedPool(0, 1, False)),
     )
     pool = SlotPool(
         SlotPoolConfig(1, init, 0, None, ({child!r},), ChildPreload({mode!r}), ({preload!r},)),

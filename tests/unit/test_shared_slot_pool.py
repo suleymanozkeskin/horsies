@@ -26,6 +26,7 @@ import pytest_asyncio
 from horsies.core.models.boot_failure import ChildPoolSetupFailed, ResourceShortage
 from horsies.core.models.tasks import MIN_CANCEL_GRACE_MS, MIN_TASK_TIMEOUT_MS
 from horsies.core.models.worker_profile import (
+    ResolvedPool,
     MemoryLimit,
     NoTaskLimit,
     SharedAsyncChildren,
@@ -139,11 +140,10 @@ def _init(app_locator: str = 'ok', imports: tuple[str, ...] = ()) -> InitFrame:
         loglevel=30,
         database_url='postgresql://unused',
         connect_kwargs={},
-        child_pool_min_size=0,
-        child_pool_max_size=1,
-        child_pool_check=False,
         process_name='test-child',
-        child_kind=IsolatedChild(),
+        child_kind=IsolatedChild(
+            pool=ResolvedPool(min_size=0, max_size=1, check=False),
+        ),
     )
 
 

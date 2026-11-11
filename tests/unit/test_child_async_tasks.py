@@ -39,6 +39,7 @@ from horsies.core.models.tasks import (
 from horsies.core.models.workflow import NodeKey, WorkflowContext
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.process_role import ProcessRole
+from horsies.core.models.worker_profile import ResolvedPool
 from horsies.core.types.result import Err, Ok, is_ok
 from horsies.core.task_decorator import await_task_call_in_worker
 from horsies.core.utils.loop_runner import in_running_event_loop
@@ -492,7 +493,9 @@ class TestResultWaitsInsideAnAsyncTask:
                 patch.object(child_runner, '_run_child_start_hooks'),
                 patch.object(child_runner, '_initialize_worker_pool'),
             ):
-                child_runner.finish_child_start(app, UNREACHABLE_URL, None, 0, 2, True)
+                child_runner.finish_child_start(
+                    app, UNREACHABLE_URL, None, ResolvedPool(0, 2, True)
+                )
             with patch.object(broker, 'enqueue_async', enqueue_async):
                 wire = _runner(app, task_loop)(waits_inside_task.task_name)
         finally:

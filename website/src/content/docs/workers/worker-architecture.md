@@ -321,8 +321,7 @@ Both preload modes:
 | `child_preload` | `WorkerProfile.preload` |
 | `parent_pool_size` | `PostgresConfig.worker_pool_size` |
 | `parent_max_overflow` | `PostgresConfig.worker_max_overflow` |
-| `child_pool_min_size` | `PostgresConfig.worker_child_pool_min_size` |
-| `child_pool_max_size` | `PostgresConfig.worker_child_pool_max_size` |
+| `isolated_pool` | `IsolatedChildren.pool`, resolved; the default `IsolatedPool()` with `NoIsolatedChildren()`. The pool of a shared child comes from `shared_async.pool` or `shared_thread.pool` |
 | `app_locator` | The app locator of the command |
 | `imports` | Task module paths |
 
@@ -333,9 +332,11 @@ poll-only dispatch if `LISTEN` is unavailable.
 
 Child database pools are initialized inside the child process. Psycopg
 connections are not process-safe. A child starts with `exec`, so it inherits no
-parent database socket. Child DB connections remain lazy by default when
-`worker_child_pool_min_size=0`. An isolated child uses one connection at a
-time: for the RUNNING update, and for the finalizing mark. The seats of a
+parent database socket. Child DB connections remain lazy by default: the `min_size` of each child
+pool is 0. An isolated child uses one connection at a time: for the RUNNING
+update, and for the finalizing mark. Its pool is `IsolatedChildren.pool`, 0 to
+2 connections by default; see
+[Connection Pools and the Default Executor](/horsies/workers/worker-profiles/#connection-pools-and-the-default-executor). The seats of a
 shared child share the pool of the child for the same writes. See
 [Connections](/horsies/workers/shared-thread-tasks/#connections). The worker process holds one more
 connection, for the runner heartbeats.

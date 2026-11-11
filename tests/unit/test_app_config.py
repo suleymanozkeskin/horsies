@@ -18,7 +18,7 @@ from horsies.core.errors import (
 from horsies.core.models.app import AppConfig
 from datetime import timedelta
 
-from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.broker import MOVED_TO_WORKER_PROFILE, PostgresConfig
 from horsies.core.models.queues import CustomQueueConfig, QueueMode
 from horsies.core.models.health import WORKER_STATE_LIVE_WINDOW_S
 from horsies.core.models.recovery import (
@@ -68,8 +68,6 @@ class TestPostgresConfigPgBouncer:
         assert config.max_overflow == 10
         assert config.worker_pool_size == 3
         assert config.worker_max_overflow == 2
-        assert config.worker_child_pool_min_size == 0
-        assert config.worker_child_pool_max_size == 2
 
         worker_config = config.worker_runtime_config()
 
@@ -100,16 +98,12 @@ class TestPostgresConfigPgBouncer:
 
         assert 'worker_pool_size' not in kwargs
         assert 'worker_max_overflow' not in kwargs
-        assert 'worker_child_pool_min_size' not in kwargs
-        assert 'worker_child_pool_max_size' not in kwargs
 
     @pytest.mark.parametrize(
         ('field', 'value'),
         [
             ('worker_pool_size', 0),
             ('worker_max_overflow', -1),
-            ('worker_child_pool_min_size', -1),
-            ('worker_child_pool_max_size', 0),
         ],
     )
     def test_worker_pool_rejects_invalid_bounds(
@@ -125,15 +119,74 @@ class TestPostgresConfigPgBouncer:
 
         assert exc_info.value.code == ErrorCode.CONFIG_INVALID_BROKER_POOL
 
-    def test_worker_child_pool_min_must_not_exceed_max(self) -> None:
+    @pytest.mark.parametrize(
+        ('field', 'value', 'pool_argument'),
+        [
+            ('worker_child_pool_min_size', 1, 'min_size=N'),
+            (
+                'worker_child_pool_max_size',
+                4,
+                'max_size=PoolSize(connections=N)',
+            ),
+            ('worker_child_pool_check', False, 'check=False'),
+        ],
+    )
+    def test_a_removed_child_pool_field_is_refused(
+        self,
+        field: str,
+        value: object,
+        pool_argument: str,
+    ) -> None:
+        """A config that still sets a child pool field of 0.6 fails at
+        build, and the help names the pool of each child kind."""
         with pytest.raises(ConfigurationError) as exc_info:
-            PostgresConfig(
-                database_url='postgresql+psycopg://user:pass@localhost/db',
-                worker_child_pool_min_size=3,
-                worker_child_pool_max_size=2,
+            PostgresConfig.model_validate(
+                {
+                    'database_url': 'postgresql+psycopg://user:pass@localhost/db',
+                    field: value,
+                },
             )
 
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_BROKER_POOL
+        error = exc_info.value
+        assert error.code == ErrorCode.CONFIG_INVALID_BROKER_POOL
+        assert error.message == f'{field} was removed in 0.7.0'
+        assert f'IsolatedChildren(pool=IsolatedPool({pool_argument}))' in (
+            error.help_text or ''
+        )
+        assert f'SharedAsyncChildren(pool=SharedPool({pool_argument}))' in (
+            error.help_text or ''
+        )
+        assert f'SharedThreadChildren(pool=SharedPool({pool_argument}))' in (
+            error.help_text or ''
+        )
+
+    def test_every_removed_child_pool_field_is_reported_at_once(self) -> None:
+        with pytest.raises(MultipleValidationErrors) as exc_info:
+            PostgresConfig.model_validate(
+                {
+                    'database_url': 'postgresql+psycopg://user:pass@localhost/db',
+                    'worker_child_pool_min_size': 0,
+                    'worker_child_pool_max_size': 2,
+                    'worker_child_pool_check': True,
+                },
+            )
+
+        messages = [error.message for error in exc_info.value.report.errors]
+        assert messages == [
+            'worker_child_pool_min_size was removed in 0.7.0',
+            'worker_child_pool_max_size was removed in 0.7.0',
+            'worker_child_pool_check was removed in 0.7.0',
+        ]
+
+    def test_the_removed_child_pool_fields_are_no_fields(self) -> None:
+        """The refusal list and the model agree: no removed field is still a
+        field of the model."""
+        assert set(MOVED_TO_WORKER_PROFILE) == {
+            'worker_child_pool_min_size',
+            'worker_child_pool_max_size',
+            'worker_child_pool_check',
+        }
+        assert not set(MOVED_TO_WORKER_PROFILE) & set(PostgresConfig.model_fields)
 
     def test_effective_session_database_url_defaults_to_database_url(self) -> None:
         config = PostgresConfig(
