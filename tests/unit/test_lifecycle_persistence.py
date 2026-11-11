@@ -94,7 +94,7 @@ def test_reconstructs_by_ordinal_instead_of_result_order() -> None:
     outcomes = _reconstruct_id_keyed_batch(
         [_outcome('two', 2), _outcome('one', 1)],
         expected_count=2,
-        command=_command(),
+        operation=type(_command()).__name__,
     )
 
     assert [outcome.task_id for outcome in outcomes] == ['one', 'two']
@@ -117,7 +117,7 @@ def test_rejects_an_invalid_ordinal_contract(
         _reconstruct_id_keyed_batch(
             outcomes,
             expected_count=2,
-            command=_command(),
+            operation=type(_command()).__name__,
         )
 
 
