@@ -63,6 +63,7 @@ async def _seed(
     status: str = 'PENDING',
     owner: str | None = None,
     lease: str | None = None,
+    queue: str = QUEUE,
 ) -> str:
     """Insert one row. ``lease`` is 'live' or 'expired' for a CLAIMED row."""
     task_id = str(uuid.uuid4())
@@ -86,7 +87,7 @@ async def _seed(
         {
             'id': task_id,
             'name': task_name,
-            'q': QUEUE,
+            'q': queue,
             'p': priority,
             'status': status,
             'age': age_secs,
@@ -132,12 +133,15 @@ def _params(
     prefetch_buffer: int = 0,
     max_claim_per_worker: int = 0,
     max_claim_batch: int = 0,
+    queues: tuple[str, ...] = (QUEUE,),
+    queue_priority: dict[str, int] | None = None,
+    queue_max_concurrency: dict[str, int] | None = None,
 ) -> dict[str, object]:
     return {
         'p_worker_id': worker_id,
-        'p_queues': json.dumps([QUEUE]),
-        'p_queue_priority': json.dumps({}),
-        'p_queue_max_concurrency': json.dumps({}),
+        'p_queues': json.dumps(list(queues)),
+        'p_queue_priority': json.dumps(queue_priority or {}),
+        'p_queue_max_concurrency': json.dumps(queue_max_concurrency or {}),
         'p_hard_cap_mode': prefetch_buffer == 0,
         'p_budgets': json.dumps(budgets),
         'p_routes': json.dumps(routes),
@@ -398,6 +402,56 @@ class TestBudgets:
             'SHARED_ASYNC': 1,
         }
 
+    async def test_a_budget_with_no_capacity_in_service_gets_no_prefetch(
+        self,
+        clean_workflow_tables: None,
+        broker: PostgresBroker,
+        session: AsyncSession,
+    ) -> None:
+        """Every SHARED_ASYNC seat is down (capacity 0) and prefetch is 3. The
+        async rows rank first and stay for a worker with seats; the ISOLATED
+        budget of 1 still prefetches 3."""
+        for _ in range(5):
+            await _seed(session, execution='SHARED_ASYNC', priority=1)
+            await _seed(session, execution='ISOLATED', priority=2)
+        await session.commit()
+
+        claimed = await _claim(
+            broker,
+            _params(
+                worker_id=_worker_id(),
+                budgets={'ISOLATED': 1, 'SHARED_ASYNC': 0},
+                routes=ISOLATED_AND_ASYNC_ROUTES,
+                prefetch_buffer=3,
+            ),
+        )
+
+        assert Counter(execution for _, execution in claimed) == {'ISOLATED': 4}
+
+    async def test_a_worker_with_no_capacity_in_service_claims_nothing(
+        self,
+        clean_workflow_tables: None,
+        broker: PostgresBroker,
+        session: AsyncSession,
+    ) -> None:
+        """Every child of the worker is down: prefetch takes no row."""
+        for _ in range(3):
+            await _seed(session, execution='SHARED_ASYNC')
+            await _seed(session, execution='ISOLATED')
+        await session.commit()
+
+        claimed = await _claim(
+            broker,
+            _params(
+                worker_id=_worker_id(),
+                budgets={'ISOLATED': 0, 'SHARED_ASYNC': 0},
+                routes=ISOLATED_AND_ASYNC_ROUTES,
+                prefetch_buffer=2,
+            ),
+        )
+
+        assert claimed == []
+
     async def test_a_route_to_a_budget_that_is_not_passed_is_refused(
         self,
         clean_workflow_tables: None,
@@ -418,6 +472,143 @@ class TestBudgets:
             'horsies_claim: p_routes names a budget class that p_budgets '
             'does not hold'
         )
+
+
+class TestOneWalk:
+    """The pass takes rows in one walk in rank order. A row that its budget
+    drops takes no room of its queue or of the pass from another class."""
+
+    async def test_a_row_its_budget_drops_takes_no_queue_room(
+        self,
+        clean_workflow_tables: None,
+        broker: PostgresBroker,
+        session: AsyncSession,
+    ) -> None:
+        """Queue P ranks first and fills the ISOLATED budget. Queue Q (cap 2)
+        holds older ISOLATED rows, which the full budget drops, then
+        SHARED_ASYNC rows: Q's room of 2 goes to those."""
+        p_rows = [
+            await _seed(
+                session, execution='ISOLATED', age_secs=1000 - i, queue='walk_p'
+            )
+            for i in range(5)
+        ]
+        for i in range(5):
+            await _seed(session, execution='ISOLATED', age_secs=900 - i, queue='walk_q')
+        q_async = [
+            await _seed(
+                session, execution='SHARED_ASYNC', age_secs=100 - i, queue='walk_q'
+            )
+            for i in range(5)
+        ]
+        await session.commit()
+
+        claimed = await _claim(
+            broker,
+            _params(
+                worker_id=_worker_id(),
+                budgets={'ISOLATED': 2, 'SHARED_ASYNC': 2},
+                routes=ISOLATED_AND_ASYNC_ROUTES,
+                queues=('walk_p', 'walk_q'),
+                queue_priority={'walk_p': 1, 'walk_q': 2},
+                queue_max_concurrency={'walk_q': 2},
+            ),
+        )
+
+        assert claimed == [
+            (p_rows[0], 'ISOLATED'),
+            (p_rows[1], 'ISOLATED'),
+            (q_async[0], 'SHARED_ASYNC'),
+            (q_async[1], 'SHARED_ASYNC'),
+        ]
+
+    async def test_expired_rows_of_a_full_budget_leave_the_other_budget_its_seats(
+        self,
+        clean_workflow_tables: None,
+        broker: PostgresBroker,
+        session: AsyncSession,
+    ) -> None:
+        """A crashed worker left 10 ISOLATED rows with expired leases. They
+        and the pending ISOLATED rows rank before the SHARED_ASYNC rows, and
+        the ISOLATED budget takes 2: the 2 async seats still fill."""
+        expired = [
+            await _seed(
+                session,
+                execution='ISOLATED',
+                age_secs=2000 - i,
+                status='CLAIMED',
+                owner='crashed-worker',
+                lease='expired',
+            )
+            for i in range(10)
+        ]
+        for i in range(5):
+            await _seed(session, execution='ISOLATED', age_secs=1000 - i)
+        pending_async = [
+            await _seed(session, execution='SHARED_ASYNC', age_secs=100 - i)
+            for i in range(5)
+        ]
+        await session.commit()
+
+        claimed = await _claim(
+            broker,
+            _params(
+                worker_id=_worker_id(),
+                budgets={'ISOLATED': 2, 'SHARED_ASYNC': 2},
+                routes=ISOLATED_AND_ASYNC_ROUTES,
+            ),
+        )
+
+        assert claimed == [
+            (expired[0], 'ISOLATED'),
+            (expired[1], 'ISOLATED'),
+            (pending_async[0], 'SHARED_ASYNC'),
+            (pending_async[1], 'SHARED_ASYNC'),
+        ]
+
+    async def test_a_stream_reads_its_pending_and_expired_rows_as_one_order(
+        self,
+        clean_workflow_tables: None,
+        broker: PostgresBroker,
+        session: AsyncSession,
+    ) -> None:
+        """Pending and expired rows of one class interleave in priority; a
+        budget of 3 takes the 3 best of both, not 3 of each."""
+        first = await _seed(session, execution='ISOLATED', priority=1)
+        second = await _seed(
+            session,
+            execution='ISOLATED',
+            priority=2,
+            status='CLAIMED',
+            owner='crashed-worker',
+            lease='expired',
+        )
+        third = await _seed(session, execution='ISOLATED', priority=3)
+        await _seed(
+            session,
+            execution='ISOLATED',
+            priority=4,
+            status='CLAIMED',
+            owner='crashed-worker',
+            lease='expired',
+        )
+        await _seed(session, execution='ISOLATED', priority=5)
+        await session.commit()
+
+        claimed = await _claim(
+            broker,
+            _params(
+                worker_id=_worker_id(),
+                budgets={'ISOLATED': 3},
+                routes=ISOLATED_ROUTES,
+            ),
+        )
+
+        assert claimed == [
+            (first, 'ISOLATED'),
+            (second, 'ISOLATED'),
+            (third, 'ISOLATED'),
+        ]
 
 
 class TestExpiredArm:
@@ -605,6 +796,52 @@ class TestLocks:
         assert claimed == [(second, 'ISOLATED')]
 
 
+class TestShortTake:
+    async def test_a_take_short_of_its_plan_asks_for_another_pass(
+        self,
+        clean_workflow_tables: None,
+        broker: PostgresBroker,
+        session: AsyncSession,
+    ) -> None:
+        """Another claim holds the 4 ISOLATED rows that rank first, and the
+        budget of 4 plans them. The take gets none of them, and the stream
+        has no other row: the pass reports the 4 it missed and asks for
+        another pass. After the other claim commits, that pass takes the
+        SHARED_THREAD rows that the first plan left out."""
+        held = [
+            await _seed(session, execution='ISOLATED', priority=1) for _ in range(4)
+        ]
+        waiting = [
+            await _seed(session, execution='SHARED_THREAD', priority=10)
+            for _ in range(2)
+        ]
+        await session.commit()
+        probe = _Probe(broker, {})
+
+        engine = current_resources(broker).engine
+        async with engine.connect() as other_claim:
+            transaction = await other_claim.begin()
+            await other_claim.execute(
+                text("""
+                    UPDATE horsies_tasks
+                    SET status = 'CLAIMED', claimed = TRUE,
+                        claimed_by_worker_id = 'other-worker',
+                        claimed_at = now(),
+                        claim_expires_at = now() + interval '1 hour'
+                    WHERE id = ANY(CAST(:ids AS uuid[]))
+                """),
+                {'ids': held},
+            )
+            first = await probe._claim_and_dispatch_all()
+            await transaction.commit()
+        second = await probe._claim_and_dispatch_all()
+
+        assert first == ClaimPass(claimed=0, dropped=0, short_of_plan=4)
+        assert first.left_unannounced_work(limited=False, short_passes_before=0)
+        assert second == ClaimPass(claimed=2, dropped=0, short_of_plan=0)
+        assert sorted(probe.dispatched) == sorted(waiting)
+
+
 class _Probe(ClaimMixin):
     """A claim pass with no slot pool; records each dispatched task id."""
 
@@ -665,8 +902,8 @@ class TestClassMismatch:
 
         first = await probe._claim_and_dispatch_all()
 
-        assert first == ClaimPass(claimed=1, dropped=1)
-        assert first.left_unannounced_work(limited=False)
+        assert first == ClaimPass(claimed=1, dropped=1, short_of_plan=0)
+        assert first.left_unannounced_work(limited=False, short_passes_before=0)
         assert probe.dispatched == []
         assert await _row_state(session, task_id) == (
             'PENDING',
@@ -677,7 +914,7 @@ class TestClassMismatch:
 
         second = await probe._claim_and_dispatch_all()
 
-        assert second == ClaimPass(claimed=1, dropped=0)
+        assert second == ClaimPass(claimed=1, dropped=0, short_of_plan=0)
         assert probe.dispatched == [task_id]
 
     async def test_a_return_with_a_stale_claim_generation_changes_nothing(

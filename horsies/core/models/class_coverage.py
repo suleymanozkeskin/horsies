@@ -4,7 +4,9 @@ A pending stream is the ``PENDING`` rows of one queue and one execution
 class. A live worker serves a stream when the queue is one of its queues and
 one of its claim budgets serves the class (``ClassBudget.serves``). A worker
 is live while its latest state snapshot is at most
-``WORKER_STATE_LIVE_WINDOW_S`` old.
+``WORKER_STATE_LIVE_WINDOW_S`` old. A live worker whose snapshot does not
+record its budgets (``ClassesNotRecorded``) is left out of every stream and
+named in the result.
 
 The types are frozen reports. The functions are pure; the database reads
 that feed them live in ``horsies.core.brokers.class_coverage_reads``.
@@ -69,17 +71,33 @@ class StreamCoverage:
 
 
 @dataclass(slots=True, frozen=True)
+class ClassesNotRecorded:
+    """A live worker whose latest snapshot has no ``class_capacity``.
+
+    A worker version that does not record its claim budgets wrote it, so the
+    classes that the worker serves are unknown. The class reads leave the
+    worker out of every stream and name it here.
+    """
+
+    worker_id: str
+    snapshot_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
 class ClassCoverage:
     """The coverage of every pending stream, read at ``checked_at``.
 
     ``checked_at`` is database time. ``live_workers`` counts the workers
-    whose latest snapshot was live. ``streams`` holds one entry per (queue,
-    class) that has ``PENDING`` rows, ordered by queue name, then by
-    ``Execution`` order. Empty when no row is pending.
+    whose latest snapshot was live and recorded their budgets; the coverage
+    of each stream comes from these. ``not_recorded`` holds the live workers
+    whose snapshot did not record them, by worker id. ``streams`` holds one
+    entry per (queue, class) that has ``PENDING`` rows, ordered by queue
+    name, then by ``Execution`` order. Empty when no row is pending.
     """
 
     checked_at: datetime
     live_workers: int
+    not_recorded: tuple[ClassesNotRecorded, ...]
     streams: tuple[StreamCoverage, ...]
 
 
@@ -157,12 +175,15 @@ class ClassReport:
     """Pending streams and the budget load of each live worker.
 
     ``checked_at`` is database time. ``streams`` is ordered like
-    ``ClassCoverage.streams``; ``workers`` by worker id.
+    ``ClassCoverage.streams``; ``workers`` by worker id. ``workers`` holds the
+    live workers that recorded their budgets; ``not_recorded`` the live
+    workers that did not (``ClassesNotRecorded``), by worker id.
     """
 
     checked_at: datetime
     streams: tuple[PendingStream, ...]
     workers: tuple[WorkerClassLoad, ...]
+    not_recorded: tuple[ClassesNotRecorded, ...]
 
 
 @dataclass(slots=True, frozen=True)
@@ -195,17 +216,20 @@ class StreamHead:
     enqueued_at: datetime
 
 
+LiveSnapshot: TypeAlias = LiveWorker | ClassesNotRecorded
+
+
 def live_worker(
     worker_id: str,
     snapshot_at: datetime,
     queues: Sequence[str],
     class_capacity: object,
-) -> Result[LiveWorker, ClassReadRefused]:
+) -> Result[LiveSnapshot, ClassReadRefused]:
     """Build a live worker from its latest snapshot row.
 
-    ``Err``: the stored ``class_capacity`` is unreadable, or it is NULL. A
-    NULL value comes from a worker version that did not record its budgets,
-    so its routes are unknown and no stream can be decided. Reads only.
+    A NULL ``class_capacity`` gives ``ClassesNotRecorded``: a worker version
+    that did not record its budgets wrote it. ``Err``: the stored value is
+    unreadable. Reads only.
     """
     match parse_class_capacity(class_capacity):
         case Ok(capacity):
@@ -221,12 +245,7 @@ def live_worker(
         case ClassBudgets(budgets=budgets):
             return Ok(LiveWorker(worker_id, snapshot_at, frozenset(queues), budgets))
         case ClassCapacityNotRecorded():
-            return Err(
-                ClassReadRefused(
-                    f'worker {worker_id} is live and its snapshot at {snapshot_at} '
-                    'has no class_capacity, so the classes it serves are unknown',
-                ),
-            )
+            return Ok(ClassesNotRecorded(worker_id, snapshot_at))
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -270,12 +289,15 @@ def stream_wait(heads: Sequence[datetime], checked_at: datetime) -> StreamWait:
 def class_coverage(
     checked_at: datetime,
     workers: Sequence[LiveWorker],
+    not_recorded: Sequence[ClassesNotRecorded],
     streams: Sequence[tuple[str, Execution]],
 ) -> ClassCoverage:
-    """The coverage of each pending (queue, class) in ``streams``."""
+    """The coverage of each pending (queue, class) in ``streams`` by
+    ``workers``; ``not_recorded`` is carried as it is, by worker id."""
     return ClassCoverage(
         checked_at=checked_at,
         live_workers=len(workers),
+        not_recorded=_by_worker_id(not_recorded),
         streams=tuple(
             StreamCoverage(
                 queue_name, execution, stream_coverage(queue_name, execution, workers)
@@ -288,13 +310,15 @@ def class_coverage(
 def class_report(
     checked_at: datetime,
     workers: Sequence[LiveWorker],
+    not_recorded: Sequence[ClassesNotRecorded],
     heads: Sequence[StreamHead],
     in_flight: Mapping[tuple[str, Execution], int],
 ) -> Result[ClassReport, ClassReadRefused]:
     """Pending streams from their heads, and the budget load of each live worker.
 
     ``in_flight`` maps (worker id, class) to the rows that the worker holds.
-    ``Err``: a worker holds rows of a class that none of its budgets serves.
+    ``not_recorded`` is carried as it is, by worker id. ``Err``: a worker
+    holds rows of a class that none of its budgets serves.
     """
     grouped: dict[tuple[str, Execution], list[datetime]] = {}
     for head in heads:
@@ -324,7 +348,14 @@ def class_report(
                 )
             case Err(refused):
                 return Err(refused)
-    return Ok(ClassReport(checked_at=checked_at, streams=streams, workers=tuple(loads)))
+    return Ok(
+        ClassReport(
+            checked_at=checked_at,
+            streams=streams,
+            workers=tuple(loads),
+            not_recorded=_by_worker_id(not_recorded),
+        ),
+    )
 
 
 def budget_loads(
@@ -357,6 +388,12 @@ def budget_loads(
             for budget in worker.budgets
         ),
     )
+
+
+def _by_worker_id(
+    workers: Sequence[ClassesNotRecorded],
+) -> tuple[ClassesNotRecorded, ...]:
+    return tuple(sorted(workers, key=lambda worker: worker.worker_id))
 
 
 def _stream_order(stream: tuple[str, Execution]) -> tuple[str, int]:

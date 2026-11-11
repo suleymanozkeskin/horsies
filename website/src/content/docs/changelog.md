@@ -87,16 +87,23 @@ there is no migration contract between pre-1.0 versions.
     (every child or seat of the serving budgets is down) or `StreamUnserved()`.
     A worker is live while its latest snapshot is at most 120 seconds old
     (`WORKER_STATE_LIVE_WINDOW_S`, the threshold at which the web UI already
-    marked a worker stale). A live snapshot without readable budgets fails the
-    read and names the worker.
+    marked a worker stale). A live snapshot without `class_capacity`, from a
+    worker version that does not record its budgets, leaves that worker out:
+    it serves no stream, is not in `live_workers`, and `not_recorded` names
+    it (`ClassesNotRecorded(worker_id, snapshot_at)`, by worker id). A live
+    snapshot whose value is unreadable fails the read and names the worker.
   - Each reaper pass runs the check, one check interval after the worker
     starts. An unserved (queue, class) logs an error, one without capacity a
     warning; each worker logs one (queue, class) at most once per 5 minutes.
+    The workers left out log one warning per 5 minutes that names up to 10 of
+    them.
     This covers a shared task that went back to the queue as `ISOLATED` while
     no live worker has isolated children.
   - `get_class_report()` adds the wait of each stream's oldest due row
     (`OldestWaiting` or `NoneDue`) and, per live worker, each budget's
-    capacity, rows in flight and free capacity (`BudgetLoad`).
+    capacity, rows in flight and free capacity (`BudgetLoad`). It names the
+    workers left out in `not_recorded` too; `GET /api/workers/classes`
+    returns them in `not_recorded`.
   - Both reads probe `idx_horsies_tasks_claim_pending_class`: the check once
     per pending (queue, class), the report once per (queue, class, priority).
     Each read has a bound and fails closed at it.
@@ -314,8 +321,11 @@ there is no migration contract between pre-1.0 versions.
   - `ClaimLimits.per_queue_per_pass`, `ClaimLimits.claimed_per_worker`, the
     queue caps and `cluster_wide_cap` apply to the worker as a whole. In soft
     cap mode each budget, and the worker, may hold `prefetch_buffer` rows
-    more than its capacity. The capacity that `HRS-218` compares with is the
-    sum of the budgets plus `prefetch_buffer`.
+    more than its capacity. A budget whose capacity in service is 0 (every
+    child or seat of it is down) gets no prefetch, and neither does a worker
+    whose budgets are all at 0: their rows stay for a worker with seats. The
+    capacity that `HRS-218` compares with is the sum of the budgets plus
+    `prefetch_buffer`.
   - A claimed row of a shared class whose task, as this worker registered it,
     has another class (for example `SHARED_ASYNC` on the row, and the
     function is now `def`) is written `ISOLATED` and returned to `PENDING`,
@@ -336,27 +346,51 @@ there is no migration contract between pre-1.0 versions.
   A worker that cannot write runner heartbeats and has not stopped 120 s
   after it started to stop exits with 77, also new.
 - **Breaking: the claim function takes a budget per execution class.**
-  `horsies_claim` takes `p_budgets` and `p_routes` in place of `p_processes`,
-  and returns each row's `execution`. Schema v55 drops the earlier signature,
-  so a 0.6.x worker fails every claim pass after a 0.7.0 process migrates.
+  `horsies_claim` takes `p_budgets` and `p_routes` in place of `p_processes`.
+  It returns a `row_kind` column: one `'CLAIMED'` row per task it took, with
+  the row's `execution`, and one `'SHORT'` row when it took fewer rows than
+  it chose, with that count in `short_by`. Schema v55 drops the earlier
+  signature, so a 0.6.x worker fails every claim pass after a 0.7.0 process
+  migrates.
   Stop every 0.6.x worker before the first 0.7.0 worker starts.
-  - A claim pass reads the head of each (queue, class) stream without locks,
-    then takes the rows it needs from each stream with `FOR UPDATE SKIP
-    LOCKED`. It locks only the rows it takes. Before, a pass over two queues
-    of equal priority could lock up to its batch in each queue and return
-    one batch.
+  - A claim pass reads the head of each (queue, class) stream without locks:
+    its pending rows and its rows with an expired lease, in one order. One
+    walk over all heads in rank order (queue priority, priority,
+    `enqueued_at`, id) takes a row when its queue, its budget and the pass
+    each have room left, so a row that one limit drops takes no room that
+    another class could use. The pass then takes the chosen rows from each
+    stream with `FOR UPDATE SKIP LOCKED`. It locks only the rows it takes.
+    Before, a pass over two queues of equal priority could lock up to its
+    batch in each queue and return one batch.
+  - A row that another claim holds at the take is skipped, and the stream
+    goes on to its next row. When a pass takes fewer rows than it chose,
+    because another transaction held or took them, the worker runs the next
+    pass at once, as no `NOTIFY` announces the rows that remain. At most 3
+    such passes run in a row; after that the worker waits for its next
+    wake.
   - v55 builds `idx_horsies_tasks_claim_expired_class` on `(queue_name,
     execution, priority, enqueued_at, id)` over CLAIMED rows concurrently,
     and drops `idx_horsies_tasks_claim_pending` and
-    `idx_horsies_tasks_claim_expired_ordered` concurrently. Each claim stream
+    `idx_horsies_tasks_claim_expired_ordered` concurrently after its version
+    row commits, so an upgrade that fails leaves the earlier claim function
+    the indexes it reads. Each claim stream
     is one range of `idx_horsies_tasks_claim_pending_class` or of the new
     index. With 50,000 expired leases in one queue, the expired stream of a
     class with no rows reads 142 buffers on the new index and 7,848 on the
     unclassed one.
-  - Both claim functions run with `jit = off`. Their generic plan passed
+  - The claim functions `horsies_claim`, `horsies_claim_plan` and
+    `horsies_claim_candidates` run with `jit = off`. Their generic plan passed
     `jit_above_cost`, so a server with JIT compiled the statement on every
     pass: 26 to 47 ms per pass against 0.7 to 1.8 ms of work, at a 90,000-row
     backlog on PostgreSQL 17.
+- **A schema upgrade keeps each claim and recovery index whose form
+  matches.** An index whose catalog form matches its declaration is kept. One
+  of another form, or an invalid one, is built concurrently under a temporary
+  name; then one transaction renames the old index away and the new one to
+  its name, and the old one is dropped concurrently. Running workers keep an
+  index of that name throughout. Before, each upgrade dropped the recovery
+  indexes and built them again, and the scans that read them ran without
+  them meanwhile.
 - **Breaking: a slot that cannot start a child for a cause that can clear no
   longer stops the worker.** A child that fails its start now reports the
   cause to the worker before it exits.

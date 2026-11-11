@@ -388,6 +388,7 @@ class TestRegisteredClasses:
 # --- the claim pass of a Worker, with the database mocked ---
 
 _COLUMNS = [
+    'row_kind',
     'id',
     'task_name',
     'args',
@@ -397,6 +398,7 @@ _COLUMNS = [
     'task_options',
     'claimed_at',
     'execution',
+    'short_by',
 ]
 
 
@@ -436,6 +438,7 @@ def _session(
 
 def _row(task_id: str, task_name: str, execution: str) -> tuple[object, ...]:
     return (
+        'CLAIMED',
         task_id,
         task_name,
         '[]',
@@ -445,6 +448,7 @@ def _row(task_id: str, task_name: str, execution: str) -> tuple[object, ...]:
         None,
         'GEN-' + task_id,
         execution,
+        None,
     )
 
 
@@ -487,7 +491,7 @@ class TestClaimPassWithClasses:
         with caplog.at_level(logging.WARNING, logger='horsies.worker'):
             claim_pass = await worker._claim_and_dispatch_all()
 
-        assert claim_pass == ClaimPass(claimed=2, dropped=1)
+        assert claim_pass == ClaimPass(claimed=2, dropped=1, short_of_plan=0)
         dispatched = [call.args[0] for call in worker._dispatch_one.await_args_list]
         assert dispatched == ['t2']
         returns = [
@@ -527,7 +531,7 @@ class TestClaimPassWithClasses:
         with caplog.at_level(logging.WARNING, logger='horsies.worker'):
             claim_pass = await worker._claim_and_dispatch_all()
 
-        assert claim_pass == ClaimPass(claimed=1, dropped=1)
+        assert claim_pass == ClaimPass(claimed=1, dropped=1, short_of_plan=0)
         worker._dispatch_one.assert_not_awaited()
         assert NOTIFY_TASK_QUEUE_SQL not in _statements(session)
         assert 'the claim was lost, so the row was left as it is' in caplog.text
@@ -549,7 +553,7 @@ class TestClaimPassWithClasses:
 
         claim_pass = await worker._claim_and_dispatch_all()
 
-        assert claim_pass == ClaimPass(claimed=3, dropped=0)
+        assert claim_pass == ClaimPass(claimed=3, dropped=0, short_of_plan=0)
         assert RETURN_CLAIMED_TASK_AS_ISOLATED_SQL not in _statements(session)
         dispatched = [call.args[0] for call in worker._dispatch_one.await_args_list]
         assert dispatched == ['t1', 't2', 't3']

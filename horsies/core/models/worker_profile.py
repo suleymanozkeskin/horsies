@@ -313,7 +313,9 @@ class ClaimLimits(BaseModel):
       one queue. With ``NoTaskLimit()``, one pass fills the free capacity.
     - ``claimed_per_worker``: the most CLAIMED tasks (claimed, not yet
       running) that the worker holds. With ``NoTaskLimit()``, the capacity
-      is the limit.
+      is the limit. It counts the CLAIMED rows of every class, so rows that
+      one class prefetched can stop the claims of another class whose seats
+      are free.
     """
 
     model_config = ConfigDict(extra='forbid', frozen=True)

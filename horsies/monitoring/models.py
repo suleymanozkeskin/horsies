@@ -376,6 +376,17 @@ class WorkerClassLoadInfo(BaseModel):
     budgets: list[BudgetLoadInfo]
 
 
+class ClassesNotRecordedInfo(BaseModel):
+    """A live worker whose snapshot does not record its claim budgets.
+
+    A worker version that does not record them wrote the snapshot; the report
+    leaves the worker out of every stream.
+    """
+
+    worker_id: str
+    snapshot_at: datetime
+
+
 class StreamServedInfo(BaseModel):
     """Live workers serve the stream with capacity in service.
 
@@ -436,13 +447,16 @@ class ClassReportInfo(BaseModel):
 
     ``checked_at`` is database time. A worker is live while its latest
     snapshot is at most ``live_window_s`` old. ``streams`` is ordered by
-    queue name, then by execution class.
+    queue name, then by execution class. ``workers`` holds the live workers
+    that recorded their claim budgets, ``not_recorded`` the live workers
+    that did not, by worker id.
     """
 
     checked_at: datetime
     live_window_s: int
     streams: list[PendingStreamInfo]
     workers: list[WorkerClassLoadInfo]
+    not_recorded: list[ClassesNotRecordedInfo]
 
 
 class WorkerPingInfo(BaseModel):

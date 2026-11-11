@@ -15,10 +15,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Optional, assert_never
+from typing import TYPE_CHECKING, Any, Final, Optional, assert_never
 
 from horsies.core.defaults import DEFAULT_CLAIM_LEASE_MS
 from horsies.core.lifecycle.commands import AbandonOwnedNodes, CancelOwnedNodes
@@ -123,6 +123,56 @@ def _resumed_before_abandon_task_ids(
     return task_ids
 
 
+# The most claim passes in a row that run again with no wait because each
+# took fewer rows than it planned. A transaction that holds planned rows for
+# longer leaves the worker to its next wake: a NOTIFY, a capacity release, or
+# the poll interval.
+SHORT_PASS_REPASS_LIMIT: Final = 3
+
+
+@dataclass(frozen=True, slots=True)
+class ClaimRows:
+    """The rows of one ``horsies_claim`` call.
+
+    ``tasks`` holds the rows that the call took, in dispatch order.
+    ``short_of_plan`` counts the rows that its plan chose and its take did
+    not get: another transaction held or took them. 0 when the take got
+    every planned row.
+    """
+
+    tasks: list[dict[str, Any]]
+    short_of_plan: int
+
+
+def read_claim_rows(
+    columns: Sequence[str],
+    rows: Sequence[Sequence[Any]],
+) -> ClaimRows:
+    """Split the rows of ``HORSIES_CLAIM_SQL`` by their ``row_kind``.
+
+    A ``'CLAIMED'`` row is a task. At most one ``'SHORT'`` row carries
+    ``short_by``, 1 or more. Another ``row_kind``, a second ``'SHORT'`` row,
+    or a ``short_by`` below 1 is a defect of the claim function
+    (``AssertionError``). Does no I/O.
+    """
+    tasks: list[dict[str, Any]] = []
+    short_rows: list[int] = []
+    for values in rows:
+        row = dict(zip(columns, values))
+        match row['row_kind']:
+            case 'CLAIMED':
+                tasks.append(row)
+            case 'SHORT':
+                short_rows.append(int(row['short_by']))
+            case other:
+                raise AssertionError(f'horsies_claim returned row_kind {other!r}')
+    assert len(short_rows) <= 1, f'horsies_claim returned SHORT rows {short_rows}'
+    assert all(
+        short >= 1 for short in short_rows
+    ), f'horsies_claim returned short_by {short_rows}'
+    return ClaimRows(tasks=tasks, short_of_plan=sum(short_rows))
+
+
 @dataclass(frozen=True, slots=True)
 class ClaimPass:
     """What one claim pass did.
@@ -131,25 +181,49 @@ class ClaimPass:
     the rows of those that the post-claim checks gave up: rows of a paused or
     cancelled workflow, and rows returned to the queue because their class
     does not fit the registered task. They used claim budget and hold no slot.
+    ``short_of_plan`` counts the rows that the claim planned and did not take
+    (``ClaimRows.short_of_plan``).
     """
 
     claimed: int
     dropped: int
+    short_of_plan: int
 
-    def left_unannounced_work(self, *, limited: bool) -> bool:
+    def left_unannounced_work(
+        self,
+        *,
+        limited: bool,
+        short_passes_before: int,
+    ) -> bool:
         """Whether ready work can remain that no wake would announce.
 
         A dropped row used budget that ready work could have had, and it frees
         no slot, so no capacity release follows. A pass under ``max_claim_batch``
-        can stop with free slots. In both cases the NOTIFY of that work was
-        already consumed. A row of a paused workflow cannot be claimed again
-        until a resume, and a row returned for its class is ISOLATED, which
-        always fits, so a loop on this ends.
+        can stop with free slots. A pass that took fewer rows than it planned
+        can stop with free slots while rows that its plan did not choose are
+        ready. In each case the NOTIFY of that work was already consumed. A row
+        of a paused workflow cannot be claimed again until a resume, and a row
+        returned for its class is ISOLATED, which always fits, so a loop on
+        these ends. A short take asks for another pass only while fewer than
+        ``SHORT_PASS_REPASS_LIMIT`` passes before it in a row were short.
 
         Args:
             limited: Whether ``max_claim_batch`` caps the pass.
+            short_passes_before: How many passes in a row before this one took
+                fewer rows than they planned (``short_passes_after``).
         """
-        return self.dropped > 0 or (limited and self.claimed > 0)
+        return (
+            self.dropped > 0
+            or (limited and self.claimed > 0)
+            or (
+                self.short_of_plan > 0 and short_passes_before < SHORT_PASS_REPASS_LIMIT
+            )
+        )
+
+    def short_passes_after(self, short_passes_before: int) -> int:
+        """How many passes in a row, ending with this one, took fewer rows
+        than they planned."""
+        return short_passes_before + 1 if self.short_of_plan > 0 else 0
 
 
 class ClaimMixin:
@@ -211,14 +285,16 @@ class ClaimMixin:
         params = self._claim_params()
         async with self.sf() as s:
             res = await s.execute(HORSIES_CLAIM_SQL, params)
-            cols = res.keys()
-            claimed_rows: list[dict[str, Any]] = [
-                dict(zip(cols, row)) for row in res.fetchall()
-            ]
+            claim_rows = read_claim_rows(list(res.keys()), res.fetchall())
             await s.commit()
 
+        claimed_rows = claim_rows.tasks
         if not claimed_rows:
-            return ClaimPass(claimed=0, dropped=0)
+            return ClaimPass(
+                claimed=0,
+                dropped=0,
+                short_of_plan=claim_rows.short_of_plan,
+            )
 
         # Post-claim guard: filter out tasks for non-runnable workflow states.
         dispatchable_rows = await self._filter_nonrunnable_workflow_tasks(claimed_rows)
@@ -240,6 +316,7 @@ class ClaimMixin:
         return ClaimPass(
             claimed=len(claimed_rows),
             dropped=len(claimed_rows) - len(fitting_rows),
+            short_of_plan=claim_rows.short_of_plan,
         )
 
     def _claim_params(self) -> dict[str, Any]:

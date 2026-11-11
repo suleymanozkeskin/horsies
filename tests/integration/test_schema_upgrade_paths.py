@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -26,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_en
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.schemas import recovery as recovery_schema
 from horsies.core.schemas.migrations import SCHEMA_VERSION
 from horsies.core.schemas.terminalization import OUTCOME_COLUMNS, OUTCOME_TYPE
 from pydantic import SecretStr
@@ -1181,12 +1183,16 @@ class TestUpgradePaths:
                     SELECT proname, coalesce(array_to_string(proconfig, ','), '')
                     FROM pg_proc
                     WHERE proname IN (
-                        'horsies_claim', 'horsies_claim_candidates',
+                        'horsies_claim', 'horsies_claim_plan',
+                        'horsies_claim_candidates',
                         'horsies_find_non_runnable_workflow_tasks'
                     )
                 """))).tuples().all())
                 assert installed == {
                     'horsies_claim': 'jit=off',
+                    'horsies_claim_plan': (
+                        'plan_cache_mode=force_generic_plan,jit=off'
+                    ),
                     'horsies_claim_candidates': (
                         'plan_cache_mode=force_generic_plan,jit=off'
                     ),
@@ -2493,7 +2499,7 @@ class TestPerClassClaimMigration:
 
     A database at v54 has the claim pair of one process count, the claim
     indexes without a class, and no class_capacity column. The upgrade drops
-    the earlier signatures, installs the current pair, builds the
+    the earlier signatures, installs the current claim functions, builds the
     class-keyed expired index, drops the two indexes without a class, and
     adds the column.
     """
@@ -2521,6 +2527,7 @@ class TestPerClassClaimMigration:
     V55_CANDIDATES_ARGS = (
         'integer, jsonb, jsonb, jsonb, jsonb, jsonb, jsonb, integer, text, bigint'
     )
+    V55_PLAN_ARGS = 'integer, jsonb, jsonb, jsonb, jsonb, jsonb, jsonb, integer'
 
     async def _demote_to_v54(self, engine: AsyncEngine) -> None:
         """Rebuild the v54 shape: old signatures, old indexes, no column."""
@@ -2565,11 +2572,27 @@ class TestPerClassClaimMigration:
                 await connection.execute(text("""
                     SELECT proname::text, oidvectortypes(proargtypes)
                     FROM pg_proc
-                    WHERE proname IN ('horsies_claim', 'horsies_claim_candidates')
+                    WHERE proname IN (
+                        'horsies_claim', 'horsies_claim_plan',
+                        'horsies_claim_candidates'
+                    )
                       AND pronamespace = current_schema()::regnamespace
                 """))
             ).all()
         return {(str(row[0]), str(row[1])) for row in rows}
+
+    async def _claim_results(self, engine: AsyncEngine) -> dict[str, str]:
+        """The OUT columns of horsies_claim and horsies_claim_candidates."""
+        async with engine.connect() as connection:
+            rows = (
+                await connection.execute(text("""
+                    SELECT proname::text, pg_get_function_result(oid)
+                    FROM pg_proc
+                    WHERE proname IN ('horsies_claim', 'horsies_claim_candidates')
+                      AND pronamespace = current_schema()::regnamespace
+                """))
+            ).all()
+        return {str(row[0]): str(row[1]) for row in rows}
 
     async def _index_definitions(self, engine: AsyncEngine) -> dict[str, str]:
         async with engine.connect() as connection:
@@ -2603,8 +2626,12 @@ class TestPerClassClaimMigration:
         assert await _stored_version(engine) == SCHEMA_VERSION
         assert await self._signatures(engine) == {
             ('horsies_claim', self.V55_CLAIM_ARGS),
+            ('horsies_claim_plan', self.V55_PLAN_ARGS),
             ('horsies_claim_candidates', self.V55_CANDIDATES_ARGS),
         }
+        for result in (await self._claim_results(engine)).values():
+            assert result.startswith('TABLE(row_kind text, id text,'), result
+            assert result.endswith(', short_by integer)'), result
         definitions = await self._index_definitions(engine)
         for name in self.RETIRED:
             assert name not in definitions, definitions
@@ -2628,6 +2655,37 @@ class TestPerClassClaimMigration:
         finally:
             await engine.dispose()
 
+    async def test_a_rerun_replaces_a_claim_pair_with_other_out_columns(
+        self,
+        scratch_database: str,
+    ) -> None:
+        """The pair has the current argument types and other OUT columns,
+        which CREATE OR REPLACE cannot change: the v55 apply drops it and
+        installs the current pair."""
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            async with engine.connect() as connection:
+                for name, args in (
+                    ('horsies_claim', self.V55_CLAIM_ARGS),
+                    ('horsies_claim_candidates', self.V55_CANDIDATES_ARGS),
+                ):
+                    await connection.execute(text(f'DROP FUNCTION {name}({args})'))
+                    await connection.execute(text(f"""
+                        CREATE FUNCTION {name}({args})
+                        RETURNS TABLE(id text) LANGUAGE sql AS 'SELECT NULL::text'
+                    """))
+                await connection.execute(
+                    text('DELETE FROM horsies_schema_version WHERE version > 54')
+                )
+                await connection.commit()
+
+            await _migrate(scratch_database)
+
+            await self._assert_declared_shape(engine)
+        finally:
+            await engine.dispose()
+
     async def test_a_v54_database_gains_the_v55_claim(
         self,
         scratch_database: str,
@@ -2645,5 +2703,249 @@ class TestPerClassClaimMigration:
 
             await _migrate(scratch_database)
             await self._assert_declared_shape(engine)
+        finally:
+            await engine.dispose()
+
+
+class TestExactIndexInstall:
+    """The exact indexes of an upgrade: a matching index is kept, and one of
+    another shape is replaced while an index of its name stays on the
+    table."""
+
+    CLAIM_INDEX = 'idx_horsies_tasks_claim_pending_class'
+    CLAIM_KEY = '(queue_name, execution, priority, enqueued_at, id)'
+
+    async def _rewind_to_54(self, engine: AsyncEngine) -> None:
+        async with engine.connect() as connection:
+            await connection.execute(
+                text('DELETE FROM horsies_schema_version WHERE version > 54')
+            )
+            await connection.execute(
+                text(
+                    'INSERT INTO horsies_schema_version (version) VALUES (54) '
+                    'ON CONFLICT DO NOTHING'
+                )
+            )
+            await connection.commit()
+
+    async def _exact_index_oids(self, engine: AsyncEngine) -> dict[str, int]:
+        names = [
+            index.name
+            for index in (
+                *recovery_schema.RECOVERY_INDEXES,
+                *recovery_schema.CLAIM_INDEXES,
+            )
+        ]
+        async with engine.connect() as connection:
+            rows = (
+                await connection.execute(
+                    text("""
+                        SELECT relname::text, oid::bigint
+                        FROM pg_class
+                        WHERE relname = ANY(CAST(:names AS text[]))
+                    """),
+                    {'names': names},
+                )
+            ).all()
+        return {str(row[0]): int(row[1]) for row in rows}
+
+    async def _temporary_indexes(self, engine: AsyncEngine) -> list[str]:
+        async with engine.connect() as connection:
+            rows = (
+                await connection.execute(
+                    text("""
+                        SELECT relname::text FROM pg_class
+                        WHERE relname LIKE 'horsies\\_recovery\\_index\\_%'
+                    """)
+                )
+            ).all()
+        return [str(row[0]) for row in rows]
+
+    async def test_an_upgrade_keeps_each_exact_index_whose_shape_matches(
+        self,
+        scratch_database: str,
+    ) -> None:
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            before = await self._exact_index_oids(engine)
+            await self._rewind_to_54(engine)
+
+            await _migrate(scratch_database)
+
+            assert len(before) == 6
+            assert await self._exact_index_oids(engine) == before
+            assert await _stored_version(engine) == SCHEMA_VERSION
+        finally:
+            await engine.dispose()
+
+    async def test_an_upgrade_drops_a_build_that_an_earlier_upgrade_left(
+        self,
+        scratch_database: str,
+    ) -> None:
+        """An upgrade stopped after its concurrent build and before the swap
+        left an index under a build name; the next upgrade drops it."""
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            async with engine.connect() as connection:
+                await connection.execute(
+                    text(
+                        'CREATE INDEX horsies_recovery_index_build_'
+                        f'{uuid.uuid4().hex} ON horsies_tasks (queue_name)'
+                    )
+                )
+                await connection.commit()
+            assert len(await self._temporary_indexes(engine)) == 1
+            await self._rewind_to_54(engine)
+
+            await _migrate(scratch_database)
+
+            assert await self._temporary_indexes(engine) == []
+        finally:
+            await engine.dispose()
+
+    async def test_a_replaced_index_keeps_its_name_while_the_old_one_drops(
+        self,
+        scratch_database: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The claim index has another shape. Each concurrent drop of the
+        upgrade finds an index of the claim index name on the table, so a
+        running claim always has one."""
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            async with engine.connect() as connection:
+                await connection.execute(text(f'DROP INDEX {self.CLAIM_INDEX}'))
+                await connection.execute(
+                    text(
+                        f'CREATE INDEX {self.CLAIM_INDEX} '
+                        'ON horsies_tasks (queue_name, priority)'
+                    )
+                )
+                await connection.commit()
+            before = (await self._exact_index_oids(engine))[self.CLAIM_INDEX]
+            await self._rewind_to_54(engine)
+            seen_at_drop: list[str | None] = []
+            drop = recovery_schema._drop_index_concurrently  # pyright: ignore[reportPrivateUsage]
+
+            async def _recording_drop(drop_engine: Any, index_name: str) -> None:
+                async with engine.connect() as connection:
+                    seen_at_drop.append(
+                        (
+                            await connection.execute(
+                                text('SELECT pg_get_indexdef(to_regclass(:name))'),
+                                {'name': self.CLAIM_INDEX},
+                            )
+                        ).scalar_one()
+                    )
+                await drop(drop_engine, index_name)
+
+            monkeypatch.setattr(
+                recovery_schema, '_drop_index_concurrently', _recording_drop
+            )
+
+            await _migrate(scratch_database)
+
+            assert seen_at_drop, 'the upgrade dropped no index'
+            assert None not in seen_at_drop, seen_at_drop
+            after = (await self._exact_index_oids(engine))[self.CLAIM_INDEX]
+            assert after != before
+            assert self.CLAIM_KEY in str(seen_at_drop[-1])
+            assert await self._temporary_indexes(engine) == []
+            assert await _stored_version(engine) == SCHEMA_VERSION
+        finally:
+            await engine.dispose()
+
+
+class TestRetiredClaimIndexes:
+    """The claim indexes without a class stay until the version row of the
+    upgrade that replaces the claim pair has committed."""
+
+    RETIRED = (
+        'idx_horsies_tasks_claim_pending',
+        'idx_horsies_tasks_claim_expired_ordered',
+    )
+
+    async def _add_retired(self, engine: AsyncEngine) -> None:
+        async with engine.connect() as connection:
+            await connection.execute(
+                text(
+                    'CREATE INDEX idx_horsies_tasks_claim_pending '
+                    'ON horsies_tasks (queue_name, priority, enqueued_at, id) '
+                    "WHERE status = 'PENDING'"
+                )
+            )
+            await connection.execute(
+                text(
+                    'CREATE INDEX idx_horsies_tasks_claim_expired_ordered '
+                    'ON horsies_tasks (queue_name, priority, enqueued_at, id) '
+                    "WHERE status = 'CLAIMED'"
+                )
+            )
+            await connection.execute(
+                text('DELETE FROM horsies_schema_version WHERE version > 54')
+            )
+            await connection.execute(
+                text(
+                    'INSERT INTO horsies_schema_version (version) VALUES (54) '
+                    'ON CONFLICT DO NOTHING'
+                )
+            )
+            await connection.commit()
+
+    async def _present(self, engine: AsyncEngine) -> set[str]:
+        async with engine.connect() as connection:
+            rows = (
+                await connection.execute(
+                    text("""
+                        SELECT relname::text FROM pg_class
+                        WHERE relname = ANY(CAST(:names AS text[]))
+                    """),
+                    {'names': list(self.RETIRED)},
+                )
+            ).all()
+        return {str(row[0]) for row in rows}
+
+    async def test_a_failed_activation_keeps_the_retired_claim_indexes(
+        self,
+        scratch_database: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The transaction that installs the claim pair and writes the version
+        row fails and rolls back: the database stays at v54, and the claim
+        indexes that its claim function reads are still there. The next
+        upgrade drops them after its version row commits."""
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            await self._add_retired(engine)
+
+            async def _failing_activation(self: PostgresBroker, engine: Any) -> None:
+                raise RuntimeError('activation failed')
+
+            with monkeypatch.context() as patch:
+                patch.setattr(
+                    PostgresBroker,
+                    '_activate_bounded_recovery',
+                    _failing_activation,
+                )
+                broker = PostgresBroker(
+                    PostgresConfig(database_url=SecretStr(scratch_database))
+                )
+                try:
+                    failed = await broker.ensure_schema_initialized()
+                finally:
+                    await broker.close_async()
+
+            assert failed.is_err()
+            assert await _stored_version(engine) == 54
+            assert await self._present(engine) == set(self.RETIRED)
+
+            await _migrate(scratch_database)
+
+            assert await _stored_version(engine) == SCHEMA_VERSION
+            assert await self._present(engine) == set()
         finally:
             await engine.dispose()

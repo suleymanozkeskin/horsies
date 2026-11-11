@@ -177,7 +177,7 @@ The first 0.7.0 process that starts migrates the schema from v52 to v55:
 
 - v53 adds `horsies_worker_states.slots_down`.
 - v54 adds `horsies_tasks.execution`, and builds `idx_horsies_tasks_claim_pending_class` concurrently.
-- v55 replaces the claim function with one that takes a budget per execution class, and drops the earlier one. It adds `horsies_worker_states.class_capacity`, builds `idx_horsies_tasks_claim_expired_class` concurrently, and drops `idx_horsies_tasks_claim_pending` and `idx_horsies_tasks_claim_expired_ordered` concurrently.
+- v55 replaces the claim function with one that takes a budget per execution class, and drops the earlier one. It adds `horsies_worker_states.class_capacity`, builds `idx_horsies_tasks_claim_expired_class` concurrently, and drops `idx_horsies_tasks_claim_pending` and `idx_horsies_tasks_claim_expired_ordered` concurrently after the v55 version row commits. An upgrade that fails before that commit leaves the earlier schema version and both indexes, so the earlier claim function keeps the indexes it reads.
 
 A 0.6.x worker that still runs fails each claim pass and exits. Stop every 0.6.x worker first, then start the 0.7.0 workers.
 
