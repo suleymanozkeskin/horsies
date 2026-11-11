@@ -214,7 +214,7 @@ One thread of the worker writes the runner heartbeats of its RUNNING tasks, over
 
 ### A timed-out task moves after its child has exited
 
-The worker writes `TASK_TIMEOUT`, the retry and the next workflow step only after the child of the task has exited. So a retry never runs next to the attempt that it replaces. When the child does not exit within 30 seconds of the kill, the worker writes nothing and logs at critical level, and stale-task recovery takes the task.
+The worker writes `TASK_TIMEOUT`, the retry and the next workflow step only after the child of the task has exited. So a retry never runs next to the attempt that it replaces. When the child does not exit within 30 seconds of the kill, the worker writes nothing and logs at critical level, and stale-task recovery takes the task. With stale RUNNING recovery off (no `RecoveryConfig`, or `auto_fail_stale_running=False`), nothing else would move the row, so the worker waits for the exit and writes the row once it sees it; a stop of the worker ends that wait.
 
 ## Execution modes are new
 

@@ -28,6 +28,7 @@ from horsies.core.lifecycle.outcomes import (
     ObservedTaskState,
     TerminalizationOutcome,
 )
+from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.tasks import OutcomeCode
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.types.status import TaskStatus
@@ -109,11 +110,18 @@ class _ScriptedChild:
         self._timeline = timeline
         self._child_exit = child_exit
         self.gate = asyncio.Event()
+        self.late_exit = asyncio.Event()
         self.waits_s: list[float] = []
         self.on_exit: list[SlotHandle] = []
 
     def kill_for_caller(self) -> None:
         self._timeline.append('kill')
+
+    async def wait_exit_seen(self) -> KilledBySignal:
+        """The exit after the bounded wait: it comes when ``late_exit`` opens."""
+        await self.late_exit.wait()
+        self._timeline.append('late exit seen')
+        return KilledBySignal(9)
 
     async def wait_exit(self, timeout_s: float) -> ChildExit:
         self.waits_s.append(timeout_s)
@@ -227,6 +235,7 @@ class _Rig:
         child_exit: ChildExit = _KILLED,
         should_retry: Result[bool, _RetryError] = Ok(False),
         schedule: Result[Any, _RetryError] = Ok('scheduled'),
+        recovery: RecoveryConfig | None = RecoveryConfig(),
     ) -> None:
         self.timeline: list[str] = []
         self.session = _RecordingSession(self.timeline, row)
@@ -241,6 +250,7 @@ class _Rig:
                 dsn='postgresql+psycopg://u:p@localhost/db',
                 psycopg_dsn='postgresql://u:p@localhost/db',
                 queues=['default'],
+                recovery_config=recovery,
             ),
         )
         self.session_factory = MagicMock(side_effect=self._open_session)
@@ -461,6 +471,40 @@ class TestNoExitSeen:
 
         assert result == Ok(None)
         assert rig.timeline == ['kill', 'wait ended']
+
+    async def test_with_stale_recovery_off_the_timeout_waits_for_the_late_exit(
+        self,
+    ) -> None:
+        """Nothing else would ever move the row: the worker writes
+        TASK_TIMEOUT once it sees the exit, and not before."""
+        rig = _Rig(row=_row('RUNNING'), child_exit=ExitUnknown(), recovery=None)
+        rig.child.gate.set()
+
+        with rig.fail_row(_applied()):
+            waiting = asyncio.ensure_future(rig.handle_timeout())
+            await asyncio.sleep(0.05)
+            assert not waiting.done()
+            assert rig.timeline == ['kill', 'wait ended']
+            rig.child.late_exit.set()
+            outcome = await asyncio.wait_for(waiting, TEST_WAIT_S)
+
+        assert outcome == _TimeoutSettled()
+        assert rig.timeline[:4] == ['kill', 'wait ended', 'late exit seen', 'lock row']
+        assert [command.error_code for command in rig.fail_commands] == [
+            OutcomeCode.TASK_TIMEOUT.value,
+        ]
+
+    async def test_with_stale_recovery_off_a_stop_ends_the_wait(self) -> None:
+        rig = _Rig(row=_row('RUNNING'), child_exit=ExitUnknown(), recovery=None)
+        rig.child.gate.set()
+        waiting = asyncio.ensure_future(rig.handle_timeout())
+        await asyncio.sleep(0.05)
+
+        rig.worker._stop.set()
+        outcome = await asyncio.wait_for(waiting, TEST_WAIT_S)
+
+        assert outcome == _AttemptEndUnknown()
+        rig.session_factory.assert_not_called()
 
 
 @pytest.mark.unit

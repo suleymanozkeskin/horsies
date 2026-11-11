@@ -13,7 +13,7 @@ relies on.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal, Optional, assert_never, cast
 
@@ -273,6 +273,12 @@ class FinalizeMixin:
             *,
             retry: RetryPlacement,
         ) -> _TimeoutSettled | _TimeoutWriteFailed: ...
+        async def _wait_for_unseen_exit(
+            self,
+            handle: SlotHandle | SharedHandle,
+            task_id: str,
+            pid: int,
+        ) -> ExitedWith | KilledBySignal | _AttemptEndUnknown: ...
         async def _finalize_killed_run(
             self,
             task_id: str,
@@ -411,7 +417,12 @@ class FinalizeMixin:
             case NotDispatched(cause=cause):
                 return await self._requeue_not_dispatched(task_id, cause, claimed_at)
             case ChildLost():
-                return await self._finalize_child_loss(task_id, outcome, claimed_at)
+                return await self._finalize_child_loss(
+                    handle,
+                    task_id,
+                    outcome,
+                    claimed_at,
+                )
             case _TimeoutSettled() | _AttemptEndUnknown():
                 # The timeout path settled this row, or left it to stale-task
                 # recovery. Crash recovery must not write it as WORKER_CRASHED.
@@ -665,7 +676,12 @@ class FinalizeMixin:
             case NotDispatched(cause=cause):
                 return await self._requeue_not_dispatched(task_id, cause, claimed_at)
             case ChildLost():
-                return await self._finalize_child_loss(task_id, outcome, claimed_at)
+                return await self._finalize_child_loss(
+                    handle,
+                    task_id,
+                    outcome,
+                    claimed_at,
+                )
             case _AttemptEndUnknown():
                 return Ok(None)
             case _ as unreachable:
@@ -725,6 +741,7 @@ class FinalizeMixin:
 
     async def _finalize_child_loss(
         self,
+        handle: SlotHandle | SharedHandle,
         task_id: str,
         lost: ChildLost,
         claimed_at: Optional[datetime],
@@ -733,23 +750,24 @@ class FinalizeMixin:
 
         Crash recovery moves the row only after the child's exit was seen,
         so a retry never runs next to a child that may still be alive.
-        ``ExitUnknown`` (the slot gave up waiting after SIGKILL) writes
-        nothing and returns Ok(None): the row keeps its state for stale-task
-        recovery, and the loss is logged at critical level with the task id
-        and the pid. A seen exit goes to ``_recover_worker_future_failure``;
-        its result is a future-stage error, retryable only when the recovery
-        hit a database error.
+        ``ExitUnknown`` (the slot gave up waiting after SIGKILL) goes to
+        ``_wait_for_unseen_exit``: with stale RUNNING recovery on it writes
+        nothing and returns Ok(None), and the row keeps its state for
+        stale-task recovery; with it off, the worker waits for the exit of
+        that child and then recovers the row as at a seen exit, unless the
+        worker stops first. A seen exit goes to
+        ``_recover_worker_future_failure``; its result is a future-stage
+        error, retryable only when the recovery hit a database error.
         """
         match lost.child_exit:
             case ExitUnknown():
-                logger.critical(
-                    'Lost child pid=%s of task %s did not exit (%s); nothing '
-                    'is written, and the row is left to stale-task recovery',
-                    lost.pid,
-                    task_id,
-                    lost.describe(),
-                )
-                return Ok(None)
+                match await self._wait_for_unseen_exit(handle, task_id, lost.pid):
+                    case ExitedWith() | KilledBySignal() as child_exit:
+                        lost = replace(lost, child_exit=child_exit)
+                    case _AttemptEndUnknown():
+                        return Ok(None)
+                    case _ as unreachable:
+                        assert_never(unreachable)
             case ExitedWith() | KilledBySignal():
                 pass
             case _ as unreachable:

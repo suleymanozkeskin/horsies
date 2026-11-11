@@ -567,8 +567,12 @@ there is no migration contract between pre-1.0 versions.
   30 s (the socket to the child was lost, the child sent a bad frame, or the
   slot was cleared at a stop or after a defect), it writes nothing and logs
   the task id and pid at critical level. Stale-task recovery then takes the
-  task. Before, the worker wrote `WORKER_CRASHED` or scheduled a retry at
-  once, so the retry could run next to a child that was still alive.
+  task. With stale RUNNING recovery off (no `RecoveryConfig`, or
+  `auto_fail_stale_running=False`), nothing else would move the row, so the
+  worker waits for the exit and writes the row once it sees it, for a timed
+  out task and for a lost child alike; a stop of the worker ends that wait.
+  Before, the worker wrote `WORKER_CRASHED` or scheduled a retry at once, so
+  the retry could run next to a child that was still alive.
 - **A child that the worker killed takes no next task.** A kill can land
   after the child's result arrived and before the worker read it. The worker
   then gave the next queued task to the dying child, and that task was lost

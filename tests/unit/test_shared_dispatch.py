@@ -14,10 +14,11 @@ import json
 from collections.abc import Coroutine
 from datetime import datetime, timezone
 from typing import Any, cast
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import ANY, AsyncMock, MagicMock
 
 import pytest
 
+from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.tasks import (
     DEFAULT_CANCEL_GRACE_MS,
     MIN_TASK_TIMEOUT_MS,
@@ -541,6 +542,7 @@ class TestFinalizeShared:
         await self._finalize(worker, lost)
 
         worker._finalize_child_loss.assert_awaited_once_with(  # type: ignore[attr-defined]
+            ANY,
             'task-1',
             lost,
             CLAIMED_AT,
@@ -875,7 +877,9 @@ class TestBackstopDecision:
         worker._record_task_timeout.assert_not_awaited()
 
     async def test_no_exit_seen_writes_nothing(self) -> None:
+        """With stale RUNNING recovery on, the row is left to it."""
         worker = _worker()
+        worker.cfg.recovery_config = RecoveryConfig()
         worker._record_task_timeout = AsyncMock()
 
         outcome = await self._backstop(
@@ -886,6 +890,26 @@ class TestBackstopDecision:
 
         assert outcome == _AttemptEndUnknown()
         worker._record_task_timeout.assert_not_awaited()
+
+    async def test_with_stale_recovery_off_a_late_exit_gives_the_kill_verdict(
+        self,
+    ) -> None:
+        """The run was past its deadline at the backstop: once the exit is
+        seen, it times out in its class, as at a seen exit."""
+        worker = _worker()
+        handle = _handle(asyncio.get_running_loop())
+        handle.wait_child_exit = AsyncMock(return_value=KilledBySignal(9))
+
+        outcome = await asyncio.wait_for(
+            self._backstop(worker, ChildEndUnknown(pid=7), handle),
+            OUTCOME_BOUND_S,
+        )
+
+        assert outcome == SeatKilled(
+            verdict=TimedOutAtKill(retry=RetryPlacement.SAME_CLASS),
+            pid=7,
+            child_exit=KilledBySignal(9),
+        )
 
     async def test_a_live_child_is_not_killed_and_the_outcome_is_awaited(self) -> None:
         worker = _worker()

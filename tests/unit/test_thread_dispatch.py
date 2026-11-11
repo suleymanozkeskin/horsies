@@ -14,7 +14,7 @@ import json
 from collections.abc import Coroutine
 from datetime import datetime, timezone
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import ANY, AsyncMock, MagicMock
 
 import pytest
 
@@ -404,6 +404,7 @@ class TestFinalizeThread:
 
         worker._record_task_timeout.assert_not_awaited()  # type: ignore[attr-defined]
         worker._finalize_child_loss.assert_awaited_once_with(  # type: ignore[attr-defined]
+            ANY,
             'task-1',
             lost,
             CLAIMED_AT,

@@ -75,12 +75,16 @@ from horsies.core.worker.slots import (
     ChildEndUnknown,
     ChildLost,
     DeadlineAcknowledged,
+    ExitedWith,
     ExitUnknown,
+    KilledBySignal,
+    LossCause,
     NotDispatched,
     NothingToKill,
     SharedAnswered,
     SharedHandle,
     SharedOutcome,
+    SeatKilled,
     SharedRunRequest,
     SlotAnswered,
     StuckAcknowledged,
@@ -90,7 +94,12 @@ from horsies.core.worker.slots import (
     TaskFinished,
     describe_exit,
 )
-from horsies.core.worker.shared_stop import RetryPlacement
+from horsies.core.worker.runner_heartbeat import (
+    StaleRunningRecoveryOff,
+    StaleRunningRecoveryOn,
+    stale_running_recovery,
+)
+from horsies.core.worker.shared_stop import RetryPlacement, TimedOutAtKill
 from horsies.core.worker.stored_timeout import NoTimeout, StoredTimeout
 from horsies.core.worker.thread_slots import ThreadRunRequest
 from horsies.core.worker.sql import (
@@ -111,6 +120,28 @@ if TYPE_CHECKING:
 logger = get_logger('worker')
 
 
+def _outcome_at_late_backstop_exit(
+    work: SharedWork,
+    pid: int,
+    child_exit: ExitedWith | KilledBySignal,
+) -> SeatKilled | ChildLost:
+    """The outcome of a run whose child the first backstop killed, when the
+    worker saw its exit only after the bounded wait. The run was past its
+    deadline, as at a seen exit (``TimedOutAtKill`` in its class); a refusal
+    has no deadline and takes the crash path. Pure."""
+    match work:
+        case SeatTask() | ThreadSeatTask():
+            return SeatKilled(
+                verdict=TimedOutAtKill(retry=RetryPlacement.SAME_CLASS),
+                pid=pid,
+                child_exit=child_exit,
+            )
+        case SeatRefusal():
+            return ChildLost(LossCause.KILLED_BY_PARENT, child_exit, False, pid)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 class DispatchMixin:
     """Slot submission, timeout containment, dispatch-failure recovery."""
 
@@ -120,6 +151,7 @@ class DispatchMixin:
         cfg: WorkerConfig
         worker_instance_id: str
         _slots: SlotPool | None
+        _stop: asyncio.Event
 
         # Cross-concern methods provided by sibling mixins / Worker.
         async def _finalize_after(
@@ -665,15 +697,13 @@ class DispatchMixin:
                 )
                 return await asyncio.shield(handle.outcome)
             case ChildEndUnknown(pid=pid):
-                logger.critical(
-                    'Shared child pid=%s of task %s did not exit %ss after '
-                    'SIGKILL; nothing is written, and its rows are left to '
-                    'stale-task recovery',
-                    pid,
-                    task_id,
-                    CHILD_KILL_WAIT_S,
-                )
-                return _AttemptEndUnknown()
+                match await self._wait_for_unseen_exit(handle, task_id, pid):
+                    case ExitedWith() | KilledBySignal() as child_exit:
+                        return _outcome_at_late_backstop_exit(work, pid, child_exit)
+                    case _AttemptEndUnknown() as unknown:
+                        return unknown
+                    case _ as unreachable:
+                        assert_never(unreachable)
             case DeadlineAcknowledged(pid=pid):
                 logger.warning(
                     'Task %s has not ended in shared child pid=%s, which '
@@ -741,15 +771,18 @@ class DispatchMixin:
                 )
                 return await asyncio.shield(handle.outcome)
             case ChildEndUnknown(pid=pid):
-                logger.critical(
-                    'Shared child pid=%s of task %s did not exit %ss after '
-                    'SIGKILL; nothing is written, and its rows are left to '
-                    'stale-task recovery',
-                    pid,
-                    task_id,
-                    CHILD_KILL_WAIT_S,
-                )
-                return _AttemptEndUnknown()
+                match await self._wait_for_unseen_exit(handle, task_id, pid):
+                    case ExitedWith() | KilledBySignal() as child_exit:
+                        return ChildLost(
+                            LossCause.KILLED_BY_PARENT,
+                            child_exit,
+                            False,
+                            pid,
+                        )
+                    case _AttemptEndUnknown() as unknown:
+                        return unknown
+                    case _ as unreachable:
+                        assert_never(unreachable)
             case StuckAcknowledged():
                 return await asyncio.shield(handle.outcome)
             case SharedAnswered(outcome=outcome):
@@ -786,11 +819,14 @@ class DispatchMixin:
           and ``_record_task_timeout`` ran.
         - ``_AttemptEndUnknown``: no exit was seen, so the attempt may still
           have effects in flight. Nothing is written and phase 2 does not
-          run. The row keeps its state for stale-task recovery: a RUNNING row
+          run (``_wait_for_unseen_exit``). With stale RUNNING recovery on,
+          the row keeps its state for stale-task recovery: a RUNNING row
           fails after ``running_stale_threshold_ms`` with no runner heartbeat
           (the kill ended its heartbeats), and a CLAIMED row is claimed again
-          when its lease ends. Logged at
-          critical level with the task id and pid.
+          when its lease ends. With it off, the worker first waits for the
+          exit, and records the timeout once it sees it; only a stop of the
+          worker before that exit gives this outcome. Logged at critical
+          level with the task id and pid.
 
         Does not raise for an expected database failure. A handle that no
         child has taken is a caller defect: the deadline starts only when a
@@ -814,17 +850,21 @@ class DispatchMixin:
                     retry=RetryPlacement.SAME_CLASS,
                 )
             case ChildEndUnknown(pid=pid):
-                logger.critical(
-                    'Child pid=%s of timed-out task %s did not exit %ss after '
-                    'SIGKILL; nothing is written, and the row is left to '
-                    'stale-task recovery',
-                    pid,
-                    task_id,
-                    CHILD_KILL_WAIT_S,
-                )
-                return _AttemptEndUnknown()
+                match await self._wait_for_unseen_exit(handle, task_id, pid):
+                    case ExitedWith() | KilledBySignal():
+                        return await self._record_task_timeout(
+                            task_id,
+                            timeout_ms,
+                            claimed_at,
+                            retry=RetryPlacement.SAME_CLASS,
+                        )
+                    case _AttemptEndUnknown() as unknown:
+                        return unknown
+                    case _ as unreachable:
+                        assert_never(unreachable)
             case SlotAnswered(outcome=outcome):
                 return await self._time_out_answered_task(
+                    handle,
                     task_id,
                     timeout_ms,
                     claimed_at,
@@ -839,6 +879,7 @@ class DispatchMixin:
 
     async def _time_out_answered_task(
         self,
+        handle: SlotHandle,
         task_id: str,
         timeout_ms: int,
         claimed_at: Optional[datetime],
@@ -850,19 +891,24 @@ class DispatchMixin:
         the timer fired is dropped, and the row gets TASK_TIMEOUT through
         ``_record_task_timeout``, the one writer. The slot's answer shows that
         the attempt ended. The exception is a loss whose exit the slot did not
-        see: that returns ``_AttemptEndUnknown`` and writes nothing, as in
-        ``_handle_task_timeout``.
+        see: it waits for that exit as ``_handle_task_timeout`` does
+        (``_wait_for_unseen_exit``), and writes nothing when it gives
+        ``_AttemptEndUnknown``.
         """
         match outcome:
             case ChildLost(child_exit=ExitUnknown(), pid=pid):
-                logger.critical(
-                    'Timed-out task %s lost its child pid=%s with no exit seen; '
-                    'nothing is written, and the row is left to stale-task '
-                    'recovery',
-                    task_id,
-                    pid,
-                )
-                return _AttemptEndUnknown()
+                match await self._wait_for_unseen_exit(handle, task_id, pid):
+                    case ExitedWith() | KilledBySignal():
+                        return await self._record_task_timeout(
+                            task_id,
+                            timeout_ms,
+                            claimed_at,
+                            retry=RetryPlacement.SAME_CLASS,
+                        )
+                    case _AttemptEndUnknown() as unknown:
+                        return unknown
+                    case _ as unreachable:
+                        assert_never(unreachable)
             case TaskFinished() | ChildLost():
                 logger.warning(
                     'Task %s reached timeout_ms=%s as its slot answered; the '
@@ -880,6 +926,96 @@ class DispatchMixin:
                 raise AssertionError(
                     f'deadline of task {task_id} fired for a task that never '
                     'reached a child',
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    async def _wait_for_unseen_exit(
+        self,
+        handle: SlotHandle | SharedHandle,
+        task_id: str,
+        pid: int,
+    ) -> ExitedWith | KilledBySignal | _AttemptEndUnknown:
+        """Decide what follows a kill or a loss of the child ``pid`` of a
+        task whose exit the slot did not see in its bounded wait.
+
+        With stale RUNNING recovery on, ``_AttemptEndUnknown`` at once: the
+        row keeps its state for stale-task recovery. With it off, nothing
+        else would ever move the row, so the worker waits for the exit of
+        that child, with no bound but the life of the worker, and returns it:
+        the caller writes the row as at a seen exit. A stop of the worker
+        before that exit ends the wait with ``_AttemptEndUnknown``. Each end
+        is logged. Writes nothing.
+        """
+        match stale_running_recovery(self.cfg.recovery_config):
+            case StaleRunningRecoveryOn():
+                logger.critical(
+                    'Child pid=%s of task %s did not exit %ss after SIGKILL; '
+                    'nothing is written, and the row is left to stale-task '
+                    'recovery',
+                    pid,
+                    task_id,
+                    CHILD_KILL_WAIT_S,
+                )
+                return _AttemptEndUnknown()
+            case StaleRunningRecoveryOff():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
+        logger.critical(
+            'Child pid=%s of task %s did not exit %ss after SIGKILL; stale '
+            'RUNNING recovery is off, so the worker writes the row once it '
+            'sees the exit',
+            pid,
+            task_id,
+            CHILD_KILL_WAIT_S,
+        )
+        match await self._exit_or_stop(handle):
+            case ExitedWith() | KilledBySignal() as child_exit:
+                logger.warning(
+                    'Child pid=%s of task %s exited (%s); writing its row',
+                    pid,
+                    task_id,
+                    describe_exit(child_exit),
+                )
+                return child_exit
+            case _AttemptEndUnknown() as unknown:
+                logger.critical(
+                    'The worker stops before child pid=%s of task %s exited; '
+                    'nothing is written',
+                    pid,
+                    task_id,
+                )
+                return unknown
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    async def _exit_or_stop(
+        self,
+        handle: SlotHandle | SharedHandle,
+    ) -> ExitedWith | KilledBySignal | _AttemptEndUnknown:
+        """Wait for the exit of the child of ``handle``, or for the stop of
+        the worker, whichever comes first. A handle that no child took is a
+        caller defect: ``AssertionError``."""
+        exit_wait = asyncio.ensure_future(handle.wait_child_exit())
+        stop_wait = asyncio.ensure_future(self._stop.wait())
+        try:
+            await asyncio.wait(
+                {exit_wait, stop_wait},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            for waiter in (exit_wait, stop_wait):
+                waiter.cancel()
+            await asyncio.gather(exit_wait, stop_wait, return_exceptions=True)
+        if not exit_wait.done() or exit_wait.cancelled():
+            return _AttemptEndUnknown()
+        match exit_wait.result():
+            case ExitedWith() | KilledBySignal() as child_exit:
+                return child_exit
+            case NothingToKill():
+                raise AssertionError(
+                    'an exit was awaited for a task that no child took',
                 )
             case _ as unreachable:
                 assert_never(unreachable)

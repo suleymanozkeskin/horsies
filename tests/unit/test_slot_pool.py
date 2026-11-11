@@ -1845,6 +1845,28 @@ class TestKillAndWait:
         assert isinstance(lost, ChildLost)
         assert lost.cause is LossCause.KILLED_BY_PARENT
 
+    async def test_an_exit_after_the_bounded_wait_is_still_seen(
+        self,
+        pool_factory: PoolFactory,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The slot gives up its bounded wait before the exit, as for a child
+        stuck in the kernel. The handle still sees the exit later, so a
+        worker with stale RUNNING recovery off can write the row then."""
+        pool = await pool_factory()
+        handle = pool.submit(_frame('hang'))
+        await asyncio.wait_for(handle.assigned, 5)
+        child = pool._slots[0].child
+        assert child is not None
+        monkeypatch.setattr(slots, 'CHILD_KILL_WAIT_S', 0.0)
+
+        ended = await handle.kill_and_wait(0.0)
+        await child.dispose()
+
+        assert ended == ChildEndUnknown(pid=child.pid)
+        late = await asyncio.wait_for(handle.wait_child_exit(), OUTCOME_TIMEOUT_S)
+        assert late == KilledBySignal(signal.SIGKILL)
+
     async def test_a_finished_task_reports_the_slot_answer(
         self,
         pool_factory: PoolFactory,

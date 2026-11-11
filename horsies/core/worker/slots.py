@@ -1433,7 +1433,11 @@ class Child:
         await self.dispose()
 
     async def dispose(self) -> None:
-        """Close the socket and wait for the process, bounded."""
+        """Close the socket and wait for the process, bounded.
+
+        A process that has not ended by then keeps its exit watch:
+        ``wait_exit_seen`` still sees its end later.
+        """
         self._transport.abort()
         await self._wait_exit(CHILD_KILL_WAIT_S)
         if not self._exit.done():
@@ -1442,7 +1446,21 @@ class Child:
                 self.pid,
                 CHILD_KILL_WAIT_S,
             )
-            self._exit.cancel()
+
+    async def wait_exit_seen(self) -> ExitedWith | KilledBySignal:
+        """Wait, with no bound, until the process ends, and report its exit.
+
+        The caller bounds the wait. Sends no signal. A process reaped with no
+        return code is a defect: ``AssertionError``.
+        """
+        await asyncio.shield(self._exit)
+        match self._current_exit():
+            case ExitedWith() | KilledBySignal() as child_exit:
+                return child_exit
+            case ExitUnknown():
+                raise AssertionError(f'child pid={self.pid} ended with no return code')
+            case _ as unreachable:
+                assert_never(unreachable)
 
     async def dispose_lost(self) -> None:
         """Clean up after a lost child, with any task subprocesses it left."""
@@ -1458,10 +1476,12 @@ class SlotHandle:
         self.assigned: asyncio.Future[Assigned | NotDispatched] = loop.create_future()
         self.outcome: asyncio.Future[SlotOutcome] = loop.create_future()
         self._child: Child | None = None
+        self._last_child: Child | None = None
 
     def bind_child(self, child: Child) -> None:
         """Pool only: the task frame was sent to this child."""
         self._child = child
+        self._last_child = child
         if not self.assigned.done():
             self.assigned.set_result(Assigned())
 
@@ -1512,6 +1532,15 @@ class SlotHandle:
                 return ChildEndUnknown(pid=child.pid)
             case _ as unreachable:
                 assert_never(unreachable)
+
+    async def wait_child_exit(self) -> ExitedWith | KilledBySignal | NothingToKill:
+        """Wait, with no bound, for the exit of the last child that took this
+        task, also after the slot ended the binding. ``NothingToKill``: no
+        child took it. The caller bounds the wait."""
+        child = self._last_child
+        if child is None:
+            return NothingToKill()
+        return await child.wait_exit_seen()
 
     def _answer_without_child(self) -> SlotAnswered | NothingToKill:
         """Report a handle that holds no child. A cancelled outcome has no answer."""
@@ -1627,10 +1656,12 @@ class SharedHandle:
         self.assigned: asyncio.Future[Assigned | NotDispatched] = loop.create_future()
         self.outcome: asyncio.Future[SharedOutcome] = loop.create_future()
         self._binding: _SeatBinding | None = None
+        self._last_child: Child | None = None
 
     def bind(self, child: Child, run: _SeatRun) -> None:
         """Pool only: the run frame was sent to this child."""
         self._binding = _SeatBinding(child, run)
+        self._last_child = child
         if not self.assigned.done():
             self.assigned.set_result(Assigned())
 
@@ -1712,6 +1743,15 @@ class SharedHandle:
         ):
             return StuckAcknowledged(pid=child.pid)
         return await _kill_and_wait(child, wait_s)
+
+    async def wait_child_exit(self) -> ExitedWith | KilledBySignal | NothingToKill:
+        """Wait, with no bound, for the exit of the child that took this run,
+        also after the slot ended the binding. ``NothingToKill``: no child
+        took it. The caller bounds the wait."""
+        child = self._last_child
+        if child is None:
+            return NothingToKill()
+        return await child.wait_exit_seen()
 
     def _answer_unbound(self) -> SharedAnswered | NothingToKill:
         """Report a handle that no child holds: the run ended, or it never
