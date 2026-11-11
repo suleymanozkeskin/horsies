@@ -625,6 +625,27 @@ there is no migration contract between pre-1.0 versions.
   - At a stop, the batcher closes after the finalizers and writes the queued
     rows, for at most 10 seconds. A row that it does not write stays RUNNING
     and goes to stale RUNNING recovery.
+- **The success of a workflow task is one statement, and its phase 2 two
+  statements shorter (schema v58).** `horsies_finish_workflow_success` takes
+  the task advisory lock, then the row lock under the claim fence (worker and
+  claimed_at), writes the COMPLETED attempt row, and moves the task to the
+  history with the phase-2 record of its node, in autocommit. It sends no
+  wake: phase 2 sends it after the dependents are enqueued. A refusal writes
+  nothing; a replay after a lost reply is already applied, reads the stored
+  result and runs phase 2. Counted at the wire with the default
+  `worker_pool_pre_ping=False` (one more per phase with it on):
+  - phase 1 of a success: 1 round trip, before 5 (BEGIN, the locking read,
+    the attempt row, `horsies_complete_locked_task`, COMMIT);
+  - phase 2, one transaction under the workflow row lock: a node that
+    promotes its dependents 9, before 11; the last node of a workflow 8,
+    before 9; a failed node whose dependent is skipped 12, before 13; a
+    failed last node 9, before 10. The capacity wake is part of the node
+    write, and the insert of each promoted task links its node in the same
+    statement.
+  - `horsies_lock_running_task` (schema v56) is dropped: its one caller was
+    this success.
+  - A row that is not a workflow task is refused (SQLSTATE 22023) with no
+    write.
 - **A schema upgrade keeps each claim and recovery index whose form
   matches.** An index whose catalog form matches its declaration is kept. One
   of another form, or an invalid one, is built concurrently under a temporary
@@ -846,8 +867,8 @@ there is no migration contract between pre-1.0 versions.
   the reaper's stale recovery and the monitoring cancel took the row lock
   first and called a move function later, so two of them on the same task
   could deadlock (SQLSTATE 40P01), and Postgres aborted one. All of them now
-  take the advisory lock first: the success of a workflow task reads its row
-  with `horsies_lock_running_task`, the failure paths call
+  take the advisory lock first: the success of a workflow task calls
+  `horsies_finish_workflow_success`, the failure paths call
   `horsies_finish_failed_attempt`, and stale recovery and the cancel take
   the advisory lock before their locked read.
 - **The phase 2 that advances a workflow node deletes the node's outbox

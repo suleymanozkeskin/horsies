@@ -8,9 +8,12 @@ aborts one of them (SQLSTATE 40P01). These tests hold one side between its
 two locks and start the other side, so a wrong order deadlocks every time:
 
 - a stale recovery that holds its locks, against a failure finalize;
-- a locked workflow completion that holds its locks, against the stale
-  recovery's move (``horsies_fail_stale_task``; the recovery's scan skips a
-  locked row, so the move is called directly);
+- a stale recovery that holds its locks, against the success finalize of a
+  workflow task;
+- the success of a workflow task (``horsies_finish_workflow_success``) that
+  holds its locks in an open transaction, against the stale recovery's move
+  (``horsies_fail_stale_task``; the recovery's scan skips a locked row, so
+  the move is called directly);
 - a monitoring cancel that holds its locks, against a failure finalize.
 
 A free race of a finalize and a stale recovery of the same task then runs
@@ -40,9 +43,14 @@ from horsies.core.codec.json_io import dumps_json
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.lifecycle.fences import OwnedClaim
 from horsies.core.types.result import Ok, is_ok
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
+from horsies.core.worker.workflow_success import (
+    FinishWorkflowSuccess,
+    success_statement,
+)
 from horsies.monitoring.task_actions import cancel_task
 from tests.integration.conftest import compute_test_enqueue_sha
 
@@ -205,7 +213,7 @@ async def _complete_workflow_task(
     task_id: str,
     claimed_at: datetime,
 ) -> Any:
-    """The finalize of a workflow task's success: the locked completion."""
+    """The finalize of a workflow task's success: one statement."""
     return await worker._persist_task_terminal_state(
         task_id=task_id,
         now=datetime.now(timezone.utc),
@@ -317,6 +325,42 @@ async def test_a_failure_finalize_waits_for_a_stale_recovery_that_holds_its_lock
     assert await _history(engine, task_id) == [('FAILED', 'FAIL_STALE')]
 
 
+@pytest.mark.asyncio(loop_scope='function')
+async def test_a_workflow_success_waits_for_a_stale_recovery_that_holds_its_locks(
+    engine: AsyncEngine,
+    broker: PostgresBroker,
+    stale_task: Callable[..., Awaitable[tuple[str, datetime]]],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Stale recovery holds the locks of a workflow task before its move;
+    the success finalize starts and waits on the advisory lock; the recovery
+    then moves the row, and the success finds it moved by another kind."""
+    task_id, claimed_at = await stale_task(is_workflow_task=True)
+    worker = _make_worker(engine)
+    import horsies.core.brokers.postgres as broker_module
+
+    gate = _Gate(broker_module.apply_async)
+    monkeypatch.setattr(broker_module, 'apply_async', gate)
+
+    with caplog.at_level(logging.ERROR):
+        recovery = asyncio.ensure_future(_recover_stale(broker))
+        await asyncio.wait_for(gate.holding.wait(), WAIT_POLL_S * WAIT_POLLS)
+        finalize = asyncio.ensure_future(
+            _complete_workflow_task(worker, task_id, claimed_at),
+        )
+        await _until_a_backend_waits_on_a_lock(
+            engine, 'horsies_finish_workflow_success'
+        )
+        gate.release.set()
+        recovered, finalized = await asyncio.gather(recovery, finalize)
+
+    assert _deadlocks(caplog) == []
+    assert recovered == Ok(1)
+    assert is_ok(finalized) and finalized.ok_value is None
+    assert await _history(engine, task_id) == [('FAILED', 'FAIL_STALE')]
+
+
 async def _fail_stale_move(engine: AsyncEngine, task_id: str) -> str:
     """The stale recovery's move of ``task_id``, in its own transaction."""
     async with engine.begin() as connection:
@@ -338,34 +382,38 @@ async def _fail_stale_move(engine: AsyncEngine, task_id: str) -> str:
 
 
 @pytest.mark.asyncio(loop_scope='function')
-async def test_the_stale_move_waits_for_a_locked_completion_that_holds_its_locks(
+async def test_the_stale_move_waits_for_a_workflow_success_that_holds_its_locks(
     engine: AsyncEngine,
     stale_task: Callable[..., Awaitable[tuple[str, datetime]]],
-    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The locked completion of a workflow task holds the task's locks
-    before its move; the stale move starts and waits; the completion then
-    moves the row, and the stale move finds it moved."""
+    """The success of a workflow task runs in a transaction that stays open,
+    so it holds the advisory lock and the row lock; the stale move starts
+    and waits; the commit then releases both, and the stale move finds the
+    row moved."""
     task_id, claimed_at = await stale_task(is_workflow_task=True)
-    worker = _make_worker(engine)
-    import horsies.core.worker.finalize as finalize_module
-
-    gate = _Gate(finalize_module.apply_async)
-    monkeypatch.setattr(finalize_module, 'apply_async', gate)
+    command = FinishWorkflowSuccess(
+        task_id=task_id,
+        fence=OwnedClaim(worker_id=WORKER, claimed_at=claimed_at),
+        result_json=_ok_result(),
+    )
+    statement = success_statement(command)
 
     with caplog.at_level(logging.ERROR):
-        finalize = asyncio.ensure_future(
-            _complete_workflow_task(worker, task_id, claimed_at),
-        )
-        await asyncio.wait_for(gate.holding.wait(), WAIT_POLL_S * WAIT_POLLS)
-        stale_move = asyncio.ensure_future(_fail_stale_move(engine, task_id))
-        await _until_a_backend_waits_on_a_lock(engine, 'horsies_fail_stale_task')
-        gate.release.set()
-        finalized, moved = await asyncio.gather(finalize, stale_move)
+        async with engine.connect() as holder:
+            transaction = await holder.begin()
+            outcome = (
+                (await holder.execute(statement.statement, dict(statement.parameters)))
+                .mappings()
+                .one()
+            )
+            assert outcome['outcome'] == 'APPLIED'
+            stale_move = asyncio.ensure_future(_fail_stale_move(engine, task_id))
+            await _until_a_backend_waits_on_a_lock(engine, 'horsies_fail_stale_task')
+            await transaction.commit()
+        moved = await stale_move
 
     assert _deadlocks(caplog) == []
-    assert is_ok(finalized) and finalized.ok_value is not None
     assert moved == 'SOURCE_STATE_CONFLICT'
     assert await _history(engine, task_id) == [('COMPLETED', 'COMPLETE_LOCKED')]
 

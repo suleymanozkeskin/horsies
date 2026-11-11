@@ -25,6 +25,7 @@ import logging
 from horsies.core.worker.finalize import (
     _Phase1Input,
     _PersistedTaskOutcome,
+    _PlainTaskDone,
     _finalize_data_for_log,
 )
 from horsies.core.worker.runtime import (
@@ -2364,13 +2365,11 @@ _SENTINEL_TASK_RESULT = MagicMock(name='TaskResult')
 def _persisted_outcome(
     *,
     queue_name: str = 'default',
-    is_workflow_task: bool = True,
 ) -> _PersistedTaskOutcome:
     return _PersistedTaskOutcome(
         result=_SENTINEL_TASK_RESULT,
         task_name='loaded_task',
         queue_name=queue_name,
-        is_workflow_task=is_workflow_task,
     )
 
 
@@ -2573,7 +2572,6 @@ class TestRetryFinalizePhase1:
             err.task_id,
             _SENTINEL_TASK_RESULT,
             queue_name='default',
-            is_workflow_task=True,
             task_name='loaded_task',
         )
         assert key_p1 not in worker._finalize_retry_attempts
@@ -2585,12 +2583,7 @@ class TestRetryFinalizePhase1:
         worker = _make_worker()
         worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
         worker._persist_task_terminal_state = AsyncMock(  # type: ignore[assignment]
-            return_value=Ok(
-                _persisted_outcome(
-                    queue_name='persisted-queue',
-                    is_workflow_task=True,
-                )
-            ),
+            return_value=Ok(_persisted_outcome(queue_name='persisted-queue')),
         )
         worker._finalize_workflow_phase = AsyncMock(  # type: ignore[assignment]
             return_value=Ok(None),
@@ -2619,7 +2612,6 @@ class TestRetryFinalizePhase1:
             err.task_id,
             _SENTINEL_TASK_RESULT,
             queue_name='persisted-queue',
-            is_workflow_task=True,
             task_name='loaded_task',
         )
 
@@ -2791,7 +2783,6 @@ class TestRetryFinalizePhase2:
             err.task_id,
             _SENTINEL_TASK_RESULT,
             queue_name='default',
-            is_workflow_task=True,
             task_name='loaded_task',
         )
         assert key not in worker._finalize_retry_attempts
@@ -2802,12 +2793,7 @@ class TestRetryFinalizePhase2:
         worker = _make_worker()
         worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
         worker._load_persisted_task_result = AsyncMock(  # type: ignore[assignment]
-            return_value=Ok(
-                _persisted_outcome(
-                    queue_name='critical',
-                    is_workflow_task=False,
-                )
-            ),
+            return_value=Ok(_persisted_outcome(queue_name='critical')),
         )
         worker._finalize_workflow_phase = AsyncMock(  # type: ignore[assignment]
             return_value=Ok(None),
@@ -2827,10 +2813,28 @@ class TestRetryFinalizePhase2:
             err.task_id,
             _SENTINEL_TASK_RESULT,
             queue_name='critical',
-            is_workflow_task=False,
             # Reloaded row name wins over error-data context.
             task_name='loaded_task',
         )
+
+    @pytest.mark.asyncio
+    async def test_a_plain_task_owes_no_phase_two(self) -> None:
+        """A reloaded plain task got its wake from the statement that ended
+        it: phase 2 does not run, and its retry count is cleared."""
+        worker = _make_worker()
+        worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
+        worker._load_persisted_task_result = AsyncMock(  # type: ignore[assignment]
+            return_value=Ok(_PlainTaskDone()),
+        )
+        worker._finalize_workflow_phase = AsyncMock()  # type: ignore[assignment]
+        err = self._make_err()
+        key = (err.task_id, _FINALIZE_STAGE_PHASE2)
+        worker._finalize_retry_attempts[key] = 3
+
+        await worker._retry_finalize_phase2(err, 0.0)
+
+        worker._finalize_workflow_phase.assert_not_awaited()
+        assert key not in worker._finalize_retry_attempts
 
     # --- U-3k: _finalize_workflow fails → delegates ---
 
@@ -5716,11 +5720,15 @@ class TestPhase1ErrorReplay:
 # _persist_task_terminal_state: typed normal-finalization operations
 # ---------------------------------------------------------------------------
 
-from horsies.core.lifecycle.commands import (
-    CompleteLockedTask,
-)
+from horsies.core.lifecycle.fences import OwnedClaim
 from horsies.core.lifecycle.operations import TerminalizationKind
-from horsies.core.lifecycle.outcomes import Applied, LostClaim, ObservedTaskState
+from horsies.core.lifecycle.outcomes import (
+    Applied,
+    LostClaim,
+    ObservedTaskState,
+    PhaseTwoOwed,
+    SuccessApplied,
+)
 from horsies.core.lifecycle.persistence import (
     BatchCommitUnknown,
     BatchRolledBack,
@@ -5728,6 +5736,7 @@ from horsies.core.lifecycle.persistence import (
     FusedCompletionBatch,
 )
 from horsies.core.types.result import Result
+from horsies.core.worker.workflow_success import FinishWorkflowSuccess
 from horsies.core.types.status import TaskStatus
 from horsies.core.utils.db import NotSent, OutcomeUnknown, StatementRefused
 import psycopg
@@ -5930,29 +5939,58 @@ class TestPersistTerminalStateFusedPath:
 
     @pytest.mark.asyncio
     async def test_workflow_ok_result_returns_persisted_routing_facts(self) -> None:
-        """The locked row supplies phase-2 routing after terminalization."""
-        ctx_row = SimpleNamespace(
-            task_name='persisted_task',
-            retry_count=0,
-            started_at=datetime.now(timezone.utc),
-            claimed_by_worker_id='w-1',
-            worker_hostname='host',
-            worker_pid=1,
-            worker_process_name='p',
-            queue_name='persisted_queue',
-            is_workflow_task=True,
-            db_now=datetime.now(timezone.utc),
-        )
-        worker, session = _make_session_worker(
-            # generation-fenced context SELECT, then attempt UPSERT
-            fetchone_results=[ctx_row, None],
+        """The success of a workflow task is one statement; the locked row
+        supplies the phase-2 routing facts."""
+        worker, session = _make_session_worker(fetchone_results=[])
+        claimed_at = datetime.now(timezone.utc)
+        applied = SuccessApplied(
+            task_id='task-1',
+            terminal_at=claimed_at,
+            observed=ObservedTaskState(
+                status=TaskStatus.RUNNING, worker_id='w-1', claimed_at=claimed_at
+            ),
+            phase_two=PhaseTwoOwed(
+                task_name='persisted_task', queue_name='persisted_queue'
+            ),
         )
 
         with patch(
-            'horsies.core.worker.finalize.apply_async',
-            AsyncMock(return_value=_applied(TerminalizationKind.COMPLETE_LOCKED)),
-        ) as apply:
+            'horsies.core.worker.finalize.finish_workflow_success',
+            AsyncMock(return_value=applied),
+        ) as finish:
             result = await worker._persist_task_terminal_state(
+                task_id='task-1',
+                now=datetime.now(timezone.utc),
+                ok=True,
+                result_json_str=_OK_WIRE,
+                failed_reason=None,
+                task_name='my_task',
+                queue_name='q1',
+                is_workflow_task=True,
+                claimed_at=claimed_at,
+            )
+
+        persisted = result.ok_value
+        assert persisted is not None and persisted.result.is_ok()
+        assert persisted.task_name == 'persisted_task'
+        assert persisted.queue_name == 'persisted_queue'
+        assert finish.await_args.args[1] == FinishWorkflowSuccess(
+            task_id='task-1',
+            fence=OwnedClaim(worker_id=worker.worker_instance_id, claimed_at=claimed_at),
+            result_json=_OK_WIRE,
+        )
+        session.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_workflow_ok_result_refused_owes_nothing(self) -> None:
+        """A refused success wrote nothing: no phase 2, no reload."""
+        worker, session = _make_session_worker(fetchone_results=[])
+
+        with patch(
+            'horsies.core.worker.finalize.finish_workflow_success',
+            AsyncMock(return_value=_lost_claim()),
+        ):
+            result = await worker._persist_task_terminal_state(  # pyright: ignore[reportPrivateUsage]
                 task_id='task-1',
                 now=datetime.now(timezone.utc),
                 ok=True,
@@ -5963,15 +6001,8 @@ class TestPersistTerminalStateFusedPath:
                 is_workflow_task=True,
             )
 
-        persisted = result.ok_value
-        assert persisted is not None and persisted.result.is_ok()
-        assert persisted.task_name == 'persisted_task'
-        assert persisted.queue_name == 'persisted_queue'
-        assert persisted.is_workflow_task is True
-        command = apply.await_args.args[1]
-        assert isinstance(command, CompleteLockedTask)
-        assert session.execute.await_count == 2
-        session.commit.assert_awaited_once()
+        assert result == Ok(None)
+        session.execute.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_workflow_stopped_returns_none_without_sql(self) -> None:

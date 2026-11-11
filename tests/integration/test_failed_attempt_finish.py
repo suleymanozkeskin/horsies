@@ -41,6 +41,7 @@ from horsies.core.lifecycle.outcomes import (
     TaskAbsent,
 )
 from horsies.core.types.status import TaskStatus
+from horsies.core.utils.db import autocommit_connection
 from horsies.core.worker.failed_attempt import (
     AttemptFailure,
     AttemptFailureKind,
@@ -48,11 +49,9 @@ from horsies.core.worker.failed_attempt import (
     NoRetry,
     RetryAfter,
     RetryRequest,
-    autocommit_connection,
     finish_failed_attempt,
 )
 from horsies.core.worker.shared_stop import RetryPlacement
-from horsies.core.worker.sql import LOCK_RUNNING_TASK_SQL
 from tests.integration.conftest import DB_URL, compute_test_enqueue_sha
 from tests.integration.history_seeding import read_attempts
 
@@ -760,65 +759,3 @@ class TestArguments:
         assert getattr(raised.value.orig, 'sqlstate', None) == sqlstate
         assert await _live_row(engine, seeded.task_id) == before
         assert await _attempts(engine, seeded.task_id) == ()
-
-
-@pytest.mark.asyncio(loop_scope='function')
-class TestLockingRead:
-    """``horsies_lock_running_task``: the advisory lock, then the fenced row."""
-
-    async def test_it_returns_the_context_and_holds_the_advisory_lock(
-        self,
-        engine: AsyncEngine,
-        seed: Any,
-    ) -> None:
-        seeded = await seed(retry_count=2, max_retries=3)
-        async with engine.begin() as connection:
-            row = (
-                await connection.execute(
-                    LOCK_RUNNING_TASK_SQL,
-                    {
-                        'id': seeded.task_id,
-                        'wid': WORKER,
-                        'claimed_at': seeded.claimed_at,
-                    },
-                )
-            ).one()
-            held = (
-                await connection.execute(
-                    text("""
-                        SELECT count(*) FROM pg_locks
-                        WHERE locktype = 'advisory'
-                          AND pid = pg_backend_pid()
-                          AND granted
-                          AND (classid::bigint << 32) | objid::bigint
-                              = hashtextextended(:id, 731)
-                    """),
-                    {'id': seeded.task_id},
-                )
-            ).scalar_one()
-        assert (row.task_name, row.retry_count, row.queue_name) == (
-            TASK_NAME,
-            2,
-            QUEUE,
-        )
-        assert row.is_workflow_task is False
-        assert held == 1
-
-    async def test_another_generation_gets_no_row(
-        self,
-        engine: AsyncEngine,
-        seed: Any,
-    ) -> None:
-        seeded = await seed()
-        async with engine.begin() as connection:
-            rows = (
-                await connection.execute(
-                    LOCK_RUNNING_TASK_SQL,
-                    {
-                        'id': seeded.task_id,
-                        'wid': WORKER,
-                        'claimed_at': seeded.claimed_at + timedelta(seconds=1),
-                    },
-                )
-            ).all()
-        assert rows == []

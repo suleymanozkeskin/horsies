@@ -136,7 +136,8 @@ class _ConstantSurrogateModel(BaseModel):
 class _RecordingSession:
     """An ``AsyncSession`` stand-in that records each statement.
 
-    ``rows`` maps a statement to the row that its ``fetchone()`` returns, or
+    ``rows`` maps a statement to the row that its ``fetchone()`` and
+    ``one()`` return, or
     to a list of rows that successive executions return in order. Every
     other statement returns an empty namespace row.
     """
@@ -159,8 +160,10 @@ class _RecordingSession:
             case list():
                 queued_rows = cast('list[Any]', configured)
                 result.fetchone.return_value = queued_rows.pop(0)
+                result.one.return_value = result.fetchone.return_value
             case row:
                 result.fetchone.return_value = row
+                result.one.return_value = row
         return result
 
 
@@ -208,7 +211,9 @@ class TestCompletionResult:
         _ = _register_refused_task(app)
         broker = MagicMock()
         broker.app = app
-        recorder = _RecordingSession({COMPLETE_WORKFLOW_TASK_SQL: None})
+        recorder = _RecordingSession(
+            {COMPLETE_WORKFLOW_TASK_SQL: SimpleNamespace(workflow_id=None)},
+        )
 
         await on_workflow_task_complete(
             recorder.session, 'task-1', TaskResult(ok={'value': 1}), broker,

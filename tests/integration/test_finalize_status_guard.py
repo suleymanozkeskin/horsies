@@ -31,12 +31,12 @@ from horsies.core.lifecycle.outcomes import (
     LostClaim,
     RetryScheduled,
     SourceStateConflict,
+    SuccessApplied,
     TerminalizationOutcome,
+    WorkflowSuccessOutcome,
+    decode_workflow_success_row,
 )
-from horsies.core.lifecycle.persistence import (
-    apply_async,
-    classify_locked_read_miss_async,
-)
+from horsies.core.lifecycle.persistence import apply_async
 from horsies.core.worker.child_runner import _mark_task_finalizing
 from horsies.core.worker.failed_attempt import (
     AttemptFailure,
@@ -48,9 +48,10 @@ from horsies.core.worker.failed_attempt import (
     finish_failed_attempt,
 )
 from horsies.core.worker.shared_stop import RetryPlacement
-from horsies.core.worker.sql import (
-    LOCK_RUNNING_TASK_SQL,
-    READ_IN_FLIGHT_ATTEMPT_SQL,
+from horsies.core.worker.sql import READ_IN_FLIGHT_ATTEMPT_SQL
+from horsies.core.worker.workflow_success import (
+    FinishWorkflowSuccess,
+    success_statement,
 )
 from horsies.core.worker.worker import (
     _confirm_ownership_and_set_running,
@@ -219,25 +220,70 @@ async def _complete_locked(
     worker_id: str = OWNER_WORKER_ID,
     result_json: str = '{"ok": "result"}',
 ) -> TerminalizationOutcome:
+    """``horsies_complete_locked_task``, which classifies its own miss."""
     command = CompleteLockedTask(
         task_id=task_id,
         fence=PriorLockedRead(worker_id=worker_id),
         result_json=result_json,
     )
-    context = (
-        await session.execute(
-            LOCK_RUNNING_TASK_SQL,
-            {'id': task_id, 'wid': worker_id, 'claimed_at': None},
-        )
-    ).first()
-    connection = await session.connection()
-    if context is None:
-        return await classify_locked_read_miss_async(
-            connection,
-            command,
-            claimed_at=None,
-        )
-    return await apply_async(connection, command)
+    return await apply_async(await session.connection(), command)
+
+
+async def _link_workflow_node(session: AsyncSession, task_id: str) -> None:
+    """Make ``task_id`` the task of a RUNNING node of a RUNNING workflow."""
+    workflow_id = str(uuid.uuid4())
+    await session.execute(
+        text("""
+            UPDATE horsies_tasks SET is_workflow_task = TRUE
+            WHERE id = CAST(:id AS uuid)
+        """),
+        {'id': task_id},
+    )
+    await session.execute(
+        text("""
+            INSERT INTO horsies_workflows
+                (id, name, status, on_error, depth, root_workflow_id,
+                 sent_at, created_at, started_at, updated_at)
+            VALUES (:wf, 'guard_test_wf', 'RUNNING', 'FAIL', 0, :wf,
+                    NOW(), NOW(), NOW(), NOW())
+        """),
+        {'wf': workflow_id},
+    )
+    await session.execute(
+        text("""
+            INSERT INTO horsies_workflow_tasks
+                (id, workflow_id, task_index, node_id, task_name, task_args,
+                 task_kwargs, queue_name, priority, dependencies,
+                 allow_failed_deps, join_type, is_subworkflow, status,
+                 task_id, created_at)
+            VALUES (:id, :wf, 0, 'node-0', 'guard_test', '[]', '{}',
+                    'default', 100, '{}', FALSE, 'all', FALSE, 'RUNNING',
+                    CAST(:task_id AS uuid), NOW())
+        """),
+        {'id': str(uuid.uuid4()), 'wf': workflow_id, 'task_id': task_id},
+    )
+    await session.flush()
+
+
+async def _finish_workflow_success(
+    session: AsyncSession,
+    task_id: str,
+    *,
+    worker_id: str,
+    claimed_at: datetime | None,
+) -> WorkflowSuccessOutcome:
+    """The success of a workflow task, in the session's open transaction."""
+    statement = success_statement(
+        FinishWorkflowSuccess(
+            task_id=task_id,
+            fence=OwnedClaim(worker_id=worker_id, claimed_at=claimed_at),
+            result_json='{"ok": "result"}',
+        ),
+    )
+    result = await session.execute(statement.statement, dict(statement.parameters))
+    return decode_workflow_success_row(
+        {str(key): value for key, value in result.mappings().one().items()},
+    )
 
 
 async def _fail_attempt(
@@ -527,33 +573,28 @@ async def test_in_flight_read_returns_the_retry_facts(
 
 
 @pytest.mark.asyncio(loop_scope='function')
-async def test_locking_read_blocks_on_ownership_mismatch(
+async def test_workflow_success_blocks_on_ownership_mismatch(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """The locking read returns no row when another worker owns the RUNNING task."""
+    """The success of a workflow task refuses a RUNNING row that another
+    worker owns, and writes nothing."""
     task_id = await _insert_running_task(
         session, claimed_by_worker_id=OTHER_WORKER_ID
     )
+    await _link_workflow_node(session, task_id)
 
-    row = (
-        await session.execute(
-            LOCK_RUNNING_TASK_SQL,
-            {'id': task_id, 'wid': OWNER_WORKER_ID, 'claimed_at': None},
-        )
-    ).fetchone()
-    assert (
-        row is None
-    ), 'The locking read must not match a RUNNING row owned by another worker'
+    outcome = await _finish_workflow_success(
+        session, task_id, worker_id=OWNER_WORKER_ID, claimed_at=None
+    )
+    assert isinstance(outcome, LostClaim)
+    assert await _get_task_status(session, task_id) == 'RUNNING'
 
     # Sanity: the actual owner still matches.
-    owner_row = (
-        await session.execute(
-            LOCK_RUNNING_TASK_SQL,
-            {'id': task_id, 'wid': OTHER_WORKER_ID, 'claimed_at': None},
-        )
-    ).fetchone()
-    assert owner_row is not None
+    owner = await _finish_workflow_success(
+        session, task_id, worker_id=OTHER_WORKER_ID, claimed_at=None
+    )
+    assert isinstance(owner, SuccessApplied)
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -749,28 +790,25 @@ async def test_fused_finalize_null_fence_matches_any_generation(
 
 
 @pytest.mark.asyncio(loop_scope='function')
-async def test_locking_read_rejects_stale_claim_generation(
+async def test_workflow_success_rejects_stale_claim_generation(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """The locking read skips a row from a different claim generation."""
+    """The success of a workflow task refuses a row of a different claim
+    generation, and applies under the current one."""
     task_id = await _insert_running_task(session, claimed_at=GEN_CURRENT)
+    await _link_workflow_node(session, task_id)
 
-    stale_row = (
-        await session.execute(
-            LOCK_RUNNING_TASK_SQL,
-            {'id': task_id, 'wid': OWNER_WORKER_ID, 'claimed_at': GEN_STALE},
-        )
-    ).fetchone()
-    assert stale_row is None
+    stale = await _finish_workflow_success(
+        session, task_id, worker_id=OWNER_WORKER_ID, claimed_at=GEN_STALE
+    )
+    assert isinstance(stale, LostClaim)
+    assert await _get_task_status(session, task_id) == 'RUNNING'
 
-    live_row = (
-        await session.execute(
-            LOCK_RUNNING_TASK_SQL,
-            {'id': task_id, 'wid': OWNER_WORKER_ID, 'claimed_at': GEN_CURRENT},
-        )
-    ).fetchone()
-    assert live_row is not None
+    live = await _finish_workflow_success(
+        session, task_id, worker_id=OWNER_WORKER_ID, claimed_at=GEN_CURRENT
+    )
+    assert isinstance(live, SuccessApplied)
 
 
 @pytest.mark.asyncio(loop_scope='function')

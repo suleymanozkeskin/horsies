@@ -22,6 +22,7 @@ from horsies.core.utils.db import (
     SingleStatement,
     StatementRefused,
     StatementRows,
+    autocommit_connection,
     is_dbapi_disconnect,
     is_retryable_connection_error,
     run_in_autocommit,
@@ -301,3 +302,21 @@ class TestRunInAutocommitResult:
             with pytest.raises(DBAPIError) as raised:
                 await run_in_autocommit(factory, _STATEMENT)
             assert raised.value is error
+
+
+@pytest.mark.unit
+class TestAutocommitConnection:
+    @pytest.mark.asyncio
+    async def test_it_asks_the_session_for_an_autocommit_connection(self) -> None:
+        """Several statements on one checkout, each its own transaction: the
+        session's connection with the one autocommit setting."""
+        connection = AsyncMock()
+        session = AsyncMock()
+        session.connection = AsyncMock(return_value=connection)
+
+        got = await autocommit_connection(session)
+
+        assert got is connection
+        session.connection.assert_awaited_once_with(
+            execution_options=dict(AUTOCOMMIT_EXECUTION_OPTIONS),
+        )

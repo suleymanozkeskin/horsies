@@ -784,6 +784,82 @@ def _decode_retry_scheduled(
     )
 
 
+# ---------------------------------------------------------------------------
+# The success of a workflow task
+# ---------------------------------------------------------------------------
+#
+# ``horsies_finish_workflow_success`` returns the ten shared columns and two
+# more, the routing facts of phase 2. A miss carries the shared classifier's
+# row unchanged and the two columns NULL, so it decodes to the shared outcome
+# types.
+
+
+@dataclass(frozen=True, slots=True)
+class SuccessApplied:
+    """The success of a workflow task committed: its attempt row, its history
+    row and the phase-2 record of its node. Phase 2 is owed."""
+
+    task_id: str
+    terminal_at: datetime
+    observed: ObservedTaskState
+    phase_two: PhaseTwoOwed
+
+
+type WorkflowSuccessOutcome = (
+    SuccessApplied | AlreadyApplied | LostClaim | SourceStateConflict | TaskAbsent
+)
+
+_WORKFLOW_SUCCESS_COLUMNS: frozenset[str] = frozenset({'queue_name', 'task_name'})
+
+
+def decode_workflow_success_row(row: Mapping[str, Any]) -> WorkflowSuccessOutcome:
+    """Decode the row of ``horsies_finish_workflow_success``.
+
+    Raises:
+        OutcomeDecodeError: the row does not satisfy the wire contract: a
+            column is missing or unknown, an APPLIED row carries a kind other
+            than COMPLETE_LOCKED or no routing column, or a refusal carries
+            a routing column.
+    """
+    present = frozenset(row.keys())
+    expected = _ROW_COLUMNS | _WORKFLOW_SUCCESS_COLUMNS
+    if present != expected:
+        raise OutcomeDecodeError(
+            f'workflow-success row shape does not match the wire contract. '
+            f'missing={sorted(expected - present)} '
+            f'unexpected={sorted(present - expected)}'
+        )
+    shared = {column: row[column] for column in _ROW_COLUMNS}
+    match decode_outcome_row(shared):
+        case Applied(
+            task_id=task_id, terminal_at=terminal_at, kind=kind, observed=observed
+        ):
+            if kind is not TerminalizationKind.COMPLETE_LOCKED:
+                raise OutcomeDecodeError(
+                    f'workflow-success APPLIED carries kind {kind.value}, '
+                    f'not COMPLETE_LOCKED'
+                )
+            return SuccessApplied(
+                task_id=task_id,
+                terminal_at=terminal_at,
+                observed=observed,
+                phase_two=PhaseTwoOwed(
+                    task_name=_require_str(row, 'task_name'),
+                    queue_name=_require_str(row, 'queue_name'),
+                ),
+            )
+        case (
+            AlreadyApplied()
+            | LostClaim()
+            | SourceStateConflict()
+            | TaskAbsent() as refused
+        ):
+            _require_null_columns(row, _WORKFLOW_SUCCESS_COLUMNS)
+            return refused
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def _require_null_columns(row: Mapping[str, Any], columns: frozenset[str]) -> None:
     populated = sorted(column for column in columns if row[column] is not None)
     if populated:

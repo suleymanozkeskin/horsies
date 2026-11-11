@@ -95,11 +95,11 @@ from horsies.core.workflows.sql import (
     GET_WORKFLOW_DEPTH_SQL,
     GET_WORKFLOW_ON_ERROR_SQL,
     GET_WORKFLOW_STATUS_SQL,
+    INSERT_AND_LINK_WORKFLOW_TASK_SQL,
     INSERT_CHILD_WORKFLOW_SQL,
     INSERT_TASK_FOR_WORKFLOW_SQL,
     INSERT_WORKFLOW_TASKS_BULK_SQL,
     LINK_SUB_WORKFLOW_SQL,
-    LINK_WORKFLOW_TASK_SQL,
     LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL,
     MARK_TASK_READY_SQL,
     MARK_WORKFLOW_COMPLETED_SQL,
@@ -697,16 +697,13 @@ async def enqueue_workflow_task(
         return None
     insert_params = build_r.ok_value
 
-    await session.execute(INSERT_TASK_FOR_WORKFLOW_SQL, insert_params)
-
-    # Link workflow_task to actual task
-    task_id = str(insert_params['id'])
+    # The task row and the link of the node to it, in one statement.
     await session.execute(
-        LINK_WORKFLOW_TASK_SQL,
-        {'tid': task_id, 'wf_id': workflow_id, 'idx': task_index},
+        INSERT_AND_LINK_WORKFLOW_TASK_SQL,
+        {**insert_params, 'wf_id': workflow_id, 'idx': task_index},
     )
 
-    return task_id
+    return str(insert_params['id'])
 
 
 
@@ -1765,6 +1762,35 @@ def node_status_for_terminal_task(task_status: str) -> str:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class QueueWake:
+    """The capacity wake of a finished task's queue: ``pg_notify(channel,
+    payload)``, sent in the transaction that advances the node."""
+
+    channel: str
+    payload: str
+
+
+@dataclass(frozen=True, slots=True)
+class NoQueueWake:
+    """The caller sends no capacity wake."""
+
+
+type NodeCompletionWake = QueueWake | NoQueueWake
+
+
+def _wake_parameters(wake: NodeCompletionWake) -> dict[str, str | None]:
+    """The wake parameters of ``COMPLETE_WORKFLOW_TASK_SQL``; NULL sends
+    none. Pure."""
+    match wake:
+        case QueueWake(channel=channel, payload=payload):
+            return {'wake_channel': channel, 'wake_payload': payload}
+        case NoQueueWake():
+            return {'wake_channel': None, 'wake_payload': None}
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 async def on_workflow_task_complete(
     session: AsyncSession,
     task_id: str,
@@ -1772,6 +1798,7 @@ async def on_workflow_task_complete(
     broker: 'PostgresBroker | None',
     *,
     task_name: str,
+    wake: NodeCompletionWake = NoQueueWake(),
 ) -> None:
     """
     Called from worker._finalize_after when a task completes.
@@ -1794,6 +1821,10 @@ async def on_workflow_task_complete(
     is needed BEFORE any statement: the single locate+lock+CAS statement
     binds the encoded result, and encoding resolves the source task's
     ``task_ok_type`` from this name.
+
+    ``wake`` is sent by the first statement, whether or not the task has a
+    node: the worker's phase 2 passes the capacity wake of the task's queue,
+    so the wake costs no round trip of its own. It is delivered at COMMIT.
 
     Strict-serde phase 7: ``broker`` is required (explicit `None` allowed for
     unit-test branches that return before dependency propagation). Removing
@@ -1852,20 +1883,22 @@ async def on_workflow_task_complete(
     # FOR UPDATE lock (serializes completion handling per workflow so
     # concurrent completions don't race dependency promotion), CAS-update
     # the node to its terminal status, and return the progression context.
-    row_result = await session.execute(
-        COMPLETE_WORKFLOW_TASK_SQL,
-        {
-            'tid': task_id,
-            'status': new_status,
-            'result': _ser_or_raise(
-                dumps_json(encoded_result),
-                f'completion result for task {task_id}',
-            ),
-            'terminal_states': WF_TASK_TERMINAL_VALUES,
-        },
-    )
-    row = row_result.fetchone()
-    if row is None:
+    row = (
+        await session.execute(
+            COMPLETE_WORKFLOW_TASK_SQL,
+            {
+                'tid': task_id,
+                'status': new_status,
+                'result': _ser_or_raise(
+                    dumps_json(encoded_result),
+                    f'completion result for task {task_id}',
+                ),
+                'terminal_states': WF_TASK_TERMINAL_VALUES,
+                **_wake_parameters(wake),
+            },
+        )
+    ).one()
+    if row.workflow_id is None:
         return  # Not a workflow task (or its workflow row is missing)
 
     workflow_id = row.workflow_id
@@ -2036,7 +2069,8 @@ async def _promote_dependents_level(
       6. per-row payload build in Python via the shared builder; a node
          whose build fails diverts to ``_fail_enqueued_task`` (per-node
          failure isolation, same as the sequential path),
-      7. one bulk task INSERT + one bulk LINK (executemany).
+      7. one executemany of the task INSERT with the node LINK, one
+         statement per node, in one round trip.
 
     SubWorkflowNode and workflow_ctx_from dependents take the per-node
     ``try_make_ready_and_enqueue`` path unchanged.
@@ -2176,7 +2210,6 @@ async def _promote_dependents_level(
         ).fetchall()
 
         insert_params: list[dict[str, Any]] = []
-        link_params: list[dict[str, Any]] = []
         paused_mid_level = False
         for cas_row in cas_rows:
             build_r = await _build_enqueued_task_params(
@@ -2208,10 +2241,8 @@ async def _promote_dependents_level(
                     paused_mid_level = True
                     break
                 continue
-            params = build_r.ok_value
-            insert_params.append(params)
-            link_params.append({
-                'tid': params['id'],
+            insert_params.append({
+                **build_r.ok_value,
                 'wf_id': workflow_id,
                 'idx': cas_row.task_index,
             })
@@ -2229,8 +2260,9 @@ async def _promote_dependents_level(
                 {'wf_id': workflow_id, 'idxs': enqueue_indexes},
             )
         elif insert_params:
-            await session.execute(INSERT_TASK_FOR_WORKFLOW_SQL, insert_params)
-            await session.execute(LINK_WORKFLOW_TASK_SQL, link_params)
+            # Each task row and the link of its node, one statement per
+            # node, sent in one round trip.
+            await session.execute(INSERT_AND_LINK_WORKFLOW_TASK_SQL, insert_params)
 
     for task_index in slow_indexes:
         await try_make_ready_and_enqueue(

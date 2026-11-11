@@ -123,7 +123,7 @@ ENQUEUE_WORKFLOW_TASK_SQL = text("""
     RETURNING wt.id, wt.task_name, wt.task_args, wt.task_kwargs, wt.queue_name, wt.priority,
               wt.args_from, wt.workflow_ctx_from, wt.task_options
 """)
-INSERT_TASK_FOR_WORKFLOW_SQL = text("""
+_INSERT_TASK_FOR_WORKFLOW = """
     INSERT INTO horsies_tasks (id, task_name, queue_name, priority, args, kwargs, status,
                        sent_at, enqueued_at, created_at, updated_at, claimed, retry_count, max_retries,
                        task_options, execution, good_until, enqueue_sha, is_workflow_task,
@@ -134,7 +134,8 @@ INSERT_TASK_FOR_WORKFLOW_SQL = text("""
             :good_until, :enqueue_sha, TRUE,
             :retention_class_key, :fingerprint_version, :fingerprint,
             :retain_rerun_input, :rerun_disposition)
-""")
+"""
+INSERT_TASK_FOR_WORKFLOW_SQL = text(_INSERT_TASK_FOR_WORKFLOW)
 
 
 def workflow_task_enqueue_stamp(
@@ -185,8 +186,20 @@ def workflow_task_enqueue_stamp(
         'retain_rerun_input': False,
         'rerun_disposition': 'NEVER_ELIGIBLE',
     }
-LINK_WORKFLOW_TASK_SQL = text("""
-    UPDATE horsies_workflow_tasks SET task_id = :tid WHERE workflow_id = :wf_id AND task_index = :idx
+# The insert of a node's task and the link of the node to it, in one
+# statement: the parameters of INSERT_TASK_FOR_WORKFLOW_SQL, plus :wf_id and
+# :idx of the node. The insert runs whether or not the node matches, as when
+# the two ran as two statements. Run with executemany, one execution per
+# node, in one round trip.
+INSERT_AND_LINK_WORKFLOW_TASK_SQL = text(f"""
+    WITH inserted AS (
+        {_INSERT_TASK_FOR_WORKFLOW}
+        RETURNING id
+    )
+    UPDATE horsies_workflow_tasks wt
+    SET task_id = inserted.id
+    FROM inserted
+    WHERE wt.workflow_id = :wf_id AND wt.task_index = :idx
 """)
 # Pause-mid-level revert: when a payload-build failure's on_error=PAUSE
 # handler pauses the workflow, the level's already-CAS'd-but-not-inserted
@@ -286,8 +299,17 @@ GET_SUBWORKFLOW_SUMMARIES_SQL = text("""
 #     (pause/cancel are UPDATEs on the same row and block on it), and
 #     data-modifying CTEs always execute exactly once, so the CAS runs
 #     even though the outer query only reads `found`.
-# Zero rows = not a workflow task, or its workflow row is missing; the
-# caller treats both as a no-op (matches the old early returns).
+# The statement returns one row. workflow_id NULL = not a workflow task, or
+# its workflow row is missing; the caller treats both as a no-op (matches
+# the old early returns).
+#
+# `woken` sends the capacity wake of the finished task's queue when
+# :wake_channel is not NULL, whether or not a node is found. A NOTIFY is
+# delivered at COMMIT, so its place in the transaction changes nothing for a
+# listener; when the transaction rolls back, no wake is sent. A wake that the
+# server refuses fails the statement, and the transaction with it. The outer
+# query reads `woken` through an aggregate, so it runs exactly once: a SELECT
+# CTE that no query reads does not run.
 #
 # `consumed` deletes the phase-2 pending row that the task's terminal move
 # wrote, and `released` the quarantine row a pending row can point at, as
@@ -305,7 +327,13 @@ GET_SUBWORKFLOW_SUMMARIES_SQL = text("""
 # The cancel transaction (LOCK_WORKFLOW_ROW_FOR_CANCEL_SQL in
 # models/workflow/handle.py) is held to the same order.
 COMPLETE_WORKFLOW_TASK_SQL = text(f"""
-    WITH found AS (
+    WITH woken AS (
+        SELECT pg_notify(
+            CAST(:wake_channel AS text), CAST(:wake_payload AS text)
+        )
+        WHERE CAST(:wake_channel AS text) IS NOT NULL
+    ),
+    found AS (
         SELECT wt.workflow_id, wt.task_index, wt.task_id,
                w.status AS wf_status, w.depth, w.root_workflow_id, w.on_error
         FROM horsies_workflow_tasks wt
@@ -338,7 +366,8 @@ COMPLETE_WORKFLOW_TASK_SQL = text(f"""
     SELECT found.workflow_id, found.task_index, found.wf_status,
            found.depth, found.root_workflow_id, found.on_error,
            EXISTS (SELECT 1 FROM upd) AS cas_won
-    FROM found
+    FROM (SELECT count(*) AS sent FROM woken) AS wake
+    LEFT JOIN found ON TRUE
 """)
 GET_WORKFLOW_STATUS_SQL = text(
     """SELECT status FROM horsies_workflows WHERE id = :wf_id"""

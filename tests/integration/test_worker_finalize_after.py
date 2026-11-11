@@ -125,8 +125,59 @@ def _make_worker(engine: AsyncEngine) -> Worker:
     return worker
 
 
-async def _insert_running_task(session: AsyncSession) -> str:
-    """Insert a minimal horsies_tasks row in RUNNING state."""
+async def _link_workflow_node(
+    session: AsyncSession, task_id: str, task_name: str
+) -> None:
+    """Make ``task_id`` the task of a RUNNING node of a RUNNING workflow, as
+    the claim of a workflow task and its start leave it."""
+    workflow_id = str(uuid.uuid4())
+    await session.execute(
+        text("""
+            UPDATE horsies_tasks
+            SET is_workflow_task = TRUE,
+                prepared_rerun_input_disposition = 'NEVER_ELIGIBLE'
+            WHERE id = CAST(:id AS uuid)
+        """),
+        {'id': task_id},
+    )
+    await session.execute(
+        text("""
+            INSERT INTO horsies_workflows
+                (id, name, status, on_error, depth, root_workflow_id,
+                 sent_at, created_at, started_at, updated_at)
+            VALUES (:wf, 'finalize_after_wf', 'RUNNING', 'FAIL', 0, :wf,
+                    NOW(), NOW(), NOW(), NOW())
+        """),
+        {'wf': workflow_id},
+    )
+    await session.execute(
+        text("""
+            INSERT INTO horsies_workflow_tasks
+                (id, workflow_id, task_index, node_id, task_name, task_args,
+                 task_kwargs, queue_name, priority, dependencies,
+                 allow_failed_deps, join_type, is_subworkflow, status,
+                 task_id, created_at)
+            VALUES (:id, :wf, 0, 'node-0', :task_name, '[]', '{}', 'default',
+                    100, '{}', FALSE, 'all', FALSE, 'RUNNING',
+                    CAST(:task_id AS uuid), NOW())
+        """),
+        {
+            'id': str(uuid.uuid4()),
+            'wf': workflow_id,
+            'task_name': task_name,
+            'task_id': task_id,
+        },
+    )
+
+
+async def _insert_running_task(
+    session: AsyncSession, *, is_workflow_task: bool = True
+) -> str:
+    """Insert a minimal horsies_tasks row in RUNNING state.
+
+    A workflow task, with its node, unless ``is_workflow_task`` is False:
+    ``_finalize_after`` takes a workflow task unless told otherwise.
+    """
     task_id = str(uuid.uuid4())
     sent_at, sha = compute_test_enqueue_sha(task_name='finalize_after_test')
     await session.execute(
@@ -153,12 +204,17 @@ async def _insert_running_task(session: AsyncSession) -> str:
             'claimed_by_worker_id': TEST_WORKER_ID,
         },
     )
+    if is_workflow_task:
+        await _link_workflow_node(session, task_id, 'finalize_after_test')
     await session.commit()
     return task_id
 
 
-async def _insert_owned_running_task(session: AsyncSession, worker_id: str) -> str:
-    """Insert a RUNNING task owned by a specific worker."""
+async def _insert_owned_running_task(
+    session: AsyncSession, worker_id: str, *, is_workflow_task: bool = True
+) -> str:
+    """Insert a RUNNING task owned by a specific worker; a workflow task, with
+    its node, unless ``is_workflow_task`` is False."""
     task_id = str(uuid.uuid4())
     sent_at, sha = compute_test_enqueue_sha(task_name='finalize_after_owned_test')
     await session.execute(
@@ -187,6 +243,8 @@ async def _insert_owned_running_task(session: AsyncSession, worker_id: str) -> s
             'worker_id': worker_id,
         },
     )
+    if is_workflow_task:
+        await _link_workflow_node(session, task_id, 'finalize_after_owned_test')
     await session.commit()
     return task_id
 
@@ -701,7 +759,7 @@ async def test_task_expired_plain_task_skips_finalization(
 ) -> None:
     """Plain-task TASK_EXPIRED keeps the skip: Ok(None), no DB write,
     no phase 2, no persisted-result load."""
-    task_id = await _insert_running_task(session)
+    task_id = await _insert_running_task(session, is_workflow_task=False)
     worker = _make_worker(engine)
     handle = task_finished_handle(
         ok=False, result_json='', failed_reason='TASK_EXPIRED',

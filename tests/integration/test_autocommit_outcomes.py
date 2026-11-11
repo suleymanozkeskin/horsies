@@ -398,10 +398,12 @@ async def test_a_dead_connection_fails_the_completion_and_the_retry_applies(
     assert await _history_rows(session, task_id) == 1
 
 
-async def test_a_dead_connection_fails_the_plain_wake_as_retryable(
+async def test_a_dead_connection_fails_phase_two_as_retryable(
     direct: ProxiedWorker,
     session: AsyncSession,
 ) -> None:
+    """Phase 2 of a workflow task opens its transaction on the dead pooled
+    connection: a retryable phase-2 error, whose retry runs phase 2 again."""
     await _one_pooled_connection(direct)
     await _kill_the_pooled_backend(direct.worker, session)
 
@@ -409,7 +411,6 @@ async def test_a_dead_connection_fails_the_plain_wake_as_retryable(
         str(uuid.uuid4()),
         TaskResult(ok=None),
         queue_name=QUEUE,
-        is_workflow_task=False,
         task_name=TASK_NAME,
     )
 

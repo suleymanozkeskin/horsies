@@ -65,6 +65,7 @@ from horsies.core.lifecycle.outcomes import (
     PhaseTwoOwed,
     RetryScheduled,
     SourceStateConflict,
+    SuccessApplied,
     TaskAbsent,
     TerminalizationOutcome,
 )
@@ -73,10 +74,8 @@ from horsies.core.lifecycle.persistence import (
     BatchRolledBack,
     BatchWriteError,
     FusedCompletionBatch,
-    apply_async,
     apply_fused_batch_in_autocommit,
     apply_in_autocommit,
-    classify_locked_read_miss_async,
 )
 from horsies.core.logging import get_logger
 from horsies.core.models.tasks import (
@@ -117,9 +116,8 @@ from horsies.core.worker.slots import (
     TaskFinished,
 )
 from horsies.core.utils.db import (
-    SingleStatement,
+    autocommit_connection,
     is_retryable_connection_error,
-    run_in_autocommit,
 )
 from horsies.core.worker.runtime import (
     CrashRecoveryCode,
@@ -151,7 +149,6 @@ from horsies.core.worker.failed_attempt import (
     NoRetry,
     RetryRequest,
     RunningAttempt,
-    autocommit_connection,
     finish_failed_attempt,
     finish_for,
     read_in_flight_attempt,
@@ -172,10 +169,9 @@ from horsies.core.worker.stored_timeout import (
     TaskTimeout,
     TimeoutValueInvalid,
 )
-from horsies.core.worker.sql import (
-    LOCK_RUNNING_TASK_SQL,
-    NOTIFY_TASK_QUEUE_SQL,
-    UPSERT_TASK_ATTEMPT_SQL,
+from horsies.core.worker.workflow_success import (
+    finish_workflow_success,
+    success_for,
 )
 
 if TYPE_CHECKING:
@@ -191,6 +187,7 @@ if TYPE_CHECKING:
     from horsies.core.brokers.postgres import PostgresBroker
     from horsies.core.worker.config import WorkerConfig
     from horsies.core.worker.finalize_batch import FinalizeBatcher
+    from horsies.core.workflows.engine import QueueWake
 
 logger = get_logger('worker')
 
@@ -218,12 +215,23 @@ class _PersistedTaskRow:
 
 @dataclass(frozen=True, slots=True)
 class _PersistedTaskOutcome:
-    """Terminal result and phase-2 routing facts read from one row."""
+    """A workflow task's terminal result and the routing facts of its phase
+    2. Phase 2 is owed only by a workflow task, so this is its only input."""
 
     result: TaskResult[Any, TaskError]
     task_name: str
     queue_name: str
-    is_workflow_task: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _PlainTaskDone:
+    """A plain task's terminal row. The statement that wrote it sent its
+    capacity wake, so nothing is owed: a plain task has no phase 2."""
+
+
+type _PersistedTerminal = _PersistedTaskOutcome | _PlainTaskDone
+"""What a persisted terminal row owes: the phase 2 of a workflow task, or
+nothing for a plain task."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,48 +244,28 @@ class _Phase1Input:
     failed_reason: str | None
 
 
-async def _write_completed_attempt(
-    s: AsyncSession,
-    task_id: str,
-    ctx_row: Any,
-) -> None:
-    """Write the COMPLETED attempt row from the locked context row, in the
-    session's transaction. Database errors raise."""
-    db_now = ctx_row.db_now
-    await s.execute(
-        UPSERT_TASK_ATTEMPT_SQL,
-        {
-            'task_id': task_id,
-            'attempt': ctx_row.retry_count + 1,
-            'outcome': 'COMPLETED',
-            'will_retry': False,
-            'started_at': ctx_row.started_at or db_now,
-            'finished_at': db_now,
-            'error_code': None,
-            'error_message': None,
-            'failed_reason': None,
-            'worker_id': ctx_row.claimed_by_worker_id,
-            'worker_hostname': ctx_row.worker_hostname,
-            'worker_pid': ctx_row.worker_pid,
-            'worker_process_name': ctx_row.worker_process_name,
-        },
-    )
-
-
 def _phase2_of_a_replay(
-    loaded: Result[_PersistedTaskOutcome, _FinalizeError],
+    loaded: Result[_PersistedTerminal, _FinalizeError],
 ) -> Result[_PersistedTaskOutcome | None, _FinalizeError]:
-    """What phase 2 still owes after a replay of a committed failure. Pure.
-
-    The failed-attempt finish sent the capacity wake of a plain task in the
-    statement that committed, so a plain task owes nothing; a workflow task
-    owes its phase 2.
+    """What phase 2 still owes after a replay of a committed terminal row.
+    Pure. ``Ok(None)``: nothing is owed.
     """
     match loaded:
-        case Ok(ok_value=persisted) if not persisted.is_workflow_task:
-            return Ok(None)
-        case Ok() | Err():
-            return loaded
+        case Ok(ok_value=persisted):
+            return Ok(_phase_two_owed(persisted))
+        case Err(err_value=error):
+            return Err(error)
+
+
+def _phase_two_owed(persisted: _PersistedTerminal) -> _PersistedTaskOutcome | None:
+    """The phase 2 that ``persisted`` owes; None for a plain task. Pure."""
+    match persisted:
+        case _PersistedTaskOutcome():
+            return persisted
+        case _PlainTaskDone():
+            return None
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _attempt_failure_of(
@@ -753,7 +741,6 @@ class FinalizeMixin:
             task_id,
             persisted.result,
             queue_name=persisted.queue_name,
-            is_workflow_task=persisted.is_workflow_task,
             task_name=persisted.task_name,
         )
         if is_err(phase2_r):
@@ -1087,9 +1074,9 @@ class FinalizeMixin:
         persistence statement is selected. Plain success uses the fused
         operation. A failure, with or without a retry, uses one unlocked read
         of the retry facts and ``horsies_finish_failed_attempt``
-        (``_persist_failed_attempt``). A workflow task's success uses the
-        advisory-first locking read, an attempt write, and its operation
-        function in one transaction (``_complete_locked_task``). A retry of a
+        (``_persist_failed_attempt``). A workflow task's success is one
+        statement, ``horsies_finish_workflow_success``
+        (``_finish_workflow_success``). A retry of a
         committed phase 1 is classified as ``AlreadyApplied`` and reloads the
         persisted result for phase 2; ``LostClaim`` and other refusals do not
         advance the workflow. ``Ok(None)``: nothing is owed to phase 2.
@@ -1220,10 +1207,9 @@ class FinalizeMixin:
                 )
                 return Ok(None)
             case ReplayWorkflowPhase2():
-                load_r = await self._load_persisted_task_result(task_id)
-                if is_err(load_r):
-                    return Err(load_r.err_value)
-                return load_r
+                return _phase2_of_a_replay(
+                    await self._load_persisted_task_result(task_id),
+                )
             case ApplyTerminalization(command=CancelOwnedOrphan() as command):
                 try:
                     outcome = await apply_in_autocommit(self.sf, command)
@@ -1298,7 +1284,7 @@ class FinalizeMixin:
         match (locked_command, report):
             case (CompleteLockedTask() as completion, ResultProduced()):
                 assert tr is not None
-                return await self._complete_locked_task(
+                return await self._finish_workflow_success(
                     completion,
                     tr,
                     claimed_at=claimed_at,
@@ -1332,7 +1318,7 @@ class FinalizeMixin:
                     f'{type(report).__name__} / {type(locked_command).__name__}'
                 )
 
-    async def _complete_locked_task(
+    async def _finish_workflow_success(
         self,
         completion: CompleteLockedTask,
         tr: TaskResult[Any, TaskError],
@@ -1340,68 +1326,50 @@ class FinalizeMixin:
         claimed_at: datetime | None,
         child: _Phase1Input,
     ) -> Result[_PersistedTaskOutcome | None, _FinalizeError]:
-        """Phase 1 of a workflow task's success, in one transaction.
+        """Phase 1 of a workflow task's success: one statement.
 
-        ``horsies_lock_running_task`` takes the task advisory lock, then the
-        row lock under the claim fence. The attempt row and the move follow
-        in the same transaction. A miss is classified: ``AlreadyApplied``
-        reloads the persisted result for the phase-2 replay; a refusal
-        writes nothing. Database errors become a retryable phase-1 error
-        when the connection failed.
+        ``finish_workflow_success`` runs ``horsies_finish_workflow_success``
+        in autocommit: the attempt row, the move and the phase-2 record of
+        the node commit together. ``SuccessApplied`` owes phase 2;
+        ``AlreadyApplied`` (a replay of a committed success) reloads the
+        persisted result for the phase-2 replay; a refusal wrote nothing and
+        owes nothing. Database errors become a phase-1 error, retryable when
+        the connection failed; its data keeps the child's report for the
+        replay.
         """
-        task_id = completion.task_id
         try:
-            async with self.sf() as s:
-                ctx_row = (
-                    await s.execute(
-                        LOCK_RUNNING_TASK_SQL,
-                        {
-                            'id': task_id,
-                            'wid': self.worker_instance_id,
-                            'claimed_at': claimed_at,
-                        },
-                    )
-                ).fetchone()
-                if ctx_row is None:
-                    return await self._settle_locked_completion_miss(
-                        s,
-                        completion,
-                        claimed_at,
-                    )
-                await _write_completed_attempt(s, task_id, ctx_row)
-                outcome = await apply_async(await s.connection(), completion)
-                match outcome:
-                    case Applied():
-                        await s.commit()
-                        return Ok(
-                            _PersistedTaskOutcome(
-                                result=tr,
-                                task_name=str(ctx_row.task_name),
-                                queue_name=str(ctx_row.queue_name),
-                                is_workflow_task=bool(ctx_row.is_workflow_task),
-                            )
-                        )
-                    case AlreadyApplied():
-                        load_r = await self._load_persisted_task_result(
-                            task_id,
-                            session=s,
-                        )
-                        await s.rollback()
-                        return load_r
-                    case LostClaim() | SourceStateConflict() | TaskAbsent():
-                        await s.rollback()
-                        return Ok(None)
-                    case _ as unreachable:
-                        assert_never(unreachable)
+            outcome = await finish_workflow_success(
+                self.sf,
+                success_for(completion, claimed_at=claimed_at),
+            )
         except Exception as exc:
             return Err(
                 self._phase1_error(
-                    task_id,
+                    completion.task_id,
                     'Failed to persist terminal task state',
                     exc,
                     child,
                 )
             )
+        match outcome:
+            case SuccessApplied(
+                phase_two=PhaseTwoOwed(task_name=task_name, queue_name=queue_name),
+            ):
+                return Ok(
+                    _PersistedTaskOutcome(
+                        result=tr,
+                        task_name=task_name,
+                        queue_name=queue_name,
+                    )
+                )
+            case AlreadyApplied(task_id=task_id):
+                return _phase2_of_a_replay(
+                    await self._load_persisted_task_result(task_id),
+                )
+            case LostClaim() | SourceStateConflict() | TaskAbsent():
+                return Ok(None)
+            case _ as unreachable:
+                assert_never(unreachable)
 
     async def _write_fused_batch(
         self,
@@ -1492,40 +1460,6 @@ class FinalizeMixin:
                 'outcome': outcome_data,
             },
         )
-
-    async def _settle_locked_completion_miss(
-        self,
-        s: AsyncSession,
-        completion: CompleteLockedTask,
-        claimed_at: datetime | None,
-    ) -> Result[_PersistedTaskOutcome | None, _FinalizeError]:
-        """Classify a locked completion whose locking read matched nothing.
-
-        The advisory lock is held. ``AlreadyApplied`` reloads the persisted
-        result for the phase-2 replay; a refusal writes nothing. Database
-        errors raise.
-        """
-        miss_outcome = await classify_locked_read_miss_async(
-            await s.connection(),
-            completion,
-            claimed_at=claimed_at,
-        )
-        match miss_outcome:
-            case AlreadyApplied():
-                load_r = await self._load_persisted_task_result(
-                    completion.task_id,
-                    session=s,
-                )
-                await s.rollback()
-                return load_r
-            case LostClaim() | SourceStateConflict() | TaskAbsent():
-                await s.rollback()
-                return Ok(None)
-            case Applied():
-                await s.rollback()
-                raise RuntimeError('locked-read miss classifier returned APPLIED')
-            case _ as unreachable:
-                assert_never(unreachable)
 
     async def _persist_failed_attempt(
         self,
@@ -1638,7 +1572,6 @@ class FinalizeMixin:
                                 result=tr,
                                 task_name=task_name,
                                 queue_name=queue_name,
-                                is_workflow_task=True,
                             )
                         )
                     case _ as unreachable:
@@ -1686,63 +1619,48 @@ class FinalizeMixin:
         tr: 'TaskResult[Any, TaskError]',
         *,
         queue_name: str = 'default',
-        is_workflow_task: bool = True,
         task_name: str,
     ) -> Result[None, _FinalizeError]:
-        """Phase 2 of finalization: workflow advancement and worker wake notifications.
+        """Phase 2 of a workflow task: advance its node and wake its queue, in
+        one transaction.
 
-        A plain task has only the wake (``_wake_queue_after_plain_task``).
-        Parent propagation queued by the completion check is driven AFTER
-        this transaction commits, one fresh transaction per ancestor level
-        (_drive_parent_propagations) — the pre-denest in-transaction
-        recursion accumulated FOR UPDATE locks root-ward across the chain.
+        Only a workflow task reaches phase 2: the statement that ends a plain
+        task sends its capacity wake. The first statement of the transaction
+        sends this task's capacity wake (``QueueWake``), and the COMMIT
+        delivers it. Parent propagation queued by the
+        completion check is driven AFTER this transaction commits, one fresh
+        transaction per ancestor level (_drive_parent_propagations) — the
+        pre-denest in-transaction recursion accumulated FOR UPDATE locks
+        root-ward across the chain.
         """
-        from horsies.core.workflows.engine import pop_pending_parent_propagations
-
-        match is_workflow_task:
-            case False:
-                return await self._wake_queue_after_plain_task(task_id, queue_name)
-            case True:
-                pass
+        from horsies.core.workflows.engine import (
+            QueueWake,
+            pop_pending_parent_propagations,
+        )
 
         pending_propagations: list[str] = []
         try:
             async with self.sf() as s:
-                # Handle workflow task completion (if this task is part of a workflow)
+                # The wake makes the workers of this queue check their
+                # capacity and backlog (workers no longer listen on
+                # task_new). It is part of the first statement: when the
+                # server refuses it, the statement fails, and the error goes
+                # to the phase-2 error below, never past it.
                 await self._handle_workflow_task_if_needed(
                     s,
                     task_id,
                     tr,
-                    is_workflow_task=is_workflow_task,
                     task_name=task_name,
+                    wake=QueueWake(
+                        channel=f'task_queue_{queue_name or "default"}',
+                        payload=f'capacity:{task_id}',
+                    ),
                 )
-
-                # Proactively wake workers of this queue to re-check
-                # capacity/backlog (workers no longer listen on task_new).
-                # The wake is a statement of this transaction: when it fails
-                # on the server, the transaction is aborted and its commit
-                # would roll the workflow writes back without an error, so a
-                # failure goes to the phase-2 error below, never past it.
-                await s.execute(
-                    NOTIFY_TASK_QUEUE_SQL,
-                    {
-                        'c2': f'task_queue_{queue_name or "default"}',
-                        'p': f'capacity:{task_id}',
-                    },
-                )
-
-                # Trigger automatically sends NOTIFY on UPDATE; commit to flush NOTIFYs
+                # The COMMIT delivers the NOTIFYs of the transaction.
                 await s.commit()
                 pending_propagations = pop_pending_parent_propagations(s)
         except Exception as exc:
-            return Err(
-                self._phase2_error(
-                    task_id,
-                    queue_name,
-                    is_workflow_task=is_workflow_task,
-                    exc=exc,
-                )
-            )
+            return Err(self._phase2_error(task_id, queue_name, exc=exc))
 
         # Outside the try deliberately: a phase2 retry cannot re-reach
         # propagation past the task-level terminal CAS, so propagation must
@@ -1752,46 +1670,11 @@ class FinalizeMixin:
             await self._drive_parent_propagations(pending_propagations)
         return Ok(None)
 
-    async def _wake_queue_after_plain_task(
-        self,
-        task_id: str,
-        queue_name: str,
-    ) -> Result[None, _FinalizeError]:
-        """Phase 2 of a plain task: wake the workers of its queue to claim.
-
-        One statement in autocommit (``run_in_autocommit``). A failure is a
-        phase-2 error with the classification of every phase-2 error: a
-        connection error is retryable, and the retry sends the wake again.
-        The terminal state of the task is already committed either way.
-        """
-        try:
-            _ = await run_in_autocommit(
-                self.sf,
-                SingleStatement(
-                    statement=NOTIFY_TASK_QUEUE_SQL,
-                    parameters={
-                        'c2': f'task_queue_{queue_name or "default"}',
-                        'p': f'capacity:{task_id}',
-                    },
-                ),
-            )
-        except Exception as exc:
-            return Err(
-                self._phase2_error(
-                    task_id,
-                    queue_name,
-                    is_workflow_task=False,
-                    exc=exc,
-                )
-            )
-        return Ok(None)
-
     def _phase2_error(
         self,
         task_id: str,
         queue_name: str,
         *,
-        is_workflow_task: bool,
         exc: Exception,
     ) -> _FinalizeError:
         """The phase-2 error of ``exc``: retryable when it is a transient
@@ -1805,7 +1688,6 @@ class FinalizeMixin:
                 'task_id': task_id,
                 'phase': 'finalize_phase_2',
                 'queue_name': queue_name or 'default',
-                'is_workflow_task': is_workflow_task,
                 'exception_type': type(exc).__name__,
                 'exception': str(exc)[:500],
             },
@@ -1816,8 +1698,9 @@ class FinalizeMixin:
         task_id: str,
         *,
         session: AsyncSession | None = None,
-    ) -> Result[_PersistedTaskOutcome, _FinalizeError]:
-        """Load the typed terminal result and its phase-2 routing facts.
+    ) -> Result[_PersistedTerminal, _FinalizeError]:
+        """Load what a persisted terminal row owes: a workflow task's typed
+        result and phase-2 routing facts, or nothing for a plain task.
 
         Values come from the task row rather than retry metadata. A NULL task
         name becomes ``''``; the workflow engine then degrades to an ``Any``
@@ -1895,8 +1778,10 @@ class FinalizeMixin:
         self,
         task_id: str,
         session: AsyncSession,
-    ) -> Result[_PersistedTaskOutcome, _FinalizeError]:
-        """Read and decode a persisted result through the supplied transaction."""
+    ) -> Result[_PersistedTerminal, _FinalizeError]:
+        """Read and decode a persisted result through the supplied transaction.
+
+        A plain task owes nothing, so its result is not decoded."""
         row = await self._read_persisted_task_row(task_id, session)
         if row is None:
             return Err(
@@ -1907,6 +1792,11 @@ class FinalizeMixin:
                     retryable=False,
                 )
             )
+        match row.is_workflow_task:
+            case False:
+                return Ok(_PlainTaskDone())
+            case True:
+                pass
         status = row.status
         raw_result = row.result
         if status not in ('COMPLETED', 'FAILED', 'EXPIRED') or raw_result is None:
@@ -1968,7 +1858,6 @@ class FinalizeMixin:
                     result=TaskResult(err=err_value),
                     task_name=str(source_task_name or ''),
                     queue_name=str(row.queue_name or 'default'),
-                    is_workflow_task=bool(row.is_workflow_task),
                 )
             )
         source_task = (
@@ -2013,7 +1902,6 @@ class FinalizeMixin:
                 result=decoded_tr,
                 task_name=str(source_task_name or ''),
                 queue_name=str(row.queue_name or 'default'),
-                is_workflow_task=bool(row.is_workflow_task),
             )
         )
 
@@ -2311,7 +2199,6 @@ class FinalizeMixin:
             err.task_id,
             persisted.result,
             queue_name=persisted.queue_name,
-            is_workflow_task=persisted.is_workflow_task,
             task_name=persisted.task_name,
         )
         if is_err(phase2_r):
@@ -2333,16 +2220,21 @@ class FinalizeMixin:
         if self._stop.is_set():
             return
 
-        load_r = await self._load_persisted_task_result(err.task_id)
+        load_r = _phase2_of_a_replay(
+            await self._load_persisted_task_result(err.task_id),
+        )
         if is_err(load_r):
             await self._handle_finalize_error(load_r.err_value)
             return
         persisted = load_r.ok_value
+        if persisted is None:
+            # A plain task: the statement that ended it sent its wake.
+            self._clear_finalize_retry_attempts(err.task_id, _FINALIZE_STAGE_PHASE2)
+            return
         phase2_r = await self._finalize_workflow_phase(
             err.task_id,
             persisted.result,
             queue_name=persisted.queue_name,
-            is_workflow_task=persisted.is_workflow_task,
             task_name=persisted.task_name,
         )
         if is_err(phase2_r):
@@ -2425,19 +2317,18 @@ class FinalizeMixin:
         task_id: str,
         result: 'TaskResult[Any, TaskError]',
         *,
-        is_workflow_task: bool = True,
         task_name: str,
+        wake: QueueWake,
     ) -> None:
         """
-        Check if task is part of a workflow and handle accordingly.
+        Advance the node of a workflow task that reached a terminal status,
+        and send ``wake`` in the same statement as the node write.
 
         This method is called after a task completes (success or failure).
         It updates the workflow_task record and triggers dependency resolution.
 
-        The old pre-flight existence check is gone: the engine's single
-        locate+lock+CAS statement returns zero rows for a non-workflow
-        task and the call no-ops, at the same one-statement cost the
-        check itself had.
+        The engine's single locate+lock+CAS statement returns no node for a
+        task whose node or workflow row is missing, and the call no-ops.
 
         Raises:
             Exception: DB and engine errors propagate to the single caller,
@@ -2447,14 +2338,11 @@ class FinalizeMixin:
         """
         from horsies.core.workflows.engine import on_workflow_task_complete
 
-        if not is_workflow_task:
-            return
-
-        # Handle workflow task completion
         await on_workflow_task_complete(
             session,
             task_id,
             result,
             self.broker,
             task_name=task_name,
+            wake=wake,
         )

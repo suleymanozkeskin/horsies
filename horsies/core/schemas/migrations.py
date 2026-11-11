@@ -391,8 +391,16 @@ from horsies.core.models.tasks import Execution
 # v57: horsies_complete_tasks_fused, the batched plain-success completion.
 #      It calls horsies_complete_task_fused once per row, in sorted task-id
 #      order, and returns each row at its input ordinality.
+# v58: horsies_finish_workflow_success writes the success of a RUNNING
+#      workflow task in one statement: the task advisory lock, the row lock
+#      under the full claim fence, the COMPLETED attempt row, and the move
+#      with kind COMPLETE_LOCKED, which writes the phase-2 record of the
+#      node. It sends no capacity NOTIFY; phase 2 sends it. Its row type
+#      is horsies_workflow_success_outcome. Both are dropped and created on
+#      every apply. horsies_lock_running_task (v56) is dropped: its one
+#      caller was the success of a workflow task.
 
-SCHEMA_VERSION = 57
+SCHEMA_VERSION = 58
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,

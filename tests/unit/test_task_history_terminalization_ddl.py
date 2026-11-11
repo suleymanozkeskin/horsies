@@ -36,6 +36,7 @@ from horsies.core.history.terminalization.move import (
     failure_family_fragments,
     terminal_snapshot_replacement_ddl,
     workflow_node_family_fragments,
+    workflow_success_fragments,
 )
 from horsies.core.history.terminalization.outcome import (
     MISS_CLASSIFIER_DDL,
@@ -181,6 +182,7 @@ class TestLockOrderInvariant:
             *completion_family_fragments()[2:],
             *failure_family_fragments(),
             failed_attempt_fragments()[1],
+            workflow_success_fragments()[1],
             expiry_family_fragments()[0],
             *cancellation_family_fragments()[:2],
             *workflow_node_family_fragments()[:2],

@@ -1,10 +1,9 @@
 """Integration tests for Worker._handle_workflow_task_if_needed().
 
 Covers broker resolution from self._app and delegation to
-on_workflow_task_complete. The old pre-flight existence check is gone:
-the engine's single locate+lock+CAS statement self-detects non-workflow
-tasks, so delegation always happens for is_workflow_task=True and the
-no-op lives in the engine.
+on_workflow_task_complete. Only a workflow task reaches phase 2, so the
+call always delegates; a task with no node is a no-op of the engine's
+single locate+lock+CAS statement.
 """
 
 from __future__ import annotations
@@ -21,9 +20,12 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
+from horsies.core.workflows.engine import QueueWake
 from tests.integration.conftest import compute_test_enqueue_sha
 
 pytestmark = [pytest.mark.integration]
+
+_WAKE = QueueWake(channel='task_queue_default', payload='capacity:handle-wf-test')
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +131,7 @@ async def test_non_workflow_task_is_engine_level_noop(
     result = _make_ok_result()
 
     await worker._handle_workflow_task_if_needed(
-        session, task_id, result, task_name='handle_wf_test',
+        session, task_id, result, task_name='handle_wf_test', wake=_WAKE,
     )
     await session.rollback()
 
@@ -140,29 +142,6 @@ async def test_non_workflow_task_is_engine_level_noop(
         )
     ).scalar()
     assert rows == 0
-
-
-@pytest.mark.asyncio(loop_scope='function')
-async def test_plain_task_flag_short_circuits_before_engine(
-    engine: AsyncEngine,
-    session: AsyncSession,
-    clean_workflow_tables: None,  # noqa: ARG001
-) -> None:
-    """is_workflow_task=False → no engine call at all (zero statements)."""
-    task_id = await _insert_task(session)
-    worker = _make_worker(engine)
-    result = _make_ok_result()
-
-    with patch(
-        'horsies.core.workflows.engine.on_workflow_task_complete',
-        new_callable=AsyncMock,
-    ) as mock_complete:
-        await worker._handle_workflow_task_if_needed(
-            session, task_id, result,
-            is_workflow_task=False, task_name='handle_wf_test',
-        )
-
-    mock_complete.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -190,11 +169,12 @@ async def test_workflow_task_delegates_with_broker(
         new_callable=AsyncMock,
     ) as mock_complete:
         await worker._handle_workflow_task_if_needed(
-            session, task_id, result, task_name='handle_wf_test',
+            session, task_id, result, task_name='handle_wf_test', wake=_WAKE,
         )
 
     mock_complete.assert_awaited_once_with(
         session, task_id, result, mock_broker, task_name='handle_wf_test',
+        wake=_WAKE,
     )
 
 
@@ -223,9 +203,10 @@ async def test_workflow_task_delegates_with_broker_none_when_no_app(
         new_callable=AsyncMock,
     ) as mock_complete:
         await worker._handle_workflow_task_if_needed(
-            session, task_id, result, task_name='handle_wf_test',
+            session, task_id, result, task_name='handle_wf_test', wake=_WAKE,
         )
 
     mock_complete.assert_awaited_once_with(
         session, task_id, result, None, task_name='handle_wf_test',
+        wake=_WAKE,
     )

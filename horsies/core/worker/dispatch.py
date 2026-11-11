@@ -45,6 +45,7 @@ from horsies.core.models.tasks import (
     TaskResult,
 )
 from horsies.core.types.result import Result, is_err
+from horsies.core.utils.db import autocommit_connection
 from horsies.core.worker.child_protocol import (
     RunFrame,
     SeatRefusal,
@@ -62,7 +63,6 @@ from horsies.core.worker.failed_attempt import (
     NoRetry,
     RetryRequest,
     RunningAttempt,
-    autocommit_connection,
     finish_failed_attempt,
     finish_for,
     read_in_flight_attempt,
@@ -120,6 +120,7 @@ from horsies.core.worker.shared_stop import RetryPlacement, TimedOutAtKill
 from horsies.core.worker.stored_timeout import NoTimeout, StoredTimeout
 from horsies.core.worker.thread_slots import ThreadRunRequest
 from horsies.core.worker.sql import UNCLAIM_CLAIMED_TASK_SQL
+from horsies.core.worker.finalize import _phase2_of_a_replay
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine
@@ -127,7 +128,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
     from horsies.core.worker.config import WorkerConfig
-    from horsies.core.worker.finalize import _PersistedTaskOutcome
+    from horsies.core.worker.finalize import _PersistedTerminal
 
 logger = get_logger('worker')
 
@@ -227,7 +228,6 @@ class DispatchMixin:
             tr: TaskResult[Any, TaskError],
             *,
             queue_name: str = 'default',
-            is_workflow_task: bool = True,
             task_name: str,
         ) -> Result[None, _FinalizeError]: ...
         async def _load_persisted_task_result(
@@ -235,7 +235,7 @@ class DispatchMixin:
             task_id: str,
             *,
             session: AsyncSession | None = None,
-        ) -> Result[_PersistedTaskOutcome, _FinalizeError]: ...
+        ) -> Result[_PersistedTerminal, _FinalizeError]: ...
         async def _handle_finalize_error(self, err: Any) -> None: ...
         def _wake_when_retry_due(
             self,
@@ -442,7 +442,6 @@ class DispatchMixin:
                             task_id,
                             task_result,
                             queue_name=queue_name,
-                            is_workflow_task=True,
                             task_name=task_name,
                         )
                         if is_err(phase2_r):
@@ -470,18 +469,17 @@ class DispatchMixin:
         capacity wake in the statement that committed. Total: a failed load
         or phase 2 goes to the finalize retry handler.
         """
-        load_r = await self._load_persisted_task_result(task_id)
+        load_r = _phase2_of_a_replay(await self._load_persisted_task_result(task_id))
         if is_err(load_r):
             await self._handle_finalize_error(load_r.err_value)
             return
         persisted = load_r.ok_value
-        if not persisted.is_workflow_task:
+        if persisted is None:
             return
         phase2_r = await self._finalize_workflow_phase(
             task_id,
             persisted.result,
             queue_name=persisted.queue_name,
-            is_workflow_task=persisted.is_workflow_task,
             task_name=persisted.task_name,
         )
         if is_err(phase2_r):

@@ -30,7 +30,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.tasks import Execution, TaskResult
+from horsies.core.models.tasks import Execution
 from horsies.core.types.result import Ok
 from horsies.core.worker.child_pool import (
     _cleanup_worker_pool,
@@ -299,30 +299,6 @@ async def test_a_claim_pass_is_one_statement(
     assert dispatch.await_args.args[0] == task_id
     row = await _row(session, task_id)
     assert row is not None and row.status == 'CLAIMED'
-
-
-async def test_the_capacity_wake_of_a_plain_task_is_one_statement(
-    proxy: RoundTripProxy,
-    proxied: ProxiedWorker,
-) -> None:
-    """Phase 2 of a plain task is its NOTIFY, sent in autocommit."""
-
-    async def arrange() -> str:
-        return str(uuid.uuid4())
-
-    async def act(task_id: str) -> None:
-        result = await proxied.worker._finalize_workflow_phase(
-            task_id,
-            TaskResult(ok=None),
-            queue_name=QUEUE,
-            is_workflow_task=False,
-            task_name=TASK_NAME,
-        )
-        assert result == Ok(None)
-
-    _, turns = await steady_state_turns(proxy, arrange, act)
-
-    assert len(turns) == ONE_STATEMENT, turns
 
 
 async def test_the_delayed_retry_wake_is_one_statement(
