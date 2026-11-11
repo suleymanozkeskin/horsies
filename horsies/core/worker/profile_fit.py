@@ -547,47 +547,84 @@ async def read_server_connection_limit(
     )
 
 
+class ChildMode(Enum):
+    """An execution mode with children. The value is the field of the mode
+    in ``WorkerProfile``."""
+
+    ISOLATED = 'isolated'
+    SHARED_ASYNC = 'shared_async'
+    SHARED_THREAD = 'shared_thread'
+
+
+@dataclass(frozen=True, slots=True)
+class ModePools:
+    """The pools of the ``children`` children of one mode: each opens up to
+    ``per_child`` connections, the resolved ``pool.max_size`` of the mode.
+    ``children`` is 1 or more."""
+
+    mode: ChildMode
+    children: int
+    per_child: int
+
+    def connections(self) -> int:
+        return self.children * self.per_child
+
+    def term(self) -> str:
+        """The term of the mode in the connection formula."""
+        label = self.mode.value.replace('_', ' ')
+        return (
+            f'{self.children} {label} children x {self.mode.value}.pool '
+            f'max_size {self.per_child}'
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class WorkerConnectionNeed:
     """The Postgres connections of one worker, by part.
 
     ``total`` counts the connections that the worker opens itself: its
     pool, its listener, its runner heartbeat connection, and the pool of
-    each child. Task code that sends through the app opens the app's
-    broker in its child: a pool of ``task_broker_per_loop`` connections for
-    each event loop that it sends from. ``total`` does not count those.
-    ``with_task_sends`` counts one such loop in each child.
+    each child, by mode (``child_pools``: one entry for each mode with
+    children, in the order isolated, shared async, shared thread). Task
+    code that sends through the app opens the app's broker in its child: a
+    pool of ``task_broker_per_loop`` connections for each event loop that
+    it sends from. ``total`` does not count those. ``with_task_sends``
+    counts one such loop in each child.
     """
 
     parent_pool: int
     listener: int
     runner_heartbeat: int
-    children: int
-    per_child: int
+    child_pools: tuple[ModePools, ...]
     task_broker_per_loop: int
+
+    def children(self) -> int:
+        """The children of the worker: the sum over the modes."""
+        return sum(pools.children for pools in self.child_pools)
 
     def total(self) -> int:
         return (
             self.parent_pool
             + self.listener
             + self.runner_heartbeat
-            + self.children * self.per_child
+            + sum(pools.connections() for pools in self.child_pools)
         )
 
     def task_sends(self) -> int:
         """The connections that task code adds with one sending loop per child."""
-        return self.children * self.task_broker_per_loop
+        return self.children() * self.task_broker_per_loop
 
     def with_task_sends(self) -> int:
         return self.total() + self.task_sends()
 
     def formula(self) -> str:
-        return (
-            f'parent pool {self.parent_pool} + listener {self.listener} + '
-            f'runner heartbeat {self.runner_heartbeat} + '
-            f'{self.children} children x worker_child_pool_max_size '
-            f'{self.per_child} = {self.total()}'
-        )
+        terms = [
+            f'parent pool {self.parent_pool}',
+            f'listener {self.listener}',
+            f'runner heartbeat {self.runner_heartbeat}',
+            *(pools.term() for pools in self.child_pools),
+        ]
+        return f'{" + ".join(terms)} = {self.total()}'
 
     def task_sends_note(self) -> str:
         """What ``total`` does not count, with its size for this profile."""
@@ -595,10 +632,64 @@ class WorkerConnectionNeed:
             'not counted: task code that sends opens a pool of '
             f'worker_pool_size + worker_max_overflow = {self.task_broker_per_loop} '
             'connections in its child for each event loop that it sends from; '
-            f'with one such loop in each child, {self.children} x '
+            f'with one such loop in each child, {self.children()} x '
             f'{self.task_broker_per_loop} = {self.task_sends()} more, '
             f'{self.with_task_sends()} in all'
         )
+
+
+def _isolated_pools(
+    isolated: IsolatedChildren | NoIsolatedChildren,
+) -> tuple[ModePools, ...]:
+    match isolated:
+        case IsolatedChildren(count=count) as children:
+            return (
+                ModePools(
+                    mode=ChildMode.ISOLATED,
+                    children=count,
+                    per_child=children.resolved_pool().max_size,
+                ),
+            )
+        case NoIsolatedChildren():
+            return ()
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _shared_async_pools(
+    shared_async: SharedAsyncChildren | NoSharedAsyncChildren,
+) -> tuple[ModePools, ...]:
+    match shared_async:
+        case SharedAsyncChildren(count=count) as children:
+            return (
+                ModePools(
+                    mode=ChildMode.SHARED_ASYNC,
+                    children=count,
+                    per_child=children.resolved_pool().max_size,
+                ),
+            )
+        case NoSharedAsyncChildren():
+            return ()
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _shared_thread_pools(
+    shared_thread: SharedThreadChildren | NoSharedThreadChildren,
+) -> tuple[ModePools, ...]:
+    match shared_thread:
+        case SharedThreadChildren(count=count) as children:
+            return (
+                ModePools(
+                    mode=ChildMode.SHARED_THREAD,
+                    children=count,
+                    per_child=children.resolved_pool().max_size,
+                ),
+            )
+        case NoSharedThreadChildren():
+            return ()
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def worker_connection_need(
@@ -607,17 +698,21 @@ def worker_connection_need(
 ) -> WorkerConnectionNeed:
     """The connections of one worker of this profile.
 
-    A child builds the app's broker from the worker runtime config, as the
-    worker process does, so a pool of task code has the size of the parent
-    pool.
+    Each child of a mode opens a pool of up to the resolved
+    ``pool.max_size`` of that mode. A child builds the app's broker from the
+    worker runtime config, as the worker process does, so a pool of task
+    code has the size of the parent pool.
     """
     parent = broker.worker_runtime_config()
     return WorkerConnectionNeed(
         parent_pool=parent.pool_size + parent.max_overflow,
         listener=LISTENER_CONNECTIONS_PER_WORKER,
         runner_heartbeat=RUNNER_HEARTBEAT_CONNECTIONS_PER_WORKER,
-        children=profile.child_count(),
-        per_child=broker.worker_child_pool_max_size,
+        child_pools=(
+            *_isolated_pools(profile.isolated),
+            *_shared_async_pools(profile.shared_async),
+            *_shared_thread_pools(profile.shared_thread),
+        ),
         task_broker_per_loop=parent.pool_size + parent.max_overflow,
     )
 
@@ -670,8 +765,9 @@ def compare_connections(
 
 
 CONNECTIONS_HELP: Final = (
-    'lower the child counts or worker_child_pool_max_size, raise '
-    'max_connections, or send the pooled connections through a transaction '
-    'pooler (pgbouncer_transaction_mode=True)'
+    'lower the child counts or the pool max_size of a mode (isolated.pool, '
+    'shared_async.pool, shared_thread.pool), raise max_connections, or send '
+    'the pooled connections through a transaction pooler '
+    '(pgbouncer_transaction_mode=True)'
 )
 """What to change when a profile needs more connections than the server has."""
