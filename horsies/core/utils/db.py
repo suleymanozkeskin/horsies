@@ -1,6 +1,7 @@
 # horsies/core/utils/db.py
 """Shared database helpers: transient error classification, engine hooks,
-and the one way to run a statement in autocommit (``run_in_autocommit``)."""
+and the one way to run a statement in autocommit (``run_in_autocommit_result``,
+and ``run_in_autocommit``, which raises its failure)."""
 
 from __future__ import annotations
 
@@ -18,6 +19,8 @@ from sqlalchemy.exc import (
     TimeoutError as SATimeoutError,
 )
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+
+from horsies.core.types.result import Err, Ok, Result
 
 
 def register_identity_text_reads(engine: AsyncEngine) -> None:
@@ -177,10 +180,39 @@ class StatementRows:
         return [dict(zip(self.columns, row, strict=True)) for row in self.rows]
 
 
-async def run_in_autocommit(
+@dataclass(frozen=True, slots=True)
+class NotSent:
+    """The statement did not reach the server: the pool had no connection in
+    time (``error`` is a pool ``TimeoutError``), or the connect failed."""
+
+    error: SATimeoutError | DBAPIError
+
+
+@dataclass(frozen=True, slots=True)
+class StatementRefused:
+    """The driver or the server refused the statement, and the connection
+    stayed usable. Nothing of the statement committed: the driver refused it
+    before it sent it, or the server reported an ERROR, which ends the
+    statement's own transaction."""
+
+    error: DBAPIError
+
+
+@dataclass(frozen=True, slots=True)
+class OutcomeUnknown:
+    """The connection broke after the statement went to the driver. The
+    statement may have committed, as after a lost COMMIT reply."""
+
+    error: DBAPIError
+
+
+type AutocommitFailure = NotSent | StatementRefused | OutcomeUnknown
+
+
+async def run_in_autocommit_result(
     session_factory: async_sessionmaker[AsyncSession],
     statement: SingleStatement,
-) -> StatementRows:
+) -> Result[StatementRows, AutocommitFailure]:
     """Run one statement as its own transaction and return its rows.
 
     Postgres commits the statement when it ends: no BEGIN and no COMMIT is
@@ -192,8 +224,43 @@ async def run_in_autocommit(
     The connection goes back to the pool in the engine's isolation level:
     SQLAlchemy resets it on return and sends nothing for that.
 
-    The statement must return rows (a SELECT, or a write with RETURNING);
-    one that does not is a defect of the caller (``AssertionError``).
+    Outcomes:
+        Ok(rows): the statement committed; every row it returned.
+        Err(NotSent): the checkout failed; nothing was sent.
+        Err(StatementRefused): nothing committed; the connection is usable.
+        Err(OutcomeUnknown): the connection broke; the statement may have
+            committed. The caller classifies its replay.
+
+    A statement that returns no rows is a defect of the caller
+    (``AssertionError``). Other exceptions are defects and propagate.
+    """
+    async with session_factory() as session:
+        try:
+            connection = await session.connection(
+                execution_options=dict(AUTOCOMMIT_EXECUTION_OPTIONS),
+            )
+        except (SATimeoutError, DBAPIError) as exc:
+            return Err(NotSent(error=exc))
+        try:
+            result = await connection.execute(
+                statement.statement,
+                dict(statement.parameters),
+            )
+        except DBAPIError as exc:
+            if is_dbapi_disconnect(exc):
+                return Err(OutcomeUnknown(error=exc))
+            return Err(StatementRefused(error=exc))
+        assert result.returns_rows, 'run_in_autocommit needs a statement with rows'
+        columns = tuple(str(key) for key in result.keys())
+        rows = tuple(tuple(row) for row in result.fetchall())
+    return Ok(StatementRows(columns=columns, rows=rows))
+
+
+async def run_in_autocommit(
+    session_factory: async_sessionmaker[AsyncSession],
+    statement: SingleStatement,
+) -> StatementRows:
+    """``run_in_autocommit_result``, raising the error of its failure.
 
     Raises:
         Exception: what the pool and the driver raise: a pool timeout, a
@@ -202,15 +269,12 @@ async def run_in_autocommit(
             committed, as after a lost COMMIT reply. The caller classifies
             its replay.
     """
-    async with session_factory() as session:
-        connection = await session.connection(
-            execution_options=dict(AUTOCOMMIT_EXECUTION_OPTIONS),
-        )
-        result = await connection.execute(
-            statement.statement,
-            dict(statement.parameters),
-        )
-        assert result.returns_rows, 'run_in_autocommit needs a statement with rows'
-        columns = tuple(str(key) for key in result.keys())
-        rows = tuple(tuple(row) for row in result.fetchall())
-    return StatementRows(columns=columns, rows=rows)
+    match await run_in_autocommit_result(session_factory, statement):
+        case Ok(rows):
+            return rows
+        case Err(
+            NotSent(error=error)
+            | StatementRefused(error=error)
+            | OutcomeUnknown(error=error)
+        ):
+            raise error

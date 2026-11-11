@@ -14,13 +14,18 @@ from sqlalchemy.exc import (
     TimeoutError as SATimeoutError,
 )
 
+from horsies.core.types.result import Err, Ok
 from horsies.core.utils.db import (
     AUTOCOMMIT_EXECUTION_OPTIONS,
+    NotSent,
+    OutcomeUnknown,
     SingleStatement,
+    StatementRefused,
     StatementRows,
     is_dbapi_disconnect,
     is_retryable_connection_error,
     run_in_autocommit,
+    run_in_autocommit_result,
 )
 
 
@@ -199,3 +204,100 @@ class TestRunInAutocommit:
         connection.execute.assert_awaited_once_with(statement, {'value': 1})
         assert AUTOCOMMIT_EXECUTION_OPTIONS == {'isolation_level': 'AUTOCOMMIT'}
         assert rows == StatementRows(columns=('outcome',), rows=(('APPLIED',),))
+
+
+def _factory_with(
+    *,
+    checkout_error: Exception | None = None,
+    execute_error: Exception | None = None,
+) -> tuple[MagicMock, AsyncMock]:
+    """A session factory whose checkout or execute raises the given error."""
+    result = MagicMock()
+    result.returns_rows = True
+    result.keys.return_value = ['outcome']
+    result.fetchall.return_value = [('APPLIED',)]
+    connection = AsyncMock()
+    connection.execute = AsyncMock(
+        side_effect=execute_error,
+        return_value=result,
+    )
+    session = AsyncMock()
+    session.connection = AsyncMock(
+        side_effect=checkout_error,
+        return_value=connection,
+    )
+    factory = MagicMock()
+    factory.return_value.__aenter__ = AsyncMock(return_value=session)
+    factory.return_value.__aexit__ = AsyncMock(return_value=False)
+    return factory, connection
+
+
+_STATEMENT = SingleStatement(statement=text('SELECT :value'), parameters={'value': 1})
+
+
+@pytest.mark.unit
+class TestRunInAutocommitResult:
+    """Each failure is classified by whether the statement can have run."""
+
+    @pytest.mark.asyncio
+    async def test_rows_are_ok(self) -> None:
+        factory, _ = _factory_with()
+
+        result = await run_in_autocommit_result(factory, _STATEMENT)
+
+        assert result == Ok(StatementRows(columns=('outcome',), rows=(('APPLIED',),)))
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        'error',
+        [SATimeoutError('QueuePool limit reached'), _make_dbapi_error()],
+        ids=['pool_timeout', 'connect_failed'],
+    )
+    async def test_a_failed_checkout_is_not_sent(
+        self,
+        error: SATimeoutError | DBAPIError,
+    ) -> None:
+        factory, connection = _factory_with(checkout_error=error)
+
+        result = await run_in_autocommit_result(factory, _STATEMENT)
+
+        assert result == Err(NotSent(error=error))
+        connection.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_an_error_on_a_usable_connection_is_refused(self) -> None:
+        error = _make_dbapi_error()
+        factory, _ = _factory_with(execute_error=error)
+
+        result = await run_in_autocommit_result(factory, _STATEMENT)
+
+        assert result == Err(StatementRefused(error=error))
+
+    @pytest.mark.asyncio
+    async def test_a_broken_connection_leaves_the_outcome_unknown(self) -> None:
+        error = _make_dbapi_error(connection_invalidated=True)
+        factory, _ = _factory_with(execute_error=error)
+
+        result = await run_in_autocommit_result(factory, _STATEMENT)
+
+        assert result == Err(OutcomeUnknown(error=error))
+
+    @pytest.mark.asyncio
+    async def test_another_error_is_a_defect_and_propagates(self) -> None:
+        factory, _ = _factory_with(execute_error=RuntimeError('defect'))
+
+        with pytest.raises(RuntimeError, match='defect'):
+            await run_in_autocommit_result(factory, _STATEMENT)
+
+    @pytest.mark.asyncio
+    async def test_the_raising_form_raises_the_error_of_each_failure(self) -> None:
+        for kind in ('checkout', 'refused', 'unknown'):
+            error = _make_dbapi_error(connection_invalidated=kind == 'unknown')
+            factory, _ = (
+                _factory_with(checkout_error=error)
+                if kind == 'checkout'
+                else _factory_with(execute_error=error)
+            )
+            with pytest.raises(DBAPIError) as raised:
+                await run_in_autocommit(factory, _STATEMENT)
+            assert raised.value is error
