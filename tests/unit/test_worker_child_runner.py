@@ -107,7 +107,12 @@ class _FakePool:
         self._conn = conn
 
     @contextmanager
-    def connection(self) -> Generator[_FakeConn, None, None]:
+    def connection(
+        self,
+        timeout: float | None = None,
+    ) -> Generator[_FakeConn, None, None]:
+        """``timeout`` is the wait for a connection, as in psycopg_pool."""
+        _ = timeout
         yield self._conn
 
 

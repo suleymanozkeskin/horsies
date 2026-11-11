@@ -496,11 +496,41 @@ def _leftover_stuck(returned: SeatFinished = _RETURNED) -> LeftoverStuckFrame:
 class TestLeftoverFrames:
     """The reports of a run that returned before its deadline and left work."""
 
-    def test_the_leftover_cancel_round_trips(self) -> None:
-        frame = LeftoverCancelFrame(dispatch=3, task_id='task-9')
+    @pytest.mark.parametrize(
+        'returned',
+        [
+            SeatFinished(ok=True, result_json='{"x":1}', failed_reason=None),
+            SeatFinished(
+                ok=False,
+                result_json='',
+                failed_reason='WorkerResolutionError',
+            ),
+        ],
+    )
+    def test_the_leftover_cancel_round_trips_with_what_the_task_returned(
+        self,
+        returned: SeatFinished,
+    ) -> None:
+        frame = LeftoverCancelFrame(dispatch=3, task_id='task-9', returned=returned)
         meta, body = _split(encode_child_frame(frame))
-        assert body == b''
+        assert body == returned.result_json.encode('utf-8')
         assert decode_child_frame(meta, body) == Ok(frame)
+
+    def test_a_leftover_cancel_without_a_finished_return_is_malformed(self) -> None:
+        meta = json.dumps(
+            {
+                'kind': 'leftover_cancel',
+                'dispatch': 3,
+                'task_id': 'task-9',
+                'returned': {'kind': 'timed_out'},
+            },
+        ).encode('utf-8')
+
+        match decode_child_frame(meta, b''):
+            case Err(MalformedFrame()):
+                pass
+            case decoded:
+                raise AssertionError(decoded)
 
     @pytest.mark.parametrize(
         'returned',

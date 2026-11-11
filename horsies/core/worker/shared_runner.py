@@ -4,15 +4,17 @@
 sync boot (the app import and the ``on_child_process_start`` hooks): it opens
 the async connection pool of the child, then runs the
 ``on_shared_async_child_start`` hooks, each bounded. ``PostgresSeats.run``
-runs one task as a coroutine on that loop: the RUNNING transition, the task
-body, the finalizing marker. Every write goes through the async pool
-(``shared_lifecycle``), so no write blocks the loop.
+runs one task as a coroutine on that loop: the RUNNING transition and the
+task body. ``PostgresSeats.mark_finalizing`` writes the finalizing marker,
+which the seat loop asks for at the end of the run. Every write goes through
+the async pool (``shared_lifecycle``), so no write blocks the loop.
 """
 
 # pyright: reportPrivateUsage=false
 
 from __future__ import annotations
 
+import asyncio
 import os
 import threading
 from collections.abc import Callable, Coroutine
@@ -51,7 +53,15 @@ from horsies.core.worker.child_runner import (
     _task_exception_response,
 )
 from horsies.core.worker.current import get_current_app
-from horsies.core.worker.shared_child import StartedSeats
+from horsies.core.worker.shared_child import (
+    MarkerBeforeDeadline,
+    MarkerWindow,
+    MarkerWithoutDeadline,
+    SeatReturn,
+    SetRunning,
+    StartedSeats,
+    StoppedBeforeRunning,
+)
 from horsies.core.worker.shared_lifecycle import (
     confirm_until_not_resumed,
     mark_task_finalizing,
@@ -71,10 +81,17 @@ class PostgresSeats:
     def __init__(self, pool: AsyncConnectionPool[AsyncConnection[Any]]) -> None:
         self._pool = pool
 
-    async def run(self, frame: SharedRunFrame) -> WireResult:
+    async def run(self, frame: SharedRunFrame) -> SeatReturn:
         """Run the task of ``frame``. The same steps and outcomes as
-        ``child_runner._run_task_entry``, on the async pool."""
+        ``child_runner._run_task_entry`` but the marker, on the async pool."""
         return await run_seat_task(self._pool, frame)
+
+    async def mark_finalizing(
+        self, frame: SharedRunFrame, window: MarkerWindow
+    ) -> None:
+        """Write the finalizing marker of the run of ``frame``
+        (``mark_seat_finalizing``)."""
+        await mark_seat_finalizing(self._pool, frame, window)
 
     async def stop(self) -> None:
         """Close the async pool, bounded by ``SHARED_POOL_CLOSE_TIMEOUT_S``.
@@ -159,15 +176,28 @@ async def _seat_call_result(
 ) -> TaskResult[Any, TaskError]:
     """Await the coroutine of an ``async def`` task call on the running loop.
 
-    A ``CancelledError`` that leaves the coroutine goes through
-    ``map_exception``, the mapping of the task
-    (``await_task_call_in_worker``). A seat runs only ``async def`` tasks,
-    whose wrapper returns a coroutine; ``_prepare_task_call`` refused the
-    others. Another value is a defect: ``AssertionError``.
+    ``await_task_call_in_worker`` maps each exception that it takes from
+    the body (a ``CancelledError``, a ``GeneratorExit``) through
+    ``map_exception``, the mapping of the task. A call that returned while a
+    cancel request is left on the seat task ends as a cancel too
+    (``_without_left_cancel``). A seat runs only ``async def`` tasks, whose
+    wrapper returns a coroutine; ``_prepare_task_call`` refused the others.
+    Another value is a defect: ``AssertionError``.
     """
     match called:
         case Coroutine():
-            return await await_task_call_in_worker(called, map_exception)
+            mapped: list[BaseException] = []
+
+            def map_and_note(exc: BaseException) -> TaskResult[Any, TaskError]:
+                mapped.append(exc)
+                return map_exception(exc)
+
+            out = await await_task_call_in_worker(called, map_and_note)
+            match mapped:
+                case []:
+                    return _without_left_cancel(out, map_exception)
+                case _:
+                    return out
         case _:
             raise AssertionError(
                 f'task wrapper of {task_name!r} returned {type(called).__name__} '
@@ -175,21 +205,46 @@ async def _seat_call_result(
             )
 
 
+def _without_left_cancel(
+    out: TaskResult[Any, TaskError],
+    map_exception: Callable[[BaseException], TaskResult[Any, TaskError]],
+) -> TaskResult[Any, TaskError]:
+    """Clear a cancel request that a returned call left on the seat task.
+
+    A body can cancel its own task (``asyncio.current_task().cancel()``, or
+    a ``call_later`` of that cancel) and return before an ``await`` takes
+    the cancel. The seat task would then end cancelled before its deadline.
+    The requests (``Task.cancelling()``) are cleared here, and the call
+    ends as a cancel of the body: ``map_exception`` maps a
+    ``CancelledError``, as for a cancel that reached the body at an
+    ``await``. A body that caught a cancel and did not call ``uncancel()``
+    leaves its request too, and ends the same way. A request of a deadline
+    cancel changes nothing: the seat loop ends that run with the timeout.
+    With no request left, ``out`` returns unchanged.
+    """
+    seat_task = asyncio.current_task()
+    assert seat_task is not None, 'a seat call runs in its seat task'
+    left_requests = seat_task.cancelling()
+    if left_requests == 0:
+        return out
+    for _ in range(left_requests):
+        _ = seat_task.uncancel()
+    return map_exception(asyncio.CancelledError())
+
+
 async def run_seat_task(
     pool: AsyncConnectionPool[AsyncConnection[Any]],
     frame: SharedRunFrame,
-) -> WireResult:
-    """Run one task on a seat and return its wire tuple.
+) -> SeatReturn:
+    """Run one task on a seat, up to its wire tuple.
 
-    The steps of ``_run_task_entry``: the RUNNING transition with the first
-    runner heartbeat (a stop before user code returns its wire tuple), the
-    task call, the result encode, and the finalizing marker in ``finally``.
-    A ``SeatRefusal`` returns ``WORKER_SERIALIZATION_ERROR`` after the RUNNING
-    transition, before it resolves the task, as ``_run_task_entry`` does for
-    a refused stored timeout. An exception of the body, a cancel among them,
-    becomes ``TASK_EXCEPTION``; the seat loop reports a cancel of its deadline
-    as the timeout. A cancel during the RUNNING transition or the marker
-    propagates, and the seat loop reports it.
+    The steps of ``_run_task_entry`` but the finalizing marker: the RUNNING
+    transition with the first runner heartbeat, then the task call and the
+    result encode (``_run_after_running``). A stop before the RUNNING
+    update commits returns ``StoppedBeforeRunning``; every other end returns
+    ``SetRunning``. The seat loop writes the marker at the end of the run
+    (``PostgresSeats.mark_finalizing``). A cancel during the RUNNING
+    transition propagates, and the seat loop reports it.
     """
     logger.info(f'Starting task execution: {frame.task_name} ({frame.task_id})')
     ownership_result = await confirm_until_not_resumed(
@@ -200,7 +255,20 @@ async def run_seat_task(
         frame.claimed_at,
     )
     if ownership_result is not None:
-        return ownership_result
+        return StoppedBeforeRunning(ownership_result)
+    return SetRunning(await _run_after_running(frame))
+
+
+async def _run_after_running(frame: SharedRunFrame) -> WireResult:
+    """The steps of a run after its RUNNING update, as in
+    ``_run_task_entry``.
+
+    A ``SeatRefusal`` returns ``WORKER_SERIALIZATION_ERROR`` before it
+    resolves the task, as ``_run_task_entry`` does for a refused stored
+    timeout. The body runs through ``_seat_call_result``, which maps a
+    cancel of the body; the seat loop reports a cancel of its deadline as
+    the timeout. Any other exception becomes ``TASK_EXCEPTION``.
+    """
     try:
         match frame.work:
             case SeatRefusal(refusal=refusal):
@@ -235,10 +303,44 @@ async def run_seat_task(
         return _encode_task_outcome(frame.task_name, task, out)
     except BaseException as e:
         return _task_exception_response(frame.task_name, e)
-    finally:
-        await mark_task_finalizing(
-            pool,
-            frame.task_id,
-            frame.worker_id,
-            frame.claimed_at,
-        )
+
+
+async def mark_seat_finalizing(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    frame: SharedRunFrame,
+    window: MarkerWindow,
+) -> None:
+    """Write the finalizing marker of a run that ended, within ``window``.
+
+    ``mark_task_finalizing`` bounds the write by
+    ``FINALIZING_MARKER_TIMEOUT_S``; ``MarkerBeforeDeadline`` bounds it as
+    well by the time left before the deadline of the run. A write cut at
+    that bound is logged and skipped: the marker is best effort, and the
+    end of the run follows at once. Nothing escapes but a cancel of the
+    calling task.
+    """
+    match window:
+        case MarkerWithoutDeadline():
+            await mark_task_finalizing(
+                pool,
+                frame.task_id,
+                frame.worker_id,
+                frame.claimed_at,
+            )
+        case MarkerBeforeDeadline(seconds=seconds):
+            try:
+                async with asyncio.timeout(seconds):
+                    await mark_task_finalizing(
+                        pool,
+                        frame.task_id,
+                        frame.worker_id,
+                        frame.claimed_at,
+                    )
+            except TimeoutError:
+                logger.warning(
+                    'Finalizing marker of task %s skipped: it did not end '
+                    'before the deadline of the task',
+                    frame.task_id,
+                )
+        case _ as unreachable:
+            assert_never(unreachable)

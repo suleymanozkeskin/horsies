@@ -38,11 +38,25 @@ from horsies.core.worker.child_protocol import (
     ThreadSeatWork,
     WireResult,
 )
-from horsies.core.worker.shared_child import CHILD_DEFECT_EXIT_CODE
+from horsies.core.worker.shared_child import (
+    CHILD_DEFECT_EXIT_CODE,
+    MarkerBeforeDeadline,
+    MarkerWindow,
+    MarkerWithoutDeadline,
+    NoMarker,
+    SetRunning,
+    StoppedBeforeRunning,
+)
+from horsies.core.worker.child_runner import (
+    DeadlineBeforeStart,
+    StartAllowed,
+    StartCheck,
+)
 from horsies.core.worker.stored_timeout import NoTimeout, TimeoutValueInvalid
 from horsies.core.worker.thread_child import (
     DEADLINE_WAIT_MAX_S,
     ThreadRunTable,
+    ThreadSeatReturn,
     ThreadSeats,
     serve_runs,
 )
@@ -166,7 +180,8 @@ class TestRunTable:
         clock.now += 0.999
         table._fire_due()
 
-        table.finish(1, OK_WIRE, RssMb(5.0))
+        _ = table.returned(1, SetRunning(OK_WIRE))
+        table.finish(1, RssMb(5.0))
 
         assert writer.frames == [
             SharedResultFrame(
@@ -187,7 +202,8 @@ class TestRunTable:
         clock.now += 1.0
         table._fire_due()
 
-        table.finish(1, OK_WIRE, RssMb(5.0))
+        _ = table.returned(1, SetRunning(OK_WIRE))
+        table.finish(1, RssMb(5.0))
 
         assert writer.frames == [
             DeadlineFiredFrame(dispatch=1, task_id='task-1'),
@@ -203,7 +219,8 @@ class TestRunTable:
         table, writer, clock = self._table()
         frame = _frame(1)
         table.add(frame, _thread_work(frame))
-        table.finish(1, OK_WIRE, RssMb(5.0))
+        _ = table.returned(1, SetRunning(OK_WIRE))
+        table.finish(1, RssMb(5.0))
         clock.now += 60.0
 
         table._fire_due()
@@ -262,6 +279,100 @@ class TestRunTable:
 
         assert exits == [('parent sent run 1 twice', BAD_PARENT_FRAME_EXIT_CODE)]
 
+    def test_a_return_before_the_deadline_fixes_the_end_and_ends_the_deadline(
+        self,
+    ) -> None:
+        """The marker of the run runs past its deadline: no deadline report
+        goes out, and the end stays what the task returned."""
+        table, writer, clock = self._table()
+        frame = _frame(1)
+        table.add(frame, _thread_work(frame))
+        clock.now += 0.9
+
+        window = table.returned(1, SetRunning(OK_WIRE))
+        clock.now += 0.5
+        table._fire_due()
+        table.finish(1, RssMb(5.0))
+
+        assert isinstance(window, MarkerBeforeDeadline)
+        assert window.seconds == pytest.approx(0.1)
+        assert writer.frames == [
+            SharedResultFrame(
+                dispatch=1,
+                task_id='task-1',
+                end=SeatFinished(ok=True, result_json='"value"', failed_reason=None),
+                rss=RssMb(5.0),
+            ),
+        ]
+
+    def test_a_return_after_the_deadline_writes_no_marker(self) -> None:
+        table, _writer, clock = self._table()
+        frame = _frame(1)
+        table.add(frame, _thread_work(frame))
+        clock.now += 1.0
+        table._fire_due()
+
+        assert table.returned(1, SetRunning(OK_WIRE)) == NoMarker()
+
+    def test_a_return_at_its_deadline_not_yet_fired_writes_no_marker(self) -> None:
+        """The deadline thread has not fired yet: the run keeps what it
+        returned, but no time is left for a marker."""
+        table, writer, clock = self._table()
+        frame = _frame(1)
+        table.add(frame, _thread_work(frame))
+        clock.now += 1.0
+
+        assert table.returned(1, SetRunning(OK_WIRE)) == NoMarker()
+        table.finish(1, RssMb(5.0))
+        assert writer.results()[0].end == SeatFinished(True, '"value"', None)
+
+    def test_a_run_that_stopped_before_running_writes_no_marker(self) -> None:
+        table, _writer, _clock = self._table()
+        frame = _frame(1)
+        table.add(frame, _thread_work(frame))
+
+        lost: WireResult = (False, '', 'CLAIM_LOST')
+        assert table.returned(1, StoppedBeforeRunning(lost)) == NoMarker()
+
+    def test_a_refusal_writes_its_marker_without_a_deadline(self) -> None:
+        table, _writer, _clock = self._table()
+        frame = _frame(1, work=SeatRefusal(refusal=TimeoutValueInvalid(reason='y')))
+        table.add(frame, _thread_work(frame))
+
+        assert table.returned(1, SetRunning(OK_WIRE)) == MarkerWithoutDeadline()
+
+    def test_a_start_before_the_deadline_is_allowed(self) -> None:
+        table, writer, clock = self._table()
+        frame = _frame(1)
+        table.add(frame, _thread_work(frame))
+        clock.now += 0.999
+
+        assert table.start_check(1) == StartAllowed()
+        assert writer.frames == []
+
+    def test_a_start_after_the_deadline_fires_it_and_is_refused(self) -> None:
+        """The seat waited for a connection past the deadline, and the
+        deadline thread has not fired it yet: the check fires it, so the
+        deadline report comes first, and the run ends with the timeout."""
+        table, writer, clock = self._table()
+        frame = _frame(1)
+        table.add(frame, _thread_work(frame))
+        clock.now += 1.0
+
+        assert table.start_check(1) == DeadlineBeforeStart()
+        assert table.returned(1, DeadlineBeforeStart()) == NoMarker()
+        table.finish(1, RssMb(5.0))
+
+        assert writer.frames == [
+            DeadlineFiredFrame(dispatch=1, task_id='task-1'),
+            SharedResultFrame(
+                dispatch=1,
+                task_id='task-1',
+                end=SeatTimedOut(),
+                rss=RssMb(5.0),
+            ),
+        ]
+
     def test_the_deadline_thread_fires_on_the_real_clock_and_stops(self) -> None:
         writer = _RecordingWriter()
         table = ThreadRunTable(1, writer)
@@ -282,18 +393,44 @@ class TestRunTable:
 
 
 class _Program:
-    """Each run calls the behavior registered for its task name."""
+    """Each run calls the behavior registered for its task name, and sets
+    its row RUNNING, but a task named in ``not_running``. A task named in
+    ``checks_start`` asks ``start_check`` first, as the RUNNING update does.
+    Each marker is recorded with its window, then calls ``marker``."""
 
     def __init__(self, behaviors: dict[str, Callable[[], str]]) -> None:
         self._behaviors = behaviors
         self.threads: list[str] = []
+        self.not_running: set[str] = set()
+        self.checks_start: set[str] = set()
+        self.markers: list[tuple[int, MarkerWindow]] = []
+        self.marker: Callable[[MarkerWindow], None] = lambda _window: None
         self._lock = threading.Lock()
 
-    def run(self, frame: SharedRunFrame, work: ThreadSeatWork) -> WireResult:
+    def run(
+        self,
+        frame: SharedRunFrame,
+        work: ThreadSeatWork,
+        start_check: Callable[[], StartCheck],
+    ) -> ThreadSeatReturn:
         _ = work
+        if frame.task_name in self.checks_start:
+            match start_check():
+                case DeadlineBeforeStart() as passed:
+                    return passed
+                case StartAllowed():
+                    pass
         with self._lock:
             self.threads.append(threading.current_thread().name)
-        return True, self._behaviors[frame.task_name](), None
+        wire: WireResult = (True, self._behaviors[frame.task_name](), None)
+        if frame.task_name in self.not_running:
+            return StoppedBeforeRunning(wire)
+        return SetRunning(wire)
+
+    def mark_finalizing(self, frame: SharedRunFrame, window: MarkerWindow) -> None:
+        with self._lock:
+            self.markers.append((frame.dispatch, window))
+        self.marker(window)
 
 
 @pytest.fixture
@@ -413,6 +550,96 @@ class TestSeatThreads:
         assert writer.results() == []
 
 
+class TestTheMarkerOfASeatThread:
+    """On real seat threads, the end of a run is fixed at its return, then
+    the marker runs, then the end is reported."""
+
+    def test_a_return_before_the_deadline_keeps_its_result_when_the_marker_crosses_it(
+        self,
+        seats_of: Callable[
+            ..., tuple[ThreadSeats, ThreadRunTable, _RecordingWriter, _Program]
+        ],
+    ) -> None:
+        def returns_near_the_deadline() -> str:
+            time.sleep(0.15)
+            return 'done'
+
+        seats, table, writer, program = seats_of(1, {'near': returns_near_the_deadline})
+        program.marker = lambda _window: time.sleep(0.3)
+        deadlines = threading.Thread(target=table.serve_deadlines, daemon=True)
+        deadlines.start()
+        try:
+            _give(
+                table,
+                seats,
+                _frame(1, 'near', work=ThreadSeatTask(timeout_ms=200)),
+            )
+            _until(lambda: len(writer.results()) == 1)
+        finally:
+            table.stop()
+            deadlines.join(WAIT_S)
+
+        assert not any(isinstance(item, DeadlineFiredFrame) for item in writer.frames)
+        assert writer.results()[0].end == SeatFinished(True, 'done', None)
+        [(dispatch, window)] = program.markers
+        assert dispatch == 1
+        assert isinstance(window, MarkerBeforeDeadline)
+        assert 0.0 < window.seconds <= 0.06
+
+    def test_a_run_that_timed_out_writes_no_marker(
+        self,
+        seats_of: Callable[
+            ..., tuple[ThreadSeats, ThreadRunTable, _RecordingWriter, _Program]
+        ],
+    ) -> None:
+        def late() -> str:
+            time.sleep(0.25)
+            return 'late'
+
+        seats, table, writer, program = seats_of(1, {'late': late})
+        deadlines = threading.Thread(target=table.serve_deadlines, daemon=True)
+        deadlines.start()
+        try:
+            _give(table, seats, _frame(1, 'late', work=ThreadSeatTask(timeout_ms=100)))
+            _until(lambda: len(writer.results()) == 1)
+        finally:
+            table.stop()
+            deadlines.join(WAIT_S)
+
+        assert program.markers == []
+        assert [type(item).__name__ for item in writer.frames] == [
+            'DeadlineFiredFrame',
+            'SharedResultFrame',
+        ]
+        assert writer.results()[0].end == SeatTimedOut()
+
+    def test_the_end_report_follows_the_marker(
+        self,
+        seats_of: Callable[
+            ..., tuple[ThreadSeats, ThreadRunTable, _RecordingWriter, _Program]
+        ],
+    ) -> None:
+        release = threading.Event()
+        results_at_marker: list[int] = []
+        seats, table, writer, program = seats_of(1, {'quick': lambda: 'quick'})
+
+        def held(_window: MarkerWindow) -> None:
+            results_at_marker.append(len(writer.results()))
+            assert release.wait(WAIT_S)
+
+        program.marker = held
+        try:
+            _give(table, seats, _frame(1, 'quick'))
+            _until(lambda: len(program.markers) == 1)
+            time.sleep(0.05)
+            assert writer.results() == []
+        finally:
+            release.set()
+        _until(lambda: len(writer.results()) == 1)
+
+        assert results_at_marker == [0]
+
+
 class _Taker:
     """Records the runs that ``serve_runs`` hands to the seats."""
 
@@ -445,8 +672,9 @@ class TestServeRuns:
         def end_runs_then_stop() -> None:
             try:
                 _until(lambda: len(taker.given) == 2)
-                table.finish(1, OK_WIRE, RssMb(1.0))
-                table.finish(2, OK_WIRE, RssMb(1.0))
+                for dispatch in (1, 2):
+                    _ = table.returned(dispatch, SetRunning(OK_WIRE))
+                    table.finish(dispatch, RssMb(1.0))
             finally:
                 inbox.put(StopFrame())
 

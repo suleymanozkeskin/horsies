@@ -17,15 +17,27 @@ start carries no mark.
   Python 3.12 and 3.13);
 - the default executor of the loop records each work item submitted with a
   mark: ``asyncio.to_thread``, ``loop.run_in_executor(None, ...)`` and
-  ``loop.getaddrinfo``.
+  ``loop.getaddrinfo``. A start hook that sets a default executor of its own
+  keeps this: after the hooks, ``track_executor_after_hooks`` wraps that
+  executor (``TrackedHookExecutor``).
 
-Not seen: threads and processes that a task starts itself, and work in an
-executor that the task created.
+Not seen: threads and processes that a task starts itself, work in an
+executor that the task created, and ``anyio.to_thread.run_sync`` work, which
+anyio runs on worker threads of its own, not in the default executor.
 
-The record of the factory spares the scan: the end check of a run scans
-only when no recorded task of the run is alive (``ScanWhen.RECORD_EMPTY``),
-since a run with a live recorded task has not ended. The cancel rounds scan
+A scan costs one pass over every live task of the loop, so the end checks
+share one: the first end check of a loop turn scans and keeps the live
+tasks by mark, and every later end check of that turn reads that index. The
+index is dropped at the next turn. The record of the factory spares even
+that: the end check of a run reads the index only when no recorded task of
+the run is alive (``ScanWhen.RECORD_EMPTY``), since a run with a live
+recorded task has not ended; the return of a run reads it to name all its
+left work (``ScanWhen.TURN``). The cancel rounds and the stuck check scan
 each time (``ScanWhen.ALWAYS``): they must reach every live task of the run.
+
+A task that code builds with ``asyncio.Task(...)`` after the scan of a turn,
+in the same turn, is not in the index: an end check of its run in that turn
+does not see it. The factory sees every task built with ``create_task``.
 
 The records hold only live work: a task leaves its record when it is
 garbage collected, and a work item when it ends. A run's records are dropped
@@ -81,13 +93,33 @@ def mark_of(task: asyncio.Task[Any]) -> RunMark | Unmarked:
 
 
 class ScanWhen(Enum):
-    """When ``MarkedWork.alive`` scans every live task of the loop."""
+    """How ``MarkedWork.alive`` finds the live tasks that the record of the
+    factory did not see."""
 
     RECORD_EMPTY = 'record_empty'
-    """Only when no recorded task of the run is alive: for the end check."""
+    """Reads the index of this loop turn, only when no recorded task of the
+    run is alive: for the end check."""
+
+    TURN = 'turn'
+    """Reads the index of this loop turn at each call: for the return of a
+    run, which names all the work that it left."""
 
     ALWAYS = 'always'
-    """At each call: for the cancel rounds and the stuck check."""
+    """Scans every live task at each call, and keeps the result as the
+    index of this turn: for the cancel rounds and the stuck check."""
+
+
+@dataclass(frozen=True, slots=True)
+class _TurnIndex:
+    """The live tasks of the loop by mark, from one scan in this loop
+    turn."""
+
+    by_mark: dict[RunMark, list[asyncio.Task[Any]]]
+
+
+@dataclass(frozen=True, slots=True)
+class _NoTurnIndex:
+    """No scan in this loop turn yet."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +171,21 @@ class _MarkingTaskFactory:
         return built
 
 
+def _record_if_marked(
+    marked: MarkedWork,
+    future: concurrent.futures.Future[Any],
+) -> None:
+    """Record ``future`` under the mark in the context of the caller, if
+    any."""
+    match RUN_MARK.get():
+        case RunMark() as mark:
+            marked.record_item(mark, future)
+        case Unmarked():
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 class TrackedExecutor(concurrent.futures.ThreadPoolExecutor):
     """The default executor of a shared async child: a ``ThreadPoolExecutor``
     with the asyncio defaults that records each work item submitted with a
@@ -156,14 +203,67 @@ class TrackedExecutor(concurrent.futures.ThreadPoolExecutor):
         **kwargs: P.kwargs,
     ) -> concurrent.futures.Future[T]:
         future = super().submit(fn, *args, **kwargs)
-        match RUN_MARK.get():
-            case RunMark() as mark:
-                self._marked.record_item(mark, future)
-            case Unmarked():
-                pass
-            case _ as unreachable:
-                assert_never(unreachable)
+        _record_if_marked(self._marked, future)
         return future
+
+
+class TrackedHookExecutor(concurrent.futures.ThreadPoolExecutor):
+    """The default executor that a start hook set, wrapped: each work item
+    runs in ``inner``, and an item submitted with a mark is recorded. The
+    loop takes only a ``ThreadPoolExecutor`` as its default executor, so the
+    wrapper is one; it starts no thread of its own."""
+
+    def __init__(
+        self,
+        marked: MarkedWork,
+        inner: concurrent.futures.ThreadPoolExecutor,
+    ) -> None:
+        super().__init__(max_workers=1, thread_name_prefix='asyncio-unused')
+        self._marked = marked
+        self._inner = inner
+
+    def submit(
+        self,
+        fn: Callable[P, T],
+        /,
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> concurrent.futures.Future[T]:
+        future = self._inner.submit(fn, *args, **kwargs)
+        _record_if_marked(self._marked, future)
+        return future
+
+    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+        self._inner.shutdown(wait=wait, cancel_futures=cancel_futures)
+        super().shutdown(wait=wait, cancel_futures=cancel_futures)
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutorKept:
+    """The default executor of the loop is still the one ``install`` set."""
+
+
+@dataclass(frozen=True, slots=True)
+class HookExecutorTracked:
+    """A start hook set a default executor of its own, of type
+    ``executor_type``. It is wrapped in ``TrackedHookExecutor`` and stays
+    the executor that runs the work."""
+
+    executor_type: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutorNotThreadPool:
+    """The default executor of the loop is not a ``ThreadPoolExecutor``
+    (``executor_type``; ``NoneType`` when it was removed). The public API of
+    the loop refuses such a value, so code set the attribute of the loop
+    directly. Its work cannot be tracked."""
+
+    executor_type: str
+
+
+type ExecutorAfterHooks = ExecutorKept | HookExecutorTracked | ExecutorNotThreadPool
+"""The default executor of the loop after the start hooks."""
 
 
 class MarkedWork:
@@ -185,9 +285,13 @@ class MarkedWork:
     ) -> None:
         self._loop = loop
         self._on_item_done = on_item_done
+        # The default executor that records work items. It starts no thread
+        # before its first submit.
+        self._executor: concurrent.futures.ThreadPoolExecutor = TrackedExecutor(self)
         self._tasks: dict[RunMark, weakref.WeakSet[asyncio.Task[Any]]] = {}
         self._items: dict[RunMark, set[concurrent.futures.Future[Any]]] = {}
         self._items_lock = threading.Lock()
+        self._index: _TurnIndex | _NoTurnIndex = _NoTurnIndex()
 
     def install(self) -> None:
         """Set the task factory and the default executor of the loop. A
@@ -195,7 +299,28 @@ class MarkedWork:
         self._loop.set_task_factory(
             _MarkingTaskFactory(self._loop.get_task_factory(), self._record_task),
         )
-        self._loop.set_default_executor(TrackedExecutor(self))
+        self._loop.set_default_executor(self._executor)
+
+    def track_executor_after_hooks(self) -> ExecutorAfterHooks:
+        """Keep the work items of each run recorded after the start hooks.
+
+        A hook that set a default executor of its own (for more threads than
+        the asyncio default) replaced the one of ``install``: that executor
+        is wrapped (``TrackedHookExecutor``) and set again. Reads the
+        default executor from the attribute of the loop that
+        ``set_default_executor`` writes (asyncio's ``BaseEventLoop``). Call
+        it once, after the hooks and before the first run.
+        """
+        current: object = getattr(self._loop, '_default_executor', None)
+        match current:
+            case _ if current is self._executor:
+                return ExecutorKept()
+            case concurrent.futures.ThreadPoolExecutor():
+                self._executor = TrackedHookExecutor(self, current)
+                self._loop.set_default_executor(self._executor)
+                return HookExecutorTracked(executor_type=type(current).__qualname__)
+            case _:
+                return ExecutorNotThreadPool(executor_type=type(current).__qualname__)
 
     def open(self, mark: RunMark) -> None:
         """Start the records of a new run. A mark in use is a defect."""
@@ -218,25 +343,68 @@ class MarkedWork:
         scan: ScanWhen,
     ) -> AliveWork:
         """The work of an open run that is still alive, without ``own_task``,
-        the task of the run. ``scan`` decides whether one pass over every
-        live task of the loop runs; that pass records the marked tasks that
-        the factory did not see."""
+        the task of the run. ``scan`` decides whether the index of this
+        turn, or a new scan, adds the marked tasks that the factory did not
+        see; they are recorded then. At most one scan runs per loop turn
+        for the end checks, and one per call for ``ScanWhen.ALWAYS``."""
         recorded = self._tasks[mark]
         live = {task for task in recorded if not task.done() and task is not own_task}
+        found: list[asyncio.Task[Any]]
         match scan:
             case ScanWhen.RECORD_EMPTY if live:
-                pass
-            case ScanWhen.RECORD_EMPTY | ScanWhen.ALWAYS:
-                for task in asyncio.all_tasks(self._loop):
-                    if task is not own_task and mark_of(task) == mark:
-                        recorded.add(task)
-                        live.add(task)
+                found = []
+            case ScanWhen.RECORD_EMPTY | ScanWhen.TURN:
+                found = self._index_of_turn().get(mark, [])
+            case ScanWhen.ALWAYS:
+                found = self._scan_into_index().get(mark, [])
             case _ as unreachable:
                 assert_never(unreachable)
+        for task in found:
+            if task is not own_task and not task.done():
+                recorded.add(task)
+                live.add(task)
         tasks = frozenset(live)
         with self._items_lock:
             executor_items = len(self._items[mark])
         return AliveWork(tasks=tasks, executor_items=executor_items)
+
+    def _index_of_turn(self) -> dict[RunMark, list[asyncio.Task[Any]]]:
+        """The live tasks by mark from the scan of this loop turn; the first
+        call of a turn scans."""
+        match self._index:
+            case _TurnIndex(by_mark=by_mark):
+                return by_mark
+            case _NoTurnIndex():
+                return self._scan_into_index()
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def _scan_into_index(self) -> dict[RunMark, list[asyncio.Task[Any]]]:
+        """Scan every live task of the loop once, keep the marked ones by
+        mark as the index of this turn, and drop that index at the next
+        turn."""
+        by_mark: dict[RunMark, list[asyncio.Task[Any]]] = {}
+        for task in asyncio.all_tasks(self._loop):
+            match mark_of(task):
+                case RunMark() as mark:
+                    by_mark.setdefault(mark, []).append(task)
+                case Unmarked():
+                    pass
+                case _ as unreachable:
+                    assert_never(unreachable)
+        match self._index:
+            case _NoTurnIndex():
+                _ = self._loop.call_soon(self._drop_index)
+            case _TurnIndex():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
+        self._index = _TurnIndex(by_mark)
+        return by_mark
+
+    def _drop_index(self) -> None:
+        """The loop turned: the next end check scans again."""
+        self._index = _NoTurnIndex()
 
     def _record_task(self, task: asyncio.Task[Any]) -> None:
         match mark_of(task):

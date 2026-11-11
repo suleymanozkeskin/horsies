@@ -60,6 +60,7 @@ from horsies.core.worker.slots import (
     ChildEnded,
     ChildHookFailed,
     ChildLost,
+    ExitUnknown,
     CloseReason,
     Closing,
     DeadlineAcknowledged,
@@ -1170,12 +1171,12 @@ class TestStopReportOrder:
             (DeadlineNotReported(), SecondCancelFrame(1, '')),
             (DeadlineReported(), RunStuckFrame(1, '', 1, 0, ('x',))),
             (StuckReported(), SecondCancelFrame(1, '')),
-            (DeadlineReported(), LeftoverCancelFrame(1, '')),
-            (LeftoverCancelReported(), LeftoverCancelFrame(1, '')),
+            (DeadlineReported(), LeftoverCancelFrame(1, '', RETURNED)),
+            (LeftoverCancelReported(RETURNED), LeftoverCancelFrame(1, '', RETURNED)),
             (DeadlineNotReported(), LeftoverStuckFrame(1, '', 1, 0, ('x',), RETURNED)),
             (SecondCancelReported(), LeftoverStuckFrame(1, '', 1, 0, ('x',), RETURNED)),
-            (LeftoverCancelReported(), SecondCancelFrame(1, '')),
-            (LeftoverCancelReported(), RunStuckFrame(1, '', 1, 0, ('x',))),
+            (LeftoverCancelReported(RETURNED), SecondCancelFrame(1, '')),
+            (LeftoverCancelReported(RETURNED), RunStuckFrame(1, '', 1, 0, ('x',))),
         ],
     )
     async def test_a_report_out_of_order_is_refused(
@@ -1247,16 +1248,20 @@ class TestStopReportOrder:
     @pytest.mark.asyncio(loop_scope='function')
     async def test_a_leftover_cancel_closes_the_child_and_kills_nothing(self) -> None:
         pool, runs, child = self._run_at(DeadlineNotReported())
-        frame = LeftoverCancelFrame(dispatch=1, task_id=runs.task_ids()[0])
+        frame = LeftoverCancelFrame(
+            dispatch=1,
+            task_id=runs.task_ids()[0],
+            returned=RETURNED,
+        )
 
         assert pool._note_stop_report(pool._shared_slots[0], child, runs, frame)
-        assert runs.get(1).deadline == LeftoverCancelReported()  # type: ignore[union-attr]
+        assert runs.get(1).deadline == LeftoverCancelReported(RETURNED)  # type: ignore[union-attr]
         assert pool.shared_states() == (Closing(CloseReason.LEFTOVER_WORK, runs),)
         child.kill_for_caller.assert_not_called()
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_a_leftover_stuck_report_keeps_what_the_task_returned(self) -> None:
-        pool, runs, child = self._run_at(LeftoverCancelReported())
+        pool, runs, child = self._run_at(LeftoverCancelReported(RETURNED))
         frame = LeftoverStuckFrame(
             dispatch=1,
             task_id=runs.task_ids()[0],
@@ -1273,7 +1278,7 @@ class TestStopReportOrder:
     @pytest.mark.asyncio(loop_scope='function')
     @pytest.mark.parametrize(
         'deadline',
-        [LeftoverCancelReported(), LeftoverStuckReported(RETURNED)],
+        [LeftoverCancelReported(RETURNED), LeftoverStuckReported(RETURNED)],
     )
     async def test_a_returned_run_ends_with_its_result_and_never_with_a_timeout(
         self,
@@ -1355,14 +1360,42 @@ class TestReturnedRunAtAKill:
         assert outcome == lost
 
     @pytest.mark.asyncio(loop_scope='function')
-    async def test_work_in_its_cancel_rounds_is_not_past_a_deadline(self) -> None:
-        """The child has not sent what the task returned yet, so a kill
-        with no named cause takes the crash path, never the timeout."""
+    @pytest.mark.parametrize(
+        'kill',
+        [
+            NoNamedKill(),
+            BlockedLoopKill(LoopHeldBy(dispatch=2, task_id='other'), 5000, 'x'),
+            BlockedLoopKill(LoopHeldBy(dispatch=1, task_id='t'), 5000, 'x'),
+            BlockedLoopKill(LoopHolderUnknown(), 5000, 'x'),
+        ],
+    )
+    async def test_work_in_its_cancel_rounds_keeps_what_the_task_returned_at_any_kill(
+        self,
+        kill: NoNamedKill | BlockedLoopKill,
+    ) -> None:
+        """The leftover cancel report carries what the task returned, so a
+        kill whose exit was seen writes it: never the timeout, never a
+        blocked loop code, never the crash path."""
         lost = ChildLost(LossCause.KILLED_BY_PARENT, KilledBySignal(9), False, 7)
 
         outcome = _outcome_at_loss(
+            kill,
+            self._run(LeftoverCancelReported(RETURNED)),
+            lost,
+            time.monotonic(),
+        )
+
+        assert outcome == SeatKilled(ReturnedBeforeKill(RETURNED), 7, KilledBySignal(9))
+
+    @pytest.mark.asyncio(loop_scope='function')
+    async def test_work_in_its_cancel_rounds_takes_the_loss_when_no_exit_was_seen(
+        self,
+    ) -> None:
+        lost = ChildLost(LossCause.KILLED_BY_PARENT, ExitUnknown(), False, 7)
+
+        outcome = _outcome_at_loss(
             NoNamedKill(),
-            self._run(LeftoverCancelReported()),
+            self._run(LeftoverCancelReported(RETURNED)),
             lost,
             time.monotonic(),
         )
@@ -1371,7 +1404,7 @@ class TestReturnedRunAtAKill:
 
     @pytest.mark.parametrize(
         'deadline',
-        [LeftoverCancelReported(), LeftoverStuckReported(RETURNED)],
+        [LeftoverCancelReported(RETURNED), LeftoverStuckReported(RETURNED)],
     )
     def test_a_leftover_report_answers_the_backstop(
         self,
@@ -1382,7 +1415,7 @@ class TestReturnedRunAtAKill:
     @pytest.mark.parametrize(
         'frame',
         [
-            LeftoverCancelFrame(dispatch=1, task_id='t'),
+            LeftoverCancelFrame(dispatch=1, task_id='t', returned=RETURNED),
             LeftoverStuckFrame(1, 't', 1, 0, ('x',), RETURNED),
         ],
     )
