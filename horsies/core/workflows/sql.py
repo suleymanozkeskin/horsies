@@ -319,6 +319,14 @@ GET_SUBWORKFLOW_SUMMARIES_SQL = text("""
 # they run after the workflow row lock: the pending row is locked after the
 # workflow row, the order of horsies_phase2_consume.
 #
+# `has_dependents` is whether a node of the same workflow lists the node in
+# its dependencies, with the predicate of the dependents read
+# (GET_DEPENDENTS_EVAL_SQL). The dependencies of a workflow are written with
+# its nodes, in the transaction that starts the workflow
+# (INSERT_WORKFLOW_TASKS_BULK_SQL), and no statement changes them, so the
+# value does not depend on the snapshot. When it is false, the dependents
+# read of the node returns no row, and the progression does not send it.
+#
 # Lock-order invariant (N6): this statement locks the workflow row (`found`'s
 # FOR UPDATE OF w) before the workflow_task row (`upd`'s UPDATE). Every
 # transaction that locks both horsies_workflows and horsies_workflow_tasks
@@ -365,7 +373,12 @@ COMPLETE_WORKFLOW_TASK_SQL = text(f"""
     )
     SELECT found.workflow_id, found.task_index, found.wf_status,
            found.depth, found.root_workflow_id, found.on_error,
-           EXISTS (SELECT 1 FROM upd) AS cas_won
+           EXISTS (SELECT 1 FROM upd) AS cas_won,
+           EXISTS (
+               SELECT 1 FROM horsies_workflow_tasks dependent
+               WHERE dependent.workflow_id = found.workflow_id
+                 AND dependent.dependencies && ARRAY[found.task_index]
+           ) AS has_dependents
     FROM (SELECT count(*) AS sent FROM woken) AS wake
     LEFT JOIN found ON TRUE
 """)

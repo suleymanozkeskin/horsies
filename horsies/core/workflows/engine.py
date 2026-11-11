@@ -1781,6 +1781,32 @@ class NoQueueWake:
 type NodeCompletionWake = QueueWake | NoQueueWake
 
 
+@dataclass(frozen=True, slots=True)
+class NodeHasNoDependents:
+    """No node of the workflow lists the node in its dependencies.
+
+    The dependencies of a workflow are written with its nodes, in the
+    transaction that starts it, and never change, so this holds for the
+    life of the workflow. The progression does not read the dependents."""
+
+
+@dataclass(frozen=True, slots=True)
+class NodeMayHaveDependents:
+    """A node of the workflow may list the node in its dependencies: the
+    progression reads the dependents."""
+
+
+type NodeDependents = NodeHasNoDependents | NodeMayHaveDependents
+
+
+def _node_dependents(has_dependents: bool) -> NodeDependents:
+    """The dependents of a node, from ``has_dependents`` of
+    ``COMPLETE_WORKFLOW_TASK_SQL``. Pure."""
+    if has_dependents:
+        return NodeMayHaveDependents()
+    return NodeHasNoDependents()
+
+
 def _wake_parameters(wake: NodeCompletionWake) -> dict[str, str | None]:
     """The wake parameters of ``COMPLETE_WORKFLOW_TASK_SQL``; NULL sends
     none. Pure."""
@@ -1889,6 +1915,7 @@ async def on_workflow_task_complete(
         workflow_status=row.wf_status,
         depth=row.depth,
         root_workflow_id=row.root_workflow_id,
+        dependents=_node_dependents(row.has_dependents),
     )
 
 
@@ -1977,6 +2004,7 @@ async def apply_node_progression(
     workflow_status: str | None,
     depth: int | None,
     root_workflow_id: str | None,
+    dependents: NodeDependents,
 ) -> None:
     """Everything a workflow does after one of its nodes goes terminal.
 
@@ -1989,7 +2017,9 @@ async def apply_node_progression(
     where the database-owned consumption function wrote the node and
     returned this same context. ``failure`` is the task's error when the
     node went terminal unsuccessfully and ``None`` otherwise — the
-    policy step is the only one that needs it.
+    policy step is the only one that needs it. ``dependents`` is
+    ``NodeHasNoDependents`` when no node of the workflow waits for the
+    node: the dependents read is not sent, as it would return no row.
     """
     # 3. Handle failure based on on_error policy. The locked row's
     # on_error is authoritative: the held lock freezes the workflow row.
@@ -2007,11 +2037,20 @@ async def apply_node_progression(
         return  # Don't propagate - workflow is paused
 
     # 5. Find and potentially enqueue dependent tasks
-    await _process_dependents(
-        session, workflow_id, task_index, broker,
-        depth=depth if depth is not None else 0,
-        root_workflow_id=root_workflow_id or workflow_id,
-    )
+    match dependents:
+        case NodeHasNoDependents():
+            pass
+        case NodeMayHaveDependents():
+            await _process_dependents(
+                session,
+                workflow_id,
+                task_index,
+                broker,
+                depth=depth if depth is not None else 0,
+                root_workflow_id=root_workflow_id or workflow_id,
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
 
     # 6. Check if workflow is complete (this transaction already holds the
     # workflow lock taken in step 2)
