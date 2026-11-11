@@ -42,6 +42,13 @@ whatever happens to that work:
 One log line names the work that each such run left, and how it ended: within
 the grace, after a cancel, or stuck.
 
+A run that set its row RUNNING and ended without a cancel writes its
+finalizing marker at its end, after its coroutine and its marked work, and
+the child reports the end after the marker. The marker never holds a run past
+its deadline. Until the worker reads the end, its runner heartbeats cover the
+row. A run that timed out or needed a cancel reports its end at once, with no
+marker (``_marker_window``).
+
 A ``LoopWatchdog`` thread reports a loop that has not turned for the block
 limit (``LoopBlockedFrame``); the parent kills the child at once.
 
@@ -111,6 +118,7 @@ from horsies.core.worker.child_protocol import (
 from horsies.core.worker.loop_watchdog import LoopWatchdog
 from horsies.core.worker.run_mark import (
     RUN_MARK,
+    UNMARKED,
     AliveWork,
     MarkedWork,
     RunMark,
@@ -148,16 +156,65 @@ CHILD_DEFECT_EXIT_CODE: Final = 1
 """A defect inside the child, as when a task escapes the task runner."""
 
 
+@dataclass(frozen=True, slots=True)
+class SetRunning:
+    """The run set its row RUNNING, then ended with ``wire``: the body ran,
+    or a refusal or a resolve error ended it after the RUNNING update. The
+    end of the run writes the finalizing marker when one is due."""
+
+    wire: WireResult
+
+
+@dataclass(frozen=True, slots=True)
+class StoppedBeforeRunning:
+    """The run ended with ``wire`` before it set its row RUNNING: a lost
+    claim, an expiry, a stopped workflow, or a failed RUNNING update. No
+    marker follows."""
+
+    wire: WireResult
+
+
+type SeatReturn = SetRunning | StoppedBeforeRunning
+"""What the coroutine of one run returns."""
+
+
+@dataclass(frozen=True, slots=True)
+class MarkerBeforeDeadline:
+    """The finalizing marker of a run must end within ``seconds``: the time
+    left before the deadline of the run."""
+
+    seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class MarkerWithoutDeadline:
+    """The run has no deadline (a refusal): the marker has only the bound of
+    the seat program."""
+
+
+type MarkerWindow = MarkerBeforeDeadline | MarkerWithoutDeadline
+"""The time that the end report of a run may wait for its finalizing marker."""
+
+
 class StartedSeats(Protocol):
     """The seats of a shared async child after its start steps."""
 
-    async def run(self, frame: SharedRunFrame) -> WireResult:
-        """Run the task of ``frame`` on a seat. Returns its wire result.
+    async def run(self, frame: SharedRunFrame) -> SeatReturn:
+        """Run the task of ``frame`` on a seat, up to its result. Writes no
+        finalizing marker.
 
         A cancel of the calling task ends the run: the cancel propagates, or
         the run returns, whichever the task body does. Any other exception
         that escapes is a defect.
         """
+        ...
+
+    async def mark_finalizing(
+        self, frame: SharedRunFrame, window: MarkerWindow
+    ) -> None:
+        """Write the finalizing marker of the run of ``frame``, which ended,
+        within ``window``. A failed, skipped or late write is logged only:
+        nothing escapes. Runs as a task with no run mark."""
         ...
 
     async def stop(self) -> None:
@@ -373,9 +430,35 @@ class _LeftoverStuck:
     left: _LeftWork
 
 
-type _RunStop = _Stop | _LeftoverGrace | _LeftoverCancel | _LeftoverStuck
-"""The step of the stop of a run: on the deadline path (``_Stop``), or on
-the path of the work that a run left after its return."""
+@dataclass(frozen=True, slots=True)
+class _Finalizing:
+    """The run ended with ``end``. Its finalizing marker is in flight, and
+    the end report follows it."""
+
+    end: SeatFinished
+
+
+type _RunStop = _Stop | _LeftoverGrace | _LeftoverCancel | _LeftoverStuck | _Finalizing
+"""The step of the stop of a run: on the deadline path (``_Stop``), on the
+path of the work that a run left after its return, or after the end of a
+run, while its marker is in flight."""
+
+
+@dataclass(frozen=True, slots=True)
+class _DeadlineAt:
+    """The deadline of a run is at ``at``, on the clock of the loop."""
+
+    at: float
+
+
+@dataclass(frozen=True, slots=True)
+class _NoDeadline:
+    """The run of a ``SeatRefusal``: no task code runs, so no deadline."""
+
+
+@dataclass(frozen=True, slots=True)
+class _NoMarker:
+    """The end of a run writes no finalizing marker."""
 
 
 class _LeftWorkEnd(Enum):
@@ -398,11 +481,14 @@ class _Seat:
     ``stop`` moves forward only. ``timer`` is the next step of the stop.
     ``watched`` holds the marked tasks whose end the run waits for: a task
     leaves it when it ends, and the run checks its end when it is empty.
+    ``program`` runs the task and writes its finalizing marker.
     """
 
     frame: SharedRunFrame
     mark: RunMark
-    task: asyncio.Task[WireResult]
+    task: asyncio.Task[SeatReturn]
+    deadline: _DeadlineAt | _NoDeadline
+    program: StartedSeats
     stop: _RunStop
     timer: asyncio.TimerHandle | _NoTimer
     watched: set[asyncio.Task[Any]]
@@ -491,17 +577,16 @@ class SeatLoop:
             context=context,
         )
         stop: _Stop
+        deadline: _DeadlineAt | _NoDeadline
         timer: asyncio.TimerHandle | _NoTimer
         match frame.work:
             case SeatTask(timeout_ms=timeout_ms):
                 stop = _Stop.BEFORE_DEADLINE
-                timer = self._loop.call_later(
-                    timeout_ms / 1000.0,
-                    self._fire,
-                    frame.dispatch,
-                )
+                deadline = _DeadlineAt(self._loop.time() + timeout_ms / 1000.0)
+                timer = self._loop.call_at(deadline.at, self._fire, frame.dispatch)
             case SeatRefusal():
                 stop = _Stop.NO_DEADLINE
+                deadline = _NoDeadline()
                 timer = _NoTimer()
             case ThreadSeatTask():
                 _exit_for_defect(
@@ -511,7 +596,16 @@ class SeatLoop:
                 )
             case _ as unreachable:
                 assert_never(unreachable)
-        self._seats[frame.dispatch] = _Seat(frame, mark, task, stop, timer, set())
+        self._seats[frame.dispatch] = _Seat(
+            frame=frame,
+            mark=mark,
+            task=task,
+            deadline=deadline,
+            program=started,
+            stop=stop,
+            timer=timer,
+            watched=set(),
+        )
         task.add_done_callback(functools.partial(self._finish, frame.dispatch))
 
     def _ended(self, seat: _Seat) -> bool:
@@ -594,7 +688,7 @@ class SeatLoop:
         match seat.stop:
             case _LeftoverGrace(left=left):
                 pass
-            case _Stop() | _LeftoverCancel() | _LeftoverStuck():
+            case _Stop() | _LeftoverCancel() | _LeftoverStuck() | _Finalizing():
                 raise AssertionError(
                     f'the leftover grace of run {dispatch} ended at step {seat.stop}',
                 )
@@ -687,6 +781,7 @@ class SeatLoop:
                 | _Stop.STUCK
                 | _LeftoverGrace()
                 | _LeftoverStuck()
+                | _Finalizing()
             ):
                 raise AssertionError(
                     f'run {dispatch} reached the stuck check at step {seat.stop}',
@@ -723,7 +818,7 @@ class SeatLoop:
         if not seat.watched:
             self._check_end(mark.dispatch)
 
-    def _finish(self, dispatch: int, task: asyncio.Task[WireResult]) -> None:
+    def _finish(self, dispatch: int, task: asyncio.Task[SeatReturn]) -> None:
         """The task of run ``dispatch`` has ended. Before its deadline it
         returned (``_returned``); for a refusal, a cancel or an exception
         that escaped the seat runner is a defect. A step of the stop can
@@ -740,7 +835,12 @@ class SeatLoop:
                 self._returned(dispatch)
             case _Stop.CANCELLED | _Stop.SECOND_CANCEL | _Stop.STUCK:
                 self._check_end(dispatch)
-            case _LeftoverGrace() | _LeftoverCancel() | _LeftoverStuck():
+            case (
+                _LeftoverGrace()
+                | _LeftoverCancel()
+                | _LeftoverStuck()
+                | _Finalizing()
+            ):
                 # The deadline found the coroutine returned and took the
                 # path of the return; that path reports the end.
                 pass
@@ -750,9 +850,10 @@ class SeatLoop:
     def _check_end(self, dispatch: int) -> None:
         """Report the end of run ``dispatch`` when its coroutine has ended
         and no marked work of it is alive; else wait for that work. A run
-        that is no longer in flight was reported already."""
+        that is no longer in flight was reported already, and a run whose
+        marker is in flight has ended already."""
         seat = self._seats.get(dispatch)
-        if seat is None or not seat.task.done():
+        if seat is None or isinstance(seat.stop, _Finalizing) or not seat.task.done():
             return
         alive = self._marked.alive(seat.mark, seat.task, ScanWhen.RECORD_EMPTY)
         if not alive.is_empty():
@@ -761,11 +862,14 @@ class SeatLoop:
         self._report_end(dispatch, seat)
 
     def _report_end(self, dispatch: int, seat: _Seat) -> None:
-        """Free the seat of a run whose coroutine and marked work ended, and
-        report its end. A run that left work after its return logs how that
-        work ended; a stuck report logged it already."""
+        """The coroutine and the marked work of run ``dispatch`` ended.
+
+        Drop the records of the run, and log how the work that it left after
+        its return ended; a stuck report logged it already. Then report the
+        end, after the finalizing marker when one is due
+        (``_marker_window``). The run keeps its seat while its marker is in
+        flight."""
         _cancel_timer(seat)
-        del self._seats[dispatch]
         self._marked.close(seat.mark)
         match seat.stop:
             case _LeftoverGrace(left=left):
@@ -774,14 +878,71 @@ class SeatLoop:
                 _log_left_work(seat.frame, left, _LeftWorkEnd.CANCELLED)
             case _Stop() | _LeftoverStuck():
                 pass
+            case _Finalizing():
+                raise AssertionError(f'run {dispatch} ended twice')
             case _ as unreachable:
                 assert_never(unreachable)
+        end = _end_of(seat)
+        match end, _marker_window(seat, self._loop.time()):
+            case _, _NoMarker():
+                self._send_end(dispatch, seat, end)
+            case SeatFinished() as finished, (
+                MarkerBeforeDeadline()
+                | MarkerWithoutDeadline() as window
+            ):
+                seat.stop = _Finalizing(finished)
+                self._start_marker(dispatch, seat, window)
+            case SeatTimedOut(), _:
+                raise AssertionError(
+                    f'run {dispatch} timed out and has a marker window',
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def _start_marker(self, dispatch: int, seat: _Seat, window: MarkerWindow) -> None:
+        """Write the finalizing marker of run ``dispatch`` in a task with no
+        run mark, so the cancel rounds and the end checks of runs never see
+        it. ``_marker_done`` reports the end."""
+        context = contextvars.copy_context()
+        _ = context.run(RUN_MARK.set, UNMARKED)
+        marker = self._loop.create_task(
+            seat.program.mark_finalizing(seat.frame, window),
+            name=f'horsies-marker-{dispatch}',
+            context=context,
+        )
+        marker.add_done_callback(functools.partial(self._marker_done, dispatch))
+
+    def _marker_done(self, dispatch: int, marker: asyncio.Task[None]) -> None:
+        """The marker of run ``dispatch`` ended: report the end of the run.
+        A marker that raised or was cancelled is a defect of the seat
+        program, whose marker logs every failure."""
+        seat = self._seats[dispatch]
+        match seat.stop:
+            case _Finalizing(end=end):
+                pass
+            case _Stop() | _LeftoverGrace() | _LeftoverCancel() | _LeftoverStuck():
+                raise AssertionError(
+                    f'the marker of run {dispatch} ended at step {seat.stop}',
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
+        if marker.cancelled() or marker.exception() is not None:
+            _exit_for_defect(
+                f'the finalizing marker of task {seat.frame.task_id} did not '
+                'end on its own',
+                CHILD_DEFECT_EXIT_CODE,
+            )
+        self._send_end(dispatch, seat, end)
+
+    def _send_end(self, dispatch: int, seat: _Seat, end: SeatEnd) -> None:
+        """Free the seat of run ``dispatch`` and report its end."""
+        del self._seats[dispatch]
         self._writer.send_result(
             seat.frame.task_name,
             SharedResultFrame(
                 dispatch=dispatch,
                 task_id=seat.frame.task_id,
-                end=_end_of(seat),
+                end=end,
                 rss=self._read_rss(),
             ),
         )
@@ -823,7 +984,7 @@ def _grace_s(frame: SharedRunFrame) -> float:
             assert_never(unreachable)
 
 
-def _exit_for_end_defect(seat: _Seat, task: asyncio.Task[WireResult]) -> None:
+def _exit_for_end_defect(seat: _Seat, task: asyncio.Task[SeatReturn]) -> None:
     """End the process when the task of a run before its deadline was
     cancelled, or when an exception escaped the seat runner: both are
     defects."""
@@ -858,16 +1019,77 @@ def _end_of(seat: _Seat) -> SeatEnd:
             | _LeftoverStuck()
         ):
             return _returned_end(seat)
+        case _Finalizing(end=end):
+            return end
         case _ as unreachable:
             assert_never(unreachable)
 
 
-def _returned_end(seat: _Seat) -> SeatFinished:
+def _seat_return(seat: _Seat) -> SeatReturn:
     """What the coroutine of a run returned. A cancel or an exception that
     escaped the seat runner is a defect: the process ends."""
     _exit_for_end_defect(seat, seat.task)
-    ok, result_json, failed_reason = seat.task.result()
-    return SeatFinished(ok=ok, result_json=result_json, failed_reason=failed_reason)
+    return seat.task.result()
+
+
+def _returned_end(seat: _Seat) -> SeatFinished:
+    """The end of a run with what its coroutine returned (``_seat_return``)."""
+    match _seat_return(seat):
+        case SetRunning(wire=wire) | StoppedBeforeRunning(wire=wire):
+            ok, result_json, failed_reason = wire
+            return SeatFinished(
+                ok=ok,
+                result_json=result_json,
+                failed_reason=failed_reason,
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _marker_window(seat: _Seat, now: float) -> MarkerWindow | _NoMarker:
+    """Whether the end report of a run that ended waits for its finalizing
+    marker, and for how long. ``now`` is the time on the clock of the loop.
+
+    The marker tells the reaper and the runner heartbeat that the attempt
+    ended and waits for the worker: the beats of the row stop, and stale
+    recovery waits ``finalizing_stale_threshold_ms`` from the marker. It is
+    written only at the end of the run, after its coroutine and its marked
+    work, so the beats cover all work of the attempt. A run writes it only
+    when it set its row RUNNING and ended without a cancel: its coroutine
+    returned before its deadline, or it had none, and the work that it left
+    ended within the cancel grace. The marker never holds a run past its
+    deadline. A run that timed out or needed a cancel reports its end at
+    once: the worker writes its outcome after the read, as at a kill, while
+    its beats cover the row until then.
+    """
+    match seat.stop:
+        case _Stop.NO_DEADLINE | _Stop.BEFORE_DEADLINE | _LeftoverGrace():
+            pass
+        case (
+            _Stop.CANCELLED
+            | _Stop.SECOND_CANCEL
+            | _Stop.STUCK
+            | _LeftoverCancel()
+            | _LeftoverStuck()
+        ):
+            return _NoMarker()
+        case _Finalizing():
+            raise AssertionError(
+                f'run {seat.frame.dispatch} asked for a second marker',
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+    match _seat_return(seat), seat.deadline:
+        case StoppedBeforeRunning(), _:
+            return _NoMarker()
+        case SetRunning(), _NoDeadline():
+            return MarkerWithoutDeadline()
+        case SetRunning(), _DeadlineAt(at=at) if at > now:
+            return MarkerBeforeDeadline(seconds=at - now)
+        case SetRunning(), _DeadlineAt():
+            return _NoMarker()
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _cancel_timer(seat: _Seat) -> None:

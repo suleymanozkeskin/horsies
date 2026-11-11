@@ -219,6 +219,17 @@ there is no migration contract between pre-1.0 versions.
     takes the cancel ends as that cancel, through its exception mapper, as
     a cancel that reaches the body at an `await` does. The request is
     cleared, so the seat does not end cancelled, and the child serves on.
+  - The child writes the finalizing marker of a task when its attempt ends:
+    after its coroutine and the work that it started, and only when the
+    task returned before its deadline and that work ended within the grace.
+    The child reports the end after the marker, and waits for it at most
+    until the deadline of the task. A task that timed out, or whose work
+    needed a cancel, gets no marker: the child reports its end at once, and
+    the runner heartbeats of the worker cover the row until the worker reads
+    that end. So the heartbeats of a row never stop while work of its
+    attempt still runs, a marker that waits for a pooled connection never
+    turns a returned value into `TASK_TIMEOUT`, and no marker uses the
+    cancel grace of a task.
   - A `SHARED_ASYNC` row without a usable stored `timeout_ms` or
     `cancel_grace_ms` fails with `WORKER_SERIALIZATION_ERROR` on every
     worker, after its RUNNING update and before the task resolves; the data

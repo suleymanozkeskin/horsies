@@ -67,7 +67,12 @@ from horsies.core.worker.child_protocol import (
     boot_failed_frame,
     encode_parent_frame,
 )
-from horsies.core.worker.shared_child import StartedSeats
+from horsies.core.worker.shared_child import (
+    MarkerWindow,
+    SeatReturn,
+    SetRunning,
+    StartedSeats,
+)
 from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
 from horsies.core.utils.loop_runner import in_running_event_loop
 from horsies.core.worker import loop_watchdog as loop_watchdog_module
@@ -631,8 +636,13 @@ async def _seat_run(frame: SharedRunFrame) -> WireResult:
 
 
 class _ScriptedSeats:
-    async def run(self, frame: SharedRunFrame) -> WireResult:
-        return await _seat_run(frame)
+    async def run(self, frame: SharedRunFrame) -> SeatReturn:
+        return SetRunning(await _seat_run(frame))
+
+    async def mark_finalizing(
+        self, frame: SharedRunFrame, window: MarkerWindow
+    ) -> None:
+        _ = frame, window
 
     async def stop(self) -> None:
         return None
