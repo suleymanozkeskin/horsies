@@ -58,7 +58,10 @@ The claim reads one stream per queue and execution class:
 `idx_horsies_tasks_claim_expired_class` key `(queue_name, execution, priority,
 enqueued_at, id)` over PENDING and CLAIMED rows, and
 `idx_horsies_tasks_claim_expired` keys `(queue_name, claim_expires_at)` over
-CLAIMED rows. The worker builds the two class indexes concurrently.
+CLAIMED rows. The worker builds the two class indexes concurrently. A schema
+upgrade keeps an index whose catalog form matches its declaration; it builds
+one of another form under a temporary name and swaps it in, so the claim has
+an index of that name throughout.
 
 Enqueue-time facts (`enqueue_sha`, `retention_class_key`, the fingerprint
 pair) are required columns with their declared checks from the first row

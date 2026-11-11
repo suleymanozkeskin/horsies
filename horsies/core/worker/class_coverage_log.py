@@ -2,9 +2,11 @@
 
 Each reaper pass reads the fleet check (``get_class_coverage_async``). A
 pending (queue, class) stream that no live worker serves is an error; one
-whose serving workers have no capacity in service is a warning. Each worker
-process logs one stream at most once per ``CLASS_COVERAGE_LOG_INTERVAL_S``,
-and a failed check at most once per the same interval.
+whose serving workers have no capacity in service is a warning. Live workers
+that the check left out, because their snapshot does not record their
+budgets, are a warning. Each worker process logs one stream at most once per
+``CLASS_COVERAGE_LOG_INTERVAL_S``, and the left-out workers and a failed
+check each at most once per the same interval.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Final, TypeAlias, assert_never
 
 from horsies.core.models.class_coverage import (
+    ClassesNotRecorded,
     StreamCoverage,
     StreamServed,
     StreamUnserved,
@@ -24,6 +27,9 @@ from horsies.core.models.tasks import Execution
 # The least time, in seconds, between two log lines of one stream (or of a
 # failed check) from one worker process.
 CLASS_COVERAGE_LOG_INTERVAL_S: Final = 300.0
+
+# The most worker ids that one log line of left-out workers names.
+NOT_RECORDED_IDS_LOGGED: Final = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,7 +45,12 @@ class CheckFailedKey:
     """The log key of a failed coverage check."""
 
 
-LogKey: TypeAlias = StreamKey | CheckFailedKey
+@dataclass(frozen=True, slots=True)
+class NotRecordedKey:
+    """The log key of the live workers that the check left out."""
+
+
+LogKey: TypeAlias = StreamKey | CheckFailedKey | NotRecordedKey
 
 
 @dataclass(slots=True)
@@ -107,6 +118,24 @@ def describe_uncovered(stream: StreamCoverage) -> str:
             raise AssertionError(f'{subject}: a served stream has no log line')
         case _ as unreachable:
             assert_never(unreachable)
+
+
+def describe_not_recorded(workers: Sequence[ClassesNotRecorded]) -> str:
+    """The log text of the live workers that the check left out.
+
+    Names at most ``NOT_RECORDED_IDS_LOGGED`` worker ids, then counts the
+    rest. An empty ``workers`` is a defect of the caller (``AssertionError``).
+    """
+    assert workers, 'a left-out worker line names at least one worker'
+    named = ', '.join(worker.worker_id for worker in workers[:NOT_RECORDED_IDS_LOGGED])
+    more = len(workers) - NOT_RECORDED_IDS_LOGGED
+    rest = f' and {more} more' if more > 0 else ''
+    return (
+        f'{len(workers)} live worker(s) are left out of the class coverage '
+        'check: their latest snapshot has no class_capacity, written by a '
+        'worker version that does not record its claim budgets. '
+        f'Workers: {named}{rest}.'
+    )
 
 
 def _serving_workers_hint(execution: Execution) -> str:

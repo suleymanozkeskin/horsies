@@ -100,8 +100,8 @@ RETURNING t.id, t.task_name, t.args, t.kwargs, t.queue_name, t.is_workflow_task,
 # a client round trip. Replaces the per-pass lock loop + counts + per-queue
 # CLAIM_SQL loop.
 HORSIES_CLAIM_SQL = text("""
-    SELECT id, task_name, args, kwargs, queue_name, is_workflow_task, task_options,
-           claimed_at, execution
+    SELECT row_kind, id, task_name, args, kwargs, queue_name, is_workflow_task,
+           task_options, claimed_at, execution, short_by
     FROM horsies_claim(
         :p_worker_id,
         CAST(:p_queues AS jsonb),

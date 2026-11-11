@@ -191,6 +191,7 @@ from .core.models.health import (
 from .core.models.class_coverage import (
     BudgetLoad,
     ClassCoverage,
+    ClassesNotRecorded,
     ClassReport,
     NoneDue,
     OldestWaiting,
@@ -419,6 +420,7 @@ __all__ = [
     'ClassCapacityNotRecorded',
     'WORKER_STATE_LIVE_WINDOW_S',
     'ClassCoverage',
+    'ClassesNotRecorded',
     'StreamCoverage',
     'StreamCoverageState',
     'StreamServed',

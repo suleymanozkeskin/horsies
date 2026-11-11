@@ -37,7 +37,12 @@ DISPOSITIONS: dict[str, tuple[str, str]] = {
     'horsies_claim_candidates': (
         'type-agnostic',
         'identity returned through an explicit text cast, and the '
-        'return-order join compares the identity as text',
+        'dispatch order sorts by the identity in its own type',
+    ),
+    'horsies_claim_plan': (
+        'type-agnostic',
+        'orders by the identity and returns counts per stream, never '
+        'an identity value',
     ),
     'horsies_terminalization_miss': (
         'varchar-world-only',
