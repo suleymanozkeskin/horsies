@@ -448,6 +448,31 @@ async def test_a_closed_registry_kills_the_child_that_takes_a_task(
 
 
 @pytest.mark.asyncio
+async def test_a_fail_closed_kill_reads_as_a_kill_by_the_worker(
+    pool: SlotPool,
+    heartbeat_factory: HeartbeatFactory,
+) -> None:
+    """Enter at the watchdog, read the loss at the pool: the kill is the
+    worker's, as a kill by the pool is, not a death of the child."""
+    handle = pool.submit(_frame('hang'))
+    await asyncio.wait_for(handle.assigned, WAIT_S)
+    stopped = _FailClosedRecorder()
+
+    heartbeat_factory(
+        pool.live_dispatches,
+        _ScriptedWriter(_always_failing),
+        window_s=SHORT_WINDOW_S,
+        on_fail_closed=stopped,
+    )
+    outcome = await _outcome(handle)
+
+    assert isinstance(outcome, ChildLost)
+    assert outcome.cause is LossCause.KILLED_BY_PARENT
+    await asyncio.wait_for(stopped.called.wait(), WAIT_S)
+    assert isinstance(stopped.causes[0], BeatsOverdue)
+
+
+@pytest.mark.asyncio
 async def test_a_task_that_holds_the_gil_keeps_its_beats(
     pool: SlotPool,
     heartbeat_factory: HeartbeatFactory,

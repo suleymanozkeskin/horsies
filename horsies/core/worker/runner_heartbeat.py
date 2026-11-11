@@ -947,8 +947,13 @@ class RunnerHeartbeat:
         self._exit_policy.exit_process(RUNNER_HEARTBEAT_LOST_EXIT_CODE)
 
     def _kill_held_children(self) -> None:
-        """Close the registry; SIGKILL the session of each child that held a task."""
+        """Close the registry; SIGKILL the session of each child that held a task.
+
+        Each child gets its kill mark first, so the slot pool reads its loss
+        as a kill by the worker.
+        """
         for dispatch in self._live.close():
+            self._live.run_kill_mark(dispatch.pid)
             kill = kill_child_session(dispatch.pid)
             match kill:
                 case SessionKilled():
