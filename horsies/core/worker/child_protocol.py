@@ -14,6 +14,7 @@ import struct
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from typing import Any, Final, TypeAlias, assert_never, cast
 
 from horsies.core.codec.json_io import dumps_json, loads_json_bytes
@@ -289,8 +290,8 @@ class LoopHoldsNoTask:
 
 @dataclass(frozen=True, slots=True)
 class LoopHoldsTasks:
-    """After the task, asyncio tasks that it started and did not await are
-    still on the child's task loop. The parent retires such a child.
+    """At the report, ``count`` asyncio tasks that are not done are on the
+    child's task loop: work that a task started and did not await.
 
     ``names`` holds the coroutine ``__qualname__`` of
     ``min(count, MAX_LEFTOVER_TASK_NAMES)`` of those tasks, sorted, each at
@@ -311,18 +312,26 @@ class LoopHoldsTasks:
 
 TaskLoopReport: TypeAlias = NoTaskLoop | LoopHoldsNoTask | LoopHoldsTasks
 
+NoLeftWork: TypeAlias = NoTaskLoop | LoopHoldsNoTask
+"""After the task, no asyncio task that it started is on a task loop of the
+child: the child has no loop, or its loop holds no task."""
+
 
 @dataclass(frozen=True, slots=True)
 class ResultFrame:
-    """Child to parent: the wire tuple of ``_run_task_entry``, plus the RSS
-    and the state of the task loop after the task."""
+    """Isolated child to parent: the wire tuple of ``_run_task_entry``, plus
+    the RSS and the state of the task loop after the task.
+
+    The task left no asyncio task on the loop. A task that left work sends
+    ``BodyReturnedFrame`` instead.
+    """
 
     task_id: str
     ok: bool
     result_json: str
     failed_reason: str | None
     rss: RssReading
-    task_loop: TaskLoopReport
+    task_loop: NoLeftWork
 
 
 @dataclass(frozen=True, slots=True)
@@ -438,6 +447,59 @@ class LeftoverStuckFrame:
 
 
 @dataclass(frozen=True, slots=True)
+class BodyReturnedFrame:
+    """Isolated child to parent: the body of task ``task_id`` returned
+    ``returned`` (a value, or an exception that the task mapped to a
+    result), and asyncio tasks that it started and did not await were still
+    on the task loop (``left``).
+
+    The deadline of the task no longer applies: ``returned`` is the outcome
+    at every end of this run whose exit the worker sees. The child now waits
+    up to ``ISOLATED_LEFTOVER_GRACE_S`` for that work, cancels the work that
+    is still alive in rounds, and reports how it ended:
+    ``LeftWorkEndedFrame`` or ``LeftWorkStuckFrame``.
+    """
+
+    task_id: str
+    returned: SeatFinished
+    left: LoopHoldsTasks
+
+
+class LeftWorkEnd(Enum):
+    """How the work that an isolated task left on its task loop ended."""
+
+    IN_GRACE = 'in_grace'
+    """It ended within ``ISOLATED_LEFTOVER_GRACE_S`` of the return."""
+
+    CANCELLED = 'cancelled'
+    """It was alive at the end of the grace, and it ended after a cancel."""
+
+
+@dataclass(frozen=True, slots=True)
+class LeftWorkEndedFrame:
+    """Isolated child to parent: the work that task ``task_id`` left on its
+    task loop ended (``end``). No asyncio task is on the loop now. ``rss``
+    is the RSS of the child after it. The parent writes what the body
+    returned (``BodyReturnedFrame``) and replaces the child: cancelled code
+    can leave broken state in the process."""
+
+    task_id: str
+    end: LeftWorkEnd
+    rss: RssReading
+
+
+@dataclass(frozen=True, slots=True)
+class LeftWorkStuckFrame:
+    """Isolated child to parent: the work that task ``task_id`` left on its
+    task loop did not stop after the cancel rounds. ``still`` counts and
+    names the asyncio tasks that are still alive. The parent kills the
+    child, and writes what the body returned after the exit."""
+
+    task_id: str
+    still: LoopHoldsTasks
+
+
+@dataclass(frozen=True, slots=True)
 class BlockingRun:
     """The run whose work held the event loop: the task of run ``dispatch``
     or a task with its mark."""
@@ -507,6 +569,9 @@ ChildFrame: TypeAlias = (
     ReadyFrame
     | BootFailedFrame
     | ResultFrame
+    | BodyReturnedFrame
+    | LeftWorkEndedFrame
+    | LeftWorkStuckFrame
     | SharedResultFrame
     | DeadlineFiredFrame
     | SecondCancelFrame
@@ -579,16 +644,18 @@ def _rss_field(rss: RssReading) -> float | None:
             assert_never(unreachable)
 
 
-def _task_loop_field(task_loop: TaskLoopReport) -> dict[str, object]:
+def _task_loop_field(task_loop: NoLeftWork) -> dict[str, object]:
     match task_loop:
         case NoTaskLoop():
             return {'kind': 'none'}
         case LoopHoldsNoTask():
             return {'kind': 'empty'}
-        case LoopHoldsTasks(count=count, names=names):
-            return {'kind': 'held', 'count': count, 'names': list(names)}
         case _ as unreachable:
             assert_never(unreachable)
+
+
+def _held_field(held: LoopHoldsTasks) -> dict[str, object]:
+    return {'count': held.count, 'names': list(held.names)}
 
 
 def encode_parent_frame(frame: ParentFrame) -> EncodedFrame:
@@ -770,6 +837,8 @@ def encode_child_frame(frame: ChildFrame) -> EncodedFrame:
                 },
                 frame.result_json.encode('utf-8'),
             )
+        case BodyReturnedFrame() | LeftWorkEndedFrame() | LeftWorkStuckFrame():
+            return _encode_left_work_report(frame)
         case SharedResultFrame():
             return _encode_shared_result(frame)
         case DeadlineFiredFrame(dispatch=dispatch, task_id=task_id):
@@ -794,6 +863,43 @@ def encode_child_frame(frame: ChildFrame) -> EncodedFrame:
             )
         case RunStuckFrame() | LeftoverStuckFrame() | LoopBlockedFrame():
             return _encode_stop_report(frame)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _encode_left_work_report(
+    frame: BodyReturnedFrame | LeftWorkEndedFrame | LeftWorkStuckFrame,
+) -> EncodedFrame:
+    match frame:
+        case BodyReturnedFrame(returned=returned):
+            return _pack(
+                {
+                    'kind': 'body_returned',
+                    'task_id': frame.task_id,
+                    'returned': _finished_field(returned),
+                    'left': _held_field(frame.left),
+                },
+                returned.result_json.encode('utf-8'),
+            )
+        case LeftWorkEndedFrame():
+            return _pack(
+                {
+                    'kind': 'left_work_ended',
+                    'task_id': frame.task_id,
+                    'end': frame.end.value,
+                    'rss_mb': _rss_field(frame.rss),
+                },
+                b'',
+            )
+        case LeftWorkStuckFrame():
+            return _pack(
+                {
+                    'kind': 'left_work_stuck',
+                    'task_id': frame.task_id,
+                    'still': _held_field(frame.still),
+                },
+                b'',
+            )
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -973,17 +1079,26 @@ def _rss(meta: Mapping[str, Any]) -> RssReading:
     return RssMb(float(value))
 
 
-def _leftover_names(task_loop: Mapping[str, Any], count: int) -> tuple[str, ...]:
+def _leftover_names(held: Mapping[str, Any], count: int, key: str) -> tuple[str, ...]:
     """One name for each leftover task up to the bound, each within its bound."""
-    names = _text_tuple(task_loop, 'names')
+    names = _text_tuple(held, 'names')
     if len(names) != min(count, MAX_LEFTOVER_TASK_NAMES):
-        raise _BadField('task_loop.names')
+        raise _BadField(f'{key}.names')
     if any(len(name) > MAX_LEFTOVER_NAME_CHARS for name in names):
-        raise _BadField('task_loop.names')
+        raise _BadField(f'{key}.names')
     return names
 
 
-def _task_loop(meta: Mapping[str, Any]) -> TaskLoopReport:
+def _held(meta: Mapping[str, Any], key: str) -> LoopHoldsTasks:
+    """The asyncio tasks on a loop: at least one, with their bounded names."""
+    held = _end_meta(meta, key)
+    count = held.get('count')
+    if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+        raise _BadField(f'{key}.count')
+    return LoopHoldsTasks(count=count, names=_leftover_names(held, count, key))
+
+
+def _task_loop(meta: Mapping[str, Any]) -> NoLeftWork:
     value = meta.get('task_loop')
     if not isinstance(value, dict):
         raise _BadField('task_loop')
@@ -993,12 +1108,6 @@ def _task_loop(meta: Mapping[str, Any]) -> TaskLoopReport:
             return NoTaskLoop()
         case 'empty':
             return LoopHoldsNoTask()
-        case 'held':
-            count = task_loop.get('count')
-            if not isinstance(count, int) or isinstance(count, bool) or count < 1:
-                raise _BadField('task_loop.count')
-            names = _leftover_names(task_loop, count)
-            return LoopHoldsTasks(count=count, names=names)
         case _:
             raise _BadField('task_loop.kind')
 
@@ -1317,6 +1426,36 @@ def _decode_leftover_stuck(meta: Mapping[str, Any], body: bytes) -> LeftoverStuc
     )
 
 
+def _decode_body_returned(meta: Mapping[str, Any], body: bytes) -> BodyReturnedFrame:
+    returned = _end_meta(meta, 'returned')
+    if returned.get('kind') != 'finished':
+        raise _BadField('returned.kind')
+    return BodyReturnedFrame(
+        task_id=_text(meta, 'task_id'),
+        returned=_finished(returned, body),
+        left=_held(meta, 'left'),
+    )
+
+
+def _decode_left_work_ended(meta: Mapping[str, Any], body: bytes) -> LeftWorkEndedFrame:
+    if body:
+        raise _BadField('the end of left work carries no result')
+    try:
+        end = LeftWorkEnd(_text(meta, 'end'))
+    except ValueError:
+        raise _BadField('end') from None
+    return LeftWorkEndedFrame(task_id=_text(meta, 'task_id'), end=end, rss=_rss(meta))
+
+
+def _decode_left_work_stuck(meta: Mapping[str, Any], body: bytes) -> LeftWorkStuckFrame:
+    if body:
+        raise _BadField('a stuck report carries no result')
+    return LeftWorkStuckFrame(
+        task_id=_text(meta, 'task_id'),
+        still=_held(meta, 'still'),
+    )
+
+
 def _loop_culprit(meta: Mapping[str, Any]) -> LoopCulprit:
     value = meta.get('culprit')
     if not isinstance(value, dict):
@@ -1378,6 +1517,12 @@ def decode_child_frame(
                         task_loop=_task_loop(meta),
                     ),
                 )
+            case 'body_returned':
+                return Ok(_decode_body_returned(meta, body))
+            case 'left_work_ended':
+                return Ok(_decode_left_work_ended(meta, body))
+            case 'left_work_stuck':
+                return Ok(_decode_left_work_stuck(meta, body))
             case 'shared_result':
                 return Ok(_decode_shared_result(meta, body))
             case 'deadline_fired':

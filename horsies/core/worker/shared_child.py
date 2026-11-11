@@ -128,7 +128,12 @@ from horsies.core.worker.run_mark import (
     RunMark,
     ScanWhen,
 )
-from horsies.core.worker.task_loop import TaskLoop, _coroutine_name
+from horsies.core.worker.task_loop import (
+    CANCEL_ROUND_INTERVAL_S,
+    EXTRA_CANCEL_ROUNDS,
+    TaskLoop,
+    _coroutine_name,
+)
 
 logger = get_logger('worker')
 
@@ -141,16 +146,6 @@ and a result."""
 FRAMES_PER_CHILD: Final = 2
 """The frames of a child outside its runs: the ready frame, and one report of
 a blocked loop."""
-
-EXTRA_CANCEL_ROUNDS: Final = 2
-"""The cancel rounds after the second cancel. In the measured set one more
-round 0.1 s after the second cancel ended every asyncio leftover within
-106 ms: an asyncpg pool refill task, and SQLAlchemy closes that turn their
-first cancel into a bounded cleanup of their own."""
-
-CANCEL_ROUND_INTERVAL_S: Final = 0.1
-"""The time between two cancel rounds, and from the last round to the stuck
-check."""
 
 WRITER_CLOSE_TIMEOUT_S: Final = 1.0
 """The longest wait for the writer thread at the stop. The parent read every

@@ -26,6 +26,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, ClassVar, cast
+from unittest.mock import MagicMock
 
 import pytest
 import pytest_asyncio
@@ -48,10 +49,14 @@ from horsies.core.worker.child_main import (
 from horsies.core.worker.config import ChildPreload
 from horsies.core.worker.preload_main import REPARENT_FAILED_EXIT_CODE
 from horsies.core.worker.child_protocol import (
+    BodyReturnedFrame,
     BootFailedFrame,
     IsolatedChild,
     ChildFrame,
     InitFrame,
+    LeftWorkEnd,
+    LeftWorkEndedFrame,
+    LeftWorkStuckFrame,
     LoopHoldsNoTask,
     LoopHoldsTasks,
     NoTaskLoop,
@@ -59,9 +64,13 @@ from horsies.core.worker.child_protocol import (
     ResultFrame,
     RssUnreadable,
     RunFrame,
+    SeatFinished,
+    StopFrame,
     encode_child_frame,
 )
-from horsies.core.worker.stored_timeout import NoTimeout
+from horsies.core.worker.stored_timeout import NoTimeout, TaskTimeout
+from horsies.core.worker.task_loop import ISOLATED_LEFTOVER_GRACE_S
+from horsies.core.worker.worker import Worker, WorkerConfig
 from horsies.core.worker import slots
 from horsies.core.worker.slots import (
     CHILD_BOOT_ATTEMPTS,
@@ -85,14 +94,17 @@ from horsies.core.worker.slots import (
     KilledBySignal,
     KillSent,
     LossCause,
+    LostAfterReturn,
     LostBeforeReady,
     NotDispatched,
     NothingToKill,
     NotRunCause,
     PoolStopped,
+    ReturnSeen,
     SlotAnswered,
     SlotDefectsRepeated,
     SlotHandle,
+    SlotOutcome,
     SlotPool,
     SlotPoolConfig,
     Starting,
@@ -192,7 +204,7 @@ def _frame(task_name: str, argument: str | None = None) -> RunFrame:
     )
 
 
-async def _outcome(handle: SlotHandle) -> TaskFinished | ChildLost | NotDispatched:
+async def _outcome(handle: SlotHandle) -> SlotOutcome:
     return await asyncio.wait_for(asyncio.shield(handle.outcome), OUTCOME_TIMEOUT_S)
 
 
@@ -1329,32 +1341,16 @@ class TestTaskRuns:
         results = [await _result_json(handle) for handle in handles]
         assert results == ['1', 'False|ran', '1']
 
-    async def test_a_stop_cancels_a_task_left_on_the_loop(
-        self,
-        pool_factory: PoolFactory,
-        tmp_path: Path,
-    ) -> None:
-        """The recycle stop closes the task loop, which cancels what is left."""
-        marker = tmp_path / 'cancelled'
-        pool = await pool_factory(_config(max_tasks_per_child=1))
-        await _result_json(pool.submit(_frame('leave_pending', str(marker))))
-        await _until(marker.exists)
-        assert marker.read_text(encoding='ascii') == 'cancelled'
-
     async def test_a_task_that_leaves_loop_tasks_retires_its_child(
         self,
         pool_factory: PoolFactory,
         tmp_path: Path,
-        caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """The leftover is cancelled, and the next task runs in a new child.
-        The retire warning names the coroutine that was left."""
+        """The leftover is cancelled before the outcome, and the next task
+        runs in a new child."""
         marker = tmp_path / 'cancelled'
         pool = await pool_factory()
-        frame = _frame('leave_pending', str(marker))
-        with caplog.at_level(logging.WARNING, logger='horsies.worker'):
-            outcome = await _outcome(pool.submit(frame))
-        match outcome:
+        match await _outcome(pool.submit(_frame('leave_pending', str(marker)))):
             case TaskFinished(result_json=first_pid, task_loop=task_loop):
                 assert task_loop == LoopHoldsTasks(
                     count=1,
@@ -1362,11 +1358,6 @@ class TestTaskRuns:
                 )
             case other:
                 raise AssertionError(other)
-        assert (
-            f'Retiring child pid={first_pid}: task {frame.task_id} left 1 task(s) on '
-            'its event loop: _mark_when_cancelled'
-        ) in caplog.text
-        await _until(marker.exists)
         assert marker.read_text(encoding='ascii') == 'cancelled'
         assert await _result_json(pool.submit(_frame('pid'))) != first_pid
 
@@ -1402,11 +1393,13 @@ class TestTaskRuns:
             'x',
         ]
 
-    async def test_a_run_frame_beside_loop_tasks_ends_the_child(
+    async def test_a_run_frame_after_a_run_that_left_work_ends_the_child(
         self,
         tmp_path: Path,
     ) -> None:
-        """The child refuses to run a task beside work of an earlier task.
+        """The child refuses to run a task after a task that left work on its
+        loop, also when that work ended: cancelled code can leave broken
+        state.
 
         The pool never sends that frame, so this drives one child directly.
         """
@@ -1420,7 +1413,12 @@ class TestTaskRuns:
             assert isinstance(await child.await_frame(OUTCOME_TIMEOUT_S), ReadyFrame)
             child.send(_frame('leave_pending', str(tmp_path / 'cancelled')))
             match await child.await_frame(OUTCOME_TIMEOUT_S):
-                case ResultFrame(task_loop=LoopHoldsTasks(count=1)):
+                case BodyReturnedFrame(left=LoopHoldsTasks(count=1)):
+                    pass
+                case other:
+                    raise AssertionError(other)
+            match await child.await_frame(OUTCOME_TIMEOUT_S):
+                case LeftWorkEndedFrame(end=LeftWorkEnd.CANCELLED):
                     pass
                 case other:
                     raise AssertionError(other)
@@ -1453,20 +1451,36 @@ class TestTaskRuns:
 
     async def test_an_idle_executor_after_a_stubborn_leftover_exits_normally(
         self,
-        pool_factory: PoolFactory,
     ) -> None:
-        """The leftover ignores the cancel and uses the whole close deadline.
-        The idle executor still shuts down, so the child exits 0, not with
-        ``STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE``."""
-        pool = await pool_factory(
-            _config(max_tasks_per_child=1, init=_init('close_timeout:0.2')),
-        )
-        frame = _frame('idle_executor_beside_a_stubborn_task')
-        pid = int(await _result_json(pool.submit(frame)))
-        child = pool._slots[0].child
-        assert child is not None and child.pid == pid
-        await _until(lambda: child.has_exited, timeout_s=slots.CHILD_STOP_TIMEOUT_S / 2)
-        assert child._current_exit() == ExitedWith(0)
+        """The leftover ignores every cancel, so the child reports it stuck.
+        A stop frame then makes the close use the whole close deadline. The
+        idle executor still shuts down, so the child exits 0, not with
+        ``STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE``.
+
+        The pool kills a child that reports stuck work, so this drives one
+        child directly.
+        """
+        config = _config(init=_init('close_timeout:0.2'))
+        match await Child.start(config, config.init):
+            case Ok(child):
+                pass
+            case Err(failed):
+                raise AssertionError(failed)
+        try:
+            assert isinstance(await child.await_frame(OUTCOME_TIMEOUT_S), ReadyFrame)
+            child.send(_frame('idle_executor_beside_a_stubborn_task'))
+            assert isinstance(
+                await child.await_frame(OUTCOME_TIMEOUT_S), BodyReturnedFrame
+            )
+            assert isinstance(
+                await child.await_frame(OUTCOME_TIMEOUT_S), LeftWorkStuckFrame
+            )
+            child.send(StopFrame())
+            assert await child.wait_exit(slots.CHILD_STOP_TIMEOUT_S / 2) == ExitedWith(
+                0
+            )
+        finally:
+            await child.dispose_lost()
 
     async def test_a_stop_with_no_executor_threads_exits_normally(
         self,
@@ -1511,6 +1525,276 @@ class TestTaskRuns:
                 assert result_json == str(-signal.SIGTERM)
             case other:
                 raise AssertionError(other)
+
+
+def _left_work_lines(caplog: pytest.LogCaptureFixture, task_id: str) -> list[str]:
+    """The log lines of the run of ``task_id`` that left work on its loop."""
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if f'({task_id}) returned and left' in record.getMessage()
+    ]
+
+
+def _worker_without_database() -> Worker:
+    """A worker whose writes fail: a path that writes would show here."""
+    return Worker(
+        session_factory=MagicMock(),
+        listener=MagicMock(),
+        cfg=WorkerConfig(
+            dsn='postgresql+psycopg://u:p@localhost/db',
+            psycopg_dsn='postgresql://u:p@localhost/db',
+            queues=['default'],
+        ),
+    )
+
+
+@pytest.mark.asyncio(loop_scope='function')
+class TestLeftWork:
+    """An async task whose body returns with asyncio tasks on the task loop:
+    the outcome is what it returned, written only after that work ended."""
+
+    async def test_work_that_ends_within_the_grace_ends_before_the_outcome(
+        self,
+        pool_factory: PoolFactory,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        marker = tmp_path / 'ended'
+        pool = await pool_factory()
+        frame = _frame('leave_ending', str(marker))
+        with caplog.at_level(logging.WARNING, logger='horsies.worker'):
+            outcome = await _outcome(pool.submit(frame))
+            ended_at_outcome = marker.read_text(encoding='ascii')
+        match outcome:
+            case TaskFinished(
+                ok=True, result_json=pid, failed_reason=None, task_loop=left
+            ):
+                assert left == LoopHoldsTasks(count=1, names=('_write_after',))
+            case other:
+                raise AssertionError(other)
+        assert ended_at_outcome == 'ended'
+        lines = _left_work_lines(caplog, frame.task_id)
+        assert len(lines) == 1
+        assert lines[0].startswith(
+            f'Task leave_ending ({frame.task_id}) returned and left 1'
+        )
+        assert f'child pid={pid} (_write_after); that work ended within' in lines[0]
+        assert await _result_json(pool.submit(_frame('pid'))) != pid
+
+    async def test_work_alive_after_the_grace_is_cancelled_before_the_outcome(
+        self,
+        pool_factory: PoolFactory,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        marker = tmp_path / 'cancelled'
+        pool = await pool_factory()
+        frame = _frame('leave_pending', str(marker))
+        handle = pool.submit(frame)
+        await handle.assigned
+        started = time.monotonic()
+        with caplog.at_level(logging.WARNING, logger='horsies.worker'):
+            outcome = await _outcome(handle)
+            cancelled_at_outcome = marker.read_text(encoding='ascii')
+        elapsed = time.monotonic() - started
+        match outcome:
+            case TaskFinished(ok=True, result_json=pid, task_loop=left):
+                assert left == LoopHoldsTasks(count=1, names=('_mark_when_cancelled',))
+            case other:
+                raise AssertionError(other)
+        assert cancelled_at_outcome == 'cancelled'
+        assert elapsed >= ISOLATED_LEFTOVER_GRACE_S
+        lines = _left_work_lines(caplog, frame.task_id)
+        assert len(lines) == 1
+        assert 'ended after a cancel' in lines[0]
+        assert 'cancelled code can leave broken state' in lines[0]
+        assert await _result_json(pool.submit(_frame('pid'))) != pid
+
+    async def test_work_that_swallows_every_cancel_gets_its_child_killed(
+        self,
+        pool_factory: PoolFactory,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The outcome is what the body returned, after the exit of the
+        killed child: no timeout, no crash."""
+        pool = await pool_factory()
+        frame = _frame('leave_stubborn')
+        with caplog.at_level(logging.WARNING, logger='horsies.worker'):
+            outcome = await _outcome(pool.submit(frame))
+        match outcome:
+            case LostAfterReturn(returned=returned, lost=lost):
+                pid = returned.result_json
+                assert returned == SeatFinished(
+                    ok=True, result_json=pid, failed_reason=None
+                )
+                assert lost == ChildLost(
+                    cause=LossCause.KILLED_BY_PARENT,
+                    child_exit=KilledBySignal(signal.SIGKILL),
+                    partial_frame=False,
+                    pid=int(pid),
+                )
+            case other:
+                raise AssertionError(other)
+        assert not _alive(int(pid))
+        lines = _left_work_lines(caplog, frame.task_id)
+        assert len(lines) == 1
+        assert (
+            'did not stop after the cancel rounds (1 task(s) alive: _ignore_cancel)'
+            in lines[0]
+        )
+        assert await _result_json(pool.submit(_frame('pid'))) != pid
+
+    async def test_a_child_that_reports_nothing_after_the_return_is_killed(
+        self,
+        pool_factory: PoolFactory,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The work holds the loop thread, so no cancel round runs."""
+        backstop_s = 2.0
+        monkeypatch.setattr(slots, 'ISOLATED_LEFTOVER_BACKSTOP_S', backstop_s)
+        pool = await pool_factory()
+        frame = _frame('leave_blocking')
+        handle = pool.submit(frame)
+        await handle.assigned
+        started = time.monotonic()
+        with caplog.at_level(logging.WARNING, logger='horsies.worker'):
+            outcome = await _outcome(handle)
+        assert time.monotonic() - started >= backstop_s
+        match outcome:
+            case LostAfterReturn(returned=returned, lost=lost):
+                assert returned.ok
+                assert lost.cause is LossCause.KILLED_BY_PARENT
+                assert lost.child_exit == KilledBySignal(signal.SIGKILL)
+            case other:
+                raise AssertionError(other)
+        lines = _left_work_lines(caplog, frame.task_id)
+        assert len(lines) == 1
+        assert f'was not reported ended or stuck within {backstop_s}s' in lines[0]
+
+    async def test_a_child_that_dies_after_the_return_keeps_what_the_body_returned(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        pool = await pool_factory()
+        match await _outcome(pool.submit(_frame('leave_exiting', '3'))):
+            case LostAfterReturn(returned=returned, lost=lost):
+                assert returned.ok
+                assert lost.cause is LossCause.CHILD_DIED
+                assert lost.child_exit == ExitedWith(3)
+                assert lost.pid == int(returned.result_json)
+            case other:
+                raise AssertionError(other)
+
+    async def test_a_system_exit_of_the_left_work_ends_the_child_at_once(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        """A normal exit would wait for the thread that the work started: the
+        child exits with the code of the ``SystemExit`` instead."""
+        pool = await pool_factory()
+        handle = pool.submit(_frame('leave_sys_exit', '5'))
+        await handle.assigned
+        started = time.monotonic()
+        match await _outcome(handle):
+            case LostAfterReturn(returned=returned, lost=lost):
+                assert returned.ok
+                assert lost.cause is LossCause.CHILD_DIED
+                assert lost.child_exit == ExitedWith(5)
+            case other:
+                raise AssertionError(other)
+        assert time.monotonic() - started < ISOLATED_LEFTOVER_GRACE_S * 2
+
+    async def test_a_deadline_kill_after_the_return_kills_nothing(
+        self,
+        pool_factory: PoolFactory,
+        tmp_path: Path,
+    ) -> None:
+        marker = tmp_path / 'cancelled'
+        pool = await pool_factory()
+        handle = pool.submit(_frame('leave_pending', str(marker)))
+        await _until(lambda: isinstance(handle._return, ReturnSeen))
+
+        match await handle.kill_and_wait(OUTCOME_TIMEOUT_S):
+            case ReturnSeen(returned=returned):
+                pass
+            case other:
+                raise AssertionError(other)
+        match await _outcome(handle):
+            case TaskFinished(result_json=pid):
+                assert pid == returned.result_json
+            case other:
+                raise AssertionError(other)
+        assert marker.read_text(encoding='ascii') == 'cancelled'
+        assert await handle.wait_child_exit() == ExitedWith(0)
+
+    async def test_the_deadline_does_not_end_a_task_whose_body_returned(
+        self,
+        pool_factory: PoolFactory,
+        tmp_path: Path,
+    ) -> None:
+        """The deadline fires while the child waits for the left work. The
+        body returned before it, so the outcome is what it returned, and the
+        child exits by its stop frame, not by a kill."""
+        marker = tmp_path / 'cancelled'
+        pool = await pool_factory()
+        handle = pool.submit(_frame('leave_pending', str(marker)))
+        deadline = TaskTimeout(ms=int(ISOLATED_LEFTOVER_GRACE_S * 1000 / 4))
+
+        outcome = await asyncio.wait_for(
+            _worker_without_database()._await_slot_outcome(
+                handle,
+                handle.frame.task_id,
+                deadline,
+                None,
+            ),
+            OUTCOME_TIMEOUT_S,
+        )
+
+        match outcome:
+            case TaskFinished(ok=True, task_loop=LoopHoldsTasks(count=1)):
+                pass
+            case other:
+                raise AssertionError(other)
+        assert marker.read_text(encoding='ascii') == 'cancelled'
+        assert await handle.wait_child_exit() == ExitedWith(0)
+
+    async def test_an_async_task_that_leaves_no_work_reports_at_once(self) -> None:
+        """No added wait: the result frame is the first frame after the run.
+
+        This drives one child directly, to see each frame.
+        """
+        config = _config()
+        match await Child.start(config, config.init):
+            case Ok(child):
+                pass
+            case Err(failed):
+                raise AssertionError(failed)
+        try:
+            assert isinstance(await child.await_frame(OUTCOME_TIMEOUT_S), ReadyFrame)
+            started = time.monotonic()
+            child.send(_frame('async_pid'))
+            match await child.await_frame(OUTCOME_TIMEOUT_S):
+                case ResultFrame(task_loop=LoopHoldsNoTask()):
+                    pass
+                case other:
+                    raise AssertionError(other)
+            assert time.monotonic() - started < ISOLATED_LEFTOVER_GRACE_S / 2
+        finally:
+            await child.dispose_lost()
+
+    async def test_a_def_task_keeps_its_child_and_reports_an_empty_loop(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        pool = await pool_factory()
+        match await _outcome(pool.submit(_frame('pid'))):
+            case TaskFinished(result_json=first_pid, task_loop=task_loop):
+                assert task_loop == LoopHoldsNoTask()
+            case other:
+                raise AssertionError(other)
+        assert await _result_json(pool.submit(_frame('pid'))) == first_pid
 
 
 @pytest.mark.asyncio(loop_scope='function')

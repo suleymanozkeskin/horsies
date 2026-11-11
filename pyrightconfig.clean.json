@@ -69,7 +69,8 @@
     "tests/unit/test_thread_child.py",
     "tests/unit/test_thread_seat_runner.py",
     "tests/unit/test_shared_thread_slot_pool.py",
-    "tests/unit/test_thread_dispatch.py"
+    "tests/unit/test_thread_dispatch.py",
+    "tests/unit/test_isolated_left_work.py"
   ],
   "reportUnnecessaryTypeIgnoreComment": "error"
 }

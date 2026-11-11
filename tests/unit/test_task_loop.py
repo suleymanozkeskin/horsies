@@ -27,6 +27,7 @@ from horsies.core.utils.loop_runner import in_running_event_loop
 from horsies.core.worker.child_protocol import (
     MAX_LEFTOVER_NAME_CHARS,
     MAX_LEFTOVER_TASK_NAMES,
+    LeftWorkEnd,
     LoopHoldsNoTask,
     LoopHoldsTasks,
     NoTaskLoop,
@@ -35,6 +36,7 @@ from horsies.core.worker import task_loop as task_loop_module
 from horsies.core.worker.task_loop import (
     ExecutorShutDown,
     ExecutorThreadsLeft,
+    LeftWorkStuck,
     LoopClosed,
     LoopCreateFailed,
     LoopNotCreated,
@@ -736,3 +738,189 @@ class TestClose:
         assert second == ExecutorThreadsLeft()
         assert loop.is_closed()
         assert 'default executor of the task loop did not shut down' in caplog.text
+
+
+SHORT_GRACE_S = 0.2
+
+
+def _leave(task_loop: TaskLoop, work: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
+    """Run a body that starts ``work`` as a task and returns without it."""
+    kept: list[asyncio.Task[None]] = []
+
+    async def body() -> None:
+        kept.append(asyncio.get_running_loop().create_task(work))
+        await asyncio.sleep(0)
+
+    task_loop.run(body())
+    return kept[0]
+
+
+class TestLeftWorkBounds:
+    def test_the_grace_is_one_second(self) -> None:
+        """An isolated task has no grace option: this bound is the contract."""
+        assert task_loop_module.ISOLATED_LEFTOVER_GRACE_S == 1.0
+
+    def test_the_parent_waits_past_the_grace_and_the_rounds(self) -> None:
+        """A child whose loop turns reports the end of the work before the
+        parent kills it for reporting nothing."""
+        from horsies.core.worker.slots import ISOLATED_LEFTOVER_BACKSTOP_S
+
+        child_bound_s = (
+            task_loop_module.ISOLATED_LEFTOVER_GRACE_S
+            + (task_loop_module.EXTRA_CANCEL_ROUNDS + 1)
+            * task_loop_module.CANCEL_ROUND_INTERVAL_S
+        )
+        assert ISOLATED_LEFTOVER_BACKSTOP_S > child_bound_s
+
+
+class TestEndLeftWork:
+    """The end of the asyncio tasks that a body left on the loop."""
+
+    @pytest.fixture(autouse=True)
+    def _short_grace(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            task_loop_module, 'ISOLATED_LEFTOVER_GRACE_S', SHORT_GRACE_S
+        )
+        monkeypatch.setattr(
+            task_loop_module, 'LOOP_CLOSE_TIMEOUT_S', SHORT_CLOSE_TIMEOUT_S
+        )
+
+    def test_work_that_ends_within_the_grace_runs_to_its_end(
+        self,
+        task_loop: TaskLoop,
+    ) -> None:
+        steps: list[str] = []
+
+        async def flush() -> None:
+            await asyncio.sleep(SHORT_GRACE_S / 4)
+            steps.append('flushed')
+
+        left = _leave(task_loop, flush())
+        started = time.monotonic()
+        end = task_loop.end_left_work()
+        elapsed = time.monotonic() - started
+
+        assert end is LeftWorkEnd.IN_GRACE
+        assert steps == ['flushed']
+        assert left.done() and not left.cancelled()
+        assert elapsed < SHORT_GRACE_S
+        assert task_loop.report() == LoopHoldsNoTask()
+        assert not in_running_event_loop()
+
+    def test_a_task_that_the_work_starts_in_the_grace_is_waited_for(
+        self,
+        task_loop: TaskLoop,
+    ) -> None:
+        steps: list[str] = []
+        kept: list[asyncio.Task[None]] = []
+
+        async def second() -> None:
+            await asyncio.sleep(SHORT_GRACE_S / 4)
+            steps.append('second')
+
+        async def first() -> None:
+            kept.append(asyncio.get_running_loop().create_task(second()))
+            steps.append('first')
+
+        _ = _leave(task_loop, first())
+        assert task_loop.end_left_work() is LeftWorkEnd.IN_GRACE
+        assert steps == ['first', 'second']
+        assert task_loop.report() == LoopHoldsNoTask()
+
+    def test_work_alive_after_the_grace_is_cancelled(self, task_loop: TaskLoop) -> None:
+        steps: list[str] = []
+
+        async def wait_forever() -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                steps.append('cancelled')
+                raise
+
+        left = _leave(task_loop, wait_forever())
+        started = time.monotonic()
+        end = task_loop.end_left_work()
+        elapsed = time.monotonic() - started
+
+        assert end is LeftWorkEnd.CANCELLED
+        assert steps == ['cancelled']
+        assert left.cancelled()
+        assert (
+            SHORT_GRACE_S
+            <= elapsed
+            < SHORT_GRACE_S + task_loop_module.CANCEL_ROUND_INTERVAL_S
+        )
+        assert task_loop.report() == LoopHoldsNoTask()
+
+    def test_a_cleanup_after_the_first_cancel_ends_in_the_rounds(
+        self,
+        task_loop: TaskLoop,
+    ) -> None:
+        """A client close turns its first cancel into a cleanup shorter than
+        one round interval; the next round would cancel that cleanup too."""
+        steps: list[str] = []
+
+        async def close_on_cancel() -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await asyncio.sleep(task_loop_module.CANCEL_ROUND_INTERVAL_S / 2)
+                steps.append('closed')
+
+        _ = _leave(task_loop, close_on_cancel())
+        assert task_loop.end_left_work() is LeftWorkEnd.CANCELLED
+        assert steps == ['closed']
+        assert task_loop.report() == LoopHoldsNoTask()
+
+    def test_work_that_swallows_every_cancel_is_stuck_after_the_rounds(
+        self,
+        task_loop: TaskLoop,
+    ) -> None:
+        cancels: list[int] = []
+
+        async def ignore_cancel() -> None:
+            while True:
+                try:
+                    await asyncio.sleep(60)
+                except asyncio.CancelledError:
+                    cancels.append(1)
+
+        left = _leave(task_loop, ignore_cancel())
+        started = time.monotonic()
+        end = task_loop.end_left_work()
+        elapsed = time.monotonic() - started
+
+        rounds = task_loop_module.EXTRA_CANCEL_ROUNDS + 1
+        match end:
+            case LeftWorkStuck(still=still):
+                assert still.count == 1
+                assert still.names[0].endswith('.<locals>.ignore_cancel')
+            case other:
+                raise AssertionError(other)
+        assert len(cancels) == rounds
+        assert (
+            elapsed >= SHORT_GRACE_S + rounds * task_loop_module.CANCEL_ROUND_INTERVAL_S
+        )
+        assert (
+            elapsed
+            < SHORT_GRACE_S + (rounds + 2) * task_loop_module.CANCEL_ROUND_INTERVAL_S
+        )
+        assert not in_running_event_loop()
+        assert isinstance(task_loop.report(), LoopHoldsTasks)
+        # The task never ends. Drop it quietly: it is pending on the loop.
+        left._log_destroy_pending = False  # pyright: ignore[reportAttributeAccessIssue]
+
+    def test_a_call_with_no_open_loop_is_a_defect(
+        self, new_task_loop: TaskLoop
+    ) -> None:
+        with pytest.raises(AssertionError, match='LoopNotCreated'):
+            new_task_loop.end_left_work()
+
+    def test_a_call_inside_a_running_loop_is_a_defect(
+        self, task_loop: TaskLoop
+    ) -> None:
+        async def inside() -> None:
+            task_loop.end_left_work()
+
+        with pytest.raises(AssertionError, match='while an event loop runs'):
+            asyncio.run(inside())

@@ -32,6 +32,7 @@ import sys
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING, Final, NoReturn, assert_never
 
 from horsies.core.codec.error_payload import serialize_error_payload
@@ -49,11 +50,15 @@ from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.child_protocol import (
     FRAME_HEADER,
     MAX_BODY_BYTES,
+    BodyReturnedFrame,
     BootFailedFrame,
     ChildFrame,
     FrameOverBound,
     InitFrame,
     IsolatedChild,
+    LeftWorkEnd,
+    LeftWorkEndedFrame,
+    LeftWorkStuckFrame,
     LoopHoldsNoTask,
     LoopHoldsTasks,
     NoTaskLoop,
@@ -64,6 +69,7 @@ from horsies.core.worker.child_protocol import (
     RssReading,
     RssUnreadable,
     RunFrame,
+    SeatFinished,
     SharedAsyncChild,
     SharedRunFrame,
     SharedThreadChild,
@@ -81,6 +87,8 @@ from horsies.core.worker.task_loop import (
     ExecutorAfterClose,
     ExecutorShutDown,
     ExecutorThreadsLeft,
+    LeftWorkOutcome,
+    LeftWorkStuck,
     LoopCreateFailed,
     TaskLoop,
 )
@@ -305,27 +313,117 @@ def _run_or_exit(
         os._exit(1)
 
 
-def _refuse_run_on_a_child_to_retire(task_loop: TaskLoop, frame: RunFrame) -> None:
-    """Exit loud when the task loop report says this child must be retired.
+class _AfterRun(Enum):
+    """Whether an isolated child may take another task after a run."""
 
-    The child reports work left on its loop in its result frame, and the
-    parent retires the child. So a run frame here is a defect in the parent.
+    SERVES = 'serves'
+    """The run left no asyncio task on the task loop."""
+
+    TO_RETIRE = 'to_retire'
+    """The body of the run returned with asyncio tasks on the task loop. The
+    child ended them, or reported them stuck, and the parent replaces it:
+    cancelled code can leave broken state in the process."""
+
+
+def _refuse_run_on_a_child_to_retire(after_run: _AfterRun, frame: RunFrame) -> None:
+    """Exit loud when an earlier run of this child left work on its loop.
+
+    The child reports that work (``BodyReturnedFrame``), and the parent
+    replaces the child. So a run frame here is a defect in the parent.
     """
-    match task_loop.report():
-        case NoTaskLoop() | LoopHoldsNoTask():
+    match after_run:
+        case _AfterRun.SERVES:
             return
-        case LoopHoldsTasks() as leftover:
+        case _AfterRun.TO_RETIRE:
             logger.critical(
-                'Parent sent task %s to a child whose task loop holds %d task(s) '
-                'of an earlier task (%s); such a child must be retired',
+                'Parent sent task %s to a child where an earlier task left work '
+                'on the task loop; such a child must be retired',
                 frame.task_id,
-                leftover.count,
-                leftover.names_text(),
+            )
+            flush_output()
+            os._exit(BAD_PARENT_FRAME_EXIT_CODE)
+
+
+def _end_left_work_or_exit(task_loop: TaskLoop, frame: RunFrame) -> LeftWorkOutcome:
+    """Run ``TaskLoop.end_left_work``. Anything that escapes it ends this
+    process at once, as for the run itself (``_run_or_exit``).
+
+    A ``SystemExit`` or ``KeyboardInterrupt`` that the left work raises
+    leaves the loop. A normal exit would wait for every non-daemon thread
+    that the task started, with no bound. The parent sees this exit, and
+    writes what the body returned.
+    """
+    try:
+        return task_loop.end_left_work()
+    except SystemExit as exc:
+        flush_output()
+        os._exit(exc.code if isinstance(exc.code, int) else 1)
+    except BaseException:
+        logger.critical(
+            'Work that task %s left on the task loop escaped it',
+            frame.task_id,
+            exc_info=True,
+        )
+        flush_output()
+        os._exit(1)
+
+
+def _report_run(
+    sock: socket.socket,
+    frame: RunFrame,
+    wire: WireResult,
+    task_loop: TaskLoop,
+) -> _AfterRun:
+    """Report the end of one run of an isolated child to the parent.
+
+    With no asyncio task left on the task loop: one ``ResultFrame``, at
+    once. With tasks left: ``BodyReturnedFrame`` with ``wire`` at once, then
+    ``TaskLoop.end_left_work``, then ``LeftWorkEndedFrame`` when that work
+    ended, or ``LeftWorkStuckFrame`` when it did not stop. ``wire`` is
+    bounded already. A parent that is gone ends the process
+    (``_send_child_frame``).
+    """
+    ok, result_json, failed_reason = wire
+    match task_loop.report():
+        case NoTaskLoop() | LoopHoldsNoTask() as nothing_left:
+            _send_child_frame(
+                sock,
+                ResultFrame(
+                    task_id=frame.task_id,
+                    ok=ok,
+                    result_json=result_json,
+                    failed_reason=failed_reason,
+                    rss=_read_rss(),
+                    task_loop=nothing_left,
+                ),
+            )
+            return _AfterRun.SERVES
+        case LoopHoldsTasks() as left:
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
+    _send_child_frame(
+        sock,
+        BodyReturnedFrame(
+            task_id=frame.task_id,
+            returned=SeatFinished(ok, result_json, failed_reason),
+            left=left,
+        ),
+    )
+    match _end_left_work_or_exit(task_loop, frame):
+        case LeftWorkEnd() as end:
+            _send_child_frame(
+                sock,
+                LeftWorkEndedFrame(task_id=frame.task_id, end=end, rss=_read_rss()),
+            )
+        case LeftWorkStuck(still=still):
+            _send_child_frame(
+                sock,
+                LeftWorkStuckFrame(task_id=frame.task_id, still=still),
             )
         case _ as unreachable:
             assert_never(unreachable)
-    flush_output()
-    os._exit(BAD_PARENT_FRAME_EXIT_CODE)
+    return _AfterRun.TO_RETIRE
 
 
 def boot_failure_from_exception(
@@ -545,31 +643,23 @@ def _serve_isolated(
 ) -> NoReturn:
     """Run tasks one at a time until the stop frame, then end the process.
 
-    Every task of the child gets ``task_loop``. Each result frame reports the
-    state of that loop. The stop frame closes it, bounded by
-    ``LOOP_CLOSE_TIMEOUT_S``, and ``exit_after_stop`` ends the process.
+    Every task of the child gets ``task_loop``. ``_report_run`` reports the
+    end of each run, after the work that the task left on that loop ended.
+    The stop frame closes the loop, bounded by ``LOOP_CLOSE_TIMEOUT_S``, and
+    ``exit_after_stop`` ends the process.
     """
     gc.collect()
     _send_child_frame(sock, ReadyFrame(pid=os.getpid(), rss=_read_rss()))
+    after_run = _AfterRun.SERVES
     while True:
         match work.get():
             case RunFrame() as frame:
-                _refuse_run_on_a_child_to_retire(task_loop, frame)
-                ok, result_json, failed_reason = _bounded_result(
+                _refuse_run_on_a_child_to_retire(after_run, frame)
+                wire = _bounded_result(
                     frame.task_name,
                     _run_or_exit(run_task, frame, init, task_loop),
                 )
-                _send_child_frame(
-                    sock,
-                    ResultFrame(
-                        task_id=frame.task_id,
-                        ok=ok,
-                        result_json=result_json,
-                        failed_reason=failed_reason,
-                        rss=_read_rss(),
-                        task_loop=task_loop.report(),
-                    ),
-                )
+                after_run = _report_run(sock, frame, wire, task_loop)
             case SharedRunFrame():
                 logger.critical('Parent sent a shared run frame to an isolated child')
                 flush_output()

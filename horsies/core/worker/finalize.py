@@ -76,6 +76,7 @@ from horsies.core.models.tasks import (
 )
 from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.worker.child_protocol import (
+    SeatFinished,
     SeatRefusal,
     SeatTask,
     SharedWork,
@@ -89,9 +90,11 @@ from horsies.core.worker.slots import (
     ExitedWith,
     ExitUnknown,
     KilledBySignal,
+    LostAfterReturn,
     NotDispatched,
     NotRunCause,
     ChildKilledPastDeadlines,
+    ReturnSeen,
     SeatDeadlineEnded,
     SeatKilled,
     SeatTaskFinished,
@@ -276,7 +279,7 @@ class FinalizeMixin:
             task_id: str,
             timeout_ms: int,
             claimed_at: Optional[datetime] = None,
-        ) -> _TimeoutOutcome: ...
+        ) -> _TimeoutOutcome | ReturnSeen: ...
         async def _handle_shared_backstop(
             self,
             handle: SharedHandle,
@@ -367,6 +370,12 @@ class FinalizeMixin:
         mean that the timeout path wrote the row, or left it on purpose;
         ``_TimeoutWriteFailed`` means that the attempt ended and its
         TASK_TIMEOUT write failed, which the caller retries.
+
+        The deadline bounds the body of the task. When the slot read that the
+        body returned with work left on its task loop before the deadline
+        fired (``ReturnSeen``), the deadline no longer applies: the slot's
+        outcome is returned when it comes, and the slot bounds that wait
+        (``ISOLATED_LEFTOVER_BACKSTOP_S``).
         """
         assigned = await asyncio.shield(handle.assigned)
         match assigned:
@@ -396,12 +405,20 @@ class FinalizeMixin:
                 timeout=timeout_ms / 1000.0,
             )
         except asyncio.TimeoutError:
-            return await self._handle_task_timeout(
-                handle,
-                task_id,
-                timeout_ms,
-                claimed_at=claimed_at,
-            )
+            pass
+        timed_out = await self._handle_task_timeout(
+            handle,
+            task_id,
+            timeout_ms,
+            claimed_at=claimed_at,
+        )
+        match timed_out:
+            case ReturnSeen():
+                return await asyncio.shield(handle.outcome)
+            case _TimeoutSettled() | _TimeoutWriteFailed() | _AttemptEndUnknown():
+                return timed_out
+            case _ as unreachable:
+                assert_never(unreachable)
 
     async def _finalize_after(
         self,
@@ -441,6 +458,17 @@ class FinalizeMixin:
                     outcome,
                     claimed_at,
                 )
+            case LostAfterReturn(returned=returned, lost=lost):
+                return await self._finalize_return_after_loss(
+                    handle,
+                    task_id,
+                    returned,
+                    lost,
+                    queue_name=queue_name,
+                    is_workflow_task=is_workflow_task,
+                    task_name=task_name,
+                    claimed_at=claimed_at,
+                )
             case _TimeoutSettled() | _AttemptEndUnknown():
                 # The timeout path settled this row, or left it to stale-task
                 # recovery. Crash recovery must not write it as WORKER_CRASHED.
@@ -469,6 +497,52 @@ class FinalizeMixin:
                         assert_never(unreachable)
             case _ as unreachable:
                 assert_never(unreachable)
+
+    async def _finalize_return_after_loss(
+        self,
+        handle: SlotHandle,
+        task_id: str,
+        returned: SeatFinished,
+        lost: ChildLost,
+        *,
+        queue_name: str,
+        is_workflow_task: bool,
+        task_name: str,
+        claimed_at: Optional[datetime],
+    ) -> Result[None, _FinalizeError]:
+        """Write what the body of a task returned, after its child ended
+        while work that the task left on its loop was alive.
+
+        The write waits for the exit of the child, so no work of the attempt
+        runs when the row moves. A seen exit: ``returned`` goes through
+        ``_finalize_task_result``, as a result does: no TASK_TIMEOUT, no
+        crash path. No exit seen: ``_wait_for_unseen_exit`` decides, as for
+        any loss. ``_AttemptEndUnknown`` writes nothing and returns
+        ``Ok(None)``; an exit seen later writes ``returned``.
+        """
+        match lost.child_exit:
+            case ExitUnknown():
+                match await self._wait_for_unseen_exit(handle, task_id, lost.pid):
+                    case ExitedWith() | KilledBySignal():
+                        pass
+                    case _AttemptEndUnknown():
+                        return Ok(None)
+                    case _ as unreachable:
+                        assert_never(unreachable)
+            case ExitedWith() | KilledBySignal():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
+        return await self._finalize_task_result(
+            task_id,
+            returned.ok,
+            returned.result_json,
+            returned.failed_reason,
+            queue_name=queue_name,
+            is_workflow_task=is_workflow_task,
+            task_name=task_name,
+            claimed_at=claimed_at,
+        )
 
     async def _requeue_not_dispatched(
         self,

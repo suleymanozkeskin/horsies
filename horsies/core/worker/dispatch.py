@@ -79,8 +79,10 @@ from horsies.core.worker.slots import (
     ExitUnknown,
     KilledBySignal,
     LossCause,
+    LostAfterReturn,
     NotDispatched,
     NothingToKill,
+    ReturnSeen,
     SharedAnswered,
     SharedHandle,
     SharedOutcome,
@@ -800,21 +802,26 @@ class DispatchMixin:
         task_id: str,
         timeout_ms: int,
         claimed_at: Optional[datetime] = None,
-    ) -> _TimeoutOutcome:
+    ) -> _TimeoutOutcome | ReturnSeen:
         """End a timed-out attempt, then record the timeout.
 
-        Once the deadline fires, the outcome of this dispatch is TASK_TIMEOUT.
-        The attempt ends before its row moves. The child that holds this task
-        gets SIGKILL, with its session, and the parent waits up to
-        ``CHILD_KILL_WAIT_S`` for that child's exit. Only after the exit are
-        TASK_TIMEOUT, the retry, the attempt row or the requeue written, and
-        only then does phase 2 run. So a retry never runs next to the attempt
-        that it replaces, and phase 2 cannot start a successor while that
-        attempt runs. The kill is bound to this task's slot, so it cannot
-        reach the next task. A slot that answered after the timer fired has
-        nothing to kill; see ``_time_out_answered_task``.
+        Once the deadline fires, the outcome of this dispatch is TASK_TIMEOUT,
+        unless the slot already read that the body of the task returned with
+        work left on its task loop (``ReturnSeen``). The attempt ends before
+        its row moves. The child that holds this task gets SIGKILL, with its
+        session, and the parent waits up to ``CHILD_KILL_WAIT_S`` for that
+        child's exit. Only after the exit are TASK_TIMEOUT, the retry, the
+        attempt row or the requeue written, and only then does phase 2 run.
+        So a retry never runs next to the attempt that it replaces, and phase
+        2 cannot start a successor while that attempt runs. The kill is bound
+        to this task's slot, so it cannot reach the next task. A slot that
+        answered after the timer fired has nothing to kill; see
+        ``_time_out_answered_task``.
 
         Returns:
+        - ``ReturnSeen``: the body returned before the kill, so its outcome
+          stands. Nothing is killed or written; the caller waits for the
+          outcome of the slot, which ends the work that the task left.
         - ``_TimeoutSettled`` or ``_TimeoutWriteFailed``: the attempt ended,
           and ``_record_task_timeout`` ran.
         - ``_AttemptEndUnknown``: no exit was seen, so the attempt may still
@@ -870,6 +877,15 @@ class DispatchMixin:
                     claimed_at,
                     outcome,
                 )
+            case ReturnSeen() as seen:
+                logger.debug(
+                    'Task %s reached timeout_ms=%s after its body returned; the '
+                    'deadline no longer applies, and the outcome is what it '
+                    'returned',
+                    task_id,
+                    timeout_ms,
+                )
+                return seen
             case NothingToKill():
                 raise AssertionError(
                     f'deadline of task {task_id} fired before a child took it',
@@ -926,6 +942,13 @@ class DispatchMixin:
                 raise AssertionError(
                     f'deadline of task {task_id} fired for a task that never '
                     'reached a child',
+                )
+            case LostAfterReturn():
+                # ``kill_and_wait`` answers ReturnSeen before it reads the
+                # outcome of a handle whose return the slot read.
+                raise AssertionError(
+                    f'deadline of task {task_id} was applied after its body '
+                    'returned',
                 )
             case _ as unreachable:
                 assert_never(unreachable)

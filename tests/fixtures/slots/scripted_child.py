@@ -299,6 +299,60 @@ async def _leave_pending(path: str) -> str:
     return str(os.getpid())
 
 
+async def _write_after(path: str, seconds: float, text: str) -> None:
+    """Write ``text`` to ``path`` after ``seconds``, as work that ends."""
+    await asyncio.sleep(seconds)
+    with open(path, 'w', encoding='ascii') as target:
+        target.write(text)
+
+
+async def _leave_task(work: Coroutine[Any, Any, None]) -> str:
+    """Start ``work`` as a task, and return the pid without awaiting it."""
+    _kept_tasks.append(asyncio.get_running_loop().create_task(work))
+    await asyncio.sleep(0)
+    return str(os.getpid())
+
+
+async def _block_the_loop() -> None:
+    """Hold the loop thread once the child waits for this work, so no cancel
+    round can run. The sleep first lets the body return and the child send
+    its return."""
+    await asyncio.sleep(0.05)
+    time.sleep(3600)
+
+
+async def _exit_soon(code: int) -> None:
+    """End the process while the child waits for this work."""
+    await asyncio.sleep(0.05)
+    os._exit(code)
+
+
+async def _sys_exit_beside_a_thread(code: int) -> None:
+    """Raise ``SystemExit`` while a non-daemon thread runs, as left work."""
+    await asyncio.sleep(0.05)
+    threading.Thread(target=time.sleep, args=(60,)).start()
+    sys.exit(code)
+
+
+def _leftover_run(name: str, argument: str, task_loop: TaskLoop) -> WireResult:
+    """The runs whose body returns and leaves work on the task loop."""
+    match name:
+        case 'leave_ending':
+            # The work ends within the grace: it writes 'ended' to the path.
+            work = _write_after(argument, 0.2, 'ended')
+        case 'leave_stubborn':
+            work = _ignore_cancel()
+        case 'leave_blocking':
+            work = _block_the_loop()
+        case 'leave_exiting':
+            work = _exit_soon(int(argument))
+        case 'leave_sys_exit':
+            work = _sys_exit_beside_a_thread(int(argument))
+        case _:
+            raise AssertionError(name)
+    return True, _run_async(task_loop, _leave_task(work)), None
+
+
 async def _async_pid() -> str:
     """Await all the work it starts, so the loop holds nothing after it."""
     await asyncio.get_running_loop().create_task(asyncio.sleep(0))
@@ -360,6 +414,14 @@ def _run(frame: RunFrame, init: InitFrame, task_loop: TaskLoop) -> WireResult:
             return True, type(task_loop.state).__name__, None
         case 'leave_pending':
             return True, _run_async(task_loop, _leave_pending(argument)), None
+        case (
+            'leave_ending'
+            | 'leave_stubborn'
+            | 'leave_blocking'
+            | 'leave_exiting'
+            | 'leave_sys_exit'
+        ):
+            return _leftover_run(frame.task_name, argument, task_loop)
         case 'idle_executor_beside_a_stubborn_task':
             pid = _run_async(task_loop, _idle_executor_beside_a_stubborn_task())
             return True, pid, None
