@@ -32,7 +32,11 @@ from horsies.core.worker.runtime import (
 )
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.models.retention import RetentionConfig
-from horsies.core.worker.claiming import ClaimPass
+from horsies.core.worker.claiming import (
+    SHORT_PASS_REPASS_LIMIT,
+    ClaimPass,
+    read_claim_rows,
+)
 from horsies.core.worker.sql import DELETE_ORPHANED_RECOVERY_FAILURES_SQL
 from horsies.core.worker.worker import (
     Worker,
@@ -167,8 +171,43 @@ _LOST = ChildLost(
 )
 
 
-_NO_CLAIM = ClaimPass(claimed=0, dropped=0)
-_ONE_CLAIM = ClaimPass(claimed=1, dropped=0)
+_NO_CLAIM = ClaimPass(claimed=0, dropped=0, short_of_plan=0)
+_ONE_CLAIM = ClaimPass(claimed=1, dropped=0, short_of_plan=0)
+_CLAIM_COLUMNS = [
+    'row_kind',
+    'id',
+    'task_name',
+    'args',
+    'kwargs',
+    'queue_name',
+    'is_workflow_task',
+    'task_options',
+    'claimed_at',
+    'execution',
+    'short_by',
+]
+
+
+def _claimed_row(task_id: str) -> tuple[object, ...]:
+    """A 'CLAIMED' row of HORSIES_CLAIM_SQL."""
+    return (
+        'CLAIMED',
+        task_id,
+        'task',
+        '[]',
+        '{}',
+        'default',
+        True,
+        None,
+        None,
+        'ISOLATED',
+        None,
+    )
+
+
+def _short_row(short_by: int) -> tuple[object, ...]:
+    """The 'SHORT' row of HORSIES_CLAIM_SQL."""
+    return ('SHORT', None, None, None, None, None, None, None, None, None, short_by)
 
 
 def _make_worker(
@@ -3113,10 +3152,44 @@ class TestCapacityReleaseWake:
         assert passes == 1
 
     @pytest.mark.asyncio
+    async def test_short_passes_run_again_at_most_the_limit_in_a_row(self) -> None:
+        """Every pass takes fewer rows than it planned (another transaction
+        holds them): the worker runs SHORT_PASS_REPASS_LIMIT more passes with
+        no wait, then waits for a wake."""
+        worker = _make_worker()
+        worker._queues = [asyncio.Queue()]
+        worker._resilience = WorkerResilienceConfig(
+            notify_poll_interval_ms=_LONG_POLL_MS,
+        )
+        worker._start_with_resilience_config = AsyncMock()  # type: ignore[method-assign]
+        worker.stop = AsyncMock(side_effect=worker._stop.set)  # type: ignore[method-assign]
+        passes = 0
+
+        async def _claim_pass() -> ClaimPass:
+            nonlocal passes
+            passes += 1
+            if passes > SHORT_PASS_REPASS_LIMIT + 1:
+                # One pass past the bound: stop instead of spinning.
+                worker._stop.set()
+            await asyncio.sleep(0)
+            return ClaimPass(claimed=0, dropped=0, short_of_plan=1)
+
+        worker._claim_and_dispatch_all = AsyncMock(side_effect=_claim_pass)  # type: ignore[method-assign]
+        loop = asyncio.create_task(worker.run_forever())
+        await asyncio.sleep(0.05)
+        worker._stop.set()
+        await asyncio.wait_for(loop, timeout=_WAKE_TIMEOUT_S)
+
+        assert passes == SHORT_PASS_REPASS_LIMIT + 1
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize('max_claim_batch', [0, 1], ids=['no_cap', 'capped'])
     @pytest.mark.parametrize(
         'first_pass',
-        [ClaimPass(claimed=1, dropped=1), ClaimPass(claimed=3, dropped=1)],
+        [
+            ClaimPass(claimed=1, dropped=1, short_of_plan=0),
+            ClaimPass(claimed=3, dropped=1, short_of_plan=0),
+        ],
         ids=['all_dropped', 'partly_dropped'],
     )
     async def test_a_pass_that_dropped_a_row_runs_again_with_no_wait(
@@ -3151,17 +3224,53 @@ class TestCapacityReleaseWake:
 
 
 @pytest.mark.unit
+class TestReadClaimRows:
+    def test_claimed_rows_come_back_in_order_with_no_short_take(self) -> None:
+        rows = read_claim_rows(
+            _CLAIM_COLUMNS,
+            [_claimed_row('id-1'), _claimed_row('id-2')],
+        )
+
+        assert [task['id'] for task in rows.tasks] == ['id-1', 'id-2']
+        assert rows.short_of_plan == 0
+
+    def test_a_short_row_is_counted_and_is_not_a_task(self) -> None:
+        rows = read_claim_rows(_CLAIM_COLUMNS, [_claimed_row('id-1'), _short_row(3)])
+
+        assert [task['id'] for task in rows.tasks] == ['id-1']
+        assert rows.short_of_plan == 3
+
+    @pytest.mark.parametrize(
+        'rows',
+        [
+            [('OTHER',) + _claimed_row('id-1')[1:]],
+            [_short_row(1), _short_row(1)],
+            [_short_row(0)],
+        ],
+        ids=['unknown_kind', 'two_short_rows', 'short_by_zero'],
+    )
+    def test_rows_that_the_claim_function_never_returns_are_a_defect(
+        self,
+        rows: list[tuple[object, ...]],
+    ) -> None:
+        with pytest.raises(AssertionError):
+            read_claim_rows(_CLAIM_COLUMNS, rows)
+
+
+@pytest.mark.unit
 class TestClaimPass:
     @pytest.mark.parametrize(
         ('claim_pass', 'limited', 'expected'),
         [
-            (ClaimPass(claimed=0, dropped=0), False, False),
-            (ClaimPass(claimed=0, dropped=0), True, False),
-            (ClaimPass(claimed=3, dropped=0), False, False),
-            (ClaimPass(claimed=3, dropped=0), True, True),
-            (ClaimPass(claimed=3, dropped=1), False, True),
-            (ClaimPass(claimed=3, dropped=3), False, True),
-            (ClaimPass(claimed=3, dropped=3), True, True),
+            (ClaimPass(claimed=0, dropped=0, short_of_plan=0), False, False),
+            (ClaimPass(claimed=0, dropped=0, short_of_plan=0), True, False),
+            (ClaimPass(claimed=3, dropped=0, short_of_plan=0), False, False),
+            (ClaimPass(claimed=3, dropped=0, short_of_plan=0), True, True),
+            (ClaimPass(claimed=3, dropped=1, short_of_plan=0), False, True),
+            (ClaimPass(claimed=3, dropped=3, short_of_plan=0), False, True),
+            (ClaimPass(claimed=3, dropped=3, short_of_plan=0), True, True),
+            (ClaimPass(claimed=0, dropped=0, short_of_plan=2), False, True),
+            (ClaimPass(claimed=1, dropped=0, short_of_plan=1), False, True),
         ],
     )
     def test_it_states_when_work_can_remain_unannounced(
@@ -3170,15 +3279,57 @@ class TestClaimPass:
         limited: bool,
         expected: bool,
     ) -> None:
-        assert claim_pass.left_unannounced_work(limited=limited) is expected
+        assert (
+            claim_pass.left_unannounced_work(limited=limited, short_passes_before=0)
+            is expected
+        )
+
+    @pytest.mark.parametrize(
+        ('short_passes_before', 'expected'),
+        [
+            (0, True),
+            (SHORT_PASS_REPASS_LIMIT - 1, True),
+            (SHORT_PASS_REPASS_LIMIT, False),
+        ],
+        ids=['first', 'last_allowed', 'limit_reached'],
+    )
+    def test_a_short_take_asks_for_a_bounded_run_of_passes(
+        self,
+        short_passes_before: int,
+        expected: bool,
+    ) -> None:
+        claim_pass = ClaimPass(claimed=0, dropped=0, short_of_plan=1)
+
+        assert (
+            claim_pass.left_unannounced_work(
+                limited=False,
+                short_passes_before=short_passes_before,
+            )
+            is expected
+        )
+
+    @pytest.mark.parametrize(
+        ('claim_pass', 'expected'),
+        [
+            (ClaimPass(claimed=0, dropped=0, short_of_plan=1), 3),
+            (ClaimPass(claimed=2, dropped=0, short_of_plan=0), 0),
+        ],
+        ids=['short', 'full'],
+    )
+    def test_short_passes_count_the_run_that_ends_with_this_pass(
+        self,
+        claim_pass: ClaimPass,
+        expected: int,
+    ) -> None:
+        assert claim_pass.short_passes_after(2) == expected
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ('kept', 'expected'),
         [
-            (3, ClaimPass(claimed=3, dropped=0)),
-            (1, ClaimPass(claimed=3, dropped=2)),
-            (0, ClaimPass(claimed=3, dropped=3)),
+            (3, ClaimPass(claimed=3, dropped=0, short_of_plan=0)),
+            (1, ClaimPass(claimed=3, dropped=2, short_of_plan=0)),
+            (0, ClaimPass(claimed=3, dropped=3, short_of_plan=0)),
         ],
         ids=['none_dropped', 'partly_dropped', 'all_dropped'],
     )
@@ -3190,15 +3341,12 @@ class TestClaimPass:
         worker = _make_worker()
         _unstarted_pool(worker)
         rows = [
-            ('id-1', 'task', '[]', '{}', 'default', True, None, None, 'ISOLATED'),
-            ('id-2', 'task', '[]', '{}', 'default', True, None, None, 'ISOLATED'),
-            ('id-3', 'task', '[]', '{}', 'default', True, None, None, 'ISOLATED'),
+            _claimed_row('id-1'),
+            _claimed_row('id-2'),
+            _claimed_row('id-3'),
         ]
         result = MagicMock()
-        result.keys.return_value = [
-            'id', 'task_name', 'args', 'kwargs', 'queue_name',
-            'is_workflow_task', 'task_options', 'claimed_at', 'execution',
-        ]
+        result.keys.return_value = _CLAIM_COLUMNS
         result.fetchall.return_value = rows
         session = AsyncMock()
         session.execute = AsyncMock(return_value=result)
@@ -3215,6 +3363,59 @@ class TestClaimPass:
 
         assert await worker._claim_and_dispatch_all() == expected
         assert worker._dispatch_one.await_count == kept
+
+    @pytest.mark.asyncio
+    async def test_a_short_take_is_reported_with_the_rows_it_took(self) -> None:
+        worker = _make_worker()
+        _unstarted_pool(worker)
+        result = MagicMock()
+        result.keys.return_value = _CLAIM_COLUMNS
+        result.fetchall.return_value = [_claimed_row('id-1'), _short_row(2)]
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=result)
+        factory = MagicMock()
+        factory.return_value.__aenter__ = AsyncMock(return_value=session)
+        factory.return_value.__aexit__ = AsyncMock(return_value=False)
+        worker.sf = factory
+
+        async def _all_runnable(
+            claimed: list[dict[str, object]],
+        ) -> list[dict[str, object]]:
+            return claimed
+
+        worker._filter_nonrunnable_workflow_tasks = AsyncMock(side_effect=_all_runnable)  # type: ignore[method-assign]
+        worker._dispatch_one = AsyncMock()  # type: ignore[method-assign]
+
+        assert await worker._claim_and_dispatch_all() == ClaimPass(
+            claimed=1,
+            dropped=0,
+            short_of_plan=2,
+        )
+        assert [call.args[0] for call in worker._dispatch_one.await_args_list] == [
+            'id-1',
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_pass_that_took_nothing_still_reports_its_short_take(
+        self,
+    ) -> None:
+        worker = _make_worker()
+        _unstarted_pool(worker)
+        result = MagicMock()
+        result.keys.return_value = _CLAIM_COLUMNS
+        result.fetchall.return_value = [_short_row(2)]
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=result)
+        factory = MagicMock()
+        factory.return_value.__aenter__ = AsyncMock(return_value=session)
+        factory.return_value.__aexit__ = AsyncMock(return_value=False)
+        worker.sf = factory
+
+        assert await worker._claim_and_dispatch_all() == ClaimPass(
+            claimed=0,
+            dropped=0,
+            short_of_plan=2,
+        )
 
     @pytest.mark.asyncio
     async def test_an_empty_pass_reports_nothing(self) -> None:

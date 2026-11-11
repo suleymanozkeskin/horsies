@@ -2579,6 +2579,19 @@ class TestPerClassClaimMigration:
             ).all()
         return {(str(row[0]), str(row[1])) for row in rows}
 
+    async def _claim_results(self, engine: AsyncEngine) -> dict[str, str]:
+        """The OUT columns of horsies_claim and horsies_claim_candidates."""
+        async with engine.connect() as connection:
+            rows = (
+                await connection.execute(text("""
+                    SELECT proname::text, pg_get_function_result(oid)
+                    FROM pg_proc
+                    WHERE proname IN ('horsies_claim', 'horsies_claim_candidates')
+                      AND pronamespace = current_schema()::regnamespace
+                """))
+            ).all()
+        return {str(row[0]): str(row[1]) for row in rows}
+
     async def _index_definitions(self, engine: AsyncEngine) -> dict[str, str]:
         async with engine.connect() as connection:
             rows = (
@@ -2614,6 +2627,9 @@ class TestPerClassClaimMigration:
             ('horsies_claim_plan', self.V55_PLAN_ARGS),
             ('horsies_claim_candidates', self.V55_CANDIDATES_ARGS),
         }
+        for result in (await self._claim_results(engine)).values():
+            assert result.startswith('TABLE(row_kind text, id text,'), result
+            assert result.endswith(', short_by integer)'), result
         definitions = await self._index_definitions(engine)
         for name in self.RETIRED:
             assert name not in definitions, definitions
@@ -2633,6 +2649,37 @@ class TestPerClassClaimMigration:
         await _migrate(scratch_database)
         engine = _engine(scratch_database)
         try:
+            await self._assert_declared_shape(engine)
+        finally:
+            await engine.dispose()
+
+    async def test_a_rerun_replaces_a_claim_pair_with_other_out_columns(
+        self,
+        scratch_database: str,
+    ) -> None:
+        """The pair has the current argument types and other OUT columns,
+        which CREATE OR REPLACE cannot change: the v55 apply drops it and
+        installs the current pair."""
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            async with engine.connect() as connection:
+                for name, args in (
+                    ('horsies_claim', self.V55_CLAIM_ARGS),
+                    ('horsies_claim_candidates', self.V55_CANDIDATES_ARGS),
+                ):
+                    await connection.execute(text(f'DROP FUNCTION {name}({args})'))
+                    await connection.execute(text(f"""
+                        CREATE FUNCTION {name}({args})
+                        RETURNS TABLE(id text) LANGUAGE sql AS 'SELECT NULL::text'
+                    """))
+                await connection.execute(
+                    text('DELETE FROM horsies_schema_version WHERE version > 54')
+                )
+                await connection.commit()
+
+            await _migrate(scratch_database)
+
             await self._assert_declared_shape(engine)
         finally:
             await engine.dispose()

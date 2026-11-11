@@ -796,6 +796,52 @@ class TestLocks:
         assert claimed == [(second, 'ISOLATED')]
 
 
+class TestShortTake:
+    async def test_a_take_short_of_its_plan_asks_for_another_pass(
+        self,
+        clean_workflow_tables: None,
+        broker: PostgresBroker,
+        session: AsyncSession,
+    ) -> None:
+        """Another claim holds the 4 ISOLATED rows that rank first, and the
+        budget of 4 plans them. The take gets none of them, and the stream
+        has no other row: the pass reports the 4 it missed and asks for
+        another pass. After the other claim commits, that pass takes the
+        SHARED_THREAD rows that the first plan left out."""
+        held = [
+            await _seed(session, execution='ISOLATED', priority=1) for _ in range(4)
+        ]
+        waiting = [
+            await _seed(session, execution='SHARED_THREAD', priority=10)
+            for _ in range(2)
+        ]
+        await session.commit()
+        probe = _Probe(broker, {})
+
+        engine = current_resources(broker).engine
+        async with engine.connect() as other_claim:
+            transaction = await other_claim.begin()
+            await other_claim.execute(
+                text("""
+                    UPDATE horsies_tasks
+                    SET status = 'CLAIMED', claimed = TRUE,
+                        claimed_by_worker_id = 'other-worker',
+                        claimed_at = now(),
+                        claim_expires_at = now() + interval '1 hour'
+                    WHERE id = ANY(CAST(:ids AS uuid[]))
+                """),
+                {'ids': held},
+            )
+            first = await probe._claim_and_dispatch_all()
+            await transaction.commit()
+        second = await probe._claim_and_dispatch_all()
+
+        assert first == ClaimPass(claimed=0, dropped=0, short_of_plan=4)
+        assert first.left_unannounced_work(limited=False, short_passes_before=0)
+        assert second == ClaimPass(claimed=2, dropped=0, short_of_plan=0)
+        assert sorted(probe.dispatched) == sorted(waiting)
+
+
 class _Probe(ClaimMixin):
     """A claim pass with no slot pool; records each dispatched task id."""
 
@@ -856,8 +902,8 @@ class TestClassMismatch:
 
         first = await probe._claim_and_dispatch_all()
 
-        assert first == ClaimPass(claimed=1, dropped=1)
-        assert first.left_unannounced_work(limited=False)
+        assert first == ClaimPass(claimed=1, dropped=1, short_of_plan=0)
+        assert first.left_unannounced_work(limited=False, short_passes_before=0)
         assert probe.dispatched == []
         assert await _row_state(session, task_id) == (
             'PENDING',
@@ -868,7 +914,7 @@ class TestClassMismatch:
 
         second = await probe._claim_and_dispatch_all()
 
-        assert second == ClaimPass(claimed=1, dropped=0)
+        assert second == ClaimPass(claimed=1, dropped=0, short_of_plan=0)
         assert probe.dispatched == [task_id]
 
     async def test_a_return_with_a_stale_claim_generation_changes_nothing(

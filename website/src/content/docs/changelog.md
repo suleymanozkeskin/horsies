@@ -322,9 +322,12 @@ there is no migration contract between pre-1.0 versions.
 ### Changed
 
 - **Breaking: the claim function takes a budget per execution class.**
-  `horsies_claim` takes `p_budgets` and `p_routes` in place of `p_processes`,
-  and returns each row's `execution`. Schema v55 drops the earlier signature,
-  so a 0.6.x worker fails every claim pass after a 0.7.0 process migrates.
+  `horsies_claim` takes `p_budgets` and `p_routes` in place of `p_processes`.
+  It returns a `row_kind` column: one `'CLAIMED'` row per task it took, with
+  the row's `execution`, and one `'SHORT'` row when it took fewer rows than
+  it chose, with that count in `short_by`. Schema v55 drops the earlier
+  signature, so a 0.6.x worker fails every claim pass after a 0.7.0 process
+  migrates.
   Stop every 0.6.x worker before the first 0.7.0 worker starts.
   - A claim pass reads the head of each (queue, class) stream without locks:
     its pending rows and its rows with an expired lease, in one order. One
@@ -335,6 +338,12 @@ there is no migration contract between pre-1.0 versions.
     stream with `FOR UPDATE SKIP LOCKED`. It locks only the rows it takes.
     Before, a pass over two queues of equal priority could lock up to its
     batch in each queue and return one batch.
+  - A row that another claim holds at the take is skipped, and the stream
+    goes on to its next row. When a pass takes fewer rows than it chose,
+    because another transaction held or took them, the worker runs the next
+    pass at once, as no `NOTIFY` announces the rows that remain. At most 3
+    such passes run in a row; after that the worker waits for its next
+    wake.
   - v55 builds `idx_horsies_tasks_claim_expired_class` on `(queue_name,
     execution, priority, enqueued_at, id)` over CLAIMED rows concurrently,
     and drops `idx_horsies_tasks_claim_pending` and

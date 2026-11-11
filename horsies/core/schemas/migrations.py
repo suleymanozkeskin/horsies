@@ -616,6 +616,7 @@ CREATE OR REPLACE FUNCTION horsies_claim(
     p_lock_keys jsonb
 )
 RETURNS TABLE(
+    row_kind text,
     id text,
     task_name varchar,
     args text,
@@ -624,7 +625,8 @@ RETURNS TABLE(
     is_workflow_task boolean,
     task_options text,
     claimed_at timestamptz,
-    execution text
+    execution text,
+    short_by integer
 )
 LANGUAGE plpgsql
 SET jit = off
@@ -906,8 +908,14 @@ END;
 $plan$;
 """)
 
-# Phase 2 of the claim (see horsies_claim_plan). Rows come back in rank
-# order: queue priority, task priority, enqueued_at, id.
+# Phase 2 of the claim (see horsies_claim_plan). One 'CLAIMED' row per task
+# it took, in rank order: queue priority, task priority, enqueued_at, id.
+# The plan comes from an unlocked read, so another transaction can hold or
+# take a planned row before the take. When the take gets fewer rows than the
+# plan, one 'SHORT' row follows, whose short_by counts the rows it missed;
+# the worker then claims again with no wait, as no NOTIFY announces the
+# rows that remain. The task columns of a 'SHORT' row are NULL, and the
+# short_by of a 'CLAIMED' row is NULL.
 CREATE_CLAIM_CANDIDATES_FUNCTION_SQL = text("""
 CREATE OR REPLACE FUNCTION horsies_claim_candidates(
     p_total integer,
@@ -922,6 +930,7 @@ CREATE OR REPLACE FUNCTION horsies_claim_candidates(
     p_lease_ms bigint
 )
 RETURNS TABLE(
+    row_kind text,
     id text,
     task_name varchar,
     args text,
@@ -930,7 +939,8 @@ RETURNS TABLE(
     is_workflow_task boolean,
     task_options text,
     claimed_at timestamptz,
-    execution text
+    execution text,
+    short_by integer
 )
 LANGUAGE plpgsql
 SET plan_cache_mode = force_generic_plan
@@ -942,17 +952,20 @@ DECLARE
     v_class text[];
     v_arm text[];
     v_take int[];
+    v_planned int;
+    v_taken int;
 BEGIN
     SELECT COALESCE(array_agg(p.queue_name), ARRAY[]::text[]),
            COALESCE(array_agg(p.row_class), ARRAY[]::text[]),
            COALESCE(array_agg(p.arm), ARRAY[]::text[]),
-           COALESCE(array_agg(p.take), ARRAY[]::int[])
-    INTO v_queue, v_class, v_arm, v_take
+           COALESCE(array_agg(p.take), ARRAY[]::int[]),
+           COALESCE(sum(p.take), 0)::int
+    INTO v_queue, v_class, v_arm, v_take, v_planned
     FROM horsies_claim_plan(
         p_total, p_available, p_routes, p_queues, p_queue_priority,
         p_queue_max_concurrency, p_queue_counts, p_max_claim_batch
     ) AS p;
-    IF cardinality(v_take) = 0 THEN
+    IF v_planned = 0 THEN
         RETURN;
     END IF;
 
@@ -1023,11 +1036,20 @@ BEGIN
                   t.kwargs, t.queue_name, t.is_workflow_task, t.task_options,
                   t.claimed_at, t.execution, t.priority, t.enqueued_at
     )
-    SELECT u.id, u.task_name, u.args, u.kwargs, u.queue_name,
-           u.is_workflow_task, u.task_options, u.claimed_at, u.execution
+    SELECT 'CLAIMED'::text, u.id, u.task_name, u.args, u.kwargs,
+           u.queue_name, u.is_workflow_task, u.task_options, u.claimed_at,
+           u.execution, NULL::integer
     FROM updated u
     ORDER BY COALESCE((p_queue_priority ->> u.queue_name)::int, 100) ASC,
              u.priority ASC, u.enqueued_at ASC, u.task_key ASC;
+
+    GET DIAGNOSTICS v_taken = ROW_COUNT;
+    IF v_taken < v_planned THEN
+        RETURN QUERY
+        SELECT 'SHORT'::text, NULL::text, NULL::varchar, NULL::text,
+               NULL::text, NULL::varchar, NULL::boolean, NULL::text,
+               NULL::timestamptz, NULL::text, v_planned - v_taken;
+    END IF;
 END;
 $candidates$;
 """)
@@ -1037,7 +1059,9 @@ $candidates$;
 # makes a second function next to the old one, and CREATE OR REPLACE cannot
 # change OUT columns, so each old signature is dropped by its exact argument
 # types. The horsies_claim signature is also the v10 to v11 one (v12 changed
-# only its OUT columns).
+# only its OUT columns). The current signatures of the pair are dropped too,
+# so an apply installs their OUT columns also over a pair of the same
+# argument types and other OUT columns.
 DROP_PREVIOUS_CLAIM_FUNCTIONS_SQL = (
     text("""
 DROP FUNCTION IF EXISTS horsies_claim(
@@ -1047,6 +1071,17 @@ DROP FUNCTION IF EXISTS horsies_claim(
     text("""
 DROP FUNCTION IF EXISTS horsies_claim_candidates(
     integer, jsonb, jsonb, jsonb, jsonb, integer, text, bigint
+)
+"""),
+    text("""
+DROP FUNCTION IF EXISTS horsies_claim(
+    text, jsonb, jsonb, jsonb, boolean, jsonb, jsonb, int, int, int, int,
+    bigint, jsonb
+)
+"""),
+    text("""
+DROP FUNCTION IF EXISTS horsies_claim_candidates(
+    integer, jsonb, jsonb, jsonb, jsonb, jsonb, jsonb, integer, text, bigint
 )
 """),
 )

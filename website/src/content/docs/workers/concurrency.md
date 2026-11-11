@@ -494,7 +494,10 @@ Key behaviors:
 1. **Locks only what it takes**: Another worker can claim every row that this
    pass does not take, while the pass runs
 2. **SKIP LOCKED**: A row that another claim holds is skipped, and the stream
-   goes on to its next row
+   goes on to its next row. When a pass takes fewer rows than it chose
+   (another transaction held or took them, and their stream had no other
+   row), the worker runs the next pass at once, as no `NOTIFY` announces the
+   rows that the pass left. At most 3 such passes run in a row.
 3. **Priority first**: Lower number = higher priority, within one class
 4. **FIFO within priority**: Earlier `enqueued_at` wins
 5. **Limit**: Respects batch size limits
