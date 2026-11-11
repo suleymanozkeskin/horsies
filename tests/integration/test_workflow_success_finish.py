@@ -480,8 +480,11 @@ class TestRefusedCall:
     """A call the function cannot serve raises and writes nothing."""
 
     @pytest.mark.parametrize(
-        ('is_workflow_task', 'result', 'sqlstate'),
-        [(False, OK_RESULT, '22023'), (True, None, '23502')],
+        ('is_workflow_task', 'result', 'sqlstate', 'message'),
+        [
+            (False, OK_RESULT, '22023', 'is not a workflow task'),
+            (True, None, '23502', 'a workflow task success needs a result payload'),
+        ],
         ids=['plain_task', 'no_result'],
     )
     async def test_it_raises_and_writes_nothing(
@@ -491,7 +494,11 @@ class TestRefusedCall:
         is_workflow_task: bool,
         result: str | None,
         sqlstate: str,
+        message: str,
     ) -> None:
+        """The function's own refusal, by its SQLSTATE and its message: the
+        move would refuse a NULL result too, after the locks and the
+        attempt row."""
         seeded = await seed(is_workflow_task=is_workflow_task)
         before = await _live_row(engine, seeded.task_id)
 
@@ -502,7 +509,11 @@ class TestRefusedCall:
                     {'id': seeded.task_id, 'worker': WORKER, 'result': result},
                 )
 
-        assert getattr(raised.value.orig, 'sqlstate', None) == sqlstate
+        original = raised.value.orig
+        assert isinstance(original, psycopg.Error)
+        assert original.sqlstate == sqlstate
+        assert original.diag.message_primary is not None
+        assert message in original.diag.message_primary
         assert await _live_row(engine, seeded.task_id) == before
         assert await _attempts(engine, seeded.task_id) == ()
         assert await _history_row(engine, seeded.task_id) is None
