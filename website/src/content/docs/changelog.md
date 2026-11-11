@@ -119,8 +119,10 @@ there is no migration contract between pre-1.0 versions.
   same comparison as a warning. It also warns when the per-child memory
   limits of its profile add up to more than the memory that it can use: the
   container (cgroup v2 or v1) memory limit when that is below the host RAM,
-  else the host RAM. The warning names the source. It starts in both
-  cases.
+  else the host RAM. The cgroup is the one that `/proc/self/cgroup` names,
+  and its limit is the smallest on the path from it up to the mount point,
+  so a systemd `MemoryMax` and a container seen with `--cgroupns=host`
+  count. The warning names the source. It starts in both cases.
 
 - **Each task declares its execution class, and each task row stores it.**
   `@app.task(..., execution=...)` takes an `Execution` member:

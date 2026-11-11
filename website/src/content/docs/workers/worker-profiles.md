@@ -253,7 +253,7 @@ The memory that the worker can use is the smaller of two values:
 
 | Source | Read from | Named in the warning |
 |--------|-----------|----------------------|
-| Container limit | cgroup v2 `/sys/fs/cgroup/memory.max`; when that file does not exist, cgroup v1 `/sys/fs/cgroup/memory/memory.limit_in_bytes` | `container limit` |
+| Container limit | The group that `/proc/self/cgroup` names: its cgroup v1 memory group when it has one, else its cgroup v2 group. The limit is the smallest `memory.limit_in_bytes` (v1, under `/sys/fs/cgroup/memory`) or `memory.max` (v2, under `/sys/fs/cgroup`) of the group and each parent group. Without `/proc/self/cgroup`: `/sys/fs/cgroup/memory.max`, else `/sys/fs/cgroup/memory/memory.limit_in_bytes` | `container limit` |
 | Host RAM | `psutil.virtual_memory().total` | `host RAM` |
 
 - A cgroup value of `max`, or no cgroup file, means no container limit.

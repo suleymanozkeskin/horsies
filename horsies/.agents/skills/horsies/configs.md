@@ -475,9 +475,12 @@ slot.
   80% of it.
 - `mb` from 1 to 16,777,216 — no fixed floor, the baseline guard is the real floor.
 - At boot the worker warns (and still starts) when `count × mb` is above the
-  usable memory: the cgroup limit (v2 `/sys/fs/cgroup/memory.max`, else v1
-  `/sys/fs/cgroup/memory/memory.limit_in_bytes`; `max` or no file = no limit)
-  when it is below the host RAM, else the host RAM. The warning names the
+  usable memory: the cgroup limit when it is below the host RAM, else the
+  host RAM. The cgroup is the one `/proc/self/cgroup` names (v1 memory group,
+  else v2 group); its limit is the smallest `memory.limit_in_bytes` /
+  `memory.max` of the group and its parents (`max` or no file = no limit),
+  so a systemd `MemoryMax` or `--cgroupns=host` counts; without
+  `/proc/self/cgroup`, the files at the mount point. The warning names the
   source: `container limit` or `host RAM`.
 
 **Using both (OR semantics).** When both are set, a child exits when *either*

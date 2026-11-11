@@ -54,15 +54,31 @@ CONNECTION_LIMIT_READ_TIMEOUT_S: Final = 10.0
 
 _BYTES_PER_MB: Final = 1024 * 1024
 
-CGROUP_V2_MEMORY_MAX: Final = Path('/sys/fs/cgroup/memory.max')
-"""The memory limit of the cgroup of this process under cgroup v2."""
+PROC_SELF_CGROUP: Final = Path('/proc/self/cgroup')
+"""The cgroups of this process, one line per hierarchy:
+``<id>:<controllers>:<path>``. The cgroup v2 line is ``0::<path>``."""
 
-CGROUP_V1_MEMORY_LIMIT: Final = Path('/sys/fs/cgroup/memory/memory.limit_in_bytes')
-"""The memory limit of the cgroup of this process under cgroup v1."""
+CGROUP_V2_ROOT: Final = Path('/sys/fs/cgroup')
+"""The mount point of the cgroup v2 hierarchy."""
+
+CGROUP_V1_MEMORY_ROOT: Final = Path('/sys/fs/cgroup/memory')
+"""The mount point of the cgroup v1 memory controller."""
+
+CGROUP_V2_LIMIT_FILE: Final = 'memory.max'
+CGROUP_V1_LIMIT_FILE: Final = 'memory.limit_in_bytes'
 
 CGROUP_FILE_MAX_BYTES: Final = 64
 """The most bytes read from a cgroup limit file. A limit is one decimal
 number of at most 20 digits, or ``max``."""
+
+PROC_CGROUP_MAX_BYTES: Final = 64 * 1024
+"""The most bytes read from ``/proc/self/cgroup``. It has one line per
+hierarchy, about 15, each with a path of a few hundred bytes at most."""
+
+CGROUP_PATH_MAX_DEPTH: Final = 32
+"""The most path parts of a cgroup that the reader walks. A deeper path
+is not resolved, and the reader falls back to the limit files at the
+mount points."""
 
 _CGROUP_NO_LIMIT: Final = 'max'
 
@@ -161,34 +177,170 @@ def _parse_cgroup_value(
     return CgroupUnreadable(reason=f'{path}: unexpected content {value!r}')
 
 
+@dataclass(frozen=True, slots=True)
+class CgroupRoots:
+    """Where the reader finds the cgroup files. Tests point it at fake files."""
+
+    proc_self_cgroup: Path = PROC_SELF_CGROUP
+    v2_root: Path = CGROUP_V2_ROOT
+    v1_memory_root: Path = CGROUP_V1_MEMORY_ROOT
+
+
+@dataclass(frozen=True, slots=True)
+class InCgroup:
+    """The process is in this group of a hierarchy, given as path parts."""
+
+    parts: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class NoCgroupPath:
+    """``/proc/self/cgroup`` names no usable group for the hierarchy: no
+    line, a path that leaves the mount point (``..``), or a path deeper than
+    ``CGROUP_PATH_MAX_DEPTH``."""
+
+
+type CgroupPathOf = InCgroup | NoCgroupPath
+
+
+@dataclass(frozen=True, slots=True)
+class ProcCgroup:
+    """The groups of this process that hold a memory limit."""
+
+    v2: CgroupPathOf
+    v1_memory: CgroupPathOf
+
+
+def _group_of(path: str) -> CgroupPathOf:
+    parts = tuple(part for part in path.split('/') if part)
+    if '..' in parts or len(parts) > CGROUP_PATH_MAX_DEPTH:
+        return NoCgroupPath()
+    return InCgroup(parts)
+
+
+def parse_proc_cgroup(text: str) -> ProcCgroup:
+    """The cgroup v2 group and the cgroup v1 memory group of ``text``.
+
+    A line that has not three fields is skipped. Pure.
+    """
+    v2: CgroupPathOf = NoCgroupPath()
+    v1_memory: CgroupPathOf = NoCgroupPath()
+    for line in text.splitlines():
+        fields = line.split(':', 2)
+        match fields:
+            case ['0', '', path]:
+                v2 = _group_of(path)
+            case [_, controllers, path] if 'memory' in controllers.split(','):
+                v1_memory = _group_of(path)
+            case _:
+                pass
+    return ProcCgroup(v2=v2, v1_memory=v1_memory)
+
+
+def _read_proc_cgroup(path: Path) -> ProcCgroup | _CgroupFileAbsent:
+    """Read ``/proc/self/cgroup``. Absent, unreadable or too long: absent."""
+    try:
+        with path.open('rb') as handle:
+            raw = handle.read(PROC_CGROUP_MAX_BYTES + 1)
+    except OSError:
+        return _CgroupFileAbsent()
+    if len(raw) > PROC_CGROUP_MAX_BYTES:
+        return _CgroupFileAbsent()
+    return parse_proc_cgroup(raw.decode('utf-8', errors='replace'))
+
+
+def _limit_files(root: Path, group: CgroupPathOf, file_name: str) -> tuple[Path, ...]:
+    """The limit file of the group, then of each parent group up to ``root``."""
+    match group:
+        case InCgroup(parts=parts):
+            return tuple(
+                root.joinpath(*parts[:depth], file_name)
+                for depth in range(len(parts), -1, -1)
+            )
+        case NoCgroupPath():
+            return (root / file_name,)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _limit_of(
+    path: Path,
+) -> CgroupLimit | NoCgroupLimit | CgroupUnreadable | _CgroupFileAbsent:
+    match _read_cgroup_file(path):
+        case str() as value:
+            return _parse_cgroup_value(path, value)
+        case CgroupUnreadable() | _CgroupFileAbsent() as other:
+            return other
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _smallest_limit(
+    files: tuple[Path, ...],
+) -> CgroupLimit | NoCgroupLimit | CgroupUnreadable | _CgroupFileAbsent:
+    """The smallest limit of ``files``: a group is limited by each parent.
+
+    ``max`` is no limit at that level. Absent when no file exists. The first
+    unreadable file is the outcome.
+    """
+    smallest: CgroupLimit | NoCgroupLimit | _CgroupFileAbsent = _CgroupFileAbsent()
+    for path in files:
+        match _limit_of(path), smallest:
+            case CgroupUnreadable() as unreadable, _:
+                return unreadable
+            case _CgroupFileAbsent(), _:
+                pass
+            case NoCgroupLimit(), _CgroupFileAbsent():
+                smallest = NoCgroupLimit()
+            case NoCgroupLimit(), _:
+                pass
+            case CgroupLimit() as limit, CgroupLimit(limit_bytes=held) if (
+                held <= limit.limit_bytes
+            ):
+                pass
+            case CgroupLimit() as limit, _:
+                smallest = limit
+            case _ as unreachable:
+                assert_never(unreachable)
+    return smallest
+
+
 def read_cgroup_memory_limit(
-    v2_path: Path = CGROUP_V2_MEMORY_MAX,
-    v1_path: Path = CGROUP_V1_MEMORY_LIMIT,
+    roots: CgroupRoots = CgroupRoots(),
 ) -> CgroupLimit | NoCgroupLimit | CgroupUnreadable:
     """Read the memory limit of the cgroup of this process.
 
-    The cgroup v2 file is read when it exists, else the cgroup v1 file. No
-    file means no cgroup limit. The cgroup v1 value for "no limit" is a
-    number far above any RAM; ``usable_memory`` then keeps the host RAM.
+    ``/proc/self/cgroup`` names the group of the process: the cgroup v1
+    memory group when one is named, else the cgroup v2 group. The limit is
+    the smallest of the group and its parent groups, up to the mount point
+    (a systemd ``MemoryMax`` of a service or a slice, or a container seen
+    with ``--cgroupns=host``). Without ``/proc/self/cgroup``, the reader
+    takes the cgroup v2 file at the mount point, else the cgroup v1 file
+    there. No file means no cgroup limit. The cgroup v1 value for "no
+    limit" is a number far above any RAM; ``usable_memory`` then keeps the
+    host RAM.
     """
-    match _read_cgroup_file(v2_path):
-        case str() as value:
-            return _parse_cgroup_value(v2_path, value)
-        case CgroupUnreadable() as unreadable:
-            return unreadable
-        case _CgroupFileAbsent():
-            pass
-        case _ as unreachable_v2:
-            assert_never(unreachable_v2)
-    match _read_cgroup_file(v1_path):
-        case str() as value:
-            return _parse_cgroup_value(v1_path, value)
-        case CgroupUnreadable() as unreadable:
-            return unreadable
-        case _CgroupFileAbsent():
-            return NoCgroupLimit()
-        case _ as unreachable_v1:
-            assert_never(unreachable_v1)
+    match _read_proc_cgroup(roots.proc_self_cgroup):
+        case ProcCgroup(v1_memory=InCgroup() as group):
+            chains = (_limit_files(roots.v1_memory_root, group, CGROUP_V1_LIMIT_FILE),)
+        case ProcCgroup(v2=InCgroup() as group):
+            chains = (_limit_files(roots.v2_root, group, CGROUP_V2_LIMIT_FILE),)
+        case ProcCgroup() | _CgroupFileAbsent():
+            chains = (
+                (roots.v2_root / CGROUP_V2_LIMIT_FILE,),
+                (roots.v1_memory_root / CGROUP_V1_LIMIT_FILE,),
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+    for files in chains:
+        match _smallest_limit(files):
+            case CgroupLimit() | NoCgroupLimit() | CgroupUnreadable() as outcome:
+                return outcome
+            case _CgroupFileAbsent():
+                pass
+            case _ as unreachable_chain:
+                assert_never(unreachable_chain)
+    return NoCgroupLimit()
 
 
 class MemorySource(Enum):

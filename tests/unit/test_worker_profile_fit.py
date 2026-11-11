@@ -32,9 +32,11 @@ from horsies.core.models.worker_profile import (
 from horsies.core.worker import profile_fit
 from horsies.core.worker.profile_fit import (
     CGROUP_FILE_MAX_BYTES,
+    CGROUP_PATH_MAX_DEPTH,
     LISTENER_CONNECTIONS_PER_WORKER,
     RUNNER_HEARTBEAT_CONNECTIONS_PER_WORKER,
     CgroupLimit,
+    CgroupRoots,
     CgroupUnreadable,
     ConnectionsExceedServer,
     ConnectionsFit,
@@ -44,7 +46,10 @@ from horsies.core.worker.profile_fit import (
     MemoryLimitsFit,
     MemoryLimitsNotSet,
     MemorySource,
+    InCgroup,
     NoCgroupLimit,
+    NoCgroupPath,
+    ProcCgroup,
     ServerConnectionLimit,
     ServerConnectionLimitUnreadable,
     UsableMemory,
@@ -52,6 +57,7 @@ from horsies.core.worker.profile_fit import (
     WorkerConnectionNeed,
     compare_connections,
     compare_memory_limits,
+    parse_proc_cgroup,
     read_cgroup_memory_limit,
     read_machine_memory,
     read_server_connection_limit,
@@ -162,11 +168,24 @@ _V1_NO_LIMIT = 9_223_372_036_854_771_712
 
 
 class _CgroupFiles:
-    """Fake cgroup v2 and v1 limit files under ``tmp_path``."""
+    """Fake ``/proc/self/cgroup`` and cgroup v2 and v1 trees under ``tmp_path``.
+
+    ``proc`` does not exist until a test writes it: the reader then falls
+    back to the limit files at the mount points, ``v2`` and ``v1``.
+    """
 
     def __init__(self, root: Path) -> None:
-        self.v2 = root / 'v2' / 'memory.max'
-        self.v1 = root / 'v1' / 'memory.limit_in_bytes'
+        self.proc = root / 'proc' / 'cgroup'
+        self.v2_root = root / 'v2'
+        self.v1_root = root / 'v1'
+        self.v2 = self.v2_root / 'memory.max'
+        self.v1 = self.v1_root / 'memory.limit_in_bytes'
+
+    def v2_group(self, path: str) -> Path:
+        return self.v2_root / path / 'memory.max'
+
+    def v1_group(self, path: str) -> Path:
+        return self.v1_root / path / 'memory.limit_in_bytes'
 
     def write(self, path: Path, content: str | bytes) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -177,7 +196,13 @@ class _CgroupFiles:
                 path.write_bytes(content)
 
     def read(self) -> CgroupLimit | NoCgroupLimit | CgroupUnreadable:
-        return read_cgroup_memory_limit(v2_path=self.v2, v1_path=self.v1)
+        return read_cgroup_memory_limit(
+            CgroupRoots(
+                proc_self_cgroup=self.proc,
+                v2_root=self.v2_root,
+                v1_memory_root=self.v1_root,
+            ),
+        )
 
 
 @pytest.fixture
@@ -245,6 +270,141 @@ class TestReadCgroupMemoryLimit:
     def test_non_ascii_content_is_unreadable(self, cgroup: _CgroupFiles) -> None:
         cgroup.write(cgroup.v1, b'\xff\xfe')
         assert cgroup.read() == CgroupUnreadable(reason=f'{cgroup.v1}: not ASCII text')
+
+
+_GIB = 1024 * 1024 * 1024
+
+
+class TestParseProcCgroup:
+    def test_the_v2_line_names_the_unified_group(self) -> None:
+        parsed = parse_proc_cgroup('0::/system.slice/worker.service\n')
+
+        assert parsed == ProcCgroup(
+            v2=InCgroup(('system.slice', 'worker.service')),
+            v1_memory=NoCgroupPath(),
+        )
+        assert parsed == parse_proc_cgroup('0::/system.slice//worker.service/\n')
+
+    def test_a_v1_line_with_the_memory_controller_names_the_memory_group(self) -> None:
+        parsed = parse_proc_cgroup(
+            '12:cpu,cpuacct:/docker/abc\n'
+            '4:memory:/docker/abc\n'
+            '1:name=systemd:/docker/abc\n'
+            '0::/docker/abc\n',
+        )
+
+        assert parsed.v1_memory == InCgroup(('docker', 'abc'))
+
+    @pytest.mark.parametrize(
+        'line',
+        [
+            '0::/../../user.slice',
+            '0::/' + '/'.join(['g'] * (CGROUP_PATH_MAX_DEPTH + 1)),
+            'not a line',
+        ],
+        ids=['leaves the mount point', 'too deep', 'malformed'],
+    )
+    def test_a_path_that_cannot_be_walked_names_no_group(self, line: str) -> None:
+        assert parse_proc_cgroup(line).v2 == NoCgroupPath()
+
+
+class TestCgroupOfThisProcess:
+    """``/proc/self/cgroup`` names the group; the limit can sit on the group
+    or on a parent group, below the mount point."""
+
+    def test_a_systemd_memory_max_of_the_service_is_the_limit(
+        self,
+        cgroup: _CgroupFiles,
+    ) -> None:
+        cgroup.write(cgroup.proc, '0::/system.slice/worker.service\n')
+        cgroup.write(cgroup.v2_group('system.slice/worker.service'), '536870912\n')
+
+        assert cgroup.read() == CgroupLimit(limit_bytes=536_870_912)
+
+    def test_a_limit_of_a_parent_slice_holds_for_the_group(
+        self,
+        cgroup: _CgroupFiles,
+    ) -> None:
+        cgroup.write(cgroup.proc, '0::/workers.slice/worker.service\n')
+        cgroup.write(cgroup.v2_group('workers.slice/worker.service'), 'max\n')
+        cgroup.write(cgroup.v2_group('workers.slice'), f'{_GIB}\n')
+
+        assert cgroup.read() == CgroupLimit(limit_bytes=_GIB)
+
+    @pytest.mark.parametrize(
+        ('service', 'slice_', 'limit'),
+        [(2 * _GIB, _GIB, _GIB), (_GIB // 2, _GIB, _GIB // 2)],
+        ids=['the parent is smaller', 'the group is smaller'],
+    )
+    def test_the_smallest_limit_on_the_path_holds(
+        self,
+        cgroup: _CgroupFiles,
+        service: int,
+        slice_: int,
+        limit: int,
+    ) -> None:
+        cgroup.write(cgroup.proc, '0::/workers.slice/worker.service\n')
+        cgroup.write(cgroup.v2_group('workers.slice/worker.service'), f'{service}\n')
+        cgroup.write(cgroup.v2_group('workers.slice'), f'{slice_}\n')
+
+        assert cgroup.read() == CgroupLimit(limit_bytes=limit)
+
+    def test_a_container_seen_with_the_host_cgroup_namespace(
+        self,
+        cgroup: _CgroupFiles,
+    ) -> None:
+        cgroup.write(cgroup.proc, '0::/system.slice/docker-abc.scope\n')
+        cgroup.write(cgroup.v2_group('system.slice/docker-abc.scope'), f'{_GIB}\n')
+
+        assert cgroup.read() == CgroupLimit(limit_bytes=_GIB)
+
+    def test_a_v1_memory_group_is_read_before_v2(self, cgroup: _CgroupFiles) -> None:
+        cgroup.write(cgroup.proc, '4:memory:/docker/abc\n0::/docker/abc\n')
+        cgroup.write(cgroup.v1_group('docker/abc'), f'{_GIB}\n')
+        cgroup.write(cgroup.v2_group('docker/abc'), 'max\n')
+
+        assert cgroup.read() == CgroupLimit(limit_bytes=_GIB)
+
+    def test_a_v1_group_not_mounted_inside_reads_the_mount_point(
+        self,
+        cgroup: _CgroupFiles,
+    ) -> None:
+        """A container on cgroup v1 sees its own group at the mount point,
+        while ``/proc/self/cgroup`` names its path on the host."""
+        cgroup.write(cgroup.proc, '4:memory:/docker/abc\n')
+        cgroup.write(cgroup.v1, f'{_GIB}\n')
+
+        assert cgroup.read() == CgroupLimit(limit_bytes=_GIB)
+
+    def test_a_path_that_leaves_the_mount_point_reads_the_mount_point(
+        self,
+        cgroup: _CgroupFiles,
+    ) -> None:
+        cgroup.write(cgroup.proc, '0::/../outside\n')
+        cgroup.write(cgroup.v2, f'{_GIB}\n')
+
+        assert cgroup.read() == CgroupLimit(limit_bytes=_GIB)
+
+    def test_an_unreadable_file_on_the_path_is_unreadable(
+        self,
+        cgroup: _CgroupFiles,
+    ) -> None:
+        cgroup.write(cgroup.proc, '0::/workers.slice/worker.service\n')
+        cgroup.write(cgroup.v2_group('workers.slice'), 'lots\n')
+
+        outcome = cgroup.read()
+
+        assert outcome == CgroupUnreadable(
+            reason=f"{cgroup.v2_group('workers.slice')}: unexpected content 'lots'",
+        )
+
+    def test_a_group_with_no_limit_file_on_its_path_has_no_limit(
+        self,
+        cgroup: _CgroupFiles,
+    ) -> None:
+        cgroup.write(cgroup.proc, '0::/user.slice/session.scope\n')
+
+        assert cgroup.read() == NoCgroupLimit()
 
 
 class TestUsableMemory:
