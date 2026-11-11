@@ -98,6 +98,36 @@ class TestPostgresConfigPgBouncer:
 
         assert 'worker_pool_size' not in kwargs
         assert 'worker_max_overflow' not in kwargs
+        assert 'worker_pool_pre_ping' not in kwargs
+
+    def test_the_worker_process_does_not_pre_ping_by_default(self) -> None:
+        """The worker's writes are one statement in autocommit; a pre-ping
+        would double their round trips. Producer engines keep theirs, also
+        the one that task code in a child sends with."""
+        config = PostgresConfig(
+            database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+        )
+
+        assert config.worker_pool_pre_ping is False
+        assert config.sqlalchemy_engine_kwargs()['pool_pre_ping'] is True
+        child_send = config.worker_runtime_config().sqlalchemy_engine_kwargs()
+        assert child_send['pool_pre_ping'] is True
+        worker = config.worker_process_config()
+        assert worker.sqlalchemy_engine_kwargs()['pool_pre_ping'] is False
+        assert (worker.pool_size, worker.max_overflow) == (3, 2)
+
+    def test_the_worker_process_pre_pings_when_set(self) -> None:
+        config = PostgresConfig(
+            database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+            pool_pre_ping=False,
+            worker_pool_pre_ping=True,
+        )
+
+        assert config.sqlalchemy_engine_kwargs()['pool_pre_ping'] is False
+        child_send = config.worker_runtime_config().sqlalchemy_engine_kwargs()
+        assert child_send['pool_pre_ping'] is False
+        worker = config.worker_process_config()
+        assert worker.sqlalchemy_engine_kwargs()['pool_pre_ping'] is True
 
     @pytest.mark.parametrize(
         ('field', 'value'),

@@ -113,7 +113,9 @@ horsies worker myapp.instance:app --profile default
 | `worker_child_pool_max_size=N` | `2` | `IsolatedChildren(pool=IsolatedPool(max_size=PoolSize(connections=N)))`, `SharedAsyncChildren(pool=SharedPool(max_size=PoolSize(connections=N)))`, `SharedThreadChildren(pool=SharedPool(max_size=PoolSize(connections=N)))` |
 | `worker_child_pool_check=False` | `True` | `IsolatedChildren(pool=IsolatedPool(check=False))`, `SharedAsyncChildren(pool=SharedPool(check=False))`, `SharedThreadChildren(pool=SharedPool(check=False))` |
 
-The isolated defaults are the 0.6.x defaults: 0 to 2 connections, checked on checkout. A shared child derives its pool size from its seats by default (`PoolSizeFromSeats()`); see [Sizes Derived from the Seats](/horsies/workers/worker-profiles/#sizes-derived-from-the-seats).
+An isolated child keeps the 0.6.x size by default: 0 to 2 connections. The checkout check is off by default in 0.7.0 (it was on in 0.6.x): each connection of a child pool is in autocommit, and each write of a child is one statement, so the check doubled its round trips. Set `check=True` on the `pool` of a kind to keep it. A shared child derives its pool size from its seats by default (`PoolSizeFromSeats()`); see [Sizes Derived from the Seats](/horsies/workers/worker-profiles/#sizes-derived-from-the-seats).
+
+The worker process no longer pre-pings its pooled connections by default. `PostgresConfig.worker_pool_pre_ping` (default `False`) sets it; `pool_pre_ping` applies to the other engines only. Set `worker_pool_pre_ping=True` to keep the 0.6.x behavior. See [Health Checks at High RTT](/horsies/configuration/remote-postgres/#health-checks-at-high-rtt).
 
 A config that still sets a removed field fails when it is built, with every such field in one report:
 

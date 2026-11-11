@@ -104,8 +104,7 @@ inside a small slot budget.
 ## Prefetch Hides Round Trips
 
 With `prefetch_buffer=0` (the default), a worker claims new tasks only
-when a process slot is free, and each claim pass costs several round
-trips. At 30ms+ RTT this serializes into the task rate and caps
+when a process slot is free, and each claim pass costs a round trip. At 30ms+ RTT this serializes into the task rate and caps
 throughput near the number of children in tasks per second, regardless of task duration.
 
 Set a prefetch buffer and claim lease for remote deployments:
@@ -126,17 +125,42 @@ Soft-cap semantics and fairness trade-offs are covered in
 
 ## Health Checks at High RTT
 
-Two settings health-check pooled connections on every checkout, costing
-one round trip each:
+Three settings can check a pooled connection on each checkout, at one
+round trip each:
 
 | Setting | Default | Scope |
 |---------|---------|-------|
-| `pool_pre_ping` | `True` | coordinator and producer engines |
-| `check` of `IsolatedPool` and `SharedPool` | `True` | the pool of each child, per child kind in the worker profile |
+| `worker_pool_pre_ping` | `False` | the engine of the worker process |
+| `pool_pre_ping` | `True` | every other engine: producers, the web UI, task sends from a child |
+| `check` of `IsolatedPool` and `SharedPool` | `False` | the pool of each child, per child kind in the worker profile |
 
-On a low-latency network the cost is unmeasurable. At 30ms+ RTT the
-checks consume roughly 20% of the per-task statement budget. Disable both
-for busy remote workers:
+The worker and its children send most writes as one statement in
+autocommit, so a check doubles their round trips. At the defaults:
+
+| Write | Sender | Round trips |
+|-------|--------|-------------|
+| Finalize of a plain task that succeeded (attempt, history row, capacity wake) | worker | 1 |
+| Claim pass (`horsies_claim`) | worker | 1 |
+| Capacity wake in phase 2 of a plain task; wake of a retry that comes due | worker | 1 |
+| RUNNING update of a plain task, with its first runner heartbeat | child | 1 |
+| Finalizing marker | child | 1 |
+| RUNNING update of a workflow task and the start of its node | child | 4 (BEGIN, update, node, COMMIT) |
+
+Without a check, a connection that died while idle fails the first
+statement instead of a transparent reconnect:
+
+- The finalize of the worker is a retryable connection error. The worker
+  runs it again on a new connection, and a statement whose reply was lost
+  is classified on that run, so it is not applied twice.
+- The claim loop retries a pass that failed with a connection error.
+- A RUNNING update of a child ends as `OWNERSHIP_UNCONFIRMED`: the task
+  stays `CLAIMED` until its claim lease returns it to the queue. A failed
+  finalizing marker is logged; the runner heartbeats of the worker cover
+  the row until the worker reads the end of the task.
+
+Turn the checks on for workers that sit idle for long stretches behind
+NAT or load balancers that kill idle connections, where stale connections
+occur:
 
 ```python
 from horsies import (
@@ -152,35 +176,26 @@ from horsies import (
 config = AppConfig(
     broker=PostgresConfig(
         database_url=SecretStr(os.environ['DATABASE_URL']),
-        pool_pre_ping=False,
+        worker_pool_pre_ping=True,
     ),
     worker_profiles={
-        'remote': WorkerProfile(
-            isolated=IsolatedChildren(count=8, pool=IsolatedPool(check=False)),
+        'idle_behind_nat': WorkerProfile(
+            isolated=IsolatedChildren(count=8, pool=IsolatedPool(check=True)),
             shared_async=SharedAsyncChildren(
                 count=2,
                 seats=50,
-                pool=SharedPool(check=False),
+                pool=SharedPool(check=True),
             ),
         ),
     },
 )
 ```
 
-Without checks, a connection that died while idle surfaces as a failed
-first statement instead of a transparent reconnect. Coordinator
-operations retry through the worker's resilience machinery; a failed
-pre-execution transition leaves the task `CLAIMED` until the
-[reaper](/horsies/workers/heartbeats-recovery/) requeues it
-(`claimed_stale_threshold_ms`, default 120s). Keep the checks enabled for
-workers that sit idle for long stretches behind NAT or load balancers
-that kill idle connections — those are the deployments where stale
-connections actually occur.
-
 ## TCP Keepalives for Idle Pooled Connections
 
-`pool_pre_ping` and the `check` of each child pool are checkout-time guards: they
-detect a dead connection *before* a query runs, not one that dies in-flight.
+`pool_pre_ping`, `worker_pool_pre_ping` and the `check` of each child pool are
+checkout-time guards: they detect a dead connection *before* a query runs, not
+one that dies in-flight.
 An idle pooled connection reaped server-side between checkouts surfaces as a
 mid-query `OperationalError` on the next claim or heartbeat — absorbed by the
 worker's retry loop, but logged as noise.
@@ -210,14 +225,14 @@ config = AppConfig(
 
 Keepalives probe only an idle connection. When a connection dies without a
 reset from the server side and horsies then writes to it (for example, the
-child pool's health check on checkout), the sent data stays unacknowledged.
+first statement on a pooled connection), the sent data stays unacknowledged.
 Keepalives do not probe in that state, so the kernel retransmission limit
 decides: about 15 minutes on Linux with the default `tcp_retries2=15`. The
 worker process is blocked for that time, and the pool's 30-second checkout
 timeout applies only after the write fails.
 
 `tcp_user_timeout_ms` (default `30000`) sets libpq `tcp_user_timeout`. Data
-that stays unacknowledged for that time closes the connection, so the check
+that stays unacknowledged for that time closes the connection, so the write
 fails within 30 seconds and the pool opens a new connection. The setting
 applies to the broker engines, each child-process pool, and the
 LISTEN/NOTIFY listener. It has an effect only on systems that support

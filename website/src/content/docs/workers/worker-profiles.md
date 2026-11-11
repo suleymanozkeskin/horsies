@@ -138,7 +138,7 @@ remote_profile = WorkerProfile(
 The worker logs the resolved values of each kind in its start line:
 
 ```text
-Worker profile 'remote': isolated=4 (recycle after 100 tasks, above no limit; pool 0 to 1 connections, check off), shared_async=2x100 seats (recycle after 100 tasks per seat, above no limit; pool 2 to 8 connections, check on; executor 16 threads), shared_thread=1x16 seats (recycle after 100 tasks per seat, above no limit; pool 0 to 4 connections, derived from seats, check on), ...
+Worker profile 'remote': isolated=4 (recycle after 100 tasks, above no limit; pool 0 to 1 connections, check off), shared_async=2x100 seats (recycle after 100 tasks per seat, above no limit; pool 2 to 8 connections, check off; executor 16 threads), shared_thread=1x16 seats (recycle after 100 tasks per seat, above no limit; pool 0 to 4 connections, derived from seats, check off), ...
 ```
 
 ### Sizes Derived from the Seats
@@ -229,7 +229,7 @@ A shared child that reaches a limit closes: it takes no new task, its running ta
 |-------|------|---------|-------------|
 | `min_size` | `int` | `0` | Connections that the pool keeps open, 0 to 1000. With 0, a connection opens at its first use |
 | `max_size` | `PoolSize` | `PoolSize(connections=2)` | The most connections of the pool |
-| `check` | `bool` | `True` | Check each connection when a write takes it from the pool: one database round trip per checkout. See [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
+| `check` | `bool` | `False` | Check each connection when a write takes it from the pool: one database round trip per checkout. Each connection is in autocommit, and a write of the child is one statement, so the check doubles its round trips. Off, a dead connection fails the write that takes it. See [Remote PostgreSQL](/horsies/configuration/remote-postgres/#health-checks-at-high-rtt) |
 
 ### `SharedPool`
 
@@ -237,7 +237,7 @@ A shared child that reaches a limit closes: it takes no new task, its running ta
 |-------|------|---------|-------------|
 | `min_size` | `int` | `0` | Connections that the pool keeps open, 0 to 1000. With 0, a connection opens at its first use |
 | `max_size` | `PoolSize \| PoolSizeFromSeats` | `PoolSizeFromSeats()` | The most connections of the pool. See [Sizes Derived from the Seats](#sizes-derived-from-the-seats) |
-| `check` | `bool` | `True` | Check each connection when a write takes it from the pool, as for `IsolatedPool` |
+| `check` | `bool` | `False` | Check each connection when a write takes it from the pool, as for `IsolatedPool` |
 
 Validation refuses a `min_size` above the resolved `max_size` of the pool.
 

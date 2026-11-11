@@ -22,9 +22,10 @@ from typing import Any, LiteralString, assert_never, cast
 
 from psycopg import AsyncCursor
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
 
 from ..logging import get_logger
+from ..utils.db import SingleStatement, run_in_autocommit
 from .commands import (
     AbandonNodesOfPausedWorkflows,
     AbandonOwnedNode,
@@ -76,6 +77,13 @@ type ExecutableCommand = (
     | AbandonOwnedNode
     | CancelOwnedNode
 )
+
+# The commands that are complete in one statement: the function checks the
+# full claim generation itself, writes the coupled rows (attempt, history,
+# capacity NOTIFY) in the same call, and writes nothing when it refuses. Only
+# these may run in autocommit. A locked command relies on the caller's
+# SELECT ... FOR UPDATE in the same transaction, so it is not one of them.
+type AutocommitCommand = CompleteTaskFused | CancelOwnedOrphan
 
 # Batch operations return zero or more rows, so they cannot share the
 # single-task adapters: exactly-one-row is a contract worth keeping honest
@@ -440,6 +448,33 @@ async def apply_async(
     statement, parameters = call_for(command)
     result = await connection.execute(statement, parameters)
     outcome = decode_outcome_row(_single_row(result.mappings().all(), command))
+    _log_outcome(command, outcome)
+    return outcome
+
+
+async def apply_in_autocommit(
+    session_factory: async_sessionmaker[AsyncSession],
+    command: AutocommitCommand,
+) -> TerminalizationOutcome:
+    """Execute a one-statement command as its own transaction.
+
+    The call runs through ``run_in_autocommit``: one round trip with the
+    pool pre-ping off. ``Applied`` is committed when this returns. A refusal
+    (``AlreadyApplied``, ``LostClaim``, ``SourceStateConflict``,
+    ``TaskAbsent``) wrote nothing, so there is nothing to roll back.
+
+    Raises:
+        Exception: what ``run_in_autocommit`` raises. A connection error
+            after the call was sent leaves the outcome unknown; a replay of
+            the same command classifies it (``AlreadyApplied`` when it
+            committed).
+    """
+    statement, parameters = call_for(command)
+    rows = await run_in_autocommit(
+        session_factory,
+        SingleStatement(statement=statement, parameters=parameters),
+    )
+    outcome = decode_outcome_row(_single_row(rows.mappings(), command))
     _log_outcome(command, outcome)
     return outcome
 

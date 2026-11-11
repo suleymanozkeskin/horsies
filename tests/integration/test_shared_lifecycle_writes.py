@@ -41,6 +41,11 @@ from tests.integration.test_pause_abandon_after_resume import (
     _node_and_task,
     _seed_paused_workflow_with_claimed_node,
 )
+from tests.integration.test_workflow_node_handoff import (
+    WORKER_ID as NODE_WORKER_ID,
+    _seed_claimed_workflow_task,
+    _seed_running_workflow_with_node,
+)
 
 pytestmark = [pytest.mark.integration]
 
@@ -285,3 +290,30 @@ async def test_a_paused_workflow_abandons_the_claim_through_the_async_path(
         task_id,
     )
     assert (node_status, node_task, workflow_status) == ('READY', None, 'PAUSED')
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_a_failed_workflow_check_undoes_the_running_update(
+    session: AsyncSession,
+    shared_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """The pool is in autocommit, and a workflow task's start runs in its own
+    transaction: a node that is not linked rolls back the RUNNING update and
+    its first beat."""
+    claimed_at = datetime.now(timezone.utc) - timedelta(seconds=5)
+    task_id = await _seed_claimed_workflow_task(session, claimed_at)
+    await _seed_running_workflow_with_node(session, task_id, 'COMPLETED')
+    await session.commit()
+
+    result = await confirm_until_not_resumed(
+        shared_pool,
+        task_id,
+        NODE_WORKER_ID,
+        True,
+        claimed_at,
+    )
+
+    assert result == (False, '', 'WORKFLOW_CHECK_FAILED')
+    assert (await _row(session, task_id)).status == 'CLAIMED'
+    assert await _runner_beats(session, task_id) == []

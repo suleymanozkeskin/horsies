@@ -7,6 +7,12 @@ it. A shared async child opens an async pool on its event loop instead
 Each has the bounds of the ``pool`` of the child kind in the worker profile
 (``IsolatedChildren.pool``, ``SharedAsyncChildren.pool``,
 ``SharedThreadChildren.pool``), which the parent sends in the init frame.
+
+Every connection of these pools is in autocommit: a statement is its own
+transaction, and a one-statement write is one round trip, with no BEGIN and
+no COMMIT. A write that needs several statements to commit together opens a
+transaction itself with an explicit ``BEGIN`` and ends it with ``commit()``
+or ``rollback()`` (``child_runner``, ``shared_lifecycle``).
 """
 
 from __future__ import annotations
@@ -31,6 +37,14 @@ thread child can wait for each other here."""
 SHARED_POOL_CONNECTION_WAIT_S: Final = CHILD_POOL_CONNECTION_WAIT_S
 """The longest wait of a lifecycle write of a shared async child for a pooled
 connection: the same wait as for the sync pool."""
+
+
+def autocommit_connect_kwargs(
+    connect_kwargs: Mapping[str, object] | None,
+) -> dict[str, object]:
+    """The psycopg connect kwargs of a child pool: ``connect_kwargs`` with
+    autocommit on. Does no I/O."""
+    return {**(connect_kwargs or {}), 'autocommit': True}
 
 
 # ---------- Per-process connection pool (initialized in child processes) ----------
@@ -64,7 +78,7 @@ def _initialize_worker_pool(
     connect_kwargs: Mapping[str, object] | None = None,
     min_size: int = 0,
     max_size: int = 2,
-    check_on_checkout: bool = True,
+    check_on_checkout: bool = False,
 ) -> None:
     """
     Initialize the per-process connection pool.
@@ -76,7 +90,11 @@ def _initialize_worker_pool(
         connect_kwargs: psycopg connect kwargs for each pooled connection
             (TCP keepalives, plus prepare_threshold=None under PgBouncer
             transaction mode). Built once from
-            ``PostgresConfig.pooled_connect_args``.
+            ``PostgresConfig.pooled_connect_args``. The pool adds
+            ``autocommit=True``.
+        check_on_checkout: check each connection when a write takes it
+            from the pool, one round trip each. Off by default, as the
+            ``check`` of ``IsolatedPool`` and ``SharedPool``.
 
     Raises:
         ValueError: invalid pool sizing.
@@ -110,7 +128,7 @@ def _initialize_worker_pool(
         check=check,
         open=False,
         timeout=CHILD_POOL_CONNECTION_WAIT_S,
-        kwargs=dict(connect_kwargs) if connect_kwargs else {},
+        kwargs=autocommit_connect_kwargs(connect_kwargs),
     )
     # The open starts the threads of the pool, and starts nothing else that
     # raises RuntimeError: such an error is a refused thread start.
@@ -132,8 +150,8 @@ async def open_shared_async_pool(
 ) -> AsyncConnectionPool[AsyncConnection[Any]]:
     """Open the async pool of a shared async child, on the running loop.
 
-    The sizes and the checkout check are those of the sync pool of an
-    isolated child. Opens without a connection when ``min_size`` is 0; an
+    The sizes, the checkout check and autocommit are those of the sync pool
+    of an isolated child. Opens without a connection when ``min_size`` is 0; an
     unreachable database shows at the first write, inside its containment.
 
     Raises:
@@ -156,7 +174,7 @@ async def open_shared_async_pool(
         check=check,
         open=False,
         timeout=SHARED_POOL_CONNECTION_WAIT_S,
-        kwargs=dict(connect_kwargs),
+        kwargs=autocommit_connect_kwargs(connect_kwargs),
     )
     await pool.open(wait=False)
     return pool

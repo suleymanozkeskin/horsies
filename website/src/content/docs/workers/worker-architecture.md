@@ -133,7 +133,7 @@ Key features:
 
 In child process:
 
-1. Set the row RUNNING, with the first runner heartbeat in the same transaction
+1. Set the row RUNNING, with the first runner heartbeat in the same statement. A workflow task also sets its node RUNNING, in one transaction with the row
 2. Resolve task from registry by name
 3. Deserialize arguments
 4. Call task function. An `async def` task runs on the event loop that the child created at boot. The child keeps that loop until it stops, and the loop runs only while an async task runs
@@ -150,6 +150,12 @@ Main process receives result from child:
 2. Check for retry eligibility
 3. Update task status (COMPLETED or FAILED)
 4. Send NOTIFY for result waiters
+
+A plain task that succeeded takes one statement, in autocommit: it checks the
+claim generation, writes the attempt, moves the row to the history, and wakes
+the workers of the queue. That is one database round trip with the defaults
+(`PostgresConfig.worker_pool_pre_ping=False`). A lost reply is a retryable
+error, and the run that retries it finds the task already applied.
 
 ## Shared Async Children
 
@@ -333,7 +339,11 @@ poll-only dispatch if `LISTEN` is unavailable.
 Child database pools are initialized inside the child process. Psycopg
 connections are not process-safe. A child starts with `exec`, so it inherits no
 parent database socket. Child DB connections remain lazy by default: the `min_size` of each child
-pool is 0. An isolated child uses one connection at a time: for the RUNNING
+pool is 0. Each connection of a child pool is in autocommit: the RUNNING update
+of a plain task and the finalizing mark are one statement each, and one round
+trip each with the checkout `check` off (the default). The RUNNING update of a
+workflow task and the start of its node run in one transaction. An isolated
+child uses one connection at a time: for the RUNNING
 update, and for the finalizing mark. Its pool is `IsolatedChildren.pool`, 0 to
 2 connections by default; see
 [Connection Pools and the Default Executor](/horsies/workers/worker-profiles/#connection-pools-and-the-default-executor). The seats of a

@@ -19,7 +19,11 @@ from horsies.core.codec.json_io import loads_json
 from horsies.core.logging import get_logger
 from horsies.core.models.tasks import OperationalErrorCode
 from horsies.core.types.result import Err, Ok, Result, is_err
-from horsies.core.utils.db import is_retryable_connection_error
+from horsies.core.utils.db import (
+    SingleStatement,
+    is_retryable_connection_error,
+    run_in_autocommit,
+)
 from horsies.core.worker.runtime import _RetryError
 from horsies.core.worker.shared_stop import RetryPlacement
 from horsies.core.worker.sql import (
@@ -343,17 +347,23 @@ class RetryMixin:
     async def _schedule_delayed_notification(
         self, delay_seconds: float, channel: str, payload: str
     ) -> None:
-        """Schedule a delayed notification to wake up the worker for retry."""
+        """Wake the workers of ``channel`` when a retry comes due.
+
+        The NOTIFY is one statement in autocommit (``run_in_autocommit``). A
+        failed wake is logged: the retried row is PENDING with its
+        ``next_retry_at``, and the claim loop also finds it by polling.
+        """
         try:
             await asyncio.sleep(delay_seconds)
 
             # Send notification to trigger retry processing
-            async with self.sf() as session:
-                await session.execute(
-                    NOTIFY_DELAYED_SQL,
-                    {'channel': channel, 'payload': payload},
-                )
-                await session.commit()
+            _ = await run_in_autocommit(
+                self.sf,
+                SingleStatement(
+                    statement=NOTIFY_DELAYED_SQL,
+                    parameters={'channel': channel, 'payload': payload},
+                ),
+            )
 
             logger.debug(f'Sent delayed notification for retry: {payload}')
         except asyncio.CancelledError:
