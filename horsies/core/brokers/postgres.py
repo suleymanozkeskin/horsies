@@ -1672,13 +1672,16 @@ class PostgresBroker:
             # v54: the class-keyed pending claim index.
             # v55: the class-keyed expired claim index.
             await install_claim_indexes(engine)
+            await self._activate_bounded_recovery(engine)
+            # After the version row commits, so a failed upgrade leaves the
+            # earlier claim function the indexes it reads:
             # v43: drop the task retention indexes that no query reads.
             # v45: drop the workflow-node indexes that the workflow-scoped
             # indexes make redundant.
-            # v55: drop the claim indexes that have no class in their key,
-            # after the class-keyed ones exist.
+            # v55: drop the claim indexes that have no class in their key.
+            # A removal that fails here leaves those indexes until the next
+            # schema upgrade, which runs it again.
             await remove_retired_indexes(engine)
-            await self._activate_bounded_recovery(engine)
 
     async def _add_task_execution_column(self, engine: AsyncEngine) -> None:
         """Add horsies_tasks.execution and its value domain (v54), in one

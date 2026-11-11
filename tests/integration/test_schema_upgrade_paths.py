@@ -2858,3 +2858,94 @@ class TestExactIndexInstall:
         finally:
             await engine.dispose()
 
+
+class TestRetiredClaimIndexes:
+    """The claim indexes without a class stay until the version row of the
+    upgrade that replaces the claim pair has committed."""
+
+    RETIRED = (
+        'idx_horsies_tasks_claim_pending',
+        'idx_horsies_tasks_claim_expired_ordered',
+    )
+
+    async def _add_retired(self, engine: AsyncEngine) -> None:
+        async with engine.connect() as connection:
+            await connection.execute(
+                text(
+                    'CREATE INDEX idx_horsies_tasks_claim_pending '
+                    'ON horsies_tasks (queue_name, priority, enqueued_at, id) '
+                    "WHERE status = 'PENDING'"
+                )
+            )
+            await connection.execute(
+                text(
+                    'CREATE INDEX idx_horsies_tasks_claim_expired_ordered '
+                    'ON horsies_tasks (queue_name, priority, enqueued_at, id) '
+                    "WHERE status = 'CLAIMED'"
+                )
+            )
+            await connection.execute(
+                text('DELETE FROM horsies_schema_version WHERE version > 54')
+            )
+            await connection.execute(
+                text(
+                    'INSERT INTO horsies_schema_version (version) VALUES (54) '
+                    'ON CONFLICT DO NOTHING'
+                )
+            )
+            await connection.commit()
+
+    async def _present(self, engine: AsyncEngine) -> set[str]:
+        async with engine.connect() as connection:
+            rows = (
+                await connection.execute(
+                    text("""
+                        SELECT relname::text FROM pg_class
+                        WHERE relname = ANY(CAST(:names AS text[]))
+                    """),
+                    {'names': list(self.RETIRED)},
+                )
+            ).all()
+        return {str(row[0]) for row in rows}
+
+    async def test_a_failed_activation_keeps_the_retired_claim_indexes(
+        self,
+        scratch_database: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The transaction that installs the claim pair and writes the version
+        row fails and rolls back: the database stays at v54, and the claim
+        indexes that its claim function reads are still there. The next
+        upgrade drops them after its version row commits."""
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            await self._add_retired(engine)
+
+            async def _failing_activation(self: PostgresBroker, engine: Any) -> None:
+                raise RuntimeError('activation failed')
+
+            with monkeypatch.context() as patch:
+                patch.setattr(
+                    PostgresBroker,
+                    '_activate_bounded_recovery',
+                    _failing_activation,
+                )
+                broker = PostgresBroker(
+                    PostgresConfig(database_url=SecretStr(scratch_database))
+                )
+                try:
+                    failed = await broker.ensure_schema_initialized()
+                finally:
+                    await broker.close_async()
+
+            assert failed.is_err()
+            assert await _stored_version(engine) == 54
+            assert await self._present(engine) == set(self.RETIRED)
+
+            await _migrate(scratch_database)
+
+            assert await _stored_version(engine) == SCHEMA_VERSION
+            assert await self._present(engine) == set()
+        finally:
+            await engine.dispose()

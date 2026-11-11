@@ -347,7 +347,9 @@ there is no migration contract between pre-1.0 versions.
   - v55 builds `idx_horsies_tasks_claim_expired_class` on `(queue_name,
     execution, priority, enqueued_at, id)` over CLAIMED rows concurrently,
     and drops `idx_horsies_tasks_claim_pending` and
-    `idx_horsies_tasks_claim_expired_ordered` concurrently. Each claim stream
+    `idx_horsies_tasks_claim_expired_ordered` concurrently after its version
+    row commits, so an upgrade that fails leaves the earlier claim function
+    the indexes it reads. Each claim stream
     is one range of `idx_horsies_tasks_claim_pending_class` or of the new
     index. With 50,000 expired leases in one queue, the expired stream of a
     class with no rows reads 142 buffers on the new index and 7,848 on the
