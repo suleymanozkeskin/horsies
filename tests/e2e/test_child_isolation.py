@@ -37,7 +37,7 @@ INSTANCE = 'tests.e2e.tasks.instance_child_isolation:app'
 PREFETCH_INSTANCE = 'tests.e2e.tasks.instance_child_isolation_prefetch:app'
 SLOW_START_S = 60.0
 FINISH_TIMEOUT_S = 40.0
-# Past running_stale_threshold_ms of the isolation instance (5 s).
+# Past running_stale_threshold_ms of the isolation instance (6 s).
 GIL_HOLD_S = 8
 
 
@@ -299,7 +299,7 @@ async def test_a_task_that_holds_the_gil_is_not_failed_as_stale(
     isolation_broker: PostgresBroker,
 ) -> None:
     """The worker process writes runner heartbeats, so C code that holds the
-    child's GIL past running_stale_threshold_ms (5 s here) cannot stop them."""
+    child's GIL past running_stale_threshold_ms (6 s here) cannot stop them."""
     with _worker(
         INSTANCE,
         children=1,

@@ -48,7 +48,7 @@ horsies worker myapp.instance:app --profile default --loglevel=DEBUG
 horsies worker app/configs/instance.py:app --profile default
 ```
 
-At boot, before any child starts, the worker logs the settings of the profile, and warns when the per-child memory limits add up to more than the memory that the worker can use (the container limit, or the host RAM), or when one worker can open more Postgres connections than the server has usable slots. See [Validation](/horsies/workers/worker-profiles/#validation).
+At boot, before any child starts, the worker logs the settings of the profile, and warns when the per-child memory limits add up to more than the memory that the worker can use (the container limit, or the host RAM), or when one worker opens more Postgres connections itself than the server has usable slots. See [Validation](/horsies/workers/worker-profiles/#validation).
 
 ### horsies scheduler
 
@@ -86,7 +86,7 @@ Validate configuration, task registration, workflow structure, and optionally br
 
 For details on validation phases, `@app.workflow_builder`, the guarantee model, and CI usage, see [Startup Validation](../configuration/app-config#startup-validation-appcheck).
 
-`horsies check` validates every worker profile of the app, and each error names the profile and the field path (`HRS-218`). With `--live`, a profile whose worker can open more Postgres connections than the server has usable slots is an error (`HRS-219`). See [Worker Profiles](/horsies/workers/worker-profiles/#validation).
+`horsies check` validates every worker profile of the app, and each error names the profile and the field path (`HRS-218`). With `--live`, a profile whose worker opens more Postgres connections itself than the server has usable slots is an error (`HRS-219`). The error also states the connections that task code that sends adds. See [Worker Profiles](/horsies/workers/worker-profiles/#validation).
 
 ```bash
 horsies check <module> [OPTIONS]

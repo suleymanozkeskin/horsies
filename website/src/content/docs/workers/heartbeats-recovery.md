@@ -52,6 +52,8 @@ With `auto_fail_stale_running=True` (the default), the worker fails closed, so t
 
 If the worker has not stopped 120 seconds later, it exits with code 77. A failed write is tried again within that half, after 0.25 s and then after doubling waits of at most 5 s.
 
+The half counts from when the last heartbeat landed. Heartbeats land one `runner_heartbeat_interval_ms` apart, plus the time the next one takes to land. So `RecoveryConfig` refuses, with `HRS-204`, a `running_stale_threshold_ms` below `2 × (runner_heartbeat_interval_ms + 2 s)` while `auto_fail_stale_running` is on. At that smallest threshold, a heartbeat that takes more than 2 s to land stops the worker. The reaper may count a heartbeat from the start of its write. So after a heartbeat whose write took almost the whole half, the worker stops 0.5 s before `running_stale_threshold_ms` has passed from the start of that write.
+
 Each killed task takes the [child crash](#child-process-crash) path when the worker can still reach the database, and stale RUNNING recovery when it cannot.
 
 With `auto_fail_stale_running=False`, or with no recovery config, no reaper fails a RUNNING row, so a missing heartbeat puts no running task at risk. The worker keeps running. It logs failed writes and late heartbeats, and a dead heartbeat thread once.
@@ -176,23 +178,28 @@ config = AppConfig(
 
 ## Timing Guidelines
 
-### Rule: Threshold >= 2x Interval
+### Rule: Thresholds Hold the Heartbeats
 
-Stale thresholds must be at least 2x the heartbeat interval:
+- With `auto_fail_stale_running=True` (the default): `running_stale_threshold_ms >= 2 × (runner_heartbeat_interval_ms + 2_000)`. The worker stops when no heartbeat lands for half of the threshold, and that half must hold one interval plus the time the next heartbeat takes to land.
+- With `auto_fail_stale_running=False`: `running_stale_threshold_ms >= 2 × runner_heartbeat_interval_ms`.
+- `finalizing_stale_threshold_ms >= 2 × runner_heartbeat_interval_ms`.
+- `claimed_stale_threshold_ms >= 2 × claimer_heartbeat_interval_ms`.
+
+A config that breaks a rule raises `ConfigurationError` with code `HRS-204`, which names the fields and the smallest valid value.
 
 <!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # Valid
 RecoveryConfig(
     runner_heartbeat_interval_ms=30_000,  # 30s
-    running_stale_threshold_ms=60_000,    # 60s (2x)
+    running_stale_threshold_ms=64_000,    # 64s = 2 x (30s + 2s)
     finalizing_stale_threshold_ms=60_000, # 60s (2x)
 )
 
-# Invalid - will raise ValueError
+# Invalid - raises ConfigurationError (HRS-204)
 RecoveryConfig(
     runner_heartbeat_interval_ms=30_000,  # 30s
-    running_stale_threshold_ms=30_000,    # 30s (too tight!)
+    running_stale_threshold_ms=60_000,    # half is 30s: no time for a heartbeat to land
 )
 ```
 
@@ -207,9 +214,11 @@ Fast tasks can use tighter detection:
 ```python
 RecoveryConfig(
     runner_heartbeat_interval_ms=10_000,   # 10 seconds
-    running_stale_threshold_ms=30_000,     # 30 seconds
+    running_stale_threshold_ms=40_000,     # 40 seconds
 )
 ```
+
+The worker stops when no heartbeat lands for 20 seconds, so a heartbeat may take up to 10 seconds to land.
 
 ### Recovery Time After a Worker Stops
 
@@ -329,7 +338,7 @@ RecoveryConfig(
 
 ### Worker Exits With a Runner Heartbeat Error
 
-The log names the cause: the heartbeat thread died, or no heartbeat landed for half of `running_stale_threshold_ms`, with the last database error. Check the database connectivity of the worker host. Under a slow database, raise `running_stale_threshold_ms`: the worker stops after half of it.
+The log names the cause: the heartbeat thread died, or no heartbeat landed for half of `running_stale_threshold_ms`, with the last database error. Check the database connectivity of the worker host. Under a slow database, raise `running_stale_threshold_ms`: the worker stops after half of it, and a heartbeat may take that half less one `runner_heartbeat_interval_ms` to land.
 
 ### Tasks Not Recovering
 

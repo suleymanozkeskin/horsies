@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+from collections.abc import Coroutine
 from typing import Any
 
 import pytest
@@ -250,6 +251,26 @@ class TestRunChildStartHooks:
         assert calls == []
 
 
+class _AsyncCallHook:
+    """A hook object whose ``__call__`` is ``async def``."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def __call__(self) -> None:
+        await asyncio.sleep(0)
+        self.calls += 1
+
+
+class _SyncCallHook:
+    def __call__(self) -> None:
+        pass
+
+
+def _sync_function() -> None:
+    pass
+
+
 class TestSharedAsyncHookRegistration:
     def test_an_async_def_hook_is_registered(self) -> None:
         app = _make_app()
@@ -277,6 +298,45 @@ class TestSharedAsyncHookRegistration:
         with pytest.raises(ConfigurationError) as raised:
             app.on_shared_async_child_start('nope')  # type: ignore[arg-type]
         assert raised.value.code == ErrorCode.CONFIG_INVALID_CHILD_HOOK
+
+    def test_an_object_with_an_async_call_is_registered(self) -> None:
+        app = _make_app()
+        hook = _AsyncCallHook()
+
+        app.on_shared_async_child_start(hook)
+
+        assert app.get_shared_async_child_start_hooks() == [hook]
+
+    def test_a_lambda_that_returns_a_coroutine_is_registered(self) -> None:
+        """A lambda can be neither async def nor annotated: the child awaits
+        its value."""
+        app = _make_app()
+
+        async def open_client(size: int) -> None:
+            del size
+
+        def hook() -> Coroutine[Any, Any, None]:
+            return open_client(10)
+
+        app.on_shared_async_child_start(hook)
+        as_lambda = lambda: open_client(10)  # noqa: E731
+        app.on_shared_async_child_start(as_lambda)
+
+        assert app.get_shared_async_child_start_hooks() == [hook, as_lambda]
+
+    @pytest.mark.parametrize(
+        'hook',
+        [_SyncCallHook(), _sync_function],
+        ids=['object with a sync call', 'def that returns None'],
+    )
+    def test_a_sync_callable_is_still_refused(self, hook: Any) -> None:
+        app = _make_app()
+
+        with pytest.raises(ConfigurationError) as raised:
+            app.on_shared_async_child_start(hook)
+
+        assert raised.value.code == ErrorCode.CONFIG_INVALID_CHILD_HOOK
+        assert app.get_shared_async_child_start_hooks() == []
 
     def test_a_second_registration_of_one_hook_is_ignored(self) -> None:
         app = _make_app()
@@ -322,6 +382,41 @@ class TestRunSharedAsyncHooks:
         self._run_on_app(app, monkeypatch)
 
         assert seen == [('first', True), ('second', True)]
+
+    def test_an_async_call_object_and_a_lambda_run_on_the_loop(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        app = _make_app()
+        hook = _AsyncCallHook()
+        seen: list[bool] = []
+
+        async def open_client() -> None:
+            seen.append(asyncio.get_running_loop().is_running())
+
+        app.on_shared_async_child_start(hook)
+        app.on_shared_async_child_start(lambda: open_client())
+        self._run_on_app(app, monkeypatch)
+
+        assert hook.calls == 1
+        assert seen == [True]
+
+    def test_a_lambda_whose_value_is_not_awaitable_fails_the_hook(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        app = _make_app()
+
+        def fake_exit(code: int) -> Any:
+            raise _ExitCalled(code)
+
+        monkeypatch.setattr(shared_runner.os, '_exit', fake_exit)
+        app.on_shared_async_child_start(lambda: None)  # type: ignore[arg-type, return-value]
+
+        with pytest.raises(_ExitCalled) as raised:
+            self._run_on_app(app, monkeypatch)
+
+        assert raised.value.code == CHILD_HOOK_FAILURE_EXIT_CODE
 
     def test_a_failing_hook_exits_173_and_skips_the_rest(
         self,

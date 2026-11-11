@@ -114,6 +114,33 @@ def test_a_child_can_hold_its_next_task_after_a_release() -> None:
     assert [d.task_id for d in live.snapshot()] == ['task-b']
 
 
+def test_run_kill_mark_runs_the_mark_of_that_child_only() -> None:
+    live = LiveDispatches(capacity=2)
+    marked: list[int] = []
+    live.register_kill_mark(101, lambda: marked.append(101))
+    live.register_kill_mark(102, lambda: marked.append(102))
+
+    live.run_kill_mark(101)
+
+    assert marked == [101]
+
+
+def test_release_child_drops_the_kill_mark() -> None:
+    """After a kill by the slot pool or an exit, the child has its own end."""
+    live = LiveDispatches(capacity=1)
+    marked: list[int] = []
+    live.register_kill_mark(101, lambda: marked.append(101))
+
+    _ = live.release_child(101)
+    live.run_kill_mark(101)
+
+    assert marked == []
+
+
+def test_a_child_with_no_kill_mark_runs_nothing() -> None:
+    LiveDispatches(capacity=1).run_kill_mark(101)
+
+
 def test_close_returns_what_is_held_and_refuses_later_holds() -> None:
     live = LiveDispatches(capacity=2)
     _held(live.hold(_frame('task-a'), pid=101, seats=1))

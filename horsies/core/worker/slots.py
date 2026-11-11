@@ -2733,11 +2733,21 @@ class SlotPool:
             await self._pause(delay_s)
 
     def _release_on_kill_or_exit(self, child: Child) -> None:
-        """Stop the runner heartbeat of this child's task at a kill or an exit."""
+        """Stop the runner heartbeat of this child's task at a kill or an exit.
+
+        A kill by the heartbeat watchdog marks the child as killed by the
+        worker first, as ``Child.kill_for_caller`` does.
+        """
 
         def release() -> None:
             _ = self._live_dispatches.release_child(child.pid)
 
+        def mark_killed_by_worker() -> None:
+            # Runs on the watchdog thread, before its SIGKILL. The loop reads
+            # the flag after it has seen the exit, which follows the kill.
+            child.killed_by_parent = True
+
+        self._live_dispatches.register_kill_mark(child.pid, mark_killed_by_worker)
         child.on_kill_sent = release
         child.notify_on_exit(release)
 

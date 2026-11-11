@@ -32,6 +32,11 @@ At defaults (`worker_pool_size=3`, `worker_max_overflow=2`,
 3 + 2 + 2 + 1 + 8 × 2 = 24 connections per worker
 ```
 
+Task code that sends through the app adds `worker_pool_size + worker_max_overflow`
+in its child for each event loop that it sends from: `8 × 5 = 40` more with one
+sending loop per child, `64` in all. See
+[Worker Profiles](/horsies/workers/worker-profiles/#connections).
+
 Producers hold their own engine pool (`pool_size + max_overflow`, default
 5 + 10) per resource set: one set for each event loop that makes broker calls,
 plus one for sync calls (see [Broker Config](/horsies/configuration/broker-config/#event-loops)).

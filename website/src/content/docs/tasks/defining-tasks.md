@@ -284,7 +284,7 @@ A `SHARED_ASYNC` task runs on a seat of a shared async child when the worker pro
 | HRS-110 | `TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC` | only `SHARED_ASYNC` takes `cancel_grace_ms` |
 | HRS-111 | `TASK_CANCEL_GRACE_OUT_OF_RANGE` | `cancel_grace_ms` is from 100 to 10,000 |
 
-When a declaration breaks more than one rule, the first rule in this order is reported. A type checker refuses the same declarations when `execution` is written as a member: the overloads require `timeout_ms` for a shared class, take `cancel_grace_ms` only with `SHARED_ASYNC`, and the decorator that they return accepts only the function kind of the class. A class that is known only at run time requires `timeout_ms`, and the decorator checks the other rules at run time.
+When a declaration breaks more than one rule, the first rule in this order is reported. A type checker refuses the same declarations when `execution` is written as a member: the overloads require `timeout_ms` for a shared class, and the decorator that they return accepts only the function kind of the class. With `cancel_grace_ms` and a member other than `SHARED_ASYNC`, the decorator accepts no function. A class that is known only at run time requires `timeout_ms` and takes `cancel_grace_ms`, and the decorator checks the other rules at run time.
 
 ### Register Tasks for Workers
 

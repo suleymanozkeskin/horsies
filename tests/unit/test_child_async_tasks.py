@@ -40,6 +40,7 @@ from horsies.core.models.workflow import NodeKey, WorkflowContext
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.process_role import ProcessRole
 from horsies.core.types.result import Err, Ok, is_ok
+from horsies.core.task_decorator import await_task_call_in_worker
 from horsies.core.utils.loop_runner import in_running_event_loop
 from horsies.core.worker import child_runner
 from horsies.core.worker.child_protocol import LoopHoldsNoTask
@@ -699,6 +700,160 @@ class TestASelfCancel:
 
         with pytest.raises(asyncio.CancelledError):
             asyncio.run(call_directly())
+
+
+class _Suspend:
+    """Suspends the coroutine that awaits it once, with no event loop."""
+
+    def __await__(self) -> Iterator[None]:
+        yield None
+
+
+class TestAGeneratorExitFromTheBody:
+    """An ``async def`` body that raises ``GeneratorExit`` gets the result of
+    a ``def`` body that raises it: the worker maps it through the exception
+    mappers. A ``close()`` of the coroutine of the call still ends it."""
+
+    @staticmethod
+    def _raising_app(mapper: dict[type[BaseException], str]) -> Horsies:
+        app = Horsies(
+            AppConfig(
+                broker=PostgresConfig(
+                    database_url=SecretStr(
+                        'postgresql+psycopg://user:password@localhost/unused'
+                    ),
+                ),
+                exception_mapper=mapper,
+            ),
+        )
+
+        @app.task('sync_raises_generator_exit')
+        def sync_raises() -> TaskResult[int, TaskError]:
+            raise GeneratorExit('from the body')
+
+        @app.task('async_raises_generator_exit')
+        async def async_raises() -> TaskResult[int, TaskError]:
+            await asyncio.sleep(0)
+            raise GeneratorExit('from the body')
+
+        @app.task('sync_raises_keyboard_interrupt')
+        def sync_interrupted() -> TaskResult[int, TaskError]:
+            raise KeyboardInterrupt
+
+        @app.task('async_raises_keyboard_interrupt')
+        async def async_interrupted() -> TaskResult[int, TaskError]:
+            await asyncio.sleep(0)
+            raise KeyboardInterrupt
+
+        _ = (sync_raises, async_raises, sync_interrupted, async_interrupted)
+        return app
+
+    def test_the_mapper_names_the_code_as_for_a_def_body(
+        self,
+        task_loop: TaskLoop,
+    ) -> None:
+        app = self._raising_app({GeneratorExit: 'BODY_GENERATOR_EXIT'})
+        run = _runner(app, task_loop)
+
+        sync_error = _result(run('sync_raises_generator_exit'), int).err_value
+        async_error = _result(run('async_raises_generator_exit'), int).err_value
+
+        assert sync_error is not None and async_error is not None
+        assert sync_error.error_code == 'BODY_GENERATOR_EXIT'
+        assert async_error.error_code == 'BODY_GENERATOR_EXIT'
+
+    def test_with_no_mapping_it_gets_the_unhandled_code(
+        self,
+        task_loop: TaskLoop,
+    ) -> None:
+        app = self._raising_app({})
+
+        error = _result(
+            _runner(app, task_loop)('async_raises_generator_exit'),
+            int,
+        ).err_value
+
+        assert error is not None
+        assert error.error_code == OperationalErrorCode.UNHANDLED_EXCEPTION
+
+    def test_a_keyboard_interrupt_still_skips_the_mappers(
+        self,
+        task_loop: TaskLoop,
+    ) -> None:
+        """It leaves the call, and the child entry records TASK_EXCEPTION, for
+        both kinds of body."""
+        app = self._raising_app({KeyboardInterrupt: 'NOT_USED'})
+        run = _runner(app, task_loop)
+
+        sync_error = _result(run('sync_raises_keyboard_interrupt'), int).err_value
+        async_error = _result(run('async_raises_keyboard_interrupt'), int).err_value
+
+        assert sync_error is not None and async_error is not None
+        assert sync_error.error_code == OperationalErrorCode.TASK_EXCEPTION
+        assert async_error.error_code == OperationalErrorCode.TASK_EXCEPTION
+
+    def test_the_direct_call_still_lets_it_pass(self) -> None:
+        app = self._raising_app({GeneratorExit: 'BODY_GENERATOR_EXIT'})
+
+        @app.task('async_raises_generator_exit_directly')
+        async def raises() -> TaskResult[int, TaskError]:
+            raise GeneratorExit('from the body')
+
+        async def call_directly() -> TaskResult[int, TaskError]:
+            return await raises()
+
+        with pytest.raises(GeneratorExit):
+            asyncio.run(call_directly())
+
+    @staticmethod
+    def _suspending_task(
+        app: Horsies,
+        awaited: Callable[[], Any],
+        ended: list[str],
+    ) -> Any:
+        @app.task('async_suspends')
+        async def suspends() -> TaskResult[int, TaskError]:
+            try:
+                await awaited()
+                return TaskResult(ok=1)
+            finally:
+                ended.append('finally')
+
+        return suspends
+
+    def test_a_close_with_no_event_loop_ends_the_call(self) -> None:
+        """A coroutine closed at garbage collection runs with no loop. The
+        close completes: the mapped result returns into it."""
+        app = self._raising_app({GeneratorExit: 'BODY_GENERATOR_EXIT'})
+        ended: list[str] = []
+        task = self._suspending_task(app, _Suspend, ended)
+        call = await_task_call_in_worker(task(), task._map_exception)
+        call.send(None)
+
+        call.close()
+
+        assert ended == ['finally']
+
+    def test_a_close_from_another_asyncio_task_ends_the_call(self) -> None:
+        app = self._raising_app({GeneratorExit: 'BODY_GENERATOR_EXIT'})
+        ended: list[str] = []
+
+        async def close_from_here() -> None:
+            never = asyncio.get_running_loop().create_future()
+            task = self._suspending_task(app, lambda: never, ended)
+            call = await_task_call_in_worker(task(), task._map_exception)
+            runner = asyncio.ensure_future(call)
+            await asyncio.sleep(0)
+
+            call.close()
+
+            runner.cancel()
+            with pytest.raises(RuntimeError):
+                await runner
+
+        asyncio.run(close_from_here())
+
+        assert ended == ['finally']
 
 
 class TestWorkflowContext:

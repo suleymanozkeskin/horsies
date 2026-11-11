@@ -17,6 +17,7 @@ from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationFa
 from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.class_coverage import (
     ClassCoverage,
+    ClassesNotRecorded,
     StreamCoverage,
     StreamServed,
     StreamUnserved,
@@ -26,9 +27,11 @@ from horsies.core.models.tasks import Execution
 from horsies.core.types.result import Err, Ok
 from horsies.core.worker.class_coverage_log import (
     CLASS_COVERAGE_LOG_INTERVAL_S,
+    NOT_RECORDED_IDS_LOGGED,
     CheckFailedKey,
     CoverageLogBound,
     StreamKey,
+    describe_not_recorded,
     describe_uncovered,
 )
 from horsies.core.worker.reaper import ReaperMixin
@@ -125,6 +128,34 @@ def _broker_returning(result: object) -> MagicMock:
 
 
 @pytest.mark.unit
+class TestDescribeNotRecorded:
+    def test_it_names_each_worker_left_out(self) -> None:
+        text = describe_not_recorded(
+            [ClassesNotRecorded('w-old-1', AT), ClassesNotRecorded('w-old-2', AT)],
+        )
+
+        assert text.startswith('2 live worker(s) are left out')
+        assert 'no class_capacity' in text
+        assert text.endswith('Workers: w-old-1, w-old-2.')
+
+    def test_it_names_at_most_the_bound_and_counts_the_rest(self) -> None:
+        workers = [
+            ClassesNotRecorded(f'w-{index:02d}', AT)
+            for index in range(NOT_RECORDED_IDS_LOGGED + 3)
+        ]
+
+        text = describe_not_recorded(workers)
+
+        assert f'w-{NOT_RECORDED_IDS_LOGGED - 1:02d}' in text
+        assert f'w-{NOT_RECORDED_IDS_LOGGED:02d}' not in text
+        assert text.endswith(' and 3 more.')
+
+    def test_no_worker_is_a_defect(self) -> None:
+        with pytest.raises(AssertionError):
+            describe_not_recorded([])
+
+
+@pytest.mark.unit
 @pytest.mark.asyncio
 class TestReaperCoverageCheck:
     """``ReaperMixin._check_class_coverage``: reads, levels and bounds."""
@@ -133,7 +164,7 @@ class TestReaperCoverageCheck:
         self,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        broker = _broker_returning(Ok(ClassCoverage(AT, 1, (UNSERVED, SERVED))))
+        broker = _broker_returning(Ok(ClassCoverage(AT, 1, (), (UNSERVED, SERVED))))
         state = _ReaperPassState()
 
         with caplog.at_level(logging.WARNING, logger='horsies.worker'):
@@ -148,7 +179,7 @@ class TestReaperCoverageCheck:
         self,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        broker = _broker_returning(Ok(ClassCoverage(AT, 2, (NO_CAPACITY,))))
+        broker = _broker_returning(Ok(ClassCoverage(AT, 2, (), (NO_CAPACITY,))))
 
         with caplog.at_level(logging.WARNING, logger='horsies.worker'):
             await ReaperMixin()._check_class_coverage(broker, _ReaperPassState())
@@ -179,8 +210,33 @@ class TestReaperCoverageCheck:
         assert len(records) == 1
         assert 'worker w1' in records[0].getMessage()
 
+    async def test_workers_left_out_log_one_warning_per_interval_with_streams(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A live worker without recorded budgets does not stop the check: the
+        unserved stream still logs, and the left-out worker is named once."""
+        coverage = ClassCoverage(
+            AT,
+            1,
+            (ClassesNotRecorded('w-old', AT),),
+            (UNSERVED,),
+        )
+        broker = _broker_returning(Ok(coverage))
+        state = _ReaperPassState()
+
+        with caplog.at_level(logging.WARNING, logger='horsies.worker'):
+            await ReaperMixin()._check_class_coverage(broker, state)
+            await ReaperMixin()._check_class_coverage(broker, state)
+
+        left_out = [r for r in caplog.records if 'left out' in r.getMessage()]
+        assert [r.levelno for r in left_out] == [logging.WARNING]
+        assert 'w-old' in left_out[0].getMessage()
+        pending = [r for r in caplog.records if 'PENDING' in r.getMessage()]
+        assert [r.levelno for r in pending] == [logging.ERROR]
+
     async def test_no_read_before_the_first_check_time(self) -> None:
-        broker = _broker_returning(Ok(ClassCoverage(AT, 0, (UNSERVED,))))
+        broker = _broker_returning(Ok(ClassCoverage(AT, 0, (), (UNSERVED,))))
         state = _ReaperPassState(class_coverage_checks_from=float('inf'))
 
         await ReaperMixin()._check_class_coverage(broker, state)

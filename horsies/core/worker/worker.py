@@ -1175,6 +1175,7 @@ class Worker(
         logger.info('Worker started')
         try:
             backoff = self._make_retry_backoff()
+            short_passes = 0
             while not self._stop.is_set():
                 try:
                     # One budgeted claim pass per wake. A NOTIFY or a capacity
@@ -1182,10 +1183,13 @@ class Worker(
                     # wait returns at once.
                     self._capacity_released.clear()
                     claim_pass = await self._claim_and_dispatch_all()
-
-                    if not claim_pass.left_unannounced_work(
+                    repass = claim_pass.left_unannounced_work(
                         limited=self.cfg.max_claim_batch > 0,
-                    ):
+                        short_passes_before=short_passes,
+                    )
+                    short_passes = claim_pass.short_passes_after(short_passes)
+
+                    if not repass:
                         # Wait for a NOTIFY from any queue or a local capacity
                         # release (coalesce bursts).
                         await self._wait_for_any_notify(

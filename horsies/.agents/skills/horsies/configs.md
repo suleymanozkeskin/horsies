@@ -145,8 +145,8 @@ class in isolated children. A shared async child opens one async pool, and a
 shared thread child one sync pool that its seat threads share, each of
 `worker_child_pool_max_size`, so each counts as one child in HRS-219. Boot also
 warns (never refuses) when the sum over modes of `count × mb` is above the
-usable memory (container limit or host RAM), and when one worker can open more
-Postgres connections than the server has usable slots.
+usable memory (container limit or host RAM), and when one worker opens more
+Postgres connections itself than the server has usable slots.
 
 Claim budgets per execution class. A worker has one budget for each class it
 runs children for; its capacity is the children (or shared seats) in service.
@@ -209,7 +209,10 @@ async def open_clients() -> None: ...
 async_hooks = app.get_shared_async_child_start_hooks()  # list[SharedAsyncChildStartHook]
 ```
 
-`on_shared_async_child_start` rules: only `async def` (else `HRS-214`); runs
+`on_shared_async_child_start` rules: the call must return a coroutine, read
+without a call: an `async def` function, an object with an `async def`
+`__call__`, a function with an awaitable return annotation, or a lambda
+(checked when the child awaits it); anything else is `HRS-214`; runs
 after the `on_child_process_start` hooks and the child's async pool; same 10 s
 bound and fail-closed stop as the sync hooks (a hook that blocks the loop is
 also ended); work it leaves running belongs to no task.
@@ -333,9 +336,14 @@ worker_pool_size + worker_max_overflow
   + task-code database connections
 ```
 
-`horsies check --live` compares this number (without task-code connections)
-for each worker profile with `max_connections` less the reserved slots and
-reports `HRS-219`; a worker logs the same comparison as a warning at boot.
+Task code that sends through the app opens the app's broker in its child: a
+pool of `worker_pool_size + worker_max_overflow` for each event loop it sends
+from (the broker's runner loop for sync tasks, the child's task loop for async
+tasks). `horsies check --live` compares the number without task-code
+connections for each worker profile with `max_connections` less the reserved
+slots and reports `HRS-219`; the error states the task-send term with one
+sending loop per child. A worker logs the same comparison at boot, as a
+warning when it is above the usable slots.
 Nothing is compared with `pgbouncer_transaction_mode=True`.
 
 Child DB connections are lazy by default (`worker_child_pool_min_size=0`). A child
@@ -472,9 +480,12 @@ slot.
   non-zero).
 - `mb` from 1 to 16,777,216 — no fixed floor, the baseline guard is the real floor.
 - At boot the worker warns (and still starts) when `count × mb` is above the
-  usable memory: the cgroup limit (v2 `/sys/fs/cgroup/memory.max`, else v1
-  `/sys/fs/cgroup/memory/memory.limit_in_bytes`; `max` or no file = no limit)
-  when it is below the host RAM, else the host RAM. The warning names the
+  usable memory: the cgroup limit when it is below the host RAM, else the
+  host RAM. The cgroup is the one `/proc/self/cgroup` names (v1 memory group,
+  else v2 group); its limit is the smallest `memory.limit_in_bytes` /
+  `memory.max` of the group and its parents (`max` or no file = no limit),
+  so a systemd `MemoryMax` or `--cgroupns=host` counts; without
+  `/proc/self/cgroup`, the files at the mount point. The warning names the
   source: `container limit` or `host RAM`.
 
 **Using both (OR semantics).** When both are set, a child exits when *either*
@@ -625,7 +636,8 @@ never held up by a stalled consumer.
 
 ### Constraints (HRS-204)
 
-- `running_stale_threshold_ms >= runner_heartbeat_interval_ms * 2`
+- With `auto_fail_stale_running=True` (default): `running_stale_threshold_ms >= 2 * (runner_heartbeat_interval_ms + 2_000)`. The worker stops when no runner heartbeat lands for half of the threshold; that half holds one interval plus 2 s for the next heartbeat to land.
+- With `auto_fail_stale_running=False`: `running_stale_threshold_ms >= runner_heartbeat_interval_ms * 2`
 - `finalizing_stale_threshold_ms >= runner_heartbeat_interval_ms * 2`
 - `claimed_stale_threshold_ms >= claimer_heartbeat_interval_ms * 2`
 
@@ -640,7 +652,7 @@ Runs on `check_interval_ms` cadence:
 
 **Runner heartbeats:** the worker process writes them for each RUNNING task whose child process runs and holds it, fenced on the worker and the claim generation; the child writes only the first one, in the RUNNING transaction. A task that holds the GIL does not delay them, so CPU-bound tasks need no extra margin. Beats end at the kill of the child, its exit, its finalizing mark, or the read of its result. The stale threshold is based on missing runner heartbeats, not total task duration.
 
-**Fail-closed exit:** with `auto_fail_stale_running=True` (default), if the heartbeat thread dies, or no heartbeat lands for half of `running_stale_threshold_ms`, the worker kills every child that holds a task, stops, and exits with code 1 (code 77 if it has not stopped within 120 s). So the reaper does not fail a task that still runs. Under a slow database, raise `running_stale_threshold_ms`. With `auto_fail_stale_running=False`, or no recovery config, no reaper fails a RUNNING row: the worker logs failed writes (at most once per 60 s) and keeps running.
+**Fail-closed exit:** with `auto_fail_stale_running=True` (default), if the heartbeat thread dies, or no heartbeat lands for half of `running_stale_threshold_ms`, the worker kills every child that holds a task, stops, and exits with code 1 (code 77 if it has not stopped within 120 s). So the reaper does not fail a task that still runs. The half counts from when the last heartbeat landed. Under a slow database, raise `running_stale_threshold_ms`. With `auto_fail_stale_running=False`, or no recovery config, no reaper fails a RUNNING row: the worker logs failed writes (at most once per 60 s) and keeps running.
 
 
 ## RetentionConfig
