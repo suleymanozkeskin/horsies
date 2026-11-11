@@ -620,7 +620,8 @@ never held up by a stalled consumer.
 
 ### Constraints (HRS-204)
 
-- `running_stale_threshold_ms >= runner_heartbeat_interval_ms * 2`
+- With `auto_fail_stale_running=True` (default): `running_stale_threshold_ms >= 2 * (runner_heartbeat_interval_ms + 2_000)`. The worker stops when no runner heartbeat lands for half of the threshold; that half holds one interval plus 2 s for the next heartbeat to land.
+- With `auto_fail_stale_running=False`: `running_stale_threshold_ms >= runner_heartbeat_interval_ms * 2`
 - `finalizing_stale_threshold_ms >= runner_heartbeat_interval_ms * 2`
 - `claimed_stale_threshold_ms >= claimer_heartbeat_interval_ms * 2`
 
@@ -635,7 +636,7 @@ Runs on `check_interval_ms` cadence:
 
 **Runner heartbeats:** the worker process writes them for each RUNNING task whose child process runs and holds it, fenced on the worker and the claim generation; the child writes only the first one, in the RUNNING transaction. A task that holds the GIL does not delay them, so CPU-bound tasks need no extra margin. Beats end at the kill of the child, its exit, its finalizing mark, or the read of its result. The stale threshold is based on missing runner heartbeats, not total task duration.
 
-**Fail-closed exit:** with `auto_fail_stale_running=True` (default), if the heartbeat thread dies, or no heartbeat lands for half of `running_stale_threshold_ms`, the worker kills every child that holds a task, stops, and exits with code 1 (code 77 if it has not stopped within 120 s). So the reaper does not fail a task that still runs. Under a slow database, raise `running_stale_threshold_ms`. With `auto_fail_stale_running=False`, or no recovery config, no reaper fails a RUNNING row: the worker logs failed writes (at most once per 60 s) and keeps running.
+**Fail-closed exit:** with `auto_fail_stale_running=True` (default), if the heartbeat thread dies, or no heartbeat lands for half of `running_stale_threshold_ms`, the worker kills every child that holds a task, stops, and exits with code 1 (code 77 if it has not stopped within 120 s). So the reaper does not fail a task that still runs. The half counts from when the last heartbeat landed. Under a slow database, raise `running_stale_threshold_ms`. With `auto_fail_stale_running=False`, or no recovery config, no reaper fails a RUNNING row: the worker logs failed writes (at most once per 60 s) and keeps running.
 
 
 ## RetentionConfig

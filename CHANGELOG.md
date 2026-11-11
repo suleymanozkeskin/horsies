@@ -430,7 +430,10 @@ and there is no migration contract between pre-1.0 versions.
   `running_stale_threshold_ms`, the worker logs the cause at critical level,
   kills every child that holds a task, stops, and exits with code 1. It exits
   with code 77 if it has not stopped 120 s later. A failed write is tried
-  again within that half. Before, the reaper failed such tasks with
+  again within that half. The half counts from when the last heartbeat
+  landed. After a heartbeat whose write took almost the whole half, the
+  worker stops 0.5 s before `running_stale_threshold_ms` has passed from the
+  start of that write, because the reaper may count from there. Before, the reaper failed such tasks with
   `WORKER_CRASHED` while they still ran, and a retry could run next to them.
   A killed task takes the child crash path, or stale-task recovery when the
   database cannot be reached. With `auto_fail_stale_running=False`, or no
@@ -470,6 +473,18 @@ and there is no migration contract between pre-1.0 versions.
   - The task of such a slot keeps the row that the earlier scheduler wrote:
     it runs with no timeout, no retries, and as `ISOLATED`. Later slots carry
     the task's options.
+- **Breaking: with `auto_fail_stale_running=True`,
+  `RecoveryConfig.running_stale_threshold_ms` is at least
+  `2 × (runner_heartbeat_interval_ms + 2,000 ms)`.** The worker stops when no
+  runner heartbeat lands for half of the threshold. Heartbeats land one
+  interval apart, plus the time the next one takes to land, so that half must
+  hold one interval plus 2 s. A smaller value raises `ConfigurationError`
+  with `HRS-204` (`CONFIG_INVALID_RECOVERY`); the message names both fields
+  and the smallest valid value. Before, the bound was
+  `2 × runner_heartbeat_interval_ms`. At that bound the half was one interval,
+  and the worker stopped and killed its tasks while every heartbeat landed.
+  With `auto_fail_stale_running=False`, the bound stays
+  `2 × runner_heartbeat_interval_ms`.
 - **Breaking: `RecoveryConfig.worker_state_snapshot_interval_ms` is at most
   60,000 ms.** A worker is live while its latest snapshot is at most
   `WORKER_STATE_LIVE_WINDOW_S` (120) seconds old. The cap is half of that

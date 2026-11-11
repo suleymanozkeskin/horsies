@@ -16,7 +16,11 @@ from horsies.core.errors import (
     HorsiesError,
     MultipleValidationErrors,
 )
-from horsies.core.models.recovery import RecoveryConfig
+from horsies.core.models.recovery import (
+    RUNNER_BEAT_LANDING_ALLOWANCE_MS,
+    RecoveryConfig,
+    fail_closed_threshold_floor_ms,
+)
 
 
 pytestmark = pytest.mark.unit
@@ -76,7 +80,9 @@ class TestRecoveryConfigMultiError:
         errors = exc_info.value.report.errors
         assert len(errors) == 2
         messages = [e.message for e in errors]
-        assert 'running_stale_threshold_ms too low' in messages
+        assert (
+            'running_stale_threshold_ms too low for auto_fail_stale_running' in messages
+        )
         assert 'claimed_stale_threshold_ms too low' in messages
 
     def test_multi_recovery_errors_are_horsies_error(self) -> None:
@@ -164,10 +170,12 @@ class TestRecoveryConfigMultiError:
                 claimer_heartbeat_interval_ms=30_000,
                 claimed_stale_threshold_ms=1_000,
             )
-        for error in exc_info.value.report.errors:
-            assert len(error.notes) == 3
-            assert 'threshold must be at least 2x heartbeat interval' in error.notes
-            assert error.help_text is not None
+        running, claimed = exc_info.value.report.errors
+        assert len(running.notes) == 4
+        assert running.help_text is not None
+        assert len(claimed.notes) == 3
+        assert 'threshold must be at least 2x heartbeat interval' in claimed.notes
+        assert claimed.help_text is not None
 
     # ── Boundary values ──────────────────────────────────────────────────
 
@@ -176,6 +184,7 @@ class TestRecoveryConfigMultiError:
         config = RecoveryConfig(
             runner_heartbeat_interval_ms=30_000,
             running_stale_threshold_ms=60_000,  # exactly 2x
+            auto_fail_stale_running=False,
             claimer_heartbeat_interval_ms=30_000,
             claimed_stale_threshold_ms=60_000,  # exactly 2x
         )
@@ -188,6 +197,7 @@ class TestRecoveryConfigMultiError:
             RecoveryConfig(
                 runner_heartbeat_interval_ms=30_000,
                 running_stale_threshold_ms=59_999,  # 2x - 1
+                auto_fail_stale_running=False,
             )
 
     # ── Pydantic field-constraint interaction ────────────────────────────
@@ -198,3 +208,74 @@ class TestRecoveryConfigMultiError:
             RecoveryConfig(running_stale_threshold_ms=0)
         # Pydantic ValidationError, not ConfigurationError
         assert not isinstance(exc_info.value, HorsiesError)
+
+
+class TestFailClosedThresholdFloor:
+    """With auto_fail_stale_running on, the worker stops when no runner
+    heartbeat lands for half of running_stale_threshold_ms. That half must
+    hold one beat interval plus the time a beat takes to land."""
+
+    def test_the_floor_is_twice_one_interval_plus_the_landing_allowance(self) -> None:
+        assert fail_closed_threshold_floor_ms(30_000) == 2 * (
+            30_000 + RUNNER_BEAT_LANDING_ALLOWANCE_MS
+        )
+
+    def test_the_floor_itself_is_accepted(self) -> None:
+        floor_ms = fail_closed_threshold_floor_ms(30_000)
+
+        config = RecoveryConfig(
+            runner_heartbeat_interval_ms=30_000,
+            running_stale_threshold_ms=floor_ms,
+        )
+
+        assert config.running_stale_threshold_ms == floor_ms
+
+    @pytest.mark.parametrize(
+        ('interval_ms', 'threshold_ms'),
+        [(1_000, 2_000), (30_000, 60_000)],
+        ids=['smallest interval', 'interval 30 s'],
+    )
+    def test_twice_the_interval_is_refused(
+        self,
+        interval_ms: int,
+        threshold_ms: int,
+    ) -> None:
+        """At twice the interval, the window is one interval: a poll during
+        any write sees no beat for longer than the window."""
+        floor_ms = fail_closed_threshold_floor_ms(interval_ms)
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            RecoveryConfig(
+                runner_heartbeat_interval_ms=interval_ms,
+                running_stale_threshold_ms=threshold_ms,
+            )
+
+        error = exc_info.value
+        assert error.code == ErrorCode.CONFIG_INVALID_RECOVERY
+        assert error.message == (
+            'running_stale_threshold_ms too low for auto_fail_stale_running'
+        )
+        assert f'running_stale_threshold_ms={threshold_ms}ms' in error.notes[0]
+        assert f'runner_heartbeat_interval_ms={interval_ms}ms' in error.notes[1]
+        assert error.help_text is not None
+        assert f'running_stale_threshold_ms >= {floor_ms}ms' in error.help_text
+
+    def test_one_ms_below_the_floor_is_refused(self) -> None:
+        with pytest.raises(
+            ConfigurationError,
+            match='too low for auto_fail_stale_running',
+        ):
+            RecoveryConfig(
+                runner_heartbeat_interval_ms=10_000,
+                running_stale_threshold_ms=fail_closed_threshold_floor_ms(10_000) - 1,
+            )
+
+    def test_with_auto_fail_off_twice_the_interval_is_accepted(self) -> None:
+        """No worker of this config stops on late beats, so no window applies."""
+        config = RecoveryConfig(
+            runner_heartbeat_interval_ms=1_000,
+            running_stale_threshold_ms=2_000,
+            auto_fail_stale_running=False,
+        )
+
+        assert config.running_stale_threshold_ms == 2_000

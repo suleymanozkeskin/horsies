@@ -8,7 +8,7 @@ tags: [migration, 0.7.0, breaking-changes, worker, profiles, cli, schema, execut
 ## Upgrade order
 
 1. Install horsies 0.7.0 with psycopg 3.3.6 or later. See [Dependencies](#dependencies).
-2. Change the config: [worker profiles](#worker-settings-move-into-profiles) and [the snapshot interval](#worker_state_snapshot_interval_ms-is-at-most-60000-ms).
+2. Change the config: [worker profiles](#worker-settings-move-into-profiles), [the running stale threshold](#running_stale_threshold_ms-holds-one-heartbeat-interval-plus-2-s) and [the snapshot interval](#worker_state_snapshot_interval_ms-is-at-most-60000-ms).
 3. Change the code: [matches on error codes](#matches-on-error-codes), [result waits inside a task](#a-result-wait-inside-a-task-is-refused) and [workflow limits](#workflow-limits).
 4. Run `horsies check <app>`, and `horsies check <app> --live` against the target database. See [New validation](#new-validation).
 5. Stop every 0.6.x worker, then start the 0.7.0 processes. See [Stop 0.6.x workers first](#stop-06x-workers-first).
@@ -102,6 +102,19 @@ app = Horsies(AppConfig(
 ```bash
 horsies worker myapp.instance:app --profile default
 ```
+
+## `running_stale_threshold_ms` holds one heartbeat interval plus 2 s
+
+With `auto_fail_stale_running=True` (the default), a 0.7.0 worker stops when
+no runner heartbeat lands for half of `RecoveryConfig.running_stale_threshold_ms`.
+That half must hold one `runner_heartbeat_interval_ms` plus 2 s for the next
+heartbeat to land. So the threshold is at least
+`2 × (runner_heartbeat_interval_ms + 2,000 ms)`: 64,000 ms at the default
+30,000 ms interval. 0.6.x accepted `2 × runner_heartbeat_interval_ms`. A
+smaller value raises `ConfigurationError` with `HRS-204` when the config is
+built, and names the smallest valid value. With
+`auto_fail_stale_running=False`, the 0.6.x bound stays. See
+[When the Worker Cannot Write Heartbeats](/horsies/workers/heartbeats-recovery/#when-the-worker-cannot-write-heartbeats).
 
 ## `worker_state_snapshot_interval_ms` is at most 60,000 ms
 

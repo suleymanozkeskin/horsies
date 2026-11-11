@@ -29,7 +29,11 @@ import psutil
 import pytest
 import pytest_asyncio
 
-from horsies.core.models.recovery import RecoveryConfig
+from horsies.core.models.recovery import (
+    RUNNER_BEAT_LANDING_ALLOWANCE_MS,
+    RecoveryConfig,
+    fail_closed_threshold_floor_ms,
+)
 from horsies.core.types.result import Err, Ok
 from horsies.core.worker import runner_heartbeat
 from horsies.core.worker.child_protocol import InitFrame, IsolatedChild, RunFrame
@@ -212,6 +216,7 @@ async def heartbeat_factory() -> AsyncIterator[HeartbeatFactory]:
         writer: Any,
         *,
         window_s: float = SAFE_WINDOW_S,
+        interval_s: float = INTERVAL_S,
         stale_running: StaleRunningRecovery | None = None,
         on_fail_closed: Callable[[FailClosedCause], None] | None = None,
         exit_policy: ExitPolicy | None = None,
@@ -222,7 +227,7 @@ async def heartbeat_factory() -> AsyncIterator[HeartbeatFactory]:
         heartbeat = RunnerHeartbeat.launch(
             live=live,
             writer=writer,
-            timing=BeatTiming(interval_s=INTERVAL_S),
+            timing=BeatTiming(interval_s=interval_s),
             stale_running=stale_running or _recovery_on(window_s),
             loop=loop_override or loop,
             on_fail_closed=on_fail_closed or _FailClosedRecorder(),
@@ -548,6 +553,40 @@ async def test_a_failed_write_inside_the_window_recovers(
     assert all(isinstance(outcome, BeatsWritten) for outcome in writer.outcomes[2:])
     assert stopped.causes == []
     assert exits.codes == []
+    assert child.poll() is None
+
+
+@pytest.mark.asyncio
+async def test_beats_that_land_within_the_window_never_stop_the_worker(
+    heartbeat_factory: HeartbeatFactory,
+    processes: Callable[..., subprocess.Popen[bytes]],
+) -> None:
+    """Each write takes 0.9 s, longer than the 0.1 s interval, so the next
+    write starts when one lands. The 1.5 s window counts from each landing:
+    0.9 s pass between two. Counted from the start of a write, 1.8 s would
+    pass, and the worker would stop while every beat lands."""
+    write_s = 0.9
+
+    def slow(_: int) -> BeatWriteOutcome:
+        time.sleep(write_s)
+        return BeatsWritten(rows=1)
+
+    live = LiveDispatches(capacity=1)
+    child = processes()
+    _hold(live, _frame(), child.pid)
+    writer = _ScriptedWriter(slow)
+    stopped = _FailClosedRecorder()
+
+    heartbeat_factory(
+        live,
+        writer,
+        window_s=1.5,
+        interval_s=0.1,
+        on_fail_closed=stopped,
+    )
+    await _until_async(lambda: writer.count() >= 5)
+
+    assert stopped.causes == []
     assert child.poll() is None
 
 
@@ -883,8 +922,7 @@ async def test_a_heartbeat_that_fails_closed_stops_the_worker_non_zero(
     worker = _worker(
         RecoveryConfig(
             runner_heartbeat_interval_ms=1_000,
-            running_stale_threshold_ms=2_000,
-            finalizing_stale_threshold_ms=2_000,
+            running_stale_threshold_ms=fail_closed_threshold_floor_ms(1_000),
         ),
     )
     pool = MagicMock()
@@ -1006,17 +1044,113 @@ def test_the_window_is_half_the_stale_threshold() -> None:
     assert StaleRunningRecoveryOn(300_000).fail_closed_window_s() == 150.0
 
 
-def test_the_smallest_window_holds_one_interval() -> None:
+def test_the_smallest_window_holds_one_interval_and_a_landing() -> None:
+    interval_ms = 1_000
     recovery = RecoveryConfig(
-        runner_heartbeat_interval_ms=1_000,
-        running_stale_threshold_ms=2_000,
-        finalizing_stale_threshold_ms=2_000,
+        runner_heartbeat_interval_ms=interval_ms,
+        running_stale_threshold_ms=fail_closed_threshold_floor_ms(interval_ms),
     )
     on = stale_running_recovery(recovery)
 
     assert isinstance(on, StaleRunningRecoveryOn)
-    assert on.fail_closed_window_s() >= beat_timing(recovery).interval_s
-    assert runner_heartbeat.WATCH_INTERVAL_S < on.fail_closed_window_s() / 2
+    assert on.fail_closed_window_s() == (
+        beat_timing(recovery).interval_s + RUNNER_BEAT_LANDING_ALLOWANCE_MS / 1000
+    )
+
+
+def test_the_kill_margin_is_above_one_watch_and_below_one_interval() -> None:
+    """Above: the watchdog sees the end of the window within one watch
+    interval. Below the smallest beat interval (1 s): a beat that lands
+    within the allowance never starts its window early."""
+    assert (
+        runner_heartbeat.WATCH_INTERVAL_S
+        < runner_heartbeat.FAIL_CLOSED_KILL_MARGIN_S
+        < 1.0
+    )
+
+
+class _Clock:
+    """Stands in for ``time`` in the heartbeat module: scripted readings."""
+
+    def __init__(self, *readings: float) -> None:
+        self._readings = list(readings)
+
+    def monotonic(self) -> float:
+        return self._readings.pop(0)
+
+
+def _beat_once_at(
+    monkeypatch: pytest.MonkeyPatch,
+    child_pid: int,
+    stale_running: StaleRunningRecovery,
+    *,
+    started_at_s: float,
+    landed_at_s: float,
+) -> tuple[float, float]:
+    """Run one beat whose write starts and lands at the given clock readings.
+
+    Returns the time from which the watchdog counts, and the wait to the
+    next write. The interval is 1 s.
+    """
+    live = LiveDispatches(capacity=1)
+    _hold(live, _frame(), child_pid)
+    loop = asyncio.new_event_loop()
+    try:
+        heartbeat = RunnerHeartbeat(
+            live=live,
+            writer=_ScriptedWriter(lambda _: BeatsWritten(rows=1)),
+            timing=BeatTiming(interval_s=1.0),
+            stale_running=stale_running,
+            loop=loop,
+            on_fail_closed=_FailClosedRecorder(),
+            exit_policy=ExitPolicy(exit_process=_ExitRecorder()),
+        )
+        monkeypatch.setattr(runner_heartbeat, 'time', _Clock(started_at_s, landed_at_s))
+        delay_s = heartbeat._beat_once()
+    finally:
+        loop.close()
+    return heartbeat._read_coverage().covered_at_s, delay_s
+
+
+@pytest.mark.parametrize(
+    'stale_running',
+    [StaleRunningRecoveryOn(threshold_ms=6_000), StaleRunningRecoveryOff()],
+    ids=['recovery on', 'recovery off'],
+)
+def test_a_landed_beat_counts_from_its_landing(
+    monkeypatch: pytest.MonkeyPatch,
+    processes: Callable[..., subprocess.Popen[bytes]],
+    stale_running: StaleRunningRecovery,
+) -> None:
+    covered_at_s, delay_s = _beat_once_at(
+        monkeypatch,
+        processes().pid,
+        stale_running,
+        started_at_s=100.0,
+        landed_at_s=101.5,
+    )
+
+    assert covered_at_s == 101.5
+    assert delay_s == 0.0
+
+
+def test_a_beat_that_took_most_of_the_window_ends_it_before_the_reaper(
+    monkeypatch: pytest.MonkeyPatch,
+    processes: Callable[..., subprocess.Popen[bytes]],
+) -> None:
+    """The reaper may count the beat from the start of its write. Its 3 s
+    window then ends the kill margin before the 6 s threshold from that
+    start, not 3 s after the landing."""
+    covered_at_s, _ = _beat_once_at(
+        monkeypatch,
+        processes().pid,
+        StaleRunningRecoveryOn(threshold_ms=6_000),
+        started_at_s=100.0,
+        landed_at_s=102.9,
+    )
+
+    window_end_s = covered_at_s + 3.0
+    assert window_end_s == 106.0 - runner_heartbeat.FAIL_CLOSED_KILL_MARGIN_S
 
 
 @pytest.mark.parametrize(
