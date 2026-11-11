@@ -388,8 +388,15 @@ from horsies.core.models.tasks import Execution
 #      horsies_failed_attempt_outcome. horsies_lock_running_task is the
 #      locking read of a RUNNING task, with the advisory lock first. Both
 #      are dropped and created on every apply.
+# v58: horsies_finish_workflow_success writes the success of a RUNNING
+#      workflow task in one statement: the task advisory lock, the row lock
+#      under the full claim fence, the COMPLETED attempt row, and the move
+#      with kind COMPLETE_LOCKED, which writes the phase-2 record of the
+#      node. It sends no capacity NOTIFY; phase 2 sends it. Its row type
+#      is horsies_workflow_success_outcome. Both are dropped and created on
+#      every apply.
 
-SCHEMA_VERSION = 56
+SCHEMA_VERSION = 58
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,

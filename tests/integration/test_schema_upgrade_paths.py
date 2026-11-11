@@ -26,7 +26,10 @@ from sqlalchemy.exc import DBAPIError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.history.terminalization.move import failed_attempt_teardown
+from horsies.core.history.terminalization.move import (
+    failed_attempt_teardown,
+    workflow_success_teardown,
+)
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.schemas import recovery as recovery_schema
 from horsies.core.schemas.migrations import SCHEMA_VERSION
@@ -1884,7 +1887,7 @@ class TestUpgradePaths:
                 )
             await _migrate(scratch_database)
             async with engine.connect() as conn:
-                assert await _stored_version(engine) == SCHEMA_VERSION == 56
+                assert await _stored_version(engine) == SCHEMA_VERSION
                 installed = (await conn.execute(program_sql)).all()
                 assert (await conn.execute(type_sql)).scalar_one() == 1
             # The installed body runs: a partial retry request is refused
@@ -1918,6 +1921,72 @@ class TestUpgradePaths:
                 ),
             ]
             assert getattr(refused.value.orig, 'sqlstate', None) == '22023'
+
+            await _migrate(scratch_database)
+            async with engine.connect() as conn:
+                assert await _stored_version(engine) == SCHEMA_VERSION
+                assert (await conn.execute(program_sql)).all() == installed
+        finally:
+            await engine.dispose()
+
+    async def test_workflow_success_program_upgrade_from_56(
+        self,
+        scratch_database: str,
+    ) -> None:
+        """A v56 database gets the success of a workflow task and its row
+        type at v58; the function answers a call, and a second apply changes
+        nothing."""
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        program_sql = text("""
+            SELECT p.proname::text, p.oid::bigint,
+                   pg_get_function_arguments(p.oid)
+            FROM pg_proc p
+            WHERE p.proname = 'horsies_finish_workflow_success'
+        """)
+        type_sql = text("""
+            SELECT count(*) FROM pg_type
+            WHERE typname = 'horsies_workflow_success_outcome'
+        """)
+        try:
+            async with engine.begin() as conn:
+                for statement in workflow_success_teardown():
+                    await conn.execute(text(statement))
+                assert (await conn.execute(program_sql)).all() == []
+                assert (await conn.execute(type_sql)).scalar_one() == 0
+                await conn.execute(
+                    text('DELETE FROM horsies_schema_version WHERE version >= 57')
+                )
+                await conn.execute(
+                    text(
+                        'INSERT INTO horsies_schema_version(version) VALUES (56) '
+                        'ON CONFLICT DO NOTHING'
+                    )
+                )
+            await _migrate(scratch_database)
+            async with engine.connect() as conn:
+                assert await _stored_version(engine) == SCHEMA_VERSION
+                installed = (await conn.execute(program_sql)).all()
+                assert (await conn.execute(type_sql)).scalar_one() == 1
+            # The installed body runs: a NULL result is refused before any
+            # lock.
+            with pytest.raises(DBAPIError) as refused:
+                async with engine.connect() as conn:
+                    await conn.execute(
+                        text("""
+                        SELECT outcome FROM horsies_finish_workflow_success(
+                            gen_random_uuid(), 'w', NULL, NULL
+                        )
+                    """)
+                    )
+            assert [(name, args) for name, _, args in installed] == [
+                (
+                    'horsies_finish_workflow_success',
+                    'p_task_id uuid, p_worker_id text, '
+                    'p_claimed_at timestamp with time zone, p_result text',
+                ),
+            ]
+            assert getattr(refused.value.orig, 'sqlstate', None) == '23502'
 
             await _migrate(scratch_database)
             async with engine.connect() as conn:

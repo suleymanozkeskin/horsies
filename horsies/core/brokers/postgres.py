@@ -1704,6 +1704,7 @@ class PostgresBroker:
             failed_attempt_program_ddl,
             pause_abandon_replacement_ddl,
             terminal_snapshot_replacement_ddl,
+            workflow_success_program_ddl,
         )
         from horsies.core.history.ddl.column_rules import (
             DROP_SINGLE_COLUMN_CHECKS_DDL,
@@ -1757,6 +1758,10 @@ class PostgresBroker:
                 # v56: the failed-attempt finish and the locking read of a
                 # RUNNING task, both with the advisory lock first.
                 for statement in failed_attempt_program_ddl():
+                    await conn.execute(text(statement))
+                # v58: the success of a workflow task in one statement,
+                # with the advisory lock first.
+                for statement in workflow_success_program_ddl():
                     await conn.execute(text(statement))
                 # v46: the update trigger cannot send task_done here.
                 await conn.execute(text(DROP_TASK_NOTIFY_UPDATE_TRIGGER_SQL))

@@ -88,6 +88,8 @@ EXPIRE_PENDING_FUNCTION: Final = 'horsies_expire_pending_tasks'
 FINISH_FAILED_ATTEMPT_FUNCTION: Final = 'horsies_finish_failed_attempt'
 FAILED_ATTEMPT_OUTCOME_TYPE: Final = 'horsies_failed_attempt_outcome'
 LOCK_RUNNING_TASK_FUNCTION: Final = 'horsies_lock_running_task'
+FINISH_WORKFLOW_SUCCESS_FUNCTION: Final = 'horsies_finish_workflow_success'
+WORKFLOW_SUCCESS_OUTCOME_TYPE: Final = 'horsies_workflow_success_outcome'
 
 RETRY_IN_SAME_CLASS: Final = 'same_class'
 """The retry placement that keeps the execution class of the row."""
@@ -1189,6 +1191,131 @@ BEGIN
       AND t.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
       AND (p_claimed_at IS NULL OR t.claimed_at = p_claimed_at)
     FOR UPDATE OF t;
+END
+$function$
+"""
+
+
+WORKFLOW_SUCCESS_OUTCOME_TYPE_DDL = f"""
+CREATE TYPE {WORKFLOW_SUCCESS_OUTCOME_TYPE} AS (
+    task_id uuid,
+    ordinality bigint,
+    outcome text,
+    terminal_at timestamptz,
+    terminalization_kind text,
+    observed_status text,
+    observed_worker_id varchar,
+    observed_claimed_at timestamptz,
+    guard_kind text,
+    observed_guard jsonb,
+    queue_name text,
+    task_name text
+)
+"""
+"""The row of ``horsies_finish_workflow_success``. The first ten columns are
+the columns of ``horsies_terminalization_outcome``, in its order, so a miss
+returns the shared classifier's row unchanged, with the last two columns
+NULL. APPLIED sets the two routing columns of phase 2 from the locked row."""
+
+
+def _finish_workflow_success_ddl() -> str:
+    """One statement for the success of a RUNNING workflow task.
+
+    Refuses a NULL result before any lock. Takes the task advisory lock,
+    then the row lock under the full claim fence (worker and claimed_at; a
+    NULL claimed_at disables the generation half). Writes the COMPLETED
+    attempt row from the locked row, then the move with kind
+    COMPLETE_LOCKED, which writes the history row and the phase-2 record
+    of the node. Sends no capacity wake: phase 2 sends it, after the
+    dependents of the node are enqueued. A miss writes nothing and returns
+    the shared classifier's row. A locked row that is not a workflow task
+    raises before any write: its success is the fused completion.
+    """
+    kind = TerminalizationKind.COMPLETE_LOCKED.value
+    return f"""
+CREATE FUNCTION {FINISH_WORKFLOW_SUCCESS_FUNCTION}(
+    p_task_id uuid,
+    p_worker_id text,
+    p_claimed_at timestamptz,
+    p_result text
+)
+RETURNS SETOF {WORKFLOW_SUCCESS_OUTCOME_TYPE}
+LANGUAGE plpgsql
+AS $function$
+DECLARE
+    v_ctx record;
+    v_terminal_at timestamptz;
+BEGIN
+    IF p_result IS NULL THEN
+        RAISE EXCEPTION 'a workflow task success needs a result payload'
+            USING ERRCODE = 'not_null_violation';
+    END IF;
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended(p_task_id::text, {TASK_LOCK_SEED})
+    );
+    SELECT id, retry_count, started_at, claimed_by_worker_id, claimed_at,
+           worker_hostname, worker_pid, worker_process_name,
+           is_workflow_task, queue_name, task_name,
+           clock_timestamp() AS db_now
+    INTO v_ctx
+    FROM {LIVE_TASKS}
+    WHERE id = p_task_id
+      AND status = 'RUNNING'
+      AND claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
+      AND (p_claimed_at IS NULL OR claimed_at = p_claimed_at)
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN QUERY SELECT m.*, NULL::text, NULL::text
+        FROM {MISS_CLASSIFIER_FUNCTION}(
+            p_task_id, {_equivalence_class_sql(TerminalizationKind(kind))},
+            p_worker_id, p_claimed_at
+        ) AS m;
+        RETURN;
+    END IF;
+    IF NOT v_ctx.is_workflow_task THEN
+        RAISE EXCEPTION
+            'task % is not a workflow task; its success is {COMPLETE_FUSED_FUNCTION}',
+            p_task_id
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    INSERT INTO {LIVE_ATTEMPTS} (
+        task_id, attempt, outcome, will_retry,
+        started_at, finished_at,
+        error_code, error_message, failed_reason,
+        worker_id, worker_hostname, worker_pid, worker_process_name
+    )
+    VALUES (
+        v_ctx.id, v_ctx.retry_count + 1, 'COMPLETED', FALSE,
+        COALESCE(v_ctx.started_at, v_ctx.db_now), v_ctx.db_now,
+        NULL, NULL, NULL,
+        v_ctx.claimed_by_worker_id, v_ctx.worker_hostname, v_ctx.worker_pid,
+        v_ctx.worker_process_name
+    )
+    ON CONFLICT (task_id, attempt) DO UPDATE SET
+        outcome = EXCLUDED.outcome,
+        will_retry = EXCLUDED.will_retry,
+        started_at = EXCLUDED.started_at,
+        finished_at = EXCLUDED.finished_at,
+        error_code = EXCLUDED.error_code,
+        error_message = EXCLUDED.error_message,
+        failed_reason = EXCLUDED.failed_reason,
+        worker_id = EXCLUDED.worker_id,
+        worker_hostname = EXCLUDED.worker_hostname,
+        worker_pid = EXCLUDED.worker_pid,
+        worker_process_name = EXCLUDED.worker_process_name;
+
+    v_terminal_at := NOW();
+    PERFORM {MOVE_FUNCTION}(
+        p_task_id, 'COMPLETED', '{kind}', v_terminal_at,
+        p_result, NULL, NULL
+    );
+    RETURN QUERY SELECT
+        p_task_id, NULL::bigint, 'APPLIED'::text,
+        v_terminal_at, '{kind}'::text,
+        'RUNNING'::text, v_ctx.claimed_by_worker_id, v_ctx.claimed_at,
+        NULL::text, NULL::jsonb,
+        v_ctx.queue_name::text, v_ctx.task_name::text;
 END
 $function$
 """
@@ -2500,6 +2627,23 @@ def failed_attempt_teardown() -> tuple[str, ...]:
         f'DROP FUNCTION IF EXISTS {LOCK_RUNNING_TASK_FUNCTION}'
         '(uuid, text, timestamptz)',
     )
+
+
+def workflow_success_fragments() -> tuple[str, ...]:
+    """The success of a workflow task: its outcome type, then the function."""
+    return (WORKFLOW_SUCCESS_OUTCOME_TYPE_DDL, _finish_workflow_success_ddl())
+
+
+def workflow_success_teardown() -> tuple[str, ...]:
+    """Drop the success of a workflow task. The outcome-type cascade drops
+    the function."""
+    return (f'DROP TYPE IF EXISTS {WORKFLOW_SUCCESS_OUTCOME_TYPE} CASCADE',)
+
+
+def workflow_success_program_ddl() -> tuple[str, ...]:
+    """Schema v58 on an installed move program, idempotent: the success of
+    a workflow task, dropped and created again."""
+    return (*workflow_success_teardown(), *workflow_success_fragments())
 
 
 def failed_attempt_program_ddl() -> tuple[str, ...]:

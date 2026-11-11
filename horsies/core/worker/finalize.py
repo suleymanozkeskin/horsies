@@ -65,13 +65,10 @@ from horsies.core.lifecycle.outcomes import (
     PhaseTwoOwed,
     RetryScheduled,
     SourceStateConflict,
+    SuccessApplied,
     TaskAbsent,
 )
-from horsies.core.lifecycle.persistence import (
-    apply_async,
-    apply_in_autocommit,
-    classify_locked_read_miss_async,
-)
+from horsies.core.lifecycle.persistence import apply_in_autocommit
 from horsies.core.logging import get_logger
 from horsies.core.models.tasks import (
     BuiltInTaskCode,
@@ -166,10 +163,10 @@ from horsies.core.worker.stored_timeout import (
     TaskTimeout,
     TimeoutValueInvalid,
 )
-from horsies.core.worker.sql import (
-    LOCK_RUNNING_TASK_SQL,
-    NOTIFY_TASK_QUEUE_SQL,
-    UPSERT_TASK_ATTEMPT_SQL,
+from horsies.core.worker.sql import NOTIFY_TASK_QUEUE_SQL
+from horsies.core.worker.workflow_success import (
+    finish_workflow_success,
+    success_for,
 )
 
 if TYPE_CHECKING:
@@ -227,34 +224,6 @@ class _Phase1Input:
     ok: bool
     result_json_str: str
     failed_reason: str | None
-
-
-async def _write_completed_attempt(
-    s: AsyncSession,
-    task_id: str,
-    ctx_row: Any,
-) -> None:
-    """Write the COMPLETED attempt row from the locked context row, in the
-    session's transaction. Database errors raise."""
-    db_now = ctx_row.db_now
-    await s.execute(
-        UPSERT_TASK_ATTEMPT_SQL,
-        {
-            'task_id': task_id,
-            'attempt': ctx_row.retry_count + 1,
-            'outcome': 'COMPLETED',
-            'will_retry': False,
-            'started_at': ctx_row.started_at or db_now,
-            'finished_at': db_now,
-            'error_code': None,
-            'error_message': None,
-            'failed_reason': None,
-            'worker_id': ctx_row.claimed_by_worker_id,
-            'worker_hostname': ctx_row.worker_hostname,
-            'worker_pid': ctx_row.worker_pid,
-            'worker_process_name': ctx_row.worker_process_name,
-        },
-    )
 
 
 def _phase2_of_a_replay(
@@ -1079,9 +1048,9 @@ class FinalizeMixin:
         persistence statement is selected. Plain success uses the fused
         operation. A failure, with or without a retry, uses one unlocked read
         of the retry facts and ``horsies_finish_failed_attempt``
-        (``_persist_failed_attempt``). A workflow task's success uses the
-        advisory-first locking read, an attempt write, and its operation
-        function in one transaction (``_complete_locked_task``). A retry of a
+        (``_persist_failed_attempt``). A workflow task's success is one
+        statement, ``horsies_finish_workflow_success``
+        (``_finish_workflow_success``). A retry of a
         committed phase 1 is classified as ``AlreadyApplied`` and reloads the
         persisted result for phase 2; ``LostClaim`` and other refusals do not
         advance the workflow. ``Ok(None)``: nothing is owed to phase 2.
@@ -1316,7 +1285,7 @@ class FinalizeMixin:
         match (locked_command, report):
             case (CompleteLockedTask() as completion, ResultProduced()):
                 assert tr is not None
-                return await self._complete_locked_task(
+                return await self._finish_workflow_success(
                     completion,
                     tr,
                     claimed_at=claimed_at,
@@ -1350,7 +1319,7 @@ class FinalizeMixin:
                     f'{type(report).__name__} / {type(locked_command).__name__}'
                 )
 
-    async def _complete_locked_task(
+    async def _finish_workflow_success(
         self,
         completion: CompleteLockedTask,
         tr: TaskResult[Any, TaskError],
@@ -1358,100 +1327,47 @@ class FinalizeMixin:
         claimed_at: datetime | None,
         child: _Phase1Input,
     ) -> Result[_PersistedTaskOutcome | None, _FinalizeError]:
-        """Phase 1 of a workflow task's success, in one transaction.
+        """Phase 1 of a workflow task's success: one statement.
 
-        ``horsies_lock_running_task`` takes the task advisory lock, then the
-        row lock under the claim fence. The attempt row and the move follow
-        in the same transaction. A miss is classified: ``AlreadyApplied``
-        reloads the persisted result for the phase-2 replay; a refusal
-        writes nothing. Database errors become a retryable phase-1 error
-        when the connection failed.
+        ``finish_workflow_success`` runs ``horsies_finish_workflow_success``
+        in autocommit: the attempt row, the move and the phase-2 record of
+        the node commit together. ``SuccessApplied`` owes phase 2;
+        ``AlreadyApplied`` (a replay of a committed success) reloads the
+        persisted result for the phase-2 replay; a refusal wrote nothing and
+        owes nothing. Database errors become a phase-1 error, retryable when
+        the connection failed; its data keeps the child's report for the
+        replay.
         """
-        task_id = completion.task_id
         try:
-            async with self.sf() as s:
-                ctx_row = (
-                    await s.execute(
-                        LOCK_RUNNING_TASK_SQL,
-                        {
-                            'id': task_id,
-                            'wid': self.worker_instance_id,
-                            'claimed_at': claimed_at,
-                        },
-                    )
-                ).fetchone()
-                if ctx_row is None:
-                    return await self._settle_locked_completion_miss(
-                        s,
-                        completion,
-                        claimed_at,
-                    )
-                await _write_completed_attempt(s, task_id, ctx_row)
-                outcome = await apply_async(await s.connection(), completion)
-                match outcome:
-                    case Applied():
-                        await s.commit()
-                        return Ok(
-                            _PersistedTaskOutcome(
-                                result=tr,
-                                task_name=str(ctx_row.task_name),
-                                queue_name=str(ctx_row.queue_name),
-                                is_workflow_task=bool(ctx_row.is_workflow_task),
-                            )
-                        )
-                    case AlreadyApplied():
-                        load_r = await self._load_persisted_task_result(
-                            task_id,
-                            session=s,
-                        )
-                        await s.rollback()
-                        return load_r
-                    case LostClaim() | SourceStateConflict() | TaskAbsent():
-                        await s.rollback()
-                        return Ok(None)
-                    case _ as unreachable:
-                        assert_never(unreachable)
+            outcome = await finish_workflow_success(
+                self.sf,
+                success_for(completion, claimed_at=claimed_at),
+            )
         except Exception as exc:
             return Err(
                 self._phase1_error(
-                    task_id,
+                    completion.task_id,
                     'Failed to persist terminal task state',
                     exc,
                     child,
                 )
             )
-
-    async def _settle_locked_completion_miss(
-        self,
-        s: AsyncSession,
-        completion: CompleteLockedTask,
-        claimed_at: datetime | None,
-    ) -> Result[_PersistedTaskOutcome | None, _FinalizeError]:
-        """Classify a locked completion whose locking read matched nothing.
-
-        The advisory lock is held. ``AlreadyApplied`` reloads the persisted
-        result for the phase-2 replay; a refusal writes nothing. Database
-        errors raise.
-        """
-        miss_outcome = await classify_locked_read_miss_async(
-            await s.connection(),
-            completion,
-            claimed_at=claimed_at,
-        )
-        match miss_outcome:
-            case AlreadyApplied():
-                load_r = await self._load_persisted_task_result(
-                    completion.task_id,
-                    session=s,
+        match outcome:
+            case SuccessApplied(
+                phase_two=PhaseTwoOwed(task_name=task_name, queue_name=queue_name),
+            ):
+                return Ok(
+                    _PersistedTaskOutcome(
+                        result=tr,
+                        task_name=task_name,
+                        queue_name=queue_name,
+                        is_workflow_task=True,
+                    )
                 )
-                await s.rollback()
-                return load_r
+            case AlreadyApplied(task_id=task_id):
+                return await self._load_persisted_task_result(task_id)
             case LostClaim() | SourceStateConflict() | TaskAbsent():
-                await s.rollback()
                 return Ok(None)
-            case Applied():
-                await s.rollback()
-                raise RuntimeError('locked-read miss classifier returned APPLIED')
             case _ as unreachable:
                 assert_never(unreachable)
 

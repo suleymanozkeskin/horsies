@@ -48,6 +48,8 @@ from ..terminalization.move import (
     failed_attempt_teardown,
     failure_family_fragments,
     workflow_node_family_fragments,
+    workflow_success_fragments,
+    workflow_success_teardown,
 )
 from ..terminalization.outcome import outcome_fragments
 from ..transcode.jobs import (
@@ -88,6 +90,7 @@ def installation_fragments(
         *completion_family_fragments(),
         *failure_family_fragments(),
         *failed_attempt_fragments(),
+        *workflow_success_fragments(),
         *expiry_family_fragments(),
         *cancellation_family_fragments(bounded_orphan=bounded_orphan),
         *workflow_node_family_fragments(),
@@ -160,15 +163,17 @@ def teardown_statements() -> tuple[str, ...]:
     """R2, the named drop list: reverse stage 2 exactly.
 
     The outcome-type CASCADE removes every terminalization operation
-    returning it, and the failed-attempt outcome type removes the
-    failed-attempt finish; the remaining drops name the locking read of
-    a RUNNING task, the encoder, the phase-2 programs (by their cascade
-    roots), the transcode state, the relocation ledger, and the
+    returning it, the failed-attempt outcome type removes the
+    failed-attempt finish, and the workflow-success outcome type removes
+    the success of a workflow task; the remaining drops name the locking
+    read of a RUNNING task, the encoder, the phase-2 programs (by their
+    cascade roots), the transcode state, the relocation ledger, and the
     uuid-bound non-runnable workflow lookup.
     """
     return (
         'DROP TYPE IF EXISTS horsies_terminalization_outcome CASCADE',
         *failed_attempt_teardown(),
+        *workflow_success_teardown(),
         # The single-row move returns void, so the type cascade misses
         # it; named explicitly, like the encoder.
         f'DROP FUNCTION IF EXISTS {MOVE_FUNCTION}'
