@@ -77,7 +77,9 @@ async def _insert_task(
     max_retries: int = 0,
     retry_count: int = 0,
     task_options: str | None = None,
+    is_workflow_task: bool = False,
 ) -> str:
+    """A task of ``owner``; a workflow task gets its RUNNING node."""
     task_id = str(uuid.uuid4())
     sent_at, sha = compute_test_enqueue_sha(
         task_name='timeout_test',
@@ -89,7 +91,7 @@ async def _insert_task(
                 (id, task_name, queue_name, priority, args, kwargs, status,
                  sent_at, created_at, updated_at, claimed, retry_count,
                  max_retries, started_at, enqueue_sha, claimed_by_worker_id,
-                 worker_pid, task_options,
+                 worker_pid, task_options, is_workflow_task,
                  retention_class_key, command_fingerprint_version,
                  command_fingerprint, retain_rerun_input,
                  prepared_rerun_input_disposition)
@@ -97,7 +99,7 @@ async def _insert_task(
                 (:id, 'timeout_test', 'default', 100, '[]', '{}', :status,
                  :sent_at, NOW(), NOW(), FALSE, :retry_count,
                  :max_retries, NOW(), :sha, :owner,
-                 :worker_pid, :task_options,
+                 :worker_pid, :task_options, :is_workflow_task,
                  'standard_30d', 1,
                  sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
                  FALSE, 'DECLINED_BY_POLICY')
@@ -112,8 +114,34 @@ async def _insert_task(
             'max_retries': max_retries,
             'worker_pid': FAKE_DEAD_PID,
             'task_options': task_options,
+            'is_workflow_task': is_workflow_task,
         },
     )
+    if is_workflow_task:
+        workflow_id = str(uuid.uuid4())
+        await session.execute(
+            text("""
+                INSERT INTO horsies_workflows
+                    (id, name, status, on_error, depth, root_workflow_id,
+                     sent_at, created_at, started_at, updated_at)
+                VALUES (:wf, 'timeout_wf', 'RUNNING', 'FAIL', 0, :wf,
+                        NOW(), NOW(), NOW(), NOW())
+            """),
+            {'wf': workflow_id},
+        )
+        await session.execute(
+            text("""
+                INSERT INTO horsies_workflow_tasks
+                    (id, workflow_id, task_index, node_id, task_name,
+                     task_args, task_kwargs, queue_name, priority,
+                     dependencies, allow_failed_deps, join_type,
+                     is_subworkflow, status, task_id, created_at)
+                VALUES (:id, :wf, 0, 'node-0', 'timeout_test', '[]', '{}',
+                        'default', 100, '{}', FALSE, 'all', FALSE,
+                        'RUNNING', CAST(:task_id AS uuid), NOW())
+            """),
+            {'id': str(uuid.uuid4()), 'wf': workflow_id, 'task_id': task_id},
+        )
     await session.commit()
     return task_id
 
@@ -168,8 +196,9 @@ async def test_timeout_replay_uses_committed_result_without_duplicate_attempt(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """A repeated timeout handler replays phase 2 from the terminal row."""
-    task_id = await _insert_task(session)
+    """A repeated timeout handler replays phase 2 of a workflow task from
+    the terminal row."""
+    task_id = await _insert_task(session, is_workflow_task=True)
     worker = _make_worker(engine)
     worker._finalize_workflow_phase = AsyncMock(  # type: ignore[method-assign]
         return_value=Ok(None),
@@ -185,6 +214,28 @@ async def test_timeout_replay_uses_committed_result_without_duplicate_attempt(
     assert persisted_result.unwrap_err().error_code == OutcomeCode.TASK_TIMEOUT
     # The replay adds no attempt to the one the first handler
     # committed, counted wherever the move left it.
+    assert len(await read_attempts(session, task_id)) == 1
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_timeout_replay_of_a_plain_task_runs_no_phase_2(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """The committed write sent the plain task's capacity wake: neither the
+    first handler nor its replay runs phase 2, and the replay adds no
+    attempt."""
+    task_id = await _insert_task(session)
+    worker = _make_worker(engine)
+    worker._finalize_workflow_phase = AsyncMock(  # type: ignore[method-assign]
+        return_value=Ok(None),
+    )
+
+    await worker._handle_task_timeout(_handle_with_child()[0], task_id, 5_000)
+    await worker._handle_task_timeout(_handle_with_child()[0], task_id, 5_000)
+
+    worker._finalize_workflow_phase.assert_not_awaited()
     assert len(await read_attempts(session, task_id)) == 1
 
 
