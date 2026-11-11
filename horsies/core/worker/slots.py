@@ -142,6 +142,7 @@ from horsies.core.worker.shared_child import (
     EXTRA_CANCEL_ROUNDS,
 )
 from horsies.core.worker.shared_lifecycle import REFUSAL_WRITES_BOUND_S
+from horsies.core.worker.thread_runner import THREAD_REFUSAL_WRITES_BOUND_S
 from horsies.core.worker.shared_stop import (
     BlockedLoopKill,
     ChildKill,
@@ -201,16 +202,17 @@ STUCK_REPORT_DELAY_S: Final = (EXTRA_CANCEL_ROUNDS + 1) * CANCEL_ROUND_INTERVAL_
 # its end by then is frozen, and the parent kills it. The margin is past the
 # block limit, as for the first backstop.
 SHARED_STUCK_BACKSTOP_S: Final = STUCK_REPORT_DELAY_S + SHARED_BACKSTOP_MARGIN_S
-# A refusal runs only the RUNNING transition and the finalizing marker. In a
-# shared async child their bounds add up to REFUSAL_WRITES_BOUND_S, so a
-# database that does not answer ends the writes first and kills no child. A
-# refusal still in flight past that, and past the block limit with the margin
-# of SHARED_BACKSTOP_MARGIN_S, means a frozen child: the parent kills the
-# child, and the refusal takes the crash path. A shared thread child runs the
-# same writes on its sync pool: its pool waits have the same bound, its
-# statements have none, so a statement that waits past this time ends the
-# child.
-SHARED_REFUSAL_BACKSTOP_S: Final = REFUSAL_WRITES_BOUND_S + SHARED_BACKSTOP_MARGIN_S
+# A refusal runs only the RUNNING transition and the finalizing marker. Their
+# bounds add up to REFUSAL_WRITES_BOUND_S in a shared async child and to
+# THREAD_REFUSAL_WRITES_BOUND_S in a shared thread child, so a database that
+# does not answer ends the writes first and kills no child. A refusal still
+# in flight past the longer one, and past the block limit with the margin of
+# SHARED_BACKSTOP_MARGIN_S, means a frozen child: the parent kills the child,
+# and the refusal takes the crash path.
+SHARED_REFUSAL_BACKSTOP_S: Final = (
+    max(REFUSAL_WRITES_BOUND_S, THREAD_REFUSAL_WRITES_BOUND_S)
+    + SHARED_BACKSTOP_MARGIN_S
+)
 
 
 @dataclass(frozen=True, slots=True)

@@ -31,9 +31,13 @@ from horsies.core.lifecycle.outcomes import (
     SourceStateConflict,
 )
 from horsies.core.models.tasks import OutcomeCode
-from horsies.core.worker import shared_lifecycle, slots
-from horsies.core.worker.child_pool import SHARED_POOL_CONNECTION_WAIT_S
+from horsies.core.worker import shared_lifecycle, slots, thread_runner
+from horsies.core.worker.child_pool import (
+    CHILD_POOL_CONNECTION_WAIT_S,
+    SHARED_POOL_CONNECTION_WAIT_S,
+)
 from horsies.core.worker.child_runner import (
+    CANCEL_REQUEST_TIMEOUT_S,
     _PRE_START_CONFIRM_ATTEMPTS,
     MARK_FINALIZING_SQL,
     RESET_PAUSED_NODE_SQL,
@@ -256,13 +260,29 @@ class TestRefusalBound:
             + shared_lifecycle.RUNNING_STATEMENTS_TIMEOUT_S
         )
 
+    def test_the_writes_of_a_thread_refusal_have_a_named_bound(self) -> None:
+        write_s = (
+            CHILD_POOL_CONNECTION_WAIT_S
+            + thread_runner.REFUSAL_STATEMENTS_TIMEOUT_S
+            + CANCEL_REQUEST_TIMEOUT_S
+        )
+
+        assert thread_runner.THREAD_REFUSAL_WRITES_BOUND_S == (
+            (_PRE_START_CONFIRM_ATTEMPTS + 1) * write_s
+        )
+
     def test_the_refusal_backstop_comes_after_the_writes_and_a_block_report(
         self,
     ) -> None:
-        """A refusal that its writes end in time never meets the backstop,
-        and a blocked loop is reported first, with its culprit."""
+        """A refusal whose writes end in time never meets the backstop, in
+        either kind of shared child, and a blocked loop is reported first,
+        with its culprit."""
         assert slots.SHARED_REFUSAL_BACKSTOP_S == (
-            shared_lifecycle.REFUSAL_WRITES_BOUND_S + slots.SHARED_BACKSTOP_MARGIN_S
+            max(
+                shared_lifecycle.REFUSAL_WRITES_BOUND_S,
+                thread_runner.THREAD_REFUSAL_WRITES_BOUND_S,
+            )
+            + slots.SHARED_BACKSTOP_MARGIN_S
         )
 
 

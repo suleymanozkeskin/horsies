@@ -242,10 +242,11 @@ and there is no migration contract between pre-1.0 versions.
     cancel_grace_ms + 20.3 s` after its placement (the first check, then
     0.3 s for the cancel rounds and the stuck check, and the same 10 s
     margin) froze after the report, and is killed as well. A child that
-    still holds a refusal 130 s after its placement is killed as well: the
-    writes of a refusal end within 120 s (two attempts of the RUNNING update,
-    each at most 30 s for a connection and 10 s for its statements, and the
-    finalizing marker, each with 10 s for a cancelled write to end), and the
+    still holds a refusal 145 s after its placement is killed as well: the
+    writes of a refusal end within 120 s on a shared async child and 135 s
+    on a shared thread child (two attempts of the RUNNING update and the
+    finalizing marker, each at most 30 s for a connection, 10 s for its
+    statements, and 5 to 10 s for a cancelled statement to end), and the
     block limit with its margin comes after them. At these kills a
     task past its deadline fails with `TASK_TIMEOUT`, and every other task
     takes the crash path. A task that the child reported stuck keeps its
