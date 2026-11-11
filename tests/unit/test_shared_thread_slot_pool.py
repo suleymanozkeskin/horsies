@@ -39,8 +39,10 @@ from horsies.core.worker.child_protocol import (
     SeatRefusal,
     SeatTask,
     SharedRunFrame,
+    SharedThreadChild,
     ThreadSeatTask,
 )
+from horsies.core.worker import slots as slots_module
 from horsies.core.worker.config import ChildPreload
 from horsies.core.worker.slots import (
     CHILD_KILL_WAIT_S,
@@ -51,10 +53,12 @@ from horsies.core.worker.slots import (
     DeadlineAcknowledged,
     Down,
     ExitedWith,
+    Idle,
     KilledBySignal,
     NotDispatched,
     Open,
     SeatDeadlineEnded,
+    SeatKilled,
     SeatTaskFinished,
     SharedHandle,
     SharedOutcome,
@@ -63,7 +67,7 @@ from horsies.core.worker.slots import (
     SlotPoolConfig,
 )
 from horsies.core.worker.stored_timeout import TimeoutValueInvalid
-from horsies.core.worker.shared_stop import RetryPlacement
+from horsies.core.worker.shared_stop import RetryPlacement, TimedOutAtKill
 from horsies.core.worker.thread_slots import (
     ClosedAtDeadline,
     RunCulprit,
@@ -649,6 +653,58 @@ class TestCapacity:
 
 
 @pytest.mark.asyncio(loop_scope='function')
+class TestNewKindBaseline:
+    async def test_the_first_ready_child_of_a_kind_down_at_the_first_start_reports_its_baseline(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The thread slot is short of descriptors at the first start, so
+        the worker starts on the isolated child, and the baseline guard of
+        the thread kind has nothing to check. The first thread child that
+        becomes ready later reports its baseline once; a replacement of the
+        same kind reports nothing, and neither does a replacement of the
+        isolated kind, whose baseline the first start returned."""
+        monkeypatch.setattr(slots_module, 'SLOT_DOWN_FIRST_DELAY_S', 0.05)
+        init = replace(
+            _init(f'short_first_on_slot:{tmp_path / "marks"}'),
+            imports=('1', '2'),
+        )
+        pool = SlotPool(_config(1, 1, isolated=1, init=init), pending_limit=10)
+        try:
+            match await asyncio.wait_for(pool.start(), OUTCOME_TIMEOUT_S):
+                case Ok(baselines):
+                    assert [baseline.child_kind for baseline in baselines] == [
+                        IsolatedChild(),
+                    ]
+                case Err(failure):
+                    raise AssertionError(failure)
+
+            late = await asyncio.wait_for(
+                pool.wait_new_kind_baseline(),
+                OUTCOME_TIMEOUT_S,
+            )
+
+            assert late.child_kind == SharedThreadChild(seats=1)
+            first = pool._thread_slots[0].child
+            isolated = pool._slots[0].child
+            assert first is not None and late.pid == first.pid
+            assert isolated is not None
+            os.kill(first.pid, signal.SIGKILL)
+            os.kill(isolated.pid, signal.SIGKILL)
+            await _until(
+                lambda: pool._thread_slots[0].child not in (None, first)
+                and isinstance(pool.thread_states()[0], Open)
+                and pool._slots[0].child not in (None, isolated)
+                and isinstance(pool.states()[0], Idle),
+            )
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(pool.wait_new_kind_baseline(), 0.5)
+        finally:
+            await pool.stop(0)
+
+
+@pytest.mark.asyncio(loop_scope='function')
 class TestStop:
     async def test_stop_lets_thread_tasks_finish(
         self, pool_factory: PoolFactory
@@ -678,6 +734,31 @@ class TestStop:
         )
         for handle in handles:
             assert isinstance(await _outcome(handle), ChildLost)
+
+    async def test_the_task_that_closed_the_child_retries_isolated_at_the_drain(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        """A neighbour with time left keeps the closed child alive. The drain
+        deadline of the stop kills it: the task whose deadline closed the
+        child keeps its isolated retry, and the neighbour takes the crash
+        path."""
+        pool = await pool_factory(_config(1, 2))
+        neighbour = pool.submit_shared(_request('sleep', '30'))
+        await _assigned(neighbour)
+        closer = pool.submit_shared(
+            _request('sleep', '30', timeout_ms=SHORT_TIMEOUT_MS),
+        )
+        await _until(lambda: isinstance(pool.thread_states()[0], Closing))
+
+        await pool.stop(0.3)
+
+        match await _outcome(closer):
+            case SeatKilled(verdict=verdict):
+                assert verdict == TimedOutAtKill(RetryPlacement.ISOLATED)
+            case other:
+                raise AssertionError(other)
+        assert isinstance(await _outcome(neighbour), ChildLost)
 
     async def test_a_task_after_stop_is_not_dispatched(
         self,

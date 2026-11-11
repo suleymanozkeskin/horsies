@@ -253,14 +253,14 @@ def _clearable_cause(value: object) -> Result[ClearableBootCause, SlotHealthUnre
         case Err(unreadable):
             return Err(SlotHealthUnreadable(f'cause: {unreadable.reason}'))
     match cause:
+        case ResourceShortage() | ThreadStartRefused():
+            return Ok(cause)
         case (
-            ResourceShortage()
+            AppLoadFailed()
+            | ChildPoolSetupFailed()
             | TaskLoopCreateFailed()
-            | ThreadStartRefused()
             | SpawnFailed()
         ):
-            return Ok(cause)
-        case AppLoadFailed() | ChildPoolSetupFailed():
             return Err(SlotHealthUnreadable(f'cause {cause!r} cannot keep a slot down'))
         case _ as unreachable:
             assert_never(unreachable)

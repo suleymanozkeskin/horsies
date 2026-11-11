@@ -13,8 +13,6 @@ from horsies.core.models.boot_failure import (
     ClearableBootCause,
     ResourceShortage,
     ShortageErrno,
-    SpawnFailed,
-    TaskLoopCreateFailed,
     ThreadStartRefused,
 )
 from horsies.core.models.health import (
@@ -206,9 +204,7 @@ class TestSlotHealth:
         'cause',
         [
             ResourceShortage(ShortageErrno.ENOMEM),
-            TaskLoopCreateFailed(),
             ThreadStartRefused(),
-            SpawnFailed(),
         ],
     )
     def test_each_cause_that_can_clear_round_trips(
@@ -243,6 +239,8 @@ class TestSlotHealth:
             ('down_since', '2026-01-01T12:00:00'),
             ('down_since', 'yesterday'),
             ('cause', {'kind': 'app_load_failed'}),
+            ('cause', {'kind': 'task_loop_create_failed'}),
+            ('cause', {'kind': 'spawn_failed'}),
             ('cause', {'kind': 'resource_shortage', 'errno': 'ENOENT'}),
         ],
         ids=[
@@ -256,6 +254,8 @@ class TestSlotHealth:
             'down-since-naive',
             'down-since-not-iso',
             'cause-that-repeats',
+            'loop-cause-that-repeats',
+            'spawn-cause-that-repeats',
             'cause-errno-not-in-table',
         ],
     )

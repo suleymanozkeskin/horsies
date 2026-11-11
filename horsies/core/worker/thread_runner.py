@@ -15,12 +15,13 @@ the finalizing marker after the return, when the run table asks for it.
 from __future__ import annotations
 
 from collections.abc import Callable, Coroutine
-from typing import Any, assert_never
+from typing import Any, Final, assert_never
 
 from horsies.core.logging import get_logger
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.worker.child_protocol import (
     SeatRefusal,
+    SeatTask,
     SharedRunFrame,
     ThreadSeatTask,
     ThreadSeatWork,
@@ -34,9 +35,15 @@ from horsies.core.worker.shared_child import (
     StoppedBeforeRunning,
 )
 from horsies.core.worker.thread_child import ThreadSeatReturn
+from horsies.core.worker.child_pool import CHILD_POOL_CONNECTION_WAIT_S
 from horsies.core.worker.child_runner import (
+    CANCEL_REQUEST_TIMEOUT_S,
+    _PRE_START_CONFIRM_ATTEMPTS,
     DeadlineBeforeStart,
     StartCheck,
+    StatementsBound,
+    StatementsLimit,
+    StatementsUnbounded,
     OnSharedThreadSeat,
     _confirm_until_not_resumed,
     _encode_task_outcome,
@@ -94,6 +101,37 @@ def _thread_call_result(
             )
 
 
+REFUSAL_STATEMENTS_TIMEOUT_S: Final = 10.0
+"""The longest time that the statements of one write of a refusal on a
+shared thread child take once the write holds its connection: each attempt
+of the RUNNING transition, and the finalizing marker."""
+
+THREAD_REFUSAL_WRITES_BOUND_S: Final = (_PRE_START_CONFIRM_ATTEMPTS + 1) * (
+    CHILD_POOL_CONNECTION_WAIT_S
+    + REFUSAL_STATEMENTS_TIMEOUT_S
+    + CANCEL_REQUEST_TIMEOUT_S
+)
+"""The longest time that the writes of a refusal take on a shared thread
+child: each attempt of the RUNNING transition and the finalizing marker,
+each with the wait for a pooled connection, its statements, and the cancel
+request of a statement past its bound. The refusal backstop of the parent
+(``slots.SHARED_REFUSAL_BACKSTOP_S``) comes after it."""
+
+
+def _statements_of(work: ThreadSeatWork) -> StatementsLimit:
+    """The bound of the statements of the writes of a run: a refusal's
+    writes are bounded, so that the refusal backstop of the parent never
+    meets a database that does not answer; a task keeps the wait of its
+    deadline backstop."""
+    match work:
+        case SeatRefusal():
+            return StatementsBound(REFUSAL_STATEMENTS_TIMEOUT_S)
+        case ThreadSeatTask():
+            return StatementsUnbounded()
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def run_thread_seat_task(
     frame: SharedRunFrame,
     work: ThreadSeatWork,
@@ -123,6 +161,7 @@ def run_thread_seat_task(
         frame.is_workflow_task,
         frame.claimed_at,
         start_check=start_check,
+        statements=_statements_of(work),
     )
     match ownership_result:
         case None:
@@ -170,6 +209,21 @@ def _run_after_running(frame: SharedRunFrame, work: ThreadSeatWork) -> WireResul
         return _task_exception_response(frame.task_name, e)
 
 
+def _refusal_or_task_statements(frame: SharedRunFrame) -> StatementsLimit:
+    """The bound of the statements of the writes of the run of ``frame``,
+    as ``_statements_of``. A frame of a shared async run on a thread seat is
+    a defect: ``AssertionError``."""
+    match frame.work:
+        case SeatRefusal() | ThreadSeatTask() as work:
+            return _statements_of(work)
+        case SeatTask():
+            raise AssertionError(
+                f'run {frame.dispatch} of a shared async child reached a thread seat',
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def mark_thread_seat_finalizing(frame: SharedRunFrame, window: MarkerWindow) -> None:
     """Write the finalizing marker of a run whose task returned, within
     ``window``, on the sync pool of the child.
@@ -178,12 +232,18 @@ def mark_thread_seat_finalizing(frame: SharedRunFrame, window: MarkerWindow) -> 
     time left before the deadline of the run; ``MarkerWithoutDeadline``
     keeps the wait of the pool (``CHILD_POOL_CONNECTION_WAIT_S``). A write
     that gets no connection in time is logged and skipped
-    (``_mark_task_finalizing``). The statement itself is not cut: a database
-    that holds it delays the end report of the run.
+    (``_mark_task_finalizing``). The statement of a task is not cut: a
+    database that holds it delays the end report of the run. The statement
+    of a refusal is bounded (``_statements_of``).
     """
     match window:
         case MarkerWithoutDeadline():
-            _mark_task_finalizing(frame.task_id, frame.worker_id, frame.claimed_at)
+            _mark_task_finalizing(
+                frame.task_id,
+                frame.worker_id,
+                frame.claimed_at,
+                statements=_refusal_or_task_statements(frame),
+            )
         case MarkerBeforeDeadline(seconds=seconds):
             _mark_task_finalizing(
                 frame.task_id,

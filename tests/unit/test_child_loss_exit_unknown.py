@@ -23,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import pytest_asyncio
 
+from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.types.result import Ok
 from horsies.core.worker import slots
 from horsies.core.worker.child_protocol import InitFrame, IsolatedChild, RunFrame
@@ -122,8 +123,11 @@ def short_kill_wait(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(slots, 'CHILD_KILL_WAIT_S', SHORT_KILL_WAIT_S)
 
 
-def _worker() -> tuple[Worker, AsyncMock]:
-    """Return a worker and its crash recovery, which records each call."""
+def _worker(
+    recovery: RecoveryConfig | None = RecoveryConfig(),
+) -> tuple[Worker, AsyncMock]:
+    """Return a worker and its crash recovery, which records each call.
+    The default config turns stale RUNNING recovery on."""
     worker = Worker(
         session_factory=MagicMock(),
         listener=MagicMock(),
@@ -131,6 +135,7 @@ def _worker() -> tuple[Worker, AsyncMock]:
             dsn='postgresql+psycopg://u:p@localhost/db',
             psycopg_dsn='postgresql://u:p@localhost/db',
             queues=['default'],
+            recovery_config=recovery,
         ),
     )
     recovery = AsyncMock(return_value=_RequeueOutcome.REQUEUED)
@@ -224,6 +229,83 @@ class TestLossWithNoExitSeen:
 
         assert _loss(stuck.handle).cause is LossCause.SLOT_DEFECT
         await _assert_left_to_stale_recovery(stuck.handle, caplog)
+
+
+class _LateProcess:
+    """A process that ends only when ``ended`` is set, long after its kill."""
+
+    pid = NO_SUCH_PID
+
+    def __init__(self) -> None:
+        self.ended = asyncio.Event()
+        self.returncode: int | None = None
+
+    async def wait(self) -> int:
+        await self.ended.wait()
+        self.returncode = -9
+        return self.returncode
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestLossWithStaleRecoveryOff:
+    """Nothing else moves the row, so the worker waits for the exit that the
+    slot did not see, and recovers the row once it sees it."""
+
+    async def _late_loss(self) -> tuple[_LateProcess, Child, socket.socket, SlotHandle]:
+        process = _LateProcess()
+        parent_sock, peer = socket.socketpair()
+        child = await Child._attach(
+            cast('asyncio.subprocess.Process', process),
+            parent_sock,
+            _init(),
+        )
+        handle = SlotHandle(_frame(), asyncio.get_running_loop())
+        handle.bind_child(child)
+        handle.finish(await child.discard_violating_child())
+        assert _loss(handle).child_exit == ExitUnknown()
+        return process, child, peer, handle
+
+    async def test_the_row_is_recovered_once_the_exit_is_seen(self) -> None:
+        process, child, peer, handle = await self._late_loss()
+        worker, recovery = _worker(recovery=None)
+        try:
+            waiting = asyncio.ensure_future(
+                worker._finalize_after(handle, TASK_ID, task_name='hang'),
+            )
+            await asyncio.sleep(0.05)
+            assert not waiting.done()
+            recovery.assert_not_awaited()
+
+            process.ended.set()
+            await asyncio.wait_for(waiting, TEST_WAIT_S)
+
+            recovery.assert_awaited_once()
+            assert recovery.await_args is not None
+            assert 'signal 9 (SIGKILL)' in recovery.await_args.args[1]
+        finally:
+            child._transport.abort()
+            peer.close()
+
+    async def test_a_stop_before_the_exit_writes_nothing(self) -> None:
+        process, child, peer, handle = await self._late_loss()
+        worker, recovery = _worker(recovery=None)
+        try:
+            waiting = asyncio.ensure_future(
+                worker._finalize_after(handle, TASK_ID, task_name='hang'),
+            )
+            await asyncio.sleep(0.05)
+
+            worker._stop.set()
+            result = await asyncio.wait_for(waiting, TEST_WAIT_S)
+
+            assert result == Ok(None)
+            recovery.assert_not_awaited()
+        finally:
+            process.ended.set()
+            await asyncio.sleep(0)
+            child._transport.abort()
+            peer.close()
 
 
 @pytest.mark.unit

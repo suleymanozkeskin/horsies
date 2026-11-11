@@ -103,7 +103,7 @@ if is_ok(result):
                 pass
 ```
 
-`DownSlot` fields: `slot` (index), `cause` (`ResourceShortage(errno_name)`, `TaskLoopCreateFailed()`, `ThreadStartRefused()` or `SpawnFailed()`), `detail` (error text of the last failed start, at most 2400 characters), `down_since` (aware `datetime`), `failed_boots` (failed starts since the slot went down, at least 1).
+`DownSlot` fields: `slot` (index), `cause` (`ResourceShortage(errno_name)` or `ThreadStartRefused()`), `detail` (error text of the last failed start, at most 2400 characters), `down_since` (aware `datetime`), `failed_boots` (failed starts since the slot went down, at least 1).
 
 ### Which classes does a worker serve?
 

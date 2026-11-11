@@ -30,7 +30,7 @@ from horsies.core.brokers.result_types import (
     BrokerListenerDisabled,
 )
 from horsies.core.codec.json_io import SerializationError
-from horsies.core.models.boot_failure import SpawnFailed
+from horsies.core.models.boot_failure import ResourceShortage, ShortageErrno
 from horsies.core.models.health import (
     AllSlotsServing,
     ClassBudget,
@@ -1907,7 +1907,7 @@ class TestWorkerStateReads:
                 [
                     {
                         'slot': 3,
-                        'cause': {'kind': 'spawn_failed'},
+                        'cause': {'kind': 'resource_shortage', 'errno': 'EAGAIN'},
                         'detail': 'OSError: [Errno 11] Resource temporarily unavailable',
                         'down_since': '2026-01-01T00:00:00+00:00',
                         'failed_boots': 5,
@@ -1917,7 +1917,7 @@ class TestWorkerStateReads:
                     (
                         DownSlot(
                             3,
-                            SpawnFailed(),
+                            ResourceShortage(ShortageErrno.EAGAIN),
                             'OSError: [Errno 11] Resource temporarily unavailable',
                             datetime(2026, 1, 1, tzinfo=timezone.utc),
                             5,

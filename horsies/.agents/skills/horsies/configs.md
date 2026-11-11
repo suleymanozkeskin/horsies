@@ -386,14 +386,17 @@ Failures stay with one task:
   stop a running task. The worker drains it. Task subprocesses do get the signal.
 - A dead preload parent stops no task. New children use `exec` until it is back.
 - A child that cannot boot reports the cause. A cause that repeats (the app or
-  a task module does not import, the child pool cannot be set up, a death with
-  no report, not ready in 120 s) uses one of 3 attempts, then the worker exits
+  a task module does not import, the child pool cannot be set up, an event
+  loop that cannot be created for another cause than the errno values below, a
+  spawn that the OS refuses with another errno such as ENOENT, a death with no
+  report, not ready in 120 s) uses one of 3 attempts, then the worker exits
   non-zero. A failed `on_child_process_start` hook stops the worker at once.
-- A cause that can clear (`OSError` EMFILE / ENFILE / ENOMEM / EAGAIN, an
-  event loop that cannot be created, a refused control thread or spawn) takes
-  only that slot down: it takes no task, the claim budget leaves it out, and it
+- A cause that can clear (`OSError` EMFILE / ENFILE / ENOMEM / EAGAIN in any
+  start step, the spawn and the event loop among them, or a refused thread)
+  takes only that slot down: it takes no task, the claim budget leaves it out, and it
   boots again after 1, 2, 4 ... up to 60 s. It uses an attempt only when every
-  other slot is down too. The worker starts degraded when one child is ready
+  other slot is down too; a failed boot while another slot is in service
+  starts the count again, so only 3 attempts in a row stop the worker. The worker starts degraded when one child is ready
   and each other slot is down. `WorkerStateSnapshot.slot_health` names the
   slots that are down (`SlotsDown`).
 - An outside SIGKILL of a booting replacement child uses no attempt while
@@ -472,7 +475,9 @@ slot.
 - Startup **baseline guard**: each child samples its settled baseline RSS (after
   `gc.collect()`); the worker hard-fails if the threshold is at or below the
   warmed baseline (the app does not fit the per-child budget) and warns within
-  80% of it.
+  80% of it. A kind whose slots were all down at the start is checked when its
+  first child becomes ready; a breach then stops the worker (drain, exit
+  non-zero).
 - `mb` from 1 to 16,777,216 — no fixed floor, the baseline guard is the real floor.
 - At boot the worker warns (and still starts) when `count × mb` is above the
   usable memory: the cgroup limit when it is below the host RAM, else the

@@ -247,7 +247,7 @@ The comparison is for one worker. Several workers, producers and other clients s
 
 At boot the worker compares the sum of `count × MemoryLimit.mb` over the modes with the memory that it can use, and logs a warning when the sum is above it. The worker starts in every case: a deployment can move between machine sizes. A profile with a mode that has children and `NoMemoryLimit()` has no sum to compare.
 
-The memory limit of each mode is also compared with the measured baseline RSS of a booted child of that mode, and a limit at or below it refuses the start.
+The memory limit of each mode is also compared with the measured baseline RSS of a booted child of that mode, and a limit at or below it refuses the start. A mode whose children were all down at the start is compared when its first child becomes ready; a limit at or below that baseline stops the worker, which exits non-zero.
 
 The memory that the worker can use is the smaller of two values:
 

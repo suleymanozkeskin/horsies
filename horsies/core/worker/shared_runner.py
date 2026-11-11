@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import threading
 from collections.abc import Callable, Coroutine
 from typing import Any, Final, assert_never
 
@@ -24,7 +23,10 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from horsies.core.logging import get_logger
-from horsies.core.models.boot_failure import ChildPoolSetupFailed
+from horsies.core.models.boot_failure import (
+    ChildPoolSetupFailed,
+    ThreadStartRefusedError,
+)
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.task_decorator import await_task_call_in_worker
 from horsies.core.types.result import Err, Ok, Result
@@ -109,8 +111,9 @@ class PostgresSeatProgram:
         """Open the async pool, then run the async start hooks.
 
         ``Err``: the pool could not be set up (``ChildPoolSetupFailed``, or a
-        ``ResourceShortage`` for an errno that can clear). A hook that fails
-        or hangs ends the process with ``CHILD_HOOK_FAILURE_EXIT_CODE``.
+        ``ResourceShortage`` for an errno that can clear), or the OS refused
+        the watchdog of a hook (``ThreadStartRefused``). A hook that fails or
+        hangs ends the process with ``CHILD_HOOK_FAILURE_EXIT_CODE``.
         """
         try:
             pool = await open_shared_async_pool(
@@ -122,7 +125,10 @@ class PostgresSeatProgram:
             )
         except Exception as exc:
             return Err(boot_failure_from_exception(exc, ChildPoolSetupFailed()))
-        await run_shared_async_start_hooks()
+        try:
+            await run_shared_async_start_hooks()
+        except ThreadStartRefusedError as exc:
+            return Err(boot_failure_from_exception(exc, ChildPoolSetupFailed()))
         return Ok(PostgresSeats(pool))
 
 
@@ -133,16 +139,14 @@ async def run_shared_async_start_hooks() -> None:
     ends the process: a hook that blocks the loop cannot stop that thread.
     A hook that raises ends the process at once. Both exits use
     ``CHILD_HOOK_FAILURE_EXIT_CODE``, so the parent stops the worker.
+
+    Raises:
+        ThreadStartRefusedError: the OS refused the watchdog of a hook,
+            before that hook ran.
     """
     for hook in get_current_app().get_shared_async_child_start_hooks():
         hook_name = getattr(hook, '__qualname__', repr(hook))
-        watchdog = threading.Timer(
-            child_runner.CHILD_HOOK_TIMEOUT_SECONDS,
-            child_runner._exit_for_hung_hook,
-            args=(hook_name,),
-        )
-        watchdog.daemon = True
-        watchdog.start()
+        watchdog = child_runner.start_hook_watchdog(hook_name)
         try:
             await hook()
         except BaseException as exc:

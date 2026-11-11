@@ -17,6 +17,11 @@ from typing import Any, cast
 
 import pytest
 
+from horsies.core.models.boot_failure import (
+    ResourceShortage,
+    ShortageErrno,
+    TaskLoopCreateFailed,
+)
 from horsies.core.types.result import Err, Ok
 from horsies.core.utils.loop_runner import in_running_event_loop
 from horsies.core.worker.child_protocol import (
@@ -109,7 +114,11 @@ class TestOpen:
     ) -> None:
         """The child then fails its boot, so nothing runs on this loop."""
         monkeypatch.setattr(asyncio, 'new_event_loop', _no_descriptors)
-        failed = LoopCreateFailed(error_name='OSError', detail=EMFILE_DETAIL)
+        failed = LoopCreateFailed(
+            cause=ResourceShortage(ShortageErrno.EMFILE),
+            error_name='OSError',
+            detail=EMFILE_DETAIL,
+        )
 
         assert new_task_loop.open() == Err(failed)
         assert new_task_loop.state == LoopNotCreated()
@@ -152,7 +161,11 @@ class TestOpen:
             raise error
 
         monkeypatch.setattr(asyncio, 'new_event_loop', refuses)
-        failed = LoopCreateFailed(error_name=type(error).__name__, detail=str(error))
+        failed = LoopCreateFailed(
+            cause=TaskLoopCreateFailed(),
+            error_name=type(error).__name__,
+            detail=str(error),
+        )
 
         assert new_task_loop.open() == Err(failed)
         assert new_task_loop.state == LoopNotCreated()

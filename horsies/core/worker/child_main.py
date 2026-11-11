@@ -37,13 +37,12 @@ from typing import TYPE_CHECKING, Final, NoReturn, assert_never
 from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.logging import get_logger
 from horsies.core.models.boot_failure import (
-    CLEARABLE_ERRNOS,
     AppLoadFailed,
     ChildPoolSetupFailed,
     ReportedBootCause,
-    ResourceShortage,
-    TaskLoopCreateFailed,
     ThreadStartRefused,
+    ThreadStartRefusedError,
+    shortage_or,
 )
 from horsies.core.models.tasks import OperationalErrorCode, TaskError, TaskResult
 from horsies.core.types.result import Err, Ok, Result
@@ -335,18 +334,22 @@ def boot_failure_from_exception(
 ) -> BootFailedFrame:
     """Name the cause of an exception that a boot step raised.
 
-    An ``OSError`` whose errno is in ``CLEARABLE_ERRNOS`` is a
-    ``ResourceShortage``, which can clear. Any other exception is
-    ``step_cause``, which repeats. Only the exception itself is read, not
-    its ``__cause__``. Pure.
+    A ``ThreadStartRefusedError`` is ``ThreadStartRefused``, which can clear;
+    the frame names the error of the refused start. An ``OSError`` whose
+    errno is in ``CLEARABLE_ERRNOS`` is a ``ResourceShortage``, which can
+    clear. Any other exception is ``step_cause``, which repeats. Only the
+    exception itself is read, not its ``__cause__``. Pure.
     """
-    cause: ReportedBootCause = step_cause
     match exc:
-        case OSError(errno=int() as number) if number in CLEARABLE_ERRNOS:
-            cause = ResourceShortage(CLEARABLE_ERRNOS[number])
+        case ThreadStartRefusedError(refusal=refusal):
+            return boot_failed_frame(
+                ThreadStartRefused(),
+                type(refusal).__name__,
+                str(exc),
+            )
         case _:
-            pass
-    return boot_failed_frame(cause, type(exc).__name__, str(exc))
+            cause: ReportedBootCause = shortage_or(exc, step_cause)
+            return boot_failed_frame(cause, type(exc).__name__, str(exc))
 
 
 def start_control_thread(
@@ -380,9 +383,10 @@ def open_task_loop_at_boot(
     """Return the task loop of this child, open when its app has an
     ``async def`` task, and not created when it has none.
 
-    ``Err``: the loop could not be created, so the cause is
-    ``TaskLoopCreateFailed``. The caller fails the boot before the ready
-    frame, so no task reaches this child.
+    ``Err``: the loop could not be created. The cause is that of
+    ``LoopCreateFailed``: ``ResourceShortage`` for an errno in
+    ``CLEARABLE_ERRNOS``, else ``TaskLoopCreateFailed``. The caller fails the
+    boot before the ready frame, so no task reaches this child.
     """
     task_loop = TaskLoop()
     match presence:
@@ -397,7 +401,7 @@ def open_task_loop_at_boot(
 
 
 def _loop_create_failure(failed: LoopCreateFailed) -> BootFailedFrame:
-    return boot_failed_frame(TaskLoopCreateFailed(), failed.error_name, failed.detail)
+    return boot_failed_frame(failed.cause, failed.error_name, failed.detail)
 
 
 def fail_boot(sock: socket.socket, failed: BootFailedFrame) -> NoReturn:

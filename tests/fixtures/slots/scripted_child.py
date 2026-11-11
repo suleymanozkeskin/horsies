@@ -15,9 +15,10 @@ program is replaced: each run is a scripted ``def`` call on the seat thread
 
 Each boot that passes reports an app with ``async def`` tasks, so ``serve``
 creates the task loop, except the ``no_async`` modes. The ``loop_*`` modes make
-that creation raise ``OSError(EMFILE)``. The ``report_*`` and ``short_*`` modes
-return a boot failure frame with a named cause, as ``child_main.boot_app``
-does.
+that creation raise ``OSError(EMFILE)``, except ``loop_policy_refuses_on_slot``,
+whose policy raises ``NotImplementedError`` in one slot. The ``report_*`` and
+``short_*`` modes return a boot failure frame with a named cause, as
+``child_main.boot_app`` does.
 """
 
 # pyright: reportPrivateUsage=false
@@ -98,6 +99,10 @@ def _no_descriptors() -> asyncio.AbstractEventLoop:
     raise OSError(errno.EMFILE, 'Too many open files')
 
 
+def _policy_refuses() -> asyncio.AbstractEventLoop:
+    raise NotImplementedError('this policy cannot build a loop here')
+
+
 def _boot_mark(path: str) -> int:
     """Add one mark for this boot. Return the marks so far, this one included."""
     with open(path, 'a+', encoding='ascii') as marks:
@@ -116,6 +121,10 @@ def _loop_boot(mode: str, argument: str, init: InitFrame) -> AsyncTaskPresence:
             return AsyncTaskPresence.NO_ASYNC_TASK
         case 'loop_create_fails':
             asyncio.new_event_loop = _no_descriptors
+        case 'loop_policy_refuses_on_slot':
+            # Only the slot named in the argument has a policy that raises.
+            if _slot_index(init) == int(argument):
+                asyncio.new_event_loop = _policy_refuses
         case 'loop_fails_first':
             # The first boots cannot create the loop, then boots pass.
             if _boot_mark(argument) <= int(init.imports[0]):
@@ -166,6 +175,12 @@ def _report_boot(
             # The first boots are short of descriptors, then boots pass.
             if _boot_mark(argument) <= int(init.imports[0]):
                 return Err(_SHORT_OF_DESCRIPTORS)
+        case 'short_first_on_slot':
+            # The slot in imports[0] is short of descriptors for its first
+            # imports[1] boots, then its boots pass.
+            if _slot_index(init) == int(init.imports[0]):
+                if _boot_mark(argument) <= int(init.imports[1]):
+                    return Err(_SHORT_OF_DESCRIPTORS)
         case 'short_after_first':
             # The first boots pass, then the next boots are short of descriptors.
             seen = _boot_mark(argument)
@@ -192,6 +207,7 @@ def _boot(init: InitFrame) -> Result[AsyncTaskPresence, BootFailedFrame]:
             'no_async'
             | 'no_async_no_descriptors'
             | 'loop_create_fails'
+            | 'loop_policy_refuses_on_slot'
             | 'loop_fails_first'
             | 'loop_fails_after_first'
         ):
@@ -202,6 +218,7 @@ def _boot(init: InitFrame) -> Result[AsyncTaskPresence, BootFailedFrame]:
             | 'short_always'
             | 'short_on_slot'
             | 'short_first'
+            | 'short_first_on_slot'
             | 'short_after_first'
             | 'short_then_hang'
         ):
@@ -514,6 +531,46 @@ async def _wait_forever() -> None:
     _ = await asyncio.Event().wait()
 
 
+# The time that a freezing operation gives the writer thread to send the
+# report of the cancel, before it stops the process.
+FREEZE_AFTER_REPORT_S = 0.2
+
+
+def _freeze() -> None:
+    """Stop the whole process after the report of the cancel left it, as C
+    code that holds the GIL stops every thread."""
+    time.sleep(FREEZE_AFTER_REPORT_S)
+    os.kill(os.getpid(), signal.SIGSTOP)
+
+
+async def _freeze_at_second_cancel() -> str:
+    """Live through the cancel at the deadline, then freeze at the second
+    cancel, before the stuck check."""
+    try:
+        await asyncio.sleep(3600)
+    except asyncio.CancelledError:
+        pass
+    try:
+        await asyncio.sleep(3600)
+    except asyncio.CancelledError:
+        _freeze()
+    return str(os.getpid())
+
+
+async def _freeze_when_cancelled() -> None:
+    try:
+        await asyncio.sleep(3600)
+    except asyncio.CancelledError:
+        _freeze()
+
+
+async def _leave_freezing_at_cancel() -> str:
+    """Start a task that freezes the process when the child cancels it, and
+    return at once."""
+    _kept_tasks.append(asyncio.get_running_loop().create_task(_freeze_when_cancelled()))
+    return str(os.getpid())
+
+
 async def _leave_ignoring_cancels() -> str:
     """Start a task that ignores every cancel, and return at once."""
     _kept_tasks.append(asyncio.get_running_loop().create_task(_ignore_cancel()))
@@ -598,6 +655,10 @@ async def _seat_run(frame: SharedRunFrame) -> WireResult:
             return True, _lazy_client(), None
         case 'ignore_every_cancel':
             return True, await _ignore_every_cancel(), None
+        case 'freeze_at_second_cancel':
+            return True, await _freeze_at_second_cancel(), None
+        case 'leave_freezing_at_cancel':
+            return True, await _leave_freezing_at_cancel(), None
         case 'start_ticker':
             # An empty context carries no run mark, as a task that a start
             # hook creates: the run ends while the ticker runs on.

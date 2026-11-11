@@ -48,6 +48,7 @@ from horsies.core.models.boot_failure import (
     ThreadStartRefused,
     cut_text,
     describe_boot_cause,
+    shortage_or,
 )
 from horsies.core.models.health import DownSlot
 from horsies.core.models.tasks import (
@@ -136,6 +137,12 @@ from horsies.core.worker.child_protocol import (
     parse_header,
 )
 from horsies.core.worker.loop_watchdog import LOOP_BLOCK_LIMIT_MS
+from horsies.core.worker.shared_child import (
+    CANCEL_ROUND_INTERVAL_S,
+    EXTRA_CANCEL_ROUNDS,
+)
+from horsies.core.worker.shared_lifecycle import REFUSAL_WRITES_BOUND_S
+from horsies.core.worker.thread_runner import THREAD_REFUSAL_WRITES_BOUND_S
 from horsies.core.worker.shared_stop import (
     BlockedLoopKill,
     ChildKill,
@@ -185,12 +192,27 @@ DRAIN_DEADLINE_S: Final = 5.0
 # kills it. The margin is past the block limit, so a block that the watchdog
 # can report is reported first, with its culprit.
 SHARED_BACKSTOP_MARGIN_S: Final = LOOP_BLOCK_LIMIT_MS / 1000 + 5.0
-# A refusal runs only the RUNNING update and the finalizing marker: a pool
-# wait of at most 30 s and a marker of at most 10 s, with the statements
-# between them. A refusal still in flight this long after its placement means
-# a frozen child or a database that does not answer: the parent kills the
-# child, and the refusal takes the crash path.
-SHARED_REFUSAL_BACKSTOP_S: Final = 120.0
+# After a shared async child reports the second cancel of a run, or the cancel
+# of the work that a run left after its return, it sends EXTRA_CANCEL_ROUNDS
+# more cancel rounds CANCEL_ROUND_INTERVAL_S apart, and reports the run stuck
+# CANCEL_ROUND_INTERVAL_S after the last one, unless the run ended.
+STUCK_REPORT_DELAY_S: Final = (EXTRA_CANCEL_ROUNDS + 1) * CANCEL_ROUND_INTERVAL_S
+# The parent checks such a run again this long after its first backstop found
+# that cancel reported. A child that has reported neither the stuck run nor
+# its end by then is frozen, and the parent kills it. The margin is past the
+# block limit, as for the first backstop.
+SHARED_STUCK_BACKSTOP_S: Final = STUCK_REPORT_DELAY_S + SHARED_BACKSTOP_MARGIN_S
+# A refusal runs only the RUNNING transition and the finalizing marker. Their
+# bounds add up to REFUSAL_WRITES_BOUND_S in a shared async child and to
+# THREAD_REFUSAL_WRITES_BOUND_S in a shared thread child, so a database that
+# does not answer ends the writes first and kills no child. A refusal still
+# in flight past the longer one, and past the block limit with the margin of
+# SHARED_BACKSTOP_MARGIN_S, means a frozen child: the parent kills the child,
+# and the refusal takes the crash path.
+SHARED_REFUSAL_BACKSTOP_S: Final = (
+    max(REFUSAL_WRITES_BOUND_S, THREAD_REFUSAL_WRITES_BOUND_S)
+    + SHARED_BACKSTOP_MARGIN_S
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -494,7 +516,8 @@ class LeftoverCancelReported:
     deadline, and that work it left was alive at the end of its cancel
     grace: the child cancels that work in rounds. The deadline no longer
     applies to the run, and the child is closed. ``returned`` is what the
-    coroutine returned: the outcome of the run at a kill of its child."""
+    coroutine returned: the outcome of the run at any end of its child
+    whose exit the worker saw."""
 
     returned: SeatFinished
 
@@ -503,8 +526,9 @@ class LeftoverCancelReported:
 class LeftoverStuckReported:
     """The child reported that the work this run left after its return did
     not stop after its cancel rounds. ``returned`` is what the coroutine
-    returned before its deadline: the outcome of the run at a kill of its
-    child. The run has no time left, and it is no culprit."""
+    returned before its deadline: the outcome of the run at any end of its
+    child whose exit the worker saw. The run has no time left, and it is no
+    culprit."""
 
     returned: SeatFinished
 
@@ -671,7 +695,12 @@ class NotReadyInTime:
 
 
 RepeatingBootCause: TypeAlias = (
-    AppLoadFailed | ChildPoolSetupFailed | LostBeforeReady | NotReadyInTime
+    AppLoadFailed
+    | ChildPoolSetupFailed
+    | TaskLoopCreateFailed
+    | SpawnFailed
+    | LostBeforeReady
+    | NotReadyInTime
 )
 BootFailureCause: TypeAlias = RepeatingBootCause | ClearableBootCause
 
@@ -724,10 +753,12 @@ class ChildHookFailed:
 
 @dataclass(frozen=True, slots=True)
 class BootAttemptsExhausted:
-    """``attempts`` counted boot attempts ended before the child was ready.
+    """``attempts`` consecutive counted boot attempts ended before the child
+    was ready.
 
     ``cause`` and ``detail`` are those of the last attempt. An attempt
-    counts when its cause repeats, or when every other slot is down.
+    counts when its cause repeats, or when every other slot is down. An
+    attempt that another slot in service spares starts the count again.
     """
 
     attempts: int
@@ -768,7 +799,8 @@ def describe_pool_failure(failure: PoolFailure) -> str:
 
 
 class _AttemptCount(Enum):
-    """Whether a failed boot uses one of ``CHILD_BOOT_ATTEMPTS``."""
+    """Whether a failed boot uses one of ``CHILD_BOOT_ATTEMPTS``. A spared
+    boot ends the run of counted boots: only consecutive ones add up."""
 
     COUNTS = 'counts'
     SPARED = 'spared'
@@ -851,6 +883,20 @@ class DeadlineAcknowledged:
 
 BackstopOutcome: TypeAlias = (
     ChildEnded | ChildEndUnknown | SharedAnswered | DeadlineAcknowledged | NothingToKill
+)
+
+
+@dataclass(frozen=True, slots=True)
+class StuckAcknowledged:
+    """The child reported that this run is stuck, or reported its end: its
+    loop was alive after the cancel rounds. Nothing was killed: the run ends,
+    or the child is killed when every run left in it is stuck."""
+
+    pid: int
+
+
+StuckBackstopOutcome: TypeAlias = (
+    ChildEnded | ChildEndUnknown | SharedAnswered | StuckAcknowledged | NothingToKill
 )
 
 
@@ -1015,13 +1061,37 @@ class FrameProtocol(asyncio.BufferedProtocol):
         self._on_closed()
 
 
-def _socket_pair() -> tuple[socket.socket, socket.socket]:
-    """Return a new (parent, child) pair with large buffers."""
-    parent_sock, child_sock = socket.socketpair()
-    for sock in (parent_sock, child_sock):
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, SOCKET_BUFFER_BYTES)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, SOCKET_BUFFER_BYTES)
-    return parent_sock, child_sock
+def spawn_failure(exc: OSError) -> BootFailure:
+    """Name the cause of an ``OSError`` of a step that starts a child in the
+    parent: ``ResourceShortage`` for an errno in ``CLEARABLE_ERRNOS``, else
+    ``SpawnFailed``. Pure."""
+    return boot_failure(shortage_or(exc, SpawnFailed()), f'{type(exc).__name__}: {exc}')
+
+
+def _socket_pair() -> Result[tuple[socket.socket, socket.socket], BootFailure]:
+    """Return a new (parent, child) pair with large buffers.
+
+    ``Err``: the OS refused the pair or a buffer size (``spawn_failure``).
+    No socket of this call is left open then.
+    """
+    try:
+        parent_sock, child_sock = socket.socketpair()
+    except OSError as exc:
+        return Err(spawn_failure(exc))
+    try:
+        for sock in (parent_sock, child_sock):
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, SOCKET_BUFFER_BYTES)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, SOCKET_BUFFER_BYTES)
+    except OSError as exc:
+        parent_sock.close()
+        child_sock.close()
+        return Err(spawn_failure(exc))
+    return Ok((parent_sock, child_sock))
+
+
+@dataclass(frozen=True, slots=True)
+class _NoForkedChild:
+    """The preload parent gave no child, so the start uses ``exec``."""
 
 
 class Child:
@@ -1065,14 +1135,22 @@ class Child:
         parent-death signal fires when the spawning thread ends. Does not wait
         for the child to be ready.
 
-        ``Err``: the OS refused the ``exec`` spawn. The cause is always
-        ``SpawnFailed``, and no process or socket is left.
+        ``Err``: the OS refused the socket pair of the child or the ``exec``
+        spawn. The cause is ``SpawnFailed``, or ``ResourceShortage`` for an
+        errno in ``CLEARABLE_ERRNOS`` (``spawn_failure``). No process or
+        socket is left.
         """
         registry = set[int]() if live_pids is None else live_pids
         if preload is not None:
-            forked = await cls._start_forked(init, preload, registry)
-            if forked is not None:
-                return Ok(forked)
+            match await cls._start_forked(init, preload, registry):
+                case Child() as forked:
+                    return Ok(forked)
+                case BootFailure() as failed:
+                    return Err(failed)
+                case _NoForkedChild():
+                    pass
+                case _ as unreachable:
+                    assert_never(unreachable)
         return await cls._start_exec(config, init, registry)
 
     @classmethod
@@ -1081,13 +1159,18 @@ class Child:
         init: InitFrame,
         preload: PreloadParent,
         registry: set[int],
-    ) -> 'Child | None':
-        """Return a forked child, or None.
+    ) -> 'Child | _NoForkedChild | BootFailure':
+        """Return a forked child, ``_NoForkedChild`` when the preload parent
+        gave none, or the ``BootFailure`` of a socket pair that the OS refused.
 
         After a failure this socket pair must not be used again: a forked child
         may exist and hold it. Closing our end gives that child EOF.
         """
-        parent_sock, child_sock = _socket_pair()
+        match _socket_pair():
+            case Ok((parent_sock, child_sock)):
+                pass
+            case Err(failed):
+                return failed
         try:
             reply = await preload.fork_child(child_sock, registry)
         finally:
@@ -1098,7 +1181,7 @@ class Child:
             case Err(down):
                 parent_sock.close()
                 logger.warning('Preload parent gave no child: %s', down.detail)
-                return None
+                return _NoForkedChild()
 
     @classmethod
     async def _start_exec(
@@ -1107,7 +1190,11 @@ class Child:
         init: InitFrame,
         registry: set[int],
     ) -> Result['Child', BootFailure]:
-        parent_sock, child_sock = _socket_pair()
+        match _socket_pair():
+            case Ok((parent_sock, child_sock)):
+                pass
+            case Err(failed):
+                return Err(failed)
         try:
             process = await asyncio.create_subprocess_exec(
                 sys.executable,
@@ -1121,7 +1208,7 @@ class Child:
             )
         except OSError as exc:
             parent_sock.close()
-            return Err(boot_failure(SpawnFailed(), f'{type(exc).__name__}: {exc}'))
+            return Err(spawn_failure(exc))
         finally:
             child_sock.close()
         return Ok(await cls._attach_registered(process, parent_sock, init, registry))
@@ -1352,7 +1439,11 @@ class Child:
         await self.dispose()
 
     async def dispose(self) -> None:
-        """Close the socket and wait for the process, bounded."""
+        """Close the socket and wait for the process, bounded.
+
+        A process that has not ended by then keeps its exit watch:
+        ``wait_exit_seen`` still sees its end later.
+        """
         self._transport.abort()
         await self._wait_exit(CHILD_KILL_WAIT_S)
         if not self._exit.done():
@@ -1361,7 +1452,21 @@ class Child:
                 self.pid,
                 CHILD_KILL_WAIT_S,
             )
-            self._exit.cancel()
+
+    async def wait_exit_seen(self) -> ExitedWith | KilledBySignal:
+        """Wait, with no bound, until the process ends, and report its exit.
+
+        The caller bounds the wait. Sends no signal. A process reaped with no
+        return code is a defect: ``AssertionError``.
+        """
+        await asyncio.shield(self._exit)
+        match self._current_exit():
+            case ExitedWith() | KilledBySignal() as child_exit:
+                return child_exit
+            case ExitUnknown():
+                raise AssertionError(f'child pid={self.pid} ended with no return code')
+            case _ as unreachable:
+                assert_never(unreachable)
 
     async def dispose_lost(self) -> None:
         """Clean up after a lost child, with any task subprocesses it left."""
@@ -1377,10 +1482,12 @@ class SlotHandle:
         self.assigned: asyncio.Future[Assigned | NotDispatched] = loop.create_future()
         self.outcome: asyncio.Future[SlotOutcome] = loop.create_future()
         self._child: Child | None = None
+        self._last_child: Child | None = None
 
     def bind_child(self, child: Child) -> None:
         """Pool only: the task frame was sent to this child."""
         self._child = child
+        self._last_child = child
         if not self.assigned.done():
             self.assigned.set_result(Assigned())
 
@@ -1431,6 +1538,15 @@ class SlotHandle:
                 return ChildEndUnknown(pid=child.pid)
             case _ as unreachable:
                 assert_never(unreachable)
+
+    async def wait_child_exit(self) -> ExitedWith | KilledBySignal | NothingToKill:
+        """Wait, with no bound, for the exit of the last child that took this
+        task, also after the slot ended the binding. ``NothingToKill``: no
+        child took it. The caller bounds the wait."""
+        child = self._last_child
+        if child is None:
+            return NothingToKill()
+        return await child.wait_exit_seen()
 
     def _answer_without_child(self) -> SlotAnswered | NothingToKill:
         """Report a handle that holds no child. A cancelled outcome has no answer."""
@@ -1499,6 +1615,45 @@ def _reported_in(
     )
 
 
+def _stuck_step_reported(report: DeadlineReport) -> bool:
+    """Whether the child reported a run of a shared async child stuck, after
+    its second cancel or after the cancel of the work that it left."""
+    match report:
+        case StuckReported() | LeftoverStuckReported():
+            return True
+        case (
+            DeadlineNotReported()
+            | DeadlineReported()
+            | SecondCancelReported()
+            | LeftoverCancelReported()
+        ):
+            return False
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _stuck_reported_in(frames: tuple[ChildFrame, ...], dispatch: int) -> bool:
+    """Whether a frame that the slot has not read yet reports this run stuck,
+    or its end."""
+    return any(
+        isinstance(frame, (RunStuckFrame, LeftoverStuckFrame, SharedResultFrame))
+        and frame.dispatch == dispatch
+        for frame in frames
+    )
+
+
+async def _kill_and_wait(child: Child, wait_s: float) -> ChildEnded | ChildEndUnknown:
+    """Kill ``child`` with its session and wait up to ``wait_s`` for its exit."""
+    child.kill_for_caller()
+    match await child.wait_exit(wait_s):
+        case ExitedWith() | KilledBySignal() as child_exit:
+            return ChildEnded(pid=child.pid, child_exit=child_exit)
+        case ExitUnknown():
+            return ChildEndUnknown(pid=child.pid)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 class SharedHandle:
     """One submitted shared async task, as the caller sees it."""
 
@@ -1507,10 +1662,12 @@ class SharedHandle:
         self.assigned: asyncio.Future[Assigned | NotDispatched] = loop.create_future()
         self.outcome: asyncio.Future[SharedOutcome] = loop.create_future()
         self._binding: _SeatBinding | None = None
+        self._last_child: Child | None = None
 
     def bind(self, child: Child, run: _SeatRun) -> None:
         """Pool only: the run frame was sent to this child."""
         self._binding = _SeatBinding(child, run)
+        self._last_child = child
         if not self.assigned.done():
             self.assigned.set_result(Assigned())
 
@@ -1548,9 +1705,7 @@ class SharedHandle:
         """
         binding = self._binding
         if binding is None:
-            if self.outcome.done() and not self.outcome.cancelled():
-                return SharedAnswered(self.outcome.result())
-            return NothingToKill()
+            return self._answer_unbound()
         child = binding.child
         if _due_step_reported(self.frame.work, binding.run.deadline) or _reported_in(
             self.frame.work,
@@ -1558,14 +1713,58 @@ class SharedHandle:
             self.frame.dispatch,
         ):
             return DeadlineAcknowledged(pid=child.pid)
-        child.kill_for_caller()
-        match await child.wait_exit(wait_s):
-            case ExitedWith() | KilledBySignal() as child_exit:
-                return ChildEnded(pid=child.pid, child_exit=child_exit)
-            case ExitUnknown():
-                return ChildEndUnknown(pid=child.pid)
+        return await _kill_and_wait(child, wait_s)
+
+    async def stuck_backstop_kill(self, wait_s: float) -> StuckBackstopOutcome:
+        """Kill the child of this async run if it froze after the cancel that
+        ``backstop_kill`` found reported, then wait for its exit.
+
+        After the second cancel, or the cancel of the work that the run
+        left, the child reports the run stuck within
+        ``STUCK_REPORT_DELAY_S`` unless it ends, and its watchdog reports a
+        blocked loop within the block limit. The caller calls this
+        ``SHARED_STUCK_BACKSTOP_S`` after ``DeadlineAcknowledged``. The child
+        counts as frozen when the run is still on it and the child has
+        reported neither the stuck run nor its end, also not in a frame that
+        the slot has not read yet. The kill is bound to this run, as in
+        ``backstop_kill``. Only a run of a ``SeatTask`` has this step: any
+        other work is a caller defect, ``AssertionError``.
+        """
+        match self.frame.work:
+            case SeatTask():
+                pass
+            case ThreadSeatTask() | SeatRefusal():
+                raise AssertionError(
+                    f'run {self.frame.dispatch} has no stuck step to wait for',
+                )
             case _ as unreachable:
                 assert_never(unreachable)
+        binding = self._binding
+        if binding is None:
+            return self._answer_unbound()
+        child = binding.child
+        if _stuck_step_reported(binding.run.deadline) or _stuck_reported_in(
+            child.queued_frames(),
+            self.frame.dispatch,
+        ):
+            return StuckAcknowledged(pid=child.pid)
+        return await _kill_and_wait(child, wait_s)
+
+    async def wait_child_exit(self) -> ExitedWith | KilledBySignal | NothingToKill:
+        """Wait, with no bound, for the exit of the child that took this run,
+        also after the slot ended the binding. ``NothingToKill``: no child
+        took it. The caller bounds the wait."""
+        child = self._last_child
+        if child is None:
+            return NothingToKill()
+        return await child.wait_exit_seen()
+
+    def _answer_unbound(self) -> SharedAnswered | NothingToKill:
+        """Report a handle that no child holds: the run ended, or it never
+        reached a child. A cancelled outcome has no answer."""
+        if self.outcome.done() and not self.outcome.cancelled():
+            return SharedAnswered(self.outcome.result())
+        return NothingToKill()
 
 
 @dataclass(slots=True)
@@ -1770,13 +1969,49 @@ def shared_recycle_reason(
             assert_never(unreachable)
 
 
-def _deadline_state(run: _SeatRun, now: float) -> DeadlineState:
+@dataclass(frozen=True, slots=True)
+class NoCloseCulprit:
+    """The shared child was not closed at a deadline or at a stuck run, so
+    its close names no culprit."""
+
+
+def _close_culprit(state: SharedSlotState) -> RunCulprit | NoCloseCulprit:
+    """The run that closed a shared child in this state: the run whose
+    deadline closed a thread child, or the first run that an async child
+    reported stuck (``ClosedAtDeadline``)."""
+    match state:
+        case Closing(reason=ClosedAtDeadline(culprit=culprit)):
+            return culprit
+        case Closing() | Open() | Starting() | Retiring() | Down():
+            return NoCloseCulprit()
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _deadline_state(
+    run: _SeatRun,
+    closer: RunCulprit | NoCloseCulprit,
+    now: float,
+) -> DeadlineState:
     """Whether the deadline of a run passed: the child reported it, or
     ``timeout_ms`` passed since the send. The child starts the run after the
     send, so its own deadline is not earlier. A run whose coroutine
-    returned before its deadline has no deadline that passed."""
+    returned before its deadline has no deadline that passed.
+
+    A run that the child reported stuck, and the run that closed its child
+    at its deadline (``closer``), are the named culprit of the stuck stop
+    of the child: ``DeadlineState.CULPRIT``."""
+    match closer:
+        case RunCulprit(dispatch=dispatch) if dispatch == run.handle.frame.dispatch:
+            return DeadlineState.CULPRIT
+        case RunCulprit() | NoCloseCulprit():
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
     match run.deadline:
-        case DeadlineReported() | SecondCancelReported() | StuckReported():
+        case StuckReported():
+            return DeadlineState.CULPRIT
+        case DeadlineReported() | SecondCancelReported():
             return DeadlineState.PASSED
         case LeftoverCancelReported() | LeftoverStuckReported():
             return DeadlineState.PENDING
@@ -1814,27 +2049,35 @@ def _stop_state(
 def _outcome_at_loss(
     kill: ChildKill,
     run: _SeatRun,
+    closer: RunCulprit | NoCloseCulprit,
     lost: ChildLost,
     now: float,
-) -> SeatKilled | ChildLost:
+) -> SeatKilled | SeatTaskFinished | ChildLost:
     """The outcome of a run of a lost shared child.
 
-    A kill by the worker whose exit was seen gives the verdict of
-    ``verdict_at_kill``; a verdict of the crash path gives the loss. A run
-    whose coroutine returned, and whose left work the child reported in its
-    cancel rounds or stuck, gets what it returned (``ReturnedBeforeKill``)
-    at such a kill instead. A death that the worker did not cause, and an
-    exit not seen, give the loss.
+    An exit not seen gives the loss: the attempt may still run. With the
+    exit seen, a run whose coroutine returned, and whose left work the child
+    reported in its cancel rounds or stuck, gets what it returned, whatever
+    ended the child: ``ReturnedBeforeKill`` at a kill by the worker,
+    ``SeatTaskFinished`` at any other end. For any other run, a kill by the
+    worker gives the verdict of ``verdict_at_kill``; a verdict of the crash
+    path gives the loss. The named culprit of a stuck stop of the child (a
+    run that the child reported stuck, or ``closer``, the run that closed
+    the child at its deadline) retries isolated at every such kill. A death
+    that the worker did not cause gives the loss.
     """
-    match lost.cause, lost.child_exit:
-        case LossCause.KILLED_BY_PARENT, ExitedWith() | KilledBySignal() as child_exit:
+    match lost.child_exit:
+        case ExitedWith() | KilledBySignal() as child_exit:
             pass
-        case _:
+        case ExitUnknown():
             return lost
-    match run.deadline:
+        case _ as unreachable:
+            assert_never(unreachable)
+    match run.deadline, lost.cause:
         case (
             LeftoverCancelReported(returned=returned)
-            | LeftoverStuckReported(returned=returned)
+            | LeftoverStuckReported(returned=returned),
+            LossCause.KILLED_BY_PARENT,
         ):
             return SeatKilled(
                 verdict=ReturnedBeforeKill(returned),
@@ -1842,18 +2085,30 @@ def _outcome_at_loss(
                 child_exit=child_exit,
             )
         case (
-            DeadlineNotReported()
-            | DeadlineReported()
-            | SecondCancelReported()
-            | StuckReported()
+            LeftoverCancelReported(returned=returned)
+            | LeftoverStuckReported(returned=returned),
+            _,
         ):
+            return SeatTaskFinished(
+                returned.ok,
+                returned.result_json,
+                returned.failed_reason,
+            )
+        case _, LossCause.KILLED_BY_PARENT:
             pass
+        case _, (
+            LossCause.CHILD_DIED
+            | LossCause.CHANNEL_LOST
+            | LossCause.PROTOCOL_VIOLATION
+            | LossCause.SLOT_DEFECT
+        ):
+            return lost
         case _ as unreachable:
             assert_never(unreachable)
     verdict = verdict_at_kill(
         kill,
         run.handle.frame.dispatch,
-        _deadline_state(run, now),
+        _deadline_state(run, closer, now),
     )
     match verdict:
         case CrashPath():
@@ -2006,6 +2261,14 @@ class SlotPool:
         self._failure: PoolFailure | None = None
         self._failed: asyncio.Future[PoolFailure] = self._loop.create_future()
         self._baselines: dict[int, ChildBaseline] = {}
+        kinds = self._child_kinds()
+        assert kinds, 'a slot pool has at least one slot'
+        # The kinds whose baseline went to the memory guard: through ``start``
+        # for the first generation, through ``wait_new_kind_baseline`` after.
+        self._kinds_with_baseline: set[ChildKind] = set()
+        self._new_kind_baselines: asyncio.Queue[ChildBaseline] = asyncio.Queue(
+            maxsize=len(kinds),
+        )
         self._stop_requested: asyncio.Future[None] = self._loop.create_future()
         self._first_generation: asyncio.Future[None] = self._loop.create_future()
         self._preload: PreloadParent | None = None
@@ -2233,6 +2496,23 @@ class SlotPool:
         """Wait until no replacement child can start. Fatal to the worker."""
         return await asyncio.shield(self._failed)
 
+    async def wait_new_kind_baseline(self) -> ChildBaseline:
+        """Wait for the baseline of the first ready child of a kind that had no
+        ready child in the first generation, for the baseline memory guard of
+        that kind. Each kind comes at most once; a kind of the first
+        generation never comes, as ``start`` returned its baselines."""
+        return await self._new_kind_baselines.get()
+
+    def _child_kinds(self) -> frozenset[ChildKind]:
+        """The kind of the children of each slot of the pool."""
+        isolated = (self._config.init.child_kind,) if self._slots else ()
+        return frozenset(
+            (
+                *isolated,
+                *(slot.kind for slot in (*self._shared_slots, *self._thread_slots)),
+            ),
+        )
+
     def states(self) -> tuple[SlotState, ...]:
         """Return the state of each isolated slot, for health reports and tests."""
         return tuple(slot.state for slot in self._slots)
@@ -2386,11 +2666,16 @@ class SlotPool:
                     handle.finish(child.lost_for(LossCause.SLOT_DEFECT))
             case _SharedSlot():
                 runs = _runs_of(slot.state)
+                closer = _close_culprit(slot.state)
                 slot.state = Retiring()
                 child, slot.child = slot.child, None
                 if child is not None:
                     await child.dispose_lost()
-                    self._end_all_runs(runs, child.lost_for(LossCause.SLOT_DEFECT))
+                    self._end_all_runs(
+                        runs,
+                        closer,
+                        child.lost_for(LossCause.SLOT_DEFECT),
+                    )
             case _ as unreachable:
                 assert_never(unreachable)
 
@@ -2404,7 +2689,9 @@ class SlotPool:
         - A cause that can clear puts the slot in ``Down``, and the slot boots
           again after ``slot_down_delay_s``. It counts only while every other
           slot is ``Down`` too: a worker where no slot can serve must fail
-          where its supervisor sees it.
+          where its supervisor sees it. When another slot is in service, the
+          attempt is spared and the count starts again, so only consecutive
+          counted attempts reach the bound.
         - A SIGKILL from outside does not count while another child serves
           (``_kill_spares_the_attempt``).
         - A failed start hook fails the pool at once.
@@ -2453,7 +2740,7 @@ class SlotPool:
                 case _AttemptCount.COUNTS:
                     counted += 1
                 case _AttemptCount.SPARED:
-                    pass
+                    counted = 0
             delay_s = self._record_failed_boot(slot, failed, counted)
             if counted >= CHILD_BOOT_ATTEMPTS:
                 return Err(BootAttemptsExhausted(counted, failed.cause, failed.detail))
@@ -2540,16 +2827,13 @@ class SlotPool:
             case (
                 AppLoadFailed()
                 | ChildPoolSetupFailed()
+                | TaskLoopCreateFailed()
+                | SpawnFailed()
                 | LostBeforeReady()
                 | NotReadyInTime()
             ):
                 return _AttemptCount.COUNTS
-            case (
-                ResourceShortage()
-                | TaskLoopCreateFailed()
-                | ThreadStartRefused()
-                | SpawnFailed()
-            ):
+            case ResourceShortage() | ThreadStartRefused():
                 every_other_down = all(
                     isinstance(other.state, Down)
                     for other in self._all_slots()
@@ -2567,16 +2851,13 @@ class SlotPool:
         """Set the slot state after a failed boot, log it, and return the wait
         before the next boot."""
         match failed.cause:
-            case (
-                ResourceShortage()
-                | TaskLoopCreateFailed()
-                | ThreadStartRefused()
-                | SpawnFailed()
-            ):
+            case ResourceShortage() | ThreadStartRefused():
                 return self._mark_down(slot, failed.cause, failed.detail, counted)
             case (
                 AppLoadFailed()
                 | ChildPoolSetupFailed()
+                | TaskLoopCreateFailed()
+                | SpawnFailed()
                 | LostBeforeReady()
                 | NotReadyInTime()
             ):
@@ -2680,10 +2961,22 @@ class SlotPool:
         )
 
     def _note_ready(self, slot: _Slot | _SharedSlot, baseline: ChildBaseline) -> None:
-        if self._first_generation.done():
+        """Note the baseline of a ready child for the baseline memory guard.
+
+        In the first generation it goes to the result of ``start``. After it,
+        the first ready child of a kind with no baseline yet goes to
+        ``wait_new_kind_baseline``, once per kind: all slots of that kind were
+        down at the first start. Any other child adds nothing.
+        """
+        if not self._first_generation.done():
+            self._baselines[slot.index] = baseline
+            self._kinds_with_baseline.add(baseline.child_kind)
+            self._check_first_generation()
             return
-        self._baselines[slot.index] = baseline
-        self._check_first_generation()
+        if baseline.child_kind in self._kinds_with_baseline:
+            return
+        self._kinds_with_baseline.add(baseline.child_kind)
+        self._new_kind_baselines.put_nowait(baseline)
 
     def _check_first_generation(self) -> None:
         """The first generation is in once every slot booted once or is
@@ -2986,14 +3279,20 @@ class SlotPool:
             case _ as unreachable:
                 assert_never(unreachable)
 
-    def _end_all_runs(self, runs: SeatRuns, lost: ChildLost) -> None:
+    def _end_all_runs(
+        self,
+        runs: SeatRuns,
+        closer: RunCulprit | NoCloseCulprit,
+        lost: ChildLost,
+    ) -> None:
         """Answer every task in flight of a lost child: with the verdict of a
         kill by the worker whose exit was seen (``_outcome_at_loss``), else
-        with the loss."""
+        with the loss. ``closer`` is the run that closed the child at its
+        deadline (``_close_culprit``), read before the slot left that state."""
         now = time.monotonic()
         for run in runs.drain():
             self._release_held(run.held)
-            run.handle.finish(_outcome_at_loss(runs.kill, run, lost, now))
+            run.handle.finish(_outcome_at_loss(runs.kill, run, closer, lost, now))
 
     async def _run_shared_generation(self, slot: _SharedSlot, child: Child) -> None:
         """Serve shared tasks on one child until it closes and drains, until it
@@ -3459,8 +3758,9 @@ class SlotPool:
             runs.count(),
             lost.describe(),
         )
+        closer = _close_culprit(slot.state)
         slot.state = Retiring()
-        self._end_all_runs(runs, lost)
+        self._end_all_runs(runs, closer, lost)
         await child.dispose_lost()
         slot.child = None
 

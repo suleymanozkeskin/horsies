@@ -93,27 +93,68 @@ class ResourceShortage:
 @dataclass(frozen=True, slots=True)
 class TaskLoopCreateFailed:
     """The app has an ``async def`` task, and the child could not create the
-    event loop for it.
+    event loop for it, for a cause other than an errno in
+    ``CLEARABLE_ERRNOS``: for example an event loop policy that raises.
 
-    This cause can clear.
+    The same code and settings fail again, so this cause repeats. An errno in
+    ``CLEARABLE_ERRNOS`` is a ``ResourceShortage`` instead.
     """
 
 
 @dataclass(frozen=True, slots=True)
 class ThreadStartRefused:
-    """The OS refused the thread that reads frames from the worker.
+    """The OS refused a thread that the child starts at boot: the thread
+    that reads frames from the worker, the watchdog of a start hook, a thread
+    of the connection pool, or a writer, watchdog or seat thread of a shared
+    child.
 
     This cause can clear.
     """
+
+
+class ThreadStartRefusedError(RuntimeError):
+    """A boot step could not start a thread. ``thread`` names the thread, and
+    ``refusal`` is the ``RuntimeError`` that ``Thread.start`` raised.
+
+    A boot step raises this in place of that error, so the boot names the
+    cause ``ThreadStartRefused`` and not the cause of the step.
+    """
+
+    def __init__(self, thread: str, refusal: RuntimeError) -> None:
+        super().__init__(f'{thread}: {refusal}')
+        self.thread = thread
+        self.refusal = refusal
 
 
 @dataclass(frozen=True, slots=True)
 class SpawnFailed:
-    """The OS refused to start the child process, or a forked child did not
-    reach the worker in time. The worker parent sees this cause, not the child.
+    """The OS refused to start the child process with an errno outside
+    ``CLEARABLE_ERRNOS``, for example ``ENOENT`` or ``EACCES`` for the
+    interpreter, or a forked child did not reach the worker in time. The
+    worker parent sees this cause, not the child.
 
-    This cause can clear.
+    The worker cannot tell that the next start differs, so this cause
+    repeats. An errno in ``CLEARABLE_ERRNOS`` is a ``ResourceShortage``
+    instead.
     """
+
+
+def shortage_or[StepCause](
+    exc: BaseException,
+    step_cause: StepCause,
+) -> ResourceShortage | StepCause:
+    """Name the cause of an exception that a boot step raised.
+
+    An ``OSError`` whose errno is in ``CLEARABLE_ERRNOS`` is a
+    ``ResourceShortage``, which can clear. Any other exception is
+    ``step_cause``, the cause of that step. Only the exception itself is
+    read, not its ``__cause__``. Pure.
+    """
+    match exc:
+        case OSError(errno=int() as number) if number in CLEARABLE_ERRNOS:
+            return ResourceShortage(CLEARABLE_ERRNOS[number])
+        case _:
+            return step_cause
 
 
 ReportedBootCause: TypeAlias = (
@@ -123,9 +164,7 @@ ReportedBootCause: TypeAlias = (
     | TaskLoopCreateFailed
     | ThreadStartRefused
 )
-ClearableBootCause: TypeAlias = (
-    ResourceShortage | TaskLoopCreateFailed | ThreadStartRefused | SpawnFailed
-)
+ClearableBootCause: TypeAlias = ResourceShortage | ThreadStartRefused
 ModelBootCause: TypeAlias = ReportedBootCause | SpawnFailed
 
 
@@ -148,7 +187,7 @@ def describe_boot_cause(cause: ModelBootCause) -> str:
         case TaskLoopCreateFailed():
             return 'the child could not create the event loop for async tasks'
         case ThreadStartRefused():
-            return 'the OS refused the control thread of the child'
+            return 'the OS refused a thread of the child'
         case SpawnFailed():
             return 'the OS refused to start the child process'
         case _ as unreachable:

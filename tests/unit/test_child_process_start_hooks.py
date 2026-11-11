@@ -19,6 +19,13 @@ from pydantic import SecretStr
 from horsies.core.app import Horsies
 from horsies.core.errors import ConfigurationError, ErrorCode
 from horsies.core.models.app import AppConfig
+from horsies.core.models.boot_failure import ThreadStartRefused, ThreadStartRefusedError
+from horsies.core.types.result import Err
+from horsies.core.worker.child_protocol import (
+    InitFrame,
+    SharedAsyncChild,
+    boot_failed_frame,
+)
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.worker import child_runner, shared_runner
 from horsies.core.worker.child_runner import (
@@ -28,6 +35,26 @@ from horsies.core.worker.child_runner import (
 from horsies.core.worker.shared_runner import run_shared_async_start_hooks
 
 pytestmark = [pytest.mark.unit]
+
+
+def _seat_init() -> InitFrame:
+    """The init frame of a shared async child whose pool opens with no
+    connection."""
+    return InitFrame(
+        app_locator='unused',
+        imports=(),
+        sys_path_roots=(),
+        parent_sys_path=(),
+        parent_argv=('pytest',),
+        loglevel=30,
+        database_url='postgresql://user:pass@localhost/db',
+        connect_kwargs={},
+        child_pool_min_size=0,
+        child_pool_max_size=1,
+        child_pool_check=False,
+        process_name='test-child',
+        child_kind=SharedAsyncChild(seats=1),
+    )
 
 
 def _make_app() -> Horsies:
@@ -226,6 +253,29 @@ class TestRunChildStartHooks:
         time.sleep(0.3)
         assert exit_codes == []
 
+    def test_a_refused_watchdog_is_a_refused_thread_and_runs_no_hook(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The OS refuses the watchdog of the hook. The boot names that a
+        thread was refused, not a failed hook, and the hook does not run
+        without its bound."""
+        app = _make_app()
+        calls: list[str] = []
+        app.on_child_process_start(lambda: calls.append('ran'))
+
+        def refuse(_thread: threading.Thread) -> None:
+            raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr(threading.Thread, 'start', refuse)
+
+        with pytest.raises(ThreadStartRefusedError) as raised:
+            _run_child_start_hooks(app)
+
+        assert str(raised.value.refusal) == "can't start new thread"
+        assert raised.value.thread.startswith('the watchdog of start hook')
+        assert calls == []
+
 
 class _AsyncCallHook:
     """A hook object whose ``__call__`` is ``async def``."""
@@ -338,6 +388,40 @@ class TestRunSharedAsyncHooks:
     def _run_on_app(self, app: Horsies, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(shared_runner, 'get_current_app', lambda: app)
         asyncio.run(run_shared_async_start_hooks())
+
+    def test_a_refused_watchdog_fails_the_start_as_a_refused_thread(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The OS refuses the watchdog of a shared async start hook. The
+        child reports ``ThreadStartRefused``, which can clear, instead of an
+        exception that leaves the child with no report; the hook does not
+        run without its bound."""
+        app = _make_app()
+        calls: list[str] = []
+
+        async def open_client() -> None:
+            calls.append('ran')
+
+        app.on_shared_async_child_start(open_client)
+        monkeypatch.setattr(shared_runner, 'get_current_app', lambda: app)
+
+        def refuse(_thread: threading.Thread) -> None:
+            raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr(threading.Thread, 'start', refuse)
+
+        started = asyncio.run(shared_runner.PostgresSeatProgram().start(_seat_init()))
+
+        assert started == Err(
+            boot_failed_frame(
+                ThreadStartRefused(),
+                'RuntimeError',
+                f'the watchdog of start hook {open_client.__qualname__!r}: '
+                "can't start new thread",
+            ),
+        )
+        assert calls == []
 
     def test_hooks_run_in_order_on_the_running_loop(
         self,

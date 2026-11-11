@@ -561,6 +561,34 @@ class TestInitializeWorkerPoolConnectKwargs:
 
         assert mock_pool.call_args.kwargs['kwargs'] == {}
 
+    def test_a_refused_pool_thread_is_a_refused_thread_start(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The open starts the threads of the real pool. A refused start is
+        named as such, and no pool is kept."""
+        import horsies.core.worker.child_pool as child_pool
+        from horsies.core.models.boot_failure import ThreadStartRefusedError
+
+        def refuse(_thread: threading.Thread) -> None:
+            raise RuntimeError("can't start new thread")
+
+        with (
+            self._reset_pool(),
+            patch('horsies.core.worker.child_pool.atexit.register') as register,
+        ):
+            monkeypatch.setattr(threading.Thread, 'start', refuse)
+            with pytest.raises(ThreadStartRefusedError) as raised:
+                child_pool._initialize_worker_pool(  # pyright: ignore[reportPrivateUsage]
+                    'postgresql://localhost/test',
+                )
+            monkeypatch.undo()
+
+            assert raised.value.thread == 'a thread of the connection pool'
+            assert str(raised.value.refusal) == "can't start new thread"
+            assert child_pool._worker_pool is None  # pyright: ignore[reportPrivateUsage]
+            register.assert_not_called()
+
 
 # ===================================================================
 # E. _get_workflow_status_for_task

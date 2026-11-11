@@ -167,6 +167,11 @@ RSS (after `gc.collect()`), and the worker:
 - **warns** if the threshold is within 80% of the baseline (little headroom for
   per-task working set).
 
+A kind of child (isolated, shared async, shared thread) whose slots were all
+down at the start has no baseline then. The worker runs the same check on the
+first child of that kind that becomes ready later. A baseline at or above the
+limit of its kind stops the worker: it drains its tasks and exits non-zero.
+
 ### Sizing
 
 Measure your warmed child baseline first, then leave headroom above it. As a

@@ -48,7 +48,12 @@ from horsies.core.worker.child_protocol import (
     ThreadSeatWork,
     WireResult,
 )
-from horsies.core.worker.child_runner import DeadlineBeforeStart, StartAllowed
+from horsies.core.worker.child_runner import (
+    DeadlineBeforeStart,
+    StartAllowed,
+    StatementsBound,
+    StatementsUnbounded,
+)
 from horsies.core.worker.shared_child import (
     MarkerBeforeDeadline,
     MarkerWithoutDeadline,
@@ -96,6 +101,9 @@ def thread_raises() -> TaskResult[int, TaskError]:
 def thread_never() -> TaskResult[int, TaskError]:
     RAN.append('thread_never')
     return TaskResult(ok=1)
+
+
+REFUSAL = SeatRefusal(refusal=TimeoutValueInvalid(reason='no stored timeout'))
 
 
 def _frame(task_name: str, kwargs: dict[str, Any] | None = None) -> SharedRunFrame:
@@ -190,6 +198,7 @@ def test_a_def_task_runs_on_the_seat_thread(steps: _Steps) -> None:
         False,
         CLAIMED_AT,
         start_check=StartAllowed,
+        statements=StatementsUnbounded(),
     )
     steps.mark.assert_not_called()
 
@@ -280,13 +289,32 @@ class TestTheMarkerOfAThreadSeat:
             connection_wait_s=0.25,
         )
 
-    def test_a_refusal_keeps_the_wait_of_the_pool(self, steps: _Steps) -> None:
+    def test_a_refusal_keeps_the_wait_of_the_pool_and_bounds_its_statement(
+        self,
+        steps: _Steps,
+    ) -> None:
+        """The refusal backstop of the parent relies on this bound."""
         thread_runner.mark_thread_seat_finalizing(
-            _frame('thread_double'),
+            dataclasses.replace(_frame('thread_double'), work=REFUSAL),
             MarkerWithoutDeadline(),
         )
 
-        steps.mark.assert_called_once_with('task-1', 'worker-1', CLAIMED_AT)
+        steps.mark.assert_called_once_with(
+            'task-1',
+            'worker-1',
+            CLAIMED_AT,
+            statements=StatementsBound(thread_runner.REFUSAL_STATEMENTS_TIMEOUT_S),
+        )
+
+    def test_the_running_update_of_a_refusal_is_bounded(self, steps: _Steps) -> None:
+        frame = dataclasses.replace(_frame('thread_double'), work=REFUSAL)
+
+        _ = thread_runner.run_thread_seat_task(frame, REFUSAL, lambda: StartAllowed())
+
+        assert steps.confirm.call_args is not None
+        assert steps.confirm.call_args.kwargs['statements'] == StatementsBound(
+            thread_runner.REFUSAL_STATEMENTS_TIMEOUT_S,
+        )
 
 
 class _SlowPool:

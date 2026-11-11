@@ -7,7 +7,8 @@ from __future__ import annotations
 import os
 import socket
 import threading
-from collections.abc import Callable, Coroutine, Mapping, Sequence
+from collections.abc import Callable, Coroutine, Generator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from importlib import import_module
@@ -46,6 +47,7 @@ from horsies.core.codec.validation_errors import ValueValidationError, exception
 _ENGINE_KEY_WORKFLOW_CTX = '__h_workflow_ctx__'
 _ENGINE_KEY_WORKFLOW_META = '__h_workflow_meta__'
 _ENGINE_KEY_TASKRESULT_ENVELOPE = '__h_taskresult_envelope__'
+from horsies.core.models.boot_failure import ThreadStartRefusedError
 from horsies.core.models.tasks import (
     MAX_CANCEL_GRACE_MS,
     MAX_TASK_TIMEOUT_MS,
@@ -117,6 +119,73 @@ class DeadlineBeforeStart:
 
 type StartCheck = StartAllowed | DeadlineBeforeStart
 """Whether a run may still start, read after it got its pooled connection."""
+
+
+@dataclass(frozen=True, slots=True)
+class StatementsBound:
+    """The statements of one write, once it holds its connection, run at most
+    ``seconds``. A timer then cancels the statement that runs; the
+    transaction aborts, so every later statement of the write fails at
+    once, and the write ends with its error path."""
+
+    seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class StatementsUnbounded:
+    """The statements of a write have no bound of their own."""
+
+
+type StatementsLimit = StatementsBound | StatementsUnbounded
+
+CANCEL_REQUEST_TIMEOUT_S: Final = 5.0
+"""The longest wait for the server to take a cancel request of a bounded
+write (``StatementsBound``)."""
+
+
+def _cancel_running_statement(conn: Connection[Any]) -> None:
+    """Timer target: cancel the statement that runs on ``conn``. A failed
+    cancel is logged: the statement then ends by itself."""
+    try:
+        conn.cancel_safe(timeout=CANCEL_REQUEST_TIMEOUT_S)
+    except Exception as exc:
+        logger.warning('Failed to cancel a statement past its bound: %s', exc)
+
+
+@contextmanager
+def _statements_within(
+    conn: Connection[Any],
+    limit: StatementsLimit,
+) -> Generator[None]:
+    """Run the body with the bound of ``limit`` on the statements of ``conn``.
+
+    ``StatementsBound`` starts a timer thread that cancels the running
+    statement after its seconds. On exit the timer is cancelled and joined,
+    so no cancel reaches the connection after it returns to the pool.
+
+    Raises:
+        ThreadStartRefusedError: the OS refused the timer thread; no
+            statement ran.
+    """
+    match limit:
+        case StatementsUnbounded():
+            yield
+            return
+        case StatementsBound(seconds=seconds):
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
+    timer = threading.Timer(seconds, _cancel_running_statement, args=(conn,))
+    timer.daemon = True
+    try:
+        timer.start()
+    except RuntimeError as exc:
+        raise ThreadStartRefusedError('the bound of a write', exc) from exc
+    try:
+        yield
+    finally:
+        timer.cancel()
+        timer.join()
 
 
 def start_always_allowed() -> StartCheck:
@@ -352,6 +421,32 @@ def _exit_for_hung_hook(hook_name: str) -> None:
     os._exit(CHILD_HOOK_FAILURE_EXIT_CODE)
 
 
+def start_hook_watchdog(hook_name: str) -> threading.Timer:
+    """Start the thread that ends the process when the start hook
+    ``hook_name`` runs longer than ``CHILD_HOOK_TIMEOUT_SECONDS``.
+
+    The caller cancels the returned timer when the hook returns.
+
+    Raises:
+        ThreadStartRefusedError: the OS refused the thread. The hook has
+            not run then.
+    """
+    watchdog = threading.Timer(
+        CHILD_HOOK_TIMEOUT_SECONDS,
+        _exit_for_hung_hook,
+        args=(hook_name,),
+    )
+    watchdog.daemon = True
+    try:
+        watchdog.start()
+    except RuntimeError as exc:
+        raise ThreadStartRefusedError(
+            f'the watchdog of start hook {hook_name!r}',
+            exc,
+        ) from exc
+    return watchdog
+
+
 def _run_child_start_hooks(app: Horsies) -> None:
     """Run app-registered child-start hooks; any failure is terminal.
 
@@ -360,16 +455,15 @@ def _run_child_start_hooks(app: Horsies) -> None:
     logs the hook name and exits with CHILD_HOOK_FAILURE_EXIT_CODE, which
     the parent recognizes and stops the worker rather than restart-looping.
     Best-effort work belongs inside the hook's own try/except.
+
+    Raises:
+        ThreadStartRefusedError: the OS refused the watchdog of a hook,
+            before that hook ran. The boot names the cause
+            ``ThreadStartRefused``.
     """
     for hook in app.get_child_process_start_hooks():
         hook_name = getattr(hook, '__qualname__', repr(hook))
-        watchdog = threading.Timer(
-            CHILD_HOOK_TIMEOUT_SECONDS,
-            _exit_for_hung_hook,
-            args=(hook_name,),
-        )
-        watchdog.daemon = True
-        watchdog.start()
+        watchdog = start_hook_watchdog(hook_name)
         try:
             hook()
         except BaseException as exc:
@@ -867,6 +961,7 @@ def _confirm_until_not_resumed(
     claimed_at: Optional[datetime],
     *,
     start_check: Callable[[], StartCheck] = start_always_allowed,
+    statements: StatementsLimit = StatementsUnbounded(),
 ) -> Optional[Tuple[bool, str, Optional[str]]] | DeadlineBeforeStart:
     """Run the RUNNING transition again when a resume refused the abandon.
 
@@ -875,6 +970,7 @@ def _confirm_until_not_resumed(
     returns OWNERSHIP_UNCONFIRMED; the task stays claimed until its lease
     returns it to the queue. ``DeadlineBeforeStart``: ``start_check`` found
     the deadline of the run fired (``_confirm_ownership_and_set_running``).
+    ``statements`` bounds the statements of each attempt.
     """
     for _ in range(_PRE_START_CONFIRM_ATTEMPTS):
         result = _confirm_ownership_and_set_running(
@@ -883,6 +979,7 @@ def _confirm_until_not_resumed(
             is_workflow_task,
             claimed_at,
             start_check=start_check,
+            statements=statements,
         )
         match result:
             case _WorkflowResumedBeforeStart():
@@ -906,6 +1003,7 @@ def _confirm_ownership_and_set_running(
     claimed_at: Optional[datetime] = None,
     *,
     start_check: Callable[[], StartCheck] = start_always_allowed,
+    statements: StatementsLimit = StatementsUnbounded(),
 ) -> (
     Optional[Tuple[bool, str, Optional[str]]]
     | _WorkflowResumedBeforeStart
@@ -916,11 +1014,13 @@ def _confirm_ownership_and_set_running(
     ``start_check`` runs once the pool gave a connection, before the
     update: a shared thread seat waits for that connection, and its
     deadline can fire meanwhile. ``DeadlineBeforeStart`` then returns with
-    no statement run, so the row stays CLAIMED.
+    no statement run, so the row stays CLAIMED. ``statements`` bounds the
+    statements after the wait for the connection; a cancelled statement
+    gives OWNERSHIP_UNCONFIRMED, as a database error does.
     """
     try:
         pool = _get_worker_pool()
-        with pool.connection() as conn:
+        with pool.connection() as conn, _statements_within(conn, statements):
             match start_check():
                 case StartAllowed():
                     pass
@@ -1015,6 +1115,7 @@ def _mark_task_finalizing(
     claimed_at: Optional[datetime],
     *,
     connection_wait_s: float = CHILD_POOL_CONNECTION_WAIT_S,
+    statements: StatementsLimit = StatementsUnbounded(),
 ) -> None:
     """Mark a completed child result as waiting for parent finalization.
 
@@ -1027,11 +1128,15 @@ def _mark_task_finalizing(
     has not read the result. The marker is best effort: a skipped or failed
     write is logged only. The wait for a pooled connection is bounded by
     ``connection_wait_s``; a shared thread seat passes the time left before
-    the deadline of its run.
+    the deadline of its run. ``statements`` bounds the statement after that
+    wait.
     """
     try:
         pool = _get_worker_pool()
-        with pool.connection(timeout=connection_wait_s) as conn:
+        with (
+            pool.connection(timeout=connection_wait_s) as conn,
+            _statements_within(conn, statements),
+        ):
             cursor = conn.cursor()
             cursor.execute(
                 MARK_FINALIZING_SQL,

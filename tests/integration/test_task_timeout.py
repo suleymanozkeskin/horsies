@@ -20,6 +20,7 @@ from sqlalchemy import Row, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from horsies.core.codec.task_options import serialize_task_options
+from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.tasks import OutcomeCode, TaskOptions
 from horsies.core.types.result import Ok, is_ok
 from horsies.core.worker.config import WorkerConfig
@@ -52,12 +53,16 @@ def _handle_with_child(
     return handle, child
 
 
-def _make_worker(engine: AsyncEngine) -> Worker:
+def _make_worker(
+    engine: AsyncEngine,
+    recovery: RecoveryConfig | None = None,
+) -> Worker:
     sf = async_sessionmaker(engine, expire_on_commit=False)
     cfg = WorkerConfig(
         dsn='postgresql+psycopg://u:p@localhost/db',
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=['default'],
+        recovery_config=recovery,
     )
     worker = Worker(session_factory=sf, listener=MagicMock(), cfg=cfg)
     worker.worker_instance_id = TEST_WORKER_ID
@@ -278,9 +283,10 @@ async def test_timeout_without_a_seen_exit_leaves_the_row_running(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """No exit seen after SIGKILL → no write; stale-task recovery owns the row."""
+    """No exit seen after SIGKILL → no write; with stale RUNNING recovery on,
+    stale-task recovery owns the row."""
     task_id = await _insert_task(session)
-    worker = _make_worker(engine)
+    worker = _make_worker(engine, RecoveryConfig())
 
     handle, child = _handle_with_child(ExitUnknown())
     await worker._handle_task_timeout(handle, task_id, 5_000)
@@ -292,6 +298,28 @@ async def test_timeout_without_a_seen_exit_leaves_the_row_running(
     assert row.claimed_by_worker_id == TEST_WORKER_ID
     assert await read_attempts(session, task_id) == ()
     child.kill_for_caller.assert_called_once_with()
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_with_stale_recovery_off_a_late_exit_writes_the_timeout(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """With stale RUNNING recovery off nothing else moves the row: the worker
+    waits past its bounded wait and writes TASK_TIMEOUT once it sees the exit."""
+    task_id = await _insert_task(session)
+    worker = _make_worker(engine)
+    handle, child = _handle_with_child(ExitUnknown())
+    child.wait_exit_seen = AsyncMock(return_value=KilledBySignal(9))
+
+    await worker._handle_task_timeout(handle, task_id, 5_000)
+    session.expire_all()
+
+    row = await _get_row(session, task_id)
+    assert row.status == 'FAILED'
+    assert row.error_code == OutcomeCode.TASK_TIMEOUT.value
+    child.wait_exit_seen.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio(loop_scope='function')

@@ -176,6 +176,7 @@ from horsies.core.worker.shared_finalize import (  # noqa: E402
     SharedKillFinalizeMixin as SharedKillFinalizeMixin,
 )
 from horsies.core.worker.runtime import (  # noqa: F401,E402
+    FinalizeStage as FinalizeStage,
     _FINALIZE_STAGE_PHASE1 as _FINALIZE_STAGE_PHASE1,
     _FINALIZE_STAGE_PHASE2 as _FINALIZE_STAGE_PHASE2,
     _FINALIZE_STAGE_FUTURE as _FINALIZE_STAGE_FUTURE,
@@ -321,11 +322,12 @@ class Worker(
         # before start), so the claim loop also waits on this local wake.
         # Releases coalesce: the loop clears it before each claim pass.
         self._capacity_released = asyncio.Event()
-        self._finalize_retry_attempts: dict[tuple[str, str], int] = {}
+        self._finalize_retry_attempts: dict[tuple[str, FinalizeStage], int] = {}
         self._fatal_background_error: (
             ChildStartFailedError
             | ServiceLoopDiedError
             | RunnerHeartbeatLostError
+            | MemoryBaselineExceedsThresholdError
             | None
         ) = None
 
@@ -618,6 +620,34 @@ class Worker(
             case _ as unreachable:
                 assert_never(unreachable)
 
+    async def _new_kind_baseline_loop(self, pool: SlotPool) -> None:
+        """Service loop: run the baseline memory guard for the first child of
+        each kind that had no ready child at the first start.
+
+        Each kind comes at most once (``SlotPool.wait_new_kind_baseline``), so
+        the loop runs the guard at most once per kind, then waits for the
+        stop. A baseline at or above the memory limit of its kind stops the
+        worker (``_stop_for_baseline``) and ends the loop.
+        """
+        while True:
+            baseline = await pool.wait_new_kind_baseline()
+            try:
+                self._check_memory_baseline((baseline,))
+            except MemoryBaselineExceedsThresholdError as exc:
+                self._stop_for_baseline(exc)
+                return
+
+    def _stop_for_baseline(self, exc: MemoryBaselineExceedsThresholdError) -> None:
+        """Stop the worker after a child baseline at or above its memory limit.
+
+        The child is already serving, so the stop drains its tasks.
+        ``run_forever`` raises the error after the stop, so the worker exits
+        non-zero, as at a breach at the first start.
+        """
+        logger.critical('Stopping worker: %s', exc)
+        self._fatal_background_error = exc
+        self._stop.set()
+
     def _check_memory_baseline(self, baselines: tuple[ChildBaseline, ...]) -> None:
         """Fail or warn when the booted child baseline crowds the threshold.
 
@@ -694,6 +724,9 @@ class Worker(
                 with dead heartbeat/reaper loops.
             RunnerHeartbeatLostError: the runner heartbeats failed closed;
                 their watchdog killed the children that held tasks.
+            MemoryBaselineExceedsThresholdError: the first child of a kind
+                that was down at the first start had a baseline at or above
+                the memory limit of its kind.
         """
         if self._fatal_background_error is not None:
             raise self._fatal_background_error
@@ -941,6 +974,11 @@ class Worker(
             self._spawn_background(
                 self._slot_failure_loop(self._slots),
                 name='slot-failure-watch',
+                service=True,
+            )
+            self._spawn_background(
+                self._new_kind_baseline_loop(self._slots),
+                name='new-kind-baseline-watch',
                 service=True,
             )
             # Start claimer heartbeat loop (CLAIMED coverage)

@@ -37,7 +37,9 @@ from horsies.core.models.tasks import (
     TaskError,
     TaskResult,
 )
+from horsies.core.worker import thread_runner
 from horsies.core.worker.child_pool import _get_worker_pool, _initialize_worker_pool
+from horsies.core.worker.child_runner import CANCEL_REQUEST_TIMEOUT_S
 from horsies.core.worker.child_protocol import (
     ChildFrame,
     RssMb,
@@ -288,6 +290,46 @@ async def test_a_refusal_sets_the_row_running_and_fails_before_resolve(
     row = await _row(session, task_id)
     assert row.status == 'RUNNING'
     assert row.finalizing_at is not None
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_a_refusal_whose_update_waits_on_a_row_lock_ends_at_its_bound(
+    session: AsyncSession,
+    thread_app: Horsies,  # noqa: ARG001
+    clean_workflow_tables: None,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another session holds the row lock. The writes of a refusal are
+    bounded: the timer cancels the waiting UPDATE, the run stops before
+    RUNNING with OWNERSHIP_UNCONFIRMED, and the row stays CLAIMED. The
+    cancelled connection serves the next refusal once the lock is gone."""
+    monkeypatch.setattr(thread_runner, 'REFUSAL_STATEMENTS_TIMEOUT_S', 0.5)
+    claimed_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    task_id = await _seed_claimed_task(session, claimed_at=claimed_at)
+    refusal = SeatRefusal(
+        refusal=TimeoutValueInvalid(
+            reason='stored timeout_ms is absent for execution SHARED_THREAD',
+        ),
+    )
+    await session.execute(
+        text('SELECT id FROM horsies_tasks WHERE id = CAST(:id AS uuid) FOR UPDATE'),
+        {'id': task_id},
+    )
+    started = time.monotonic()
+
+    try:
+        [wire] = _run_on_seats([_frame(task_id, claimed_at, refusal)])
+    finally:
+        await session.rollback()
+    elapsed_s = time.monotonic() - started
+
+    assert wire == (False, '', 'OWNERSHIP_UNCONFIRMED')
+    assert elapsed_s < 0.5 + CANCEL_REQUEST_TIMEOUT_S
+    assert (await _row(session, task_id)).status == 'CLAIMED'
+    assert await _runner_beats(session, task_id) == []
+    [again] = _run_on_seats([_frame(task_id, claimed_at, refusal)])
+    assert again[0] is True
+    assert (await _row(session, task_id)).status == 'RUNNING'
 
 
 @pytest.mark.asyncio(loop_scope='function')

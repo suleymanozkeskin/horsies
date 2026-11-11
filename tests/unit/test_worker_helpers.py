@@ -10,6 +10,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from collections.abc import Coroutine
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -26,10 +27,14 @@ from horsies.core.worker.finalize import (
     _finalize_data_for_log,
 )
 from horsies.core.worker.runtime import (
+    FinalizeStage,
+    _FINALIZE_STAGE_TIMEOUT,
     _AttemptEndUnknown,
     _TimeoutSettled,
     _TimeoutWriteFailed,
 )
+from horsies.core.worker.shared_finalize import timeout_retry_write
+from horsies.core.worker.shared_stop import RetryPlacement
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.models.retention import RetentionConfig
 from horsies.core.worker.claiming import (
@@ -1393,25 +1398,62 @@ class TestAwaitSlotOutcome:
         assert await waiter == NotDispatched(NotRunCause.POOL_STOPPING)
 
     @pytest.mark.asyncio
-    async def test_the_slot_decides_when_the_timeout_write_failed(self) -> None:
+    async def test_a_failed_timeout_write_drops_the_late_answer_of_the_slot(
+        self,
+    ) -> None:
+        """The deadline decides: a result that reached the slot after the
+        timer fired is not written, also when the TASK_TIMEOUT write failed."""
         worker = _make_worker()
         handle = SlotHandle(_run_frame(), asyncio.get_running_loop())
         handle.bind_child(MagicMock())
+        late = TaskFinished(True, '{"ok":1}', None, RssUnreadable(), NoTaskLoop())
 
         async def _timeout_handler(*_args: Any, **_kwargs: Any) -> object:
-            handle.finish(_LOST)
+            handle.finish(late)
             return _TimeoutWriteFailed()
 
         worker._handle_task_timeout = AsyncMock(  # type: ignore[method-assign]
             side_effect=_timeout_handler,
         )
 
-        outcome = await worker._await_slot_outcome(
-            handle, 'task-1', TaskTimeout(ms=1), None,
+        outcome = await worker._await_slot_outcome(  # pyright: ignore[reportPrivateUsage]
+            handle,
+            'task-1',
+            TaskTimeout(ms=1),
+            None,
         )
 
-        worker._handle_task_timeout.assert_awaited_once()
-        assert outcome == _LOST
+        worker._handle_task_timeout.assert_awaited_once()  # pyright: ignore[reportPrivateUsage]
+        assert outcome == _TimeoutWriteFailed()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_timeout_write_is_retried_as_that_write(self) -> None:
+        worker = _make_worker()
+        handle = SlotHandle(_run_frame(), asyncio.get_running_loop())
+        worker._await_slot_outcome = AsyncMock(  # type: ignore[method-assign]
+            return_value=_TimeoutWriteFailed(),
+        )
+        claimed_at = datetime(2026, 11, 11, tzinfo=timezone.utc)
+
+        result = await worker._finalize_after(  # pyright: ignore[reportPrivateUsage]
+            handle,
+            'task-1',
+            timeout=TaskTimeout(ms=1500),
+            task_name='t',
+            claimed_at=claimed_at,
+        )
+
+        match result:
+            case Err(err_value=error):
+                assert error.stage == _FINALIZE_STAGE_TIMEOUT
+                assert error.retryable is True
+                assert timeout_retry_write(error.data) == (
+                    1500,
+                    RetryPlacement.SAME_CLASS,
+                    claimed_at,
+                )
+            case Ok():
+                raise AssertionError(result)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -1900,7 +1942,7 @@ class TestLeaseRenewalAgeGuard:
 
 def _make_finalize_error(
     *,
-    stage: str = _FINALIZE_STAGE_PHASE1,
+    stage: FinalizeStage = _FINALIZE_STAGE_PHASE1,
     task_id: str = 'task-fe-1',
     retryable: bool = True,
     message: str = 'test error',
@@ -1942,22 +1984,53 @@ class TestHandleFinalizeError:
         assert worker._spawn_background.call_count == 0
         assert worker._finalize_retry_attempts == {}
 
-    # --- U-2b: unknown stage ---
+    # --- U-2b: each stage has its retry route ---
 
     @pytest.mark.asyncio
-    async def test_unknown_stage_logs_and_returns(
+    @pytest.mark.parametrize(
+        ('stage', 'label'),
+        [
+            (FinalizeStage.FUTURE, 'future'),
+            (FinalizeStage.TIMEOUT, 'timeout'),
+            (FinalizeStage.PHASE1, 'phase1'),
+            (FinalizeStage.PHASE2, 'phase2'),
+            (FinalizeStage.PARENT, 'parent'),
+        ],
+    )
+    async def test_each_stage_spawns_its_own_retry(
         self,
-        caplog: pytest.LogCaptureFixture,
+        stage: FinalizeStage,
+        label: str,
     ) -> None:
-        """Unknown stage value → logs error with stage info, returns."""
+        """The stages are a closed type: each one has a retry, and a stage
+        name that is not a member cannot reach the handler."""
         worker = _make_worker()
-        worker._spawn_background = MagicMock()  # type: ignore[assignment]
-        err = _make_finalize_error(stage='phase99_unknown')
-        with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
-            await worker._handle_finalize_error(err)
 
-        assert 'phase99_unknown' in caplog.text
-        assert worker._spawn_background.call_count == 0
+        def close_retry(
+            coroutine: Coroutine[Any, Any, None],
+            **_kwargs: object,
+        ) -> None:
+            coroutine.close()
+
+        spawn = MagicMock(side_effect=close_retry)
+        worker._spawn_background = spawn  # type: ignore[assignment]
+
+        await worker._handle_finalize_error(  # pyright: ignore[reportPrivateUsage]
+            _make_finalize_error(stage=stage),
+        )
+
+        assert spawn.call_args.kwargs['name'] == f'finalize-retry-{label}-task-fe-1'
+        attempts = worker._finalize_retry_attempts  # pyright: ignore[reportPrivateUsage]
+        assert attempts == {('task-fe-1', stage): 1}
+
+    def test_the_stages_are_the_closed_set_of_retry_routes(self) -> None:
+        assert {stage.value for stage in FinalizeStage} == {
+            'phase1_persist',
+            'phase2_workflow',
+            'future',
+            'parent_propagation',
+            'timeout_write',
+        }
 
     # --- U-2c: non-retryable error ---
 
@@ -2232,17 +2305,16 @@ class TestFinalizeErrorLogOmitsResult:
     @pytest.mark.parametrize(
         ('stage', 'retryable', 'prior_attempts'),
         [
-            ('phase99_unknown', True, 0),
             (_FINALIZE_STAGE_PHASE1, False, 0),
             (_FINALIZE_STAGE_PHASE1, True, _FINALIZE_PHASE1_MAX_RETRIES),
         ],
-        ids=['unknown_stage', 'not_reattempted', 'retries_exhausted'],
+        ids=['not_reattempted', 'retries_exhausted'],
     )
     @pytest.mark.asyncio
     async def test_log_line_has_result_length_not_result(
         self,
         caplog: pytest.LogCaptureFixture,
-        stage: str,
+        stage: FinalizeStage,
         retryable: bool,
         prior_attempts: int,
     ) -> None:
@@ -3714,6 +3786,56 @@ class TestStartupRegistersEveryClassItRuns:
         assert registered.get('standard_365d') == timedelta(days=365), (
             'listed periods must reach startup registration'
         )
+
+
+@pytest.mark.unit
+class TestStartGuardsKindsDownAtTheFirstStart:
+    """A kind whose slots were all down at the first start has no baseline
+    then. The test enters at ``worker.start()``: the guard of such a kind
+    runs only when the start spawns its loop as a service of the worker."""
+
+    @pytest.mark.asyncio
+    async def test_the_start_spawns_the_new_kind_baseline_loop(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from horsies.core.history.maintenance import coverage as coverage_module
+
+        async def _ensured(*_args: Any, **_kwargs: Any) -> Any:
+            return coverage_module.CoverageEnsured(
+                created_history_leaves=0,
+                created_heartbeat_leaves=0,
+                republished=False,
+                absent_leaves=(),
+                heartbeat_covered_now=True,
+                history_covered_through=datetime(2026, 1, 2, tzinfo=timezone.utc),
+                heartbeats_covered_through=datetime(2026, 1, 1, 1, tzinfo=timezone.utc),
+            )
+
+        monkeypatch.setattr(
+            coverage_module, 'ensure_startup_coverage_in_database', _ensured
+        )
+        worker = _make_worker()
+        worker.broker = MagicMock()
+        attach_resources(worker.broker, fake_resources())
+        worker.broker.validate_worker_database_paths = AsyncMock()
+        worker._preload_modules_main = MagicMock()  # type: ignore[assignment]
+        _stub_slot_start(worker)
+        worker.listener.start = AsyncMock(return_value=Ok(None))
+        worker.listener.listen_many = AsyncMock(return_value=Ok(None))
+        worker.listener.listen = AsyncMock(return_value=Ok(asyncio.Queue[object]()))
+        spawn = MagicMock()
+        worker._spawn_background = spawn  # type: ignore[assignment]
+
+        await worker.start()
+
+        calls = {call.kwargs['name']: call for call in spawn.call_args_list}
+        for call in spawn.call_args_list:
+            call.args[0].close()
+        watch = calls['new-kind-baseline-watch']
+        assert watch.kwargs['service'] is True
+        loop = Worker._new_kind_baseline_loop  # pyright: ignore[reportPrivateUsage]
+        assert watch.args[0].cr_code is loop.__code__
 
 
 @pytest.mark.unit

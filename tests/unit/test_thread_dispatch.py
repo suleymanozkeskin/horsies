@@ -14,7 +14,7 @@ import json
 from collections.abc import Coroutine
 from datetime import datetime, timezone
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import ANY, AsyncMock, MagicMock
 
 import pytest
 
@@ -25,7 +25,7 @@ from horsies.core.models.worker_profile import (
     SharedRecycle,
     SharedThreadChildren,
 )
-from horsies.core.types.result import Err, Ok
+from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker import finalize
 from horsies.core.worker.child_protocol import (
     IsolatedChild,
@@ -45,10 +45,13 @@ from horsies.core.worker.dispatch_route import (
 )
 from horsies.core.worker.runtime import (
     MemoryBaselineExceedsThresholdError,
+    _FINALIZE_STAGE_TIMEOUT,
+    _FinalizeError,
     _RequeueOutcome,
     _TimeoutSettled,
     _TimeoutWriteFailed,
 )
+from horsies.core.worker.shared_finalize import timeout_retry_write
 from horsies.core.worker.slots import (
     Assigned,
     ChildBaseline,
@@ -364,9 +367,11 @@ class TestFinalizeThread:
         )
         worker._finalize_child_loss.assert_not_awaited()  # type: ignore[attr-defined]
 
-    async def test_a_failed_timeout_write_after_the_kill_takes_crash_recovery(
+    async def test_a_failed_timeout_write_after_the_kill_is_retried_as_that_write(
         self,
     ) -> None:
+        """The error keeps the TASK_TIMEOUT write and the placement of the
+        culprit; crash recovery does not run at once."""
         worker = self._worker_with_paths()
         worker._record_task_timeout.return_value = _TimeoutWriteFailed()  # type: ignore[attr-defined]
         killed = ChildKilledPastDeadlines(
@@ -375,10 +380,19 @@ class TestFinalizeThread:
             culprit=RunCulprit(dispatch=1, task_id='task-1'),
         )
 
-        result = await self._finalize(worker, killed)
+        result: Result[None, _FinalizeError] = await self._finalize(worker, killed)
 
-        assert isinstance(result, Err)
-        worker._recover_worker_future_failure.assert_awaited_once()  # type: ignore[attr-defined]
+        match result:
+            case Err(err_value=error):
+                assert error.stage == _FINALIZE_STAGE_TIMEOUT
+                assert timeout_retry_write(error.data) == (
+                    1500,
+                    RetryPlacement.ISOLATED,
+                    CLAIMED_AT,
+                )
+            case Ok():
+                raise AssertionError(result)
+        worker._recover_worker_future_failure.assert_not_awaited()  # type: ignore[attr-defined]
 
     async def test_a_kill_with_no_exit_seen_writes_nothing_here(self) -> None:
         """The pool gives the loss of the child; crash recovery leaves the row
@@ -390,6 +404,7 @@ class TestFinalizeThread:
 
         worker._record_task_timeout.assert_not_awaited()  # type: ignore[attr-defined]
         worker._finalize_child_loss.assert_awaited_once_with(  # type: ignore[attr-defined]
+            ANY,
             'task-1',
             lost,
             CLAIMED_AT,

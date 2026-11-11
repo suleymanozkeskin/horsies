@@ -13,16 +13,18 @@ import asyncio
 import json
 from collections.abc import Coroutine
 from datetime import datetime, timezone
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from typing import Any, cast
+from unittest.mock import ANY, AsyncMock, MagicMock
 
 import pytest
 
+from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.tasks import (
     DEFAULT_CANCEL_GRACE_MS,
     MIN_TASK_TIMEOUT_MS,
     Execution,
     OperationalErrorCode,
+    OutcomeCode,
 )
 from horsies.core.models.worker_profile import (
     MemoryLimit,
@@ -32,6 +34,7 @@ from horsies.core.models.worker_profile import (
 )
 from horsies.core.worker.claim_plan import ClaimPlan, isolated_children_plan
 from horsies.core.types.result import Err, Ok, Result
+from horsies.core.worker import dispatch as dispatch_module
 from horsies.core.worker import finalize
 from horsies.core.worker.child_protocol import (
     IsolatedChild,
@@ -40,11 +43,15 @@ from horsies.core.worker.child_protocol import (
     SeatRefusal,
     SeatTask,
     SharedAsyncChild,
+    ThreadSeatTask,
 )
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.dispatch_route import RunIsolated, RunShared, dispatch_route
 from horsies.core.worker.runtime import (
     MemoryBaselineExceedsThresholdError,
+    _FINALIZE_STAGE_FUTURE,
+    _FINALIZE_STAGE_TIMEOUT,
+    _FINALIZE_TIMEOUT_MAX_RETRIES,
     _AttemptEndUnknown,
     _FinalizeError,
     _RequeueOutcome,
@@ -69,10 +76,12 @@ from horsies.core.worker.slots import (
     SharedHandle,
     SharedRunRequest,
     SlotPool,
+    StuckAcknowledged,
 )
 from horsies.core.worker.shared_finalize import (
     future_retry_data,
     future_retry_write,
+    timeout_retry_write,
 )
 from horsies.core.worker.shared_stop import (
     BesideBlockedLoop,
@@ -463,17 +472,31 @@ class TestFinalizeShared:
         )
         worker._recover_worker_future_failure.assert_not_awaited()  # type: ignore[attr-defined]
 
-    async def test_a_failed_timeout_write_takes_crash_recovery(self) -> None:
+    async def test_a_failed_timeout_write_is_retried_as_the_timeout_write(
+        self,
+    ) -> None:
+        """Crash recovery does not write WORKER_CRASHED at once: the error
+        keeps the TASK_TIMEOUT write, and its retries run it again."""
         worker = self._worker_with_paths()
         worker._record_task_timeout.return_value = _TimeoutWriteFailed()  # type: ignore[attr-defined]
 
-        result = await self._finalize(
+        result: Result[None, _FinalizeError] = await self._finalize(
             worker,
-            SeatDeadlineEnded(retry=RetryPlacement.SAME_CLASS),
+            SeatDeadlineEnded(retry=RetryPlacement.ISOLATED),
         )
 
-        assert isinstance(result, Err)
-        worker._recover_worker_future_failure.assert_awaited_once()  # type: ignore[attr-defined]
+        match result:
+            case Err(err_value=error):
+                assert error.stage == _FINALIZE_STAGE_TIMEOUT
+                assert error.retryable is True
+                assert timeout_retry_write(error.data) == (
+                    1500,
+                    RetryPlacement.ISOLATED,
+                    CLAIMED_AT,
+                )
+            case Ok():
+                raise AssertionError(result)
+        worker._recover_worker_future_failure.assert_not_awaited()  # type: ignore[attr-defined]
 
     async def test_the_result_of_a_refusal_takes_the_path_of_an_isolated_result(
         self,
@@ -519,6 +542,7 @@ class TestFinalizeShared:
         await self._finalize(worker, lost)
 
         worker._finalize_child_loss.assert_awaited_once_with(  # type: ignore[attr-defined]
+            ANY,
             'task-1',
             lost,
             CLAIMED_AT,
@@ -669,7 +693,7 @@ class TestFinalizeKilledRun:
         writes = _KillWrites()
         error = writes.worker._make_finalize_error(
             task_id='task-1',
-            stage='future',
+            stage=_FINALIZE_STAGE_FUTURE,
             message='kill write failed',
             retryable=True,
             data=future_retry_data(
@@ -687,6 +711,20 @@ class TestFinalizeKilledRun:
             'failure_code': OperationalErrorCode.NEIGHBOUR_BLOCKED_LOOP,
             'retry': RetryPlacement.SAME_CLASS,
         }
+
+    async def test_a_timeout_code_is_kept_for_the_retry_of_crash_recovery(
+        self,
+    ) -> None:
+        data = future_retry_data(
+            OutcomeCode.TASK_TIMEOUT,
+            RetryPlacement.ISOLATED,
+            CLAIMED_AT,
+        )
+
+        assert future_retry_write(data) == (
+            OutcomeCode.TASK_TIMEOUT,
+            RetryPlacement.ISOLATED,
+        )
 
     async def test_a_crash_error_retries_as_a_crash(self) -> None:
         assert future_retry_write({'claimed_at': None}) == (
@@ -801,6 +839,11 @@ class TestBackstopTimer:
         worker._handle_shared_backstop.assert_not_awaited()
 
 
+# A wait that the code under test must end by itself fails the test past this
+# time, instead of hanging it.
+OUTCOME_BOUND_S = 5.0
+
+
 @pytest.mark.asyncio
 class TestBackstopDecision:
     WORK = SeatTask(timeout_ms=1000, cancel_grace_ms=500)
@@ -834,7 +877,9 @@ class TestBackstopDecision:
         worker._record_task_timeout.assert_not_awaited()
 
     async def test_no_exit_seen_writes_nothing(self) -> None:
+        """With stale RUNNING recovery on, the row is left to it."""
         worker = _worker()
+        worker.cfg.recovery_config = RecoveryConfig()
         worker._record_task_timeout = AsyncMock()
 
         outcome = await self._backstop(
@@ -845,6 +890,26 @@ class TestBackstopDecision:
 
         assert outcome == _AttemptEndUnknown()
         worker._record_task_timeout.assert_not_awaited()
+
+    async def test_with_stale_recovery_off_a_late_exit_gives_the_kill_verdict(
+        self,
+    ) -> None:
+        """The run was past its deadline at the backstop: once the exit is
+        seen, it times out in its class, as at a seen exit."""
+        worker = _worker()
+        handle = _handle(asyncio.get_running_loop())
+        handle.wait_child_exit = AsyncMock(return_value=KilledBySignal(9))
+
+        outcome = await asyncio.wait_for(
+            self._backstop(worker, ChildEndUnknown(pid=7), handle),
+            OUTCOME_BOUND_S,
+        )
+
+        assert outcome == SeatKilled(
+            verdict=TimedOutAtKill(retry=RetryPlacement.SAME_CLASS),
+            pid=7,
+            child_exit=KilledBySignal(9),
+        )
 
     async def test_a_live_child_is_not_killed_and_the_outcome_is_awaited(self) -> None:
         worker = _worker()
@@ -869,6 +934,185 @@ class TestBackstopDecision:
         )
 
         assert outcome == finished
+
+    async def test_a_child_silent_after_the_acknowledged_cancel_gets_the_stuck_backstop(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The child reported the second cancel, then froze: no stuck report
+        and no end come. The stuck backstop kills it, and the slot verdict
+        is the outcome."""
+        monkeypatch.setattr(dispatch_module, 'SHARED_STUCK_BACKSTOP_S', 0.01)
+        worker = _worker()
+        handle = _handle(asyncio.get_running_loop())
+        killed = SeatKilled(
+            verdict=TimedOutAtKill(retry=RetryPlacement.SAME_CLASS),
+            pid=7,
+            child_exit=KilledBySignal(9),
+        )
+
+        async def kill_the_frozen_child(_wait_s: float) -> ChildEnded:
+            handle.finish(killed)
+            return ChildEnded(pid=7, child_exit=KilledBySignal(9))
+
+        stuck_backstop = AsyncMock(side_effect=kill_the_frozen_child)
+        handle.stuck_backstop_kill = stuck_backstop
+
+        outcome = await asyncio.wait_for(
+            self._backstop(worker, DeadlineAcknowledged(pid=7), handle),
+            OUTCOME_BOUND_S,
+        )
+
+        assert outcome == killed
+        stuck_backstop.assert_awaited_once()
+
+    async def test_a_stuck_report_leaves_the_run_on_its_seat(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(dispatch_module, 'SHARED_STUCK_BACKSTOP_S', 0.01)
+        worker = _worker()
+        handle = _handle(asyncio.get_running_loop())
+        ended = SeatDeadlineEnded(retry=RetryPlacement.ISOLATED)
+        handle.stuck_backstop_kill = AsyncMock(return_value=StuckAcknowledged(pid=7))
+        asyncio.get_running_loop().call_later(0.05, handle.finish, ended)
+
+        outcome = await asyncio.wait_for(
+            self._backstop(worker, DeadlineAcknowledged(pid=7), handle),
+            OUTCOME_BOUND_S,
+        )
+
+        assert outcome == ended
+
+    async def test_a_thread_run_has_no_stuck_backstop(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A thread cannot be cancelled: after its deadline report the run
+        waits for its end or for the kill of its child."""
+        monkeypatch.setattr(dispatch_module, 'SHARED_STUCK_BACKSTOP_S', 0.01)
+        worker = _worker()
+        handle = _handle(asyncio.get_running_loop())
+        handle.backstop_kill = AsyncMock(return_value=DeadlineAcknowledged(pid=7))
+        stuck_backstop = AsyncMock()
+        handle.stuck_backstop_kill = stuck_backstop
+        ended = SeatDeadlineEnded(retry=RetryPlacement.SAME_CLASS)
+        asyncio.get_running_loop().call_later(0.05, handle.finish, ended)
+
+        outcome = await asyncio.wait_for(
+            worker._handle_shared_backstop(handle, 'task-1', ThreadSeatTask(1000)),
+            OUTCOME_BOUND_S,
+        )
+
+        assert outcome == ended
+        stuck_backstop.assert_not_awaited()
+
+
+class _TimeoutWriteRetries:
+    """A worker whose timeout write and crash recovery are recorded."""
+
+    def __init__(self) -> None:
+        self.worker = _worker()
+        self.timeout = AsyncMock(return_value=_TimeoutSettled())
+        self.recovery = AsyncMock(return_value=_RequeueOutcome.REQUEUED)
+        self.handled = AsyncMock()
+        self.worker._record_task_timeout = self.timeout
+        self.worker._recover_worker_future_failure = self.recovery
+
+    def error(self) -> Any:
+        return self.worker._timeout_write_error(
+            'task-1',
+            1500,
+            CLAIMED_AT,
+            RetryPlacement.ISOLATED,
+        )
+
+
+@pytest.mark.asyncio
+class TestTimeoutWriteRetry:
+    """A TASK_TIMEOUT write that failed after the attempt ended runs again,
+    bounded; crash recovery writes TASK_TIMEOUT only after the last retry."""
+
+    async def test_the_retry_runs_the_same_timeout_write(self) -> None:
+        retries = _TimeoutWriteRetries()
+
+        await retries.worker._retry_finalize_timeout(retries.error(), 0.0)
+
+        retries.timeout.assert_awaited_once_with(
+            'task-1',
+            1500,
+            CLAIMED_AT,
+            retry=RetryPlacement.ISOLATED,
+        )
+        retries.recovery.assert_not_awaited()
+
+    async def test_a_failed_retry_goes_back_to_the_bounded_handler(self) -> None:
+        retries = _TimeoutWriteRetries()
+        retries.timeout.return_value = _TimeoutWriteFailed()
+        error = retries.error()
+        retries.worker._handle_finalize_error = retries.handled
+
+        await retries.worker._retry_finalize_timeout(error, 0.0)
+
+        retries.handled.assert_awaited_once_with(error)
+        retries.recovery.assert_not_awaited()
+
+    async def test_the_handler_schedules_the_timeout_write_until_its_bound(
+        self,
+    ) -> None:
+        retries = _TimeoutWriteRetries()
+        spawned: list[str] = []
+
+        def spawn(coroutine: Any, *, name: str, **_kwargs: Any) -> None:
+            coroutine.close()
+            spawned.append(name)
+
+        retries.worker._spawn_background = MagicMock(side_effect=spawn)
+        error = retries.error()
+
+        for _ in range(_FINALIZE_TIMEOUT_MAX_RETRIES + 1):
+            await retries.worker._handle_finalize_error(error)
+
+        assert spawned == [
+            *(['finalize-retry-timeout-task-1'] * _FINALIZE_TIMEOUT_MAX_RETRIES),
+            'finalize-timeout-recovery-task-1',
+        ]
+
+    async def test_crash_recovery_after_the_last_retry_decides_on_the_timeout(
+        self,
+    ) -> None:
+        retries = _TimeoutWriteRetries()
+
+        await retries.worker._recover_timed_out_row(retries.error())
+
+        assert retries.recovery.await_args is not None
+        assert retries.recovery.await_args.kwargs == {
+            'claimed_at': CLAIMED_AT,
+            'failure_code': OutcomeCode.TASK_TIMEOUT,
+            'retry': RetryPlacement.ISOLATED,
+        }
+
+    async def test_a_database_error_of_crash_recovery_keeps_the_timeout_code(
+        self,
+    ) -> None:
+        retries = _TimeoutWriteRetries()
+        retries.recovery.return_value = _RequeueOutcome.DB_ERROR
+        retries.worker._handle_finalize_error = retries.handled
+
+        await retries.worker._recover_timed_out_row(retries.error())
+
+        assert retries.handled.await_args is not None
+        handed = retries.handled.await_args.args[0]
+        assert handed.stage == _FINALIZE_STAGE_FUTURE
+        assert future_retry_write(handed.data) == (
+            OutcomeCode.TASK_TIMEOUT,
+            RetryPlacement.ISOLATED,
+        )
+
+
+def test_the_data_of_a_timeout_write_is_a_closed_shape() -> None:
+    with pytest.raises(AssertionError, match='no TASK_TIMEOUT write'):
+        timeout_retry_write({'claimed_at': None})
 
 
 class TestCapacityAndConfig:
@@ -928,3 +1172,62 @@ class TestSharedMemoryBaseline:
         worker._check_memory_baseline(
             (ChildBaseline(1, RssMb(500.0), SharedAsyncChild(seats=4)),),
         )
+
+
+class _NewKindBaselines:
+    """The pool side of the guard of a kind that was down at the first
+    start: each baseline once, then no more."""
+
+    def __init__(self, *baselines: ChildBaseline) -> None:
+        self._baselines: asyncio.Queue[ChildBaseline] = asyncio.Queue()
+        for baseline in baselines:
+            self._baselines.put_nowait(baseline)
+
+    async def wait_new_kind_baseline(self) -> ChildBaseline:
+        return await self._baselines.get()
+
+
+class TestNewKindBaselineGuard:
+    """Every shared async slot was down at the first start, so its kind had
+    no baseline then. Its first ready child gets the guard."""
+
+    def _worker(self) -> Worker:
+        recycle = SharedRecycle(above=MemoryLimit(mb=100))
+        return _worker(SharedAsyncChildren(count=1, seats=4, recycle=recycle))
+
+    @pytest.mark.asyncio
+    async def test_a_late_baseline_at_its_limit_stops_the_worker(self) -> None:
+        worker = self._worker()
+        pool = _NewKindBaselines(
+            ChildBaseline(1, RssMb(100.0), SharedAsyncChild(seats=4)),
+        )
+
+        await asyncio.wait_for(
+            worker._new_kind_baseline_loop(cast(SlotPool, pool)),
+            5.0,
+        )
+
+        assert worker._stop.is_set()
+        match worker._fatal_background_error:
+            case MemoryBaselineExceedsThresholdError() as error:
+                assert 'shared async' in str(error)
+            case other:
+                raise AssertionError(other)
+
+    @pytest.mark.asyncio
+    async def test_a_late_baseline_under_its_limit_keeps_the_worker(self) -> None:
+        worker = self._worker()
+        pool = _NewKindBaselines(
+            ChildBaseline(1, RssMb(50.0), SharedAsyncChild(seats=4)),
+        )
+        guard = asyncio.ensure_future(
+            worker._new_kind_baseline_loop(cast(SlotPool, pool)),
+        )
+
+        await asyncio.sleep(0.05)
+
+        assert not guard.done()
+        assert not worker._stop.is_set()
+        assert worker._fatal_background_error is None
+        guard.cancel()
+        await asyncio.gather(guard, return_exceptions=True)

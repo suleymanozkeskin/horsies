@@ -34,12 +34,14 @@ there is no migration contract between pre-1.0 versions.
     a generator function is.
   - A child whose app has an `async def` task creates its event loop at
     boot, before it reports ready. A child whose app has none creates no
-    loop. When the loop cannot be created, for example with EMFILE or an
-    event loop policy that raises, the child fails its boot, and no task
-    reaches it. That cause can clear, so only that slot is down (see the
-    change to child start failures below). The log names the slot and the
-    cause, for example `Slot 1 is down: the child could not create the event
-    loop for async tasks: OSError: [Errno 24] Too many open files`.
+    loop. When the loop cannot be created, the child fails its boot, and no
+    task reaches it. An `OSError` with `EMFILE`, `ENFILE`, `ENOMEM` or
+    `EAGAIN` can clear, so only that slot is down (see the change to child
+    start failures below). The log names the slot and the cause, for example
+    `Slot 1 is down: the OS ran short of a resource (EMFILE): OSError:
+    [Errno 24] Too many open files`. Any other failure, such as an event loop
+    policy that raises, repeats (`TaskLoopCreateFailed`) and counts one of
+    three attempts.
   - The task loop of a worker child does not count against the broker's
     limit of 5 open caller loops (`EVENT_LOOP_LIMIT`), as the broker's sync
     runner loop does not. An async task that calls the broker gives the task
@@ -66,9 +68,9 @@ there is no migration contract between pre-1.0 versions.
   `WorkerStateSnapshot.slot_health` is `AllSlotsServing()`,
   `SlotsDown(slots)`, or `SlotHealthNotRecorded()` for a snapshot that a
   worker without this field wrote. Each `DownSlot` holds the slot index, the
-  cause (`ResourceShortage(errno_name)`, `TaskLoopCreateFailed()`,
-  `ThreadStartRefused()` or `SpawnFailed()`), the error text of the last
-  failed start (at most 2400 characters), `down_since`, and `failed_boots`.
+  cause (`ResourceShortage(errno_name)` or `ThreadStartRefused()`), the
+  error text of the last failed start (at most 2400 characters),
+  `down_since`, and `failed_boots`.
   `list_worker_states()`, `get_worker_state()` and
   `get_worker_state_history()` return it. A stored value of another shape
   fails the read with `MONITORING_QUERY_FAILED`. Schema v53 adds the column
@@ -238,13 +240,29 @@ there is no migration contract between pre-1.0 versions.
     crash path, as for code of no task.
   - The worker kills a child that has reported neither the second cancel
     nor the end of a task `timeout_ms + cancel_grace_ms + 10 s` after its
-    placement: C code holds the GIL in it. A child that still holds a
-    refusal 120 s after its placement is killed as well. At these kills a
-    task past its deadline fails with `TASK_TIMEOUT`, every other task takes
-    the crash path, and no retry moves to an isolated child.
+    placement: C code holds the GIL in it. A child that reported that cancel,
+    or the cancel of the work that a task left after its return, and then
+    reports neither the task stuck nor its end by `timeout_ms +
+    cancel_grace_ms + 20.3 s` after its placement (the first check, then
+    0.3 s for the cancel rounds and the stuck check, and the same 10 s
+    margin) froze after the report, and is killed as well. A child that
+    still holds a refusal 145 s after its placement is killed as well: the
+    writes of a refusal end within 120 s on a shared async child and 135 s
+    on a shared thread child (two attempts of the RUNNING update and the
+    finalizing marker, each at most 30 s for a connection, 10 s for its
+    statements, and 5 to 10 s for a cancelled statement to end), and the
+    block limit with its margin comes after them. At these kills a
+    task past its deadline fails with `TASK_TIMEOUT`, and every other task
+    takes the crash path. A task that the child reported stuck keeps its
+    retry in an isolated child at every kill by the worker whose exit it
+    saw: this backstop, the drain deadline of a stop, and a blocked loop of
+    another task. No other retry moves to an isolated child.
   - A crash of a shared child that the worker did not cause ends every task
     in it through crash recovery (`WORKER_CRASHED`, or its retry), after the
-    worker saw the exit.
+    worker saw the exit. A task that returned before its deadline, and whose
+    left work the child reported in its cancel rounds or stuck, ends with
+    what it returned at every end of its child whose exit the worker saw,
+    also at an out-of-memory kill or a crash.
   - A task that cancels its own asyncio task and returns before an `await`
     takes the cancel ends as that cancel, through its exception mapper, as
     a cancel that reaches the body at an `await` does. The request is
@@ -267,10 +285,14 @@ there is no migration contract between pre-1.0 versions.
     the queue.
   - The RUNNING update with the first runner heartbeat and the finalizing
     marker of a shared task run on an async connection pool that the child
-    opens on its loop, of `worker_child_pool_max_size` connections. The
-    child writes its frames from a thread, so a slow worker never stops the
-    loop. A shared child runs only `async def` tasks; a row that reaches one
-    with a `def` function fails with `WORKER_RESOLUTION_ERROR`.
+    opens on its loop, of `worker_child_pool_max_size` connections. An
+    attempt of the RUNNING update that does not end within 40 s (30 s for a
+    connection, 10 s for its statements, for example an UPDATE that waits on
+    a row lock) ends with `OWNERSHIP_UNCONFIRMED`: the task does not start,
+    and its row stays `CLAIMED` until its lease ends. The child writes its
+    frames from a thread, so a slow worker never stops the loop. A shared
+    child runs only `async def` tasks; a row that reaches one with a `def`
+    function fails with `WORKER_RESOLUTION_ERROR`.
   - `@app.on_shared_async_child_start` registers an `async def` hook that
     runs on the loop of each shared async child before its first task, for
     long-lived async clients. Same 10 s bound and fail-closed stop as
@@ -285,7 +307,9 @@ there is no migration contract between pre-1.0 versions.
     shared child. The claim limit check (`HRS-218`) compares with it plus
     `prefetch_buffer`; the connection check (`HRS-219`) and the memory
     warning count the shared children; the boot memory guard compares each
-    mode's limit with the baseline of a child of that mode.
+    mode's limit with the baseline of a child of that mode. A mode whose
+    children were all down at the start is compared when its first child
+    becomes ready, and a breach then stops the worker non-zero.
 
 - **Shared thread children run `SHARED_THREAD` tasks, many at once.**
   `WorkerProfile.shared_thread` takes `SharedThreadChildren(count, seats,
@@ -313,7 +337,10 @@ there is no migration contract between pre-1.0 versions.
     its deadline fails with `TASK_TIMEOUT`. A child that has not reported a
     deadline by `timeout_ms + 10 s` is frozen (C code holds the GIL): the
     worker kills it, each task past its deadline fails with `TASK_TIMEOUT`,
-    and every other task of the child takes the crash path.
+    and every other task of the child takes the crash path. The task whose
+    deadline closed the child keeps its retry in an isolated child at every
+    kill by the worker whose exit it saw, also at this one and at the drain
+    deadline of a stop.
   - A crash or a kill of a thread child ends every task in it, each through
     crash recovery after the worker saw the exit.
   - A `SHARED_THREAD` row without a usable stored `timeout_ms` fails with
@@ -440,22 +467,30 @@ there is no migration contract between pre-1.0 versions.
   cause to the worker before it exits.
   - A cause that is the same on every attempt still counts one of three
     attempts, and the third stops the worker: the app or a task module does
-    not import, the child connection pool cannot be set up, the child dies
-    with no report, or it is not ready within 120 seconds. A failed
-    `on_child_process_start` hook still stops the worker at once.
+    not import, the child connection pool cannot be set up, the event loop
+    for `async def` tasks cannot be created for a cause other than the
+    errno values below (for example an event loop policy that raises), the
+    OS refuses the spawn with another errno (for example `ENOENT` or
+    `EACCES` for the interpreter), a forked child does not reach the worker
+    in 5 seconds, the child dies with no report, or it is not ready within
+    120 seconds. A failed `on_child_process_start` hook still stops the
+    worker at once.
   - A cause that can clear takes only that slot down: `OSError` with
-    `EMFILE`, `ENFILE`, `ENOMEM` or `EAGAIN` in a start step, an event loop
-    for `async def` tasks that cannot be created, a control thread that the
-    OS refuses, or a spawn that the OS refuses. Before, each of these used an
-    attempt, and the worker stopped after three, also while other children
-    served tasks. A spawn refusal stopped the worker at once.
+    `EMFILE`, `ENFILE`, `ENOMEM` or `EAGAIN` in a start step of the child or
+    of the worker (the socket pair of the child, the spawn, the event loop),
+    or a thread that the OS refuses at the start (the control thread, the
+    watchdog of a start hook, a thread of the connection pool). Before, each
+    of these used an attempt, and the worker stopped after three, also while
+    other children served tasks. A spawn refusal stopped the worker at once.
   - A slot that is down takes no task, and the claim passes only the slots
     that are not down as the worker's process count. The worker starts a new
     child for that slot after 1 second, then 2, 4, up to 60 seconds, and
     logs one line per failed attempt with the slot, the cause and the next
     wait. The slot returns to service when a child starts.
   - When every slot is down, a failed start for a cause that can clear
-    counts an attempt, so a worker that serves no task stops after three.
+    counts an attempt, so a worker that serves no task stops after three in
+    a row. A failed start while another slot is in service starts the count
+    again.
     A worker with 1 process has no other slot, so each of its failed starts
     counts.
   - At the first start, the worker starts degraded when at least one child
@@ -630,14 +665,22 @@ there is no migration contract between pre-1.0 versions.
   ran. If the child does not exit within 30 s, the worker writes nothing and
   logs at critical level, and stale-task recovery takes the task. A timed-out
   task no longer also goes through crash recovery, which replayed its
-  workflow step and logged a finalize error.
+  workflow step and logged a finalize error. When the `TASK_TIMEOUT` write
+  fails after the exit, the worker runs that write again up to 3 times, with
+  growing waits; only then does crash recovery write the row, with
+  `TASK_TIMEOUT` as the code that the retry policy reads. A result that the
+  child sent after the deadline is never written.
 - **Crash recovery moves a lost child's row only after it saw the child
   exit.** When the worker kills a child and does not see it exit within
   30 s (the socket to the child was lost, the child sent a bad frame, or the
   slot was cleared at a stop or after a defect), it writes nothing and logs
   the task id and pid at critical level. Stale-task recovery then takes the
-  task. Before, the worker wrote `WORKER_CRASHED` or scheduled a retry at
-  once, so the retry could run next to a child that was still alive.
+  task. With stale RUNNING recovery off (no `RecoveryConfig`, or
+  `auto_fail_stale_running=False`), nothing else would move the row, so the
+  worker waits for the exit and writes the row once it sees it, for a timed
+  out task and for a lost child alike; a stop of the worker ends that wait.
+  Before, the worker wrote `WORKER_CRASHED` or scheduled a retry at once, so
+  the retry could run next to a child that was still alive.
 - **A child that the worker killed takes no next task.** A kill can land
   after the child's result arrived and before the worker read it. The worker
   then gave the next queued task to the dying child, and that task was lost

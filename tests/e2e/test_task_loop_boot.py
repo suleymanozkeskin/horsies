@@ -23,7 +23,7 @@ import pytest
 from sqlalchemy import text
 
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.boot_failure import TaskLoopCreateFailed
+from horsies.core.models.boot_failure import ResourceShortage, ShortageErrno
 from horsies.core.models.health import DownSlot, SlotsDown, WorkerStateSnapshot
 from horsies.core.task_decorator import TaskFunction, TaskHandle
 from horsies.core.types.result import is_err, is_ok
@@ -44,8 +44,9 @@ INSTANCE = 'tests.e2e.tasks.instance_task_loop_boot:app'
 SYNC_ONLY_INSTANCE = 'tests.e2e.tasks.instance_task_loop_boot_sync_only:app'
 RESULT_TIMEOUT_MS = 30_000
 WORKER_EXIT_TIMEOUT_S = 60.0
+# EMFILE at the creation of the loop is a resource shortage, which can clear.
 LOOP_CAUSE = (
-    'the child could not create the event loop for async tasks: '
+    'the OS ran short of a resource (EMFILE): '
     'OSError: [Errno 24] Too many open files'
 )
 SNAPSHOT_POLLS: Final = 40
@@ -225,7 +226,11 @@ async def test_a_slot_that_cannot_create_its_task_loop_leaves_the_worker_degrade
         assert worker.poll() is None
 
     match snapshot.slot_health:
-        case SlotsDown(slots=(DownSlot(slot=1, cause=TaskLoopCreateFailed()) as down,)):
+        case SlotsDown(
+            slots=(
+                DownSlot(slot=1, cause=ResourceShortage(ShortageErrno.EMFILE)) as down,
+            ),
+        ):
             assert down.detail == 'OSError: [Errno 24] Too many open files'
             assert down.failed_boots >= 1
         case other:

@@ -221,7 +221,7 @@ Sends of an `@app.task` function write valid options. This affects only code tha
 
 ### A child that cannot start does not always stop the worker
 
-A child that fails its start for a cause that can clear takes only its slot down: `EMFILE`, `ENFILE`, `ENOMEM` or `EAGAIN` in a start step, an event loop that cannot be created, or a spawn or a thread that the OS refuses. The worker runs on degraded, and starts a new child for the slot after a growing wait. In 0.6.x each such failure counted one of three attempts, and the third stopped the worker. A worker with every slot down still stops after three failed starts. Read `WorkerStateSnapshot.slot_health` to see the slots that are down. See [Child Start Failures](/horsies/workers/worker-architecture/#child-start-failures).
+A child that fails its start for a cause that can clear takes only its slot down: `EMFILE`, `ENFILE`, `ENOMEM` or `EAGAIN` in a start step (the spawn and the event loop among them), or a thread that the OS refuses. The worker runs on degraded, and starts a new child for the slot after a growing wait. In 0.6.x each such failure counted one of three attempts, and the third stopped the worker. A worker with every slot down still stops after three failed starts in a row. Read `WorkerStateSnapshot.slot_health` to see the slots that are down. See [Child Start Failures](/horsies/workers/worker-architecture/#child-start-failures).
 
 ### The worker process writes the runner heartbeats
 
@@ -229,7 +229,7 @@ One thread of the worker writes the runner heartbeats of its RUNNING tasks, over
 
 ### A timed-out task moves after its child has exited
 
-The worker writes `TASK_TIMEOUT`, the retry and the next workflow step only after the child of the task has exited. So a retry never runs next to the attempt that it replaces. When the child does not exit within 30 seconds of the kill, the worker writes nothing and logs at critical level, and stale-task recovery takes the task.
+The worker writes `TASK_TIMEOUT`, the retry and the next workflow step only after the child of the task has exited. So a retry never runs next to the attempt that it replaces. When the child does not exit within 30 seconds of the kill, the worker writes nothing and logs at critical level, and stale-task recovery takes the task. With stale RUNNING recovery off (no `RecoveryConfig`, or `auto_fail_stale_running=False`), nothing else would move the row, so the worker waits for the exit and writes the row once it sees it; a stop of the worker ends that wait.
 
 ## Execution modes are new
 

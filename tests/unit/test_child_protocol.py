@@ -24,6 +24,7 @@ from horsies.core.models.boot_failure import (
     ShortageErrno,
     TaskLoopCreateFailed,
     ThreadStartRefused,
+    ThreadStartRefusedError,
 )
 from horsies.core.types.result import Err, Ok
 from horsies.core.worker import child_main
@@ -1103,6 +1104,22 @@ class TestBootFailureFromException:
         assert frame.error_name == type(exc).__name__
         assert frame.detail == str(exc)
 
+    @pytest.mark.parametrize('step', [AppLoadFailed(), ChildPoolSetupFailed()])
+    def test_a_refused_thread_of_a_boot_step_is_thread_start_refused(
+        self,
+        step: AppLoadFailed | ChildPoolSetupFailed,
+    ) -> None:
+        """The step that raised does not decide: a refused thread can clear,
+        whichever step started it."""
+        refusal = RuntimeError("can't start new thread")
+        exc = ThreadStartRefusedError('a thread of the connection pool', refusal)
+
+        assert child_main.boot_failure_from_exception(exc, step) == boot_failed_frame(
+            ThreadStartRefused(),
+            'RuntimeError',
+            "a thread of the connection pool: can't start new thread",
+        )
+
     def test_a_refused_control_thread_is_thread_start_refused(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -1125,7 +1142,7 @@ class TestBootFailureFromException:
             ),
         )
 
-    def test_a_loop_that_cannot_be_created_is_task_loop_create_failed(
+    def test_a_loop_short_of_descriptors_is_a_resource_shortage(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -1136,10 +1153,36 @@ class TestBootFailureFromException:
         result = child_main.open_task_loop_at_boot(AsyncTaskPresence.HAS_ASYNC_TASKS)
         assert result == Err(
             boot_failed_frame(
-                TaskLoopCreateFailed(),
+                ResourceShortage(ShortageErrno.EMFILE),
                 'OSError',
                 '[Errno 24] Too many open files',
             ),
+        )
+
+    @pytest.mark.parametrize(
+        'error',
+        [
+            NotImplementedError('this policy cannot build a loop here'),
+            RuntimeError('the event loop policy refuses'),
+            OSError(errno.ENOENT, 'No such file or directory'),
+        ],
+        ids=['policy-not-implemented', 'policy-runtime', 'enoent'],
+    )
+    def test_a_loop_that_fails_the_same_way_each_boot_is_task_loop_create_failed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        error: Exception,
+    ) -> None:
+        """An event loop policy that raises, or an errno outside the table,
+        fails every boot the same way, so the cause repeats."""
+
+        def refuses() -> object:
+            raise error
+
+        monkeypatch.setattr(asyncio, 'new_event_loop', refuses)
+        result = child_main.open_task_loop_at_boot(AsyncTaskPresence.HAS_ASYNC_TASKS)
+        assert result == Err(
+            boot_failed_frame(TaskLoopCreateFailed(), type(error).__name__, str(error)),
         )
 
     def test_an_app_with_no_async_task_gets_no_loop(self) -> None:

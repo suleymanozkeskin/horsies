@@ -169,11 +169,12 @@ The worker places each `SHARED_ASYNC` task on the open shared child with the few
 | A task is still alive `cancel_grace_ms` after its cancel | The child cancels it a second time, with the asyncio tasks that it started, in up to three rounds 0.1 s apart. The child takes no new task, and a new child replaces it when its tasks end |
 | A task is still alive after the cancel rounds | The task is stuck and keeps its seat. The worker kills the child when every task left in it is stuck; each fails with `TASK_TIMEOUT`, and its retry runs in an isolated child |
 | The event loop has not turned for 5 s | The worker kills the child at once. The task that held the loop fails with `TASK_BLOCKED_LOOP` and retries isolated; each other task before its deadline fails with `NEIGHBOUR_BLOCKED_LOOP`; a task past its deadline with `TASK_TIMEOUT` |
-| The child reports neither the second cancel nor the end of a task by `timeout_ms + cancel_grace_ms + 10 s` | C code holds the GIL in the child. The worker kills it: each task past its deadline fails with `TASK_TIMEOUT`, and every other task takes the crash path |
-| The child crashes | Every task of the child takes the crash path, after the worker saw the exit. A new child starts |
+| The child reports neither the second cancel nor the end of a task by `timeout_ms + cancel_grace_ms + 10 s` | C code holds the GIL in the child. The worker kills it: each task past its deadline fails with `TASK_TIMEOUT`, and every other task takes the crash path. A task that the child reported stuck retries in an isolated child |
+| The child reported the second cancel of a task, or the cancel of the work that a task left, then reports neither the task stuck nor its end by `timeout_ms + cancel_grace_ms + 20.3 s` | The child froze after its report. The worker kills it, with the same outcomes as in the row above |
+| The child crashes | Every task of the child takes the crash path, after the worker saw the exit. A task that returned before its deadline, and whose left work the child reported stuck, ends with what it returned. A new child starts |
 | The child reaches a recycle limit | It takes no new task, its tasks finish, then it stops and a new child starts |
 
-At a stop the worker closes each shared child: it takes no new task, and it exits by stop frame when its tasks have ended. At the drain deadline the worker kills a shared child that still runs tasks: each of them past its deadline fails with `TASK_TIMEOUT`, and every other one takes the crash path.
+At a stop the worker closes each shared child: it takes no new task, and it exits by stop frame when its tasks have ended. At the drain deadline the worker kills a shared child that still runs tasks: each of them past its deadline fails with `TASK_TIMEOUT`, and every other one takes the crash path. A task that the worker already named as the cause of a stuck stop (a task that a shared async child reported stuck, or the task whose deadline closed a shared thread child) retries in an isolated child at this kill too.
 
 ## Shared Thread Children
 
@@ -195,7 +196,7 @@ The worker places each `SHARED_THREAD` task on the open shared thread child with
 | No task in a closed child has time left | The worker kills the child with its session. After the exit, each task that was still in it fails with `TASK_TIMEOUT`, with the retry and the next workflow step; the task whose deadline closed the child retries in an isolated child. A new child starts |
 | A task ends by itself after its deadline | The outcome is `TASK_TIMEOUT` |
 | A task in the closed child still has time left | It runs to its end or to its own deadline |
-| The child does not report a deadline by `timeout_ms + 10 s` | C code holds the GIL, and no thread of the child runs. The worker kills it: each task past its deadline fails with `TASK_TIMEOUT`, and every other task of the child takes the crash path |
+| The child does not report a deadline by `timeout_ms + 10 s` | C code holds the GIL, and no thread of the child runs. The worker kills it: each task past its deadline fails with `TASK_TIMEOUT`, and every other task of the child takes the crash path. The task whose deadline closed the child, when one did, retries in an isolated child |
 | The child crashes or is killed | Every task of the child takes the crash path, after the worker saw the exit. A new child starts |
 | The child reaches a recycle limit | It takes no new task, its tasks finish, then it stops and a new child starts |
 
@@ -348,7 +349,7 @@ On SIGTERM/SIGINT the worker:
 5. Waits for pending result writes
 6. Closes database connections
 
-Set `drain_timeout` below the stop window of your supervisor, and leave a few seconds for result writes. If the supervisor kills the worker first, its running tasks wait for the reaper. At the deadline, the worker records each killed task at once. A task whose child does not exit within 30 seconds of the kill is left to stale-task recovery.
+Set `drain_timeout` below the stop window of your supervisor, and leave a few seconds for result writes. If the supervisor kills the worker first, its running tasks wait for the reaper. At the deadline, the worker records each killed task at once. A task whose child does not exit within 30 seconds of the kill is left to stale-task recovery, or, with stale RUNNING recovery off, written when the worker sees the exit before it stops.
 
 | Supervisor | Default stop window | Signal goes to |
 | ---------- | ------------------- | -------------- |
@@ -385,17 +386,17 @@ A child that cannot start reports the cause of the failure to the worker, before
 | The child connection pool cannot be set up, for example a URL that does not parse (`ChildPoolSetupFailed`) | Repeats | Counts an attempt |
 | The child dies with no report: a crash in native code, `os._exit()` in app code (`LostBeforeReady`) | Repeats | Counts an attempt |
 | No ready report within 120 seconds (`NotReadyInTime`) | Repeats | Counts an attempt |
+| The child cannot create its event loop for `async def` tasks for a cause other than the errno values below, for example an event loop policy that raises (`TaskLoopCreateFailed`) | Repeats | Counts an attempt |
+| The OS refuses to start the child process with another errno, for example `ENOENT` or `EACCES` for the interpreter, or a forked child does not reach the worker in 5 seconds (`SpawnFailed`) | Repeats | Counts an attempt |
 | An `on_child_process_start` [hook](/horsies/workers/child-process-hooks/) fails | Repeats | Stops the worker at once |
-| A boot step fails with `OSError` `EMFILE`, `ENFILE`, `ENOMEM` or `EAGAIN` (`ResourceShortage`) | Can clear | Takes the slot down |
-| The child cannot create its event loop for `async def` tasks (`TaskLoopCreateFailed`) | Can clear | Takes the slot down |
-| The OS refuses the control thread of the child (`ThreadStartRefused`) | Can clear | Takes the slot down |
-| The OS refuses to start the child process (`SpawnFailed`) | Can clear | Takes the slot down |
+| A start step of the child or of the worker (the socket pair, the spawn, the event loop) fails with `OSError` `EMFILE`, `ENFILE`, `ENOMEM` or `EAGAIN` (`ResourceShortage`) | Can clear | Takes the slot down |
+| The OS refuses a thread that the child starts at boot: the control thread, the watchdog of a start hook, a thread of the connection pool (`ThreadStartRefused`) | Can clear | Takes the slot down |
 
 A child that dies with no report names no cause, so the worker counts it as a cause that repeats. The worker cannot tell a crash that clears from a crash in the code. Counting it stops a worker whose code crashes at every start, instead of keeping a slot down with no end.
 
-- After three counted attempts, the worker exits non-zero, so that its supervisor restarts it. This also applies when other children serve tasks.
+- After three counted attempts in a row, the worker exits non-zero, so that its supervisor restarts it. This also applies when other children serve tasks.
 - A slot that is down takes no task, and the claim budget leaves it out: a worker with 4 processes and 1 slot down claims as a worker with 3 processes. The worker starts a new child for that slot after 1 second, then 2, 4, up to 60 seconds between attempts. Each failed attempt logs one line with the slot, the cause, and the next wait. The slot returns to service when a child starts.
-- A cause that can clear counts an attempt only when every other slot is down too. A worker that serves no task must fail where its supervisor can see it. A worker with 1 process has no other slot, so each of its failed attempts counts.
+- A cause that can clear counts an attempt only when every other slot is down too. A worker that serves no task must fail where its supervisor can see it. A failed attempt that does not count, because another slot is in service, starts the count again. A worker with 1 process has no other slot, so each of its failed attempts counts.
 - At the first start, the worker starts when each slot has a ready child or is down, and at least one child is ready. Its [worker state](/horsies/monitoring/worker-health/#which-slots-are-down) names the slots that are down. When no child starts, the worker exits non-zero.
 - An outside SIGKILL of a booting replacement child, such as an out-of-memory kill, does not count an attempt while another child is serving: the worker waits up to 5 seconds and starts another. A kill during the first start counts, and so does a kill when no other child is serving.
 
