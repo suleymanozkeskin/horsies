@@ -120,7 +120,7 @@ def make_report(*, report_id: str) -> TaskResult[None, TaskError]:
 3. Wait until no row has the old name.
 4. Remove the old task.
 
-A scheduled task (see [Schedule Config](../scheduling/schedule-config)) sends by name. Change the schedule to the new name in step 2.
+A scheduled task (see [Schedule Config](/horsies/scheduling/schedule-config/)) sends by name. Change the schedule to the new name in step 2.
 
 ### Change a Return Type
 
@@ -189,7 +189,7 @@ A started workflow keeps its stored DAG. Changing the class does not change a ru
 - Keep the old `definition_key` registered for as long as a running workflow can start a subworkflow with it.
 - A subworkflow node that is not ready yet is built from the current code when it becomes ready. If the `build_with` signature changed, its stored kwargs can fail to decode.
 
-`retry_start` is best-effort idempotent by `workflow_id` and does not compare the spec. After a deploy, it can return the handle of a workflow that has the old shape. See [Workflow API](../concepts/workflows/workflow-api).
+`retry_start` is best-effort idempotent by `workflow_id` and does not compare the spec. After a deploy, it can return the handle of a workflow that has the old shape. See [Workflow API](/horsies/concepts/workflows/workflow-api/).
 
 ### Check for Remaining Rows
 
@@ -215,7 +215,7 @@ A `PAUSED` workflow keeps its unstarted nodes until it resumes or ends.
 
 ## Worker Shutdown
 
-On SIGTERM or SIGINT a worker stops new claims and waits for running tasks. See [Worker Architecture](../workers/worker-architecture). A task that is already running keeps the code that it loaded. A row that is still `PENDING` is claimed later by any worker, with the code of that worker.
+On SIGTERM or SIGINT a worker stops new claims and waits for running tasks. See [Worker Architecture](/horsies/workers/worker-architecture/). A task that is already running keeps the code that it loaded. A row that is still `PENDING` is claimed later by any worker, with the code of that worker.
 
 A recycled child loads your app from disk, unless the worker profile sets `preload=ChildPreload.APP`. With that mode, a recycled child keeps the code that the preload parent imported, so new code needs a worker restart.
 

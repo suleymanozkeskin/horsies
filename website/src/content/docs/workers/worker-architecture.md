@@ -33,7 +33,7 @@ tags: [workers, architecture, child-processes]
 A worker owns one child process per slot:
 
 - **Main process**: Coordinates claiming, dispatching, result handling, and writes the runner heartbeats of the running tasks
-- **Isolated children**: Execute task code in isolation, one task at a time. Set by `IsolatedChildren(count=N)` in the [worker profile](worker-profiles)
+- **Isolated children**: Execute task code in isolation, one task at a time. Set by `IsolatedChildren(count=N)` in the [worker profile](/horsies/workers/worker-profiles/)
 - **Shared async children**: Execute up to `seats` `SHARED_ASYNC` tasks at once, as coroutines on one event loop. Set by `SharedAsyncChildren(count=N, seats=K)`. See [Shared Async Children](#shared-async-children)
 - **Shared thread children**: Execute up to `seats` `SHARED_THREAD` tasks at once, each on a thread of its own. Set by `SharedThreadChildren(count=N, seats=K)`. See [Shared Thread Children](#shared-thread-children)
 
@@ -49,7 +49,7 @@ Benefits of isolated children:
 - A crash, a timeout, or an exit in one child affects only the task of that child
 - Memory isolation between tasks
 
-Shared children trade these for more tasks per process. See [Choosing an Execution Mode](execution-modes).
+Shared children trade these for more tasks per process. See [Choosing an Execution Mode](/horsies/workers/execution-modes/).
 
 ## Failure Isolation
 
@@ -64,7 +64,7 @@ Each isolated child holds one task, so a failure stays with that task. A shared 
 | A task forks a helper, then its child dies | The worker sees the death at once. The helper does not hide it |
 | A timeout fires as a task ends | The kill is bound to that task, so it cannot reach the next task. The killed child takes no next task |
 | A task holds the GIL in C code | Its runner heartbeats continue: the worker process writes them, so the reaper does not fail the task |
-| The worker cannot write runner heartbeats for half of `running_stale_threshold_ms`, or its heartbeat thread dies | With `auto_fail_stale_running` on, the worker kills every child that holds a task, stops, and exits non-zero. With it off, the worker logs it and runs on. See [When the Worker Cannot Write Heartbeats](heartbeats-recovery#when-the-worker-cannot-write-heartbeats) |
+| The worker cannot write runner heartbeats for half of `running_stale_threshold_ms`, or its heartbeat thread dies | With `auto_fail_stale_running` on, the worker kills every child that holds a task, stops, and exits non-zero. With it off, the worker logs it and runs on. See [When the Worker Cannot Write Heartbeats](/horsies/workers/heartbeats-recovery/#when-the-worker-cannot-write-heartbeats) |
 
 ## Execution Flow
 
@@ -121,7 +121,7 @@ Key features:
 
 - `FOR UPDATE SKIP LOCKED`: Non-blocking concurrent claiming
 - One budget per execution class that the worker runs children for; see
-  [Budgets per Execution Class](concurrency#budgets-per-execution-class)
+  [Budgets per Execution Class](/horsies/workers/concurrency/#budgets-per-execution-class)
 - Priority ordering within one class: Lower priority number = higher priority
 - FIFO within same priority
 - Expiry check: Skip tasks past `good_until`
@@ -138,7 +138,7 @@ In child process:
 4. Call task function. An `async def` task runs on the event loop that the child created at boot. The child keeps that loop until it stops, and the loop runs only while an async task runs. The result reports the asyncio tasks that are still on the loop after the task, and the worker retires a child that reports any
 5. Mark the row finalizing, and serialize the result
 
-The child runs no heartbeat thread. While the child holds the task, a thread of the worker process writes its runner heartbeats. See [Heartbeats & Recovery](heartbeats-recovery#runner-heartbeat).
+The child runs no heartbeat thread. While the child holds the task, a thread of the worker process writes its runner heartbeats. See [Heartbeats & Recovery](/horsies/workers/heartbeats-recovery/#runner-heartbeat).
 
 ### 5. Result Handling
 
@@ -158,7 +158,7 @@ A shared async child runs `SHARED_ASYNC` tasks of the claimed rows. It has four 
 - The writer thread writes the frames of the child. The loop queues a frame and returns, so a worker that reads slowly never stops the loop.
 - The watchdog thread watches the event loop. When the loop has not turned for 5 seconds, it names the task that holds the loop, with the source line, and reports it to the worker through the writer thread.
 
-The start steps, after the import of the app and the `on_child_process_start` hooks: the child opens an async connection pool on its loop, runs the [`on_shared_async_child_start` hooks](child-process-hooks#shared-async-child-start-hooks), and sends its ready frame. Each task then runs on the loop: the RUNNING update with the first runner heartbeat, the task body, and the finalizing marker. Each write goes through the async pool, so no write of the child blocks the loop.
+The start steps, after the import of the app and the `on_child_process_start` hooks: the child opens an async connection pool on its loop, runs the [`on_shared_async_child_start` hooks](/horsies/workers/child-process-hooks/#shared-async-child-start-hooks), and sends its ready frame. Each task then runs on the loop: the RUNNING update with the first runner heartbeat, the task body, and the finalizing marker. Each write goes through the async pool, so no write of the child blocks the loop.
 
 The worker places each `SHARED_ASYNC` task on the open shared child with the fewest tasks in flight and a free seat. Each result frame names its run, and a free seat takes the next queued task at once. The runner heartbeats of every task of the child come from the worker process, as for an isolated child.
 
@@ -199,7 +199,7 @@ The worker places each `SHARED_THREAD` task on the open shared thread child with
 | The child crashes or is killed | Every task of the child takes the crash path, after the worker saw the exit. A new child starts |
 | The child reaches a recycle limit | It takes no new task, its tasks finish, then it stops and a new child starts |
 
-See [Shared Thread Tasks](shared-thread-tasks).
+See [Shared Thread Tasks](/horsies/workers/shared-thread-tasks/).
 
 ## Child Process Initialization
 
@@ -253,7 +253,7 @@ Conditions: 8 children, Linux, tasks that run pydantic, SQLAlchemy, and pandas (
 
 With `app`:
 
-- Your app's module code runs once, in the preload parent, before any child exists. Put per-child setup in an [`on_child_process_start` hook](child-process-hooks), which still runs in every child.
+- Your app's module code runs once, in the preload parent, before any child exists. Put per-child setup in an [`on_child_process_start` hook](/horsies/workers/child-process-hooks/), which still runs in every child.
 - The worker refuses to start if the import leaves a Python thread or a socket. A fork copies a lock in whatever state another thread left it, and all children would share one socket.
 
 With 4 children, the whole worker at start, including its main process, is measured as summed PSS:
@@ -263,7 +263,7 @@ With 4 children, the whole worker at start, including its main process, is measu
 | Small | 290 MiB | 159 MiB | 146 MiB |
 | With pandas | 445 MiB | 342 MiB | 212 MiB |
 
-Throughput is on the [performance](../internals/performance#worker-start-paths) page.
+Throughput is on the [performance](/horsies/internals/performance/#worker-start-paths) page.
 
 The worker stays the real parent of each child, so exit codes, kills, and parent-death behavior do not change.
 
@@ -299,7 +299,7 @@ Both preload modes:
 
 ## Worker Configuration
 
-`horsies worker` builds the internal `WorkerConfig` from the app config and the chosen [worker profile](worker-profiles):
+`horsies worker` builds the internal `WorkerConfig` from the app config and the chosen [worker profile](/horsies/workers/worker-profiles/):
 
 | Field | Source |
 | ----- | ------ |
@@ -334,7 +334,7 @@ parent database socket. Child DB connections remain lazy by default when
 `worker_child_pool_min_size=0`. An isolated child uses one connection at a
 time: for the RUNNING update, and for the finalizing mark. The seats of a
 shared child share the pool of the child for the same writes. See
-[Connections](shared-thread-tasks#connections). The worker process holds one more
+[Connections](/horsies/workers/shared-thread-tasks/#connections). The worker process holds one more
 connection, for the runner heartbeats.
 
 ## Graceful Shutdown
@@ -344,7 +344,7 @@ On SIGTERM/SIGINT the worker:
 1. Stops new claims
 2. Returns tasks that wait for a child or a seat to `PENDING`, because they have not started
 3. Waits up to the `drain_timeout` of the profile for running tasks (default 300 seconds). A shared child takes no new task in this time
-4. Kills the children that still run a task. Each of these tasks takes the [child crash](heartbeats-recovery#child-process-crash) path; for a shared child, every task in it
+4. Kills the children that still run a task. Each of these tasks takes the [child crash](/horsies/workers/heartbeats-recovery/#child-process-crash) path; for a shared child, every task in it
 5. Waits for pending result writes
 6. Closes database connections
 
@@ -362,7 +362,7 @@ Set `drain_timeout` below the stop window of your supervisor, and leave a few se
 
 Children ignore SIGTERM and SIGINT. The worker decides when a child stops, so a task continues when a supervisor signals every process. A subprocess that a task starts does not ignore these signals. To keep such a subprocess running on systemd, set `KillMode=mixed`.
 
-If the worker process dies, each child stops at once. A child that continues has no way to write its result, and a retry could overlap it. The reaper recovers these rows. See [Recovery Time After a Worker Stops](heartbeats-recovery#recovery-time-after-a-worker-stops).
+If the worker process dies, each child stops at once. A child that continues has no way to write its result, and a retry could overlap it. The reaper recovers these rows. See [Recovery Time After a Worker Stops](/horsies/workers/heartbeats-recovery/#recovery-time-after-a-worker-stops).
 
 ## Resilience
 
@@ -385,7 +385,7 @@ A child that cannot start reports the cause of the failure to the worker, before
 | The child connection pool cannot be set up, for example a URL that does not parse (`ChildPoolSetupFailed`) | Repeats | Counts an attempt |
 | The child dies with no report: a crash in native code, `os._exit()` in app code (`LostBeforeReady`) | Repeats | Counts an attempt |
 | No ready report within 120 seconds (`NotReadyInTime`) | Repeats | Counts an attempt |
-| An `on_child_process_start` [hook](child-process-hooks) fails | Repeats | Stops the worker at once |
+| An `on_child_process_start` [hook](/horsies/workers/child-process-hooks/) fails | Repeats | Stops the worker at once |
 | A boot step fails with `OSError` `EMFILE`, `ENFILE`, `ENOMEM` or `EAGAIN` (`ResourceShortage`) | Can clear | Takes the slot down |
 | The child cannot create its event loop for `async def` tasks (`TaskLoopCreateFailed`) | Can clear | Takes the slot down |
 | The OS refuses the control thread of the child (`ThreadStartRefused`) | Can clear | Takes the slot down |
@@ -497,7 +497,7 @@ Monkeypatching has the same limit: a patch that must run before those imports, s
 
 **Don't expect a recycle to load new code with `preload=ChildPreload.APP`.** A recycled child is a new fork of the same preload parent. Restart the worker.
 
-**Don't count children by process name.** A forked child shows the command line of the preload parent, and there is one more process than the profile has children. Read `processes` in [worker health](../monitoring/worker-health).
+**Don't count children by process name.** A forked child shows the command line of the preload parent, and there is one more process than the profile has children. Read `processes` in [worker health](/horsies/monitoring/worker-health/).
 
 **Don't add `children_memory_mb` to get the real footprint.** It sums RSS, so with preload it counts each shared page once per child. Read the container or cgroup total.
 

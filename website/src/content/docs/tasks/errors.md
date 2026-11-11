@@ -15,7 +15,7 @@ Runtime errors are returned via `TaskResult[T, TaskError]`. The `TaskError.error
 
 When a task reaches a terminal `FAILED` state with a `TaskResult(err=TaskError(...))`, the `error_code` is persisted to `horsies_tasks.error_code` for queryability. This column is `NULL` for successful and non-terminal tasks. Worker/process failures synthesize a `TaskResult(err=TaskError(...))` where possible, so `WORKER_CRASHED` and serialization failures are queryable. Access it via `TaskInfo.error_code` from `handle.info()`.
 
-Each execution attempt is also recorded in `horsies_task_attempts` with per-attempt `error_code`, `error_message`, and outcome. See [Retrieving Results](retrieving-results#task-metadata-and-attempt-history) for API usage.
+Each execution attempt is also recorded in `horsies_task_attempts` with per-attempt `error_code`, `error_message`, and outcome. See [Retrieving Results](/horsies/tasks/retrieving-results/#task-metadata-and-attempt-history) for API usage.
 
 ### TaskError
 
@@ -223,7 +223,7 @@ Send errors are returned via `TaskSendResult[TaskHandle[T]]` from `.send()`, `.s
 
 #### TaskSendError
 
-`TaskSendError` is a union with one frozen variant per `TaskSendErrorCode` member. Each variant has only the fields of its failure, and `err.code` names its member. Match on the variant; a `match` that omits a variant fails pyright's exhaustiveness check. The handling pattern is in [Sending Tasks](./sending-tasks#retrying-failed-sends).
+`TaskSendError` is a union with one frozen variant per `TaskSendErrorCode` member. Each variant has only the fields of its failure, and `err.code` names its member. Match on the variant; a `match` that omits a variant fails pyright's exhaustiveness check. The handling pattern is in [Sending Tasks](/horsies/tasks/sending-tasks/#retrying-failed-sends).
 
 | Variant | `code` | Fields |
 | ------- | ------ | ------ |
@@ -419,7 +419,7 @@ session_database_url appears to be transaction-pooled; LISTEN notification was n
 `LISTEN` + `NOTIFY` behavior probe did not deliver a notification. Use a direct
 Postgres URL or a session-pooling URL for `session_database_url`.
 
-See [PgBouncer Troubleshooting](../troubleshooting/pgbouncer) for the full
+See [PgBouncer Troubleshooting](/horsies/troubleshooting/pgbouncer/) for the full
 deployment pattern.
 
 ### Reserved Built-In Code Enforcement

@@ -73,13 +73,13 @@ error[HRS-206]: --profile is required
 
 ## Execution Modes
 
-A profile sets a number of children for each execution mode. A child never changes its mode. To choose a mode for a task, see [Choosing an Execution Mode](execution-modes).
+A profile sets a number of children for each execution mode. A child never changes its mode. To choose a mode for a task, see [Choosing an Execution Mode](/horsies/workers/execution-modes/).
 
 | Mode | Field | A child runs |
 |------|-------|--------------|
-| isolated | `isolated=IsolatedChildren(count=N)` | one task at a time, in its own process. See [Worker Architecture](worker-architecture) |
-| shared async | `shared_async=SharedAsyncChildren(count=N, seats=K)` | up to K `SHARED_ASYNC` tasks at once, as coroutines on one event loop. See [Shared Async Tasks](shared-async-tasks) |
-| shared thread | `shared_thread=SharedThreadChildren(count=N, seats=K)` | up to K `SHARED_THREAD` tasks at once, each on a thread of its own. See [Shared Thread Tasks](shared-thread-tasks) |
+| isolated | `isolated=IsolatedChildren(count=N)` | one task at a time, in its own process. See [Worker Architecture](/horsies/workers/worker-architecture/) |
+| shared async | `shared_async=SharedAsyncChildren(count=N, seats=K)` | up to K `SHARED_ASYNC` tasks at once, as coroutines on one event loop. See [Shared Async Tasks](/horsies/workers/shared-async-tasks/) |
+| shared thread | `shared_thread=SharedThreadChildren(count=N, seats=K)` | up to K `SHARED_THREAD` tasks at once, each on a thread of its own. See [Shared Thread Tasks](/horsies/workers/shared-thread-tasks/) |
 
 The number of children of a worker is the sum of the per-mode counts. There is no separate total. A profile with only shared children is valid. A worker with no shared async children runs `SHARED_ASYNC` tasks in isolated children, and a worker with no shared thread children runs `SHARED_THREAD` tasks in isolated children.
 
@@ -109,8 +109,8 @@ io_profile = WorkerProfile(
 | `shared_async` | `SharedAsyncChildren \| NoSharedAsyncChildren` | `NoSharedAsyncChildren()` | The shared async children |
 | `shared_thread` | `SharedThreadChildren \| NoSharedThreadChildren` | `NoSharedThreadChildren()` | The shared thread children. A profile needs at least one child of any mode |
 | `claim` | `ClaimLimits` | `ClaimLimits()` | Limits on the tasks that the worker claims |
-| `drain_timeout` | `timedelta` | 300 seconds | How long a stopping worker waits for running tasks. Above 0, at most 24 hours. See [Graceful Shutdown](worker-architecture#graceful-shutdown) |
-| `preload` | `ChildPreload` | `ChildPreload.LIBRARY` | What a Linux worker imports once before it forks children. See [Preload Parent](worker-architecture#preload-parent) |
+| `drain_timeout` | `timedelta` | 300 seconds | How long a stopping worker waits for running tasks. Above 0, at most 24 hours. See [Graceful Shutdown](/horsies/workers/worker-architecture/#graceful-shutdown) |
+| `preload` | `ChildPreload` | `ChildPreload.LIBRARY` | What a Linux worker imports once before it forks children. See [Preload Parent](/horsies/workers/worker-architecture/#preload-parent) |
 
 `WorkerProfile.child_count()` returns the number of children of the profile. `WorkerProfile.seat_count()` returns the tasks that they run at once: one per isolated child, and `seats` per shared child.
 
@@ -125,7 +125,7 @@ io_profile = WorkerProfile(
 
 ### `IsolatedRecycle`
 
-The worker replaces a child with a new one when either limit is reached. Each child has its own counters, so children are replaced at different times. See [Process Recycling](concurrency#process-recycling).
+The worker replaces a child with a new one when either limit is reached. Each child has its own counters, so children are replaced at different times. See [Process Recycling](/horsies/workers/concurrency/#process-recycling).
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -154,7 +154,7 @@ The worker replaces a child with a new one when either limit is reached. Each ch
 
 ### `SharedRecycle`
 
-A shared child that reaches a limit closes: it takes no new task, its running tasks finish, then it stops and a new child starts. See [Recycling](shared-async-tasks#recycling) and [Recycling](shared-thread-tasks#recycling).
+A shared child that reaches a limit closes: it takes no new task, its running tasks finish, then it stops and a new child starts. See [Recycling](/horsies/workers/shared-async-tasks/#recycling) and [Recycling](/horsies/workers/shared-thread-tasks/#recycling).
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -163,7 +163,7 @@ A shared child that reaches a limit closes: it takes no new task, its running ta
 
 ### `ClaimLimits`
 
-The capacity of a worker is its number of seats (`seat_count()`) plus `AppConfig.prefetch_buffer`. A worker never holds more tasks than its capacity, so validation refuses a limit above it. See [Claiming Controls](concurrency#claiming-controls).
+The capacity of a worker is its number of seats (`seat_count()`) plus `AppConfig.prefetch_buffer`. A worker never holds more tasks than its capacity, so validation refuses a limit above it. See [Claiming Controls](/horsies/workers/concurrency/#claiming-controls).
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -231,7 +231,7 @@ worker_pool_size + worker_max_overflow   # parent pool
 
 The worker process writes the runner heartbeats of its RUNNING tasks over one connection of its own. `children` counts every mode: an isolated child opens a sync pool, a shared async child opens an async pool of the same size, and a shared thread child opens a sync pool of the same size that its seat threads share, whatever its seats. At the defaults, a profile of 8 children needs `3 + 2 + 2 + 1 + 8 × 2 = 24`.
 
-The server has `max_connections` minus `superuser_reserved_connections` minus `reserved_connections` (PostgreSQL 16 and later) usable slots. `horsies check --live` reports `HRS-219` for each profile above that number. At boot the worker reads the same settings before it builds its children and logs a warning. With `pgbouncer_transaction_mode=True` the pooled connections do not map to server connections, and nothing is compared. See [Remote PostgreSQL](../configuration/remote-postgres#connection-budget).
+The server has `max_connections` minus `superuser_reserved_connections` minus `reserved_connections` (PostgreSQL 16 and later) usable slots. `horsies check --live` reports `HRS-219` for each profile above that number. At boot the worker reads the same settings before it builds its children and logs a warning. With `pgbouncer_transaction_mode=True` the pooled connections do not map to server connections, and nothing is compared. See [Remote PostgreSQL](/horsies/configuration/remote-postgres/#connection-budget).
 
 The comparison is for one worker. Several workers, producers and other clients share the same slots.
 
@@ -278,4 +278,4 @@ claim_at_capacity = WorkerProfile(
 
 ## Migrating from Worker Flags
 
-The worker flags `--processes`, `--max-claim-batch`, `--max-claim-per-worker`, `--max-tasks-per-child`, `--max-memory-per-child-mb`, `--drain-timeout` and `--child-preload` are removed. Each one exits with a message that names the profile field that replaces it. See [Migrating to 0.7.0](../migrations/migration-to-0-7-0) for the table.
+The worker flags `--processes`, `--max-claim-batch`, `--max-claim-per-worker`, `--max-tasks-per-child`, `--max-memory-per-child-mb`, `--drain-timeout` and `--child-preload` are removed. Each one exits with a message that names the profile field that replaces it. See [Migrating to 0.7.0](/horsies/migrations/migration-to-0-7-0/) for the table.

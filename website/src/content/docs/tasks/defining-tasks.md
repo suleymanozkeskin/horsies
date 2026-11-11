@@ -82,7 +82,7 @@ A child creates its event loop at boot, before it reports ready, when the app ha
 - The cause can clear, so the slot is down: it takes no task, and the worker starts a new child for it after a growing wait. Other children continue. When every slot is down, the worker exits non-zero after three failed attempts, so its supervisor restarts it. See [Child Start Failures](/horsies/workers/worker-architecture/#child-start-failures).
 - The log names the slot and the cause, for example `Slot 1 is down: the child could not create the event loop for async tasks: OSError: [Errno 24] Too many open files`.
 
-In an async task, send with `.send_async()` or `.schedule_async()`. The sync `.send()` and `.schedule()` refuse a running event loop: they return `Err(TaskSendAsyncContext)` and enqueue nothing. See [Sending Tasks](sending-tasks).
+In an async task, send with `.send_async()` or `.schedule_async()`. The sync `.send()` and `.schedule()` refuse a running event loop: they return `Err(TaskSendAsyncContext)` and enqueue nothing. See [Sending Tasks](/horsies/tasks/sending-tasks/).
 
 ```python
 from horsies import Ok, Err
@@ -344,4 +344,4 @@ def task_two() -> TaskResult[str, TaskError]:
 
 **Returns:** For a `def` function, a `TaskFunction`: a direct call returns the `TaskResult`. For an `async def` function, an `AsyncTaskFunction`: a direct call returns a coroutine, and `await` gives the `TaskResult`. Both send with `.send()` / `.send_async()`.
 
-`good_until` is not accepted here — task expiry deadlines are a per-send concern. See [Sending Tasks — Set a Task Deadline](sending-tasks#set-a-task-deadline).
+`good_until` is not accepted here — task expiry deadlines are a per-send concern. See [Sending Tasks — Set a Task Deadline](/horsies/tasks/sending-tasks/#set-a-task-deadline).

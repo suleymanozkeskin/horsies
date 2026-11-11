@@ -14,13 +14,13 @@ A task declares its execution mode with `execution=` on `@app.task()`. The mode 
 <!-- members: Execution -->
 | `execution` | A child runs | Function | `timeout_ms` | Details |
 | ----------- | ------------ | -------- | ------------ | ------- |
-| `Execution.ISOLATED` | one task at a time, in a process of its own. This is the default | `def` or `async def` | optional | [Worker Architecture](worker-architecture) |
-| `Execution.SHARED_ASYNC` | up to `seats` tasks at once, as coroutines on one event loop | `async def` | required | [Shared Async Tasks](shared-async-tasks) |
-| `Execution.SHARED_THREAD` | up to `seats` tasks at once, each on a thread of its own | `def` | required | [Shared Thread Tasks](shared-thread-tasks) |
+| `Execution.ISOLATED` | one task at a time, in a process of its own. This is the default | `def` or `async def` | optional | [Worker Architecture](/horsies/workers/worker-architecture/) |
+| `Execution.SHARED_ASYNC` | up to `seats` tasks at once, as coroutines on one event loop | `async def` | required | [Shared Async Tasks](/horsies/workers/shared-async-tasks/) |
+| `Execution.SHARED_THREAD` | up to `seats` tasks at once, each on a thread of its own | `def` | required | [Shared Thread Tasks](/horsies/workers/shared-thread-tasks/) |
 
-The decorator refuses a declaration that breaks these rules, one code per rule (`HRS-107` to `HRS-111`). See [Choose the Execution Class](../tasks/defining-tasks#choose-the-execution-class).
+The decorator refuses a declaration that breaks these rules, one code per rule (`HRS-107` to `HRS-111`). See [Choose the Execution Class](/horsies/tasks/defining-tasks/#choose-the-execution-class).
 
-A worker gives a task more isolation than its row asks for, never less. A worker with no shared async children runs `SHARED_ASYNC` tasks in its isolated children, with the usual kill at `timeout_ms`. The same applies to `SHARED_THREAD` tasks on a worker with no shared thread children. So you can mark a task shared before any worker has shared children. See [Budgets per Execution Class](concurrency#budgets-per-execution-class).
+A worker gives a task more isolation than its row asks for, never less. A worker with no shared async children runs `SHARED_ASYNC` tasks in its isolated children, with the usual kill at `timeout_ms`. The same applies to `SHARED_THREAD` tasks on a worker with no shared thread children. So you can mark a task shared before any worker has shared children. See [Budgets per Execution Class](/horsies/workers/concurrency/#budgets-per-execution-class).
 
 ## Choose by the Work
 
@@ -45,7 +45,7 @@ What a cancel did to common clients. Conditions: one shared async child, CPython
 - asyncpg, against a server that stops answering: did not end after the first cancel. The second cancel ended a connection within 1 ms. A pool needed one more cancel round, about 0.1 s.
 - `asyncio.to_thread()` and a DNS lookup: no cancel stopped the thread. It ran until the client timeout or the resolver gave up (9.7 s with glibc defaults).
 
-The child sends the second cancel at `timeout_ms + cancel_grace_ms`, then two more rounds. The full table is in [The Timeout](shared-async-tasks#the-timeout).
+The child sends the second cancel at `timeout_ms + cancel_grace_ms`, then two more rounds. The full table is in [The Timeout](/horsies/workers/shared-async-tasks/#the-timeout).
 
 A cancel of one task did not slow the other tasks of the loop. Conditions: one event loop with 25 tasks; 24 tasks sent HTTP requests to a server with a 100 ms delay through one shared `httpx.AsyncClient`; one task ran one of 13 cancel cases, among them servers that stop answering; 10 runs per case, about 26,500 requests per case. Result: the request latency of the 24 tasks stayed within 0.6 ms (p50) and 1.6 ms (p99) of runs with no cancelled task.
 
@@ -81,7 +81,7 @@ On a standard build, the GIL lets one thread run Python code at a time. Conditio
 
 For CPU work, more thread seats than CPUs added nothing. Conditions: 4 CPUs, all four builds, all four workloads above. Result: 8 and 16 threads stayed within the run-to-run spread of 4 threads. Processes showed the same limit.
 
-For CPU work, give all the thread children of a machine together at most one seat per CPU. For tasks that wait in a sync client, the seats needed are about the rate of tasks times their mean duration. See [Sizing](shared-thread-tasks#sizing).
+For CPU work, give all the thread children of a machine together at most one seat per CPU. For tasks that wait in a sync client, the seats needed are about the rate of tasks times their mean duration. See [Sizing](/horsies/workers/shared-thread-tasks/#sizing).
 
 ### When to Keep a Task Isolated
 
@@ -107,14 +107,14 @@ A task retries only when its `auto_retry_for` names the code. In every mode, the
 
 ## Rules for Task Authors
 
-Each mode adds rules to [Defining Tasks](../tasks/defining-tasks). The pages of the modes explain each rule.
+Each mode adds rules to [Defining Tasks](/horsies/tasks/defining-tasks/). The pages of the modes explain each rule.
 
 `ISOLATED`:
 
 - Set `timeout_ms` as a hang backstop above the normal runtime.
-- In an `async def` task, await the asyncio tasks that it starts. See [Async Tasks](../tasks/defining-tasks#async-tasks).
+- In an `async def` task, await the asyncio tasks that it starts. See [Async Tasks](/horsies/tasks/defining-tasks/#async-tasks).
 
-`SHARED_ASYNC` ([Rules for Task Authors](shared-async-tasks#rules-for-task-authors)):
+`SHARED_ASYNC` ([Rules for Task Authors](/horsies/workers/shared-async-tasks/#rules-for-task-authors)):
 
 - Let `asyncio.CancelledError` propagate. Catch it only to clean up, then raise it again.
 - Give each client call its own timeout, below `timeout_ms`.
@@ -123,7 +123,7 @@ Each mode adds rules to [Defining Tasks](../tasks/defining-tasks). The pages of 
 - Await what you start.
 - Send with `send_async()`.
 
-`SHARED_THREAD` ([Rules for Task Authors](shared-thread-tasks#rules-for-task-authors)):
+`SHARED_THREAD` ([Rules for Task Authors](/horsies/workers/shared-thread-tasks/#rules-for-task-authors)):
 
 - Use a lock for module state that a task changes.
 - Give each blocking call its own timeout, below `timeout_ms`.
@@ -198,9 +198,9 @@ horsies worker myapp.instance:app --profile io
 
 A worker with the `io` profile runs `fetch_rate` on a shared async seat. It runs `compress_report` and `render_invoice` in its isolated children, because the profile has no shared thread children. A worker with the `compute` profile runs `compress_report` on a seat thread, and `fetch_rate` in an isolated child.
 
-A profile can also hold only shared children. Its worker claims no `ISOLATED` rows, so another worker must have isolated children for them. The fleet check reports a class that no live worker serves. See [Does a live worker serve every pending class?](../monitoring/worker-health#does-a-live-worker-serve-every-pending-class)
+A profile can also hold only shared children. Its worker claims no `ISOLATED` rows, so another worker must have isolated children for them. The fleet check reports a class that no live worker serves. See [Does a live worker serve every pending class?](/horsies/monitoring/worker-health/#does-a-live-worker-serve-every-pending-class)
 
-Each child opens one connection pool, whatever its seats, so a shared child counts as one child in the connection budget. See [Connections](worker-profiles#connections).
+Each child opens one connection pool, whatever its seats, so a shared child counts as one child in the connection budget. See [Connections](/horsies/workers/worker-profiles/#connections).
 
 ## Things to Avoid
 

@@ -17,7 +17,7 @@ tags: [migration, 0.7.0, breaking-changes, worker, profiles, cli, schema, execut
 
 ## Dependencies
 
-horsies 0.7.0 requires psycopg 3.3.6 or later. The `pg-binary` and `pg-c` extras require `psycopg-binary` or `psycopg-c` 3.3.6 or later. Before 3.3.6, psycopg waited with no limit for an interrupted query to end. The 5-second limit on the cancel request also needs libpq 17 or later. See [psycopg and libpq](../configuration/broker-config#psycopg-and-libpq).
+horsies 0.7.0 requires psycopg 3.3.6 or later. The `pg-binary` and `pg-c` extras require `psycopg-binary` or `psycopg-c` 3.3.6 or later. Before 3.3.6, psycopg waited with no limit for an interrupted query to end. The 5-second limit on the cancel request also needs libpq 17 or later. See [psycopg and libpq](/horsies/configuration/broker-config/#psycopg-and-libpq).
 
 ## Worker settings move into profiles
 
@@ -125,7 +125,7 @@ An exhaustive `match` on these types needs a change:
 
 The new code strings are reserved. An `exception_mapper` or a `default_unhandled_error_code` with one of these values fails `horsies check` with `HRS-212`. A 0.6.x process cannot decode an error stored with one of the new `OperationalErrorCode` values, so upgrade every process that reads task results.
 
-New fields without a default: `WorkerStateSnapshot.slot_health`, `WorkerStateSnapshot.class_capacity` and the monitoring `LeafTaskInfo.execution`. Code that builds one of these types, for example a test fake, must pass them. See [Worker & Database Health](../monitoring/worker-health).
+New fields without a default: `WorkerStateSnapshot.slot_health`, `WorkerStateSnapshot.class_capacity` and the monitoring `LeafTaskInfo.execution`. Code that builds one of these types, for example a test fake, must pass them. See [Worker & Database Health](/horsies/monitoring/worker-health/).
 
 ## A result wait inside a task is refused
 
@@ -136,7 +136,7 @@ In a worker child, a wait for the result of another task or workflow returns an 
 | `TaskHandle.get()` and `get_async()` on a sent task, `app.get_result()` and `get_result_async()`, `WorkflowHandle.get()` and `get_async()` | `RetrievalCode.WAIT_INSIDE_TASK` |
 | `app.get_raw_result()`, `broker.get_raw_result_record()` and their `*_async` forms | `Err(BrokerWaitInsideTask)` |
 
-The refusal also covers the threads that a task starts and the `on_child_process_start` hooks. `send()`, a workflow start, `TaskHandle.info()` and `workflow_ctx.result_for()` still work. Compose the steps as a workflow. See [Waiting for a Result Inside a Task](../concepts/result-handling#waiting-for-a-result-inside-a-task).
+The refusal also covers the threads that a task starts and the `on_child_process_start` hooks. `send()`, a workflow start, `TaskHandle.info()` and `workflow_ctx.result_for()` still work. Compose the steps as a workflow. See [Waiting for a Result Inside a Task](/horsies/concepts/result-handling/#waiting-for-a-result-inside-a-task).
 
 ## Workflow limits
 
@@ -144,7 +144,7 @@ The refusal also covers the threads that a task starts and the `on_child_process
 - A `WorkflowSpec` holds at most 10,000 nodes. A larger spec raises `HRS-038` when it is built. Split the nodes into `SubWorkflowNode`s: each child workflow has its own limit.
 - `horsies check` reports `HRS-036` for a nesting deeper than 32, and `HRS-037` for a definition that includes itself with the same kwargs, when no `SubWorkflowNode` on the path has `waits_for`.
 
-See [Limits](../concepts/workflows/subworkflows#66-limits).
+See [Limits](/horsies/concepts/workflows/subworkflows/#66-limits).
 
 ## New validation
 
@@ -156,7 +156,7 @@ These were not checked before 0.7.0, because the values were command-line flags:
 
 Each bound of the old flags still applies: at least one child, a task limit of at least 1, a memory limit of at least 1 MB, and a drain timeout above 0. New upper bounds: 1024 isolated children, 2,147,483,647 tasks for a task limit, 16,777,216 MB for a memory limit, and 24 hours for the drain timeout.
 
-See [Worker Profiles](../workers/worker-profiles) for every field and for the validation table.
+See [Worker Profiles](/horsies/workers/worker-profiles/) for every field and for the validation table.
 
 ## Stop 0.6.x workers first
 
@@ -180,7 +180,7 @@ A 0.6.x process refuses a schema newer than its own when it sets up its schema: 
 | 77 | `horsies worker` | As above, and the worker has not stopped 120 seconds later | No such code |
 | 76 | worker child | A forked child that does not reparent to the worker | Code 74, which also meant a stop with executor threads left |
 
-See [Exit Codes](../cli#exit-codes).
+See [Exit Codes](/horsies/cli/#exit-codes).
 
 ## After the upgrade
 
@@ -188,7 +188,7 @@ See [Exit Codes](../cli#exit-codes).
 
 A scheduled run stores the options of its task: `timeout_ms`, `retry_policy`, `execution` and `cancel_grace_ms`. In 0.6.x a scheduled run had no timeout and no retries, and ran as `ISOLATED`. A scheduled task with `timeout_ms` now stops at its timeout, and a failure retries by its policy.
 
-The enqueue digest of every slot changes. A slot that a 0.6.x scheduler enqueued and did not record gets `PAYLOAD_MISMATCH` when 0.7.0 fires it. This happens when the 0.6.x scheduler stopped before it saved the schedule state. The scheduler then counts the slot as fired: it logs one warning, records the run with the task id of the slot, and moves to the next slot. That run keeps its 0.6.x row: no timeout, no retries, `ISOLATED`. See [Task Options](../scheduling/scheduler-overview#task-options).
+The enqueue digest of every slot changes. A slot that a 0.6.x scheduler enqueued and did not record gets `PAYLOAD_MISMATCH` when 0.7.0 fires it. This happens when the 0.6.x scheduler stopped before it saved the schedule state. The scheduler then counts the slot as fired: it logs one warning, records the run with the task id of the slot, and moves to the next slot. That run keeps its 0.6.x row: no timeout, no retries, `ISOLATED`. See [Task Options](/horsies/scheduling/scheduler-overview/#task-options).
 
 ### A keyed send that a 0.6.x process sent is a conflict
 
@@ -206,11 +206,11 @@ Sends of an `@app.task` function write valid options. This affects only code tha
 
 ### A child that cannot start does not always stop the worker
 
-A child that fails its start for a cause that can clear takes only its slot down: `EMFILE`, `ENFILE`, `ENOMEM` or `EAGAIN` in a start step, an event loop that cannot be created, or a spawn or a thread that the OS refuses. The worker runs on degraded, and starts a new child for the slot after a growing wait. In 0.6.x each such failure counted one of three attempts, and the third stopped the worker. A worker with every slot down still stops after three failed starts. Read `WorkerStateSnapshot.slot_health` to see the slots that are down. See [Child Start Failures](../workers/worker-architecture#child-start-failures).
+A child that fails its start for a cause that can clear takes only its slot down: `EMFILE`, `ENFILE`, `ENOMEM` or `EAGAIN` in a start step, an event loop that cannot be created, or a spawn or a thread that the OS refuses. The worker runs on degraded, and starts a new child for the slot after a growing wait. In 0.6.x each such failure counted one of three attempts, and the third stopped the worker. A worker with every slot down still stops after three failed starts. Read `WorkerStateSnapshot.slot_health` to see the slots that are down. See [Child Start Failures](/horsies/workers/worker-architecture/#child-start-failures).
 
 ### The worker process writes the runner heartbeats
 
-One thread of the worker writes the runner heartbeats of its RUNNING tasks, over one connection of its own. A worker opens one more Postgres connection than in 0.6.x. A task that holds the GIL in C code no longer stops its heartbeats. See [When the Worker Cannot Write Heartbeats](../workers/heartbeats-recovery#when-the-worker-cannot-write-heartbeats).
+One thread of the worker writes the runner heartbeats of its RUNNING tasks, over one connection of its own. A worker opens one more Postgres connection than in 0.6.x. A task that holds the GIL in C code no longer stops its heartbeats. See [When the Worker Cannot Write Heartbeats](/horsies/workers/heartbeats-recovery/#when-the-worker-cannot-write-heartbeats).
 
 ### A timed-out task moves after its child has exited
 
@@ -223,4 +223,4 @@ A profile can start shared async children and shared thread children:
 - `shared_async=SharedAsyncChildren(count=N, seats=K)`: each child runs up to K `Execution.SHARED_ASYNC` tasks at once, as coroutines.
 - `shared_thread=SharedThreadChildren(count=N, seats=K)`: each child runs up to K `Execution.SHARED_THREAD` tasks at once, on threads.
 
-They are new in 0.7.0 and have no flag before them. A profile without them runs every task in isolated children, as 0.6.x did, also a task marked `SHARED_ASYNC` or `SHARED_THREAD`. See [Choosing an Execution Mode](../workers/execution-modes).
+They are new in 0.7.0 and have no flag before them. A profile without them runs every task in isolated children, as 0.6.x did, also a task marked `SHARED_ASYNC` or `SHARED_THREAD`. See [Choosing an Execution Mode](/horsies/workers/execution-modes/).

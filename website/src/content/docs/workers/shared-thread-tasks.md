@@ -25,7 +25,7 @@ Threads share one process, so a thread task costs less memory and less start tim
 - A third-party C extension without free-threading support can turn the GIL back on in a free-threaded build.
 - Threads that wait in sync I/O (a sync database or HTTP client) were not measured. Such a wait releases the GIL, so the threads wait at the same time.
 
-Use a shared thread task for `def` code that waits in a sync client, or that calls C code that releases the GIL, such as hashing, compression or image work. Use [Shared Async Tasks](shared-async-tasks) for code that has an async client. Keep `Execution.ISOLATED` (the default) for CPU work in pure Python on a standard build, and for tasks that must not share a process with other tasks.
+Use a shared thread task for `def` code that waits in a sync client, or that calls C code that releases the GIL, such as hashing, compression or image work. Use [Shared Async Tasks](/horsies/workers/shared-async-tasks/) for code that has an async client. Keep `Execution.ISOLATED` (the default) for CPU work in pure Python on a standard build, and for tasks that must not share a process with other tasks.
 
 ## What Runs Where
 
@@ -35,7 +35,7 @@ Use a shared thread task for `def` code that waits in a sync client, or that cal
 | `SHARED_THREAD` | a shared thread child, on a seat thread | an isolated child, one task in the process |
 | `ISOLATED` | an isolated child | an isolated child |
 
-A worker may run a task more isolated than its row says, never less. A worker with no shared thread children claims `SHARED_THREAD` rows into its `ISOLATED` budget and runs them in isolated children, with the usual kill at `timeout_ms`. A worker with shared thread children claims them into its `SHARED_THREAD` budget, whose capacity is the seats of those children; its isolated children and its shared async children never run one. See [Budgets per Execution Class](concurrency#budgets-per-execution-class).
+A worker may run a task more isolated than its row says, never less. A worker with no shared thread children claims `SHARED_THREAD` rows into its `ISOLATED` budget and runs them in isolated children, with the usual kill at `timeout_ms`. A worker with shared thread children claims them into its `SHARED_THREAD` budget, whose capacity is the seats of those children; its isolated children and its shared async children never run one. See [Budgets per Execution Class](/horsies/workers/concurrency/#budgets-per-execution-class).
 
 A shared thread child runs only `def` tasks. When a deploy changed the function of a queued `SHARED_THREAD` row to `async def`, the worker writes `ISOLATED` on the row and returns it to the queue before any child takes it.
 
@@ -90,7 +90,7 @@ Start a worker with a profile that has shared thread children:
 horsies worker myapp.instance:app --profile files
 ```
 
-This worker runs `ISOLATED` tasks in 2 isolated children and `SHARED_THREAD` tasks on 2 × 4 = 8 seats. See [Worker Profiles](worker-profiles#sharedthreadchildren) for the fields.
+This worker runs `ISOLATED` tasks in 2 isolated children and `SHARED_THREAD` tasks on 2 × 4 = 8 seats. See [Worker Profiles](/horsies/workers/worker-profiles/#sharedthreadchildren) for the fields.
 
 ## The Timeout
 
@@ -151,7 +151,7 @@ A new task goes to the open shared thread child with the fewest tasks in flight,
 
 ## Connections
 
-Each shared thread child opens one sync connection pool of `worker_child_pool_max_size` connections (default 2), as an isolated child does, whatever its seats. Its seat threads share that pool for two writes of each task: the RUNNING update at its start, and the finalizing marker at its end. The worker process writes the runner heartbeats over its own connection. See [Connections](worker-profiles#connections).
+Each shared thread child opens one sync connection pool of `worker_child_pool_max_size` connections (default 2), as an isolated child does, whatever its seats. Its seat threads share that pool for two writes of each task: the RUNNING update at its start, and the finalizing marker at its end. The worker process writes the runner heartbeats over its own connection. See [Connections](/horsies/workers/worker-profiles/#connections).
 
 A seat thread waits up to 30 seconds for a free connection. A thread that gets none in that time does not run its task: the task stays claimed, and its claim lease returns it to the queue.
 

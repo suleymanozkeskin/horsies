@@ -102,7 +102,7 @@ def report() -> TaskResult[int, TaskError]:
 
 ## Shared async child start hooks
 
-`@app.on_shared_async_child_start` registers an `async def` function that runs once in every [shared async child](shared-async-tasks), on the event loop of that child, before the child takes its first task. Use it to build long-lived async clients: an HTTP client or an async database pool that it builds belongs to the loop that every task of the child uses.
+`@app.on_shared_async_child_start` registers an `async def` function that runs once in every [shared async child](/horsies/workers/shared-async-tasks/), on the event loop of that child, before the child takes its first task. Use it to build long-lived async clients: an HTTP client or an async database pool that it builds belongs to the loop that every task of the child uses.
 
 ```python
 import asyncio
