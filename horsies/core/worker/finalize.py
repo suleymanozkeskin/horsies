@@ -169,7 +169,6 @@ from horsies.core.worker.stored_timeout import (
     TaskTimeout,
     TimeoutValueInvalid,
 )
-from horsies.core.worker.sql import NOTIFY_TASK_QUEUE_SQL
 from horsies.core.worker.workflow_success import (
     finish_workflow_success,
     success_for,
@@ -188,6 +187,7 @@ if TYPE_CHECKING:
     from horsies.core.brokers.postgres import PostgresBroker
     from horsies.core.worker.config import WorkerConfig
     from horsies.core.worker.finalize_batch import FinalizeBatcher
+    from horsies.core.workflows.engine import QueueWake
 
 logger = get_logger('worker')
 
@@ -1621,42 +1621,42 @@ class FinalizeMixin:
         queue_name: str = 'default',
         task_name: str,
     ) -> Result[None, _FinalizeError]:
-        """Phase 2 of a workflow task: advance its node, then wake its queue.
+        """Phase 2 of a workflow task: advance its node and wake its queue, in
+        one transaction.
 
         Only a workflow task reaches phase 2: the statement that ends a plain
-        task sends its capacity wake. Parent propagation queued by the
+        task sends its capacity wake. The first statement of the transaction
+        sends this task's capacity wake (``QueueWake``), and the COMMIT
+        delivers it. Parent propagation queued by the
         completion check is driven AFTER this transaction commits, one fresh
         transaction per ancestor level (_drive_parent_propagations) — the
         pre-denest in-transaction recursion accumulated FOR UPDATE locks
         root-ward across the chain.
         """
-        from horsies.core.workflows.engine import pop_pending_parent_propagations
+        from horsies.core.workflows.engine import (
+            QueueWake,
+            pop_pending_parent_propagations,
+        )
 
         pending_propagations: list[str] = []
         try:
             async with self.sf() as s:
+                # The wake makes the workers of this queue check their
+                # capacity and backlog (workers no longer listen on
+                # task_new). It is part of the first statement: when the
+                # server refuses it, the statement fails, and the error goes
+                # to the phase-2 error below, never past it.
                 await self._handle_workflow_task_if_needed(
                     s,
                     task_id,
                     tr,
                     task_name=task_name,
+                    wake=QueueWake(
+                        channel=f'task_queue_{queue_name or "default"}',
+                        payload=f'capacity:{task_id}',
+                    ),
                 )
-
-                # Proactively wake workers of this queue to re-check
-                # capacity/backlog (workers no longer listen on task_new).
-                # The wake is a statement of this transaction: when it fails
-                # on the server, the transaction is aborted and its commit
-                # would roll the workflow writes back without an error, so a
-                # failure goes to the phase-2 error below, never past it.
-                await s.execute(
-                    NOTIFY_TASK_QUEUE_SQL,
-                    {
-                        'c2': f'task_queue_{queue_name or "default"}',
-                        'p': f'capacity:{task_id}',
-                    },
-                )
-
-                # Trigger automatically sends NOTIFY on UPDATE; commit to flush NOTIFYs
+                # The COMMIT delivers the NOTIFYs of the transaction.
                 await s.commit()
                 pending_propagations = pop_pending_parent_propagations(s)
         except Exception as exc:
@@ -2318,9 +2318,11 @@ class FinalizeMixin:
         result: 'TaskResult[Any, TaskError]',
         *,
         task_name: str,
+        wake: QueueWake,
     ) -> None:
         """
-        Advance the node of a workflow task that reached a terminal status.
+        Advance the node of a workflow task that reached a terminal status,
+        and send ``wake`` in the same statement as the node write.
 
         This method is called after a task completes (success or failure).
         It updates the workflow_task record and triggers dependency resolution.
@@ -2342,4 +2344,5 @@ class FinalizeMixin:
             result,
             self.broker,
             task_name=task_name,
+            wake=wake,
         )

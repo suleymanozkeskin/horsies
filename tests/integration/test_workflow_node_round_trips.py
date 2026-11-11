@@ -10,8 +10,9 @@ the statements are named from an earlier run, whose turns still carry the
 SQL text. The worker's engine is the one the CLI builds, with
 ``worker_pool_pre_ping`` off unless a test turns it on.
 
-Shapes: ``chain`` is A -> B (phase 2 of A promotes B), ``single`` is A alone
-(phase 2 of A completes the workflow).
+Shapes: ``chain`` is A -> B (phase 2 of A promotes B), ``fanout`` is A with
+``FANOUT`` dependents (phase 2 of A promotes all of them with the statements
+of ``chain``), ``single`` is A alone (phase 2 of A completes the workflow).
 """
 
 from __future__ import annotations
@@ -48,6 +49,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function'
 
 PING: Final = 1
 """The pool pre-ping of a checkout, when ``worker_pool_pre_ping`` is on."""
+FANOUT: Final = 5
 LABEL_RUN: Final = 2
 """A run whose statements are not prepared yet, so each turn shows its SQL."""
 
@@ -61,10 +63,10 @@ FAILURE_PHASE1: Final = (
     'SELECT CAST(status AS text) AS status, retry_count',
     'SELECT * FROM horsies_finish_failed_attempt(',
 )
-NODE_WRITE: Final = 'WITH found AS ( SELECT wt.workflow_id'
+NODE_WRITE: Final = 'WITH woken AS ( SELECT pg_notify('
+"""The node write, which sends the capacity wake of the task's queue."""
 DEPENDENTS: Final = 'SELECT d.task_index, d.dependencies'
 COMPLETION_CHECK: Final = 'SELECT w.status, w.completed_at, w.error'
-WAKE: Final = 'SELECT pg_notify('
 FIRST_FAILURE: Final = 'SELECT task_name, result FROM horsies_workflow_tasks'
 PHASE2: Final[dict[tuple[str, bool], tuple[str, ...]]] = {
     ('chain', True): (
@@ -74,10 +76,19 @@ PHASE2: Final[dict[tuple[str, bool], tuple[str, ...]]] = {
         "UPDATE horsies_workflow_tasks SET status = 'READY'",
         'SELECT task_index, task_name, status, result',
         "UPDATE horsies_workflow_tasks wt SET status = 'ENQUEUED'",
-        'INSERT INTO horsies_tasks',
-        'UPDATE horsies_workflow_tasks SET task_id',
+        'WITH inserted AS ( INSERT INTO horsies_tasks',
         COMPLETION_CHECK,
-        WAKE,
+        'COMMIT',
+    ),
+    ('fanout', True): (
+        'BEGIN',
+        NODE_WRITE,
+        DEPENDENTS,
+        "UPDATE horsies_workflow_tasks SET status = 'READY'",
+        'SELECT task_index, task_name, status, result',
+        "UPDATE horsies_workflow_tasks wt SET status = 'ENQUEUED'",
+        'WITH inserted AS ( INSERT INTO horsies_tasks',
+        COMPLETION_CHECK,
         'COMMIT',
     ),
     ('single', True): (
@@ -88,7 +99,6 @@ PHASE2: Final[dict[tuple[str, bool], tuple[str, ...]]] = {
         'SELECT task_index, dependencies FROM horsies_workflow_tasks',
         'SELECT node_id, task_index, task_name, status, result',
         "UPDATE horsies_workflows SET status = 'COMPLETED'",
-        WAKE,
         'COMMIT',
     ),
     ('chain', False): (
@@ -103,7 +113,6 @@ PHASE2: Final[dict[tuple[str, bool], tuple[str, ...]]] = {
         COMPLETION_CHECK,
         FIRST_FAILURE,
         "UPDATE horsies_workflows SET status = 'FAILED'",
-        WAKE,
         'COMMIT',
     ),
     ('single', False): (
@@ -115,7 +124,6 @@ PHASE2: Final[dict[tuple[str, bool], tuple[str, ...]]] = {
         COMPLETION_CHECK,
         FIRST_FAILURE,
         "UPDATE horsies_workflows SET status = 'FAILED'",
-        WAKE,
         'COMMIT',
     ),
 }
@@ -153,6 +161,11 @@ async def _start(app: Horsies, broker: PostgresBroker, fn: Any, shape: str) -> s
     match shape:
         case 'chain':
             nodes.append(TaskNode(fn=fn, kwargs={'value': 2}, waits_for=[a]))
+        case 'fanout':
+            nodes.extend(
+                TaskNode(fn=fn, kwargs={'value': value}, waits_for=[a])
+                for value in range(FANOUT)
+            )
         case _:
             pass
     spec = app.workflow(
@@ -333,8 +346,23 @@ async def test_phase_one_of_a_failure_is_one_read_and_one_statement(
 
 
 @PRE_PING
-@pytest.mark.parametrize('ok', [True, False], ids=['success', 'failure'])
-@pytest.mark.parametrize('shape', ['chain', 'single'])
+@pytest.mark.parametrize(
+    ('shape', 'ok'),
+    [
+        ('chain', True),
+        ('fanout', True),
+        ('single', True),
+        ('chain', False),
+        ('single', False),
+    ],
+    ids=[
+        'chain-success',
+        'fanout-success',
+        'single-success',
+        'chain-failure',
+        'single-failure',
+    ],
+)
 async def test_phase_two_statements(
     proxy: RoundTripProxy,
     db_url: str,
@@ -354,5 +382,7 @@ async def test_phase_two_statements(
     expected = PHASE2[(shape, ok)]
 
     assert len(steady.phase2) == len(expected) + (PING if pre_ping else 0)
-    if not pre_ping:
+    # The insert of a fan-out runs FANOUT times a run, so it is prepared, and
+    # sends no text, before the labelled run; chain names the same statements.
+    if not pre_ping and shape != 'fanout':
         _assert_statements(labelled.phase2, expected)

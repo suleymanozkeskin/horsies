@@ -1,8 +1,9 @@
 """Integration tests for Worker._finalize_workflow_phase().
 
-Covers phase-2 of finalization: workflow advancement delegation,
-NOTIFY wake signals, queue-name channel routing, exception handling,
-and a NOTIFY refused by the server, which is a phase-2 error.
+Covers phase-2 of finalization: workflow advancement delegation, the
+capacity wake that the node statement sends on the queue of the task,
+exception handling, a phase 2 that fails (no wake), and a NOTIFY refused by
+the server, which is a phase-2 error.
 """
 
 from __future__ import annotations
@@ -12,6 +13,8 @@ from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import psycopg
+import psycopg.sql
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -24,7 +27,7 @@ from horsies.core.worker.worker import (
     Worker,
     _FINALIZE_STAGE_PHASE2,
 )
-from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.conftest import DB_URL, compute_test_enqueue_sha
 from tests.integration.history_seeding import force_terminal
 
 pytestmark = [pytest.mark.integration]
@@ -320,66 +323,87 @@ async def test_workflow_handler_exception_returns_err(
 # ---------------------------------------------------------------------------
 
 
+_WAKE_WAIT_S = 0.5
+"""How long a test listens for wakes after phase 2 returned."""
+
+
+async def _listen(channel: str) -> psycopg.AsyncConnection[Any]:
+    connection = await psycopg.AsyncConnection.connect(
+        DB_URL.replace('postgresql+psycopg://', 'postgresql://'),
+        autocommit=True,
+    )
+    await connection.execute(
+        psycopg.sql.SQL('LISTEN {}').format(psycopg.sql.Identifier(channel)),
+    )
+    return connection
+
+
+@pytest.mark.parametrize('linked', [True, False], ids=['node', 'no_node'])
 @pytest.mark.asyncio(loop_scope='function')
-async def test_queue_name_used_in_notify_channel(
+async def test_phase_two_wakes_the_queue_of_the_task_once(
     engine: AsyncEngine,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
+    linked: bool,
 ) -> None:
-    """Task with queue='high-priority' → NOTIFY sent to task_queue_high-priority."""
+    """The node statement sends one capacity wake on ``task_queue_<queue>``,
+    delivered at COMMIT, whether or not the task has a node."""
     task_id = await _insert_task(session, queue_name='high-priority')
+    if linked:
+        await _link_task_to_workflow(session, task_id)
     worker = _make_worker(engine)
-    tr = _make_ok_task_result()
-
-    # Capture the NOTIFY calls
-    executed_stmts: list[tuple[str, dict[str, Any]]] = []
-    original_sf = worker.sf
-
-    def capturing_sf() -> Any:
-        real_session = original_sf()
-
-        class CapturingSession:
-            def __init__(self, inner: Any) -> None:
-                self._inner = inner
-
-            async def __aenter__(self) -> 'CapturingSession':
-                self._s = await self._inner.__aenter__()
-                return self
-
-            @property
-            def info(self) -> Any:
-                return self._s.info
-
-            async def __aexit__(self, *args: Any) -> None:
-                await self._inner.__aexit__(*args)
-
-            async def execute(self, stmt: Any, params: Any = None) -> Any:
-                stmt_text = getattr(stmt, 'text', str(stmt))
-                if params and 'pg_notify' in stmt_text:
-                    executed_stmts.append((stmt_text, dict(params)))
-                if params is not None:
-                    return await self._s.execute(stmt, params)
-                return await self._s.execute(stmt)
-
-            async def commit(self) -> None:
-                await self._s.commit()
-
-        return CapturingSession(real_session)
-
-    worker.sf = capturing_sf  # type: ignore[assignment]
-
-    result = await worker._finalize_workflow_phase(
-        task_id,
-        tr,
-        queue_name='high-priority',
-        task_name='wf_phase_test',
-    )
+    listener = await _listen('task_queue_high-priority')
+    try:
+        result = await worker._finalize_workflow_phase(
+            task_id,
+            _make_ok_task_result(),
+            queue_name='high-priority',
+            task_name='wf_phase_test',
+        )
+        payloads = [
+            notify.payload async for notify in listener.notifies(timeout=_WAKE_WAIT_S)
+        ]
+    finally:
+        await listener.close()
 
     assert is_ok(result)
-    # Find the queue-specific NOTIFY
-    queue_notifies = [
-        params for (_, params) in executed_stmts
-        if params.get('c2', '').startswith('task_queue_')
-    ]
-    assert len(queue_notifies) == 1
-    assert queue_notifies[0]['c2'] == 'task_queue_high-priority'
+    assert payloads == [f'capacity:{task_id}']
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_phase_two_that_fails_sends_no_wake(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wake is queued by the first statement and delivered at COMMIT: a
+    phase 2 that fails after it rolls back the wake with the node write."""
+    task_id = await _insert_running_node(session)
+    worker = _make_worker(engine)
+    import horsies.core.workflows.engine as engine_module
+
+    async def _fail_after_the_node_write(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        raise RuntimeError('progression failed after the node write')
+
+    monkeypatch.setattr(
+        engine_module, 'apply_node_progression', _fail_after_the_node_write
+    )
+    listener = await _listen('task_queue_default')
+    try:
+        result = await worker._finalize_workflow_phase(
+            task_id,
+            _make_ok_task_result(),
+            queue_name='default',
+            task_name='wf_phase_test',
+        )
+        payloads = [
+            notify.payload async for notify in listener.notifies(timeout=_WAKE_WAIT_S)
+        ]
+    finally:
+        await listener.close()
+
+    assert is_err(result)
+    assert result.err_value.stage == _FINALIZE_STAGE_PHASE2
+    assert payloads == []

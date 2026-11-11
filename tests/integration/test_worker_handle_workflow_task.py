@@ -20,9 +20,12 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
+from horsies.core.workflows.engine import QueueWake
 from tests.integration.conftest import compute_test_enqueue_sha
 
 pytestmark = [pytest.mark.integration]
+
+_WAKE = QueueWake(channel='task_queue_default', payload='capacity:handle-wf-test')
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +131,7 @@ async def test_non_workflow_task_is_engine_level_noop(
     result = _make_ok_result()
 
     await worker._handle_workflow_task_if_needed(
-        session, task_id, result, task_name='handle_wf_test',
+        session, task_id, result, task_name='handle_wf_test', wake=_WAKE,
     )
     await session.rollback()
 
@@ -166,11 +169,12 @@ async def test_workflow_task_delegates_with_broker(
         new_callable=AsyncMock,
     ) as mock_complete:
         await worker._handle_workflow_task_if_needed(
-            session, task_id, result, task_name='handle_wf_test',
+            session, task_id, result, task_name='handle_wf_test', wake=_WAKE,
         )
 
     mock_complete.assert_awaited_once_with(
         session, task_id, result, mock_broker, task_name='handle_wf_test',
+        wake=_WAKE,
     )
 
 
@@ -199,9 +203,10 @@ async def test_workflow_task_delegates_with_broker_none_when_no_app(
         new_callable=AsyncMock,
     ) as mock_complete:
         await worker._handle_workflow_task_if_needed(
-            session, task_id, result, task_name='handle_wf_test',
+            session, task_id, result, task_name='handle_wf_test', wake=_WAKE,
         )
 
     mock_complete.assert_awaited_once_with(
         session, task_id, result, None, task_name='handle_wf_test',
+        wake=_WAKE,
     )
