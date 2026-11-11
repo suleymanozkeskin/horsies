@@ -67,6 +67,7 @@ from tests.integration.conftest import (
 )
 from tests.broker_resources_support import listener_of
 from tests.fixtures.slots.handles import finished_handle, task_finished_handle
+from tests.fixtures.run_return import wire_of
 
 pytestmark = [pytest.mark.integration]
 
@@ -646,14 +647,16 @@ async def test_task_expired_workflow_task_advances_workflow_without_reaper(
     set_current_app(app)
     database_url = listener_of(broker).database_url
     _initialize_worker_pool(database_url)
-    wire = _run_task_entry(
-        task_name=task_name,
-        args_json=args_json,
-        kwargs_json=kwargs_json,
-        task_id=task_id,
-        master_worker_id=TEST_WORKER_ID,
-        claimed_at=claimed_at,
-        task_loop=TaskLoop(),
+    wire = wire_of(
+        _run_task_entry(
+            task_name=task_name,
+            args_json=args_json,
+            kwargs_json=kwargs_json,
+            task_id=task_id,
+            master_worker_id=TEST_WORKER_ID,
+            claimed_at=claimed_at,
+            task_loop=TaskLoop(),
+        )
     )
     assert wire == (False, '', 'TASK_EXPIRED')
     # The child self-expired the row before the parent finalizes.

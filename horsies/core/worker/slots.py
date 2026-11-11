@@ -68,7 +68,10 @@ from horsies.core.models.worker_profile import (
     TaskLimit,
 )
 from horsies.core.types.result import Err, Ok, Result
-from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
+from horsies.core.worker.child_runner import (
+    CHILD_HOOK_FAILURE_EXIT_CODE,
+    LEFT_WORK_MARKER_BOUND_S,
+)
 from horsies.core.worker.config import ChildPreload
 from horsies.core.worker.live_dispatches import (
     Held,
@@ -209,13 +212,17 @@ STUCK_REPORT_DELAY_S: Final = (EXTRA_CANCEL_ROUNDS + 1) * CANCEL_ROUND_INTERVAL_
 SHARED_STUCK_BACKSTOP_S: Final = STUCK_REPORT_DELAY_S + SHARED_BACKSTOP_MARGIN_S
 # After an isolated child reports that the body of a task returned with work
 # left on its task loop, it waits up to ISOLATED_LEFTOVER_GRACE_S for that
-# work, then cancels it in the rounds of STUCK_REPORT_DELAY_S, and reports
-# how the work ended. Code of that work that holds the loop delays the report.
-# The parent kills a child that has reported nothing this long after the
-# return. The margin is that of a shared child: a hold of the loop shorter
-# than the block limit, and 5 s more, passes.
+# work, then cancels it in the rounds of STUCK_REPORT_DELAY_S, writes the
+# finalizing marker of a run whose work ended (LEFT_WORK_MARKER_BOUND_S), and
+# reports how the work ended. Code of that work that holds the loop delays
+# the report. The parent kills a child that has reported nothing this long
+# after the return. The margin is that of a shared child: a hold of the loop
+# shorter than the block limit, and 5 s more, passes.
 ISOLATED_LEFTOVER_BACKSTOP_S: Final = (
-    ISOLATED_LEFTOVER_GRACE_S + STUCK_REPORT_DELAY_S + SHARED_BACKSTOP_MARGIN_S
+    ISOLATED_LEFTOVER_GRACE_S
+    + STUCK_REPORT_DELAY_S
+    + LEFT_WORK_MARKER_BOUND_S
+    + SHARED_BACKSTOP_MARGIN_S
 )
 # A refusal runs only the RUNNING transition and the finalizing marker. Their
 # bounds add up to REFUSAL_WRITES_BOUND_S in a shared async child and to
@@ -1877,8 +1884,8 @@ def _ended_text(end: LeftWorkEnd) -> str:
     match end:
         case LeftWorkEnd.IN_GRACE:
             return (
-                f'ended within {ISOLATED_LEFTOVER_GRACE_S}s; the outcome is what '
-                'the task returned, and the child is replaced'
+                'ended with no cancel; the outcome is what the task returned, '
+                'and the child is replaced'
             )
         case LeftWorkEnd.CANCELLED:
             return (

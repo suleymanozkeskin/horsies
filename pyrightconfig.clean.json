@@ -70,7 +70,11 @@
     "tests/unit/test_thread_seat_runner.py",
     "tests/unit/test_shared_thread_slot_pool.py",
     "tests/unit/test_thread_dispatch.py",
-    "tests/unit/test_isolated_left_work.py"
+    "tests/unit/test_isolated_left_work.py",
+    "horsies/core/worker/run_return.py",
+    "tests/fixtures/run_return.py",
+    "tests/e2e/test_isolated_left_work_marker.py",
+    "tests/e2e/tasks/instance_left_work_marker.py"
   ],
   "reportUnnecessaryTypeIgnoreComment": "error"
 }

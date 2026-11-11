@@ -59,11 +59,15 @@ there is no migration contract between pre-1.0 versions.
     outcome is never `TASK_TIMEOUT` in this wait. Work still alive 0.3 s
     after the first cancel is stuck: the worker kills the child and writes
     what the task returned after it saw the exit. A child that reports
-    neither the end of that work nor that it is stuck within 11.3 s of the
+    neither the end of that work nor that it is stuck within 26.3 s of the
     return, and a child that ends in the wait, also end with what the task
     returned once the exit was seen; no exit seen within 30 s of a kill
-    follows the rule of a timeout kill. A client that keeps its own
-    background tasks on the loop delays the outcome of each async task by
+    follows the rule of a timeout kill. The child writes the finalizing
+    marker of the row only after that work ended, and not at all for work
+    that did not stop, so the worker beats the row while the work runs and
+    the reaper does not fail it, also with small stale thresholds. A client
+    that keeps its own background tasks on the loop delays the outcome of
+    each async task by
     about 1 second and causes a child replacement after it. The worker logs
     one line for each task that left work: the coroutine of each task left,
     up to 10, and how that work ended. A task that cancels a helper task in

@@ -36,6 +36,7 @@ from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.worker import child_runner
 from horsies.core.worker.task_loop import TaskLoop
+from tests.fixtures.run_return import wire_of
 
 Positive = Annotated[int, Field(gt=0)]
 Upper = Annotated[str, AfterValidator(str.upper)]
@@ -455,14 +456,16 @@ def _run_child(
         patch.object(child_runner, '_mark_task_finalizing', MagicMock()),
         patch.object(child_runner, 'get_current_app', MagicMock(return_value=app)),
     ):
-        return child_runner._run_task_entry(
-            task_name=task_name,
-            args_json='[]',
-            kwargs_json=json.dumps(kwargs),
-            task_id='task-id',
-            master_worker_id='worker',
-            is_workflow_task=True,
-            task_loop=TaskLoop(),
+        return wire_of(
+            child_runner._run_task_entry(
+                task_name=task_name,
+                args_json='[]',
+                kwargs_json=json.dumps(kwargs),
+                task_id='task-id',
+                master_worker_id='worker',
+                is_workflow_task=True,
+                task_loop=TaskLoop(),
+            )
         )
 
 

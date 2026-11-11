@@ -76,6 +76,11 @@ from horsies.core.worker.shared_child import (
     StartedSeats,
 )
 from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE, StartCheck
+from horsies.core.worker.run_return import (
+    IsolatedMarkerWindow,
+    RunReturn,
+    StoppedBeforeRunning,
+)
 from horsies.core.utils.loop_runner import in_running_event_loop
 from horsies.core.worker import loop_watchdog as loop_watchdog_module
 from horsies.core.worker import task_loop as task_loop_module
@@ -840,8 +845,53 @@ class _ScriptedThreadSeats:
         _ = frame, window
 
 
+# The runs whose argument is a path: the scripted marker records each
+# marker write next to that path.
+_MARKED_RUNS = frozenset(
+    {
+        'leave_ending',
+        'leave_pending',
+        'leave_stubborn',
+        'marker_probe',
+        'marker_probe_async',
+        'stopped_run',
+    },
+)
+
+
+def _run_isolated(frame: RunFrame, init: InitFrame, task_loop: TaskLoop) -> RunReturn:
+    """A scripted run. ``stopped_run`` ends as a run that never set its row
+    RUNNING; every other run set it."""
+    match frame.task_name:
+        case 'stopped_run':
+            return StoppedBeforeRunning((True, 'stopped', 'CLAIM_LOST'))
+        case 'marker_probe':
+            return SetRunning(_pid_result())
+        case 'marker_probe_async':
+            return SetRunning((True, _run_async(task_loop, _async_pid()), None))
+        case _:
+            return SetRunning(_run(frame, init, task_loop))
+
+
+def _mark_finalizing(frame: RunFrame, window: IsolatedMarkerWindow) -> None:
+    """Record a marker write of a run in ``_MARKED_RUNS``: one line in
+    ``<argument>.marks`` with the window, and what the file at the argument
+    holds at that moment (``absent`` when there is none)."""
+    if frame.task_name not in _MARKED_RUNS or not frame.kwargs_json:
+        return
+    path = frame.kwargs_json
+    try:
+        with open(path, encoding='ascii') as work_marker:
+            state = work_marker.read()
+    except FileNotFoundError:
+        state = 'absent'
+    with open(f'{path}.marks', 'a', encoding='ascii') as marks:
+        marks.write(f'{type(window).__name__} {state}\n')
+
+
 RUNNERS = TaskRunners(
-    run_task=_run,
+    run_task=_run_isolated,
+    mark_finalizing=_mark_finalizing,
     seats=_ScriptedSeatProgram(),
     threads=_ScriptedThreadSeats(),
 )

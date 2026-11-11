@@ -112,10 +112,13 @@ from horsies.core.worker.child_protocol import (
     SharedRunFrame,
     StopFrame,
     ThreadSeatTask,
-    WireResult,
     boot_failed_frame,
 )
 from horsies.core.worker.loop_watchdog import LoopWatchdog
+from horsies.core.worker.run_return import (
+    SetRunning as SetRunning,
+    StoppedBeforeRunning as StoppedBeforeRunning,
+)
 from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
 from horsies.core.worker.run_mark import (
     RUN_MARK,
@@ -153,24 +156,6 @@ result before it sent the stop frame, so the queue is empty then."""
 
 CHILD_DEFECT_EXIT_CODE: Final = 1
 """A defect inside the child, as when a task escapes the task runner."""
-
-
-@dataclass(frozen=True, slots=True)
-class SetRunning:
-    """The run set its row RUNNING, then ended with ``wire``: the body ran,
-    or a refusal or a resolve error ended it after the RUNNING update. The
-    end of the run writes the finalizing marker when one is due."""
-
-    wire: WireResult
-
-
-@dataclass(frozen=True, slots=True)
-class StoppedBeforeRunning:
-    """The run ended with ``wire`` before it set its row RUNNING: a lost
-    claim, an expiry, a stopped workflow, or a failed RUNNING update. No
-    marker follows."""
-
-    wire: WireResult
 
 
 type SeatReturn = SetRunning | StoppedBeforeRunning

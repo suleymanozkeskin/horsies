@@ -1579,7 +1579,10 @@ class TestLeftWork:
         assert lines[0].startswith(
             f'Task leave_ending ({frame.task_id}) returned and left 1'
         )
-        assert f'child pid={pid} (_write_after); that work ended within' in lines[0]
+        assert (
+            f'child pid={pid} (_write_after); that work ended with no cancel'
+            in lines[0]
+        )
         assert await _result_json(pool.submit(_frame('pid'))) != pid
 
     async def test_work_alive_after_the_grace_is_cancelled_before_the_outcome(
@@ -1783,6 +1786,88 @@ class TestLeftWork:
             assert time.monotonic() - started < ISOLATED_LEFTOVER_GRACE_S / 2
         finally:
             await child.dispose_lost()
+
+    async def test_the_marker_follows_the_end_of_work_left_within_the_grace(
+        self,
+        pool_factory: PoolFactory,
+        tmp_path: Path,
+    ) -> None:
+        """The marker is the last write of the run: written after the work
+        that the task left ended, so the runner heartbeats cover that work."""
+        work = tmp_path / 'ended'
+        pool = await pool_factory()
+        match await _outcome(pool.submit(_frame('leave_ending', str(work)))):
+            case TaskFinished(task_loop=LoopHoldsTasks(count=1)):
+                pass
+            case other:
+                raise AssertionError(other)
+        marks = Path(f'{work}.marks').read_text(encoding='ascii')
+        assert marks == 'MarkerAfterLeftWork ended\n'
+
+    async def test_the_marker_follows_the_cancel_of_work_left_past_the_grace(
+        self,
+        pool_factory: PoolFactory,
+        tmp_path: Path,
+    ) -> None:
+        work = tmp_path / 'cancelled'
+        pool = await pool_factory()
+        match await _outcome(pool.submit(_frame('leave_pending', str(work)))):
+            case TaskFinished(task_loop=LoopHoldsTasks(count=1)):
+                pass
+            case other:
+                raise AssertionError(other)
+        marks = Path(f'{work}.marks').read_text(encoding='ascii')
+        assert marks == 'MarkerAfterLeftWork cancelled\n'
+
+    async def test_work_that_does_not_stop_gets_no_marker(
+        self,
+        pool_factory: PoolFactory,
+        tmp_path: Path,
+    ) -> None:
+        """The parent kills the child; its runner heartbeats cover the row
+        until the exit."""
+        work = tmp_path / 'stubborn'
+        pool = await pool_factory()
+        match await _outcome(pool.submit(_frame('leave_stubborn', str(work)))):
+            case LostAfterReturn(lost=lost):
+                assert lost.cause is LossCause.KILLED_BY_PARENT
+            case other:
+                raise AssertionError(other)
+        assert not Path(f'{work}.marks').exists()
+
+    @pytest.mark.parametrize('task_name', ['marker_probe', 'marker_probe_async'])
+    async def test_a_run_that_leaves_no_work_writes_its_marker_before_its_result(
+        self,
+        pool_factory: PoolFactory,
+        tmp_path: Path,
+        task_name: str,
+    ) -> None:
+        """As before the change: the marker at the return, then the result
+        frame, so the marker is there when the outcome is read."""
+        probe = tmp_path / 'probe'
+        pool = await pool_factory()
+        match await _outcome(pool.submit(_frame(task_name, str(probe)))):
+            case TaskFinished(task_loop=LoopHoldsNoTask()):
+                marks_at_outcome = Path(f'{probe}.marks').read_text(encoding='ascii')
+            case other:
+                raise AssertionError(other)
+        assert marks_at_outcome == 'MarkerAtReturn absent\n'
+
+    async def test_a_run_that_stopped_before_running_writes_no_marker(
+        self,
+        pool_factory: PoolFactory,
+        tmp_path: Path,
+    ) -> None:
+        probe = tmp_path / 'stopped'
+        pool = await pool_factory()
+        match await _outcome(pool.submit(_frame('stopped_run', str(probe)))):
+            case TaskFinished(
+                ok=True, result_json='stopped', failed_reason='CLAIM_LOST'
+            ):
+                pass
+            case other:
+                raise AssertionError(other)
+        assert not Path(f'{probe}.marks').exists()
 
     async def test_a_def_task_keeps_its_child_and_reports_an_empty_loop(
         self,

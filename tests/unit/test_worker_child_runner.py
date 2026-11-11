@@ -58,6 +58,8 @@ from horsies.core.worker.child_runner import (
     _run_task_entry,
     _serialization_error_response,
 )
+from horsies.core.worker.run_return import SetRunning, StoppedBeforeRunning
+from tests.fixtures.run_return import wire_of
 
 
 # ---------------------------------------------------------------------------
@@ -928,14 +930,28 @@ class TestRunTaskEntryErrorPaths:
         self,
         _run_entry_defaults: dict[str, Any],
     ) -> None:
-        """When ownership returns a tuple, _run_task_entry returns it."""
+        """When ownership returns a tuple, _run_task_entry returns it as a
+        run that stopped before its RUNNING update."""
         sentinel = (False, '', 'CLAIM_LOST')
         patches = _make_run_task_patches(ownership=sentinel)
 
         with _apply_patches(patches):
             result = _run_task_entry(**_run_entry_defaults)
 
-        assert result == sentinel
+        assert result == StoppedBeforeRunning(sentinel)
+
+    def test_a_run_after_the_running_update_set_its_row_running(
+        self,
+        _run_entry_defaults: dict[str, Any],
+    ) -> None:
+        """A run past the ownership confirm returns SetRunning, also when the
+        task cannot be resolved."""
+        patches = _make_run_task_patches(task_missing=True)
+
+        with _apply_patches(patches):
+            result = _run_task_entry(**_run_entry_defaults)
+
+        assert isinstance(result, SetRunning)
 
     def test_task_resolution_failure(
         self,
@@ -945,7 +961,7 @@ class TestRunTaskEntryErrorPaths:
         patches = _make_run_task_patches(task_missing=True)
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert 'KeyError' in (reason or '')
@@ -962,7 +978,7 @@ class TestRunTaskEntryErrorPaths:
         _run_entry_defaults['args_json'] = '{{{invalid json'
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is not None and 'SerializationError' in reason
@@ -979,7 +995,7 @@ class TestRunTaskEntryErrorPaths:
         _run_entry_defaults['args_json'] = '"a string"'
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is not None and 'SerializationError' in reason
@@ -1010,7 +1026,7 @@ class TestRunTaskEntryErrorPaths:
         _run_entry_defaults['kwargs_json'] = '{{{bad'
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is not None and 'SerializationError' in reason
@@ -1024,7 +1040,7 @@ class TestRunTaskEntryErrorPaths:
         _run_entry_defaults['kwargs_json'] = r'{"x":"\ud800"}'
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is not None and 'lone surrogate' in reason
@@ -1041,7 +1057,7 @@ class TestRunTaskEntryErrorPaths:
         )
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is not None and 'nested deeper than' in reason
@@ -1056,7 +1072,7 @@ class TestRunTaskEntryErrorPaths:
         _run_entry_defaults['kwargs_json'] = '{"x":1e9999}'
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is not None and 'finite binary64' in reason
@@ -1071,7 +1087,7 @@ class TestRunTaskEntryErrorPaths:
         _run_entry_defaults['kwargs_json'] = '[1, 2]'
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is not None and 'SerializationError' in reason
@@ -1100,7 +1116,7 @@ class TestRunTaskEntryErrorPaths:
         _run_entry_defaults['kwargs_json'] = None
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         parsed = _parse_task_result(payload)
@@ -1124,7 +1140,7 @@ class TestRunTaskEntryErrorPaths:
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with _apply_patches(patches):
-            ok, payload, _ = _run_task_entry(**_run_entry_defaults)
+            ok, payload, _ = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         err = _parse_task_result(payload)['err']
@@ -1146,7 +1162,7 @@ class TestRunTaskEntryErrorPaths:
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is None  # exception path sets reason=None
@@ -1182,7 +1198,7 @@ class TestRunTaskEntryErrorPaths:
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is not None and 'holds a lone surrogate' in reason
@@ -1210,7 +1226,7 @@ class TestRunTaskEntryErrorPaths:
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with _apply_patches(patches):
-            ok, payload, _ = _run_task_entry(**_run_entry_defaults)
+            ok, payload, _ = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         parsed = _parse_task_result(payload)
@@ -1233,7 +1249,7 @@ class TestRunTaskEntryErrorPaths:
         )
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is None
@@ -1255,7 +1271,7 @@ class TestRunTaskEntryErrorPaths:
         )
 
         with _apply_patches(patches):
-            _, payload, _ = _run_task_entry(**_run_entry_defaults)
+            _, payload, _ = wire_of(_run_task_entry(**_run_entry_defaults))
 
         err = _parse_task_result(payload)['err']
         assert err['error_code'] == 'MY_ERROR'
@@ -1276,7 +1292,7 @@ class TestRunTaskEntryErrorPaths:
         )
 
         with _apply_patches(patches):
-            ok, payload, _ = _run_task_entry(**_run_entry_defaults)
+            ok, payload, _ = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         parsed = _parse_task_result(payload)
@@ -1296,7 +1312,7 @@ class TestRunTaskEntryErrorPaths:
         )
 
         with _apply_patches(patches):
-            _, payload, _ = _run_task_entry(**_run_entry_defaults)
+            _, payload, _ = wire_of(_run_task_entry(**_run_entry_defaults))
 
         err = _parse_task_result(payload)['err']
         assert err['error_code'] == 'MY_ERROR'
@@ -1315,7 +1331,7 @@ class TestRunTaskEntryErrorPaths:
         )
 
         with _apply_patches(patches):
-            ok, payload, _ = _run_task_entry(**_run_entry_defaults)
+            ok, payload, _ = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         parsed = _parse_task_result(payload)
@@ -1340,7 +1356,7 @@ class TestRunTaskEntryErrorPaths:
         )
 
         with _apply_patches(patches):
-            ok, payload, _ = _run_task_entry(**_run_entry_defaults)
+            ok, payload, _ = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         parsed = _parse_task_result(payload)
@@ -1361,7 +1377,7 @@ class TestRunTaskEntryErrorPaths:
         _run_entry_defaults['kwargs_json'] = json.dumps({'x': {'name': 'plain'}})
 
         with _apply_patches(patches):
-            ok, payload, _ = _run_task_entry(**_run_entry_defaults)
+            ok, payload, _ = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         parsed = _parse_task_result(payload)
@@ -1393,7 +1409,7 @@ class TestRunTaskEntryErrorPaths:
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with _apply_patches(patches):
-            ok, payload, _ = _run_task_entry(**_run_entry_defaults)
+            ok, payload, _ = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         parsed = _parse_task_result(payload)
@@ -1414,7 +1430,7 @@ class TestRunTaskEntryErrorPaths:
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with _apply_patches(patches):
-            ok, payload, _ = _run_task_entry(**_run_entry_defaults)
+            ok, payload, _ = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         _ = payload.encode('utf-8')
@@ -1456,7 +1472,7 @@ class TestRunTaskEntryErrorPaths:
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is not None and 'SerializationError' in reason
@@ -1480,7 +1496,7 @@ class TestRunTaskEntryErrorPaths:
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is None
@@ -1500,7 +1516,7 @@ class TestRunTaskEntryErrorPaths:
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is None
@@ -1522,7 +1538,7 @@ class TestRunTaskEntryErrorPaths:
             'horsies.core.worker.child_runner.dumps_json',
             return_value=Err(SerializationError('cannot serialize')),
         ):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is not None and 'SerializationError' in reason
@@ -1551,7 +1567,7 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         })
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is not None and 'SerializationError' in reason
@@ -1570,7 +1586,7 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         })
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is not None and 'SerializationError' in reason
@@ -1612,7 +1628,7 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         })
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is not None and 'SerializationError' in reason
@@ -1652,7 +1668,7 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         })
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is not None and 'SerializationError' in reason
@@ -1686,7 +1702,7 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         })
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is None
@@ -2146,7 +2162,7 @@ class TestRunTaskEntryWorkflowHappyPaths:
         })
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is None
@@ -2195,7 +2211,7 @@ class TestRunTaskEntryWorkflowHappyPaths:
         })
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is None
@@ -2254,7 +2270,7 @@ class TestChildWritesNoRunnerHeartbeat:
         }
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert (ok, reason) == (True, None)
         assert _parse_task_result(payload)['ok'] == 'done'
@@ -2262,7 +2278,9 @@ class TestChildWritesNoRunnerHeartbeat:
         assert not any(name.startswith('heartbeat') for name in names_during_run)
         statements = [' '.join(sql.split()) for sql, _ in cursor.queries]
         assert not any('horsies_heartbeats' in sql for sql in statements)
-        assert any('SET finalizing_at = NOW()' in sql for sql in statements)
+        # The child writes the marker after the run has ended, with the work
+        # that the task left on its loop (child_main._report_run).
+        assert not any('SET finalizing_at = NOW()' in sql for sql in statements)
 
 
 # ===================================================================
@@ -2307,7 +2325,7 @@ class TestRunTaskEntryRefusalTextHoldsNoInput:
         _run_entry_defaults['kwargs_json'] = json.dumps({'count': _INPUT_MARKER})
 
         with caplog.at_level(logging.DEBUG), _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         self._assert_no_marker(payload, reason, caplog)
@@ -2340,7 +2358,7 @@ class TestRunTaskEntryRefusalTextHoldsNoInput:
         })
 
         with caplog.at_level(logging.DEBUG), _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         self._assert_no_marker(payload, reason, caplog)
@@ -2361,7 +2379,7 @@ class TestRunTaskEntryRefusalTextHoldsNoInput:
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with caplog.at_level(logging.DEBUG), _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is None
@@ -2383,7 +2401,7 @@ class TestRunTaskEntryRefusalTextHoldsNoInput:
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with caplog.at_level(logging.DEBUG), _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         self._assert_no_marker(payload, reason, caplog)
@@ -2424,7 +2442,7 @@ class TestRunTaskEntryStoredErrorRefusal:
         })
 
         with _apply_patches(patches):
-            ok, payload, _ = _run_task_entry(**_run_entry_defaults)
+            ok, payload, _ = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         err = _parse_task_result(payload)['err']
@@ -2468,7 +2486,7 @@ class TestRunTaskEntryStoredErrorRefusal:
         })
 
         with _apply_patches(patches):
-            ok, _, reason = _run_task_entry(**_run_entry_defaults)
+            ok, _, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is None
@@ -2532,8 +2550,11 @@ class TestRunTaskEntryStoredTimeout:
         app_lookup = patches['horsies.core.worker.child_runner.get_current_app']
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(
-                **_run_entry_defaults, timeout=refusal,
+            ok, payload, reason = wire_of(
+                _run_task_entry(
+                    **_run_entry_defaults,
+                    timeout=refusal,
+                )
             )
 
         assert ok is True
@@ -2554,9 +2575,11 @@ class TestRunTaskEntryStoredTimeout:
         patches = _make_run_task_patches()
 
         with _apply_patches(patches):
-            _, payload, _ = _run_task_entry(
-                **_run_entry_defaults,
-                timeout=TimeoutValueInvalid(reason='stored timeout_ms is a bool'),
+            _, payload, _ = wire_of(
+                _run_task_entry(
+                    **_run_entry_defaults,
+                    timeout=TimeoutValueInvalid(reason='stored timeout_ms is a bool'),
+                )
             )
 
         data = _parse_task_result(payload)['err']['data']
@@ -2574,9 +2597,13 @@ class TestRunTaskEntryStoredTimeout:
         patches = _make_run_task_patches()
 
         with _apply_patches(patches):
-            _, payload, _ = _run_task_entry(
-                **_run_entry_defaults,
-                timeout=CancelGraceInvalid(reason='stored cancel_grace_ms is absent'),
+            _, payload, _ = wire_of(
+                _run_task_entry(
+                    **_run_entry_defaults,
+                    timeout=CancelGraceInvalid(
+                        reason='stored cancel_grace_ms is absent'
+                    ),
+                )
             )
 
         data = _parse_task_result(payload)['err']['data']
@@ -2623,7 +2650,7 @@ class TestRunTaskEntryCoroutineCall:
 
         try:
             with _apply_patches(patches):
-                ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+                ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
             loop_state = task_loop.state
         finally:
             task_loop.close()

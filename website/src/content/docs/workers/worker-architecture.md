@@ -63,7 +63,7 @@ Each isolated child holds one task, so a failure stays with that task. A shared 
 | A supervisor sends SIGTERM to every process | Running tasks continue, and the worker drains them |
 | A task forks a helper, then its child dies | The worker sees the death at once. The helper does not hide it |
 | A timeout fires as a task ends | The kill is bound to that task, so it cannot reach the next task. The killed child takes no next task |
-| An `async def` task returns while asyncio tasks that it started are still on the loop | The child waits up to 1 s for them, then cancels them in three rounds 0.1 s apart. The worker writes what the task returned after that work ended, and replaces the child. The deadline no longer applies. Work still alive after the rounds, or no report within 11.3 s of the return: the worker kills the child, and writes what the task returned after the exit. See [Async Tasks](/horsies/tasks/defining-tasks/#async-tasks) |
+| An `async def` task returns while asyncio tasks that it started are still on the loop | The child waits up to 1 s for them, then cancels them in three rounds 0.1 s apart. The worker writes what the task returned after that work ended, and replaces the child. The deadline no longer applies. Work still alive after the rounds, or no report within 26.3 s of the return: the worker kills the child, and writes what the task returned after the exit. See [Async Tasks](/horsies/tasks/defining-tasks/#async-tasks) |
 | A task holds the GIL in C code | Its runner heartbeats continue: the worker process writes them, so the reaper does not fail the task |
 | The worker cannot write runner heartbeats for half of `running_stale_threshold_ms`, or its heartbeat thread dies | With `auto_fail_stale_running` on, the worker kills every child that holds a task, stops, and exits non-zero. With it off, the worker logs it and runs on. See [When the Worker Cannot Write Heartbeats](/horsies/workers/heartbeats-recovery/#when-the-worker-cannot-write-heartbeats) |
 
@@ -137,8 +137,8 @@ In child process:
 2. Resolve task from registry by name
 3. Deserialize arguments
 4. Call task function. An `async def` task runs on the event loop that the child created at boot. The child keeps that loop until it stops, and the loop runs only while an async task runs
-5. Mark the row finalizing, and serialize the result
-6. Report the result. When the body of an `async def` task returned with asyncio tasks still on the loop, the child reports the return with the result, waits up to 1 second for that work, cancels the work that is still alive, and reports how it ended. The worker writes the result only after that report, and replaces the child
+5. Serialize the result
+6. Mark the row finalizing, and report the result. When the body of an `async def` task returned with asyncio tasks still on the loop, the child reports the return with the result, waits up to 1 second for that work, and cancels the work that is still alive. When that work has ended, it marks the row finalizing and reports how the work ended; work that did not stop gets no marker. The worker writes the result only after that report, and replaces the child
 
 The child runs no heartbeat thread. While the child holds the task, a thread of the worker process writes its runner heartbeats. See [Heartbeats & Recovery](/horsies/workers/heartbeats-recovery/#runner-heartbeat).
 

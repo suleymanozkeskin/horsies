@@ -760,18 +760,6 @@ class TestLeftWorkBounds:
         """An isolated task has no grace option: this bound is the contract."""
         assert task_loop_module.ISOLATED_LEFTOVER_GRACE_S == 1.0
 
-    def test_the_parent_waits_past_the_grace_and_the_rounds(self) -> None:
-        """A child whose loop turns reports the end of the work before the
-        parent kills it for reporting nothing."""
-        from horsies.core.worker.slots import ISOLATED_LEFTOVER_BACKSTOP_S
-
-        child_bound_s = (
-            task_loop_module.ISOLATED_LEFTOVER_GRACE_S
-            + (task_loop_module.EXTRA_CANCEL_ROUNDS + 1)
-            * task_loop_module.CANCEL_ROUND_INTERVAL_S
-        )
-        assert ISOLATED_LEFTOVER_BACKSTOP_S > child_bound_s
-
 
 class TestEndLeftWork:
     """The end of the asyncio tasks that a body left on the loop."""

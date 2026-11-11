@@ -469,7 +469,9 @@ class LeftWorkEnd(Enum):
     """How the work that an isolated task left on its task loop ended."""
 
     IN_GRACE = 'in_grace'
-    """It ended within ``ISOLATED_LEFTOVER_GRACE_S`` of the return."""
+    """It ended before the child cancelled it: within
+    ``ISOLATED_LEFTOVER_GRACE_S`` of the return, or later while code of that
+    work held the loop."""
 
     CANCELLED = 'cancelled'
     """It was alive at the end of the grace, and it ended after a cancel."""

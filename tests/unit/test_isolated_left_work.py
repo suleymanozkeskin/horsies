@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import cast
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -20,7 +20,11 @@ from horsies.core.worker.child_protocol import (
     RssUnreadable,
     SeatFinished,
 )
+from horsies.core.worker import child_runner
+from horsies.core.worker.child_runner import StatementsBound
+from horsies.core.worker.run_return import MarkerAfterLeftWork, MarkerAtReturn
 from horsies.core.worker.slots import (
+    ISOLATED_LEFTOVER_BACKSTOP_S,
     Assigned,
     Child,
     ChildExit,
@@ -35,6 +39,11 @@ from horsies.core.worker.slots import (
     TaskFinished,
 )
 from horsies.core.worker.stored_timeout import TaskTimeout
+from horsies.core.worker.task_loop import (
+    CANCEL_ROUND_INTERVAL_S,
+    EXTRA_CANCEL_ROUNDS,
+    ISOLATED_LEFTOVER_GRACE_S,
+)
 from horsies.core.worker.worker import Worker, WorkerConfig
 from tests.fixtures.slots.handles import finished_handle, unbound_handle
 
@@ -295,3 +304,43 @@ class TestFinalize:
 
         assert result == Ok(None)
         cast(AsyncMock, worker._finalize_task_result).assert_not_awaited()
+
+
+class TestMarkerBounds:
+    async def test_the_marker_at_the_return_keeps_the_bounds_of_the_pool(self) -> None:
+        with patch.object(child_runner, '_mark_task_finalizing') as write:
+            child_runner.mark_isolated_run_finalizing(
+                TASK_ID,
+                'worker-1',
+                None,
+                MarkerAtReturn(),
+            )
+        write.assert_called_once_with(TASK_ID, 'worker-1', None)
+
+    async def test_the_marker_after_left_work_has_bounds_of_its_own(self) -> None:
+        with patch.object(child_runner, '_mark_task_finalizing') as write:
+            child_runner.mark_isolated_run_finalizing(
+                TASK_ID,
+                'worker-1',
+                None,
+                MarkerAfterLeftWork(),
+            )
+        write.assert_called_once_with(
+            TASK_ID,
+            'worker-1',
+            None,
+            connection_wait_s=child_runner.LEFT_WORK_MARKER_CONNECTION_WAIT_S,
+            statements=StatementsBound(child_runner.LEFT_WORK_MARKER_STATEMENTS_S),
+        )
+
+    async def test_the_parent_waits_past_the_child_bound_after_a_return(self) -> None:
+        """A child whose loop turns reports the end of the left work, with
+        its marker, before the parent kills it for reporting nothing."""
+        child_bound_s = (
+            ISOLATED_LEFTOVER_GRACE_S
+            + (EXTRA_CANCEL_ROUNDS + 1) * CANCEL_ROUND_INTERVAL_S
+            + child_runner.LEFT_WORK_MARKER_CONNECTION_WAIT_S
+            + child_runner.LEFT_WORK_MARKER_STATEMENTS_S
+            + child_runner.CANCEL_REQUEST_TIMEOUT_S
+        )
+        assert ISOLATED_LEFTOVER_BACKSTOP_S > child_bound_s

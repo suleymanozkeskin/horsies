@@ -30,6 +30,7 @@ from horsies.core.worker.task_loop import TaskLoop
 from .conftest import make_simple_task, make_no_ctx_task, make_workflow_spec, start_ok
 from tests.integration.conftest import task_name_for
 from tests.broker_resources_support import listener_of
+from tests.fixtures.run_return import wire_of
 
 
 def _is_str_keyed_dict(value: object) -> TypeGuard[dict[str, Any]]:
@@ -525,13 +526,15 @@ class TestWorkflowCtx:
         set_current_app(app)
         database_url = listener_of(broker).database_url
         _initialize_worker_pool(database_url)
-        ok, result_json, worker_failure = _run_task_entry(
-            task_name=task_name,
-            args_json=args_json,
-            kwargs_json=kwargs_json,
-            task_id=task_id,
-            master_worker_id='test-worker',
-            task_loop=TaskLoop(),
+        ok, result_json, worker_failure = wire_of(
+            _run_task_entry(
+                task_name=task_name,
+                args_json=args_json,
+                kwargs_json=kwargs_json,
+                task_id=task_id,
+                master_worker_id='test-worker',
+                task_loop=TaskLoop(),
+            )
         )
         assert ok is True
         assert worker_failure is None
@@ -594,13 +597,15 @@ class TestWorkflowCtx:
         set_current_app(app)
         database_url = listener_of(broker).database_url
         _initialize_worker_pool(database_url)
-        ok, result_json, worker_failure = _run_task_entry(
-            task_name=task_name,
-            args_json=args_json,
-            kwargs_json=kwargs_json,
-            task_id=task_id,
-            master_worker_id='test-worker',
-            task_loop=TaskLoop(),
+        ok, result_json, worker_failure = wire_of(
+            _run_task_entry(
+                task_name=task_name,
+                args_json=args_json,
+                kwargs_json=kwargs_json,
+                task_id=task_id,
+                master_worker_id='test-worker',
+                task_loop=TaskLoop(),
+            )
         )
         assert ok is True
         assert worker_failure is None
@@ -666,13 +671,15 @@ class TestWorkflowCtx:
         set_current_app(app)
         database_url = listener_of(broker).database_url
         _initialize_worker_pool(database_url)
-        ok, result_json, worker_failure = _run_task_entry(
-            task_name=task_name,
-            args_json=args_json,
-            kwargs_json=kwargs_json,
-            task_id=task_id,
-            master_worker_id='test-worker',
-            task_loop=TaskLoop(),
+        ok, result_json, worker_failure = wire_of(
+            _run_task_entry(
+                task_name=task_name,
+                args_json=args_json,
+                kwargs_json=kwargs_json,
+                task_id=task_id,
+                master_worker_id='test-worker',
+                task_loop=TaskLoop(),
+            )
         )
         assert ok is True
         assert worker_failure is None
@@ -953,13 +960,15 @@ class TestWorkflowCtx:
         set_current_app(app)
         database_url = listener_of(broker).database_url
         _initialize_worker_pool(database_url)
-        ok, result_json, worker_failure = _run_task_entry(
-            task_name=task_name,
-            args_json=args_json,
-            kwargs_json=modified_kwargs_json,
-            task_id=task_id,
-            master_worker_id='test-worker',
-            task_loop=TaskLoop(),
+        ok, result_json, worker_failure = wire_of(
+            _run_task_entry(
+                task_name=task_name,
+                args_json=args_json,
+                kwargs_json=modified_kwargs_json,
+                task_id=task_id,
+                master_worker_id='test-worker',
+                task_loop=TaskLoop(),
+            )
         )
         assert ok is True
         assert worker_failure is None
