@@ -26,10 +26,13 @@ from horsies.core.worker.finalize import (
     _finalize_data_for_log,
 )
 from horsies.core.worker.runtime import (
+    _FINALIZE_STAGE_TIMEOUT,
     _AttemptEndUnknown,
     _TimeoutSettled,
     _TimeoutWriteFailed,
 )
+from horsies.core.worker.shared_finalize import timeout_retry_write
+from horsies.core.worker.shared_stop import RetryPlacement
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.models.retention import RetentionConfig
 from horsies.core.worker.claiming import ClaimPass
@@ -1354,25 +1357,62 @@ class TestAwaitSlotOutcome:
         assert await waiter == NotDispatched(NotRunCause.POOL_STOPPING)
 
     @pytest.mark.asyncio
-    async def test_the_slot_decides_when_the_timeout_write_failed(self) -> None:
+    async def test_a_failed_timeout_write_drops_the_late_answer_of_the_slot(
+        self,
+    ) -> None:
+        """The deadline decides: a result that reached the slot after the
+        timer fired is not written, also when the TASK_TIMEOUT write failed."""
         worker = _make_worker()
         handle = SlotHandle(_run_frame(), asyncio.get_running_loop())
         handle.bind_child(MagicMock())
+        late = TaskFinished(True, '{"ok":1}', None, RssUnreadable(), NoTaskLoop())
 
         async def _timeout_handler(*_args: Any, **_kwargs: Any) -> object:
-            handle.finish(_LOST)
+            handle.finish(late)
             return _TimeoutWriteFailed()
 
         worker._handle_task_timeout = AsyncMock(  # type: ignore[method-assign]
             side_effect=_timeout_handler,
         )
 
-        outcome = await worker._await_slot_outcome(
-            handle, 'task-1', TaskTimeout(ms=1), None,
+        outcome = await worker._await_slot_outcome(  # pyright: ignore[reportPrivateUsage]
+            handle,
+            'task-1',
+            TaskTimeout(ms=1),
+            None,
         )
 
-        worker._handle_task_timeout.assert_awaited_once()
-        assert outcome == _LOST
+        worker._handle_task_timeout.assert_awaited_once()  # pyright: ignore[reportPrivateUsage]
+        assert outcome == _TimeoutWriteFailed()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_timeout_write_is_retried_as_that_write(self) -> None:
+        worker = _make_worker()
+        handle = SlotHandle(_run_frame(), asyncio.get_running_loop())
+        worker._await_slot_outcome = AsyncMock(  # type: ignore[method-assign]
+            return_value=_TimeoutWriteFailed(),
+        )
+        claimed_at = datetime(2026, 11, 11, tzinfo=timezone.utc)
+
+        result = await worker._finalize_after(  # pyright: ignore[reportPrivateUsage]
+            handle,
+            'task-1',
+            timeout=TaskTimeout(ms=1500),
+            task_name='t',
+            claimed_at=claimed_at,
+        )
+
+        match result:
+            case Err(err_value=error):
+                assert error.stage == _FINALIZE_STAGE_TIMEOUT
+                assert error.retryable is True
+                assert timeout_retry_write(error.data) == (
+                    1500,
+                    RetryPlacement.SAME_CLASS,
+                    claimed_at,
+                )
+            case Ok():
+                raise AssertionError(result)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

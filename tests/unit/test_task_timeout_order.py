@@ -33,7 +33,9 @@ from horsies.core.types.result import Err, Ok, Result
 from horsies.core.types.status import TaskStatus
 from horsies.core.worker.child_protocol import NoTaskLoop, RssUnreadable
 from horsies.core.worker.runtime import (
+    _FINALIZE_STAGE_TIMEOUT,
     _AttemptEndUnknown,
+    _FinalizeError,
     _RequeueOutcome,
     _RetryError,
     _TimeoutSettled,
@@ -480,17 +482,31 @@ class TestOneWriter:
         assert 'crash recovery' not in rig.timeline
         assert rig.timeline.count('phase 2') == 1
 
-    async def test_a_failed_write_falls_back_to_crash_recovery_after_the_exit(
+    async def test_a_failed_write_after_the_exit_is_retried_as_the_timeout_write(
         self,
     ) -> None:
+        """No crash recovery at once: the finalizer returns a retryable
+        timeout-stage error, whose retries run the TASK_TIMEOUT write again
+        and hand the row to crash recovery only after the last one."""
         rig = _Rig(row=_row('RUNNING'))
         rig.child.on_exit.append(rig.handle)
         rig.child.gate.set()
         rig.refuse_sessions()
 
-        await rig.finalize_after_deadline()
+        result = await rig.finalize_after_deadline()
 
-        assert rig.timeline == ['kill', 'exit seen', 'open session', 'crash recovery']
+        assert rig.timeline == ['kill', 'exit seen', 'open session']
+        _assert_timeout_write_error(result)
+
+
+def _assert_timeout_write_error(result: object) -> None:
+    """The finalizer gave the retryable error of a failed TASK_TIMEOUT write."""
+    match result:
+        case Err(err_value=_FinalizeError() as error):
+            assert error.stage == _FINALIZE_STAGE_TIMEOUT
+            assert error.retryable is True
+        case other:
+            raise AssertionError(other)
 
 
 @pytest.mark.unit
@@ -536,16 +552,18 @@ class TestSlotAnsweredAfterTheDeadline:
             OutcomeCode.TASK_TIMEOUT.value,
         ]
 
-    async def test_a_failed_write_after_a_late_answer_falls_back_to_crash_recovery(
+    async def test_a_failed_write_after_a_late_answer_is_retried_as_the_timeout_write(
         self,
     ) -> None:
+        """The late answer of the slot is not read: the deadline decides."""
         rig = _Rig(row=_row('RUNNING'))
         rig.slot_answers_before_the_kill(_KILLED_BY_PARENT)
         rig.refuse_sessions()
 
-        await rig.finalize_after_deadline()
+        result = await rig.finalize_after_deadline()
 
-        assert rig.timeline == ['open session', 'crash recovery']
+        assert rig.timeline == ['open session']
+        _assert_timeout_write_error(result)
 
     async def test_a_late_loss_with_no_exit_seen_writes_nothing(
         self,

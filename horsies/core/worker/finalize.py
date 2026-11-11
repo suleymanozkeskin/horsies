@@ -70,6 +70,7 @@ from horsies.core.logging import get_logger
 from horsies.core.models.tasks import (
     BuiltInTaskCode,
     OperationalErrorCode,
+    OutcomeCode,
     TaskError,
     TaskResult,
 )
@@ -102,6 +103,7 @@ from horsies.core.worker.slots import (
 )
 from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.worker.runtime import (
+    CrashRecoveryCode,
     _AttemptEndUnknown,
     _TimeoutOutcome,
     _TimeoutSettled,
@@ -116,6 +118,8 @@ from horsies.core.worker.runtime import (
     _FINALIZE_STAGE_PARENT,
     _FINALIZE_STAGE_PHASE1,
     _FINALIZE_STAGE_PHASE2,
+    _FINALIZE_STAGE_TIMEOUT,
+    _FINALIZE_TIMEOUT_MAX_RETRIES,
     _FinalizeError,
     _RequeueOutcome,
     _RetryError,
@@ -123,6 +127,8 @@ from horsies.core.worker.runtime import (
 from horsies.core.worker.shared_finalize import (
     future_retry_data,
     future_retry_write,
+    timeout_retry_data,
+    timeout_retry_write,
 )
 from horsies.core.worker.shared_stop import RetryPlacement, culprit_retry
 from horsies.core.worker.stored_timeout import (
@@ -290,7 +296,7 @@ class FinalizeMixin:
             reason: str,
             claimed_at: Optional[datetime] = None,
             *,
-            failure_code: OperationalErrorCode = OperationalErrorCode.WORKER_CRASHED,
+            failure_code: CrashRecoveryCode = OperationalErrorCode.WORKER_CRASHED,
             retry: RetryPlacement = RetryPlacement.SAME_CLASS,
         ) -> _RequeueOutcome: ...
         async def _should_retry_task(
@@ -322,7 +328,7 @@ class FinalizeMixin:
         task_id: str,
         timeout: StoredTimeout,
         claimed_at: Optional[datetime],
-    ) -> SlotOutcome | _TimeoutSettled | _AttemptEndUnknown:
+    ) -> SlotOutcome | _TimeoutOutcome:
         """Wait for the outcome. The timeout starts when a child gets the task.
 
         Time waiting for a free slot does not count: a ``TaskTimeout`` bounds
@@ -330,13 +336,13 @@ class FinalizeMixin:
         the task at once, before it resolves the task. Never raises for a
         task.
 
-        Once the deadline fires, ``_handle_task_timeout`` owns the row.
-        ``_TimeoutSettled`` and ``_AttemptEndUnknown`` mean that the timeout
-        path wrote the row, or left it on purpose, so the slot's outcome is
-        not read, even when the slot answered after the timer fired. After
-        ``_TimeoutWriteFailed`` the slot's outcome is returned, and the usual
-        path finalizes it as the crash-recovery fallback: the attempt has
-        ended, so that outcome comes without an open-ended wait.
+        Once the deadline fires, ``_handle_task_timeout`` owns the row, and
+        its outcome is returned: the slot's outcome is not read, even when
+        the slot answered after the timer fired. The deadline decides, so a
+        late result is dropped. ``_TimeoutSettled`` and ``_AttemptEndUnknown``
+        mean that the timeout path wrote the row, or left it on purpose;
+        ``_TimeoutWriteFailed`` means that the attempt ended and its
+        TASK_TIMEOUT write failed, which the caller retries.
         """
         assigned = await asyncio.shield(handle.assigned)
         match assigned:
@@ -366,19 +372,12 @@ class FinalizeMixin:
                 timeout=timeout_ms / 1000.0,
             )
         except asyncio.TimeoutError:
-            timeout_outcome = await self._handle_task_timeout(
+            return await self._handle_task_timeout(
                 handle,
                 task_id,
                 timeout_ms,
                 claimed_at=claimed_at,
             )
-        match timeout_outcome:
-            case _TimeoutSettled() | _AttemptEndUnknown():
-                return timeout_outcome
-            case _TimeoutWriteFailed():
-                return await asyncio.shield(handle.outcome)
-            case _ as unreachable:
-                assert_never(unreachable)
 
     async def _finalize_after(
         self,
@@ -417,6 +416,28 @@ class FinalizeMixin:
                 # The timeout path settled this row, or left it to stale-task
                 # recovery. Crash recovery must not write it as WORKER_CRASHED.
                 return Ok(None)
+            case _TimeoutWriteFailed():
+                match timeout:
+                    case TaskTimeout(ms=timeout_ms):
+                        return Err(
+                            self._timeout_write_error(
+                                task_id,
+                                timeout_ms,
+                                claimed_at,
+                                RetryPlacement.SAME_CLASS,
+                            ),
+                        )
+                    case (
+                        NoTimeout()
+                        | OptionsUnreadable()
+                        | TimeoutValueInvalid()
+                        | CancelGraceInvalid()
+                    ):
+                        raise AssertionError(
+                            f'task {task_id} timed out with no deadline',
+                        )
+                    case _ as unreachable:
+                        assert_never(unreachable)
             case _ as unreachable:
                 assert_never(unreachable)
 
@@ -661,9 +682,10 @@ class FinalizeMixin:
         coroutine and its marked work ended, or its child exited. ``retry``
         is where the retry runs.
 
-        A failed write takes crash recovery, as the timeout of an isolated
-        task does after its write failed: the recovery reads the row under
-        its lock and acts on its state.
+        A failed write gives a timeout-stage error, as the timeout of an
+        isolated task does: the finalize retry handler runs the same write
+        again (``_retry_finalize_timeout``), and crash recovery writes
+        TASK_TIMEOUT only after those retries failed.
         """
         match await self._record_task_timeout(
             task_id,
@@ -674,34 +696,31 @@ class FinalizeMixin:
             case _TimeoutSettled():
                 return Ok(None)
             case _TimeoutWriteFailed():
-                pass
+                return Err(
+                    self._timeout_write_error(task_id, timeout_ms, claimed_at, retry),
+                )
             case _ as unreachable:
                 assert_never(unreachable)
-        reason = (
-            f'Task reached timeout_ms={timeout_ms} on a shared child, and the '
-            'TASK_TIMEOUT write failed'
-        )
-        requeue_outcome = await self._recover_worker_future_failure(
-            task_id,
-            reason,
-            claimed_at=claimed_at,
-            retry=retry,
-        )
-        return Err(
-            self._make_finalize_error(
-                task_id=task_id,
-                stage=_FINALIZE_STAGE_FUTURE,
-                message=reason,
-                retryable=requeue_outcome is _RequeueOutcome.DB_ERROR,
-                data={
-                    **future_retry_data(
-                        OperationalErrorCode.WORKER_CRASHED,
-                        retry,
-                        claimed_at,
-                    ),
-                    'requeue_outcome': requeue_outcome.value,
-                },
-            )
+
+    def _timeout_write_error(
+        self,
+        task_id: str,
+        timeout_ms: int,
+        claimed_at: Optional[datetime],
+        retry: RetryPlacement,
+    ) -> _FinalizeError:
+        """The retryable timeout-stage error of an attempt that has ended and
+        whose TASK_TIMEOUT write failed. Its data keeps that write
+        (``timeout_retry_data``). Pure."""
+        return self._make_finalize_error(
+            task_id=task_id,
+            stage=_FINALIZE_STAGE_TIMEOUT,
+            message=(
+                f'Task reached timeout_ms={timeout_ms}, and the TASK_TIMEOUT '
+                'write failed'
+            ),
+            retryable=True,
+            data=timeout_retry_data(timeout_ms, retry, claimed_at),
         )
 
     async def _finalize_child_loss(
@@ -1640,6 +1659,8 @@ class FinalizeMixin:
         task_id = err.task_id
         if stage == _FINALIZE_STAGE_FUTURE:
             max_attempts = _FINALIZE_FUTURE_MAX_RETRIES
+        elif stage == _FINALIZE_STAGE_TIMEOUT:
+            max_attempts = _FINALIZE_TIMEOUT_MAX_RETRIES
         elif stage == _FINALIZE_STAGE_PHASE1:
             max_attempts = _FINALIZE_PHASE1_MAX_RETRIES
         elif stage == _FINALIZE_STAGE_PHASE2:
@@ -1674,6 +1695,12 @@ class FinalizeMixin:
                 f'{err.message}; data={_finalize_data_for_log(err.data)}'
             )
             self._clear_finalize_retry_attempts(task_id, stage)
+            if stage == _FINALIZE_STAGE_TIMEOUT:
+                self._spawn_background(
+                    self._recover_timed_out_row(err),
+                    name=f'finalize-timeout-recovery-{task_id}',
+                    finalizer=True,
+                )
             return
 
         attempt_no = attempts + 1
@@ -1691,6 +1718,12 @@ class FinalizeMixin:
             self._spawn_background(
                 self._retry_finalize_future(err, delay),
                 name=f'finalize-retry-future-{task_id}',
+                finalizer=True,
+            )
+        elif stage == _FINALIZE_STAGE_TIMEOUT:
+            self._spawn_background(
+                self._retry_finalize_timeout(err, delay),
+                name=f'finalize-retry-timeout-{task_id}',
                 finalizer=True,
             )
         elif stage == _FINALIZE_STAGE_PHASE1:
@@ -1759,6 +1792,82 @@ class FinalizeMixin:
                 data=data,
             )
         )
+
+    async def _retry_finalize_timeout(
+        self,
+        err: _FinalizeError,
+        delay_s: float,
+    ) -> None:
+        """Run the failed TASK_TIMEOUT write of an ended attempt again.
+
+        The write is ``_record_task_timeout``, with the ``timeout_ms``, the
+        retry placement and the claim generation that the error kept. A
+        settled row clears the retries; a failed write goes back to
+        ``_handle_finalize_error``, which bounds the retries and hands the
+        row to crash recovery after the last one. A stop drops the retry,
+        as for every finalize retry.
+        """
+        await self._sleep_with_stop(delay_s)
+        if self._stop.is_set():
+            return
+        timeout_ms, retry, claimed_at = timeout_retry_write(err.data)
+        match await self._record_task_timeout(
+            err.task_id,
+            timeout_ms,
+            claimed_at,
+            retry=retry,
+        ):
+            case _TimeoutSettled():
+                self._clear_finalize_retry_attempts(
+                    err.task_id,
+                    _FINALIZE_STAGE_TIMEOUT,
+                )
+            case _TimeoutWriteFailed():
+                await self._handle_finalize_error(err)
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    async def _recover_timed_out_row(self, err: _FinalizeError) -> None:
+        """Crash recovery of an ended attempt whose TASK_TIMEOUT write failed
+        on every retry.
+
+        The writer of crash recovery reads the row under its lock and writes
+        TASK_TIMEOUT, so the retry policy decides on that code; the retry runs
+        at the placement that the error kept. A database error there becomes
+        a future-stage error whose data keeps the same code and placement
+        (``future_retry_data``).
+        """
+        timeout_ms, retry, claimed_at = timeout_retry_write(err.data)
+        code: CrashRecoveryCode = OutcomeCode.TASK_TIMEOUT
+        reason = (
+            f'Task reached timeout_ms={timeout_ms}, and the TASK_TIMEOUT write '
+            f'failed {_FINALIZE_TIMEOUT_MAX_RETRIES + 1} times'
+        )
+        match await self._recover_worker_future_failure(
+            err.task_id,
+            reason,
+            claimed_at=claimed_at,
+            failure_code=code,
+            retry=retry,
+        ):
+            case (
+                _RequeueOutcome.REQUEUED
+                | _RequeueOutcome.TERMINAL_REPLAYED
+                | _RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED
+            ):
+                return
+            case _RequeueOutcome.DB_ERROR:
+                await self._handle_finalize_error(
+                    self._make_finalize_error(
+                        task_id=err.task_id,
+                        stage=_FINALIZE_STAGE_FUTURE,
+                        message=reason,
+                        retryable=True,
+                        data=future_retry_data(code, retry, claimed_at),
+                    ),
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
 
     async def _retry_finalize_phase1(self, err: _FinalizeError, delay_s: float) -> None:
         """Retry phase-1 terminal persistence from captured child outcome payload.

@@ -59,6 +59,7 @@ from horsies.core.worker.dispatch_route import (
     dispatch_route,
 )
 from horsies.core.worker.runtime import (
+    CrashRecoveryCode,
     _AttemptEndUnknown,
     _FinalizeError,
     _RequeueOutcome,
@@ -230,7 +231,7 @@ class DispatchMixin:
         reason: str,
         claimed_at: Optional[datetime] = None,
         *,
-        failure_code: OperationalErrorCode = OperationalErrorCode.WORKER_CRASHED,
+        failure_code: CrashRecoveryCode = OperationalErrorCode.WORKER_CRASHED,
         retry: RetryPlacement = RetryPlacement.SAME_CLASS,
     ) -> _RequeueOutcome:
         """Recover a task whose child ended without a task result.
@@ -909,8 +910,10 @@ class DispatchMixin:
 
         ``_TimeoutWriteFailed``: a database error, or a failed retry decision
         or retry schedule, logged here. An error before the commit leaves the
-        row unchanged; an error after it leaves the row written. The caller's
-        crash recovery reads the row under its lock and acts on its state.
+        row unchanged; an error after it leaves the row written. The caller
+        returns a timeout-stage finalize error: its retries run this write
+        again, each reading the row under its lock, and crash recovery writes
+        TASK_TIMEOUT after the last one failed.
         """
         try:
             async with self.sf() as s:
@@ -923,8 +926,8 @@ class DispatchMixin:
                 )
         except Exception as exc:
             logger.error(
-                'Failed to persist TASK_TIMEOUT for task %s: %s; crash '
-                'recovery will classify the row',
+                'Failed to persist TASK_TIMEOUT for task %s: %s; the write '
+                'is retried',
                 task_id,
                 exc,
             )

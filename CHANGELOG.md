@@ -553,7 +553,11 @@ and there is no migration contract between pre-1.0 versions.
   ran. If the child does not exit within 30 s, the worker writes nothing and
   logs at critical level, and stale-task recovery takes the task. A timed-out
   task no longer also goes through crash recovery, which replayed its
-  workflow step and logged a finalize error.
+  workflow step and logged a finalize error. When the `TASK_TIMEOUT` write
+  fails after the exit, the worker runs that write again up to 3 times, with
+  growing waits; only then does crash recovery write the row, with
+  `TASK_TIMEOUT` as the code that the retry policy reads. A result that the
+  child sent after the deadline is never written.
 - **Crash recovery moves a lost child's row only after it saw the child
   exit.** When the worker kills a child and does not see it exit within
   30 s (the socket to the child was lost, the child sent a bad frame, or the

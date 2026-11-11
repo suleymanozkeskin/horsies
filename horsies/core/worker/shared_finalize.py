@@ -29,7 +29,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, Optional, assert_never
 
 from horsies.core.logging import get_logger
-from horsies.core.models.tasks import OperationalErrorCode
+from horsies.core.models.tasks import OperationalErrorCode, OutcomeCode
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.child_protocol import (
     SeatRefusal,
@@ -38,6 +38,7 @@ from horsies.core.worker.child_protocol import (
     ThreadSeatTask,
 )
 from horsies.core.worker.runtime import (
+    CrashRecoveryCode,
     _FINALIZE_STAGE_FUTURE,
     _FinalizeError,
     _RequeueOutcome,
@@ -87,7 +88,7 @@ class SharedKillFinalizeMixin:
             reason: str,
             claimed_at: Optional[datetime] = None,
             *,
-            failure_code: OperationalErrorCode = OperationalErrorCode.WORKER_CRASHED,
+            failure_code: CrashRecoveryCode = OperationalErrorCode.WORKER_CRASHED,
             retry: RetryPlacement = RetryPlacement.SAME_CLASS,
         ) -> _RequeueOutcome: ...
         def _make_finalize_error(
@@ -254,7 +255,7 @@ class SharedKillFinalizeMixin:
 
 
 def future_retry_data(
-    failure_code: OperationalErrorCode,
+    failure_code: CrashRecoveryCode,
     retry: RetryPlacement,
     claimed_at: Optional[datetime],
 ) -> dict[str, Any]:
@@ -269,13 +270,50 @@ def future_retry_data(
 
 def future_retry_write(
     data: dict[str, Any] | None,
-) -> tuple[OperationalErrorCode, RetryPlacement]:
+) -> tuple[CrashRecoveryCode, RetryPlacement]:
     """The code and the retry placement that the retry of a future-stage
     error writes: those that ``future_retry_data`` kept, else those of crash
     recovery (``WORKER_CRASHED``, in its class). A kept value that is not a
     member is a defect: ``ValueError``. Pure."""
     match data:
+        case {'failure_code': 'TASK_TIMEOUT', 'retry': str() as placement}:
+            return OutcomeCode.TASK_TIMEOUT, RetryPlacement(placement)
         case {'failure_code': str() as code, 'retry': str() as placement}:
             return OperationalErrorCode(code), RetryPlacement(placement)
         case _:
             return OperationalErrorCode.WORKER_CRASHED, RetryPlacement.SAME_CLASS
+
+
+def timeout_retry_data(
+    timeout_ms: int,
+    retry: RetryPlacement,
+    claimed_at: Optional[datetime],
+) -> dict[str, Any]:
+    """The data of a timeout-stage error: the TASK_TIMEOUT write that its
+    retry runs again, for an attempt of ``timeout_ms`` whose retry runs at
+    ``retry``. Pure."""
+    return {
+        'timeout_ms': timeout_ms,
+        'retry': retry.value,
+        'claimed_at': claimed_at,
+    }
+
+
+def timeout_retry_write(
+    data: dict[str, Any] | None,
+) -> tuple[int, RetryPlacement, Optional[datetime]]:
+    """The ``timeout_ms``, the retry placement and the claim generation that
+    ``timeout_retry_data`` kept. Data of another shape is a defect: only
+    ``timeout_retry_data`` builds the data of a timeout-stage error.
+    ``AssertionError``. Pure."""
+    match data:
+        case {
+            'timeout_ms': int() as timeout_ms,
+            'retry': str() as placement,
+            'claimed_at': datetime() | None as claimed_at,
+        }:
+            return timeout_ms, RetryPlacement(placement), claimed_at
+        case _:
+            raise AssertionError(
+                f'the data of a timeout-stage error has no TASK_TIMEOUT write: {data!r}',
+            )

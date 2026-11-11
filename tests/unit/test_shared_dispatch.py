@@ -23,6 +23,7 @@ from horsies.core.models.tasks import (
     MIN_TASK_TIMEOUT_MS,
     Execution,
     OperationalErrorCode,
+    OutcomeCode,
 )
 from horsies.core.models.worker_profile import (
     MemoryLimit,
@@ -47,6 +48,9 @@ from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.dispatch_route import RunIsolated, RunShared, dispatch_route
 from horsies.core.worker.runtime import (
     MemoryBaselineExceedsThresholdError,
+    _FINALIZE_STAGE_FUTURE,
+    _FINALIZE_STAGE_TIMEOUT,
+    _FINALIZE_TIMEOUT_MAX_RETRIES,
     _AttemptEndUnknown,
     _FinalizeError,
     _RequeueOutcome,
@@ -76,6 +80,7 @@ from horsies.core.worker.slots import (
 from horsies.core.worker.shared_finalize import (
     future_retry_data,
     future_retry_write,
+    timeout_retry_write,
 )
 from horsies.core.worker.shared_stop import (
     BesideBlockedLoop,
@@ -466,17 +471,31 @@ class TestFinalizeShared:
         )
         worker._recover_worker_future_failure.assert_not_awaited()  # type: ignore[attr-defined]
 
-    async def test_a_failed_timeout_write_takes_crash_recovery(self) -> None:
+    async def test_a_failed_timeout_write_is_retried_as_the_timeout_write(
+        self,
+    ) -> None:
+        """Crash recovery does not write WORKER_CRASHED at once: the error
+        keeps the TASK_TIMEOUT write, and its retries run it again."""
         worker = self._worker_with_paths()
         worker._record_task_timeout.return_value = _TimeoutWriteFailed()  # type: ignore[attr-defined]
 
-        result = await self._finalize(
+        result: Result[None, _FinalizeError] = await self._finalize(
             worker,
-            SeatDeadlineEnded(retry=RetryPlacement.SAME_CLASS),
+            SeatDeadlineEnded(retry=RetryPlacement.ISOLATED),
         )
 
-        assert isinstance(result, Err)
-        worker._recover_worker_future_failure.assert_awaited_once()  # type: ignore[attr-defined]
+        match result:
+            case Err(err_value=error):
+                assert error.stage == _FINALIZE_STAGE_TIMEOUT
+                assert error.retryable is True
+                assert timeout_retry_write(error.data) == (
+                    1500,
+                    RetryPlacement.ISOLATED,
+                    CLAIMED_AT,
+                )
+            case Ok():
+                raise AssertionError(result)
+        worker._recover_worker_future_failure.assert_not_awaited()  # type: ignore[attr-defined]
 
     async def test_the_result_of_a_refusal_takes_the_path_of_an_isolated_result(
         self,
@@ -690,6 +709,20 @@ class TestFinalizeKilledRun:
             'failure_code': OperationalErrorCode.NEIGHBOUR_BLOCKED_LOOP,
             'retry': RetryPlacement.SAME_CLASS,
         }
+
+    async def test_a_timeout_code_is_kept_for_the_retry_of_crash_recovery(
+        self,
+    ) -> None:
+        data = future_retry_data(
+            OutcomeCode.TASK_TIMEOUT,
+            RetryPlacement.ISOLATED,
+            CLAIMED_AT,
+        )
+
+        assert future_retry_write(data) == (
+            OutcomeCode.TASK_TIMEOUT,
+            RetryPlacement.ISOLATED,
+        )
 
     async def test_a_crash_error_retries_as_a_crash(self) -> None:
         assert future_retry_write({'claimed_at': None}) == (
@@ -949,6 +982,113 @@ class TestBackstopDecision:
 
         assert outcome == ended
         stuck_backstop.assert_not_awaited()
+
+
+class _TimeoutWriteRetries:
+    """A worker whose timeout write and crash recovery are recorded."""
+
+    def __init__(self) -> None:
+        self.worker = _worker()
+        self.timeout = AsyncMock(return_value=_TimeoutSettled())
+        self.recovery = AsyncMock(return_value=_RequeueOutcome.REQUEUED)
+        self.handled = AsyncMock()
+        self.worker._record_task_timeout = self.timeout
+        self.worker._recover_worker_future_failure = self.recovery
+
+    def error(self) -> Any:
+        return self.worker._timeout_write_error(
+            'task-1',
+            1500,
+            CLAIMED_AT,
+            RetryPlacement.ISOLATED,
+        )
+
+
+@pytest.mark.asyncio
+class TestTimeoutWriteRetry:
+    """A TASK_TIMEOUT write that failed after the attempt ended runs again,
+    bounded; crash recovery writes TASK_TIMEOUT only after the last retry."""
+
+    async def test_the_retry_runs_the_same_timeout_write(self) -> None:
+        retries = _TimeoutWriteRetries()
+
+        await retries.worker._retry_finalize_timeout(retries.error(), 0.0)
+
+        retries.timeout.assert_awaited_once_with(
+            'task-1',
+            1500,
+            CLAIMED_AT,
+            retry=RetryPlacement.ISOLATED,
+        )
+        retries.recovery.assert_not_awaited()
+
+    async def test_a_failed_retry_goes_back_to_the_bounded_handler(self) -> None:
+        retries = _TimeoutWriteRetries()
+        retries.timeout.return_value = _TimeoutWriteFailed()
+        error = retries.error()
+        retries.worker._handle_finalize_error = retries.handled
+
+        await retries.worker._retry_finalize_timeout(error, 0.0)
+
+        retries.handled.assert_awaited_once_with(error)
+        retries.recovery.assert_not_awaited()
+
+    async def test_the_handler_schedules_the_timeout_write_until_its_bound(
+        self,
+    ) -> None:
+        retries = _TimeoutWriteRetries()
+        spawned: list[str] = []
+
+        def spawn(coroutine: Any, *, name: str, **_kwargs: Any) -> None:
+            coroutine.close()
+            spawned.append(name)
+
+        retries.worker._spawn_background = MagicMock(side_effect=spawn)
+        error = retries.error()
+
+        for _ in range(_FINALIZE_TIMEOUT_MAX_RETRIES + 1):
+            await retries.worker._handle_finalize_error(error)
+
+        assert spawned == [
+            *(['finalize-retry-timeout-task-1'] * _FINALIZE_TIMEOUT_MAX_RETRIES),
+            'finalize-timeout-recovery-task-1',
+        ]
+
+    async def test_crash_recovery_after_the_last_retry_decides_on_the_timeout(
+        self,
+    ) -> None:
+        retries = _TimeoutWriteRetries()
+
+        await retries.worker._recover_timed_out_row(retries.error())
+
+        assert retries.recovery.await_args is not None
+        assert retries.recovery.await_args.kwargs == {
+            'claimed_at': CLAIMED_AT,
+            'failure_code': OutcomeCode.TASK_TIMEOUT,
+            'retry': RetryPlacement.ISOLATED,
+        }
+
+    async def test_a_database_error_of_crash_recovery_keeps_the_timeout_code(
+        self,
+    ) -> None:
+        retries = _TimeoutWriteRetries()
+        retries.recovery.return_value = _RequeueOutcome.DB_ERROR
+        retries.worker._handle_finalize_error = retries.handled
+
+        await retries.worker._recover_timed_out_row(retries.error())
+
+        assert retries.handled.await_args is not None
+        handed = retries.handled.await_args.args[0]
+        assert handed.stage == _FINALIZE_STAGE_FUTURE
+        assert future_retry_write(handed.data) == (
+            OutcomeCode.TASK_TIMEOUT,
+            RetryPlacement.ISOLATED,
+        )
+
+
+def test_the_data_of_a_timeout_write_is_a_closed_shape() -> None:
+    with pytest.raises(AssertionError, match='no TASK_TIMEOUT write'):
+        timeout_retry_write({'claimed_at': None})
 
 
 class TestCapacityAndConfig:
