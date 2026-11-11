@@ -23,6 +23,7 @@ from horsies.core.defaults import DEFAULT_CLAIM_LEASE_MS
 import logging
 
 from horsies.core.worker.finalize import (
+    _Phase1Input,
     _PersistedTaskOutcome,
     _finalize_data_for_log,
 )
@@ -64,7 +65,6 @@ from horsies.core.worker.worker import (
     _FINALIZE_STAGE_PHASE1,
     _FINALIZE_STAGE_PHASE2,
     _RequeueOutcome,
-    _RetryError,
     ChildHookFailedError,
     ChildStartFailedError,
     MemoryBaselineExceedsThresholdError,
@@ -5608,105 +5608,58 @@ class TestReaperResourceSelection:
 
 
 # ---------------------------------------------------------------------------
-# Retry Err mapping at caller seams
+# Database errors of the failed-attempt write at the caller seams
 # ---------------------------------------------------------------------------
 
 
-def _make_running_ctx_session(worker: Worker) -> AsyncMock:
-    """Session whose first execute returns a RUNNING in-flight ctx row."""
-    now = datetime.now(timezone.utc)
-    ctx_row = SimpleNamespace(
-        status='RUNNING',
-        retry_count=0,
-        db_now=now,
-        started_at=now,
-        claimed_by_worker_id=worker.worker_instance_id,
-        worker_hostname='host',
-        worker_pid=123,
-        worker_process_name='proc',
-        queue_name='default',
-    )
-    ctx_result = MagicMock()
-    ctx_result.fetchone.return_value = ctx_row
-
-    session = AsyncMock()
-    session.__aenter__ = AsyncMock(return_value=session)
-    session.__aexit__ = AsyncMock(return_value=None)
-    session.execute = AsyncMock(return_value=ctx_result)
-    session.commit = AsyncMock()
-    return session
-
-
-def _retry_error(task_id: str = 'task-1') -> _RetryError:
-    return _RetryError(
-        error_code=OperationalErrorCode.BROKER_ERROR,
-        message='DB error reading retry info: boom',
-        task_id=task_id,
-        retryable=True,
-        data={'exception_type': 'OperationalError'},
-    )
+def _session_whose_connection_fails() -> MagicMock:
+    """A session factory result whose autocommit connection raises on its
+    first statement, as a database that went away."""
+    connection = MagicMock()
+    connection.execute = AsyncMock(side_effect=OperationalError('db down'))
+    session = MagicMock()
+    session.connection = AsyncMock(return_value=connection)
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=session)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+    return ctx
 
 
 @pytest.mark.unit
-class TestRecoverRetryErrMapping:
-    """_recover_worker_future_failure maps retry Err arms to DB_ERROR."""
+class TestRecoverDatabaseErrorMapping:
+    """_recover_worker_future_failure maps a database error to DB_ERROR."""
 
     @pytest.mark.asyncio
-    async def test_should_retry_err_returns_db_error(self) -> None:
-        """Err from the retry decision aborts recovery with DB_ERROR."""
+    async def test_a_failed_read_returns_db_error(self) -> None:
         worker = _make_worker()
-        session = _make_running_ctx_session(worker)
-        worker.sf = MagicMock(return_value=session)
-        worker._should_retry_task = AsyncMock(  # type: ignore[method-assign]
-            return_value=Err(_retry_error()),
-        )
+        worker.sf = MagicMock(return_value=_session_whose_connection_fails())
 
         outcome = await worker._recover_worker_future_failure('task-1', 'pool broke')
 
         assert outcome is _RequeueOutcome.DB_ERROR
-        session.commit.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_schedule_retry_err_returns_db_error(self) -> None:
-        """Err from retry scheduling aborts recovery with DB_ERROR."""
-        worker = _make_worker()
-        session = _make_running_ctx_session(worker)
-        worker.sf = MagicMock(return_value=session)
-        worker._should_retry_task = AsyncMock(  # type: ignore[method-assign]
-            return_value=Ok(True),
-        )
-        worker._schedule_retry = AsyncMock(  # type: ignore[method-assign]
-            return_value=Err(_retry_error()),
-        )
-
-        outcome = await worker._recover_worker_future_failure('task-1', 'pool broke')
-
-        assert outcome is _RequeueOutcome.DB_ERROR
-        session.commit.assert_not_awaited()
 
 
 @pytest.mark.unit
-class TestFinalizeErrorFromRetryError:
-    """_finalize_error_from_retry_error translation preserves the failure."""
+class TestPhase1Error:
+    """_phase1_error keeps the child's report for the phase-1 replay."""
 
-    def test_translation_targets_phase1_and_preserves_fields(self) -> None:
+    def test_a_connection_error_is_retryable_and_keeps_the_report(self) -> None:
         worker = _make_worker()
-        retry_err = _retry_error(task_id='task-9')
 
-        finalize_err = worker._finalize_error_from_retry_error(
-            retry_err,
-            ok=False,
-            result_json_str='{"err": {"error_code": "BOOM"}}',
-            failed_reason=None,
+        finalize_err = worker._phase1_error(
+            'task-9',
+            'Failed to persist terminal task state',
+            OperationalError('connection lost'),
+            _Phase1Input(False, '{"err": {"error_code": "BOOM"}}', None),
         )
 
         assert finalize_err.stage == _FINALIZE_STAGE_PHASE1
         assert finalize_err.error_code == OperationalErrorCode.BROKER_ERROR
-        assert finalize_err.message == retry_err.message
         assert finalize_err.task_id == 'task-9'
         assert finalize_err.retryable is True
         assert finalize_err.data == {
             'exception_type': 'OperationalError',
+            'exception': 'connection lost',
             'outcome': {
                 'ok': False,
                 'result_json_str': '{"err": {"error_code": "BOOM"}}',
@@ -5714,49 +5667,31 @@ class TestFinalizeErrorFromRetryError:
             },
         }
 
-    def test_translation_preserves_non_retryable(self) -> None:
+    def test_another_error_is_not_retryable(self) -> None:
         worker = _make_worker()
-        retry_err = _RetryError(
-            error_code=OperationalErrorCode.BROKER_ERROR,
-            message='DB error persisting retry schedule: boom',
-            task_id='task-9',
-            retryable=False,
-        )
 
-        finalize_err = worker._finalize_error_from_retry_error(
-            retry_err,
-            ok=True,
-            result_json_str='{"ok": 1}',
-            failed_reason=None,
+        finalize_err = worker._phase1_error(
+            'task-9',
+            'Failed to persist terminal task state',
+            ValueError('bad row'),
+            _Phase1Input(True, '{"ok": 1}', None),
         )
 
         assert finalize_err.retryable is False
-        assert finalize_err.data == {
-            'outcome': {
-                'ok': True,
-                'result_json_str': '{"ok": 1}',
-                'failed_reason': None,
-            },
-        }
 
 
 @pytest.mark.unit
-class TestRetryErrPhase1Replay:
-    """Mapped retry-seam errors must carry the payload phase1 replay needs.
-
-    Regression: the first mapping passed _RetryError.data through bare, so
-    _retry_finalize_phase1 hit its missing-outcome guard and abandoned the
-    retry after one backoff sleep instead of replaying persistence.
-    """
+class TestPhase1ErrorReplay:
+    """A phase-1 error carries the payload that the phase-1 retry replays."""
 
     @pytest.mark.asyncio
-    async def test_phase1_retry_replays_persistence_from_mapped_error(self) -> None:
+    async def test_phase1_retry_replays_persistence_from_the_error(self) -> None:
         worker = _make_worker()
-        finalize_err = worker._finalize_error_from_retry_error(
-            _retry_error(task_id='task-1'),
-            ok=True,
-            result_json_str='{"ok": 42}',
-            failed_reason=None,
+        finalize_err = worker._phase1_error(
+            'task-1',
+            'Failed to persist terminal task state',
+            OperationalError('connection lost'),
+            _Phase1Input(True, '{"ok": 42}', None),
         )
         worker._persist_task_terminal_state = AsyncMock(  # type: ignore[method-assign]
             return_value=Ok(None),

@@ -60,8 +60,8 @@ from horsies.core.models.tasks import (
     TaskResult,
 )
 from horsies.core.worker.sql import (
+    LOCK_RUNNING_TASK_SQL,
     NOTIFY_TASK_QUEUE_SQL,
-    SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
     UPSERT_TASK_ATTEMPT_SQL,
 )
 from horsies.core.workflows.engine import on_workflow_task_complete
@@ -721,7 +721,7 @@ def _run_terminal_invocation(
 
 def _upsert_completed_attempt(connection: Connection, task_id: str) -> None:
     context = connection.execute(
-        SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
+        LOCK_RUNNING_TASK_SQL,
         {'id': task_id, 'wid': WORKER_ID, 'claimed_at': CLAIMED_AT},
     ).fetchone()
     if context is None:

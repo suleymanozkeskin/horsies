@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Literal, Optional, assert_never, cast
+from typing import TYPE_CHECKING, Any, Optional, assert_never, cast
 
 from sqlalchemy import text
 
@@ -58,7 +58,12 @@ from horsies.core.lifecycle.commands import (
 from horsies.core.lifecycle.outcomes import (
     AlreadyApplied,
     Applied,
+    CapacityWoken,
+    FailedAttemptOutcome,
+    FailureApplied,
     LostClaim,
+    PhaseTwoOwed,
+    RetryScheduled,
     SourceStateConflict,
     TaskAbsent,
 )
@@ -126,7 +131,20 @@ from horsies.core.worker.runtime import (
     _FINALIZE_TIMEOUT_MAX_RETRIES,
     _FinalizeError,
     _RequeueOutcome,
-    _RetryError,
+)
+from horsies.core.worker.failed_attempt import (
+    AttemptFailure,
+    AttemptFailureKind,
+    AttemptNotHeld,
+    ClaimedAttempt,
+    NoRetry,
+    RetryRequest,
+    RunningAttempt,
+    autocommit_connection,
+    finish_failed_attempt,
+    finish_for,
+    read_in_flight_attempt,
+    retry_request_for,
 )
 from horsies.core.worker.shared_finalize import (
     future_retry_data,
@@ -144,15 +162,19 @@ from horsies.core.worker.stored_timeout import (
     TimeoutValueInvalid,
 )
 from horsies.core.worker.sql import (
+    LOCK_RUNNING_TASK_SQL,
     NOTIFY_TASK_QUEUE_SQL,
-    SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
     UPSERT_TASK_ATTEMPT_SQL,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine
 
-    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+    from sqlalchemy.ext.asyncio import (
+        AsyncConnection,
+        AsyncSession,
+        async_sessionmaker,
+    )
 
     from horsies.core.app import Horsies
     from horsies.core.brokers.postgres import PostgresBroker
@@ -190,6 +212,44 @@ class _PersistedTaskOutcome:
     task_name: str
     queue_name: str
     is_workflow_task: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _Phase1Input:
+    """The child's report as phase 1 received it. A phase-1 retry replays it
+    from the error data."""
+
+    ok: bool
+    result_json_str: str
+    failed_reason: str | None
+
+
+def _attempt_failure_of(
+    report: WorkerLevelFailure | ResultUndecodable | ErrorProduced,
+) -> AttemptFailure:
+    """What the attempt row records for a failure report. Pure."""
+    match report:
+        case WorkerLevelFailure(detail=detail):
+            message = detail or 'Worker failure'
+            return AttemptFailure(
+                kind=AttemptFailureKind.WORKER_FAILURE,
+                error_message=message,
+                failed_reason=message,
+            )
+        case ResultUndecodable(detail=detail):
+            return AttemptFailure(
+                kind=AttemptFailureKind.FAILED,
+                error_message=detail,
+                failed_reason=None,
+            )
+        case ErrorProduced(error=error):
+            return AttemptFailure(
+                kind=AttemptFailureKind.FAILED,
+                error_message=error.message,
+                failed_reason=None,
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _refused_retry_command(
@@ -326,19 +386,11 @@ class FinalizeMixin:
             failure_code: CrashRecoveryCode = OperationalErrorCode.WORKER_CRASHED,
             retry: RetryPlacement = RetryPlacement.SAME_CLASS,
         ) -> _RequeueOutcome: ...
-        async def _should_retry_task(
-            self, task_id: str, error: TaskError, session: AsyncSession
-        ) -> Result[bool, _RetryError]: ...
-        async def _schedule_retry(
+        def _wake_when_retry_due(
             self,
-            task_id: str,
-            session: AsyncSession,
-            queue_name: str,
-            *,
-            retry: RetryPlacement = RetryPlacement.SAME_CLASS,
-        ) -> Result[
-            Literal['scheduled', 'reaper_reclaimed', 'expired'], _RetryError
-        ]: ...
+            scheduled: RetryScheduled,
+            request: RetryRequest,
+        ) -> None: ...
         async def _sleep_with_stop(self, delay_seconds: float) -> None: ...
         def _spawn_background(
             self,
@@ -906,36 +958,6 @@ class FinalizeMixin:
             data=data,
         )
 
-    def _finalize_error_from_retry_error(
-        self,
-        err: _RetryError,
-        *,
-        ok: bool,
-        result_json_str: str,
-        failed_reason: str | None,
-    ) -> _FinalizeError:
-        """Translate a retry-concern DB failure into a phase1 finalize error.
-
-        The outcome triple must ride along in ``data``: ``_retry_finalize_phase1``
-        replays ``_persist_task_terminal_state`` from ``data['outcome']`` and
-        abandons the retry if it is missing.
-        """
-        return _FinalizeError(
-            error_code=err.error_code,
-            message=err.message,
-            stage=_FINALIZE_STAGE_PHASE1,
-            task_id=err.task_id,
-            retryable=err.retryable,
-            data={
-                **(err.data or {}),
-                'outcome': {
-                    'ok': ok,
-                    'result_json_str': result_json_str,
-                    'failed_reason': failed_reason,
-                },
-            },
-        )
-
     def _with_finalize_context(
         self,
         err: _FinalizeError,
@@ -1006,11 +1028,14 @@ class FinalizeMixin:
 
         The child wire report is classified into a typed decision before any
         persistence statement is selected. Plain success uses the fused
-        operation. Every other normal terminal result uses the generation-
-        fenced locked read, an attempt write, and its operation function in one
-        caller-owned transaction. A retry of a committed phase 1 is classified
-        as ``AlreadyApplied`` and reloads the persisted result for phase 2;
-        ``LostClaim`` and other refusals do not advance the workflow.
+        operation. A failure, with or without a retry, uses one unlocked read
+        of the retry facts and ``horsies_finish_failed_attempt``
+        (``_persist_failed_attempt``). A workflow task's success uses the
+        advisory-first locking read, an attempt write, and its operation
+        function in one transaction (``_complete_locked_task``). A retry of a
+        committed phase 1 is classified as ``AlreadyApplied`` and reloads the
+        persisted result for phase 2; ``LostClaim`` and other refusals do not
+        advance the workflow. ``Ok(None)``: nothing is owed to phase 2.
         """
         recovery_cfg = self.cfg.recovery_config
         context = FinalizeContext(
@@ -1247,234 +1272,316 @@ class FinalizeMixin:
                     )
                 )
 
+        match (locked_command, report):
+            case (CompleteLockedTask() as completion, ResultProduced()):
+                assert tr is not None
+                return await self._complete_locked_task(
+                    completion,
+                    tr,
+                    claimed_at=claimed_at,
+                    child=_Phase1Input(ok, result_json_str, failed_reason),
+                )
+            case (
+                FailLockedTask() as failure,
+                WorkerLevelFailure()
+                | ResultUndecodable() as failure_report,
+            ):
+                assert tr is not None
+                return await self._persist_failed_attempt(
+                    failure,
+                    failure_report,
+                    tr,
+                    claimed_at=claimed_at,
+                    child=_Phase1Input(ok, result_json_str, failed_reason),
+                )
+            case (None, ErrorProduced() as failure_report) if (retry_error is not None):
+                assert tr is not None
+                return await self._persist_failed_attempt(
+                    _refused_retry_command(retry_error, context),
+                    failure_report,
+                    tr,
+                    claimed_at=claimed_at,
+                    child=_Phase1Input(ok, result_json_str, failed_reason),
+                )
+            case _:
+                raise AssertionError(
+                    'terminal report and locked command disagree: '
+                    f'{type(report).__name__} / {type(locked_command).__name__}'
+                )
+
+    async def _complete_locked_task(
+        self,
+        completion: CompleteLockedTask,
+        tr: TaskResult[Any, TaskError],
+        *,
+        claimed_at: datetime | None,
+        child: _Phase1Input,
+    ) -> Result[_PersistedTaskOutcome | None, _FinalizeError]:
+        """Phase 1 of a workflow task's success, in one transaction.
+
+        ``horsies_lock_running_task`` takes the task advisory lock, then the
+        row lock under the claim fence. The attempt row and the move follow
+        in the same transaction. A miss is classified: ``AlreadyApplied``
+        reloads the persisted result for the phase-2 replay; a refusal
+        writes nothing. Database errors become a retryable phase-1 error
+        when the connection failed.
+        """
+        task_id = completion.task_id
         try:
             async with self.sf() as s:
-                ctx_result = await s.execute(
-                    SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
-                    {
-                        'id': task_id,
-                        'wid': self.worker_instance_id,
-                        'claimed_at': claimed_at,
-                    },
-                )
-                ctx_row = ctx_result.fetchone()
-                if ctx_row is None:
-                    miss_command = locked_command
-                    if miss_command is None:
-                        assert retry_error is not None
-                        miss_command = _refused_retry_command(
-                            retry_error,
-                            context,
-                        )
-                    miss_outcome = await classify_locked_read_miss_async(
-                        await s.connection(),
-                        miss_command,
-                        claimed_at=claimed_at,
+                ctx_row = (
+                    await s.execute(
+                        LOCK_RUNNING_TASK_SQL,
+                        {
+                            'id': task_id,
+                            'wid': self.worker_instance_id,
+                            'claimed_at': claimed_at,
+                        },
                     )
-                    match miss_outcome:
-                        case AlreadyApplied():
-                            load_r = await self._load_persisted_task_result(
-                                task_id,
-                                session=s,
-                            )
-                            await s.rollback()
-                            if is_err(load_r):
-                                return Err(load_r.err_value)
-                            return load_r
-                        case LostClaim() | SourceStateConflict() | TaskAbsent():
-                            await s.rollback()
-                            return Ok(None)
-                        case Applied():
-                            await s.rollback()
-                            raise RuntimeError(
-                                'locked-read miss classifier returned APPLIED'
-                            )
-                        case _ as unreachable:
-                            assert_never(unreachable)
-                else:
-                    attempt_num = (ctx_row.retry_count or 0) + 1
-                    db_now = ctx_row.db_now or now
-                    attempt_started_at = ctx_row.started_at or db_now
-                    attempt_worker = {
+                ).fetchone()
+                if ctx_row is None:
+                    return await self._settle_locked_completion_miss(
+                        s,
+                        completion,
+                        claimed_at,
+                    )
+                db_now = ctx_row.db_now
+                await s.execute(
+                    UPSERT_TASK_ATTEMPT_SQL,
+                    {
+                        'task_id': task_id,
+                        'attempt': ctx_row.retry_count + 1,
+                        'outcome': 'COMPLETED',
+                        'will_retry': False,
+                        'started_at': ctx_row.started_at or db_now,
+                        'finished_at': db_now,
+                        'error_code': None,
+                        'error_message': None,
+                        'failed_reason': None,
                         'worker_id': ctx_row.claimed_by_worker_id,
                         'worker_hostname': ctx_row.worker_hostname,
                         'worker_pid': ctx_row.worker_pid,
                         'worker_process_name': ctx_row.worker_process_name,
-                    }
-
-                    if retry_error is not None:
-                        failure_command = _refused_retry_command(
-                            retry_error,
-                            context,
-                        )
-                        should_retry_r = await self._should_retry_task(
-                            task_id,
-                            retry_error,
-                            s,
-                        )
-                        if is_err(should_retry_r):
-                            return Err(
-                                self._finalize_error_from_retry_error(
-                                    should_retry_r.err_value,
-                                    ok=ok,
-                                    result_json_str=result_json_str,
-                                    failed_reason=failed_reason,
-                                ),
-                            )
-                        if should_retry_r.ok_value:
-                            retry_r = await self._schedule_retry(
-                                task_id,
-                                s,
-                                queue_name=ctx_row.queue_name or 'default',
-                            )
-                            if is_err(retry_r):
-                                return Err(
-                                    self._finalize_error_from_retry_error(
-                                        retry_r.err_value,
-                                        ok=ok,
-                                        result_json_str=result_json_str,
-                                        failed_reason=failed_reason,
-                                    ),
-                                )
-                            match retry_r.ok_value:
-                                case 'scheduled':
-                                    await s.execute(
-                                        UPSERT_TASK_ATTEMPT_SQL,
-                                        {
-                                            'task_id': task_id,
-                                            'attempt': attempt_num,
-                                            'outcome': 'FAILED',
-                                            'will_retry': True,
-                                            'started_at': attempt_started_at,
-                                            'finished_at': db_now,
-                                            'error_code': failure_command.error_code,
-                                            'error_message': retry_error.message,
-                                            'failed_reason': None,
-                                            **attempt_worker,
-                                        },
-                                    )
-                                    await s.commit()
-                                    return Ok(None)
-                                case 'reaper_reclaimed':
-                                    logger.warning(
-                                        'Task %s retry aborted during finalize: '
-                                        'task no longer RUNNING',
-                                        task_id,
-                                    )
-                                    await s.commit()
-                                    return Ok(None)
-                                case 'expired':
-                                    logger.info(
-                                        'Task %s retry skipped: good_until '
-                                        'exceeded; terminalizing failure',
-                                        task_id,
-                                    )
-                        locked_command = failure_command
-
-                    assert locked_command is not None
-                    assert tr is not None
-                    match (report, locked_command):
-                        case (
-                            WorkerLevelFailure(detail=detail),
-                            FailLockedTask(error_code=error_code),
-                        ):
-                            message = detail or 'Worker failure'
-                            attempt_outcome = 'WORKER_FAILURE'
-                            attempt_error_code = error_code
-                            attempt_error_message = message
-                            attempt_failed_reason = message
-                        case (
-                            ResultUndecodable(detail=detail),
-                            FailLockedTask(error_code=error_code),
-                        ):
-                            attempt_outcome = 'FAILED'
-                            attempt_error_code = error_code
-                            attempt_error_message = detail
-                            attempt_failed_reason = None
-                        case (
-                            ErrorProduced(error=error),
-                            FailLockedTask(error_code=error_code),
-                        ):
-                            attempt_outcome = 'FAILED'
-                            attempt_error_code = error_code
-                            attempt_error_message = error.message
-                            attempt_failed_reason = None
-                        case (ResultProduced(), CompleteLockedTask()):
-                            attempt_outcome = 'COMPLETED'
-                            attempt_error_code = None
-                            attempt_error_message = None
-                            attempt_failed_reason = None
-                        case unexpected:
-                            raise RuntimeError(
-                                'terminal report and locked command disagree: '
-                                f'{type(unexpected[0]).__name__} / '
-                                f'{type(unexpected[1]).__name__}'
-                            )
-
-                    await s.execute(
-                        UPSERT_TASK_ATTEMPT_SQL,
-                        {
-                            'task_id': task_id,
-                            'attempt': attempt_num,
-                            'outcome': attempt_outcome,
-                            'will_retry': False,
-                            'started_at': attempt_started_at,
-                            'finished_at': db_now,
-                            'error_code': attempt_error_code,
-                            'error_message': attempt_error_message,
-                            'failed_reason': attempt_failed_reason,
-                            **attempt_worker,
-                        },
-                    )
-                    applied_outcome = await apply_async(
-                        await s.connection(),
-                        locked_command,
-                    )
-                    match applied_outcome:
-                        case Applied():
-                            await s.commit()
-                            return Ok(
-                                _PersistedTaskOutcome(
-                                    result=tr,
-                                    task_name=str(ctx_row.task_name or ''),
-                                    queue_name=str(ctx_row.queue_name or 'default'),
-                                    is_workflow_task=bool(ctx_row.is_workflow_task),
-                                )
-                            )
-                        case AlreadyApplied():
-                            load_r = await self._load_persisted_task_result(
-                                task_id,
-                                session=s,
-                            )
-                            await s.rollback()
-                            if is_err(load_r):
-                                return Err(load_r.err_value)
-                            return load_r
-                        case LostClaim() | SourceStateConflict() | TaskAbsent():
-                            await s.rollback()
-                            return Ok(None)
-                        case _ as unreachable:
-                            assert_never(unreachable)
-
-            return Ok(None)
-        except Exception as exc:
-            return Err(
-                self._make_finalize_error(
-                    task_id=task_id,
-                    stage=_FINALIZE_STAGE_PHASE1,
-                    message='Failed to persist terminal task state',
-                    retryable=is_retryable_connection_error(exc),
-                    data={
-                        'exception_type': type(exc).__name__,
-                        'exception': str(exc)[:500],
-                        'outcome': {
-                            'ok': ok,
-                            'result_json_str': result_json_str,
-                            'failed_reason': failed_reason,
-                        },
                     },
                 )
+                outcome = await apply_async(await s.connection(), completion)
+                match outcome:
+                    case Applied():
+                        await s.commit()
+                        return Ok(
+                            _PersistedTaskOutcome(
+                                result=tr,
+                                task_name=str(ctx_row.task_name),
+                                queue_name=str(ctx_row.queue_name),
+                                is_workflow_task=bool(ctx_row.is_workflow_task),
+                            )
+                        )
+                    case AlreadyApplied():
+                        load_r = await self._load_persisted_task_result(
+                            task_id,
+                            session=s,
+                        )
+                        await s.rollback()
+                        return load_r
+                    case LostClaim() | SourceStateConflict() | TaskAbsent():
+                        await s.rollback()
+                        return Ok(None)
+                    case _ as unreachable:
+                        assert_never(unreachable)
+        except Exception as exc:
+            return Err(
+                self._phase1_error(
+                    task_id,
+                    'Failed to persist terminal task state',
+                    exc,
+                    child,
+                )
             )
+
+    async def _settle_locked_completion_miss(
+        self,
+        s: AsyncSession,
+        completion: CompleteLockedTask,
+        claimed_at: datetime | None,
+    ) -> Result[_PersistedTaskOutcome | None, _FinalizeError]:
+        """Classify a locked completion whose locking read matched nothing.
+
+        The advisory lock is held. ``AlreadyApplied`` reloads the persisted
+        result for the phase-2 replay; a refusal writes nothing. Database
+        errors raise.
+        """
+        miss_outcome = await classify_locked_read_miss_async(
+            await s.connection(),
+            completion,
+            claimed_at=claimed_at,
+        )
+        match miss_outcome:
+            case AlreadyApplied():
+                load_r = await self._load_persisted_task_result(
+                    completion.task_id,
+                    session=s,
+                )
+                await s.rollback()
+                return load_r
+            case LostClaim() | SourceStateConflict() | TaskAbsent():
+                await s.rollback()
+                return Ok(None)
+            case Applied():
+                await s.rollback()
+                raise RuntimeError('locked-read miss classifier returned APPLIED')
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    async def _persist_failed_attempt(
+        self,
+        failure: FailLockedTask,
+        report: WorkerLevelFailure | ResultUndecodable | ErrorProduced,
+        tr: TaskResult[Any, TaskError],
+        *,
+        claimed_at: datetime | None,
+        child: _Phase1Input,
+    ) -> Result[_PersistedTaskOutcome | None, _FinalizeError]:
+        """Phase 1 of a failed attempt: one read and one statement.
+
+        For a task error the retry facts are read first, and the policy
+        decides the retry; a worker-level failure and an undecodable result
+        are never retried, so they skip the read. ``finish_failed_attempt``
+        writes the attempt row with the retry or the terminal failure, both
+        in autocommit. The result routes phase 2: a workflow task's failure
+        and a replay of a committed failure return the persisted outcome; a
+        plain task's failure (its capacity wake is sent), a retry and a
+        refusal return ``Ok(None)``. Database errors become a phase-1 error,
+        retryable when the connection failed; its data keeps the child's
+        report for the replay.
+        """
+        task_id = failure.task_id
+        try:
+            async with self.sf() as s:
+                connection = await autocommit_connection(s)
+                match report:
+                    case ErrorProduced():
+                        retry = await self._finalize_retry_request(
+                            connection,
+                            task_id,
+                            failure.error_code,
+                            claimed_at,
+                        )
+                    case WorkerLevelFailure() | ResultUndecodable():
+                        retry = NoRetry()
+                    case _ as unreachable:
+                        assert_never(unreachable)
+                outcome = await finish_failed_attempt(
+                    connection,
+                    finish_for(
+                        failure,
+                        claimed_at=claimed_at,
+                        retry=retry,
+                        attempt=_attempt_failure_of(report),
+                    ),
+                )
+                return await self._after_failed_attempt(s, outcome, retry, tr)
+        except Exception as exc:
+            return Err(
+                self._phase1_error(
+                    task_id,
+                    'Failed to persist terminal task state',
+                    exc,
+                    child,
+                )
+            )
+
+    async def _finalize_retry_request(
+        self,
+        connection: AsyncConnection,
+        task_id: str,
+        error_code: str | None,
+        claimed_at: datetime | None,
+    ) -> RetryRequest:
+        """The retry that the policy asks for, from the unlocked read.
+
+        A row that this claim generation does not hold RUNNING gets
+        ``NoRetry``: the finish then classifies it and writes nothing.
+        Database errors raise.
+        """
+        attempt = await read_in_flight_attempt(
+            connection,
+            task_id=task_id,
+            worker_id=self.worker_instance_id,
+            claimed_at=claimed_at,
+        )
+        match attempt:
+            case RunningAttempt():
+                return retry_request_for(
+                    attempt,
+                    error_code,
+                    RetryPlacement.SAME_CLASS,
+                )
+            case ClaimedAttempt() | AttemptNotHeld():
+                return NoRetry()
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    async def _after_failed_attempt(
+        self,
+        s: AsyncSession,
+        outcome: FailedAttemptOutcome,
+        retry: RetryRequest,
+        tr: TaskResult[Any, TaskError],
+    ) -> Result[_PersistedTaskOutcome | None, _FinalizeError]:
+        """Route the outcome of a failed-attempt finish to phase 2 or to done.
+
+        Database errors of the replay read raise.
+        """
+        match outcome:
+            case FailureApplied(after=after):
+                match after:
+                    case CapacityWoken():
+                        return Ok(None)
+                    case PhaseTwoOwed(task_name=task_name, queue_name=queue_name):
+                        return Ok(
+                            _PersistedTaskOutcome(
+                                result=tr,
+                                task_name=task_name,
+                                queue_name=queue_name,
+                                is_workflow_task=True,
+                            )
+                        )
+                    case _ as unreachable:
+                        assert_never(unreachable)
+            case RetryScheduled():
+                self._wake_when_retry_due(outcome, retry)
+                return Ok(None)
+            case AlreadyApplied(task_id=task_id):
+                return await self._load_persisted_task_result(task_id, session=s)
+            case LostClaim() | SourceStateConflict() | TaskAbsent():
+                return Ok(None)
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def _phase1_error(
+        self,
+        task_id: str,
+        message: str,
+        exc: Exception,
+        child: _Phase1Input,
+    ) -> _FinalizeError:
+        """The phase-1 error of a failed write. Its data keeps the child's
+        report, which the phase-1 retry replays. Pure."""
+        return self._make_finalize_error(
+            task_id=task_id,
+            stage=_FINALIZE_STAGE_PHASE1,
+            message=message,
+            retryable=is_retryable_connection_error(exc),
+            data={
+                'exception_type': type(exc).__name__,
+                'exception': str(exc)[:500],
+                'outcome': {
+                    'ok': child.ok,
+                    'result_json_str': child.result_json_str,
+                    'failed_reason': child.failed_reason,
+                },
+            },
+        )
 
     async def _finalize_workflow_phase(
         self,

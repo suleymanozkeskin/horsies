@@ -4,8 +4,9 @@ Proves that a late-returning worker cannot overwrite a task's status after the
 reaper has already reclaimed it, and that a stale worker cannot clobber an
 attempt that was re-claimed by another worker (row RUNNING again under a new
 owner).  Each test inserts a task in RUNNING state, simulates the competing
-transition, then fires the guarded SQL and asserts the UPDATE is a no-op
-(RETURNING yields no row).
+transition, then fires the guarded statement and asserts it writes nothing.
+The failure and retry writes go through ``horsies_finish_failed_attempt``,
+whose fence is the one the locked read and the retry update carried.
 """
 
 from __future__ import annotations
@@ -22,12 +23,13 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.lifecycle.commands import (
     CompleteLockedTask,
     CompleteTaskFused,
-    FailLockedTask,
 )
 from horsies.core.lifecycle.fences import OwnedClaim, PriorLockedRead
 from horsies.core.lifecycle.outcomes import (
     Applied,
+    FailedAttemptOutcome,
     LostClaim,
+    RetryScheduled,
     SourceStateConflict,
     TerminalizationOutcome,
 )
@@ -36,14 +38,23 @@ from horsies.core.lifecycle.persistence import (
     classify_locked_read_miss_async,
 )
 from horsies.core.worker.child_runner import _mark_task_finalizing
+from horsies.core.worker.failed_attempt import (
+    AttemptFailure,
+    AttemptFailureKind,
+    FinishFailedAttempt,
+    NoRetry,
+    RetryAfter,
+    RetryRequest,
+    finish_failed_attempt,
+)
+from horsies.core.worker.shared_stop import RetryPlacement
+from horsies.core.worker.sql import (
+    LOCK_RUNNING_TASK_SQL,
+    READ_IN_FLIGHT_ATTEMPT_SQL,
+)
 from horsies.core.worker.worker import (
     _confirm_ownership_and_set_running,
     _initialize_worker_pool,
-    GET_TASK_RETRY_CONFIG_SQL,
-    GET_TASK_RETRY_INFO_SQL,
-    SCHEDULE_TASK_RETRY_SQL,
-    SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
-    SELECT_WORKER_OWNED_IN_FLIGHT_FOR_UPDATE_SQL,
     UNCLAIM_CLAIMED_TASK_SQL,
 )
 from tests.integration.conftest import compute_test_enqueue_sha
@@ -215,7 +226,7 @@ async def _complete_locked(
     )
     context = (
         await session.execute(
-            SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
+            LOCK_RUNNING_TASK_SQL,
             {'id': task_id, 'wid': worker_id, 'claimed_at': None},
         )
     ).first()
@@ -229,34 +240,39 @@ async def _complete_locked(
     return await apply_async(connection, command)
 
 
-async def _fail_locked(
+async def _fail_attempt(
     session: AsyncSession,
     task_id: str,
     *,
     worker_id: str = OWNER_WORKER_ID,
     failed_reason: str | None = None,
-) -> TerminalizationOutcome:
-    command = FailLockedTask(
-        task_id=task_id,
-        fence=PriorLockedRead(worker_id=worker_id),
-        result_json='{"err": {"error_code": "LATE"}}',
-        error_code='LATE',
-        failed_reason=failed_reason,
+    retry: RetryRequest = NoRetry(),
+) -> FailedAttemptOutcome:
+    """The failure or retry write, in the session's open transaction."""
+    return await finish_failed_attempt(
+        await session.connection(),
+        FinishFailedAttempt(
+            task_id=task_id,
+            fence=OwnedClaim(worker_id=worker_id, claimed_at=None),
+            retry=retry,
+            result_json='{"err": {"error_code": "LATE"}}',
+            error_code='LATE',
+            failed_reason=failed_reason,
+            attempt=AttemptFailure(
+                kind=AttemptFailureKind.FAILED,
+                error_message='late',
+                failed_reason=failed_reason,
+            ),
+        ),
     )
-    context = (
-        await session.execute(
-            SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
-            {'id': task_id, 'wid': worker_id, 'claimed_at': None},
-        )
-    ).first()
-    connection = await session.connection()
-    if context is None:
-        return await classify_locked_read_miss_async(
-            connection,
-            command,
-            claimed_at=None,
-        )
-    return await apply_async(connection, command)
+
+
+def _retry_after(retry_count: int) -> RetryAfter:
+    return RetryAfter(
+        retry_count=retry_count,
+        delay_s=1.0,
+        placement=RetryPlacement.SAME_CLASS,
+    )
 
 
 async def _complete_fused(
@@ -334,7 +350,7 @@ async def test_fail_guard_blocks_when_not_running(
     # Simulate reaper rescheduling a retry (RUNNING → PENDING)
     await _set_task_status(session, task_id, 'PENDING')
 
-    outcome = await _fail_locked(session, task_id)
+    outcome = await _fail_attempt(session, task_id)
 
     assert isinstance(outcome, SourceStateConflict)
     assert await _get_task_status(session, task_id) == 'PENDING', (
@@ -353,7 +369,7 @@ async def test_fail_worker_guard_blocks_when_not_running(
     # Simulate reaper intervention
     await _set_task_status(session, task_id, 'FAILED')
 
-    outcome = await _fail_locked(
+    outcome = await _fail_attempt(
         session,
         task_id,
         failed_reason='late worker failure',
@@ -367,30 +383,20 @@ async def test_retry_guard_blocks_when_not_running(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """SCHEDULE_TASK_RETRY_SQL is a no-op when task is no longer RUNNING."""
+    """The retry write is a no-op when the task is no longer RUNNING."""
     task_id = await _insert_running_task(session)
 
     # Simulate reaper already marking FAILED
     await _set_task_status(session, task_id, 'FAILED')
 
-    next_retry = datetime.now(timezone.utc)
-    result = await session.execute(
-        SCHEDULE_TASK_RETRY_SQL,
-        {
-            'id': task_id,
-            'wid': OWNER_WORKER_ID,
-            'retry_count': 1,
-            'next_retry_at': next_retry,
-        },
-    )
-    returned_row = result.fetchone()
+    outcome = await _fail_attempt(session, task_id, retry=_retry_after(0))
 
-    assert returned_row is None, (
-        'SCHEDULE_TASK_RETRY_SQL must be a no-op when status != RUNNING'
-    )
-    assert await _get_task_status(session, task_id) == 'FAILED', (
-        'Task status must remain FAILED after blocked retry'
-    )
+    assert isinstance(
+        outcome, SourceStateConflict
+    ), 'the retry write must refuse a task that is not RUNNING'
+    assert (
+        await _get_task_status(session, task_id) == 'FAILED'
+    ), 'Task status must remain FAILED after blocked retry'
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -398,24 +404,14 @@ async def test_retry_guard_succeeds_when_running(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """SCHEDULE_TASK_RETRY_SQL works normally when task IS running."""
+    """The retry write applies when the task IS running."""
     task_id = await _insert_running_task(session)
 
-    next_retry = datetime.now(timezone.utc)
-    result = await session.execute(
-        SCHEDULE_TASK_RETRY_SQL,
-        {
-            'id': task_id,
-            'wid': OWNER_WORKER_ID,
-            'retry_count': 1,
-            'next_retry_at': next_retry,
-        },
-    )
-    returned_row = result.fetchone()
+    outcome = await _fail_attempt(session, task_id, retry=_retry_after(0))
 
-    assert returned_row is not None, (
-        'SCHEDULE_TASK_RETRY_SQL must return a row when status == RUNNING'
-    )
+    assert isinstance(
+        outcome, RetryScheduled
+    ), 'the retry write must apply when status == RUNNING'
     assert await _get_task_status(session, task_id) == 'PENDING'
 
 
@@ -478,7 +474,7 @@ async def test_reaper_then_retry_race_sequence(
     Timeline:
       T=0  Task is RUNNING
       T=1  Reaper marks FAILED
-      T=2  Late worker tries SCHEDULE_TASK_RETRY_SQL → blocked
+      T=2  Late worker tries the retry write → blocked
       T=3  Assert: task is FAILED, not PENDING (retry was blocked)
     """
     task_id = await _insert_running_task(session)
@@ -487,77 +483,42 @@ async def test_reaper_then_retry_race_sequence(
     await _set_task_status(session, task_id, 'FAILED')
 
     # T=2: Late worker tries to schedule a retry
-    next_retry = datetime.now(timezone.utc)
-    retry_res = await session.execute(
-        SCHEDULE_TASK_RETRY_SQL,
-        {
-            'id': task_id,
-            'wid': OWNER_WORKER_ID,
-            'retry_count': 1,
-            'next_retry_at': next_retry,
-        },
-    )
-    assert retry_res.fetchone() is None, 'Late retry must be blocked'
+    retry_outcome = await _fail_attempt(session, task_id, retry=_retry_after(0))
+    assert isinstance(retry_outcome, SourceStateConflict), 'Late retry must be blocked'
 
     # T=3: Task must remain FAILED
     assert await _get_task_status(session, task_id) == 'FAILED'
 
 
 @pytest.mark.asyncio(loop_scope='function')
-async def test_retry_info_sql_returns_good_until_and_db_now(
+async def test_in_flight_read_returns_the_retry_facts(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """GET_TASK_RETRY_INFO_SQL should include good_until and db_now."""
-    expected_good_until = datetime.now(timezone.utc) + timedelta(seconds=60)
+    """READ_IN_FLIGHT_ATTEMPT_SQL returns the status and the retry facts."""
+    good_until = datetime.now(timezone.utc) + timedelta(seconds=60)
     task_id = await _insert_running_task_with_retry(
-        session, good_until=expected_good_until
+        session, good_until=good_until, retry_count=1
+    )
+    await session.execute(
+        text(
+            'UPDATE horsies_tasks SET claimed_by_worker_id = :wid '
+            'WHERE id = CAST(:id AS uuid)'
+        ),
+        {'id': task_id, 'wid': OWNER_WORKER_ID},
     )
 
     row = (
-        await session.execute(GET_TASK_RETRY_INFO_SQL, {'id': task_id})
-    ).fetchone()
-    assert row is not None
+        await session.execute(
+            READ_IN_FLIGHT_ATTEMPT_SQL,
+            {'id': task_id, 'wid': OWNER_WORKER_ID, 'claimed_at': None},
+        )
+    ).one()
 
-    good_until = row.good_until
-    db_now = row.db_now
-    assert good_until is not None
-    assert db_now is not None
-    if good_until.tzinfo is None:
-        good_until = good_until.replace(tzinfo=timezone.utc)
-    if db_now.tzinfo is None:
-        db_now = db_now.replace(tzinfo=timezone.utc)
-    assert abs((good_until - expected_good_until).total_seconds()) < 2.0
-    assert abs((datetime.now(timezone.utc) - db_now).total_seconds()) < 10.0
-
-
-@pytest.mark.asyncio(loop_scope='function')
-async def test_retry_config_sql_returns_good_until_and_db_now(
-    session: AsyncSession,
-    clean_workflow_tables: None,  # noqa: ARG001
-) -> None:
-    """GET_TASK_RETRY_CONFIG_SQL should include good_until and db_now."""
-    past_good_until = datetime.now(timezone.utc) - timedelta(seconds=10)
-    task_id = await _insert_running_task_with_retry(
-        session,
-        good_until=past_good_until,
-        intervals=[60],
-    )
-
-    row = (
-        await session.execute(GET_TASK_RETRY_CONFIG_SQL, {'id': task_id})
-    ).fetchone()
-    assert row is not None
-
-    good_until = row.good_until
-    db_now = row.db_now
-    assert good_until is not None
-    assert db_now is not None
-    if good_until.tzinfo is None:
-        good_until = good_until.replace(tzinfo=timezone.utc)
-    if db_now.tzinfo is None:
-        db_now = db_now.replace(tzinfo=timezone.utc)
-    assert good_until < db_now
+    assert (row.status, row.retry_count, row.max_retries) == ('RUNNING', 1, 3)
+    assert json.loads(row.task_options)['retry_policy']['auto_retry_for'] == [
+        'TRANSIENT',
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -566,29 +527,29 @@ async def test_retry_config_sql_returns_good_until_and_db_now(
 
 
 @pytest.mark.asyncio(loop_scope='function')
-async def test_context_select_blocks_on_ownership_mismatch(
+async def test_locking_read_blocks_on_ownership_mismatch(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """Context SELECT returns no row when another worker owns the RUNNING task."""
+    """The locking read returns no row when another worker owns the RUNNING task."""
     task_id = await _insert_running_task(
         session, claimed_by_worker_id=OTHER_WORKER_ID
     )
 
     row = (
         await session.execute(
-            SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
+            LOCK_RUNNING_TASK_SQL,
             {'id': task_id, 'wid': OWNER_WORKER_ID, 'claimed_at': None},
         )
     ).fetchone()
-    assert row is None, (
-        'Context SELECT must not match a RUNNING row owned by another worker'
-    )
+    assert (
+        row is None
+    ), 'The locking read must not match a RUNNING row owned by another worker'
 
     # Sanity: the actual owner still matches.
     owner_row = (
         await session.execute(
-            SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
+            LOCK_RUNNING_TASK_SQL,
             {'id': task_id, 'wid': OTHER_WORKER_ID, 'claimed_at': None},
         )
     ).fetchone()
@@ -621,12 +582,12 @@ async def test_fail_guard_blocks_on_ownership_mismatch(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """Locked failure refuses a row owned by another worker."""
+    """The failure write refuses a row owned by another worker."""
     task_id = await _insert_running_task(
         session, claimed_by_worker_id=OTHER_WORKER_ID
     )
 
-    outcome = await _fail_locked(session, task_id)
+    outcome = await _fail_attempt(session, task_id)
     assert isinstance(outcome, LostClaim)
     assert await _get_task_status(session, task_id) == 'RUNNING'
 
@@ -636,27 +597,18 @@ async def test_retry_guard_blocks_on_ownership_mismatch(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """SCHEDULE_TASK_RETRY_SQL must not flip another worker's RUNNING row to PENDING."""
+    """The retry write must not flip another worker's RUNNING row to PENDING."""
     task_id = await _insert_running_task(
         session, claimed_by_worker_id=OTHER_WORKER_ID
     )
 
-    next_retry = datetime.now(timezone.utc)
-    result = await session.execute(
-        SCHEDULE_TASK_RETRY_SQL,
-        {
-            'id': task_id,
-            'wid': OWNER_WORKER_ID,
-            'retry_count': 2,
-            'next_retry_at': next_retry,
-        },
-    )
-    assert result.fetchone() is None, (
-        'SCHEDULE_TASK_RETRY_SQL must be a no-op on ownership mismatch'
-    )
-    assert await _get_task_status(session, task_id) == 'RUNNING', (
-        'In-flight attempt of the new owner must not be requeued by a stale worker'
-    )
+    outcome = await _fail_attempt(session, task_id, retry=_retry_after(0))
+    assert isinstance(
+        outcome, LostClaim
+    ), 'the retry write must be a no-op on ownership mismatch'
+    assert (
+        await _get_task_status(session, task_id) == 'RUNNING'
+    ), 'In-flight attempt of the new owner must not be requeued by a stale worker'
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -797,16 +749,16 @@ async def test_fused_finalize_null_fence_matches_any_generation(
 
 
 @pytest.mark.asyncio(loop_scope='function')
-async def test_context_select_rejects_stale_claim_generation(
+async def test_locking_read_rejects_stale_claim_generation(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """Err-path context lock skips a row from a different claim generation."""
+    """The locking read skips a row from a different claim generation."""
     task_id = await _insert_running_task(session, claimed_at=GEN_CURRENT)
 
     stale_row = (
         await session.execute(
-            SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
+            LOCK_RUNNING_TASK_SQL,
             {'id': task_id, 'wid': OWNER_WORKER_ID, 'claimed_at': GEN_STALE},
         )
     ).fetchone()
@@ -814,7 +766,7 @@ async def test_context_select_rejects_stale_claim_generation(
 
     live_row = (
         await session.execute(
-            SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
+            LOCK_RUNNING_TASK_SQL,
             {'id': task_id, 'wid': OWNER_WORKER_ID, 'claimed_at': GEN_CURRENT},
         )
     ).fetchone()
@@ -822,16 +774,17 @@ async def test_context_select_rejects_stale_claim_generation(
 
 
 @pytest.mark.asyncio(loop_scope='function')
-async def test_worker_owned_select_rejects_stale_claim_generation(
+async def test_in_flight_read_rejects_stale_claim_generation(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """Timeout/future-failure row lock skips a row from a different generation."""
+    """The in-flight read of the failure paths skips a row from a different
+    generation."""
     task_id = await _insert_running_task(session, claimed_at=GEN_CURRENT)
 
     stale_row = (
         await session.execute(
-            SELECT_WORKER_OWNED_IN_FLIGHT_FOR_UPDATE_SQL,
+            READ_IN_FLIGHT_ATTEMPT_SQL,
             {'id': task_id, 'wid': OWNER_WORKER_ID, 'claimed_at': GEN_STALE},
         )
     ).fetchone()
@@ -839,7 +792,7 @@ async def test_worker_owned_select_rejects_stale_claim_generation(
 
     live_row = (
         await session.execute(
-            SELECT_WORKER_OWNED_IN_FLIGHT_FOR_UPDATE_SQL,
+            READ_IN_FLIGHT_ATTEMPT_SQL,
             {'id': task_id, 'wid': OWNER_WORKER_ID, 'claimed_at': GEN_CURRENT},
         )
     ).fetchone()

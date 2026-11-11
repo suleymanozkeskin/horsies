@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TypedDict, cast
 from unittest.mock import AsyncMock, MagicMock
 
+import psycopg
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -35,7 +36,7 @@ from horsies.core.worker.worker import (
 )
 from horsies.core.workflows.lifecycle import pause_workflow
 from tests.fixtures.slots.handles import task_finished_handle
-from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.conftest import DB_URL, compute_test_enqueue_sha
 from tests.integration.history_seeding import read_attempts
 
 pytestmark = [pytest.mark.integration]
@@ -78,7 +79,9 @@ async def _insert_owned_running_task(
     max_retries: int = 0,
     started_at: datetime | None = None,
     finalizing_at: datetime | None = None,
+    is_workflow_task: bool = False,
 ) -> str:
+    """A RUNNING row of ``worker_id``; a workflow task gets its node."""
     task_id = str(uuid.uuid4())
     sent_at, sha = compute_test_enqueue_sha(
         task_name='lifecycle_regression_task',
@@ -92,7 +95,7 @@ async def _insert_owned_running_task(
                  claimed, retry_count, max_retries, started_at, enqueue_sha,
                  claimed_by_worker_id, worker_hostname, worker_pid,
                  worker_process_name, task_options, finalizing_at,
-                 finalizing_by_worker_id,
+                 finalizing_by_worker_id, is_workflow_task,
                  retention_class_key, command_fingerprint_version,
                  command_fingerprint, retain_rerun_input,
                  prepared_rerun_input_disposition)
@@ -102,7 +105,7 @@ async def _insert_owned_running_task(
                  FALSE, 0, :max_retries, :started_at, :enqueue_sha,
                  :worker_id, 'itest-host', 4321,
                  'itest-process', :task_options, :finalizing_at,
-                 :finalizing_by_worker_id,
+                 :finalizing_by_worker_id, :is_workflow_task,
                  'standard_30d', 1,
                  sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
                  FALSE, 'DECLINED_BY_POLICY')
@@ -117,10 +120,46 @@ async def _insert_owned_running_task(
             'started_at': started_at or datetime.now(timezone.utc),
             'finalizing_at': finalizing_at,
             'finalizing_by_worker_id': worker_id if finalizing_at else None,
+            'is_workflow_task': is_workflow_task,
         },
     )
+    if is_workflow_task:
+        await _link_running_node(session, task_id)
     await session.commit()
     return task_id
+
+
+async def _link_running_node(session: AsyncSession, task_id: str) -> None:
+    """A RUNNING workflow and its RUNNING node backed by ``task_id``."""
+    workflow_id = str(uuid.uuid4())
+    await session.execute(
+        text("""
+            INSERT INTO horsies_workflows
+                (id, name, status, on_error, sent_at, created_at, updated_at,
+                 depth, root_workflow_id)
+            VALUES (:workflow_id, 'lifecycle-regression', 'RUNNING', 'fail',
+                    NOW(), NOW(), NOW(), 0, :workflow_id)
+        """),
+        {'workflow_id': workflow_id},
+    )
+    await session.execute(
+        text("""
+            INSERT INTO horsies_workflow_tasks
+                (id, workflow_id, task_index, node_id, task_name, task_args,
+                 task_kwargs, queue_name, priority, dependencies,
+                 allow_failed_deps, join_type, status, task_id,
+                 is_subworkflow, created_at, started_at)
+            VALUES (:node_id, :workflow_id, 0, 'node-0',
+                    'lifecycle_regression_task', '[]', '{}', 'default', 100,
+                    ARRAY[]::integer[], FALSE, 'all', 'RUNNING',
+                    CAST(:task_id AS uuid), FALSE, NOW(), NOW())
+        """),
+        {
+            'node_id': str(uuid.uuid4()),
+            'workflow_id': workflow_id,
+            'task_id': task_id,
+        },
+    )
 
 
 async def _task_row(session: AsyncSession, task_id: str) -> _TaskRow:
@@ -337,6 +376,7 @@ async def test_future_failure_terminal_phase2_error_schedules_finalize_retry(
         session,
         worker_id=worker.worker_instance_id,
         max_retries=0,
+        is_workflow_task=True,
     )
     phase2_err = worker._make_finalize_error(
         task_id=task_id,
@@ -364,11 +404,12 @@ async def test_finalize_worker_failure_runs_phase2(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """Worker-failure terminal paths return a TaskResult so phase 2 still runs."""
+    """A workflow task's worker failure returns a TaskResult so phase 2 runs."""
     worker = _make_worker(engine)
     task_id = await _insert_owned_running_task(
         session,
         worker_id=worker.worker_instance_id,
+        is_workflow_task=True,
     )
 
     phase2_calls: list[tuple[str, TaskResult[object, TaskError]]] = []
@@ -388,7 +429,7 @@ async def test_finalize_worker_failure_runs_phase2(
         handle,
         task_id,
         queue_name='default',
-        is_workflow_task=False,
+        is_workflow_task=True,
         task_name='lifecycle_regression_test',
     )
 
@@ -396,6 +437,45 @@ async def test_finalize_worker_failure_runs_phase2(
     assert len(phase2_calls) == 1
     assert phase2_calls[0][0] == task_id
     assert phase2_calls[0][1].is_err()
+    row = await _task_row(session, task_id)
+    assert row['status'] == 'FAILED'
+    assert row['error_code'] == OperationalErrorCode.BROKER_ERROR.value
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_plain_worker_failure_wakes_the_queue_in_its_write(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """A plain task owes no phase 2: the failure write sends its capacity wake."""
+    worker = _make_worker(engine)
+    task_id = await _insert_owned_running_task(
+        session,
+        worker_id=worker.worker_instance_id,
+    )
+    listener = await psycopg.AsyncConnection.connect(
+        DB_URL.replace('postgresql+psycopg://', 'postgresql://'),
+        autocommit=True,
+    )
+    try:
+        await listener.execute('LISTEN task_queue_default')
+        handle = task_finished_handle(False, '', 'bookkeeping failed')
+
+        result = await worker._finalize_after(
+            handle,
+            task_id,
+            queue_name='default',
+            is_workflow_task=False,
+            task_name='lifecycle_regression_test',
+        )
+
+        payloads = [notify.payload async for notify in listener.notifies(timeout=0.5)]
+    finally:
+        await listener.close()
+    assert is_ok(result)
+    assert f'capacity:{task_id}' in payloads
+    worker._finalize_workflow_phase.assert_not_awaited()  # type: ignore[attr-defined]
     row = await _task_row(session, task_id)
     assert row['status'] == 'FAILED'
     assert row['error_code'] == OperationalErrorCode.BROKER_ERROR.value

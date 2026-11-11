@@ -437,7 +437,7 @@ async def test_worker_failure_marks_failed(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """Generic worker failure → error TaskResult, task becomes FAILED with reason."""
+    """Generic worker failure → task becomes FAILED with reason, no phase 2."""
     task_id = await _insert_running_task(session)
     worker = _make_worker(engine)
 
@@ -453,8 +453,8 @@ async def test_worker_failure_marks_failed(
     )
 
     assert is_ok(result)
-    assert result.ok_value is not None
-    assert result.ok_value.result.is_err()
+    # A plain task owes no phase 2: the failure write sent its capacity wake.
+    assert result.ok_value is None
     status, _, failed_reason, _ = await _get_task_row(session, task_id)
     assert status == 'FAILED'
     assert failed_reason == 'Worker crash'
@@ -516,8 +516,8 @@ async def test_corrupt_json_marks_serialization_error(
     )
 
     assert is_ok(result)
-    assert result.ok_value is not None
-    assert result.ok_value.result.is_err()
+    # A plain task owes no phase 2: the failure write sent its capacity wake.
+    assert result.ok_value is None
     status, result_json, _, _ = await _get_task_row(session, task_id)
     assert status == 'FAILED'
     assert result_json is not None
@@ -546,8 +546,8 @@ async def test_invalid_task_result_structure_marks_error(
     )
 
     assert is_ok(result)
-    assert result.ok_value is not None
-    assert result.ok_value.result.is_err()
+    # A plain task owes no phase 2: the failure write sent its capacity wake.
+    assert result.ok_value is None
     status, result_json, _, _ = await _get_task_row(session, task_id)
     assert status == 'FAILED'
     assert result_json is not None
@@ -600,7 +600,7 @@ async def test_err_no_retry_marks_failed(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """Error result with no retry config → Ok(tr) with tr.is_err(), task FAILED."""
+    """Error result with no retry config → task FAILED, Ok(None)."""
     task_id = await _insert_running_task(session)  # max_retries=0
     worker = _make_worker(engine)
     result_json = _serialize_err('TRANSIENT', 'some transient error')
@@ -617,9 +617,8 @@ async def test_err_no_retry_marks_failed(
     )
 
     assert is_ok(result)
-    persisted = result.ok_value
-    assert persisted is not None
-    assert persisted.result.is_err()
+    # A plain task owes no phase 2: the failure write sent its capacity wake.
+    assert result.ok_value is None
     status, db_result, _, _ = await _get_task_row(session, task_id)
     assert status == 'FAILED'
     assert db_result == result_json
@@ -694,9 +693,8 @@ async def test_err_retry_expired_falls_through_to_failed(
     )
 
     assert is_ok(result)
-    persisted = result.ok_value
-    assert persisted is not None
-    assert persisted.result.is_err()
+    # A plain task owes no phase 2: the failure write sent its capacity wake.
+    assert result.ok_value is None
     status, db_result, _, _ = await _get_task_row(session, task_id)
     assert status == 'FAILED'
     assert db_result == result_json
