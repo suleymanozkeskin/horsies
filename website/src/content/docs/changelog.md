@@ -495,6 +495,36 @@ there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **A failed attempt, a timeout and their retry are one read and one
+  statement (schema v56).** `horsies_finish_failed_attempt` takes the task
+  advisory lock, then the row lock under the claim fence, and writes the
+  attempt row with the retry or the terminal failure. The worker reads the
+  retry facts of the attempt first, without a lock and fenced on the claim
+  generation; the retry policy and its jittered delay are decided in Python,
+  as before. Both statements run in autocommit. Counted at the wire with the
+  default `worker_pool_pre_ping=False`:
+  - a task error, a timeout or a crash, failed or retried: 2 round trips,
+    before 7 (BEGIN, the locked read, one or two reads of the retry facts,
+    the retry or the attempt row and the move, COMMIT, and the capacity wake
+    of a failed plain task);
+  - a worker-level failure or a result that does not decode, which are
+    never retried: 1 round trip, before 6.
+  With the pre-ping on, each is 1 round trip more, before 2 more.
+  - The terminal failure of a plain task sends its capacity wake in the same
+    statement, so it has no phase 2. A workflow task's failure runs phase 2
+    as before, which sends its wake. A scheduled retry still wakes its queue
+    when the retry is due.
+  - `will_retry` of the attempt row is true only when the same statement
+    wrote the retry. A retry whose next attempt would start at or after
+    `good_until` is written as the terminal failure; the log names both
+    instants. `good_until` is judged against the database clock under the
+    row lock.
+  - The retry count that the worker read is part of the fence: a write for
+    another attempt of the same task writes nothing.
+  - A replay of a committed failure (the reply was lost) writes nothing and
+    runs the phase 2 of a workflow task again; a plain task gets no second
+    wake. A replay of a committed retry writes nothing: the retry ended the
+    claim generation, so the replay is a lost claim.
 - **Breaking: worker child exit codes 74 to 76.** In 0.6.x, 74 meant only a
   forked child that does not reparent to the worker. In 0.7.0:
   - 74: a child that stopped while threads of the executor of its task loop
@@ -548,9 +578,8 @@ there is no migration contract between pre-1.0 versions.
   - Worker process: the finalize of a plain task that succeeded
     (`horsies_complete_task_fused`: attempt, history row and capacity wake in
     one call) is 1 round trip, before 4 (pre-ping, BEGIN, the call,
-    COMMIT). The claim statement, the orphan cancel, the capacity wake in
-    phase 2 of a plain task and the wake of a retry that comes due are 1
-    round trip each, before 4 each.
+    COMMIT). The claim statement, the orphan cancel and the wake of a retry
+    that comes due are 1 round trip each, before 4 each.
   - `PostgresConfig.worker_pool_pre_ping` (default `False`) sets the
     pre-ping of the worker process's engine. `pool_pre_ping` (default
     `True`) applies to the other engines only: producers, the web UI, and
@@ -573,11 +602,8 @@ there is no migration contract between pre-1.0 versions.
     `check=True` on the `pool` of a kind to check each checkout.
   - The advisory lock of `horsies_claim` ends with the claim statement. It
     was held until the COMMIT one round trip later.
-  - A failed capacity wake in phase 2 of a plain task is a phase-2 error:
-    a connection error is retried, as for a workflow task. It was dropped
-    before.
 - **The worker process writes the outcomes of plain tasks that succeeded in
-  batches.** Schema v56 adds `horsies_complete_tasks_fused`: one statement
+  batches.** Schema v57 adds `horsies_complete_tasks_fused`: one statement
   calls `horsies_complete_task_fused` once per row, in task-id order, so each
   row keeps its claim-generation check, attempt row, history move and capacity
   wake. A batch holds up to 64 rows and is one round trip; a batch of one row
@@ -814,6 +840,28 @@ there is no migration contract between pre-1.0 versions.
 
 ### Fixed
 
+- **A finalize no longer deadlocks with stale recovery or a cancel of the
+  same task.** Every move function takes the task advisory lock before the
+  row lock. The locked read of a workflow task's success, the failure paths,
+  the reaper's stale recovery and the monitoring cancel took the row lock
+  first and called a move function later, so two of them on the same task
+  could deadlock (SQLSTATE 40P01), and Postgres aborted one. All of them now
+  take the advisory lock first: the success of a workflow task reads its row
+  with `horsies_lock_running_task`, the failure paths call
+  `horsies_finish_failed_attempt`, and stale recovery and the cancel take
+  the advisory lock before their locked read.
+- **The phase 2 that advances a workflow node deletes the node's outbox
+  row.** The terminal move of a workflow task records the progression it
+  owes in `horsies_workflow_phase2_pending`. Phase 2 advanced the node and
+  left the row, so a later recovery pass consumed it as already applied. The
+  statement that writes the node now deletes the row in the same
+  transaction; a phase 2 that fails leaves it for the recovery pass.
+- **A capacity wake that the server refuses in the phase 2 of a workflow
+  task is a phase-2 error.** The wake ran in the transaction of the node
+  write, and its error was dropped before the commit. A statement that fails
+  on the server aborts the transaction, so the commit rolled the node write
+  back without an error, and phase 2 returned as if it had committed. The
+  error is now a phase-2 error with the usual retry classification.
 - **A timed-out task's row moves only after its child has exited.** At the
   deadline the worker kills the child, waits up to 30 s for its exit, and
   only then writes `TASK_TIMEOUT`, the retry and the attempt row, or requeues

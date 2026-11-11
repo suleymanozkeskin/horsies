@@ -1,6 +1,6 @@
 ---
 title: Migrating to 0.7.0
-summary: What to change to upgrade from 0.6.x to 0.7.0, in upgrade order - psycopg 3.3.7, worker profiles in place of worker flags, child pools per child kind in place of the PostgresConfig child pool fields, the snapshot interval cap, new error code cases, result waits inside a task, workflow limits, a stop of every 0.6.x worker before schema v56, exit codes, and the changes in behaviour after the upgrade.
+summary: What to change to upgrade from 0.6.x to 0.7.0, in upgrade order - psycopg 3.3.7, worker profiles in place of worker flags, child pools per child kind in place of the PostgresConfig child pool fields, the snapshot interval cap, new error code cases, result waits inside a task, workflow limits, a stop of every 0.6.x worker before schema v57, exit codes, and the changes in behaviour after the upgrade.
 related: [../changelog, ../workers/worker-profiles, ../workers/execution-modes, ../cli, ../configuration/recovery-config, migration-to-0-6-0]
 tags: [migration, 0.7.0, breaking-changes, worker, profiles, cli, schema, execution]
 ---
@@ -244,16 +244,17 @@ See [Worker Profiles](/horsies/workers/worker-profiles/) for every field and for
 
 ## Stop 0.6.x workers first
 
-The first 0.7.0 process that starts migrates the schema from v52 to v56:
+The first 0.7.0 process that starts migrates the schema from v52 to v57:
 
 - v53 adds `horsies_worker_states.slots_down`.
 - v54 adds `horsies_tasks.execution`, and builds `idx_horsies_tasks_claim_pending_class` concurrently.
-- v55 replaces the claim function with one that takes a budget per execution class, and drops the earlier one. It adds `horsies_worker_states.class_capacity`, builds `idx_horsies_tasks_claim_expired_class` concurrently, and drops `idx_horsies_tasks_claim_pending` and `idx_horsies_tasks_claim_expired_ordered` concurrently after the v55 version row commits. An upgrade that fails before that commit leaves the earlier schema version and both indexes, so the earlier claim function keeps the indexes it reads.
-- v56 adds the function `horsies_complete_tasks_fused`, which writes a batch of plain successes in one statement.
+- v55 replaces the claim function with one that takes a budget per execution class, and drops the earlier one. It adds `horsies_worker_states.class_capacity`, builds `idx_horsies_tasks_claim_expired_class` concurrently, and drops `idx_horsies_tasks_claim_pending` and `idx_horsies_tasks_claim_expired_ordered` concurrently after the version row commits. An upgrade that fails before that commit leaves the earlier schema version and both indexes, so the earlier claim function keeps the indexes it reads.
+- v56 adds `horsies_finish_failed_attempt`, which writes a failed attempt of a RUNNING task (the attempt row, then the retry or the terminal failure) in one statement, its row type `horsies_failed_attempt_outcome`, and `horsies_lock_running_task`, the locking read of a RUNNING task. Both take the task advisory lock before the row lock. No table changes.
+- v57 adds the function `horsies_complete_tasks_fused`, which writes a batch of plain successes in one statement.
 
 A 0.6.x worker that still runs fails each claim pass and exits. Stop every 0.6.x worker first, then start the 0.7.0 workers.
 
-A 0.6.x process refuses a schema newer than its own when it sets up its schema: `database schema v56 is newer than this build supports (v52)`. Upgrade the producers, the schedulers and the web UI too. Rows that a 0.6.x process writes read `ISOLATED`.
+A 0.6.x process refuses a schema newer than its own when it sets up its schema: `database schema v57 is newer than this build supports (v52)`. Upgrade the producers, the schedulers and the web UI too. Rows that a 0.6.x process writes read `ISOLATED`.
 
 ## Exit codes
 

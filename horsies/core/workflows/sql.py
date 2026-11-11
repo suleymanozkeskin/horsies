@@ -12,6 +12,7 @@ from ..history.ddl.classes import (
     resolve_retention_class_key,
 )
 from ..history.identity.fingerprint import EnqueueCommandV1
+from ..history.names import WORKFLOW_PHASE2_PENDING, WORKFLOW_PHASE2_QUARANTINE
 from ..history.periods import RetentionClassKey
 
 # -- SQL constants for start_workflow_async --
@@ -288,6 +289,14 @@ GET_SUBWORKFLOW_SUMMARIES_SQL = text("""
 # Zero rows = not a workflow task, or its workflow row is missing; the
 # caller treats both as a no-op (matches the old early returns).
 #
+# `consumed` deletes the phase-2 pending row that the task's terminal move
+# wrote, and `released` the quarantine row a pending row can point at, as
+# the consumption function does on a durable disposition. The progression
+# runs in this transaction, so the delete commits with it or not at all, and
+# a later recovery pass has nothing left to consume. Both read `found`, so
+# they run after the workflow row lock: the pending row is locked after the
+# workflow row, the order of horsies_phase2_consume.
+#
 # Lock-order invariant (N6): this statement locks the workflow row (`found`'s
 # FOR UPDATE OF w) before the workflow_task row (`upd`'s UPDATE). Every
 # transaction that locks both horsies_workflows and horsies_workflow_tasks
@@ -295,9 +304,9 @@ GET_SUBWORKFLOW_SUMMARIES_SQL = text("""
 # can deadlock against this path (Postgres aborts one side, SQLSTATE 40P01).
 # The cancel transaction (LOCK_WORKFLOW_ROW_FOR_CANCEL_SQL in
 # models/workflow/handle.py) is held to the same order.
-COMPLETE_WORKFLOW_TASK_SQL = text("""
+COMPLETE_WORKFLOW_TASK_SQL = text(f"""
     WITH found AS (
-        SELECT wt.workflow_id, wt.task_index,
+        SELECT wt.workflow_id, wt.task_index, wt.task_id,
                w.status AS wf_status, w.depth, w.root_workflow_id, w.on_error
         FROM horsies_workflow_tasks wt
         JOIN horsies_workflows w ON w.id = wt.workflow_id
@@ -312,6 +321,19 @@ COMPLETE_WORKFLOW_TASK_SQL = text("""
           AND wt.task_index = found.task_index
           AND NOT (wt.status = ANY(:terminal_states))
         RETURNING wt.task_index
+    ),
+    consumed AS (
+        DELETE FROM {WORKFLOW_PHASE2_PENDING} pending
+        USING found
+        WHERE pending.task_id = found.task_id
+          AND pending.workflow_id = found.workflow_id
+        RETURNING pending.recovery_source, pending.quarantine_task_id
+    ),
+    released AS (
+        DELETE FROM {WORKFLOW_PHASE2_QUARANTINE} quarantined
+        USING consumed
+        WHERE consumed.recovery_source = 'QUARANTINE'
+          AND quarantined.task_id = consumed.quarantine_task_id
     )
     SELECT found.workflow_id, found.task_index, found.wf_status,
            found.depth, found.root_workflow_id, found.on_error,

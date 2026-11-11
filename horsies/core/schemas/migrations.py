@@ -381,11 +381,18 @@ from horsies.core.models.tasks import Execution
 #      horsies_worker_states.class_capacity holds the capacity of each budget
 #      and the classes it serves. Nullable, no backfill: a row from an
 #      earlier worker did not record it.
-# v56: horsies_complete_tasks_fused, the batched plain-success completion.
+# v56: horsies_finish_failed_attempt writes a failed attempt of a RUNNING
+#      task in one statement: the attempt row, then the retry or the
+#      terminal failure, and the capacity NOTIFY of a plain task. It takes
+#      the task advisory lock before the row lock. Its row type is
+#      horsies_failed_attempt_outcome. horsies_lock_running_task is the
+#      locking read of a RUNNING task, with the advisory lock first. Both
+#      are dropped and created on every apply.
+# v57: horsies_complete_tasks_fused, the batched plain-success completion.
 #      It calls horsies_complete_task_fused once per row, in sorted task-id
 #      order, and returns each row at its input ordinality.
 
-SCHEMA_VERSION = 56
+SCHEMA_VERSION = 57
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,

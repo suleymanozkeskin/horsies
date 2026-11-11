@@ -564,3 +564,230 @@ def _require_payload(
             f'missing={sorted(missing)} unexpected={sorted(unexpected)}'
         )
     return payload
+
+
+# ---------------------------------------------------------------------------
+# The failed-attempt finish
+# ---------------------------------------------------------------------------
+#
+# ``horsies_finish_failed_attempt`` returns the ten shared columns and seven
+# more. A miss carries the shared classifier's row unchanged and the seven
+# columns NULL, so it decodes to the shared outcome types.
+
+
+@dataclass(frozen=True, slots=True)
+class RetryNotRequested:
+    """The caller asked for no retry: the policy declined, or was not asked."""
+
+
+@dataclass(frozen=True, slots=True)
+class RetryPastDeadline:
+    """The caller asked for a retry, and its next attempt would start at or
+    after ``good_until``, so the function wrote the terminal failure."""
+
+    next_retry_at: datetime
+    good_until: datetime
+
+
+type RetryRefusal = RetryNotRequested | RetryPastDeadline
+
+
+@dataclass(frozen=True, slots=True)
+class CapacityWoken:
+    """A plain task: the function sent its capacity wake. Nothing is owed."""
+
+
+@dataclass(frozen=True, slots=True)
+class PhaseTwoOwed:
+    """A workflow task: phase 2 advances its node and sends its capacity wake."""
+
+    task_name: str
+    queue_name: str
+
+
+type AfterFailure = CapacityWoken | PhaseTwoOwed
+
+
+@dataclass(frozen=True, slots=True)
+class FailureApplied:
+    """The terminal failure and its attempt row committed."""
+
+    task_id: str
+    terminal_at: datetime
+    observed: ObservedTaskState
+    retry: RetryRefusal
+    after: AfterFailure
+
+
+@dataclass(frozen=True, slots=True)
+class RetryScheduled:
+    """The retry and its attempt row (``will_retry``) committed.
+
+    ``retry_count`` is the count the row now holds, the number of the retry.
+    The queue is woken by the caller when the retry is due.
+    """
+
+    task_id: str
+    retry_count: int
+    next_retry_at: datetime
+    queue_name: str
+    observed: ObservedTaskState
+
+
+type FailedAttemptOutcome = (
+    FailureApplied
+    | RetryScheduled
+    | AlreadyApplied
+    | LostClaim
+    | SourceStateConflict
+    | TaskAbsent
+)
+
+_FAILED_ATTEMPT_COLUMNS: frozenset[str] = frozenset(
+    {
+        'retry_disposition',
+        'retry_count',
+        'next_retry_at',
+        'good_until',
+        'is_workflow_task',
+        'queue_name',
+        'task_name',
+    }
+)
+
+
+def decode_failed_attempt_row(row: Mapping[str, Any]) -> FailedAttemptOutcome:
+    """Decode the row of ``horsies_finish_failed_attempt``.
+
+    Raises:
+        OutcomeDecodeError: the row does not satisfy the wire contract: a
+            column is missing or unknown, or a column is set or NULL against
+            its outcome.
+    """
+    present = frozenset(row.keys())
+    expected = _ROW_COLUMNS | _FAILED_ATTEMPT_COLUMNS
+    if present != expected:
+        raise OutcomeDecodeError(
+            f'failed-attempt row shape does not match the wire contract. '
+            f'missing={sorted(expected - present)} '
+            f'unexpected={sorted(present - expected)}'
+        )
+    shared = {column: row[column] for column in _ROW_COLUMNS}
+    match row['outcome']:
+        case 'APPLIED':
+            return _decode_failure_applied(row, shared)
+        case 'RETRY_SCHEDULED':
+            return _decode_retry_scheduled(row, shared)
+        case _:
+            _require_null_columns(row, _FAILED_ATTEMPT_COLUMNS)
+            match decode_outcome_row(shared):
+                case (
+                    (
+                        AlreadyApplied()
+                        | LostClaim()
+                        | SourceStateConflict()
+                        | TaskAbsent()
+                    ) as refused
+                ):
+                    return refused
+                case Applied():
+                    raise AssertionError('APPLIED is decoded above')
+                case _ as unreachable:
+                    assert_never(unreachable)
+
+
+def _decode_failure_applied(
+    row: Mapping[str, Any],
+    shared: Mapping[str, Any],
+) -> FailureApplied:
+    _require_null_columns(row, frozenset({'retry_count'}))
+    match decode_outcome_row(shared):
+        case Applied(
+            task_id=task_id, terminal_at=terminal_at, kind=kind, observed=observed
+        ):
+            pass
+        case AlreadyApplied() | LostClaim() | SourceStateConflict() | TaskAbsent():
+            raise AssertionError('the shared decoder kept the APPLIED discriminant')
+        case _ as unreachable:
+            assert_never(unreachable)
+    if kind is not TerminalizationKind.FAIL_RUNNING:
+        raise OutcomeDecodeError(
+            f'failed-attempt APPLIED carries kind {kind.value}, not FAIL_RUNNING'
+        )
+    return FailureApplied(
+        task_id=task_id,
+        terminal_at=terminal_at,
+        observed=observed,
+        retry=_decode_retry_refusal(row),
+        after=_decode_after_failure(row),
+    )
+
+
+def _decode_retry_refusal(row: Mapping[str, Any]) -> RetryRefusal:
+    match row['retry_disposition']:
+        case 'NOT_REQUESTED':
+            _require_null_columns(row, frozenset({'next_retry_at', 'good_until'}))
+            return RetryNotRequested()
+        case 'PAST_DEADLINE':
+            return RetryPastDeadline(
+                next_retry_at=_require_datetime(row, 'next_retry_at'),
+                good_until=_require_datetime(row, 'good_until'),
+            )
+        case unknown:
+            raise OutcomeDecodeError(f'unknown retry_disposition {unknown!r}')
+
+
+def _decode_after_failure(row: Mapping[str, Any]) -> AfterFailure:
+    match row['is_workflow_task']:
+        case True:
+            return PhaseTwoOwed(
+                task_name=_require_str(row, 'task_name'),
+                queue_name=_require_str(row, 'queue_name'),
+            )
+        case False:
+            return CapacityWoken()
+        case unknown:
+            raise OutcomeDecodeError(
+                f'is_workflow_task must be a boolean, got {type(unknown).__name__}'
+            )
+
+
+def _decode_retry_scheduled(
+    row: Mapping[str, Any],
+    shared: Mapping[str, Any],
+) -> RetryScheduled:
+    _require_null_columns(
+        row,
+        frozenset(
+            {
+                'terminal_at',
+                'terminalization_kind',
+                'guard_kind',
+                'observed_guard',
+                'retry_disposition',
+                'good_until',
+                'is_workflow_task',
+                'task_name',
+            }
+        ),
+    )
+    return RetryScheduled(
+        task_id=_require_identity_text(shared, 'task_id'),
+        retry_count=_require_int(row, 'retry_count'),
+        next_retry_at=_require_datetime(row, 'next_retry_at'),
+        queue_name=_require_str(row, 'queue_name'),
+        observed=ObservedTaskState(
+            status=_optional_status(shared, 'observed_status'),
+            worker_id=_optional_str(shared, 'observed_worker_id'),
+            claimed_at=_optional_datetime(shared, 'observed_claimed_at'),
+        ),
+    )
+
+
+def _require_null_columns(row: Mapping[str, Any], columns: frozenset[str]) -> None:
+    populated = sorted(column for column in columns if row[column] is not None)
+    if populated:
+        raise OutcomeDecodeError(
+            f'{row["outcome"]} row carries columns its outcome does not set: '
+            f'{populated}'
+        )

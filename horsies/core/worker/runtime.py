@@ -41,7 +41,6 @@ __all__ = [
     'ChildStartFailedError',
     '_RetryBackoff',
     '_FinalizeError',
-    '_RetryError',
     '_RequeueOutcome',
     '_TimeoutSettled',
     '_TimeoutWriteFailed',
@@ -123,23 +122,6 @@ class _FinalizeError:
     error_code: BuiltInTaskCode | str
     message: str
     stage: FinalizeStage
-    task_id: str
-    retryable: bool = False
-    data: dict[str, Any] | None = None
-
-
-@dataclass(frozen=True)
-class _RetryError:
-    """DB failure while deciding or persisting a task retry.
-
-    Owned by the retry concern; callers translate it into their own error
-    domain at the seam (finalize -> _FinalizeError, dispatch recovery ->
-    _RequeueOutcome.DB_ERROR). ``retryable`` reports whether the underlying
-    failure was a transient connection error.
-    """
-
-    error_code: BuiltInTaskCode | str
-    message: str
     task_id: str
     retryable: bool = False
     data: dict[str, Any] | None = None

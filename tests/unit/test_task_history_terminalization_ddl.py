@@ -32,6 +32,7 @@ from horsies.core.history.terminalization.move import (
     disposition_case_expression,
     disposition_if_chain,
     expiry_family_fragments,
+    failed_attempt_fragments,
     failure_family_fragments,
     terminal_snapshot_replacement_ddl,
     workflow_node_family_fragments,
@@ -179,6 +180,7 @@ class TestLockOrderInvariant:
         [
             *completion_family_fragments()[2:],
             *failure_family_fragments(),
+            failed_attempt_fragments()[1],
             expiry_family_fragments()[0],
             *cancellation_family_fragments()[:2],
             *workflow_node_family_fragments()[:2],
