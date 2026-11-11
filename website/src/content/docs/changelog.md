@@ -576,6 +576,25 @@ there is no migration contract between pre-1.0 versions.
   - A failed capacity wake in phase 2 of a plain task is a phase-2 error:
     a connection error is retried, as for a workflow task. It was dropped
     before.
+- **The worker process writes the outcomes of plain tasks that succeeded in
+  batches.** Schema v56 adds `horsies_complete_tasks_fused`: one statement
+  calls `horsies_complete_task_fused` once per row, in task-id order, so each
+  row keeps its claim-generation check, attempt row, history move and capacity
+  wake. A batch holds up to 64 rows and is one round trip; at most 2 batch
+  statements of a worker run at once, each on a connection of the worker pool.
+  - There is no timer. A lone row is written at once; the rows that come while
+    both statements run form the next batch.
+  - A finalizer ends, and frees its seat, only after the statement of its
+    batch returned.
+  - A row that the server refuses (for example, no history partition for its
+    retention class) refuses the whole statement. The batch is then written
+    row by row, once each: the other rows commit, and the refused row takes a
+    phase-1 error. A lost reply or a broken connection is a retryable error
+    for each row of the batch; the retry finds a committed row already
+    applied.
+  - At a stop, the batcher closes after the finalizers and writes the queued
+    rows, for at most 10 seconds. A row that it does not write stays RUNNING
+    and goes to stale RUNNING recovery.
 - **A schema upgrade keeps each claim and recovery index whose form
   matches.** An index whose catalog form matches its declaration is kept. One
   of another form, or an invalid one, is built concurrently under a temporary
