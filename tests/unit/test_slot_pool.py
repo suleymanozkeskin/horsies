@@ -993,6 +993,67 @@ class TestRealChildBootCauses:
 
         assert isinstance(await self._start(app_file), Ok)
 
+    @pytest.mark.parametrize(
+        ('hooks', 'thread'),
+        [
+            ('', 'a thread of the connection pool'),
+            (
+                'app.on_child_process_start(lambda: None)\n',
+                "the watchdog of start hook '<lambda>'",
+            ),
+        ],
+        ids=['pool', 'hook-watchdog'],
+    )
+    async def test_a_slot_whose_threads_are_refused_is_down_while_another_serves(
+        self,
+        tmp_path: Path,
+        hooks: str,
+        thread: str,
+    ) -> None:
+        """The child of slot 1 starts its control thread, then the OS refuses
+        each next thread, as at a thread limit: the watchdog of a start hook,
+        or the threads of the connection pool. The cause can clear, so only
+        slot 1 is down, and the worker starts on slot 0."""
+        app_file = tmp_path / 'refusing_app.py'
+        app_file.write_text(VALID_APP + REFUSE_THREADS_IN_SLOT_1 + hooks)
+        pool = SlotPool(
+            _config(2, init=_init(f'{app_file}:app'), child_entry=slots.CHILD_ENTRY),
+            pending_limit=10,
+        )
+        try:
+            started = await asyncio.wait_for(pool.start(), 3 * OUTCOME_TIMEOUT_S)
+
+            match started:
+                case Ok(baselines):
+                    assert len(baselines) == 1
+                case Err(failure):
+                    raise AssertionError(failure)
+            assert isinstance(pool.states()[0], Idle)
+            match pool.states()[1]:
+                case Down(cause=ThreadStartRefused(), detail=detail):
+                    assert detail == f"RuntimeError: {thread}: can't start new thread"
+                case other:
+                    raise AssertionError(other)
+            assert pool._failure is None
+        finally:
+            await pool.stop(0)
+
+
+# Appended to an app module: in the child of slot 1, each thread that starts
+# after the import is refused, as at a thread limit of the process.
+REFUSE_THREADS_IN_SLOT_1 = """
+import multiprocessing
+import threading
+
+
+def _refuse(_thread: threading.Thread) -> None:
+    raise RuntimeError("can't start new thread")
+
+
+if multiprocessing.current_process().name.endswith('-1'):
+    threading.Thread.start = _refuse
+"""
+
 
 class TestDownSlotRules:
     """Pure rules of a slot that is down."""

@@ -24,6 +24,7 @@ from horsies.core.models.boot_failure import (
     ShortageErrno,
     TaskLoopCreateFailed,
     ThreadStartRefused,
+    ThreadStartRefusedError,
 )
 from horsies.core.types.result import Err, Ok
 from horsies.core.worker import child_main
@@ -1072,6 +1073,22 @@ class TestBootFailureFromException:
         assert frame.cause == step
         assert frame.error_name == type(exc).__name__
         assert frame.detail == str(exc)
+
+    @pytest.mark.parametrize('step', [AppLoadFailed(), ChildPoolSetupFailed()])
+    def test_a_refused_thread_of_a_boot_step_is_thread_start_refused(
+        self,
+        step: AppLoadFailed | ChildPoolSetupFailed,
+    ) -> None:
+        """The step that raised does not decide: a refused thread can clear,
+        whichever step started it."""
+        refusal = RuntimeError("can't start new thread")
+        exc = ThreadStartRefusedError('a thread of the connection pool', refusal)
+
+        assert child_main.boot_failure_from_exception(exc, step) == boot_failed_frame(
+            ThreadStartRefused(),
+            'RuntimeError',
+            "a thread of the connection pool: can't start new thread",
+        )
 
     def test_a_refused_control_thread_is_thread_start_refused(
         self,

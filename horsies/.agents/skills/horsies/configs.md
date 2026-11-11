@@ -382,7 +382,7 @@ Failures stay with one task:
   no report, not ready in 120 s) uses one of 3 attempts, then the worker exits
   non-zero. A failed `on_child_process_start` hook stops the worker at once.
 - A cause that can clear (`OSError` EMFILE / ENFILE / ENOMEM / EAGAIN, an
-  event loop that cannot be created, a refused control thread or spawn) takes
+  event loop that cannot be created, a refused thread or spawn) takes
   only that slot down: it takes no task, the claim budget leaves it out, and it
   boots again after 1, 2, 4 ... up to 60 s. It uses an attempt only when every
   other slot is down too. The worker starts degraded when one child is ready

@@ -18,6 +18,7 @@ from pydantic import SecretStr
 from horsies.core.app import Horsies
 from horsies.core.errors import ConfigurationError, ErrorCode
 from horsies.core.models.app import AppConfig
+from horsies.core.models.boot_failure import ThreadStartRefusedError
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.worker import child_runner, shared_runner
 from horsies.core.worker.child_runner import (
@@ -224,6 +225,29 @@ class TestRunChildStartHooks:
         # Give a cancelled-timer misfire a moment to surface before asserting.
         time.sleep(0.3)
         assert exit_codes == []
+
+    def test_a_refused_watchdog_is_a_refused_thread_and_runs_no_hook(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The OS refuses the watchdog of the hook. The boot names that a
+        thread was refused, not a failed hook, and the hook does not run
+        without its bound."""
+        app = _make_app()
+        calls: list[str] = []
+        app.on_child_process_start(lambda: calls.append('ran'))
+
+        def refuse(_thread: threading.Thread) -> None:
+            raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr(threading.Thread, 'start', refuse)
+
+        with pytest.raises(ThreadStartRefusedError) as raised:
+            _run_child_start_hooks(app)
+
+        assert str(raised.value.refusal) == "can't start new thread"
+        assert raised.value.thread.startswith('the watchdog of start hook')
+        assert calls == []
 
 
 class TestSharedAsyncHookRegistration:

@@ -16,6 +16,8 @@ from typing import Any, Final
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool, ConnectionPool
 
+from horsies.core.models.boot_failure import ThreadStartRefusedError
+
 CHILD_POOL_MAX_LIFETIME_S: Final = 300.0
 """Each pooled connection of a child is replaced after this time."""
 
@@ -76,9 +78,11 @@ def _initialize_worker_pool(
 
     Raises:
         ValueError: invalid pool sizing.
+        ThreadStartRefusedError: the OS refused a thread of the pool. The
+            boot names the cause ``ThreadStartRefused``.
         Exception: conninfo parse errors raise from the constructor — in
             production out of the child initializer, killing the child.
-            Connection failures do NOT raise here: ``open=True`` starts the
+            Connection failures do NOT raise here: the open starts the
             pool without connecting (min_size defaults to 0), so an
             unreachable database surfaces at first acquisition as a
             PoolTimeout inside task pre-flight / heartbeat containment.
@@ -96,16 +100,23 @@ def _initialize_worker_pool(
     # trip (a full RTT on remote links); callers' statement-level error
     # containment then absorbs the rare stale connection instead.
     check = ConnectionPool.check_connection if check_on_checkout else None
-    _worker_pool = ConnectionPool(
+    pool: ConnectionPool = ConnectionPool(
         database_url,
         min_size=min_size,
         max_size=max_size,
         max_lifetime=CHILD_POOL_MAX_LIFETIME_S,
         check=check,
-        open=True,
+        open=False,
         timeout=CHILD_POOL_CONNECTION_WAIT_S,
         kwargs=dict(connect_kwargs) if connect_kwargs else {},
     )
+    # The open starts the threads of the pool, and starts nothing else that
+    # raises RuntimeError: such an error is a refused thread start.
+    try:
+        pool.open()
+    except RuntimeError as exc:
+        raise ThreadStartRefusedError('a thread of the connection pool', exc) from exc
+    _worker_pool = pool
     atexit.register(_cleanup_worker_pool)
 
 

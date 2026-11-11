@@ -350,10 +350,12 @@ there is no migration contract between pre-1.0 versions.
     `on_child_process_start` hook still stops the worker at once.
   - A cause that can clear takes only that slot down: `OSError` with
     `EMFILE`, `ENFILE`, `ENOMEM` or `EAGAIN` in a start step, an event loop
-    for `async def` tasks that cannot be created, a control thread that the
-    OS refuses, or a spawn that the OS refuses. Before, each of these used an
-    attempt, and the worker stopped after three, also while other children
-    served tasks. A spawn refusal stopped the worker at once.
+    for `async def` tasks that cannot be created, a thread that the OS
+    refuses at the start (the control thread, the watchdog of a start hook, a
+    thread of the connection pool), or a spawn that the OS refuses. Before,
+    each of these used an attempt, and the worker stopped after three, also
+    while other children served tasks. A spawn refusal stopped the worker at
+    once.
   - A slot that is down takes no task, and the claim passes only the slots
     that are not down as the worker's process count. The worker starts a new
     child for that slot after 1 second, then 2, 4, up to 60 seconds, and

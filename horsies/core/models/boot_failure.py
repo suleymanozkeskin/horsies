@@ -101,10 +101,27 @@ class TaskLoopCreateFailed:
 
 @dataclass(frozen=True, slots=True)
 class ThreadStartRefused:
-    """The OS refused the thread that reads frames from the worker.
+    """The OS refused a thread that the child starts at boot: the thread
+    that reads frames from the worker, the watchdog of a start hook, a thread
+    of the connection pool, or a writer, watchdog or seat thread of a shared
+    child.
 
     This cause can clear.
     """
+
+
+class ThreadStartRefusedError(RuntimeError):
+    """A boot step could not start a thread. ``thread`` names the thread, and
+    ``refusal`` is the ``RuntimeError`` that ``Thread.start`` raised.
+
+    A boot step raises this in place of that error, so the boot names the
+    cause ``ThreadStartRefused`` and not the cause of the step.
+    """
+
+    def __init__(self, thread: str, refusal: RuntimeError) -> None:
+        super().__init__(f'{thread}: {refusal}')
+        self.thread = thread
+        self.refusal = refusal
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,7 +183,7 @@ def describe_boot_cause(cause: ModelBootCause) -> str:
         case TaskLoopCreateFailed():
             return 'the child could not create the event loop for async tasks'
         case ThreadStartRefused():
-            return 'the OS refused the control thread of the child'
+            return 'the OS refused a thread of the child'
         case SpawnFailed():
             return 'the OS refused to start the child process'
         case _ as unreachable:

@@ -46,6 +46,7 @@ from horsies.core.codec.validation_errors import ValueValidationError, exception
 _ENGINE_KEY_WORKFLOW_CTX = '__h_workflow_ctx__'
 _ENGINE_KEY_WORKFLOW_META = '__h_workflow_meta__'
 _ENGINE_KEY_TASKRESULT_ENVELOPE = '__h_taskresult_envelope__'
+from horsies.core.models.boot_failure import ThreadStartRefusedError
 from horsies.core.models.tasks import (
     MAX_CANCEL_GRACE_MS,
     MAX_TASK_TIMEOUT_MS,
@@ -329,6 +330,32 @@ def _exit_for_hung_hook(hook_name: str) -> None:
     os._exit(CHILD_HOOK_FAILURE_EXIT_CODE)
 
 
+def start_hook_watchdog(hook_name: str) -> threading.Timer:
+    """Start the thread that ends the process when the start hook
+    ``hook_name`` runs longer than ``CHILD_HOOK_TIMEOUT_SECONDS``.
+
+    The caller cancels the returned timer when the hook returns.
+
+    Raises:
+        ThreadStartRefusedError: the OS refused the thread. The hook has
+            not run then.
+    """
+    watchdog = threading.Timer(
+        CHILD_HOOK_TIMEOUT_SECONDS,
+        _exit_for_hung_hook,
+        args=(hook_name,),
+    )
+    watchdog.daemon = True
+    try:
+        watchdog.start()
+    except RuntimeError as exc:
+        raise ThreadStartRefusedError(
+            f'the watchdog of start hook {hook_name!r}',
+            exc,
+        ) from exc
+    return watchdog
+
+
 def _run_child_start_hooks(app: Horsies) -> None:
     """Run app-registered child-start hooks; any failure is terminal.
 
@@ -337,16 +364,15 @@ def _run_child_start_hooks(app: Horsies) -> None:
     logs the hook name and exits with CHILD_HOOK_FAILURE_EXIT_CODE, which
     the parent recognizes and stops the worker rather than restart-looping.
     Best-effort work belongs inside the hook's own try/except.
+
+    Raises:
+        ThreadStartRefusedError: the OS refused the watchdog of a hook,
+            before that hook ran. The boot names the cause
+            ``ThreadStartRefused``.
     """
     for hook in app.get_child_process_start_hooks():
         hook_name = getattr(hook, '__qualname__', repr(hook))
-        watchdog = threading.Timer(
-            CHILD_HOOK_TIMEOUT_SECONDS,
-            _exit_for_hung_hook,
-            args=(hook_name,),
-        )
-        watchdog.daemon = True
-        watchdog.start()
+        watchdog = start_hook_watchdog(hook_name)
         try:
             hook()
         except BaseException as exc:

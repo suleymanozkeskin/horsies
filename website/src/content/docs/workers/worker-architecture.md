@@ -388,7 +388,7 @@ A child that cannot start reports the cause of the failure to the worker, before
 | An `on_child_process_start` [hook](/horsies/workers/child-process-hooks/) fails | Repeats | Stops the worker at once |
 | A boot step fails with `OSError` `EMFILE`, `ENFILE`, `ENOMEM` or `EAGAIN` (`ResourceShortage`) | Can clear | Takes the slot down |
 | The child cannot create its event loop for `async def` tasks (`TaskLoopCreateFailed`) | Can clear | Takes the slot down |
-| The OS refuses the control thread of the child (`ThreadStartRefused`) | Can clear | Takes the slot down |
+| The OS refuses a thread that the child starts at boot: the control thread, the watchdog of a start hook, a thread of the connection pool (`ThreadStartRefused`) | Can clear | Takes the slot down |
 | The OS refuses to start the child process (`SpawnFailed`) | Can clear | Takes the slot down |
 
 A child that dies with no report names no cause, so the worker counts it as a cause that repeats. The worker cannot tell a crash that clears from a crash in the code. Counting it stops a worker whose code crashes at every start, instead of keeping a slot down with no end.
