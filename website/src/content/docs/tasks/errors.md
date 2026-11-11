@@ -15,7 +15,7 @@ Runtime errors are returned via `TaskResult[T, TaskError]`. The `TaskError.error
 
 When a task reaches a terminal `FAILED` state with a `TaskResult(err=TaskError(...))`, the `error_code` is persisted to `horsies_tasks.error_code` for queryability. This column is `NULL` for successful and non-terminal tasks. Worker/process failures synthesize a `TaskResult(err=TaskError(...))` where possible, so `WORKER_CRASHED` and serialization failures are queryable. Access it via `TaskInfo.error_code` from `handle.info()`.
 
-Each execution attempt is also recorded in `horsies_task_attempts` with per-attempt `error_code`, `error_message`, and outcome. See [Retrieving Results](retrieving-results#task-metadata-and-attempt-history) for API usage.
+Each execution attempt is also recorded in `horsies_task_attempts` with per-attempt `error_code`, `error_message`, and outcome. See [Retrieving Results](/horsies/tasks/retrieving-results/#task-metadata-and-attempt-history) for API usage.
 
 ### TaskError
 
@@ -151,7 +151,7 @@ Three broker methods return a subset of `BrokerOperationError`, their only failu
 | `LOOP_RUNNER_FAILED` | A sync method could not run the call on the broker's sync runner: the runner is stopped, its thread did not start, or scheduling failed. Nothing ran. `close()` and `close_async()` stop the runner, and a stopped runner does not start again: call the `*_async` form or use a new broker | No |
 | `NO_TYPE_AVAILABLE` | Typed decode at the `app` layer needs an `ok_type`, but `task_name` is not in the local task registry | No |
 | `INVALID_JSON_PAYLOAD` | Stored result JSON is malformed, not a JSON object, has an invalid strict-serde envelope, or fails app-level typed slot decode | No |
-| `INVALID_TASK_OPTIONS` | `enqueue_async` received task options that are not valid JSON, or a `retry_policy` that does not validate as `RetryPolicy` (strict types, no unknown fields). The message names each failing field. Nothing was written | No |
+| `INVALID_TASK_OPTIONS` | `enqueue_async` received task options that are not valid JSON or not a JSON object, a `retry_policy` that does not validate as `RetryPolicy` (strict types, no unknown fields), an `execution` that is not an `Execution` value, or a `cancel_grace_ms` that does not fit the class (100 to 10,000 ms for `SHARED_ASYNC`, absent or null for the others). The message names each failing field. Nothing was written | No |
 | `INVALID_INPUT` | An argument was refused before anything ran: a non-positive `timeout_seconds`, `min_responses` or history `limit`, a `target_worker_id` that is not a string, both `enqueued_at` and `enqueue_delay_seconds`, a future `sent_at` without either, a naive `sent_at`, `enqueued_at` or `good_until`, malformed args or kwargs JSON, args that are not null or an empty array, kwargs that are not an object or null, an empty task or queue name, a priority outside 1..100, a negative `enqueue_delay_seconds`, an empty `retention_class_key`, or an idempotency key that is empty or over 255 bytes. Nothing was written | No |
 | `LISTENER_DISABLED` | The broker was built with `assume_initialized=True` and has no listener, so `ping_workers` cannot run. Nothing ran | No |
 | `WAIT_INSIDE_TASK` | A raw result read (`app.get_raw_result()`, `broker.get_raw_result_record()` or an `*_async` form) was called in a worker child, where task bodies run. Nothing ran. Compose the tasks with a workflow: see [Waiting for a Result Inside a Task](/horsies/concepts/result-handling/#waiting-for-a-result-inside-a-task) | No |
@@ -223,7 +223,7 @@ Send errors are returned via `TaskSendResult[TaskHandle[T]]` from `.send()`, `.s
 
 #### TaskSendError
 
-`TaskSendError` is a union with one frozen variant per `TaskSendErrorCode` member. Each variant has only the fields of its failure, and `err.code` names its member. Match on the variant; a `match` that omits a variant fails pyright's exhaustiveness check. The handling pattern is in [Sending Tasks](./sending-tasks#retrying-failed-sends).
+`TaskSendError` is a union with one frozen variant per `TaskSendErrorCode` member. Each variant has only the fields of its failure, and `err.code` names its member. Match on the variant; a `match` that omits a variant fails pyright's exhaustiveness check. The handling pattern is in [Sending Tasks](/horsies/tasks/sending-tasks/#retrying-failed-sends).
 
 | Variant | `code` | Fields |
 | ------- | ------ | ------ |
@@ -419,7 +419,7 @@ session_database_url appears to be transaction-pooled; LISTEN notification was n
 `LISTEN` + `NOTIFY` behavior probe did not deliver a notification. Use a direct
 Postgres URL or a session-pooling URL for `session_database_url`.
 
-See [PgBouncer Troubleshooting](../troubleshooting/pgbouncer) for the full
+See [PgBouncer Troubleshooting](/horsies/troubleshooting/pgbouncer/) for the full
 deployment pattern.
 
 ### Reserved Built-In Code Enforcement

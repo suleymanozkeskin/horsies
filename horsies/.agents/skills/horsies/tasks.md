@@ -70,7 +70,7 @@ Returns `TaskFunction[P, T]` for a `def` function, and `AsyncTaskFunction[P, T]`
 
 ### Async tasks
 
-- A worker child runs one task at a time, `def` or `async def`. The same RUNNING update, heartbeats, `timeout_ms` kill, recovery and retry policy apply.
+- This section is about `Execution.ISOLATED` (the default). An isolated child runs one task at a time, `def` or `async def`. The same RUNNING update, heartbeats, `timeout_ms` kill, recovery and retry policy apply. A `SHARED_ASYNC` task runs as described under Shared async tasks.
 - Each child keeps one event loop until the child stops. An `async def` task runs on it, so an async client that a module keeps stays open across the tasks of one child.
 - The loop runs only while an `async def` task runs. A `def` task runs with no running event loop and can call `asyncio.run()`. While the child runs a `def` task or waits for its next task, the timers of a module-level async client (a keepalive, a pool maintenance task) do not run.
 - An `async def` task must await the work that it starts. When it ends and asyncio tasks that it started (`asyncio.create_task()`) are still on the loop, the worker replaces the child after that task, and the next task runs in a new child. The old child cancels that work when it stops, within 5 seconds. A client that keeps its own background tasks on the loop (a keepalive, a consumer) causes a replacement after each async task. Only asyncio tasks are seen: a `loop.call_soon()` / `loop.call_later()` callback, or `loop.run_in_executor()` work that the task did not await, causes no replacement and can still run during a later task of the same child.

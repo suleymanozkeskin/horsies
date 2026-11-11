@@ -316,7 +316,7 @@ configuration snapshot, refreshed with each snapshot:
   `errors`, and per case the rows selected, refusals and errors. The
   top-level `errors` adds every case and the failures that no case counted.
   `failures_counted` and `limit_reached` per case show the
-  [recovery limit](../configuration/recovery-config#workflow-recovery-limit).
+  [recovery limit](/horsies/configuration/recovery-config/#workflow-recovery-limit).
   `over_failure_limit` counts the `RUNNING` workflows at or over the limit:
   a live node holds such a workflow, and so does a limit write that fails.
 
@@ -324,8 +324,8 @@ configuration snapshot, refreshed with each snapshot:
 children, so per-child memory growth is invisible there; `children_memory_mb`
 captures it. The platform memory quota (e.g. Heroku R14) is measured against the
 whole process tree. `children_memory_mb` sums RSS, so with a
-[preload parent](../workers/worker-architecture#preload-parent) it counts each
+[preload parent](/horsies/workers/worker-architecture/#preload-parent) it counts each
 shared page once per child, and it reads above real use. Use it to see one child
 grow, and read the container or cgroup total for the footprint that the quota
 enforces. To bound it, see
-[process recycling](../workers/concurrency#process-recycling).
+[process recycling](/horsies/workers/concurrency/#process-recycling).

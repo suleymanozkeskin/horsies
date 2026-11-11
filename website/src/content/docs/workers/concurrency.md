@@ -8,7 +8,7 @@ tags: [workers, concurrency, claiming, limits]
 ## Operational Notes
 
 - **Priority ordering:** Priority holds within one execution class. Each (queue, class) is its own claim stream in `(priority, enqueued_at, id)` order. A budget that claims more than one class reads the merge of their streams in that order. Two budgets do not compare priorities: a high-priority `SHARED_ASYNC` row does not take a seat from an `ISOLATED` row. Within the same priority, FIFO ordering uses `enqueued_at`. When many tasks share the same timestamp, ordering can appear non-deterministic.
-- **Soft-cap overshoot:** With `prefetch_buffer > 0`, queue concurrency counts only RUNNING tasks; buffered CLAIMED tasks are invisible to the cap and are dispatched without a re-check. A queue's RUNNING count can therefore exceed its nominal cap, the excess lasts for the duration of those tasks (not just the claim pass), and with multiple workers each pass grants against the same RUNNING snapshot — N workers can reach up to N × cap RUNNING, bounded by their aggregate process slots. Use hard cap mode (`prefetch_buffer = 0`) where the cap must hold strictly.
+- **Soft-cap overshoot:** With `prefetch_buffer > 0`, queue concurrency counts only RUNNING tasks; buffered CLAIMED tasks are invisible to the cap and are dispatched without a re-check. A queue's RUNNING count can therefore exceed its nominal cap, the excess lasts for the duration of those tasks (not just the claim pass), and with multiple workers each pass grants against the same RUNNING snapshot — N workers can reach up to N × cap RUNNING, bounded by their aggregate seats. Use hard cap mode (`prefetch_buffer = 0`) where the cap must hold strictly.
 - **Claim leases:** In soft-cap mode, claims can expire and be reclaimed. Workers must verify ownership before running user code.
 
 ## Concurrency Levels
@@ -27,7 +27,7 @@ tags: [workers, concurrency, claiming, limits]
 │  │  ┌─────────────────────────────────────────────┐  │  │
 │  │  │  Per-Worker Concurrency                     │  │  │
 │  │  │  Max concurrent tasks per worker            │  │  │
-│  │  │  (equals the children of the profile)       │  │  │
+│  │  │  (equals the seats of the profile)          │  │  │
 │  │  └─────────────────────────────────────────────┘  │  │
 │  └───────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────┘
@@ -35,7 +35,7 @@ tags: [workers, concurrency, claiming, limits]
 
 ## Worker-Level: Children
 
-Each worker runs the children of its [worker profile](worker-profiles):
+Each worker runs the children of its [worker profile](/horsies/workers/worker-profiles/):
 
 ```python
 eight_children = WorkerProfile(isolated=IsolatedChildren(count=8))
@@ -48,7 +48,7 @@ horsies worker myapp.instance:app --profile default
 - Limits concurrent task execution on this worker
 - Each isolated child handles one task at a time
 - `count` is required, from 1 to 1024
-- A shared async child handles up to `seats` `SHARED_ASYNC` tasks at once, and a shared thread child up to `seats` `SHARED_THREAD` tasks. The tasks of a worker at once are its seats: one per isolated child, and `seats` per shared child. See [Shared Async Tasks](shared-async-tasks) and [Shared Thread Tasks](shared-thread-tasks)
+- A shared async child handles up to `seats` `SHARED_ASYNC` tasks at once, and a shared thread child up to `seats` `SHARED_THREAD` tasks. The tasks of a worker at once are its seats: one per isolated child, and `seats` per shared child. See [Shared Async Tasks](/horsies/workers/shared-async-tasks/) and [Shared Thread Tasks](/horsies/workers/shared-thread-tasks/)
 
 ## Process Recycling
 
@@ -93,7 +93,7 @@ smooth (no synchronized restart).
 
 ### Child startup
 
-On Linux, a [preload parent](worker-architecture#preload-parent) forks each child,
+On Linux, a [preload parent](/horsies/workers/worker-architecture/#preload-parent) forks each child,
 so a recycle costs milliseconds and children share library pages. With `exec`,
 which other platforms always use, each child is a new Python interpreter that
 imports everything: a recycle then costs a full import.
@@ -105,7 +105,7 @@ child connection pool. On Linux a preload parent makes that start cheap: with 10
 no-op tasks and 8 children, `N=100` drains 803 tasks/s against 853 with recycling
 off. With `exec` the same test drains 437 against 819. Pick the **highest N whose
 peak memory stays under the platform quota**. Use the `children_memory_mb` column in
-[worker health](../monitoring/worker-health) snapshots to watch growth — it reports
+[worker health](/horsies/monitoring/worker-health/) snapshots to watch growth — it reports
 the summed RSS of the worker's children, which the parent-only `memory_usage_mb`
 metric does not capture. With preload, that sum counts shared pages once per child,
 so size against the container or cgroup total.
@@ -203,7 +203,7 @@ keep a high threshold and lower `count`.
 Note that summing per-child RSS overcounts shared pages — the cgroup total is
 usually lower than `count × child_rss` because shared libraries and mmap'd
 pages are charged once. Use the `children_memory_mb` column in
-[worker health](../monitoring/worker-health) snapshots to observe real per-tree
+[worker health](/horsies/monitoring/worker-health/) snapshots to observe real per-tree
 footprint while tuning. For large task results, prefer returning a reference (row
 id, object key) over the payload itself, so the result does not inflate the RSS
 sampled at recycle time.
@@ -237,7 +237,7 @@ either_limit = WorkerProfile(
 
 At boot the worker warns when `count × MemoryLimit.mb` is above the memory that
 it can use: the container (cgroup) limit when it is below the host RAM, else the
-host RAM. It starts in every case. See [Worker Profiles](worker-profiles#memory).
+host RAM. It starts in every case. See [Worker Profiles](/horsies/workers/worker-profiles/#memory).
 
 To run **memory-only**, disable count recycling explicitly (otherwise its
 default `TaskLimit(tasks=100)` still applies):
@@ -337,7 +337,7 @@ In production, task durations vary wildly. Without hard cap mode, a worker proce
 
 ### Soft Cap Mode (with Prefetch)
 
-When `prefetch_buffer > 0`, queue concurrency counts **RUNNING** tasks, allowing workers to prefetch beyond their running capacity. A worker's local budget still subtracts already-claimed rows so it cannot hold more than its children + `prefetch_buffer` in total:
+When `prefetch_buffer > 0`, queue concurrency counts **RUNNING** tasks, allowing workers to prefetch beyond their running capacity. A worker's local budget still subtracts already-claimed rows so it cannot hold more than its seats + `prefetch_buffer` in total:
 
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
@@ -362,7 +362,7 @@ config = AppConfig(
 
 ## Budgets per Execution Class
 
-A worker has one claim budget for each [execution class](../tasks/defining-tasks)
+A worker has one claim budget for each [execution class](/horsies/tasks/defining-tasks/)
 that it runs children for. The worker builds its claim plan once at start,
 from its profile, and logs it. The plan routes the rows of each class:
 
@@ -383,11 +383,11 @@ A profile with `shared_async=SharedAsyncChildren(...)` has a `SHARED_ASYNC`
 budget, and a profile with `shared_thread=SharedThreadChildren(...)` has a
 `SHARED_THREAD` budget; a profile with isolated children only claims the rows
 of every class into its `ISOLATED` budget. See
-[Shared Async Tasks](shared-async-tasks) and
-[Shared Thread Tasks](shared-thread-tasks).
+[Shared Async Tasks](/horsies/workers/shared-async-tasks/) and
+[Shared Thread Tasks](/horsies/workers/shared-thread-tasks/).
 
 The capacity of a budget is its children (`ISOLATED`) or seats (a shared
-class) that are in service: a [slot that is down](worker-architecture) does not
+class) that are in service: a [slot that is down](/horsies/workers/worker-architecture/) does not
 count. A shared child that closes counts only the tasks it still runs: its
 free seats take no task. The claim counts the use of each budget from the
 rows: this worker's RUNNING and live CLAIMED rows of the classes that the
@@ -398,7 +398,7 @@ The worker publishes each budget, its capacity, and the classes it claims in
 
 Each reaper pass checks that a live worker serves every (queue, class) with
 `PENDING` rows, and logs each one that no live worker serves. See
-[Does a live worker serve every pending class?](../monitoring/worker-health#does-a-live-worker-serve-every-pending-class)
+[Does a live worker serve every pending class?](/horsies/monitoring/worker-health/#does-a-live-worker-serve-every-pending-class)
 
 ### A row whose class does not fit its task
 
@@ -413,7 +413,7 @@ dispatched, and its child fails it as before.
 
 ## Claiming Controls
 
-`ClaimLimits` in the [worker profile](worker-profiles) holds the claim limits.
+`ClaimLimits` in the [worker profile](/horsies/workers/worker-profiles/) holds the claim limits.
 The capacity of a worker is the sum of the capacities of its budgets plus
 `prefetch_buffer`: it never holds more tasks than that. The sum is
 `WorkerProfile.seat_count()`: one per isolated child, and `seats` per shared
@@ -452,8 +452,8 @@ few_claimed = WorkerProfile(
 ```
 
 **Default behavior** (`NoTaskLimit()`): the capacity is the limit.
-- Hard cap mode (`prefetch_buffer=0`): the number of children
-- Soft cap mode (`prefetch_buffer>0`): the number of children + `prefetch_buffer`
+- Hard cap mode (`prefetch_buffer=0`): the seats of the profile (`seat_count()`)
+- Soft cap mode (`prefetch_buffer>0`): the seats of the profile + `prefetch_buffer`
 
 **Why this limit exists:**
 
@@ -621,13 +621,16 @@ config = AppConfig(
 Worker logs its profile and concurrency config at startup:
 
 ```text
-Worker profile 'default': isolated=4 (recycle after 100 tasks, above no limit), claim per queue per pass: no limit, claimed per worker: no limit, drain_timeout=300s, preload=library
-Concurrency config: processes=4, cluster_wide_cap=20, max_claim_per_worker=4, max_claim_batch=0
+Worker profile 'default': isolated=4 (recycle after 100 tasks, above no limit), shared_async=none, shared_thread=none, claim per queue per pass: no limit, claimed per worker: no limit, drain_timeout=300s, preload=library
+Concurrency config: processes=4, shared_async_children=0, shared_thread_children=0, seats=4, cluster_wide_cap=20, max_claim_per_worker=4, max_claim_batch=0
+Claim plan: ISOLATED -> ISOLATED budget, SHARED_ASYNC -> ISOLATED budget, SHARED_THREAD -> ISOLATED budget
 ```
 
 The second line uses the internal names: `processes` is the number of
-children, `max_claim_per_worker` is the effective `claimed_per_worker` limit,
-and `max_claim_batch=0` means `per_queue_per_pass=NoTaskLimit()`.
+isolated children, `seats` is `WorkerProfile.seat_count()`,
+`max_claim_per_worker` is the effective `claimed_per_worker` limit, and
+`max_claim_batch=0` means `per_queue_per_pass=NoTaskLimit()`. The third line
+is the [claim plan](#budgets-per-execution-class).
 
 ## Troubleshooting
 

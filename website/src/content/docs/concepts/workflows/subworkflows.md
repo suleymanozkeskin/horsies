@@ -86,7 +86,7 @@ class DataPipeline(WorkflowDefinition[bool]):
 - `config = WorkflowDefinitionConfig(output=...)` names the node whose result becomes the workflow result. The class body can name its own nodes there
 - A `Meta` attribute (the earlier nested `class Meta` form), or a `config` that is not a `WorkflowDefinitionConfig`, raises `HRS-033` when the class is created
 
-For type-safe node construction with static arguments, see [Typed Node Builder](typed-node-builder).
+For type-safe node construction with static arguments, see [Typed Node Builder](/horsies/concepts/workflows/typed-node-builder/).
 
 ### 2.2 Starting a Workflow
 

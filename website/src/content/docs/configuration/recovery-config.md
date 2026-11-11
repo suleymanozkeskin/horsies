@@ -61,7 +61,7 @@ retention class assigned at enqueue; per-queue row-delete windows no longer
 exist.
 
 Retention and partition-coverage fields moved to
-[`AppConfig.retention`](retention-config); this table lists only what
+[`AppConfig.retention`](/horsies/configuration/retention-config/); this table lists only what
 `RecoveryConfig` still owns.
 
 ## Recovery Behaviors
@@ -213,7 +213,7 @@ RecoveryConfig(
 ## Retention
 
 Retention moved to its own configuration section:
-[`AppConfig.retention`](retention-config). It decides how long records
+[`AppConfig.retention`](/horsies/configuration/retention-config/). It decides how long records
 live and how their storage is prepared and reclaimed, which is a
 different question from the one this page answers — recovery is about
 work that went wrong, retention about work that went right and is now

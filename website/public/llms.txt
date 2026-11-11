@@ -59,10 +59,30 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - isolated: IsolatedChildren(count: int 1-1024, recycle: IsolatedRecycle) | NoIsolatedChildren (default NoIsolatedChildren(); a profile needs at least one child)
 - IsolatedRecycle.after: TaskLimit(tasks: int 1-2147483647) | NoTaskLimit (default TaskLimit(tasks=100))
 - IsolatedRecycle.above: MemoryLimit(mb: int 1-16777216) | NoMemoryLimit (default NoMemoryLimit())
-- claim: ClaimLimits(per_queue_per_pass: TaskLimit | NoTaskLimit, claimed_per_worker: TaskLimit | NoTaskLimit) (defaults NoTaskLimit(); a TaskLimit above children + prefetch_buffer is refused)
+- shared_async: SharedAsyncChildren(count: int 1-1024, seats: int 1-1000, recycle: SharedRecycle) | NoSharedAsyncChildren (default NoSharedAsyncChildren())
+- shared_thread: SharedThreadChildren(count: int 1-1024, seats: int 1-256, recycle: SharedRecycle) | NoSharedThreadChildren (default NoSharedThreadChildren())
+- SharedRecycle.after_per_seat: TaskLimit | NoTaskLimit (default TaskLimit(tasks=100); the child is replaced after tasks x seats tasks); SharedRecycle.above: MemoryLimit | NoMemoryLimit (default NoMemoryLimit(); RSS read after each task)
+- claim: ClaimLimits(per_queue_per_pass: TaskLimit | NoTaskLimit, claimed_per_worker: TaskLimit | NoTaskLimit) (defaults NoTaskLimit(); a TaskLimit above seat_count() + prefetch_buffer is refused)
 - drain_timeout: timedelta (default 300 s; above 0, at most 24 h)
 - preload: ChildPreload (LIBRARY default, APP, NONE)
 - child_count() -> int: the number of children, the sum over modes
+- seat_count() -> int: the tasks that the children run at once: 1 per isolated child, seats per shared child
+
+### Execution modes (Execution enum, @app.task(execution=...))
+- Guide: /horsies/workers/execution-modes/ ; details: /horsies/workers/shared-async-tasks/ and /horsies/workers/shared-thread-tasks/
+- Execution.ISOLATED (default): one task at a time in a child process of its own; def or async def; timeout_ms optional; at timeout_ms the worker kills the child and the subprocesses in its session, then writes TASK_TIMEOUT; a crash ends that task only
+- Execution.SHARED_ASYNC: async def only (HRS-107); timeout_ms required (HRS-109); cancel_grace_ms optional, 100-10000 ms, default 1000 (HRS-110, HRS-111); runs as a coroutine on a seat of a shared async child
+- Execution.SHARED_THREAD: def only (HRS-108); timeout_ms required (HRS-109); no cancel_grace_ms (a thread cannot be cancelled); runs on a seat thread of a shared thread child
+- A worker never runs a task less isolated than its row: a worker with no children of a shared class runs that class in isolated children; the isolated children of a worker with children of a shared class never run that class; a worker with no isolated children claims no ISOLATED rows
+- SHARED_ASYNC timeout (T = timeout_ms, G = cancel_grace_ms): at T the child cancels the task; TASK_TIMEOUT is written after the coroutine and the work it started (asyncio tasks, default-executor calls) have ended; at T + G a second cancel, then 2 more rounds 0.1 s apart, and the child takes no new task; still alive 0.3 s after the second cancel = stuck; the worker kills the child when every task left in it is stuck; a value returned after T is still TASK_TIMEOUT
+- SHARED_ASYNC blocked loop: a loop that has not turned for 5 s (block limit) -> the worker kills the child at once; the task that held it: TASK_BLOCKED_LOOP; each other task before its deadline: NEIGHBOUR_BLOCKED_LOOP; a task past its deadline: TASK_TIMEOUT; backstop kill of a frozen child (C code holds the GIL) at timeout_ms + cancel_grace_ms + 10 s
+- SHARED_THREAD timeout: at timeout_ms the child reports the deadline and takes no new task; the task runs on; the worker kills the child (with its session) when no task in it has time left, then writes TASK_TIMEOUT; a task alone in its child is killed at its deadline; backstop kill of a frozen child at timeout_ms + 10 s
+- Shared modes: a crash or a kill of the child ends every task in it (WORKER_CRASHED, or a retry by policy); the task named as the cause of a kill or a stuck stop retries in an isolated child; in every mode the outcome is written after the attempt ended, so a retry never runs next to the attempt it replaces
+- Choose: waits on network/database/API with an async client -> SHARED_ASYNC; waits in a sync client -> SHARED_THREAD (not measured); C code that releases the GIL (zlib, hashlib) -> SHARED_THREAD (Linux, 4 CPUs, CPython 3.13/3.14: 4 threads 2.6-3.8x one thread, 0.89-1.13x 4 processes); pure-Python CPU work -> SHARED_THREAD only on free-threaded CPython 3.13t/3.14t (4 threads 1.9-3.6x one), else ISOLATED (standard build: 4 threads 0.56-1.02x one); more thread seats than CPUs added nothing; needs isolation or an exact kill at timeout_ms -> ISOLATED
+- Measured cancel (one shared async child, CPython 3.13, local network): healthy server: httpx, aiohttp, psycopg, asyncpg, SQLAlchemy ended within 16 ms of the first cancel; psycopg >= 3.3.6 against a server that stops answering: 10.0 s, or within 5 ms of the second cancel; asyncio.to_thread() and DNS lookup threads are never stopped by a cancel
+- SHARED_ASYNC author rules: let CancelledError propagate; a client timeout below timeout_ms on each call; open long-lived clients in @app.on_shared_async_child_start (async def hook, runs on the loop of each shared async child before its first task, 10 s bound); never block the loop; await what you start; send with send_async()
+- SHARED_THREAD author rules: lock module state that a task changes; a timeout below timeout_ms on each blocking call; no threads that outlive the task
+- Connections: each child opens one pool of worker_child_pool_max_size (default 2) whatever its seats; the seats share it for the RUNNING update and the finalizing marker and wait up to 30 s for a connection (none in 30 s: the task is not run and its claim lease returns it); average connections in use = tasks per second of the child x 2 writes x time of one write
 - Every config model (AppConfig, its nested configs, ScheduleConfig and the schedule patterns) refuses unknown keys: ValidationError type extra_forbidden
 
 ### PostgresConfig
@@ -81,6 +101,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - tcp_keepalives_interval: int (default 10)
 - tcp_keepalives_count: int (default 3)
 - tcp_user_timeout_ms: int (default 30000; 0 uses the operating system default)
+- psycopg >= 3.3.6 is required: after an interrupted query it sends a cancel request (at most 5 s) and waits for the query (at most 5 s), then closes the connection; the 5 s limit on the cancel request needs libpq 17+ (older libpq: no limit; horsies[pg-binary] bundles its own libpq; psycopg.pq.version() reads it, 170000 = 17.0)
 - retain_rerun_input_default: bool (default False)
 - pool_timeout: int (default 30)
 - pool_recycle: int (default 1800)
@@ -165,9 +186,9 @@ making web request, local will cost you less tokens and greater knowledgebase at
 ### @app.task Decorator
 - Decorated function must return TaskResult[T, TaskError]
 - Decorated function is def or async def; a function that yields raises HRS-101 at definition time
-- An async def task runs on the one event loop that its worker child keeps; the loop runs only while an async task runs; in an async task, send with send_async (the sync send returns TaskSendAsyncContext in a running loop)
-- An async def task must await the work it starts: asyncio tasks of it still on the loop when it ends make the worker replace the child after that task, and the child cancels them when it stops (within 5 s); a client that keeps its own background tasks on the loop causes a replacement after each async task; an asyncio.to_thread() thread is not a task and does not cause one; only asyncio tasks are seen: a loop.call_soon()/call_later() callback or loop.run_in_executor() work that the task did not await causes no replacement and can still run during a later task of the same child; a task that cancels a helper task in finally must also await it (helper.cancel(), then await asyncio.gather(helper, return_exceptions=True)); the retire warning names the coroutine of each task left, up to 10
-- A child creates its event loop at boot, before it reports ready, when the app has an async def task (an app with none gets no loop); when it cannot be created (for example EMFILE, or an event loop policy that raises), the child fails its boot and no task reaches it; after three failed child starts the worker exits non-zero so its supervisor restarts it
+- In an isolated child (Execution.ISOLATED, the default), an async def task runs on the one event loop that the child keeps; the loop runs only while an async task runs; in an async task, send with send_async (the sync send returns TaskSendAsyncContext in a running loop)
+- An async def task in an isolated child must await the work it starts: asyncio tasks of it still on the loop when it ends make the worker replace the child after that task, and the child cancels them when it stops (within 5 s); a client that keeps its own background tasks on the loop causes a replacement after each async task; an asyncio.to_thread() thread is not a task and does not cause one; only asyncio tasks are seen: a loop.call_soon()/call_later() callback or loop.run_in_executor() work that the task did not await causes no replacement and can still run during a later task of the same child; a task that cancels a helper task in finally must also await it (helper.cancel(), then await asyncio.gather(helper, return_exceptions=True)); the retire warning names the coroutine of each task left, up to 10
+- A child creates its event loop at boot, before it reports ready, when the app has an async def task (an app with none gets no loop); when it cannot be created (for example EMFILE, or an event loop policy that raises), the child fails its boot and no task reaches it; that cause can clear, so only that slot is down and boots again after a growing wait (1 s, 2 s, 4 s, up to 60 s); when every slot is down, the worker exits non-zero after three failed starts so its supervisor restarts it
 - Options: task_name, queue_name, retry_policy, exception_mapper, default_unhandled_error_code, timeout_ms, execution, cancel_grace_ms
 - execution: Execution.ISOLATED (default; def or async def, timeout_ms optional), Execution.SHARED_ASYNC (async def, timeout_ms required), Execution.SHARED_THREAD (def, timeout_ms required); every task row stores the class
 - cancel_grace_ms: SHARED_ASYNC only, 100 to 10000 ms, default 1000 ms; the stored options hold the value in effect at send
@@ -692,7 +713,7 @@ Registry (HRS-300-HRS-399):
 ### CLI Commands
 - `horsies worker <module> --profile NAME [--loglevel LEVEL]`
   - `--profile NAME` — required; a profile in AppConfig.worker_profiles; no default profile; a missing or unknown name exits 1 and lists the defined names
-  - Worker settings live in the profile, not in flags: WorkerProfile(isolated=IsolatedChildren(count=N, recycle=IsolatedRecycle(after=TaskLimit(tasks=N) | NoTaskLimit(), above=MemoryLimit(mb=N) | NoMemoryLimit())), claim=ClaimLimits(per_queue_per_pass=..., claimed_per_worker=...), drain_timeout=timedelta, preload=ChildPreload.LIBRARY | APP | NONE)
+  - Worker settings live in the profile, not in flags: WorkerProfile(isolated=IsolatedChildren(count=N, recycle=IsolatedRecycle(after=TaskLimit(tasks=N) | NoTaskLimit(), above=MemoryLimit(mb=N) | NoMemoryLimit())), shared_async=SharedAsyncChildren(count=N, seats=K), shared_thread=SharedThreadChildren(count=N, seats=K), claim=ClaimLimits(per_queue_per_pass=..., claimed_per_worker=...), drain_timeout=timedelta, preload=ChildPreload.LIBRARY | APP | NONE)
   - Removed flags exit 2 and name the field: --processes -> IsolatedChildren.count; --max-tasks-per-child -> IsolatedRecycle.after; --max-memory-per-child-mb -> IsolatedRecycle.above; --max-claim-batch -> ClaimLimits.per_queue_per_pass; --max-claim-per-worker -> ClaimLimits.claimed_per_worker; --drain-timeout -> WorkerProfile.drain_timeout; --child-preload -> WorkerProfile.preload
   - Boot warns (never refuses) when count x MemoryLimit.mb is above the usable memory: the cgroup limit (v2 /sys/fs/cgroup/memory.max, else v1 /sys/fs/cgroup/memory/memory.limit_in_bytes; "max" or no file = no limit) when below the host RAM, else the host RAM; the warning names the source ("container limit" or "host RAM"), and when one worker can open more Postgres connections than the server has usable slots; a memory limit at or below the warmed child baseline still refuses to start
 - `horsies scheduler <module> [--loglevel LEVEL]`
@@ -707,7 +728,7 @@ Registry (HRS-300-HRS-399):
 - `horsies skills install --target DIR [--force]` — copy the packaged skill folder to `DIR/horsies/`; refuses to replace a changed copy without `--force`
 - Module format: `myapp.config:app` (dotted:attr) or `app/config.py:app` (file:attr)
 - Auto-discovery: if module has exactly one Horsies instance, `:name` can be omitted
-- Exit codes: 0 = success, 1 = error, 2 = bad invocation (argument error)
+- Exit codes: 0 = success, 1 = error (also a missing or unknown --profile, and a worker that cannot write runner heartbeats), 2 = bad invocation (argument error, a removed worker flag), 77 = a worker that cannot write runner heartbeats and has not stopped 120 s later
 - Signals: SIGTERM/SIGINT for graceful shutdown (workers wait up to the profile's drain_timeout (default 300 seconds) for running tasks, then kill their children)
 - Both worker and scheduler run app.check() at startup; fail with ValidationReport if errors
 
@@ -757,7 +778,10 @@ Each entry: Title -- summary -> URL
 
 ### Workers
 - Worker Architecture -- worker-owned child processes -> /horsies/workers/worker-architecture/
+- Choosing an Execution Mode -- ISOLATED, SHARED_ASYNC or SHARED_THREAD by the work of a task, measured conditions and results, timeouts and crashes per mode, author rules, profile examples -> /horsies/workers/execution-modes/
 - Worker Profiles -- named worker settings in AppConfig, --profile, check and boot validation -> /horsies/workers/worker-profiles/
+- Shared Async Tasks -- SHARED_ASYNC tasks as coroutines on seats of a shared async child, the timeout sequence, the blocked loop, author rules -> /horsies/workers/shared-async-tasks/
+- Shared Thread Tasks -- SHARED_THREAD tasks on seat threads of a shared thread child, when threads help, the timeout and the kill, pool sizing -> /horsies/workers/shared-thread-tasks/
 - Concurrency -- worker/queue/cluster limits -> /horsies/workers/concurrency/
 - Heartbeats & Recovery -- crash detection -> /horsies/workers/heartbeats-recovery/
 - Child-Process Hooks -- per-child-process setup with @app.on_child_process_start -> /horsies/workers/child-process-hooks/
@@ -800,7 +824,7 @@ Each entry: Title -- summary -> URL
 - Migrating to 0.1.2 -- strict-serde breaking changes from 0.1.1 -> /horsies/migrations/migration-to-0-1-2/
 - Migrating to 0.5.0 and 0.5.2 -- live/history split (schema v34), offline cutover, offline schema v35 upgrade -> /horsies/migrations/migration-to-0-5-0/
 - Migrating to 0.6.0 -- stop-all upgrade rule, schema v52, new settings and flags, required code changes -> /horsies/migrations/migration-to-0-6-0/
-- Migrating to 0.7.0 -- worker flags move into named worker profiles, flag to field table -> /horsies/migrations/migration-to-0-7-0/
+- Migrating to 0.7.0 -- upgrade order: psycopg 3.3.6, worker profiles and the flag to field table, new error code cases, refused result waits inside a task, workflow limits, stop 0.6.x workers before schema v55, exit codes, behaviour changes -> /horsies/migrations/migration-to-0-7-0/
 
 ### Changelog
 - Changelog -- notable changes per release -> /horsies/changelog/
@@ -881,6 +905,10 @@ migration 0.5.0, live/history split, offline cutover, schema v35 -> /horsies/mig
 migration 0.6.0, upgrade from 0.5.x, schema v52, stop all processes -> /horsies/migrations/migration-to-0-6-0/
 migration 0.7.0, worker profiles, removed worker flags, --profile -> /horsies/migrations/migration-to-0-7-0/
 WorkerProfile, IsolatedChildren, IsolatedRecycle, TaskLimit, MemoryLimit, ClaimLimits, ChildPreload, worker_profiles, --profile -> /horsies/workers/worker-profiles/
+Execution, execution mode, ISOLATED, SHARED_ASYNC, SHARED_THREAD, choose a mode, free-threaded, GIL -> /horsies/workers/execution-modes/
+SharedAsyncChildren, SharedRecycle, cancel_grace_ms, TASK_BLOCKED_LOOP, NEIGHBOUR_BLOCKED_LOOP, on_shared_async_child_start -> /horsies/workers/shared-async-tasks/
+SharedThreadChildren, seat thread, worker_child_pool_max_size, thread pool sizing -> /horsies/workers/shared-thread-tasks/
+psycopg, libpq, cancel request, pg-binary -> /horsies/configuration/broker-config/
 start once, idempotent start, deterministic workflow_id, uuid5, WORKFLOW_ID_CONFLICT, WorkflowStartIdConflict -> /horsies/guides/start-workflow-once/
 FastAPI, lifespan, ASGI, async framework, close_async, ASYNC_CONTEXT, EVENT_LOOP_LIMIT -> /horsies/guides/async-frameworks/
 dynamic fan-out, runtime-built child, build_with, args_from, SubWorkflowNode -> /horsies/concepts/workflows/subworkflows/
