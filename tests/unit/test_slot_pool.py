@@ -162,6 +162,7 @@ def _init(app_locator: str = 'ok', imports: tuple[str, ...] = ()) -> InitFrame:
         process_name='test-child',
         child_kind=IsolatedChild(
             pool=ResolvedPool(min_size=0, max_size=1, check=False),
+            task_send_pool=2,
         ),
     )
 
@@ -1091,6 +1092,7 @@ class TestRealChildBootCauses:
             _init(f'{app_file}:app'),
             child_kind=IsolatedChild(
                 pool=ResolvedPool(min_size=2, max_size=1, check=False),
+                task_send_pool=2,
             ),
         )
 
@@ -2585,7 +2587,7 @@ class TestStopDuringBoot:
         baseline = ChildBaseline(
             pid=1,
             rss=RssUnreadable(),
-            child_kind=IsolatedChild(pool=ResolvedPool(0, 2, True)),
+            child_kind=IsolatedChild(pool=ResolvedPool(0, 2, True), task_send_pool=2),
         )
         pool._note_ready(pool._slots[0], baseline)
         pool._note_ready(pool._slots[0], baseline)
@@ -2724,7 +2726,7 @@ from horsies.core.worker.slots import SlotPool, SlotPoolConfig
 async def main():
     init = InitFrame(
         'ok', (), (), tuple(sys.path), ('p',), 30, 'x', {{}}, 'c',
-        IsolatedChild(ResolvedPool(0, 1, False)),
+        IsolatedChild(ResolvedPool(0, 1, False), task_send_pool=2),
     )
     pool = SlotPool(
         SlotPoolConfig(1, init, 0, None, ({child!r},), ChildPreload({mode!r}), ({preload!r},)),

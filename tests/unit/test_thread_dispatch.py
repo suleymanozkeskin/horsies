@@ -76,7 +76,7 @@ from horsies.core.worker.thread_slots import RunCulprit, ThreadRunRequest
 from horsies.core.worker.worker import Worker
 
 _POOL = ResolvedPool(min_size=0, max_size=2, check=True)
-_THREAD_KIND = SharedThreadChild(seats=4, pool=_POOL)
+_THREAD_KIND = SharedThreadChild(seats=4, pool=_POOL, task_send_pool=2)
 
 pytestmark = [pytest.mark.unit]
 
@@ -497,8 +497,8 @@ class TestThreadMemoryBaseline:
     @pytest.mark.parametrize(
         'kind',
         [
-            IsolatedChild(pool=_POOL),
-            SharedAsyncChild(seats=4, pool=_POOL, executor_threads=4),
+            IsolatedChild(pool=_POOL, task_send_pool=2),
+            SharedAsyncChild(seats=4, pool=_POOL, executor_threads=4, task_send_pool=2),
         ],
         ids=['isolated', 'shared-async'],
     )

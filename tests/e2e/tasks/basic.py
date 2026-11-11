@@ -41,6 +41,14 @@ def child_pool_bounds() -> TaskResult[str, TaskError]:
     return TaskResult(ok=f'{pool.min_size}:{pool.max_size}')
 
 
+@app.task(task_name='e2e_task_send_pool')
+def task_send_pool() -> TaskResult[str, TaskError]:
+    """The pool of the app broker that task code in this child opens when it
+    sends: ``pool_size:max_overflow``."""
+    config = app.get_broker().config
+    return TaskResult(ok=f'{config.pool_size}:{config.max_overflow}')
+
+
 @app.task(task_name='e2e_simple')
 def simple_task(*, x: int) -> TaskResult[int, TaskError]:
     return TaskResult(ok=x * 2)

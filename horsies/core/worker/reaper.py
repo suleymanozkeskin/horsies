@@ -116,10 +116,11 @@ class ReaperMixin:
 
         A gated pass needs two simultaneous coordinator connections: the
         gate session holding the xact lock, plus the pass body's own
-        session. With total pool capacity below two, the second checkout
-        blocks until pool timeout — so the gate must be skipped.
+        session. The pool of the worker process has no overflow; with
+        fewer than two connections, the second checkout blocks until pool
+        timeout — so the gate must be skipped.
         """
-        return (self.cfg.parent_pool_size + self.cfg.parent_max_overflow) >= 2
+        return self.cfg.parent_pool_size >= 2
 
     # Stale detection is handled via heartbeat policy for RUNNING tasks.
 
@@ -784,7 +785,7 @@ class ReaperMixin:
                     session_database_url=self.cfg.session_dsn or None,
                     pgbouncer_transaction_mode=self.cfg.pgbouncer_transaction_mode,
                     pool_size=self.cfg.parent_pool_size,
-                    max_overflow=self.cfg.parent_max_overflow,
+                    max_overflow=0,
                 )
                 temp_broker = PostgresBroker(
                     temp_broker_config,
@@ -822,11 +823,9 @@ class ReaperMixin:
             if not gate_enabled:
                 logger.warning(
                     'Reaper gate disabled: coordinator pool has a single '
-                    'connection (pool_size=%s, max_overflow=%s); passes run '
-                    'ungated (safe via SKIP LOCKED, may be redundant across '
-                    'workers)',
+                    'connection (pool.max_size=%s); passes run ungated (safe '
+                    'via SKIP LOCKED, may be redundant across workers)',
                     self.cfg.parent_pool_size,
-                    self.cfg.parent_max_overflow,
                 )
 
             while not self._stop.is_set():

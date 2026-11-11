@@ -1,5 +1,5 @@
-"""The pool of each child kind, from the worker config to the init frame
-that each child reads.
+"""The pool and the task-send pool of each child kind, from the worker
+config to the init frame that each child reads.
 
 Enters at ``Worker._slot_pool_config`` and ``SlotPool``, the real builders
 of the init frames, and asserts on the frames after a trip over the wire.
@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from horsies.core.models.child_sizing import (
+    DEFAULT_TASK_SEND_POOL_CONNECTIONS,
     shared_async_executor_threads,
     shared_async_pool_connections,
     shared_thread_pool_connections,
@@ -40,6 +41,10 @@ from horsies.core.worker.slots import SlotPool
 from horsies.core.worker.worker import Worker
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio(loop_scope='function')]
+
+_ONE_ASYNC_CHILD: dict[str, object] = {
+    'shared_async': SharedAsyncChildren(count=1, seats=1),
+}
 
 
 def _worker(cfg: WorkerConfig) -> Worker:
@@ -94,7 +99,10 @@ async def test_each_kind_gets_the_resolved_pool_of_its_setting() -> None:
     )
 
     assert _kinds_of_children(_worker(cfg)) == [
-        IsolatedChild(pool=ResolvedPool(min_size=1, max_size=3, check=False)),
+        IsolatedChild(
+            pool=ResolvedPool(min_size=1, max_size=3, check=False),
+            task_send_pool=DEFAULT_TASK_SEND_POOL_CONNECTIONS,
+        ),
         SharedAsyncChild(
             seats=25,
             pool=ResolvedPool(
@@ -103,6 +111,7 @@ async def test_each_kind_gets_the_resolved_pool_of_its_setting() -> None:
                 check=False,
             ),
             executor_threads=6,
+            task_send_pool=DEFAULT_TASK_SEND_POOL_CONNECTIONS,
         ),
         SharedThreadChild(
             seats=8,
@@ -111,6 +120,7 @@ async def test_each_kind_gets_the_resolved_pool_of_its_setting() -> None:
                 max_size=shared_thread_pool_connections(8),
                 check=False,
             ),
+            task_send_pool=DEFAULT_TASK_SEND_POOL_CONNECTIONS,
         ),
     ]
 
@@ -136,10 +146,12 @@ async def test_every_child_of_a_kind_gets_the_same_pool() -> None:
             check=False,
         ),
         executor_threads=shared_async_executor_threads(40),
+        task_send_pool=DEFAULT_TASK_SEND_POOL_CONNECTIONS,
     )
     thread_kind = SharedThreadChild(
         seats=4,
         pool=ResolvedPool(min_size=0, max_size=7, check=False),
+        task_send_pool=DEFAULT_TASK_SEND_POOL_CONNECTIONS,
     )
     assert kinds == [async_kind, async_kind, async_kind, thread_kind, thread_kind]
 
@@ -147,6 +159,41 @@ async def test_every_child_of_a_kind_gets_the_same_pool() -> None:
 async def test_the_isolated_default_is_a_pool_of_two_without_a_check() -> None:
     isolated_kind = IsolatedChild(
         pool=ResolvedPool(min_size=0, max_size=2, check=False),
+        task_send_pool=DEFAULT_TASK_SEND_POOL_CONNECTIONS,
     )
     kinds = _kinds_of_children(_worker(_config(processes=2)))
     assert kinds == [isolated_kind, isolated_kind]
+
+
+async def test_each_kind_gets_the_task_send_pool_of_its_setting() -> None:
+    """Each kind carries its own task_send_pool, not the parent pool and not
+    the pool of another kind."""
+    cfg = _config(
+        processes=1,
+        isolated_task_send_pool=3,
+        shared_async=SharedAsyncChildren(
+            count=1,
+            seats=4,
+            task_send_pool=PoolSize(connections=5),
+        ),
+        shared_thread=SharedThreadChildren(
+            count=1,
+            seats=4,
+            task_send_pool=PoolSize(connections=7),
+        ),
+    )
+
+    kinds = _kinds_of_children(_worker(cfg))
+
+    assert [kind.task_send_pool for kind in kinds] == [3, 5, 7]
+
+
+async def test_the_preload_template_carries_the_isolated_task_send_pool() -> None:
+    """The template init frame, which a preload parent imports the app with,
+    is an isolated kind with the isolated task-send pool."""
+    cfg = _config(processes=0, isolated_task_send_pool=4, **_ONE_ASYNC_CHILD)
+    template = _worker(cfg)._slot_pool_config().init  # pyright: ignore[reportPrivateUsage]
+    assert _over_the_wire(template) == IsolatedChild(
+        pool=ResolvedPool(min_size=0, max_size=2, check=False),
+        task_send_pool=4,
+    )

@@ -103,6 +103,7 @@ def _init(app_locator: str = 'ok') -> InitFrame:
         process_name='test-child',
         child_kind=IsolatedChild(
             pool=ResolvedPool(min_size=0, max_size=1, check=False),
+            task_send_pool=2,
         ),
     )
 
@@ -688,6 +689,7 @@ class TestNewKindBaseline:
             assert late.child_kind == SharedThreadChild(
                 seats=1,
                 pool=ResolvedPool(min_size=0, max_size=2, check=False),
+                task_send_pool=2,
             )
             first = pool._thread_slots[0].child
             isolated = pool._slots[0].child

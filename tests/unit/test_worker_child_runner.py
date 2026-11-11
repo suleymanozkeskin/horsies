@@ -274,6 +274,7 @@ class TestChildInitializer:
             loglevel=20,
             database_url='postgresql://localhost/test',
             pool=ResolvedPool(min_size=0, max_size=2, check=True),
+            task_send_pool=2,
         )
 
         mock_set_level.assert_called_once_with(20)
@@ -313,6 +314,7 @@ class TestChildInitializer:
             loglevel=20,
             database_url='postgresql://localhost/test',
             pool=ResolvedPool(min_size=0, max_size=1, check=False),
+            task_send_pool=2,
             connect_kwargs={'keepalives': 1, 'prepare_threshold': None},
         )
 
@@ -353,11 +355,56 @@ class TestChildInitializer:
             loglevel=20,
             database_url='postgresql://localhost/test',
             pool=ResolvedPool(min_size=0, max_size=2, check=True),
+            task_send_pool=2,
         )
 
         inherited_broker.discard_inherited_resources.assert_called_once_with()
         assert mocks['app']._broker is None
         mocks['app'].set_role.assert_called_once_with('worker')
+
+    @patch('horsies.core.worker.child_runner.set_current_app')
+    @patch('horsies.core.worker.child_runner._locate_app')
+    @patch('horsies.core.worker.child_runner.import_module')
+    @patch('horsies.core.logging.configure_logging')
+    def test_an_import_time_broker_opens_the_task_send_pool(
+        self,
+        _mock_logging: MagicMock,
+        mock_import_module: MagicMock,
+        mock_locate_app: MagicMock,
+        _mock_set_current: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The child sets the task-send pool of its kind before it imports
+        task modules, so a broker that an import builds through
+        ``app.get_broker()`` opens that pool, not the producer pool."""
+        from horsies.core.worker.child_runner import import_app_for_child
+
+        monkeypatch.delenv('HORSIES_CHILD_PROCESS', raising=False)
+        app = Horsies(
+            AppConfig(
+                broker=PostgresConfig(
+                    database_url=SecretStr('postgresql+psycopg://u:p@localhost/db'),
+                    pool_size=30,
+                    max_overflow=30,
+                ),
+            ),
+        )
+        mock_locate_app.return_value = app
+        built: list[tuple[int, int]] = []
+
+        def import_that_builds_a_broker(_name: str) -> None:
+            config = app.get_broker().config
+            built.append((config.pool_size, config.max_overflow))
+
+        mock_import_module.side_effect = import_that_builds_a_broker
+
+        returned = import_app_for_child('mymod:app', ['tasks_mod'], [], 20, 4)
+
+        try:
+            assert returned is app
+            assert built == [(4, 0)]
+        finally:
+            _ = app.get_broker().close()
 
     @patch('horsies.core.worker.child_runner._initialize_worker_pool')
     @patch('horsies.core.worker.child_runner.set_current_app')
@@ -385,6 +432,7 @@ class TestChildInitializer:
                 loglevel=20,
                 database_url='postgresql://localhost/test',
                 pool=ResolvedPool(min_size=0, max_size=2, check=True),
+                task_send_pool=2,
             )
         mock_init_pool.assert_not_called()
 
@@ -414,6 +462,7 @@ class TestChildInitializer:
                 loglevel=20,
                 database_url='postgresql://localhost/test',
                 pool=ResolvedPool(min_size=0, max_size=2, check=True),
+                task_send_pool=2,
             )
         mock_init_pool.assert_not_called()
 
@@ -443,6 +492,7 @@ class TestChildInitializer:
                 loglevel=20,
                 database_url='postgresql://localhost/test',
                 pool=ResolvedPool(min_size=0, max_size=2, check=True),
+                task_send_pool=2,
             )
 
     @patch('horsies.core.worker.child_runner._initialize_worker_pool')
@@ -474,6 +524,7 @@ class TestChildInitializer:
             loglevel=20,
             database_url='postgresql://localhost/test',
             pool=ResolvedPool(min_size=0, max_size=2, check=True),
+            task_send_pool=2,
         )
         # /tmp/tasks.py should be imported via import_by_path, not import_module
         assert mock_import_path.called
@@ -510,6 +561,7 @@ class TestChildInitializer:
             loglevel=20,
             database_url='postgresql://localhost/test',
             pool=ResolvedPool(min_size=0, max_size=2, check=True),
+            task_send_pool=2,
         )
         # import_by_path should NOT be called because samefile returns True
         mock_import_path.assert_not_called()

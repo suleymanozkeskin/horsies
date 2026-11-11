@@ -143,6 +143,7 @@ def _init(app_locator: str = 'ok', imports: tuple[str, ...] = ()) -> InitFrame:
         process_name='test-child',
         child_kind=IsolatedChild(
             pool=ResolvedPool(min_size=0, max_size=1, check=False),
+            task_send_pool=2,
         ),
     )
 

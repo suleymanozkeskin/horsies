@@ -91,6 +91,7 @@ def _init(app_locator: str = 'ok') -> InitFrame:
         process_name='horsies-child',
         child_kind=IsolatedChild(
             pool=ResolvedPool(min_size=0, max_size=1, check=False),
+            task_send_pool=2,
         ),
     )
 

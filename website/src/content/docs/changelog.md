@@ -135,14 +135,14 @@ there is no migration contract between pre-1.0 versions.
     worker's down slots (`GET /api/workers/classes`; `WorkerStateInfo` gains
     `slot_health` and `down_slots`).
 - **`horsies check --live` compares every worker profile with the server
-  connection limit.** One worker opens its parent pool
-  (`worker_pool_size + worker_max_overflow`), 2 listener connections, 1
+  connection limit.** One worker opens the pool of the worker process (the
+  resolved `WorkerProfile.pool`), 2 listener connections, 1
   runner heartbeat connection and the resolved `pool.max_size` of its mode
   for each child. A profile whose worker opens
   more than `max_connections` less `superuser_reserved_connections`
   and `reserved_connections` fails with `HRS-219`
   (`CHECK_WORKER_CONNECTIONS`). Task code that sends opens the app's broker
-  in its child, `worker_pool_size + worker_max_overflow` for each event loop
+  in its child, the `task_send_pool` of its child kind for each event loop
   it sends from. The comparison does not count it; the error and the boot
   log state it, with one sending loop per child. With `pgbouncer_transaction_mode=True`
   nothing is compared. At boot, before any child starts, a worker logs the
@@ -450,15 +450,48 @@ there is no migration contract between pre-1.0 versions.
     field path, for example `worker_profiles['batch'].shared_async.pool.min_size`.
   - The connection check (`HRS-219`) and the boot warning count each child
     with the resolved `pool.max_size` of its mode, one term per mode:
-    `parent pool 5 + listener 2 + runner heartbeat 1 + 4 isolated children x
-    isolated.pool max_size 2 + 2 shared async children x shared_async.pool
-    max_size 5 = 26`.
+    `parent pool max_size 5 + listener 2 + runner heartbeat 1 + 4 isolated
+    children x isolated.pool max_size 2 + 2 shared async children x
+    shared_async.pool max_size 5 = 26`.
   - The start log line of the worker states the resolved pool of each kind
     and the executor threads of the shared async children, with `derived
     from seats` for a derived size.
   - `IsolatedPool`, `SharedPool`, `PoolSize`, `PoolSizeFromSeats`,
     `ExecutorThreads` and `ExecutorThreadsFromSeats` are exported from
     `horsies`.
+
+- **The worker process sizes its own pool in the profile, and task code in a
+  child opens a task-send pool of its kind.** `WorkerProfile.pool` takes a
+  `ParentPool(max_size)` whose `max_size` is `PoolSize(connections=N)` or
+  `PoolSizeFromSeats()`, the default. The worker process claims tasks and
+  writes the outcome of each task through this pool. It opens with
+  `pool_size = max_size`, `max_overflow = 0` and the pre-ping of
+  `worker_pool_pre_ping`, so the connection check counts it exactly.
+  - The default derives the size from the seats of the whole profile:
+    `min(20, max(5, ceil(seat_count() / 10)))`, with the provisional
+    constants `PARENT_POOL_CONNECTIONS_CAP`, `PARENT_POOL_CONNECTIONS_FLOOR`
+    and `PARENT_SEATS_PER_POOL_CONNECTION` in
+    `horsies.core.models.child_sizing`. 8 isolated children: 5; 64 isolated
+    children: 7; one shared async child of 100 seats: 10; of 1000 seats:
+    20. `WorkerProfile.resolved_parent_pool()` returns the size.
+  - `IsolatedChildren`, `SharedAsyncChildren` and `SharedThreadChildren`
+    take `task_send_pool: PoolSize`, default `PoolSize(connections=2)`.
+    Task code that sends through the app (`app.get_broker()`) opens the
+    app's broker in its child with that many connections and no overflow,
+    for each event loop that it sends from. That broker keeps
+    `pool_pre_ping`. The child sets it before it
+    imports its task modules, so a broker that an import builds opens it
+    too. The pool of `PostgresConfig` does not apply in a child. In every
+    other process, the worker process included, `app.get_broker()` opens the
+    pool of `PostgresConfig`.
+  - The connection check (`HRS-219`) and the boot warning count the parent
+    pool as `parent pool max_size N`, and state the task-send pool of each
+    mode as a ceiling for children whose tasks send:
+    `8 isolated children x isolated.task_send_pool 2 = 16 more, 40 in all`.
+  - The start log line of the worker states the resolved parent pool, with
+    the seats it derives from, and the `task_send_pool` of each kind:
+    `pool=20 connections (derived from 1000 seats)`.
+  - `ParentPool` is exported from `horsies`.
 
 ### Changed
 
@@ -774,6 +807,13 @@ there is no migration contract between pre-1.0 versions.
   with `HRS-213` (`CONFIG_INVALID_BROKER_POOL`), and the help names the
   replacement, for example `IsolatedChildren(pool=IsolatedPool(min_size=N))`.
   Every such field is reported at once.
+- **`PostgresConfig.worker_pool_size`, `worker_max_overflow` and
+  `worker_runtime_config()`.** `WorkerProfile.pool` replaces them for the
+  worker process, and the `task_send_pool` of each child kind for task code
+  that sends in a child. A config that still sets one, also to `None`,
+  fails when it is built with `HRS-213` (`CONFIG_INVALID_BROKER_POOL`), and
+  the help names `WorkerProfile(pool=ParentPool(max_size=PoolSize(connections=N)))`.
+  These fields and the removed child pool fields are reported at once.
 
 ### Fixed
 

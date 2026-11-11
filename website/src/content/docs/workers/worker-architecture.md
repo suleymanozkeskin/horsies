@@ -325,9 +325,9 @@ Both preload modes:
 | `max_claim_per_worker` | `ClaimLimits.claimed_per_worker` |
 | `drain_timeout_s` | `WorkerProfile.drain_timeout` |
 | `child_preload` | `WorkerProfile.preload` |
-| `parent_pool_size` | `PostgresConfig.worker_pool_size` |
-| `parent_max_overflow` | `PostgresConfig.worker_max_overflow` |
+| `parent_pool_size` | `WorkerProfile.pool`, resolved. The pool of the worker process has no overflow |
 | `isolated_pool` | `IsolatedChildren.pool`, resolved; the default `IsolatedPool()` with `NoIsolatedChildren()`. The pool of a shared child comes from `shared_async.pool` or `shared_thread.pool` |
+| `isolated_task_send_pool` | `IsolatedChildren.task_send_pool`; the default with `NoIsolatedChildren()`. The task-send pool of a shared child comes from `shared_async.task_send_pool` or `shared_thread.task_send_pool` |
 | `app_locator` | The app locator of the command |
 | `imports` | Task module paths |
 

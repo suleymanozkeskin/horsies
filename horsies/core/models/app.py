@@ -365,8 +365,6 @@ class AppConfig(BaseModel):
         )
         lines.append(f'    pool_size: {self.broker.pool_size}')
         lines.append(f'    max_overflow: {self.broker.max_overflow}')
-        lines.append(f'    worker_pool_size: {self.broker.worker_pool_size}')
-        lines.append(f'    worker_max_overflow: {self.broker.worker_max_overflow}')
 
         # Recovery config
         lines.append('  recovery:')

@@ -218,6 +218,21 @@ class _ChildNotBuilt:
     check findings, in the log, or left to the run time."""
 
 
+@dataclass(frozen=True, slots=True)
+class _ConfigBrokerPool:
+    """``get_broker()`` opens the pool that ``PostgresConfig`` sets:
+    ``pool_size`` plus ``max_overflow``."""
+
+
+@dataclass(frozen=True, slots=True)
+class _TaskSendBrokerPool:
+    """A worker child: ``get_broker()`` opens up to ``connections``
+    connections, with no overflow: the ``task_send_pool`` of the kind of the
+    child."""
+
+    connections: int
+
+
 @dataclass
 class _WorkflowBuilderMeta:
     """Internal metadata for a registered workflow builder."""
@@ -240,14 +255,13 @@ def _no_location(error: _E) -> _E:
 
 def _worker_connection_errors(
     profiles: Mapping[str, WorkerProfile],
-    broker_config: PostgresConfig,
     limit: ServerConnectionLimit,
 ) -> list[HorsiesError]:
     """One error for each profile that needs more connections than the
     server has usable slots, in name order."""
     errors: list[HorsiesError] = []
     for name in sorted(profiles):
-        match compare_connections(profiles[name], broker_config, limit):
+        match compare_connections(profiles[name], limit):
             case ConnectionsExceedServer() as exceed:
                 errors.append(
                     _no_location(
@@ -282,6 +296,9 @@ class Horsies:
         self.run_schema_migrations = run_schema_migrations
         self._broker: Optional['PostgresBroker'] = None
         self._broker_init_lock = threading.Lock()
+        # The pool that get_broker() opens. A worker child sets its
+        # task-send pool before it imports task modules.
+        self._broker_pool: _ConfigBrokerPool | _TaskSendBrokerPool = _ConfigBrokerPool()
         self.tasks: TaskRegistry[
             'TaskFunction[Any, Any] | AsyncTaskFunction[Any, Any]'
         ] = TaskRegistry()
@@ -322,6 +339,21 @@ class Horsies:
             self.logger.debug(f'horsies running as {role}')
         else:
             self.logger.info(f'horsies running as {role}')
+
+    def set_task_send_pool(self, connections: int) -> None:
+        """Make ``get_broker()`` open a pool of up to ``connections``
+        connections with no overflow, in place of the pool that
+        ``PostgresConfig`` sets.
+
+        A worker child calls this at start, before it imports task modules,
+        with the ``task_send_pool`` of its kind, so task code that sends
+        opens that pool. ``connections`` is from 1 to
+        ``MAX_CHILD_POOL_CONNECTIONS``: the child decoded it within that
+        bound. A broker that ``get_broker()`` built before the call keeps
+        its pool. Below 1 is a defect: ``AssertionError``.
+        """
+        assert connections >= 1, f'connections must be >= 1; got {connections}'
+        self._broker_pool = _TaskSendBrokerPool(connections=connections)
 
     def on_child_process_start(
         self,
@@ -1438,7 +1470,7 @@ class Horsies:
                     )
                 ]
             case ServerConnectionLimit() as limit:
-                return _worker_connection_errors(profiles, broker_config, limit)
+                return _worker_connection_errors(profiles, limit)
             case _ as unreachable:
                 assert_never(unreachable)
 
@@ -1448,6 +1480,12 @@ class Horsies:
 
     def get_broker(self) -> 'PostgresBroker':
         """Get the configured PostgreSQL broker for this app.
+
+        In a worker child the broker opens the task-send pool of the kind of
+        the child (``set_task_send_pool``). In every other process, the
+        worker process included, it opens the pool that ``PostgresConfig``
+        sets. The worker process opens its own pool, ``WorkerProfile.pool``,
+        on a broker of its own.
 
         Raises:
             HorsiesError: broker construction failed (BROKER_INIT_FAILED;
@@ -1461,11 +1499,7 @@ class Horsies:
                 # construct a PostgresBroker (one engine/pool leaks).
                 with self._broker_init_lock:
                     if self._broker is None:
-                        broker_config = (
-                            self.config.broker.worker_runtime_config()
-                            if self._role == 'worker'
-                            else self.config.broker
-                        )
+                        broker_config = self._broker_config()
                         broker = PostgresBroker(
                             broker_config,
                             run_schema_migrations=self.run_schema_migrations,
@@ -1482,6 +1516,16 @@ class Horsies:
                 notes=[str(e)],
                 help_text='check database_url in PostgresConfig; the note holds the cause',
             ) from e
+
+    def _broker_config(self) -> PostgresConfig:
+        """The config of the broker that ``get_broker()`` builds."""
+        match self._broker_pool:
+            case _ConfigBrokerPool():
+                return self.config.broker
+            case _TaskSendBrokerPool(connections=connections):
+                return self.config.broker.with_exact_pool(connections)
+            case _ as unreachable:
+                assert_never(unreachable)
 
     # ─── Strict-serde phase 6b: app-level result APIs ──────────────
 
