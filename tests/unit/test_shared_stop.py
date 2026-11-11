@@ -70,6 +70,22 @@ def test_the_verdict_of_a_run_at_a_kill(
 
 
 @pytest.mark.parametrize(
+    'kill',
+    [NoNamedKill(), HELD_BY_NEIGHBOUR, HELD_BY_NO_RUN, HELD_BY_RUN],
+    ids=['no-named-cause', 'loop-held-by-another', 'loop-held-by-no-run', 'loop-held'],
+)
+def test_the_named_culprit_of_a_stuck_stop_retries_isolated_at_every_kill(
+    kill: ChildKill,
+) -> None:
+    """A run that the child reported stuck, or whose deadline closed a
+    thread child, keeps its isolated retry at the drain deadline, at the
+    backstop, and at a blocked loop of another run."""
+    assert verdict_at_kill(kill, RUN, DeadlineState.CULPRIT) == TimedOutAtKill(
+        RetryPlacement.ISOLATED,
+    )
+
+
+@pytest.mark.parametrize(
     ('culprit_dispatch', 'placement'),
     [(RUN, RetryPlacement.ISOLATED), (9, RetryPlacement.SAME_CLASS)],
 )

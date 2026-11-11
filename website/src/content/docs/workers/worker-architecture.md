@@ -169,11 +169,11 @@ The worker places each `SHARED_ASYNC` task on the open shared child with the few
 | A task is still alive `cancel_grace_ms` after its cancel | The child cancels it a second time, with the asyncio tasks that it started, in up to three rounds 0.1 s apart. The child takes no new task, and a new child replaces it when its tasks end |
 | A task is still alive after the cancel rounds | The task is stuck and keeps its seat. The worker kills the child when every task left in it is stuck; each fails with `TASK_TIMEOUT`, and its retry runs in an isolated child |
 | The event loop has not turned for 5 s | The worker kills the child at once. The task that held the loop fails with `TASK_BLOCKED_LOOP` and retries isolated; each other task before its deadline fails with `NEIGHBOUR_BLOCKED_LOOP`; a task past its deadline with `TASK_TIMEOUT` |
-| The child reports neither the second cancel nor the end of a task by `timeout_ms + cancel_grace_ms + 10 s` | C code holds the GIL in the child. The worker kills it: each task past its deadline fails with `TASK_TIMEOUT`, and every other task takes the crash path |
+| The child reports neither the second cancel nor the end of a task by `timeout_ms + cancel_grace_ms + 10 s` | C code holds the GIL in the child. The worker kills it: each task past its deadline fails with `TASK_TIMEOUT`, and every other task takes the crash path. A task that the child reported stuck retries in an isolated child |
 | The child crashes | Every task of the child takes the crash path, after the worker saw the exit. A new child starts |
 | The child reaches a recycle limit | It takes no new task, its tasks finish, then it stops and a new child starts |
 
-At a stop the worker closes each shared child: it takes no new task, and it exits by stop frame when its tasks have ended. At the drain deadline the worker kills a shared child that still runs tasks: each of them past its deadline fails with `TASK_TIMEOUT`, and every other one takes the crash path.
+At a stop the worker closes each shared child: it takes no new task, and it exits by stop frame when its tasks have ended. At the drain deadline the worker kills a shared child that still runs tasks: each of them past its deadline fails with `TASK_TIMEOUT`, and every other one takes the crash path. A task that the worker already named as the cause of a stuck stop (a task that a shared async child reported stuck, or the task whose deadline closed a shared thread child) retries in an isolated child at this kill too.
 
 ## Shared Thread Children
 
@@ -195,7 +195,7 @@ The worker places each `SHARED_THREAD` task on the open shared thread child with
 | No task in a closed child has time left | The worker kills the child with its session. After the exit, each task that was still in it fails with `TASK_TIMEOUT`, with the retry and the next workflow step; the task whose deadline closed the child retries in an isolated child. A new child starts |
 | A task ends by itself after its deadline | The outcome is `TASK_TIMEOUT` |
 | A task in the closed child still has time left | It runs to its end or to its own deadline |
-| The child does not report a deadline by `timeout_ms + 10 s` | C code holds the GIL, and no thread of the child runs. The worker kills it: each task past its deadline fails with `TASK_TIMEOUT`, and every other task of the child takes the crash path |
+| The child does not report a deadline by `timeout_ms + 10 s` | C code holds the GIL, and no thread of the child runs. The worker kills it: each task past its deadline fails with `TASK_TIMEOUT`, and every other task of the child takes the crash path. The task whose deadline closed the child, when one did, retries in an isolated child |
 | The child crashes or is killed | Every task of the child takes the crash path, after the worker saw the exit. A new child starts |
 | The child reaches a recycle limit | It takes no new task, its tasks finish, then it stops and a new child starts |
 

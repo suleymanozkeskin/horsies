@@ -87,6 +87,7 @@ from horsies.core.worker.slots import (
     SharedRunRequest,
     SlotPool,
     SlotPoolConfig,
+    NoCloseCulprit,
     _SeatRun,
     _due_step_reported,
     _outcome_at_loss,
@@ -1335,6 +1336,7 @@ class TestReturnedRunAtAKill:
         outcome = _outcome_at_loss(
             kill,
             self._run(LeftoverStuckReported(RETURNED)),
+            NoCloseCulprit(),
             lost,
             time.monotonic(),
         )
@@ -1348,6 +1350,7 @@ class TestReturnedRunAtAKill:
         outcome = _outcome_at_loss(
             NoNamedKill(),
             self._run(LeftoverStuckReported(RETURNED)),
+            NoCloseCulprit(),
             lost,
             time.monotonic(),
         )
@@ -1363,6 +1366,7 @@ class TestReturnedRunAtAKill:
         outcome = _outcome_at_loss(
             NoNamedKill(),
             self._run(LeftoverCancelReported()),
+            NoCloseCulprit(),
             lost,
             time.monotonic(),
         )
@@ -1393,6 +1397,114 @@ class TestReturnedRunAtAKill:
         """The slot has not read the report yet: the child is alive."""
         assert _reported_in(SeatTask(1000, 100), (frame,), 1) is True
         assert _reported_in(SeatTask(1000, 100), (frame,), 2) is False
+
+
+class TestNamedCulpritAtAKill:
+    """The named culprit of a stuck stop retries isolated at every kill by
+    the worker whose exit was seen, not only at the kill when no run has
+    time left."""
+
+    KILLED = ChildLost(LossCause.KILLED_BY_PARENT, KilledBySignal(9), False, 7)
+
+    def _run(self, dispatch: int, deadline: DeadlineReport) -> _SeatRun:
+        handle = SharedHandle(
+            _request('echo').frame_for(dispatch),
+            asyncio.get_running_loop(),
+        )
+        # Placed long ago: by the clock, the deadline of the run has passed.
+        return _SeatRun(handle, RegistryClosed(), deadline, time.monotonic() - 3600)
+
+    @pytest.mark.asyncio(loop_scope='function')
+    @pytest.mark.parametrize(
+        'kill',
+        [
+            NoNamedKill(),
+            BlockedLoopKill(LoopHeldBy(dispatch=9, task_id='other'), 5000, 'x'),
+        ],
+        ids=['drain-or-backstop', 'loop-held-by-another-run'],
+    )
+    async def test_a_run_reported_stuck_retries_isolated(
+        self,
+        kill: NoNamedKill | BlockedLoopKill,
+    ) -> None:
+        outcome = _outcome_at_loss(
+            kill,
+            self._run(1, StuckReported()),
+            NoCloseCulprit(),
+            self.KILLED,
+            time.monotonic(),
+        )
+
+        assert outcome == SeatKilled(
+            TimedOutAtKill(RetryPlacement.ISOLATED),
+            7,
+            KilledBySignal(9),
+        )
+
+    @pytest.mark.asyncio(loop_scope='function')
+    async def test_the_run_that_closed_a_thread_child_retries_isolated(self) -> None:
+        """Another run past its deadline is no culprit: it retries in its class."""
+        closer = RunCulprit(dispatch=1, task_id='closer')
+
+        outcomes = [
+            _outcome_at_loss(
+                NoNamedKill(),
+                self._run(dispatch, DeadlineReported()),
+                closer,
+                self.KILLED,
+                time.monotonic(),
+            )
+            for dispatch in (1, 2)
+        ]
+
+        assert outcomes == [
+            SeatKilled(TimedOutAtKill(RetryPlacement.ISOLATED), 7, KilledBySignal(9)),
+            SeatKilled(TimedOutAtKill(RetryPlacement.SAME_CLASS), 7, KilledBySignal(9)),
+        ]
+
+    @pytest.mark.asyncio(loop_scope='function')
+    async def test_a_crash_the_worker_did_not_cause_isolates_no_run(self) -> None:
+        lost = ChildLost(LossCause.CHILD_DIED, KilledBySignal(9), False, 7)
+
+        outcome = _outcome_at_loss(
+            NoNamedKill(),
+            self._run(1, StuckReported()),
+            RunCulprit(dispatch=1, task_id='closer'),
+            lost,
+            time.monotonic(),
+        )
+
+        assert outcome == lost
+
+    @pytest.mark.asyncio(loop_scope='function')
+    async def test_a_stuck_task_killed_at_the_drain_deadline_retries_isolated(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        """A neighbour with time left keeps the child alive past the stuck
+        report. The drain deadline of the stop kills the child: the stuck
+        task keeps its isolated retry, and the neighbour takes the crash
+        path."""
+        pool = await pool_factory(_config(1, 2))
+        neighbour = pool.submit_shared(_request('sleep', '30'))
+        await asyncio.wait_for(asyncio.shield(neighbour.assigned), OUTCOME_TIMEOUT_S)
+        stuck = pool.submit_shared(
+            _request(
+                'ignore_every_cancel',
+                timeout_ms=SHORT_TIMEOUT_MS,
+                grace_ms=MIN_CANCEL_GRACE_MS,
+            )
+        )
+        await _until(lambda: _closed_by_a_stuck_task(pool))
+
+        await pool.stop(0.3)
+
+        match await _outcome(stuck):
+            case SeatKilled(verdict=verdict):
+                assert verdict == TimedOutAtKill(RetryPlacement.ISOLATED)
+            case other:
+                raise AssertionError(other)
+        assert isinstance(await _outcome(neighbour), ChildLost)
 
 
 IDLE_CPU_PROBE_S = 1.0

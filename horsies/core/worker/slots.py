@@ -1809,13 +1809,49 @@ def shared_recycle_reason(
             assert_never(unreachable)
 
 
-def _deadline_state(run: _SeatRun, now: float) -> DeadlineState:
+@dataclass(frozen=True, slots=True)
+class NoCloseCulprit:
+    """The shared child was not closed at a deadline or at a stuck run, so
+    its close names no culprit."""
+
+
+def _close_culprit(state: SharedSlotState) -> RunCulprit | NoCloseCulprit:
+    """The run that closed a shared child in this state: the run whose
+    deadline closed a thread child, or the first run that an async child
+    reported stuck (``ClosedAtDeadline``)."""
+    match state:
+        case Closing(reason=ClosedAtDeadline(culprit=culprit)):
+            return culprit
+        case Closing() | Open() | Starting() | Retiring() | Down():
+            return NoCloseCulprit()
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _deadline_state(
+    run: _SeatRun,
+    closer: RunCulprit | NoCloseCulprit,
+    now: float,
+) -> DeadlineState:
     """Whether the deadline of a run passed: the child reported it, or
     ``timeout_ms`` passed since the send. The child starts the run after the
     send, so its own deadline is not earlier. A run whose coroutine
-    returned before its deadline has no deadline that passed."""
+    returned before its deadline has no deadline that passed.
+
+    A run that the child reported stuck, and the run that closed its child
+    at its deadline (``closer``), are the named culprit of the stuck stop
+    of the child: ``DeadlineState.CULPRIT``."""
+    match closer:
+        case RunCulprit(dispatch=dispatch) if dispatch == run.handle.frame.dispatch:
+            return DeadlineState.CULPRIT
+        case RunCulprit() | NoCloseCulprit():
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
     match run.deadline:
-        case DeadlineReported() | SecondCancelReported() | StuckReported():
+        case StuckReported():
+            return DeadlineState.CULPRIT
+        case DeadlineReported() | SecondCancelReported():
             return DeadlineState.PASSED
         case LeftoverCancelReported() | LeftoverStuckReported():
             return DeadlineState.PENDING
@@ -1853,16 +1889,20 @@ def _stop_state(
 def _outcome_at_loss(
     kill: ChildKill,
     run: _SeatRun,
+    closer: RunCulprit | NoCloseCulprit,
     lost: ChildLost,
     now: float,
 ) -> SeatKilled | ChildLost:
     """The outcome of a run of a lost shared child.
 
     A kill by the worker whose exit was seen gives the verdict of
-    ``verdict_at_kill``; a verdict of the crash path gives the loss. A run
-    stuck only in the work that it left after its return gets what it
-    returned (``ReturnedBeforeKill``) at such a kill instead. A death that
-    the worker did not cause, and an exit not seen, give the loss.
+    ``verdict_at_kill``; a verdict of the crash path gives the loss. The
+    named culprit of a stuck stop of the child (a run that the child
+    reported stuck, or ``closer``, the run that closed the child at its
+    deadline) retries isolated at every such kill. A run stuck only in the
+    work that it left after its return gets what it returned
+    (``ReturnedBeforeKill``) at such a kill instead. A death that the worker
+    did not cause, and an exit not seen, give the loss.
     """
     match lost.cause, lost.child_exit:
         case LossCause.KILLED_BY_PARENT, ExitedWith() | KilledBySignal() as child_exit:
@@ -1889,7 +1929,7 @@ def _outcome_at_loss(
     verdict = verdict_at_kill(
         kill,
         run.handle.frame.dispatch,
-        _deadline_state(run, now),
+        _deadline_state(run, closer, now),
     )
     match verdict:
         case CrashPath():
@@ -2422,11 +2462,16 @@ class SlotPool:
                     handle.finish(child.lost_for(LossCause.SLOT_DEFECT))
             case _SharedSlot():
                 runs = _runs_of(slot.state)
+                closer = _close_culprit(slot.state)
                 slot.state = Retiring()
                 child, slot.child = slot.child, None
                 if child is not None:
                     await child.dispose_lost()
-                    self._end_all_runs(runs, child.lost_for(LossCause.SLOT_DEFECT))
+                    self._end_all_runs(
+                        runs,
+                        closer,
+                        child.lost_for(LossCause.SLOT_DEFECT),
+                    )
             case _ as unreachable:
                 assert_never(unreachable)
 
@@ -3012,14 +3057,20 @@ class SlotPool:
             case _ as unreachable:
                 assert_never(unreachable)
 
-    def _end_all_runs(self, runs: SeatRuns, lost: ChildLost) -> None:
+    def _end_all_runs(
+        self,
+        runs: SeatRuns,
+        closer: RunCulprit | NoCloseCulprit,
+        lost: ChildLost,
+    ) -> None:
         """Answer every task in flight of a lost child: with the verdict of a
         kill by the worker whose exit was seen (``_outcome_at_loss``), else
-        with the loss."""
+        with the loss. ``closer`` is the run that closed the child at its
+        deadline (``_close_culprit``), read before the slot left that state."""
         now = time.monotonic()
         for run in runs.drain():
             self._release_held(run.held)
-            run.handle.finish(_outcome_at_loss(runs.kill, run, lost, now))
+            run.handle.finish(_outcome_at_loss(runs.kill, run, closer, lost, now))
 
     async def _run_shared_generation(self, slot: _SharedSlot, child: Child) -> None:
         """Serve shared tasks on one child until it closes and drains, until it
@@ -3485,8 +3536,9 @@ class SlotPool:
             runs.count(),
             lost.describe(),
         )
+        closer = _close_culprit(slot.state)
         slot.state = Retiring()
-        self._end_all_runs(runs, lost)
+        self._end_all_runs(runs, closer, lost)
         await child.dispose_lost()
         slot.child = None
 

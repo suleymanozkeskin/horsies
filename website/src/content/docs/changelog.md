@@ -210,8 +210,11 @@ there is no migration contract between pre-1.0 versions.
     nor the end of a task `timeout_ms + cancel_grace_ms + 10 s` after its
     placement: C code holds the GIL in it. A child that still holds a
     refusal 120 s after its placement is killed as well. At these kills a
-    task past its deadline fails with `TASK_TIMEOUT`, every other task takes
-    the crash path, and no retry moves to an isolated child.
+    task past its deadline fails with `TASK_TIMEOUT`, and every other task
+    takes the crash path. A task that the child reported stuck keeps its
+    retry in an isolated child at every kill by the worker whose exit it
+    saw: this backstop, the drain deadline of a stop, and a blocked loop of
+    another task. No other retry moves to an isolated child.
   - A crash of a shared child that the worker did not cause ends every task
     in it through crash recovery (`WORKER_CRASHED`, or its retry), after the
     worker saw the exit.
@@ -266,7 +269,10 @@ there is no migration contract between pre-1.0 versions.
     its deadline fails with `TASK_TIMEOUT`. A child that has not reported a
     deadline by `timeout_ms + 10 s` is frozen (C code holds the GIL): the
     worker kills it, each task past its deadline fails with `TASK_TIMEOUT`,
-    and every other task of the child takes the crash path.
+    and every other task of the child takes the crash path. The task whose
+    deadline closed the child keeps its retry in an isolated child at every
+    kill by the worker whose exit it saw, also at this one and at the drain
+    deadline of a stop.
   - A crash or a kill of a thread child ends every task in it, each through
     crash recovery after the worker saw the exit.
   - A `SHARED_THREAD` row without a usable stored `timeout_ms` fails with

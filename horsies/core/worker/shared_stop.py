@@ -19,6 +19,9 @@ The verdict of each run at such a kill, whose exit the worker saw
 
 - the run that blocked the loop: ``TASK_BLOCKED_LOOP`` before its deadline,
   ``TASK_TIMEOUT`` past it; its retry runs in an isolated child;
+- the named culprit of a stuck stop (``DeadlineState.CULPRIT``): a run that
+  an async child reported stuck, or the run whose deadline closed a thread
+  child: ``TASK_TIMEOUT``; its retry runs in an isolated child;
 - another run past its own deadline: ``TASK_TIMEOUT``;
 - another run before its deadline, when the loop was blocked and the
   watchdog named the run that blocked it: ``NEIGHBOUR_BLOCKED_LOOP``;
@@ -29,8 +32,9 @@ child reported stuck, gets ``ReturnedBeforeKill`` at every kill by the
 worker instead: what it returned. The slot gives that verdict before it
 asks ``verdict_at_kill``.
 
-A kill with no named cause isolates no run, and neither does a crash of the
-child that the worker did not cause. Pure.
+A kill with no named cause names no new culprit: only a run that was
+already the named culprit of a stuck stop retries isolated at it. A crash of
+the child that the worker did not cause isolates no run. Pure.
 """
 
 from __future__ import annotations
@@ -89,10 +93,16 @@ type ChildKill = BlockedLoopKill | NoNamedKill
 
 
 class DeadlineState(Enum):
-    """Whether the deadline of a run passed at the kill."""
+    """Whether the deadline of a run passed at the kill, and whether the run
+    is the named culprit of the stuck stop of its child."""
 
     PENDING = 'pending'
     PASSED = 'passed'
+    CULPRIT = 'culprit'
+    """The deadline passed, and the run is the named culprit of the stuck
+    stop of its child: a run that an async child reported stuck, or the run
+    whose deadline closed a thread child. Its retry runs isolated at every
+    kill whose exit the worker saw."""
 
 
 class StopState(Enum):
@@ -172,7 +182,8 @@ def verdict_at_kill(
     deadline: DeadlineState,
 ) -> KilledRunVerdict | CrashPath:
     """The verdict of run ``dispatch`` at a kill of its child by the worker,
-    whose exit was seen. Pure."""
+    whose exit was seen. A run in ``DeadlineState.CULPRIT`` retries isolated
+    at every such kill. Pure."""
     match kill:
         case BlockedLoopKill(holder=LoopHeldBy(dispatch=holder)) if holder == dispatch:
             return _verdict_of_holder(kill, deadline)
@@ -181,6 +192,8 @@ def verdict_at_kill(
         case _ as unreachable:
             assert_never(unreachable)
     match deadline, kill:
+        case DeadlineState.CULPRIT, _:
+            return TimedOutAtKill(retry=RetryPlacement.ISOLATED)
         case DeadlineState.PASSED, _:
             return TimedOutAtKill(retry=RetryPlacement.SAME_CLASS)
         case (
@@ -203,7 +216,7 @@ def _verdict_of_holder(
 ) -> KilledRunVerdict:
     """The run that held the blocked loop retries isolated."""
     match deadline:
-        case DeadlineState.PASSED:
+        case DeadlineState.PASSED | DeadlineState.CULPRIT:
             return TimedOutAtKill(retry=RetryPlacement.ISOLATED)
         case DeadlineState.PENDING:
             return BlockedTheLoop(blocked_ms=kill.blocked_ms, where=kill.where)

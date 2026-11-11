@@ -103,7 +103,7 @@ The shared thread child holds the deadline of each of its tasks. It starts the d
 
 The attempt ends before its row moves, so a retry never runs next to the attempt that it replaces. A timeout is terminal by default; add `"TASK_TIMEOUT"` to `auto_retry_for` for a retry.
 
-The worker keeps one more timer per task, at `timeout_ms + 10 seconds`. A child reports each deadline at once, so a child that has not reported the deadline by then is frozen: C code holds the GIL, and no thread of the child runs. The worker kills that child. Each task in it that is past its deadline fails with `TASK_TIMEOUT`, and every other task takes the crash path (`WORKER_CRASHED`, or a retry when its policy names that code). The worker cannot tell which thread held the GIL, so it names no culprit.
+The worker keeps one more timer per task, at `timeout_ms + 10 seconds`. A child reports each deadline at once, so a child that has not reported the deadline by then is frozen: C code holds the GIL, and no thread of the child runs. The worker kills that child. Each task in it that is past its deadline fails with `TASK_TIMEOUT`, and every other task takes the crash path (`WORKER_CRASHED`, or a retry when its policy names that code). The worker cannot tell which thread held the GIL, so it names no new culprit. A task whose deadline already closed the child keeps its retry in an isolated child at this kill, and at the drain deadline of a stop.
 
 ## Rules for Task Authors
 

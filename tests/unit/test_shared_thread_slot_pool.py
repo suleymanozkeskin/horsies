@@ -55,6 +55,7 @@ from horsies.core.worker.slots import (
     NotDispatched,
     Open,
     SeatDeadlineEnded,
+    SeatKilled,
     SeatTaskFinished,
     SharedHandle,
     SharedOutcome,
@@ -63,7 +64,7 @@ from horsies.core.worker.slots import (
     SlotPoolConfig,
 )
 from horsies.core.worker.stored_timeout import TimeoutValueInvalid
-from horsies.core.worker.shared_stop import RetryPlacement
+from horsies.core.worker.shared_stop import RetryPlacement, TimedOutAtKill
 from horsies.core.worker.thread_slots import (
     ClosedAtDeadline,
     RunCulprit,
@@ -678,6 +679,31 @@ class TestStop:
         )
         for handle in handles:
             assert isinstance(await _outcome(handle), ChildLost)
+
+    async def test_the_task_that_closed_the_child_retries_isolated_at_the_drain(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        """A neighbour with time left keeps the closed child alive. The drain
+        deadline of the stop kills it: the task whose deadline closed the
+        child keeps its isolated retry, and the neighbour takes the crash
+        path."""
+        pool = await pool_factory(_config(1, 2))
+        neighbour = pool.submit_shared(_request('sleep', '30'))
+        await _assigned(neighbour)
+        closer = pool.submit_shared(
+            _request('sleep', '30', timeout_ms=SHORT_TIMEOUT_MS),
+        )
+        await _until(lambda: isinstance(pool.thread_states()[0], Closing))
+
+        await pool.stop(0.3)
+
+        match await _outcome(closer):
+            case SeatKilled(verdict=verdict):
+                assert verdict == TimedOutAtKill(RetryPlacement.ISOLATED)
+            case other:
+                raise AssertionError(other)
+        assert isinstance(await _outcome(neighbour), ChildLost)
 
     async def test_a_task_after_stop_is_not_dispatched(
         self,
