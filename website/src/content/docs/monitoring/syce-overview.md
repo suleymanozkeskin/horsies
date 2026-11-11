@@ -7,7 +7,7 @@ tags: [monitoring, syce, tui, dashboard]
 
 Syce is a real-time terminal UI (TUI) for monitoring Horsies workers, tasks, and workflows. Built in Rust with [ratatui](https://ratatui.rs), it connects directly to the Horsies PostgreSQL database and renders live cluster state in the terminal.
 
-Syce reads only `horsies_tasks`. That table holds live tasks only: `PENDING`, `CLAIMED` and `RUNNING`. Syce does not show terminal task history. The [web UI](web-ui-overview) and `horsies.monitoring` read the history.
+Syce reads only `horsies_tasks`. That table holds live tasks only: `PENDING`, `CLAIMED` and `RUNNING`. Syce does not show terminal task history. The [web UI](/horsies/monitoring/web-ui-overview/) and `horsies.monitoring` read the history.
 
 ## Installation
 

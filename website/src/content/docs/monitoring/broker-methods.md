@@ -92,7 +92,7 @@ if is_ok(result):
 
 ### Worker health and load
 
-For per-worker load, configuration, and liveness, use the typed [Worker & Database Health](/monitoring/worker-health/) API (`app.list_worker_states_async`, `app.ping_workers_async`, `app.ping_database_async`). It reads the worker-state timeseries — so it includes idle workers — and returns typed `WorkerStateSnapshot` / `WorkerPong` models rather than raw dicts.
+For per-worker load, configuration, and liveness, use the typed [Worker & Database Health](/horsies/monitoring/worker-health/) API (`app.list_worker_states_async`, `app.ping_workers_async`, `app.ping_database_async`). It reads the worker-state timeseries — so it includes idle workers — and returns typed `WorkerStateSnapshot` / `WorkerPong` models rather than raw dicts.
 
 ### `get_expired_tasks() -> BrokerResult[list[dict[str, Any]]]`
 

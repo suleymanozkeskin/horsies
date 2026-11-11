@@ -157,7 +157,7 @@ Returned by the `WorkflowHandle` methods `.status()`, `.results()`, `.tasks()`, 
 | `HandleEventLoopLimit` | `EVENT_LOOP_LIMIT` | `loop_limit: EventLoopLimit` | `False` | Nothing ran |
 | `HandleAsyncContext` | `ASYNC_CONTEXT` | – | `False` | Nothing ran |
 
-See [Errors Reference](../../tasks/errors#workflow-handle-errors-handleresult) for when each code occurs.
+See [Errors Reference](/horsies/tasks/errors/#workflow-handle-errors-handleresult) for when each code occurs.
 
 **Usage:**
 
@@ -215,7 +215,7 @@ The `.node()` method on task functions returns a `NodeFactory` for type-safe `Ta
 | `min_success` | `int` | `None` | Required for `join='quorum'` |
 | `good_until` | `datetime` | `None` | Task expiry deadline. Must be timezone-aware: a naive `datetime` raises `HRS-035` when the spec is built |
 
-See [Typed Node Builder](typed-node-builder) for usage examples.
+See [Typed Node Builder](/horsies/concepts/workflows/typed-node-builder/) for usage examples.
 
 ### `@app.workflow_builder`
 
@@ -262,4 +262,4 @@ def build_regional_pipeline(region: str) -> WorkflowSpec:
 | HRS-029 | Builder raises an exception, returns non-`WorkflowSpec`, or returns a spec missing required validation like `definition_key`, or `build_with()` returned a spec that this call did not build |
 | HRS-030 | Function returns `WorkflowSpec` but lacks `@app.workflow_builder` |
 
-For the guarantee model and CI usage, see [Startup Validation](../../configuration/app-config#startup-validation-appcheck).
+For the guarantee model and CI usage, see [Startup Validation](/horsies/configuration/app-config/#startup-validation-appcheck).
