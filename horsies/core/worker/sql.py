@@ -233,10 +233,8 @@ GET_NONRUNNABLE_WORKFLOW_TASK_IDS_SQL = text("""
 """)
 
 # The optional :claimed_at fence scopes the release to a specific claim
-# generation (C10); NULL disables it. Callers inside a transaction that
-# already fence-locked the row via SELECT_WORKER_OWNED_IN_FLIGHT_FOR_UPDATE_SQL
-# pass the same value; the standalone requeue path passes its dispatch's
-# generation so it cannot release a re-claimed row.
+# generation (C10); NULL disables it. Every caller passes its dispatch's
+# generation, so it cannot release a re-claimed row.
 UNCLAIM_CLAIMED_TASK_SQL = text("""
     UPDATE horsies_tasks
     SET status = 'PENDING',
@@ -304,77 +302,19 @@ NOTIFY_TASK_QUEUE_SQL = text("""
     SELECT pg_notify(:c2, :p)
 """)
 
-GET_TASK_RETRY_INFO_SQL = text("""
-    SELECT retry_count, max_retries, task_options, good_until, clock_timestamp() AS db_now
-    FROM horsies_tasks
-    WHERE id = :id
-""")
-
-GET_TASK_RETRY_CONFIG_SQL = text("""
-    SELECT retry_count, task_options, good_until, clock_timestamp() AS db_now
-    FROM horsies_tasks
-    WHERE id = :id
-""")
-
-GET_TASK_RETRY_POSTCHECK_SQL = text("""
-    SELECT status, good_until
-    FROM horsies_tasks
-    WHERE id = :id
-""")
-
-SELECT_WORKER_OWNED_IN_FLIGHT_FOR_UPDATE_SQL = text("""
-    SELECT id, status, retry_count, started_at, claimed_by_worker_id,
-           worker_hostname, worker_pid, worker_process_name,
-           queue_name, is_workflow_task, max_retries, task_options, good_until,
-           task_name,
-           clock_timestamp() AS db_now
+# The retry facts of the attempt this claim generation holds, without a lock.
+# The facts cannot change inside one generation; the write that follows
+# fences on the generation and on the retry count read here.
+READ_IN_FLIGHT_ATTEMPT_SQL = text("""
+    SELECT CAST(status AS text) AS status, retry_count, max_retries,
+           task_options
     FROM horsies_tasks
     WHERE id = :id
       AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
       AND status IN ('CLAIMED', 'RUNNING')
       AND (CAST(:claimed_at AS TIMESTAMPTZ) IS NULL
            OR claimed_at = CAST(:claimed_at AS TIMESTAMPTZ))
-    FOR UPDATE
 """)
-
-# Sets a RUNNING row of this worker PENDING for its retry. ``class_change``
-# is empty, or the SET item that moves the row to another execution class.
-_SCHEDULE_TASK_RETRY_TEMPLATE = """
-    UPDATE horsies_tasks
-    SET status = 'PENDING',{class_change}
-        retry_count = :retry_count,
-        next_retry_at = :next_retry_at,
-        enqueued_at = :next_retry_at,
-        claimed = FALSE,
-        claimed_at = NULL,
-        claimed_by_worker_id = NULL,
-        claim_expires_at = NULL,
-        started_at = NULL,
-        worker_pid = NULL,
-        worker_hostname = NULL,
-        worker_process_name = NULL,
-        finalizing_at = NULL,
-        finalizing_by_worker_id = NULL,
-        error_code = NULL,
-        updated_at = now()
-    WHERE id = :id
-      AND status = 'RUNNING'
-      AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
-      AND (good_until IS NULL OR :next_retry_at < good_until)
-    RETURNING id
-"""
-
-SCHEDULE_TASK_RETRY_SQL = text(_SCHEDULE_TASK_RETRY_TEMPLATE.format(class_change=''))
-
-# The retry of a task that stopped a shared child (it did not stop after its
-# second cancel, or it blocked the event loop) runs in an isolated child: the
-# write that schedules the retry also sets the class. The stored task options
-# keep their class: the column is what the claim reads.
-SCHEDULE_ISOLATED_TASK_RETRY_SQL = text(
-    _SCHEDULE_TASK_RETRY_TEMPLATE.format(
-        class_change=f"\n        execution = '{Execution.ISOLATED.value}',",
-    ),
-)
 
 SCHEDULE_STALE_TASK_RETRY_SQL = text("""
     UPDATE horsies_tasks AS t
@@ -562,17 +502,16 @@ DELETE_ORPHANED_RECOVERY_FAILURES_SQL = text("""
     )
 """)
 
-SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL = text("""
+# The locking read of a RUNNING task of this claim generation: the task
+# advisory lock first, then the row lock (horsies_lock_running_task). No row:
+# the claim does not hold the row RUNNING.
+LOCK_RUNNING_TASK_SQL = text("""
     SELECT task_name, retry_count, started_at, claimed_by_worker_id,
            worker_hostname, worker_pid, worker_process_name,
-           queue_name, is_workflow_task, clock_timestamp() AS db_now
-    FROM horsies_tasks
-    WHERE id = :id
-      AND status = 'RUNNING'
-      AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
-      AND (CAST(:claimed_at AS TIMESTAMPTZ) IS NULL
-           OR claimed_at = CAST(:claimed_at AS TIMESTAMPTZ))
-    FOR UPDATE
+           queue_name, is_workflow_task, db_now
+    FROM horsies_lock_running_task(
+        CAST(:id AS uuid), CAST(:wid AS TEXT), CAST(:claimed_at AS TIMESTAMPTZ)
+    )
 """)
 
 UPSERT_TASK_ATTEMPT_SQL = text("""

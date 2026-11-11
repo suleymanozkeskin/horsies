@@ -179,3 +179,101 @@ async def test_finalize_phase2_failure_keeps_terminal_task_result_durable(
 
     # Ensure phase-2 was actually attempted.
     worker._handle_workflow_task_if_needed.assert_awaited()
+
+
+def _worker(engine: AsyncEngine) -> Worker:
+    cfg = WorkerConfig(
+        dsn='postgresql+psycopg://u:p@localhost/db',
+        psycopg_dsn='postgresql://u:p@localhost/db',
+        queues=['default'],
+    )
+    worker = Worker(
+        session_factory=async_sessionmaker(engine, expire_on_commit=False),
+        listener=MagicMock(),
+        cfg=cfg,
+    )
+    worker._app = _test_app()
+    worker.worker_instance_id = TEST_WORKER_ID
+    return worker
+
+
+async def _outbox_rows(session: AsyncSession, task_id: str) -> int:
+    return (
+        await session.execute(
+            text(
+                'SELECT count(*) FROM horsies_workflow_phase2_pending '
+                'WHERE task_id = CAST(:id AS uuid)'
+            ),
+            {'id': task_id},
+        )
+    ).scalar_one()
+
+
+async def _node_status(session: AsyncSession, task_id: str) -> str:
+    return (
+        await session.execute(
+            text(
+                'SELECT status FROM horsies_workflow_tasks '
+                'WHERE task_id = CAST(:id AS uuid)'
+            ),
+            {'id': task_id},
+        )
+    ).scalar_one()
+
+
+@pytest.mark.parametrize('ok', [True, False], ids=['success', 'failure'])
+@pytest.mark.asyncio(loop_scope='function')
+async def test_phase2_deletes_the_outbox_row_of_the_node(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+    ok: bool,
+) -> None:
+    """Phase 1 writes the node's outbox row; the phase 2 that advances the
+    node deletes it in the same transaction, so no recovery pass has it
+    left to consume."""
+    task_id = await _insert_running_task(session)
+    worker = _worker(engine)
+    result: TaskResult[JsonValue, TaskError] = (
+        TaskResult(ok='done')
+        if ok
+        else TaskResult(err=TaskError(error_code='BOOM', message='boom'))
+    )
+    wire = dumps_json(encode_task_result(result, JsonValue))
+    assert not is_err(wire)
+
+    finalize_r = await worker._finalize_after(
+        task_finished_handle(True, wire.ok_value, None),
+        task_id,
+        task_name='two_phase_finalize_test',
+    )
+
+    assert not is_err(finalize_r)
+    assert await _node_status(session, task_id) == ('COMPLETED' if ok else 'FAILED')
+    assert await _outbox_rows(session, task_id) == 0
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_a_failed_phase2_keeps_the_outbox_row(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """The delete commits with the node write, or not at all: a phase 2
+    that fails leaves the row for the recovery pass."""
+    task_id = await _insert_running_task(session)
+    worker = _worker(engine)
+    worker._handle_workflow_task_if_needed = AsyncMock(  # type: ignore[method-assign]
+        side_effect=RuntimeError('phase-2 boom'),
+    )
+    wire = dumps_json(encode_task_result(TaskResult(ok='done'), JsonValue))
+    assert not is_err(wire)
+
+    finalize_r = await worker._finalize_after(
+        task_finished_handle(True, wire.ok_value, None),
+        task_id,
+        task_name='two_phase_finalize_test',
+    )
+
+    assert is_err(finalize_r)
+    assert await _outbox_rows(session, task_id) == 1

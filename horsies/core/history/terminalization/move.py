@@ -32,6 +32,8 @@ from __future__ import annotations
 from typing import Final, assert_never
 
 from ...lifecycle.operations import TerminalizationKind, equivalence_class_of
+from ...models.tasks import Execution
+from ...types.status import TaskAttemptOutcome
 
 
 def _equivalence_class_sql(kind: TerminalizationKind) -> str:
@@ -83,7 +85,18 @@ FAIL_STALE_FUNCTION: Final = 'horsies_fail_stale_task'
 EXPIRE_OWNED_FUNCTION: Final = 'horsies_expire_owned_claim'
 EXPIRE_PENDING_FUNCTION: Final = 'horsies_expire_pending_tasks'
 
-_TASK_LOCK_SEED: Final = 731
+FINISH_FAILED_ATTEMPT_FUNCTION: Final = 'horsies_finish_failed_attempt'
+FAILED_ATTEMPT_OUTCOME_TYPE: Final = 'horsies_failed_attempt_outcome'
+LOCK_RUNNING_TASK_FUNCTION: Final = 'horsies_lock_running_task'
+
+RETRY_IN_SAME_CLASS: Final = 'same_class'
+"""The retry placement that keeps the execution class of the row."""
+RETRY_ISOLATED: Final = 'isolated'
+"""The retry placement that writes ``execution = 'ISOLATED'`` with the retry."""
+
+TASK_LOCK_SEED: Final = 731
+"""The seed of the task advisory lock. The lock key of a task is
+``hashtextextended(<task id as uuid text>, TASK_LOCK_SEED)``."""
 
 # The kind classification, once: terminal status, projection-agreement
 # message, deferred-phase-2 ownership, and — derived from deferral — the
@@ -451,7 +464,7 @@ BEGIN
     END CASE;
 
     PERFORM pg_advisory_xact_lock(
-        hashtextextended(p_task_id::text, {_TASK_LOCK_SEED})
+        hashtextextended(p_task_id::text, {TASK_LOCK_SEED})
     );
 
     SELECT * INTO STRICT v_task
@@ -616,7 +629,7 @@ DECLARE
     v_terminal_at timestamptz;
 BEGIN
     PERFORM pg_advisory_xact_lock(
-        hashtextextended(p_task_id::text, {_TASK_LOCK_SEED})
+        hashtextextended(p_task_id::text, {TASK_LOCK_SEED})
     );
     SELECT claimed_at INTO v_claimed_at
     FROM {LIVE_TASKS}
@@ -666,7 +679,7 @@ DECLARE
     v_terminal_at timestamptz;
 BEGIN
     PERFORM pg_advisory_xact_lock(
-        hashtextextended(p_task_id::text, {_TASK_LOCK_SEED})
+        hashtextextended(p_task_id::text, {TASK_LOCK_SEED})
     );
     SELECT id, retry_count, started_at, claimed_by_worker_id, claimed_at,
            worker_hostname, worker_pid, worker_process_name,
@@ -746,7 +759,7 @@ DECLARE
     v_terminal_at timestamptz;
 BEGIN
     PERFORM pg_advisory_xact_lock(
-        hashtextextended(p_task_id::text, {_TASK_LOCK_SEED})
+        hashtextextended(p_task_id::text, {TASK_LOCK_SEED})
     );
     SELECT claimed_at INTO v_claimed_at
     FROM {LIVE_TASKS}
@@ -802,7 +815,7 @@ DECLARE
     v_terminal_at timestamptz;
 BEGIN
     PERFORM pg_advisory_xact_lock(
-        hashtextextended(p_task_id::text, {_TASK_LOCK_SEED})
+        hashtextextended(p_task_id::text, {TASK_LOCK_SEED})
     );
     -- One capture: the row locked, the heartbeat read beside it, and the
     -- instant both arms are judged at. Nothing is reread after a refusal,
@@ -891,6 +904,296 @@ $function$
 """
 
 
+FAILED_ATTEMPT_OUTCOME_TYPE_DDL = f"""
+CREATE TYPE {FAILED_ATTEMPT_OUTCOME_TYPE} AS (
+    task_id uuid,
+    ordinality bigint,
+    outcome text,
+    terminal_at timestamptz,
+    terminalization_kind text,
+    observed_status text,
+    observed_worker_id varchar,
+    observed_claimed_at timestamptz,
+    guard_kind text,
+    observed_guard jsonb,
+    retry_disposition text,
+    retry_count integer,
+    next_retry_at timestamptz,
+    good_until timestamptz,
+    is_workflow_task boolean,
+    queue_name text,
+    task_name text
+)
+"""
+"""The row of ``horsies_finish_failed_attempt``. The first ten columns are
+the columns of ``horsies_terminalization_outcome``, in its order, so a miss
+returns the shared classifier's row unchanged, with the last seven columns
+NULL. APPLIED sets ``retry_disposition`` (``next_retry_at`` and
+``good_until`` too for a retry past its deadline) and the three routing
+columns of the locked row. RETRY_SCHEDULED sets ``retry_count``,
+``next_retry_at`` and ``queue_name``."""
+
+
+def _finish_failed_attempt_arguments_check() -> str:
+    """The argument checks of the failed-attempt finish, before any lock."""
+    outcomes = ', '.join(
+        f"'{outcome.value}'"
+        for outcome in (
+            TaskAttemptOutcome.FAILED,
+            TaskAttemptOutcome.WORKER_FAILURE,
+        )
+    )
+    return f"""    IF num_nulls(
+        p_expected_retry_count, p_retry_delay_s, p_retry_placement
+    ) NOT IN (0, 3) THEN
+        RAISE EXCEPTION
+            'a retry request needs the retry count, the delay and the placement'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF p_retry_delay_s IS NOT NULL AND NOT (
+        p_retry_delay_s >= 0
+        AND p_retry_delay_s < 'Infinity'::double precision
+    ) THEN
+        RAISE EXCEPTION 'retry delay % s is not a finite, non-negative value',
+            p_retry_delay_s
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF p_retry_placement IS NOT NULL AND p_retry_placement NOT IN (
+        '{RETRY_IN_SAME_CLASS}', '{RETRY_ISOLATED}'
+    ) THEN
+        RAISE EXCEPTION 'unknown retry placement %', p_retry_placement
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF p_attempt_outcome IS NULL OR p_attempt_outcome NOT IN ({outcomes}) THEN
+        RAISE EXCEPTION 'attempt outcome % is not a failure', p_attempt_outcome
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF p_result IS NULL THEN
+        RAISE EXCEPTION 'a failed attempt needs a result payload'
+            USING ERRCODE = 'not_null_violation';
+    END IF;
+"""
+
+
+def _finish_failed_attempt_ddl() -> str:
+    """One statement for a failed attempt of a RUNNING task.
+
+    Advisory lock, then the row lock under the full claim fence. When the
+    caller asks for a retry, the retry count it read is part of the fence,
+    because the delay was computed for that attempt. Writes the attempt row,
+    then either the retry (``RETRY_SCHEDULED``) or the terminal failure
+    (``APPLIED``). A retry whose next attempt would start at or after
+    ``good_until`` is written as the terminal failure, with
+    ``retry_disposition = 'PAST_DEADLINE'``. The terminal failure of a plain
+    task sends its capacity wake on ``task_queue_<queue>``; a workflow task
+    gets it from phase 2, after its dependents are enqueued. A retry sends
+    no wake: the caller wakes the queue when the retry is due. A miss writes
+    nothing and returns the shared classifier's row.
+    """
+    kind = TerminalizationKind.FAIL_RUNNING.value
+    return f"""
+CREATE FUNCTION {FINISH_FAILED_ATTEMPT_FUNCTION}(
+    p_task_id uuid,
+    p_worker_id text,
+    p_claimed_at timestamptz,
+    p_expected_retry_count integer,
+    p_retry_delay_s double precision,
+    p_retry_placement text,
+    p_result text,
+    p_error_code text,
+    p_failed_reason text,
+    p_attempt_outcome text,
+    p_attempt_error_message text,
+    p_attempt_failed_reason text
+)
+RETURNS SETOF {FAILED_ATTEMPT_OUTCOME_TYPE}
+LANGUAGE plpgsql
+AS $function$
+DECLARE
+    v_ctx record;
+    v_will_retry boolean := FALSE;
+    v_retry_disposition text;
+    v_next_retry_at timestamptz;
+    v_good_until timestamptz;
+    v_terminal_at timestamptz;
+    v_updated bigint;
+BEGIN
+{_finish_failed_attempt_arguments_check()}
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended(p_task_id::text, {TASK_LOCK_SEED})
+    );
+    SELECT id, retry_count, started_at, claimed_by_worker_id, claimed_at,
+           worker_hostname, worker_pid, worker_process_name,
+           good_until, is_workflow_task, queue_name, task_name,
+           clock_timestamp() AS db_now
+    INTO v_ctx
+    FROM {LIVE_TASKS}
+    WHERE id = p_task_id
+      AND status = 'RUNNING'
+      AND claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
+      AND (p_claimed_at IS NULL OR claimed_at = p_claimed_at)
+      AND (
+          p_expected_retry_count IS NULL
+          OR retry_count = p_expected_retry_count
+      )
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN QUERY SELECT m.*,
+            NULL::text, NULL::integer, NULL::timestamptz, NULL::timestamptz,
+            NULL::boolean, NULL::text, NULL::text
+        FROM {MISS_CLASSIFIER_FUNCTION}(
+            p_task_id, {_equivalence_class_sql(TerminalizationKind(kind))},
+            p_worker_id, p_claimed_at
+        ) AS m;
+        RETURN;
+    END IF;
+
+    IF p_expected_retry_count IS NULL THEN
+        v_retry_disposition := 'NOT_REQUESTED';
+    ELSE
+        v_next_retry_at := v_ctx.db_now + make_interval(secs => p_retry_delay_s);
+        IF v_ctx.good_until IS NULL OR v_next_retry_at < v_ctx.good_until THEN
+            v_will_retry := TRUE;
+        ELSE
+            v_retry_disposition := 'PAST_DEADLINE';
+            v_good_until := v_ctx.good_until;
+        END IF;
+    END IF;
+
+    INSERT INTO {LIVE_ATTEMPTS} (
+        task_id, attempt, outcome, will_retry,
+        started_at, finished_at,
+        error_code, error_message, failed_reason,
+        worker_id, worker_hostname, worker_pid, worker_process_name
+    )
+    VALUES (
+        v_ctx.id, v_ctx.retry_count + 1, p_attempt_outcome, v_will_retry,
+        COALESCE(v_ctx.started_at, v_ctx.db_now), v_ctx.db_now,
+        p_error_code, p_attempt_error_message, p_attempt_failed_reason,
+        v_ctx.claimed_by_worker_id, v_ctx.worker_hostname, v_ctx.worker_pid,
+        v_ctx.worker_process_name
+    )
+    ON CONFLICT (task_id, attempt) DO UPDATE SET
+        outcome = EXCLUDED.outcome,
+        will_retry = EXCLUDED.will_retry,
+        started_at = EXCLUDED.started_at,
+        finished_at = EXCLUDED.finished_at,
+        error_code = EXCLUDED.error_code,
+        error_message = EXCLUDED.error_message,
+        failed_reason = EXCLUDED.failed_reason,
+        worker_id = EXCLUDED.worker_id,
+        worker_hostname = EXCLUDED.worker_hostname,
+        worker_pid = EXCLUDED.worker_pid,
+        worker_process_name = EXCLUDED.worker_process_name;
+
+    IF v_will_retry THEN
+        UPDATE {LIVE_TASKS}
+        SET status = 'PENDING',
+            execution = CASE
+                WHEN p_retry_placement = '{RETRY_ISOLATED}'
+                THEN '{Execution.ISOLATED.value}'
+                ELSE execution
+            END,
+            retry_count = v_ctx.retry_count + 1,
+            next_retry_at = v_next_retry_at,
+            enqueued_at = v_next_retry_at,
+            claimed = FALSE,
+            claimed_at = NULL,
+            claimed_by_worker_id = NULL,
+            claim_expires_at = NULL,
+            started_at = NULL,
+            worker_pid = NULL,
+            worker_hostname = NULL,
+            worker_process_name = NULL,
+            finalizing_at = NULL,
+            finalizing_by_worker_id = NULL,
+            error_code = NULL,
+            updated_at = now()
+        WHERE id = p_task_id;
+        GET DIAGNOSTICS v_updated = ROW_COUNT;
+        IF v_updated <> 1 THEN
+            RAISE EXCEPTION 'retry of task % updated % rows', p_task_id, v_updated;
+        END IF;
+        RETURN QUERY SELECT
+            p_task_id, NULL::bigint, 'RETRY_SCHEDULED'::text,
+            NULL::timestamptz, NULL::text,
+            'RUNNING'::text, v_ctx.claimed_by_worker_id, v_ctx.claimed_at,
+            NULL::text, NULL::jsonb,
+            NULL::text, v_ctx.retry_count + 1, v_next_retry_at,
+            NULL::timestamptz,
+            NULL::boolean, v_ctx.queue_name::text, NULL::text;
+        RETURN;
+    END IF;
+
+    v_terminal_at := NOW();
+    PERFORM {MOVE_FUNCTION}(
+        p_task_id, 'FAILED', '{kind}', v_terminal_at,
+        p_result, p_error_code, p_failed_reason
+    );
+    IF NOT v_ctx.is_workflow_task THEN
+        PERFORM pg_notify(
+            'task_queue_' || v_ctx.queue_name, 'capacity:' || p_task_id::text
+        );
+    END IF;
+    RETURN QUERY SELECT
+        p_task_id, NULL::bigint, 'APPLIED'::text,
+        v_terminal_at, '{kind}'::text,
+        'RUNNING'::text, v_ctx.claimed_by_worker_id, v_ctx.claimed_at,
+        NULL::text, NULL::jsonb,
+        v_retry_disposition, NULL::integer, v_next_retry_at, v_good_until,
+        v_ctx.is_workflow_task, v_ctx.queue_name::text, v_ctx.task_name::text;
+END
+$function$
+"""
+
+
+def _lock_running_task_ddl() -> str:
+    """The locking read of a RUNNING task, advisory lock first.
+
+    Returns the attempt context of the row this claim generation holds, or
+    no row. The caller writes in the same transaction; the move functions it
+    calls take the same advisory lock again, which is free.
+    """
+    return f"""
+CREATE FUNCTION {LOCK_RUNNING_TASK_FUNCTION}(
+    p_task_id uuid,
+    p_worker_id text,
+    p_claimed_at timestamptz
+)
+RETURNS TABLE (
+    task_name varchar,
+    retry_count integer,
+    started_at timestamptz,
+    claimed_by_worker_id varchar,
+    worker_hostname varchar,
+    worker_pid integer,
+    worker_process_name varchar,
+    queue_name varchar,
+    is_workflow_task boolean,
+    db_now timestamptz
+)
+LANGUAGE plpgsql
+AS $function$
+BEGIN
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended(p_task_id::text, {TASK_LOCK_SEED})
+    );
+    RETURN QUERY
+    SELECT t.task_name::varchar, t.retry_count, t.started_at,
+           t.claimed_by_worker_id::varchar, t.worker_hostname::varchar,
+           t.worker_pid, t.worker_process_name::varchar,
+           t.queue_name::varchar, t.is_workflow_task, clock_timestamp()
+    FROM {LIVE_TASKS} t
+    WHERE t.id = p_task_id
+      AND t.status = 'RUNNING'
+      AND t.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
+      AND (p_claimed_at IS NULL OR t.claimed_at = p_claimed_at)
+    FOR UPDATE OF t;
+END
+$function$
+"""
+
+
 def _expire_owned_ddl() -> str:
     kind = TerminalizationKind.EXPIRE_CLAIMED.value
     return f"""
@@ -912,7 +1215,7 @@ DECLARE
     v_terminal_at timestamptz;
 BEGIN
     PERFORM pg_advisory_xact_lock(
-        hashtextextended(p_task_id::text, {_TASK_LOCK_SEED})
+        hashtextextended(p_task_id::text, {TASK_LOCK_SEED})
     );
     -- One locked capture judges the deadline. Every good_until writer
     -- mutates this row and therefore needs the lock this transaction now
@@ -1559,7 +1862,7 @@ DECLARE
     v_terminal_at timestamptz;
 BEGIN
     PERFORM pg_advisory_xact_lock(
-        hashtextextended(p_task_id::text, {_TASK_LOCK_SEED})
+        hashtextextended(p_task_id::text, {TASK_LOCK_SEED})
     );
     -- The caller chooses the permitted live source set; the database owns
     -- the fixed part: plain tasks only, live statuses only, and the
@@ -1615,7 +1918,7 @@ DECLARE
     v_terminal_at timestamptz;
 BEGIN
     PERFORM pg_advisory_xact_lock(
-        hashtextextended(p_task_id::text, {_TASK_LOCK_SEED})
+        hashtextextended(p_task_id::text, {TASK_LOCK_SEED})
     );
     -- One capture: the row locked, the runnable-link observation read
     -- beside it. A terminal link does not count as runnable and still
@@ -1906,7 +2209,7 @@ BEGIN
     LIMIT 1
     FOR SHARE OF w;
     PERFORM pg_advisory_xact_lock(
-        hashtextextended(p_task_id::text, {_TASK_LOCK_SEED})
+        hashtextextended(p_task_id::text, {TASK_LOCK_SEED})
     );
     SELECT t.status, t.claimed_by_worker_id, t.claimed_at
     INTO v_status, v_worker, v_claimed_at
@@ -1973,7 +2276,7 @@ DECLARE
     v_terminal_at timestamptz;
 BEGIN
     PERFORM pg_advisory_xact_lock(
-        hashtextextended(p_task_id::text, {_TASK_LOCK_SEED})
+        hashtextextended(p_task_id::text, {TASK_LOCK_SEED})
     );
     -- Full ownership fence, with the explicit carve-out for a task this
     -- same child observed as requeued to PENDING, where no claim remains
@@ -2170,6 +2473,11 @@ def failure_family_fragments() -> tuple[str, ...]:
     return (_fail_locked_ddl(), _fail_stale_ddl())
 
 
+def failed_attempt_fragments() -> tuple[str, ...]:
+    """The failed-attempt finish: its outcome type, then the function."""
+    return (FAILED_ATTEMPT_OUTCOME_TYPE_DDL, _finish_failed_attempt_ddl())
+
+
 def completion_family_fragments() -> tuple[str, ...]:
     """Encoder, move, and completion operations, in installation order."""
     return (
@@ -2177,4 +2485,29 @@ def completion_family_fragments() -> tuple[str, ...]:
         _move_ddl(),
         _complete_locked_ddl(),
         _complete_fused_ddl(),
+        _lock_running_task_ddl(),
+    )
+
+
+def failed_attempt_teardown() -> tuple[str, ...]:
+    """Drop the failed-attempt finish and the locking read of a RUNNING task.
+
+    The outcome-type cascade drops the finish. The locking read returns a
+    table, so it is dropped by its signature.
+    """
+    return (
+        f'DROP TYPE IF EXISTS {FAILED_ATTEMPT_OUTCOME_TYPE} CASCADE',
+        f'DROP FUNCTION IF EXISTS {LOCK_RUNNING_TASK_FUNCTION}'
+        '(uuid, text, timestamptz)',
+    )
+
+
+def failed_attempt_program_ddl() -> tuple[str, ...]:
+    """Schema v56 on an installed move program, idempotent: the
+    failed-attempt finish and the locking read of a RUNNING task, dropped
+    and created again."""
+    return (
+        *failed_attempt_teardown(),
+        *failed_attempt_fragments(),
+        _lock_running_task_ddl(),
     )

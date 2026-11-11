@@ -62,6 +62,7 @@ from horsies.core.models.tasks import (
 )
 from horsies.core.lifecycle.commands import FailStaleTask
 from horsies.core.lifecycle.operations import TerminalizationKind
+from horsies.core.lifecycle.persistence import LOCK_TASK_SQL
 from horsies.core.lifecycle.outcomes import (
     Applied,
     ObservedStaleness,
@@ -2215,6 +2216,10 @@ class TestPingWorkers:
 # ---------------------------------------------------------------------------
 
 
+_LOCKED = MagicMock()
+"""The result of the task advisory lock, the first statement of each task."""
+
+
 @pytest.mark.unit
 class TestMarkStaleTasksAsFailed:
     """Tests for mark_stale_tasks_as_failed stale detection and cleanup."""
@@ -2303,7 +2308,7 @@ class TestMarkStaleTasksAsFailed:
             ts = AsyncMock()
             ts.__aenter__ = AsyncMock(return_value=ts)
             ts.__aexit__ = AsyncMock(return_value=None)
-            ts.execute = AsyncMock(side_effect=[ctx_result, MagicMock()])
+            ts.execute = AsyncMock(side_effect=[_LOCKED, ctx_result, MagicMock()])
             return ts
 
         task_sessions = [
@@ -2362,7 +2367,7 @@ class TestMarkStaleTasksAsFailed:
         task_session = AsyncMock()
         task_session.__aenter__ = AsyncMock(return_value=task_session)
         task_session.__aexit__ = AsyncMock(return_value=None)
-        task_session.execute = AsyncMock(side_effect=[ctx_result, MagicMock()])
+        task_session.execute = AsyncMock(side_effect=[_LOCKED, ctx_result, MagicMock()])
 
         _set_resources(broker, session_factory=MagicMock(side_effect=[scan_session, task_session]))
 
@@ -2370,9 +2375,10 @@ class TestMarkStaleTasksAsFailed:
         with patch('horsies.core.brokers.postgres.apply_async', new=apply_mock):
             await broker.mark_stale_tasks_as_failed()
 
-        # Per-task SQL: [0]=SELECT FOR UPDATE, [1]=UPSERT_ATTEMPT. The terminal
-        # transition itself crosses the typed operation boundary.
-        attempt_call = task_session.execute.call_args_list[1]
+        # Per-task SQL: [0]=the task advisory lock, [1]=SELECT FOR UPDATE,
+        # [2]=UPSERT_ATTEMPT. The terminal transition itself crosses the
+        # typed operation boundary.
+        attempt_call = task_session.execute.call_args_list[2]
         attempt_params = attempt_call[0][1]
         assert attempt_params['task_id'] == 'task-1'
         assert attempt_params['outcome'] == 'FAILED'
@@ -2419,7 +2425,7 @@ class TestMarkStaleTasksAsFailed:
         task_session = AsyncMock()
         task_session.__aenter__ = AsyncMock(return_value=task_session)
         task_session.__aexit__ = AsyncMock(return_value=None)
-        task_session.execute = AsyncMock(side_effect=[ctx_result, MagicMock()])
+        task_session.execute = AsyncMock(side_effect=[_LOCKED, ctx_result, MagicMock()])
         _set_resources(broker, session_factory=MagicMock(
             side_effect=[scan_session, task_session],
         ))
@@ -2504,7 +2510,7 @@ class TestMarkStaleTasksAsFailed:
         task_session.__aenter__ = AsyncMock(return_value=task_session)
         task_session.__aexit__ = AsyncMock(return_value=None)
         task_session.execute = AsyncMock(
-            side_effect=[ctx_result, MagicMock(), retry_result]
+            side_effect=[_LOCKED, ctx_result, MagicMock(), retry_result]
         )
 
         # notify session (best-effort pg_notify after retry commit)
@@ -2523,7 +2529,7 @@ class TestMarkStaleTasksAsFailed:
         task_session.commit.assert_awaited_once()
 
         # [1] = UPSERT_ATTEMPT with will_retry=True
-        attempt_call = task_session.execute.call_args_list[1]
+        attempt_call = task_session.execute.call_args_list[2]
         attempt_params = attempt_call[0][1]
         assert attempt_params['will_retry'] is True
         assert attempt_params['error_code'] == 'WORKER_CRASHED'
@@ -2576,7 +2582,7 @@ class TestMarkStaleTasksAsFailed:
         task_session = AsyncMock()
         task_session.__aenter__ = AsyncMock(return_value=task_session)
         task_session.__aexit__ = AsyncMock(return_value=None)
-        task_session.execute = AsyncMock(side_effect=[ctx_result, MagicMock()])
+        task_session.execute = AsyncMock(side_effect=[_LOCKED, ctx_result, MagicMock()])
 
         _set_resources(broker, session_factory=MagicMock(side_effect=[scan_session, task_session]))
 
@@ -2594,7 +2600,7 @@ class TestMarkStaleTasksAsFailed:
         assert result.ok_value == 1
 
         # [1] = UPSERT_ATTEMPT with will_retry=False (exhausted)
-        attempt_call = task_session.execute.call_args_list[1]
+        attempt_call = task_session.execute.call_args_list[2]
         attempt_params = attempt_call[0][1]
         assert attempt_params['will_retry'] is False
 
@@ -2653,7 +2659,9 @@ class TestMarkStaleTasksAsFailed:
 
         assert is_ok(result)
         assert result.ok_value == 0
-        select_params = task_session.execute.call_args_list[0][0][1]
+        lock_call, select_call = task_session.execute.call_args_list[:2]
+        assert lock_call[0] == (LOCK_TASK_SQL, {'task_id': 'task-fresh'})
+        select_params = select_call[0][1]
         assert select_params['stale_threshold'] == 300.0
         task_session.commit.assert_not_awaited()
 

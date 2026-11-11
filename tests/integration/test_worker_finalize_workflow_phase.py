@@ -2,7 +2,7 @@
 
 Covers phase-2 of finalization: workflow advancement delegation,
 NOTIFY wake signals, queue-name channel routing, exception handling,
-and the non-fatal NOTIFY failure swallow.
+and a NOTIFY refused by the server, which is a phase-2 error.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.models.tasks import TaskError, TaskResult
-from horsies.core.types.result import is_err, is_ok
+from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import (
     Worker,
@@ -201,76 +201,84 @@ async def test_workflow_task_delegates_to_engine(
 
 
 # ---------------------------------------------------------------------------
-# Test 3: NOTIFY failure is swallowed — Ok(None) still returned
+# Test 3: a NOTIFY that fails on the server is a phase-2 error
 # ---------------------------------------------------------------------------
+
+# A channel name of 64 bytes or more is refused by the server ("channel name
+# too long"), after the node write of the same transaction ran.
+_TOO_LONG_QUEUE = 'q' * 60
+
+
+async def _insert_running_node(session: AsyncSession) -> str:
+    """A RUNNING workflow node and the id of the task that backs it."""
+    task_id = str(uuid.uuid4())
+    workflow_id = str(uuid.uuid4())
+    await session.execute(
+        text("""
+            INSERT INTO horsies_workflows
+                (id, name, status, on_error, depth, root_workflow_id,
+                 sent_at, created_at, started_at, updated_at)
+            VALUES (:wf, 'wf_phase_notify', 'RUNNING', 'FAIL', 0, :wf,
+                    NOW(), NOW(), NOW(), NOW())
+        """),
+        {'wf': workflow_id},
+    )
+    await session.execute(
+        text("""
+            INSERT INTO horsies_workflow_tasks
+                (id, workflow_id, task_index, node_id, task_name, task_args,
+                 task_kwargs, queue_name, priority, dependencies,
+                 allow_failed_deps, join_type, is_subworkflow, status,
+                 task_id, created_at)
+            VALUES (:id, :wf, 0, 'node-0', 'wf_phase_test', '[]', '{}',
+                    'default', 100, '{}', FALSE, 'all', FALSE, 'RUNNING',
+                    CAST(:task_id AS uuid), NOW())
+        """),
+        {'id': str(uuid.uuid4()), 'wf': workflow_id, 'task_id': task_id},
+    )
+    await session.commit()
+    return task_id
 
 
 @pytest.mark.asyncio(loop_scope='function')
-async def test_notify_failure_swallowed(
+async def test_a_notify_that_fails_on_the_server_is_a_phase2_error(
     engine: AsyncEngine,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """NOTIFY SQL raising → swallowed by inner try/except, Ok(None) returned."""
-    task_id = await _insert_task(session)
+    """The node write and the wake share one transaction. A wake refused by
+    the server aborts it, so the writes are either committed or reported:
+    never a silent rollback behind Ok(None)."""
+    task_id = await _insert_running_node(session)
     worker = _make_worker(engine)
-    tr = _make_ok_task_result()
-
-    # Patch GET_TASK_QUEUE_NAME_SQL execution to raise inside the NOTIFY block.
-    # We do this by making _handle_workflow_task_if_needed succeed but
-    # replacing the NOTIFY SQL constant with something that raises.
-    original_sf = worker.sf
-
-    call_count = 0
-
-    def patched_sf() -> Any:
-        """Return a session whose execute raises on NOTIFY calls."""
-        real_session = original_sf()
-
-        class NotifyFailSession:
-            """Wraps the real session, failing on NOTIFY-related queries."""
-
-            def __init__(self, inner: Any) -> None:
-                self._inner = inner
-
-            async def __aenter__(self) -> 'NotifyFailSession':
-                self._s = await self._inner.__aenter__()
-                return self
-
-            @property
-            def info(self) -> Any:
-                return self._s.info
-
-            async def __aexit__(self, *args: Any) -> None:
-                await self._inner.__aexit__(*args)
-
-            async def execute(self, stmt: Any, params: Any = None) -> Any:
-                nonlocal call_count
-                stmt_str = str(stmt) if hasattr(stmt, 'text') else str(stmt)
-                # Let the engine completion statement through, fail on pg_notify
-                if 'pg_notify' in stmt_str:
-                    raise RuntimeError('NOTIFY channel unavailable')
-                call_count += 1
-                if params is not None:
-                    return await self._s.execute(stmt, params)
-                return await self._s.execute(stmt)
-
-            async def commit(self) -> None:
-                await self._s.commit()
-
-        return NotifyFailSession(real_session)
-
-    worker.sf = patched_sf  # type: ignore[assignment]
 
     result = await worker._finalize_workflow_phase(
         task_id,
-        tr,
-        queue_name='high-priority',
+        _make_ok_task_result(),
+        queue_name=_TOO_LONG_QUEUE,
         task_name='wf_phase_test',
     )
 
-    assert is_ok(result)
-    assert result.ok_value is None
+    node_status = (
+        await session.execute(
+            text(
+                'SELECT status FROM horsies_workflow_tasks '
+                'WHERE task_id = CAST(:id AS uuid)'
+            ),
+            {'id': task_id},
+        )
+    ).scalar_one()
+    match result:
+        case Ok():
+            assert (
+                node_status == 'COMPLETED'
+            ), 'phase 2 returned Ok but its node write did not commit'
+        case Err(err_value=error):
+            assert error.stage == _FINALIZE_STAGE_PHASE2
+            assert node_status == 'RUNNING'
+    assert is_err(result), 'a NOTIFY refused by the server is a phase-2 error'
+    assert result.err_value.data is not None
+    assert 'channel name too long' in result.err_value.data['exception']
 
 
 # ---------------------------------------------------------------------------

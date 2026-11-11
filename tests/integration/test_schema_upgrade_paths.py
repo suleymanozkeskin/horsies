@@ -22,10 +22,11 @@ from typing import Any
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
-from sqlalchemy.exc import ProgrammingError
+from sqlalchemy.exc import DBAPIError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.history.terminalization.move import failed_attempt_teardown
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.schemas import recovery as recovery_schema
 from horsies.core.schemas.migrations import SCHEMA_VERSION
@@ -1842,6 +1843,86 @@ class TestUpgradePaths:
                     'last_exception_type',
                 ]
                 assert (await conn.execute(foreign_keys_sql)).scalar_one() == 0
+        finally:
+            await engine.dispose()
+
+    async def test_failed_attempt_program_upgrade_from_55(
+        self,
+        scratch_database: str,
+    ) -> None:
+        """A v55 database gets the failed-attempt finish, its row type and
+        the RUNNING locking read at v56; the finish answers a call, and a
+        second apply changes nothing."""
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        program_sql = text("""
+            SELECT p.proname::text, p.oid::bigint,
+                   pg_get_function_arguments(p.oid)
+            FROM pg_proc p
+            WHERE p.proname IN (
+                'horsies_finish_failed_attempt', 'horsies_lock_running_task'
+            )
+            ORDER BY p.proname
+        """)
+        type_sql = text("""
+            SELECT count(*) FROM pg_type
+            WHERE typname = 'horsies_failed_attempt_outcome'
+        """)
+        try:
+            async with engine.begin() as conn:
+                for statement in failed_attempt_teardown():
+                    await conn.execute(text(statement))
+                assert (await conn.execute(program_sql)).all() == []
+                await conn.execute(
+                    text('DELETE FROM horsies_schema_version WHERE version >= 56')
+                )
+                await conn.execute(
+                    text(
+                        'INSERT INTO horsies_schema_version(version) VALUES (55) '
+                        'ON CONFLICT DO NOTHING'
+                    )
+                )
+            await _migrate(scratch_database)
+            async with engine.connect() as conn:
+                assert await _stored_version(engine) == SCHEMA_VERSION == 56
+                installed = (await conn.execute(program_sql)).all()
+                assert (await conn.execute(type_sql)).scalar_one() == 1
+            # The installed body runs: a partial retry request is refused
+            # before any lock.
+            with pytest.raises(DBAPIError) as refused:
+                async with engine.connect() as conn:
+                    await conn.execute(
+                        text("""
+                        SELECT outcome FROM horsies_finish_failed_attempt(
+                            gen_random_uuid(), 'w', NULL, 0, NULL, NULL,
+                            '{}', 'BOOM', NULL, 'FAILED', NULL, NULL
+                        )
+                    """)
+                    )
+            assert [(name, args) for name, _, args in installed] == [
+                (
+                    'horsies_finish_failed_attempt',
+                    'p_task_id uuid, p_worker_id text, '
+                    'p_claimed_at timestamp with time zone, '
+                    'p_expected_retry_count integer, '
+                    'p_retry_delay_s double precision, '
+                    'p_retry_placement text, p_result text, '
+                    'p_error_code text, p_failed_reason text, '
+                    'p_attempt_outcome text, p_attempt_error_message text, '
+                    'p_attempt_failed_reason text',
+                ),
+                (
+                    'horsies_lock_running_task',
+                    'p_task_id uuid, p_worker_id text, '
+                    'p_claimed_at timestamp with time zone',
+                ),
+            ]
+            assert getattr(refused.value.orig, 'sqlstate', None) == '22023'
+
+            await _migrate(scratch_database)
+            async with engine.connect() as conn:
+                assert await _stored_version(engine) == SCHEMA_VERSION
+                assert (await conn.execute(program_sql)).all() == installed
         finally:
             await engine.dispose()
 

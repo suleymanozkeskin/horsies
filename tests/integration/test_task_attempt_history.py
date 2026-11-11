@@ -451,8 +451,8 @@ async def test_terminal_failure_writes_failed_attempt_and_error_code(
     )
 
     assert is_ok(result)
-    persisted = result.ok_value
-    assert persisted is not None and persisted.result.is_err()
+    # A plain task owes no phase 2: the failure write sent its capacity wake.
+    assert result.ok_value is None
 
     attempts = await _get_attempts(session, task_id)
     assert len(attempts) == 1
@@ -551,8 +551,8 @@ async def test_worker_failure_writes_worker_failure_attempt(
     )
 
     assert is_ok(result)
-    assert result.ok_value is not None
-    assert result.ok_value.result.is_err()
+    # A plain task owes no phase 2: the failure write sent its capacity wake.
+    assert result.ok_value is None
 
     attempts = await _get_attempts(session, task_id)
     assert len(attempts) == 1

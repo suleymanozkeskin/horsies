@@ -147,8 +147,10 @@ autocommit, so a check doubles their round trips. At the defaults:
 | Write | Sender | Round trips |
 |-------|--------|-------------|
 | Finalize of a plain task that succeeded (attempt, history row, capacity wake) | worker | 1 |
+| Failure of a task, a timeout or a crash: the read of the retry facts, then the attempt with the retry or the history row (and the capacity wake of a plain task) | worker | 2 |
+| Failure that is never retried: a worker-level failure, a result that does not decode | worker | 1 |
 | Claim pass (`horsies_claim`) | worker | 1 |
-| Capacity wake in phase 2 of a plain task; wake of a retry that comes due | worker | 1 |
+| Wake of a retry that comes due | worker | 1 |
 | RUNNING update of a plain task, with its first runner heartbeat | child | 1 |
 | Finalizing marker | child | 1 |
 | RUNNING update of a workflow task and the start of its node | child | 4 (BEGIN, update, node, COMMIT) |
