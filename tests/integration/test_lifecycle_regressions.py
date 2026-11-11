@@ -473,8 +473,10 @@ async def test_plain_worker_failure_wakes_the_queue_in_its_write(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """A plain task owes no phase 2: the failure write sends its capacity wake."""
+    """A plain task owes no phase 2: the failure write sends its capacity
+    wake, once. Phase 2 is the real one here, so a second wake would show."""
     worker = _make_worker(engine)
+    del worker._finalize_workflow_phase  # the class method, not the mock
     task_id = await _insert_owned_running_task(
         session,
         worker_id=worker.worker_instance_id,
@@ -499,8 +501,7 @@ async def test_plain_worker_failure_wakes_the_queue_in_its_write(
     finally:
         await listener.close()
     assert is_ok(result)
-    assert f'capacity:{task_id}' in payloads
-    worker._finalize_workflow_phase.assert_not_awaited()  # type: ignore[attr-defined]
+    assert payloads.count(f'capacity:{task_id}') == 1, payloads
     row = await _task_row(session, task_id)
     assert row['status'] == 'FAILED'
     assert row['error_code'] == OperationalErrorCode.BROKER_ERROR.value
