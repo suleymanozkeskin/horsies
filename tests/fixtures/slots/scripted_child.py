@@ -37,7 +37,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from typing import Any
 
 from horsies.core.models.boot_failure import (
@@ -67,13 +67,14 @@ from horsies.core.worker.child_protocol import (
     boot_failed_frame,
     encode_parent_frame,
 )
+from horsies.core.worker.thread_child import ThreadSeatReturn
 from horsies.core.worker.shared_child import (
     MarkerWindow,
     SeatReturn,
     SetRunning,
     StartedSeats,
 )
-from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
+from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE, StartCheck
 from horsies.core.utils.loop_runner import in_running_event_loop
 from horsies.core.worker import loop_watchdog as loop_watchdog_module
 from horsies.core.worker import task_loop as task_loop_module
@@ -703,8 +704,13 @@ def _thread_seat_run(frame: SharedRunFrame) -> WireResult:
 
 
 class _ScriptedThreadSeats:
-    def run(self, frame: SharedRunFrame, work: ThreadSeatWork) -> SeatReturn:
-        _ = work
+    def run(
+        self,
+        frame: SharedRunFrame,
+        work: ThreadSeatWork,
+        start_check: Callable[[], StartCheck],
+    ) -> ThreadSeatReturn:
+        _ = work, start_check
         return SetRunning(_thread_seat_run(frame))
 
     def mark_finalizing(self, frame: SharedRunFrame, window: MarkerWindow) -> None:

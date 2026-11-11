@@ -103,6 +103,28 @@ class _WorkflowResumedBeforeStart:
     workflow_status: str
 
 
+@dataclass(frozen=True, slots=True)
+class StartAllowed:
+    """The run may set its row RUNNING."""
+
+
+@dataclass(frozen=True, slots=True)
+class DeadlineBeforeStart:
+    """The deadline of the run fired before its RUNNING update, while it
+    waited for a pooled connection. The run does not start: its row stays
+    CLAIMED, and the timeout of the worker returns it to the queue."""
+
+
+type StartCheck = StartAllowed | DeadlineBeforeStart
+"""Whether a run may still start, read after it got its pooled connection."""
+
+
+def start_always_allowed() -> StartCheck:
+    """The start check of a run with no deadline in its child, as in an
+    isolated child: the parent holds that deadline."""
+    return StartAllowed()
+
+
 # One attempt plus one after a resume. A workflow paused and resumed again
 # between the two ends as OWNERSHIP_UNCONFIRMED; the claim lease then
 # returns the task to the queue.
@@ -843,13 +865,16 @@ def _confirm_until_not_resumed(
     worker_id: str,
     is_workflow_task: bool,
     claimed_at: Optional[datetime],
-) -> Optional[Tuple[bool, str, Optional[str]]]:
+    *,
+    start_check: Callable[[], StartCheck] = start_always_allowed,
+) -> Optional[Tuple[bool, str, Optional[str]]] | DeadlineBeforeStart:
     """Run the RUNNING transition again when a resume refused the abandon.
 
     Returns None to start the task, or the wire tuple that stops it. A
     workflow resumed on every one of ``_PRE_START_CONFIRM_ATTEMPTS`` tries
     returns OWNERSHIP_UNCONFIRMED; the task stays claimed until its lease
-    returns it to the queue.
+    returns it to the queue. ``DeadlineBeforeStart``: ``start_check`` found
+    the deadline of the run fired (``_confirm_ownership_and_set_running``).
     """
     for _ in range(_PRE_START_CONFIRM_ATTEMPTS):
         result = _confirm_ownership_and_set_running(
@@ -857,11 +882,12 @@ def _confirm_until_not_resumed(
             worker_id,
             is_workflow_task,
             claimed_at,
+            start_check=start_check,
         )
         match result:
             case _WorkflowResumedBeforeStart():
                 continue
-            case None | tuple():
+            case None | tuple() | DeadlineBeforeStart():
                 return result
             case _ as unreachable:
                 assert_never(unreachable)
@@ -878,10 +904,30 @@ def _confirm_ownership_and_set_running(
     worker_id: str,
     is_workflow_task: bool = True,
     claimed_at: Optional[datetime] = None,
-) -> Optional[Tuple[bool, str, Optional[str]]] | _WorkflowResumedBeforeStart:
+    *,
+    start_check: Callable[[], StartCheck] = start_always_allowed,
+) -> (
+    Optional[Tuple[bool, str, Optional[str]]]
+    | _WorkflowResumedBeforeStart
+    | DeadlineBeforeStart
+):
+    """Set the row RUNNING with its first runner heartbeat. None: started.
+
+    ``start_check`` runs once the pool gave a connection, before the
+    update: a shared thread seat waits for that connection, and its
+    deadline can fire meanwhile. ``DeadlineBeforeStart`` then returns with
+    no statement run, so the row stays CLAIMED.
+    """
     try:
         pool = _get_worker_pool()
         with pool.connection() as conn:
+            match start_check():
+                case StartAllowed():
+                    pass
+                case DeadlineBeforeStart() as passed:
+                    return passed
+                case _ as unreachable:
+                    assert_never(unreachable)
             cursor = conn.cursor(row_factory=namedtuple_row)
             # The first runner heartbeat is part of the transition: the row can
             # never be observed RUNNING without heartbeat coverage, and a
@@ -1578,8 +1624,17 @@ def _run_task_entry(
         is_workflow_task,
         claimed_at,
     )
-    if ownership_result is not None:
-        return ownership_result
+    match ownership_result:
+        case None:
+            pass
+        case tuple():
+            return ownership_result
+        case DeadlineBeforeStart():
+            raise AssertionError(
+                'an isolated child checks no deadline before its RUNNING update',
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
 
     try:
         # A stored timeout that the worker cannot use fails the task before

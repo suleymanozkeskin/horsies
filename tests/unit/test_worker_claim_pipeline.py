@@ -28,6 +28,12 @@ from horsies.core.schemas.terminalization import (
     CREATE_ABANDON_OWNED_NODES_SQL,
     CREATE_CANCEL_OWNED_NODES_SQL,
 )
+from horsies.core.worker.child_runner import (
+    DeadlineBeforeStart,
+    StartAllowed,
+    StartCheck,
+    _confirm_ownership_and_set_running,
+)
 from horsies.core.worker.sql import (
     CLAIM_SQL,
     COUNT_CLAIMED_FOR_WORKER_SQL,
@@ -336,7 +342,7 @@ class TestOwnershipGateBehavioral:
 
             result = _confirm_ownership_and_set_running('task-1', 'worker-A')
 
-        assert result is not None, 'Ownership lost should return a tuple'
+        assert isinstance(result, tuple), 'Ownership lost should return a tuple'
         ok, _result_json, reason = result
         assert ok is False
         assert reason == 'CLAIM_LOST'
@@ -356,10 +362,59 @@ class TestOwnershipGateBehavioral:
 
             result = _confirm_ownership_and_set_running('task-1', 'worker-A')
 
-        assert result is not None, 'Exception path should return a tuple'
+        assert isinstance(result, tuple), 'Exception path should return a tuple'
         ok, _result_json, reason = result
         assert ok is False
         assert reason == 'OWNERSHIP_UNCONFIRMED'
+
+    def test_a_deadline_before_start_runs_no_statement(self) -> None:
+        """The start check runs once the pool gave a connection. A deadline
+        that fired during the wait stops the run there: no RUNNING update,
+        no commit, and the row stays CLAIMED."""
+        cursor = _FakeCursor(fetchone_return=('task-1',))
+        conn = _FakeConn(cursor)
+        pool = _FakePool(conn)
+        checks: list[str] = []
+
+        def deadline_fired() -> StartCheck:
+            checks.append('checked')
+            return DeadlineBeforeStart()
+
+        with patch(
+            'horsies.core.worker.child_runner._get_worker_pool',
+            return_value=pool,
+        ):
+            result = _confirm_ownership_and_set_running(
+                'task-1',
+                'worker-A',
+                is_workflow_task=False,
+                start_check=deadline_fired,
+            )
+
+        assert result == DeadlineBeforeStart()
+        assert checks == ['checked']
+        assert cursor.queries == []
+        assert conn.commits == 0
+
+    def test_an_allowed_start_runs_the_update(self) -> None:
+        cursor = _FakeCursor(fetchone_return=('task-1',))
+        conn = _FakeConn(cursor)
+        pool = _FakePool(conn)
+
+        with patch(
+            'horsies.core.worker.child_runner._get_worker_pool',
+            return_value=pool,
+        ):
+            result = _confirm_ownership_and_set_running(
+                'task-1',
+                'worker-A',
+                is_workflow_task=False,
+                start_check=StartAllowed,
+            )
+
+        assert result is None
+        assert len(cursor.queries) == 1
+        assert conn.commits == 1
 
 
 # ---------------------------------------------------------------------------

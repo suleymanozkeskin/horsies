@@ -12,6 +12,7 @@ the real statements; a recording writer stands in for the frame writer.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 import os
@@ -42,6 +43,7 @@ from horsies.core.worker.child_protocol import (
     RssMb,
     SeatFinished,
     SeatRefusal,
+    SeatTimedOut,
     SharedResultFrame,
     SharedRunFrame,
     ThreadSeatTask,
@@ -286,3 +288,52 @@ async def test_a_refusal_sets_the_row_running_and_fails_before_resolve(
     row = await _row(session, task_id)
     assert row.status == 'RUNNING'
     assert row.finalizing_at is not None
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_a_seat_that_gets_its_connection_after_the_deadline_leaves_the_row_claimed(
+    session: AsyncSession,
+    thread_app: Horsies,  # noqa: ARG001
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """Every connection of the pool is held, so the seat thread waits; the
+    deadline of its run fires during the wait. When the seat gets its
+    connection, it does not set the row RUNNING: the row stays CLAIMED with
+    no runner heartbeat, and the run ends with the timeout."""
+    claimed_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    task_id = await _seed_claimed_task(session, claimed_at=claimed_at)
+    work = ThreadSeatTask(timeout_ms=300)
+    frame = _frame(task_id, claimed_at, work)
+    pool = _get_worker_pool()
+    held = [pool.getconn() for _ in range(pool.max_size)]
+    writer = _RecordingWriter()
+    table = ThreadRunTable(1, writer)
+    deadlines = threading.Thread(target=table.serve_deadlines, daemon=True)
+    deadlines.start()
+    seats = ThreadSeats(1, table, PostgresThreadSeats(), lambda: RssMb(1.0))
+    assert seats.start().is_ok()
+    try:
+        table.add(frame, work)
+        seats.give(frame, work)
+        await asyncio.sleep(0.8)
+        assert writer.results() == []
+    finally:
+        for connection in held:
+            pool.putconn(connection)
+    ends_by = time.monotonic() + JOIN_S
+    while not writer.results():
+        assert time.monotonic() < ends_by, 'the seat did not end its run'
+        await asyncio.sleep(0.01)
+    seats.stop(JOIN_S)
+    table.stop()
+    deadlines.join(JOIN_S)
+
+    assert [type(item).__name__ for item in writer.frames] == [
+        'DeadlineFiredFrame',
+        'SharedResultFrame',
+    ]
+    assert writer.results()[0].end == SeatTimedOut()
+    row = await _row(session, task_id)
+    assert row.status == 'CLAIMED'
+    assert row.finalizing_at is None
+    assert await _runner_beats(session, task_id) == []

@@ -298,8 +298,13 @@ there is no migration contract between pre-1.0 versions.
     a pooled connection for it at most until that deadline. A task that
     timed out gets no marker: the child reports its end at once, and the
     runner heartbeats of the worker cover the row until the worker reads
-    it. A marker that waits for a connection no longer turns a returned
-    value into `TASK_TIMEOUT`.
+    it. A marker that waits for a connection never turns a returned value
+    into `TASK_TIMEOUT`.
+  - A seat thread whose task reaches its deadline while the thread waits
+    for a pooled connection does not start the task: right before the
+    RUNNING update it reads the deadline of the run, and the row stays
+    `CLAIMED`. The child reports the deadline, and the worker returns the
+    row to the queue with no `TASK_TIMEOUT`.
   - Recycling is per seat, as for shared async children. The claim limit
     check (`HRS-218`), the connection check (`HRS-219`), the memory warning
     and the boot memory guard count the thread children.

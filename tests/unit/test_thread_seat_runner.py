@@ -1,18 +1,21 @@
 """One task run on a seat of a shared thread child (``run_thread_seat_task``).
 
 Real registered tasks run here, on a thread. The database steps around the
-body, the RUNNING transition and the finalizing marker, are replaced; with a
-real database they are covered in ``tests/integration``.
+body, the RUNNING transition and the finalizing marker, are replaced, or the
+pool under them is; with a real database they are covered in
+``tests/integration``.
 """
 
 # pyright: reportPrivateUsage=false
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import threading
-from collections.abc import Iterator
+import time
+from collections.abc import Generator, Iterator
 from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -35,12 +38,17 @@ from horsies.core.models.tasks import (
 )
 from horsies.core.worker import child_runner, thread_runner
 from horsies.core.worker.child_protocol import (
+    ChildFrame,
+    RssMb,
     SeatRefusal,
+    SeatTimedOut,
+    SharedResultFrame,
     SharedRunFrame,
     ThreadSeatTask,
     ThreadSeatWork,
     WireResult,
 )
+from horsies.core.worker.child_runner import DeadlineBeforeStart, StartAllowed
 from horsies.core.worker.shared_child import (
     MarkerBeforeDeadline,
     MarkerWithoutDeadline,
@@ -49,6 +57,7 @@ from horsies.core.worker.shared_child import (
     StoppedBeforeRunning,
 )
 from horsies.core.worker.stored_timeout import TimeoutValueInvalid
+from horsies.core.worker.thread_child import ThreadRunTable, ThreadSeats
 
 pytestmark = [pytest.mark.unit]
 
@@ -138,9 +147,16 @@ def _run(frame: SharedRunFrame, work: ThreadSeatWork | None = None) -> SeatRetur
                     pass
                 case _:
                     raise AssertionError(frame.work)
-            results.append(
-                thread_runner.run_thread_seat_task(frame, work or frame_work)
+            returned = thread_runner.run_thread_seat_task(
+                frame,
+                work or frame_work,
+                StartAllowed,
             )
+            match returned:
+                case SetRunning() | StoppedBeforeRunning():
+                    results.append(returned)
+                case DeadlineBeforeStart():
+                    raise AssertionError('a start that is always allowed was refused')
 
     seat = threading.Thread(target=body, name='horsies-seat-0')
     seat.start()
@@ -168,7 +184,13 @@ def test_a_def_task_runs_on_the_seat_thread(steps: _Steps) -> None:
 
     assert _result(wire, int).unwrap() == 42
     assert RAN == ['horsies-seat-0']
-    steps.confirm.assert_called_once_with('task-1', 'worker-1', False, CLAIMED_AT)
+    steps.confirm.assert_called_once_with(
+        'task-1',
+        'worker-1',
+        False,
+        CLAIMED_AT,
+        start_check=StartAllowed,
+    )
     steps.mark.assert_not_called()
 
 
@@ -265,3 +287,112 @@ class TestTheMarkerOfAThreadSeat:
         )
 
         steps.mark.assert_called_once_with('task-1', 'worker-1', CLAIMED_AT)
+
+
+class _SlowPool:
+    """A sync pool that gives a connection ``wait_s`` after the ask, as a
+    full pool does. Records each statement run on its connections."""
+
+    def __init__(self, wait_s: float) -> None:
+        self.wait_s = wait_s
+        self.statements: list[str] = []
+
+    @contextlib.contextmanager
+    def connection(self, timeout: float | None = None) -> Generator[_Connection]:
+        _ = timeout
+        time.sleep(self.wait_s)
+        yield _Connection(self.statements)
+
+
+class _Connection:
+    def __init__(self, statements: list[str]) -> None:
+        self._statements = statements
+
+    def cursor(self, row_factory: object = None) -> _Cursor:
+        _ = row_factory
+        return _Cursor(self._statements)
+
+    def commit(self) -> None:
+        return None
+
+    def rollback(self) -> None:
+        return None
+
+
+class _Cursor:
+    rowcount = 1
+
+    def __init__(self, statements: list[str]) -> None:
+        self._statements = statements
+
+    def execute(self, sql: str, params: object = ()) -> None:
+        _ = params
+        self._statements.append(sql)
+
+    def fetchone(self) -> tuple[str]:
+        return ('task-1',)
+
+
+class _RecordingWriter:
+    def __init__(self) -> None:
+        self.frames: list[ChildFrame] = []
+        self._lock = threading.Lock()
+
+    def send(self, frame: ChildFrame) -> None:
+        with self._lock:
+            self.frames.append(frame)
+
+    def send_result(self, task_name: str, frame: SharedResultFrame) -> None:
+        _ = task_name
+        self.send(frame)
+
+    def results(self) -> list[SharedResultFrame]:
+        with self._lock:
+            return [item for item in self.frames if isinstance(item, SharedResultFrame)]
+
+
+def test_a_seat_that_gets_its_connection_after_the_deadline_does_not_start(
+    fresh_marks: None,
+) -> None:
+    """The real seat thread, run table and seat program, on a pool that
+    answers 0.5 s after the ask: the deadline (0.2 s) fires during the
+    wait. The RUNNING update does not run, the body does not run, and the
+    run ends with the timeout; its row stays CLAIMED for the worker to
+    return to the queue."""
+    _ = fresh_marks
+    pool = _SlowPool(wait_s=0.5)
+    writer = _RecordingWriter()
+    table = ThreadRunTable(1, writer)
+    deadlines = threading.Thread(target=table.serve_deadlines, daemon=True)
+    seats = ThreadSeats(
+        1, table, thread_runner.PostgresThreadSeats(), lambda: RssMb(1.0)
+    )
+    frame = dataclasses.replace(
+        _frame('thread_double', {'x': 2}),
+        work=ThreadSeatTask(timeout_ms=200),
+    )
+    with (
+        patch.object(child_runner, '_get_worker_pool', MagicMock(return_value=pool)),
+        patch.object(child_runner, 'get_current_app', MagicMock(return_value=APP)),
+    ):
+        deadlines.start()
+        assert seats.start().is_ok()
+        try:
+            table.add(frame, ThreadSeatTask(timeout_ms=200))
+            seats.give(frame, ThreadSeatTask(timeout_ms=200))
+            ends_by = time.monotonic() + 10.0
+            while not writer.results():
+                assert time.monotonic() < ends_by, 'the run did not end'
+                time.sleep(0.01)
+        finally:
+            seats.stop(10.0)
+            table.stop()
+            deadlines.join(10.0)
+
+    assert RAN == []
+    assert pool.statements == []
+    assert [type(item).__name__ for item in writer.frames] == [
+        'DeadlineFiredFrame',
+        'SharedResultFrame',
+    ]
+    assert writer.results()[0].end == SeatTimedOut()

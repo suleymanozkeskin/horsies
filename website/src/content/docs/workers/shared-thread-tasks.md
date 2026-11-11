@@ -155,7 +155,7 @@ A new task goes to the open shared thread child with the fewest tasks in flight,
 
 Each shared thread child opens one sync connection pool of `worker_child_pool_max_size` connections (default 2), as an isolated child does, whatever its seats. Its seat threads share that pool for two writes of each task: the RUNNING update at its start, and the finalizing marker at its end (only for a task that returned before its deadline). The worker process writes the runner heartbeats over its own connection. See [Connections](/horsies/workers/worker-profiles/#connections).
 
-A seat thread waits up to 30 seconds for a free connection. A thread that gets none in that time does not run its task: the task stays claimed, and its claim lease returns it to the queue.
+A seat thread waits up to 30 seconds for a free connection. A thread that gets none in that time does not run its task: the task stays claimed, and its claim lease returns it to the queue. A thread whose task reaches its deadline during that wait does not start the task either: the child reports the deadline, the task stays claimed, and the worker returns it to the queue with no `TASK_TIMEOUT`.
 
 Size the pool from the writes, not from the seats:
 

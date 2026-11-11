@@ -44,14 +44,19 @@ from horsies.core.worker.shared_child import (
     MarkerWindow,
     MarkerWithoutDeadline,
     NoMarker,
-    SeatReturn,
     SetRunning,
     StoppedBeforeRunning,
+)
+from horsies.core.worker.child_runner import (
+    DeadlineBeforeStart,
+    StartAllowed,
+    StartCheck,
 )
 from horsies.core.worker.stored_timeout import NoTimeout, TimeoutValueInvalid
 from horsies.core.worker.thread_child import (
     DEADLINE_WAIT_MAX_S,
     ThreadRunTable,
+    ThreadSeatReturn,
     ThreadSeats,
     serve_runs,
 )
@@ -336,6 +341,38 @@ class TestRunTable:
 
         assert table.returned(1, SetRunning(OK_WIRE)) == MarkerWithoutDeadline()
 
+    def test_a_start_before_the_deadline_is_allowed(self) -> None:
+        table, writer, clock = self._table()
+        frame = _frame(1)
+        table.add(frame, _thread_work(frame))
+        clock.now += 0.999
+
+        assert table.start_check(1) == StartAllowed()
+        assert writer.frames == []
+
+    def test_a_start_after_the_deadline_fires_it_and_is_refused(self) -> None:
+        """The seat waited for a connection past the deadline, and the
+        deadline thread has not fired it yet: the check fires it, so the
+        deadline report comes first, and the run ends with the timeout."""
+        table, writer, clock = self._table()
+        frame = _frame(1)
+        table.add(frame, _thread_work(frame))
+        clock.now += 1.0
+
+        assert table.start_check(1) == DeadlineBeforeStart()
+        assert table.returned(1, DeadlineBeforeStart()) == NoMarker()
+        table.finish(1, RssMb(5.0))
+
+        assert writer.frames == [
+            DeadlineFiredFrame(dispatch=1, task_id='task-1'),
+            SharedResultFrame(
+                dispatch=1,
+                task_id='task-1',
+                end=SeatTimedOut(),
+                rss=RssMb(5.0),
+            ),
+        ]
+
     def test_the_deadline_thread_fires_on_the_real_clock_and_stops(self) -> None:
         writer = _RecordingWriter()
         table = ThreadRunTable(1, writer)
@@ -357,19 +394,32 @@ class TestRunTable:
 
 class _Program:
     """Each run calls the behavior registered for its task name, and sets
-    its row RUNNING, but a task named in ``not_running``. Each marker is
-    recorded with its window, then calls ``marker``."""
+    its row RUNNING, but a task named in ``not_running``. A task named in
+    ``checks_start`` asks ``start_check`` first, as the RUNNING update does.
+    Each marker is recorded with its window, then calls ``marker``."""
 
     def __init__(self, behaviors: dict[str, Callable[[], str]]) -> None:
         self._behaviors = behaviors
         self.threads: list[str] = []
         self.not_running: set[str] = set()
+        self.checks_start: set[str] = set()
         self.markers: list[tuple[int, MarkerWindow]] = []
         self.marker: Callable[[MarkerWindow], None] = lambda _window: None
         self._lock = threading.Lock()
 
-    def run(self, frame: SharedRunFrame, work: ThreadSeatWork) -> SeatReturn:
+    def run(
+        self,
+        frame: SharedRunFrame,
+        work: ThreadSeatWork,
+        start_check: Callable[[], StartCheck],
+    ) -> ThreadSeatReturn:
         _ = work
+        if frame.task_name in self.checks_start:
+            match start_check():
+                case DeadlineBeforeStart() as passed:
+                    return passed
+                case StartAllowed():
+                    pass
         with self._lock:
             self.threads.append(threading.current_thread().name)
         wire: WireResult = (True, self._behaviors[frame.task_name](), None)

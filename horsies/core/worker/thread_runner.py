@@ -14,7 +14,7 @@ the finalizing marker after the return, when the run table asks for it.
 
 from __future__ import annotations
 
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from typing import Any, assert_never
 
 from horsies.core.logging import get_logger
@@ -30,11 +30,13 @@ from horsies.core.worker.shared_child import (
     MarkerBeforeDeadline,
     MarkerWindow,
     MarkerWithoutDeadline,
-    SeatReturn,
     SetRunning,
     StoppedBeforeRunning,
 )
+from horsies.core.worker.thread_child import ThreadSeatReturn
 from horsies.core.worker.child_runner import (
+    DeadlineBeforeStart,
+    StartCheck,
     OnSharedThreadSeat,
     _confirm_until_not_resumed,
     _encode_task_outcome,
@@ -51,10 +53,15 @@ logger = get_logger('worker')
 class PostgresThreadSeats:
     """The seats of a worker's shared thread child, on its sync pool."""
 
-    def run(self, frame: SharedRunFrame, work: ThreadSeatWork) -> SeatReturn:
+    def run(
+        self,
+        frame: SharedRunFrame,
+        work: ThreadSeatWork,
+        start_check: Callable[[], StartCheck],
+    ) -> ThreadSeatReturn:
         """Run the task of ``frame`` on the calling seat thread; see
         ``run_thread_seat_task``."""
-        return run_thread_seat_task(frame, work)
+        return run_thread_seat_task(frame, work, start_check)
 
     def mark_finalizing(self, frame: SharedRunFrame, window: MarkerWindow) -> None:
         """Write the finalizing marker of the run of ``frame``; see
@@ -87,12 +94,19 @@ def _thread_call_result(
             )
 
 
-def run_thread_seat_task(frame: SharedRunFrame, work: ThreadSeatWork) -> SeatReturn:
+def run_thread_seat_task(
+    frame: SharedRunFrame,
+    work: ThreadSeatWork,
+    start_check: Callable[[], StartCheck],
+) -> ThreadSeatReturn:
     """Run one task on the calling seat thread, up to its wire tuple.
 
     The steps and outcomes of ``child_runner._run_task_entry`` but the
     finalizing marker: the RUNNING transition with the first runner
-    heartbeat, then the task call and the result encode. A stop before the
+    heartbeat, then the task call and the result encode. ``start_check``
+    runs once the pool gave a connection, before the RUNNING update: a
+    deadline that fired during the wait returns ``DeadlineBeforeStart``, and
+    the task does not start; its row stays CLAIMED. A stop before the
     RUNNING update commits returns ``StoppedBeforeRunning``; every other end
     returns ``SetRunning``. A ``SeatRefusal`` returns
     ``WORKER_SERIALIZATION_ERROR`` after the RUNNING transition, before it
@@ -108,10 +122,23 @@ def run_thread_seat_task(frame: SharedRunFrame, work: ThreadSeatWork) -> SeatRet
         frame.worker_id,
         frame.is_workflow_task,
         frame.claimed_at,
+        start_check=start_check,
     )
-    if ownership_result is not None:
-        return StoppedBeforeRunning(ownership_result)
-    return SetRunning(_run_after_running(frame, work))
+    match ownership_result:
+        case None:
+            return SetRunning(_run_after_running(frame, work))
+        case tuple():
+            return StoppedBeforeRunning(ownership_result)
+        case DeadlineBeforeStart():
+            logger.info(
+                'Task %s (%s) did not start: its deadline fired while it waited '
+                'for a pooled connection; it stays claimed',
+                frame.task_name,
+                frame.task_id,
+            )
+            return ownership_result
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _run_after_running(frame: SharedRunFrame, work: ThreadSeatWork) -> WireResult:

@@ -15,6 +15,11 @@ fired, whatever the task returned, else ``SeatFinished``. A run whose task
 returned has no deadline left. A ``SeatRefusal`` runs no task code and has no
 deadline.
 
+A seat thread that waited for a pooled connection past the deadline of its
+run does not start the task: right before the RUNNING update it asks the
+table (``start_check``), and the row stays CLAIMED for the worker to return
+to the queue.
+
 After the return, a run that set its row RUNNING and returned before its
 deadline writes its finalizing marker, at most until that deadline; the seat
 reports the end after it. A run that timed out writes none: the runner
@@ -84,10 +89,14 @@ from horsies.core.worker.shared_child import (
     MarkerWindow,
     MarkerWithoutDeadline,
     NoMarker,
-    SeatReturn,
     SetRunning,
     StoppedBeforeRunning,
     _exit_for_defect,
+)
+from horsies.core.worker.child_runner import (
+    DeadlineBeforeStart,
+    StartAllowed,
+    StartCheck,
 )
 from horsies.core.worker.task_loop import TaskLoop
 
@@ -109,13 +118,26 @@ class FrameSink(Protocol):
     def send_result(self, task_name: str, frame: SharedResultFrame) -> None: ...
 
 
+type ThreadSeatReturn = SetRunning | StoppedBeforeRunning | DeadlineBeforeStart
+"""What the run of one task on a seat thread returns. ``DeadlineBeforeStart``:
+the deadline of the run fired while it waited for a pooled connection, and
+the run did not start."""
+
+
 class ThreadSeatProgram(Protocol):
     """How a shared thread child runs one task, on the calling seat thread."""
 
-    def run(self, frame: SharedRunFrame, work: ThreadSeatWork) -> SeatReturn:
+    def run(
+        self,
+        frame: SharedRunFrame,
+        work: ThreadSeatWork,
+        start_check: Callable[[], StartCheck],
+    ) -> ThreadSeatReturn:
         """Run the task of ``frame``, whose work is ``work``, up to its
-        result; write no finalizing marker. An exception that escapes is a
-        defect: the child ends at once with ``CHILD_DEFECT_EXIT_CODE``."""
+        result; write no finalizing marker. ``start_check`` tells, right
+        before the RUNNING update, whether the deadline of the run fired. An
+        exception that escapes is a defect: the child ends at once with
+        ``CHILD_DEFECT_EXIT_CODE``."""
         ...
 
     def mark_finalizing(self, frame: SharedRunFrame, window: MarkerWindow) -> None:
@@ -180,13 +202,19 @@ def _deadline_at(work: ThreadSeatWork, now: float) -> _DeadlineAt | _NoDeadline:
             assert_never(unreachable)
 
 
-def _end_at_return(run: _ThreadRun, returned: SeatReturn) -> SeatEnd:
+def _end_at_return(run: _ThreadRun, returned: ThreadSeatReturn) -> SeatEnd:
     """The end of a run whose task returned ``returned``: the timeout after
     a deadline that fired, also when the task returned a value, else what
-    the task returned. A second return is a defect."""
+    the task returned. A second return is a defect, and so is a run that did
+    not start for a deadline that has not fired."""
     match run.state, returned:
         case _Deadline.FIRED, _:
             return SeatTimedOut()
+        case _Deadline.PENDING, DeadlineBeforeStart():
+            raise AssertionError(
+                f'run {run.frame.dispatch} did not start before a deadline '
+                'that has not fired',
+            )
         case _Deadline.PENDING, SetRunning(wire=wire) | StoppedBeforeRunning(wire=wire):
             ok, result_json, failed_reason = wire
             return SeatFinished(
@@ -202,7 +230,7 @@ def _end_at_return(run: _ThreadRun, returned: SeatReturn) -> SeatEnd:
 
 def _marker_window(
     run: _ThreadRun,
-    returned: SeatReturn,
+    returned: ThreadSeatReturn,
     end: SeatEnd,
     now: float,
 ) -> MarkerWindow | NoMarker:
@@ -218,7 +246,7 @@ def _marker_window(
     match end, returned, run.deadline_at:
         case SeatTimedOut(), _, _:
             return NoMarker()
-        case SeatFinished(), StoppedBeforeRunning(), _:
+        case SeatFinished(), StoppedBeforeRunning() | DeadlineBeforeStart(), _:
             return NoMarker()
         case SeatFinished(), SetRunning(), _NoDeadline():
             return MarkerWithoutDeadline()
@@ -280,7 +308,31 @@ class ThreadRunTable:
             )
             self._changed.notify_all()
 
-    def returned(self, dispatch: int, returned: SeatReturn) -> MarkerWindow | NoMarker:
+    def start_check(self, dispatch: int) -> StartCheck:
+        """Whether run ``dispatch`` may still set its row RUNNING. Its seat
+        thread asks right before the update, after the wait for a pooled
+        connection. Fires every deadline that is due first, so a deadline
+        that the deadline thread has not reached yet counts too."""
+        with self._lock:
+            _ = self._fire_due()
+            run = self._runs[dispatch]
+            match run.state:
+                case _Deadline.PENDING:
+                    return StartAllowed()
+                case _Deadline.FIRED:
+                    return DeadlineBeforeStart()
+                case _Returned():
+                    raise AssertionError(
+                        f'run {dispatch} asked to start after its return',
+                    )
+                case _ as unreachable:
+                    assert_never(unreachable)
+
+    def returned(
+        self,
+        dispatch: int,
+        returned: ThreadSeatReturn,
+    ) -> MarkerWindow | NoMarker:
         """Fix the end of run ``dispatch``, whose task returned ``returned``
         (``_end_at_return``): the run has no deadline left. Returns whether
         its seat writes the finalizing marker, and within what time
@@ -470,9 +522,17 @@ class ThreadSeats:
                 assert_never(unreachable)
         self._table.finish(frame.dispatch, self._read_rss())
 
-    def _run_or_exit(self, frame: SharedRunFrame, work: ThreadSeatWork) -> SeatReturn:
+    def _run_or_exit(
+        self,
+        frame: SharedRunFrame,
+        work: ThreadSeatWork,
+    ) -> ThreadSeatReturn:
         try:
-            return self._program.run(frame, work)
+            return self._program.run(
+                frame,
+                work,
+                functools.partial(self._table.start_check, frame.dispatch),
+            )
         except BaseException as exc:
             _exit_for_defect(
                 f'task {frame.task_id} escaped the seat runner: '
