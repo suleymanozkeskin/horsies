@@ -290,7 +290,7 @@ config = PostgresConfig(
 
 Driver must be psycopg3 (async). `postgresql+psycopg2://` is rejected.
 
-psycopg >= 3.3.6 bounds the wait after an interrupted query (a cancelled asyncio
+horsies requires psycopg >= 3.3.7. psycopg >= 3.3.6 bounds the wait after an interrupted query (a cancelled asyncio
 task, `KeyboardInterrupt`, `SystemExit`): a cancel request of at most 5 s, then
 at most 5 s for the query, then it closes the connection. The 5 s limit on the
 cancel request needs libpq 17+; with an older libpq the request has no limit (in

@@ -101,7 +101,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - tcp_keepalives_interval: int (default 10)
 - tcp_keepalives_count: int (default 3)
 - tcp_user_timeout_ms: int (default 30000; 0 uses the operating system default)
-- psycopg >= 3.3.6 is required: after an interrupted query it sends a cancel request (at most 5 s) and waits for the query (at most 5 s), then closes the connection; the 5 s limit on the cancel request needs libpq 17+ (older libpq: no limit; horsies[pg-binary] bundles its own libpq; psycopg.pq.version() reads it, 170000 = 17.0)
+- psycopg >= 3.3.7 is required: after an interrupted query it sends a cancel request (at most 5 s) and waits for the query (at most 5 s), then closes the connection; the 5 s limit on the cancel request needs libpq 17+ (older libpq: no limit; horsies[pg-binary] bundles its own libpq; psycopg.pq.version() reads it, 170000 = 17.0)
 - retain_rerun_input_default: bool (default False)
 - pool_timeout: int (default 30)
 - pool_recycle: int (default 1800)
@@ -824,7 +824,7 @@ Each entry: Title -- summary -> URL
 - Migrating to 0.1.2 -- strict-serde breaking changes from 0.1.1 -> /horsies/migrations/migration-to-0-1-2/
 - Migrating to 0.5.0 and 0.5.2 -- live/history split (schema v34), offline cutover, offline schema v35 upgrade -> /horsies/migrations/migration-to-0-5-0/
 - Migrating to 0.6.0 -- stop-all upgrade rule, schema v52, new settings and flags, required code changes -> /horsies/migrations/migration-to-0-6-0/
-- Migrating to 0.7.0 -- upgrade order: psycopg 3.3.6, worker profiles and the flag to field table, new error code cases, refused result waits inside a task, workflow limits, stop 0.6.x workers before schema v55, exit codes, behaviour changes -> /horsies/migrations/migration-to-0-7-0/
+- Migrating to 0.7.0 -- upgrade order: psycopg 3.3.7, worker profiles and the flag to field table, new error code cases, refused result waits inside a task, workflow limits, stop 0.6.x workers before schema v55, exit codes, behaviour changes -> /horsies/migrations/migration-to-0-7-0/
 
 ### Changelog
 - Changelog -- notable changes per release -> /horsies/changelog/

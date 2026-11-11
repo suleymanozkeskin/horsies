@@ -1,13 +1,13 @@
 ---
 title: Migrating to 0.7.0
-summary: What to change to upgrade from 0.6.x to 0.7.0, in upgrade order - psycopg 3.3.6, worker profiles in place of worker flags, the snapshot interval cap, new error code cases, result waits inside a task, workflow limits, a stop of every 0.6.x worker before schema v55, exit codes, and the changes in behaviour after the upgrade.
+summary: What to change to upgrade from 0.6.x to 0.7.0, in upgrade order - psycopg 3.3.7, worker profiles in place of worker flags, the snapshot interval cap, new error code cases, result waits inside a task, workflow limits, a stop of every 0.6.x worker before schema v55, exit codes, and the changes in behaviour after the upgrade.
 related: [../changelog, ../workers/worker-profiles, ../workers/execution-modes, ../cli, ../configuration/recovery-config, migration-to-0-6-0]
 tags: [migration, 0.7.0, breaking-changes, worker, profiles, cli, schema, execution]
 ---
 
 ## Upgrade order
 
-1. Install horsies 0.7.0 with psycopg 3.3.6 or later. See [Dependencies](#dependencies).
+1. Install horsies 0.7.0 with psycopg 3.3.7 or later. See [Dependencies](#dependencies).
 2. Change the config: [worker profiles](#worker-settings-move-into-profiles), [the running stale threshold](#running_stale_threshold_ms-holds-one-heartbeat-interval-plus-2-s) and [the snapshot interval](#worker_state_snapshot_interval_ms-is-at-most-60000-ms).
 3. Change the code: [matches on error codes](#matches-on-error-codes), [result waits inside a task](#a-result-wait-inside-a-task-is-refused) and [workflow limits](#workflow-limits).
 4. Run `horsies check <app>`, and `horsies check <app> --live` against the target database. See [New validation](#new-validation).
@@ -17,7 +17,7 @@ tags: [migration, 0.7.0, breaking-changes, worker, profiles, cli, schema, execut
 
 ## Dependencies
 
-horsies 0.7.0 requires psycopg 3.3.6 or later. The `pg-binary` and `pg-c` extras require `psycopg-binary` or `psycopg-c` 3.3.6 or later. Before 3.3.6, psycopg waited with no limit for an interrupted query to end. The 5-second limit on the cancel request also needs libpq 17 or later. See [psycopg and libpq](/horsies/configuration/broker-config/#psycopg-and-libpq).
+horsies 0.7.0 requires psycopg 3.3.7 or later. The `pg-binary` and `pg-c` extras require `psycopg-binary` or `psycopg-c` 3.3.7 or later. Before 3.3.6, psycopg waited with no limit for an interrupted query to end. 3.3.7 also sends the cancel request when the cancel connection is not ready at once. The 5-second limit on the cancel request also needs libpq 17 or later. See [psycopg and libpq](/horsies/configuration/broker-config/#psycopg-and-libpq).
 
 ## Worker settings move into profiles
 

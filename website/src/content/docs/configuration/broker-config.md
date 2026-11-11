@@ -56,7 +56,7 @@ Components:
 
 ## psycopg and libpq
 
-horsies needs psycopg 3.3.6 or later. The install sets where the libpq of psycopg comes from:
+horsies needs psycopg 3.3.7 or later. The install sets where the libpq of psycopg comes from:
 
 | Install | psycopg loads |
 |---------|---------------|
