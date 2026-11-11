@@ -18,7 +18,12 @@ from horsies.core.errors import (
 from horsies.core.models.app import AppConfig
 from datetime import timedelta
 
-from horsies.core.models.broker import MOVED_TO_WORKER_PROFILE, PostgresConfig
+from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.models.broker import (
+    MOVED_TO_PARENT_POOL,
+    MOVED_TO_WORKER_PROFILE,
+    PostgresConfig,
+)
 from horsies.core.models.queues import CustomQueueConfig, QueueMode
 from horsies.core.models.health import WORKER_STATE_LIVE_WINDOW_S
 from horsies.core.models.recovery import (
@@ -57,64 +62,38 @@ SHORT_HB_RECOVERY = RecoveryConfig(claimer_heartbeat_interval_ms=1_000)
 class TestPostgresConfigPgBouncer:
     """Tests for split PostgreSQL URL configuration."""
 
-    def test_worker_pool_defaults_are_smaller_than_producer_pool(self) -> None:
+    def test_the_producer_pool_defaults(self) -> None:
         config = PostgresConfig(
-            database_url='postgresql+psycopg://user:pass@localhost/db',
+            database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
         )
 
         # Producer defaults follow SQLAlchemy's (spec change, 0.1.7);
         # the old 30+30 let one producer pin 60 server connections.
         assert config.pool_size == 5
         assert config.max_overflow == 10
-        assert config.worker_pool_size == 3
-        assert config.worker_max_overflow == 2
 
-        worker_config = config.worker_runtime_config()
-
-        assert worker_config.pool_size == 3
-        assert worker_config.max_overflow == 2
-        assert worker_config.database_url == config.database_url
-
-    def test_worker_pool_can_inherit_producer_pool(self) -> None:
+    def test_sqlalchemy_engine_kwargs_exclude_the_worker_pre_ping(self) -> None:
         config = PostgresConfig(
-            database_url='postgresql+psycopg://user:pass@localhost/db',
-            pool_size=11,
-            max_overflow=7,
-            worker_pool_size=None,
-            worker_max_overflow=None,
+            database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
         )
 
-        worker_config = config.worker_runtime_config()
-
-        assert worker_config.pool_size == 11
-        assert worker_config.max_overflow == 7
-
-    def test_sqlalchemy_engine_kwargs_excludes_worker_only_fields(self) -> None:
-        config = PostgresConfig(
-            database_url='postgresql+psycopg://user:pass@localhost/db',
-        )
-
-        kwargs = config.sqlalchemy_engine_kwargs()
-
-        assert 'worker_pool_size' not in kwargs
-        assert 'worker_max_overflow' not in kwargs
-        assert 'worker_pool_pre_ping' not in kwargs
+        assert 'worker_pool_pre_ping' not in config.sqlalchemy_engine_kwargs()
 
     def test_the_worker_process_does_not_pre_ping_by_default(self) -> None:
         """The worker's writes are one statement in autocommit; a pre-ping
         would double their round trips. Producer engines keep theirs, also
-        the one that task code in a child sends with."""
+        the one that task code in a child sends with (the task-send pool)."""
         config = PostgresConfig(
             database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
         )
 
         assert config.worker_pool_pre_ping is False
         assert config.sqlalchemy_engine_kwargs()['pool_pre_ping'] is True
-        child_send = config.worker_runtime_config().sqlalchemy_engine_kwargs()
+        child_send = config.with_exact_pool(2).sqlalchemy_engine_kwargs()
         assert child_send['pool_pre_ping'] is True
-        worker = config.worker_process_config()
+        worker = config.worker_process_config(7)
         assert worker.sqlalchemy_engine_kwargs()['pool_pre_ping'] is False
-        assert (worker.pool_size, worker.max_overflow) == (3, 2)
+        assert (worker.pool_size, worker.max_overflow) == (7, 0)
 
     def test_the_worker_process_pre_pings_when_set(self) -> None:
         config = PostgresConfig(
@@ -124,30 +103,96 @@ class TestPostgresConfigPgBouncer:
         )
 
         assert config.sqlalchemy_engine_kwargs()['pool_pre_ping'] is False
-        child_send = config.worker_runtime_config().sqlalchemy_engine_kwargs()
+        child_send = config.with_exact_pool(2).sqlalchemy_engine_kwargs()
         assert child_send['pool_pre_ping'] is False
-        worker = config.worker_process_config()
+        worker = config.worker_process_config(7)
         assert worker.sqlalchemy_engine_kwargs()['pool_pre_ping'] is True
+        assert (worker.pool_size, worker.max_overflow) == (7, 0)
 
+    @pytest.mark.parametrize('parent_pool', [0, -1])
+    def test_a_worker_process_pool_below_one_is_a_defect(
+        self,
+        parent_pool: int,
+    ) -> None:
+        config = PostgresConfig(
+            database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+        )
+        with pytest.raises(AssertionError, match='connections must be >= 1'):
+            config.worker_process_config(parent_pool)
+
+    @pytest.mark.parametrize('value', [3, 0, None])
     @pytest.mark.parametrize(
-        ('field', 'value'),
+        ('field', 'note'),
         [
-            ('worker_pool_size', 0),
-            ('worker_max_overflow', -1),
+            (
+                'worker_pool_size',
+                'the worker process opens its pool with the resolved '
+                'pool.max_size of its worker profile',
+            ),
+            (
+                'worker_max_overflow',
+                'the pool of the worker process has no overflow: it holds at '
+                'most pool.max_size connections',
+            ),
         ],
     )
-    def test_worker_pool_rejects_invalid_bounds(
+    def test_a_removed_worker_pool_field_is_refused(
         self,
         field: str,
-        value: int,
+        note: str,
+        value: object,
     ) -> None:
+        """A config that still sets a worker pool field of 0.6, also to
+        None, fails at build, and the help names the pool of the worker
+        process in the profile."""
         with pytest.raises(ConfigurationError) as exc_info:
-            PostgresConfig(
-                database_url='postgresql+psycopg://user:pass@localhost/db',
-                **{field: value},
+            PostgresConfig.model_validate(
+                {
+                    'database_url': 'postgresql+psycopg://user:pass@localhost/db',
+                    field: value,
+                },
             )
 
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_BROKER_POOL
+        error = exc_info.value
+        assert error.code == ErrorCode.CONFIG_INVALID_BROKER_POOL
+        assert error.message == f'{field} was removed in 0.7.0'
+        assert error.notes[0] == note
+        assert error.notes[1] == (
+            'task code in a worker child that sends opens the task_send_pool '
+            'of its child kind, not this pool'
+        )
+        assert (
+            'WorkerProfile(pool=ParentPool(max_size=PoolSize(connections=N)))'
+            in (error.help_text or '')
+        )
+
+    def test_every_removed_pool_field_is_reported_at_once(self) -> None:
+        """The worker pool fields and the child pool fields of 0.6 are
+        refused in one report."""
+        with pytest.raises(MultipleValidationErrors) as exc_info:
+            PostgresConfig.model_validate(
+                {
+                    'database_url': 'postgresql+psycopg://user:pass@localhost/db',
+                    'worker_pool_size': 3,
+                    'worker_max_overflow': 2,
+                    'worker_child_pool_max_size': 2,
+                },
+            )
+
+        messages = [error.message for error in exc_info.value.report.errors]
+        assert messages == [
+            'worker_child_pool_max_size was removed in 0.7.0',
+            'worker_pool_size was removed in 0.7.0',
+            'worker_max_overflow was removed in 0.7.0',
+        ]
+
+    def test_the_removed_worker_pool_fields_are_no_fields(self) -> None:
+        assert set(MOVED_TO_PARENT_POOL) == {'worker_pool_size', 'worker_max_overflow'}
+        assert not set(MOVED_TO_PARENT_POOL) & set(PostgresConfig.model_fields)
+        kwargs = PostgresConfig(
+            database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+        ).sqlalchemy_engine_kwargs()
+        assert not set(MOVED_TO_PARENT_POOL) & set(kwargs)
 
     @pytest.mark.parametrize(
         ('field', 'value', 'pool_argument'),
@@ -1379,29 +1424,108 @@ class TestFormatSchedulePattern:
 
 
 @pytest.mark.unit
+class TestExactPool:
+    """``PostgresConfig.with_exact_pool``: the pool of the worker process and
+    the task-send pool of a child hold exactly ``connections`` connections,
+    with no overflow."""
+
+    _CONFIG = PostgresConfig(
+        database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+        pool_size=30,
+        max_overflow=30,
+        pool_timeout=12,
+    )
+
+    def test_the_copy_has_the_pool_and_no_overflow(self) -> None:
+        exact = self._CONFIG.with_exact_pool(7)
+        assert (exact.pool_size, exact.max_overflow) == (7, 0)
+        assert exact.database_url == self._CONFIG.database_url
+        assert exact.pool_timeout == 12
+        assert (self._CONFIG.pool_size, self._CONFIG.max_overflow) == (30, 30)
+
+    @pytest.mark.parametrize('connections', [0, -1])
+    def test_below_one_is_a_defect(self, connections: int) -> None:
+        with pytest.raises(AssertionError, match='connections must be >= 1'):
+            self._CONFIG.with_exact_pool(connections)
+
+    @pytest.mark.asyncio
+    async def test_the_broker_engine_opens_with_the_pool_and_no_overflow(
+        self,
+    ) -> None:
+        """The engine that a broker of the copy builds: QueuePool of
+        ``pool_size`` 7 and ``max_overflow`` 0. No connection opens."""
+        from sqlalchemy.pool import QueuePool
+
+        broker = PostgresBroker(self._CONFIG.with_exact_pool(7))
+        resources = broker._build_resources()  # pyright: ignore[reportPrivateUsage]
+        try:
+            pool = resources.engine.sync_engine.pool
+            assert isinstance(pool, QueuePool)
+            assert pool.size() == 7
+            assert pool._max_overflow == 0  # pyright: ignore[reportPrivateUsage]
+            assert pool.checkedout() == 0
+        finally:
+            await resources.engine.dispose()
+
+
+@pytest.mark.unit
 class TestGetBrokerErrorHandling:
     """Regression tests for Horsies.get_broker() error wrapping (HRS-211)."""
 
-    def test_worker_role_get_broker_uses_worker_pool_profile(self) -> None:
-        """Worker app brokers should not use producer-sized pool defaults."""
+    def test_a_worker_child_opens_the_task_send_pool_of_its_kind(self) -> None:
+        """A worker child sets its task-send pool at start: the app broker
+        of its task code opens exactly that many, not the producer pool."""
         from horsies import Horsies
 
         config = PostgresConfig(
-            database_url='postgresql+psycopg://user:pass@localhost/db',
+            database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
             pool_size=30,
             max_overflow=30,
-            worker_pool_size=3,
-            worker_max_overflow=2,
         )
         app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, broker=config))
         app.set_role('worker')
+        app.set_task_send_pool(4)
 
         with patch('horsies.core.app.PostgresBroker') as mock_broker_cls:
             app.get_broker()
 
         broker_config = mock_broker_cls.call_args.args[0]
-        assert broker_config.pool_size == 3
-        assert broker_config.max_overflow == 2
+        assert (broker_config.pool_size, broker_config.max_overflow) == (4, 0)
+        assert broker_config.database_url == config.database_url
+        # A producer engine: it keeps pool_pre_ping, not worker_pool_pre_ping.
+        assert (config.pool_pre_ping, config.worker_pool_pre_ping) == (True, False)
+        assert broker_config.pool_pre_ping is True
+
+    @pytest.mark.parametrize('role', ['producer', 'scheduler', 'worker'])
+    def test_without_a_task_send_pool_the_broker_opens_the_config_pool(
+        self,
+        role: str,
+    ) -> None:
+        """A producer, the scheduler, and the worker process itself keep the
+        pool of PostgresConfig: the worker role alone does not resize it."""
+        from horsies import Horsies
+
+        config = PostgresConfig(
+            database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+            pool_size=30,
+            max_overflow=30,
+        )
+        app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, broker=config))
+        app.set_role(role)
+
+        with patch('horsies.core.app.PostgresBroker') as mock_broker_cls:
+            app.get_broker()
+
+        broker_config = mock_broker_cls.call_args.args[0]
+        assert (broker_config.pool_size, broker_config.max_overflow) == (30, 30)
+
+    @pytest.mark.parametrize('connections', [0, -1])
+    def test_a_task_send_pool_below_one_is_a_defect(self, connections: int) -> None:
+        from horsies import Horsies
+
+        app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, broker=BROKER))
+        with pytest.raises(AssertionError, match='connections must be >= 1'):
+            app.set_task_send_pool(connections)
 
     def test_non_horsies_error_wrapped_as_broker_init_failed(self) -> None:
         """Non-HorsiesError exceptions are wrapped with BROKER_INIT_FAILED."""

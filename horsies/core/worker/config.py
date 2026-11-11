@@ -9,6 +9,10 @@ from enum import Enum
 from typing import TYPE_CHECKING, Optional
 
 from horsies.core.defaults import MAX_CLAIM_RENEW_AGE_MS
+from horsies.core.models.child_sizing import (
+    DEFAULT_TASK_SEND_POOL_CONNECTIONS,
+    PARENT_POOL_CONNECTIONS_FLOOR,
+)
 from horsies.core.worker.claim_plan import ClaimPlan, claim_plan_for_children
 
 if TYPE_CHECKING:
@@ -80,11 +84,16 @@ class WorkerConfig:
     pgbouncer_transaction_mode: bool = False
     # The isolated children. 0 is valid when the worker has shared children.
     processes: int = os.cpu_count() or 2
-    parent_pool_size: int = 3
-    parent_max_overflow: int = 2
+    # The most connections of the pool of the worker process: the resolved
+    # WorkerProfile.pool. The pool has no overflow.
+    parent_pool_size: int = PARENT_POOL_CONNECTIONS_FLOOR
     # The connection pool of each isolated child. The pool of each shared
     # child comes from its setting in shared_async or shared_thread.
     isolated_pool: ResolvedPool = field(default_factory=_default_isolated_pool)
+    # The connections of the pool that task code opens in an isolated child
+    # when it sends. Each shared kind carries its own in shared_async or
+    # shared_thread.
+    isolated_task_send_pool: int = DEFAULT_TASK_SEND_POOL_CONNECTIONS
     # psycopg connect kwargs for each child-pool connection (TCP keepalives,
     # plus prepare_threshold=None under PgBouncer transaction mode). Built
     # from PostgresConfig.pooled_connect_args.
@@ -287,7 +296,6 @@ class WorkerConfig:
             'queues': self.queues,
             'processes': self.processes,
             'parent_pool_size': self.parent_pool_size,
-            'parent_max_overflow': self.parent_max_overflow,
             'prefetch_buffer': self.prefetch_buffer,
             'cluster_wide_cap': self.cluster_wide_cap,
         }

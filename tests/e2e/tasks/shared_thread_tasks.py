@@ -49,6 +49,18 @@ def thread_pool_bounds() -> TaskResult[str, TaskError]:
 
 
 @app.task(
+    task_name='e2e_thread_task_send_pool',
+    execution=Execution.SHARED_THREAD,
+    timeout_ms=30_000,
+)
+def thread_task_send_pool() -> TaskResult[str, TaskError]:
+    """The pool of the app broker that task code in this child opens when it
+    sends: ``pool_size:max_overflow``."""
+    config = app.get_broker().config
+    return TaskResult(ok=f'{config.pool_size}:{config.max_overflow}')
+
+
+@app.task(
     task_name='e2e_thread_hang',
     execution=Execution.SHARED_THREAD,
     timeout_ms=HANG_TIMEOUT_MS,

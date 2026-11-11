@@ -19,7 +19,7 @@ pooler, and the configuration that recovers throughput at high RTT.
 Each worker holds, under load:
 
 ```text
-worker_pool_size + worker_max_overflow                  # coordinator engine
+pool max_size                                           # pool of the worker process
 + 2                                                     # LISTEN connections (tasks, ping)
 + 1                                                     # runner heartbeat connection
 + isolated children × isolated.pool max_size            # isolated child pools
@@ -27,20 +27,27 @@ worker_pool_size + worker_max_overflow                  # coordinator engine
 + shared thread children × shared_thread.pool max_size  # shared thread child pools
 ```
 
-Each `max_size` is the resolved value of its mode: a `PoolSize`, or the size
-that `PoolSizeFromSeats()` derives from the seats of a shared child (see
+Each `max_size` is the resolved value: a `PoolSize`, or the size that
+`PoolSizeFromSeats()` derives from the seats of a shared child or, for the
+pool of the worker process, of the profile (see
 [Sizes Derived from the Seats](/horsies/workers/worker-profiles/#sizes-derived-from-the-seats)).
-At defaults (`worker_pool_size=3`, `worker_max_overflow=2`, an isolated pool
+At defaults (a pool of the worker process of 5 for 8 seats, an isolated pool
 `max_size` of 2) with a profile of 8 isolated children:
 
 ```text
-3 + 2 + 2 + 1 + 8 × 2 = 24 connections per worker
+5 + 2 + 1 + 8 × 2 = 24 connections per worker
 ```
 
-Task code that sends through the app adds `worker_pool_size + worker_max_overflow`
-in its child for each event loop that it sends from: `8 × 5 = 40` more with one
-sending loop per child, `64` in all. See
+Task code that sends through the app adds the `task_send_pool` of its child
+kind (default 2) in its child for each event loop that it sends from:
+`8 × 2 = 16` more with one sending loop per child, `40` in all. See
 [Worker Profiles](/horsies/workers/worker-profiles/#connections).
+
+The pool of the worker process writes the outcome of each task. At a high RTT
+each outcome holds a connection longer, so the worker process needs more
+connections for the same rate: set
+`WorkerProfile(pool=ParentPool(max_size=PoolSize(connections=N)))`. See
+[The Pool of the Worker Process](/horsies/workers/worker-profiles/#the-pool-of-the-worker-process).
 
 Producers hold their own engine pool (`pool_size + max_overflow`, default
 5 + 10) per resource set: one set for each event loop that makes broker calls,

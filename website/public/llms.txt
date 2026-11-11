@@ -56,16 +56,18 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - worker_profiles: dict[str, WorkerProfile] (default {}; `horsies worker <app> --profile <name>` runs one; every profile is validated at construction, HRS-218)
 
 ### WorkerProfile
-- isolated: IsolatedChildren(count: int 1-1024, recycle: IsolatedRecycle, pool: IsolatedPool) | NoIsolatedChildren (default NoIsolatedChildren(); a profile needs at least one child)
+- isolated: IsolatedChildren(count: int 1-1024, recycle: IsolatedRecycle, pool: IsolatedPool, task_send_pool: PoolSize) | NoIsolatedChildren (default NoIsolatedChildren(); a profile needs at least one child)
 - IsolatedRecycle.after: TaskLimit(tasks: int 1-2147483647) | NoTaskLimit (default TaskLimit(tasks=100))
 - IsolatedRecycle.above: MemoryLimit(mb: int 1-16777216) | NoMemoryLimit (default NoMemoryLimit())
-- shared_async: SharedAsyncChildren(count: int 1-1024, seats: int 1-1000, recycle: SharedRecycle, pool: SharedPool, executor: ExecutorThreads | ExecutorThreadsFromSeats) | NoSharedAsyncChildren (default NoSharedAsyncChildren())
-- shared_thread: SharedThreadChildren(count: int 1-1024, seats: int 1-256, recycle: SharedRecycle, pool: SharedPool) | NoSharedThreadChildren (default NoSharedThreadChildren())
+- shared_async: SharedAsyncChildren(count: int 1-1024, seats: int 1-1000, recycle: SharedRecycle, pool: SharedPool, executor: ExecutorThreads | ExecutorThreadsFromSeats, task_send_pool: PoolSize) | NoSharedAsyncChildren (default NoSharedAsyncChildren())
+- shared_thread: SharedThreadChildren(count: int 1-1024, seats: int 1-256, recycle: SharedRecycle, pool: SharedPool, task_send_pool: PoolSize) | NoSharedThreadChildren (default NoSharedThreadChildren())
+- task_send_pool: PoolSize (default PoolSize(connections=2) for every kind): task code that sends through the app opens the app's broker in its child with exactly this many connections, no overflow, for each event loop that it sends from; PostgresConfig pool_size/max_overflow do not apply in a child
+- pool: ParentPool(max_size: PoolSize | PoolSizeFromSeats = PoolSizeFromSeats()): the pool of the worker process, which writes the outcome of each task; no overflow (pool_size = max_size, max_overflow = 0); derived from the seats of the whole profile: min(20, max(5, ceil(seat_count() / 10))) (provisional constants); WorkerProfile.resolved_parent_pool() returns it
 - IsolatedPool(min_size: int 0-1000 = 0, max_size: PoolSize = PoolSize(connections=2), check: bool = True): the sync connection pool of each isolated child
 - SharedPool(min_size: int 0-1000 = 0, max_size: PoolSize | PoolSizeFromSeats = PoolSizeFromSeats(), check: bool = True): the pool of each shared child, shared by its seats
 - PoolSize(connections: int 1-1000); ExecutorThreads(threads: int 1-256): the threads of the default executor of the loop of each shared async child (default ExecutorThreadsFromSeats(); a start hook that sets its own default executor wins)
 - Derived from the seats: min(cap, max(floor, ceil(seats / seats_per_unit))); shared async pool 10 seats per connection, cap 10; shared thread pool 4 seats per connection, cap 10; pool floor 2; shared async executor 1 seat per thread, floor 2, cap 32
-- A pool min_size above its resolved max_size is refused (HRS-218); the worker start log line states the resolved pool of each kind and the executor threads
+- A pool min_size above its resolved max_size is refused (HRS-218); the worker start log line states the resolved pool and task_send_pool of each kind, the executor threads, and the resolved pool of the worker process
 - SharedRecycle.after_per_seat: TaskLimit | NoTaskLimit (default TaskLimit(tasks=100); the child is replaced after tasks x seats tasks); SharedRecycle.above: MemoryLimit | NoMemoryLimit (default NoMemoryLimit(); RSS read after each task)
 - claim: ClaimLimits(per_queue_per_pass: TaskLimit | NoTaskLimit, claimed_per_worker: TaskLimit | NoTaskLimit) (defaults NoTaskLimit(); a TaskLimit above seat_count() + prefetch_buffer is refused)
 - drain_timeout: timedelta (default 300 s; above 0, at most 24 h)
@@ -87,7 +89,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Measured cancel (one shared async child, CPython 3.13, local network): healthy server: httpx, aiohttp, psycopg, asyncpg, SQLAlchemy ended within 16 ms of the first cancel; psycopg >= 3.3.6 against a server that stops answering: 10.0 s, or within 5 ms of the second cancel; asyncio.to_thread() and DNS lookup threads are never stopped by a cancel
 - SHARED_ASYNC author rules: let CancelledError propagate; a client timeout below timeout_ms on each call; open long-lived clients in @app.on_shared_async_child_start (async def hook, runs on the loop of each shared async child before its first task, 10 s bound); never block the loop; await what you start; send with send_async()
 - SHARED_THREAD author rules: lock module state that a task changes; a timeout below timeout_ms on each blocking call; no threads that outlive the task
-- Connections: each child opens one pool, sized by the pool of its kind (IsolatedChildren.pool, SharedAsyncChildren.pool, SharedThreadChildren.pool); the seats share it for the RUNNING update and the finalizing marker and wait up to 30 s for a connection (none in 30 s: the task is not run and its claim lease returns it); average connections in use = tasks per second of the child x 2 writes x time of one write; HRS-219 counts parent pool + 2 listener + 1 runner heartbeat + children x resolved pool max_size, per mode
+- Connections: each child opens one pool, sized by the pool of its kind (IsolatedChildren.pool, SharedAsyncChildren.pool, SharedThreadChildren.pool); the seats share it for the RUNNING update and the finalizing marker and wait up to 30 s for a connection (none in 30 s: the task is not run and its claim lease returns it); average connections in use = tasks per second of the child x 2 writes x time of one write; HRS-219 counts the resolved WorkerProfile.pool max_size + 2 listener + 1 runner heartbeat + children x resolved pool max_size, per mode; it states, not compares, children x task_send_pool per mode for task code that sends
 - Every config model (AppConfig, its nested configs, ScheduleConfig and the schedule patterns) refuses unknown keys: ValidationError type extra_forbidden
 
 ### PostgresConfig
@@ -96,8 +98,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - pgbouncer_transaction_mode: bool (default False; disables prepared statements for transaction-pooled PgBouncer)
 - pool_size: int (default 5)
 - max_overflow: int (default 10)
-- worker_pool_size: int | None (default 3; None inherits pool_size)
-- worker_max_overflow: int | None (default 2; None inherits max_overflow)
+- worker_pool_size, worker_max_overflow: removed in 0.7.0; setting one fails with HRS-213 and names WorkerProfile(pool=ParentPool(max_size=PoolSize(connections=N))); task code in a child opens the task_send_pool of its kind
 - worker_child_pool_min_size, worker_child_pool_max_size, worker_child_pool_check: removed in 0.7.0; setting one fails with HRS-213 and names the pool field of each child kind (IsolatedPool, SharedPool)
 - tcp_keepalives: bool (default True)
 - tcp_keepalives_idle: int (default 30)
@@ -111,7 +112,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - pool_pre_ping: bool (default True)
 - echo: bool (default False)
 - PgBouncer pattern: database_url -> pooled transaction URL, session_database_url -> direct/session-capable URL, pgbouncer_transaction_mode=True
-- PgBouncer pool size: each worker opens parent pool + 1 runner heartbeat + children x resolved pool max_size per mode as pooler clients (the 2 listener connections go to session_database_url); max_client_conn >= the sum over workers and other clients; default_pool_size equal to that sum never makes a transaction wait -> /horsies/troubleshooting/pgbouncer/#pool-size
+- PgBouncer pool size: each worker opens the resolved WorkerProfile.pool max_size + 1 runner heartbeat + children x resolved pool max_size per mode, plus task_send_pool per sending event loop in each child, as pooler clients (the 2 listener connections go to session_database_url); max_client_conn >= the sum over workers and other clients; default_pool_size equal to that sum never makes a transaction wait -> /horsies/troubleshooting/pgbouncer/#pool-size
 - PgBouncer-only workers are unsupported because PostgreSQL LISTEN requires a persistent session
 
 ### QueueMode
@@ -649,7 +650,7 @@ Config/broker (HRS-200-HRS-299):
 - HRS-216 CONFIG_INVALID_RETENTION
 - HRS-217 CHECK_LIVE_ASYNC_CONTEXT (check(live=True) called inside a running event loop; the live check did not run)
 - HRS-218 CONFIG_INVALID_WORKER_PROFILE (a worker profile is not valid; the message names the profile and the field path)
-- HRS-219 CHECK_WORKER_CONNECTIONS (check(live=True): one worker of a profile opens more Postgres connections itself than the server allows, or the limit could not be read; not compared, but stated in the error: task code that sends opens worker_pool_size + worker_max_overflow in its child per event loop it sends from)
+- HRS-219 CHECK_WORKER_CONNECTIONS (check(live=True): one worker of a profile opens more Postgres connections itself than the server allows, or the limit could not be read; not compared, but stated in the error: task code that sends opens the task_send_pool of its child kind in its child per event loop it sends from)
 Registry (HRS-300-HRS-399):
 <!-- members: ErrorCode part -->
 - HRS-300 TASK_NOT_REGISTERED
@@ -718,7 +719,7 @@ Registry (HRS-300-HRS-399):
 - `horsies worker <module> --profile NAME [--loglevel LEVEL]`
   - `--profile NAME` — required; a profile in AppConfig.worker_profiles; no default profile; a missing or unknown name exits 1 and lists the defined names
   - Worker settings live in the profile, not in flags: WorkerProfile(isolated=IsolatedChildren(count=N, recycle=IsolatedRecycle(after=TaskLimit(tasks=N) | NoTaskLimit(), above=MemoryLimit(mb=N) | NoMemoryLimit())), shared_async=SharedAsyncChildren(count=N, seats=K), shared_thread=SharedThreadChildren(count=N, seats=K), claim=ClaimLimits(per_queue_per_pass=..., claimed_per_worker=...), drain_timeout=timedelta, preload=ChildPreload.LIBRARY | APP | NONE)
-  - Removed PostgresConfig fields fail at config build (HRS-213): worker_child_pool_min_size -> IsolatedPool/SharedPool min_size; worker_child_pool_max_size -> max_size=PoolSize(connections=N); worker_child_pool_check -> check
+  - Removed PostgresConfig fields fail at config build (HRS-213): worker_child_pool_min_size -> IsolatedPool/SharedPool min_size; worker_child_pool_max_size -> max_size=PoolSize(connections=N); worker_child_pool_check -> check; worker_pool_size, worker_max_overflow -> WorkerProfile(pool=ParentPool(max_size=PoolSize(connections=N))) for the worker process and task_send_pool=PoolSize(connections=N) on a child kind for task code that sends
   - Removed flags exit 2 and name the field: --processes -> IsolatedChildren.count; --max-tasks-per-child -> IsolatedRecycle.after; --max-memory-per-child-mb -> IsolatedRecycle.above; --max-claim-batch -> ClaimLimits.per_queue_per_pass; --max-claim-per-worker -> ClaimLimits.claimed_per_worker; --drain-timeout -> WorkerProfile.drain_timeout; --child-preload -> WorkerProfile.preload
   - Boot warns (never refuses) when count x MemoryLimit.mb is above the usable memory: the cgroup limit (the group that /proc/self/cgroup names, v1 memory group else v2 group; the smallest memory.limit_in_bytes / memory.max of the group and its parents, so a systemd MemoryMax or --cgroupns=host counts; without /proc/self/cgroup the files at the mount point; "max" or no file = no limit) when below the host RAM, else the host RAM; the warning names the source ("container limit" or "host RAM"), and when one worker opens more Postgres connections itself than the server has usable slots; a memory limit at or below the warmed child baseline still refuses to start
 - `horsies scheduler <module> [--loglevel LEVEL]`
@@ -909,7 +910,7 @@ migration 0.1.2, strict serde, upgrade from 0.1.1 -> /horsies/migrations/migrati
 migration 0.5.0, live/history split, offline cutover, schema v35 -> /horsies/migrations/migration-to-0-5-0/
 migration 0.6.0, upgrade from 0.5.x, schema v52, stop all processes -> /horsies/migrations/migration-to-0-6-0/
 migration 0.7.0, worker profiles, removed worker flags, --profile, removed worker_child_pool fields -> /horsies/migrations/migration-to-0-7-0/
-WorkerProfile, IsolatedChildren, IsolatedRecycle, IsolatedPool, SharedPool, PoolSize, PoolSizeFromSeats, ExecutorThreads, ExecutorThreadsFromSeats, TaskLimit, MemoryLimit, ClaimLimits, ChildPreload, worker_profiles, --profile -> /horsies/workers/worker-profiles/
+WorkerProfile, IsolatedChildren, IsolatedRecycle, IsolatedPool, SharedPool, ParentPool, task_send_pool, PoolSize, PoolSizeFromSeats, ExecutorThreads, ExecutorThreadsFromSeats, TaskLimit, MemoryLimit, ClaimLimits, ChildPreload, worker_profiles, --profile -> /horsies/workers/worker-profiles/
 Execution, execution mode, ISOLATED, SHARED_ASYNC, SHARED_THREAD, choose a mode, free-threaded, GIL -> /horsies/workers/execution-modes/
 SharedAsyncChildren, SharedRecycle, cancel_grace_ms, TASK_BLOCKED_LOOP, NEIGHBOUR_BLOCKED_LOOP, on_shared_async_child_start -> /horsies/workers/shared-async-tasks/
 SharedThreadChildren, seat thread, SharedPool, thread pool sizing -> /horsies/workers/shared-thread-tasks/

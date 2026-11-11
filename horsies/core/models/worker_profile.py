@@ -7,6 +7,8 @@ that name from ``AppConfig.worker_profiles``. A profile states:
 - when a child is replaced (recycled),
 - the connection pool of each child, and the default executor of a shared
   async child,
+- the pool that task code opens in a child when it sends,
+- the connection pool of the worker process itself,
 - how many tasks the worker claims,
 - how long a stopping worker waits for running tasks,
 - what a Linux worker imports before it forks children.
@@ -43,6 +45,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from horsies.core.errors import ConfigurationError, ErrorCode
 from horsies.core.models.child_sizing import (
     DEFAULT_ISOLATED_POOL_CONNECTIONS,
+    DEFAULT_TASK_SEND_POOL_CONNECTIONS,
+    parent_pool_connections,
     shared_async_executor_threads,
     shared_async_pool_connections,
     shared_thread_pool_connections,
@@ -171,7 +175,9 @@ MemoryLimitSetting = Annotated[
 
 class PoolSize(BaseModel):
     """A pool of at most ``connections`` connections, from 1 to
-    ``MAX_CHILD_POOL_CONNECTIONS``."""
+    ``MAX_CHILD_POOL_CONNECTIONS``. The bound applies to every pool of one
+    process: the pool of a child, the pool that task code opens when it
+    sends, and the pool of the worker process."""
 
     model_config = ConfigDict(extra='forbid', frozen=True)
 
@@ -184,17 +190,24 @@ class PoolSize(BaseModel):
 
 
 class PoolSizeFromSeats(BaseModel):
-    """The most connections of the pool follow the seats of the child:
-    ``min(cap, max(2, ceil(seats / seats_per_connection)))``, with the
-    ``seats_per_connection`` and ``cap`` of the kind of the child
-    (``horsies.core.models.child_sizing``)."""
+    """The most connections of the pool follow the seats:
+    ``min(cap, max(floor, ceil(seats / seats_per_connection)))``
+    (``horsies.core.models.child_sizing``).
+
+    - The pool of a shared child follows the seats of the child, with a
+      floor of 2 and the ``seats_per_connection`` and ``cap`` of its kind.
+    - The pool of the worker process (``ParentPool``) follows the seats of
+      the profile, with ``PARENT_POOL_CONNECTIONS_FLOOR``,
+      ``PARENT_SEATS_PER_POOL_CONNECTION`` and
+      ``PARENT_POOL_CONNECTIONS_CAP``.
+    """
 
     model_config = ConfigDict(extra='forbid', frozen=True)
 
     kind: Literal['pool_size_from_seats'] = 'pool_size_from_seats'
 
 
-SharedPoolSizeSetting = Annotated[
+PoolSizeSetting = Annotated[
     Union[PoolSize, PoolSizeFromSeats],
     Field(discriminator='kind'),
 ]
@@ -248,6 +261,10 @@ class ResolvedPool:
 
 def _default_isolated_pool_size() -> PoolSize:
     return PoolSize(connections=DEFAULT_ISOLATED_POOL_CONNECTIONS)
+
+
+def _default_task_send_pool() -> PoolSize:
+    return PoolSize(connections=DEFAULT_TASK_SEND_POOL_CONNECTIONS)
 
 
 class IsolatedPool(BaseModel):
@@ -314,7 +331,7 @@ class SharedPool(BaseModel):
         le=MAX_CHILD_POOL_CONNECTIONS,
         description='Connections that the pool keeps open',
     )
-    max_size: SharedPoolSizeSetting = Field(default_factory=PoolSizeFromSeats)
+    max_size: PoolSizeSetting = Field(default_factory=PoolSizeFromSeats)
     check: bool = Field(
         default=False,
         description='Check each connection on checkout',
@@ -363,7 +380,12 @@ class IsolatedRecycle(BaseModel):
 class IsolatedChildren(BaseModel):
     """``count`` isolated children: each runs one task at a time in its own
     process, and opens the connection pool ``pool``. ``count`` is from 1 to
-    ``MAX_ISOLATED_CHILDREN``."""
+    ``MAX_ISOLATED_CHILDREN``.
+
+    Task code that sends through the app (``app.get_broker()``) opens a pool
+    of up to ``task_send_pool`` connections in its child, with no overflow,
+    for each event loop that it sends from.
+    """
 
     model_config = ConfigDict(extra='forbid', frozen=True)
 
@@ -375,6 +397,7 @@ class IsolatedChildren(BaseModel):
     )
     recycle: IsolatedRecycle = Field(default_factory=IsolatedRecycle)
     pool: IsolatedPool = Field(default_factory=IsolatedPool)
+    task_send_pool: PoolSize = Field(default_factory=_default_task_send_pool)
 
     def resolved_pool(self) -> ResolvedPool:
         """The pool that each child opens."""
@@ -435,6 +458,11 @@ class SharedAsyncChildren(BaseModel):
     (``asyncio.to_thread``, ``loop.run_in_executor(None, ...)``). An
     ``on_shared_async_child_start`` hook that sets a default executor of its
     own replaces it.
+
+    Task code that sends through the app (``app.get_broker()``) opens a pool
+    of up to ``task_send_pool`` connections in its child, with no overflow,
+    for each event loop that it sends from. The seats of a child send from
+    its one event loop, so they share that pool.
     """
 
     model_config = ConfigDict(extra='forbid', frozen=True)
@@ -455,6 +483,7 @@ class SharedAsyncChildren(BaseModel):
     executor: ExecutorThreadsSetting = Field(
         default_factory=ExecutorThreadsFromSeats,
     )
+    task_send_pool: PoolSize = Field(default_factory=_default_task_send_pool)
 
     def resolved_pool(self) -> ResolvedPool:
         """The pool that each child opens."""
@@ -494,6 +523,11 @@ class SharedThreadChildren(BaseModel):
     ``MAX_SHARED_THREAD_CHILDREN``; ``seats`` is from 1 to
     ``MAX_SEATS_PER_SHARED_THREAD_CHILD``. Each child opens the sync
     connection pool ``pool``, which its seat threads share.
+
+    Task code that sends through the app (``app.get_broker()``) opens a pool
+    of up to ``task_send_pool`` connections in its child, with no overflow,
+    for each event loop that it sends from. A sync send runs on the one loop
+    of the broker, so the seat threads of a child share that pool.
     """
 
     model_config = ConfigDict(extra='forbid', frozen=True)
@@ -511,6 +545,7 @@ class SharedThreadChildren(BaseModel):
     )
     recycle: SharedRecycle = Field(default_factory=SharedRecycle)
     pool: SharedPool = Field(default_factory=SharedPool)
+    task_send_pool: PoolSize = Field(default_factory=_default_task_send_pool)
 
     def resolved_pool(self) -> ResolvedPool:
         """The pool that each child opens. Its seat threads share it."""
@@ -553,6 +588,40 @@ class ClaimLimits(BaseModel):
     claimed_per_worker: TaskLimitSetting = Field(default_factory=NoTaskLimit)
 
 
+class ParentPool(BaseModel):
+    """The connection pool of the worker process, the parent of the children.
+
+    The worker process claims tasks and writes the outcome of each task
+    through this pool; its claimer heartbeat, health and reaper loops share
+    it. The runner heartbeats use a connection of their own. It
+    holds at most ``max_size`` connections and has no overflow
+    (``pool_size = max_size``, ``max_overflow = 0``), so the connection
+    check counts it exactly. ``PostgresConfig.worker_pool_pre_ping`` sets its
+    pre-ping.
+
+    - ``max_size``: ``PoolSize(connections=N)``, or ``PoolSizeFromSeats()``
+      to derive it from the seats of the profile: one connection for each
+      ``PARENT_SEATS_PER_POOL_CONNECTION`` seats, from
+      ``PARENT_POOL_CONNECTIONS_FLOOR`` to ``PARENT_POOL_CONNECTIONS_CAP``
+      (``horsies.core.models.child_sizing``).
+    """
+
+    model_config = ConfigDict(extra='forbid', frozen=True)
+
+    max_size: PoolSizeSetting = Field(default_factory=PoolSizeFromSeats)
+
+    def resolved(self, from_seats: int) -> int:
+        """The most connections of the pool. ``from_seats`` is the size that
+        the profile derives from its seats."""
+        match self.max_size:
+            case PoolSize(connections=connections):
+                return connections
+            case PoolSizeFromSeats():
+                return from_seats
+            case _ as unreachable:
+                assert_never(unreachable)
+
+
 def _default_drain_timeout() -> timedelta:
     return DEFAULT_DRAIN_TIMEOUT
 
@@ -564,6 +633,7 @@ class WorkerProfile(BaseModel):
     - ``shared_async``: the shared async children.
     - ``shared_thread``: the shared thread children. At least one child of
       any mode is required.
+    - ``pool``: the connection pool of the worker process (``ParentPool``).
     - ``claim``: the claim limits.
     - ``drain_timeout``: how long a stopping worker waits for running tasks,
       above 0 and at most ``MAX_DRAIN_TIMEOUT``. At this deadline it kills
@@ -580,6 +650,7 @@ class WorkerProfile(BaseModel):
     shared_thread: SharedThreadSetting = Field(
         default_factory=NoSharedThreadChildren,
     )
+    pool: ParentPool = Field(default_factory=ParentPool)
     claim: ClaimLimits = Field(default_factory=ClaimLimits)
     drain_timeout: timedelta = Field(
         default_factory=_default_drain_timeout,
@@ -611,6 +682,11 @@ class WorkerProfile(BaseModel):
             + async_seats
             + _shared_thread_seats(self.shared_thread)
         )
+
+    def resolved_parent_pool(self) -> int:
+        """The most connections of the pool of the worker process: the
+        resolved ``pool.max_size``."""
+        return self.pool.resolved(parent_pool_connections(self.seat_count()))
 
 
 def _isolated_count(isolated: IsolatedChildren | NoIsolatedChildren) -> int:
@@ -705,12 +781,32 @@ def _describe_pool(pool: ResolvedPool, origin: _SizeOrigin) -> str:
     )
 
 
-def _shared_pool_origin(pool: SharedPool) -> _SizeOrigin:
-    match pool.max_size:
+def _pool_size_origin(max_size: PoolSize | PoolSizeFromSeats) -> _SizeOrigin:
+    match max_size:
         case PoolSize():
             return _SizeOrigin.PROFILE
         case PoolSizeFromSeats():
             return _SizeOrigin.SEATS
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _describe_task_send_pool(task_send_pool: PoolSize) -> str:
+    return f'task_send_pool {task_send_pool.connections} connections'
+
+
+def _describe_parent_pool(profile: WorkerProfile) -> str:
+    """The resolved pool of the worker process, and where its size comes
+    from."""
+    connections = profile.resolved_parent_pool()
+    match _pool_size_origin(profile.pool.max_size):
+        case _SizeOrigin.PROFILE:
+            return f'pool={connections} connections'
+        case _SizeOrigin.SEATS:
+            return (
+                f'pool={connections} connections '
+                f'(derived from {profile.seat_count()} seats)'
+            )
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -734,7 +830,8 @@ def _describe_isolated(isolated: IsolatedChildren | NoIsolatedChildren) -> str:
                 f'isolated={count} (recycle after '
                 f'{_describe_task_limit(recycle.after)}, above '
                 f'{_describe_memory_limit(recycle.above)}; '
-                f'{_describe_pool(isolated.resolved_pool(), _SizeOrigin.PROFILE)})'
+                f'{_describe_pool(isolated.resolved_pool(), _SizeOrigin.PROFILE)}; '
+                f'{_describe_task_send_pool(isolated.task_send_pool)})'
             )
         case NoIsolatedChildren():
             return 'isolated=none'
@@ -749,14 +846,15 @@ def _describe_shared_async(
         case SharedAsyncChildren(count=count, seats=seats, recycle=recycle):
             pool = _describe_pool(
                 shared_async.resolved_pool(),
-                _shared_pool_origin(shared_async.pool),
+                _pool_size_origin(shared_async.pool.max_size),
             )
             return (
                 f'shared_async={count}x{seats} seats (recycle after '
                 f'{_describe_task_limit(recycle.after_per_seat)} per seat, '
                 f'above {_describe_memory_limit(recycle.above)}; {pool}; '
                 f'executor {shared_async.resolved_executor_threads()} threads'
-                f'{_origin_text(_executor_origin(shared_async.executor))})'
+                f'{_origin_text(_executor_origin(shared_async.executor))}; '
+                f'{_describe_task_send_pool(shared_async.task_send_pool)})'
             )
         case NoSharedAsyncChildren():
             return 'shared_async=none'
@@ -771,12 +869,13 @@ def _describe_shared_thread(
         case SharedThreadChildren(count=count, seats=seats, recycle=recycle):
             pool = _describe_pool(
                 shared_thread.resolved_pool(),
-                _shared_pool_origin(shared_thread.pool),
+                _pool_size_origin(shared_thread.pool.max_size),
             )
             return (
                 f'shared_thread={count}x{seats} seats (recycle after '
                 f'{_describe_task_limit(recycle.after_per_seat)} per seat, '
-                f'above {_describe_memory_limit(recycle.above)}; {pool})'
+                f'above {_describe_memory_limit(recycle.above)}; {pool}; '
+                f'{_describe_task_send_pool(shared_thread.task_send_pool)})'
             )
         case NoSharedThreadChildren():
             return 'shared_thread=none'
@@ -790,6 +889,7 @@ def describe_worker_profile(profile: WorkerProfile) -> str:
         f'{_describe_isolated(profile.isolated)}, '
         f'{_describe_shared_async(profile.shared_async)}, '
         f'{_describe_shared_thread(profile.shared_thread)}, '
+        f'{_describe_parent_pool(profile)}, '
         f'claim per queue per pass: '
         f'{_describe_task_limit(profile.claim.per_queue_per_pass)}, '
         f'claimed per worker: '
