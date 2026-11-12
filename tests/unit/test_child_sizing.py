@@ -143,11 +143,53 @@ class TestEachKindBindsItsConstants:
         )
 
 
+class TestSharedPoolConnections:
+    """A shared child derives its pool from its seats: one connection per 10
+    seats, at least 2, at most 40 (async) or 26 (thread). The values are the
+    measured knees; see the docstrings of the constants."""
+
+    def test_the_measured_constants(self) -> None:
+        assert (
+            POOL_CONNECTIONS_FLOOR,
+            SHARED_ASYNC_SEATS_PER_POOL_CONNECTION,
+            SHARED_ASYNC_POOL_CONNECTIONS_CAP,
+            SHARED_THREAD_SEATS_PER_POOL_CONNECTION,
+            SHARED_THREAD_POOL_CONNECTIONS_CAP,
+        ) == (2, 10, 40, 10, 26)
+
+    @pytest.mark.parametrize(
+        ('seats', 'expected'),
+        [
+            (1, 2),  # raised to the floor
+            (20, 2),
+            (21, 3),  # a part of 10 seats counts as one connection
+            (100, 10),  # the knee of 100 seats at 3.5 ms
+            (250, 25),  # the knee of 250 seats
+            (400, 40),  # at the cap
+            (1000, 40),  # the knee of 1000 seats
+        ],
+    )
+    def test_the_shared_async_rule(self, seats: int, expected: int) -> None:
+        assert shared_async_pool_connections(seats) == expected
+
+    @pytest.mark.parametrize(
+        ('seats', 'expected'),
+        [
+            (1, 2),
+            (24, 3),  # 2 reached the rate of 6
+            (64, 7),  # 5 reached the rate of 20
+            (256, 26),  # the most seats: the cap
+        ],
+    )
+    def test_the_shared_thread_rule(self, seats: int, expected: int) -> None:
+        assert shared_thread_pool_connections(seats) == expected
+
+
 class TestParentPoolConnections:
     """The worker process derives its pool from the seats of the profile:
-    ``min(20, max(5, ceil(seats / 10)))`` with the provisional constants."""
+    ``min(20, max(5, ceil(seats / 10)))``."""
 
-    def test_the_provisional_constants(self) -> None:
+    def test_the_measured_constants(self) -> None:
         assert (
             PARENT_POOL_CONNECTIONS_FLOOR,
             PARENT_SEATS_PER_POOL_CONNECTION,

@@ -2739,7 +2739,7 @@ class TestWorkerStartLog:
         ]
         assert 'isolated=2 (' in line
         assert (
-            'pool 0 to 2 connections, check off; task_send_pool 2 connections)'
+            'pool 0 to 1 connections, check off; task_send_pool 2 connections)'
         ) in line
         assert (
             f'pool 0 to {shared_async_pool_connections(25)} connections, '
@@ -3000,12 +3000,12 @@ class TestBootConnectionFit:
         warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
         assert len(warnings) == 1
         assert warnings[0].startswith(
-            "Worker profile 'default': one worker opens up to 48 Postgres "
+            "Worker profile 'default': one worker opens up to 28 Postgres "
             'connections itself, not counting task code; the server has 27 '
             'usable slots',
         )
         assert (
-            '20 isolated children x isolated.task_send_pool 2 = 40 more, 88 in all'
+            '20 isolated children x isolated.task_send_pool 2 = 40 more, 68 in all'
         ) in warnings[0]
 
     async def test_a_profile_within_the_limit_does_not_warn(

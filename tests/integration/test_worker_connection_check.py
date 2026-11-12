@@ -19,7 +19,10 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.errors import ErrorCode
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.models.child_sizing import shared_thread_pool_connections
+from horsies.core.models.child_sizing import (
+    DEFAULT_ISOLATED_POOL_CONNECTIONS,
+    shared_thread_pool_connections,
+)
 from horsies.core.models.worker_profile import (
     MAX_CHILD_POOL_CONNECTIONS,
     IsolatedChildren,
@@ -85,7 +88,15 @@ async def test_each_child_kind_counts_its_own_pool_against_the_server(
     errors = await asyncio.to_thread(app.check, live=True)
 
     parent_pool = big.resolved_parent_pool()
-    total = parent_pool + 2 + 1 + 1 * 2 + async_children * per_async_child + thread_pool
+    isolated_pool = DEFAULT_ISOLATED_POOL_CONNECTIONS
+    total = (
+        parent_pool
+        + 2
+        + 1
+        + 1 * isolated_pool
+        + async_children * per_async_child
+        + thread_pool
+    )
     assert total > usable
     assert [error.code for error in errors] == [ErrorCode.CHECK_WORKER_CONNECTIONS]
     assert errors[0].message.startswith(
@@ -94,7 +105,7 @@ async def test_each_child_kind_counts_its_own_pool_against_the_server(
     )
     assert errors[0].notes[0] == (
         f'parent pool max_size {parent_pool} + listener 2 + runner heartbeat 1 '
-        f'+ 1 isolated children x isolated.pool max_size 2 + {async_children} '
+        f'+ 1 isolated children x isolated.pool max_size {isolated_pool} + {async_children} '
         f'shared async children x shared_async.pool max_size {per_async_child} '
         f'+ 1 shared thread children x shared_thread.pool max_size '
         f'{thread_pool} = {total}'
@@ -137,10 +148,11 @@ async def test_the_parent_pool_of_the_profile_is_counted_against_the_server(
 
     errors = await asyncio.to_thread(app.check, live=True)
 
-    total = parent_pool + 2 + 1 + 1 * 2
+    isolated_pool = DEFAULT_ISOLATED_POOL_CONNECTIONS
+    total = parent_pool + 2 + 1 + 1 * isolated_pool
     assert total > usable
     assert [error.code for error in errors] == [ErrorCode.CHECK_WORKER_CONNECTIONS]
     assert errors[0].notes[0] == (
         f'parent pool max_size {parent_pool} + listener 2 + runner heartbeat 1 '
-        f'+ 1 isolated children x isolated.pool max_size 2 = {total}'
+        f'+ 1 isolated children x isolated.pool max_size {isolated_pool} = {total}'
     )

@@ -539,14 +539,14 @@ class TestConnectionNeed:
                 ModePools(
                     ChildMode.ISOLATED,
                     children=8,
-                    per_child=2,
+                    per_child=1,
                     task_send_pool=DEFAULT_TASK_SEND_POOL_CONNECTIONS,
                 ),
             ),
         )
         assert LISTENER_CONNECTIONS_PER_WORKER == 2
         assert RUNNER_HEARTBEAT_CONNECTIONS_PER_WORKER == 1
-        assert need.total() == 24
+        assert need.total() == 16
 
     def test_task_sends_add_the_task_send_pool_of_each_kind(self) -> None:
         """A task that sends opens the task_send_pool of its child kind in
@@ -628,11 +628,11 @@ class TestConnectionNeed:
 
         assert isinstance(outcome, ConnectionsFit)
         assert outcome.describe() == (
-            'one worker opens up to 24 Postgres connections itself, of 97 usable '
+            'one worker opens up to 16 Postgres connections itself, of 97 usable '
             'on the server; not counted: task code that sends opens a pool of '
             'the task_send_pool of its child kind in its child, for each event '
             'loop that it sends from; with one such loop in each child, 8 '
-            'isolated children x isolated.task_send_pool 2 = 16 more, 40 in all'
+            'isolated children x isolated.task_send_pool 2 = 16 more, 32 in all'
         )
 
     def test_each_mode_counts_its_own_resolved_pool_max(self) -> None:
@@ -650,14 +650,14 @@ class TestConnectionNeed:
         thread_pool = shared_thread_pool_connections(64)
         send = DEFAULT_TASK_SEND_POOL_CONNECTIONS
         assert need.child_pools == (
-            ModePools(ChildMode.ISOLATED, 2, 2, task_send_pool=send),
+            ModePools(ChildMode.ISOLATED, 2, 1, task_send_pool=send),
             ModePools(ChildMode.SHARED_ASYNC, 3, async_pool, task_send_pool=send),
             ModePools(ChildMode.SHARED_THREAD, 4, thread_pool, task_send_pool=send),
         )
         assert need.children() == 9
         assert need.parent_pool == parent_pool_connections(2 + 3 * 200 + 4 * 64)
         assert need.total() == (
-            need.parent_pool + 2 + 1 + 2 * 2 + 3 * async_pool + 4 * thread_pool
+            need.parent_pool + 2 + 1 + 2 * 1 + 3 * async_pool + 4 * thread_pool
         )
 
     def test_a_set_pool_size_is_counted_as_set(self) -> None:
@@ -723,9 +723,9 @@ class TestConnectionNeed:
         )
         assert need.formula() == (
             'parent pool max_size 5 + listener 2 + runner heartbeat 1 + 4 isolated '
-            'children x isolated.pool max_size 2 + 2 shared async children x '
+            'children x isolated.pool max_size 1 + 2 shared async children x '
             'shared_async.pool max_size 3 + 1 shared thread children x '
-            'shared_thread.pool max_size 6 = 28'
+            'shared_thread.pool max_size 6 = 24'
         )
         assert need.task_sends() == 7 * DEFAULT_TASK_SEND_POOL_CONNECTIONS
 
@@ -754,18 +754,18 @@ class TestConnectionNeed:
 
     def test_need_above_usable_exceeds(self) -> None:
         profile = WorkerProfile(isolated=IsolatedChildren(count=8))
-        limit = ServerConnectionLimit(max_connections=26, reserved=3)
+        limit = ServerConnectionLimit(max_connections=18, reserved=3)
         outcome = compare_connections(profile, limit)
         assert isinstance(outcome, ConnectionsExceedServer)
         assert outcome.describe() == (
-            'one worker opens up to 24 Postgres connections itself, not '
-            'counting task code; the server has 23 usable slots '
-            '(max_connections 26 - reserved 3)'
+            'one worker opens up to 16 Postgres connections itself, not '
+            'counting task code; the server has 15 usable slots '
+            '(max_connections 18 - reserved 3)'
         )
 
     def test_need_equal_to_usable_fits(self) -> None:
         profile = WorkerProfile(isolated=IsolatedChildren(count=8))
-        limit = ServerConnectionLimit(max_connections=27, reserved=3)
+        limit = ServerConnectionLimit(max_connections=19, reserved=3)
         assert isinstance(compare_connections(profile, limit), ConnectionsFit)
 
 
@@ -796,17 +796,17 @@ class TestCheckLiveWorkerConnections:
 
         assert [error.code for error in errors] == [ErrorCode.CHECK_WORKER_CONNECTIONS]
         assert errors[0].message == (
-            "worker_profiles['big']: one worker opens up to 48 Postgres "
+            "worker_profiles['big']: one worker opens up to 28 Postgres "
             'connections itself, not counting task code; the server has 27 '
             'usable slots (max_connections 30 - reserved 3)'
         )
         assert errors[0].notes == [
             'parent pool max_size 5 + listener 2 + runner heartbeat 1 + 20 isolated '
-            'children x isolated.pool max_size 2 = 48',
+            'children x isolated.pool max_size 1 = 28',
             'not counted: task code that sends opens a pool of the '
             'task_send_pool of its child kind in its child, for each event '
             'loop that it sends from; with one such loop in each child, 20 '
-            'isolated children x isolated.task_send_pool 2 = 40 more, 88 in '
+            'isolated children x isolated.task_send_pool 2 = 40 more, 68 in '
             'all',
         ]
         assert errors[0].location is None
