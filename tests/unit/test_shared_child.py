@@ -15,6 +15,7 @@ import concurrent.futures
 import contextlib
 import contextvars
 import dataclasses
+import gc
 import logging
 import socket
 import threading
@@ -785,9 +786,12 @@ class TestTheStopOfARun:
         """The body returned before T, and its marked work outlived T: the
         deadline no longer applies. The work is cancelled after the grace,
         and the run ends with what the body returned."""
+        # The loop holds only weak references to its tasks.
+        kept: list[asyncio.Task[bool]] = []
 
         async def leave_forever() -> int:
-            _ = asyncio.get_running_loop().create_task(asyncio.Event().wait())
+            loop = asyncio.get_running_loop()
+            kept.append(loop.create_task(asyncio.Event().wait()))
             return 1
 
         writer = _run_to_end(
@@ -895,6 +899,8 @@ class TestWorkLeftAfterAReturn:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         cancelled = asyncio.Event()
+        # The loop holds only weak references to its tasks.
+        kept: list[asyncio.Task[None]] = []
 
         async def keepalive() -> None:
             try:
@@ -904,7 +910,12 @@ class TestWorkLeftAfterAReturn:
                 raise
 
         async def leave() -> int:
-            _ = asyncio.get_running_loop().create_task(keepalive())
+            kept.append(asyncio.get_running_loop().create_task(keepalive()))
+            # The left task starts to wait, then a cycle collection runs
+            # before the return. The task stays alive because the test
+            # holds it, as task code must.
+            await asyncio.sleep(0)
+            _ = gc.collect()
             return 1
 
         writer = _run_to_end(
@@ -1047,9 +1058,12 @@ class TestWorkLeftAfterAReturn:
         self,
     ) -> None:
         release = asyncio.Event()
+        # The loop holds only weak references to its tasks.
+        kept: list[asyncio.Task[bool]] = []
 
         async def leave() -> int:
-            _ = asyncio.get_running_loop().create_task(asyncio.Event().wait())
+            loop = asyncio.get_running_loop()
+            kept.append(loop.create_task(asyncio.Event().wait()))
             return 1
 
         async def hold() -> int:
@@ -1133,12 +1147,14 @@ class TestTheLeftoverCancelReport:
     def test_the_report_carries_what_the_task_returned(self) -> None:
         """The worker writes what a task returned at any kill once it holds
         it: the leftover cancel report gives it at the end of the grace."""
+        # The loop holds only weak references to its tasks.
+        kept: list[asyncio.Task[None]] = []
 
         async def leave() -> int:
             async def holds_on() -> None:
                 await asyncio.Event().wait()
 
-            _ = asyncio.get_running_loop().create_task(holds_on())
+            kept.append(asyncio.get_running_loop().create_task(holds_on()))
             return 1
 
         writer = _run_to_end(
@@ -1314,12 +1330,14 @@ class TestTheMarkerAtTheEnd:
     def test_a_return_whose_work_needed_a_cancel_writes_no_marker(self) -> None:
         """The run keeps what it returned, but its stop reached the cancel
         rounds: it reports its end at once."""
+        # The loop holds only weak references to its tasks.
+        kept: list[asyncio.Task[None]] = []
 
         async def leave() -> int:
             async def holds_on() -> None:
                 await asyncio.Event().wait()
 
-            _ = asyncio.get_running_loop().create_task(holds_on())
+            kept.append(asyncio.get_running_loop().create_task(holds_on()))
             return 1
 
         seats = _ScriptedSeats({'leave': leave})
