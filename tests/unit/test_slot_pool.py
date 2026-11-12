@@ -20,7 +20,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -50,6 +50,7 @@ from horsies.core.worker.config import ChildPreload
 from horsies.core.worker.preload_main import REPARENT_FAILED_EXIT_CODE
 from horsies.core.models.worker_profile import ResolvedPool
 from horsies.core.worker.child_protocol import (
+    FRAME_HEADER,
     BodyReturnedFrame,
     BootFailedFrame,
     IsolatedChild,
@@ -60,6 +61,7 @@ from horsies.core.worker.child_protocol import (
     LeftWorkStuckFrame,
     LoopHoldsNoTask,
     LoopHoldsTasks,
+    MalformedFrame,
     NoTaskLoop,
     ReadyFrame,
     ResultFrame,
@@ -68,6 +70,7 @@ from horsies.core.worker.child_protocol import (
     SeatFinished,
     StopFrame,
     encode_child_frame,
+    encode_parent_frame,
 )
 from horsies.core.worker.stored_timeout import NoTimeout, TaskTimeout
 from horsies.core.worker.task_loop import ISOLATED_LEFTOVER_GRACE_S
@@ -75,6 +78,9 @@ from horsies.core.worker.worker import Worker, WorkerConfig
 from horsies.core.worker import slots
 from horsies.core.worker.slots import (
     CHILD_BOOT_ATTEMPTS,
+    DIRECT_BODY_BYTES,
+    FRAME_READ_BUFFER_BYTES,
+    JOINED_WRITE_BODY_BYTES,
     CHILD_BOOT_KILL_DELAY_MAX_S,
     SLOT_DEFECT_LIMIT,
     Assigned,
@@ -325,6 +331,9 @@ class TestFrameProtocol:
             def abort(self) -> None:
                 aborted.append(True)
 
+            def is_closing(self) -> bool:
+                return bool(aborted)
+
         protocol = FrameProtocol(frames.append, lambda: closed.append(True))
         protocol.connection_made(FakeTransport())
         return protocol, frames, closed, aborted
@@ -370,6 +379,164 @@ class TestFrameProtocol:
         protocol, _, closed, _ = self._protocol()
         protocol.connection_lost(None)
         assert closed == [True]
+
+    def _results(self, frames: list[object]) -> list[str]:
+        return [cast(ResultFrame, frame).result_json for frame in frames]
+
+    def test_every_complete_frame_of_one_read_is_delivered_in_that_read(self) -> None:
+        protocol, frames, _, _ = self._protocol()
+        data = b''.join(self._result_bytes(f'r{index}') for index in range(5))
+        assert len(data) <= FRAME_READ_BUFFER_BYTES
+
+        target = protocol.get_buffer(-1)
+        target[: len(data)] = data
+        protocol.buffer_updated(len(data))
+
+        assert self._results(frames) == [f'r{index}' for index in range(5)]
+        assert not protocol.has_partial_frame()
+
+    @pytest.mark.parametrize('chunk', [1, 7, 4096, 1 << 20])
+    def test_a_large_body_arrives_whole_at_any_read_size(self, chunk: int) -> None:
+        protocol, frames, _, aborted = self._protocol()
+        large = 'x' * (DIRECT_BODY_BYTES * 3 + 17)
+
+        self._feed(protocol, self._result_bytes(large), chunk)
+
+        assert self._results(frames) == [large]
+        assert aborted == []
+        assert not protocol.has_partial_frame()
+
+    def test_small_and_large_frames_keep_their_order(self) -> None:
+        protocol, frames, _, _ = self._protocol()
+        large = 'y' * (DIRECT_BODY_BYTES + 1)
+        data = (
+            self._result_bytes('first')
+            + self._result_bytes(large)
+            + self._result_bytes('last')
+        )
+
+        self._feed(protocol, data, 4096)
+
+        assert self._results(frames) == ['first', large, 'last']
+
+    def test_a_large_body_does_not_grow_the_read_buffer(self) -> None:
+        protocol, frames, _, _ = self._protocol()
+        self._feed(protocol, self._result_bytes('z' * (DIRECT_BODY_BYTES * 4)), 4096)
+        assert len(frames) == 1
+
+        free = protocol.get_buffer(-1)
+
+        assert len(free) <= FRAME_READ_BUFFER_BYTES
+
+    def test_a_partial_large_body_is_reported(self) -> None:
+        protocol, frames, _, _ = self._protocol()
+        data = self._result_bytes('w' * (DIRECT_BODY_BYTES * 2))
+
+        self._feed(protocol, data[:-1], 4096)
+
+        assert frames == []
+        assert protocol.has_partial_frame()
+
+    def test_a_frame_that_closes_the_channel_ends_delivery_of_that_read(self) -> None:
+        frames: list[object] = []
+        aborted: list[bool] = []
+
+        class FakeTransport(asyncio.Transport):
+            def abort(self) -> None:
+                aborted.append(True)
+
+            def is_closing(self) -> bool:
+                return bool(aborted)
+
+        transport = FakeTransport()
+
+        def on_frame(frame: object) -> None:
+            frames.append(frame)
+            transport.abort()
+
+        protocol = FrameProtocol(on_frame, lambda: None)
+        protocol.connection_made(transport)
+        data = b''.join(self._result_bytes(f'r{index}') for index in range(3))
+
+        self._feed(protocol, data, 1 << 20)
+
+        assert self._results(frames) == ['r0']
+
+    def test_a_malformed_frame_after_a_good_one_aborts_after_the_good_one(self) -> None:
+        protocol, frames, _, aborted = self._protocol()
+        bad_meta = b'not json'
+        data = self._result_bytes('good') + FRAME_HEADER.pack(len(bad_meta), 0) + bad_meta
+
+        self._feed(protocol, data, 1 << 20)
+
+        assert self._results(frames) == ['good']
+        assert aborted == [True]
+        assert isinstance(protocol.violation, MalformedFrame)
+
+
+@pytest.mark.asyncio(loop_scope='function')
+class TestChildSend:
+    """How a parent frame reaches the transport of a child channel."""
+
+    class _RecordingTransport(asyncio.Transport):
+        def __init__(self) -> None:
+            super().__init__()
+            self.writes: list[bytes] = []
+
+        def write(self, data: bytes | bytearray | memoryview) -> None:
+            self.writes.append(bytes(data))
+
+        def is_closing(self) -> bool:
+            return False
+
+    class _NeverExits:
+        pid = 4242
+
+        async def wait(self) -> int:
+            await asyncio.Event().wait()
+            return 0
+
+    def _child(self, transport: asyncio.Transport) -> Child:
+        protocol = FrameProtocol(lambda _frame: None, lambda: None)
+        return Child(
+            cast(Any, self._NeverExits()),
+            protocol,
+            transport,
+            deque(),
+            asyncio.Event(),
+        )
+
+    def _run_frame(self, args_bytes: int) -> RunFrame:
+        return RunFrame(
+            task_id='task-a',
+            task_name='send_test',
+            args_json='[' + '1,' * (args_bytes // 2) + '1]',
+            kwargs_json=None,
+            worker_id='worker-1',
+            is_workflow_task=False,
+            timeout=NoTimeout(),
+            claimed_at=None,
+        )
+
+    async def test_a_frame_with_a_small_body_is_one_write(self) -> None:
+        transport = self._RecordingTransport()
+        child = self._child(transport)
+        frame = self._run_frame(64)
+
+        child.send(frame)
+
+        encoded = encode_parent_frame(frame)
+        assert transport.writes == [encoded.head + encoded.body]
+
+    async def test_a_large_body_goes_in_a_write_of_its_own(self) -> None:
+        transport = self._RecordingTransport()
+        child = self._child(transport)
+        frame = self._run_frame(JOINED_WRITE_BODY_BYTES + 10)
+
+        child.send(frame)
+
+        encoded = encode_parent_frame(frame)
+        assert transport.writes == [encoded.head, encoded.body]
 
 
 @pytest.mark.asyncio(loop_scope='function')

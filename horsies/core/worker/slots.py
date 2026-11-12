@@ -104,6 +104,7 @@ from horsies.core.worker.child_protocol import (
     ChildFrame,
     ChildKind,
     FrameOverBound,
+    MAX_META_BYTES,
     InitFrame,
     LeftoverCancelFrame,
     LeftoverStuckFrame,
@@ -1044,8 +1045,51 @@ def interpreter_flags() -> tuple[str, ...]:
     return tuple(args)
 
 
+FRAME_READ_BUFFER_BYTES: Final = 1 << 16
+"""The first size of the read buffer of a child channel. The frames are parsed
+from it: every complete frame of one read, in one call."""
+
+DIRECT_BODY_BYTES: Final = 1 << 16
+"""A frame body larger than this is read straight into a buffer of its own
+size, so a large result is not first copied into the read buffer."""
+
+READ_BUFFER_BOUND: Final = FRAME_HEADER.size + MAX_META_BYTES + DIRECT_BODY_BYTES
+"""The largest size of the read buffer: a header, the largest metadata, and a
+body that is not read straight into its own buffer."""
+
+JOINED_WRITE_BODY_BYTES: Final = 1 << 16
+"""A parent frame with a body up to this size goes to the channel in one write:
+header, metadata and body joined. A larger body goes in a write of its own, so
+it is not copied."""
+
+
+@dataclass(frozen=True, slots=True)
+class _BufferedFrames:
+    """The channel reads frames into the read buffer."""
+
+
+@dataclass(slots=True)
+class _DirectBody:
+    """The channel reads the large body of one frame into ``body``: ``filled``
+    bytes of it have arrived. ``meta`` is the metadata of that frame."""
+
+    meta: bytes
+    body: bytearray
+    filled: int
+
+
+_ReadState: TypeAlias = _BufferedFrames | _DirectBody
+
+
 class FrameProtocol(asyncio.BufferedProtocol):
-    """Reads frames into preallocated buffers, so a large body is not copied."""
+    """Reads the frames of one child channel.
+
+    Frames with a body up to ``DIRECT_BODY_BYTES`` are parsed from one read
+    buffer: every complete frame of a read is delivered in that call, in order.
+    A larger body is read straight into a buffer of its own size. A header
+    over the bounds aborts the channel before anything is allocated for its
+    frame. The read buffer stays within ``READ_BUFFER_BOUND``.
+    """
 
     def __init__(
         self,
@@ -1055,60 +1099,117 @@ class FrameProtocol(asyncio.BufferedProtocol):
         self._on_frame = on_frame
         self._on_closed = on_closed
         self._transport: asyncio.Transport | None = None
-        self._header = bytearray(FRAME_HEADER.size)
-        self._meta = bytearray()
-        self._body = bytearray()
-        self._target = memoryview(self._header)
-        self._filled = 0
-        self._stage = 'header'
+        self._buffer = bytearray(FRAME_READ_BUFFER_BYTES)
+        self._start: int = 0
+        """The first byte of the read buffer that no delivered frame used."""
+        self._end: int = 0
+        """The end of the bytes that arrived in the read buffer."""
+        self._needed: int = 0
+        """The size of the frame that starts at ``_start`` when its header has
+        arrived and the frame does not fit the bytes at hand; else 0."""
+        self._state: _ReadState = _BufferedFrames()
         self.bytes_received = 0
         self.violation: FrameOverBound | MalformedFrame | None = None
-
-    def _expect(self, buffer: bytearray, stage: str) -> None:
-        self._target = memoryview(buffer)
-        self._filled = 0
-        self._stage = stage
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         self._transport = cast('asyncio.Transport', transport)
 
     def get_buffer(self, sizehint: int) -> memoryview:
-        return self._target[self._filled :]
+        match self._state:
+            case _DirectBody(body=body, filled=filled):
+                return memoryview(body)[filled:]
+            case _BufferedFrames():
+                return self._free_space()
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def _free_space(self) -> memoryview:
+        """The free tail of the read buffer, with room for the frame that
+        waits: the bytes at hand move to the front, and the buffer grows to
+        the size of that frame, at most ``READ_BUFFER_BOUND``."""
+        if self._start == self._end:
+            self._start = self._end = 0
+        pending = self._end - self._start
+        wanted = max(self._needed, pending + 1)
+        if len(self._buffer) - self._start < wanted or self._end == len(self._buffer):
+            self._buffer[:pending] = self._buffer[self._start : self._end]
+            self._start, self._end = 0, pending
+            if len(self._buffer) < wanted:
+                assert wanted <= READ_BUFFER_BOUND, (
+                    f'a frame of {wanted} bytes is over the read buffer bound '
+                    f'of {READ_BUFFER_BOUND} bytes'
+                )
+                self._buffer.extend(bytes(wanted - len(self._buffer)))
+        return memoryview(self._buffer)[self._end :]
 
     def buffer_updated(self, nbytes: int) -> None:
-        self._filled += nbytes
         self.bytes_received += nbytes
-        if self._filled == len(self._target):
-            self._advance()
+        match self._state:
+            case _DirectBody() as direct:
+                direct.filled += nbytes
+                if direct.filled == len(direct.body):
+                    self._state = _BufferedFrames()
+                    _ = self._deliver(direct.meta, bytes(direct.body))
+            case _BufferedFrames():
+                self._end += nbytes
+                self._parse()
+            case _ as unreachable:
+                assert_never(unreachable)
 
-    def _advance(self) -> None:
-        match self._stage:
-            case 'header':
-                match parse_header(bytes(self._header)):
-                    case Ok(sizes):
-                        self._body = bytearray(sizes.body_bytes)
-                        self._meta = bytearray(sizes.meta_bytes)
-                        self._expect(self._meta, 'meta')
-                    case Err(over):
-                        self._fail(over)
-            case 'meta':
-                if self._body:
-                    self._expect(self._body, 'body')
+    def _parse(self) -> None:
+        """Deliver every complete frame of the read buffer, in order. Stop at
+        a frame that has not fully arrived, at a violation, when the channel
+        closes, and at a large body that has not fully arrived: that body is
+        read straight into its own buffer from then on."""
+        header_size = FRAME_HEADER.size
+        while self._end - self._start >= header_size:
+            header = bytes(self._buffer[self._start : self._start + header_size])
+            match parse_header(header):
+                case Ok(sizes):
+                    pass
+                case Err(over):
+                    self._fail(over)
+                    return
+            meta_at = self._start + header_size
+            body_at = meta_at + sizes.meta_bytes
+            frame_end = body_at + sizes.body_bytes
+            if self._end < frame_end:
+                if sizes.body_bytes > DIRECT_BODY_BYTES and self._end >= body_at:
+                    self._read_body_directly(meta_at, body_at, sizes.body_bytes)
                 else:
-                    self._finish_frame()
-            case 'body':
-                self._finish_frame()
-            case _:
-                raise AssertionError(f'unknown frame stage {self._stage!r}')
+                    self._needed = (
+                        body_at if sizes.body_bytes > DIRECT_BODY_BYTES else frame_end
+                    ) - self._start
+                return
+            meta = bytes(self._buffer[meta_at:body_at])
+            body = bytes(self._buffer[body_at:frame_end])
+            self._start = frame_end
+            self._needed = 0
+            if not self._deliver(meta, body):
+                return
 
-    def _finish_frame(self) -> None:
-        match decode_child_frame(bytes(self._meta), bytes(self._body)):
+    def _read_body_directly(self, meta_at: int, body_at: int, body_bytes: int) -> None:
+        """Move the arrived part of a large body into a buffer of the body's
+        size, and read the rest of the body into it. The read buffer is empty
+        after this: every byte at hand belongs to that body."""
+        body = bytearray(body_bytes)
+        arrived = self._end - body_at
+        body[:arrived] = self._buffer[body_at : self._end]
+        meta = bytes(self._buffer[meta_at:body_at])
+        self._start = self._end = 0
+        self._needed = 0
+        self._state = _DirectBody(meta=meta, body=body, filled=arrived)
+
+    def _deliver(self, meta: bytes, body: bytes) -> bool:
+        """Decode one frame and hand it on. False: the channel failed or closed,
+        and no later frame of this read is delivered."""
+        match decode_child_frame(meta, body):
             case Ok(frame):
-                self._body = bytearray()
-                self._expect(self._header, 'header')
                 self._on_frame(frame)
+                return self._transport is None or not self._transport.is_closing()
             case Err(malformed):
                 self._fail(malformed)
+                return False
 
     def _fail(self, violation: FrameOverBound | MalformedFrame) -> None:
         self.violation = violation
@@ -1116,7 +1217,13 @@ class FrameProtocol(asyncio.BufferedProtocol):
         self._transport.abort()
 
     def has_partial_frame(self) -> bool:
-        return self._stage != 'header' or self._filled > 0
+        match self._state:
+            case _DirectBody():
+                return True
+            case _BufferedFrames():
+                return self._end > self._start
+            case _ as unreachable:
+                assert_never(unreachable)
 
     def eof_received(self) -> bool:
         return False
@@ -1330,8 +1437,11 @@ class Child:
         if self._transport.is_closing():
             return
         encoded = encode_parent_frame(frame)
-        self._transport.write(encoded.head)
-        self._transport.write(encoded.body)
+        if len(encoded.body) <= JOINED_WRITE_BODY_BYTES:
+            self._transport.write(encoded.head + encoded.body)
+        else:
+            self._transport.write(encoded.head)
+            self._transport.write(encoded.body)
 
     def kill_group(self) -> None:
         """SIGKILL the child's session, so task subprocesses go with it.
