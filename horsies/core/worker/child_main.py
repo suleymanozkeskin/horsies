@@ -50,10 +50,12 @@ from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.child_protocol import (
     FRAME_HEADER,
     MAX_BODY_BYTES,
+    MAX_META_BYTES,
     BodyReturnedFrame,
     BootFailedFrame,
     ChildFrame,
     FrameOverBound,
+    FrameSizes,
     InitFrame,
     IsolatedChild,
     LeftWorkEnd,
@@ -116,6 +118,21 @@ STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE: Final = 74
 # At boot, after ``BootFailedFrame``: the frame names the cause.
 BOOT_FAILED_EXIT_CODE: Final = 75
 INIT_FRAME_TIMEOUT_S: Final = 30.0
+CONTROL_READ_BUFFER_BYTES: Final = 1 << 16
+"""The first size of the read buffer of the control thread. Every complete
+parent frame of one read is taken from it before the next read."""
+CONTROL_DIRECT_BODY_BYTES: Final = 1 << 16
+"""A parent frame body larger than this is read straight into a buffer of its
+own size, not into the read buffer."""
+CONTROL_READ_BUFFER_BOUND: Final = (
+    FRAME_HEADER.size + MAX_META_BYTES + CONTROL_DIRECT_BODY_BYTES
+)
+"""The largest size of the read buffer: a header, the largest metadata, and a
+body that is not read straight into its own buffer."""
+JOINED_CHILD_WRITE_BODY_BYTES: Final = 1 << 16
+"""A child frame with a body up to this size goes to the socket in one write:
+header, metadata and body joined. A larger body goes in a write of its own, so
+it is not copied."""
 # Metadata holds this text as JSON, and one character takes at most 12 bytes
 # there, so the reason stays well under ``MAX_META_BYTES``.
 MAX_FAILED_REASON_CHARS: Final = 64 * 1024
@@ -159,16 +176,20 @@ def _recv_exact(sock: socket.socket, count: int) -> bytes:
     return bytes(data)
 
 
-def _recv_parent_frame(sock: socket.socket) -> ParentFrame:
-    """Read one frame. A bad frame from the parent is a defect: exit loud."""
-    match parse_header(_recv_exact(sock, FRAME_HEADER.size)):
+def _sizes_or_exit(header: bytes) -> FrameSizes:
+    """The sizes of a parent frame header. A header over the bounds is a
+    defect of the parent: exit loud."""
+    match parse_header(header):
         case Ok(sizes):
-            pass
+            return sizes
         case Err(FrameOverBound() as over):
             logger.critical('Parent sent a frame over the bounds: %s', over)
             os._exit(BAD_PARENT_FRAME_EXIT_CODE)
-    meta = _recv_exact(sock, sizes.meta_bytes)
-    body = _recv_exact(sock, sizes.body_bytes)
+
+
+def _parent_frame_or_exit(meta: bytes, body: bytes) -> ParentFrame:
+    """Decode a parent frame. A bad frame from the parent is a defect: exit
+    loud."""
     match decode_parent_frame(meta, body):
         case Ok(frame):
             return frame
@@ -177,12 +198,115 @@ def _recv_parent_frame(sock: socket.socket) -> ParentFrame:
             os._exit(BAD_PARENT_FRAME_EXIT_CODE)
 
 
+def _recv_parent_frame(sock: socket.socket) -> ParentFrame:
+    """Read exactly one frame, and no byte after it. A bad frame from the
+    parent is a defect: exit loud."""
+    sizes = _sizes_or_exit(_recv_exact(sock, FRAME_HEADER.size))
+    meta = _recv_exact(sock, sizes.meta_bytes)
+    body = _recv_exact(sock, sizes.body_bytes)
+    return _parent_frame_or_exit(meta, body)
+
+
+class ParentFrameReader:
+    """Reads the parent frames of the control thread from a blocking socket.
+
+    One ``recv_into`` fills the free tail of the read buffer, and
+    ``next_frame`` takes the frames from it in order: it reads again only when
+    the next frame has not fully arrived. A body larger than
+    ``CONTROL_DIRECT_BODY_BYTES`` is read straight into a buffer of its own.
+    The read buffer stays within ``CONTROL_READ_BUFFER_BOUND``. Not safe to
+    share between threads.
+    """
+
+    def __init__(self, sock: socket.socket) -> None:
+        self._sock = sock
+        self._buffer = bytearray(CONTROL_READ_BUFFER_BYTES)
+        self._start: int = 0
+        """The first byte of the read buffer that no returned frame used."""
+        self._end: int = 0
+        """The end of the bytes that arrived in the read buffer."""
+
+    def next_frame(self) -> ParentFrame:
+        """The next parent frame.
+
+        Raises:
+            EOFError: the parent closed the socket.
+            OSError: the socket failed.
+
+        A bad frame from the parent ends the process (``_sizes_or_exit``,
+        ``_parent_frame_or_exit``).
+        """
+        header_end = FRAME_HEADER.size
+        self._fill_to(header_end)
+        sizes = _sizes_or_exit(
+            bytes(self._buffer[self._start : self._start + header_end]),
+        )
+        meta_end = header_end + sizes.meta_bytes
+        if sizes.body_bytes > CONTROL_DIRECT_BODY_BYTES:
+            self._fill_to(meta_end)
+            meta = bytes(self._buffer[self._start + header_end : self._start + meta_end])
+            self._start += meta_end
+            return _parent_frame_or_exit(meta, self._take_body(sizes.body_bytes))
+        frame_end = meta_end + sizes.body_bytes
+        self._fill_to(frame_end)
+        meta = bytes(self._buffer[self._start + header_end : self._start + meta_end])
+        body = bytes(self._buffer[self._start + meta_end : self._start + frame_end])
+        self._start += frame_end
+        return _parent_frame_or_exit(meta, body)
+
+    def _fill_to(self, count: int) -> None:
+        """Read until ``count`` bytes from ``_start`` have arrived. The bytes
+        at hand move to the front first when the frame would not fit the
+        buffer, and the buffer grows to ``count`` when it is smaller."""
+        assert count <= CONTROL_READ_BUFFER_BOUND, (
+            f'a read of {count} bytes is over the read buffer bound of '
+            f'{CONTROL_READ_BUFFER_BOUND} bytes'
+        )
+        if self._start == self._end:
+            self._start = self._end = 0
+        if self._end - self._start >= count:
+            return
+        if len(self._buffer) - self._start < count:
+            pending = self._end - self._start
+            self._buffer[:pending] = self._buffer[self._start : self._end]
+            self._start, self._end = 0, pending
+            if len(self._buffer) < count:
+                self._buffer.extend(bytes(count - len(self._buffer)))
+        view = memoryview(self._buffer)
+        while self._end - self._start < count:
+            got = self._sock.recv_into(view[self._end :])
+            if got == 0:
+                raise EOFError
+            self._end += got
+
+    def _take_body(self, body_bytes: int) -> bytes:
+        """A large body: the part at hand, then the rest read straight into
+        a buffer of the body's size."""
+        body = bytearray(body_bytes)
+        at_hand = min(self._end - self._start, body_bytes)
+        body[:at_hand] = self._buffer[self._start : self._start + at_hand]
+        self._start += at_hand
+        view = memoryview(body)
+        filled = at_hand
+        while filled < body_bytes:
+            got = self._sock.recv_into(view[filled:])
+            if got == 0:
+                raise EOFError
+            filled += got
+        return bytes(body)
+
+
 def _send_child_frame(sock: socket.socket, frame: ChildFrame) -> None:
-    """Write one frame. A failed write means the parent is gone."""
+    """Write one frame: one write up to ``JOINED_CHILD_WRITE_BODY_BYTES`` of
+    body, else the body in a write of its own. A failed write means the
+    parent is gone."""
     encoded = encode_child_frame(frame)
     try:
-        sock.sendall(encoded.head)
-        sock.sendall(encoded.body)
+        if len(encoded.body) <= JOINED_CHILD_WRITE_BODY_BYTES:
+            sock.sendall(encoded.head + encoded.body)
+        else:
+            sock.sendall(encoded.head)
+            sock.sendall(encoded.body)
     except OSError:
         os._exit(PARENT_GONE_EXIT_CODE)
 
@@ -192,9 +316,10 @@ def _read_parent_frames(
     work: ParentFrameInbox,
 ) -> None:
     """Control thread body. Ends the process when the parent is gone."""
+    reader = ParentFrameReader(sock)
     try:
         while True:
-            match _recv_parent_frame(sock):
+            match reader.next_frame():
                 case InitFrame():
                     logger.critical('Parent sent a second init frame')
                     os._exit(BAD_PARENT_FRAME_EXIT_CODE)
