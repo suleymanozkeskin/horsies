@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
+from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
@@ -36,6 +37,11 @@ from horsies.core.schemas.migrations import SCHEMA_VERSION
 from horsies.core.schemas.terminalization import OUTCOME_COLUMNS, OUTCOME_TYPE
 from pydantic import SecretStr
 from tests.integration.conftest import DB_URL
+from tests.integration.test_task_history_relocation import (
+    HOST_CLOCK_OFFSETS,
+    SESSION_TIME_ZONES,
+    SessionTimeZone,
+)
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
@@ -212,6 +218,49 @@ async def _restore_v34_forever_shape(connection: AsyncConnection) -> None:
             f'ON {TASK_HISTORY_FOREVER} (enqueued_at)'
         )
     )
+
+
+async def _seed_v34_forever_row(
+    connection: AsyncConnection,
+    *,
+    host_now: datetime,
+) -> str:
+    """Put a migrated database back at v34 with one terminal forever row.
+
+    Returns the row's id. The row is COMPLETED, has no class and predates
+    fingerprints; `host_now` is the clock reading that dates it. The
+    cutover state is cleared and the stored version is 34, so the next
+    migration runs the v35 forever conversion.
+    """
+    from horsies.core.history.cutover.state import CUTOVER_STATE_TABLE
+    from tests.integration.test_task_history_relocation import (
+        demote_to_upgraded_world,
+        insert_legacy_task,
+    )
+
+    await demote_to_upgraded_world(connection)
+    await _restore_v34_forever_shape(connection)
+    task_id = await insert_legacy_task(
+        connection,
+        status='COMPLETED',
+        kind=None,
+        class_key=None,
+        disposition=None,
+        retain=None,
+        fingerprinted=False,
+        clock=lambda: host_now,
+    )
+    await connection.execute(text(f'DELETE FROM {CUTOVER_STATE_TABLE}'))
+    await connection.execute(
+        text('DELETE FROM horsies_schema_version WHERE version > 34')
+    )
+    await connection.execute(
+        text(
+            'INSERT INTO horsies_schema_version (version) '
+            'VALUES (34) ON CONFLICT DO NOTHING'
+        )
+    )
+    return task_id
 
 
 # The signature of horsies_lock_running_task (schemas v56 and v57), which v58
@@ -983,69 +1032,74 @@ class TestUpgradePaths:
         finally:
             await engine.dispose()
 
+    @HOST_CLOCK_OFFSETS
+    @SESSION_TIME_ZONES
     async def test_v34_conversion_relocates_todays_forever_row_into_the_open_ended_leaf(
         self,
         scratch_database: str,
+        host_clock_offset: timedelta,
+        session_time_zone: SessionTimeZone,
     ) -> None:
-        """After the v35 conversion, a forever row of today lands in the open-ended leaf."""
-        from datetime import datetime, timedelta, timezone
+        """After the v35 conversion, a forever row of the conversion day lands in the open-ended leaf.
 
+        The conversion takes its day from the database clock. The row ends
+        at the open-ended leaf's lower anchor, read from the leaf catalog,
+        so neither the host clock nor the session time zone decides the
+        leaf.
+        """
         from horsies.core.history.cutover.identity import (
             normalize_attempt_identity,
         )
         from horsies.core.history.cutover.program import install_programs
-        from horsies.core.history.cutover.state import CUTOVER_STATE_TABLE
         from horsies.core.history.cutover.relocation import RelocationComplete
-        from horsies.core.history.partitions.catalog import open_ended_leaf_name
+        from horsies.core.history.names import TASK_HISTORY_FOREVER
+        from horsies.core.history.partitions.catalog import (
+            open_ended_leaf_name,
+            read_attached_open_ended_leaf,
+        )
         from horsies.core.history.partitions.forever import FOREVER_LEGACY_LEAF
         from tests.integration.test_task_history_preparation import (
             run_preparation_to_complete,
         )
         from tests.integration.test_task_history_relocation import (
-            demote_to_upgraded_world,
-            insert_legacy_task,
+            database_utc_day,
+            date_legacy_task,
+            read_session_time_zone,
             relocate_all,
+            set_database_time_zone,
         )
 
+        await set_database_time_zone(scratch_database, session_time_zone)
         await _migrate(scratch_database)
         engine = _engine(scratch_database)
         try:
             async with engine.begin() as connection:
-                await demote_to_upgraded_world(connection)
-                await _restore_v34_forever_shape(connection)
-                task_id = await insert_legacy_task(
+                day_before_conversion = await database_utc_day(connection)
+                task_id = await _seed_v34_forever_row(
                     connection,
-                    status='COMPLETED',
-                    kind=None,
-                    class_key=None,
-                    disposition=None,
-                    retain=None,
-                    fingerprinted=False,
-                )
-                await connection.execute(
-                    text(f'DELETE FROM {CUTOVER_STATE_TABLE}')
-                )
-                await connection.execute(
-                    text(
-                        'DELETE FROM horsies_schema_version WHERE version > 34'
-                    )
-                )
-                await connection.execute(
-                    text(
-                        'INSERT INTO horsies_schema_version (version) '
-                        'VALUES (34) ON CONFLICT DO NOTHING'
-                    )
+                    host_now=day_before_conversion + host_clock_offset,
                 )
 
             await _migrate_pre_cutover(scratch_database)
 
             async with engine.begin() as connection:
+                assert await read_session_time_zone(connection) == session_time_zone
+                open_leaf = await read_attached_open_ended_leaf(connection)
+                assert open_leaf is not None
+                conversion_day = open_leaf.lower_anchor
+                day_after_conversion = await database_utc_day(connection)
+                assert day_before_conversion <= conversion_day <= day_after_conversion
+                assert conversion_day == conversion_day.replace(
+                    hour=0, minute=0, second=0, microsecond=0
+                )
+                assert open_leaf.leaf_name == open_ended_leaf_name(
+                    TASK_HISTORY_FOREVER, conversion_day
+                )
                 await normalize_attempt_identity(connection)
                 installed = await install_programs(connection)
                 assert isinstance(installed, int), installed
-                await run_preparation_to_complete(
-                    connection, retain_default=True
-                )
+                await run_preparation_to_complete(connection, retain_default=True)
+                await date_legacy_task(connection, task_id, terminal_at=conversion_day)
                 relocated = await relocate_all(connection)
                 assert isinstance(relocated, RelocationComplete)
                 assert relocated.rows_relocated == 1
@@ -1059,12 +1113,7 @@ class TestUpgradePaths:
                         {'task_id': task_id},
                     )
                 ).scalar_one()
-                today = datetime.now(timezone.utc).replace(
-                    hour=0, minute=0, second=0, microsecond=0
-                )
-                assert relation == open_ended_leaf_name(
-                    'horsies_task_history_forever', today
-                )
+                assert relation == open_leaf.leaf_name
                 forever_leaves = (
                     await connection.execute(
                         text(

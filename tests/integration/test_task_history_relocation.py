@@ -20,7 +20,9 @@ and no notify.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from typing import Literal, get_args
 
 import pytest
 from pydantic import SecretStr
@@ -44,6 +46,10 @@ from horsies.core.history.cutover.relocation import (
     RelocationRuleViolation,
 )
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.history.partitions.catalog import (
+    database_now,
+    read_attached_leaf_rows,
+)
 from horsies.core.history.terminalization.move import ATTEMPT_ENCODER_DDL
 from tests.integration.task_history_harness import prepare_move_storage
 from tests.integration.test_terminal_snapshot_reuse import (
@@ -60,6 +66,23 @@ __all__ = ['make_database']
 pytestmark = [pytest.mark.integration]
 
 CLASS_KEY = 'it_relocation'
+
+# Readings of the host clock on one UTC day, as offsets from its midnight.
+# At 00:00:01, `insert_legacy_task` ends a row thirty minutes earlier, on the
+# previous UTC day; at 23:59:59, the row ends on the same day.
+HOST_CLOCK_OFFSETS = pytest.mark.parametrize(
+    'host_clock_offset',
+    [timedelta(seconds=1), timedelta(days=1) - timedelta(seconds=1)],
+    ids=['host_at_00_00_01', 'host_at_23_59_59'],
+)
+
+SessionTimeZone = Literal['UTC', 'Etc/GMT+12', 'Etc/GMT-12']
+
+# UTC, and one zone on each side of it. `Etc/GMT+12` is UTC-12.
+SESSION_TIME_ZONES = pytest.mark.parametrize(
+    'session_time_zone',
+    list(get_args(SessionTimeZone)),
+)
 
 
 async def _prepare(url: str) -> None:
@@ -187,6 +210,7 @@ async def insert_legacy_task(
     retain: bool | None = False,
     class_key: str | None = CLASS_KEY,
     fingerprinted: bool = True,
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> str:
     """One row as 0.4.x left it, with the transitional columns in their
     post-backfill state.
@@ -197,9 +221,15 @@ async def insert_legacy_task(
     — the genuinely pre-v27 shape, where none of the enqueue-time
     columns existed. A fixture more modern than reality is the named
     hazard: rows that always carry what the stage under test must
-    supply cannot exercise that stage."""
+    supply cannot exercise that stage.
+
+    ``clock`` (the host clock by default) dates the row: enqueued two
+    hours, started one hour and, when terminal, ended thirty minutes
+    before its reading. That end can fall on the previous UTC day, so a
+    test that expects the row in one leaf dates it again with
+    ``date_legacy_task``."""
     task_id = str(uuid.uuid4())
-    now = datetime.now(UTC)
+    now = clock()
     terminal = status not in ('PENDING', 'CLAIMED', 'RUNNING')
     await connection.execute(
         text(
@@ -277,6 +307,57 @@ async def insert_legacy_task(
     return task_id
 
 
+async def date_legacy_task(
+    connection: AsyncConnection,
+    task_id: str,
+    *,
+    terminal_at: datetime,
+) -> None:
+    """Set the terminal time of one live legacy row.
+
+    The relocation routes a row to the leaf whose bounds hold its
+    terminal time, so a test that expects one leaf takes the time from
+    that leaf's catalog row, not from the host clock.
+    """
+    updated = await connection.execute(
+        text(
+            'UPDATE horsies_tasks SET terminal_at = :terminal_at '
+            'WHERE id::text = :task_id'
+        ),
+        {'terminal_at': terminal_at, 'task_id': task_id},
+    )
+    assert updated.rowcount == 1, task_id
+
+
+async def database_utc_day(connection: AsyncConnection) -> datetime:
+    """Midnight UTC of the database clock's current day."""
+    now = await database_now(connection)
+    return now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+async def set_database_time_zone(url: str, time_zone: SessionTimeZone) -> None:
+    """Make every new session on the database at ``url`` use ``time_zone``.
+
+    The broker opens its own sessions, so a per-session setting would
+    not reach the migration and maintenance statements.
+    """
+    database = url.rsplit('/', 1)[1]
+    quoted_zone = f"'{time_zone}'"
+    engine = create_async_engine(url)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(f'ALTER DATABASE "{database}" SET timezone TO {quoted_zone}')
+            )
+    finally:
+        await engine.dispose()
+
+
+async def read_session_time_zone(connection: AsyncConnection) -> str:
+    """The time zone of the session behind ``connection``."""
+    return str((await connection.execute(text('SHOW timezone'))).scalar_one())
+
+
 async def relocate_all(
     connection: AsyncConnection, *, batch_size: int = 2
 ) -> RelocationComplete:
@@ -301,16 +382,31 @@ class TestStructuralOmissions:
 
 class TestRelocationEncodesOnce:
     @pytest.mark.asyncio
+    @HOST_CLOCK_OFFSETS
+    @SESSION_TIME_ZONES
     async def test_the_insert_encodes_each_snapshot_once(
-        self, make_database: MakeDatabase
+        self,
+        make_database: MakeDatabase,
+        host_clock_offset: timedelta,
+        session_time_zone: SessionTimeZone,
     ) -> None:
-        """The snapshot column and its digest read one encoding per row."""
+        """The snapshot column and its digest read one encoding per row.
+
+        The insert runs without the relocation's coverage step, so the
+        rows end at the lower anchor of the oldest leaf that
+        ``install_program_state`` made, whatever the host clock reads.
+        """
         url = await make_database()
+        await set_database_time_zone(url, session_time_zone)
         await _prepare(url)
         engine = create_async_engine(url)
         try:
             async with engine.begin() as connection:
+                assert await read_session_time_zone(connection) == session_time_zone
                 await install_program_state(connection)
+                coverage = await read_attached_leaf_rows(connection, CLASS_KEY)
+                covered_from = coverage[0].lower_anchor
+                host_now = covered_from + host_clock_offset
                 task_ids = [
                     await insert_legacy_task(
                         connection,
@@ -319,9 +415,14 @@ class TestRelocationEncodesOnce:
                         result='{"error": {"code": "BOOM"}}',
                         error_code='BOOM',
                         attempts=(('FAILED', 'reason'),) * attempt_count,
+                        clock=lambda: host_now,
                     )
                     for attempt_count in (0, 1, 2)
                 ]
+                for task_id in task_ids:
+                    await date_legacy_task(
+                        connection, task_id, terminal_at=covered_from
+                    )
                 await count_encoder_calls(connection)
                 inserted = (await connection.execute(
                     text(relocation_insert_sql() + ' RETURNING task_id'),
