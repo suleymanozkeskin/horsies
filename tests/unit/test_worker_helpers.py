@@ -219,6 +219,19 @@ def _short_row(short_by: int) -> tuple[object, ...]:
     return ('SHORT', None, None, None, None, None, None, None, None, None, short_by)
 
 
+
+@pytest.fixture(autouse=True)
+def _keep_the_test_process_unfrozen(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``run_forever`` freezes the objects of its process after a completed
+    start. These tests run it in the test process, which every later test
+    shares, so the freeze is a no-op here. ``TestStartupObjectsFreeze``
+    checks the call."""
+    monkeypatch.setattr(
+        'horsies.core.worker.worker.freeze_startup_objects',
+        lambda: None,
+    )
+
+
 def _make_worker(
     dsn: str = 'postgresql+psycopg://u:p@localhost/db',
     psycopg_dsn: str = 'postgresql://u:p@localhost/db',
