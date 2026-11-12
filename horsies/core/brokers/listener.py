@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections import defaultdict
-from typing import Any, DefaultDict, Optional, Sequence, Set
+from typing import Any, DefaultDict, Final, Optional, Sequence, Set
 from asyncio import Task, Queue  # precise type for Pylance/pyright
 
 import psycopg
@@ -42,6 +42,10 @@ from horsies.core.types.result import Ok, Err, Result, is_err
 from horsies.core.utils.db import is_retryable_connection_error
 
 logger = get_logger('listener')
+
+ACTIVITY_PROBE_MIN_INTERVAL_S: Final = 1.0
+"""The shortest time between two health probes that notification activity
+starts. The probe covers the activity that arrives within this time."""
 
 _SUBSCRIBER_QUEUE_MAXSIZE: int = 4096
 
@@ -431,6 +435,9 @@ class PostgresListener:
                             # Connection is dead, trigger reconnection
                             await self._handle_health_disconnect()
                             continue
+                    # At most one activity probe per interval: steady
+                    # notifications would otherwise start a probe per burst.
+                    await asyncio.sleep(ACTIVITY_PROBE_MIN_INTERVAL_S)
 
                 except asyncio.TimeoutError:
                     # No activity for 60 seconds - perform health check
