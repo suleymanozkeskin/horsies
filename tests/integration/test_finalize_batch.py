@@ -25,7 +25,8 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import AsyncGenerator, Generator, Sequence
-from datetime import datetime, timedelta
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from typing import Any, Final
 
 import psycopg
@@ -269,6 +270,33 @@ async def _history(
     return {str(row.task_id): (str(row.status), row.error_code) for row in rows}
 
 
+async def _history_results(
+    session: AsyncSession, task_ids: list[str]
+) -> dict[str, str | None]:
+    """The result text of each history row of ``task_ids``."""
+    rows = (
+        await session.execute(
+            text(
+                "SELECT task_id, convert_from(result_payload, 'UTF8') AS result "
+                'FROM horsies_task_history WHERE task_id = ANY(CAST(:ids AS uuid[]))'
+            ),
+            {'ids': task_ids},
+        )
+    ).all()
+    await session.commit()
+    return {str(row.task_id): row.result for row in rows}
+
+
+def _written(
+    result: Result[tuple[TerminalizationOutcome, ...], BatchWriteError],
+) -> list[type[TerminalizationOutcome]]:
+    match result:
+        case Ok(outcomes):
+            return [type(outcome) for outcome in outcomes]
+        case Err(error):
+            raise AssertionError(f'the batch was not written: {error!r}')
+
+
 async def _capacity_payloads(
     listener: psycopg.AsyncConnection[Any],
     session: AsyncSession,
@@ -433,6 +461,52 @@ async def test_each_row_keeps_its_own_fence_in_one_batch(
         stale: 'RUNNING',
     }
     assert set(await _history(session, [mine, foreign, stale, done])) == {mine, done}
+
+
+async def test_a_batch_writes_each_result_text_as_given(
+    direct: ProxiedWorker,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """Escapes, whitespace and characters outside ASCII reach the row
+    unchanged."""
+    (first, first_at), (second, second_at) = await _running_tasks(session, 2)
+    texts = {
+        first: '{\n\t"ok": "quote \\" backslash \\\\ escaped nul \\u0000"}',
+        second: '{"ok":"é 中 𝄞"}',
+    }
+    batch = FusedCompletionBatch(
+        commands=(
+            replace(_command(first, first_at), result_json=texts[first]),
+            replace(_command(second, second_at), result_json=texts[second]),
+        ),
+    )
+
+    written = await apply_fused_batch_in_autocommit(direct.worker.sf, batch)
+
+    assert _written(written) == [Applied, Applied]
+    assert await _history_results(session, [first, second]) == texts
+
+
+async def test_a_claim_generation_keeps_its_microseconds_and_its_offset(
+    direct: ProxiedWorker,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """The fence compares instants: the same instant at another UTC offset
+    matches, one microsecond later does not."""
+    (same, same_at), (later, later_at) = await _running_tasks(session, 2)
+    batch = FusedCompletionBatch(
+        commands=(
+            _command(same, same_at.astimezone(timezone(timedelta(hours=5, minutes=30)))),
+            _command(later, later_at + timedelta(microseconds=1)),
+        ),
+    )
+
+    written = await apply_fused_batch_in_autocommit(direct.worker.sf, batch)
+
+    assert _written(written) == [Applied, LostClaim]
+    assert await _live_statuses(session, [same, later]) == {later: 'RUNNING'}
 
 
 async def test_a_row_without_a_claim_generation_is_fenced_on_its_worker(

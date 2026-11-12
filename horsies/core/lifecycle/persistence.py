@@ -14,10 +14,12 @@ type checker says so at the call site rather than at run time.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Final, LiteralString, assert_never, cast
 
 from psycopg import AsyncCursor
@@ -126,11 +128,22 @@ _COMPLETE_TASK_FUSED_SQL = text("""
     )
 """)
 
+# The batch arrives as one JSON parameter (``_fused_batch_parameters``): one
+# array per command, holding the six arguments of its row. Each ARRAY keeps the
+# input order, so the arguments of one command share one index.
 _COMPLETE_TASKS_FUSED_SQL = text("""
+    WITH batch AS MATERIALIZED (
+        SELECT entry.value AS fields, entry.ordinality AS input_order
+        FROM jsonb_array_elements(CAST(:batch AS jsonb))
+            WITH ORDINALITY AS entry(value, ordinality)
+    )
     SELECT * FROM horsies_complete_tasks_fused(
-        CAST(:task_ids AS uuid[]), CAST(:worker_ids AS TEXT[]),
-        CAST(:claimed_ats AS TIMESTAMPTZ[]), CAST(:results AS TEXT[]),
-        CAST(:notify_channels AS TEXT[]), CAST(:notify_payloads AS TEXT[])
+        ARRAY(SELECT CAST(fields->>0 AS uuid) FROM batch ORDER BY input_order),
+        ARRAY(SELECT fields->>1 FROM batch ORDER BY input_order),
+        ARRAY(SELECT CAST(fields->>2 AS TIMESTAMPTZ) FROM batch ORDER BY input_order),
+        ARRAY(SELECT fields->>3 FROM batch ORDER BY input_order),
+        ARRAY(SELECT fields->>4 FROM batch ORDER BY input_order),
+        ARRAY(SELECT fields->>5 FROM batch ORDER BY input_order)
     )
 """)
 
@@ -576,17 +589,43 @@ def _batch_write_error(failure: AutocommitFailure) -> BatchWriteError:
 
 
 def _fused_batch_parameters(batch: FusedCompletionBatch) -> dict[str, object]:
-    """The arrays of ``horsies_complete_tasks_fused``: one element per
-    command, in input order, for each parameter of the single function."""
-    commands = batch.commands
+    """The one parameter of the batch statement: a JSON array with one array
+    per command, in input order. Each holds the six arguments of
+    ``horsies_complete_task_fused`` for its row, as text or null. Pure.
+
+    The driver sends one string, not six arrays that it dumps element by
+    element. Every value is a ``str`` or None, so ``json.dumps`` has no value
+    to refuse; ``ensure_ascii=False`` keeps each string as it is, apart from
+    the escapes of quotes, backslashes and control characters.
+    """
     return {
-        'task_ids': [command.task_id for command in commands],
-        'worker_ids': [command.fence.worker_id for command in commands],
-        'claimed_ats': [command.fence.claimed_at for command in commands],
-        'results': [command.result_json for command in commands],
-        'notify_channels': [command.notify_channel for command in commands],
-        'notify_payloads': [command.notify_payload for command in commands],
+        'batch': json.dumps(
+            [
+                [
+                    command.task_id,
+                    command.fence.worker_id,
+                    _generation_text(command.fence.claimed_at),
+                    command.result_json,
+                    command.notify_channel,
+                    command.notify_payload,
+                ]
+                for command in batch.commands
+            ],
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(',', ':'),
+        ),
     }
+
+
+def _generation_text(claimed_at: datetime | None) -> str | None:
+    """The claim generation as ISO 8601 text with its microseconds and its
+    UTC offset, or None when the fence has no generation. Pure."""
+    match claimed_at:
+        case None:
+            return None
+        case datetime():
+            return claimed_at.isoformat()
 
 
 async def apply_fused_batch_in_autocommit(
