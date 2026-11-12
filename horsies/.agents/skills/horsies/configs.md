@@ -136,7 +136,7 @@ worker_profiles = {
 | `SharedThreadChildren` | `pool` | `SharedPool()` | The sync connection pool of each child, shared by its seat threads |
 | `SharedThreadChildren` | `task_send_pool` | `PoolSize(connections=2)` | As for `IsolatedChildren`; the seat threads share it |
 | `IsolatedPool` | `min_size` | `0` | 0-1000 connections kept open; 0 opens on first use |
-| `IsolatedPool` | `max_size` | `PoolSize(connections=2)` | `PoolSize(connections=N)`, 1-1000 |
+| `IsolatedPool` | `max_size` | `PoolSize(connections=1)` | `PoolSize(connections=N)`, 1-1000; an isolated child writes one statement at a time, so 1 is enough |
 | `IsolatedPool` | `check` | `False` | Check each connection on checkout: one round trip each. Each child write is one statement in autocommit; with the check off a dead connection fails that write (RUNNING update: `OWNERSHIP_UNCONFIRMED`, the lease returns the task) |
 | `SharedPool` | `min_size` | `0` | 0-1000 connections kept open |
 | `SharedPool` | `max_size` | `PoolSizeFromSeats()` | `PoolSize(connections=N)` or derived from the seats |
@@ -161,12 +161,16 @@ shared thread child one sync pool that its seat threads share; each child
 counts the resolved `pool.max_size` of its mode in HRS-219. A derived size is
 `min(cap, max(floor, ceil(seats / seats_per_unit)))` with per-kind constants in
 `horsies.core.models.child_sizing` (shared async pool: 10 seats per
-connection, cap 10; shared thread pool: 4 seats per connection, cap 10; floor
-2; shared async executor: 1 seat per thread, floor 2, cap 32). The pool of the
-worker process (`WorkerProfile.pool`) derives from `seat_count()`: 10 seats per
-connection, floor 5, cap 20 (provisional constants); it has no overflow and
-counts in HRS-219 as `parent pool max_size N`. Set
-`pool=ParentPool(max_size=PoolSize(connections=N))` for a high RTT or many
+connection, cap 40; shared thread pool: 10 seats per connection, cap 26;
+floor 2; shared async executor: 1 seat per thread, floor 2, cap 32). A child
+pool keeps about `2 x tasks per second x (RTT + server time)` connections busy
+(2 writes per task); the defaults are the measured knees at 3.5 ms RTT and
+leave more than a local database needs. The pool of the worker process
+(`WorkerProfile.pool`) derives from `seat_count()`: 10 seats per connection,
+floor 5, cap 20; it has no overflow and counts in HRS-219 as
+`parent pool max_size N`. Plain successes are written in batches and use few
+of its connections; failures, retries and workflow nodes are written per task.
+Set `pool=ParentPool(max_size=PoolSize(connections=N))` for a high RTT or many
 failures, retries or workflow nodes. Task code that sends opens the
 `task_send_pool` of its child kind (default 2) per event loop; HRS-219 states
 it but does not compare it. A `min_size`

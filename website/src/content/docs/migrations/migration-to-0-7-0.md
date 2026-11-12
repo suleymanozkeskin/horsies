@@ -113,7 +113,7 @@ horsies worker myapp.instance:app --profile default
 | `worker_child_pool_max_size=N` | `2` | `IsolatedChildren(pool=IsolatedPool(max_size=PoolSize(connections=N)))`, `SharedAsyncChildren(pool=SharedPool(max_size=PoolSize(connections=N)))`, `SharedThreadChildren(pool=SharedPool(max_size=PoolSize(connections=N)))` |
 | `worker_child_pool_check=False` | `True` | `IsolatedChildren(pool=IsolatedPool(check=False))`, `SharedAsyncChildren(pool=SharedPool(check=False))`, `SharedThreadChildren(pool=SharedPool(check=False))` |
 
-An isolated child keeps the 0.6.x size by default: 0 to 2 connections. The checkout check is off by default in 0.7.0 (it was on in 0.6.x): each connection of a child pool is in autocommit, and each write of a child is one statement, so the check doubled its round trips. Set `check=True` on the `pool` of a kind to keep it. A shared child derives its pool size from its seats by default (`PoolSizeFromSeats()`); see [Sizes Derived from the Seats](/horsies/workers/worker-profiles/#sizes-derived-from-the-seats).
+An isolated child opens 0 to 1 connections by default (0.6.x: 0 to 2). It runs one task at a time, and its two writes run one after the other, so it never uses a second connection. The checkout check is off by default in 0.7.0 (it was on in 0.6.x): each connection of a child pool is in autocommit, and each write of a child is one statement, so the check doubled its round trips. Set `check=True` on the `pool` of a kind to keep it. A shared child derives its pool size from its seats by default (`PoolSizeFromSeats()`); see [Sizes Derived from the Seats](/horsies/workers/worker-profiles/#sizes-derived-from-the-seats).
 
 The worker process no longer pre-pings its pooled connections by default. `PostgresConfig.worker_pool_pre_ping` (default `False`) sets it; `pool_pre_ping` applies to the other engines only. Set `worker_pool_pre_ping=True` to keep the 0.6.x behavior. See [Health Checks at High RTT](/horsies/configuration/remote-postgres/#health-checks-at-high-rtt).
 
@@ -127,7 +127,7 @@ error[HRS-213]: worker_child_pool_max_size was removed in 0.7.0
         set the pool of each child kind in AppConfig.worker_profiles: IsolatedChildren(pool=IsolatedPool(max_size=PoolSize(connections=N))), SharedAsyncChildren(pool=SharedPool(max_size=PoolSize(connections=N))) or SharedThreadChildren(pool=SharedPool(max_size=PoolSize(connections=N)))
 ```
 
-A 0.6.x config with `worker_child_pool_max_size=1` and `worker_child_pool_check=False`, and the 0.7.0 profile:
+A 0.6.x config with `worker_child_pool_max_size=1` and `worker_child_pool_check=False`, and the 0.7.0 profile. Both values are the 0.7.0 defaults of `IsolatedPool`; the profile states them:
 
 ```python
 from horsies import IsolatedPool, PoolSize

@@ -190,13 +190,13 @@ Each `max_size` is the resolved value: a `PoolSize`, or the size that
 `PoolSizeFromSeats()` derives from the seats; see
 [Connections](/horsies/workers/worker-profiles/#connections). With the defaults
 and a profile of 8 isolated children, the framework ceiling is about
-`5 + 2 + 1 + 8 * 2 = 24` direct connections, and `8 * 2 = 16` more when every
+`5 + 2 + 1 + 8 * 1 = 16` direct connections, and `8 * 2 = 16` more when every
 child sends from one event loop.
 Idle child processes keep no database connection by default because the
 `min_size` of each pool is 0; connections are opened lazily when task
 lifecycle work starts. An isolated child uses one connection at a time, for the
 RUNNING update and the finalizing mark: the worker process writes the runner
-heartbeats over its own connection. So
+heartbeats over its own connection. So the default
 `IsolatedPool(max_size=PoolSize(connections=1))` is enough for the own work of
 an isolated child. The seats of a shared child share the pool of their child;
 see [Connections](/horsies/workers/shared-thread-tasks/#connections) for its
