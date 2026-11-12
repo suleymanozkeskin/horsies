@@ -1,6 +1,6 @@
 ---
 title: Worker Profiles
-summary: Named worker settings in AppConfig - isolated, shared async and shared thread children, recycling, connection pools of the children, of task code that sends and of the worker process and their measured default sizes, claim limits, drain timeout and preload - and what horsies check and worker boot validate.
+summary: Named worker settings in AppConfig - isolated, shared async and shared thread children, recycling, connection pools of the children, of task code that sends and of the worker process and their measured default sizes, claim limits, drain timeout and preload, example profiles for one machine - and what horsies check and worker boot validate.
 related: [execution-modes, worker-architecture, shared-async-tasks, shared-thread-tasks, concurrency, ../cli, ../configuration/app-config, ../migrations/migration-to-0-7-0]
 tags: [workers, profiles, configuration, concurrency, recycling, connections, validation]
 ---
@@ -234,6 +234,68 @@ A seat whose task takes 0.1 s, with Postgres 3.5 ms away, keeps about one connec
 | isolated, 14 children | 2 | 116-118 | 106 |
 
 The defaults follow the knees at 3.5 ms. A database on the same host or network needs fewer connections: at 0.25 ms, 5 connections give a 100-seat async child the rate of 20. There, set a smaller `PoolSize(connections=N)` to save server connections. A shared thread child of 24 or 64 seats derives 3 or 7 connections, between pool sizes of the same rate.
+
+## Profiles for One Machine
+
+The profiles below are for one worker on a machine with 16 vCPU and 64 GB of memory, one profile per kind of work. Each setting that a profile does not show is the default, so the pools are the derived sizes.
+
+**Async I/O.** Tasks that wait on the network or a database through async clients. Each shared async child runs on one CPU at most; 4 children leave CPUs for the worker process and the rest of the machine.
+
+```python
+from horsies import IsolatedChildren, SharedAsyncChildren, SharedThreadChildren, WorkerProfile
+
+async_io = WorkerProfile(
+    shared_async=SharedAsyncChildren(count=4, seats=100),
+)
+```
+
+**Blocking I/O on threads.** Tasks that wait in a sync client (`requests`, a sync driver). A waiting thread holds no CPU, so the seats follow the waits, not the CPUs.
+
+```python
+blocking_io = WorkerProfile(
+    shared_thread=SharedThreadChildren(count=2, seats=64),
+)
+```
+
+**CPU work in isolated children.** Pure-Python CPU work: one task per process, one process per CPU, 2 CPUs left for the worker process and the system.
+
+```python
+cpu_isolated = WorkerProfile(
+    isolated=IsolatedChildren(count=14),
+)
+```
+
+**CPU work in native code that releases the GIL.** `zlib`, `hashlib` and similar C code run in parallel on the threads of one process: one seat per CPU, 2 CPUs left.
+
+```python
+native_threads = WorkerProfile(
+    shared_thread=SharedThreadChildren(count=1, seats=14),
+)
+```
+
+**A mixed profile.** Each kind of task goes to the children of its execution mode.
+
+```python
+mixed = WorkerProfile(
+    isolated=IsolatedChildren(count=4),
+    shared_async=SharedAsyncChildren(count=2, seats=200),
+    shared_thread=SharedThreadChildren(count=1, seats=32),
+)
+```
+
+The connections that each profile opens, and the rate of the worker:
+
+| Profile | Derived pools | Connections that `HRS-219` counts | Task code that sends adds, at most | Tasks/s of one worker |
+|---------|---------------|-----------------------------------|------------------------------------|-----------------------|
+| `async_io` | 4 shared async children × 10, worker process 20 | `20 + 2 + 1 + 4 × 10 = 63` | `4 × 2 = 8` | 2,490-2,630 |
+| `blocking_io` | 2 shared thread children × 7, worker process 13 | `13 + 2 + 1 + 2 × 7 = 30` | `2 × 2 = 4` | 1,010-1,070 |
+| `cpu_isolated` | 14 isolated children × 1, worker process 5 | `5 + 2 + 1 + 14 × 1 = 22` | `14 × 2 = 28` | 108-110 |
+| `native_threads` | 1 shared thread child × 2, worker process 5 | `5 + 2 + 1 + 1 × 2 = 10` | `1 × 2 = 2` | 114-115 |
+| `mixed` | 4 isolated children × 1, 2 shared async children × 20, 1 shared thread child × 4, worker process 20 | `20 + 2 + 1 + 4 × 1 + 2 × 20 + 1 × 4 = 71` | `7 × 2 = 14` | 2,020-2,500: async 1,810-2,270, thread 184-205, isolated 24-27 |
+
+The rates were measured on an 8-core host (Apple M2) with Postgres 18 on the same host, two runs per profile, with a task that sleeps 0.1 s in place of the work: `asyncio.sleep` for the async tasks, `time.sleep` for the others, which releases the GIL as blocking I/O and native code do. They show what the worker itself carries, on a host with half the CPUs of the profiles. Real work sets its own rate; for CPU work it is about the children, or the seats, divided by the CPU seconds of one task. With Postgres 3.5 ms away, see the per-child rates in [Sizes Derived from the Seats](#sizes-derived-from-the-seats).
+
+A pool opens a connection only when a write finds none free, so a worker can open fewer connections than `HRS-219` counts: in these runs Postgres saw at most 48 connections for `async_io` (63 counted) and 21 for `blocking_io` (30 counted), the measuring script's own connection included. To save server connections when Postgres is near, set a smaller `PoolSize(connections=N)` on the pool of a kind.
 
 ## API Reference
 
