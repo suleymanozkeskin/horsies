@@ -191,6 +191,46 @@ def test_release_child_removes_every_seat_of_a_shared_child() -> None:
     assert [d.task_id for d in live.snapshot()] == ['task-d']
 
 
+def test_a_shared_child_can_hold_again_after_one_seat_is_released() -> None:
+    """The seat count of a child follows its releases, not only its holds."""
+    live = LiveDispatches(capacity=3)
+    first = _held(live.hold(_frame('task-a'), pid=101, seats=2))
+    _held(live.hold(_frame('task-b'), pid=101, seats=2))
+    _ = live.release(first)
+
+    _held(live.hold(_frame('task-c'), pid=101, seats=2))
+
+    with pytest.raises(AssertionError, match='holds 2 of its 2 seats'):
+        live.hold(_frame('task-d'), pid=101, seats=2)
+
+
+def test_a_reused_pid_starts_with_no_held_tasks() -> None:
+    """The OS can give a new child the pid of a child whose exit was seen."""
+    live = LiveDispatches(capacity=4)
+    for name in ('task-a', 'task-b'):
+        _held(live.hold(_frame(name), pid=101, seats=2))
+    _ = live.release_child(101)
+
+    for name in ('task-c', 'task-d'):
+        _held(live.hold(_frame(name), pid=101, seats=2))
+
+    assert [d.task_id for d in live.snapshot()] == ['task-c', 'task-d']
+
+
+def test_releasing_a_ticket_twice_frees_one_seat() -> None:
+    """The second release of a ticket is NotHeld and frees nothing."""
+    live = LiveDispatches(capacity=3)
+    first = _held(live.hold(_frame('task-a'), pid=101, seats=2))
+    _held(live.hold(_frame('task-b'), pid=101, seats=2))
+    _ = live.release(first)
+    assert live.release(first) == NotHeld()
+
+    _held(live.hold(_frame('task-c'), pid=101, seats=2))
+
+    with pytest.raises(AssertionError, match='holds 2 of its 2 seats'):
+        live.hold(_frame('task-d'), pid=101, seats=2)
+
+
 def test_more_dispatches_than_seats_is_a_defect() -> None:
     live = LiveDispatches(capacity=1)
     _held(live.hold(_frame('task-a'), pid=101, seats=1))

@@ -90,6 +90,10 @@ class LiveDispatches:
         self._capacity = capacity
         self._lock = threading.Lock()
         self._by_ticket: dict[int, LiveDispatch] = {}
+        self._held_by_pid: dict[int, int] = {}
+        """The entries of ``_by_ticket`` per child pid, written with it under
+        the lock. ``hold`` checks the seats of a child with one read, not with
+        a scan of every held task."""
         self._kill_marks: dict[int, Callable[[], None]] = {}
         self._next_ticket = 1
         self._state = _RegistryState.OPEN
@@ -139,9 +143,7 @@ class LiveDispatches:
                     pass
                 case _ as unreachable:
                     assert_never(unreachable)
-            held_by_child = sum(
-                1 for held in self._by_ticket.values() if held.pid == pid
-            )
+            held_by_child = self._held_by_pid.get(pid, 0)
             assert held_by_child < seats, (
                 f'child pid={pid} took task {frame.task_id} while it holds '
                 f'{held_by_child} of its {seats} seats'
@@ -157,12 +159,15 @@ class LiveDispatches:
                 claimed_at=frame.claimed_at,
                 pid=pid,
             )
+            self._held_by_pid[pid] = held_by_child + 1
             return Held(ticket)
 
     def release(self, ticket: int) -> ReleaseOutcome:
         """Remove the dispatch with this ticket. The attempt has ended."""
         with self._lock:
             dispatch = self._by_ticket.pop(ticket, None)
+            if dispatch is not None:
+                self._count_one_less(dispatch.pid)
         match dispatch:
             case None:
                 return NotHeld()
@@ -184,6 +189,11 @@ class LiveDispatches:
             )
             for dispatch in removed:
                 del self._by_ticket[dispatch.ticket]
+            counted = self._held_by_pid.pop(pid, 0)
+            assert counted == len(removed), (
+                f'child pid={pid} was counted with {counted} held tasks, '
+                f'the registry held {len(removed)}'
+            )
             _ = self._kill_marks.pop(pid, None)
         return removed
 
@@ -202,4 +212,19 @@ class LiveDispatches:
             self._state = _RegistryState.CLOSED
             held = tuple(self._by_ticket[ticket] for ticket in sorted(self._by_ticket))
             self._by_ticket.clear()
+            self._held_by_pid.clear()
         return held
+
+    def _count_one_less(self, pid: int) -> None:
+        """Count one held task less for child ``pid``. The caller holds the
+        lock. A count that is not positive here means ``_held_by_pid`` and
+        ``_by_ticket`` disagree: a defect, ``AssertionError``."""
+        counted = self._held_by_pid.get(pid, 0)
+        assert counted > 0, (
+            f'child pid={pid} released a task while it was counted with '
+            f'{counted} held tasks'
+        )
+        if counted == 1:
+            del self._held_by_pid[pid]
+        else:
+            self._held_by_pid[pid] = counted - 1
