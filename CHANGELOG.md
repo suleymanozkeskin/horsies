@@ -502,6 +502,13 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **A task's start sends no `horsies_task_status` event (schema v59).** The
+  status update trigger skips the change to RUNNING. A task's start commit is
+  one transaction per task, and its NOTIFY made Postgres commit it one at a
+  time with every other notifying commit. The web app sees RUNNING when it
+  next re-reads the tasks. A listener of `horsies_task_status` that needs the
+  start reads the row.
+
 - **A failed attempt, a timeout and their retry are one read and one
   statement (schema v56).** `horsies_finish_failed_attempt` takes the task
   advisory lock, then the row lock under the claim fence, and writes the
@@ -872,6 +879,12 @@ and there is no migration contract between pre-1.0 versions.
   These fields and the removed child pool fields are reported at once.
 
 ### Fixed
+
+- **The live web UI sees a task finish (schema v59).** A terminal move
+  deletes the live row, so no status change sent `horsies_task_status`, and in
+  live mode a finished task stayed RUNNING on screen until another task
+  changed. The single move and each batch move send the event with the task
+  id, in the transaction that already sends `task_done`.
 
 - **A finalize no longer deadlocks with stale recovery or a cancel of the
   same task.** Every move function takes the task advisory lock before the

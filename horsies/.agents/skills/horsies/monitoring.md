@@ -247,7 +247,8 @@ The web process holds ONE `PostgresListener` (~2 connections, lazy start) on
 coalesces notifies (250 ms), and fans out over `GET /api/events` (SSE).
 Events are invalidation signals — `{"topic", "ids"}` — never data. Client
 polling is a fallback that activates only while the stream is down; the
-schedules table always polls (its table has no trigger).
+schedules table always polls (its table has no trigger). A task's start
+(RUNNING) sends no event; its creation, other status changes and its end do.
 
 ## Deployment Footprint
 

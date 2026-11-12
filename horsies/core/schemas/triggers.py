@@ -55,7 +55,11 @@ DROP_TASK_NOTIFY_UPDATE_TRIGGER_SQL = (
 
 
 # ---- Task status triggers (TUI/monitoring) ----
-# Fire on ANY status change so the TUI gets real-time updates.
+# Fire on every insert and on every status change but the start (RUNNING). A
+# task's start commit is one transaction per task, and a NOTIFY makes Postgres
+# commit it one at a time with every other notifying commit. The monitoring
+# stream sees RUNNING at its next re-read. The history move sends this channel
+# for each terminal move, because it deletes the live row.
 
 CREATE_TASK_STATUS_NOTIFY_FUNCTION_SQL = text("""
     CREATE OR REPLACE FUNCTION horsies_notify_task_status_change()
@@ -80,7 +84,10 @@ CREATE_TASK_STATUS_NOTIFY_TRIGGER_SQL = text("""
     CREATE TRIGGER horsies_task_status_notify_update_trigger
         AFTER UPDATE ON horsies_tasks
         FOR EACH ROW
-        WHEN (OLD.status IS DISTINCT FROM NEW.status)
+        WHEN (
+            OLD.status IS DISTINCT FROM NEW.status
+            AND NEW.status::text <> 'RUNNING'
+        )
         EXECUTE FUNCTION horsies_notify_task_status_change();
 """)
 

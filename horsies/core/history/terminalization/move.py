@@ -614,6 +614,7 @@ BEGIN
         RAISE EXCEPTION 'live task delete did not affect one row';
     END IF;
     PERFORM pg_notify('task_done', p_task_id::text);
+    PERFORM pg_notify('horsies_task_status', p_task_id::text);
 END
 $function$
 """
@@ -1702,6 +1703,8 @@ def _move_stage_core(
     END IF;
 
     PERFORM pg_notify('task_done', u.tid::text)
+    FROM unnest({ids_var}) AS u(tid);
+    PERFORM pg_notify('horsies_task_status', u.tid::text)
     FROM unnest({ids_var}) AS u(tid);
 """
 

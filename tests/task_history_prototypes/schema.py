@@ -83,7 +83,12 @@ _IDENTIFIER = re.compile(r'^[a-z][a-z0-9_]{0,62}$')
 # (horsies_finish_workflow_success, horsies_workflow_success_outcome) and
 # drops horsies_lock_running_task. It changes no table, column or index of
 # horsies_tasks, so the cloned shape is unchanged and the base advances.
-_EXPECTED_BASE_SCHEMA_VERSION = 58
+# v59 changes the WHEN of horsies_task_status_notify_update_trigger and adds a
+# NOTIFY to the bodies of the moves. A LIKE clone takes no trigger; no
+# prototype names the trigger or the channel; the prototype terminalization
+# functions are their own copies and do not call the moves. The cloned shape is
+# unchanged and the base advances.
+_EXPECTED_BASE_SCHEMA_VERSION = 59
 
 
 @dataclass(frozen=True, slots=True)
