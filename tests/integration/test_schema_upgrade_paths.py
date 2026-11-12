@@ -15,6 +15,7 @@ end state.
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime, timedelta
@@ -29,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_en
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.history.terminalization.move import (
     failed_attempt_teardown,
+    terminal_snapshot_replacement_ddl,
     workflow_success_teardown,
 )
 from horsies.core.models.broker import PostgresConfig
@@ -273,6 +275,27 @@ _RETIRED_LOCKING_READ_STAND_IN = """
     LANGUAGE sql
     AS $$ SELECT NULL::varchar WHERE FALSE $$
 """
+
+
+# The status update trigger of v58: it also fired on the start (RUNNING).
+_V58_STATUS_UPDATE_TRIGGER = """
+    DROP TRIGGER IF EXISTS horsies_task_status_notify_update_trigger ON horsies_tasks;
+    CREATE TRIGGER horsies_task_status_notify_update_trigger
+        AFTER UPDATE ON horsies_tasks
+        FOR EACH ROW
+        WHEN (OLD.status IS DISTINCT FROM NEW.status)
+        EXECUTE FUNCTION horsies_notify_task_status_change();
+"""
+
+# The status event of a move, as v59 writes it in the single move and in each
+# batch move. Without it, a move body is the body of v58.
+_MOVE_STATUS_EVENT = re.compile(r"    PERFORM pg_notify\('horsies_task_status', [^;]*;\n")
+
+
+def _function_name(ddl: str) -> str:
+    match = re.search(r"FUNCTION\s+([a-z_]+)\s*\(", ddl)
+    assert match is not None, ddl[:200]
+    return match.group(1)
 
 
 async def _stored_version(engine: AsyncEngine) -> int:
@@ -2058,6 +2081,67 @@ class TestUpgradePaths:
             async with engine.connect() as conn:
                 assert await _stored_version(engine) == SCHEMA_VERSION
                 assert (await conn.execute(program_sql)).all() == installed
+        finally:
+            await engine.dispose()
+
+    async def test_status_event_upgrade_from_58(
+        self,
+        scratch_database: str,
+    ) -> None:
+        """A v58 database gets, at v59, the status update trigger that skips
+        the start and the moves that send the status event; a second apply
+        changes nothing."""
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        moves = terminal_snapshot_replacement_ddl()
+        names = [_function_name(ddl) for ddl in moves]
+        trigger_sql = text(
+            "SELECT pg_get_triggerdef(oid) FROM pg_trigger "
+            "WHERE tgname = 'horsies_task_status_notify_update_trigger'"
+        )
+        sending_sql = text("""
+            SELECT p.proname::text FROM pg_proc p
+            WHERE p.proname = ANY(CAST(:names AS text[]))
+              AND p.prosrc LIKE '%horsies_task_status%'
+            ORDER BY 1
+        """)
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text(_V58_STATUS_UPDATE_TRIGGER))
+                for ddl in moves:
+                    v58_ddl = _MOVE_STATUS_EVENT.sub('', ddl)
+                    assert v58_ddl != ddl, _function_name(ddl)
+                    await conn.execute(text(v58_ddl))
+                assert 'RUNNING' not in (await conn.execute(trigger_sql)).scalar_one()
+                assert (
+                    await conn.execute(sending_sql, {'names': names})
+                ).scalars().all() == []
+                await conn.execute(
+                    text('DELETE FROM horsies_schema_version WHERE version >= 59')
+                )
+                await conn.execute(
+                    text(
+                        'INSERT INTO horsies_schema_version(version) VALUES (58) '
+                        'ON CONFLICT DO NOTHING'
+                    )
+                )
+            assert await _stored_version(engine) == 58
+            await _migrate(scratch_database)
+            async with engine.connect() as conn:
+                assert await _stored_version(engine) == SCHEMA_VERSION
+                trigger = (await conn.execute(trigger_sql)).scalar_one()
+                sending = (
+                    await conn.execute(sending_sql, {'names': names})
+                ).scalars().all()
+            assert "'RUNNING'" in trigger
+            assert sending == sorted(names)
+
+            await _migrate(scratch_database)
+            async with engine.connect() as conn:
+                assert (await conn.execute(trigger_sql)).scalar_one() == trigger
+                assert (
+                    await conn.execute(sending_sql, {'names': names})
+                ).scalars().all() == sending
         finally:
             await engine.dispose()
 

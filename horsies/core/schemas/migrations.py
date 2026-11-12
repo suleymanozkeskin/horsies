@@ -399,8 +399,12 @@ from horsies.core.models.tasks import Execution
 #      is horsies_workflow_success_outcome. Both are dropped and created on
 #      every apply. horsies_lock_running_task (v56) is dropped: its one
 #      caller was the success of a workflow task.
+# v59: horsies_task_status_notify_update_trigger skips NEW.status =
+#      'RUNNING': a task's start commit sends no NOTIFY. The history move
+#      functions send horsies_task_status with the task id next to
+#      task_done, so the monitoring stream hears every terminal move.
 
-SCHEMA_VERSION = 58
+SCHEMA_VERSION = 59
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,

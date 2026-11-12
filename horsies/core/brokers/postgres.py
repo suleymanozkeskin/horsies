@@ -1451,7 +1451,8 @@ class PostgresBroker:
         # Create trigger
         await conn.execute(CREATE_TASK_NOTIFY_TRIGGER_SQL)
 
-        # TUI notification triggers (broader: fires on ANY status change)
+        # Monitoring notification triggers: every insert and every status
+        # change but the start (RUNNING)
         await conn.execute(CREATE_TASK_STATUS_NOTIFY_FUNCTION_SQL)
         await conn.execute(CREATE_TASK_STATUS_NOTIFY_TRIGGER_SQL)
         await conn.execute(CREATE_WORKER_STATE_NOTIFY_FUNCTION_SQL)
@@ -1769,6 +1770,9 @@ class PostgresBroker:
                 # with the advisory lock first.
                 for statement in workflow_success_program_ddl():
                     await conn.execute(text(statement))
+            # v59: the status update trigger skips the start (RUNNING). Both
+            # programs keep the trigger, so it is replaced on every database.
+            await conn.execute(CREATE_TASK_STATUS_NOTIFY_TRIGGER_SQL)
             # v49: the writers hold the single-column history rules.
             await conn.execute(text(DROP_SINGLE_COLUMN_CHECKS_DDL))
             # v51: the task retention statistics have no reader.

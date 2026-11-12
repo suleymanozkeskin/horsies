@@ -93,6 +93,11 @@ monitoring NOTIFY channels (`horsies_task_status`, `horsies_workflow_status`,
 `GET /api/events`. Payloads are ids, never data: an event says which surface
 changed, and the browser refetches through the normal endpoints.
 
+A task sends a `horsies_task_status` event when it is created, when its status
+changes, and when it ends. Its start (RUNNING) sends none: the start commit is
+one transaction per task, and a NOTIFY would make Postgres commit those one at
+a time. The task list and the task detail show RUNNING at their next re-read.
+
 Events drive the row-level surfaces: the task list, task detail, and workflow
 run/node views. The task aggregates (stats, facets, breakdown) are
 timer-driven in both modes — they are whole-table aggregations whose value
