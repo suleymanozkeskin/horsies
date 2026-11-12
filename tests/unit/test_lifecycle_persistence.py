@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -32,6 +33,7 @@ from horsies.core.lifecycle.outcomes import (
 )
 from horsies.core.lifecycle.persistence import (
     FusedCompletionBatch,
+    _fused_batch_parameters,  # pyright: ignore[reportPrivateUsage]
     _fused_outcomes,  # pyright: ignore[reportPrivateUsage]
     _fused_statement,  # pyright: ignore[reportPrivateUsage]
     _log_outcome,  # pyright: ignore[reportPrivateUsage]
@@ -306,7 +308,43 @@ def test_a_batch_of_several_rows_runs_the_batch_function() -> None:
     )
 
     assert 'horsies_complete_tasks_fused(' in str(statement.statement)
-    assert statement.parameters['task_ids'] == ['a', 'b']
+    batch_text = statement.parameters['batch']
+    assert isinstance(batch_text, str)
+    assert [fields[0] for fields in json.loads(batch_text)] == ['a', 'b']
+
+
+def test_the_batch_parameter_holds_each_command_in_input_order() -> None:
+    """Six text-or-null fields per command; the generation keeps its
+    microseconds and its UTC offset."""
+    generation = datetime(
+        2026, 11, 12, 9, 30, 0, 123456, tzinfo=timezone(timedelta(hours=5, minutes=30)),
+    )
+    later = CompleteTaskFused(
+        task_id='b',
+        fence=OwnedClaim(worker_id='worker-2', claimed_at=generation),
+        result_json='{"ok":"quote \\" é 𝄞"}',
+        notify_channel='task_queue_other',
+        notify_payload='capacity:b',
+    )
+
+    parameters = _fused_batch_parameters(
+        FusedCompletionBatch(commands=(later, _fused_command('a'))),
+    )
+
+    assert list(parameters) == ['batch']
+    batch_text = parameters['batch']
+    assert isinstance(batch_text, str)
+    assert json.loads(batch_text) == [
+        [
+            'b',
+            'worker-2',
+            '2026-11-12T09:30:00.123456+05:30',
+            '{"ok":"quote \\" é 𝄞"}',
+            'task_queue_other',
+            'capacity:b',
+        ],
+        ['a', 'worker-1', None, '{"ok":null}', 'task_queue_default', 'capacity:a'],
+    ]
 
 
 def test_the_single_fused_completion_answers_without_ordinality() -> None:
