@@ -45,6 +45,7 @@ from horsies.core.worker.child_protocol import (
     SharedAsyncChild,
     SharedThreadChild,
 )
+from horsies.core.worker.gc_policy import freeze_startup_objects
 from horsies.core.worker.finalize_batch import (
     FINALIZE_BATCH_CLOSE_TIMEOUT_S,
     FinalizeBatcher,
@@ -1201,6 +1202,7 @@ class Worker(
             await self.stop()
             self._raise_captured_fatal_error()
             return
+        freeze_startup_objects()
         logger.info('Worker started')
         try:
             backoff = self._make_retry_backoff()

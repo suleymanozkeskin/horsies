@@ -219,6 +219,19 @@ def _short_row(short_by: int) -> tuple[object, ...]:
     return ('SHORT', None, None, None, None, None, None, None, None, None, short_by)
 
 
+
+@pytest.fixture(autouse=True)
+def _keep_the_test_process_unfrozen(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``run_forever`` freezes the objects of its process after a completed
+    start. These tests run it in the test process, which every later test
+    shares, so the freeze is a no-op here. ``TestStartupObjectsFreeze``
+    checks the call."""
+    monkeypatch.setattr(
+        'horsies.core.worker.worker.freeze_startup_objects',
+        lambda: None,
+    )
+
+
 def _make_worker(
     dsn: str = 'postgresql+psycopg://u:p@localhost/db',
     psycopg_dsn: str = 'postgresql://u:p@localhost/db',
@@ -1771,6 +1784,47 @@ class TestStopDuringStart:
         await worker.run_forever()
 
         worker.stop.assert_awaited_once_with()
+
+
+@pytest.mark.unit
+class TestStartupObjectsFreeze:
+    @pytest.mark.asyncio
+    async def test_a_completed_start_freezes_the_startup_objects_once(self) -> None:
+        worker = _make_worker()
+        worker._queues = [asyncio.Queue()]
+        worker._resilience = WorkerResilienceConfig(
+            notify_poll_interval_ms=_LONG_POLL_MS,
+        )
+        worker._start_with_resilience_config = AsyncMock()  # type: ignore[method-assign]
+        worker.stop = AsyncMock(side_effect=worker._stop.set)  # type: ignore[method-assign]
+
+        async def _claim_pass() -> ClaimPass:
+            worker._stop.set()
+            return _NO_CLAIM
+
+        worker._claim_and_dispatch_all = AsyncMock(side_effect=_claim_pass)  # type: ignore[method-assign]
+
+        with patch(
+            'horsies.core.worker.worker.freeze_startup_objects', autospec=True,
+        ) as freeze:
+            await asyncio.wait_for(worker.run_forever(), timeout=_WAKE_TIMEOUT_S)
+
+        freeze.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_a_start_that_ends_stopped_freezes_nothing(self) -> None:
+        worker = _make_worker()
+        worker._start_with_resilience_config = AsyncMock(  # type: ignore[method-assign]
+            side_effect=worker._stop.set,
+        )
+        worker.stop = AsyncMock()  # type: ignore[method-assign]
+
+        with patch(
+            'horsies.core.worker.worker.freeze_startup_objects', autospec=True,
+        ) as freeze:
+            await worker.run_forever()
+
+        freeze.assert_not_called()
 
 
 @pytest.mark.unit
