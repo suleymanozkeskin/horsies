@@ -116,6 +116,22 @@ async def guard_source(connection: AsyncConnection) -> str:
     )
 
 
+async def reader_settings(connection: AsyncConnection) -> dict[str, str | None]:
+    """The function-level settings of each rendered reader."""
+    rows = (
+        await connection.execute(
+            text(
+                'SELECT reader.signature, '
+                "array_to_string(p.proconfig, ',') AS settings "
+                'FROM unnest(CAST(:signatures AS text[])) AS reader(signature) '
+                'JOIN pg_proc p ON p.oid = to_regprocedure(reader.signature)'
+            ),
+            {'signatures': list(RENDERED_READER_SIGNATURES)},
+        )
+    ).all()
+    return {str(row.signature): row.settings for row in rows}
+
+
 def _database(schema: HistorySchema) -> PartitionMaintenanceDatabase:
     return PartitionMaintenanceDatabase(schema.engine, connection_capacity=2)
 
@@ -138,6 +154,26 @@ async def test_publication_stamps_every_rendered_reader(
         }
         assert await published_readers_stamped(connection)
         assert await StagedLoaderPublisher().is_current(connection)
+
+
+async def test_every_rendered_reader_runs_without_sequential_scans(
+    partition_schema: HistorySchema,
+) -> None:
+    """Each probe keeps its plan. On a leaf that statistics show as empty, a
+    kept sequential scan would read the whole leaf once the leaf fills."""
+    ensured = await maintain_partition_coverage(
+        _database(partition_schema),
+        history_horizon_days=2,
+        heartbeat_horizon_hours=2,
+    )
+    assert isinstance(ensured, CoverageEnsured), ensured
+
+    async with partition_schema.engine.connect() as connection:
+        settings = await reader_settings(connection)
+
+    assert settings == {
+        signature: 'enable_seqscan=off' for signature in RENDERED_READER_SIGNATURES
+    }
 
 
 async def test_a_manifest_rewritten_without_the_guard_republishes_the_guard(

@@ -880,6 +880,14 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Fixed
 
+- **A history probe uses the task id index of a new leaf.** The duplicate
+  guard of every terminal move (`horsies_task_history_duplicate_staged`) and
+  the four history readers kept the plan of each leaf probe. On a new leaf
+  that statistics showed as empty, that plan was a sequential scan, kept
+  until an ANALYZE of the leaf, so each probe read the whole leaf. The five
+  generated functions run with `enable_seqscan = off`; every probe has an
+  index.
+
 - **The live web UI sees a task finish (schema v59).** A terminal move
   deletes the live row, so no status change sent `horsies_task_status`, and in
   live mode a finished task stayed RUNNING on screen until another task
