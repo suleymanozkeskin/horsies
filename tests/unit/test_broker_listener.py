@@ -18,6 +18,7 @@ import pytest
 from tests.broker_resources_support import attach_resources, fake_resources
 from psycopg import Notify, OperationalError
 
+from horsies.core.brokers import listener as listener_module
 from horsies.core.brokers.listener import PostgresListener
 from horsies.core.brokers.result_types import BrokerErrorCode
 
@@ -428,6 +429,32 @@ class TestHealthMonitor:
         cmd_conn.close.assert_awaited_once()
         assert listener._dispatcher_conn is None
         assert listener._command_conn is None
+
+    @pytest.mark.asyncio
+    async def test_steady_activity_probes_at_most_once_per_interval(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Notifications that keep arriving start at most one probe per interval."""
+        monkeypatch.setattr(listener_module, 'ACTIVITY_PROBE_MIN_INTERVAL_S', 0.2)
+        listener = _make_listener()
+        cmd_conn = _make_mock_conn()
+        listener._command_conn = cmd_conn
+        listener._dispatcher_conn = _make_mock_conn()
+
+        task = asyncio.create_task(listener._health_monitor())
+        try:
+            loop = asyncio.get_running_loop()
+            end = loop.time() + 0.5
+            while loop.time() < end:
+                listener._notification_activity.set()
+                await asyncio.sleep(0.005)
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        assert 1 <= cmd_conn.execute.await_count <= 4
 
     @pytest.mark.asyncio
     async def test_health_disconnect_pauses_dispatcher_before_closing(self) -> None:
