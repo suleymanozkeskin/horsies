@@ -434,12 +434,19 @@ and there is no migration contract between pre-1.0 versions.
   loop of each shared async child (`asyncio.to_thread`,
   `loop.run_in_executor(None, ...)`). An `on_shared_async_child_start` hook
   that sets its own default executor still replaces it.
-  - Defaults: an isolated child keeps a pool of 0 to 2 connections, with
-    no checkout check. A shared child derives its pool `max_size`, and a shared
-    async child its executor threads, from its seats:
+  - Defaults: an isolated child opens a pool of 0 to 1 connections, with
+    no checkout check: its two writes run one after the other. A shared child
+    derives its pool `max_size`, and a shared async child its executor
+    threads, from its seats:
     `min(cap, max(floor, ceil(seats / seats_per_unit)))`, with constants of
-    each kind in `horsies.core.models.child_sizing`. A derived pool has at
-    least 2 connections.
+    each kind in `horsies.core.models.child_sizing`: one connection per 10
+    seats, from 2 to 40 for a shared async child and from 2 to 26 for a
+    shared thread child; one executor thread per seat, from 2 to 32.
+  - The pool sizes are the measured knees with tasks that sleep 0.1 s,
+    3.5 ms from Postgres 17: a shared async child of 100 seats gives 790-810
+    tasks/s with 10 connections, as with 20, and 570-590 with 5; a shared
+    async child of 1000 seats gives 1,700-1,760 tasks/s with 40 connections,
+    1,715-1,720 with 80 and 970 with 10.
   - Bounds: `PoolSize.connections` is 1 to 1000, `min_size` is 0 to 1000,
     and `ExecutorThreads.threads` is 1 to 256. A `min_size` above the
     resolved `max_size` fails `horsies check` with `HRS-218` and names the
@@ -447,8 +454,8 @@ and there is no migration contract between pre-1.0 versions.
   - The connection check (`HRS-219`) and the boot warning count each child
     with the resolved `pool.max_size` of its mode, one term per mode:
     `parent pool max_size 5 + listener 2 + runner heartbeat 1 + 4 isolated
-    children x isolated.pool max_size 2 + 2 shared async children x
-    shared_async.pool max_size 5 = 26`.
+    children x isolated.pool max_size 1 + 2 shared async children x
+    shared_async.pool max_size 5 = 22`.
   - The start log line of the worker states the resolved pool of each kind
     and the executor threads of the shared async children, with `derived
     from seats` for a derived size.
@@ -464,12 +471,16 @@ and there is no migration contract between pre-1.0 versions.
   `pool_size = max_size`, `max_overflow = 0` and the pre-ping of
   `worker_pool_pre_ping`, so the connection check counts it exactly.
   - The default derives the size from the seats of the whole profile:
-    `min(20, max(5, ceil(seat_count() / 10)))`, with the provisional
-    constants `PARENT_POOL_CONNECTIONS_CAP`, `PARENT_POOL_CONNECTIONS_FLOOR`
-    and `PARENT_SEATS_PER_POOL_CONNECTION` in
+    `min(20, max(5, ceil(seat_count() / 10)))`, with the constants
+    `PARENT_POOL_CONNECTIONS_CAP`, `PARENT_POOL_CONNECTIONS_FLOOR` and
+    `PARENT_SEATS_PER_POOL_CONNECTION` in
     `horsies.core.models.child_sizing`. 8 isolated children: 5; 64 isolated
     children: 7; one shared async child of 100 seats: 10; of 1000 seats:
     20. `WorkerProfile.resolved_parent_pool()` returns the size.
+  - Plain successes are written in batches: a worker of 1000 seats kept at
+    most 3 to 8 of its 20 connections busy at 970-1,760 tasks/s. A failure is
+    written per task: a worker of 1000 seats whose tasks all fail, 3.5 ms
+    from Postgres, gives 1,010 tasks/s with 20 connections and 500 with 5.
   - `IsolatedChildren`, `SharedAsyncChildren` and `SharedThreadChildren`
     take `task_send_pool: PoolSize`, default `PoolSize(connections=2)`.
     Task code that sends through the app (`app.get_broker()`) opens the
@@ -483,7 +494,7 @@ and there is no migration contract between pre-1.0 versions.
   - The connection check (`HRS-219`) and the boot warning count the parent
     pool as `parent pool max_size N`, and state the task-send pool of each
     mode as a ceiling for children whose tasks send:
-    `8 isolated children x isolated.task_send_pool 2 = 16 more, 40 in all`.
+    `8 isolated children x isolated.task_send_pool 2 = 16 more, 32 in all`.
   - The start log line of the worker states the resolved parent pool, with
     the seats it derives from, and the `task_send_pool` of each kind:
     `pool=20 connections (derived from 1000 seats)`.

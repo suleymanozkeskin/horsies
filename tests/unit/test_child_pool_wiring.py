@@ -156,9 +156,9 @@ async def test_every_child_of_a_kind_gets_the_same_pool() -> None:
     assert kinds == [async_kind, async_kind, async_kind, thread_kind, thread_kind]
 
 
-async def test_the_isolated_default_is_a_pool_of_two_without_a_check() -> None:
+async def test_the_isolated_default_is_a_pool_of_one_without_a_check() -> None:
     isolated_kind = IsolatedChild(
-        pool=ResolvedPool(min_size=0, max_size=2, check=False),
+        pool=ResolvedPool(min_size=0, max_size=1, check=False),
         task_send_pool=DEFAULT_TASK_SEND_POOL_CONNECTIONS,
     )
     kinds = _kinds_of_children(_worker(_config(processes=2)))
@@ -194,6 +194,6 @@ async def test_the_preload_template_carries_the_isolated_task_send_pool() -> Non
     cfg = _config(processes=0, isolated_task_send_pool=4, **_ONE_ASYNC_CHILD)
     template = _worker(cfg)._slot_pool_config().init  # pyright: ignore[reportPrivateUsage]
     assert _over_the_wire(template) == IsolatedChild(
-        pool=ResolvedPool(min_size=0, max_size=2, check=False),
+        pool=ResolvedPool(min_size=0, max_size=1, check=False),
         task_send_pool=4,
     )

@@ -32,15 +32,15 @@ Each `max_size` is the resolved value: a `PoolSize`, or the size that
 pool of the worker process, of the profile (see
 [Sizes Derived from the Seats](/horsies/workers/worker-profiles/#sizes-derived-from-the-seats)).
 At defaults (a pool of the worker process of 5 for 8 seats, an isolated pool
-`max_size` of 2) with a profile of 8 isolated children:
+`max_size` of 1) with a profile of 8 isolated children:
 
 ```text
-5 + 2 + 1 + 8 × 2 = 24 connections per worker
+5 + 2 + 1 + 8 × 1 = 16 connections per worker
 ```
 
 Task code that sends through the app adds the `task_send_pool` of its child
 kind (default 2) in its child for each event loop that it sends from:
-`8 × 2 = 16` more with one sending loop per child, `40` in all. See
+`8 × 2 = 16` more with one sending loop per child, `32` in all. See
 [Worker Profiles](/horsies/workers/worker-profiles/#connections).
 
 The pool of the worker process writes the outcome of each task. At a high RTT
@@ -56,8 +56,9 @@ plus one for sync calls (see [Broker Config](/horsies/configuration/broker-confi
 Size against the server's effective capacity, not its nominal
 `max_connections`: subtract superuser-reserved slots and any connections
 held by the provider's infrastructure. A managed instance with
-`max_connections=50` fits one 8-process worker on direct connections —
-not two.
+`max_connections=50` and 3 reserved slots fits two workers of 8 isolated
+children on direct connections (`2 × 16 = 32`), not three (`48`). When
+their task code sends, each worker can open 16 more, and one worker fits.
 
 When workers exhaust the server's slots, connection attempts fail with:
 

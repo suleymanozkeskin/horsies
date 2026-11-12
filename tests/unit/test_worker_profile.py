@@ -518,18 +518,20 @@ class TestChildPoolMinSizeBounds:
 
 
 class TestChildPoolDefaults:
-    def test_an_isolated_child_keeps_a_pool_of_two_without_a_check(self) -> None:
-        """Lazy, at most 2. No checkout check: each write of the child is one
-        statement in autocommit, and a check would double its round trips."""
-        assert DEFAULT_ISOLATED_POOL_CONNECTIONS == 2
+    def test_an_isolated_child_keeps_a_pool_of_one_without_a_check(self) -> None:
+        """Lazy, at most 1: the child runs one task, and its two writes run
+        one after the other. No checkout check: each write of the child is
+        one statement in autocommit, and a check would double its round
+        trips."""
+        assert DEFAULT_ISOLATED_POOL_CONNECTIONS == 1
         assert IsolatedChildren(count=1).pool == IsolatedPool(
             min_size=0,
-            max_size=PoolSize(connections=2),
+            max_size=PoolSize(connections=1),
             check=False,
         )
         assert IsolatedChildren(count=1).resolved_pool() == ResolvedPool(
             min_size=0,
-            max_size=2,
+            max_size=1,
             check=False,
         )
 
@@ -823,15 +825,15 @@ class TestAppConfigPoolChecks:
         assert error.code == ErrorCode.CONFIG_INVALID_WORKER_PROFILE
         assert error.message == (
             "worker_profiles['p'].isolated.pool.min_size: 3 is above the pool "
-            'max_size (2)'
+            'max_size (1)'
         )
         assert error.notes == [
-            'max_size=PoolSize(connections=2)',
+            'max_size=PoolSize(connections=1)',
             'a pool keeps min_size connections open and never opens more than '
             'max_size',
         ]
         assert error.help_text == (
-            'set min_size to 2 or less, or set max_size=PoolSize(connections=3) '
+            'set min_size to 1 or less, or set max_size=PoolSize(connections=3) '
             'or more'
         )
 
@@ -1099,7 +1101,7 @@ class TestDescribeWorkerProfile:
             preload=ChildPreload.APP,
         )
         assert describe_worker_profile(profile) == (
-            'isolated=8 (recycle after no limit, above 1024 MB; pool 0 to 2 '
+            'isolated=8 (recycle after no limit, above 1024 MB; pool 0 to 1 '
             'connections, check off; task_send_pool 2 connections), '
             'shared_async=none, shared_thread=none, '
             'pool=5 connections (derived from 8 seats), '
