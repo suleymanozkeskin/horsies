@@ -663,3 +663,76 @@ class TestSubworkflowKwargsVarParamNameCollision:
             decode_subworkflow_kwargs(_OpaqueParamsWorkflow, {'args': [1, 2, 3]})
         with pytest.raises(StrictJsonError, match="unknown kwarg 'params'"):
             decode_subworkflow_kwargs(_OpaqueParamsWorkflow, {'params': {'a': 1}})
+
+
+# ── The resolution of a plain function is kept ─────────────────────────
+
+import gc  # noqa: E402
+import weakref  # noqa: E402
+from typing import get_type_hints  # noqa: E402
+
+from horsies.core.codec import kwargs as kwargs_module  # noqa: E402
+
+
+class _CountedHints:
+    """``get_type_hints`` that counts its calls."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self, obj: Any, *, include_extras: bool) -> dict[str, Any]:
+        self.calls += 1
+        return get_type_hints(obj, include_extras=include_extras)
+
+
+class TestResolutionIsKeptPerFunction:
+    def test_a_function_resolves_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        counted = _CountedHints()
+        monkeypatch.setattr(kwargs_module, 'get_type_hints', counted)
+
+        def f(*, value: int) -> int:
+            return value
+
+        first = resolve_hints_and_sig(f)
+        second = resolve_hints_and_sig(f)
+
+        assert counted.calls == 1
+        assert first is not None and first == second
+
+    def test_each_call_gets_its_own_hints(self) -> None:
+        def f(*, value: int) -> int:
+            return value
+
+        _ = resolve_hints_and_sig(f)
+        kept = resolve_hints_and_sig(f)
+        assert kept is not None
+        kept[0]['value'] = str
+
+        again = resolve_hints_and_sig(f)
+
+        assert again is not None and again[0]['value'] is int
+
+    def test_a_failed_resolution_is_not_kept(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def f(*, value: 'LaterName') -> int:  # type: ignore[name-defined]  # noqa: F821
+            return 0
+
+        assert resolve_hints_and_sig(f) is None  # pyright: ignore[reportUnknownArgumentType]
+        monkeypatch.setitem(f.__globals__, 'LaterName', int)
+
+        resolved = resolve_hints_and_sig(f)  # pyright: ignore[reportUnknownArgumentType]
+
+        assert resolved is not None and resolved[0]['value'] is int
+
+    def test_a_kept_resolution_does_not_keep_its_function_alive(self) -> None:
+        def f(*, value: int) -> int:
+            return value
+
+        assert resolve_hints_and_sig(f) is not None
+        watcher = weakref.ref(f)
+        del f
+        _ = gc.collect()
+
+        assert watcher() is None

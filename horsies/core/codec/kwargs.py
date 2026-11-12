@@ -25,13 +25,15 @@ parameter.
 from __future__ import annotations
 
 import inspect
+import weakref
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
-from types import UnionType
+from types import FunctionType, UnionType
 from typing import (
     Annotated,
     Any,
     Callable,
+    Final,
     Literal,
     Union,
     assert_never,
@@ -129,12 +131,28 @@ list.
 """
 
 
+_RESOLVED_FUNCTIONS: Final[
+    weakref.WeakKeyDictionary[FunctionType, tuple[dict[str, Any], inspect.Signature]]
+] = weakref.WeakKeyDictionary()
+"""The hints and the signature of each plain function that resolved, kept
+while the function lives."""
+
+
 def resolve_hints_and_sig(
     task_fn: Callable[..., Any],
 ) -> tuple[dict[str, Any], inspect.Signature] | None:
     """Resolve annotation hints and signature, or None if the callable
     can't be introspected. A caller that has a kwarg to bind refuses None.
+
+    A plain function resolves once: later calls return a copy of its hints
+    and the same signature, and a later change to the annotations of that
+    function object is not seen. A resolution that fails is not kept. Other
+    callables resolve on each call.
     """
+    known = _kept_resolution(task_fn)
+    if known is not None:
+        known_hints, known_sig = known
+        return dict(known_hints), known_sig
     try:
         hints = get_type_hints(task_fn, include_extras=True)
     except (TypeError, NameError):
@@ -143,7 +161,33 @@ def resolve_hints_and_sig(
         sig = inspect.signature(task_fn)
     except (TypeError, ValueError):
         return None
+    _keep_resolution(task_fn, hints, sig)
     return hints, sig
+
+
+def _kept_resolution(
+    task_fn: object,
+) -> tuple[dict[str, Any], inspect.Signature] | None:
+    """The kept resolution of a plain function, or None."""
+    match task_fn:
+        case FunctionType():
+            return _RESOLVED_FUNCTIONS.get(task_fn)
+        case _:
+            return None
+
+
+def _keep_resolution(
+    task_fn: object,
+    hints: dict[str, Any],
+    sig: inspect.Signature,
+) -> None:
+    """Keep a copy of the resolution of a plain function. Other callables
+    are not kept."""
+    match task_fn:
+        case FunctionType():
+            _RESOLVED_FUNCTIONS[task_fn] = (dict(hints), sig)
+        case _:
+            pass
 
 
 # Backwards-compatible alias for the previously private name. Kept until
