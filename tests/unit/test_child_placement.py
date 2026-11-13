@@ -66,8 +66,10 @@ class _Process:
 
 
 def _init() -> InitFrame:
+    """The init frame of the slot pool. ``app_locator`` is the boot mode
+    of the scripted child: ``ok`` boots it with no other step."""
     return InitFrame(
-        app_locator='app:app',
+        app_locator='ok',
         imports=(),
         sys_path_roots=(),
         parent_sys_path=(),
