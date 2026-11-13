@@ -20,6 +20,7 @@ import pytest
 
 from sqlalchemy.exc import OperationalError as SAOperationalError
 from sqlalchemy.exc import TimeoutError as SATimeoutError
+from horsies.core.brokers.postgres import SyncSendRoute
 from horsies.core.brokers.resources import ListenerDisabled, ListenerEnabled
 from horsies.core.brokers.result_types import (
     BrokerEnqueueFailed,
@@ -3022,11 +3023,51 @@ class TestRequeueStaleClaimed:
 class TestSyncFacades:
     """Tests for sync wrappers: enqueue, get_result, get_task_info."""
 
-    def test_enqueue_delegates_to_loop_runner(self) -> None:
-        """enqueue() should call _loop_runner.call with enqueue_async."""
+    def test_enqueue_on_the_caller_thread_route_skips_the_loop_runner(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """On ``SyncSendRoute.CALLER_THREAD``, enqueue() writes through
+        ``_enqueue_on_caller_thread`` and does not call the loop runner."""
+        broker = _make_broker()
+        broker._loop_runner = MagicMock()
+
+        def _route(_key: str | None) -> SyncSendRoute:
+            return SyncSendRoute.CALLER_THREAD
+
+        monkeypatch.setattr(broker, 'send_route', _route)
+        on_caller = MagicMock(return_value='task-id-456')
+        monkeypatch.setattr(broker, '_enqueue_on_caller_thread', on_caller)
+
+        result = broker.enqueue(
+            'my_task',
+            'queue',
+            task_id='test-task-id',
+            enqueue_sha='test-sha',
+            kwargs_json='{"k": "v"}',
+            priority=50,
+        )
+
+        assert result == 'task-id-456'
+        broker._loop_runner.call.assert_not_called()
+        assert on_caller.call_args.args == ('my_task', 'queue')
+        assert on_caller.call_args.kwargs['task_id'] == 'test-task-id'
+        assert on_caller.call_args.kwargs['priority'] == 50
+
+    def test_enqueue_delegates_to_loop_runner(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """On ``SyncSendRoute.LOOP_RUNNER``, enqueue() calls
+        _loop_runner.call with enqueue_async."""
         broker = _make_broker()
         broker._loop_runner = MagicMock()
         broker._loop_runner.call = MagicMock(return_value='task-id-123')
+
+        def _route(_key: str | None) -> SyncSendRoute:
+            return SyncSendRoute.LOOP_RUNNER
+
+        monkeypatch.setattr(broker, 'send_route', _route)
 
         result = broker.enqueue(
             'my_task',
