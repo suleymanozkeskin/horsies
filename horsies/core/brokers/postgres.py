@@ -1704,6 +1704,7 @@ class PostgresBroker:
             bounded_cancel_orphan_sweep_ddl,
             completion_batch_replacement_ddl,
             failed_attempt_program_ddl,
+            locking_read_replacement_ddl,
             pause_abandon_replacement_ddl,
             terminal_snapshot_replacement_ddl,
             workflow_success_program_ddl,
@@ -1765,6 +1766,10 @@ class PostgresBroker:
                 await conn.execute(text(DROP_TASK_NOTIFY_UPDATE_TRIGGER_SQL))
                 # v57: the batched plain-success completion.
                 for statement in completion_batch_replacement_ddl():
+                    await conn.execute(text(statement))
+                # v60: the completion and failure functions read their row by
+                # id alone and check the fence on the locked row.
+                for statement in locking_read_replacement_ddl():
                     await conn.execute(text(statement))
                 # v58: the success of a workflow task in one statement,
                 # with the advisory lock first.

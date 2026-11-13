@@ -29,7 +29,11 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_en
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.history.terminalization.move import (
+    COMPLETE_FUSED_FUNCTION,
+    COMPLETE_LOCKED_FUNCTION,
+    FAIL_LOCKED_FUNCTION,
     failed_attempt_teardown,
+    locking_read_replacement_ddl,
     terminal_snapshot_replacement_ddl,
     workflow_success_teardown,
 )
@@ -290,6 +294,12 @@ _V58_STATUS_UPDATE_TRIGGER = """
 # The status event of a move, as v59 writes it in the single move and in each
 # batch move. Without it, a move body is the body of v58.
 _MOVE_STATUS_EVENT = re.compile(r"    PERFORM pg_notify\('horsies_task_status', [^;]*;\n")
+
+
+# The locking read of v60, and a v59 stand-in with the fence in the WHERE
+# clause.
+_BY_ID_READ = 'WHERE id = p_task_id\n    FOR UPDATE;'
+_FENCED_READ = "WHERE id = p_task_id\n      AND status = 'RUNNING'\n    FOR UPDATE;"
 
 
 def _function_name(ddl: str) -> str:
@@ -2142,6 +2152,57 @@ class TestUpgradePaths:
                 assert (
                     await conn.execute(sending_sql, {'names': names})
                 ).scalars().all() == sending
+        finally:
+            await engine.dispose()
+
+    async def test_locking_read_upgrade_from_59(
+        self,
+        scratch_database: str,
+    ) -> None:
+        """A v59 database gets, at v60, the completion and failure functions
+        that read their row by id alone; a second apply changes nothing."""
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        names = sorted(
+            [COMPLETE_LOCKED_FUNCTION, COMPLETE_FUSED_FUNCTION, FAIL_LOCKED_FUNCTION],
+        )
+        by_id_sql = text("""
+            SELECT p.proname::text FROM pg_proc p
+            WHERE p.proname = ANY(CAST(:names AS text[]))
+              AND position(CAST(:read AS text) IN p.prosrc) > 0
+            ORDER BY 1
+        """)
+        try:
+            async with engine.begin() as conn:
+                for ddl in locking_read_replacement_ddl():
+                    assert ddl.count(_BY_ID_READ) == 1, _function_name(ddl)
+                    await conn.execute(text(ddl.replace(_BY_ID_READ, _FENCED_READ)))
+                assert (
+                    await conn.execute(by_id_sql, {'names': names, 'read': _BY_ID_READ})
+                ).scalars().all() == []
+                await conn.execute(
+                    text('DELETE FROM horsies_schema_version WHERE version >= 60')
+                )
+                await conn.execute(
+                    text(
+                        'INSERT INTO horsies_schema_version(version) VALUES (59) '
+                        'ON CONFLICT DO NOTHING'
+                    )
+                )
+            assert await _stored_version(engine) == 59
+            await _migrate(scratch_database)
+            async with engine.connect() as conn:
+                assert await _stored_version(engine) == SCHEMA_VERSION
+                upgraded = (
+                    await conn.execute(by_id_sql, {'names': names, 'read': _BY_ID_READ})
+                ).scalars().all()
+            assert upgraded == names
+
+            await _migrate(scratch_database)
+            async with engine.connect() as conn:
+                assert (
+                    await conn.execute(by_id_sql, {'names': names, 'read': _BY_ID_READ})
+                ).scalars().all() == names
         finally:
             await engine.dispose()
 

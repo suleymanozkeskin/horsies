@@ -632,19 +632,27 @@ RETURNS SETOF {OUTCOME_TYPE}
 LANGUAGE plpgsql
 AS $function$
 DECLARE
+    v_status text;
+    v_worker varchar;
     v_claimed_at timestamptz;
     v_terminal_at timestamptz;
 BEGIN
     PERFORM pg_advisory_xact_lock(
         hashtextextended(p_task_id::text, {TASK_LOCK_SEED})
     );
-    SELECT claimed_at INTO v_claimed_at
+    -- Read the row by id alone, so that only the primary key serves the
+    -- read whatever the statistics say, and check the fence on the locked
+    -- row. A row that fails the fence stays locked: the miss classifier
+    -- locks it by id too.
+    SELECT status, claimed_by_worker_id, claimed_at
+    INTO v_status, v_worker, v_claimed_at
     FROM {LIVE_TASKS}
     WHERE id = p_task_id
-      AND status = 'RUNNING'
-      AND claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
     FOR UPDATE;
-    IF NOT FOUND THEN
+    IF NOT FOUND OR (
+        v_status = 'RUNNING'
+        AND v_worker = CAST(p_worker_id AS VARCHAR)
+    ) IS NOT TRUE THEN
         RETURN QUERY SELECT * FROM {MISS_CLASSIFIER_FUNCTION}(
             p_task_id, {_equivalence_class_sql(TerminalizationKind(kind))},
             p_worker_id, NULL::timestamptz
@@ -688,17 +696,22 @@ BEGIN
     PERFORM pg_advisory_xact_lock(
         hashtextextended(p_task_id::text, {TASK_LOCK_SEED})
     );
-    SELECT id, retry_count, started_at, claimed_by_worker_id, claimed_at,
-           worker_hostname, worker_pid, worker_process_name,
+    -- Read the row by id alone, so that only the primary key serves the
+    -- read whatever the statistics say, and check the fence on the locked
+    -- row. A row that fails the fence stays locked: the miss classifier
+    -- locks it by id too.
+    SELECT id, status, retry_count, started_at, claimed_by_worker_id,
+           claimed_at, worker_hostname, worker_pid, worker_process_name,
            clock_timestamp() AS db_now
     INTO v_ctx
     FROM {LIVE_TASKS}
     WHERE id = p_task_id
-      AND status = 'RUNNING'
-      AND claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
-      AND (p_claimed_at IS NULL OR claimed_at = p_claimed_at)
     FOR UPDATE;
-    IF NOT FOUND THEN
+    IF NOT FOUND OR (
+        v_ctx.status = 'RUNNING'
+        AND v_ctx.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
+        AND (p_claimed_at IS NULL OR v_ctx.claimed_at = p_claimed_at)
+    ) IS NOT TRUE THEN
         RETURN QUERY SELECT * FROM {MISS_CLASSIFIER_FUNCTION}(
             p_task_id, {_equivalence_class_sql(TerminalizationKind(kind))},
             p_worker_id, p_claimed_at
@@ -842,19 +855,27 @@ RETURNS SETOF {OUTCOME_TYPE}
 LANGUAGE plpgsql
 AS $function$
 DECLARE
+    v_status text;
+    v_worker varchar;
     v_claimed_at timestamptz;
     v_terminal_at timestamptz;
 BEGIN
     PERFORM pg_advisory_xact_lock(
         hashtextextended(p_task_id::text, {TASK_LOCK_SEED})
     );
-    SELECT claimed_at INTO v_claimed_at
+    -- Read the row by id alone, so that only the primary key serves the
+    -- read whatever the statistics say, and check the fence on the locked
+    -- row. A row that fails the fence stays locked: the miss classifier
+    -- locks it by id too.
+    SELECT status, claimed_by_worker_id, claimed_at
+    INTO v_status, v_worker, v_claimed_at
     FROM {LIVE_TASKS}
     WHERE id = p_task_id
-      AND status = 'RUNNING'
-      AND claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
     FOR UPDATE;
-    IF NOT FOUND THEN
+    IF NOT FOUND OR (
+        v_status = 'RUNNING'
+        AND v_worker = CAST(p_worker_id AS VARCHAR)
+    ) IS NOT TRUE THEN
         RETURN QUERY SELECT * FROM {MISS_CLASSIFIER_FUNCTION}(
             p_task_id, {_equivalence_class_sql(TerminalizationKind(kind))},
             p_worker_id, NULL::timestamptz
@@ -1109,22 +1130,27 @@ BEGIN
     PERFORM pg_advisory_xact_lock(
         hashtextextended(p_task_id::text, {TASK_LOCK_SEED})
     );
-    SELECT id, retry_count, started_at, claimed_by_worker_id, claimed_at,
-           worker_hostname, worker_pid, worker_process_name,
+    -- Read the row by id alone, so that only the primary key serves the
+    -- read whatever the statistics say, and check the fence on the locked
+    -- row. A row that fails the fence stays locked: the miss classifier
+    -- locks it by id too.
+    SELECT id, status, retry_count, started_at, claimed_by_worker_id,
+           claimed_at, worker_hostname, worker_pid, worker_process_name,
            good_until, is_workflow_task, queue_name, task_name,
            clock_timestamp() AS db_now
     INTO v_ctx
     FROM {LIVE_TASKS}
     WHERE id = p_task_id
-      AND status = 'RUNNING'
-      AND claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
-      AND (p_claimed_at IS NULL OR claimed_at = p_claimed_at)
-      AND (
-          p_expected_retry_count IS NULL
-          OR retry_count = p_expected_retry_count
-      )
     FOR UPDATE;
-    IF NOT FOUND THEN
+    IF NOT FOUND OR (
+        v_ctx.status = 'RUNNING'
+        AND v_ctx.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
+        AND (p_claimed_at IS NULL OR v_ctx.claimed_at = p_claimed_at)
+        AND (
+            p_expected_retry_count IS NULL
+            OR v_ctx.retry_count = p_expected_retry_count
+        )
+    ) IS NOT TRUE THEN
         RETURN QUERY SELECT m.*,
             NULL::text, NULL::integer, NULL::timestamptz, NULL::timestamptz,
             NULL::boolean, NULL::text, NULL::text
@@ -1291,18 +1317,23 @@ BEGIN
     PERFORM pg_advisory_xact_lock(
         hashtextextended(p_task_id::text, {TASK_LOCK_SEED})
     );
-    SELECT id, retry_count, started_at, claimed_by_worker_id, claimed_at,
-           worker_hostname, worker_pid, worker_process_name,
+    -- Read the row by id alone, so that only the primary key serves the
+    -- read whatever the statistics say, and check the fence on the locked
+    -- row. A row that fails the fence stays locked: the miss classifier
+    -- locks it by id too.
+    SELECT id, status, retry_count, started_at, claimed_by_worker_id,
+           claimed_at, worker_hostname, worker_pid, worker_process_name,
            is_workflow_task, queue_name, task_name,
            clock_timestamp() AS db_now
     INTO v_ctx
     FROM {LIVE_TASKS}
     WHERE id = p_task_id
-      AND status = 'RUNNING'
-      AND claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
-      AND (p_claimed_at IS NULL OR claimed_at = p_claimed_at)
     FOR UPDATE;
-    IF NOT FOUND THEN
+    IF NOT FOUND OR (
+        v_ctx.status = 'RUNNING'
+        AND v_ctx.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
+        AND (p_claimed_at IS NULL OR v_ctx.claimed_at = p_claimed_at)
+    ) IS NOT TRUE THEN
         RETURN QUERY SELECT m.*, NULL::text, NULL::text
         FROM {MISS_CLASSIFIER_FUNCTION}(
             p_task_id, {_equivalence_class_sql(TerminalizationKind(kind))},
@@ -2690,6 +2721,18 @@ def failed_attempt_program_ddl() -> tuple[str, ...]:
     """Schema v56 on an installed move program, idempotent: the
     failed-attempt finish, dropped and created again."""
     return (*failed_attempt_teardown(), *failed_attempt_fragments())
+
+
+def locking_read_replacement_ddl() -> tuple[str, ...]:
+    """The completion and failure functions that the cutover program
+    installs once, as CREATE OR REPLACE. Schema v60 installs their locking
+    read by id alone on a uuid database. Signatures and return types are
+    unchanged. The failed-attempt finish and the success of a workflow task
+    are dropped and created on every apply, so they need no entry here."""
+    return tuple(
+        _create_or_replace(ddl)
+        for ddl in (_complete_locked_ddl(), _complete_fused_ddl(), _fail_locked_ddl())
+    )
 
 
 def completion_batch_fragments() -> tuple[str, ...]:

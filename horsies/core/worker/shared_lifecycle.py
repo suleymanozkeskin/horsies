@@ -57,6 +57,7 @@ from horsies.core.worker.child_runner import (
     WORKFLOW_STATUS_OF_TASK_SQL,
     _PRE_START_CONFIRM_ATTEMPTS,
     _WorkflowResumedBeforeStart,
+    mark_finalizing_params,
     set_running_params,
     set_running_sql,
 )
@@ -461,7 +462,7 @@ async def mark_task_finalizing(
                 cursor = conn.cursor()
                 await cursor.execute(
                     MARK_FINALIZING_SQL,
-                    (worker_id, task_id, worker_id, claimed_at, claimed_at),
+                    mark_finalizing_params(task_id, worker_id, claimed_at),
                 )
                 marked_rows = cursor.rowcount
     except Exception as exc:
