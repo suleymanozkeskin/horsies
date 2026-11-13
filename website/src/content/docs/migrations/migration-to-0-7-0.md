@@ -117,6 +117,8 @@ An isolated child opens 0 to 1 connections by default (0.6.x: 0 to 2). It runs o
 
 The worker process no longer pre-pings its pooled connections by default. `PostgresConfig.worker_pool_pre_ping` (default `False`) sets it; `pool_pre_ping` applies to the other engines only. Set `worker_pool_pre_ping=True` to keep the 0.6.x behavior. See [Health Checks at High RTT](/horsies/configuration/remote-postgres/#health-checks-at-high-rtt).
 
+`pool_pre_ping` and `worker_pool_pre_ping` ping a pooled connection only when it waited in the pool for more than 1 s (`PRE_PING_AFTER_IDLE_S`); 0.6.x pinged at every checkout. A connection that dies within 1 s of its check-in fails its next statement with a retryable connection error (`TaskSendEnqueueFailed(retryable=True)` for a send): retry it with `retry_send`, or set `resend_on_transient_err=True`.
+
 A config that still sets a removed field fails when it is built, with every such field in one report:
 
 ```text

@@ -25,6 +25,11 @@ DEFAULT_TCP_USER_TIMEOUT_MS: int = 30_000  # 30 seconds
 # connections follow the same age.
 DEFAULT_POOL_RECYCLE_S: Final = 1800
 
+PRE_PING_AFTER_IDLE_S: Final = 1.0
+"""With ``pool_pre_ping`` on, a pooled connection that waited in the pool for
+longer than this many seconds is pinged when it is checked out. A connection
+checked in more recently is used with no ping."""
+
 # A worker is live while its latest state snapshot is at most this many
 # seconds old. Each worker writes a snapshot every
 # ``RecoveryConfig.worker_state_snapshot_interval_ms`` (30 s by default), so

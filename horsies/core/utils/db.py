@@ -20,6 +20,7 @@ in one of these forms."""
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -33,6 +34,7 @@ from sqlalchemy import TextClause, event
 from sqlalchemy.engine import Dialect
 from sqlalchemy.exc import (
     DBAPIError,
+    InvalidatePoolError,
     OperationalError as SAOperationalError,
     TimeoutError as SATimeoutError,
 )
@@ -138,6 +140,71 @@ def register_session_settings(
             dbapi_connection.autocommit = autocommit
 
     event.listen(engine.sync_engine, 'connect', _disable_jit)
+
+
+CHECKED_IN_AT_KEY: Final = 'horsies_checked_in_at'
+"""The key in a pooled connection's ``info`` that holds the monotonic time of
+its last check-in. SQLAlchemy clears ``info`` when it replaces the
+connection, so a new connection has no entry."""
+
+
+def register_idle_ping(engine: AsyncEngine, after_idle_s: float) -> None:
+    """Ping a pooled connection of ``engine`` at checkout when it waited in
+    the pool for longer than ``after_idle_s``. This replaces SQLAlchemy's
+    ``pool_pre_ping``, which pings at every checkout.
+
+    Contract:
+
+    - A connection checked in within ``after_idle_s``, and a new connection,
+      are used with no ping.
+    - The ping is the dialect's own ``do_ping``, as with ``pool_pre_ping``.
+      A ping that fails with a disconnect raises ``InvalidatePoolError``
+      from the checkout listener: the pool replaces that connection and
+      every connection checked in before it, and the checkout takes a new
+      one.
+    - A ping that fails without a disconnect raises its driver error from
+      the checkout.
+
+    It does not ping a connection in use, and it does not retry a statement:
+    a connection that dies within ``after_idle_s`` of its check-in fails the
+    next statement on it, as a connection that dies after a ping does.
+    Registration is a no-op for anything that is not a real ``AsyncEngine``,
+    as with ``register_session_settings``.
+    """
+    if not isinstance(engine, AsyncEngine):  # pyright: ignore[reportUnnecessaryIsInstance]
+        return
+    dialect = engine.sync_engine.dialect
+
+    def _mark_checkin(dbapi_connection: Any, connection_record: Any) -> None:
+        if dbapi_connection is None:
+            return  # invalidated: SQLAlchemy replaces it
+        connection_record.info[CHECKED_IN_AT_KEY] = time.monotonic()
+
+    def _ping_after_idle(
+        dbapi_connection: Any,
+        connection_record: Any,
+        connection_proxy: PoolProxiedConnection,
+    ) -> None:
+        match connection_record.info.get(CHECKED_IN_AT_KEY):
+            case None:
+                return  # a new connection
+            case float() as checked_in_at:
+                if time.monotonic() - checked_in_at <= after_idle_s:
+                    return
+            case unexpected:
+                raise AssertionError(f'{CHECKED_IN_AT_KEY} holds {unexpected!r}')
+        try:
+            _ = dialect.do_ping(dbapi_connection)
+        except psycopg.Error as exc:
+            if _dialect_sees_disconnect(dialect, exc, connection_proxy):
+                raise InvalidatePoolError(
+                    f'a pooled connection idle for more than {after_idle_s} s '
+                    f'failed its ping: {exc!r}',
+                ) from exc
+            raise
+
+    event.listen(engine.sync_engine.pool, 'checkin', _mark_checkin)
+    event.listen(engine.sync_engine.pool, 'checkout', _ping_after_idle)
 
 
 def is_dbapi_disconnect(exc: DBAPIError) -> bool:

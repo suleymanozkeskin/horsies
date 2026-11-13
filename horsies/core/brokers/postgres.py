@@ -125,10 +125,12 @@ from horsies.core.history.cutover.state import (
     MARK_CUTOVER_COMPLETE_SQL,
     cutover_complete,
 )
+from horsies.core.defaults import PRE_PING_AFTER_IDLE_S
 from horsies.core.utils.db import (
     is_retryable_connection_error,
     SessionSettings,
     register_identity_text_reads,
+    register_idle_ping,
     register_session_settings,
 )
 from horsies.core.process_role import (
@@ -1029,6 +1031,7 @@ class PostgresBroker:
         )
         register_identity_text_reads(engine)
         register_session_settings(engine, self._runtime_session_settings())
+        self._register_pre_ping(engine)
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
         session_url = self.config.effective_session_database_url
@@ -1043,6 +1046,7 @@ class PostgresBroker:
             # The session URL must keep session state (LISTEN, session
             # advisory locks), so it keeps session settings too.
             register_session_settings(session_async_engine, SessionSettings.KEPT)
+            self._register_pre_ping(session_async_engine)
             session_engine = SessionEngineSeparate(engine=session_async_engine)
         partition_maintenance = PartitionMaintenanceDatabase(
             session_async_engine,
@@ -1344,7 +1348,18 @@ class PostgresBroker:
         )
         register_identity_text_reads(engine)
         register_session_settings(engine, self._runtime_session_settings())
+        self._register_pre_ping(engine)
         return engine
+
+    def _register_pre_ping(self, engine: AsyncEngine) -> None:
+        """With ``pool_pre_ping`` on, ping a pooled connection of ``engine``
+        at checkout when it waited in the pool for longer than
+        ``PRE_PING_AFTER_IDLE_S``. No I/O at registration."""
+        match self.config.pool_pre_ping:
+            case True:
+                register_idle_ping(engine, PRE_PING_AFTER_IDLE_S)
+            case False:
+                pass
 
     @property
     def app(self) -> 'Horsies | None':

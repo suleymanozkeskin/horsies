@@ -22,6 +22,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from horsies.core.brokers import postgres as postgres_module
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec import JsonValue, encode_task_result
 from horsies.core.codec.json_io import dumps_json
@@ -43,7 +44,15 @@ from tests.integration.round_trip_proxy import RoundTripProxy
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
 
 PING: Final = 1
-"""The pool pre-ping of a checkout, when ``worker_pool_pre_ping`` is on."""
+"""The pre-ping of a checkout, when ``worker_pool_pre_ping`` is on. These
+tests set the idle limit to 0, so every reused connection is pinged."""
+
+
+@pytest.fixture(autouse=True)
+def _ping_every_reused_connection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With ``worker_pool_pre_ping`` on, the count does not depend on how
+    long a connection waited in the pool."""
+    monkeypatch.setattr(postgres_module, 'PRE_PING_AFTER_IDLE_S', 0.0)
 ERROR_CODE: Final = 'FLAKY'
 TIMEOUT_MS: Final = 1_000
 
