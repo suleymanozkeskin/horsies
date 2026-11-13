@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio, hashlib, contextlib, os, random, threading, time, uuid
 from collections.abc import AsyncGenerator, Callable, Coroutine
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Final, Optional, TYPE_CHECKING, assert_never, cast
 from datetime import datetime, timedelta, timezone
 import psycopg
@@ -12,7 +13,9 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
     async_sessionmaker,
 )
-from sqlalchemy import text, select
+from sqlalchemy import create_engine, text, select
+from sqlalchemy.dialects.postgresql.psycopg import PGDialect_psycopg
+from sqlalchemy.engine import Engine
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from pydantic import ValidationError
 from horsies.core.brokers.listener import PostgresListener
@@ -931,6 +934,39 @@ ENQUEUE_INSERT_SQL = text("""
     RETURNING id
 """)
 
+ENQUEUE_INSERT_DRIVER_SQL: Final[str] = ENQUEUE_INSERT_SQL.compile(
+    dialect=PGDialect_psycopg(),
+).string
+"""``ENQUEUE_INSERT_SQL`` as the psycopg dialect sends it (``%(name)s``
+binds): the statement of a sync send on the caller's thread."""
+
+
+class SyncSendRoute(Enum):
+    """Where a sync ``enqueue`` writes its row."""
+
+    CALLER_THREAD = 'caller_thread'
+    """On the calling thread, through the broker's sync send engine."""
+    LOOP_RUNNER = 'loop_runner'
+    """On the sync runner's event loop, through ``enqueue_async``."""
+
+
+class _InsertOutcome(Enum):
+    """What the INSERT of an unkeyed send did."""
+
+    INSERTED = 'inserted'
+    ID_TAKEN = 'id_taken'
+    """A row with the task id exists: the payload is compared next."""
+
+
+@dataclass(frozen=True, slots=True)
+class _SyncSendEngineNotOpen:
+    """No sync send ran yet, or the broker closed the engine."""
+
+
+@dataclass(frozen=True, slots=True)
+class _SyncSendEngineOpen:
+    engine: Engine
+
 
 # Most open event loops, other than the broker's sync runner loop and a worker
 # child's task loop, that get their own resource set. pytest-asyncio keeps one event loop open per
@@ -1008,6 +1044,12 @@ class PostgresBroker:
         self._loop_sets_lock = threading.Lock()
 
         self._initialized = assume_initialized
+        # The engine of the sync sends that run on the caller's thread
+        # (send_route), opened by the first such send.
+        self._sync_send_engine: _SyncSendEngineNotOpen | _SyncSendEngineOpen = (
+            _SyncSendEngineNotOpen()
+        )
+        self._sync_send_lock = threading.Lock()
         # True once this broker saw the staged result function. Only a
         # positive answer is kept: until a worker publishes the readers,
         # each result probe checks again.
@@ -1351,7 +1393,7 @@ class PostgresBroker:
         self._register_pre_ping(engine)
         return engine
 
-    def _register_pre_ping(self, engine: AsyncEngine) -> None:
+    def _register_pre_ping(self, engine: AsyncEngine | Engine) -> None:
         """With ``pool_pre_ping`` on, ping a pooled connection of ``engine``
         at checkout when it waited in the pool for longer than
         ``PRE_PING_AFTER_IDLE_S``. No I/O at registration."""
@@ -3387,6 +3429,19 @@ class PostgresBroker:
         errors: list[BaseException] = [
             error for set_errors in per_set_errors for error in set_errors
         ]
+        with self._sync_send_lock:
+            sync_send_engine = self._sync_send_engine
+            self._sync_send_engine = _SyncSendEngineNotOpen()
+        match sync_send_engine:
+            case _SyncSendEngineOpen(engine=engine):
+                try:
+                    await asyncio.to_thread(engine.dispose)
+                except _DRIVER_ERRORS as exc:
+                    errors.append(exc)
+            case _SyncSendEngineNotOpen():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
         # If sync APIs started the LoopRunner, close_async should also tear it down
         # when called from any thread except the loop-runner thread itself.
         # stop() joins the runner thread (up to 2 s), so it runs on a worker
@@ -4348,6 +4403,151 @@ class PostgresBroker:
 
     # ----------------- Sync API Facades -----------------
 
+    def send_route(self, idempotency_key: Optional[str]) -> SyncSendRoute:
+        """Where a sync ``enqueue`` writes its row. Pure.
+
+        ``CALLER_THREAD`` for an unkeyed send of a process that runs no task
+        bodies, once this broker's schema is initialized. A send with an
+        idempotency key takes a key reservation in a transaction, and the
+        first send may run the schema setup: both stay on the loop runner.
+        Task code in a worker child sends through the child's
+        ``task_send_pool``, which the worker profile counts exactly, so it
+        stays on the loop runner too.
+        """
+        match (process_role(), idempotency_key, self._initialized):
+            case (ProcessRole.RUNS_NO_TASK_BODIES, None, True):
+                return SyncSendRoute.CALLER_THREAD
+            case _:
+                return SyncSendRoute.LOOP_RUNNER
+
+    def _sync_send_engine_open(self) -> Engine:
+        """The engine of the sync sends, opened on first use: the runtime
+        engine's URL, pool sizes, connect args and session settings, in
+        autocommit, and the idle ping of ``pool_pre_ping``. Thread-safe. No
+        I/O: connections open on first checkout."""
+        with self._sync_send_lock:
+            match self._sync_send_engine:
+                case _SyncSendEngineOpen(engine=engine):
+                    return engine
+                case _SyncSendEngineNotOpen():
+                    pass
+                case _ as unreachable:
+                    assert_never(unreachable)
+            engine = create_engine(
+                self.config.database_url.get_secret_value(),
+                **self._runtime_engine_config(),
+                isolation_level='AUTOCOMMIT',
+            )
+            register_session_settings(engine, self._runtime_session_settings())
+            self._register_pre_ping(engine)
+            self._sync_send_engine = _SyncSendEngineOpen(engine)
+            return engine
+
+    def _insert_on_caller_thread(self, insert_params: dict[str, Any]) -> _InsertOutcome:
+        """Run the unkeyed enqueue INSERT on this thread, one statement in
+        autocommit. Raises what the driver and SQLAlchemy raise: the caller
+        classifies it, as on the async path."""
+        engine = self._sync_send_engine_open()
+        with engine.connect() as connection:
+            row = connection.exec_driver_sql(
+                ENQUEUE_INSERT_DRIVER_SQL, insert_params,
+            ).fetchone()
+        match row:
+            case None:
+                return _InsertOutcome.ID_TAKEN
+            case _:
+                return _InsertOutcome.INSERTED
+
+    def _enqueue_on_caller_thread(
+        self,
+        task_name: str,
+        queue_name: str,
+        *,
+        task_id: str,
+        enqueue_sha: str,
+        args_json: str | None,
+        kwargs_json: str | None,
+        priority: int,
+        sent_at: Optional[datetime],
+        enqueued_at: Optional[datetime],
+        enqueue_delay_seconds: Optional[int],
+        good_until: Optional[datetime],
+        task_options: Optional[str],
+        retention_class_key: RetentionClassKey | None,
+        retain_rerun_input: Optional[bool],
+    ) -> Result[str, BrokerEnqueueError | BrokerSyncCallError]:
+        """The unkeyed path of ``enqueue_async``, on the calling thread: the
+        same row, the same statement and the same error classification. A
+        task id that is taken is compared on the loop runner
+        (``_verify_enqueue_conflict``)."""
+        resolved_retention_class_key = resolve_retention_class_key(
+            retention_class_key
+        )
+        if retain_rerun_input is None:
+            retain_rerun_input = self.config.retain_rerun_input_default
+        prepared_r = self._prepare_enqueue(
+            task_id=task_id,
+            enqueue_sha=enqueue_sha,
+            task_name=task_name,
+            queue_name=queue_name,
+            priority=priority,
+            args_json=args_json,
+            kwargs_json=kwargs_json,
+            sent_at=sent_at,
+            enqueued_at=enqueued_at,
+            enqueue_delay_seconds=enqueue_delay_seconds,
+            good_until=good_until,
+            task_options=task_options,
+            retention_class_key=resolved_retention_class_key,
+            retain_rerun_input=retain_rerun_input,
+            idempotency_key=None,
+        )
+        if is_err(prepared_r):
+            return prepared_r
+        prepared = prepared_r.ok_value
+        assert prepared.scoped_key_digest is None, 'an unkeyed send has no key'
+        try:
+            outcome = self._insert_on_caller_thread(prepared.insert_params)
+        except _ENQUEUE_WRITE_ERRORS as exc:
+            return _enqueue_failed(
+                f'Failed to enqueue task {task_name}: {exc}',
+                exc,
+            )
+        match outcome:
+            case _InsertOutcome.INSERTED:
+                return Ok(task_id)
+            case _InsertOutcome.ID_TAKEN:
+                pass
+        try:
+            return self.run_sync(
+                self._verify_taken_task_id, task_id, enqueue_sha, task_name,
+            )
+        except LoopRunnerError as exc:
+            return _loop_runner_err(f'PostgresBroker.enqueue({task_name!r})', exc)
+
+    async def _verify_taken_task_id(
+        self,
+        task_id: str,
+        enqueue_sha: str,
+        task_name: str,
+    ) -> Result[str, BrokerEnqueueError]:
+        """``_verify_enqueue_conflict`` on this loop's resource set, for a
+        sync send whose INSERT found the task id taken."""
+        match await self.select_resources():
+            case Err(loop_limit):
+                return _loop_limit_err('enqueue', loop_limit)
+            case Ok(resources):
+                pass
+        try:
+            return await self._verify_enqueue_conflict(
+                resources, task_id, enqueue_sha, task_name,
+            )
+        except _ENQUEUE_WRITE_ERRORS as exc:
+            return _enqueue_failed(
+                f'Failed to enqueue task {task_name}: {exc}',
+                exc,
+            )
+
     def enqueue(
         self,
         task_name: str,
@@ -4367,15 +4567,37 @@ class PostgresBroker:
         retention_class_key: RetentionClassKey | None = DEFAULT_RETENTION_CLASS_KEY,
         retain_rerun_input: Optional[bool] = None,
     ) -> Result[str, BrokerEnqueueError | BrokerSyncCallError]:
-        """Synchronous task submission (runs enqueue_async in background loop).
+        """Synchronous task submission, with the outcomes of ``enqueue_async``.
 
-        On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
-        and writes nothing.
+        ``send_route`` decides where the row is written: on the calling
+        thread, or on the sync runner's loop through ``enqueue_async``. On a
+        thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)`` and
+        writes nothing.
         """
         if in_running_event_loop():
             return _async_context_err(
                 'PostgresBroker.enqueue()', 'broker.enqueue_async(...)',
             )
+        match self.send_route(idempotency_key):
+            case SyncSendRoute.CALLER_THREAD:
+                return self._enqueue_on_caller_thread(
+                    task_name,
+                    queue_name,
+                    task_id=task_id,
+                    enqueue_sha=enqueue_sha,
+                    args_json=args_json,
+                    kwargs_json=kwargs_json,
+                    priority=priority,
+                    sent_at=sent_at,
+                    enqueued_at=enqueued_at,
+                    enqueue_delay_seconds=enqueue_delay_seconds,
+                    good_until=good_until,
+                    task_options=task_options,
+                    retention_class_key=retention_class_key,
+                    retain_rerun_input=retain_rerun_input,
+                )
+            case SyncSendRoute.LOOP_RUNNER:
+                pass
         try:
             return self.run_sync(
                 self.enqueue_async,

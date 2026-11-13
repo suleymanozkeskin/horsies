@@ -514,6 +514,23 @@ there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **A sync send of a producer writes its row on the calling thread.**
+  `send()` ran its INSERT on the broker's sync runner thread: each send handed
+  the work to that thread and waited for it. On a VM, the hand-offs across
+  CPUs around the database wait cost CPU: with 5,000 sequential sends to one
+  Postgres 18 server, 411-419 sends/s and 1,441-1,479 µs of CPU per send. In
+  a process that runs no task bodies, an unkeyed `send()` now prepares the
+  row and runs the same INSERT on the calling thread, through a sync pool of
+  the broker with the same URL, pool sizes, connect args, session settings
+  and idle ping: 637-660 sends/s and 619-672 µs of CPU per send.
+  - The first send of a broker (it checks the schema), a send with an
+    idempotency key, and a send from task code in a worker child keep the
+    sync runner. A task id that is taken is compared on the sync runner, as
+    before. The outcomes and errors are those of `enqueue_async`.
+  - The sync pool opens on first use and holds up to
+    `pool_size + max_overflow` connections, next to the pool of the sync
+    runner's set. `close()` closes it.
+
 - **`pool_pre_ping` pings only a connection that waited in the pool for more
   than 1 s.** SQLAlchemy's `pool_pre_ping` pinged at every checkout: one
   round trip more for each send of a producer. The broker now registers its

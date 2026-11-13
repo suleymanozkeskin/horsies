@@ -285,6 +285,14 @@ A process can open this once per set:
 | pytest run with a session-scoped broker and function-scoped async tests | 2 (session loop, current test loop), plus 1 when tests make sync calls |
 | Worker child whose task code sends | 1 for the sync tasks (the runner loop), plus 1 for the async tasks (the task loop) |
 
+A process that runs no task bodies writes a sync `send()` without an
+idempotency key on the calling thread, through one more pool of the broker:
+up to `pool_size + max_overflow` more connections, opened on first use, with
+the same URL, connect args and idle ping. The first send of a broker (it
+checks the schema), a send with an idempotency key, and the other sync calls
+use the set of the sync runner. Task code in a worker child sends through
+the set of its `task_send_pool` only.
+
 ### Things to Avoid
 
 **Don't leave event loops open after their work is done.** Each open loop
