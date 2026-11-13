@@ -457,8 +457,10 @@ def running_transition_columns(child_runner_source: str) -> frozenset[str]:
     product change to the transition then breaks the pin instead of silently
     leaving the harness establishing a different precondition.
     """
+    # The statement may name the table with an alias (`UPDATE horsies_tasks t`).
     transition = re.search(
-        r"UPDATE horsies_tasks\s+SET status = 'RUNNING'", child_runner_source,
+        r"UPDATE horsies_tasks(?:\s+(?!SET\b)[A-Za-z_]\w*)?\s+SET status = 'RUNNING'",
+        child_runner_source,
     )
     if transition is None:
         raise MeasurementError(
