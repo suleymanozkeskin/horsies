@@ -258,6 +258,8 @@ dedicated_host = WorkerProfile(
 
 Use it on a host or a CPU set that runs this worker alone, when the worker process is the limit: it runs at one CPU while the children have room. It gives one core to one process, so leave it at `SHARED` where several workers share a few cores.
 
+The children lose the CPUs of that core. Where the children are the limit, for example tasks that keep a CPU busy, they run on the CPUs that are left. On 8 CPUs (4 physical cores with 2 SMT threads each) the children get 6: 8 isolated children that ran pure-Python work went from 52 to 39 tasks/s, and one shared thread child with 8 seats that ran C work that releases the GIL went from 71 to 56 tasks/s. Keep `SHARED` for those workers.
+
 ## Profiles for One Machine
 
 The profiles below are for one worker on a machine with 16 vCPU and 64 GB of memory, one profile per kind of work. Each setting that a profile does not show is the default, so the pools are the derived sizes.

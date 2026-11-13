@@ -16,7 +16,11 @@ and there is no migration contract between pre-1.0 versions.
   and every child, recycled children too, on the other CPUs. The worker
   sets the CPUs of each child before the child's first frame. The worker
   start fails on another platform or with fewer than 2 physical cores.
-  `ParentCpu.SHARED` (the default) changes nothing.
+  `ParentCpu.SHARED` (the default) changes nothing. The children lose the
+  CPUs of that core: on 8 CPUs (4 physical cores with 2 SMT threads each),
+  8 isolated children that ran pure-Python work went from 52 to 39 tasks/s,
+  and one shared thread child with 8 seats that ran C work that releases
+  the GIL went from 71 to 56. Use it when the worker process is the limit.
 
 - **A task can be an `async def` function.** `@app.task()` registers it and
   returns an `AsyncTaskFunction`. A worker child runs it as it runs a `def`
