@@ -134,7 +134,11 @@ async def test_statements_reuse_the_held_connection(
 
 async def test_a_refused_statement_keeps_the_held_connection(
     session_factory: async_sessionmaker[AsyncSession],
+    checkouts: list[int],
 ) -> None:
+    """The statement after a refused one runs on the same checkout. The
+    backend pid alone cannot show it: the pool can give the same backend
+    back after a give-back."""
     held = HeldConnection(session_factory, NoRecycle())
     before = _pid(await held.run(BACKEND_PID))
 
@@ -149,6 +153,7 @@ async def test_a_refused_statement_keeps_the_held_connection(
         case _:
             raise AssertionError(f'expected StatementRefused, got {refused!r}')
     assert _pid(await held.run(BACKEND_PID)) == before
+    assert len(checkouts) == 1
     await held.release()
 
 
