@@ -43,8 +43,10 @@ dependencies = [
 
 [project.optional-dependencies]
 web = ["fastapi>=0.115.0", "uvicorn>=0.30.0"]
-pg-binary = ["psycopg-binary>=3.3.7"]
-pg-c = ["psycopg-c>=3.3.7"]
+# psycopg's own extras pin the C build to the psycopg version; a C build of
+# another version fails at import.
+pg-binary = ["psycopg[binary]>=3.3.7"]
+pg-c = ["psycopg[c]>=3.3.7"]
 
 [project.urls]
 Homepage = "https://github.com/suleymanozkeskin/horsies"
@@ -67,7 +69,7 @@ horsies = [".agents/skills/horsies/*.md", "web/static/**"]
 
 [dependency-groups]
 dev = [
-    "psycopg-binary>=3.3.7",
+    "psycopg[binary]>=3.3.7",
     "pyright>=1.1.409",
     "ty>=0.0.34",
     "python-dotenv>=1.2.1",

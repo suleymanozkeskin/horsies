@@ -420,6 +420,14 @@ def _staged_function(
     `absence_values` (the scalar-returning pair) or a caller-supplied
     statement (`RETURN;` for the set-returning detail form). Exactly one
     must be given.
+
+    The function runs with `enable_seqscan = off`. PL/pgSQL keeps a generic
+    plan of each probe; on a new leaf that statistics show as empty, that
+    plan is a sequential scan, and Postgres keeps it until an ANALYZE of the
+    leaf, so each probe would read the whole leaf. Every probe has an index:
+    the task_id index of each leaf and the primary keys of the live table
+    and the clock-skew exceptions. The setting is part of the CREATE
+    FUNCTION because each publication replaces the function.
     """
     if (absence_values is None) == (absence_statement is None):
         raise ValueError('exactly one absence form must be supplied')
@@ -494,6 +502,7 @@ def _staged_function(
     RETURNS {return_type}
     LANGUAGE plpgsql
     STABLE
+    SET enable_seqscan = off
     AS $function$
     DECLARE
 {declare_block}
