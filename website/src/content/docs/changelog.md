@@ -14,6 +14,14 @@ there is no migration contract between pre-1.0 versions.
 
 ### Added
 
+- **`WorkerProfile.parent_cpu` gives the worker process a core of its own.**
+  `ParentCpu.OWN_CORE` (Linux) puts every thread of the worker process on
+  one physical core of the CPUs that the worker may use, both SMT threads,
+  and every child, recycled children too, on the other CPUs. The worker
+  sets the CPUs of each child before the child's first frame. The worker
+  start fails on another platform or with fewer than 2 physical cores.
+  `ParentCpu.SHARED` (the default) changes nothing.
+
 - **A task can be an `async def` function.** `@app.task()` registers it and
   returns an `AsyncTaskFunction`. A worker child runs it as it runs a `def`
   task: one task at a time, with the same RUNNING update, heartbeats,

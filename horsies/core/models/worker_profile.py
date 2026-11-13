@@ -52,6 +52,7 @@ from horsies.core.models.child_sizing import (
     shared_thread_pool_connections,
 )
 from horsies.core.worker.config import ChildPreload
+from horsies.core.worker.cpu_placement import ParentCpu
 
 MAX_ISOLATED_CHILDREN: Final = 1024
 """The most isolated children that one profile starts."""
@@ -641,6 +642,11 @@ class WorkerProfile(BaseModel):
       crash path. Set it below the stop window of the supervisor.
     - ``preload``: what a Linux worker imports once before it forks
       children. Other platforms start every child with ``exec``.
+    - ``parent_cpu``: where the worker process runs. ``SHARED`` (the
+      default) leaves every process on the CPUs it inherits. ``OWN_CORE``
+      (Linux) gives the worker process one physical core of the CPUs it may
+      use, both SMT threads, and the children the other CPUs; the start
+      fails on another platform or with fewer than 2 physical cores.
     """
 
     model_config = ConfigDict(extra='forbid', frozen=True)
@@ -658,6 +664,7 @@ class WorkerProfile(BaseModel):
         le=MAX_DRAIN_TIMEOUT,
     )
     preload: ChildPreload = ChildPreload.LIBRARY
+    parent_cpu: ParentCpu = ParentCpu.SHARED
 
     def child_count(self) -> int:
         """The number of children of the worker: the sum over the modes."""
@@ -895,7 +902,8 @@ def describe_worker_profile(profile: WorkerProfile) -> str:
         f'claimed per worker: '
         f'{_describe_task_limit(profile.claim.claimed_per_worker)}, '
         f'drain_timeout={profile.drain_timeout.total_seconds():g}s, '
-        f'preload={profile.preload.value}'
+        f'preload={profile.preload.value}, '
+        f'parent_cpu={profile.parent_cpu.value}'
     )
 
 

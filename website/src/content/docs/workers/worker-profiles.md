@@ -1,6 +1,6 @@
 ---
 title: Worker Profiles
-summary: Named worker settings in AppConfig - isolated, shared async and shared thread children, recycling, connection pools of the children, of task code that sends and of the worker process and their measured default sizes, claim limits, drain timeout and preload, example profiles for one machine - and what horsies check and worker boot validate.
+summary: Named worker settings in AppConfig - isolated, shared async and shared thread children, recycling, connection pools of the children, of task code that sends and of the worker process and their measured default sizes, claim limits, drain timeout, preload and the core of the worker process, example profiles for one machine - and what horsies check and worker boot validate.
 related: [execution-modes, worker-architecture, shared-async-tasks, shared-thread-tasks, concurrency, ../cli, ../configuration/app-config, ../migrations/migration-to-0-7-0]
 tags: [workers, profiles, configuration, concurrency, recycling, connections, validation]
 ---
@@ -235,6 +235,29 @@ A seat whose task takes 0.1 s, with Postgres 3.5 ms away, keeps about one connec
 
 The defaults follow the knees at 3.5 ms. A database on the same host or network needs fewer connections: at 0.25 ms, 5 connections give a 100-seat async child the rate of 20. There, set a smaller `PoolSize(connections=N)` to save server connections. A shared thread child of 24 or 64 seats derives 3 or 7 connections, between pool sizes of the same rate.
 
+## The Core of the Worker Process
+
+The worker process claims every task, hands it to a child, and writes every outcome. On a host with SMT, two threads of one physical core share its execution units, so a busy child on the other thread of the worker's core slows the worker process.
+
+`parent_cpu=ParentCpu.OWN_CORE` (Linux) splits the CPUs that the worker may use (its CPU affinity, for example from `taskset` or a cgroup cpuset):
+
+- The worker process gets the physical core of the lowest of those CPUs, both of its SMT threads. Every thread of the worker process runs there.
+- The children get every other CPU of the set, recycled children too. The worker sets the CPUs of each child before it sends the child its first frame, so every thread of the child runs on them.
+- With the preload parent (the Linux default), each child is forked off the worker's core. A child that starts with `exec` runs its interpreter start on the worker's core until the worker sets its CPUs.
+
+The worker start fails on another platform, or when the CPUs of the worker hold fewer than 2 physical cores.
+
+```python
+from horsies import ParentCpu, SharedAsyncChildren, WorkerProfile
+
+dedicated_host = WorkerProfile(
+    shared_async=SharedAsyncChildren(count=6, seats=100),
+    parent_cpu=ParentCpu.OWN_CORE,
+)
+```
+
+Use it on a host or a CPU set that runs this worker alone, when the worker process is the limit: it runs at one CPU while the children have room. It gives one core to one process, so leave it at `SHARED` where several workers share a few cores.
+
 ## Profiles for One Machine
 
 The profiles below are for one worker on a machine with 16 vCPU and 64 GB of memory, one profile per kind of work. Each setting that a profile does not show is the default, so the pools are the derived sizes.
@@ -310,6 +333,7 @@ A pool opens a connection only when a write finds none free, so a worker can ope
 | `claim` | `ClaimLimits` | `ClaimLimits()` | Limits on the tasks that the worker claims |
 | `drain_timeout` | `timedelta` | 300 seconds | How long a stopping worker waits for running tasks. Above 0, at most 24 hours. See [Graceful Shutdown](/horsies/workers/worker-architecture/#graceful-shutdown) |
 | `preload` | `ChildPreload` | `ChildPreload.LIBRARY` | What a Linux worker imports once before it forks children. See [Preload Parent](/horsies/workers/worker-architecture/#preload-parent) |
+| `parent_cpu` | `ParentCpu` | `ParentCpu.SHARED` | Where the worker process runs. See [The Core of the Worker Process](#the-core-of-the-worker-process) |
 
 `WorkerProfile.child_count()` returns the number of children of the profile. `WorkerProfile.seat_count()` returns the tasks that they run at once: one per isolated child, and `seats` per shared child. `WorkerProfile.resolved_parent_pool()` returns the most connections of the pool of the worker process.
 
@@ -428,6 +452,14 @@ The capacity of a worker is its number of seats (`seat_count()`) plus `AppConfig
 | `NONE` | `none` | Nothing. Every child starts with `exec` |
 
 Other platforms start every child with `exec`.
+
+### `ParentCpu`
+
+<!-- members: ParentCpu -->
+| Member | Value | Where the worker process and its children run |
+|--------|-------|-----------------------------------------------|
+| `SHARED` | `SHARED` | On the CPUs that each process inherits. The default |
+| `OWN_CORE` | `OWN_CORE` | The worker process on one physical core, both SMT threads; the children on the other CPUs. Linux only |
 
 ## Validation
 

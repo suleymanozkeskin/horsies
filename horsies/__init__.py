@@ -131,6 +131,7 @@ from .core.models.worker_profile import (
     WorkerProfile,
 )
 from .core.worker.config import ChildPreload
+from .core.worker.cpu_placement import ParentCpu
 from .core.types.status import TaskStatus, TaskAttemptOutcome, TASK_TERMINAL_STATES
 from .core.errors import ErrorCode, ValidationReport, MultipleValidationErrors
 from .core.exception_mapper import ExceptionMapper
@@ -374,6 +375,7 @@ __all__ = [
     'NoMemoryLimit',
     'ClaimLimits',
     'ChildPreload',
+    'ParentCpu',
     # Exception mapper
     'ExceptionMapper',
     # Task handle

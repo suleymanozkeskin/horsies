@@ -46,6 +46,14 @@ from horsies.core.worker.child_protocol import (
     SharedThreadChild,
 )
 from horsies.core.worker.gc_policy import freeze_startup_objects
+from horsies.core.worker.cpu_placement import (
+    CpuPlacement,
+    OwnCore,
+    SharedCpus,
+    describe_refusal,
+    place_worker_threads,
+    plan_cpu_placement,
+)
 from horsies.core.worker.finalize_batch import (
     FINALIZE_BATCH_CLOSE_TIMEOUT_S,
     FinalizeBatcher,
@@ -323,6 +331,9 @@ class Worker(
         # Releases coalesce: the loop clears it before each claim pass.
         self._capacity_released = asyncio.Event()
         self._finalize_retry_attempts: dict[tuple[str, FinalizeStage], int] = {}
+        # The CPUs of the worker process and of its children, planned at the
+        # start of the slots from cfg.parent_cpu.
+        self._cpu_placement: CpuPlacement = SharedCpus()
         # Writes the plain-success outcomes in batches. Its flushers start on
         # the first row, at most one per connection of the worker pool;
         # ``stop`` closes it after the finalizer drain.
@@ -454,7 +465,38 @@ class Worker(
             child_preload=self.cfg.child_preload,
             shared_async=self.cfg.shared_async,
             shared_thread=self.cfg.shared_thread,
+            placement=self._cpu_placement,
         )
+
+    def _place_worker_process(self) -> None:
+        """Put every thread of the worker process on its core when the
+        placement is ``OwnCore``. Runs after the children started: the
+        preload parent and the first children keep the CPUs they inherited,
+        and each child got its own CPUs before its init frame.
+
+        Raises:
+            ChildStartFailedError: the OS refused the CPUs of a thread.
+        """
+        match self._cpu_placement:
+            case SharedCpus():
+                return
+            case OwnCore(parent=parent, children=children):
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
+        match place_worker_threads(parent):
+            case Ok(threads):
+                logger.info(
+                    'Worker process on CPUs %s (%d threads); children on CPUs %s',
+                    sorted(parent),
+                    threads,
+                    sorted(children),
+                )
+            case Err(refused):
+                raise ChildStartFailedError(
+                    f'the CPUs of worker thread {refused.target} could not be '
+                    f'set: {refused.cause}',
+                )
 
     def _pending_task_limit(self) -> int:
         """The most tasks that may wait for a slot or a seat: twice the claim
@@ -541,6 +583,11 @@ class Worker(
                 'new program with its own __main__. Use a module path or a file '
                 'path.',
             )
+        match plan_cpu_placement(self.cfg.parent_cpu):
+            case Ok(placement):
+                self._cpu_placement = placement
+            case Err(refused):
+                raise ChildStartFailedError(describe_refusal(refused))
         pool = SlotPool(self._slot_pool_config(), self._pending_task_limit())
         self._slots = pool
         match await pool.start():
@@ -550,6 +597,7 @@ class Worker(
                     len(baselines),
                     self.cfg.child_count(),
                 )
+                self._place_worker_process()
                 self._check_memory_baseline(baselines)
                 self._runner_heartbeat = self._launch_runner_heartbeat(pool)
                 return

@@ -58,6 +58,7 @@ from horsies.core.models.worker_profile import (
 )
 from horsies.core.scheduler import Scheduler
 from horsies.core.worker.config import ChildPreload
+from horsies.core.worker.cpu_placement import ParentCpu
 from horsies.core.worker.profile_fit import (
     CONNECTIONS_HELP,
     CgroupLimit,
@@ -542,6 +543,7 @@ class ExecutionSettings:
     max_claim_per_worker: int
     drain_timeout_s: float
     child_preload: ChildPreload
+    parent_cpu: ParentCpu
     shared_async: SharedAsyncChildren | NoSharedAsyncChildren
     shared_thread: SharedThreadChildren | NoSharedThreadChildren
 
@@ -605,6 +607,7 @@ def execution_settings(profile: WorkerProfile) -> ExecutionSettings:
         max_claim_per_worker=_tasks_or_zero(profile.claim.claimed_per_worker),
         drain_timeout_s=profile.drain_timeout.total_seconds(),
         child_preload=profile.preload,
+        parent_cpu=profile.parent_cpu,
         shared_async=profile.shared_async,
         shared_thread=profile.shared_thread,
     )
@@ -868,6 +871,7 @@ def worker_command(args: argparse.Namespace) -> None:
         max_memory_per_child_mb=settings.max_memory_per_child_mb,
         drain_timeout_s=settings.drain_timeout_s,
         child_preload=settings.child_preload,
+        parent_cpu=settings.parent_cpu,
         shared_async=settings.shared_async,
         shared_thread=settings.shared_thread,
         recovery_config=app.config.recovery,

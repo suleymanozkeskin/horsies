@@ -67,6 +67,7 @@ from horsies.core.models.worker_profile import (
     describe_worker_profile,
 )
 from horsies.core.worker.config import ChildPreload
+from horsies.core.worker.cpu_placement import ParentCpu
 
 pytestmark = [pytest.mark.unit]
 
@@ -1099,6 +1100,7 @@ class TestDescribeWorkerProfile:
             claim=ClaimLimits(per_queue_per_pass=TaskLimit(tasks=4)),
             drain_timeout=timedelta(seconds=90),
             preload=ChildPreload.APP,
+            parent_cpu=ParentCpu.OWN_CORE,
         )
         assert describe_worker_profile(profile) == (
             'isolated=8 (recycle after no limit, above 1024 MB; pool 0 to 1 '
@@ -1106,7 +1108,7 @@ class TestDescribeWorkerProfile:
             'shared_async=none, shared_thread=none, '
             'pool=5 connections (derived from 8 seats), '
             'claim per queue per pass: 4 tasks, claimed per worker: no limit, '
-            'drain_timeout=90s, preload=app'
+            'drain_timeout=90s, preload=app, parent_cpu=OWN_CORE'
         )
 
     def test_shared_async_children_are_named(self) -> None:
