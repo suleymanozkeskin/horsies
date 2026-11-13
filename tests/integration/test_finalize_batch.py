@@ -48,6 +48,7 @@ from horsies.core.lifecycle.outcomes import (
 from horsies.core.lifecycle.persistence import (
     BatchWriteError,
     FusedCompletionBatch,
+    apply_fused_batch,
     apply_fused_batch_in_autocommit,
 )
 from horsies.core.types.result import Err, Ok, Result
@@ -57,6 +58,7 @@ from horsies.core.worker.finalize_batch import FinalizeBatcher, FlushersCancelle
 from horsies.core.worker.runtime import FinalizeStage, _FinalizeError
 from horsies.core.worker.slots import Assigned, TaskFinished
 from horsies.core.worker.worker import Worker
+from horsies.core.utils.db import PooledStatements, StatementRunner
 from tests.fixtures.slots.handles import unbound_handle
 from tests.integration.autocommit_support import (
     QUEUE,
@@ -114,6 +116,8 @@ async def _open_worker(database_url: str) -> ProxiedWorker:
     worker = opened.worker
     worker._finalize_batcher = FinalizeBatcher(
         worker._write_fused_batch,
+        steady_runners=worker._batch_connections,
+        surge_runner=PooledStatements(worker.sf),
         max_queued_rows=QUEUE_ROOM,
         max_flushers=worker.cfg.parent_pool_size,
     )
@@ -127,7 +131,7 @@ async def direct(
 ) -> AsyncGenerator[ProxiedWorker]:
     opened = await _open_worker(db_url)
     yield opened
-    _ = await opened.broker.close_async()
+    await opened.close()
 
 
 @pytest_asyncio.fixture(loop_scope='function')
@@ -165,11 +169,11 @@ class _RecordedBatches:
 
     async def __call__(
         self,
-        session_factory: Any,
+        runner: StatementRunner,
         batch: FusedCompletionBatch,
     ) -> Result[tuple[TerminalizationOutcome, ...], BatchWriteError]:
         self.batches.append(tuple(command.task_id for command in batch.commands))
-        written = await apply_fused_batch_in_autocommit(session_factory, batch)
+        written = await apply_fused_batch(runner, batch)
         self.results.append(written)
         return written
 
@@ -189,7 +193,7 @@ class _RecordedBatches:
 @pytest.fixture
 def recorded(monkeypatch: pytest.MonkeyPatch) -> _RecordedBatches:
     recording = _RecordedBatches()
-    monkeypatch.setattr(finalize_module, 'apply_fused_batch_in_autocommit', recording)
+    monkeypatch.setattr(finalize_module, 'apply_fused_batch', recording)
     return recording
 
 
@@ -602,7 +606,7 @@ async def test_a_batch_of_rows_is_one_round_trip(
     try:
         case, turns = await steady_state_turns(proxy, arrange, act)
     finally:
-        _ = await opened.broker.close_async()
+        await opened.close()
 
     assert len(turns) == 1, turns
     assert set(await _history(session, [task_id for task_id, _ in case])) == {
@@ -691,7 +695,7 @@ async def test_a_lost_reply_of_a_batch_is_classified_by_the_replay_of_each_row(
             OUTER_BOUND_S,
         )
     finally:
-        _ = await opened.broker.close_async()
+        await opened.close()
 
     assert recorded.outcomes() == {task_id: [AlreadyApplied] for task_id in task_ids}
     assert len(recorded.batches) == 2

@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.worker.claiming import ClaimMixin
 from horsies.core.worker.config import WorkerConfig
+from horsies.core.utils.db import PooledStatements
 from tests.broker_resources_support import current_resources
 
 pytestmark = [pytest.mark.integration]
@@ -110,6 +111,7 @@ def _probe(broker: PostgresBroker, **cfg_kwargs: Any) -> ClaimMixin:
     class _P(ClaimMixin):
         def __init__(self) -> None:
             self.sf = current_resources(broker).session_factory
+            self._claim_runner = PooledStatements(self.sf)
             self.cfg = cfg
             self.worker_instance_id = f'probe-{uuid.uuid4().hex[:8]}'
             # No task is registered: every claimed row is dispatched.

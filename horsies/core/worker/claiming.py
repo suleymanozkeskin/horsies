@@ -35,7 +35,7 @@ from horsies.core.lifecycle.outcomes import (
 from horsies.core.lifecycle.persistence import apply_batch_async
 from horsies.core.logging import get_logger
 from horsies.core.models.tasks import Execution
-from horsies.core.utils.db import SingleStatement, run_in_autocommit
+from horsies.core.utils.db import SingleStatement, StatementRunner, rows_or_raise
 from horsies.core.worker.claim_plan import (
     BudgetCapacity,
     budgets_json,
@@ -234,6 +234,7 @@ class ClaimMixin:
         # Worker state this mixin reads.
         sf: async_sessionmaker[AsyncSession]
         cfg: WorkerConfig
+        _claim_runner: StatementRunner
         worker_instance_id: str
         _registered_classes: Mapping[str, Execution]
 
@@ -283,11 +284,14 @@ class ClaimMixin:
         # across a client round trip, so a stalled worker cannot freeze the
         # cluster mid-pass. Budget and cap semantics are computed in-function;
         # see schemas/migrations.py::horsies_claim.
-        claim_result = await run_in_autocommit(
-            self.sf,
-            SingleStatement(
-                statement=HORSIES_CLAIM_SQL,
-                parameters=self._claim_params(),
+        # The claim loop's held connection: one checkout for the passes that
+        # follow each other, given back after an idle period.
+        claim_result = rows_or_raise(
+            await self._claim_runner.run(
+                SingleStatement(
+                    statement=HORSIES_CLAIM_SQL,
+                    parameters=self._claim_params(),
+                ),
             ),
         )
         claim_rows = read_claim_rows(claim_result.columns, claim_result.rows)

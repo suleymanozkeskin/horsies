@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from unittest.mock import AsyncMock, MagicMock
@@ -17,14 +19,20 @@ from sqlalchemy.exc import (
 from horsies.core.types.result import Err, Ok
 from horsies.core.utils.db import (
     AUTOCOMMIT_EXECUTION_OPTIONS,
+    HeldConnection,
+    NoRecycle,
     NotSent,
     OutcomeUnknown,
+    PooledStatements,
+    RecycleAfter,
     SingleStatement,
     StatementRefused,
     StatementRows,
     autocommit_connection,
+    held_recycle,
     is_dbapi_disconnect,
     is_retryable_connection_error,
+    rows_or_raise,
     run_in_autocommit,
     run_in_autocommit_result,
 )
@@ -320,3 +328,141 @@ class TestAutocommitConnection:
         session.connection.assert_awaited_once_with(
             execution_options=dict(AUTOCOMMIT_EXECUTION_OPTIONS),
         )
+
+
+_HELD_STATEMENT = SingleStatement(
+    statement=text('SELECT CAST(:v AS integer)'),
+    parameters={'v': 1},
+)
+_HELD_ROWS = StatementRows(columns=('v',), rows=((1,),))
+
+
+class TestRowsOrRaise:
+    def test_rows_are_returned(self) -> None:
+        assert rows_or_raise(Ok(_HELD_ROWS)) is _HELD_ROWS
+
+    @pytest.mark.parametrize(
+        'failure',
+        [
+            NotSent(error=SATimeoutError('QueuePool limit reached')),
+            StatementRefused(error=_make_dbapi_error()),
+            OutcomeUnknown(error=_make_dbapi_error(connection_invalidated=True)),
+        ],
+        ids=['not_sent', 'refused', 'unknown'],
+    )
+    def test_the_error_of_a_failure_is_raised(
+        self,
+        failure: NotSent | StatementRefused | OutcomeUnknown,
+    ) -> None:
+        with pytest.raises(type(failure.error)) as raised:
+            rows_or_raise(Err(failure))
+
+        assert raised.value is failure.error
+
+
+class TestHeldRecycle:
+    @pytest.mark.parametrize(
+        ('pool_recycle_s', 'expected'),
+        [
+            (-1, NoRecycle()),
+            (-5, NoRecycle()),
+            (0, RecycleAfter(seconds=0.0)),
+            (1800, RecycleAfter(seconds=1800.0)),
+        ],
+        ids=['off', 'any-negative', 'every-statement', 'default'],
+    )
+    def test_it_reads_pool_recycle_as_sqlalchemy_does(
+        self,
+        pool_recycle_s: int,
+        expected: NoRecycle | RecycleAfter,
+    ) -> None:
+        assert held_recycle(pool_recycle_s) == expected
+
+    def test_a_negative_age_is_refused(self) -> None:
+        with pytest.raises(ValueError, match='0 or more'):
+            RecycleAfter(seconds=-0.5)
+
+
+class _GatedCheckout:
+    """A session whose checkout waits for ``open`` and then fails, as a pool
+    with no connection in time does."""
+
+    def __init__(self) -> None:
+        self.open = asyncio.Event()
+        self.closed = 0
+
+    async def connection(self, execution_options: object) -> object:
+        del execution_options
+        await self.open.wait()
+        raise SATimeoutError('QueuePool limit reached')
+
+    async def close(self) -> None:
+        self.closed += 1
+
+
+class TestHeldConnectionWithoutADatabase:
+    def test_nothing_touches_the_factory_before_the_first_statement(self) -> None:
+        factory = MagicMock()
+
+        _ = HeldConnection(factory, NoRecycle())
+
+        factory.assert_not_called()
+
+    def test_the_idle_time_must_be_positive(self) -> None:
+        with pytest.raises(ValueError, match='idle_release_s'):
+            _ = HeldConnection(MagicMock(), NoRecycle(), idle_release_s=0.0)
+
+    @pytest.mark.asyncio
+    async def test_a_failed_checkout_is_not_sent_and_closes_its_session(self) -> None:
+        session = _GatedCheckout()
+        held = HeldConnection(MagicMock(return_value=session), NoRecycle())
+        session.open.set()
+
+        outcome = await held.run(_HELD_STATEMENT)
+
+        match outcome:
+            case Err(NotSent(error=error)):
+                assert isinstance(error, SATimeoutError)
+            case _:
+                raise AssertionError(f'expected NotSent, got {outcome!r}')
+        assert session.closed == 1
+
+    @pytest.mark.asyncio
+    async def test_a_second_statement_while_one_runs_is_a_defect(self) -> None:
+        session = _GatedCheckout()
+        held = HeldConnection(MagicMock(return_value=session), NoRecycle())
+        first = asyncio.create_task(held.run(_HELD_STATEMENT))
+        await asyncio.sleep(0)
+
+        # Bounded: without the check, the second statement would wait on the
+        # same gate, and the test would fail on the timeout, not hang.
+        with pytest.raises(AssertionError, match='one statement at a time'):
+            await asyncio.wait_for(held.run(_HELD_STATEMENT), 5.0)
+
+        session.open.set()
+        _ = await asyncio.wait_for(first, 5.0)
+
+    @pytest.mark.asyncio
+    async def test_release_with_nothing_held_does_nothing(self) -> None:
+        factory = MagicMock()
+        held = HeldConnection(factory, NoRecycle())
+
+        await held.release()
+
+        factory.assert_not_called()
+
+
+class TestPooledStatements:
+    @pytest.mark.asyncio
+    async def test_it_runs_one_statement_per_checkout(self) -> None:
+        session_factory = MagicMock()
+        runner = PooledStatements(session_factory)
+        expected = Ok(_HELD_ROWS)
+        run = AsyncMock(return_value=expected)
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr('horsies.core.utils.db.run_in_autocommit_result', run)
+            outcome = await runner.run(_HELD_STATEMENT)
+
+        assert outcome is expected
+        run.assert_awaited_once_with(session_factory, _HELD_STATEMENT)

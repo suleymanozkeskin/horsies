@@ -40,6 +40,7 @@ from horsies.core.models.tasks import (
 from horsies.core.types.result import is_err, is_ok
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
+from tests.integration.autocommit_support import use_pooled_runners
 from tests.integration.conftest import compute_test_enqueue_sha
 
 pytestmark = [pytest.mark.integration]
@@ -114,6 +115,8 @@ def _make_worker(engine: AsyncEngine) -> Worker:
     # Pin the instance id to the owner id used by the insert helpers so the
     # finalize-path ownership guard matches.
     worker.worker_instance_id = 'w-test-1'
+    # Terminal-state writes, one checkout per statement: no worker stop here.
+    use_pooled_runners(worker)
     return worker
 
 

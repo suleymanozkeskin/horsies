@@ -20,6 +20,11 @@ MAX_CLAIM_RENEW_AGE_MS: int = 180_000  # 3 minutes
 # is unacknowledged.
 DEFAULT_TCP_USER_TIMEOUT_MS: int = 30_000  # 30 seconds
 
+# Seconds after which the pool replaces a connection (SQLAlchemy
+# pool_recycle). A negative value turns recycling off. The worker's held
+# connections follow the same age.
+DEFAULT_POOL_RECYCLE_S: Final = 1800
+
 # A worker is live while its latest state snapshot is at most this many
 # seconds old. Each worker writes a snapshot every
 # ``RecoveryConfig.worker_state_snapshot_interval_ms`` (30 s by default), so

@@ -29,6 +29,7 @@ from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.types.result import is_err, is_ok
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
+from tests.integration.autocommit_support import use_pooled_runners
 from tests.integration.conftest import compute_test_enqueue_sha
 from tests.integration.history_seeding import (
     force_terminal,
@@ -96,6 +97,8 @@ def _make_worker(engine: AsyncEngine) -> Worker:
     worker = Worker(session_factory=sf, listener=MagicMock(), cfg=cfg)
     worker._app = _test_app()
     worker.worker_instance_id = TEST_WORKER_ID
+    # Terminal-state writes, one checkout per statement: no worker stop here.
+    use_pooled_runners(worker)
     return worker
 
 

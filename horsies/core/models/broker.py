@@ -2,7 +2,7 @@ from collections.abc import Mapping
 from typing import Any, ClassVar, Final, cast
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
-from horsies.core.defaults import DEFAULT_TCP_USER_TIMEOUT_MS
+from horsies.core.defaults import DEFAULT_POOL_RECYCLE_S, DEFAULT_TCP_USER_TIMEOUT_MS
 from horsies.core.errors import (
     ConfigurationError,
     ErrorCode,
@@ -105,7 +105,8 @@ class PostgresConfig(BaseModel):
         default=30, description='The timeout for acquiring a connection from the pool'
     )
     pool_recycle: int = Field(
-        default=1800, description='The number of seconds to recycle connections'
+        default=DEFAULT_POOL_RECYCLE_S,
+        description='The number of seconds to recycle connections',
     )
     # TCP keepalives keep idle pooled sockets warm so a server-side or
     # middlebox idle-reap is detected and recycled at the socket layer
