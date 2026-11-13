@@ -21,6 +21,7 @@ and a run that continues could overlap a retry of the same task.
 
 from __future__ import annotations
 
+import atexit
 import ctypes
 import gc
 import logging
@@ -30,6 +31,7 @@ import signal
 import socket
 import sys
 import threading
+import traceback
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import Enum
@@ -115,6 +117,12 @@ BAD_ARGUMENTS_EXIT_CODE: Final = 73
 # After a stop frame, when threads of the task loop's executor still run:
 # the child leaves without waiting for them, so ``atexit`` handlers do not run.
 STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE: Final = 74
+
+_JOIN_NON_DAEMON_THREADS: Final[Callable[[], None]] = getattr(threading, '_shutdown')
+"""The first step of ``sys.exit``: the callbacks that ``concurrent.futures``
+and other modules registered with ``threading`` (they stop their executors),
+then a join of every non-daemon thread. Read at import, so a Python without
+it fails the child at boot, not at its stop."""
 # At boot, after ``BootFailedFrame``: the frame names the cause.
 BOOT_FAILED_EXIT_CODE: Final = 75
 INIT_FRAME_TIMEOUT_S: Final = 30.0
@@ -738,7 +746,9 @@ def _boot_or_exit(
 def exit_after_stop(executor: ExecutorAfterClose) -> NoReturn:
     """End the process after a stop frame and the task loop close.
 
-    ``ExecutorShutDown``: ``sys.exit(0)``, so ``atexit`` handlers run.
+    ``ExecutorShutDown``: ``end_without_teardown(0)``: the child waits for its
+    non-daemon threads and runs its ``atexit`` handlers, as ``sys.exit(0)``
+    does, and skips the interpreter teardown.
 
     ``ExecutorThreadsLeft``: a normal exit would join the executor threads
     that still run, with no bound, until the parent kills the process group
@@ -750,7 +760,7 @@ def exit_after_stop(executor: ExecutorAfterClose) -> NoReturn:
     """
     match executor:
         case ExecutorShutDown():
-            sys.exit(0)
+            end_without_teardown(0)
         case ExecutorThreadsLeft():
             logger.warning(
                 'Threads of the task loop executor still run after the stop; '
@@ -761,6 +771,34 @@ def exit_after_stop(executor: ExecutorAfterClose) -> NoReturn:
             os._exit(STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE)
         case _ as unreachable:
             assert_never(unreachable)
+
+
+def end_without_teardown(code: int) -> NoReturn:
+    """End the process with ``code`` after the steps that ``sys.exit`` runs
+    before the interpreter teardown: the join of the non-daemon threads (with
+    the stop of the executors that registered with ``threading``), the
+    ``atexit`` handlers, and a flush of the output. Then ``os._exit(code)``.
+
+    The teardown clears every module and frees every object. In a child that
+    the preload parent forked, that writes to the pages the child shares with
+    it, so the kernel copies each of them while the child ends: the memory of
+    an ending child grows by about the size of the shared library. Python
+    does not promise ``__del__`` for objects that still exist at exit, and
+    those calls are the part that no longer runs. ``multiprocessing`` ends
+    its forked children with ``os._exit`` too.
+
+    An exception from a step is printed, and the process still ends with
+    ``code``, as an error in an ``atexit`` handler leaves the code of
+    ``sys.exit``.
+    """
+    try:
+        _JOIN_NON_DAEMON_THREADS()
+        atexit._run_exitfuncs()  # pyright: ignore[reportPrivateUsage] - what sys.exit runs next
+    except BaseException:
+        traceback.print_exc()
+    finally:
+        flush_output()
+        os._exit(code)
 
 
 def serve(

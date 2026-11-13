@@ -26,6 +26,7 @@ whose policy raises ``NotImplementedError`` in one slot. The ``report_*`` and
 from __future__ import annotations
 
 import asyncio
+import atexit
 import contextlib
 import contextvars
 import ctypes
@@ -99,6 +100,47 @@ _seen_loops: list[asyncio.AbstractEventLoop] = []
 
 def _pid_result() -> WireResult:
     return True, str(os.getpid()), None
+
+
+EXIT_MARK_THREAD_DELAY_S = 0.3
+
+
+def _write_mark(path: str) -> None:
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.close(descriptor)
+
+
+class _MarkOnDelete:
+    """Writes a mark from ``__del__``: only an interpreter teardown frees it.
+    Keeps its own references to ``os``, which a teardown may clear first."""
+
+    def __init__(self, path: str) -> None:
+        self._path = path
+        self._open = os.open
+        self._close = os.close
+        self._flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+
+    def __del__(self) -> None:
+        self._close(self._open(self._path, self._flags, 0o600))
+
+
+_KEPT_UNTIL_EXIT: list[_MarkOnDelete] = []
+
+
+def _exit_marks(directory: str) -> WireResult:
+    """Task code that relies on the end of its child: an ``atexit`` handler,
+    a non-daemon thread that writes after ``EXIT_MARK_THREAD_DELAY_S``, and a
+    module-level object with ``__del__``. Each writes its own mark."""
+    atexit.register(_write_mark, os.path.join(directory, 'atexit'))
+    threading.Thread(
+        target=lambda: (
+            time.sleep(EXIT_MARK_THREAD_DELAY_S),
+            _write_mark(os.path.join(directory, 'thread')),
+        ),
+        daemon=False,
+    ).start()
+    _KEPT_UNTIL_EXIT.append(_MarkOnDelete(os.path.join(directory, 'teardown')))
+    return _pid_result()
 
 
 def _no_descriptors() -> asyncio.AbstractEventLoop:
@@ -435,6 +477,8 @@ def _run(frame: RunFrame, init: InitFrame, task_loop: TaskLoop) -> WireResult:
             return True, _run_async(task_loop, _thread_outlives_wait(float(argument))), None
         case 'pid':
             return _pid_result()
+        case 'exit_marks':
+            return _exit_marks(argument)
         case 'freeze_count':
             return True, str(gc.get_freeze_count()), None
         case 'socket_count':

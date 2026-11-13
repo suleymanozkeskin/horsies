@@ -81,6 +81,13 @@ no_recycling = WorkerProfile(
 
 - **Default `TaskLimit(tasks=100)`.** Tune it for your deployment — there is no
   universal value (see [Choosing N](#choosing-n)).
+- **How a replaced or stopped child ends.** The child waits for its non-daemon
+  threads, runs its `atexit` handlers and flushes its output, as `sys.exit`
+  does, then ends with `os._exit`. The interpreter teardown does not run, so
+  an object that still exists does not get `__del__`. Close files and clients
+  in the task, or register the close with `atexit`. The teardown would write to
+  every page that the child shares with the preload parent, and the kernel would
+  copy those pages while the child ends.
 - `NoTaskLimit()` disables recycling: children live for the worker's lifetime.
 - `tasks` must be `>= 1`. With `TaskLimit(tasks=1)`, each task runs in a new child.
 

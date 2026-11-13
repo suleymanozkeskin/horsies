@@ -1664,6 +1664,27 @@ class TestTaskRuns:
         await _until(lambda: child.has_exited, timeout_s=slots.CHILD_STOP_TIMEOUT_S / 2)
         assert child._current_exit() == ExitedWith(0)
 
+    async def test_a_stopped_child_ends_without_the_interpreter_teardown(
+        self,
+        pool_factory: PoolFactory,
+        tmp_path: Path,
+    ) -> None:
+        """A child stopped after its last task waits for the non-daemon
+        thread of the task and runs its ``atexit`` handler, as ``sys.exit``
+        does, then ends with ``os._exit``: the teardown that would free the
+        module-level object, and write to the pages shared with the preload
+        parent, does not run."""
+        pool = await pool_factory(_config(max_tasks_per_child=1))
+        pid = int(await _result_json(pool.submit(_frame('exit_marks', str(tmp_path)))))
+        child = pool._slots[0].child
+        assert child is not None and child.pid == pid
+        await _until(lambda: child.has_exited, timeout_s=slots.CHILD_STOP_TIMEOUT_S / 2)
+
+        assert child._current_exit() == ExitedWith(0)
+        assert (tmp_path / 'atexit').exists()
+        assert (tmp_path / 'thread').exists()
+        assert not (tmp_path / 'teardown').exists()
+
     async def test_child_program_restores_parent_argv_and_keeps_asserts(
         self,
         pool_factory: PoolFactory,
