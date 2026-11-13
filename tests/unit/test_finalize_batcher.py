@@ -37,7 +37,16 @@ from horsies.core.lifecycle.persistence import (
 )
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.types.status import TaskStatus
-from horsies.core.utils.db import NotSent, OutcomeUnknown, StatementRefused
+from horsies.core.utils.db import (
+    AutocommitFailure,
+    HeldConnection,
+    NotSent,
+    OutcomeUnknown,
+    SingleStatement,
+    StatementRefused,
+    StatementRows,
+    StatementRunner,
+)
 from horsies.core.worker.finalize_batch import (
     FINALIZE_BATCH_FLUSHERS,
     BatcherState,
@@ -45,6 +54,7 @@ from horsies.core.worker.finalize_batch import (
     FinalizeBatcher,
     FlushersCancelled,
     FlushersDrained,
+    FusedBatchWrite,
 )
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
@@ -120,8 +130,29 @@ def _outcome_unknown() -> OutcomeUnknown:
     )
 
 
+class _NamedRunner:
+    """A ``StatementRunner`` that only names itself: the scripted writes
+    record which runner wrote each batch and never run a statement."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    async def run(
+        self,
+        statement: SingleStatement,
+    ) -> Result[StatementRows, AutocommitFailure]:
+        raise AssertionError(f'{self.name}: the scripted write runs no statement')
+
+
+STEADY_RUNNERS: Final = tuple(
+    _NamedRunner(f'steady-{index}') for index in range(FINALIZE_BATCH_FLUSHERS)
+)
+SURGE_RUNNER: Final = _NamedRunner('surge')
+
+
 class _ScriptedWrite:
-    """A batch write that records each batch and answers with ``answer``.
+    """A batch write that records each batch, the runner that wrote it, and
+    answers with ``answer``.
 
     With ``gated`` set, each write waits for ``release`` before it answers.
     """
@@ -133,6 +164,7 @@ class _ScriptedWrite:
         gated: bool = False,
     ) -> None:
         self.batches: list[tuple[str, ...]] = []
+        self.runners: list[StatementRunner] = []
         self.in_flight = 0
         self.most_in_flight = 0
         self._answer = answer
@@ -143,8 +175,13 @@ class _ScriptedWrite:
     def release(self) -> None:
         self._gate.set()
 
-    async def __call__(self, batch: FusedCompletionBatch) -> WriteResult:
+    async def __call__(
+        self,
+        batch: FusedCompletionBatch,
+        runner: StatementRunner,
+    ) -> WriteResult:
         self.batches.append(tuple(command.task_id for command in batch.commands))
+        self.runners.append(runner)
         self.in_flight += 1
         self.most_in_flight = max(self.most_in_flight, self.in_flight)
         try:
@@ -152,6 +189,22 @@ class _ScriptedWrite:
         finally:
             self.in_flight -= 1
         return self._answer(batch)
+
+
+def _batcher(
+    write: FusedBatchWrite,
+    *,
+    max_queued_rows: int,
+    max_flushers: int,
+) -> FinalizeBatcher:
+    """A batcher on ``write``, with the named steady and surge runners."""
+    return FinalizeBatcher(
+        write,
+        steady_runners=STEADY_RUNNERS,
+        surge_runner=SURGE_RUNNER,
+        max_queued_rows=max_queued_rows,
+        max_flushers=max_flushers,
+    )
 
 
 async def _settle() -> None:
@@ -190,7 +243,7 @@ def _ok_task_id(result: BatchRowResult) -> str:
 @pytest.mark.asyncio
 async def test_a_lone_row_is_written_at_once() -> None:
     write = _ScriptedWrite()
-    batcher = FinalizeBatcher(
+    batcher = _batcher(
         write, max_queued_rows=QUEUE_BOUND, max_flushers=STEADY_ONLY
     )
 
@@ -203,7 +256,7 @@ async def test_a_lone_row_is_written_at_once() -> None:
 @pytest.mark.asyncio
 async def test_rows_that_arrive_while_the_flushers_write_form_the_next_batch() -> None:
     write = _ScriptedWrite(gated=True)
-    batcher = FinalizeBatcher(
+    batcher = _batcher(
         write, max_queued_rows=QUEUE_BOUND, max_flushers=STEADY_ONLY
     )
     first = [await _submit_alone(batcher, task_id) for task_id in ('a', 'b')]
@@ -223,7 +276,7 @@ async def test_rows_that_arrive_while_the_flushers_write_form_the_next_batch() -
 @pytest.mark.asyncio
 async def test_a_batch_holds_at_most_the_max_rows() -> None:
     write = _ScriptedWrite()
-    batcher = FinalizeBatcher(
+    batcher = _batcher(
         write, max_queued_rows=QUEUE_BOUND, max_flushers=STEADY_ONLY
     )
     task_ids = [f't{index}' for index in range(FUSED_BATCH_MAX_ROWS + 10)]
@@ -240,7 +293,7 @@ async def test_a_batch_holds_at_most_the_max_rows() -> None:
 @pytest.mark.asyncio
 async def test_no_more_than_the_flusher_bound_write_at_once() -> None:
     write = _ScriptedWrite(gated=True)
-    batcher = FinalizeBatcher(
+    batcher = _batcher(
         write, max_queued_rows=QUEUE_BOUND, max_flushers=STEADY_ONLY
     )
     calls = [
@@ -261,7 +314,7 @@ async def test_no_more_than_the_flusher_bound_write_at_once() -> None:
 @pytest.mark.asyncio
 async def test_a_repeated_task_id_waits_for_the_next_batch() -> None:
     write = _ScriptedWrite()
-    batcher = FinalizeBatcher(
+    batcher = _batcher(
         write, max_queued_rows=QUEUE_BOUND, max_flushers=STEADY_ONLY
     )
     first_flusher_rows = ('a', 'b', 'a', 'c')
@@ -301,7 +354,7 @@ async def test_each_row_gets_the_outcome_of_its_own_task() -> None:
                 outcomes.append(_applied(command.task_id, position))
         return Ok(tuple(outcomes))
 
-    batcher = FinalizeBatcher(
+    batcher = _batcher(
         _ScriptedWrite(mixed), max_queued_rows=QUEUE_BOUND, max_flushers=STEADY_ONLY
     )
 
@@ -322,7 +375,7 @@ async def test_each_row_gets_the_outcome_of_its_own_task() -> None:
 @pytest.mark.asyncio
 async def test_the_answer_resolves_only_after_the_write_returned() -> None:
     write = _ScriptedWrite(gated=True)
-    batcher = FinalizeBatcher(
+    batcher = _batcher(
         write, max_queued_rows=QUEUE_BOUND, max_flushers=STEADY_ONLY
     )
 
@@ -345,7 +398,7 @@ async def test_a_refused_batch_writes_each_row_alone_once() -> None:
         return _all_applied(batch)
 
     write = _ScriptedWrite(refuse_bad)
-    batcher = FinalizeBatcher(
+    batcher = _batcher(
         write, max_queued_rows=QUEUE_BOUND, max_flushers=STEADY_ONLY
     )
 
@@ -372,7 +425,7 @@ async def test_a_refused_batch_writes_each_row_alone_once() -> None:
 @pytest.mark.asyncio
 async def test_a_refused_row_of_one_is_not_written_again() -> None:
     write = _ScriptedWrite(lambda _batch: Err(BatchRolledBack(cause=_refused())))
-    batcher = FinalizeBatcher(
+    batcher = _batcher(
         write, max_queued_rows=QUEUE_BOUND, max_flushers=STEADY_ONLY
     )
 
@@ -392,7 +445,7 @@ async def test_a_failure_of_the_connection_answers_every_row_without_a_split(
     error: BatchWriteError,
 ) -> None:
     write = _ScriptedWrite(lambda _batch: Err(error))
-    batcher = FinalizeBatcher(
+    batcher = _batcher(
         write, max_queued_rows=QUEUE_BOUND, max_flushers=STEADY_ONLY
     )
 
@@ -422,13 +475,17 @@ def test_the_retryable_flag_follows_the_cause() -> None:
 async def test_a_defect_of_the_write_is_raised_to_every_row() -> None:
     writes: list[int] = []
 
-    async def broken_once(batch: FusedCompletionBatch) -> WriteResult:
+    async def broken_once(
+        batch: FusedCompletionBatch,
+        runner: StatementRunner,
+    ) -> WriteResult:
+        del runner
         writes.append(len(batch.commands))
         if len(writes) == 1:
             raise RuntimeError('FusedCompletionBatch returned a row without ordinality')
         return _all_applied(batch)
 
-    batcher = FinalizeBatcher(
+    batcher = _batcher(
         broken_once, max_queued_rows=QUEUE_BOUND, max_flushers=STEADY_ONLY
     )
 
@@ -450,7 +507,7 @@ async def test_a_defect_of_the_write_is_raised_to_every_row() -> None:
 @pytest.mark.asyncio
 async def test_a_cancelled_caller_leaves_its_row_written() -> None:
     write = _ScriptedWrite(gated=True)
-    batcher = FinalizeBatcher(
+    batcher = _batcher(
         write, max_queued_rows=QUEUE_BOUND, max_flushers=STEADY_ONLY
     )
     held = await _submit_alone(batcher, 'a')
@@ -469,7 +526,7 @@ async def test_a_cancelled_caller_leaves_its_row_written() -> None:
 
 @pytest.mark.asyncio
 async def test_a_full_queue_is_a_defect() -> None:
-    batcher = FinalizeBatcher(
+    batcher = _batcher(
         _ScriptedWrite(), max_queued_rows=2, max_flushers=STEADY_ONLY
     )
     first = asyncio.create_task(batcher.complete(_command('a')))
@@ -493,7 +550,7 @@ async def test_a_full_queue_is_a_defect() -> None:
 @pytest.mark.asyncio
 async def test_close_writes_the_queued_rows_first() -> None:
     write = _ScriptedWrite(gated=True)
-    batcher = FinalizeBatcher(
+    batcher = _batcher(
         write, max_queued_rows=QUEUE_BOUND, max_flushers=STEADY_ONLY
     )
     calls = [asyncio.create_task(batcher.complete(_command(i))) for i in 'abc']
@@ -512,7 +569,7 @@ async def test_close_writes_the_queued_rows_first() -> None:
 @pytest.mark.asyncio
 async def test_close_cancels_the_flushers_at_its_timeout() -> None:
     write = _ScriptedWrite(gated=True)
-    batcher = FinalizeBatcher(
+    batcher = _batcher(
         write, max_queued_rows=QUEUE_BOUND, max_flushers=STEADY_ONLY
     )
     calls = [await _submit_alone(batcher, task_id) for task_id in 'abcd']
@@ -526,7 +583,7 @@ async def test_close_cancels_the_flushers_at_its_timeout() -> None:
 
 @pytest.mark.asyncio
 async def test_a_closed_batcher_refuses_rows() -> None:
-    batcher = FinalizeBatcher(
+    batcher = _batcher(
         _ScriptedWrite(), max_queued_rows=QUEUE_BOUND, max_flushers=STEADY_ONLY
     )
 
@@ -581,7 +638,7 @@ async def _submit_together(
 @pytest.mark.asyncio
 async def test_a_surge_flusher_starts_only_when_a_full_batch_waits() -> None:
     write = _ScriptedWrite(gated=True)
-    batcher = FinalizeBatcher(write, max_queued_rows=QUEUE_BOUND, max_flushers=4)
+    batcher = _batcher(write, max_queued_rows=QUEUE_BOUND, max_flushers=4)
     held = [await _submit_alone(batcher, task_id) for task_id in ('a', 'b')]
     almost = await _submit_together(
         batcher,
@@ -603,7 +660,7 @@ async def test_a_surge_flusher_writes_full_batches_only() -> None:
     """With the steady flushers busy, 70 rows wait: the surge flusher writes
     64 of them and ends; a steady flusher writes the other 6."""
     write = _ScriptedWrite(gated=True)
-    batcher = FinalizeBatcher(write, max_queued_rows=QUEUE_BOUND, max_flushers=3)
+    batcher = _batcher(write, max_queued_rows=QUEUE_BOUND, max_flushers=3)
     held = [await _submit_alone(batcher, task_id) for task_id in ('a', 'b')]
     waiting = await _submit_together(batcher, [f'w{index}' for index in range(70)])
 
@@ -623,7 +680,7 @@ async def test_a_surge_flusher_writes_full_batches_only() -> None:
 @pytest.mark.asyncio
 async def test_the_flusher_bound_holds_for_both_roles() -> None:
     write = _ScriptedWrite(gated=True)
-    batcher = FinalizeBatcher(write, max_queued_rows=QUEUE_BOUND, max_flushers=3)
+    batcher = _batcher(write, max_queued_rows=QUEUE_BOUND, max_flushers=3)
     held = [await _submit_alone(batcher, task_id) for task_id in ('a', 'b')]
     waiting = await _submit_together(
         batcher,
@@ -639,7 +696,7 @@ async def test_the_flusher_bound_holds_for_both_roles() -> None:
 @pytest.mark.asyncio
 async def test_a_pool_of_one_connection_has_one_flusher() -> None:
     write = _ScriptedWrite(gated=True)
-    batcher = FinalizeBatcher(write, max_queued_rows=QUEUE_BOUND, max_flushers=1)
+    batcher = _batcher(write, max_queued_rows=QUEUE_BOUND, max_flushers=1)
     held = [await _submit_alone(batcher, task_id) for task_id in ('a', 'b')]
     waiting = await _submit_together(
         batcher,
@@ -654,7 +711,7 @@ async def test_a_pool_of_one_connection_has_one_flusher() -> None:
 
 def test_the_flusher_bound_must_be_positive() -> None:
     with pytest.raises(ValueError, match='max_flushers'):
-        _ = FinalizeBatcher(
+        _ = _batcher(
             _ScriptedWrite(), max_queued_rows=QUEUE_BOUND, max_flushers=0
         )
 
@@ -681,13 +738,19 @@ class _GatedPerWrite:
 
     def __init__(self) -> None:
         self.batches: list[tuple[str, ...]] = []
+        self.runners: list[StatementRunner] = []
         self._gates: list[asyncio.Event] = []
 
     def release(self, call: int) -> None:
         self._gates[call].set()
 
-    async def __call__(self, batch: FusedCompletionBatch) -> WriteResult:
+    async def __call__(
+        self,
+        batch: FusedCompletionBatch,
+        runner: StatementRunner,
+    ) -> WriteResult:
         self.batches.append(tuple(command.task_id for command in batch.commands))
+        self.runners.append(runner)
         gate = asyncio.Event()
         self._gates.append(gate)
         await gate.wait()
@@ -699,7 +762,7 @@ async def test_a_surge_flusher_leaves_a_partial_batch_to_the_steady_flushers() -
     """The steady flushers stay busy; the surge flusher finishes its full
     batch and ends: the 10 rows left wait for a steady flusher."""
     write = _GatedPerWrite()
-    batcher = FinalizeBatcher(write, max_queued_rows=QUEUE_BOUND, max_flushers=3)
+    batcher = _batcher(write, max_queued_rows=QUEUE_BOUND, max_flushers=3)
     held = [await _submit_alone(batcher, task_id) for task_id in ('a', 'b')]
     waiting = await _submit_together(
         batcher,
@@ -732,7 +795,7 @@ async def test_no_surge_flusher_is_created_while_less_than_a_full_batch_waits() 
     """A submit while the steady flushers write creates no task for a surge
     flusher until a full batch waits."""
     write = _ScriptedWrite(gated=True)
-    batcher = FinalizeBatcher(write, max_queued_rows=QUEUE_BOUND, max_flushers=4)
+    batcher = _batcher(write, max_queued_rows=QUEUE_BOUND, max_flushers=4)
     held = [await _submit_alone(batcher, task_id) for task_id in ('a', 'b')]
     calls = [
         asyncio.create_task(batcher.complete(_command(f'w{index}')))
@@ -748,3 +811,101 @@ async def test_no_surge_flusher_is_created_while_less_than_a_full_batch_waits() 
     assert len(_surge_tasks()) == 1
     write.release()
     _ = await asyncio.wait_for(asyncio.gather(*held, *calls), OUTER_BOUND_S)
+
+
+# ---------------------------------------------------------------------------
+# Runners: a steady flusher holds one runner while it runs; a surge flusher
+# writes on the surge runner
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_each_running_steady_flusher_writes_on_its_own_runner() -> None:
+    write = _ScriptedWrite(gated=True)
+    batcher = _batcher(write, max_queued_rows=QUEUE_BOUND, max_flushers=STEADY_ONLY)
+    held = [await _submit_alone(batcher, task_id) for task_id in ('a', 'b')]
+
+    assert write.in_flight == FINALIZE_BATCH_FLUSHERS
+    assert set(write.runners) == set(STEADY_RUNNERS)
+    assert len(write.runners) == len(set(write.runners))
+    write.release()
+    _ = await asyncio.wait_for(asyncio.gather(*held), OUTER_BOUND_S)
+
+
+@pytest.mark.asyncio
+async def test_a_surge_flusher_writes_on_the_surge_runner() -> None:
+    write = _ScriptedWrite(gated=True)
+    batcher = _batcher(write, max_queued_rows=QUEUE_BOUND, max_flushers=3)
+    held = [await _submit_alone(batcher, task_id) for task_id in ('a', 'b')]
+    full = await _submit_together(
+        batcher,
+        [f'w{index}' for index in range(FUSED_BATCH_MAX_ROWS)],
+    )
+
+    assert [len(batch) for batch in write.batches] == [1, 1, FUSED_BATCH_MAX_ROWS]
+    assert write.runners[2] is SURGE_RUNNER
+    assert SURGE_RUNNER not in write.runners[:2]
+    write.release()
+    _ = await asyncio.wait_for(asyncio.gather(*held, *full), OUTER_BOUND_S)
+
+
+@pytest.mark.asyncio
+async def test_a_steady_runner_goes_back_when_its_flusher_ends() -> None:
+    """Lone rows one after another: each flusher ends before the next row,
+    so every write finds a free steady runner, and both are free at the end."""
+    write = _ScriptedWrite()
+    batcher = _batcher(write, max_queued_rows=QUEUE_BOUND, max_flushers=STEADY_ONLY)
+    for task_id in ('a', 'b', 'c', 'd', 'e'):
+        _ = await asyncio.wait_for(batcher.complete(_command(task_id)), OUTER_BOUND_S)
+
+    assert len(write.runners) == 5
+    assert set(write.runners) <= set(STEADY_RUNNERS)
+
+    gated = _ScriptedWrite(gated=True)
+    batcher._write = gated  # pyright: ignore[reportPrivateUsage]
+    held = [await _submit_alone(batcher, task_id) for task_id in ('f', 'g')]
+
+    assert set(gated.runners) == set(STEADY_RUNNERS)
+    gated.release()
+    _ = await asyncio.wait_for(asyncio.gather(*held), OUTER_BOUND_S)
+
+
+@pytest.mark.asyncio
+async def test_a_pool_of_one_connection_writes_on_one_steady_runner() -> None:
+    write = _ScriptedWrite()
+    batcher = _batcher(write, max_queued_rows=QUEUE_BOUND, max_flushers=1)
+    for task_id in ('a', 'b', 'c'):
+        _ = await asyncio.wait_for(batcher.complete(_command(task_id)), OUTER_BOUND_S)
+
+    assert write.runners == [STEADY_RUNNERS[0]] * 3
+
+
+def test_fewer_runners_than_steady_flushers_is_refused() -> None:
+    with pytest.raises(ValueError, match='runners'):
+        _ = FinalizeBatcher(
+            _ScriptedWrite(),
+            steady_runners=STEADY_RUNNERS[:1],
+            surge_runner=SURGE_RUNNER,
+            max_queued_rows=QUEUE_BOUND,
+            max_flushers=STEADY_ONLY,
+        )
+
+
+def test_the_worker_holds_a_connection_for_claims_and_one_per_steady_flusher() -> None:
+    worker = Worker(
+        session_factory=MagicMock(),
+        listener=MagicMock(),
+        cfg=WorkerConfig(
+            dsn='postgresql+psycopg://u:p@localhost/db',
+            psycopg_dsn='postgresql://u:p@localhost/db',
+            queues=['default'],
+            parent_pool_size=5,
+        ),
+    )
+    held = worker._held_connections  # pyright: ignore[reportPrivateUsage]
+    batch = worker._batch_connections  # pyright: ignore[reportPrivateUsage]
+
+    assert all(isinstance(connection, HeldConnection) for connection in held)
+    assert held == (worker._claim_runner, *batch)  # pyright: ignore[reportPrivateUsage]
+    assert len(batch) == FINALIZE_BATCH_FLUSHERS
+    assert len(set(map(id, held))) == len(held)

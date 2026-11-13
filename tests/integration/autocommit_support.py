@@ -32,7 +32,9 @@ from horsies.core.models.child_sizing import parent_pool_connections
 from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.types.result import Err, Ok
+from horsies.core.utils.db import PooledStatements
 from horsies.core.worker.config import WorkerConfig
+from horsies.core.worker.finalize_batch import FINALIZE_BATCH_FLUSHERS, FinalizeBatcher
 from horsies.core.worker.worker import Worker
 from tests.integration.conftest import compute_test_enqueue_sha
 from tests.integration.round_trip_proxy import RoundTripProxy, Turn
@@ -94,12 +96,34 @@ def upstream_of(database_url: str) -> tuple[str, int]:
     return url.host or '127.0.0.1', url.port or 5432
 
 
+def use_pooled_runners(worker: Worker) -> None:
+    """Give ``worker`` one checkout per statement for its claim pass and its
+    batched success write, in place of its held connections. For a test that
+    calls the worker's steps and never stops the worker: no connection stays
+    held after the test."""
+    pooled = PooledStatements(worker.sf)
+    worker._claim_runner = pooled  # pyright: ignore[reportPrivateUsage]
+    worker._finalize_batcher = FinalizeBatcher(  # pyright: ignore[reportPrivateUsage]
+        worker._write_fused_batch,  # pyright: ignore[reportPrivateUsage]
+        steady_runners=(pooled,) * FINALIZE_BATCH_FLUSHERS,
+        surge_runner=pooled,
+        max_queued_rows=worker._pending_task_limit(),  # pyright: ignore[reportPrivateUsage]
+        max_flushers=worker.cfg.parent_pool_size,
+    )
+    worker._held_connections = ()  # pyright: ignore[reportPrivateUsage]
+
+
 @dataclass(frozen=True, slots=True)
 class ProxiedWorker:
-    """A worker on a broker of its own. The caller closes the broker."""
+    """A worker on a broker of its own. The caller closes it (``close``)."""
 
     worker: Worker
     broker: PostgresBroker
+
+    async def close(self) -> None:
+        """Give the worker's held connections back, then close the broker."""
+        await self.worker._release_held_connections()  # pyright: ignore[reportPrivateUsage]
+        _ = await self.broker.close_async()
 
 
 async def open_proxied_worker(

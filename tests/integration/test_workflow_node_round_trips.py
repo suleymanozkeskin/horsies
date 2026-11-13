@@ -298,7 +298,7 @@ async def _measure(
                 labelled = measured
             steady = measured
     finally:
-        _ = await opened.broker.close_async()
+        await opened.close()
     assert labelled is not None and steady is not None
     return labelled, steady
 

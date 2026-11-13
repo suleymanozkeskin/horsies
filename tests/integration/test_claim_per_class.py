@@ -35,6 +35,7 @@ from horsies.core.worker.row_class import RowClassMismatch
 from horsies.core.worker.slots import SlotPool
 from horsies.core.worker.sql import HORSIES_CLAIM_SQL
 from horsies.core.worker.worker import Worker
+from horsies.core.utils.db import PooledStatements
 from tests.broker_resources_support import current_resources
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
@@ -851,6 +852,7 @@ class _Probe(ClaimMixin):
         registered: dict[str, Execution],
     ) -> None:
         self.sf = current_resources(broker).session_factory
+        self._claim_runner = PooledStatements(self.sf)
         self.cfg = WorkerConfig(
             dsn='unused',
             psycopg_dsn='unused',

@@ -86,6 +86,7 @@ from horsies.core.utils.imports import (
     import_file_path,
     setup_sys_path_from_cwd,
 )
+from horsies.core.utils.db import held_recycle
 from horsies.core.utils.url import to_psycopg_url
 
 
@@ -851,6 +852,7 @@ def worker_command(args: argparse.Namespace) -> None:
         psycopg_dsn=to_psycopg_url(postgres_config.effective_session_database_url),
         pgbouncer_transaction_mode=postgres_config.pgbouncer_transaction_mode,
         parent_pool_size=settings.parent_pool,
+        parent_pool_recycle=held_recycle(postgres_config.pool_recycle),
         isolated_pool=settings.isolated_pool,
         isolated_task_send_pool=settings.isolated_task_send_pool,
         child_connect_kwargs=postgres_config.pooled_connect_args,

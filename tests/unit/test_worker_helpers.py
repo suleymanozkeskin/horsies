@@ -45,6 +45,7 @@ from horsies.core.worker.claiming import (
     read_claim_rows,
 )
 from horsies.core.worker.sql import DELETE_ORPHANED_RECOVERY_FAILURES_SQL
+from horsies.core.utils.db import PooledStatements
 from horsies.core.worker.worker import (
     Worker,
     WorkerConfig,
@@ -3488,6 +3489,7 @@ class TestClaimPass:
         factory.return_value.__aenter__ = AsyncMock(return_value=session)
         factory.return_value.__aexit__ = AsyncMock(return_value=False)
         worker.sf = factory
+        worker._claim_runner = PooledStatements(factory)  # pyright: ignore[reportPrivateUsage]
 
         async def _keep(claimed: list[dict[str, object]]) -> list[dict[str, object]]:
             return claimed[:kept]
@@ -3512,6 +3514,7 @@ class TestClaimPass:
         factory.return_value.__aenter__ = AsyncMock(return_value=session)
         factory.return_value.__aexit__ = AsyncMock(return_value=False)
         worker.sf = factory
+        worker._claim_runner = PooledStatements(factory)  # pyright: ignore[reportPrivateUsage]
 
         async def _all_runnable(
             claimed: list[dict[str, object]],
@@ -3546,6 +3549,7 @@ class TestClaimPass:
         factory.return_value.__aenter__ = AsyncMock(return_value=session)
         factory.return_value.__aexit__ = AsyncMock(return_value=False)
         worker.sf = factory
+        worker._claim_runner = PooledStatements(factory)  # pyright: ignore[reportPrivateUsage]
 
         assert await worker._claim_and_dispatch_all() == ClaimPass(
             claimed=0,
@@ -3567,6 +3571,7 @@ class TestClaimPass:
         factory.return_value.__aenter__ = AsyncMock(return_value=session)
         factory.return_value.__aexit__ = AsyncMock(return_value=False)
         worker.sf = factory
+        worker._claim_runner = PooledStatements(factory)  # pyright: ignore[reportPrivateUsage]
 
         assert await worker._claim_and_dispatch_all() == _NO_CLAIM
 
@@ -3596,6 +3601,7 @@ class TestClaimPass:
         factory.return_value.__aenter__ = AsyncMock(return_value=session)
         factory.return_value.__aexit__ = AsyncMock(return_value=False)
         worker.sf = factory
+        worker._claim_runner = PooledStatements(factory)  # pyright: ignore[reportPrivateUsage]
 
         await worker._claim_and_dispatch_all()  # pyright: ignore[reportPrivateUsage]
 
@@ -5879,11 +5885,11 @@ class TestPersistTerminalStateFusedPath:
     @pytest.mark.asyncio
     async def test_plain_ok_result_uses_fused_statement(self) -> None:
         """Plain task + ok result → the fused command, written by the batch
-        write of the finalize batcher on the worker pool, Ok(None)."""
+        write of the finalize batcher on a held connection, Ok(None)."""
         worker, session = _make_session_worker(fetchone_results=[])
 
         with patch(
-            'horsies.core.worker.finalize.apply_fused_batch_in_autocommit',
+            'horsies.core.worker.finalize.apply_fused_batch',
             AsyncMock(
                 return_value=Ok((_applied(TerminalizationKind.COMPLETE_FUSED),)),
             ),
@@ -5893,7 +5899,8 @@ class TestPersistTerminalStateFusedPath:
         assert result.ok_value is None
         apply.assert_awaited_once()
         assert apply.await_args is not None
-        assert apply.await_args.args[0] is worker.sf
+        # A steady flusher writes on its held connection.
+        assert apply.await_args.args[0] in worker._batch_connections  # pyright: ignore[reportPrivateUsage]
         batch = apply.await_args.args[1]
         assert isinstance(batch, FusedCompletionBatch)
         (command,) = batch.commands
@@ -5914,7 +5921,7 @@ class TestPersistTerminalStateFusedPath:
         worker, session = _make_session_worker(fetchone_results=[])
 
         with patch(
-            'horsies.core.worker.finalize.apply_fused_batch_in_autocommit',
+            'horsies.core.worker.finalize.apply_fused_batch',
             AsyncMock(return_value=Ok((_lost_claim(),))),
         ):
             result = await self._persist_plain_ok(worker)
@@ -5972,7 +5979,7 @@ class TestPersistTerminalStateFusedPath:
         worker, _session = _make_session_worker(fetchone_results=[])
 
         with patch(
-            'horsies.core.worker.finalize.apply_fused_batch_in_autocommit',
+            'horsies.core.worker.finalize.apply_fused_batch',
             AsyncMock(return_value=Err(error)),
         ):
             result = await self._persist_plain_ok(worker)

@@ -34,6 +34,7 @@ from horsies.core.worker.child_pool import _initialize_worker_pool
 from horsies.core.worker.claiming import ClaimMixin
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.workflows.lifecycle import resume_workflow
+from horsies.core.utils.db import PooledStatements
 from tests.integration.conftest import DB_URL, compute_test_enqueue_sha
 from tests.broker_resources_support import current_resources, listener_of
 
@@ -109,6 +110,7 @@ def _claim_filter_probe(broker: PostgresBroker) -> ClaimMixin:
     class _Probe(ClaimMixin):
         def __init__(self) -> None:
             self.sf = current_resources(broker).session_factory
+            self._claim_runner = PooledStatements(self.sf)
             self.cfg = cfg
             self.worker_instance_id = WORKER_ID
 

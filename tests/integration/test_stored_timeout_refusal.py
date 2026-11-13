@@ -44,6 +44,7 @@ from horsies.core.worker.stored_timeout import (
 )
 from horsies.core.worker.worker import Worker, _initialize_worker_pool, _run_task_entry
 from horsies.core.worker.task_loop import TaskLoop
+from tests.integration.autocommit_support import use_pooled_runners
 from tests.broker_resources_support import current_resources, listener_of
 from tests.fixtures.slots.handles import task_finished_handle
 from tests.integration.history_seeding import read_attempts
@@ -77,6 +78,8 @@ def _make_worker(broker: PostgresBroker, app: Horsies) -> Worker:
     worker.broker = broker
     # No slot pool: every configured slot counts.
     worker._claim_slot_count = lambda: cfg.processes  # type: ignore[method-assign]
+    # Terminal-state writes, one checkout per statement: no worker stop here.
+    use_pooled_runners(worker)
     return worker
 
 

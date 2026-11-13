@@ -74,7 +74,7 @@ from horsies.core.lifecycle.persistence import (
     BatchRolledBack,
     BatchWriteError,
     FusedCompletionBatch,
-    apply_fused_batch_in_autocommit,
+    apply_fused_batch,
     apply_in_autocommit,
 )
 from horsies.core.logging import get_logger
@@ -116,6 +116,7 @@ from horsies.core.worker.slots import (
     TaskFinished,
 )
 from horsies.core.utils.db import (
+    StatementRunner,
     autocommit_connection,
     is_retryable_connection_error,
 )
@@ -1374,9 +1375,11 @@ class FinalizeMixin:
     async def _write_fused_batch(
         self,
         batch: FusedCompletionBatch,
+        runner: StatementRunner,
     ) -> Result[tuple[TerminalizationOutcome, ...], BatchWriteError]:
-        """Write ``batch`` on the worker pool. The write of the batcher."""
-        return await apply_fused_batch_in_autocommit(self.sf, batch)
+        """Write ``batch`` on ``runner``: a held connection of a steady
+        flusher, or a checkout per statement. The write of the batcher."""
+        return await apply_fused_batch(runner, batch)
 
     async def _complete_plain_success(
         self,

@@ -136,7 +136,7 @@ async def _measure(
     try:
         (task_id, _), turns = await steady_state_turns(proxy, arrange, act)
     finally:
-        _ = await opened.broker.close_async()
+        await opened.close()
     return task_id, len(turns), turns
 
 

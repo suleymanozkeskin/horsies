@@ -510,6 +510,28 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **The worker keeps one connection for its claim loop and for each steady
+  finalize flusher.** Each claim pass and each batched completion took a
+  connection from the worker pool and gave it back, so each statement paid
+  a checkout, and a ping when `worker_pool_pre_ping` is on. The claim loop
+  and the two steady flushers of the finalize batcher now hold one pool
+  connection each, in autocommit, and send each statement on its psycopg
+  connection. A flusher started for a surge takes a connection per
+  statement, as before.
+  - A held connection goes back to the pool after 1 s with no statement,
+    when it reaches the `pool_recycle` age, and at the worker stop.
+  - A connection error on a held connection is a lost outcome
+    (`OutcomeUnknown`). The claim loop retries the pass, and finalize
+    retries and classifies the replay, as before. SQLAlchemy's disconnect
+    handling then replaces every connection of the pool. A cancelled
+    statement drops its held connection.
+  - A plain success finalize is one round trip, with `worker_pool_pre_ping`
+    on or off: the held connection needs no checkout.
+  - With 20,000 no-op tasks, 3 runs each: 8 isolated children 1,540-1,674 →
+    1,799-1,925 tasks/s, Postgres CPU per task 1.49-1.62 → 1.32-1.42 ms;
+    8 shared async children of 100 slots 4,109-4,204 → 4,150-4,288
+    tasks/s.
+
 - **A task row is read by its id alone (schema v60).** The start of a task,
   its finalizing marker, and the completion and failure functions
   (`horsies_complete_task_fused`, `horsies_complete_locked_task`,
