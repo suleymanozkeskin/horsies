@@ -31,7 +31,7 @@ from psycopg import InterfaceError, OperationalError
 from psycopg.rows import TupleRow
 from psycopg.types.string import TextLoader
 from sqlalchemy import TextClause, event
-from sqlalchemy.engine import Dialect
+from sqlalchemy.engine import Dialect, Engine
 from sqlalchemy.exc import (
     DBAPIError,
     InvalidatePoolError,
@@ -90,6 +90,19 @@ def register_identity_text_reads(engine: AsyncEngine) -> None:
         )
 
 
+def _sync_engine_of(engine: AsyncEngine | Engine) -> Engine | None:
+    """The sync engine that SQLAlchemy events attach to: an ``AsyncEngine``'s
+    ``sync_engine``, or the ``Engine`` itself. None for anything else (a test
+    double), so that registration is a no-op for it."""
+    match engine:
+        case AsyncEngine():
+            return engine.sync_engine
+        case Engine():
+            return engine
+        case _:
+            return None
+
+
 class SessionSettings(Enum):
     """Whether a pooled server session keeps a client's session settings.
 
@@ -109,17 +122,18 @@ DISABLE_JIT_SQL: Final = 'SET jit = off'
 
 
 def register_session_settings(
-    engine: AsyncEngine,
+    engine: AsyncEngine | Engine,
     settings: SessionSettings,
 ) -> None:
     """Run ``SET jit = off`` once on each new connection that keeps it.
 
     The SET runs in autocommit, so a rollback of the connection's first
     transaction cannot undo it. A NOT_KEPT engine keeps the server's JIT
-    configuration. Like ``register_identity_text_reads``, registration is
-    a no-op for anything that is not a real ``AsyncEngine``.
+    configuration. Registration is a no-op for anything that is not a real
+    ``AsyncEngine`` or ``Engine``.
     """
-    if not isinstance(engine, AsyncEngine):  # pyright: ignore[reportUnnecessaryIsInstance]
+    sync_engine = _sync_engine_of(engine)
+    if sync_engine is None:
         return
     match settings:
         case SessionSettings.NOT_KEPT:
@@ -139,7 +153,7 @@ def register_session_settings(
         finally:
             dbapi_connection.autocommit = autocommit
 
-    event.listen(engine.sync_engine, 'connect', _disable_jit)
+    event.listen(sync_engine, 'connect', _disable_jit)
 
 
 CHECKED_IN_AT_KEY: Final = 'horsies_checked_in_at'
@@ -148,7 +162,7 @@ its last check-in. SQLAlchemy clears ``info`` when it replaces the
 connection, so a new connection has no entry."""
 
 
-def register_idle_ping(engine: AsyncEngine, after_idle_s: float) -> None:
+def register_idle_ping(engine: AsyncEngine | Engine, after_idle_s: float) -> None:
     """Ping a pooled connection of ``engine`` at checkout when it waited in
     the pool for longer than ``after_idle_s``. This replaces SQLAlchemy's
     ``pool_pre_ping``, which pings at every checkout.
@@ -168,12 +182,13 @@ def register_idle_ping(engine: AsyncEngine, after_idle_s: float) -> None:
     It does not ping a connection in use, and it does not retry a statement:
     a connection that dies within ``after_idle_s`` of its check-in fails the
     next statement on it, as a connection that dies after a ping does.
-    Registration is a no-op for anything that is not a real ``AsyncEngine``,
-    as with ``register_session_settings``.
+    Registration is a no-op for anything that is not a real ``AsyncEngine``
+    or ``Engine``, as with ``register_session_settings``.
     """
-    if not isinstance(engine, AsyncEngine):  # pyright: ignore[reportUnnecessaryIsInstance]
+    sync_engine = _sync_engine_of(engine)
+    if sync_engine is None:
         return
-    dialect = engine.sync_engine.dialect
+    dialect = sync_engine.dialect
 
     def _mark_checkin(dbapi_connection: Any, connection_record: Any) -> None:
         if dbapi_connection is None:
@@ -203,8 +218,8 @@ def register_idle_ping(engine: AsyncEngine, after_idle_s: float) -> None:
                 ) from exc
             raise
 
-    event.listen(engine.sync_engine.pool, 'checkin', _mark_checkin)
-    event.listen(engine.sync_engine.pool, 'checkout', _ping_after_idle)
+    event.listen(sync_engine.pool, 'checkin', _mark_checkin)
+    event.listen(sync_engine.pool, 'checkout', _ping_after_idle)
 
 
 def is_dbapi_disconnect(exc: DBAPIError) -> bool:

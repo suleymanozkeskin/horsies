@@ -51,7 +51,8 @@ connections for the same rate: set
 
 Producers hold their own engine pool (`pool_size + max_overflow`, default
 5 + 10) per resource set: one set for each event loop that makes broker calls,
-plus one for sync calls (see [Broker Config](/horsies/configuration/broker-config/#event-loops)).
+plus one for sync calls, and one more pool of the same size for sync sends
+(see [Connection Ceiling](/horsies/configuration/broker-config/#connection-ceiling)).
 
 Size against the server's effective capacity, not its nominal
 `max_connections`: subtract superuser-reserved slots and any connections
