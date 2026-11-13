@@ -234,11 +234,17 @@ class TestProgram:
         assert _BODY.index('FROM horsies_tasks') < _BODY.index('FOR UPDATE')
 
     def test_the_fence_holds_the_worker_and_the_generation(self) -> None:
-        fence = _BODY[_BODY.index('FROM horsies_tasks') : _BODY.index('FOR UPDATE')]
+        """The row is read and locked by its id alone; the claim is checked
+        on the locked row, and a NULL comparison counts as a miss."""
+        read = _BODY[_BODY.index('FROM horsies_tasks') : _BODY.index('FOR UPDATE')]
+        fence = _BODY[_BODY.index('FOR UPDATE') : _BODY.index('RETURN QUERY')]
 
-        assert "status = 'RUNNING'" in fence
-        assert 'claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)' in fence
-        assert '(p_claimed_at IS NULL OR claimed_at = p_claimed_at)' in fence
+        assert 'WHERE id = p_task_id' in read
+        assert 'status' not in read
+        assert "v_ctx.status = 'RUNNING'" in fence
+        assert 'v_ctx.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)' in fence
+        assert '(p_claimed_at IS NULL OR v_ctx.claimed_at = p_claimed_at)' in fence
+        assert ') IS NOT TRUE THEN' in fence
 
     def test_a_plain_task_is_refused_before_any_write(self) -> None:
         refusal = _BODY.index('IF NOT v_ctx.is_workflow_task THEN')
