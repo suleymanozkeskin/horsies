@@ -73,12 +73,17 @@ async def _rows_with_drain_start_statistics(session: AsyncSession, status: str) 
         text("""
             UPDATE horsies_tasks
             SET status = :status,
-                claimed = (:status = 'CLAIMED'),
+                claimed = :claimed,
                 claimed_at = NOW(),
                 claimed_by_worker_id = :worker_id,
-                started_at = CASE WHEN :status = 'RUNNING' THEN NOW() END
+                started_at = CASE WHEN :started THEN NOW() END
         """),
-        {'status': status, 'worker_id': WORKER_ID},
+        {
+            'status': status,
+            'claimed': status == 'CLAIMED',
+            'started': status == 'RUNNING',
+            'worker_id': WORKER_ID,
+        },
     )
     await session.commit()
     task_id = (await session.execute(text('SELECT CAST(id AS text) FROM horsies_tasks LIMIT 1'))).scalar_one()
