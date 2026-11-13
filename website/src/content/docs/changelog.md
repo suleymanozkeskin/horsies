@@ -506,6 +506,20 @@ there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **`pool_pre_ping` pings only a connection that waited in the pool for more
+  than 1 s.** SQLAlchemy's `pool_pre_ping` pinged at every checkout: one
+  round trip more for each send of a producer. The broker now registers its
+  own checkout hook (`register_idle_ping`), with SQLAlchemy's ping off: a
+  connection checked in within `PRE_PING_AFTER_IDLE_S` (1 s), and a new
+  connection, are used with no ping. `worker_pool_pre_ping` has the same
+  meaning for the engine of the worker process.
+  - A ping that finds a dead connection replaces it and every connection
+    checked in before it, and the checkout takes a new one, as before.
+  - A connection that dies within 1 s of its check-in fails its next
+    statement with a retryable connection error; for a send,
+    `TaskSendEnqueueFailed(retryable=True)`. The ping never covered a
+    connection that dies after it.
+
 - **The worker keeps one connection for its claim loop and for each steady
   finalize flusher.** Each claim pass and each batched completion took a
   connection from the worker pool and gave it back, so each statement paid

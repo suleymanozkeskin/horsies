@@ -79,6 +79,20 @@ class TestPostgresConfigPgBouncer:
 
         assert 'worker_pool_pre_ping' not in config.sqlalchemy_engine_kwargs()
 
+    @pytest.mark.parametrize('pool_pre_ping', [True, False])
+    def test_sqlalchemy_engine_kwargs_leave_the_ping_to_the_broker(
+        self,
+        pool_pre_ping: bool,
+    ) -> None:
+        """SQLAlchemy's own pre-ping pings at every checkout; it stays off.
+        The broker registers the ping of idle connections itself."""
+        config = PostgresConfig(
+            database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+            pool_pre_ping=pool_pre_ping,
+        )
+
+        assert 'pool_pre_ping' not in config.sqlalchemy_engine_kwargs()
+
     def test_the_worker_process_does_not_pre_ping_by_default(self) -> None:
         """The worker's writes are one statement in autocommit; a pre-ping
         would double their round trips. Producer engines keep theirs, also
@@ -88,11 +102,10 @@ class TestPostgresConfigPgBouncer:
         )
 
         assert config.worker_pool_pre_ping is False
-        assert config.sqlalchemy_engine_kwargs()['pool_pre_ping'] is True
-        child_send = config.with_exact_pool(2).sqlalchemy_engine_kwargs()
-        assert child_send['pool_pre_ping'] is True
+        assert config.pool_pre_ping is True
+        assert config.with_exact_pool(2).pool_pre_ping is True
         worker = config.worker_process_config(7)
-        assert worker.sqlalchemy_engine_kwargs()['pool_pre_ping'] is False
+        assert worker.pool_pre_ping is False
         assert (worker.pool_size, worker.max_overflow) == (7, 0)
 
     def test_the_worker_process_pre_pings_when_set(self) -> None:
@@ -102,11 +115,10 @@ class TestPostgresConfigPgBouncer:
             worker_pool_pre_ping=True,
         )
 
-        assert config.sqlalchemy_engine_kwargs()['pool_pre_ping'] is False
-        child_send = config.with_exact_pool(2).sqlalchemy_engine_kwargs()
-        assert child_send['pool_pre_ping'] is False
+        assert config.pool_pre_ping is False
+        assert config.with_exact_pool(2).pool_pre_ping is False
         worker = config.worker_process_config(7)
-        assert worker.sqlalchemy_engine_kwargs()['pool_pre_ping'] is True
+        assert worker.pool_pre_ping is True
         assert (worker.pool_size, worker.max_overflow) == (7, 0)
 
     @pytest.mark.parametrize('parent_pool', [0, -1])

@@ -308,8 +308,8 @@ config = PostgresConfig(
 | `retain_rerun_input_default` | `bool` | `False` | App-level default for enqueue-time rerun-input retention; a per-task value overrides it and the resolved value is snapshotted at enqueue. A task enqueued without a retained input cannot be rerun later |
 | `pool_timeout` | `int` | `30` | Seconds to wait for a connection |
 | `pool_recycle` | `int` | `1800` | Seconds before connections are recycled |
-| `pool_pre_ping` | `bool` | `True` | Pre-ping connections before use, in every engine but the worker process's |
-| `worker_pool_pre_ping` | `bool` | `False` | Pre-ping the worker process's connections. Off: a one-statement write is one round trip, and a dead connection fails its first statement as a retryable connection error |
+| `pool_pre_ping` | `bool` | `True` | Ping a pooled connection at checkout when it waited in the pool for more than 1 s (`PRE_PING_AFTER_IDLE_S`), in every engine but the worker process's |
+| `worker_pool_pre_ping` | `bool` | `False` | Ping a pooled connection of the worker process at checkout when it waited in the pool for more than 1 s. Off: a one-statement write is one round trip, and a dead connection fails its first statement as a retryable connection error |
 | `tcp_keepalives` | `bool` | `True` | Enable libpq TCP keepalives on broker and child-process connections |
 | `tcp_keepalives_idle` | `int` | `30` | Idle seconds before the first keepalive probe (libpq `keepalives_idle`) |
 | `tcp_keepalives_interval` | `int` | `10` | Seconds between keepalive probes (libpq `keepalives_interval`) |
@@ -351,7 +351,8 @@ the child x 2 writes x time of one write; keep the pool above it.
 or middlebox idle-reap is detected and recycled at the socket layer instead of
 surfacing as a mid-query `OperationalError`. `pool_pre_ping`,
 `worker_pool_pre_ping` and `pool_recycle` are checkout-time guards and cannot
-catch a connection that dies in-flight. The
+catch a connection that dies in-flight. The pre-ping settings check only a
+connection that waited in the pool for more than 1 s. The
 keepalives apply to the broker engine pool and each child-process pool; the
 LISTEN/NOTIFY listener sets its own keepalives independently. Without them, the
 OS idle default (often 7200s) outlives a pooler's idle-reap window — e.g.

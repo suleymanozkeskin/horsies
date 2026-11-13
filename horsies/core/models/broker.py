@@ -41,6 +41,7 @@ class PostgresConfig(BaseModel):
         'session_database_url',
         'pgbouncer_transaction_mode',
         'retain_rerun_input_default',
+        'pool_pre_ping',
         'worker_pool_pre_ping',
         'tcp_keepalives',
         'tcp_keepalives_idle',
@@ -63,13 +64,22 @@ class PostgresConfig(BaseModel):
         default=False,
         description='Disable prepared statements for transaction-pooled PgBouncer URLs',
     )
+    # The ping runs at checkout only for a connection that waited in the
+    # pool for longer than PRE_PING_AFTER_IDLE_S (register_idle_ping). A
+    # connection that dies within that time of its check-in fails the next
+    # statement on it, as one that dies after a ping does.
     pool_pre_ping: bool = Field(
-        default=True, description='Whether to pre-ping the database connection pool'
+        default=True,
+        description=(
+            'Whether to ping a pooled connection at checkout when it waited '
+            'in the pool for longer than PRE_PING_AFTER_IDLE_S (1 s)'
+        ),
     )
     # The pre-ping of the worker process's engine (worker_process_config).
     # The worker sends most of its writes as one statement in autocommit:
-    # one round trip each. A pre-ping adds a round trip to each
-    # checkout. With it off, a dead pooled connection shows at the first
+    # one round trip each. A pre-ping adds a round trip to a checkout of a
+    # connection that waited in the pool for longer than
+    # PRE_PING_AFTER_IDLE_S. With it off, a dead pooled connection shows at the first
     # statement instead, as a connection error: finalize retries its phase
     # and classifies the replay, the claim loop retries the pass. TCP
     # keepalives and tcp_user_timeout_ms still apply.

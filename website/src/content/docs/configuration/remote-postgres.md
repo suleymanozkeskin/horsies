@@ -133,8 +133,11 @@ Soft-cap semantics and fairness trade-offs are covered in
 
 ## Health Checks at High RTT
 
-Three settings can check a pooled connection on each checkout, at one
-round trip each:
+Three settings can check a pooled connection at checkout, at one round trip
+each. The two pre-ping settings check a connection only when it waited in the
+pool for more than 1 s (`PRE_PING_AFTER_IDLE_S`). A connection checked in more
+recently is used with no check, so a burst of statements pays no checks. The
+`check` of a child pool runs at every checkout.
 
 | Setting | Default | Scope |
 |---------|---------|-------|
@@ -207,7 +210,9 @@ config = AppConfig(
 
 `pool_pre_ping`, `worker_pool_pre_ping` and the `check` of each child pool are
 checkout-time guards: they detect a dead connection *before* a query runs, not
-one that dies in-flight.
+one that dies in-flight. The pre-ping settings check only a connection that
+waited in the pool for more than 1 s, so a connection that dies within 1 s of
+its check-in fails its next statement with a retryable connection error.
 An idle pooled connection reaped server-side between checkouts surfaces as a
 mid-query `OperationalError` on the next claim or heartbeat — absorbed by the
 worker's retry loop, but logged as noise.
