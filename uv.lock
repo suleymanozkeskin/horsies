@@ -241,10 +241,10 @@ dependencies = [
 
 [package.optional-dependencies]
 pg-binary = [
-    { name = "psycopg-binary" },
+    { name = "psycopg", extra = ["binary"] },
 ]
 pg-c = [
-    { name = "psycopg-c" },
+    { name = "psycopg", extra = ["c"] },
 ]
 web = [
     { name = "fastapi" },
@@ -257,7 +257,7 @@ dev = [
     { name = "fastapi" },
     { name = "httpx" },
     { name = "jinja2" },
-    { name = "psycopg-binary" },
+    { name = "psycopg", extra = ["binary"] },
     { name = "pyright" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -272,8 +272,8 @@ requires-dist = [
     { name = "greenlet", specifier = ">=3.3.0" },
     { name = "psutil", specifier = ">=7.2.1" },
     { name = "psycopg", specifier = ">=3.3.7" },
-    { name = "psycopg-binary", marker = "extra == 'pg-binary'", specifier = ">=3.3.7" },
-    { name = "psycopg-c", marker = "extra == 'pg-c'", specifier = ">=3.3.7" },
+    { name = "psycopg", extras = ["binary"], marker = "extra == 'pg-binary'", specifier = ">=3.3.7" },
+    { name = "psycopg", extras = ["c"], marker = "extra == 'pg-c'", specifier = ">=3.3.7" },
     { name = "psycopg-pool", specifier = ">=3.2.0" },
     { name = "pydantic", specifier = ">=2.12.5" },
     { name = "sqlalchemy", specifier = ">=2.0.46" },
@@ -287,7 +287,7 @@ dev = [
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "jinja2", specifier = ">=3.1.0" },
-    { name = "psycopg-binary", specifier = ">=3.3.7" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.3.7" },
     { name = "pyright", specifier = ">=1.1.409" },
     { name = "pytest", specifier = ">=8.3.4" },
     { name = "pytest-asyncio", specifier = ">=0.25.0" },
@@ -471,6 +471,14 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/77/a3/55c9fb649391fddec8d7ba3005162cd76e8cb3b2eea3dc922684aa0013e4/psycopg-3.3.7.tar.gz", hash = "sha256:6574f23fd79bf129ee0616b49f6e358faf7ae1bf3a362d2ad599cf8f9c3d4935", size = 168912, upload-time = "2026-11-03T03:58:07.876Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b0/2a/2e05cc01b2817b8baff419823774bb928efd0a36de12da78f19482cfa329/psycopg-3.3.7-py3-none-any.whl", hash = "sha256:d592e88a077e01ff57f22d59f16e828b92f2b2d9f439b6679d582b48d74cf306", size = 216207, upload-time = "2026-11-03T03:51:21.09Z" },
+]
+
+[package.optional-dependencies]
+binary = [
+    { name = "psycopg-binary", marker = "implementation_name != 'pypy'" },
+]
+c = [
+    { name = "psycopg-c", marker = "implementation_name != 'pypy'" },
 ]
 
 [[package]]
