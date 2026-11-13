@@ -17,7 +17,7 @@ tags: [migration, 0.7.0, breaking-changes, worker, profiles, cli, schema, execut
 
 ## Dependencies
 
-horsies 0.7.0 requires psycopg 3.3.7 or later. The `pg-binary` and `pg-c` extras require `psycopg-binary` or `psycopg-c` 3.3.7 or later. Before 3.3.6, psycopg waited with no limit for an interrupted query to end. 3.3.7 also sends the cancel request when the cancel connection is not ready at once. The 5-second limit on the cancel request also needs libpq 17 or later. See [psycopg and libpq](/horsies/configuration/broker-config/#psycopg-and-libpq).
+horsies 0.7.0 requires psycopg 3.3.7 or later. The `pg-binary` and `pg-c` extras require `psycopg[binary]` or `psycopg[c]` 3.3.7 or later, which install the C build of the same version as psycopg. Before 3.3.6, psycopg waited with no limit for an interrupted query to end. 3.3.7 also sends the cancel request when the cancel connection is not ready at once. The 5-second limit on the cancel request also needs libpq 17 or later. See [psycopg and libpq](/horsies/configuration/broker-config/#psycopg-and-libpq).
 
 ## Worker settings move into profiles
 
