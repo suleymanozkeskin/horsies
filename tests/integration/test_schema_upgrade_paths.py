@@ -39,7 +39,7 @@ from horsies.core.history.terminalization.move import (
 )
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.schemas import recovery as recovery_schema
-from horsies.core.schemas.migrations import SCHEMA_VERSION
+from horsies.core.schemas.migrations import CREATE_CLAIM_FUNCTION_SQL, SCHEMA_VERSION
 from horsies.core.schemas.terminalization import OUTCOME_COLUMNS, OUTCOME_TYPE
 from pydantic import SecretStr
 from tests.integration.conftest import DB_URL
@@ -301,6 +301,51 @@ _MOVE_STATUS_EVENT = re.compile(r"    PERFORM pg_notify\('horsies_task_status', 
 _BY_ID_READ = 'WHERE id = p_task_id\n    FOR UPDATE;'
 _FENCED_READ = "WHERE id = p_task_id\n      AND status = 'RUNNING'\n    FOR UPDATE;"
 
+
+# The call of v61 in horsies_claim, and the in-flight count that the claim of
+# v60 ran in its own body.
+_V61_IN_FLIGHT_CALL = """    SELECT c.my_claimed, c.my_in_flight, c.global_in_flight, c.queue_counts,
+           c.budget_counts
+    INTO v_my_claimed, v_my_in_flight, v_global_in_flight, v_queue_counts,
+         v_budget_counts
+    FROM horsies_claim_in_flight(
+        p_worker_id, v_capped, p_hard_cap_mode, p_routes
+    ) AS c;
+"""
+_V60_IN_FLIGHT_COUNT = """    WITH in_flight AS (
+        SELECT t.queue_name, t.status, t.claimed_by_worker_id, t.execution
+        FROM horsies_tasks t
+        WHERE t.status = 'RUNNING'
+           OR (t.status = 'CLAIMED'
+               AND (t.claim_expires_at IS NULL OR t.claim_expires_at > now()))
+    )
+    SELECT
+        COUNT(*) FILTER (
+            WHERE f.claimed_by_worker_id = p_worker_id AND f.status = 'CLAIMED'),
+        COUNT(*) FILTER (WHERE f.claimed_by_worker_id = p_worker_id),
+        COUNT(*),
+        COALESCE((
+            SELECT jsonb_object_agg(g.queue_name, g.cnt) FROM (
+                SELECT q.queue_name, COUNT(*) AS cnt
+                FROM in_flight q
+                WHERE q.queue_name = ANY(v_capped)
+                  AND (p_hard_cap_mode OR q.status = 'RUNNING')
+                GROUP BY q.queue_name
+            ) g
+        ), '{}'::jsonb),
+        COALESCE((
+            SELECT jsonb_object_agg(g.budget_class, g.cnt) FROM (
+                SELECT p_routes ->> m.execution AS budget_class, COUNT(*) AS cnt
+                FROM in_flight m
+                WHERE m.claimed_by_worker_id = p_worker_id
+                  AND p_routes ? m.execution
+                GROUP BY 1
+            ) g
+        ), '{}'::jsonb)
+    INTO v_my_claimed, v_my_in_flight, v_global_in_flight, v_queue_counts,
+         v_budget_counts
+    FROM in_flight f;
+"""
 
 def _function_name(ddl: str) -> str:
     match = re.search(r"FUNCTION\s+([a-z_]+)\s*\(", ddl)
@@ -2203,6 +2248,57 @@ class TestUpgradePaths:
                 assert (
                     await conn.execute(by_id_sql, {'names': names, 'read': _BY_ID_READ})
                 ).scalars().all() == names
+        finally:
+            await engine.dispose()
+
+    async def test_claim_in_flight_upgrade_from_60(
+        self,
+        scratch_database: str,
+    ) -> None:
+        """A v60 database, whose claim counts the in-flight rows in its own
+        body, gets at v61 horsies_claim_in_flight with its planner settings and
+        a claim that calls it; a second apply changes nothing."""
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        state_sql = text("""
+            SELECT
+                (SELECT array_to_string(proconfig, ',') FROM pg_proc
+                 WHERE proname = 'horsies_claim_in_flight'),
+                (SELECT position('horsies_claim_in_flight(' IN prosrc) > 0
+                 FROM pg_proc WHERE proname = 'horsies_claim')
+        """)
+        v61_state = ('jit=off,enable_bitmapscan=off,enable_seqscan=off', True)
+        claim_v61 = CREATE_CLAIM_FUNCTION_SQL.text
+        assert claim_v61.count(_V61_IN_FLIGHT_CALL) == 1
+        claim_v60 = claim_v61.replace(_V61_IN_FLIGHT_CALL, _V60_IN_FLIGHT_COUNT)
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text(claim_v60))
+                await conn.execute(
+                    text(
+                        'DROP FUNCTION horsies_claim_in_flight'
+                        '(text, text[], boolean, jsonb)'
+                    )
+                )
+                assert tuple((await conn.execute(state_sql)).one()) == (None, False)
+                await conn.execute(
+                    text('DELETE FROM horsies_schema_version WHERE version >= 61')
+                )
+                await conn.execute(
+                    text(
+                        'INSERT INTO horsies_schema_version(version) VALUES (60) '
+                        'ON CONFLICT DO NOTHING'
+                    )
+                )
+            assert await _stored_version(engine) == 60
+            await _migrate(scratch_database)
+            async with engine.connect() as conn:
+                assert await _stored_version(engine) == SCHEMA_VERSION
+                assert tuple((await conn.execute(state_sql)).one()) == v61_state
+
+            await _migrate(scratch_database)
+            async with engine.connect() as conn:
+                assert tuple((await conn.execute(state_sql)).one()) == v61_state
         finally:
             await engine.dispose()
 

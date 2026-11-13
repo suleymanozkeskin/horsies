@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Final
+
 from sqlalchemy import text
 
 from horsies.core.models.tasks import Execution
@@ -409,8 +411,12 @@ from horsies.core.models.tasks import Execution
 #      their row by id alone and check the fence on the locked row, so only
 #      the primary key serves the read whatever the statistics say. Same
 #      signatures, outcomes and locks.
+# v61: the in-flight count of horsies_claim runs in horsies_claim_in_flight:
+#      one IN list on status, with bitmap and sequential scans off, so the
+#      count is a plain scan of ix_horsies_tasks_status that marks the dead
+#      entries it passes. Same rows and counts.
 
-SCHEMA_VERSION = 60
+SCHEMA_VERSION = 61
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,
@@ -597,6 +603,82 @@ ANALYZE_EXPRESSION_INDEXED_TABLES_SQL = text("""
     ANALYZE horsies_tasks, horsies_workflows;
 """)
 
+# The rows that count as in flight: RUNNING, and CLAIMED with a valid lease.
+# One IN list on status is one index condition of ix_horsies_tasks_status;
+# the lease is a filter. Same rows as "status = 'RUNNING' OR (status =
+# 'CLAIMED' AND <lease valid>)".
+CLAIM_IN_FLIGHT_ROWS_SQL: Final[str] = """SELECT t.queue_name, t.status, t.claimed_by_worker_id, t.execution
+        FROM horsies_tasks t
+        WHERE t.status IN ('RUNNING', 'CLAIMED')
+          AND (t.status = 'RUNNING'
+               OR t.claim_expires_at IS NULL OR t.claim_expires_at > now())"""
+
+# The in-flight count of horsies_claim (v61).
+#
+# A task that finishes leaves two dead entries in ix_horsies_tasks_status,
+# one CLAIMED and one RUNNING. A plain index scan marks each dead entry that
+# it passes, so later scans skip it, and nbtree removes the marked entries
+# before it splits the leaf page. A bitmap scan marks none: it reads the heap
+# for every dead entry until vacuum. An OR of two status conditions gets a
+# bitmap scan, so the count is one IN list on status, and the function turns
+# off bitmap and sequential scans: the plan is the scan of the status index
+# whatever the statistics say. Without them, statistics that show most rows
+# in flight give a sequential scan of the whole table. Each claim pass marks
+# the entries that died since the pass before.
+CREATE_CLAIM_IN_FLIGHT_FUNCTION_SQL = text(f"""
+CREATE OR REPLACE FUNCTION horsies_claim_in_flight(
+    p_worker_id text,
+    p_capped text[],
+    p_hard_cap_mode boolean,
+    p_routes jsonb
+)
+RETURNS TABLE(
+    my_claimed bigint,
+    my_in_flight bigint,
+    global_in_flight bigint,
+    queue_counts jsonb,
+    budget_counts jsonb
+)
+LANGUAGE plpgsql
+STABLE
+SET jit = off
+SET enable_bitmapscan = off
+SET enable_seqscan = off
+AS $func$
+#variable_conflict use_column
+BEGIN
+    RETURN QUERY
+    WITH in_flight AS (
+        {CLAIM_IN_FLIGHT_ROWS_SQL}
+    )
+    SELECT
+        COUNT(*) FILTER (
+            WHERE f.claimed_by_worker_id = p_worker_id AND f.status = 'CLAIMED'),
+        COUNT(*) FILTER (WHERE f.claimed_by_worker_id = p_worker_id),
+        COUNT(*),
+        COALESCE((
+            SELECT jsonb_object_agg(g.queue_name, g.cnt) FROM (
+                SELECT q.queue_name, COUNT(*) AS cnt
+                FROM in_flight q
+                WHERE q.queue_name = ANY(p_capped)
+                  AND (p_hard_cap_mode OR q.status = 'RUNNING')
+                GROUP BY q.queue_name
+            ) g
+        ), '{{}}'::jsonb),
+        COALESCE((
+            SELECT jsonb_object_agg(g.budget_class, g.cnt) FROM (
+                SELECT p_routes ->> m.execution AS budget_class, COUNT(*) AS cnt
+                FROM in_flight m
+                WHERE m.claimed_by_worker_id = p_worker_id
+                  AND p_routes ? m.execution
+                GROUP BY 1
+            ) g
+        ), '{{}}'::jsonb)
+    FROM in_flight f;
+END;
+$func$;
+""")
+
 # Collapsed claim. The advisory lock is the FIRST imperative statement (a
 # plpgsql function executes sequentially), guaranteeing acquisition before any
 # read with predictable ordering — a raw CTE cannot guarantee this. Held until
@@ -701,42 +783,17 @@ BEGIN
     INTO v_capped
     FROM jsonb_object_keys(p_queue_max_concurrency) AS key;
 
-    -- 2. Counts under the lock snapshot. Per-queue counts: hard mode counts
-    --    RUNNING+CLAIMED, soft counts RUNNING. Per-budget counts: this
-    --    worker's in-flight rows, by the budget that their class routes to.
-    WITH in_flight AS (
-        SELECT t.queue_name, t.status, t.claimed_by_worker_id, t.execution
-        FROM horsies_tasks t
-        WHERE t.status = 'RUNNING'
-           OR (t.status = 'CLAIMED'
-               AND (t.claim_expires_at IS NULL OR t.claim_expires_at > now()))
-    )
-    SELECT
-        COUNT(*) FILTER (
-            WHERE f.claimed_by_worker_id = p_worker_id AND f.status = 'CLAIMED'),
-        COUNT(*) FILTER (WHERE f.claimed_by_worker_id = p_worker_id),
-        COUNT(*),
-        COALESCE((
-            SELECT jsonb_object_agg(g.queue_name, g.cnt) FROM (
-                SELECT q.queue_name, COUNT(*) AS cnt
-                FROM in_flight q
-                WHERE q.queue_name = ANY(v_capped)
-                  AND (p_hard_cap_mode OR q.status = 'RUNNING')
-                GROUP BY q.queue_name
-            ) g
-        ), '{}'::jsonb),
-        COALESCE((
-            SELECT jsonb_object_agg(g.budget_class, g.cnt) FROM (
-                SELECT p_routes ->> m.execution AS budget_class, COUNT(*) AS cnt
-                FROM in_flight m
-                WHERE m.claimed_by_worker_id = p_worker_id
-                  AND p_routes ? m.execution
-                GROUP BY 1
-            ) g
-        ), '{}'::jsonb)
+    -- 2. Counts under the lock snapshot (horsies_claim_in_flight). Per-queue
+    --    counts: hard mode counts RUNNING+CLAIMED, soft counts RUNNING.
+    --    Per-budget counts: this worker's in-flight rows, by the budget that
+    --    their class routes to.
+    SELECT c.my_claimed, c.my_in_flight, c.global_in_flight, c.queue_counts,
+           c.budget_counts
     INTO v_my_claimed, v_my_in_flight, v_global_in_flight, v_queue_counts,
          v_budget_counts
-    FROM in_flight f;
+    FROM horsies_claim_in_flight(
+        p_worker_id, v_capped, p_hard_cap_mode, p_routes
+    ) AS c;
 
     -- 3. Budget math. The capacity of the worker is the sum over budgets.
     SELECT COALESCE(SUM(b.capacity::int), 0)

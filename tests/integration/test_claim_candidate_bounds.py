@@ -257,7 +257,8 @@ async def test_only_candidate_selection_forces_a_generic_plan(
             SELECT proname, coalesce(array_to_string(proconfig, ','), '')
             FROM pg_proc
             WHERE proname IN (
-                'horsies_claim', 'horsies_claim_plan', 'horsies_claim_candidates'
+                'horsies_claim', 'horsies_claim_plan', 'horsies_claim_candidates',
+                'horsies_claim_in_flight'
             )
         """)
                 )
@@ -267,10 +268,13 @@ async def test_only_candidate_selection_forces_a_generic_plan(
         )
     # Both run without JIT: the generic plan's cost estimate would compile
     # the statement on every pass.
+    # The in-flight count turns off bitmap and sequential scans, so its plan
+    # is the scan of the status index, which marks the dead entries it passes.
     assert settings == {
         'horsies_claim': 'jit=off',
         'horsies_claim_plan': 'plan_cache_mode=force_generic_plan,jit=off',
         'horsies_claim_candidates': 'plan_cache_mode=force_generic_plan,jit=off',
+        'horsies_claim_in_flight': 'jit=off,enable_bitmapscan=off,enable_seqscan=off',
     }
 
 

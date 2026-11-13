@@ -92,7 +92,10 @@ _IDENTIFIER = re.compile(r'^[a-z][a-z0-9_]{0,62}$')
 # locking read is by id alone). It changes no table, column or index. The
 # prototypes define their own functions of these names in their own
 # namespaces and do not call the production ones, so the base advances.
-_EXPECTED_BASE_SCHEMA_VERSION = 60
+# v61 adds horsies_claim_in_flight and changes the body of horsies_claim. It
+# changes no table, column or index, and the prototypes do not call the
+# claim functions, so the base advances.
+_EXPECTED_BASE_SCHEMA_VERSION = 61
 
 
 @dataclass(frozen=True, slots=True)
