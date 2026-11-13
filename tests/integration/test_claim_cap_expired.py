@@ -27,6 +27,7 @@ from horsies.core.worker.sql import (
     COUNT_QUEUE_IN_FLIGHT_HARD_SQL,
 )
 from horsies.core.worker.worker import Worker
+from horsies.core.utils.db import PooledStatements
 from tests.integration.conftest import compute_test_enqueue_sha
 from tests.broker_resources_support import current_resources, listener_of
 
@@ -330,6 +331,8 @@ class TestReclaimUnderCap:
             listener=MagicMock(),
             cfg=cfg,
         )
+        # Claim semantics: one checkout per claim statement.
+        worker._claim_runner = PooledStatements(worker.sf)  # pyright: ignore[reportPrivateUsage]
         # No slot pool: every configured slot counts.
         worker._claim_slot_count = lambda: cfg.processes  # type: ignore[method-assign]
 

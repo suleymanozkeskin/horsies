@@ -76,7 +76,8 @@ from tests.integration.test_workflow_node_handoff import (
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
 
 ONE_STATEMENT: Final = 1
-STATEMENT_AFTER_PING: Final = 2
+HELD_FOR_THE_TEST_S: Final = 600.0
+"""The idle time of the held connections in a test that measures them held."""
 WORKFLOW_START: Final = ('BEGIN', 'COMMIT')
 
 type Case = tuple[str, datetime]
@@ -99,7 +100,7 @@ async def proxied(
 ) -> AsyncGenerator[ProxiedWorker]:
     opened = await open_proxied_worker(proxied_url(db_url, proxy))
     yield opened
-    _ = await opened.broker.close_async()
+    await opened.close()
 
 
 @pytest_asyncio.fixture(loop_scope='function')
@@ -190,11 +191,7 @@ def _simple_queries(turns: tuple[Turn, ...]) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ('pre_ping', 'round_trips'),
-    [(False, ONE_STATEMENT), (True, STATEMENT_AFTER_PING)],
-    ids=['pre_ping_off', 'pre_ping_on'],
-)
+@pytest.mark.parametrize('pre_ping', [False, True], ids=['pre_ping_off', 'pre_ping_on'])
 async def test_a_plain_success_finalize_is_one_statement(
     proxy: RoundTripProxy,
     db_url: str,
@@ -202,11 +199,15 @@ async def test_a_plain_success_finalize_is_one_statement(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
     pre_ping: bool,
-    round_trips: int,
 ) -> None:
-    """The fused completion is its own transaction; the pre-ping is the only
-    other round trip, and only when ``worker_pool_pre_ping`` is on."""
+    """The fused completion is its own transaction, on the held connection
+    of a steady flusher. In steady state that connection is held, so there is
+    no checkout and no pre-ping: one round trip, also with
+    ``worker_pool_pre_ping`` on. The held connections keep their connection
+    for the whole test, so a slow host cannot make them give it back."""
     opened = await open_proxied_worker(proxied_url(db_url, proxy), pre_ping=pre_ping)
+    for held in opened.worker._held_connections:  # pyright: ignore[reportPrivateUsage]
+        held._idle_release_s = HELD_FOR_THE_TEST_S  # pyright: ignore[reportPrivateUsage]
 
     async def arrange() -> Case:
         return await insert_task(session, status='RUNNING')
@@ -228,9 +229,9 @@ async def test_a_plain_success_finalize_is_one_statement(
     try:
         (task_id, _), turns = await steady_state_turns(proxy, arrange, act)
     finally:
-        _ = await opened.broker.close_async()
+        await opened.close()
 
-    assert len(turns) == round_trips, turns
+    assert len(turns) == ONE_STATEMENT, turns
     assert await _row(session, task_id) is None
     assert await _history_rows(session, task_id) == 1
 

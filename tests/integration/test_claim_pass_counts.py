@@ -28,6 +28,7 @@ from horsies.core.worker.sql import (
     COUNT_QUEUE_IN_FLIGHT_SOFT_SQL,
     COUNT_RUNNING_FOR_WORKER_SQL,
 )
+from horsies.core.utils.db import PooledStatements
 from tests.integration.conftest import compute_test_enqueue_sha
 from tests.broker_resources_support import current_resources
 
@@ -172,6 +173,7 @@ class TestClaimPassCounts:
         class _Probe(ClaimMixin):
             def __init__(self) -> None:
                 self.sf = current_resources(broker).session_factory
+                self._claim_runner = PooledStatements(self.sf)
                 self.cfg = cfg
                 self.worker_instance_id = f'probe-{uuid.uuid4().hex[:8]}'
 

@@ -86,7 +86,7 @@ async def worker_of(
     opened.worker._app = app
     opened.broker.app = app
     yield opened
-    _ = await opened.broker.close_async()
+    await opened.close()
 
 
 def _task(app: Horsies) -> Any:

@@ -51,7 +51,7 @@ async def direct(
     """A worker on the database URL itself, as the CLI builds it."""
     opened = await open_proxied_worker(db_url)
     yield opened
-    _ = await opened.broker.close_async()
+    await opened.close()
 
 
 @pytest_asyncio.fixture(loop_scope='function')

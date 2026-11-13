@@ -242,7 +242,7 @@ async def worker(
 ) -> AsyncGenerator[ProxiedWorker]:
     opened = await open_proxied_worker(db_url)
     yield opened
-    _ = await opened.broker.close_async()
+    await opened.close()
 
 
 async def test_the_claim_passes_of_a_worker_share_one_checkout(

@@ -340,7 +340,10 @@ class Worker(
         )
         self._claim_runner = claim_connection
         self._batch_connections = batch_connections
-        self._held_connections = (claim_connection, *batch_connections)
+        self._held_connections: tuple[HeldConnection, ...] = (
+            claim_connection,
+            *batch_connections,
+        )
         # Writes the plain-success outcomes in batches. Its flushers start on
         # the first row, at most one per connection of the worker pool;
         # ``stop`` closes it after the finalizer drain.

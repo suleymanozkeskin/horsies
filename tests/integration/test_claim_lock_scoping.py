@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
+from horsies.core.utils.db import PooledStatements
 
 pytestmark = [pytest.mark.integration]
 
@@ -42,6 +43,8 @@ def _make_worker(engine: AsyncEngine, *, queues: dict[str, int]) -> Worker:
         listener=MagicMock(),
         cfg=cfg,
     )
+    # Claim semantics: one checkout per claim statement.
+    worker._claim_runner = PooledStatements(worker.sf)  # pyright: ignore[reportPrivateUsage]
     # No slot pool: every configured slot counts.
     worker._claim_slot_count = lambda: cfg.processes  # type: ignore[method-assign]
     return worker
@@ -121,6 +124,8 @@ class TestClaimLockScoping:
             listener=MagicMock(),
             cfg=cfg,
         )
+        # Claim semantics: one checkout per claim statement.
+        passer._claim_runner = PooledStatements(passer.sf)  # pyright: ignore[reportPrivateUsage]
         # No slot pool: every configured slot counts.
         passer._claim_slot_count = lambda: cfg.processes  # type: ignore[method-assign]
         sf = async_sessionmaker(engine, expire_on_commit=False)

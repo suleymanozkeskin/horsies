@@ -2,8 +2,9 @@
 
 The fused completion runs as its own transaction (``apply_in_autocommit``);
 the worker writes it through the batched statement of the finalize batcher
-(``apply_fused_batch_in_autocommit``). These tests pin what the transaction
-used to guarantee and what the caller relies on:
+(``apply_fused_batch``, on the held connection of a steady flusher). These
+tests pin what the transaction used to guarantee and what the caller relies
+on:
 
 - ``Applied`` is committed with its attempt, its history row and its
   capacity NOTIFY.
@@ -44,12 +45,13 @@ from horsies.core.lifecycle.outcomes import (
 from horsies.core.lifecycle.persistence import (
     BatchWriteError,
     FusedCompletionBatch,
-    apply_fused_batch_in_autocommit,
+    apply_fused_batch,
     apply_in_autocommit,
 )
 from horsies.core.models.tasks import Execution, TaskResult
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.utils.db import (
+    StatementRunner,
     SingleStatement,
     is_retryable_connection_error,
     run_in_autocommit,
@@ -99,7 +101,7 @@ async def direct(
     """A worker on the database URL itself, as the CLI builds it."""
     opened = await open_proxied_worker(db_url)
     yield opened
-    _ = await opened.broker.close_async()
+    await opened.close()
 
 
 @pytest_asyncio.fixture(loop_scope='function')
@@ -184,10 +186,10 @@ class _RecordedOutcomes:
 
     async def __call__(
         self,
-        session_factory: Any,
+        runner: StatementRunner,
         batch: FusedCompletionBatch,
     ) -> Result[tuple[TerminalizationOutcome, ...], BatchWriteError]:
-        written = await apply_fused_batch_in_autocommit(session_factory, batch)
+        written = await apply_fused_batch(runner, batch)
         match written:
             case Ok(outcomes):
                 self.outcomes.extend(outcomes)
@@ -199,7 +201,7 @@ class _RecordedOutcomes:
 @pytest.fixture
 def recorded(monkeypatch: pytest.MonkeyPatch) -> _RecordedOutcomes:
     recording = _RecordedOutcomes()
-    monkeypatch.setattr(finalize_module, 'apply_fused_batch_in_autocommit', recording)
+    monkeypatch.setattr(finalize_module, 'apply_fused_batch', recording)
     return recording
 
 
@@ -365,7 +367,7 @@ async def test_a_lost_reply_is_retried_and_classified_on_the_replay(
 
         await opened.worker._retry_finalize_phase1(error, 0.0)
     finally:
-        _ = await opened.broker.close_async()
+        await opened.close()
 
     assert [type(outcome) for outcome in recorded.outcomes] == [AlreadyApplied]
     assert await _history_rows(session, task_id) == 1
