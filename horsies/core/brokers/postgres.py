@@ -518,6 +518,7 @@ from horsies.core.schemas.migrations import (
     CREATE_CLAIM_CANDIDATES_FUNCTION_SQL,
     CREATE_CLAIM_PLAN_FUNCTION_SQL,
     CREATE_CLAIM_FUNCTION_SQL,
+    CREATE_CLAIM_IN_FLIGHT_FUNCTION_SQL,
     CREATE_OUTCOME_TYPE_SQL,
     CREATE_TERMINALIZATION_FUNCTIONS_SQL,
     DROP_TASKS_RETENTION_STATISTICS_SQL,
@@ -1733,6 +1734,8 @@ class PostgresBroker:
                 await conn.execute(drop_claim_function)
             await conn.execute(CREATE_CLAIM_PLAN_FUNCTION_SQL)
             await conn.execute(CREATE_CLAIM_CANDIDATES_FUNCTION_SQL)
+            # v61: the in-flight count that horsies_claim calls.
+            await conn.execute(CREATE_CLAIM_IN_FLIGHT_FUNCTION_SQL)
             await conn.execute(CREATE_CLAIM_FUNCTION_SQL)
             uuid_identity = bool(
                 (await conn.execute(FRESH_IDENTITY_PREDICATE_SQL)).scalar_one()
@@ -1909,6 +1912,8 @@ class PostgresBroker:
                 await conn.execute(drop_claim_function)
             await conn.execute(CREATE_CLAIM_PLAN_FUNCTION_SQL)
             await conn.execute(CREATE_CLAIM_CANDIDATES_FUNCTION_SQL)
+            # v61: the in-flight count that horsies_claim calls.
+            await conn.execute(CREATE_CLAIM_IN_FLIGHT_FUNCTION_SQL)
             await conn.execute(CREATE_CLAIM_FUNCTION_SQL)
 
             # Migration (v18): terminal_at completeness. Backfill first, then

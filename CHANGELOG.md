@@ -893,6 +893,18 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Fixed
 
+- **The claim's in-flight count marks the dead entries of the status index
+  (schema v61).** `horsies_claim` counted the in-flight rows with
+  `status = 'RUNNING' OR (status = 'CLAIMED' AND <valid lease>)`, which
+  Postgres runs as a bitmap scan. A bitmap scan does not mark dead index
+  entries, so each claim read the heap for every task that finished since
+  the last vacuum: two dead entries per task. The count now runs in
+  `horsies_claim_in_flight`, with one IN list on `status` and bitmap and
+  sequential scans off. It is a plain scan of `ix_horsies_tasks_status`,
+  which marks the dead entries that it passes. Same rows and counts. With 8
+  isolated children and 20,000 no-op tasks: 867-902 pages per count before,
+  21 after.
+
 - **A history probe uses the task id index of a new leaf.** The duplicate
   guard of every terminal move (`horsies_task_history_duplicate_staged`) and
   the four history readers kept the plan of each leaf probe. On a new leaf

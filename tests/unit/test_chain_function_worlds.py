@@ -44,6 +44,11 @@ DISPOSITIONS: dict[str, tuple[str, str]] = {
         'orders by the identity and returns counts per stream, never '
         'an identity value',
     ),
+    'horsies_claim_in_flight': (
+        'type-agnostic',
+        'counts rows by status, worker, queue and execution class; '
+        'never reads or returns an identity value',
+    ),
     'horsies_terminalization_miss': (
         'varchar-world-only',
         'installed inside the fork else-arm; the move family carries '
