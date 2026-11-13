@@ -519,8 +519,7 @@ there is no migration contract between pre-1.0 versions.
   threads, runs its `atexit` handlers and flushes its output, as `sys.exit(0)`
   did, then ends with `os._exit(0)`. The teardown freed every object, which
   wrote to the pages that a forked child shares with the preload parent, so
-  each ending child copied them: with 8 isolated children recycled after 500
-  no-op tasks each, the peak memory of the worker rose by 45-95 MB while the
+  each ending child copied them, and the peak memory of the worker rose while
   children were replaced. An object that still exists at the stop no longer
   gets `__del__` in a child; Python does not promise those calls at exit.
 
