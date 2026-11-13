@@ -526,6 +526,7 @@ and there is no migration contract between pre-1.0 versions.
   - The sync pool opens on first use and holds up to
     `pool_size + max_overflow` connections, next to the pool of the sync
     runner's set. `close()` closes it.
+
 - **A stopped child ends without the interpreter teardown.** After a stop
   frame, a child that has no executor threads left waits for its non-daemon
   threads, runs its `atexit` handlers and flushes its output, as `sys.exit(0)`
