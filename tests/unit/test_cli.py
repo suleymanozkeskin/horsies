@@ -14,6 +14,7 @@ import pytest
 from pydantic import SecretStr
 
 from horsies.core.worker.config import ChildPreload
+from horsies.core.worker.cpu_placement import ParentCpu
 from horsies.core.app import Horsies
 from horsies.core.brokers.resources import ListenerDisabled, ListenerEnabled
 from horsies.core.cli import (
@@ -2605,6 +2606,7 @@ class TestExecutionSettings:
             max_claim_per_worker=4,
             drain_timeout_s=45.0,
             child_preload=ChildPreload.NONE,
+            parent_cpu=ParentCpu.SHARED,
             shared_async=NoSharedAsyncChildren(),
             shared_thread=NoSharedThreadChildren(),
         )

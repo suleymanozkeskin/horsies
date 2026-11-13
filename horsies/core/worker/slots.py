@@ -73,6 +73,13 @@ from horsies.core.worker.child_runner import (
     LEFT_WORK_MARKER_BOUND_S,
 )
 from horsies.core.worker.config import ChildPreload
+from horsies.core.worker.cpu_placement import (
+    CpuPlacement,
+    OwnCore,
+    PlaceRefused,
+    SharedCpus,
+    place_process,
+)
 from horsies.core.worker.live_dispatches import (
     Held,
     HoldOutcome,
@@ -994,6 +1001,9 @@ class SlotPoolConfig:
     shared_thread: SharedThreadChildren | NoSharedThreadChildren = field(
         default_factory=NoSharedThreadChildren,
     )
+    # Where the children run: each child gets the children's CPUs of an
+    # OwnCore placement before its init frame.
+    placement: CpuPlacement = field(default_factory=SharedCpus)
 
     def shared_slots(self) -> int:
         """The number of shared async slots."""
@@ -1232,6 +1242,27 @@ class FrameProtocol(asyncio.BufferedProtocol):
         self._on_closed()
 
 
+def _place_child(placement: CpuPlacement, pid: int) -> Result[None, PlaceRefused]:
+    """Set the CPUs of child ``pid`` that ``placement`` names."""
+    match placement:
+        case SharedCpus():
+            return Ok(None)
+        case OwnCore(children=cpus):
+            return place_process(pid, cpus)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+async def _end_unplaced_child(process: ChildProcess, parent_sock: socket.socket) -> None:
+    """Kill a child that got no init frame, and wait for its exit."""
+    parent_sock.close()
+    try:
+        os.kill(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    _ = await process.wait()
+
+
 def spawn_failure(exc: OSError) -> BootFailure:
     """Name the cause of an ``OSError`` of a step that starts a child in the
     parent: ``ResourceShortage`` for an errno in ``CLEARABLE_ERRNOS``, else
@@ -1313,7 +1344,7 @@ class Child:
         """
         registry = set[int]() if live_pids is None else live_pids
         if preload is not None:
-            match await cls._start_forked(init, preload, registry):
+            match await cls._start_forked(config, init, preload, registry):
                 case Child() as forked:
                     return Ok(forked)
                 case BootFailure() as failed:
@@ -1327,6 +1358,7 @@ class Child:
     @classmethod
     async def _start_forked(
         cls,
+        config: SlotPoolConfig,
         init: InitFrame,
         preload: PreloadParent,
         registry: set[int],
@@ -1348,7 +1380,13 @@ class Child:
             child_sock.close()
         match reply:
             case Ok(process):
-                return await cls._attach_registered(process, parent_sock, init, registry)
+                return await cls._attach_registered(
+                    process,
+                    parent_sock,
+                    init,
+                    registry,
+                    config.placement,
+                )
             case Err(down):
                 parent_sock.close()
                 logger.warning('Preload parent gave no child: %s', down.detail)
@@ -1382,7 +1420,19 @@ class Child:
             return Err(spawn_failure(exc))
         finally:
             child_sock.close()
-        return Ok(await cls._attach_registered(process, parent_sock, init, registry))
+        match await cls._attach_registered(
+            process,
+            parent_sock,
+            init,
+            registry,
+            config.placement,
+        ):
+            case Child() as child:
+                return Ok(child)
+            case BootFailure() as failed:
+                return Err(failed)
+            case _ as unreachable:
+                assert_never(unreachable)
 
     @classmethod
     async def _attach_registered(
@@ -1391,8 +1441,26 @@ class Child:
         parent_sock: socket.socket,
         init: InitFrame,
         registry: set[int],
-    ) -> 'Child':
+        placement: CpuPlacement,
+    ) -> 'Child | BootFailure':
+        """Place the child on its CPUs, then send its init frame.
+
+        The child waits for the init frame before it starts a thread, so the
+        CPUs that it gets here hold for each thread it starts. A child whose
+        CPUs the OS refuses is killed and waited for: its start failed
+        (``SpawnFailed``), and the same placement fails again.
+        """
         registry.add(process.pid)
+        match _place_child(placement, process.pid):
+            case Ok():
+                pass
+            case Err(refused):
+                await _end_unplaced_child(process, parent_sock)
+                registry.discard(process.pid)
+                return boot_failure(
+                    SpawnFailed(),
+                    f'the CPUs of child {process.pid} could not be set: {refused.cause}',
+                )
         child = await cls._attach(process, parent_sock, init)
         child.notify_on_exit(lambda: registry.discard(process.pid))
         return child

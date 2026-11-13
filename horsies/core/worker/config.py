@@ -15,6 +15,7 @@ from horsies.core.models.child_sizing import (
 )
 from horsies.core.utils.db import HeldRecycle, held_recycle
 from horsies.core.worker.claim_plan import ClaimPlan, claim_plan_for_children
+from horsies.core.worker.cpu_placement import ParentCpu
 
 if TYPE_CHECKING:
     from horsies.core.models.recovery import RecoveryConfig
@@ -177,6 +178,8 @@ class WorkerConfig:
     # takes the crash path. Set it below the supervisor's stop window.
     drain_timeout_s: float = 300.0
     child_preload: ChildPreload = ChildPreload.LIBRARY
+    # Where the worker process runs: WorkerProfile.parent_cpu.
+    parent_cpu: ParentCpu = ParentCpu.SHARED
     # The shared async children of the worker profile, with their seats and
     # their recycle limits.
     shared_async: SharedAsyncChildren | NoSharedAsyncChildren = field(
