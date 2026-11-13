@@ -26,8 +26,8 @@ broker = PostgresConfig(
 | `pool_size` | `int` | 5 | Connection pool size (raise for high-throughput producers) |
 | `max_overflow` | `int` | 10 | Additional connections beyond pool_size |
 | `pool_timeout` | `int` | 30 | Seconds to wait for connection |
-| `pool_pre_ping` | `bool` | `True` | Pre-ping connections before use, in every engine but the one of the worker process; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
-| `worker_pool_pre_ping` | `bool` | `False` | Pre-ping the connections of the worker process before use. Off: the worker sends a one-statement write in one round trip, and a dead pooled connection fails its first statement with a connection error that the worker retries; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/#health-checks-at-high-rtt) |
+| `pool_pre_ping` | `bool` | `True` | Ping a pooled connection at checkout when it waited in the pool for more than 1 s (`PRE_PING_AFTER_IDLE_S`), in every engine but the one of the worker process; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
+| `worker_pool_pre_ping` | `bool` | `False` | Ping a pooled connection of the worker process at checkout when it waited in the pool for more than 1 s. Off: the worker sends a one-statement write in one round trip, and a dead pooled connection fails its first statement with a connection error that the worker retries; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/#health-checks-at-high-rtt) |
 | `tcp_keepalives` | `bool` | `True` | Enable libpq TCP keepalives on broker and child-process connections; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
 | `tcp_keepalives_idle` | `int` | 30 | Idle seconds before the first keepalive probe (libpq `keepalives_idle`) |
 | `tcp_keepalives_interval` | `int` | 10 | Seconds between keepalive probes (libpq `keepalives_interval`) |

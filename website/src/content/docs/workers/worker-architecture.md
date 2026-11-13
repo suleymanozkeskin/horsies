@@ -200,8 +200,8 @@ error in phase 2 never undoes phase 1.
   A worker that stops between the phases leaves the phase-2 record, and the
   recovery pass runs phase 2.
 
-Round trips with the defaults (`worker_pool_pre_ping=False`; one more per
-phase with it on):
+Round trips with the defaults (`worker_pool_pre_ping=False`; with it on, one
+more per phase whose connection waited in the pool for more than 1 s):
 
 | Finalize of a workflow task | Phase 1 | Phase 2 |
 |---|---|---|
