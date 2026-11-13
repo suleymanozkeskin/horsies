@@ -8,11 +8,12 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Optional
 
-from horsies.core.defaults import MAX_CLAIM_RENEW_AGE_MS
+from horsies.core.defaults import DEFAULT_POOL_RECYCLE_S, MAX_CLAIM_RENEW_AGE_MS
 from horsies.core.models.child_sizing import (
     DEFAULT_TASK_SEND_POOL_CONNECTIONS,
     PARENT_POOL_CONNECTIONS_FLOOR,
 )
+from horsies.core.utils.db import HeldRecycle, held_recycle
 from horsies.core.worker.claim_plan import ClaimPlan, claim_plan_for_children
 
 if TYPE_CHECKING:
@@ -38,6 +39,10 @@ def _default_str_int_dict() -> dict[str, int]:
 
 def _default_connect_kwargs() -> dict[str, object]:
     return {}
+
+
+def _default_parent_pool_recycle() -> HeldRecycle:
+    return held_recycle(DEFAULT_POOL_RECYCLE_S)
 
 
 def _default_isolated_pool() -> ResolvedPool:
@@ -87,6 +92,12 @@ class WorkerConfig:
     # The most connections of the pool of the worker process: the resolved
     # WorkerProfile.pool. The pool has no overflow.
     parent_pool_size: int = PARENT_POOL_CONNECTIONS_FLOOR
+    # The pool_recycle of that pool: the claim loop and the steady flushers
+    # of the batched success write give their held connection back at this
+    # age (HeldConnection).
+    parent_pool_recycle: HeldRecycle = field(
+        default_factory=_default_parent_pool_recycle
+    )
     # The connection pool of each isolated child. The pool of each shared
     # child comes from its setting in shared_async or shared_thread.
     isolated_pool: ResolvedPool = field(default_factory=_default_isolated_pool)

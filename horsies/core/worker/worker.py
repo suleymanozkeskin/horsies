@@ -9,6 +9,7 @@ from importlib import import_module
 from collections.abc import Coroutine, Mapping
 from typing import Any, TYPE_CHECKING, assert_never
 import sys
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from horsies.core.app import Horsies
 from horsies.core.brokers.listener import PostgresListener
@@ -18,7 +19,11 @@ from horsies.core.logging import get_logger
 from horsies.core.worker.current import set_current_app
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.types.result import Err, Ok, is_err
-from horsies.core.utils.db import is_retryable_connection_error
+from horsies.core.utils.db import (
+    HeldConnection,
+    PooledStatements,
+    is_retryable_connection_error,
+)
 from horsies.core.utils.url import to_psycopg_url
 
 if TYPE_CHECKING:
@@ -48,6 +53,7 @@ from horsies.core.worker.child_protocol import (
 from horsies.core.worker.gc_policy import freeze_startup_objects
 from horsies.core.worker.finalize_batch import (
     FINALIZE_BATCH_CLOSE_TIMEOUT_S,
+    FINALIZE_BATCH_FLUSHERS,
     FinalizeBatcher,
     FlushersCancelled,
     FlushersDrained,
@@ -323,11 +329,25 @@ class Worker(
         # Releases coalesce: the loop clears it before each claim pass.
         self._capacity_released = asyncio.Event()
         self._finalize_retry_attempts: dict[tuple[str, FinalizeStage], int] = {}
+        # The claim loop and each steady flusher of the batched success write
+        # keep one pool connection while they send statements back to back
+        # (HeldConnection); every other write checks out per statement.
+        # ``stop`` gives them back after the claim loop and the batcher end.
+        claim_connection = HeldConnection(session_factory, cfg.parent_pool_recycle)
+        batch_connections = tuple(
+            HeldConnection(session_factory, cfg.parent_pool_recycle)
+            for _ in range(FINALIZE_BATCH_FLUSHERS)
+        )
+        self._claim_runner = claim_connection
+        self._batch_connections = batch_connections
+        self._held_connections = (claim_connection, *batch_connections)
         # Writes the plain-success outcomes in batches. Its flushers start on
         # the first row, at most one per connection of the worker pool;
         # ``stop`` closes it after the finalizer drain.
         self._finalize_batcher = FinalizeBatcher(
             self._write_fused_batch,
+            steady_runners=batch_connections,
+            surge_runner=PooledStatements(session_factory),
             max_queued_rows=self._pending_task_limit(),
             max_flushers=self.cfg.parent_pool_size,
         )
@@ -1086,6 +1106,8 @@ class Worker(
         # After the finalizers: a finalizer that the drain cancelled leaves
         # its row in the batcher, and the batch of that row is still written.
         await self._close_finalize_batcher()
+        # The claim loop and the batch flushers have ended.
+        await self._release_held_connections()
 
         # Close the Postgres listener after finalizers so completion NOTIFYs
         # and result waits drain through normally.
@@ -1105,6 +1127,16 @@ class Worker(
         # the exit bound of a fail-closed stop until here.
         await self._stop_runner_heartbeat()
         logger.info('Worker stopped')
+
+    async def _release_held_connections(self) -> None:
+        """Give the held connections of the claim loop and of the batch
+        flushers back to the pool. Runs after both have stopped. Never
+        raises: a driver error is logged."""
+        for held in self._held_connections:
+            try:
+                await held.release()
+            except DBAPIError as exc:
+                logger.error('Giving back a held connection at stop failed: %r', exc)
 
     async def _close_finalize_batcher(self) -> None:
         """Close the finalize batcher, and log the rows that its close

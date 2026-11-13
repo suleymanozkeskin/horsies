@@ -3,11 +3,14 @@
 and the worker's ways to write without a transaction.
 
 Autocommit has one owner, this module, and one setting
-(``AUTOCOMMIT_EXECUTION_OPTIONS``). Two forms use it:
+(``AUTOCOMMIT_EXECUTION_OPTIONS``). Three forms use it:
 
 - One statement on one checkout: ``run_in_autocommit_result`` returns the
   rows of the statement, read in full before the connection goes back, or
   its closed failure; ``run_in_autocommit`` raises that failure instead.
+  ``PooledStatements`` is this form as a ``StatementRunner``.
+- One statement at a time on a connection that one loop keeps:
+  ``HeldConnection``, a ``StatementRunner`` with the same outcomes.
 - Several statements on one checkout: ``autocommit_connection``. Each
   statement commits alone; nothing makes them commit together.
 
@@ -16,14 +19,18 @@ in one of these forms."""
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final, Protocol, assert_never, cast
 
+import psycopg
 from psycopg import InterfaceError, OperationalError
+from psycopg.rows import TupleRow
 from psycopg.types.string import TextLoader
 from sqlalchemy import TextClause, event
+from sqlalchemy.engine import Dialect
 from sqlalchemy.exc import (
     DBAPIError,
     OperationalError as SAOperationalError,
@@ -35,8 +42,17 @@ from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
 )
+from sqlalchemy.pool import PoolProxiedConnection
+from sqlalchemy.sql.compiler import SQLCompiler
+from sqlalchemy.sql.sqltypes import NullType
 
+from horsies.core.logging import get_logger
 from horsies.core.types.result import Err, Ok, Result
+
+if TYPE_CHECKING:
+    from sqlalchemy.engine.interfaces import DBAPIModule
+
+logger = get_logger('db')
 
 
 def register_identity_text_reads(engine: AsyncEngine) -> None:
@@ -309,7 +325,19 @@ async def run_in_autocommit(
             committed, as after a lost COMMIT reply. The caller classifies
             its replay.
     """
-    match await run_in_autocommit_result(session_factory, statement):
+    return rows_or_raise(await run_in_autocommit_result(session_factory, statement))
+
+
+def rows_or_raise(
+    result: Result[StatementRows, AutocommitFailure],
+) -> StatementRows:
+    """The rows of ``result``, or the error of its failure, raised. Pure.
+
+    Raises:
+        SATimeoutError | DBAPIError: the error of ``NotSent``,
+            ``StatementRefused`` or ``OutcomeUnknown``.
+    """
+    match result:
         case Ok(rows):
             return rows
         case Err(
@@ -318,3 +346,441 @@ async def run_in_autocommit(
             | OutcomeUnknown(error=error)
         ):
             raise error
+
+
+class StatementRunner(Protocol):
+    """Runs one statement as its own transaction and returns its rows, with
+    the outcomes of ``run_in_autocommit_result``."""
+
+    async def run(
+        self,
+        statement: SingleStatement,
+    ) -> Result[StatementRows, AutocommitFailure]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class PooledStatements:
+    """A ``StatementRunner`` that checks out a connection of
+    ``session_factory`` for each statement: ``run_in_autocommit_result``."""
+
+    session_factory: async_sessionmaker[AsyncSession]
+
+    async def run(
+        self,
+        statement: SingleStatement,
+    ) -> Result[StatementRows, AutocommitFailure]:
+        """``run_in_autocommit_result`` of ``statement``."""
+        return await run_in_autocommit_result(self.session_factory, statement)
+
+
+HELD_CONNECTION_IDLE_RELEASE_S: Final = 1.0
+"""Seconds with no statement after which a ``HeldConnection`` gives its
+connection back to the pool. Under load its loop sends a statement every few
+milliseconds and keeps the connection; an idle loop leaves the pool as free
+as the per-call path does."""
+
+HELD_STATEMENTS_BOUND: Final = 8
+"""The most statement texts that one ``HeldConnection`` compiles. Its
+callers pass library constants: one loop sends two or three of them."""
+
+DISCONNECT_PROBE_SQL: Final = 'SELECT 1'
+"""The statement that ``HeldConnection`` sends through SQLAlchemy on a broken
+connection, so that SQLAlchemy runs its own disconnect handling."""
+
+
+@dataclass(frozen=True, slots=True)
+class RecycleAfter:
+    """The held connection goes back to the pool once it was held this
+    long, and the next statement checks out another: the pool's
+    ``pool_recycle``. 0 gives the connection back after every statement.
+
+    Raises:
+        ValueError: ``seconds`` is negative.
+    """
+
+    seconds: float
+
+    def __post_init__(self) -> None:
+        if self.seconds < 0:
+            raise ValueError(
+                f'RecycleAfter.seconds must be 0 or more, got {self.seconds}',
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class NoRecycle:
+    """The pool does not recycle connections by age (a negative
+    ``pool_recycle``): the held connection is kept until an idle period, a
+    failure or ``release``."""
+
+
+type HeldRecycle = RecycleAfter | NoRecycle
+
+
+def held_recycle(pool_recycle_s: int) -> HeldRecycle:
+    """The ``HeldRecycle`` of a pool whose ``pool_recycle`` is
+    ``pool_recycle_s``, as SQLAlchemy reads it: a negative value turns
+    recycling off. Pure."""
+    if pool_recycle_s < 0:
+        return NoRecycle()
+    return RecycleAfter(seconds=float(pool_recycle_s))
+
+
+@dataclass(frozen=True, slots=True)
+class _HeldStatement:
+    """A statement text compiled once for psycopg. ``query`` is the
+    compiled SQL as bytes, the query form that psycopg takes from a
+    variable."""
+
+    clause: TextClause
+    compiled: SQLCompiler
+    query: bytes
+
+
+@dataclass(slots=True)
+class _Holding:
+    """The connection that a ``HeldConnection`` holds, and the session that
+    checked it out: closing the session gives it back. ``last_used`` and
+    ``idle_check`` change after each statement."""
+
+    session: AsyncSession
+    connection: AsyncConnection
+    pooled: PoolProxiedConnection
+    driver: psycopg.AsyncConnection[TupleRow]
+    taken_at: float
+    last_used: float
+    idle_check: asyncio.TimerHandle
+
+
+@dataclass(frozen=True, slots=True)
+class _Free:
+    """A ``HeldConnection`` that holds no connection: the next statement
+    checks one out."""
+
+
+type _HeldState = _Holding | _Free
+
+
+class HeldConnection:
+    """A ``StatementRunner`` that keeps one connection of the pool of
+    ``session_factory``, in autocommit, and sends each statement on its
+    psycopg connection.
+
+    Contract:
+
+    - The first statement checks out a connection through a session of
+      ``session_factory`` (``autocommit_connection``); later statements reuse
+      it. Nothing touches the factory before the first statement. Each statement commits when it ends, as with
+      ``run_in_autocommit_result``, and the locks it takes end with it.
+    - One statement at a time: one loop owns the runner. A second
+      concurrent ``run`` is a defect (``AssertionError``).
+    - The connection goes back to the pool after ``idle_release_s`` with no
+      statement, once it was held for the recycle age, and on ``release``.
+    - A statement whose connection broke (the dialect's disconnect check)
+      returns ``OutcomeUnknown``. The runner then sends
+      ``DISCONNECT_PROBE_SQL`` on the broken connection through SQLAlchemy,
+      whose disconnect handling invalidates that connection and every
+      connection of the pool, as after a disconnect on the per-call path.
+    - A cancelled statement invalidates the held connection: its state is
+      unknown. The cancel propagates.
+    - Statements carry untyped bind parameters only: the values go to
+      psycopg unchanged. A typed bind is a defect (``AssertionError``).
+
+    It does not hold a transaction open, and it does not retry.
+    """
+
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        recycle: HeldRecycle,
+        *,
+        idle_release_s: float = HELD_CONNECTION_IDLE_RELEASE_S,
+    ) -> None:
+        if not idle_release_s > 0:
+            raise ValueError(
+                f'idle_release_s must be positive, got {idle_release_s}',
+            )
+        self._session_factory = session_factory
+        self._recycle = recycle
+        self._idle_release_s = idle_release_s
+        self._state: _HeldState = _Free()
+        self._running = False
+        self._statements: dict[int, _HeldStatement] = {}
+        self._giving_back: set[asyncio.Task[None]] = set()
+
+    async def run(
+        self,
+        statement: SingleStatement,
+    ) -> Result[StatementRows, AutocommitFailure]:
+        """Run ``statement`` on the held connection; outcomes and failures as
+        ``run_in_autocommit_result``.
+
+        Outcomes:
+            Ok(rows): the statement committed; every row it returned.
+            Err(NotSent): the checkout failed; nothing was sent.
+            Err(StatementRefused): nothing committed; the connection stays
+                held.
+            Err(OutcomeUnknown): the connection broke; the statement may
+                have committed. The pool's connections are invalidated.
+        """
+        assert not self._running, 'HeldConnection runs one statement at a time'
+        self._running = True
+        try:
+            return await self._run_once(statement)
+        finally:
+            self._running = False
+
+    async def release(self) -> None:
+        """Give the held connection back to the pool, and wait for the
+        connections that idle periods gave back. The next ``run`` checks
+        out another connection. Safe to call when nothing is held."""
+        assert not self._running, 'HeldConnection.release during a statement'
+        match self._state:
+            case _Holding() as holding:
+                self._state = _Free()
+                await _give_back(holding)
+            case _Free():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
+        if self._giving_back:
+            _ = await asyncio.gather(*self._giving_back, return_exceptions=True)
+
+    async def _run_once(
+        self,
+        statement: SingleStatement,
+    ) -> Result[StatementRows, AutocommitFailure]:
+        match await self._take():
+            case Ok(holding):
+                pass
+            case Err(not_sent):
+                return Err(not_sent)
+        held = self._compiled(statement.statement, holding.connection.dialect)
+        parameters = held.compiled.construct_params(dict(statement.parameters))
+        try:
+            async with holding.driver.cursor() as cursor:
+                _ = await cursor.execute(held.query, parameters)
+                description = cursor.description
+                assert description is not None, (
+                    'HeldConnection needs a statement with rows'
+                )
+                rows = await cursor.fetchall()
+        except psycopg.Error as exc:
+            return await self._failed(holding, held, parameters, exc)
+        except asyncio.CancelledError:
+            self._state = _Free()
+            await _drop_after_cancel(holding)
+            raise
+        holding.last_used = asyncio.get_running_loop().time()
+        return Ok(
+            StatementRows(
+                columns=tuple(column.name for column in description),
+                rows=tuple(tuple(row) for row in rows),
+            ),
+        )
+
+    async def _failed(
+        self,
+        holding: _Holding,
+        held: _HeldStatement,
+        parameters: Mapping[str, Any],
+        exc: psycopg.Error,
+    ) -> Result[StatementRows, AutocommitFailure]:
+        """Classify the driver error of a statement as the per-call path does."""
+        dialect = holding.connection.dialect
+        disconnect = _dialect_sees_disconnect(dialect, exc, holding.pooled)
+        error = DBAPIError.instance(
+            held.compiled.string,
+            dict(parameters),
+            exc,
+            psycopg.Error,
+            connection_invalidated=disconnect,
+            dialect=dialect,
+        )
+        assert isinstance(error, DBAPIError), error
+        if not disconnect:
+            holding.last_used = asyncio.get_running_loop().time()
+            return Err(StatementRefused(error=error))
+        self._state = _Free()
+        holding.idle_check.cancel()
+        await _invalidate_pool_through(holding)
+        return Err(OutcomeUnknown(error=error))
+
+    async def _take(self) -> Result[_Holding, NotSent]:
+        """The held connection, or a new checkout when none is held or the
+        held one reached the recycle age."""
+        loop = asyncio.get_running_loop()
+        match self._state:
+            case _Holding() as holding if not _recycle_due(
+                self._recycle,
+                holding,
+                loop.time(),
+            ):
+                return Ok(holding)
+            case _Holding() as holding:
+                self._state = _Free()
+                await _give_back(holding)
+            case _Free():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
+        session = self._session_factory()
+        try:
+            connection = await autocommit_connection(session)
+            pooled = await connection.get_raw_connection()
+        except (SATimeoutError, DBAPIError) as exc:
+            await session.close()
+            return Err(NotSent(error=exc))
+        now = loop.time()
+        holding = _Holding(
+            session=session,
+            connection=connection,
+            pooled=pooled,
+            driver=_driver_of(pooled),
+            taken_at=now,
+            last_used=now,
+            idle_check=loop.call_later(self._idle_release_s, self._check_idle),
+        )
+        self._state = holding
+        return Ok(holding)
+
+    def _check_idle(self) -> None:
+        """Timer callback: give the connection back when no statement ran
+        for ``idle_release_s``; otherwise check again when that time would
+        pass."""
+        match self._state:
+            case _Holding() as holding:
+                pass
+            case _Free():
+                return
+            case _ as unreachable:
+                assert_never(unreachable)
+        loop = asyncio.get_running_loop()
+        idle_for = loop.time() - holding.last_used
+        if self._running:
+            holding.idle_check = loop.call_later(
+                self._idle_release_s,
+                self._check_idle,
+            )
+            return
+        if idle_for < self._idle_release_s:
+            holding.idle_check = loop.call_later(
+                self._idle_release_s - idle_for,
+                self._check_idle,
+            )
+            return
+        self._state = _Free()
+        task = loop.create_task(_give_back(holding))
+        self._giving_back.add(task)
+        task.add_done_callback(self._given_back)
+
+    def _given_back(self, task: asyncio.Task[None]) -> None:
+        self._giving_back.discard(task)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.error('Giving back an idle held connection failed: %r', error)
+
+    def _compiled(self, clause: TextClause, dialect: Dialect) -> _HeldStatement:
+        """``clause`` compiled for ``dialect``, once per runner: the dialect of
+        one pool does not change."""
+        cached = self._statements.get(id(clause))
+        if cached is not None and cached.clause is clause:
+            return cached
+        assert len(self._statements) < HELD_STATEMENTS_BOUND, (
+            f'HeldConnection compiled {len(self._statements)} statement '
+            'texts; its callers pass library constants'
+        )
+        compiled = clause.compile(dialect=dialect)
+        assert isinstance(compiled, SQLCompiler), type(compiled)
+        assert not compiled.positional, 'HeldConnection needs named parameters'
+        typed = [
+            name
+            for name, bind in compiled.binds.items()
+            if not isinstance(bind.type, NullType)
+        ]
+        assert not typed, (
+            f'HeldConnection sends parameters unchanged; typed binds {typed}'
+        )
+        held = _HeldStatement(
+            clause=clause,
+            compiled=compiled,
+            query=compiled.string.encode(),
+        )
+        self._statements[id(clause)] = held
+        return held
+
+
+def _driver_of(pooled: PoolProxiedConnection) -> psycopg.AsyncConnection[TupleRow]:
+    """The psycopg connection under ``pooled``. Any other driver is a defect:
+    the held path sends psycopg calls."""
+    driver = pooled.driver_connection
+    assert isinstance(driver, psycopg.AsyncConnection), type(driver)
+    # isinstance narrows to AsyncConnection[Unknown]; SQLAlchemy opens its
+    # psycopg connections with the default row factory, tuple rows.
+    return cast('psycopg.AsyncConnection[TupleRow]', driver)
+
+
+def _dialect_sees_disconnect(
+    dialect: Dialect,
+    exc: psycopg.Error,
+    pooled: PoolProxiedConnection,
+) -> bool:
+    """The dialect's disconnect check, as SQLAlchemy runs it on the per-call
+    path (for psycopg: the connection is closed or broken)."""
+    # SQLAlchemy types the error as the class of its DBAPI protocol; at run
+    # time it passes the driver's own error, as here.
+    return bool(
+        dialect.is_disconnect(cast('DBAPIModule.Error', exc), pooled, None),
+    )
+
+
+def _recycle_due(recycle: HeldRecycle, holding: _Holding, now: float) -> bool:
+    """Whether ``holding`` was held for the recycle age. Pure."""
+    match recycle:
+        case RecycleAfter(seconds=seconds):
+            return now - holding.taken_at >= seconds
+        case NoRecycle():
+            return False
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+async def _give_back(holding: _Holding) -> None:
+    """Return the connection of ``holding`` to the pool: close its session."""
+    holding.idle_check.cancel()
+    await holding.session.close()
+
+
+async def _drop_after_cancel(holding: _Holding) -> None:
+    """Invalidate the connection of a cancelled statement: its state is
+    unknown. A driver error of the invalidation is logged, so that the
+    caller's cancel propagates."""
+    holding.idle_check.cancel()
+    try:
+        await holding.connection.invalidate()
+        await holding.session.close()
+    except DBAPIError as exc:
+        logger.warning('Invalidating a cancelled held connection failed: %r', exc)
+
+
+async def _invalidate_pool_through(holding: _Holding) -> None:
+    """Send ``DISCONNECT_PROBE_SQL`` through SQLAlchemy on the broken
+    connection of ``holding``. SQLAlchemy sees the disconnect and invalidates
+    the connection and every connection of the pool. Then the session is
+    closed. A probe that runs (the connection works after all) invalidates
+    only this connection."""
+    connection = holding.connection
+    try:
+        _ = await connection.exec_driver_sql(DISCONNECT_PROBE_SQL)
+    except DBAPIError as probed:
+        if not probed.connection_invalidated:
+            await connection.invalidate(probed)
+    else:
+        logger.warning(
+            'A held connection that the dialect saw as broken answered the '
+            'probe; it is invalidated alone',
+        )
+        await connection.invalidate()
+    await holding.session.close()

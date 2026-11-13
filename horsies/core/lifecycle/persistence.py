@@ -33,11 +33,12 @@ from ..utils.db import (
     AutocommitFailure,
     NotSent,
     OutcomeUnknown,
+    PooledStatements,
     SingleStatement,
     StatementRefused,
+    StatementRunner,
     is_retryable_connection_error,
     run_in_autocommit,
-    run_in_autocommit_result,
 )
 from .commands import (
     AbandonNodesOfPausedWorkflows,
@@ -632,9 +633,19 @@ async def apply_fused_batch_in_autocommit(
     session_factory: async_sessionmaker[AsyncSession],
     batch: FusedCompletionBatch,
 ) -> Result[tuple[TerminalizationOutcome, ...], BatchWriteError]:
+    """``apply_fused_batch`` on one checkout of ``session_factory``
+    (``PooledStatements``). Outcomes and failures as ``apply_fused_batch``."""
+    return await apply_fused_batch(PooledStatements(session_factory), batch)
+
+
+async def apply_fused_batch(
+    runner: StatementRunner,
+    batch: FusedCompletionBatch,
+) -> Result[tuple[TerminalizationOutcome, ...], BatchWriteError]:
     """Write a batch of plain-success completions as one statement.
 
-    One round trip in autocommit (``run_in_autocommit_result``). A batch of
+    One round trip in autocommit on ``runner``: a checkout per call
+    (``PooledStatements``) or a held connection (``HeldConnection``). A batch of
     one row runs ``horsies_complete_task_fused`` itself; a batch of several
     runs ``horsies_complete_tasks_fused``, which calls that function once per
     row. The statement is atomic: every ``Applied`` row committed with it,
@@ -653,7 +664,7 @@ async def apply_fused_batch_in_autocommit(
             ordinality, an outcome for another task). These are defects; the
             rows of the statement committed or wrote nothing.
     """
-    match await run_in_autocommit_result(session_factory, _fused_statement(batch)):
+    match await runner.run(_fused_statement(batch)):
         case Ok(rows):
             pass
         case Err(failure):

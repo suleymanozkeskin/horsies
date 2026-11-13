@@ -64,6 +64,7 @@ from horsies.core.worker.sql import (
     NOTIFY_TASK_QUEUE_SQL,
     RETURN_CLAIMED_TASK_AS_ISOLATED_SQL,
 )
+from horsies.core.utils.db import PooledStatements
 from horsies.core.worker.worker import Worker, _log_claim_plan
 from pydantic import SecretStr
 
@@ -464,6 +465,7 @@ class TestClaimPassWithClasses:
         worker = _worker(processes=1)
         session = _session([], returned_rowcount=0)
         worker.sf = MagicMock(return_value=session)
+        worker._claim_runner = PooledStatements(worker.sf)  # pyright: ignore[reportPrivateUsage]
 
         await worker._claim_and_dispatch_all()
 
@@ -488,6 +490,7 @@ class TestClaimPassWithClasses:
             returned_rowcount=1,
         )
         worker.sf = MagicMock(return_value=session)
+        worker._claim_runner = PooledStatements(worker.sf)  # pyright: ignore[reportPrivateUsage]
         worker._dispatch_one = AsyncMock()  # type: ignore[method-assign]
 
         with caplog.at_level(logging.WARNING, logger='horsies.worker'):
@@ -528,6 +531,7 @@ class TestClaimPassWithClasses:
             returned_rowcount=0,
         )
         worker.sf = MagicMock(return_value=session)
+        worker._claim_runner = PooledStatements(worker.sf)  # pyright: ignore[reportPrivateUsage]
         worker._dispatch_one = AsyncMock()  # type: ignore[method-assign]
 
         with caplog.at_level(logging.WARNING, logger='horsies.worker'):
@@ -551,6 +555,7 @@ class TestClaimPassWithClasses:
             returned_rowcount=1,
         )
         worker.sf = MagicMock(return_value=session)
+        worker._claim_runner = PooledStatements(worker.sf)  # pyright: ignore[reportPrivateUsage]
         worker._dispatch_one = AsyncMock()  # type: ignore[method-assign]
 
         claim_pass = await worker._claim_and_dispatch_all()

@@ -16,6 +16,10 @@ Flush rule, with no timer:
   all. A surge flusher writes full batches only, and ends when less than a full
   batch waits.
 
+Each steady flusher writes on one of the batcher's steady runners for as long
+as it runs; the worker gives each a held connection (``HeldConnection``). A
+surge flusher writes on the surge runner, a checkout per statement.
+
 So a lone row is written at once, and the rows that arrive while the steady
 flushers write form the next batch. A worker frees a seat only after the
 commit of its row, so a timer would hold every seat longer. More steady
@@ -31,7 +35,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import Final, assert_never
@@ -47,7 +51,7 @@ from horsies.core.lifecycle.persistence import (
 )
 from horsies.core.logging import get_logger
 from horsies.core.types.result import Err, Ok, Result
-from horsies.core.utils.db import StatementRefused
+from horsies.core.utils.db import StatementRefused, StatementRunner
 
 logger = get_logger('worker')
 
@@ -64,10 +68,10 @@ type BatchRowResult = Result[TerminalizationOutcome, BatchWriteError]
 it."""
 
 type FusedBatchWrite = Callable[
-    [FusedCompletionBatch],
+    [FusedCompletionBatch, StatementRunner],
     Awaitable[Result[tuple[TerminalizationOutcome, ...], BatchWriteError]],
 ]
-"""Writes one batch: ``apply_fused_batch_in_autocommit`` on a pool."""
+"""Writes one batch on a runner: ``apply_fused_batch``."""
 
 
 class FlusherRole(Enum):
@@ -133,13 +137,20 @@ class FinalizeBatcher:
 
     ``max_flushers`` bounds the flushers of both roles together: the size of
     the worker pool. The steady flushers are ``FINALIZE_BATCH_FLUSHERS``, or
-    ``max_flushers`` when it is smaller.
+    ``max_flushers`` when it is smaller. Each running steady flusher holds one
+    of ``steady_runners``; every surge flusher writes on ``surge_runner``.
+
+    Raises:
+        ValueError: a bound is not positive, or ``steady_runners`` holds fewer
+            runners than the steady flushers.
     """
 
     def __init__(
         self,
         write: FusedBatchWrite,
         *,
+        steady_runners: Sequence[StatementRunner],
+        surge_runner: StatementRunner,
         max_queued_rows: int,
         max_flushers: int,
     ) -> None:
@@ -151,6 +162,17 @@ class FinalizeBatcher:
         self._max_queued_rows = max_queued_rows
         self._steady_bound = min(FINALIZE_BATCH_FLUSHERS, max_flushers)
         self._surge_bound = max_flushers - self._steady_bound
+        if len(steady_runners) < self._steady_bound:
+            raise ValueError(
+                f'{self._steady_bound} steady flushers need as many runners, '
+                f'got {len(steady_runners)}'
+            )
+        # A steady flusher takes a runner when it starts and gives it back in
+        # its last synchronous step, with its count.
+        self._free_steady_runners: list[StatementRunner] = list(
+            steady_runners[: self._steady_bound],
+        )
+        self._surge_runner = surge_runner
         self._queue: deque[_QueuedRow] = deque()
         # The counts decide whether a submit starts a flusher. A flusher
         # lowers its count in its last synchronous step, so a submit never
@@ -221,16 +243,24 @@ class FinalizeBatcher:
             self._start_flusher(FlusherRole.SURGE)
 
     def _start_flusher(self, role: FlusherRole) -> None:
+        match role:
+            case FlusherRole.STEADY:
+                runner = self._free_steady_runners.pop()
+            case FlusherRole.SURGE:
+                runner = self._surge_runner
+            case _ as unreachable:
+                assert_never(unreachable)
         self._running[role] += 1
         flusher = asyncio.create_task(
-            self._flush(role),
+            self._flush(role, runner),
             name=f'finalize-batch-flusher-{role.value.lower()}',
         )
         self._flushers.add(flusher)
         flusher.add_done_callback(self._flusher_ended)
 
-    async def _flush(self, role: FlusherRole) -> None:
-        """Write batches while the flush rule of ``role`` finds one.
+    async def _flush(self, role: FlusherRole, runner: StatementRunner) -> None:
+        """Write batches on ``runner`` while the flush rule of ``role`` finds
+        one.
 
         Each round takes at most ``FUSED_BATCH_MAX_ROWS`` rows and answers
         every one of them; the queue holds at most ``max_queued_rows``.
@@ -239,11 +269,18 @@ class FinalizeBatcher:
             while rows := self._take_batch(role):
                 self._rows_in_flight += len(rows)
                 try:
-                    await self._write_and_answer(rows)
+                    await self._write_and_answer(rows, runner)
                 finally:
                     self._rows_in_flight -= len(rows)
         finally:
             self._running[role] -= 1
+            match role:
+                case FlusherRole.STEADY:
+                    self._free_steady_runners.append(runner)
+                case FlusherRole.SURGE:
+                    pass
+                case _ as unreachable:
+                    assert_never(unreachable)
 
     def _take_batch(self, role: FlusherRole) -> tuple[_QueuedRow, ...]:
         """Take the queued rows, oldest first, up to ``FUSED_BATCH_MAX_ROWS``.
@@ -273,7 +310,11 @@ class FinalizeBatcher:
         self._queue.extendleft(reversed(skipped))
         return tuple(taken)
 
-    async def _write_and_answer(self, rows: tuple[_QueuedRow, ...]) -> None:
+    async def _write_and_answer(
+        self,
+        rows: tuple[_QueuedRow, ...],
+        runner: StatementRunner,
+    ) -> None:
         """Write ``rows`` as one batch and answer each row.
 
         When the server or the driver refuses a batch of several rows, one
@@ -282,7 +323,7 @@ class FinalizeBatcher:
         is not about one row: every row gets that error.
         """
         try:
-            written = await self._write(_batch_of(rows))
+            written = await self._write(_batch_of(rows), runner)
             match written:
                 case Ok(outcomes):
                     for row, outcome in zip(rows, outcomes, strict=True):
@@ -303,7 +344,7 @@ class FinalizeBatcher:
                         str(refused.error)[:500],
                     )
                     for row in rows:
-                        _answer(row, await self._write_alone(row))
+                        _answer(row, await self._write_alone(row, runner))
                 case BatchRolledBack() | BatchCommitUnknown():
                     for row in rows:
                         _answer(row, Err(error))
@@ -322,9 +363,13 @@ class FinalizeBatcher:
             for row in rows:
                 _fail(row, exc)
 
-    async def _write_alone(self, row: _QueuedRow) -> BatchRowResult:
-        """Write ``row`` as a batch of one."""
-        match await self._write(_batch_of((row,))):
+    async def _write_alone(
+        self,
+        row: _QueuedRow,
+        runner: StatementRunner,
+    ) -> BatchRowResult:
+        """Write ``row`` as a batch of one, on ``runner``."""
+        match await self._write(_batch_of((row,)), runner):
             case Ok(outcomes):
                 (outcome,) = outcomes
                 return Ok(outcome)
