@@ -45,6 +45,7 @@ from horsies.core.worker.child_runner import (
     SKIP_CANCELLED_NODE_SQL,
     START_WORKFLOW_NODE_SQL,
     WORKFLOW_STATUS_OF_TASK_SQL,
+    mark_finalizing_params,
     set_running_params,
     set_running_sql,
 )
@@ -424,7 +425,7 @@ class TestFinalizingMarker:
         assert cursor.queries == [
             (
                 MARK_FINALIZING_SQL,
-                ('worker-1', 'task-1', 'worker-1', CLAIMED_AT, CLAIMED_AT),
+                mark_finalizing_params('task-1', 'worker-1', CLAIMED_AT),
             ),
         ]
         # One statement on an autocommit connection: no transaction to end.

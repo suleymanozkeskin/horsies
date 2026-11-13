@@ -88,7 +88,11 @@ _IDENTIFIER = re.compile(r'^[a-z][a-z0-9_]{0,62}$')
 # prototype names the trigger or the channel; the prototype terminalization
 # functions are their own copies and do not call the moves. The cloned shape is
 # unchanged and the base advances.
-_EXPECTED_BASE_SCHEMA_VERSION = 59
+# v60 changes the bodies of the completion and failure functions (their
+# locking read is by id alone). It changes no table, column or index. The
+# prototypes define their own functions of these names in their own
+# namespaces and do not call the production ones, so the base advances.
+_EXPECTED_BASE_SCHEMA_VERSION = 60
 
 
 @dataclass(frozen=True, slots=True)

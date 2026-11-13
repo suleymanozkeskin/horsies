@@ -502,6 +502,19 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **A task row is read by its id alone (schema v60).** The start of a task,
+  its finalizing marker, and the completion and failure functions
+  (`horsies_complete_task_fused`, `horsies_complete_locked_task`,
+  `horsies_fail_locked_task`, `horsies_finish_failed_attempt`,
+  `horsies_finish_workflow_success`) read the row by id and check the claim
+  on the locked row. With the statistics that Postgres takes while every row
+  is PENDING, for example after a burst of sends, the planner served the
+  earlier statements from the status index or a partial index: 113 index and
+  table pages per call for the start, 258 for the marker and 179 for the read
+  of the completion, against 27, 10 and 5 with the statistics of a working
+  queue. Outcomes and locks are the same, except that a start or a marker
+  whose claim changed now locks the row until its transaction ends.
+
 - **A task's start sends no `horsies_task_status` event (schema v59).** The
   status update trigger skips the change to RUNNING. A task's start commit is
   one transaction per task, and its NOTIFY made Postgres commit it one at a

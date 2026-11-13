@@ -698,9 +698,28 @@ SKIP_CANCELLED_NODE_SQL: Final[LiteralString] = """
                           AND status IN ('ENQUEUED', 'READY')
                         """
 
+# The start and the finalizing marker read their row by id alone, in a
+# MATERIALIZED CTE that locks it FOR NO KEY UPDATE (the lock of the UPDATE)
+# and computes the fence as one boolean. The UPDATE joins on id and checks
+# that boolean, so only the primary key serves either scan whatever the
+# statistics say. A row that fails the fence stays locked until the
+# transaction ends.
 _SET_RUNNING_HEAD_SQL: Final[LiteralString] = """
-                WITH started AS (
-                    UPDATE horsies_tasks
+                WITH target AS MATERIALIZED (
+                    SELECT id,
+                           (
+                               status = 'CLAIMED'
+                               AND claimed_by_worker_id = %s
+                               AND (%s::timestamptz IS NULL OR claimed_at = %s::timestamptz)
+                               AND (claim_expires_at IS NULL OR claim_expires_at > now())
+                               AND (good_until IS NULL OR good_until > now())
+                           ) IS TRUE AS startable
+                    FROM horsies_tasks
+                    WHERE id = %s
+                    FOR NO KEY UPDATE
+                ),
+                started AS (
+                    UPDATE horsies_tasks t
                     SET status = 'RUNNING',
                         claimed = FALSE,
                         claim_expires_at = NULL,
@@ -709,12 +728,9 @@ _SET_RUNNING_HEAD_SQL: Final[LiteralString] = """
                         worker_hostname = %s,
                         worker_process_name = %s,
                         updated_at = NOW()
-                    WHERE id = %s
-                      AND status = 'CLAIMED'
-                      AND claimed_by_worker_id = %s
-                      AND (%s::timestamptz IS NULL OR claimed_at = %s::timestamptz)
-                      AND (claim_expires_at IS NULL OR claim_expires_at > now())
-                      AND (good_until IS NULL OR good_until > now())
+                    FROM target
+                    WHERE t.id = target.id
+                      AND target.startable
                 """
 
 _SET_RUNNING_WORKFLOW_GUARD_SQL: Final[LiteralString] = """
@@ -728,7 +744,7 @@ _SET_RUNNING_WORKFLOW_GUARD_SQL: Final[LiteralString] = """
             """
 
 _SET_RUNNING_TAIL_SQL: Final[LiteralString] = """
-                    RETURNING id
+                    RETURNING t.id
                 ),
                 first_beat AS (
                     INSERT INTO horsies_heartbeats (
@@ -765,15 +781,36 @@ BEGIN_SQL: Final[LiteralString] = 'BEGIN'
 autocommit (``child_pool``)."""
 
 MARK_FINALIZING_SQL: Final[LiteralString] = """
-                UPDATE horsies_tasks
+                WITH target AS MATERIALIZED (
+                    SELECT id,
+                           (
+                               status = 'RUNNING'
+                               AND claimed_by_worker_id = %s
+                               AND (%s::timestamptz IS NULL OR claimed_at = %s::timestamptz)
+                           ) IS TRUE AS fenced
+                    FROM horsies_tasks
+                    WHERE id = %s
+                    FOR NO KEY UPDATE
+                )
+                UPDATE horsies_tasks t
                 SET finalizing_at = NOW(),
                     finalizing_by_worker_id = %s,
                     updated_at = NOW()
-                WHERE id = %s
-                  AND status = 'RUNNING'
-                  AND claimed_by_worker_id = %s
-                  AND (%s::timestamptz IS NULL OR claimed_at = %s::timestamptz)
+                FROM target
+                WHERE t.id = target.id
+                  AND target.fenced
                 """
+
+
+def mark_finalizing_params(
+    task_id: str,
+    worker_id: str,
+    claimed_at: Optional[datetime],
+) -> tuple[object, ...]:
+    """The parameters of ``MARK_FINALIZING_SQL``, in order: the fence (the
+    worker and the claim generation twice), the task, and the marking
+    worker. No I/O."""
+    return (worker_id, claimed_at, claimed_at, task_id, worker_id)
 
 
 def set_running_sql(is_workflow_task: bool) -> LiteralString:
@@ -826,13 +863,13 @@ def set_running_params(
     pid = os.getpid()
     hostname = socket.gethostname()
     params: list[object] = [
-        pid,
-        hostname,
-        f'worker-{pid}',
-        task_id,
         worker_id,
         claimed_at,
         claimed_at,
+        task_id,
+        pid,
+        hostname,
+        f'worker-{pid}',
     ]
     if is_workflow_task:
         params.append(task_id)
@@ -1204,7 +1241,7 @@ def _mark_task_finalizing(
             cursor = conn.cursor()
             cursor.execute(
                 MARK_FINALIZING_SQL,
-                (worker_id, task_id, worker_id, claimed_at, claimed_at),
+                mark_finalizing_params(task_id, worker_id, claimed_at),
             )
             marked_rows = cursor.rowcount
     except Exception as exc:

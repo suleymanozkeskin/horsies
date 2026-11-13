@@ -403,8 +403,14 @@ from horsies.core.models.tasks import Execution
 #      'RUNNING': a task's start commit sends no NOTIFY. The history move
 #      functions send horsies_task_status with the task id next to
 #      task_done, so the monitoring stream hears every terminal move.
+# v60: the completion and failure functions (horsies_complete_locked_task,
+#      horsies_complete_task_fused, horsies_fail_locked_task,
+#      horsies_finish_failed_attempt, horsies_finish_workflow_success) read
+#      their row by id alone and check the fence on the locked row, so only
+#      the primary key serves the read whatever the statistics say. Same
+#      signatures, outcomes and locks.
 
-SCHEMA_VERSION = 59
+SCHEMA_VERSION = 60
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,

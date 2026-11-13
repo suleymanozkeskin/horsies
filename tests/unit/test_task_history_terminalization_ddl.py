@@ -9,6 +9,8 @@ refactor touches the body text.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from horsies.core.history.ddl.fragments import frozen_fragments
@@ -24,6 +26,10 @@ from horsies.core.history.terminalization.move import (
     ATTEMPT_ENCODER_DDL,
     ATTEMPT_ENCODER_FUNCTION,
     COMPLETE_FUSED_FUNCTION,
+    COMPLETE_LOCKED_FUNCTION,
+    FAIL_LOCKED_FUNCTION,
+    FINISH_FAILED_ATTEMPT_FUNCTION,
+    FINISH_WORKFLOW_SUCCESS_FUNCTION,
     KIND_PROJECTIONS,
     cancellation_family_fragments,
     completion_batch_fragments,
@@ -34,6 +40,7 @@ from horsies.core.history.terminalization.move import (
     expiry_family_fragments,
     failed_attempt_fragments,
     failure_family_fragments,
+    locking_read_replacement_ddl,
     terminal_snapshot_replacement_ddl,
     workflow_node_family_fragments,
     workflow_success_fragments,
@@ -778,3 +785,54 @@ class TestBatchedFusedCompletion:
             'CREATE OR REPLACE FUNCTION',
             1,
         )
+
+
+_LOCKING_READ = re.compile(
+    r'FROM horsies_tasks\n    WHERE (?P<where>.*?)\n    FOR UPDATE;',
+    re.DOTALL,
+)
+
+
+def _function_ddl(name: str) -> str:
+    fragments = (
+        *completion_family_fragments(),
+        *failure_family_fragments(),
+        *failed_attempt_fragments(),
+        *workflow_success_fragments(),
+    )
+    matching = [ddl for ddl in fragments if f'CREATE FUNCTION {name}(' in ddl]
+    assert len(matching) == 1, name
+    return matching[0]
+
+
+class TestLockingReads:
+    """A completion or failure function reads its row by id alone and checks
+    the fence on the locked row, so only the primary key serves the read,
+    whatever the statistics say."""
+
+    @pytest.mark.parametrize(
+        'name',
+        [
+            COMPLETE_LOCKED_FUNCTION,
+            COMPLETE_FUSED_FUNCTION,
+            FAIL_LOCKED_FUNCTION,
+            FINISH_FAILED_ATTEMPT_FUNCTION,
+            FINISH_WORKFLOW_SUCCESS_FUNCTION,
+        ],
+    )
+    def test_the_locking_read_names_only_the_id(self, name: str) -> None:
+        reads = [match.group('where') for match in _LOCKING_READ.finditer(_function_ddl(name))]
+
+        assert reads == ['id = p_task_id']
+
+    def test_the_upgrade_replaces_the_functions_that_the_cutover_installs_once(
+        self,
+    ) -> None:
+        replaced = [
+            name
+            for name in (COMPLETE_LOCKED_FUNCTION, COMPLETE_FUSED_FUNCTION, FAIL_LOCKED_FUNCTION)
+            for ddl in locking_read_replacement_ddl()
+            if f'CREATE OR REPLACE FUNCTION {name}(' in ddl
+        ]
+
+        assert replaced == [COMPLETE_LOCKED_FUNCTION, COMPLETE_FUSED_FUNCTION, FAIL_LOCKED_FUNCTION]
