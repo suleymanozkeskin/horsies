@@ -35,6 +35,7 @@ import traceback
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import Enum
+from types import ModuleType
 from typing import TYPE_CHECKING, Final, NoReturn, assert_never
 
 from horsies.core.codec.error_payload import serialize_error_payload
@@ -117,12 +118,6 @@ BAD_ARGUMENTS_EXIT_CODE: Final = 73
 # After a stop frame, when threads of the task loop's executor still run:
 # the child leaves without waiting for them, so ``atexit`` handlers do not run.
 STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE: Final = 74
-
-_JOIN_NON_DAEMON_THREADS: Final[Callable[[], None]] = getattr(threading, '_shutdown')
-"""The first step of ``sys.exit``: the callbacks that ``concurrent.futures``
-and other modules registered with ``threading`` (they stop their executors),
-then a join of every non-daemon thread. Read at import, so a Python without
-it fails the child at boot, not at its stop."""
 # At boot, after ``BootFailedFrame``: the frame names the cause.
 BOOT_FAILED_EXIT_CODE: Final = 75
 INIT_FRAME_TIMEOUT_S: Final = 30.0
@@ -773,6 +768,65 @@ def exit_after_stop(executor: ExecutorAfterClose) -> NoReturn:
             assert_never(unreachable)
 
 
+class ExitStep(Enum):
+    """A private CPython function that ``sys.exit`` runs, with no argument,
+    before the interpreter teardown. The value is its module and its name
+    there. The members are in the order that ``sys.exit`` runs them."""
+
+    JOIN_NON_DAEMON_THREADS = (threading, '_shutdown')
+    """The callbacks that ``concurrent.futures`` and other modules registered
+    with ``threading`` (they stop their executors), then a join of every
+    non-daemon thread."""
+
+    RUN_ATEXIT_HANDLERS = (atexit, '_run_exitfuncs')
+    """The ``atexit`` handlers."""
+
+    def __init__(self, module: ModuleType, attribute: str) -> None:
+        self.module: Final = module
+        self.attribute: Final = attribute
+
+    @property
+    def dotted_name(self) -> str:
+        """For example ``threading._shutdown``."""
+        return f'{self.module.__name__}.{self.attribute}'
+
+    def look_up(self) -> object:
+        """The value at the name of this step, or None when its module has no
+        such name. Calls nothing."""
+        return getattr(self.module, self.attribute, None)
+
+
+@dataclass(frozen=True, slots=True)
+class ExitStepsFound:
+    """Both exit steps are functions on this Python."""
+
+    join_non_daemon_threads: Callable[[], object]
+    run_atexit_handlers: Callable[[], object]
+
+
+@dataclass(frozen=True, slots=True)
+class ExitStepMissing:
+    """This Python has no function at the name of ``step``."""
+
+    step: ExitStep
+
+
+type ExitStepsLookup = ExitStepsFound | ExitStepMissing
+
+
+def look_up_exit_steps() -> ExitStepsLookup:
+    """Find the exit steps on this Python. Reads ``threading`` and
+    ``atexit``, and calls nothing. ``ExitStepMissing`` names the first
+    missing step, in the order of ``ExitStep``."""
+    join_non_daemon_threads = ExitStep.JOIN_NON_DAEMON_THREADS.look_up()
+    if not callable(join_non_daemon_threads):
+        return ExitStepMissing(ExitStep.JOIN_NON_DAEMON_THREADS)
+    run_atexit_handlers = ExitStep.RUN_ATEXIT_HANDLERS.look_up()
+    if not callable(run_atexit_handlers):
+        return ExitStepMissing(ExitStep.RUN_ATEXIT_HANDLERS)
+    return ExitStepsFound(join_non_daemon_threads, run_atexit_handlers)
+
+
 def end_without_teardown(code: int) -> NoReturn:
     """End the process with ``code`` after the steps that ``sys.exit`` runs
     before the interpreter teardown: the join of the non-daemon threads (with
@@ -790,15 +844,35 @@ def end_without_teardown(code: int) -> NoReturn:
     An exception from a step is printed, and the process still ends with
     ``code``, as an error in an ``atexit`` handler leaves the code of
     ``sys.exit``.
+
+    The steps are private CPython functions (``ExitStep``). They are looked
+    up here, at the stop, so a Python without one of them still starts its
+    children. On such a Python the child logs the missing name and ends
+    through ``sys.exit(code)``, which runs the same steps and the teardown.
     """
-    try:
-        _JOIN_NON_DAEMON_THREADS()
-        atexit._run_exitfuncs()  # pyright: ignore[reportPrivateUsage] - what sys.exit runs next
-    except BaseException:
-        traceback.print_exc()
-    finally:
-        flush_output()
-        os._exit(code)
+    match look_up_exit_steps():
+        case ExitStepsFound(
+            join_non_daemon_threads=join_non_daemon_threads,
+            run_atexit_handlers=run_atexit_handlers,
+        ):
+            try:
+                _ = join_non_daemon_threads()
+                _ = run_atexit_handlers()
+            except BaseException:
+                traceback.print_exc()
+            finally:
+                flush_output()
+                os._exit(code)
+        case ExitStepMissing(step=step):
+            logger.warning(
+                'This Python has no %s; the child ends through sys.exit(%d), '
+                'with the interpreter teardown',
+                step.dotted_name,
+                code,
+            )
+            sys.exit(code)
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def serve(
