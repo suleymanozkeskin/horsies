@@ -703,7 +703,11 @@ SKIP_CANCELLED_NODE_SQL: Final[LiteralString] = """
 # and computes the fence as one boolean. The UPDATE joins on id and checks
 # that boolean, so only the primary key serves either scan whatever the
 # statistics say. A row that fails the fence stays locked until the
-# transaction ends.
+# transaction ends. The move functions take the task advisory lock before
+# the row lock, so no move function runs in a transaction that holds this
+# lock: a workflow start that returns no row ends its transaction before
+# its miss path (``_begin_miss_path_when_workflow``), and the marker is one
+# statement in autocommit.
 _SET_RUNNING_HEAD_SQL: Final[LiteralString] = """
                 WITH target AS MATERIALIZED (
                     SELECT id,
@@ -839,11 +843,43 @@ def _begin_when_workflow(cursor: Cursor[Any], is_workflow_task: bool) -> None:
     ``BEGIN_SQL`` before the update, and each branch ends the transaction
     with ``commit()`` or ``rollback()``.
 
+    The update can lock the row and return no row: its fence fails after
+    the row is locked, and the lock lasts until this transaction ends. The
+    move functions of the miss path take the task advisory lock before the
+    row lock, so a start that returns no row ends this transaction before
+    them (``_begin_miss_path_when_workflow``).
+
     Raises:
         Exception: what the driver raises for the BEGIN.
     """
     match is_workflow_task:
         case True:
+            cursor.execute(BEGIN_SQL)
+        case False:
+            pass
+
+
+def _begin_miss_path_when_workflow(
+    cursor: Cursor[Any],
+    conn: Connection[Any],
+    is_workflow_task: bool,
+) -> None:
+    """Release the row lock of a workflow start that returned no row.
+
+    A workflow task rolls back the transaction of its start, then opens a
+    new one with ``BEGIN_SQL`` for the miss path. The rollback loses no
+    write: the update and the first beat apply only to a started row. The
+    miss path then waits for the task advisory lock while it holds no lock
+    on the row. A transaction that holds the advisory lock and waits for
+    the row gets it, and no deadlock occurs. A plain task sends nothing:
+    its start ran in autocommit, and its lock ended with the statement.
+
+    Raises:
+        Exception: what the driver raises for the ROLLBACK or the BEGIN.
+    """
+    match is_workflow_task:
+        case True:
+            conn.rollback()
             cursor.execute(BEGIN_SQL)
         case False:
             pass
@@ -1143,6 +1179,7 @@ def _confirm_ownership_and_set_running(
             )
             updated_row = cursor.fetchone()
             if updated_row is None:
+                _begin_miss_path_when_workflow(cursor, conn, is_workflow_task)
                 expired_result = _expire_claimed_task_before_start(
                     cursor,
                     conn,

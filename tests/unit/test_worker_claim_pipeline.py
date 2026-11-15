@@ -346,7 +346,7 @@ class TestOwnershipGateBehavioral:
         ok, _result_json, reason = result
         assert ok is False
         assert reason == 'CLAIM_LOST'
-        assert conn.rollbacks == 1, 'Should rollback on ownership loss'
+        assert conn.rollbacks == 2, 'The start that missed, then the miss path'
         assert conn.commits == 0, 'No commit on ownership loss'
         assert not any('UPDATE horsies_workflow_tasks' in sql for sql, _ in cursor.queries)
 

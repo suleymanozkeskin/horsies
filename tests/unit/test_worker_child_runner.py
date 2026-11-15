@@ -138,6 +138,30 @@ class _SequenceCursor(_FakeCursor):
         return self._rows.pop(0)
 
 
+class _OrderedConn(_FakeConn):
+    """Records each commit and rollback among the statements of its cursor,
+    so a test sees where a transaction ends."""
+
+    def commit(self) -> None:
+        super().commit()
+        self._cursor.queries.append(('COMMIT', ()))
+
+    def rollback(self) -> None:
+        super().rollback()
+        self._cursor.queries.append(('ROLLBACK', ()))
+
+
+def _apply_recording(outcomes: list[Any]) -> MagicMock:
+    """An ``apply_sync`` that records each command by its class name among
+    the statements of the cursor, and returns ``outcomes`` in order."""
+
+    def apply(cursor: _FakeCursor, command: object) -> Any:
+        cursor.queries.append((type(command).__name__, ()))
+        return outcomes.pop(0)
+
+    return MagicMock(side_effect=apply)
+
+
 # ---------------------------------------------------------------------------
 # Helper to parse a TaskResult from serialized JSON produced by child_runner
 # ---------------------------------------------------------------------------
@@ -2049,7 +2073,8 @@ class TestOwnershipLostWorkflowBranch:
 
         assert result == (False, '', OutcomeCode.TASK_EXPIRED.value)
         assert conn.commits == 1
-        assert conn.rollbacks == 0
+        # The start that missed, before the expiry.
+        assert conn.rollbacks == 1
         assert not any('UPDATE horsies_workflow_tasks' in sql for sql, _ in cursor.queries)
         executed_sql = '\n'.join(sql for sql, _ in cursor.queries)
         assert 'good_until IS NULL OR good_until > now()' in executed_sql
@@ -2087,8 +2112,92 @@ class TestOwnershipLostWorkflowBranch:
 
         assert result == (False, '', 'CLAIM_LOST')
         assert conn.commits == 0
-        assert conn.rollbacks == 1
+        # The start that missed, then the miss path.
+        assert conn.rollbacks == 2
         assert not any('UPDATE horsies_workflow_tasks' in sql for sql, _ in cursor.queries)
+
+    def test_a_missed_workflow_start_ends_its_transaction_before_the_miss_path(
+        self,
+    ) -> None:
+        """A start that returns no row can hold the row lock: its fence
+        failed after the row was locked. The miss path takes the task
+        advisory lock before the row, so it runs in a new transaction, after
+        the rollback of the start."""
+        from horsies.core.lifecycle.commands import AbandonOwnedNode, ExpireOwnedClaim
+        from horsies.core.lifecycle.outcomes import Applied, LostClaim
+        from horsies.core.worker.child_runner import (
+            BEGIN_SQL,
+            RESET_PAUSED_NODE_SQL,
+            WORKFLOW_STATUS_OF_TASK_SQL,
+            _confirm_ownership_and_set_running,
+            set_running_sql,
+        )
+
+        cursor = _SequenceCursor([None, _FakeRow(status='PAUSED')])
+        conn = _OrderedConn(cursor)
+        outcomes = [MagicMock(spec=LostClaim), MagicMock(spec=Applied)]
+
+        with (
+            patch(
+                'horsies.core.worker.child_runner._get_worker_pool',
+                return_value=_FakePool(conn),
+            ),
+            patch(
+                'horsies.core.worker.child_runner.apply_sync',
+                _apply_recording(outcomes),
+            ),
+        ):
+            result = _confirm_ownership_and_set_running('task-1', 'worker-A')
+
+        assert result == (False, '', 'WORKFLOW_STOPPED')
+        assert [sql for sql, _ in cursor.queries] == [
+            BEGIN_SQL,
+            set_running_sql(True),
+            'ROLLBACK',
+            BEGIN_SQL,
+            ExpireOwnedClaim.__name__,
+            WORKFLOW_STATUS_OF_TASK_SQL,
+            AbandonOwnedNode.__name__,
+            RESET_PAUSED_NODE_SQL,
+            'COMMIT',
+        ]
+
+    def test_a_missed_plain_start_opens_no_transaction(self) -> None:
+        """A plain task starts in autocommit: the lock of its start ended with
+        the statement, and nothing is sent between the start and the
+        expiry."""
+        from horsies.core.lifecycle.commands import ExpireOwnedClaim
+        from horsies.core.lifecycle.outcomes import LostClaim
+        from horsies.core.worker.child_runner import (
+            _confirm_ownership_and_set_running,
+            set_running_sql,
+        )
+
+        cursor = _SequenceCursor([None])
+        conn = _OrderedConn(cursor)
+
+        with (
+            patch(
+                'horsies.core.worker.child_runner._get_worker_pool',
+                return_value=_FakePool(conn),
+            ),
+            patch(
+                'horsies.core.worker.child_runner.apply_sync',
+                _apply_recording([MagicMock(spec=LostClaim)]),
+            ),
+        ):
+            result = _confirm_ownership_and_set_running(
+                'task-1',
+                'worker-A',
+                is_workflow_task=False,
+            )
+
+        assert result == (False, '', 'CLAIM_LOST')
+        assert [sql for sql, _ in cursor.queries] == [
+            set_running_sql(False),
+            ExpireOwnedClaim.__name__,
+            'ROLLBACK',
+        ]
 
 
 # ===================================================================

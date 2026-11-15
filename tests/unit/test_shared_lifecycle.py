@@ -99,6 +99,19 @@ class _Conn:
         self.rollbacks += 1
 
 
+class _OrderedConn(_Conn):
+    """Records each commit and rollback among the statements of its cursor,
+    so a test sees where a transaction ends."""
+
+    async def commit(self) -> None:
+        await super().commit()
+        self.cursor_.queries.append(('COMMIT', ()))
+
+    async def rollback(self) -> None:
+        await super().rollback()
+        self.cursor_.queries.append(('ROLLBACK', ()))
+
+
 class _Pool:
     """Hands out ``conns`` in order, one per ``connection()``."""
 
@@ -120,6 +133,17 @@ class _BrokenPool:
 def _pool(fake: _Pool | _BrokenPool) -> Any:
     """The fake as the pool type that the functions take."""
     return fake
+
+
+def _apply_recording(outcomes: list[Any]) -> AsyncMock:
+    """An ``apply_psycopg_async`` that records each command by its class name
+    among the statements of the cursor, and returns ``outcomes`` in order."""
+
+    async def apply(cursor: _Cursor, command: object) -> Any:
+        cursor.queries.append((type(command).__name__, ()))
+        return outcomes.pop(0)
+
+    return AsyncMock(side_effect=apply)
 
 
 def _confirm(pool: _Pool | _BrokenPool, *, is_workflow_task: bool = False) -> Any:
@@ -359,6 +383,56 @@ class TestMissedStart:
         assert cancel.accepts_requeued_pending is True
         assert cursor.queries[-1][0] == SKIP_CANCELLED_NODE_SQL
 
+    def test_a_missed_workflow_start_ends_its_transaction_before_the_miss_path(
+        self,
+    ) -> None:
+        """A start that returns no row can hold the row lock: its fence
+        failed after the row was locked. The miss path takes the task
+        advisory lock before the row, so it runs in a new transaction, after
+        the rollback of the start."""
+        cursor = _Cursor([None, _Row(status='PAUSED')])
+        conn = _OrderedConn(cursor)
+        outcomes = [MagicMock(spec=LostClaim), MagicMock(spec=Applied)]
+        with patch.object(
+            shared_lifecycle,
+            'apply_psycopg_async',
+            _apply_recording(outcomes),
+        ):
+            result = _confirm(_Pool(conn), is_workflow_task=True)
+
+        assert result == (False, '', 'WORKFLOW_STOPPED')
+        assert [sql for sql, _ in cursor.queries] == [
+            BEGIN_SQL,
+            set_running_sql(True),
+            'ROLLBACK',
+            BEGIN_SQL,
+            ExpireOwnedClaim.__name__,
+            WORKFLOW_STATUS_OF_TASK_SQL,
+            AbandonOwnedNode.__name__,
+            RESET_PAUSED_NODE_SQL,
+            'COMMIT',
+        ]
+
+    def test_a_missed_plain_start_opens_no_transaction(self) -> None:
+        """A plain task starts in autocommit: the lock of its start ended with
+        the statement, and nothing is sent between the start and the
+        expiry."""
+        cursor = _Cursor([None])
+        conn = _OrderedConn(cursor)
+        with patch.object(
+            shared_lifecycle,
+            'apply_psycopg_async',
+            _apply_recording([MagicMock(spec=LostClaim)]),
+        ):
+            result = _confirm(_Pool(conn))
+
+        assert result == (False, '', 'CLAIM_LOST')
+        assert [sql for sql, _ in cursor.queries] == [
+            set_running_sql(False),
+            ExpireOwnedClaim.__name__,
+            'ROLLBACK',
+        ]
+
     def test_a_resume_before_the_abandon_starts_the_task_on_the_next_attempt(
         self,
     ) -> None:
@@ -382,7 +456,8 @@ class TestMissedStart:
             result = _confirm(_Pool(first, second), is_workflow_task=True)
 
         assert result is None
-        assert (first.commits, first.rollbacks) == (0, 1)
+        # The start that missed, then the refused abandon.
+        assert (first.commits, first.rollbacks) == (0, 2)
         assert second.commits == 1
 
     def test_a_resume_on_every_attempt_leaves_the_claim_to_its_lease(self) -> None:

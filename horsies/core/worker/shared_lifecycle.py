@@ -328,9 +328,27 @@ async def _begin_when_workflow(
     is_workflow_task: bool,
 ) -> None:
     """Open the transaction of the RUNNING transition of a workflow task.
-    Same contract as the sync function of this name in ``child_runner``."""
+    Same contract as the sync function of this name in ``child_runner``: a
+    start that returns no row ends this transaction before its miss path
+    (``_begin_miss_path_when_workflow``)."""
     match is_workflow_task:
         case True:
+            await cursor.execute(BEGIN_SQL)
+        case False:
+            pass
+
+
+async def _begin_miss_path_when_workflow(
+    cursor: AsyncCursor[Any],
+    conn: AsyncConnection[Any],
+    is_workflow_task: bool,
+) -> None:
+    """Release the row lock of a workflow start that returned no row: roll
+    back, then open the transaction of the miss path. Same contract as the
+    sync function of this name in ``child_runner``."""
+    match is_workflow_task:
+        case True:
+            await conn.rollback()
             await cursor.execute(BEGIN_SQL)
         case False:
             pass
@@ -391,6 +409,7 @@ async def _set_running_on_a_connection(
             set_running_params(task_id, worker_id, is_workflow_task, claimed_at),
         )
         if await cursor.fetchone() is None:
+            await _begin_miss_path_when_workflow(cursor, conn, is_workflow_task)
             return await _after_missed_start(
                 cursor,
                 conn,
