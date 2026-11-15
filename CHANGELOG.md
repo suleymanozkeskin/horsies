@@ -8,6 +8,17 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-15
+
+0.7.0 runs a task in one of three execution modes: in an isolated child,
+in a shared async child, or in a shared thread child. A task names its
+mode, and a worker profile sets the children of each kind; a worker starts
+with `--profile`, which replaces the execution flags. A task takes fewer
+round trips, and plain successes are written in batches. The schema moves
+from v52 to v61, and the first 0.7.0 process that connects upgrades it.
+The release is breaking: read the migration guide to 0.7.0 before you
+upgrade.
+
 ### Added
 
 - **`WorkerProfile.parent_cpu` gives the worker process a core of its own.**
@@ -489,6 +500,12 @@ and there is no migration contract between pre-1.0 versions.
     `horsies.core.models.child_sizing`. 8 isolated children: 5; 64 isolated
     children: 7; one shared async child of 100 seats: 10; of 1000 seats:
     20. `WorkerProfile.resolved_parent_pool()` returns the size.
+  - An explicit size has a minimum of 5 (`PARENT_POOL_MIN_CONNECTIONS`):
+    while the worker is busy, the claim loop holds 1 connection and the 2
+    steady flushers of the batched success write hold 1 each, and 2 stay
+    free for the reaper and the writes per task. A smaller
+    `PoolSize(connections=N)` fails with HRS-218; a size derived from the
+    seats is never below it.
   - Plain successes are written in batches: a worker of 1000 seats kept at
     most 3 to 8 of its 20 connections busy at 970-1,760 tasks/s. A failure is
     written per task: a worker of 1000 seats whose tasks all fail, 3.5 ms
@@ -513,6 +530,15 @@ and there is no migration contract between pre-1.0 versions.
   - `ParentPool` is exported from `horsies`.
 
 ### Changed
+
+- **The worker process and its children spend less CPU per task.** The
+  worker process counts the tasks that each child holds, reads child frames
+  from one buffer and writes a small frame in one call, probes its listener
+  connection at most once per interval of activity, freezes the objects of
+  its start for the garbage collector, and sends a batch of fused
+  completions as one JSON parameter. A child keeps the resolved hints and
+  signature of each task function and reads parent frames through one
+  buffer. One frame parser serves both sides.
 
 - **A sync send of a producer writes its row on the calling thread.**
   `send()` ran its INSERT on the broker's sync runner thread: each send handed
@@ -539,6 +565,10 @@ and there is no migration contract between pre-1.0 versions.
   each ending child copied them, and the peak memory of the worker rose while
   children were replaced. An object that still exists at the stop no longer
   gets `__del__` in a child; Python does not promise those calls at exit.
+  Close or flush files in the task: buffered files that task code left
+  open are not flushed at the stop. The child looks up these steps,
+  private CPython functions, at the stop; on a Python without them it logs
+  the missing name and ends through `sys.exit`.
 
 - **`pool_pre_ping` pings only a connection that waited in the pool for more
   than 1 s.** SQLAlchemy's `pool_pre_ping` pinged at every checkout: one
@@ -966,6 +996,15 @@ and there is no migration contract between pre-1.0 versions.
   These fields and the removed child pool fields are reported at once.
 
 ### Fixed
+
+- **A child that starts a task of a paused workflow no longer deadlocks
+  with a cancel of that workflow.** At the start, the child ran its expiry
+  check and the abandon of the task in one transaction: it held the task's
+  advisory lock and row lock while it asked for the workflow row. A cancel
+  of the workflow and the expiry of paused workflows lock the workflow row
+  first and then the task rows, so Postgres aborted one of the two. The
+  expiry check now runs alone, and the abandon locks the workflow row
+  before the task locks.
 
 - **The claim's in-flight count marks the dead entries of the status index
   (schema v61).** `horsies_claim` counted the in-flight rows with
