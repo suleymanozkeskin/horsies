@@ -7,7 +7,7 @@ dropped; with the partial index it never examines a dropped record.
 
 from __future__ import annotations
 
-from typing import cast
+from typing import Final, cast
 
 import pytest
 from sqlalchemy import text
@@ -23,6 +23,11 @@ pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 CLASS_KEY = 'catalog_active_probe'
 DROPPED_RECORDS = 6_000
 ACTIVE_RECORDS = 20
+ACTIVE_INDEX: Final = 'idx_horsies_history_catalog_active'
+MAX_PLAN_NODES: Final = 256
+"""Upper bound of the plan nodes the walk reads; a larger plan fails the test."""
+
+type PlanNode = dict[str, object]
 
 SEED_CATALOG_SQL = text(f"""
     INSERT INTO {LEAF_CATALOG} (
@@ -39,40 +44,42 @@ SEED_CATALOG_SQL = text(f"""
     FROM generate_series(0, :total - 1) AS day
 """)
 
-
-def _catalog_rows_examined(plan: object) -> float:
-    match plan:
-        case list():
-            return sum(_catalog_rows_examined(item) for item in cast(list[object], plan))
-        case dict():
-            fields = cast(dict[str, object], plan)
-            current = 0.0
-            if fields.get('Relation Name') == LEAF_CATALOG:
-                per_loop = sum(
-                    float(cast(int | float, fields.get(name, 0)))
-                    for name in ('Actual Rows', 'Rows Removed by Filter')
-                )
-                current = per_loop * float(cast(int | float, fields.get('Actual Loops', 0)))
-            return current + sum(_catalog_rows_examined(value) for value in fields.values())
-        case _:
-            return 0.0
+INDEX_DEFINITION_SQL = text('SELECT pg_get_indexdef(to_regclass(:index_name))')
 
 
-def _index_names(plan: object) -> set[str]:
-    names: set[str] = set()
-    match plan:
-        case list():
-            for item in cast(list[object], plan):
-                names |= _index_names(item)
-        case dict():
-            fields = cast(dict[str, object], plan)
-            if 'Index Name' in fields:
-                names.add(str(fields['Index Name']))
-            for value in fields.values():
-                names |= _index_names(value)
-        case _:
-            pass
-    return names
+def _plan_nodes(root: PlanNode) -> list[PlanNode]:
+    """Return every node of the plan tree."""
+    nodes: list[PlanNode] = []
+    pending = [root]
+    while pending:
+        assert len(nodes) < MAX_PLAN_NODES, f'plan has more than {MAX_PLAN_NODES} nodes'
+        node = pending.pop()
+        nodes.append(node)
+        pending.extend(cast(list[PlanNode], node.get('Plans', [])))
+    return nodes
+
+
+def _catalog_scan_indexes(root: PlanNode) -> list[frozenset[str]]:
+    """Return, for each catalog scan in the plan, the indexes it reads through.
+
+    A scan that reads the table without an index (a Seq Scan) reads through none.
+    """
+    scans: list[frozenset[str]] = []
+    for node in _plan_nodes(root):
+        if node.get('Relation Name') != LEAF_CATALOG:
+            continue
+        match node.get('Node Type'):
+            case 'Index Scan' | 'Index Only Scan':
+                scans.append(frozenset({str(node['Index Name'])}))
+            case 'Bitmap Heap Scan':
+                scans.append(frozenset(
+                    str(inner['Index Name'])
+                    for inner in _plan_nodes(node)
+                    if 'Index Name' in inner
+                ))
+            case _:
+                scans.append(frozenset())
+    return scans
 
 
 async def test_expired_leaf_scan_examines_only_active_records(
@@ -91,17 +98,24 @@ async def test_expired_leaf_scan_examines_only_active_records(
                 'total': DROPPED_RECORDS + ACTIVE_RECORDS,
             })
             await connection.execute(text(f'ANALYZE {LEAF_CATALOG}'))
-            active_in_catalog = int((await connection.execute(text(
-                f'SELECT count(*) FROM {LEAF_CATALOG} WHERE dropped_at IS NULL'
-            ))).scalar_one())
-            plan = (await connection.execute(
+            definition = cast(str | None, (await connection.execute(
+                INDEX_DEFINITION_SQL, {'index_name': ACTIVE_INDEX},
+            )).scalar_one())
+            plan = cast(PlanNode, (await connection.execute(
                 text('EXPLAIN (ANALYZE, FORMAT JSON) ' + EXPIRED_HISTORY_LEAVES_SQL),
                 {'heartbeat_class_key': HEARTBEAT_CLASS_KEY},
-            )).scalar_one()[0]['Plan']
+            )).scalar_one()[0]['Plan'])
         finally:
             await transaction.rollback()
 
-    assert 'idx_horsies_history_catalog_active' in _index_names(plan)
-    # Every class's active records, and none of the dropped ones.
-    assert active_in_catalog >= ACTIVE_RECORDS
-    assert _catalog_rows_examined(plan) <= active_in_catalog
+    # The index holds only records whose leaf is not dropped, and every
+    # catalog scan reads through it: the scan examines no dropped record.
+    # Rows are not counted. EXPLAIN gives the rows of a scan as a mean per
+    # loop, rounded, so the mean times the loops is not the exact count.
+    assert definition is not None, f'{ACTIVE_INDEX} does not exist'
+    assert definition.endswith(' WHERE (dropped_at IS NULL)'), definition
+    scans = _catalog_scan_indexes(plan)
+    assert scans, plan
+    assert all(scan == {ACTIVE_INDEX} for scan in scans), plan
+    # The seeded active records are expired, so the scan returns them.
+    assert cast(float, plan['Actual Rows']) >= ACTIVE_RECORDS
