@@ -9,8 +9,12 @@ from horsies.core.models import child_sizing
 from horsies.core.models.child_sizing import (
     DEFAULT_TASK_SEND_POOL_CONNECTIONS,
     EXECUTOR_THREADS_FLOOR,
+    FINALIZE_BATCH_FLUSHERS,
+    PARENT_POOL_CLAIM_CONNECTIONS,
     PARENT_POOL_CONNECTIONS_CAP,
     PARENT_POOL_CONNECTIONS_FLOOR,
+    PARENT_POOL_MIN_CONNECTIONS,
+    PARENT_POOL_RESERVE,
     PARENT_SEATS_PER_POOL_CONNECTION,
     POOL_CONNECTIONS_FLOOR,
     SHARED_ASYNC_EXECUTOR_THREADS_CAP,
@@ -20,6 +24,7 @@ from horsies.core.models.child_sizing import (
     SHARED_THREAD_POOL_CONNECTIONS_CAP,
     SHARED_THREAD_SEATS_PER_POOL_CONNECTION,
     parent_pool_connections,
+    parent_pool_flusher_bound,
     shared_async_executor_threads,
     shared_async_pool_connections,
     shared_thread_pool_connections,
@@ -221,6 +226,57 @@ class TestParentPoolConnections:
     def test_negative_seats_are_a_defect(self) -> None:
         with pytest.raises(AssertionError, match='seats must be >= 0'):
             parent_pool_connections(-1)
+
+    def test_every_derived_size_is_at_least_the_minimum(self) -> None:
+        """A derived size never goes below the minimum that AppConfig
+        validation requires of an explicit size, and that the flusher bound
+        of the worker takes."""
+        for seats in range(0, PARENT_POOL_CONNECTIONS_CAP * 20):
+            assert parent_pool_connections(seats) >= PARENT_POOL_MIN_CONNECTIONS
+
+
+class TestParentPoolMinimum:
+    """The fewest connections of the pool of the worker process: the claim
+    loop, the steady flushers of the batched success write, and the reserve
+    for the other users of the pool."""
+
+    def test_the_counted_connections(self) -> None:
+        assert (
+            PARENT_POOL_CLAIM_CONNECTIONS,
+            FINALIZE_BATCH_FLUSHERS,
+            PARENT_POOL_RESERVE,
+            PARENT_POOL_MIN_CONNECTIONS,
+        ) == (1, 2, 2, 5)
+
+
+class TestParentPoolFlusherBound:
+    """The flushers of the batched success write run on the parent pool less
+    the connection of the claim loop and the reserve."""
+
+    @pytest.mark.parametrize(
+        ('connections', 'expected'),
+        [
+            (5, 2),  # the minimum: the steady flushers only
+            (6, 3),  # one surge flusher
+            (20, 17),  # the cap of a derived size
+            (1000, 997),  # the largest PoolSize
+        ],
+    )
+    def test_the_bound(self, connections: int, expected: int) -> None:
+        assert parent_pool_flusher_bound(connections) == expected
+
+    def test_the_minimum_runs_the_steady_flushers_only(self) -> None:
+        assert (
+            parent_pool_flusher_bound(PARENT_POOL_MIN_CONNECTIONS)
+            == FINALIZE_BATCH_FLUSHERS
+        )
+
+    def test_a_pool_below_the_minimum_is_a_defect(self) -> None:
+        with pytest.raises(
+            AssertionError,
+            match='a parent pool of 4 connections is below the minimum of 5',
+        ):
+            parent_pool_flusher_bound(PARENT_POOL_MIN_CONNECTIONS - 1)
 
 
 class TestConstantsFitTheBounds:

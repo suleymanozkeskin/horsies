@@ -46,6 +46,10 @@ from horsies.core.errors import ConfigurationError, ErrorCode
 from horsies.core.models.child_sizing import (
     DEFAULT_ISOLATED_POOL_CONNECTIONS,
     DEFAULT_TASK_SEND_POOL_CONNECTIONS,
+    FINALIZE_BATCH_FLUSHERS,
+    PARENT_POOL_CLAIM_CONNECTIONS,
+    PARENT_POOL_MIN_CONNECTIONS,
+    PARENT_POOL_RESERVE,
     parent_pool_connections,
     shared_async_executor_threads,
     shared_async_pool_connections,
@@ -605,6 +609,14 @@ class ParentPool(BaseModel):
       ``PARENT_SEATS_PER_POOL_CONNECTION`` seats, from
       ``PARENT_POOL_CONNECTIONS_FLOOR`` to ``PARENT_POOL_CONNECTIONS_CAP``
       (``horsies.core.models.child_sizing``).
+
+    Under load the claim loop holds one connection of the pool, and each of
+    the ``FINALIZE_BATCH_FLUSHERS`` steady flushers of the batched success
+    write holds one. ``PARENT_POOL_RESERVE`` more stay free for the reaper,
+    the claimer heartbeat and the writes per task: the flushers run at most
+    ``parent_pool_flusher_bound(max_size)`` at once. AppConfig validation
+    refuses an explicit size below ``PARENT_POOL_MIN_CONNECTIONS``, which is
+    also the floor of a derived size.
     """
 
     model_config = ConfigDict(extra='forbid', frozen=True)
@@ -1112,15 +1124,56 @@ def profile_pool_errors(name: str, profile: WorkerProfile) -> list[Configuration
     return errors
 
 
+def _parent_pool_size_error(name: str, connections: int) -> ConfigurationError:
+    """The refusal of an explicit pool of the worker process of
+    ``connections`` connections, below ``PARENT_POOL_MIN_CONNECTIONS``."""
+    return _profile_error(
+        f'{profile_path(name)}.pool.max_size: {connections} connections is '
+        'below the minimum of the pool of the worker process '
+        f'({PARENT_POOL_MIN_CONNECTIONS})',
+        [
+            f'minimum = claim loop {PARENT_POOL_CLAIM_CONNECTIONS} + steady '
+            f'flushers of the batched success write {FINALIZE_BATCH_FLUSHERS} '
+            f'+ reserve {PARENT_POOL_RESERVE}',
+            'the claim loop and the steady flushers hold their connections '
+            'while the worker is busy; the reserve is for the reaper, the '
+            'claimer heartbeat and the writes of failures, retries and '
+            'workflow nodes, which otherwise wait for the pool timeout and fail',
+        ],
+        f'set max_size=PoolSize(connections={PARENT_POOL_MIN_CONNECTIONS}) or '
+        'more, or max_size=PoolSizeFromSeats()',
+    )
+
+
+def profile_parent_pool_errors(
+    name: str,
+    profile: WorkerProfile,
+) -> list[ConfigurationError]:
+    """Refuse an explicit pool of the worker process below
+    ``PARENT_POOL_MIN_CONNECTIONS``. A size derived from the seats is at
+    least that minimum."""
+    match profile.pool.max_size:
+        case PoolSize(connections=connections) if (
+            connections < PARENT_POOL_MIN_CONNECTIONS
+        ):
+            return [_parent_pool_size_error(name, connections)]
+        case PoolSize() | PoolSizeFromSeats():
+            return []
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def worker_profiles_shape_errors(
     profiles: Mapping[str, WorkerProfile],
 ) -> list[ConfigurationError]:
-    """The name, children and pool errors of every profile, in name order."""
+    """The name, children, child pool and worker pool errors of every
+    profile, in name order."""
     errors: list[ConfigurationError] = []
     for name in sorted(profiles):
         errors.extend(profile_name_errors(name))
         errors.extend(profile_children_errors(name, profiles[name]))
         errors.extend(profile_pool_errors(name, profiles[name]))
+        errors.extend(profile_parent_pool_errors(name, profiles[name]))
     return errors
 
 

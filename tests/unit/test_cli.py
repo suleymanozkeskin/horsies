@@ -6,8 +6,9 @@ import argparse
 import logging
 import signal
 import types
+from collections.abc import Callable
 from datetime import timedelta
-from typing import Any
+from typing import Any, Final
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -3106,3 +3107,66 @@ class TestCheckCommandReportsEveryProfile:
             '10 tasks is above the capacity of the worker (2)'
         ) in logged
         assert 'aborting due to 2 previous errors' in logged
+
+
+SMALL_PARENT_POOL_APP: Final = (
+    'from horsies import (AppConfig, Horsies, IsolatedChildren, ParentPool,\n'
+    '    PoolSize, PostgresConfig, WorkerProfile)\n'
+    'app = Horsies(AppConfig(\n'
+    "    broker=PostgresConfig(database_url='postgresql+psycopg://u:p@h/db'),\n"
+    '    worker_profiles={\n'
+    "        'small': WorkerProfile(\n"
+    '            isolated=IsolatedChildren(count=1),\n'
+    '            pool=ParentPool(max_size=PoolSize(connections=4)),\n'
+    '        ),\n'
+    '    },\n'
+    '))\n'
+)
+"""An app module whose one profile sets a pool of the worker process below
+the minimum."""
+
+
+def _check_args(module: str) -> argparse.Namespace:
+    return _make_check_namespace(module=module)
+
+
+def _worker_args(module: str) -> argparse.Namespace:
+    return _make_worker_namespace(module=module, profile='small')
+
+
+@pytest.mark.unit
+class TestCommandsRefuseASmallParentPool:
+    """`horsies check` and the worker start both build the app config from
+    the app module, so both refuse a pool of the worker process below the
+    minimum."""
+
+    @pytest.mark.parametrize(
+        ('command', 'arguments'),
+        [(check_command, _check_args), (worker_command, _worker_args)],
+        ids=['check', 'worker'],
+    )
+    def test_the_command_exits_1_with_the_profile_error(
+        self,
+        command: Callable[[argparse.Namespace], None],
+        arguments: Callable[[str], argparse.Namespace],
+        tmp_path: Any,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        module = tmp_path / 'small_parent_pool_app.py'
+        module.write_text(SMALL_PARENT_POOL_APP)
+
+        with (
+            patch('horsies.core.cli.setup_logging', autospec=True),
+            patch('horsies.core.cli.setup_sys_path_from_cwd', return_value=None),
+            caplog.at_level(logging.ERROR, logger='horsies'),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            command(arguments(f'{module}:app'))
+
+        assert exc_info.value.code == 1
+        logged = '\n'.join(r.getMessage() for r in caplog.records)
+        assert (
+            "error[HRS-218]: worker_profiles['small'].pool.max_size: 4 "
+            'connections is below the minimum of the pool of the worker '
+            'process (5)'
+        ) in logged

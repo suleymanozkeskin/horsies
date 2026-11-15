@@ -28,13 +28,17 @@ from horsies.core.codec import JsonValue, encode_task_result
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.models.child_sizing import parent_pool_connections
+from horsies.core.models.child_sizing import (
+    FINALIZE_BATCH_FLUSHERS,
+    parent_pool_connections,
+    parent_pool_flusher_bound,
+)
 from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.types.result import Err, Ok
 from horsies.core.utils.db import PooledStatements
 from horsies.core.worker.config import WorkerConfig
-from horsies.core.worker.finalize_batch import FINALIZE_BATCH_FLUSHERS, FinalizeBatcher
+from horsies.core.worker.finalize_batch import FinalizeBatcher
 from horsies.core.worker.worker import Worker
 from tests.integration.conftest import compute_test_enqueue_sha
 from tests.integration.round_trip_proxy import RoundTripProxy, Turn
@@ -108,7 +112,7 @@ def use_pooled_runners(worker: Worker) -> None:
         steady_runners=(pooled,) * FINALIZE_BATCH_FLUSHERS,
         surge_runner=pooled,
         max_queued_rows=worker._pending_task_limit(),  # pyright: ignore[reportPrivateUsage]
-        max_flushers=worker.cfg.parent_pool_size,
+        max_flushers=parent_pool_flusher_bound(worker.cfg.parent_pool_size),
     )
     worker._held_connections = ()  # pyright: ignore[reportPrivateUsage]
 

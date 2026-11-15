@@ -15,6 +15,12 @@ pool that task code opens in a child when it sends has a fixed default size.
 Every constant that decides a default size is in this module. The module is
 pure.
 
+The pool of the worker process has a minimum, ``PARENT_POOL_MIN_CONNECTIONS``:
+the connections that its claim loop and the steady flushers of the batched
+success write hold under load, and ``PARENT_POOL_RESERVE`` for its other
+users. AppConfig validation refuses an explicit size below it, and it is the
+floor of a derived size.
+
 A shared child writes 2 statements per task through its pool (the RUNNING
 update and the finalizing marker), each one round trip in autocommit. On
 average its pool keeps this many connections busy:
@@ -69,10 +75,43 @@ not cut a thread pool below one connection per 10 seats. 256 seats, Postgres
 18 on the host itself, one run each: 26 connections give 1,750 tasks/s, 10
 give 1,660, 40 give 1,520."""
 
-PARENT_POOL_CONNECTIONS_FLOOR: Final = 5
+FINALIZE_BATCH_FLUSHERS: Final = 2
+"""The steady flushers of the batched success write (``FinalizeBatcher``):
+they write whenever rows wait. Each one holds one connection of the parent
+pool while it writes (``HeldConnection``)."""
+
+PARENT_POOL_CLAIM_CONNECTIONS: Final = 1
+"""The connection of the parent pool that the claim loop holds while it
+claims (``HeldConnection``)."""
+
+PARENT_POOL_RESERVE: Final = 2
+"""Connections of the parent pool that the claim loop and the flushers of the
+batched success write leave free for the other users of the pool. Under load
+the held connections stay held, so the other users get only these.
+
+The reaper holds the most at once, 2:
+
+1. its gate session (``ReaperMixin._reaper_loop``), for the whole pass;
+2. one checkout of the pass body (``_run_reaper_pass``) at a time.
+
+Each other user holds one connection for one statement or one transaction,
+and waits in the pool queue while both are taken: the claimer heartbeat, the
+worker-state snapshot, the ping reply, the workflow and class checks of a
+claim pass (beside the connection of the claim loop), and for each task its
+failure, workflow success, phase 2, parent propagation, requeue and retry
+NOTIFY writes. The runner heartbeats and the listener have connections of
+their own."""
+
+PARENT_POOL_MIN_CONNECTIONS: Final = (
+    PARENT_POOL_CLAIM_CONNECTIONS + FINALIZE_BATCH_FLUSHERS + PARENT_POOL_RESERVE
+)
+"""The fewest connections of the parent pool: the claim loop, the steady
+flushers of the batched success write and ``PARENT_POOL_RESERVE``. AppConfig
+validation refuses an explicit ``ParentPool`` size below it (HRS-218)."""
+
+PARENT_POOL_CONNECTIONS_FLOOR: Final = PARENT_POOL_MIN_CONNECTIONS
 """The fewest connections of a parent pool size derived from the seats of
-the worker: the 2 steady flushers of the batched success write, a claim pass
-and the 2 connections of a reaper pass can each hold one at once."""
+the worker: the minimum of an explicit size."""
 
 PARENT_SEATS_PER_POOL_CONNECTION: Final = 10
 """Seats of the worker per connection of a derived parent pool size. A
@@ -165,3 +204,19 @@ def parent_pool_connections(seats: int) -> int:
         PARENT_POOL_CONNECTIONS_FLOOR,
         PARENT_POOL_CONNECTIONS_CAP,
     )
+
+
+def parent_pool_flusher_bound(connections: int) -> int:
+    """The most flushers of the batched success write, steady and surge
+    together, on a parent pool of ``connections`` connections: the pool less
+    ``PARENT_POOL_CLAIM_CONNECTIONS`` and ``PARENT_POOL_RESERVE``.
+
+    ``connections`` is at least ``PARENT_POOL_MIN_CONNECTIONS``: AppConfig
+    validation refuses a smaller explicit size, and a derived size is at
+    least the floor. A smaller value is a defect: ``AssertionError``.
+    """
+    assert connections >= PARENT_POOL_MIN_CONNECTIONS, (
+        f'a parent pool of {connections} connections is below the minimum '
+        f'of {PARENT_POOL_MIN_CONNECTIONS}'
+    )
+    return connections - PARENT_POOL_CLAIM_CONNECTIONS - PARENT_POOL_RESERVE

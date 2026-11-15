@@ -35,6 +35,10 @@ from horsies.core.lifecycle.persistence import (
     BatchWriteError,
     FusedCompletionBatch,
 )
+from horsies.core.models.child_sizing import (
+    FINALIZE_BATCH_FLUSHERS,
+    PARENT_POOL_MIN_CONNECTIONS,
+)
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.types.status import TaskStatus
 from horsies.core.utils.db import (
@@ -48,7 +52,6 @@ from horsies.core.utils.db import (
     StatementRunner,
 )
 from horsies.core.worker.finalize_batch import (
-    FINALIZE_BATCH_FLUSHERS,
     BatcherState,
     BatchRowResult,
     FinalizeBatcher,
@@ -716,8 +719,17 @@ def test_the_flusher_bound_must_be_positive() -> None:
         )
 
 
-@pytest.mark.parametrize('pool', [1, 5, 20])
-def test_the_worker_bounds_its_flushers_by_its_pool(pool: int) -> None:
+@pytest.mark.parametrize(
+    ('pool', 'flushers'),
+    [
+        (PARENT_POOL_MIN_CONNECTIONS, FINALIZE_BATCH_FLUSHERS),
+        (20, 17),
+    ],
+)
+def test_the_worker_leaves_the_claim_loop_and_the_reserve_free(
+    pool: int,
+    flushers: int,
+) -> None:
     worker = Worker(
         session_factory=MagicMock(),
         listener=MagicMock(),
@@ -730,7 +742,7 @@ def test_the_worker_bounds_its_flushers_by_its_pool(pool: int) -> None:
     )
     batcher = worker._finalize_batcher  # pyright: ignore[reportPrivateUsage]
 
-    assert batcher.max_flushers == pool
+    assert batcher.max_flushers == flushers
 
 
 class _GatedPerWrite:

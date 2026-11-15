@@ -51,6 +51,7 @@ from horsies.core.lifecycle.persistence import (
     apply_fused_batch,
     apply_fused_batch_in_autocommit,
 )
+from horsies.core.models.child_sizing import parent_pool_flusher_bound
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker import finalize as finalize_module
 from horsies.core.worker.child_protocol import NoTaskLoop, RssUnreadable
@@ -119,7 +120,7 @@ async def _open_worker(database_url: str) -> ProxiedWorker:
         steady_runners=worker._batch_connections,
         surge_runner=PooledStatements(worker.sf),
         max_queued_rows=QUEUE_ROOM,
-        max_flushers=worker.cfg.parent_pool_size,
+        max_flushers=parent_pool_flusher_bound(worker.cfg.parent_pool_size),
     )
     return opened
 

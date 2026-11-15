@@ -34,6 +34,10 @@ from horsies.core.worker.config import WorkerConfig as WorkerConfig  # noqa: F40
 from horsies.core.worker.child_pool import (
     _initialize_worker_pool as _initialize_worker_pool,
 )  # noqa: F401
+from horsies.core.models.child_sizing import (
+    FINALIZE_BATCH_FLUSHERS,
+    parent_pool_flusher_bound,
+)
 from horsies.core.models.worker_profile import (
     MemoryLimit,
     NoMemoryLimit,
@@ -61,7 +65,6 @@ from horsies.core.worker.cpu_placement import (
 )
 from horsies.core.worker.finalize_batch import (
     FINALIZE_BATCH_CLOSE_TIMEOUT_S,
-    FINALIZE_BATCH_FLUSHERS,
     FinalizeBatcher,
     FlushersCancelled,
     FlushersDrained,
@@ -356,14 +359,16 @@ class Worker(
             *batch_connections,
         )
         # Writes the plain-success outcomes in batches. Its flushers start on
-        # the first row, at most one per connection of the worker pool;
-        # ``stop`` closes it after the finalizer drain.
+        # the first row; the claim loop and the flushers leave
+        # PARENT_POOL_RESERVE connections of the pool free for the other
+        # writes (parent_pool_flusher_bound). ``stop`` closes it after the
+        # finalizer drain.
         self._finalize_batcher = FinalizeBatcher(
             self._write_fused_batch,
             steady_runners=batch_connections,
             surge_runner=PooledStatements(session_factory),
             max_queued_rows=self._pending_task_limit(),
-            max_flushers=self.cfg.parent_pool_size,
+            max_flushers=parent_pool_flusher_bound(self.cfg.parent_pool_size),
         )
         self._fatal_background_error: (
             ChildStartFailedError

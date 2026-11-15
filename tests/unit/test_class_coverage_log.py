@@ -252,10 +252,12 @@ class TestReaperCoverageCheck:
             dsn='postgresql+psycopg://u:p@localhost/db',
             psycopg_dsn='postgresql://u:p@localhost/db',
             queues=['default'],
-            parent_pool_size=1,
             recovery_config=RecoveryConfig(check_interval_ms=7_000),
         )
         worker = Worker(session_factory=MagicMock(), listener=MagicMock(), cfg=cfg)
+        # One connection runs the passes without a gate session: the reaper
+        # reads the pool size when its loop starts.
+        worker.cfg.parent_pool_size = 1
         worker.broker = MagicMock()
         attach_resources(worker.broker, fake_resources())
         seen: list[_ReaperPassState] = []
