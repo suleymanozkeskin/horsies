@@ -11,8 +11,6 @@ import pytest
 from horsies.core.worker import child_main
 from horsies.core.worker.child_main import (
     BAD_PARENT_FRAME_EXIT_CODE,
-    CONTROL_DIRECT_BODY_BYTES,
-    CONTROL_READ_BUFFER_BYTES,
     JOINED_CHILD_WRITE_BODY_BYTES,
     ParentFrameReader,
     _send_child_frame,  # pyright: ignore[reportPrivateUsage]
@@ -29,6 +27,7 @@ from horsies.core.worker.child_protocol import (
     StopFrame,
     encode_parent_frame,
 )
+from horsies.core.worker.frame_parser import DIRECT_BODY_BYTES, FRAME_READ_BUFFER_BYTES
 from horsies.core.worker.stored_timeout import NoTimeout
 
 pytestmark = [pytest.mark.unit]
@@ -86,7 +85,18 @@ def _reader(data: bytes, chunk: int) -> tuple[ParentFrameReader, _ScriptedSocket
 
 
 def _large_kwargs() -> str:
-    return json.dumps({'blob': 'x' * (CONTROL_DIRECT_BODY_BYTES * 3)})
+    return json.dumps({'blob': 'x' * (DIRECT_BODY_BYTES * 3)})
+
+
+def _run_of_wire_size(size: int) -> RunFrame:
+    """A run frame of exactly ``size`` bytes on the wire. The second pass
+    takes off the digits that the size field in the metadata gains."""
+    pad = 0
+    for _ in range(2):
+        pad += size - len(_wire([_run('a', json.dumps({'pad': 'p' * pad}))]))
+    frame = _run('a', json.dumps({'pad': 'p' * pad}))
+    assert len(_wire([frame])) == size
+    return frame
 
 
 def test_frames_that_arrive_together_are_read_in_one_read() -> None:
@@ -115,7 +125,7 @@ def test_frames_that_cross_the_end_of_the_read_buffer_are_read_whole(chunk: int)
     of the buffer moves to its front and is completed by the next read."""
     frames: list[ParentFrame] = [_run(f'task-{index}') for index in range(1_000)]
     wire = _wire(frames)
-    assert len(wire) > 2 * CONTROL_READ_BUFFER_BYTES
+    assert len(wire) > 2 * FRAME_READ_BUFFER_BYTES
     reader, _ = _reader(wire, chunk)
 
     received = [reader.next_frame() for _ in frames]
@@ -130,7 +140,25 @@ def test_a_large_body_does_not_grow_the_read_buffer() -> None:
     received = [reader.next_frame() for _ in frames]
 
     assert received == frames
-    assert len(reader._buffer) == CONTROL_READ_BUFFER_BYTES  # pyright: ignore[reportPrivateUsage]
+    assert len(reader._buffer) == FRAME_READ_BUFFER_BYTES  # pyright: ignore[reportPrivateUsage]
+
+
+def test_a_header_split_at_the_buffer_end_moves_to_the_front_for_one_read() -> None:
+    """2 bytes of a header at hand and 3 free bytes at the end of the read
+    buffer: the bytes move to the front, and one read completes the next
+    frame."""
+    first = _run_of_wire_size(FRAME_READ_BUFFER_BYTES - 5)
+    second = _run('b')
+    reader, scripted = _reader(
+        _wire([first, second]),
+        chunk=FRAME_READ_BUFFER_BYTES - 3,
+    )
+
+    assert reader.next_frame() == first
+    assert scripted.reads == 1
+
+    assert reader.next_frame() == second
+    assert scripted.reads == 2
 
 
 def test_a_parent_gone_in_the_middle_of_a_frame_is_the_end_of_the_stream() -> None:
