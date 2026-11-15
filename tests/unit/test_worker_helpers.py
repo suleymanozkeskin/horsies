@@ -5532,14 +5532,17 @@ class TestReaperGatePoolCapacity:
             dsn='postgresql+psycopg://u:p@localhost/db',
             psycopg_dsn='postgresql://u:p@localhost/db',
             queues=['default'],
-            parent_pool_size=pool_size,
             recovery_config=RecoveryConfig(check_interval_ms=1_000),
         )
-        return Worker(
+        worker = Worker(
             session_factory=MagicMock(),
             listener=MagicMock(),
             cfg=cfg,
         )
+        # The worker refuses a pool below PARENT_POOL_MIN_CONNECTIONS when it
+        # is built; the reaper reads the pool size when its loop starts.
+        worker.cfg.parent_pool_size = pool_size
+        return worker
 
     def test_gate_disabled_for_single_connection_pool(self) -> None:
         assert self._capacity_worker(1)._reaper_gate_enabled() is False
@@ -5606,10 +5609,13 @@ class TestReaperResourceSelection:
             dsn='postgresql+psycopg://u:p@localhost/db',
             psycopg_dsn='postgresql://u:p@localhost/db',
             queues=['default'],
-            parent_pool_size=1,
             recovery_config=RecoveryConfig(check_interval_ms=1_000),
         )
-        return Worker(session_factory=MagicMock(), listener=MagicMock(), cfg=cfg)
+        worker = Worker(session_factory=MagicMock(), listener=MagicMock(), cfg=cfg)
+        # One connection runs the passes without a gate session: the reaper
+        # reads the pool size when its loop starts.
+        worker.cfg.parent_pool_size = 1
+        return worker
 
     async def test_every_pass_gets_the_set_selected_at_start(self) -> None:
         worker = self._ungated_reaper_worker()

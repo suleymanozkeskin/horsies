@@ -22,6 +22,7 @@ from horsies.core.models.child_sizing import (
     DEFAULT_ISOLATED_POOL_CONNECTIONS,
     DEFAULT_TASK_SEND_POOL_CONNECTIONS,
     PARENT_POOL_CONNECTIONS_FLOOR,
+    PARENT_POOL_MIN_CONNECTIONS,
     parent_pool_connections,
     shared_async_executor_threads,
     shared_async_pool_connections,
@@ -924,6 +925,56 @@ class TestAppConfigPoolChecks:
             "worker_profiles['p'].shared_async.pool.min_size",
             "worker_profiles['p'].shared_thread.pool.min_size",
         ]
+
+
+class TestAppConfigParentPoolChecks:
+    """An explicit pool of the worker process below the connections that
+    the claim loop, the steady flushers and the reserve need is refused with
+    the profile name and the field path."""
+
+    @staticmethod
+    def _with_pool(max_size: PoolSize | PoolSizeFromSeats) -> WorkerProfile:
+        return WorkerProfile(
+            isolated=IsolatedChildren(count=1),
+            pool=ParentPool(max_size=max_size),
+        )
+
+    def test_a_size_below_the_minimum_names_the_held_connections(self) -> None:
+        profile = self._with_pool(
+            PoolSize(connections=PARENT_POOL_MIN_CONNECTIONS - 1),
+        )
+        with pytest.raises(ConfigurationError) as exc_info:
+            _app_config({'p': profile})
+
+        error = exc_info.value
+        assert error.code == ErrorCode.CONFIG_INVALID_WORKER_PROFILE
+        assert error.message == (
+            "worker_profiles['p'].pool.max_size: 4 connections is below the "
+            'minimum of the pool of the worker process (5)'
+        )
+        assert error.notes == [
+            'minimum = claim loop 1 + steady flushers of the batched success '
+            'write 2 + reserve 2',
+            'the claim loop and the steady flushers hold their connections '
+            'while the worker is busy; the reserve is for the reaper, the '
+            'claimer heartbeat and the writes of failures, retries and '
+            'workflow nodes, which otherwise wait for the pool timeout and fail',
+        ]
+        assert error.help_text == (
+            'set max_size=PoolSize(connections=5) or more, or '
+            'max_size=PoolSizeFromSeats()'
+        )
+
+    def test_the_minimum_is_accepted(self) -> None:
+        profile = self._with_pool(PoolSize(connections=PARENT_POOL_MIN_CONNECTIONS))
+        assert _app_config({'p': profile}).worker_profiles == {'p': profile}
+
+    def test_a_size_from_seats_at_the_floor_is_accepted(self) -> None:
+        """One seat derives the floor; the derived sizes are unchanged."""
+        profile = self._with_pool(PoolSizeFromSeats())
+
+        assert _app_config({'p': profile}).worker_profiles == {'p': profile}
+        assert profile.resolved_parent_pool() == 5
 
 
 class TestAppConfigProfileChecks:

@@ -50,14 +50,11 @@ from horsies.core.lifecycle.persistence import (
     FusedCompletionBatch,
 )
 from horsies.core.logging import get_logger
+from horsies.core.models.child_sizing import FINALIZE_BATCH_FLUSHERS
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.utils.db import StatementRefused, StatementRunner
 
 logger = get_logger('worker')
-
-FINALIZE_BATCH_FLUSHERS: Final = 2
-"""The steady flushers: they write whenever rows wait. Each one holds one
-connection of the worker pool while it writes."""
 
 FINALIZE_BATCH_CLOSE_TIMEOUT_S: Final = 10.0
 """How long ``FinalizeBatcher.close`` waits for the flushers to write the
@@ -135,10 +132,11 @@ class FinalizeBatcher:
     before anything else, so the queue never holds more rows than the worker
     has in flight. ``max_queued_rows`` bounds it; a full queue is a defect.
 
-    ``max_flushers`` bounds the flushers of both roles together: the size of
-    the worker pool. The steady flushers are ``FINALIZE_BATCH_FLUSHERS``, or
-    ``max_flushers`` when it is smaller. Each running steady flusher holds one
-    of ``steady_runners``; every surge flusher writes on ``surge_runner``.
+    ``max_flushers`` bounds the flushers of both roles together; the worker
+    passes ``parent_pool_flusher_bound`` of its pool. The steady flushers are
+    ``FINALIZE_BATCH_FLUSHERS``, or ``max_flushers`` when it is smaller. Each
+    running steady flusher holds one of ``steady_runners``; every surge
+    flusher writes on ``surge_runner``.
 
     Raises:
         ValueError: a bound is not positive, or ``steady_runners`` holds fewer
