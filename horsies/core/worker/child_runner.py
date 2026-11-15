@@ -1572,12 +1572,11 @@ def _prepare_task_call(
     # The worker derives the upstream OkT from `app.tasks[source_task_name]`
     # and decodes via `decode_task_result(inner, ok_type)`.
     for key, value in list(kwargs.items()):
-        if not (
-            isinstance(value, dict)
-            and value.get(_ENGINE_KEY_TASKRESULT_ENVELOPE) is True
-        ):
+        if not isinstance(value, dict):
             continue
         envelope = cast('dict[str, Any]', value)
+        if envelope.get(_ENGINE_KEY_TASKRESULT_ENVELOPE) is not True:
+            continue
         source_task_name = envelope.get('source_task_name')
         if not isinstance(source_task_name, str):
             return _serialization_error_response(
@@ -1806,7 +1805,7 @@ def _task_exception_response(
     """The wire tuple of a task that raised: ``TASK_EXCEPTION``. Logs it."""
     logger.error(f'Task exception: {task_name}: {exception_text(e)}')
     # If the task raised an exception, we wrap it in a TaskError
-    tr = TaskResult(
+    tr: TaskResult[None, TaskError] = TaskResult(
         err=TaskError(
             error_code=OperationalErrorCode.TASK_EXCEPTION,
             message=f'{type(e).__name__}: {exception_text(e)}',
