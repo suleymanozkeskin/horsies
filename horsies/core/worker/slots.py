@@ -436,7 +436,7 @@ class SharedRunRequest:
     kwargs_json: str | None
     worker_id: str
     is_workflow_task: bool
-    claimed_at: datetime | None
+    claimed_at: datetime
     work: SeatWork
 
     def __post_init__(self) -> None:

@@ -66,12 +66,11 @@ class FinishWorkflowSuccess:
 def success_for(
     completion: CompleteLockedTask,
     *,
-    claimed_at: datetime | None,
+    claimed_at: datetime,
 ) -> FinishWorkflowSuccess:
     """The one-statement success of a locked completion. Pure.
 
-    ``claimed_at`` is the claim generation that the dispatch was handed; None
-    disables the generation half of the fence.
+    ``claimed_at`` is the claim generation that the dispatch was handed.
     """
     return FinishWorkflowSuccess(
         task_id=completion.task_id,

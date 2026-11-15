@@ -69,14 +69,12 @@ class WorkerOwned:
 class OwnedClaim:
     """One task, held by this worker at this claim generation.
 
-    `claimed_at` of None disables the generation half, leaving worker
-    ownership. That is a compatibility seam rather than a loophole: a caller
-    without a dispatch context still fences on ownership rather than silently
-    fencing on nothing.
+    Both halves are always checked. Every dispatch carries the claim time
+    that its claim returned, so there is no fence on the worker alone.
     """
 
     worker_id: str
-    claimed_at: datetime | None
+    claimed_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,7 +88,7 @@ class OwnedClaimBatch:
     """
 
     worker_id: str
-    claim_generations: tuple[tuple[str, datetime | None], ...]
+    claim_generations: tuple[tuple[str, datetime], ...]
 
     def __post_init__(self) -> None:
         seen: set[str] = set()
@@ -106,7 +104,7 @@ class OwnedClaimBatch:
     def task_ids(self) -> tuple[str, ...]:
         return tuple(task_id for task_id, _ in self.claim_generations)
 
-    def generations(self) -> tuple[datetime | None, ...]:
+    def generations(self) -> tuple[datetime, ...]:
         return tuple(generation for _, generation in self.claim_generations)
 
 

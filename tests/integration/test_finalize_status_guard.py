@@ -15,6 +15,7 @@ import json
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import psycopg
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,10 +35,11 @@ from horsies.core.lifecycle.outcomes import (
     SuccessApplied,
     TerminalizationOutcome,
     WorkflowSuccessOutcome,
+    decode_outcome_row,
     decode_workflow_success_row,
 )
-from horsies.core.lifecycle.persistence import apply_async
-from horsies.core.worker.child_runner import _mark_task_finalizing
+from horsies.core.lifecycle.persistence import apply_async, call_for
+from horsies.core.worker.child_runner import MARK_FINALIZING_SQL, _mark_task_finalizing
 from horsies.core.worker.failed_attempt import (
     AttemptFailure,
     AttemptFailureKind,
@@ -67,6 +69,9 @@ pytestmark = [pytest.mark.integration]
 # Stable worker ids for ownership-guard scenarios.
 OWNER_WORKER_ID = 'worker-owner-aaaa'
 OTHER_WORKER_ID = 'worker-other-bbbb'
+# The claim generation of a row that a test seeds without naming one. Every
+# owned-row statement checks it, so the helpers pass it by default.
+CLAIMED_AT = datetime(2026, 1, 1, 11, 0, tzinfo=timezone.utc)
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +82,7 @@ async def _insert_running_task(
     session: AsyncSession,
     *,
     claimed_by_worker_id: str = OWNER_WORKER_ID,
-    claimed_at: datetime | None = None,
+    claimed_at: datetime = CLAIMED_AT,
 ) -> str:
     """Insert a minimal horsies_tasks row in RUNNING state and return its id."""
     task_id = str(uuid.uuid4())
@@ -147,14 +152,14 @@ async def _insert_running_task_with_retry(
             INSERT INTO horsies_tasks
                 (id, task_name, queue_name, priority, args, kwargs, status, sent_at,
                  created_at, updated_at, claimed, retry_count, max_retries, started_at,
-                 good_until, task_options, enqueue_sha,
+                 good_until, task_options, enqueue_sha, claimed_at,
                  retention_class_key, command_fingerprint_version,
                  command_fingerprint, retain_rerun_input,
                  prepared_rerun_input_disposition)
             VALUES
                 (:id, 'guard_test_retry', 'default', 100, '[]', '{}', 'RUNNING', :sent_at,
                  NOW(), NOW(), FALSE, :retry_count, :max_retries, NOW(),
-                 :good_until, :task_options, :enqueue_sha,
+                 :good_until, :task_options, :enqueue_sha, :claimed_at,
                  'standard_30d', 1,
                  sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
                  FALSE, 'DECLINED_BY_POLICY')
@@ -167,6 +172,7 @@ async def _insert_running_task_with_retry(
             'max_retries': max_retries,
             'good_until': good_until,
             'task_options': task_options,
+            'claimed_at': CLAIMED_AT,
         },
     )
     await session.flush()
@@ -270,7 +276,7 @@ async def _finish_workflow_success(
     task_id: str,
     *,
     worker_id: str,
-    claimed_at: datetime | None,
+    claimed_at: datetime,
 ) -> WorkflowSuccessOutcome:
     """The success of a workflow task, in the session's open transaction."""
     statement = success_statement(
@@ -291,6 +297,7 @@ async def _fail_attempt(
     task_id: str,
     *,
     worker_id: str = OWNER_WORKER_ID,
+    claimed_at: datetime = CLAIMED_AT,
     failed_reason: str | None = None,
     retry: RetryRequest = NoRetry(),
 ) -> FailedAttemptOutcome:
@@ -299,7 +306,7 @@ async def _fail_attempt(
         await session.connection(),
         FinishFailedAttempt(
             task_id=task_id,
-            fence=OwnedClaim(worker_id=worker_id, claimed_at=None),
+            fence=OwnedClaim(worker_id=worker_id, claimed_at=claimed_at),
             retry=retry,
             result_json='{"err": {"error_code": "LATE"}}',
             error_code='LATE',
@@ -325,7 +332,7 @@ async def _complete_fused(
     session: AsyncSession,
     task_id: str,
     *,
-    claimed_at: datetime | None,
+    claimed_at: datetime,
     result_json: str,
 ) -> TerminalizationOutcome:
     return await apply_async(
@@ -557,7 +564,7 @@ async def test_in_flight_read_returns_the_retry_facts(
     row = (
         await session.execute(
             READ_IN_FLIGHT_ATTEMPT_SQL,
-            {'id': task_id, 'wid': OWNER_WORKER_ID, 'claimed_at': None},
+            {'id': task_id, 'wid': OWNER_WORKER_ID, 'claimed_at': CLAIMED_AT},
         )
     ).one()
 
@@ -585,14 +592,14 @@ async def test_workflow_success_blocks_on_ownership_mismatch(
     await _link_workflow_node(session, task_id)
 
     outcome = await _finish_workflow_success(
-        session, task_id, worker_id=OWNER_WORKER_ID, claimed_at=None
+        session, task_id, worker_id=OWNER_WORKER_ID, claimed_at=CLAIMED_AT
     )
     assert isinstance(outcome, LostClaim)
     assert await _get_task_status(session, task_id) == 'RUNNING'
 
     # Sanity: the actual owner still matches.
     owner = await _finish_workflow_success(
-        session, task_id, worker_id=OTHER_WORKER_ID, claimed_at=None
+        session, task_id, worker_id=OTHER_WORKER_ID, claimed_at=CLAIMED_AT
     )
     assert isinstance(owner, SuccessApplied)
 
@@ -724,14 +731,15 @@ async def test_stale_finalizer_after_reclaim_race_sequence(
 
 
 # ---------------------------------------------------------------------------
-# Claim-generation fence (C10)
+# Claim-generation fence
 #
 # (status, worker_id) alone cannot reject a stale finalize when the SAME
 # worker re-claimed its own reaper-requeued task: worker_id matches and the
 # row is RUNNING again. The :claimed_at fence pins every owned-row statement
 # to the claim generation the dispatch was born from; a requeue clears
 # claimed_at and a re-claim stamps a new one, so a stale actor no longer
-# matches. NULL disables the fence (pre-fence caller behavior).
+# matches. The worker always sends the claim time; the stored functions keep
+# their NULL contract for a caller that sends none.
 # ---------------------------------------------------------------------------
 
 # Fixed, deterministic claim generations. GEN_STALE simulates the dispatch
@@ -772,18 +780,29 @@ async def test_fused_finalize_rejects_stale_claim_generation(
 
 
 @pytest.mark.asyncio(loop_scope='function')
-async def test_fused_finalize_null_fence_matches_any_generation(
+async def test_the_stored_fused_completion_keeps_its_null_fence(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """NULL fence preserves the (status, worker_id)-only behavior."""
+    """The stored function keeps its contract: a NULL claimed_at matches a
+    row of any generation on (status, worker_id) alone. The worker never
+    sends one (``OwnedClaim`` requires a claim time), so the statement runs
+    with the claim time replaced by NULL."""
     task_id = await _insert_running_task(session, claimed_at=GEN_CURRENT)
+    statement, parameters = call_for(
+        CompleteTaskFused(
+            task_id=task_id,
+            fence=OwnedClaim(worker_id=OWNER_WORKER_ID, claimed_at=GEN_CURRENT),
+            result_json='{"ok": 1}',
+            notify_channel='task_queue_default',
+            notify_payload=f'capacity:{task_id}',
+        ),
+    )
 
-    outcome = await _complete_fused(
-        session,
-        task_id,
-        claimed_at=None,
-        result_json='{"ok": 1}',
+    result = await session.execute(statement, {**parameters, 'claimed_at': None})
+
+    outcome = decode_outcome_row(
+        {str(key): value for key, value in result.mappings().one().items()},
     )
     assert isinstance(outcome, Applied)
     assert await _get_task_status(session, task_id) == 'COMPLETED'
@@ -881,13 +900,13 @@ async def test_confirm_ownership_rejects_stale_claim_generation(
     _initialize_worker_pool(listener_of(broker).database_url)
 
     stale_result = _confirm_ownership_and_set_running(
-        task_id, OWNER_WORKER_ID, False, GEN_STALE,
+        task_id, OWNER_WORKER_ID, False, claimed_at=GEN_STALE,
     )
     assert stale_result == (False, '', 'CLAIM_LOST')
     assert await _get_task_status(session, task_id) == 'CLAIMED'
 
     live_result = _confirm_ownership_and_set_running(
-        task_id, OWNER_WORKER_ID, False, GEN_CURRENT,
+        task_id, OWNER_WORKER_ID, False, claimed_at=GEN_CURRENT,
     )
     assert live_result is None
     assert await _get_task_status(session, task_id) == 'RUNNING'
@@ -927,16 +946,21 @@ async def test_finalizing_marker_rejects_stale_claim_generation(
 
 
 @pytest.mark.asyncio(loop_scope='function')
-async def test_finalizing_marker_null_fence_matches_any_generation(
+async def test_the_finalizing_marker_has_no_null_fence(
     session: AsyncSession,
     broker: 'PostgresBroker',
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """A NULL claimed_at disables the generation half of the marker fence."""
+    """The marker compares the claim time with no NULL branch: a NULL claim
+    time matches no row, so nothing can turn off the generation half."""
     task_id = await _insert_running_task(session, claimed_at=GEN_CURRENT)
-    await session.commit()
+    await session.commit()  # the marker runs on its own connection
 
-    _initialize_worker_pool(listener_of(broker).database_url)
+    with psycopg.connect(listener_of(broker).database_url, autocommit=True) as conn:
+        marked = conn.execute(
+            MARK_FINALIZING_SQL,
+            (OWNER_WORKER_ID, None, task_id, OWNER_WORKER_ID),
+        ).rowcount
 
-    _mark_task_finalizing(task_id, OWNER_WORKER_ID, None)
-    assert await _get_finalizing_worker(session, task_id) == OWNER_WORKER_ID
+    assert marked == 0
+    assert await _get_finalizing_worker(session, task_id) is None

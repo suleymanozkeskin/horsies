@@ -56,7 +56,7 @@ class ThreadRunRequest:
     kwargs_json: str | None
     worker_id: str
     is_workflow_task: bool
-    claimed_at: datetime | None
+    claimed_at: datetime
     work: ThreadSeatWork
 
     def __post_init__(self) -> None:

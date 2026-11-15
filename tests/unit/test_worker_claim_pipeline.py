@@ -43,6 +43,8 @@ from horsies.core.worker.sql import (
     UNCLAIM_CLAIMED_TASK_SQL,
 )
 
+CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
+
 BROKER = PostgresConfig(
     database_url='postgresql+psycopg://user:pass@localhost/db',
     pool_size=5,
@@ -307,6 +309,7 @@ class TestOwnershipGateBehavioral:
                 'task-1',
                 'worker-A',
                 is_workflow_task=False,
+                claimed_at=CLAIMED_AT,
             )
 
         assert result is None, 'Ownership confirmed should return None'
@@ -340,7 +343,11 @@ class TestOwnershipGateBehavioral:
                 _confirm_ownership_and_set_running,
             )
 
-            result = _confirm_ownership_and_set_running('task-1', 'worker-A')
+            result = _confirm_ownership_and_set_running(
+                'task-1',
+                'worker-A',
+                claimed_at=CLAIMED_AT,
+            )
 
         assert isinstance(result, tuple), 'Ownership lost should return a tuple'
         ok, _result_json, reason = result
@@ -360,7 +367,11 @@ class TestOwnershipGateBehavioral:
                 _confirm_ownership_and_set_running,
             )
 
-            result = _confirm_ownership_and_set_running('task-1', 'worker-A')
+            result = _confirm_ownership_and_set_running(
+                'task-1',
+                'worker-A',
+                claimed_at=CLAIMED_AT,
+            )
 
         assert isinstance(result, tuple), 'Exception path should return a tuple'
         ok, _result_json, reason = result
@@ -388,6 +399,7 @@ class TestOwnershipGateBehavioral:
                 'task-1',
                 'worker-A',
                 is_workflow_task=False,
+                claimed_at=CLAIMED_AT,
                 start_check=deadline_fired,
             )
 
@@ -409,6 +421,7 @@ class TestOwnershipGateBehavioral:
                 'task-1',
                 'worker-A',
                 is_workflow_task=False,
+                claimed_at=CLAIMED_AT,
                 start_check=StartAllowed,
             )
 

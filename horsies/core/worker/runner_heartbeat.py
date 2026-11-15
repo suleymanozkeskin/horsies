@@ -93,11 +93,11 @@ WATCH_THREAD_NAME: Final = 'horsies-runner-heartbeat-watch'
 
 # One statement per interval. ``dispatches`` is a JSON array of
 # {"task_id", "claimed_at"}. Each row is fenced like every other write of a
-# dispatch: this worker, and the claim generation of the dispatch (a NULL
-# claimed_at disables the generation half, as in OwnedClaim). A row with the
-# finalizing marker gets no beat: its child has ended the attempt, and the
-# reaper reads the marker for that row. Each parameter has an explicit type:
-# worker_id appears twice, and Postgres refuses two deduced types for it.
+# dispatch: this worker, and the claim generation of the dispatch, as in
+# OwnedClaim. A row with the finalizing marker gets no beat: its child has
+# ended the attempt, and the reaper reads the marker for that row. Each
+# parameter has an explicit type: worker_id appears twice, and Postgres
+# refuses two deduced types for it.
 INSERT_RUNNER_HEARTBEATS_SQL: Final[LiteralString] = """
     INSERT INTO horsies_heartbeats (task_id, sender_id, role, sent_at, hostname, pid)
     SELECT t.id, CAST(%(worker_id)s AS VARCHAR), 'runner', NOW(),
@@ -107,7 +107,7 @@ INSERT_RUNNER_HEARTBEATS_SQL: Final[LiteralString] = """
     JOIN horsies_tasks t ON t.id = d.task_id
     WHERE t.status = 'RUNNING'
       AND t.claimed_by_worker_id = CAST(%(worker_id)s AS VARCHAR)
-      AND (d.claimed_at IS NULL OR t.claimed_at = d.claimed_at)
+      AND t.claimed_at = d.claimed_at
       AND t.finalizing_at IS NULL
 """
 
@@ -351,9 +351,7 @@ def _dispatches_json(dispatches: Sequence[LiveDispatch]) -> str:
     rows = [
         {
             'task_id': dispatch.task_id,
-            'claimed_at': (
-                None if dispatch.claimed_at is None else dispatch.claimed_at.isoformat()
-            ),
+            'claimed_at': dispatch.claimed_at.isoformat(),
         }
         for dispatch in dispatches
     ]

@@ -45,7 +45,11 @@ from horsies.core.worker.task_loop import (
     ISOLATED_LEFTOVER_GRACE_S,
 )
 from horsies.core.worker.worker import Worker, WorkerConfig
-from tests.fixtures.slots.handles import finished_handle, unbound_handle
+from tests.fixtures.slots.handles import (
+    HANDLE_CLAIMED_AT,
+    finished_handle,
+    unbound_handle,
+)
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
@@ -176,7 +180,7 @@ class TestDeadline:
         handle.note_return(SEEN)
 
         outcome = await asyncio.wait_for(
-            worker._handle_task_timeout(handle, TASK_ID, 1_000),
+            worker._handle_task_timeout(handle, TASK_ID, 1_000, HANDLE_CLAIMED_AT),
             TEST_WAIT_S,
         )
 
@@ -200,7 +204,12 @@ class TestDeadline:
         )
 
         waiter = asyncio.ensure_future(
-            worker._await_slot_outcome(handle, TASK_ID, TaskTimeout(ms=1), None),
+            worker._await_slot_outcome(
+                handle,
+                TASK_ID,
+                TaskTimeout(ms=1),
+                HANDLE_CLAIMED_AT,
+            ),
         )
         await asyncio.sleep(0.05)
         assert not waiter.done()
@@ -220,7 +229,7 @@ class TestDeadline:
                 handle,
                 TASK_ID,
                 1_000,
-                None,
+                HANDLE_CLAIMED_AT,
                 LostAfterReturn(RETURNED, _lost(KilledBySignal(9))),
             )
         cast(AsyncMock, worker._record_task_timeout).assert_not_awaited()
@@ -246,6 +255,7 @@ class TestFinalize:
             TASK_ID,
             timeout=TaskTimeout(ms=1_000),
             task_name='left_work_task',
+            claimed_at=HANDLE_CLAIMED_AT,
         )
 
         assert result == Ok(None)
@@ -258,6 +268,7 @@ class TestFinalize:
             finished_handle(LostAfterReturn(RETURNED, _lost(ExitUnknown()))),
             TASK_ID,
             task_name='left_work_task',
+            claimed_at=HANDLE_CLAIMED_AT,
         )
 
         assert result == Ok(None)
@@ -273,7 +284,12 @@ class TestFinalize:
         handle.finish(LostAfterReturn(RETURNED, _lost(ExitUnknown())))
 
         finalize = asyncio.ensure_future(
-            worker._finalize_after(handle, TASK_ID, task_name='left_work_task'),
+            worker._finalize_after(
+                handle,
+                TASK_ID,
+                task_name='left_work_task',
+                claimed_at=HANDLE_CLAIMED_AT,
+            ),
         )
         await asyncio.sleep(0.05)
         cast(AsyncMock, worker._finalize_task_result).assert_not_awaited()
@@ -297,7 +313,7 @@ class TestFinalize:
                 queue_name='default',
                 is_workflow_task=False,
                 task_name='left_work_task',
-                claimed_at=None,
+                claimed_at=HANDLE_CLAIMED_AT,
             ),
             TEST_WAIT_S,
         )
@@ -312,23 +328,23 @@ class TestMarkerBounds:
             child_runner.mark_isolated_run_finalizing(
                 TASK_ID,
                 'worker-1',
-                None,
+                HANDLE_CLAIMED_AT,
                 MarkerAtReturn(),
             )
-        write.assert_called_once_with(TASK_ID, 'worker-1', None)
+        write.assert_called_once_with(TASK_ID, 'worker-1', HANDLE_CLAIMED_AT)
 
     async def test_the_marker_after_left_work_has_bounds_of_its_own(self) -> None:
         with patch.object(child_runner, '_mark_task_finalizing') as write:
             child_runner.mark_isolated_run_finalizing(
                 TASK_ID,
                 'worker-1',
-                None,
+                HANDLE_CLAIMED_AT,
                 MarkerAfterLeftWork(),
             )
         write.assert_called_once_with(
             TASK_ID,
             'worker-1',
-            None,
+            HANDLE_CLAIMED_AT,
             connection_wait_s=child_runner.LEFT_WORK_MARKER_CONNECTION_WAIT_S,
             statements=StatementsBound(child_runner.LEFT_WORK_MARKER_STATEMENTS_S),
         )

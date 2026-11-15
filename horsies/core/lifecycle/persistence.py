@@ -619,14 +619,10 @@ def _fused_batch_parameters(batch: FusedCompletionBatch) -> dict[str, object]:
     }
 
 
-def _generation_text(claimed_at: datetime | None) -> str | None:
+def _generation_text(claimed_at: datetime) -> str:
     """The claim generation as ISO 8601 text with its microseconds and its
-    UTC offset, or None when the fence has no generation. Pure."""
-    match claimed_at:
-        case None:
-            return None
-        case datetime():
-            return claimed_at.isoformat()
+    UTC offset. Pure."""
+    return claimed_at.isoformat()
 
 
 async def apply_fused_batch_in_autocommit(

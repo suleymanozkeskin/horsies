@@ -27,7 +27,11 @@ from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.slots import ChildExit, ExitUnknown, KilledBySignal, SlotHandle
 from horsies.core.worker.stored_timeout import NoTimeout, TaskTimeout, read_stored_timeout
 from horsies.core.worker.worker import Worker
-from tests.fixtures.slots.handles import task_finished_handle, unbound_handle
+from tests.fixtures.slots.handles import (
+    HANDLE_CLAIMED_AT,
+    task_finished_handle,
+    unbound_handle,
+)
 from tests.integration.conftest import compute_test_enqueue_sha
 from tests.integration.history_seeding import read_attempts
 
@@ -91,7 +95,7 @@ async def _insert_task(
                 (id, task_name, queue_name, priority, args, kwargs, status,
                  sent_at, created_at, updated_at, claimed, retry_count,
                  max_retries, started_at, enqueue_sha, claimed_by_worker_id,
-                 worker_pid, task_options, is_workflow_task,
+                 claimed_at, worker_pid, task_options, is_workflow_task,
                  retention_class_key, command_fingerprint_version,
                  command_fingerprint, retain_rerun_input,
                  prepared_rerun_input_disposition)
@@ -99,7 +103,7 @@ async def _insert_task(
                 (:id, 'timeout_test', 'default', 100, '[]', '{}', :status,
                  :sent_at, NOW(), NOW(), FALSE, :retry_count,
                  :max_retries, NOW(), :sha, :owner,
-                 :worker_pid, :task_options, :is_workflow_task,
+                 :claimed_at, :worker_pid, :task_options, :is_workflow_task,
                  'standard_30d', 1,
                  sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
                  FALSE, 'DECLINED_BY_POLICY')
@@ -110,6 +114,7 @@ async def _insert_task(
             'sent_at': sent_at,
             'sha': sha,
             'owner': owner,
+            'claimed_at': HANDLE_CLAIMED_AT,
             'retry_count': retry_count,
             'max_retries': max_retries,
             'worker_pid': FAKE_DEAD_PID,
@@ -172,7 +177,7 @@ async def test_timeout_marks_running_task_failed(
     worker = _make_worker(engine)
 
     handle, child = _handle_with_child()
-    await worker._handle_task_timeout(handle, task_id, 5_000)
+    await worker._handle_task_timeout(handle, task_id, 5_000, HANDLE_CLAIMED_AT)
     session.expire_all()
 
     row = await _get_row(session, task_id)
@@ -204,9 +209,19 @@ async def test_timeout_replay_uses_committed_result_without_duplicate_attempt(
         return_value=Ok(None),
     )
 
-    await worker._handle_task_timeout(_handle_with_child()[0], task_id, 5_000)
+    await worker._handle_task_timeout(
+        _handle_with_child()[0],
+        task_id,
+        5_000,
+        HANDLE_CLAIMED_AT,
+    )
     worker._finalize_workflow_phase.reset_mock()
-    await worker._handle_task_timeout(_handle_with_child()[0], task_id, 5_000)
+    await worker._handle_task_timeout(
+        _handle_with_child()[0],
+        task_id,
+        5_000,
+        HANDLE_CLAIMED_AT,
+    )
 
     worker._finalize_workflow_phase.assert_awaited_once()
     persisted_result = worker._finalize_workflow_phase.await_args.args[1]
@@ -232,8 +247,18 @@ async def test_timeout_replay_of_a_plain_task_runs_no_phase_2(
         return_value=Ok(None),
     )
 
-    await worker._handle_task_timeout(_handle_with_child()[0], task_id, 5_000)
-    await worker._handle_task_timeout(_handle_with_child()[0], task_id, 5_000)
+    await worker._handle_task_timeout(
+        _handle_with_child()[0],
+        task_id,
+        5_000,
+        HANDLE_CLAIMED_AT,
+    )
+    await worker._handle_task_timeout(
+        _handle_with_child()[0],
+        task_id,
+        5_000,
+        HANDLE_CLAIMED_AT,
+    )
 
     worker._finalize_workflow_phase.assert_not_awaited()
     assert len(await read_attempts(session, task_id)) == 1
@@ -250,7 +275,7 @@ async def test_timeout_respects_ownership(
     worker = _make_worker(engine)
 
     handle, child = _handle_with_child()
-    await worker._handle_task_timeout(handle, task_id, 5_000)
+    await worker._handle_task_timeout(handle, task_id, 5_000, HANDLE_CLAIMED_AT)
     session.expire_all()
 
     row = await _get_row(session, task_id)
@@ -270,7 +295,7 @@ async def test_timeout_requeues_claimed_task(
     worker = _make_worker(engine)
 
     handle, child = _handle_with_child()
-    await worker._handle_task_timeout(handle, task_id, 5_000)
+    await worker._handle_task_timeout(handle, task_id, 5_000, HANDLE_CLAIMED_AT)
     session.expire_all()
 
     row = await _get_row(session, task_id)
@@ -306,7 +331,7 @@ async def test_timeout_retries_when_opted_in(
     worker = _make_worker(engine)
 
     handle, child = _handle_with_child()
-    await worker._handle_task_timeout(handle, task_id, 5_000)
+    await worker._handle_task_timeout(handle, task_id, 5_000, HANDLE_CLAIMED_AT)
     session.expire_all()
 
     row = await _get_row(session, task_id)
@@ -340,7 +365,7 @@ async def test_timeout_without_a_seen_exit_leaves_the_row_running(
     worker = _make_worker(engine, RecoveryConfig())
 
     handle, child = _handle_with_child(ExitUnknown())
-    await worker._handle_task_timeout(handle, task_id, 5_000)
+    await worker._handle_task_timeout(handle, task_id, 5_000, HANDLE_CLAIMED_AT)
     session.expire_all()
 
     row = await _get_row(session, task_id)
@@ -364,7 +389,7 @@ async def test_with_stale_recovery_off_a_late_exit_writes_the_timeout(
     handle, child = _handle_with_child(ExitUnknown())
     child.wait_exit_seen = AsyncMock(return_value=KilledBySignal(9))
 
-    await worker._handle_task_timeout(handle, task_id, 5_000)
+    await worker._handle_task_timeout(handle, task_id, 5_000, HANDLE_CLAIMED_AT)
     session.expire_all()
 
     row = await _get_row(session, task_id)
@@ -384,7 +409,7 @@ async def test_timeout_after_the_slot_answered_is_still_a_timeout(
     worker = _make_worker(engine)
 
     handle = task_finished_handle(True, '{}', None)
-    await worker._handle_task_timeout(handle, task_id, 5_000)
+    await worker._handle_task_timeout(handle, task_id, 5_000, HANDLE_CLAIMED_AT)
     session.expire_all()
 
     row = await _get_row(session, task_id)

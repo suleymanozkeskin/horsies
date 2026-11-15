@@ -17,6 +17,7 @@ import sys
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -115,6 +116,8 @@ from horsies.core.worker.shared_stop import (
 )
 from horsies.core.worker.stored_timeout import TimeoutValueInvalid
 
+CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
+
 SCRIPTED_CHILD = str(
     Path(__file__).parent.parent / 'fixtures' / 'slots' / 'scripted_child.py'
 )
@@ -191,7 +194,7 @@ def _request(
         kwargs_json=argument,
         worker_id='worker-1',
         is_workflow_task=False,
-        claimed_at=None,
+        claimed_at=CLAIMED_AT,
         work=SeatTask(timeout_ms=timeout_ms, cancel_grace_ms=grace_ms),
     )
 
@@ -1126,7 +1129,7 @@ class TestStartAndStop:
                 worker_id='worker-1',
                 is_workflow_task=False,
                 timeout=NoTimeout(),
-                claimed_at=None,
+                claimed_at=CLAIMED_AT,
             ),
         )
         shared = pool.submit_shared(_request('pid'))

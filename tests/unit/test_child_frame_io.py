@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import socket
+from datetime import datetime, timezone
 from typing import cast
 
 import pytest
@@ -32,6 +34,8 @@ from horsies.core.worker.child_protocol import (
 from horsies.core.worker.stored_timeout import NoTimeout
 
 pytestmark = [pytest.mark.unit]
+
+CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
 
 
 class _ScriptedSocket:
@@ -71,7 +75,7 @@ def _run(task_id: str, kwargs_json: str | None = '{"job_id":1}') -> RunFrame:
         worker_id='worker-1',
         is_workflow_task=False,
         timeout=NoTimeout(),
-        claimed_at=None,
+        claimed_at=CLAIMED_AT,
     )
 
 
@@ -162,6 +166,36 @@ def test_a_header_over_the_bounds_ends_the_process(
         reader.next_frame()
 
     assert exited.value.code == BAD_PARENT_FRAME_EXIT_CODE
+
+
+def test_a_run_frame_without_a_claim_time_ends_the_process(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The child fences every write of the attempt on the claim time, so a
+    run frame without one is a bad parent frame."""
+
+    def _exit(code: int) -> None:
+        raise _Exited(code)
+
+    monkeypatch.setattr(child_main.os, '_exit', _exit)
+    encoded = encode_parent_frame(_run('a'))
+    fields = json.loads(encoded.head[FRAME_HEADER.size :])
+    del fields['claimed_at']
+    meta = json.dumps(fields).encode()
+    wire = FRAME_HEADER.pack(len(meta), len(encoded.body)) + meta + encoded.body
+    reader, _ = _reader(wire, chunk=1 << 20)
+
+    with (
+        caplog.at_level(logging.CRITICAL, logger='horsies.worker'),
+        pytest.raises(_Exited) as exited,
+    ):
+        reader.next_frame()
+
+    assert exited.value.code == BAD_PARENT_FRAME_EXIT_CODE
+    assert [record.getMessage() for record in caplog.records] == [
+        'Parent sent a bad frame: _BadField: claimed_at',
+    ]
 
 
 def test_a_small_child_frame_is_one_write() -> None:

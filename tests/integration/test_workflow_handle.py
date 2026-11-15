@@ -1533,23 +1533,27 @@ class TestWorkflowHandleCancel:
             """),
             {'wf_id': handle.workflow_id},
         )
-        await session.execute(
-            text("""
-                UPDATE horsies_tasks
-                SET status = 'CLAIMED',
-                    claimed = TRUE,
-                    claimed_at = NOW(),
-                    claimed_by_worker_id = :worker_id,
-                    claim_expires_at = NOW() + INTERVAL '5 minutes',
-                    updated_at = NOW()
-                WHERE id = :task_id
-            """),
-            {'task_id': task_id, 'worker_id': worker.worker_instance_id},
-        )
+        claimed_at = (
+            await session.execute(
+                text("""
+                    UPDATE horsies_tasks
+                    SET status = 'CLAIMED',
+                        claimed = TRUE,
+                        claimed_at = NOW(),
+                        claimed_by_worker_id = :worker_id,
+                        claim_expires_at = NOW() + INTERVAL '5 minutes',
+                        updated_at = NOW()
+                    WHERE id = :task_id
+                    RETURNING claimed_at
+                """),
+                {'task_id': task_id, 'worker_id': worker.worker_instance_id},
+            )
+        ).scalar_one()
         await session.commit()
 
+        # The claim row carries its claim time, as a row of horsies_claim does.
         filtered = await worker._filter_nonrunnable_workflow_tasks(
-            [{'id': task_id}],
+            [{'id': task_id, 'claimed_at': claimed_at}],
         )
         assert filtered == []
 

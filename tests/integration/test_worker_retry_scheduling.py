@@ -42,6 +42,9 @@ pytestmark = [pytest.mark.integration]
 # retry-path ownership guard matches.
 TEST_WORKER_ID = 'w-retry-test'
 TASK_NAME = 'retry_test'
+# The claim generation of every row seeded here, which the fences of the
+# worker check.
+CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
 
 
 @functools.cache
@@ -106,6 +109,7 @@ async def _insert_task(
                 (id, task_name, queue_name, priority, args, kwargs, status, sent_at,
                  created_at, updated_at, claimed, retry_count, max_retries, started_at,
                  good_until, task_options, enqueue_sha, claimed_by_worker_id,
+                 claimed_at,
                  retention_class_key, command_fingerprint_version,
                  command_fingerprint, retain_rerun_input,
                  prepared_rerun_input_disposition)
@@ -113,6 +117,7 @@ async def _insert_task(
                 (:id, :task_name, 'default', 100, '[]', '{}', :status, :sent_at,
                  NOW(), NOW(), FALSE, :retry_count, :max_retries, NOW(),
                  :good_until, :task_options, :enqueue_sha, :claimed_by_worker_id,
+                 :claimed_at,
                  'standard_30d', 1,
                  sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
                  FALSE, 'DECLINED_BY_POLICY')
@@ -128,6 +133,7 @@ async def _insert_task(
             'good_until': good_until,
             'task_options': task_options,
             'claimed_by_worker_id': claimed_by_worker_id,
+            'claimed_at': CLAIMED_AT,
         },
     )
     if is_terminal:
@@ -174,6 +180,7 @@ async def _finalize_error(worker: Worker, task_id: str, code: str) -> Any:
         task_name=TASK_NAME,
         queue_name='default',
         is_workflow_task=False,
+        claimed_at=CLAIMED_AT,
     )
 
 

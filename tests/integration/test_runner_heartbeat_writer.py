@@ -9,11 +9,13 @@ of stale recovery, and a fence that fails leaves the row to it.
 
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import psycopg
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,7 +23,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.types.result import is_ok
 from horsies.core.worker.live_dispatches import LiveDispatch
-from horsies.core.worker.runner_heartbeat import BeatsWritten, PostgresBeatWriter
+from horsies.core.worker.runner_heartbeat import (
+    INSERT_RUNNER_HEARTBEATS_SQL,
+    BeatsWritten,
+    PostgresBeatWriter,
+)
 from tests.broker_resources_support import listener_of
 from tests.integration.conftest import compute_test_enqueue_sha
 
@@ -107,9 +113,7 @@ def _writer(broker: PostgresBroker) -> PostgresBeatWriter:
     )
 
 
-def _dispatch(
-    task_id: str, claimed_at: datetime | None, ticket: int = 1
-) -> LiveDispatch:
+def _dispatch(task_id: str, claimed_at: datetime, ticket: int = 1) -> LiveDispatch:
     return LiveDispatch(ticket=ticket, task_id=task_id, claimed_at=claimed_at, pid=1)
 
 
@@ -181,11 +185,15 @@ async def test_a_row_outside_the_fence_gets_no_beat(
 
 
 @pytest.mark.asyncio(loop_scope='function')
-async def test_a_null_generation_fences_on_the_worker_only(
+async def test_a_null_generation_gets_no_beat(
     broker: PostgresBroker,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
+    """The fence compares the claim generation with no NULL branch: a
+    dispatch row without one matches no task, also a task of this worker.
+    ``LiveDispatch`` cannot hold such a row, so the statement runs with a
+    hand-built parameter."""
     ours = await _insert_running_task(session, claimed_at=_claimed_at())
     theirs = await _insert_running_task(
         session,
@@ -193,17 +201,25 @@ async def test_a_null_generation_fences_on_the_worker_only(
         worker_id=OTHER_WORKER_ID,
     )
     await session.commit()
-    writer = _writer(broker)
 
-    try:
-        outcome = writer.write(
-            (_dispatch(ours, None, ticket=1), _dispatch(theirs, None, ticket=2)),
-        )
-    finally:
-        writer.close()
+    with psycopg.connect(listener_of(broker).database_url, autocommit=True) as conn:
+        written = conn.execute(
+            INSERT_RUNNER_HEARTBEATS_SQL,
+            {
+                'worker_id': WORKER_ID,
+                'hostname': 'beat-host',
+                'pid': os.getpid(),
+                'dispatches': json.dumps(
+                    [
+                        {'task_id': ours, 'claimed_at': None},
+                        {'task_id': theirs, 'claimed_at': None},
+                    ],
+                ),
+            },
+        ).rowcount
 
-    assert outcome == BeatsWritten(rows=1)
-    assert len(await _beats(session, ours)) == 1
+    assert written == 0
+    assert await _beats(session, ours) == []
     assert await _beats(session, theirs) == []
 
 

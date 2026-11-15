@@ -13,6 +13,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable, Iterator
+from datetime import datetime, timezone
 from typing import NoReturn
 
 import pytest
@@ -62,6 +63,8 @@ from horsies.core.worker.thread_child import (
 )
 
 pytestmark = [pytest.mark.unit]
+
+CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
 
 WAIT_S = 10.0
 
@@ -127,7 +130,7 @@ def _frame(
         kwargs_json=None,
         worker_id='worker-1',
         is_workflow_task=False,
-        claimed_at=None,
+        claimed_at=CLAIMED_AT,
         work=work or ThreadSeatTask(timeout_ms=1000),
     )
 
@@ -738,7 +741,7 @@ class TestServeRuns:
             worker_id='w',
             is_workflow_task=False,
             timeout=NoTimeout(),
-            claimed_at=None,
+            claimed_at=CLAIMED_AT,
         )
         with pytest.raises(_Exited):
             self._serve(_Taker(), run, StopFrame())

@@ -17,6 +17,7 @@ import socket
 import sys
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock
 
@@ -41,6 +42,8 @@ from horsies.core.worker.slots import (
 )
 from horsies.core.worker.stored_timeout import NoTimeout
 from horsies.core.worker.worker import Worker, WorkerConfig
+
+CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
 
 # A pid that cannot exist, so the kill of the double reaches no process.
 NO_SUCH_PID = 2**30
@@ -100,7 +103,7 @@ def _frame() -> RunFrame:
         worker_id='worker-1',
         is_workflow_task=False,
         timeout=NoTimeout(),
-        claimed_at=None,
+        claimed_at=CLAIMED_AT,
     )
 
 
@@ -146,7 +149,12 @@ def _worker(
 
 async def _finalize(worker: Worker, handle: SlotHandle) -> object:
     return await asyncio.wait_for(
-        worker._finalize_after(handle, TASK_ID, task_name='hang'),
+        worker._finalize_after(
+            handle,
+            TASK_ID,
+            task_name='hang',
+            claimed_at=CLAIMED_AT,
+        ),
         TEST_WAIT_S,
     )
 
@@ -272,7 +280,12 @@ class TestLossWithStaleRecoveryOff:
         worker, recovery = _worker(recovery=None)
         try:
             waiting = asyncio.ensure_future(
-                worker._finalize_after(handle, TASK_ID, task_name='hang'),
+                worker._finalize_after(
+                    handle,
+                    TASK_ID,
+                    task_name='hang',
+                    claimed_at=CLAIMED_AT,
+                ),
             )
             await asyncio.sleep(0.05)
             assert not waiting.done()
@@ -293,7 +306,12 @@ class TestLossWithStaleRecoveryOff:
         worker, recovery = _worker(recovery=None)
         try:
             waiting = asyncio.ensure_future(
-                worker._finalize_after(handle, TASK_ID, task_name='hang'),
+                worker._finalize_after(
+                    handle,
+                    TASK_ID,
+                    task_name='hang',
+                    claimed_at=CLAIMED_AT,
+                ),
             )
             await asyncio.sleep(0.05)
 

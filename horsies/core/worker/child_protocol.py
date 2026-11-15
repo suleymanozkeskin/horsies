@@ -151,7 +151,11 @@ class InitFrame:
 
 @dataclass(frozen=True, slots=True)
 class RunFrame:
-    """Parent to child: run one task."""
+    """Parent to child: run one task.
+
+    ``claimed_at`` is the claim time that the claim of the task returned.
+    The child fences each write of the attempt on it and ``worker_id``.
+    """
 
     task_id: str
     task_name: str
@@ -160,7 +164,7 @@ class RunFrame:
     worker_id: str
     is_workflow_task: bool
     timeout: StoredTimeout
-    claimed_at: datetime | None
+    claimed_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,7 +226,8 @@ class SharedRunFrame:
 
     ``dispatch`` names this run in the pool, from 1, and each frame of the
     child about it carries the same number. ``work`` is the task with its
-    deadline, or the refusal that fails it.
+    deadline, or the refusal that fails it. ``claimed_at`` is the claim
+    time of the task, as in ``RunFrame``.
     """
 
     dispatch: int
@@ -232,7 +237,7 @@ class SharedRunFrame:
     kwargs_json: str | None
     worker_id: str
     is_workflow_task: bool
-    claimed_at: datetime | None
+    claimed_at: datetime
     work: SharedWork
 
 
@@ -725,9 +730,7 @@ def _encode_run_frame(frame: RunFrame) -> EncodedFrame:
             'worker_id': frame.worker_id,
             'is_workflow_task': frame.is_workflow_task,
             'timeout': _encode_timeout(frame.timeout),
-            'claimed_at': (
-                None if frame.claimed_at is None else frame.claimed_at.isoformat()
-            ),
+            'claimed_at': frame.claimed_at.isoformat(),
         },
         (args or b'') + (kwargs or b''),
     )
@@ -758,9 +761,7 @@ def _encode_shared_run_frame(frame: SharedRunFrame) -> EncodedFrame:
             **sizes,
             'worker_id': frame.worker_id,
             'is_workflow_task': frame.is_workflow_task,
-            'claimed_at': (
-                None if frame.claimed_at is None else frame.claimed_at.isoformat()
-            ),
+            'claimed_at': frame.claimed_at.isoformat(),
             'work': _encode_seat_work(frame.work),
         },
         body,
@@ -1315,7 +1316,6 @@ def _decode_run(meta: Mapping[str, Any], body: bytes) -> RunFrame:
     args_end = args_bytes or 0
     if args_end + (kwargs_bytes or 0) != len(body):
         raise _BadField('args_bytes and kwargs_bytes do not match the body')
-    claimed_at = _optional_text(meta, 'claimed_at')
     return RunFrame(
         task_id=_text(meta, 'task_id'),
         task_name=_text(meta, 'task_name'),
@@ -1324,8 +1324,18 @@ def _decode_run(meta: Mapping[str, Any], body: bytes) -> RunFrame:
         worker_id=_text(meta, 'worker_id'),
         is_workflow_task=_flag(meta, 'is_workflow_task'),
         timeout=_decode_timeout(meta),
-        claimed_at=None if claimed_at is None else datetime.fromisoformat(claimed_at),
+        claimed_at=_claim_time(meta),
     )
+
+
+def _claim_time(meta: Mapping[str, Any]) -> datetime:
+    """The claim time of a run, from its ISO 8601 text.
+
+    A run without a claim time is malformed: the child fences every write
+    of the attempt on it. Text that is not ISO 8601 raises ``ValueError``,
+    which the decoder also reports as malformed.
+    """
+    return datetime.fromisoformat(_text(meta, 'claimed_at'))
 
 
 def _decode_arguments(
@@ -1346,7 +1356,6 @@ def _decode_arguments(
 
 def _decode_shared_run(meta: Mapping[str, Any], body: bytes) -> SharedRunFrame:
     args_json, kwargs_json = _decode_arguments(meta, body)
-    claimed_at = _optional_text(meta, 'claimed_at')
     return SharedRunFrame(
         dispatch=_dispatch(meta),
         task_id=_text(meta, 'task_id'),
@@ -1355,7 +1364,7 @@ def _decode_shared_run(meta: Mapping[str, Any], body: bytes) -> SharedRunFrame:
         kwargs_json=kwargs_json,
         worker_id=_text(meta, 'worker_id'),
         is_workflow_task=_flag(meta, 'is_workflow_task'),
-        claimed_at=None if claimed_at is None else datetime.fromisoformat(claimed_at),
+        claimed_at=_claim_time(meta),
         work=_decode_seat_work(meta),
     )
 

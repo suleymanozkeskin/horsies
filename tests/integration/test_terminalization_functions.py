@@ -67,11 +67,14 @@ from horsies.core.lifecycle.outcomes import (
     ObservedWorkflowLink,
     SourceStateConflict,
     TaskAbsent,
+    decode_outcome_row,
 )
 from horsies.core.lifecycle.persistence import (
     apply_async,
     apply_batch_async,
     apply_sync,
+    batch_call_for,
+    call_for,
 )
 from horsies.core.types.status import TaskStatus
 from tests.broker_resources_support import current_resources
@@ -258,7 +261,7 @@ def _locked(task_id: str) -> CompleteLockedTask:
     )
 
 
-def _fused(task_id: str, claimed_at: datetime | None = GENERATION) -> CompleteTaskFused:
+def _fused(task_id: str, claimed_at: datetime = GENERATION) -> CompleteTaskFused:
     return CompleteTaskFused(
         task_id=task_id,
         fence=OwnedClaim(worker_id=WORKER, claimed_at=claimed_at),
@@ -1615,7 +1618,7 @@ def _cancel_locked(
 
 def _cancel_owned_orphan(
     task_id: str,
-    claimed_at: datetime | None = GENERATION,
+    claimed_at: datetime = GENERATION,
 ) -> CancelOwnedOrphan:
     return CancelOwnedOrphan(
         task_id=task_id,
@@ -2150,7 +2153,7 @@ class TestCancelOrphanedTasks:
 
 def _abandon_owned(
     task_id: str,
-    claimed_at: datetime | None = GENERATION,
+    claimed_at: datetime = GENERATION,
 ) -> AbandonOwnedNode:
     return AbandonOwnedNode(
         task_id=task_id,
@@ -2160,7 +2163,7 @@ def _abandon_owned(
 
 def _cancel_owned_node(
     task_id: str,
-    claimed_at: datetime | None = GENERATION,
+    claimed_at: datetime = GENERATION,
     *,
     accepts_requeued_pending: bool = True,
 ) -> CancelOwnedNode:
@@ -2237,10 +2240,15 @@ class TestAbandonOwnedNode:
         self,
         session: AsyncSession,
     ) -> None:
+        """The stored function keeps its contract: a NULL claimed_at fences
+        on the worker alone. The worker never sends one (``OwnedClaim``
+        requires a claim time), so the statement runs with NULL in its
+        place."""
         task_id = await _seed(session, status='CLAIMED', is_workflow_task=True)
-        outcome = await apply_async(
-            await session.connection(),
-            _abandon_owned(task_id, None),
+        statement, parameters = call_for(_abandon_owned(task_id))
+        result = await session.execute(statement, {**parameters, 'claimed_at': None})
+        outcome = decode_outcome_row(
+            {str(key): value for key, value in result.mappings().one().items()},
         )
         await session.commit()
         assert isinstance(outcome, Applied)
@@ -2711,14 +2719,22 @@ class TestIdKeyedWorkflowBatches:
         session: AsyncSession,
         command_type: type[AbandonOwnedNodes] | type[CancelOwnedNodes],
     ) -> None:
+        """The stored function keeps its contract: a NULL entry of the
+        generations array fences its task on the worker alone. The worker
+        never sends one, so the statement runs with NULL in its place."""
         task_id = await _seed(session, status='CLAIMED', is_workflow_task=True)
         command = command_type(
             fence=OwnedClaimBatch(
                 worker_id=WORKER,
-                claim_generations=((task_id, None),),
+                claim_generations=((task_id, GENERATION),),
             ),
         )
-        outcomes = await apply_batch_async(await session.connection(), command)
+        statement, parameters = batch_call_for(command)
+        result = await session.execute(statement, {**parameters, 'claimed_ats': [None]})
+        outcomes = [
+            decode_outcome_row({str(key): value for key, value in row.items()})
+            for row in result.mappings().all()
+        ]
         await session.commit()
         assert len(outcomes) == 1
         assert isinstance(outcomes[0], Applied)

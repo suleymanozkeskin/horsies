@@ -13,6 +13,7 @@ import asyncio
 import json
 import threading
 from collections.abc import Callable, Iterator
+from datetime import datetime, timezone
 from enum import Enum
 from contextlib import ExitStack
 from typing import Any, cast
@@ -54,6 +55,8 @@ from horsies.core.worker.task_loop import (
 from tests.fixtures.run_return import wire_of
 
 pytestmark = [pytest.mark.unit]
+
+CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
 
 type WireResult = tuple[bool, str, str | None]
 
@@ -127,6 +130,7 @@ def _runner(
                     task_id='task-id',
                     master_worker_id='worker',
                     is_workflow_task=False,
+                    claimed_at=CLAIMED_AT,
                     task_loop=task_loop,
                 )
             )

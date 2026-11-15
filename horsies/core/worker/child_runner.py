@@ -675,7 +675,7 @@ CLAIM_STILL_STARTABLE_SQL: Final[LiteralString] = """
             WHERE id = %s
               AND status = 'CLAIMED'
               AND claimed_by_worker_id = %s
-              AND (%s::timestamptz IS NULL OR claimed_at = %s::timestamptz)
+              AND claimed_at = %s::timestamptz
               AND (claim_expires_at IS NULL OR claim_expires_at > now())
               AND (good_until IS NULL OR good_until > now())
         ) AS startable
@@ -714,7 +714,7 @@ _SET_RUNNING_HEAD_SQL: Final[LiteralString] = """
                            (
                                status = 'CLAIMED'
                                AND claimed_by_worker_id = %s
-                               AND (%s::timestamptz IS NULL OR claimed_at = %s::timestamptz)
+                               AND claimed_at = %s::timestamptz
                                AND (claim_expires_at IS NULL OR claim_expires_at > now())
                                AND (good_until IS NULL OR good_until > now())
                            ) IS TRUE AS startable
@@ -790,7 +790,7 @@ MARK_FINALIZING_SQL: Final[LiteralString] = """
                            (
                                status = 'RUNNING'
                                AND claimed_by_worker_id = %s
-                               AND (%s::timestamptz IS NULL OR claimed_at = %s::timestamptz)
+                               AND claimed_at = %s::timestamptz
                            ) IS TRUE AS fenced
                     FROM horsies_tasks
                     WHERE id = %s
@@ -809,12 +809,12 @@ MARK_FINALIZING_SQL: Final[LiteralString] = """
 def mark_finalizing_params(
     task_id: str,
     worker_id: str,
-    claimed_at: Optional[datetime],
+    claimed_at: datetime,
 ) -> tuple[object, ...]:
     """The parameters of ``MARK_FINALIZING_SQL``, in order: the fence (the
-    worker and the claim generation twice), the task, and the marking
-    worker. No I/O."""
-    return (worker_id, claimed_at, claimed_at, task_id, worker_id)
+    worker and the claim generation), the task, and the marking worker. No
+    I/O."""
+    return (worker_id, claimed_at, task_id, worker_id)
 
 
 def set_running_sql(is_workflow_task: bool) -> LiteralString:
@@ -900,7 +900,7 @@ def set_running_params(
     task_id: str,
     worker_id: str,
     is_workflow_task: bool,
-    claimed_at: Optional[datetime],
+    claimed_at: datetime,
 ) -> tuple[object, ...]:
     """The parameters of ``set_running_sql(is_workflow_task)``, in order.
 
@@ -911,7 +911,6 @@ def set_running_params(
     hostname = socket.gethostname()
     params: list[object] = [
         worker_id,
-        claimed_at,
         claimed_at,
         task_id,
         pid,
@@ -946,16 +945,15 @@ def _claim_still_startable(
     cursor: Cursor[Any],
     task_id: str,
     worker_id: str,
-    claimed_at: Optional[datetime],
+    claimed_at: datetime,
 ) -> bool:
     """Whether every guard of the RUNNING transition but the workflow holds.
 
-    The same claim, lease, and deadline predicates as the transition; a NULL
-    claimed_at disables the generation half, as there.
+    The same claim, lease, and deadline predicates as the transition.
     """
     cursor.execute(
         CLAIM_STILL_STARTABLE_SQL,
-        (task_id, worker_id, claimed_at, claimed_at),
+        (task_id, worker_id, claimed_at),
     )
     row = cursor.fetchone()
     assert row is not None, 'SELECT EXISTS returns one row'
@@ -968,16 +966,15 @@ def _handle_workflow_stop_before_start(
     task_id: str,
     workflow_status: str,
     worker_id: str,
-    claimed_at: Optional[datetime] = None,
+    claimed_at: datetime,
 ) -> Tuple[bool, str, Optional[str]] | _WorkflowResumedBeforeStart:
     """Skip a task whose workflow is PAUSED/CANCELLED; return the wire tuple.
 
-    Both branches carry the ClaimedOwnerFence pair (worker_id, claimed_at) —
+    Both branches carry the ``OwnedClaim`` pair (worker_id, claimed_at) —
     the same fence _confirm_ownership_and_set_running applies to the
     CLAIMED->RUNNING transition. These are claimed pre-start operations, so a
     row requeued and re-claimed since this child was handed its dispatch is a
-    different claim generation and must not be terminalized here. A NULL
-    claimed_at disables the generation half, matching the ownership confirm.
+    different claim generation and must not be terminalized here.
 
     PAUSED: the abandon re-checks the pause under the workflow lock. A refusal
     because the workflow was resumed returns ``_WorkflowResumedBeforeStart``
@@ -1103,7 +1100,7 @@ def _confirm_until_not_resumed(
     task_id: str,
     worker_id: str,
     is_workflow_task: bool,
-    claimed_at: Optional[datetime],
+    claimed_at: datetime,
     *,
     start_check: Callable[[], StartCheck] = start_always_allowed,
     statements: StatementsLimit = StatementsUnbounded(),
@@ -1122,7 +1119,7 @@ def _confirm_until_not_resumed(
             task_id,
             worker_id,
             is_workflow_task,
-            claimed_at,
+            claimed_at=claimed_at,
             start_check=start_check,
             statements=statements,
         )
@@ -1145,8 +1142,8 @@ def _confirm_ownership_and_set_running(
     task_id: str,
     worker_id: str,
     is_workflow_task: bool = True,
-    claimed_at: Optional[datetime] = None,
     *,
+    claimed_at: datetime,
     start_check: Callable[[], StartCheck] = start_always_allowed,
     statements: StatementsLimit = StatementsUnbounded(),
 ) -> (
@@ -1179,11 +1176,11 @@ def _confirm_ownership_and_set_running(
             # never be observed RUNNING without heartbeat coverage, and a
             # transition that does not apply inserts no beat. The worker
             # process writes the later beats while this child holds the task.
-            # The claimed_at pair is the claim-generation fence (C10): the
-            # dispatch that submitted this child carries the claim's own
-            # claimed_at; a row requeued and re-claimed since then (same
-            # worker or not) no longer matches, so the stale child aborts
-            # with CLAIM_LOST instead of double-running the task.
+            # The claimed_at pair is the claim-generation fence: the dispatch
+            # that submitted this child carries the claim's own claimed_at; a
+            # row requeued and re-claimed since then (same worker or not) no
+            # longer matches, so the stale child aborts with CLAIM_LOST
+            # instead of double-running the task.
             cursor.execute(
                 set_running_sql(is_workflow_task),
                 set_running_params(task_id, worker_id, is_workflow_task, claimed_at),
@@ -1260,7 +1257,7 @@ def _confirm_ownership_and_set_running(
 def _mark_task_finalizing(
     task_id: str,
     worker_id: str,
-    claimed_at: Optional[datetime],
+    claimed_at: datetime,
     *,
     connection_wait_s: float = CHILD_POOL_CONNECTION_WAIT_S,
     statements: StatementsLimit = StatementsUnbounded(),
@@ -1269,9 +1266,8 @@ def _mark_task_finalizing(
 
     The marker is fenced on the claim generation (worker_id, claimed_at): a
     stale attempt cannot refresh the marker of a later claim of the same
-    task, which would delay that claim's stale-RUNNING recovery. A NULL
-    claimed_at disables the generation half, matching the ownership confirm.
-    The worker's runner heartbeat skips a row that carries the marker, so
+    task, which would delay that claim's stale-RUNNING recovery. The
+    worker's runner heartbeat skips a row that carries the marker, so
     the beats of the attempt end here, also while the worker's event loop
     has not read the result. The marker is best effort: a skipped or failed
     write is logged only. The wait for a pooled connection is bounded by
@@ -1306,7 +1302,7 @@ def _mark_task_finalizing(
 def mark_isolated_run_finalizing(
     task_id: str,
     worker_id: str,
-    claimed_at: Optional[datetime],
+    claimed_at: datetime,
     window: IsolatedMarkerWindow,
 ) -> None:
     """Write the finalizing marker of an isolated run that set its row
@@ -1868,8 +1864,8 @@ def _run_task_entry(
     master_worker_id: str,
     is_workflow_task: bool = True,
     timeout: StoredTimeout = NoTimeout(),
-    claimed_at: Optional[datetime] = None,
     *,
+    claimed_at: datetime,
     task_loop: TaskLoop,
 ) -> RunReturn:
     """Run one task in an isolated child, up to its wire tuple.

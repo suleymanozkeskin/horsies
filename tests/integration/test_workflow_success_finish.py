@@ -35,11 +35,13 @@ from horsies.core.lifecycle.outcomes import (
     SuccessApplied,
     TaskAbsent,
     WorkflowSuccessOutcome,
+    decode_workflow_success_row,
 )
 from horsies.core.types.status import TaskStatus
 from horsies.core.worker.workflow_success import (
     FinishWorkflowSuccess,
     finish_workflow_success,
+    success_statement,
 )
 from tests.integration.conftest import DB_URL, compute_test_enqueue_sha
 from tests.integration.history_seeding import read_attempts
@@ -342,12 +344,22 @@ class TestApplied:
         engine: AsyncEngine,
         seed: Any,
     ) -> None:
+        """The stored function keeps its contract: a NULL claimed_at
+        disables the generation half of its fence. The worker never sends
+        one (``OwnedClaim`` requires a claim time), so the statement runs
+        with NULL in its place."""
         seeded = await seed()
+        statement = success_statement(_command(seeded))
 
-        outcome = await _finish(
-            engine,
-            _command(seeded, fence=OwnedClaim(worker_id=WORKER, claimed_at=None)),
-        )
+        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+            result = await session.execute(
+                statement.statement,
+                {**statement.parameters, 'claimed_at': None},
+            )
+            outcome = decode_workflow_success_row(
+                {str(key): value for key, value in result.mappings().one().items()},
+            )
+            await session.commit()
 
         assert isinstance(outcome, SuccessApplied)
 

@@ -117,12 +117,12 @@ async def _claim_still_startable(
     cursor: AsyncCursor[Any],
     task_id: str,
     worker_id: str,
-    claimed_at: datetime | None,
+    claimed_at: datetime,
 ) -> bool:
     """Whether every guard of the RUNNING transition but the workflow holds."""
     await cursor.execute(
         CLAIM_STILL_STARTABLE_SQL,
-        (task_id, worker_id, claimed_at, claimed_at),
+        (task_id, worker_id, claimed_at),
     )
     row = await cursor.fetchone()
     assert row is not None, 'SELECT EXISTS returns one row'
@@ -134,7 +134,7 @@ async def _abandon_paused_node(
     conn: AsyncConnection[Any],
     task_id: str,
     worker_id: str,
-    claimed_at: datetime | None,
+    claimed_at: datetime,
 ) -> WireResult | _WorkflowResumedBeforeStart:
     """The PAUSED branch of ``_handle_workflow_stop_before_start``."""
     outcome = await apply_psycopg_async(
@@ -172,7 +172,7 @@ async def _cancel_node(
     conn: AsyncConnection[Any],
     task_id: str,
     worker_id: str,
-    claimed_at: datetime | None,
+    claimed_at: datetime,
 ) -> WireResult:
     """The CANCELLED branch of ``_handle_workflow_stop_before_start``."""
     outcome = await apply_psycopg_async(
@@ -200,7 +200,7 @@ async def _handle_workflow_stop_before_start(
     task_id: str,
     workflow_status: str,
     worker_id: str,
-    claimed_at: datetime | None,
+    claimed_at: datetime,
 ) -> WireResult | _WorkflowResumedBeforeStart:
     """Skip a task whose workflow is PAUSED or CANCELLED. Same contract as
     the sync function of this name in ``child_runner``."""
@@ -264,7 +264,7 @@ async def _after_missed_start(
     task_id: str,
     worker_id: str,
     is_workflow_task: bool,
-    claimed_at: datetime | None,
+    claimed_at: datetime,
 ) -> WireResult | _WorkflowResumedBeforeStart:
     """The RUNNING transition matched no row: find which guard fired."""
     expired_result = await _expire_claimed_task_before_start(
@@ -365,7 +365,7 @@ async def _confirm_ownership_and_set_running(
     task_id: str,
     worker_id: str,
     is_workflow_task: bool,
-    claimed_at: datetime | None,
+    claimed_at: datetime,
 ) -> WireResult | None | _WorkflowResumedBeforeStart:
     """Set the row RUNNING with its first runner heartbeat. None: started.
 
@@ -403,7 +403,7 @@ async def _set_running_on_a_connection(
     task_id: str,
     worker_id: str,
     is_workflow_task: bool,
-    claimed_at: datetime | None,
+    claimed_at: datetime,
 ) -> WireResult | None | _WorkflowResumedBeforeStart:
     """One attempt of ``_confirm_ownership_and_set_running``, unbounded.
     Raises what the pool and the statements raise."""
@@ -437,7 +437,7 @@ async def confirm_until_not_resumed(
     task_id: str,
     worker_id: str,
     is_workflow_task: bool,
-    claimed_at: datetime | None,
+    claimed_at: datetime,
 ) -> WireResult | None:
     """Run the RUNNING transition, again when a resume refused the abandon.
 
@@ -471,7 +471,7 @@ async def mark_task_finalizing(
     pool: AsyncConnectionPool[AsyncConnection[Any]],
     task_id: str,
     worker_id: str,
-    claimed_at: datetime | None,
+    claimed_at: datetime,
 ) -> None:
     """Mark the row of a task whose body ended as waiting for the parent.
 

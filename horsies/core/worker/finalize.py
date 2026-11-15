@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Optional, assert_never, cast
+from typing import TYPE_CHECKING, Any, assert_never, cast
 
 from sqlalchemy import text
 
@@ -158,6 +158,7 @@ from horsies.core.worker.failed_attempt import (
 from horsies.core.worker.shared_finalize import (
     future_retry_data,
     future_retry_write,
+    kept_claim_time,
     timeout_retry_data,
     timeout_retry_write,
 )
@@ -384,7 +385,7 @@ class FinalizeMixin:
             handle: SlotHandle,
             task_id: str,
             timeout_ms: int,
-            claimed_at: Optional[datetime] = None,
+            claimed_at: datetime,
         ) -> _TimeoutOutcome | ReturnSeen: ...
         async def _handle_shared_backstop(
             self,
@@ -396,7 +397,7 @@ class FinalizeMixin:
             self,
             task_id: str,
             timeout_ms: int,
-            claimed_at: Optional[datetime],
+            claimed_at: datetime,
             *,
             retry: RetryPlacement,
         ) -> _TimeoutSettled | _TimeoutWriteFailed: ...
@@ -411,7 +412,7 @@ class FinalizeMixin:
             task_id: str,
             killed: SeatKilled,
             work: SharedWork,
-            claimed_at: Optional[datetime],
+            claimed_at: datetime,
             *,
             queue_name: str,
             is_workflow_task: bool,
@@ -421,13 +422,13 @@ class FinalizeMixin:
             self,
             task_id: str,
             reason: str,
-            claimed_at: Optional[datetime] = None,
+            claimed_at: datetime,
         ) -> _RequeueOutcome: ...
         async def _recover_worker_future_failure(
             self,
             task_id: str,
             reason: str,
-            claimed_at: Optional[datetime] = None,
+            claimed_at: datetime,
             *,
             failure_code: CrashRecoveryCode = OperationalErrorCode.WORKER_CRASHED,
             retry: RetryPlacement = RetryPlacement.SAME_CLASS,
@@ -452,7 +453,7 @@ class FinalizeMixin:
         handle: SlotHandle,
         task_id: str,
         timeout: StoredTimeout,
-        claimed_at: Optional[datetime],
+        claimed_at: datetime,
     ) -> SlotOutcome | _TimeoutOutcome:
         """Wait for the outcome. The timeout starts when a child gets the task.
 
@@ -527,7 +528,7 @@ class FinalizeMixin:
         timeout: StoredTimeout = NoTimeout(),
         *,
         task_name: str,
-        claimed_at: Optional[datetime] = None,
+        claimed_at: datetime,
     ) -> Result[None, _FinalizeError]:
         outcome = await self._await_slot_outcome(
             handle,
@@ -606,7 +607,7 @@ class FinalizeMixin:
         queue_name: str,
         is_workflow_task: bool,
         task_name: str,
-        claimed_at: Optional[datetime],
+        claimed_at: datetime,
     ) -> Result[None, _FinalizeError]:
         """Write what the body of a task returned, after its child ended
         while work that the task left on its loop was alive.
@@ -646,7 +647,7 @@ class FinalizeMixin:
         self,
         task_id: str,
         cause: NotRunCause,
-        claimed_at: Optional[datetime],
+        claimed_at: datetime,
     ) -> Result[None, _FinalizeError]:
         """Return a claimed row that never reached a child to the queue.
 
@@ -690,7 +691,7 @@ class FinalizeMixin:
         queue_name: str,
         is_workflow_task: bool,
         task_name: str,
-        claimed_at: Optional[datetime],
+        claimed_at: datetime,
     ) -> Result[None, _FinalizeError]:
         """Persist the result that a child reported, then run phase 2.
 
@@ -805,7 +806,7 @@ class FinalizeMixin:
         work: SharedWork,
         *,
         task_name: str,
-        claimed_at: Optional[datetime],
+        claimed_at: datetime,
     ) -> Result[None, _FinalizeError]:
         """Finalize a shared task from its outcome.
 
@@ -880,7 +881,7 @@ class FinalizeMixin:
         self,
         task_id: str,
         timeout_ms: int,
-        claimed_at: Optional[datetime],
+        claimed_at: datetime,
         retry: RetryPlacement,
     ) -> Result[None, _FinalizeError]:
         """Record the timeout of a shared task whose attempt has ended: its
@@ -911,7 +912,7 @@ class FinalizeMixin:
         self,
         task_id: str,
         timeout_ms: int,
-        claimed_at: Optional[datetime],
+        claimed_at: datetime,
         retry: RetryPlacement,
     ) -> _FinalizeError:
         """The retryable timeout-stage error of an attempt that has ended and
@@ -933,7 +934,7 @@ class FinalizeMixin:
         handle: SlotHandle | SharedHandle,
         task_id: str,
         lost: ChildLost,
-        claimed_at: Optional[datetime],
+        claimed_at: datetime,
     ) -> Result[None, _FinalizeError]:
         """Recover the row of a task whose child ended with no result.
 
@@ -1010,7 +1011,7 @@ class FinalizeMixin:
         queue_name: str,
         is_workflow_task: bool,
         task_name: str,
-        claimed_at: Optional[datetime] = None,
+        claimed_at: datetime,
     ) -> _FinalizeError:
         data = dict(err.data or {})
         data.setdefault('queue_name', queue_name or 'default')
@@ -1029,24 +1030,23 @@ class FinalizeMixin:
     def _finalize_context_from_error(
         self,
         err: _FinalizeError,
-    ) -> tuple[str, bool, str, datetime | None]:
+    ) -> tuple[str, bool, str, datetime]:
         """Recover (queue_name, is_workflow_task, task_name, claimed_at)
         from error data.
 
         A missing task_name degrades to '' — the engine's ok_type
         resolution then falls back to ``Any`` (same degradation as a
-        broker-less completion), it does not fail the retry. A missing
-        claimed_at degrades to None, which disables the claim-generation
-        fence for the replay (pre-fence behavior).
+        broker-less completion), it does not fail the retry. The claim
+        time is required (``kept_claim_time``): ``_with_finalize_context``
+        keeps it on every phase-1 error, so data without it is a defect.
         """
         data = err.data or {}
         is_workflow_task_raw = data.get('is_workflow_task')
-        claimed_at_raw = data.get('claimed_at')
         return (
             str(data.get('queue_name') or 'default'),
             is_workflow_task_raw if isinstance(is_workflow_task_raw, bool) else True,
             str(data.get('task_name') or ''),
-            claimed_at_raw if isinstance(claimed_at_raw, datetime) else None,
+            kept_claim_time(err.data),
         )
 
     def _clear_finalize_retry_attempts(
@@ -1067,7 +1067,7 @@ class FinalizeMixin:
         task_name: str,
         queue_name: str,
         is_workflow_task: bool,
-        claimed_at: datetime | None = None,
+        claimed_at: datetime,
     ) -> Result[_PersistedTaskOutcome | None, _FinalizeError]:
         """Phase 1 of finalization: persist task terminal state/result durably.
 
@@ -1324,7 +1324,7 @@ class FinalizeMixin:
         completion: CompleteLockedTask,
         tr: TaskResult[Any, TaskError],
         *,
-        claimed_at: datetime | None,
+        claimed_at: datetime,
         child: _Phase1Input,
     ) -> Result[_PersistedTaskOutcome | None, _FinalizeError]:
         """Phase 1 of a workflow task's success: one statement.
@@ -1470,7 +1470,7 @@ class FinalizeMixin:
         report: WorkerLevelFailure | ResultUndecodable | ErrorProduced,
         tr: TaskResult[Any, TaskError],
         *,
-        claimed_at: datetime | None,
+        claimed_at: datetime,
         child: _Phase1Input,
     ) -> Result[_PersistedTaskOutcome | None, _FinalizeError]:
         """Phase 1 of a failed attempt: one read and one statement.
@@ -1527,7 +1527,7 @@ class FinalizeMixin:
         connection: AsyncConnection,
         task_id: str,
         error_code: str | None,
-        claimed_at: datetime | None,
+        claimed_at: datetime,
     ) -> RetryRequest:
         """The retry that the policy asks for, from the unlocked read.
 
@@ -2021,14 +2021,11 @@ class FinalizeMixin:
         if self._stop.is_set():
             return
 
-        claimed_at_raw = (err.data or {}).get('claimed_at')
         failure_code, retry = future_retry_write(err.data)
         outcome = await self._recover_worker_future_failure(
             err.task_id,
             f'Retry after future-stage finalize error: {err.message}',
-            claimed_at=(
-                claimed_at_raw if isinstance(claimed_at_raw, datetime) else None
-            ),
+            claimed_at=kept_claim_time(err.data),
             failure_code=failure_code,
             retry=retry,
         )

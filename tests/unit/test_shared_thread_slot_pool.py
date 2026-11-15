@@ -16,6 +16,7 @@ import sys
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -76,6 +77,8 @@ from horsies.core.worker.thread_slots import (
 )
 
 pytestmark = [pytest.mark.unit]
+
+CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
 
 SCRIPTED_CHILD = str(
     Path(__file__).parent.parent / 'fixtures' / 'slots' / 'scripted_child.py'
@@ -154,7 +157,7 @@ def _request(
         kwargs_json=argument,
         worker_id='worker-1',
         is_workflow_task=False,
-        claimed_at=None,
+        claimed_at=CLAIMED_AT,
         work=ThreadSeatTask(timeout_ms=timeout_ms),
     )
 
@@ -341,7 +344,7 @@ class TestSeats:
             kwargs_json=None,
             worker_id='worker-1',
             is_workflow_task=False,
-            claimed_at=None,
+            claimed_at=CLAIMED_AT,
             work=SeatTask(timeout_ms=LONG_TIMEOUT_MS, cancel_grace_ms=1_000),
         )
 
@@ -610,7 +613,7 @@ class TestLoss:
                 kwargs_json=None,
                 worker_id='worker-1',
                 is_workflow_task=False,
-                claimed_at=None,
+                claimed_at=CLAIMED_AT,
                 work=SeatTask(timeout_ms=LONG_TIMEOUT_MS, cancel_grace_ms=1_000),
             ),
         )

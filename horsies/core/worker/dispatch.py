@@ -209,7 +209,7 @@ class DispatchMixin:
             timeout: StoredTimeout = NoTimeout(),
             *,
             task_name: str,
-            claimed_at: Optional[datetime] = None,
+            claimed_at: datetime,
         ) -> Result[None, _FinalizeError]: ...
         async def _finalize_shared_after(
             self,
@@ -220,7 +220,7 @@ class DispatchMixin:
             work: SharedWork,
             *,
             task_name: str,
-            claimed_at: Optional[datetime],
+            claimed_at: datetime,
         ) -> Result[None, _FinalizeError]: ...
         async def _finalize_workflow_phase(
             self,
@@ -255,7 +255,7 @@ class DispatchMixin:
         self,
         task_id: str,
         reason: str,
-        claimed_at: Optional[datetime] = None,
+        claimed_at: datetime,
     ) -> _RequeueOutcome:
         try:
             async with self.sf() as s:
@@ -298,7 +298,7 @@ class DispatchMixin:
         self,
         task_id: str,
         reason: str,
-        claimed_at: Optional[datetime] = None,
+        claimed_at: datetime,
         *,
         failure_code: CrashRecoveryCode = OperationalErrorCode.WORKER_CRASHED,
         retry: RetryPlacement = RetryPlacement.SAME_CLASS,
@@ -315,9 +315,8 @@ class DispatchMixin:
         retry runs.
 
         ``claimed_at`` fences every statement to the dispatch's claim
-        generation; None disables the fence. ``DB_ERROR``: a database error,
-        logged here; the row is unchanged, or the write committed and its
-        reply was lost.
+        generation. ``DB_ERROR``: a database error, logged here; the row is
+        unchanged, or the write committed and its reply was lost.
         """
         task_error = TaskError(
             error_code=failure_code,
@@ -359,7 +358,7 @@ class DispatchMixin:
         self,
         task_id: str,
         task_error: TaskError,
-        claimed_at: Optional[datetime],
+        claimed_at: datetime,
         retry: RetryPlacement,
     ) -> _EndedAttemptWrite:
         """Write the failure of an attempt whose child has ended.
@@ -494,8 +493,8 @@ class DispatchMixin:
         queue_name: str = 'default',
         is_workflow_task: bool = True,
         timeout: StoredTimeout = NoTimeout(),
-        claimed_at: Optional[datetime] = None,
         *,
+        claimed_at: datetime,
         execution: Execution,
         task_options: str | None,
     ) -> None:
@@ -510,7 +509,7 @@ class DispatchMixin:
         ``claimed_at`` is the claim generation this dispatch was born from
         (the claim statement's RETURNING); it fences the child's ownership
         confirm and every parent-side finalize/recovery statement so a
-        stale dispatch cannot touch a re-claimed row (C10).
+        stale dispatch cannot touch a re-claimed row.
 
         ``timeout`` is the stored timeout as the claim read it. A refusal is
         sent to the child, which sets the row RUNNING and fails the task with
@@ -593,7 +592,7 @@ class DispatchMixin:
         kwargs_json: Optional[str],
         queue_name: str,
         is_workflow_task: bool,
-        claimed_at: Optional[datetime],
+        claimed_at: datetime,
     ) -> None:
         """Submit a ``SHARED_ASYNC`` row to the shared async children, and
         spawn its finalizer. ``work`` is the task with its deadline, or the
@@ -796,7 +795,7 @@ class DispatchMixin:
         handle: SlotHandle,
         task_id: str,
         timeout_ms: int,
-        claimed_at: Optional[datetime] = None,
+        claimed_at: datetime,
     ) -> _TimeoutOutcome | ReturnSeen:
         """End a timed-out attempt, then record the timeout.
 
@@ -893,7 +892,7 @@ class DispatchMixin:
         handle: SlotHandle,
         task_id: str,
         timeout_ms: int,
-        claimed_at: Optional[datetime],
+        claimed_at: datetime,
         outcome: SlotOutcome,
     ) -> _TimeoutOutcome:
         """Record the timeout of a task whose slot answered after the deadline fired.
@@ -1042,15 +1041,15 @@ class DispatchMixin:
         self,
         task_id: str,
         timeout_ms: int,
-        claimed_at: Optional[datetime],
+        claimed_at: datetime,
         *,
         retry: RetryPlacement,
     ) -> _TimeoutSettled | _TimeoutWriteFailed:
         """Record the timeout of an attempt whose child has exited.
 
         Ownership-guarded like every finalize path, and fenced to the claim
-        generation ``claimed_at``; None disables the fence. ``retry`` is
-        where the retry runs, when the policy retries the timeout.
+        generation ``claimed_at``. ``retry`` is where the retry runs, when
+        the policy retries the timeout.
 
         ``_TimeoutSettled`` covers each way the row is settled:
         - a RUNNING row fails with TASK_TIMEOUT and its attempt row, in one
@@ -1089,7 +1088,7 @@ class DispatchMixin:
         self,
         task_id: str,
         timeout_ms: int,
-        claimed_at: Optional[datetime],
+        claimed_at: datetime,
         retry: RetryPlacement,
     ) -> _TimeoutSettled:
         """Settle this claim's row for a timeout.

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import AsyncGenerator
+from datetime import datetime, timezone
 from typing import Any, Final
 
 import psycopg
@@ -34,6 +35,9 @@ pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function'
 
 ROWS: Final = 20_000
 PRIMARY_KEY: Final = 'horsies_tasks_pkey'
+# A claim time for the fence parameter. The plan is generic, so its value
+# does not change the plan.
+CLAIMED_AT: Final = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
 
 
 @pytest_asyncio.fixture(loop_scope='function')
@@ -144,7 +148,7 @@ async def test_the_start_reads_its_row_through_the_primary_key(
     plan = await _generic_plan(
         probe,
         set_running_sql(False),
-        set_running_params(task_id, WORKER_ID, False, None),
+        set_running_params(task_id, WORKER_ID, False, CLAIMED_AT),
     )
 
     assert await _task_indexes_in(probe, plan) == {PRIMARY_KEY}, plan
@@ -160,7 +164,7 @@ async def test_the_finalizing_marker_reads_its_row_through_the_primary_key(
     plan = await _generic_plan(
         probe,
         MARK_FINALIZING_SQL,
-        mark_finalizing_params(task_id, WORKER_ID, None),
+        mark_finalizing_params(task_id, WORKER_ID, CLAIMED_AT),
     )
 
     assert await _task_indexes_in(probe, plan) == {PRIMARY_KEY}, plan
