@@ -15,21 +15,39 @@ end state.
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import AsyncIterator
+from datetime import datetime, timedelta
+from typing import Any
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
-from sqlalchemy.exc import ProgrammingError
+from sqlalchemy.exc import DBAPIError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.history.terminalization.move import (
+    COMPLETE_FUSED_FUNCTION,
+    COMPLETE_LOCKED_FUNCTION,
+    FAIL_LOCKED_FUNCTION,
+    failed_attempt_teardown,
+    locking_read_replacement_ddl,
+    terminal_snapshot_replacement_ddl,
+    workflow_success_teardown,
+)
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.schemas.migrations import SCHEMA_VERSION
+from horsies.core.schemas import recovery as recovery_schema
+from horsies.core.schemas.migrations import CREATE_CLAIM_FUNCTION_SQL, SCHEMA_VERSION
 from horsies.core.schemas.terminalization import OUTCOME_COLUMNS, OUTCOME_TYPE
 from pydantic import SecretStr
 from tests.integration.conftest import DB_URL
+from tests.integration.test_task_history_relocation import (
+    HOST_CLOCK_OFFSETS,
+    SESSION_TIME_ZONES,
+    SessionTimeZone,
+)
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
@@ -206,6 +224,133 @@ async def _restore_v34_forever_shape(connection: AsyncConnection) -> None:
             f'ON {TASK_HISTORY_FOREVER} (enqueued_at)'
         )
     )
+
+
+async def _seed_v34_forever_row(
+    connection: AsyncConnection,
+    *,
+    host_now: datetime,
+) -> str:
+    """Put a migrated database back at v34 with one terminal forever row.
+
+    Returns the row's id. The row is COMPLETED, has no class and predates
+    fingerprints; `host_now` is the clock reading that dates it. The
+    cutover state is cleared and the stored version is 34, so the next
+    migration runs the v35 forever conversion.
+    """
+    from horsies.core.history.cutover.state import CUTOVER_STATE_TABLE
+    from tests.integration.test_task_history_relocation import (
+        demote_to_upgraded_world,
+        insert_legacy_task,
+    )
+
+    await demote_to_upgraded_world(connection)
+    await _restore_v34_forever_shape(connection)
+    task_id = await insert_legacy_task(
+        connection,
+        status='COMPLETED',
+        kind=None,
+        class_key=None,
+        disposition=None,
+        retain=None,
+        fingerprinted=False,
+        clock=lambda: host_now,
+    )
+    await connection.execute(text(f'DELETE FROM {CUTOVER_STATE_TABLE}'))
+    await connection.execute(
+        text('DELETE FROM horsies_schema_version WHERE version > 34')
+    )
+    await connection.execute(
+        text(
+            'INSERT INTO horsies_schema_version (version) '
+            'VALUES (34) ON CONFLICT DO NOTHING'
+        )
+    )
+    return task_id
+
+
+# The signature of horsies_lock_running_task (schemas v56 and v57), which v58
+# drops. The body is a stand-in: the drop names the signature only.
+_RETIRED_LOCKING_READ_STAND_IN = """
+    CREATE FUNCTION horsies_lock_running_task(
+        p_task_id uuid, p_worker_id text, p_claimed_at timestamptz
+    )
+    RETURNS TABLE (task_name varchar)
+    LANGUAGE sql
+    AS $$ SELECT NULL::varchar WHERE FALSE $$
+"""
+
+
+# The status update trigger of v58: it also fired on the start (RUNNING).
+_V58_STATUS_UPDATE_TRIGGER = """
+    DROP TRIGGER IF EXISTS horsies_task_status_notify_update_trigger ON horsies_tasks;
+    CREATE TRIGGER horsies_task_status_notify_update_trigger
+        AFTER UPDATE ON horsies_tasks
+        FOR EACH ROW
+        WHEN (OLD.status IS DISTINCT FROM NEW.status)
+        EXECUTE FUNCTION horsies_notify_task_status_change();
+"""
+
+# The status event of a move, as v59 writes it in the single move and in each
+# batch move. Without it, a move body is the body of v58.
+_MOVE_STATUS_EVENT = re.compile(r"    PERFORM pg_notify\('horsies_task_status', [^;]*;\n")
+
+
+# The locking read of v60, and a v59 stand-in with the fence in the WHERE
+# clause.
+_BY_ID_READ = 'WHERE id = p_task_id\n    FOR UPDATE;'
+_FENCED_READ = "WHERE id = p_task_id\n      AND status = 'RUNNING'\n    FOR UPDATE;"
+
+
+# The call of v61 in horsies_claim, and the in-flight count that the claim of
+# v60 ran in its own body.
+_V61_IN_FLIGHT_CALL = """    SELECT c.my_claimed, c.my_in_flight, c.global_in_flight, c.queue_counts,
+           c.budget_counts
+    INTO v_my_claimed, v_my_in_flight, v_global_in_flight, v_queue_counts,
+         v_budget_counts
+    FROM horsies_claim_in_flight(
+        p_worker_id, v_capped, p_hard_cap_mode, p_routes
+    ) AS c;
+"""
+_V60_IN_FLIGHT_COUNT = """    WITH in_flight AS (
+        SELECT t.queue_name, t.status, t.claimed_by_worker_id, t.execution
+        FROM horsies_tasks t
+        WHERE t.status = 'RUNNING'
+           OR (t.status = 'CLAIMED'
+               AND (t.claim_expires_at IS NULL OR t.claim_expires_at > now()))
+    )
+    SELECT
+        COUNT(*) FILTER (
+            WHERE f.claimed_by_worker_id = p_worker_id AND f.status = 'CLAIMED'),
+        COUNT(*) FILTER (WHERE f.claimed_by_worker_id = p_worker_id),
+        COUNT(*),
+        COALESCE((
+            SELECT jsonb_object_agg(g.queue_name, g.cnt) FROM (
+                SELECT q.queue_name, COUNT(*) AS cnt
+                FROM in_flight q
+                WHERE q.queue_name = ANY(v_capped)
+                  AND (p_hard_cap_mode OR q.status = 'RUNNING')
+                GROUP BY q.queue_name
+            ) g
+        ), '{}'::jsonb),
+        COALESCE((
+            SELECT jsonb_object_agg(g.budget_class, g.cnt) FROM (
+                SELECT p_routes ->> m.execution AS budget_class, COUNT(*) AS cnt
+                FROM in_flight m
+                WHERE m.claimed_by_worker_id = p_worker_id
+                  AND p_routes ? m.execution
+                GROUP BY 1
+            ) g
+        ), '{}'::jsonb)
+    INTO v_my_claimed, v_my_in_flight, v_global_in_flight, v_queue_counts,
+         v_budget_counts
+    FROM in_flight f;
+"""
+
+def _function_name(ddl: str) -> str:
+    match = re.search(r"FUNCTION\s+([a-z_]+)\s*\(", ddl)
+    assert match is not None, ddl[:200]
+    return match.group(1)
 
 
 async def _stored_version(engine: AsyncEngine) -> int:
@@ -965,69 +1110,74 @@ class TestUpgradePaths:
         finally:
             await engine.dispose()
 
+    @HOST_CLOCK_OFFSETS
+    @SESSION_TIME_ZONES
     async def test_v34_conversion_relocates_todays_forever_row_into_the_open_ended_leaf(
         self,
         scratch_database: str,
+        host_clock_offset: timedelta,
+        session_time_zone: SessionTimeZone,
     ) -> None:
-        """After the v35 conversion, a forever row of today lands in the open-ended leaf."""
-        from datetime import datetime, timedelta, timezone
+        """After the v35 conversion, a forever row of the conversion day lands in the open-ended leaf.
 
+        The conversion takes its day from the database clock. The row ends
+        at the open-ended leaf's lower anchor, read from the leaf catalog,
+        so neither the host clock nor the session time zone decides the
+        leaf.
+        """
         from horsies.core.history.cutover.identity import (
             normalize_attempt_identity,
         )
         from horsies.core.history.cutover.program import install_programs
-        from horsies.core.history.cutover.state import CUTOVER_STATE_TABLE
         from horsies.core.history.cutover.relocation import RelocationComplete
-        from horsies.core.history.partitions.catalog import open_ended_leaf_name
+        from horsies.core.history.names import TASK_HISTORY_FOREVER
+        from horsies.core.history.partitions.catalog import (
+            open_ended_leaf_name,
+            read_attached_open_ended_leaf,
+        )
         from horsies.core.history.partitions.forever import FOREVER_LEGACY_LEAF
         from tests.integration.test_task_history_preparation import (
             run_preparation_to_complete,
         )
         from tests.integration.test_task_history_relocation import (
-            demote_to_upgraded_world,
-            insert_legacy_task,
+            database_utc_day,
+            date_legacy_task,
+            read_session_time_zone,
             relocate_all,
+            set_database_time_zone,
         )
 
+        await set_database_time_zone(scratch_database, session_time_zone)
         await _migrate(scratch_database)
         engine = _engine(scratch_database)
         try:
             async with engine.begin() as connection:
-                await demote_to_upgraded_world(connection)
-                await _restore_v34_forever_shape(connection)
-                task_id = await insert_legacy_task(
+                day_before_conversion = await database_utc_day(connection)
+                task_id = await _seed_v34_forever_row(
                     connection,
-                    status='COMPLETED',
-                    kind=None,
-                    class_key=None,
-                    disposition=None,
-                    retain=None,
-                    fingerprinted=False,
-                )
-                await connection.execute(
-                    text(f'DELETE FROM {CUTOVER_STATE_TABLE}')
-                )
-                await connection.execute(
-                    text(
-                        'DELETE FROM horsies_schema_version WHERE version > 34'
-                    )
-                )
-                await connection.execute(
-                    text(
-                        'INSERT INTO horsies_schema_version (version) '
-                        'VALUES (34) ON CONFLICT DO NOTHING'
-                    )
+                    host_now=day_before_conversion + host_clock_offset,
                 )
 
             await _migrate_pre_cutover(scratch_database)
 
             async with engine.begin() as connection:
+                assert await read_session_time_zone(connection) == session_time_zone
+                open_leaf = await read_attached_open_ended_leaf(connection)
+                assert open_leaf is not None
+                conversion_day = open_leaf.lower_anchor
+                day_after_conversion = await database_utc_day(connection)
+                assert day_before_conversion <= conversion_day <= day_after_conversion
+                assert conversion_day == conversion_day.replace(
+                    hour=0, minute=0, second=0, microsecond=0
+                )
+                assert open_leaf.leaf_name == open_ended_leaf_name(
+                    TASK_HISTORY_FOREVER, conversion_day
+                )
                 await normalize_attempt_identity(connection)
                 installed = await install_programs(connection)
                 assert isinstance(installed, int), installed
-                await run_preparation_to_complete(
-                    connection, retain_default=True
-                )
+                await run_preparation_to_complete(connection, retain_default=True)
+                await date_legacy_task(connection, task_id, terminal_at=conversion_day)
                 relocated = await relocate_all(connection)
                 assert isinstance(relocated, RelocationComplete)
                 assert relocated.rows_relocated == 1
@@ -1041,12 +1191,7 @@ class TestUpgradePaths:
                         {'task_id': task_id},
                     )
                 ).scalar_one()
-                today = datetime.now(timezone.utc).replace(
-                    hour=0, minute=0, second=0, microsecond=0
-                )
-                assert relation == open_ended_leaf_name(
-                    'horsies_task_history_forever', today
-                )
+                assert relation == open_leaf.leaf_name
                 forever_leaves = (
                     await connection.execute(
                         text(
@@ -1150,7 +1295,7 @@ class TestUpgradePaths:
     async def test_claim_programs_upgrade_from_38(
         self, scratch_database: str,
     ) -> None:
-        """A v38 database receives the v39 claim pair and the lookup."""
+        """A v38 database receives the current claim pair and the lookup."""
         await _migrate(scratch_database)
         engine = _engine(scratch_database)
         broker = PostgresBroker(PostgresConfig(database_url=SecretStr(scratch_database)))
@@ -1158,7 +1303,8 @@ class TestUpgradePaths:
             async with engine.begin() as conn:
                 await conn.execute(text(
                     'DROP FUNCTION horsies_claim_candidates('
-                    'integer, jsonb, jsonb, jsonb, jsonb, integer, text, bigint)'
+                    'integer, jsonb, jsonb, jsonb, jsonb, jsonb, jsonb, '
+                    'integer, text, bigint)'
                 ))
                 await conn.execute(text(
                     'DROP FUNCTION horsies_find_non_runnable_workflow_tasks(uuid[])'
@@ -1180,13 +1326,19 @@ class TestUpgradePaths:
                     SELECT proname, coalesce(array_to_string(proconfig, ','), '')
                     FROM pg_proc
                     WHERE proname IN (
-                        'horsies_claim', 'horsies_claim_candidates',
+                        'horsies_claim', 'horsies_claim_plan',
+                        'horsies_claim_candidates',
                         'horsies_find_non_runnable_workflow_tasks'
                     )
                 """))).tuples().all())
                 assert installed == {
-                    'horsies_claim': '',
-                    'horsies_claim_candidates': 'plan_cache_mode=force_generic_plan',
+                    'horsies_claim': 'jit=off',
+                    'horsies_claim_plan': (
+                        'plan_cache_mode=force_generic_plan,jit=off'
+                    ),
+                    'horsies_claim_candidates': (
+                        'plan_cache_mode=force_generic_plan,jit=off'
+                    ),
                     'horsies_find_non_runnable_workflow_tasks': (
                         'plan_cache_mode=force_generic_plan'
                     ),
@@ -1751,6 +1903,43 @@ class TestUpgradePaths:
             await broker.close_async()
             await engine.dispose()
 
+    async def test_slots_down_column_upgrade_from_52(
+        self,
+        scratch_database: str,
+    ) -> None:
+        """A v52 database gets horsies_worker_states.slots_down at v53, as a
+        nullable jsonb column, and a second apply changes nothing."""
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        column_sql = text("""
+            SELECT format_type(atttypid, atttypmod), attnotnull
+            FROM pg_attribute
+            WHERE attrelid = 'horsies_worker_states'::regclass
+              AND attname = 'slots_down'
+              AND NOT attisdropped
+        """)
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(
+                    text('ALTER TABLE horsies_worker_states DROP COLUMN slots_down'),
+                )
+                await conn.execute(
+                    text('DELETE FROM horsies_schema_version WHERE version >= 53'),
+                )
+                await conn.execute(
+                    text(
+                        'INSERT INTO horsies_schema_version(version) VALUES (52) '
+                        'ON CONFLICT DO NOTHING',
+                    ),
+                )
+            await _migrate(scratch_database)
+            await _migrate(scratch_database)
+            async with engine.connect() as conn:
+                assert await _stored_version(engine) == SCHEMA_VERSION
+                assert (await conn.execute(column_sql)).all() == [('jsonb', False)]
+        finally:
+            await engine.dispose()
+
     async def test_recovery_failure_table_upgrade_from_51(
         self, scratch_database: str,
     ) -> None:
@@ -1796,6 +1985,320 @@ class TestUpgradePaths:
                     'last_exception_type',
                 ]
                 assert (await conn.execute(foreign_keys_sql)).scalar_one() == 0
+        finally:
+            await engine.dispose()
+
+    async def test_failed_attempt_program_upgrade_from_55(
+        self,
+        scratch_database: str,
+    ) -> None:
+        """A v55 database gets the failed-attempt finish and its row type;
+        the finish answers a call, and a second apply changes nothing. The
+        RUNNING locking read of v56 is not installed: v58 retired it."""
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        program_sql = text("""
+            SELECT p.proname::text, p.oid::bigint,
+                   pg_get_function_arguments(p.oid)
+            FROM pg_proc p
+            WHERE p.proname IN (
+                'horsies_finish_failed_attempt', 'horsies_lock_running_task'
+            )
+            ORDER BY p.proname
+        """)
+        type_sql = text("""
+            SELECT count(*) FROM pg_type
+            WHERE typname = 'horsies_failed_attempt_outcome'
+        """)
+        try:
+            async with engine.begin() as conn:
+                for statement in failed_attempt_teardown():
+                    await conn.execute(text(statement))
+                assert (await conn.execute(program_sql)).all() == []
+                await conn.execute(
+                    text('DELETE FROM horsies_schema_version WHERE version >= 56')
+                )
+                await conn.execute(
+                    text(
+                        'INSERT INTO horsies_schema_version(version) VALUES (55) '
+                        'ON CONFLICT DO NOTHING'
+                    )
+                )
+            await _migrate(scratch_database)
+            async with engine.connect() as conn:
+                assert await _stored_version(engine) == SCHEMA_VERSION
+                installed = (await conn.execute(program_sql)).all()
+                assert (await conn.execute(type_sql)).scalar_one() == 1
+            # The installed body runs: a partial retry request is refused
+            # before any lock.
+            with pytest.raises(DBAPIError) as refused:
+                async with engine.connect() as conn:
+                    await conn.execute(
+                        text("""
+                        SELECT outcome FROM horsies_finish_failed_attempt(
+                            gen_random_uuid(), 'w', NULL, 0, NULL, NULL,
+                            '{}', 'BOOM', NULL, 'FAILED', NULL, NULL
+                        )
+                    """)
+                    )
+            assert [(name, args) for name, _, args in installed] == [
+                (
+                    'horsies_finish_failed_attempt',
+                    'p_task_id uuid, p_worker_id text, '
+                    'p_claimed_at timestamp with time zone, '
+                    'p_expected_retry_count integer, '
+                    'p_retry_delay_s double precision, '
+                    'p_retry_placement text, p_result text, '
+                    'p_error_code text, p_failed_reason text, '
+                    'p_attempt_outcome text, p_attempt_error_message text, '
+                    'p_attempt_failed_reason text',
+                ),
+            ]
+            assert getattr(refused.value.orig, 'sqlstate', None) == '22023'
+
+            await _migrate(scratch_database)
+            async with engine.connect() as conn:
+                assert await _stored_version(engine) == SCHEMA_VERSION
+                assert (await conn.execute(program_sql)).all() == installed
+        finally:
+            await engine.dispose()
+
+    async def test_workflow_success_program_upgrade_from_57(
+        self,
+        scratch_database: str,
+    ) -> None:
+        """A v57 database gets the success of a workflow task and its row
+        type at v58; the function answers a call, and a second apply changes
+        nothing."""
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        program_sql = text("""
+            SELECT p.proname::text, p.oid::bigint,
+                   pg_get_function_arguments(p.oid)
+            FROM pg_proc p
+            WHERE p.proname = 'horsies_finish_workflow_success'
+        """)
+        type_sql = text("""
+            SELECT count(*) FROM pg_type
+            WHERE typname = 'horsies_workflow_success_outcome'
+        """)
+        locking_read_sql = text("""
+            SELECT count(*) FROM pg_proc
+            WHERE proname = 'horsies_lock_running_task'
+        """)
+        try:
+            async with engine.begin() as conn:
+                for statement in workflow_success_teardown():
+                    await conn.execute(text(statement))
+                assert (await conn.execute(program_sql)).all() == []
+                assert (await conn.execute(type_sql)).scalar_one() == 0
+                # The v57 database still has the locking read of v56, by
+                # its signature.
+                await conn.execute(text(_RETIRED_LOCKING_READ_STAND_IN))
+                assert (await conn.execute(locking_read_sql)).scalar_one() == 1
+                await conn.execute(
+                    text('DELETE FROM horsies_schema_version WHERE version >= 58')
+                )
+                await conn.execute(
+                    text(
+                        'INSERT INTO horsies_schema_version(version) VALUES (57) '
+                        'ON CONFLICT DO NOTHING'
+                    )
+                )
+            assert await _stored_version(engine) == 57
+            await _migrate(scratch_database)
+            async with engine.connect() as conn:
+                assert await _stored_version(engine) == SCHEMA_VERSION
+                installed = (await conn.execute(program_sql)).all()
+                assert (await conn.execute(type_sql)).scalar_one() == 1
+                assert (await conn.execute(locking_read_sql)).scalar_one() == 0
+            # The installed body runs: a NULL result is refused before any
+            # lock.
+            with pytest.raises(DBAPIError) as refused:
+                async with engine.connect() as conn:
+                    await conn.execute(
+                        text("""
+                        SELECT outcome FROM horsies_finish_workflow_success(
+                            gen_random_uuid(), 'w', NULL, NULL
+                        )
+                    """)
+                    )
+            assert [(name, args) for name, _, args in installed] == [
+                (
+                    'horsies_finish_workflow_success',
+                    'p_task_id uuid, p_worker_id text, '
+                    'p_claimed_at timestamp with time zone, p_result text',
+                ),
+            ]
+            assert getattr(refused.value.orig, 'sqlstate', None) == '23502'
+
+            await _migrate(scratch_database)
+            async with engine.connect() as conn:
+                assert await _stored_version(engine) == SCHEMA_VERSION
+                assert (await conn.execute(program_sql)).all() == installed
+        finally:
+            await engine.dispose()
+
+    async def test_status_event_upgrade_from_58(
+        self,
+        scratch_database: str,
+    ) -> None:
+        """A v58 database gets, at v59, the status update trigger that skips
+        the start and the moves that send the status event; a second apply
+        changes nothing."""
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        moves = terminal_snapshot_replacement_ddl()
+        names = [_function_name(ddl) for ddl in moves]
+        trigger_sql = text(
+            "SELECT pg_get_triggerdef(oid) FROM pg_trigger "
+            "WHERE tgname = 'horsies_task_status_notify_update_trigger'"
+        )
+        sending_sql = text("""
+            SELECT p.proname::text FROM pg_proc p
+            WHERE p.proname = ANY(CAST(:names AS text[]))
+              AND p.prosrc LIKE '%horsies_task_status%'
+            ORDER BY 1
+        """)
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text(_V58_STATUS_UPDATE_TRIGGER))
+                for ddl in moves:
+                    v58_ddl = _MOVE_STATUS_EVENT.sub('', ddl)
+                    assert v58_ddl != ddl, _function_name(ddl)
+                    await conn.execute(text(v58_ddl))
+                assert 'RUNNING' not in (await conn.execute(trigger_sql)).scalar_one()
+                assert (
+                    await conn.execute(sending_sql, {'names': names})
+                ).scalars().all() == []
+                await conn.execute(
+                    text('DELETE FROM horsies_schema_version WHERE version >= 59')
+                )
+                await conn.execute(
+                    text(
+                        'INSERT INTO horsies_schema_version(version) VALUES (58) '
+                        'ON CONFLICT DO NOTHING'
+                    )
+                )
+            assert await _stored_version(engine) == 58
+            await _migrate(scratch_database)
+            async with engine.connect() as conn:
+                assert await _stored_version(engine) == SCHEMA_VERSION
+                trigger = (await conn.execute(trigger_sql)).scalar_one()
+                sending = (
+                    await conn.execute(sending_sql, {'names': names})
+                ).scalars().all()
+            assert "'RUNNING'" in trigger
+            assert sending == sorted(names)
+
+            await _migrate(scratch_database)
+            async with engine.connect() as conn:
+                assert (await conn.execute(trigger_sql)).scalar_one() == trigger
+                assert (
+                    await conn.execute(sending_sql, {'names': names})
+                ).scalars().all() == sending
+        finally:
+            await engine.dispose()
+
+    async def test_locking_read_upgrade_from_59(
+        self,
+        scratch_database: str,
+    ) -> None:
+        """A v59 database gets, at v60, the completion and failure functions
+        that read their row by id alone; a second apply changes nothing."""
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        names = sorted(
+            [COMPLETE_LOCKED_FUNCTION, COMPLETE_FUSED_FUNCTION, FAIL_LOCKED_FUNCTION],
+        )
+        by_id_sql = text("""
+            SELECT p.proname::text FROM pg_proc p
+            WHERE p.proname = ANY(CAST(:names AS text[]))
+              AND position(CAST(:read AS text) IN p.prosrc) > 0
+            ORDER BY 1
+        """)
+        try:
+            async with engine.begin() as conn:
+                for ddl in locking_read_replacement_ddl():
+                    assert ddl.count(_BY_ID_READ) == 1, _function_name(ddl)
+                    await conn.execute(text(ddl.replace(_BY_ID_READ, _FENCED_READ)))
+                assert (
+                    await conn.execute(by_id_sql, {'names': names, 'read': _BY_ID_READ})
+                ).scalars().all() == []
+                await conn.execute(
+                    text('DELETE FROM horsies_schema_version WHERE version >= 60')
+                )
+                await conn.execute(
+                    text(
+                        'INSERT INTO horsies_schema_version(version) VALUES (59) '
+                        'ON CONFLICT DO NOTHING'
+                    )
+                )
+            assert await _stored_version(engine) == 59
+            await _migrate(scratch_database)
+            async with engine.connect() as conn:
+                assert await _stored_version(engine) == SCHEMA_VERSION
+                upgraded = (
+                    await conn.execute(by_id_sql, {'names': names, 'read': _BY_ID_READ})
+                ).scalars().all()
+            assert upgraded == names
+
+            await _migrate(scratch_database)
+            async with engine.connect() as conn:
+                assert (
+                    await conn.execute(by_id_sql, {'names': names, 'read': _BY_ID_READ})
+                ).scalars().all() == names
+        finally:
+            await engine.dispose()
+
+    async def test_claim_in_flight_upgrade_from_60(
+        self,
+        scratch_database: str,
+    ) -> None:
+        """A v60 database, whose claim counts the in-flight rows in its own
+        body, gets at v61 horsies_claim_in_flight with its planner settings and
+        a claim that calls it; a second apply changes nothing."""
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        state_sql = text("""
+            SELECT
+                (SELECT array_to_string(proconfig, ',') FROM pg_proc
+                 WHERE proname = 'horsies_claim_in_flight'),
+                (SELECT position('horsies_claim_in_flight(' IN prosrc) > 0
+                 FROM pg_proc WHERE proname = 'horsies_claim')
+        """)
+        v61_state = ('jit=off,enable_bitmapscan=off,enable_seqscan=off', True)
+        claim_v61 = CREATE_CLAIM_FUNCTION_SQL.text
+        assert claim_v61.count(_V61_IN_FLIGHT_CALL) == 1
+        claim_v60 = claim_v61.replace(_V61_IN_FLIGHT_CALL, _V60_IN_FLIGHT_COUNT)
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text(claim_v60))
+                await conn.execute(
+                    text(
+                        'DROP FUNCTION horsies_claim_in_flight'
+                        '(text, text[], boolean, jsonb)'
+                    )
+                )
+                assert tuple((await conn.execute(state_sql)).one()) == (None, False)
+                await conn.execute(
+                    text('DELETE FROM horsies_schema_version WHERE version >= 61')
+                )
+                await conn.execute(
+                    text(
+                        'INSERT INTO horsies_schema_version(version) VALUES (60) '
+                        'ON CONFLICT DO NOTHING'
+                    )
+                )
+            assert await _stored_version(engine) == 60
+            await _migrate(scratch_database)
+            async with engine.connect() as conn:
+                assert await _stored_version(engine) == SCHEMA_VERSION
+                assert tuple((await conn.execute(state_sql)).one()) == v61_state
+
+            await _migrate(scratch_database)
+            async with engine.connect() as conn:
+                assert tuple((await conn.execute(state_sql)).one()) == v61_state
         finally:
             await engine.dispose()
 
@@ -2212,5 +2715,768 @@ class TestOrderingIndexMigration:
                 == 1
             )
             assert await self._ordering_index_count(engine, finite_leaf) == 1
+        finally:
+            await engine.dispose()
+
+
+class TestExecutionClassMigration:
+    """v54: horsies_tasks.execution, its CHECK, and the class claim index.
+
+    A database at v53 has no column. The upgrade adds it with the constant
+    default, so the rows it holds read ISOLATED, and so do the rows that a
+    process of an earlier version writes after it. The CHECK is guarded on
+    its definition and the index is rebuilt to its exact form, so a database
+    that holds either in another form gets the declared one.
+    """
+
+    CLAIM_INDEX = 'idx_horsies_tasks_claim_pending_class'
+    CLAIM_KEY = '(queue_name, execution, priority, enqueued_at, id)'
+
+    async def _rewind(self, engine: AsyncEngine, version: int) -> None:
+        async with engine.connect() as connection:
+            await connection.execute(
+                text('DELETE FROM horsies_schema_version WHERE version > :v'),
+                {'v': version},
+            )
+            await connection.execute(
+                text(
+                    'INSERT INTO horsies_schema_version (version) '
+                    'VALUES (:v) ON CONFLICT DO NOTHING'
+                ),
+                {'v': version},
+            )
+            await connection.commit()
+
+    async def _demote_to_v53(self, engine: AsyncEngine) -> None:
+        """Remove the index and the column; the CHECK goes with the column."""
+        async with engine.connect() as connection:
+            await connection.execute(
+                text(f'DROP INDEX IF EXISTS {self.CLAIM_INDEX}')
+            )
+            await connection.execute(
+                text('ALTER TABLE horsies_tasks DROP COLUMN IF EXISTS execution')
+            )
+            await connection.commit()
+        await self._rewind(engine, 53)
+
+    async def _insert_old_writer_row(self, engine: AsyncEngine) -> str:
+        """A PENDING row from a writer that does not name the column."""
+        task_id = str(uuid.uuid4())
+        async with engine.connect() as connection:
+            await connection.execute(
+                text("""
+                    INSERT INTO horsies_tasks
+                      (id, task_name, queue_name, priority, status,
+                       enqueued_at, claimed, is_workflow_task, enqueue_sha,
+                       created_at, updated_at, retry_count, max_retries,
+                       retention_class_key, command_fingerprint_version,
+                       command_fingerprint, retain_rerun_input,
+                       prepared_rerun_input_disposition)
+                    VALUES
+                      (CAST(:id AS uuid), 'old_writer', 'default', 100,
+                       'PENDING', now(), false, false, :sha, now(), now(),
+                       0, 0, 'standard_30d', 1,
+                       sha256(convert_to(CAST(:id AS text), 'UTF8')), false,
+                       'DECLINED_BY_POLICY')
+                """),
+                {'id': task_id, 'sha': '0' * 64},
+            )
+            await connection.commit()
+        return task_id
+
+    async def _stored_class(self, engine: AsyncEngine, task_id: str) -> str:
+        async with engine.connect() as connection:
+            return str(
+                (
+                    await connection.execute(
+                        text(
+                            'SELECT execution FROM horsies_tasks '
+                            'WHERE id = CAST(:id AS uuid)'
+                        ),
+                        {'id': task_id},
+                    )
+                ).scalar_one()
+            )
+
+    async def _column_shape(self, engine: AsyncEngine) -> tuple[str, bool, str]:
+        """(type, not null, default) of horsies_tasks.execution."""
+        async with engine.connect() as connection:
+            row = (
+                await connection.execute(
+                    text("""
+                        SELECT format_type(a.atttypid, a.atttypmod) AS type,
+                               a.attnotnull AS not_null,
+                               pg_get_expr(d.adbin, d.adrelid) AS default_value
+                        FROM pg_attribute AS a
+                        LEFT JOIN pg_attrdef AS d
+                          ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+                        WHERE a.attrelid = 'horsies_tasks'::regclass
+                          AND a.attname = 'execution'
+                          AND NOT a.attisdropped
+                    """)
+                )
+            ).one()
+        return str(row.type), bool(row.not_null), str(row.default_value)
+
+    async def _check_shape(self, engine: AsyncEngine) -> tuple[str, bool]:
+        """(definition, validated) of ck_horsies_tasks_execution."""
+        async with engine.connect() as connection:
+            row = (
+                await connection.execute(
+                    text("""
+                        SELECT pg_get_constraintdef(oid) AS definition,
+                               convalidated
+                        FROM pg_constraint
+                        WHERE conrelid = 'horsies_tasks'::regclass
+                          AND conname = 'ck_horsies_tasks_execution'
+                    """)
+                )
+            ).one()
+        return str(row.definition), bool(row.convalidated)
+
+    async def _index_shape(self, engine: AsyncEngine) -> tuple[str, bool]:
+        """(definition, valid) of the class claim index."""
+        async with engine.connect() as connection:
+            row = (
+                await connection.execute(
+                    text("""
+                        SELECT pg_get_indexdef(i.indexrelid) AS definition,
+                               i.indisvalid AS valid
+                        FROM pg_index AS i
+                        WHERE i.indexrelid = to_regclass(:name)
+                          AND i.indrelid = 'horsies_tasks'::regclass
+                    """),
+                    {'name': self.CLAIM_INDEX},
+                )
+            ).one()
+        return str(row.definition), bool(row.valid)
+
+    async def _assert_declared_shape(self, engine: AsyncEngine) -> None:
+        assert await _stored_version(engine) == SCHEMA_VERSION
+        column_type, not_null, default_value = await self._column_shape(engine)
+        assert column_type == 'text'
+        assert not_null
+        assert "'ISOLATED'" in default_value
+        definition, validated = await self._check_shape(engine)
+        assert validated, 'a NOT VALID constraint proves nothing about old rows'
+        for value in ('ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD'):
+            assert f"'{value}'" in definition, definition
+        index_definition, valid = await self._index_shape(engine)
+        assert valid
+        assert self.CLAIM_KEY in index_definition, index_definition
+        assert "'PENDING'" in index_definition, index_definition
+
+    async def test_a_fresh_database_is_born_with_the_declared_shape(
+        self,
+        scratch_database: str,
+    ) -> None:
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            await self._assert_declared_shape(engine)
+        finally:
+            await engine.dispose()
+
+    async def test_a_v53_database_gains_the_column_the_check_and_the_index(
+        self,
+        scratch_database: str,
+    ) -> None:
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            await self._demote_to_v53(engine)
+            existing = await self._insert_old_writer_row(engine)
+
+            await _migrate(scratch_database)
+
+            await self._assert_declared_shape(engine)
+            assert await self._stored_class(engine, existing) == 'ISOLATED'
+            later = await self._insert_old_writer_row(engine)
+            assert await self._stored_class(engine, later) == 'ISOLATED'
+        finally:
+            await engine.dispose()
+
+    async def test_a_check_with_another_domain_is_replaced(
+        self,
+        scratch_database: str,
+    ) -> None:
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            async with engine.connect() as connection:
+                await connection.execute(
+                    text(
+                        'ALTER TABLE horsies_tasks '
+                        'DROP CONSTRAINT ck_horsies_tasks_execution'
+                    )
+                )
+                await connection.execute(
+                    text(
+                        'ALTER TABLE horsies_tasks '
+                        'ADD CONSTRAINT ck_horsies_tasks_execution '
+                        "CHECK (execution IN ('ISOLATED'))"
+                    )
+                )
+                await connection.commit()
+            await self._rewind(engine, 53)
+
+            await _migrate(scratch_database)
+
+            await self._assert_declared_shape(engine)
+        finally:
+            await engine.dispose()
+
+    async def test_a_claim_index_in_another_form_is_rebuilt(
+        self,
+        scratch_database: str,
+    ) -> None:
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            async with engine.connect() as connection:
+                await connection.execute(text(f'DROP INDEX {self.CLAIM_INDEX}'))
+                await connection.execute(
+                    text(
+                        f'CREATE INDEX {self.CLAIM_INDEX} '
+                        'ON horsies_tasks (queue_name, priority)'
+                    )
+                )
+                await connection.commit()
+            await self._rewind(engine, 53)
+
+            await _migrate(scratch_database)
+
+            await self._assert_declared_shape(engine)
+        finally:
+            await engine.dispose()
+
+
+class TestPerClassClaimMigration:
+    """v55: the claim pair with per-class budgets and its indexes.
+
+    A database at v54 has the claim pair of one process count, the claim
+    indexes without a class, and no class_capacity column. The upgrade drops
+    the earlier signatures, installs the current claim functions, builds the
+    class-keyed expired index, drops the two indexes without a class, and
+    adds the column.
+    """
+
+    RETIRED = (
+        'idx_horsies_tasks_claim_pending',
+        'idx_horsies_tasks_claim_expired_ordered',
+    )
+    CLASS_INDEXES = (
+        ('idx_horsies_tasks_claim_pending_class', 'PENDING'),
+        ('idx_horsies_tasks_claim_expired_class', 'CLAIMED'),
+    )
+    # The argument types of each signature, as pg_proc renders them.
+    V54_CLAIM_ARGS = (
+        'text, jsonb, jsonb, jsonb, boolean, integer, integer, integer, '
+        'integer, integer, bigint, jsonb'
+    )
+    V54_CANDIDATES_ARGS = (
+        'integer, jsonb, jsonb, jsonb, jsonb, integer, text, bigint'
+    )
+    V55_CLAIM_ARGS = (
+        'text, jsonb, jsonb, jsonb, boolean, jsonb, jsonb, integer, integer, '
+        'integer, integer, bigint, jsonb'
+    )
+    V55_CANDIDATES_ARGS = (
+        'integer, jsonb, jsonb, jsonb, jsonb, jsonb, jsonb, integer, text, bigint'
+    )
+    V55_PLAN_ARGS = 'integer, jsonb, jsonb, jsonb, jsonb, jsonb, jsonb, integer'
+
+    async def _demote_to_v54(self, engine: AsyncEngine) -> None:
+        """Rebuild the v54 shape: old signatures, old indexes, no column."""
+        async with engine.connect() as connection:
+            await connection.execute(
+                text('DROP INDEX IF EXISTS idx_horsies_tasks_claim_expired_class')
+            )
+            await connection.execute(text(
+                'CREATE INDEX idx_horsies_tasks_claim_pending '
+                'ON horsies_tasks (queue_name, priority, enqueued_at, id) '
+                "WHERE status = 'PENDING'"
+            ))
+            await connection.execute(text(
+                'CREATE INDEX idx_horsies_tasks_claim_expired_ordered '
+                'ON horsies_tasks (queue_name, priority, enqueued_at, id) '
+                "WHERE status = 'CLAIMED'"
+            ))
+            await connection.execute(text(
+                'ALTER TABLE horsies_worker_states DROP COLUMN class_capacity'
+            ))
+            await connection.execute(text(f"""
+                CREATE FUNCTION horsies_claim({self.V54_CLAIM_ARGS})
+                RETURNS TABLE(id text) LANGUAGE sql AS 'SELECT NULL::text'
+            """))
+            await connection.execute(text(f"""
+                CREATE FUNCTION horsies_claim_candidates(
+                    {self.V54_CANDIDATES_ARGS})
+                RETURNS TABLE(id text) LANGUAGE sql AS 'SELECT NULL::text'
+            """))
+            await connection.execute(
+                text('DELETE FROM horsies_schema_version WHERE version > 54')
+            )
+            await connection.execute(text(
+                'INSERT INTO horsies_schema_version (version) VALUES (54) '
+                'ON CONFLICT DO NOTHING'
+            ))
+            await connection.commit()
+
+    async def _signatures(self, engine: AsyncEngine) -> set[tuple[str, str]]:
+        async with engine.connect() as connection:
+            rows = (
+                await connection.execute(text("""
+                    SELECT proname::text, oidvectortypes(proargtypes)
+                    FROM pg_proc
+                    WHERE proname IN (
+                        'horsies_claim', 'horsies_claim_plan',
+                        'horsies_claim_candidates'
+                    )
+                      AND pronamespace = current_schema()::regnamespace
+                """))
+            ).all()
+        return {(str(row[0]), str(row[1])) for row in rows}
+
+    async def _claim_results(self, engine: AsyncEngine) -> dict[str, str]:
+        """The OUT columns of horsies_claim and horsies_claim_candidates."""
+        async with engine.connect() as connection:
+            rows = (
+                await connection.execute(text("""
+                    SELECT proname::text, pg_get_function_result(oid)
+                    FROM pg_proc
+                    WHERE proname IN ('horsies_claim', 'horsies_claim_candidates')
+                      AND pronamespace = current_schema()::regnamespace
+                """))
+            ).all()
+        return {str(row[0]): str(row[1]) for row in rows}
+
+    async def _index_definitions(self, engine: AsyncEngine) -> dict[str, str]:
+        async with engine.connect() as connection:
+            rows = (
+                await connection.execute(text("""
+                    SELECT c.relname::text, pg_get_indexdef(i.indexrelid),
+                           i.indisvalid
+                    FROM pg_index AS i
+                    JOIN pg_class AS c ON c.oid = i.indexrelid
+                    WHERE i.indrelid = 'horsies_tasks'::regclass
+                      AND c.relname LIKE 'idx_horsies_tasks_claim%'
+                """))
+            ).all()
+        assert all(bool(row[2]) for row in rows), rows
+        return {str(row[0]): str(row[1]) for row in rows}
+
+    async def _column(self, engine: AsyncEngine) -> list[tuple[str, bool]]:
+        async with engine.connect() as connection:
+            rows = (
+                await connection.execute(text("""
+                    SELECT format_type(atttypid, atttypmod), attnotnull
+                    FROM pg_attribute
+                    WHERE attrelid = 'horsies_worker_states'::regclass
+                      AND attname = 'class_capacity'
+                      AND NOT attisdropped
+                """))
+            ).all()
+        return [(str(row[0]), bool(row[1])) for row in rows]
+
+    async def _assert_declared_shape(self, engine: AsyncEngine) -> None:
+        assert await _stored_version(engine) == SCHEMA_VERSION
+        assert await self._signatures(engine) == {
+            ('horsies_claim', self.V55_CLAIM_ARGS),
+            ('horsies_claim_plan', self.V55_PLAN_ARGS),
+            ('horsies_claim_candidates', self.V55_CANDIDATES_ARGS),
+        }
+        for result in (await self._claim_results(engine)).values():
+            assert result.startswith('TABLE(row_kind text, id text,'), result
+            assert result.endswith(', short_by integer)'), result
+        definitions = await self._index_definitions(engine)
+        for name in self.RETIRED:
+            assert name not in definitions, definitions
+        for name, status in self.CLASS_INDEXES:
+            definition = definitions[name]
+            assert (
+                '(queue_name, execution, priority, enqueued_at, id)' in definition
+            ), definition
+            assert f"'{status}'" in definition, definition
+        assert 'idx_horsies_tasks_claim_expired' in definitions
+        assert await self._column(engine) == [('jsonb', False)]
+
+    async def test_a_fresh_database_is_born_with_the_declared_shape(
+        self,
+        scratch_database: str,
+    ) -> None:
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            await self._assert_declared_shape(engine)
+        finally:
+            await engine.dispose()
+
+    async def test_a_rerun_replaces_a_claim_pair_with_other_out_columns(
+        self,
+        scratch_database: str,
+    ) -> None:
+        """The pair has the current argument types and other OUT columns,
+        which CREATE OR REPLACE cannot change: the v55 apply drops it and
+        installs the current pair."""
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            async with engine.connect() as connection:
+                for name, args in (
+                    ('horsies_claim', self.V55_CLAIM_ARGS),
+                    ('horsies_claim_candidates', self.V55_CANDIDATES_ARGS),
+                ):
+                    await connection.execute(text(f'DROP FUNCTION {name}({args})'))
+                    await connection.execute(text(f"""
+                        CREATE FUNCTION {name}({args})
+                        RETURNS TABLE(id text) LANGUAGE sql AS 'SELECT NULL::text'
+                    """))
+                await connection.execute(
+                    text('DELETE FROM horsies_schema_version WHERE version > 54')
+                )
+                await connection.commit()
+
+            await _migrate(scratch_database)
+
+            await self._assert_declared_shape(engine)
+        finally:
+            await engine.dispose()
+
+    async def test_a_v54_database_gains_the_v55_claim(
+        self,
+        scratch_database: str,
+    ) -> None:
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            await self._demote_to_v54(engine)
+            assert ('horsies_claim', self.V54_CLAIM_ARGS) in await self._signatures(
+                engine,
+            )
+
+            await _migrate(scratch_database)
+            await self._assert_declared_shape(engine)
+
+            await _migrate(scratch_database)
+            await self._assert_declared_shape(engine)
+        finally:
+            await engine.dispose()
+
+
+class TestExactIndexInstall:
+    """The exact indexes of an upgrade: a matching index is kept, and one of
+    another shape is replaced while an index of its name stays on the
+    table."""
+
+    CLAIM_INDEX = 'idx_horsies_tasks_claim_pending_class'
+    CLAIM_KEY = '(queue_name, execution, priority, enqueued_at, id)'
+
+    async def _rewind_to_54(self, engine: AsyncEngine) -> None:
+        async with engine.connect() as connection:
+            await connection.execute(
+                text('DELETE FROM horsies_schema_version WHERE version > 54')
+            )
+            await connection.execute(
+                text(
+                    'INSERT INTO horsies_schema_version (version) VALUES (54) '
+                    'ON CONFLICT DO NOTHING'
+                )
+            )
+            await connection.commit()
+
+    async def _exact_index_oids(self, engine: AsyncEngine) -> dict[str, int]:
+        names = [
+            index.name
+            for index in (
+                *recovery_schema.RECOVERY_INDEXES,
+                *recovery_schema.CLAIM_INDEXES,
+            )
+        ]
+        async with engine.connect() as connection:
+            rows = (
+                await connection.execute(
+                    text("""
+                        SELECT relname::text, oid::bigint
+                        FROM pg_class
+                        WHERE relname = ANY(CAST(:names AS text[]))
+                    """),
+                    {'names': names},
+                )
+            ).all()
+        return {str(row[0]): int(row[1]) for row in rows}
+
+    async def _temporary_indexes(self, engine: AsyncEngine) -> list[str]:
+        async with engine.connect() as connection:
+            rows = (
+                await connection.execute(
+                    text("""
+                        SELECT relname::text FROM pg_class
+                        WHERE relname LIKE 'horsies\\_recovery\\_index\\_%'
+                    """)
+                )
+            ).all()
+        return [str(row[0]) for row in rows]
+
+    async def test_an_upgrade_keeps_each_exact_index_whose_shape_matches(
+        self,
+        scratch_database: str,
+    ) -> None:
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            before = await self._exact_index_oids(engine)
+            await self._rewind_to_54(engine)
+
+            await _migrate(scratch_database)
+
+            assert len(before) == 6
+            assert await self._exact_index_oids(engine) == before
+            assert await _stored_version(engine) == SCHEMA_VERSION
+        finally:
+            await engine.dispose()
+
+    async def test_an_upgrade_drops_a_build_that_an_earlier_upgrade_left(
+        self,
+        scratch_database: str,
+    ) -> None:
+        """An upgrade stopped after its concurrent build and before the swap
+        left an index under a build name; the next upgrade drops it."""
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            async with engine.connect() as connection:
+                await connection.execute(
+                    text(
+                        'CREATE INDEX horsies_recovery_index_build_'
+                        f'{uuid.uuid4().hex} ON horsies_tasks (queue_name)'
+                    )
+                )
+                await connection.commit()
+            assert len(await self._temporary_indexes(engine)) == 1
+            await self._rewind_to_54(engine)
+
+            await _migrate(scratch_database)
+
+            assert await self._temporary_indexes(engine) == []
+        finally:
+            await engine.dispose()
+
+    async def test_a_replaced_index_keeps_its_name_while_the_old_one_drops(
+        self,
+        scratch_database: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The claim index has another shape. Each concurrent drop of the
+        upgrade finds an index of the claim index name on the table, so a
+        running claim always has one."""
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            async with engine.connect() as connection:
+                await connection.execute(text(f'DROP INDEX {self.CLAIM_INDEX}'))
+                await connection.execute(
+                    text(
+                        f'CREATE INDEX {self.CLAIM_INDEX} '
+                        'ON horsies_tasks (queue_name, priority)'
+                    )
+                )
+                await connection.commit()
+            before = (await self._exact_index_oids(engine))[self.CLAIM_INDEX]
+            await self._rewind_to_54(engine)
+            seen_at_drop: list[str | None] = []
+            drop = recovery_schema._drop_index_concurrently  # pyright: ignore[reportPrivateUsage]
+
+            async def _recording_drop(drop_engine: Any, index_name: str) -> None:
+                async with engine.connect() as connection:
+                    seen_at_drop.append(
+                        (
+                            await connection.execute(
+                                text('SELECT pg_get_indexdef(to_regclass(:name))'),
+                                {'name': self.CLAIM_INDEX},
+                            )
+                        ).scalar_one()
+                    )
+                await drop(drop_engine, index_name)
+
+            monkeypatch.setattr(
+                recovery_schema, '_drop_index_concurrently', _recording_drop
+            )
+
+            await _migrate(scratch_database)
+
+            assert seen_at_drop, 'the upgrade dropped no index'
+            assert None not in seen_at_drop, seen_at_drop
+            after = (await self._exact_index_oids(engine))[self.CLAIM_INDEX]
+            assert after != before
+            assert self.CLAIM_KEY in str(seen_at_drop[-1])
+            assert await self._temporary_indexes(engine) == []
+            assert await _stored_version(engine) == SCHEMA_VERSION
+        finally:
+            await engine.dispose()
+
+
+class TestRetiredClaimIndexes:
+    """The claim indexes without a class stay until the version row of the
+    upgrade that replaces the claim pair has committed."""
+
+    RETIRED = (
+        'idx_horsies_tasks_claim_pending',
+        'idx_horsies_tasks_claim_expired_ordered',
+    )
+
+    async def _add_retired(self, engine: AsyncEngine) -> None:
+        async with engine.connect() as connection:
+            await connection.execute(
+                text(
+                    'CREATE INDEX idx_horsies_tasks_claim_pending '
+                    'ON horsies_tasks (queue_name, priority, enqueued_at, id) '
+                    "WHERE status = 'PENDING'"
+                )
+            )
+            await connection.execute(
+                text(
+                    'CREATE INDEX idx_horsies_tasks_claim_expired_ordered '
+                    'ON horsies_tasks (queue_name, priority, enqueued_at, id) '
+                    "WHERE status = 'CLAIMED'"
+                )
+            )
+            await connection.execute(
+                text('DELETE FROM horsies_schema_version WHERE version > 54')
+            )
+            await connection.execute(
+                text(
+                    'INSERT INTO horsies_schema_version (version) VALUES (54) '
+                    'ON CONFLICT DO NOTHING'
+                )
+            )
+            await connection.commit()
+
+    async def _present(self, engine: AsyncEngine) -> set[str]:
+        async with engine.connect() as connection:
+            rows = (
+                await connection.execute(
+                    text("""
+                        SELECT relname::text FROM pg_class
+                        WHERE relname = ANY(CAST(:names AS text[]))
+                    """),
+                    {'names': list(self.RETIRED)},
+                )
+            ).all()
+        return {str(row[0]) for row in rows}
+
+    async def test_a_failed_activation_keeps_the_retired_claim_indexes(
+        self,
+        scratch_database: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The transaction that installs the claim pair and writes the version
+        row fails and rolls back: the database stays at v54, and the claim
+        indexes that its claim function reads are still there. The next
+        upgrade drops them after its version row commits."""
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            await self._add_retired(engine)
+
+            async def _failing_activation(self: PostgresBroker, engine: Any) -> None:
+                raise RuntimeError('activation failed')
+
+            with monkeypatch.context() as patch:
+                patch.setattr(
+                    PostgresBroker,
+                    '_activate_bounded_recovery',
+                    _failing_activation,
+                )
+                broker = PostgresBroker(
+                    PostgresConfig(database_url=SecretStr(scratch_database))
+                )
+                try:
+                    failed = await broker.ensure_schema_initialized()
+                finally:
+                    await broker.close_async()
+
+            assert failed.is_err()
+            assert await _stored_version(engine) == 54
+            assert await self._present(engine) == set(self.RETIRED)
+
+            await _migrate(scratch_database)
+
+            assert await _stored_version(engine) == SCHEMA_VERSION
+            assert await self._present(engine) == set()
+        finally:
+            await engine.dispose()
+
+
+class TestBatchedCompletionMigration:
+    """v57: horsies_complete_tasks_fused, the batched plain-success completion.
+
+    A database at v56 has the fused completion and no batched one. The
+    upgrade installs it with the argument list of the fused completion, as
+    arrays.
+    """
+
+    SIGNATURE = (
+        'p_task_ids uuid[], p_worker_ids text[], '
+        'p_claimed_ats timestamp with time zone[], p_results text[], '
+        'p_notify_channels text[], p_notify_payloads text[]'
+    )
+
+    async def _batched_signatures(self, engine: AsyncEngine) -> list[str]:
+        async with engine.connect() as connection:
+            rows = (
+                await connection.execute(
+                    text("""
+                    SELECT pg_get_function_arguments(oid)
+                    FROM pg_proc
+                    WHERE proname = 'horsies_complete_tasks_fused'
+                      AND pronamespace = current_schema()::regnamespace
+                """)
+                )
+            ).all()
+        return [str(row[0]) for row in rows]
+
+    async def test_a_fresh_database_is_born_with_the_batched_completion(
+        self,
+        scratch_database: str,
+    ) -> None:
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            assert await _stored_version(engine) == SCHEMA_VERSION
+            assert await self._batched_signatures(engine) == [self.SIGNATURE]
+        finally:
+            await engine.dispose()
+
+    async def test_a_v56_database_gains_the_batched_completion(
+        self,
+        scratch_database: str,
+    ) -> None:
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            async with engine.connect() as connection:
+                await connection.execute(
+                    text(
+                        f'DROP FUNCTION horsies_complete_tasks_fused({self.SIGNATURE})'
+                    )
+                )
+                await connection.execute(
+                    text('DELETE FROM horsies_schema_version WHERE version > 56')
+                )
+                await connection.execute(
+                    text(
+                        'INSERT INTO horsies_schema_version(version) VALUES (56) '
+                        'ON CONFLICT DO NOTHING'
+                    )
+                )
+                await connection.commit()
+            assert await _stored_version(engine) == 56
+            assert await self._batched_signatures(engine) == []
+
+            await _migrate(scratch_database)
+
+            assert await _stored_version(engine) == SCHEMA_VERSION
+            assert await self._batched_signatures(engine) == [self.SIGNATURE]
         finally:
             await engine.dispose()

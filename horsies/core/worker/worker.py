@@ -6,18 +6,24 @@ import uuid
 import os
 from datetime import datetime, timezone
 from importlib import import_module
-from collections.abc import Coroutine
+from collections.abc import Coroutine, Mapping
 from typing import Any, TYPE_CHECKING, assert_never
 import sys
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from horsies.core.app import Horsies
 from horsies.core.brokers.listener import PostgresListener
-from horsies.core.models.health import WORKER_PING_CHANNEL
+from horsies.core.models.health import WORKER_PING_CHANNEL, DownSlot
+from horsies.core.models.tasks import Execution
 from horsies.core.logging import get_logger
 from horsies.core.worker.current import set_current_app
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.types.result import Err, Ok, is_err
-from horsies.core.utils.db import is_retryable_connection_error
+from horsies.core.utils.db import (
+    HeldConnection,
+    PooledStatements,
+    is_retryable_connection_error,
+)
 from horsies.core.utils.url import to_psycopg_url
 
 if TYPE_CHECKING:
@@ -28,16 +34,63 @@ from horsies.core.worker.config import WorkerConfig as WorkerConfig  # noqa: F40
 from horsies.core.worker.child_pool import (
     _initialize_worker_pool as _initialize_worker_pool,
 )  # noqa: F401
-from horsies.core.worker.child_protocol import InitFrame, RssMb
+from horsies.core.models.child_sizing import (
+    FINALIZE_BATCH_FLUSHERS,
+    parent_pool_flusher_bound,
+)
+from horsies.core.models.worker_profile import (
+    MemoryLimit,
+    NoMemoryLimit,
+    NoSharedAsyncChildren,
+    NoSharedThreadChildren,
+    SharedAsyncChildren,
+    SharedRecycle,
+    SharedThreadChildren,
+)
+from horsies.core.worker.child_protocol import (
+    InitFrame,
+    IsolatedChild,
+    RssMb,
+    SharedAsyncChild,
+    SharedThreadChild,
+)
+from horsies.core.worker.gc_policy import freeze_startup_objects
+from horsies.core.worker.cpu_placement import (
+    CpuPlacement,
+    OwnCore,
+    SharedCpus,
+    describe_refusal,
+    place_worker_threads,
+    plan_cpu_placement,
+)
+from horsies.core.worker.finalize_batch import (
+    FINALIZE_BATCH_CLOSE_TIMEOUT_S,
+    FinalizeBatcher,
+    FlushersCancelled,
+    FlushersDrained,
+)
+from horsies.core.worker.runner_heartbeat import (
+    FailClosedCause,
+    PostgresBeatWriter,
+    RunnerHeartbeat,
+    RunnerHeartbeatLostError,
+    beat_timing,
+    describe_fail_closed,
+    stale_running_recovery,
+)
+from horsies.core.models.recovery import RecoveryConfig
+from horsies.core.worker.claim_plan import ClaimPlan, describe_claim_plan
+from horsies.core.worker.row_class import registered_task_classes
 from horsies.core.worker.slots import (
     BootAttemptsExhausted,
     ChildBaseline,
     ChildHookFailed,
     PoolStopped,
+    SlotDefectsRepeated,
     SlotPool,
     SlotPoolConfig,
     PreloadRefused,
-    SpawnFailed,
+    describe_pool_failure,
 )
 from horsies.core.worker.child_runner import (  # noqa: F401
     CHILD_HOOK_FAILURE_EXIT_CODE as CHILD_HOOK_FAILURE_EXIT_CODE,
@@ -51,7 +104,6 @@ from horsies.core.worker.child_runner import (  # noqa: F401
     _derive_sys_path_roots_from_file as _derive_sys_path_roots_from_file,
     _debug_imports_enabled as _debug_imports_enabled,
     _debug_imports_log as _debug_imports_log,
-    _heartbeat_worker as _heartbeat_worker,
 )
 from horsies.core.worker.sql import (  # noqa: F401
     CLAIM_SQL as CLAIM_SQL,
@@ -67,14 +119,8 @@ from horsies.core.worker.sql import (  # noqa: F401
     UNCLAIM_CLAIMED_TASK_SQL as UNCLAIM_CLAIMED_TASK_SQL,
     RESET_PAUSED_WORKFLOW_TASKS_SQL as RESET_PAUSED_WORKFLOW_TASKS_SQL,
     SKIP_CANCELLED_WORKFLOW_TASKS_SQL as SKIP_CANCELLED_WORKFLOW_TASKS_SQL,
-    SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL as SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
     UPSERT_TASK_ATTEMPT_SQL as UPSERT_TASK_ATTEMPT_SQL,
     NOTIFY_TASK_QUEUE_SQL as NOTIFY_TASK_QUEUE_SQL,
-    GET_TASK_RETRY_INFO_SQL as GET_TASK_RETRY_INFO_SQL,
-    GET_TASK_RETRY_CONFIG_SQL as GET_TASK_RETRY_CONFIG_SQL,
-    GET_TASK_RETRY_POSTCHECK_SQL as GET_TASK_RETRY_POSTCHECK_SQL,
-    SELECT_WORKER_OWNED_IN_FLIGHT_FOR_UPDATE_SQL as SELECT_WORKER_OWNED_IN_FLIGHT_FOR_UPDATE_SQL,
-    SCHEDULE_TASK_RETRY_SQL as SCHEDULE_TASK_RETRY_SQL,
     NOTIFY_DELAYED_SQL as NOTIFY_DELAYED_SQL,
     INSERT_CLAIMER_HEARTBEAT_SQL as INSERT_CLAIMER_HEARTBEAT_SQL,
     RENEW_CLAIM_LEASE_SQL as RENEW_CLAIM_LEASE_SQL,
@@ -112,6 +158,22 @@ def _frame_sys_path() -> tuple[str, ...]:
         entries.append(text)
     return tuple(entries)
 
+
+def _log_claim_plan(plan: ClaimPlan) -> None:
+    """Log the route of each execution class, and name the classes of which
+    this worker claims no row. A worker is not refused for them."""
+    logger.info('Claim plan: %s', describe_claim_plan(plan))
+    match plan.unserved():
+        case ():
+            pass
+        case unserved:
+            logger.info(
+                'This worker claims no rows of class %s: it runs no children '
+                'that can run them',
+                ', '.join(member.value for member in unserved),
+            )
+
+
 _HOOK_FAILURE_MESSAGE = (
     'on_child_process_start hook failed in a worker child (see the child log '
     'line above for the hook name); fix the hook, the worker will not '
@@ -128,7 +190,11 @@ from horsies.core.worker.finalize import (  # noqa: E402
 from horsies.core.worker.health import HealthMixin as HealthMixin  # noqa: E402
 from horsies.core.worker.reaper import ReaperMixin as ReaperMixin  # noqa: E402
 from horsies.core.worker.retrying import RetryMixin as RetryMixin  # noqa: E402
+from horsies.core.worker.shared_finalize import (  # noqa: E402
+    SharedKillFinalizeMixin as SharedKillFinalizeMixin,
+)
 from horsies.core.worker.runtime import (  # noqa: F401,E402
+    FinalizeStage as FinalizeStage,
     _FINALIZE_STAGE_PHASE1 as _FINALIZE_STAGE_PHASE1,
     _FINALIZE_STAGE_PHASE2 as _FINALIZE_STAGE_PHASE2,
     _FINALIZE_STAGE_FUTURE as _FINALIZE_STAGE_FUTURE,
@@ -146,15 +212,83 @@ from horsies.core.worker.runtime import (  # noqa: F401,E402
     MemoryBaselineExceedsThresholdError as MemoryBaselineExceedsThresholdError,
     _RetryBackoff as _RetryBackoff,
     _FinalizeError as _FinalizeError,
-    _RetryError as _RetryError,
     _RequeueOutcome as _RequeueOutcome,
     _ReaperPassState as _ReaperPassState,
     _collect_psutil_metrics as _collect_psutil_metrics,
 )
 
 
+def _recycle_memory_limit_mb(recycle: SharedRecycle) -> int | None:
+    """The memory limit of a shared recycle setting, in MB, or None for none."""
+    match recycle.above:
+        case MemoryLimit(mb=mb):
+            return mb
+        case NoMemoryLimit():
+            return None
+
+
+def _check_baseline_against(
+    baselines: tuple[ChildBaseline, ...],
+    threshold: int | None,
+    limit_name: str,
+) -> None:
+    """Fail or warn when these booted children crowd their memory limit.
+
+    ``threshold`` is the limit in MB, or None for no limit; ``limit_name``
+    names it in the messages. No children of a kind check nothing.
+
+    Raises:
+        MemoryBaselineExceedsThresholdError: a settled baseline RSS is at or
+            above ``threshold``.
+    """
+    if threshold is None or not baselines:
+        return
+    samples = [
+        baseline.rss.value for baseline in baselines if isinstance(baseline.rss, RssMb)
+    ]
+    if not samples:
+        logger.warning(
+            '%s=%sMB is set but child baseline RSS '
+            'was unreadable; skipping the startup baseline guard. Per-child '
+            'recycle is best-effort and will not fire while the per-task RSS '
+            'reader keeps failing the same way (fail-open).',
+            limit_name,
+            threshold,
+        )
+        return
+    max_baseline = max(samples)
+    if max_baseline >= threshold:
+        raise MemoryBaselineExceedsThresholdError(
+            f'child baseline {max_baseline:.0f}MB >= '
+            f'{limit_name} {threshold}MB; the app does not fit '
+            'this per-child budget — raise the budget or the threshold'
+        )
+    if max_baseline >= 0.8 * threshold:
+        logger.warning(
+            'Child baseline %.0fMB is within 80%% of '
+            '%s %sMB; little headroom for per-task '
+            'working set, so children may recycle frequently',
+            max_baseline,
+            limit_name,
+            threshold,
+        )
+    else:
+        logger.info(
+            'Child baseline %.0fMB vs %s %sMB',
+            max_baseline,
+            limit_name,
+            threshold,
+        )
+
+
 class Worker(
-    ClaimMixin, DispatchMixin, FinalizeMixin, HealthMixin, ReaperMixin, RetryMixin
+    ClaimMixin,
+    DispatchMixin,
+    FinalizeMixin,
+    HealthMixin,
+    ReaperMixin,
+    RetryMixin,
+    SharedKillFinalizeMixin,
 ):
     """
     Async master that:
@@ -178,6 +312,9 @@ class Worker(
         self.worker_instance_id = str(uuid.uuid4())
         self._started_at = datetime.now(timezone.utc)
         self._app: Horsies | None = None
+        # The Execution of each task that the preload registered, by name.
+        # Empty until the preload: no claim pass runs before it.
+        self._registered_classes: Mapping[str, Execution] = {}
         self._resilience = self.cfg.resilience_config or WorkerResilienceConfig()
         # Last coverage-ensure outcome, published with worker-state
         # snapshots so operators see covered_through and typed failures.
@@ -191,6 +328,8 @@ class Worker(
         # Created after preloading modules, so that import and validation
         # errors surface in the main process at startup.
         self._slots: SlotPool | None = None
+        # Writes the runner heartbeats of the pool's tasks; starts with it.
+        self._runner_heartbeat: RunnerHeartbeat | None = None
         self._stop = asyncio.Event()
         self._ping_queue: asyncio.Queue[Any] | None = None
         self._service_tasks: set[asyncio.Task[Any]] = set()
@@ -200,9 +339,43 @@ class Worker(
         # before start), so the claim loop also waits on this local wake.
         # Releases coalesce: the loop clears it before each claim pass.
         self._capacity_released = asyncio.Event()
-        self._finalize_retry_attempts: dict[tuple[str, str], int] = {}
+        self._finalize_retry_attempts: dict[tuple[str, FinalizeStage], int] = {}
+        # The CPUs of the worker process and of its children, planned at the
+        # start of the slots from cfg.parent_cpu.
+        self._cpu_placement: CpuPlacement = SharedCpus()
+        # The claim loop and each steady flusher of the batched success write
+        # keep one pool connection while they send statements back to back
+        # (HeldConnection); every other write checks out per statement.
+        # ``stop`` gives them back after the claim loop and the batcher end.
+        claim_connection = HeldConnection(session_factory, cfg.parent_pool_recycle)
+        batch_connections = tuple(
+            HeldConnection(session_factory, cfg.parent_pool_recycle)
+            for _ in range(FINALIZE_BATCH_FLUSHERS)
+        )
+        self._claim_runner = claim_connection
+        self._batch_connections = batch_connections
+        self._held_connections: tuple[HeldConnection, ...] = (
+            claim_connection,
+            *batch_connections,
+        )
+        # Writes the plain-success outcomes in batches. Its flushers start on
+        # the first row; the claim loop and the flushers leave
+        # PARENT_POOL_RESERVE connections of the pool free for the other
+        # writes (parent_pool_flusher_bound). ``stop`` closes it after the
+        # finalizer drain.
+        self._finalize_batcher = FinalizeBatcher(
+            self._write_fused_batch,
+            steady_runners=batch_connections,
+            surge_runner=PooledStatements(session_factory),
+            max_queued_rows=self._pending_task_limit(),
+            max_flushers=parent_pool_flusher_bound(self.cfg.parent_pool_size),
+        )
         self._fatal_background_error: (
-            ChildStartFailedError | ServiceLoopDiedError | None
+            ChildStartFailedError
+            | ServiceLoopDiedError
+            | RunnerHeartbeatLostError
+            | MemoryBaselineExceedsThresholdError
+            | None
         ) = None
 
     def request_stop(self) -> None:
@@ -309,31 +482,126 @@ class Worker(
                 loglevel=self.cfg.loglevel,
                 database_url=to_psycopg_url(self.cfg.dsn),
                 connect_kwargs=self.cfg.child_connect_kwargs,
-                child_pool_min_size=self.cfg.child_pool_min_size,
-                child_pool_max_size=self.cfg.child_pool_max_size,
-                child_pool_check=self.cfg.child_pool_check,
                 process_name='horsies-child',
+                child_kind=IsolatedChild(
+                    pool=self.cfg.isolated_pool,
+                    task_send_pool=self.cfg.isolated_task_send_pool,
+                ),
             ),
             max_tasks_per_child=self.cfg.max_tasks_per_child,
             max_memory_per_child_mb=self.cfg.max_memory_per_child_mb,
             child_preload=self.cfg.child_preload,
+            shared_async=self.cfg.shared_async,
+            shared_thread=self.cfg.shared_thread,
+            placement=self._cpu_placement,
         )
 
+    def _place_worker_process(self) -> None:
+        """Put every thread of the worker process on its core when the
+        placement is ``OwnCore``. Runs after the children started: the
+        preload parent and the first children keep the CPUs they inherited,
+        and each child got its own CPUs before its init frame.
+
+        Raises:
+            ChildStartFailedError: the OS refused the CPUs of a thread.
+        """
+        match self._cpu_placement:
+            case SharedCpus():
+                return
+            case OwnCore(parent=parent, children=children):
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
+        match place_worker_threads(parent):
+            case Ok(threads):
+                logger.info(
+                    'Worker process on CPUs %s (%d threads); children on CPUs %s',
+                    sorted(parent),
+                    threads,
+                    sorted(children),
+                )
+            case Err(refused):
+                raise ChildStartFailedError(
+                    f'the CPUs of worker thread {refused.target} could not be '
+                    f'set: {refused.cause}',
+                )
+
     def _pending_task_limit(self) -> int:
-        """The most tasks that may wait for a slot: twice the claim budget."""
+        """The most tasks that may wait for a slot or a seat: twice the claim
+        budget."""
         budget = max(
-            self.cfg.processes + self.cfg.prefetch_buffer,
+            self.cfg.seat_count() + self.cfg.prefetch_buffer,
             self.cfg.max_claim_per_worker,
         )
         return 2 * budget
 
+    def _claim_slot_count(self) -> int:
+        """The isolated slots that the ``ISOLATED`` budget counts: every one
+        that is not down.
+
+        A slot that is down for a cause that can clear takes no task, so the
+        claim leaves it out. A claim pass before the slot pool exists is a
+        defect: ``AssertionError``.
+        """
+        match self._slots:
+            case SlotPool() as pool:
+                return pool.slots_in_service()
+            case None:
+                raise AssertionError('a claim pass ran before the slot pool exists')
+
+    def _shared_async_seats_in_service(self) -> int:
+        """The seats that the ``SHARED_ASYNC`` budget counts
+        (``SlotPool.shared_async_capacity``): every seat of a shared async
+        child that boots, is open or retires, and the tasks that a closing
+        child still runs. A child that is down counts nothing.
+
+        A claim pass before the slot pool exists is a defect:
+        ``AssertionError``.
+        """
+        match self._slots:
+            case SlotPool() as pool:
+                return pool.shared_async_capacity()
+            case None:
+                raise AssertionError('a claim pass ran before the slot pool exists')
+
+    def _shared_thread_seats_in_service(self) -> int:
+        """The seats that the ``SHARED_THREAD`` budget counts
+        (``SlotPool.shared_thread_capacity``), as for ``SHARED_ASYNC``.
+
+        A claim pass before the slot pool exists is a defect:
+        ``AssertionError``.
+        """
+        match self._slots:
+            case SlotPool() as pool:
+                return pool.shared_thread_capacity()
+            case None:
+                raise AssertionError('a claim pass ran before the slot pool exists')
+
+    def _down_slots(self) -> tuple[DownSlot, ...]:
+        """Each slot that is down, for the worker state snapshot.
+
+        A snapshot before the slot pool exists is a defect: ``AssertionError``.
+        """
+        match self._slots:
+            case SlotPool() as pool:
+                return pool.down_slots()
+            case None:
+                raise AssertionError(
+                    'a worker state snapshot ran before the slot pool exists',
+                )
+
     async def _start_slots(self) -> None:
         """Start every child and publish the pool. A stop during this returns.
+
+        A slot that is down for a cause that can clear does not stop the
+        start: the worker starts degraded when at least one child is ready.
 
         Raises:
             ChildHookFailedError: an ``on_child_process_start`` hook failed.
                 Never retried.
-            ChildStartFailedError: a child could not start.
+            ChildStartFailedError: a child could not start: a cause that
+                repeats used every attempt, or every slot is down and used
+                every attempt.
             MemoryBaselineExceedsThresholdError: the booted child baseline is
                 at or above ``max_memory_per_child_mb``.
         """
@@ -343,6 +611,11 @@ class Worker(
                 'new program with its own __main__. Use a module path or a file '
                 'path.',
             )
+        match plan_cpu_placement(self.cfg.parent_cpu):
+            case Ok(placement):
+                self._cpu_placement = placement
+            case Err(refused):
+                raise ChildStartFailedError(describe_refusal(refused))
         pool = SlotPool(self._slot_pool_config(), self._pending_task_limit())
         self._slots = pool
         match await pool.start():
@@ -350,15 +623,64 @@ class Worker(
                 logger.info(
                     'Worker child processes ready: %s/%s',
                     len(baselines),
-                    self.cfg.processes,
+                    self.cfg.child_count(),
                 )
+                self._place_worker_process()
                 self._check_memory_baseline(baselines)
-            case Err(PoolStopped()):
+                self._runner_heartbeat = self._launch_runner_heartbeat(pool)
                 return
-            case Err(ChildHookFailed()):
-                raise ChildHookFailedError(_HOOK_FAILURE_MESSAGE)
             case Err(failure):
-                raise ChildStartFailedError(f'worker child start failed: {failure}')
+                pass
+        match failure:
+            case PoolStopped():
+                return
+            case ChildHookFailed():
+                raise ChildHookFailedError(_HOOK_FAILURE_MESSAGE)
+            case BootAttemptsExhausted() | PreloadRefused() | SlotDefectsRepeated():
+                raise ChildStartFailedError(
+                    f'worker child start failed: {describe_pool_failure(failure)}',
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def _launch_runner_heartbeat(self, pool: SlotPool) -> RunnerHeartbeat:
+        """Start the threads that write the runner heartbeats of ``pool``'s tasks.
+
+        The heartbeat connection uses the children's database URL and connect
+        kwargs. It opens at the first beat, not here. The recovery config
+        decides here, once, whether beats that cannot land stop the worker:
+        only when this config's reaper fails stale RUNNING rows.
+        """
+        return RunnerHeartbeat.launch(
+            live=pool.live_dispatches,
+            writer=PostgresBeatWriter(
+                database_url=to_psycopg_url(self.cfg.dsn),
+                connect_kwargs=self.cfg.child_connect_kwargs,
+                worker_id=self.worker_instance_id,
+            ),
+            timing=beat_timing(self.cfg.recovery_config or RecoveryConfig()),
+            stale_running=stale_running_recovery(self.cfg.recovery_config),
+            loop=asyncio.get_running_loop(),
+            on_fail_closed=self._stop_for_lost_runner_heartbeat,
+        )
+
+    def _stop_for_lost_runner_heartbeat(self, cause: FailClosedCause) -> None:
+        """Stop the worker after its runner heartbeats failed closed. Runs on the loop.
+
+        The watchdog already killed every child that held a task.
+        ``run_forever`` raises the error after the stop, so the worker exits
+        non-zero.
+        """
+        self._fatal_background_error = RunnerHeartbeatLostError(
+            describe_fail_closed(cause),
+        )
+        self._stop.set()
+
+    async def _stop_runner_heartbeat(self) -> None:
+        """End the heartbeat threads, bounded. Call it after the children stopped."""
+        heartbeat, self._runner_heartbeat = self._runner_heartbeat, None
+        if heartbeat is not None:
+            await asyncio.to_thread(heartbeat.stop)
 
     async def _slot_failure_loop(self, pool: SlotPool) -> None:
         """Service loop: end the worker when no replacement child can start.
@@ -375,57 +697,92 @@ class Worker(
                 self._stop_for_child_hook_failure(
                     ChildHookFailedError(_HOOK_FAILURE_MESSAGE),
                 )
-            case SpawnFailed() | BootAttemptsExhausted() | PreloadRefused():
-                raise ChildStartFailedError(f'worker child start failed: {failure}')
+            case BootAttemptsExhausted() | PreloadRefused() | SlotDefectsRepeated():
+                raise ChildStartFailedError(
+                    f'worker child start failed: {describe_pool_failure(failure)}',
+                )
             case _ as unreachable:
                 assert_never(unreachable)
+
+    async def _new_kind_baseline_loop(self, pool: SlotPool) -> None:
+        """Service loop: run the baseline memory guard for the first child of
+        each kind that had no ready child at the first start.
+
+        Each kind comes at most once (``SlotPool.wait_new_kind_baseline``), so
+        the loop runs the guard at most once per kind, then waits for the
+        stop. A baseline at or above the memory limit of its kind stops the
+        worker (``_stop_for_baseline``) and ends the loop.
+        """
+        while True:
+            baseline = await pool.wait_new_kind_baseline()
+            try:
+                self._check_memory_baseline((baseline,))
+            except MemoryBaselineExceedsThresholdError as exc:
+                self._stop_for_baseline(exc)
+                return
+
+    def _stop_for_baseline(self, exc: MemoryBaselineExceedsThresholdError) -> None:
+        """Stop the worker after a child baseline at or above its memory limit.
+
+        The child is already serving, so the stop drains its tasks.
+        ``run_forever`` raises the error after the stop, so the worker exits
+        non-zero, as at a breach at the first start.
+        """
+        logger.critical('Stopping worker: %s', exc)
+        self._fatal_background_error = exc
+        self._stop.set()
 
     def _check_memory_baseline(self, baselines: tuple[ChildBaseline, ...]) -> None:
         """Fail or warn when the booted child baseline crowds the threshold.
 
+        Each kind of child is compared with its own limit: isolated children
+        with ``max_memory_per_child_mb``, shared async and shared thread
+        children with the memory limit of their recycle setting.
+
         Raises:
             MemoryBaselineExceedsThresholdError: a child's settled baseline RSS
-                is at or above ``max_memory_per_child_mb`` — the app does not
+                is at or above the memory limit of its kind — the app does not
                 fit this per-child budget, so recycling would fire every task.
         """
-        threshold = self.cfg.max_memory_per_child_mb
-        if threshold is None:
-            return
-        samples = [
-            baseline.rss.value
+        isolated = tuple(
+            baseline
             for baseline in baselines
-            if isinstance(baseline.rss, RssMb)
-        ]
-        if not samples:
-            logger.warning(
-                'max_memory_per_child_mb=%sMB is set but child baseline RSS '
-                'was unreadable; skipping the startup baseline guard. Per-child '
-                'recycle is best-effort and will not fire while the per-task RSS '
-                'reader keeps failing the same way (fail-open).',
-                threshold,
-            )
-            return
-        max_baseline = max(samples)
-        if max_baseline >= threshold:
-            raise MemoryBaselineExceedsThresholdError(
-                f'child baseline {max_baseline:.0f}MB >= '
-                f'max_memory_per_child_mb {threshold}MB; the app does not fit '
-                'this per-child budget — raise the budget or the threshold'
-            )
-        if max_baseline >= 0.8 * threshold:
-            logger.warning(
-                'Child baseline %.0fMB is within 80%% of '
-                'max_memory_per_child_mb %sMB; little headroom for per-task '
-                'working set, so children may recycle frequently',
-                max_baseline,
-                threshold,
-            )
-        else:
-            logger.info(
-                'Child baseline %.0fMB vs max_memory_per_child_mb %sMB',
-                max_baseline,
-                threshold,
-            )
+            if isinstance(baseline.child_kind, IsolatedChild)
+        )
+        _check_baseline_against(
+            isolated,
+            self.cfg.max_memory_per_child_mb,
+            'max_memory_per_child_mb',
+        )
+        match self.cfg.shared_async:
+            case SharedAsyncChildren(recycle=recycle):
+                shared_limit_mb = _recycle_memory_limit_mb(recycle)
+            case NoSharedAsyncChildren():
+                shared_limit_mb = None
+        shared = tuple(
+            baseline
+            for baseline in baselines
+            if isinstance(baseline.child_kind, SharedAsyncChild)
+        )
+        _check_baseline_against(
+            shared,
+            shared_limit_mb,
+            'the shared async memory limit',
+        )
+        match self.cfg.shared_thread:
+            case SharedThreadChildren(recycle=recycle):
+                thread_limit_mb = _recycle_memory_limit_mb(recycle)
+            case NoSharedThreadChildren():
+                thread_limit_mb = None
+        _check_baseline_against(
+            tuple(
+                baseline
+                for baseline in baselines
+                if isinstance(baseline.child_kind, SharedThreadChild)
+            ),
+            thread_limit_mb,
+            'the shared thread memory limit',
+        )
 
     def _stop_for_child_hook_failure(self, exc: ChildHookFailedError) -> None:
         """Stop the worker on a hook failure instead of restart-looping.
@@ -449,6 +806,11 @@ class Worker(
                 no shutdown requested; re-raising crashes the worker so the
                 supervisor restarts it instead of leaving a claiming worker
                 with dead heartbeat/reaper loops.
+            RunnerHeartbeatLostError: the runner heartbeats failed closed;
+                their watchdog killed the children that held tasks.
+            MemoryBaselineExceedsThresholdError: the first child of a kind
+                that was down at the first start had a baseline at or above
+                the memory limit of its kind.
         """
         if self._fatal_background_error is not None:
             raise self._fatal_background_error
@@ -492,6 +854,7 @@ class Worker(
         pool, self._slots = self._slots, None
         if pool is not None:
             await pool.stop(0)
+        await self._stop_runner_heartbeat()
 
     async def _handle_retryable_start_error(
         self,
@@ -638,11 +1001,14 @@ class Worker(
             max_claimed_effective = (
                 self.cfg.max_claim_per_worker
                 if self.cfg.max_claim_per_worker > 0
-                else self.cfg.processes
+                else self.cfg.seat_count()
             )
             logger.info(
-                'Concurrency config: processes=%s, cluster_wide_cap=%s, max_claim_per_worker=%s, max_claim_batch=%s',
+                'Concurrency config: processes=%s, shared_async_children=%s, shared_thread_children=%s, seats=%s, cluster_wide_cap=%s, max_claim_per_worker=%s, max_claim_batch=%s',
                 self.cfg.processes,
+                self.cfg.shared_async_children(),
+                self.cfg.shared_thread_children(),
+                self.cfg.seat_count(),
                 (
                     self.cfg.cluster_wide_cap
                     if self.cfg.cluster_wide_cap is not None
@@ -651,6 +1017,7 @@ class Worker(
                 max_claimed_effective,
                 self.cfg.max_claim_batch,
             )
+            _log_claim_plan(self.cfg.claim_plan())
 
             # Subscribe to each queue channel in one batch. The global
             # task_new channel is deliberately NOT subscribed: queue channels
@@ -691,6 +1058,11 @@ class Worker(
             self._spawn_background(
                 self._slot_failure_loop(self._slots),
                 name='slot-failure-watch',
+                service=True,
+            )
+            self._spawn_background(
+                self._new_kind_baseline_loop(self._slots),
+                name='new-kind-baseline-watch',
                 service=True,
             )
             # Start claimer heartbeat loop (CLAIMED coverage)
@@ -787,6 +1159,12 @@ class Worker(
                 await asyncio.gather(*done, return_exceptions=True)
             self._finalizer_tasks.clear()
 
+        # After the finalizers: a finalizer that the drain cancelled leaves
+        # its row in the batcher, and the batch of that row is still written.
+        await self._close_finalize_batcher()
+        # The claim loop and the batch flushers have ended.
+        await self._release_held_connections()
+
         # Close the Postgres listener after finalizers so completion NOTIFYs
         # and result waits drain through normally.
         try:
@@ -801,7 +1179,37 @@ class Worker(
             clear_workflow_registry()
         except Exception as e:
             logger.error(f'Error clearing workflow registry: {e}')
+        # Last: the heartbeat covers the drain above, and its watchdog keeps
+        # the exit bound of a fail-closed stop until here.
+        await self._stop_runner_heartbeat()
         logger.info('Worker stopped')
+
+    async def _release_held_connections(self) -> None:
+        """Give the held connections of the claim loop and of the batch
+        flushers back to the pool. Runs after both have stopped. Never
+        raises: a driver error is logged."""
+        for held in self._held_connections:
+            try:
+                await held.release()
+            except DBAPIError as exc:
+                logger.error('Giving back a held connection at stop failed: %r', exc)
+
+    async def _close_finalize_batcher(self) -> None:
+        """Close the finalize batcher, and log the rows that its close
+        timeout left unwritten. Never raises."""
+        match await self._finalize_batcher.close(FINALIZE_BATCH_CLOSE_TIMEOUT_S):
+            case FlushersDrained():
+                return
+            case FlushersCancelled(rows_in_flight=in_flight, rows_unsent=unsent):
+                logger.warning(
+                    'Worker stop cancelled the finalize batch writes after '
+                    '%.0fs: %s rows in a cancelled statement (commit unknown), '
+                    '%s rows not sent. Stale RUNNING recovery fails each row '
+                    'that did not commit.',
+                    FINALIZE_BATCH_CLOSE_TIMEOUT_S,
+                    in_flight,
+                    unsent,
+                )
 
     def _preload_modules_main(self) -> None:
         """Import the app and all task modules in the main process.
@@ -849,6 +1257,9 @@ class Worker(
             finally:
                 app.suppress_sends(False)
             _debug_imports_log(f'[preload] registered_tasks={app.list_tasks()}')
+            self._registered_classes = registered_task_classes(
+                (name, task.task_options_json) for name, task in app.tasks.items()
+            )
         except Exception as e:
             # Surface the error clearly and re-raise to stop startup
             logger.error(f'Failed during preload of task modules: {e}')
@@ -879,9 +1290,11 @@ class Worker(
             await self.stop()
             self._raise_captured_fatal_error()
             return
+        freeze_startup_objects()
         logger.info('Worker started')
         try:
             backoff = self._make_retry_backoff()
+            short_passes = 0
             while not self._stop.is_set():
                 try:
                     # One budgeted claim pass per wake. A NOTIFY or a capacity
@@ -889,10 +1302,13 @@ class Worker(
                     # wait returns at once.
                     self._capacity_released.clear()
                     claim_pass = await self._claim_and_dispatch_all()
-
-                    if not claim_pass.left_unannounced_work(
+                    repass = claim_pass.left_unannounced_work(
                         limited=self.cfg.max_claim_batch > 0,
-                    ):
+                        short_passes_before=short_passes,
+                    )
+                    short_passes = claim_pass.short_passes_after(short_passes)
+
+                    if not repass:
                         # Wait for a NOTIFY from any queue or a local capacity
                         # release (coalesce bursts).
                         await self._wait_for_any_notify(
@@ -988,5 +1404,5 @@ class Worker(
 
 
 """
-horsies examples/instance.py worker --loglevel=info --processes=8 
+horsies worker examples/instance.py:app --profile default --loglevel=info
 """

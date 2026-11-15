@@ -1,8 +1,36 @@
-from typing import Any, ClassVar
+from collections.abc import Mapping
+from typing import Any, ClassVar, Final, cast
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
-from horsies.core.defaults import DEFAULT_TCP_USER_TIMEOUT_MS
-from horsies.core.errors import ConfigurationError, ErrorCode
+from horsies.core.defaults import DEFAULT_POOL_RECYCLE_S, DEFAULT_TCP_USER_TIMEOUT_MS
+from horsies.core.errors import (
+    ConfigurationError,
+    ErrorCode,
+    ValidationReport,
+    raise_collected,
+)
+
+MOVED_TO_WORKER_PROFILE: Final[Mapping[str, str]] = {
+    'worker_child_pool_min_size': 'min_size=N',
+    'worker_child_pool_max_size': 'max_size=PoolSize(connections=N)',
+    'worker_child_pool_check': 'check=False',
+}
+"""The child pool fields that 0.7.0 removed from ``PostgresConfig``, and the
+argument of the pool of each child kind in a worker profile
+(``IsolatedPool``, ``SharedPool``) that replaces each one."""
+
+MOVED_TO_PARENT_POOL: Final[Mapping[str, str]] = {
+    'worker_pool_size': (
+        'the worker process opens its pool with the resolved pool.max_size '
+        'of its worker profile'
+    ),
+    'worker_max_overflow': (
+        'the pool of the worker process has no overflow: it holds at most '
+        'pool.max_size connections'
+    ),
+}
+"""The worker pool fields that 0.7.0 removed from ``PostgresConfig``, and the
+note of the refusal of each one. ``WorkerProfile.pool`` replaces both."""
 
 
 class PostgresConfig(BaseModel):
@@ -13,11 +41,8 @@ class PostgresConfig(BaseModel):
         'session_database_url',
         'pgbouncer_transaction_mode',
         'retain_rerun_input_default',
-        'worker_pool_size',
-        'worker_max_overflow',
-        'worker_child_pool_min_size',
-        'worker_child_pool_max_size',
-        'worker_child_pool_check',
+        'pool_pre_ping',
+        'worker_pool_pre_ping',
         'tcp_keepalives',
         'tcp_keepalives_idle',
         'tcp_keepalives_interval',
@@ -39,14 +64,40 @@ class PostgresConfig(BaseModel):
         default=False,
         description='Disable prepared statements for transaction-pooled PgBouncer URLs',
     )
+    # The ping runs at checkout only for a connection that waited in the
+    # pool for longer than PRE_PING_AFTER_IDLE_S (register_idle_ping). A
+    # connection that dies within that time of its check-in fails the next
+    # statement on it, as one that dies after a ping does.
     pool_pre_ping: bool = Field(
-        default=True, description='Whether to pre-ping the database connection pool'
+        default=True,
+        description=(
+            'Whether to ping a pooled connection at checkout when it waited '
+            'in the pool for longer than PRE_PING_AFTER_IDLE_S (1 s)'
+        ),
     )
-    # Producer-side defaults match SQLAlchemy's (5 + 10). The previous
-    # 30 + 30 let a single enqueue-only producer pin up to 60 server
-    # connections; several producer processes then pressed Postgres
-    # max_connections. High-throughput producers should raise these
-    # explicitly. Worker-side pools are tuned separately below.
+    # The pre-ping of the worker process's engine (worker_process_config).
+    # The worker sends most of its writes as one statement in autocommit:
+    # one round trip each. A pre-ping adds a round trip to a checkout of a
+    # connection that waited in the pool for longer than
+    # PRE_PING_AFTER_IDLE_S. With it off, a dead pooled connection shows at the first
+    # statement instead, as a connection error: finalize retries its phase
+    # and classifies the replay, the claim loop retries the pass. TCP
+    # keepalives and tcp_user_timeout_ms still apply.
+    worker_pool_pre_ping: bool = Field(
+        default=False,
+        description=(
+            'Whether the worker process pre-pings its pooled connections; '
+            'pool_pre_ping applies to other engines'
+        ),
+    )
+    # The producer defaults match SQLAlchemy's (5 + 10) for each pool. A
+    # producer can hold several pools of this size: one in the resource set
+    # of each event loop that calls the broker (two when
+    # session_database_url differs), and the sync send pool. See Connection
+    # Ceiling in the broker config docs. Raise them for producers that send
+    # at a high rate. A worker process sizes its own pool in its worker
+    # profile (WorkerProfile.pool), and task code in a worker child opens
+    # the task_send_pool of its child kind.
     pool_size: int = Field(
         default=5, description='The size of the database connection pool'
     )
@@ -61,35 +112,12 @@ class PostgresConfig(BaseModel):
             'snapshotted at enqueue'
         ),
     )
-    worker_pool_size: int | None = Field(
-        default=3,
-        description='Worker coordinator connection pool size; None inherits pool_size',
-    )
-    worker_max_overflow: int | None = Field(
-        default=2,
-        description='Worker coordinator overflow connections; None inherits max_overflow',
-    )
-    worker_child_pool_min_size: int = Field(
-        default=0,
-        description='Minimum connections kept by each child worker process',
-    )
-    worker_child_pool_max_size: int = Field(
-        default=2,
-        description='Maximum connections allowed per child worker process',
-    )
-    worker_child_pool_check: bool = Field(
-        default=True,
-        description=(
-            'Health-check child pool connections on checkout. Each check is '
-            'a database round trip; disable on high-RTT links where the '
-            'per-statement retry handling already covers stale connections'
-        ),
-    )
     pool_timeout: int = Field(
         default=30, description='The timeout for acquiring a connection from the pool'
     )
     pool_recycle: int = Field(
-        default=1800, description='The number of seconds to recycle connections'
+        default=DEFAULT_POOL_RECYCLE_S,
+        description='The number of seconds to recycle connections',
     )
     # TCP keepalives keep idle pooled sockets warm so a server-side or
     # middlebox idle-reap is detected and recycled at the socket layer
@@ -129,6 +157,31 @@ class PostgresConfig(BaseModel):
         ),
     )
     echo: bool = Field(default=False, description='Whether to echo the SQL statements')
+
+    @model_validator(mode='before')
+    @classmethod
+    def reject_moved_pool_fields(cls, data: object) -> object:
+        """Fail closed on the pool fields that moved to the worker profiles.
+
+        In 0.7.0 each child kind has its own pool
+        (``IsolatedChildren.pool``, ``SharedAsyncChildren.pool``,
+        ``SharedThreadChildren.pool``), and the worker process has its own
+        (``WorkerProfile.pool``). A config that still names a removed field
+        is refused, never silently ignored. Every such field is reported at
+        once, so one edit fixes the config.
+        """
+        if not isinstance(data, dict):
+            return data
+        fields = cast('dict[str, object]', data)
+        report = ValidationReport('broker')
+        for name, pool_argument in MOVED_TO_WORKER_PROFILE.items():
+            if name in fields:
+                report.add(_moved_child_pool_field_error(name, pool_argument))
+        for name, note in MOVED_TO_PARENT_POOL.items():
+            if name in fields:
+                report.add(_moved_parent_pool_field_error(name, note))
+        raise_collected(report)
+        return fields
 
     @field_validator('database_url')
     def validate_database_url(cls, v: SecretStr) -> SecretStr:
@@ -184,44 +237,6 @@ class PostgresConfig(BaseModel):
                     'partition maintenance and LISTEN require PostgreSQL session affinity',
                 ],
                 help_text='use a direct/session-capable Postgres URL for session_database_url',
-            )
-        if self.worker_pool_size is not None and self.worker_pool_size < 1:
-            raise ConfigurationError(
-                message='invalid worker_pool_size',
-                code=ErrorCode.CONFIG_INVALID_BROKER_POOL,
-                notes=['worker_pool_size must be >= 1 or None'],
-                help_text='set worker_pool_size to a positive integer, or None to inherit pool_size',
-            )
-        if self.worker_max_overflow is not None and self.worker_max_overflow < 0:
-            raise ConfigurationError(
-                message='invalid worker_max_overflow',
-                code=ErrorCode.CONFIG_INVALID_BROKER_POOL,
-                notes=['worker_max_overflow must be >= 0 or None'],
-                help_text='set worker_max_overflow to a non-negative integer, or None to inherit max_overflow',
-            )
-        if self.worker_child_pool_min_size < 0:
-            raise ConfigurationError(
-                message='invalid worker_child_pool_min_size',
-                code=ErrorCode.CONFIG_INVALID_BROKER_POOL,
-                notes=['worker_child_pool_min_size must be >= 0'],
-                help_text='use 1 for eager per-child connections or 0 for lazy child pools',
-            )
-        if self.worker_child_pool_max_size < 1:
-            raise ConfigurationError(
-                message='invalid worker_child_pool_max_size',
-                code=ErrorCode.CONFIG_INVALID_BROKER_POOL,
-                notes=['worker_child_pool_max_size must be >= 1'],
-                help_text='use 1 or 2 for typical workers; increase only for task code that checks out multiple framework connections concurrently',
-            )
-        if self.worker_child_pool_min_size > self.worker_child_pool_max_size:
-            raise ConfigurationError(
-                message='invalid worker child pool bounds',
-                code=ErrorCode.CONFIG_INVALID_BROKER_POOL,
-                notes=[
-                    f'worker_child_pool_min_size={self.worker_child_pool_min_size}',
-                    f'worker_child_pool_max_size={self.worker_child_pool_max_size}',
-                ],
-                help_text='worker_child_pool_min_size must be <= worker_child_pool_max_size',
             )
         if self.tcp_keepalives:
             for name, value in (
@@ -304,11 +319,65 @@ class PostgresConfig(BaseModel):
             'hide_parameters': True,
         }
 
-    def worker_runtime_config(self) -> 'PostgresConfig':
-        """Return a broker config with worker-specific parent pool sizing."""
-        updates: dict[str, int] = {}
-        if self.worker_pool_size is not None:
-            updates['pool_size'] = self.worker_pool_size
-        if self.worker_max_overflow is not None:
-            updates['max_overflow'] = self.worker_max_overflow
-        return self.model_copy(update=updates)
+    def with_exact_pool(self, connections: int) -> 'PostgresConfig':
+        """A copy whose engine pool holds up to ``connections`` connections
+        with no overflow: ``pool_size = connections``, ``max_overflow = 0``.
+        Every other field, ``pool_pre_ping`` included, is kept.
+
+        A worker child opens the broker of its task code with the
+        ``task_send_pool`` of its kind, a producer engine that keeps
+        ``pool_pre_ping``. ``connections`` is 1 or more, from a validated
+        profile. Below 1 is a defect: ``AssertionError``.
+        """
+        assert connections >= 1, f'connections must be >= 1; got {connections}'
+        return self.model_copy(
+            update={'pool_size': connections, 'max_overflow': 0},
+        )
+
+    def worker_process_config(self, parent_pool: int) -> 'PostgresConfig':
+        """The broker config of the worker process: a pool of up to
+        ``parent_pool`` connections with no overflow (``with_exact_pool``),
+        the resolved ``WorkerProfile.pool``, and ``worker_pool_pre_ping`` as
+        its pre-ping. ``parent_pool`` is 1 or more. Below 1 is a defect:
+        ``AssertionError``."""
+        return self.with_exact_pool(parent_pool).model_copy(
+            update={'pool_pre_ping': self.worker_pool_pre_ping},
+        )
+
+
+def _moved_child_pool_field_error(name: str, pool_argument: str) -> ConfigurationError:
+    """The refusal of a removed child pool field: it names the pool field of
+    each child kind in a worker profile that replaces it."""
+    return ConfigurationError(
+        message=f'{name} was removed in 0.7.0',
+        code=ErrorCode.CONFIG_INVALID_BROKER_POOL,
+        notes=[
+            'each child kind of a worker profile has its own connection pool',
+        ],
+        help_text=(
+            'set the pool of each child kind in AppConfig.worker_profiles: '
+            f'IsolatedChildren(pool=IsolatedPool({pool_argument})), '
+            f'SharedAsyncChildren(pool=SharedPool({pool_argument})) or '
+            f'SharedThreadChildren(pool=SharedPool({pool_argument}))'
+        ),
+    )
+
+
+def _moved_parent_pool_field_error(name: str, note: str) -> ConfigurationError:
+    """The refusal of a removed worker pool field: it names the pool of the
+    worker process in a worker profile that replaces it."""
+    return ConfigurationError(
+        message=f'{name} was removed in 0.7.0',
+        code=ErrorCode.CONFIG_INVALID_BROKER_POOL,
+        notes=[
+            note,
+            'task code in a worker child that sends opens the task_send_pool '
+            'of its child kind, not this pool',
+        ],
+        help_text=(
+            'set the pool of the worker process in AppConfig.worker_profiles: '
+            'WorkerProfile(pool=ParentPool(max_size=PoolSize(connections=N))); '
+            'the default, PoolSizeFromSeats(), derives it from the seats of '
+            'the profile'
+        ),
+    )

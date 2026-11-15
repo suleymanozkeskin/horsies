@@ -58,7 +58,44 @@ _IDENTIFIER = re.compile(r'^[a-z][a-z0-9_]{0,62}$')
 # v52 adds horsies_workflow_recovery_failures and its orphan delete in
 # worker/sql.py. Neither touches horsies_tasks, and no prototype names a
 # workflow table, so the qualified shape is unchanged and the base advances.
-_EXPECTED_BASE_SCHEMA_VERSION = 52
+# v53 adds horsies_worker_states.slots_down. It does not touch horsies_tasks,
+# and no prototype names the worker states table, so the base advances.
+# v54 DOES touch horsies_tasks: the execution column (NOT NULL, DEFAULT
+# 'ISOLATED'), its CHECK, and idx_horsies_tasks_claim_pending_class. The LIKE
+# clones take the column with its default (INCLUDING DEFAULTS) and never the
+# CHECK. Every prototype statement names its columns, so its inserts store
+# the default. The index replay reads the deployed definitions from the
+# catalog, and the clone has the indexed column, so the replay holds; the
+# replayed name stays inside the 63-byte bound. The base advances.
+# v55 builds idx_horsies_tasks_claim_expired_class on columns that the clone
+# has, drops idx_horsies_tasks_claim_pending and
+# idx_horsies_tasks_claim_expired_ordered, which no prototype names, replaces
+# the claim function pair, and adds horsies_worker_states.class_capacity. The
+# replay reads the deployed set, and the longest replayed name is 47 bytes.
+# The base advances.
+# v56 adds two functions and one composite type
+# (horsies_finish_failed_attempt, horsies_lock_running_task,
+# horsies_failed_attempt_outcome). It changes no table, column or index of
+# horsies_tasks, so the cloned shape is unchanged and the base advances.
+# v57 adds the function horsies_complete_tasks_fused. It touches no table, and
+# no prototype names it, so the base advances.
+# v58 adds one function and one composite type
+# (horsies_finish_workflow_success, horsies_workflow_success_outcome) and
+# drops horsies_lock_running_task. It changes no table, column or index of
+# horsies_tasks, so the cloned shape is unchanged and the base advances.
+# v59 changes the WHEN of horsies_task_status_notify_update_trigger and adds a
+# NOTIFY to the bodies of the moves. A LIKE clone takes no trigger; no
+# prototype names the trigger or the channel; the prototype terminalization
+# functions are their own copies and do not call the moves. The cloned shape is
+# unchanged and the base advances.
+# v60 changes the bodies of the completion and failure functions (their
+# locking read is by id alone). It changes no table, column or index. The
+# prototypes define their own functions of these names in their own
+# namespaces and do not call the production ones, so the base advances.
+# v61 adds horsies_claim_in_flight and changes the body of horsies_claim. It
+# changes no table, column or index, and the prototypes do not call the
+# claim functions, so the base advances.
+_EXPECTED_BASE_SCHEMA_VERSION = 61
 
 
 @dataclass(frozen=True, slots=True)

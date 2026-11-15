@@ -61,6 +61,17 @@ class OperationalErrorCode(str, Enum):
     WORKFLOW_ENQUEUE_FAILED = 'WORKFLOW_ENQUEUE_FAILED'
     SUBWORKFLOW_LOAD_FAILED = 'SUBWORKFLOW_LOAD_FAILED'
     WORKFLOW_RECOVERY_LIMIT_REACHED = 'WORKFLOW_RECOVERY_LIMIT_REACHED'
+    # The engine did not start a child workflow, because its depth would
+    # pass MAX_SUBWORKFLOW_DEPTH (horsies.core.models.workflow.limits).
+    SUBWORKFLOW_DEPTH_LIMIT_REACHED = 'SUBWORKFLOW_DEPTH_LIMIT_REACHED'
+    # This task held the event loop of its shared async child past the block
+    # limit, before its timeout_ms. The worker killed the child; a retry
+    # (only when auto_retry_for names this code) runs in an isolated child.
+    TASK_BLOCKED_LOOP = 'TASK_BLOCKED_LOOP'
+    # Another task held the event loop of this task's shared async child
+    # past the block limit, before this task's timeout_ms. The worker killed
+    # the child. A retry runs only when auto_retry_for names this code.
+    NEIGHBOUR_BLOCKED_LOOP = 'NEIGHBOUR_BLOCKED_LOOP'
 
 
 class ContractCode(str, Enum):
@@ -103,6 +114,10 @@ class RetrievalCode(str, Enum):
     # example a timeout_ms outside 0 to MAX_TASK_TIMEOUT_MS. Never cached:
     # a call with a valid argument reads the value.
     INVALID_INPUT = 'INVALID_INPUT'
+    # A result wait was called in a process that runs task bodies, so it
+    # returns at once and waits for nothing. Never cached: a task composes
+    # with other tasks through a workflow, not through a wait.
+    WAIT_INSIDE_TASK = 'WAIT_INSIDE_TASK'
 
 
 class OutcomeCode(str, Enum):
@@ -493,6 +508,9 @@ class TaskInfo:
     - ``result_decoded``: ``True`` iff ``decoded_result`` was populated.
       Lets callers branch without comparing for ``None`` (which is also
       a valid ok-value for ``TaskResult[None, TaskError]``).
+
+    ``execution`` is the stored ``Execution`` of a live task. It is ``None``
+    for a task read from the history archive, which does not keep the class.
     """
 
     task_id: str
@@ -518,6 +536,7 @@ class TaskInfo:
     result_decoded: bool = False
     failed_reason: str | None = None
     attempts: list[TaskAttemptInfo] | None = None
+    execution: Execution | None = None
 
 
 MAX_RETRY_ATTEMPTS: Final = 20
@@ -532,6 +551,48 @@ MAX_TASK_TIMEOUT_MS: Final = 2**32 - 1
 About 49.7 days. It is the limit of the Rust port's `u32` field, so both
 libraries accept the same declarations.
 """
+
+MIN_CANCEL_GRACE_MS: Final = 100
+"""The smallest `cancel_grace_ms` of a `SHARED_ASYNC` task.
+
+A healthy cleanup after a cancel ended within 15.4 ms in the measured set
+(local network), so this is 6.5 times that. A lower value would send the
+second cancel into healthy cleanups and drop their connections.
+"""
+
+MAX_CANCEL_GRACE_MS: Final = 10_000
+"""The largest `cancel_grace_ms` of a `SHARED_ASYNC` task.
+
+The longest library cleanup with an end in the measured set took 10.0 s
+(psycopg 3.3.6 and later: a 5 s cancel request, then a 5 s drain). A larger
+grace changes no measured outcome; it only keeps a seat longer.
+"""
+
+DEFAULT_CANCEL_GRACE_MS: Final = 1_000
+"""The `cancel_grace_ms` that a `SHARED_ASYNC` task gets when it sets none.
+
+65 times the slowest healthy cleanup in the measured set. The task row
+stores the value in effect when the task was sent, so a change of this
+default does not change rows that are already queued.
+"""
+
+
+class Execution(str, Enum):
+    """How a worker runs a task. Each task row stores its class.
+
+    - `ISOLATED`: one task at a time in its own child process. The function
+      can be `def` or `async def`, and `timeout_ms` is optional. The default.
+    - `SHARED_ASYNC`: many `async def` tasks run as coroutines in one child
+      process. The task must set `timeout_ms`. `cancel_grace_ms` is the time
+      the task gets to stop after its cancel.
+    - `SHARED_THREAD`: many `def` tasks run on threads in one child process.
+      The task must set `timeout_ms`. A thread cannot be cancelled, so the
+      task cannot set `cancel_grace_ms`.
+    """
+
+    ISOLATED = 'ISOLATED'
+    SHARED_ASYNC = 'SHARED_ASYNC'
+    SHARED_THREAD = 'SHARED_THREAD'
 
 
 class RetryPolicy(BaseModel):
@@ -673,8 +734,17 @@ class TaskOptions(BaseModel):
             subprocesses in its session; retry only happens when
             'TASK_TIMEOUT' is listed in auto_retry_for. Other tasks on the
             worker continue. The worker must start a new child, so timeouts
-            are for exceptional hangs, not routine control flow. The value
-            is from MIN_TASK_TIMEOUT_MS to MAX_TASK_TIMEOUT_MS.
+            are for exceptional hangs, not routine control flow. A
+            SHARED_ASYNC task on a shared async child is cancelled instead,
+            and its child is killed only when no task in it has time left.
+            The value is from MIN_TASK_TIMEOUT_MS to MAX_TASK_TIMEOUT_MS.
+        execution: How a worker runs the task (`Execution`). The default is
+            `Execution.ISOLATED`.
+        cancel_grace_ms: The cancel grace that the task declares, or None
+            when it declares none. This model checks only the type. The task
+            decorator checks the class and the bounds
+            (MIN_CANCEL_GRACE_MS to MAX_CANCEL_GRACE_MS), and the stored
+            options hold the resolved value (see `serialize_task_options`).
     """
 
     model_config = ConfigDict(extra='forbid')
@@ -691,6 +761,8 @@ class TaskOptions(BaseModel):
             description='Execution time limit in milliseconds (1 s to about 49.7 days)',
         ),
     ] | None = None
+    execution: Execution = Execution.ISOLATED
+    cancel_grace_ms: int | None = None
 
     @field_validator('good_until')
     @classmethod

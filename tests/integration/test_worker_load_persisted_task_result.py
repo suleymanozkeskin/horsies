@@ -2,7 +2,8 @@
 
 Covers the phase-2 replay method that reads a terminal task's persisted
 result from DB: not-found, non-terminal, null result, corrupt JSON,
-invalid TaskResult structure, and valid success/error results.
+invalid TaskResult structure, and valid success/error results of a
+workflow task, and a plain task, which owes no phase 2.
 """
 
 from __future__ import annotations
@@ -25,7 +26,8 @@ from horsies.core.models.tasks import (
     TaskError,
     TaskResult,
 )
-from horsies.core.types.result import is_err, is_ok
+from horsies.core.types.result import Ok, is_err, is_ok
+from horsies.core.worker.finalize import _PlainTaskDone
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import _FINALIZE_STAGE_PHASE2, Worker
 from tests.integration.conftest import compute_test_enqueue_sha
@@ -83,12 +85,14 @@ async def _insert_task(
     *,
     status: str = 'RUNNING',
     result: str | None = None,
+    is_workflow_task: bool = True,
 ) -> str:
     """Seed a task in the given status, holding the given stored result.
 
     A terminal status is reached the way a worker reaches it: the row is
     born running and then terminalized, which moves it to history with
-    the result as its payload. A non-terminal status stays live.
+    the result as its payload. A non-terminal status stays live. A
+    workflow task by default: only a workflow task owes a phase 2.
     """
     task_id = str(uuid.uuid4())
     sent_at, sha = compute_test_enqueue_sha(task_name='load_result_test')
@@ -99,6 +103,7 @@ async def _insert_task(
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
                  max_retries, started_at, result, enqueue_sha,
+                 is_workflow_task,
                  retention_class_key, command_fingerprint_version,
                  command_fingerprint, retain_rerun_input,
                  prepared_rerun_input_disposition)
@@ -106,12 +111,14 @@ async def _insert_task(
                 (:id, 'load_result_test', 'default', 100, '[]', '{}',
                  :status, :sent_at, NOW(), NOW(), FALSE, 0,
                  0, NOW(), :result, :enqueue_sha,
+                 :is_workflow_task,
                  'standard_30d', 1,
                  sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-                 FALSE, 'DECLINED_BY_POLICY')
+                 FALSE, 'NEVER_ELIGIBLE')
         """),
         {
             'id': task_id,
+            'is_workflow_task': is_workflow_task,
             'status': 'RUNNING' if is_terminal else status,
             'result': None if is_terminal else result,
             'sent_at': sent_at,
@@ -304,7 +311,27 @@ async def test_completed_ok_result_returns_task_result(
     assert persisted.result.unwrap() == 'hello'
     assert persisted.task_name == 'load_result_test'
     assert persisted.queue_name == 'default'
-    assert persisted.is_workflow_task is False
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_a_plain_task_owes_no_phase_two(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """A plain task's terminal row: the statement that wrote it sent its
+    capacity wake, so the load reports nothing owed and decodes nothing."""
+    task_id = await _insert_task(
+        session,
+        status='COMPLETED',
+        result='{not json',
+        is_workflow_task=False,
+    )
+    worker = _make_worker(engine)
+
+    result = await worker._load_persisted_task_result(task_id)
+
+    assert result == Ok(_PlainTaskDone())
 
 
 # ---------------------------------------------------------------------------
@@ -381,17 +408,17 @@ async def test_unknown_task_err_result_uses_fast_path(
             INSERT INTO horsies_tasks
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, started_at, enqueue_sha,
+                 max_retries, started_at, enqueue_sha, is_workflow_task,
                  retention_class_key, command_fingerprint_version,
                  command_fingerprint, retain_rerun_input,
                  prepared_rerun_input_disposition)
             VALUES
                 (:id, 'unknown_task_xyz', 'default', 100, '[]', '{}',
                  'RUNNING', :sent_at, NOW(), NOW(), FALSE, 0,
-                 0, NOW(), :enqueue_sha,
+                 0, NOW(), :enqueue_sha, TRUE,
                  'standard_30d', 1,
                  sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-                 FALSE, 'DECLINED_BY_POLICY')
+                 FALSE, 'NEVER_ELIGIBLE')
         """),
         {
             'id': task_id,

@@ -13,9 +13,9 @@ relies on.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Literal, Optional, assert_never, cast
+from typing import TYPE_CHECKING, Any, assert_never, cast
 
 from sqlalchemy import text
 
@@ -58,32 +58,75 @@ from horsies.core.lifecycle.commands import (
 from horsies.core.lifecycle.outcomes import (
     AlreadyApplied,
     Applied,
+    CapacityWoken,
+    FailedAttemptOutcome,
+    FailureApplied,
     LostClaim,
+    PhaseTwoOwed,
+    RetryScheduled,
     SourceStateConflict,
+    SuccessApplied,
     TaskAbsent,
+    TerminalizationOutcome,
 )
 from horsies.core.lifecycle.persistence import (
-    apply_async,
-    classify_locked_read_miss_async,
+    BatchCommitUnknown,
+    BatchRolledBack,
+    BatchWriteError,
+    FusedCompletionBatch,
+    apply_fused_batch,
+    apply_in_autocommit,
 )
 from horsies.core.logging import get_logger
 from horsies.core.models.tasks import (
     BuiltInTaskCode,
     OperationalErrorCode,
+    OutcomeCode,
     TaskError,
     TaskResult,
 )
 from horsies.core.types.result import Err, Ok, Result, is_err
+from horsies.core.worker.child_protocol import (
+    SeatFinished,
+    SeatRefusal,
+    SeatTask,
+    SharedWork,
+    ThreadSeatTask,
+)
 from horsies.core.worker.slots import (
+    SHARED_BACKSTOP_MARGIN_S,
+    SHARED_REFUSAL_BACKSTOP_S,
     Assigned,
     ChildLost,
+    ExitedWith,
+    ExitUnknown,
+    KilledBySignal,
+    LostAfterReturn,
     NotDispatched,
+    NotRunCause,
+    ChildKilledPastDeadlines,
+    ReturnSeen,
+    SeatDeadlineEnded,
+    SeatKilled,
+    SeatTaskFinished,
+    SharedHandle,
+    SharedOutcome,
     SlotHandle,
     SlotOutcome,
     TaskFinished,
 )
-from horsies.core.utils.db import is_retryable_connection_error
+from horsies.core.utils.db import (
+    StatementRunner,
+    autocommit_connection,
+    is_retryable_connection_error,
+)
 from horsies.core.worker.runtime import (
+    CrashRecoveryCode,
+    FinalizeStage,
+    _AttemptEndUnknown,
+    _TimeoutOutcome,
+    _TimeoutSettled,
+    _TimeoutWriteFailed,
     _FINALIZE_FUTURE_MAX_RETRIES,
     _FINALIZE_PARENT_MAX_RETRIES,
     _FINALIZE_PHASE1_MAX_RETRIES,
@@ -94,31 +137,59 @@ from horsies.core.worker.runtime import (
     _FINALIZE_STAGE_PARENT,
     _FINALIZE_STAGE_PHASE1,
     _FINALIZE_STAGE_PHASE2,
+    _FINALIZE_STAGE_TIMEOUT,
+    _FINALIZE_TIMEOUT_MAX_RETRIES,
     _FinalizeError,
     _RequeueOutcome,
-    _RetryError,
 )
+from horsies.core.worker.failed_attempt import (
+    AttemptFailure,
+    AttemptFailureKind,
+    AttemptNotHeld,
+    ClaimedAttempt,
+    NoRetry,
+    RetryRequest,
+    RunningAttempt,
+    finish_failed_attempt,
+    finish_for,
+    read_in_flight_attempt,
+    retry_request_for,
+)
+from horsies.core.worker.shared_finalize import (
+    future_retry_data,
+    future_retry_write,
+    kept_claim_time,
+    timeout_retry_data,
+    timeout_retry_write,
+)
+from horsies.core.worker.shared_stop import RetryPlacement, culprit_retry
 from horsies.core.worker.stored_timeout import (
+    CancelGraceInvalid,
     NoTimeout,
     OptionsUnreadable,
     StoredTimeout,
     TaskTimeout,
     TimeoutValueInvalid,
 )
-from horsies.core.worker.sql import (
-    NOTIFY_TASK_QUEUE_SQL,
-    SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
-    UPSERT_TASK_ATTEMPT_SQL,
+from horsies.core.worker.workflow_success import (
+    finish_workflow_success,
+    success_for,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine
 
-    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+    from sqlalchemy.ext.asyncio import (
+        AsyncConnection,
+        AsyncSession,
+        async_sessionmaker,
+    )
 
     from horsies.core.app import Horsies
     from horsies.core.brokers.postgres import PostgresBroker
     from horsies.core.worker.config import WorkerConfig
+    from horsies.core.worker.finalize_batch import FinalizeBatcher
+    from horsies.core.workflows.engine import QueueWake
 
 logger = get_logger('worker')
 
@@ -146,12 +217,85 @@ class _PersistedTaskRow:
 
 @dataclass(frozen=True, slots=True)
 class _PersistedTaskOutcome:
-    """Terminal result and phase-2 routing facts read from one row."""
+    """A workflow task's terminal result and the routing facts of its phase
+    2. Phase 2 is owed only by a workflow task, so this is its only input."""
 
     result: TaskResult[Any, TaskError]
     task_name: str
     queue_name: str
-    is_workflow_task: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _PlainTaskDone:
+    """A plain task's terminal row. The statement that wrote it sent its
+    capacity wake, so nothing is owed: a plain task has no phase 2."""
+
+
+type _PersistedTerminal = _PersistedTaskOutcome | _PlainTaskDone
+"""What a persisted terminal row owes: the phase 2 of a workflow task, or
+nothing for a plain task."""
+
+
+@dataclass(frozen=True, slots=True)
+class _Phase1Input:
+    """The child's report as phase 1 received it. A phase-1 retry replays it
+    from the error data."""
+
+    ok: bool
+    result_json_str: str
+    failed_reason: str | None
+
+
+def _phase2_of_a_replay(
+    loaded: Result[_PersistedTerminal, _FinalizeError],
+) -> Result[_PersistedTaskOutcome | None, _FinalizeError]:
+    """What phase 2 still owes after a replay of a committed terminal row.
+    Pure. ``Ok(None)``: nothing is owed.
+    """
+    match loaded:
+        case Ok(ok_value=persisted):
+            return Ok(_phase_two_owed(persisted))
+        case Err(err_value=error):
+            return Err(error)
+
+
+def _phase_two_owed(persisted: _PersistedTerminal) -> _PersistedTaskOutcome | None:
+    """The phase 2 that ``persisted`` owes; None for a plain task. Pure."""
+    match persisted:
+        case _PersistedTaskOutcome():
+            return persisted
+        case _PlainTaskDone():
+            return None
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _attempt_failure_of(
+    report: WorkerLevelFailure | ResultUndecodable | ErrorProduced,
+) -> AttemptFailure:
+    """What the attempt row records for a failure report. Pure."""
+    match report:
+        case WorkerLevelFailure(detail=detail):
+            message = detail or 'Worker failure'
+            return AttemptFailure(
+                kind=AttemptFailureKind.WORKER_FAILURE,
+                error_message=message,
+                failed_reason=message,
+            )
+        case ResultUndecodable(detail=detail):
+            return AttemptFailure(
+                kind=AttemptFailureKind.FAILED,
+                error_message=detail,
+                failed_reason=None,
+            )
+        case ErrorProduced(error=error):
+            return AttemptFailure(
+                kind=AttemptFailureKind.FAILED,
+                error_message=error.message,
+                failed_reason=None,
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _refused_retry_command(
@@ -189,6 +333,38 @@ def _finalize_data_for_log(data: dict[str, Any] | None) -> dict[str, Any] | None
             return data
 
 
+def _shared_timeout_ms(task_id: str, work: SharedWork) -> int:
+    """The ``timeout_ms`` of a shared run that ended at its deadline. The
+    pool refuses a deadline report of a refusal, so a ``SeatRefusal`` never
+    ends that way: ``AssertionError``."""
+    match work:
+        case SeatTask(timeout_ms=timeout_ms) | ThreadSeatTask(timeout_ms=timeout_ms):
+            return timeout_ms
+        case SeatRefusal():
+            raise AssertionError(
+                f'the refused task {task_id} ended at a deadline it does not have',
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _max_retries_of(stage: FinalizeStage) -> int:
+    """The bound of the finalize retries of ``stage``. Pure."""
+    match stage:
+        case FinalizeStage.FUTURE:
+            return _FINALIZE_FUTURE_MAX_RETRIES
+        case FinalizeStage.TIMEOUT:
+            return _FINALIZE_TIMEOUT_MAX_RETRIES
+        case FinalizeStage.PHASE1:
+            return _FINALIZE_PHASE1_MAX_RETRIES
+        case FinalizeStage.PHASE2:
+            return _FINALIZE_PHASE2_MAX_RETRIES
+        case FinalizeStage.PARENT:
+            return _FINALIZE_PARENT_MAX_RETRIES
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 class FinalizeMixin:
     """Two-phase finalize pipeline with bounded stage retries."""
 
@@ -200,7 +376,8 @@ class FinalizeMixin:
         worker_instance_id: str
         _app: Horsies | None
         _stop: asyncio.Event
-        _finalize_retry_attempts: dict[tuple[str, str], int]
+        _finalize_retry_attempts: dict[tuple[str, FinalizeStage], int]
+        _finalize_batcher: FinalizeBatcher
 
         # Cross-concern methods provided by sibling mixins / Worker.
         async def _handle_task_timeout(
@@ -208,28 +385,59 @@ class FinalizeMixin:
             handle: SlotHandle,
             task_id: str,
             timeout_ms: int,
-            claimed_at: Optional[datetime] = None,
-        ) -> None: ...
+            claimed_at: datetime,
+        ) -> _TimeoutOutcome | ReturnSeen: ...
+        async def _handle_shared_backstop(
+            self,
+            handle: SharedHandle,
+            task_id: str,
+            work: SharedWork,
+        ) -> SharedOutcome | _AttemptEndUnknown: ...
+        async def _record_task_timeout(
+            self,
+            task_id: str,
+            timeout_ms: int,
+            claimed_at: datetime,
+            *,
+            retry: RetryPlacement,
+        ) -> _TimeoutSettled | _TimeoutWriteFailed: ...
+        async def _wait_for_unseen_exit(
+            self,
+            handle: SlotHandle | SharedHandle,
+            task_id: str,
+            pid: int,
+        ) -> ExitedWith | KilledBySignal | _AttemptEndUnknown: ...
+        async def _finalize_killed_run(
+            self,
+            task_id: str,
+            killed: SeatKilled,
+            work: SharedWork,
+            claimed_at: datetime,
+            *,
+            queue_name: str,
+            is_workflow_task: bool,
+            task_name: str,
+        ) -> Result[None, _FinalizeError]: ...
         async def _requeue_claimed_task(
             self,
             task_id: str,
             reason: str,
-            claimed_at: Optional[datetime] = None,
+            claimed_at: datetime,
         ) -> _RequeueOutcome: ...
         async def _recover_worker_future_failure(
             self,
             task_id: str,
             reason: str,
-            claimed_at: Optional[datetime] = None,
+            claimed_at: datetime,
+            *,
+            failure_code: CrashRecoveryCode = OperationalErrorCode.WORKER_CRASHED,
+            retry: RetryPlacement = RetryPlacement.SAME_CLASS,
         ) -> _RequeueOutcome: ...
-        async def _should_retry_task(
-            self, task_id: str, error: TaskError, session: AsyncSession
-        ) -> Result[bool, _RetryError]: ...
-        async def _schedule_retry(
-            self, task_id: str, session: AsyncSession, queue_name: str
-        ) -> Result[
-            Literal['scheduled', 'reaper_reclaimed', 'expired'], _RetryError
-        ]: ...
+        def _wake_when_retry_due(
+            self,
+            scheduled: RetryScheduled,
+            request: RetryRequest,
+        ) -> None: ...
         async def _sleep_with_stop(self, delay_seconds: float) -> None: ...
         def _spawn_background(
             self,
@@ -245,15 +453,28 @@ class FinalizeMixin:
         handle: SlotHandle,
         task_id: str,
         timeout: StoredTimeout,
-        claimed_at: Optional[datetime],
-    ) -> SlotOutcome:
+        claimed_at: datetime,
+    ) -> SlotOutcome | _TimeoutOutcome:
         """Wait for the outcome. The timeout starts when a child gets the task.
 
         Time waiting for a free slot does not count: a ``TaskTimeout`` bounds
         execution. A refused stored timeout has no deadline: the child fails
         the task at once, before it resolves the task. Never raises for a
-        task; a timeout goes through ``_handle_task_timeout``, and the slot
-        still reports what happened.
+        task.
+
+        Once the deadline fires, ``_handle_task_timeout`` owns the row, and
+        its outcome is returned: the slot's outcome is not read, even when
+        the slot answered after the timer fired. The deadline decides, so a
+        late result is dropped. ``_TimeoutSettled`` and ``_AttemptEndUnknown``
+        mean that the timeout path wrote the row, or left it on purpose;
+        ``_TimeoutWriteFailed`` means that the attempt ended and its
+        TASK_TIMEOUT write failed, which the caller retries.
+
+        The deadline bounds the body of the task. When the slot read that the
+        body returned with work left on its task loop before the deadline
+        fired (``ReturnSeen``), the deadline no longer applies: the slot's
+        outcome is returned when it comes, and the slot bounds that wait
+        (``ISOLATED_LEFTOVER_BACKSTOP_S``).
         """
         assigned = await asyncio.shield(handle.assigned)
         match assigned:
@@ -266,28 +487,37 @@ class FinalizeMixin:
         match timeout:
             case TaskTimeout(ms=timeout_ms):
                 pass
-            case NoTimeout() | OptionsUnreadable() | TimeoutValueInvalid():
+            case (
+                NoTimeout()
+                | OptionsUnreadable()
+                | TimeoutValueInvalid()
+                | CancelGraceInvalid()
+            ):
                 return await asyncio.shield(handle.outcome)
             case _ as unreachable:
                 assert_never(unreachable)
         try:
             # shield: wait_for must not cancel the outcome. The child keeps
-            # running regardless, and the outcome is awaited again below.
+            # running regardless, and the outcome may be awaited again below.
             return await asyncio.wait_for(
                 asyncio.shield(handle.outcome),
                 timeout=timeout_ms / 1000.0,
             )
         except asyncio.TimeoutError:
-            await self._handle_task_timeout(
-                handle,
-                task_id,
-                timeout_ms,
-                claimed_at=claimed_at,
-            )
-            # A kill ends the child, and the slot then reports it. A complete
-            # result that beat the kill still arrives here, and the fences in
-            # the persist path refuse it if the row has moved on.
-            return await asyncio.shield(handle.outcome)
+            pass
+        timed_out = await self._handle_task_timeout(
+            handle,
+            task_id,
+            timeout_ms,
+            claimed_at=claimed_at,
+        )
+        match timed_out:
+            case ReturnSeen():
+                return await asyncio.shield(handle.outcome)
+            case _TimeoutSettled() | _TimeoutWriteFailed() | _AttemptEndUnknown():
+                return timed_out
+            case _ as unreachable:
+                assert_never(unreachable)
 
     async def _finalize_after(
         self,
@@ -298,7 +528,7 @@ class FinalizeMixin:
         timeout: StoredTimeout = NoTimeout(),
         *,
         task_name: str,
-        claimed_at: Optional[datetime] = None,
+        claimed_at: datetime,
     ) -> Result[None, _FinalizeError]:
         outcome = await self._await_slot_outcome(
             handle,
@@ -307,62 +537,168 @@ class FinalizeMixin:
             claimed_at,
         )
         match outcome:
-            case TaskFinished():
-                ok = outcome.ok
-                result_json_str = outcome.result_json
-                failed_reason = outcome.failed_reason
-            case NotDispatched(cause=cause):
-                requeued = await self._requeue_claimed_task(
+            case TaskFinished(ok=ok, result_json=result_json, failed_reason=reason):
+                return await self._finalize_task_result(
                     task_id,
-                    cause.value,
-                    claimed_at=claimed_at,
-                )
-                if requeued is _RequeueOutcome.DB_ERROR:
-                    logger.critical(
-                        'Requeue DB_ERROR: task %s may remain orphaned CLAIMED '
-                        '(worker=%s, reason=%s)',
-                        task_id,
-                        self.worker_instance_id,
-                        cause.value,
-                    )
-                    return Err(
-                        self._make_finalize_error(
-                            task_id=task_id,
-                            stage=_FINALIZE_STAGE_FUTURE,
-                            message=f'Requeue failed: {cause.value}',
-                            retryable=True,
-                            data={
-                                'requeue_outcome': requeued.value,
-                                'claimed_at': claimed_at,
-                            },
-                        )
-                    )
-                return Ok(None)
-            case ChildLost():
-                reason = f'Worker child lost: {outcome.describe()}'
-                requeue_outcome = await self._recover_worker_future_failure(
-                    task_id,
+                    ok,
+                    result_json,
                     reason,
+                    queue_name=queue_name,
+                    is_workflow_task=is_workflow_task,
+                    task_name=task_name,
                     claimed_at=claimed_at,
                 )
-                return Err(
-                    self._make_finalize_error(
-                        task_id=task_id,
-                        stage=_FINALIZE_STAGE_FUTURE,
-                        message=reason,
-                        # Retryability is keyed on the recovery DB failure: a
-                        # requeue that hit a transient DB blip must retry the
-                        # recovery instead of waiting on the reaper.
-                        retryable=requeue_outcome is _RequeueOutcome.DB_ERROR,
-                        data={
-                            'loss_cause': outcome.cause.value,
-                            'requeue_outcome': requeue_outcome.value,
-                            'claimed_at': claimed_at,
-                        },
-                    )
+            case NotDispatched(cause=cause):
+                return await self._requeue_not_dispatched(task_id, cause, claimed_at)
+            case ChildLost():
+                return await self._finalize_child_loss(
+                    handle,
+                    task_id,
+                    outcome,
+                    claimed_at,
                 )
+            case LostAfterReturn(returned=returned, lost=lost):
+                return await self._finalize_return_after_loss(
+                    handle,
+                    task_id,
+                    returned,
+                    lost,
+                    queue_name=queue_name,
+                    is_workflow_task=is_workflow_task,
+                    task_name=task_name,
+                    claimed_at=claimed_at,
+                )
+            case _TimeoutSettled() | _AttemptEndUnknown():
+                # The timeout path settled this row, or left it to stale-task
+                # recovery. Crash recovery must not write it as WORKER_CRASHED.
+                return Ok(None)
+            case _TimeoutWriteFailed():
+                match timeout:
+                    case TaskTimeout(ms=timeout_ms):
+                        return Err(
+                            self._timeout_write_error(
+                                task_id,
+                                timeout_ms,
+                                claimed_at,
+                                RetryPlacement.SAME_CLASS,
+                            ),
+                        )
+                    case (
+                        NoTimeout()
+                        | OptionsUnreadable()
+                        | TimeoutValueInvalid()
+                        | CancelGraceInvalid()
+                    ):
+                        raise AssertionError(
+                            f'task {task_id} timed out with no deadline',
+                        )
+                    case _ as unreachable:
+                        assert_never(unreachable)
             case _ as unreachable:
                 assert_never(unreachable)
+
+    async def _finalize_return_after_loss(
+        self,
+        handle: SlotHandle,
+        task_id: str,
+        returned: SeatFinished,
+        lost: ChildLost,
+        *,
+        queue_name: str,
+        is_workflow_task: bool,
+        task_name: str,
+        claimed_at: datetime,
+    ) -> Result[None, _FinalizeError]:
+        """Write what the body of a task returned, after its child ended
+        while work that the task left on its loop was alive.
+
+        The write waits for the exit of the child, so no work of the attempt
+        runs when the row moves. A seen exit: ``returned`` goes through
+        ``_finalize_task_result``, as a result does: no TASK_TIMEOUT, no
+        crash path. No exit seen: ``_wait_for_unseen_exit`` decides, as for
+        any loss. ``_AttemptEndUnknown`` writes nothing and returns
+        ``Ok(None)``; an exit seen later writes ``returned``.
+        """
+        match lost.child_exit:
+            case ExitUnknown():
+                match await self._wait_for_unseen_exit(handle, task_id, lost.pid):
+                    case ExitedWith() | KilledBySignal():
+                        pass
+                    case _AttemptEndUnknown():
+                        return Ok(None)
+                    case _ as unreachable:
+                        assert_never(unreachable)
+            case ExitedWith() | KilledBySignal():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
+        return await self._finalize_task_result(
+            task_id,
+            returned.ok,
+            returned.result_json,
+            returned.failed_reason,
+            queue_name=queue_name,
+            is_workflow_task=is_workflow_task,
+            task_name=task_name,
+            claimed_at=claimed_at,
+        )
+
+    async def _requeue_not_dispatched(
+        self,
+        task_id: str,
+        cause: NotRunCause,
+        claimed_at: datetime,
+    ) -> Result[None, _FinalizeError]:
+        """Return a claimed row that never reached a child to the queue.
+
+        A database error is a retryable future-stage error: the row may stay
+        CLAIMED until its lease ends.
+        """
+        requeued = await self._requeue_claimed_task(
+            task_id,
+            cause.value,
+            claimed_at=claimed_at,
+        )
+        if requeued is _RequeueOutcome.DB_ERROR:
+            logger.critical(
+                'Requeue DB_ERROR: task %s may remain orphaned CLAIMED '
+                '(worker=%s, reason=%s)',
+                task_id,
+                self.worker_instance_id,
+                cause.value,
+            )
+            return Err(
+                self._make_finalize_error(
+                    task_id=task_id,
+                    stage=_FINALIZE_STAGE_FUTURE,
+                    message=f'Requeue failed: {cause.value}',
+                    retryable=True,
+                    data={
+                        'requeue_outcome': requeued.value,
+                        'claimed_at': claimed_at,
+                    },
+                )
+            )
+        return Ok(None)
+
+    async def _finalize_task_result(
+        self,
+        task_id: str,
+        ok: bool,
+        result_json_str: str,
+        failed_reason: str | None,
+        *,
+        queue_name: str,
+        is_workflow_task: bool,
+        task_name: str,
+        claimed_at: datetime,
+    ) -> Result[None, _FinalizeError]:
+        """Persist the result that a child reported, then run phase 2.
+
+        ``ok`` has the ``_run_task_entry`` meaning. Phase 1 writes the
+        terminal row and its attempt, or the retry; phase 2 runs the workflow
+        step and the capacity wakes.
+        """
         now = datetime.now(timezone.utc)
 
         # Warn-only: results are never rejected over size (the work is
@@ -407,7 +743,6 @@ class FinalizeMixin:
             task_id,
             persisted.result,
             queue_name=persisted.queue_name,
-            is_workflow_task=persisted.is_workflow_task,
             task_name=persisted.task_name,
         )
         if is_err(phase2_r):
@@ -416,11 +751,245 @@ class FinalizeMixin:
         self._clear_finalize_retry_attempts(task_id, _FINALIZE_STAGE_PHASE2)
         return Ok(None)
 
+    async def _await_shared_outcome(
+        self,
+        handle: SharedHandle,
+        task_id: str,
+        work: SharedWork,
+    ) -> SharedOutcome | _AttemptEndUnknown:
+        """Wait for the end of a shared task, with one backstop timer.
+
+        The child holds the deadline of the task and reports each step of
+        its stop: a shared async child cancels the task at ``timeout_ms``
+        and sends a second cancel after ``cancel_grace_ms``; a shared thread
+        child closes at ``timeout_ms``. The parent waits from the placement
+        until the due step (``timeout_ms``, plus ``cancel_grace_ms`` for an
+        async task) and ``SHARED_BACKSTOP_MARGIN_S`` more; past that it
+        hands the run to ``_handle_shared_backstop``, which kills the child
+        only when it is frozen. A ``SeatRefusal`` runs no task code and has
+        no deadline: its backstop is ``SHARED_REFUSAL_BACKSTOP_S``. The timer
+        ends when the outcome arrives. Never raises for a task.
+        """
+        assigned = await asyncio.shield(handle.assigned)
+        match assigned:
+            case NotDispatched():
+                return assigned
+            case Assigned():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
+        match work:
+            case SeatTask(timeout_ms=timeout_ms, cancel_grace_ms=cancel_grace_ms):
+                backstop_s = (
+                    timeout_ms + cancel_grace_ms
+                ) / 1000.0 + SHARED_BACKSTOP_MARGIN_S
+            case ThreadSeatTask(timeout_ms=timeout_ms):
+                backstop_s = timeout_ms / 1000.0 + SHARED_BACKSTOP_MARGIN_S
+            case SeatRefusal():
+                backstop_s = SHARED_REFUSAL_BACKSTOP_S
+            case _ as unreachable:
+                assert_never(unreachable)
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(handle.outcome),
+                timeout=backstop_s,
+            )
+        except asyncio.TimeoutError:
+            return await self._handle_shared_backstop(handle, task_id, work)
+
+    async def _finalize_shared_after(
+        self,
+        handle: SharedHandle,
+        task_id: str,
+        queue_name: str,
+        is_workflow_task: bool,
+        work: SharedWork,
+        *,
+        task_name: str,
+        claimed_at: datetime,
+    ) -> Result[None, _FinalizeError]:
+        """Finalize a shared task from its outcome.
+
+        A result takes the path of an isolated result; the result of a
+        ``SeatRefusal`` is its ``WORKER_SERIALIZATION_ERROR``. A task that
+        ended after its deadline, with its marked work for an async task,
+        and a task whose child was killed when no task in it had time left
+        (``ChildKilledPastDeadlines``, after its exit was seen), ended before
+        its row moves: TASK_TIMEOUT, the retry and phase 2 go through
+        ``_record_task_timeout``, the writer of isolated timeouts. The retry
+        of a culprit runs isolated. The pool refuses a deadline report of a
+        run without a deadline, so a ``SeatRefusal`` never ends that way:
+        ``AssertionError``. A child that the worker killed for another named
+        cause or after the deadline of the run gives its verdict
+        (``_finalize_killed_run``); a run that returned before its deadline
+        and was stuck only in the work that it left writes what it returned.
+        A lost child takes crash recovery, which writes only after the exit
+        of the child was seen.
+        """
+        outcome = await self._await_shared_outcome(handle, task_id, work)
+        match outcome:
+            case SeatTaskFinished(ok=ok, result_json=result_json, failed_reason=reason):
+                return await self._finalize_task_result(
+                    task_id,
+                    ok,
+                    result_json,
+                    reason,
+                    queue_name=queue_name,
+                    is_workflow_task=is_workflow_task,
+                    task_name=task_name,
+                    claimed_at=claimed_at,
+                )
+            case SeatDeadlineEnded(retry=retry):
+                return await self._finalize_shared_timeout(
+                    task_id,
+                    _shared_timeout_ms(task_id, work),
+                    claimed_at,
+                    retry,
+                )
+            case ChildKilledPastDeadlines(culprit=culprit):
+                return await self._finalize_shared_timeout(
+                    task_id,
+                    _shared_timeout_ms(task_id, work),
+                    claimed_at,
+                    culprit_retry(culprit, handle.frame.dispatch),
+                )
+            case SeatKilled():
+                return await self._finalize_killed_run(
+                    task_id,
+                    outcome,
+                    work,
+                    claimed_at,
+                    queue_name=queue_name,
+                    is_workflow_task=is_workflow_task,
+                    task_name=task_name,
+                )
+            case NotDispatched(cause=cause):
+                return await self._requeue_not_dispatched(task_id, cause, claimed_at)
+            case ChildLost():
+                return await self._finalize_child_loss(
+                    handle,
+                    task_id,
+                    outcome,
+                    claimed_at,
+                )
+            case _AttemptEndUnknown():
+                return Ok(None)
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    async def _finalize_shared_timeout(
+        self,
+        task_id: str,
+        timeout_ms: int,
+        claimed_at: datetime,
+        retry: RetryPlacement,
+    ) -> Result[None, _FinalizeError]:
+        """Record the timeout of a shared task whose attempt has ended: its
+        coroutine and its marked work ended, or its child exited. ``retry``
+        is where the retry runs.
+
+        A failed write gives a timeout-stage error, as the timeout of an
+        isolated task does: the finalize retry handler runs the same write
+        again (``_retry_finalize_timeout``), and crash recovery writes
+        TASK_TIMEOUT only after those retries failed.
+        """
+        match await self._record_task_timeout(
+            task_id,
+            timeout_ms,
+            claimed_at,
+            retry=retry,
+        ):
+            case _TimeoutSettled():
+                return Ok(None)
+            case _TimeoutWriteFailed():
+                return Err(
+                    self._timeout_write_error(task_id, timeout_ms, claimed_at, retry),
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def _timeout_write_error(
+        self,
+        task_id: str,
+        timeout_ms: int,
+        claimed_at: datetime,
+        retry: RetryPlacement,
+    ) -> _FinalizeError:
+        """The retryable timeout-stage error of an attempt that has ended and
+        whose TASK_TIMEOUT write failed. Its data keeps that write
+        (``timeout_retry_data``). Pure."""
+        return self._make_finalize_error(
+            task_id=task_id,
+            stage=_FINALIZE_STAGE_TIMEOUT,
+            message=(
+                f'Task reached timeout_ms={timeout_ms}, and the TASK_TIMEOUT '
+                'write failed'
+            ),
+            retryable=True,
+            data=timeout_retry_data(timeout_ms, retry, claimed_at),
+        )
+
+    async def _finalize_child_loss(
+        self,
+        handle: SlotHandle | SharedHandle,
+        task_id: str,
+        lost: ChildLost,
+        claimed_at: datetime,
+    ) -> Result[None, _FinalizeError]:
+        """Recover the row of a task whose child ended with no result.
+
+        Crash recovery moves the row only after the child's exit was seen,
+        so a retry never runs next to a child that may still be alive.
+        ``ExitUnknown`` (the slot gave up waiting after SIGKILL) goes to
+        ``_wait_for_unseen_exit``: with stale RUNNING recovery on it writes
+        nothing and returns Ok(None), and the row keeps its state for
+        stale-task recovery; with it off, the worker waits for the exit of
+        that child and then recovers the row as at a seen exit, unless the
+        worker stops first. A seen exit goes to
+        ``_recover_worker_future_failure``; its result is a future-stage
+        error, retryable only when the recovery hit a database error.
+        """
+        match lost.child_exit:
+            case ExitUnknown():
+                match await self._wait_for_unseen_exit(handle, task_id, lost.pid):
+                    case ExitedWith() | KilledBySignal() as child_exit:
+                        lost = replace(lost, child_exit=child_exit)
+                    case _AttemptEndUnknown():
+                        return Ok(None)
+                    case _ as unreachable:
+                        assert_never(unreachable)
+            case ExitedWith() | KilledBySignal():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
+        reason = f'Worker child lost: {lost.describe()}'
+        requeue_outcome = await self._recover_worker_future_failure(
+            task_id,
+            reason,
+            claimed_at=claimed_at,
+        )
+        return Err(
+            self._make_finalize_error(
+                task_id=task_id,
+                stage=_FINALIZE_STAGE_FUTURE,
+                message=reason,
+                # Retryability is keyed on the recovery DB failure: a
+                # requeue that hit a transient DB blip must retry the
+                # recovery instead of waiting on the reaper.
+                retryable=requeue_outcome is _RequeueOutcome.DB_ERROR,
+                data={
+                    'loss_cause': lost.cause.value,
+                    'requeue_outcome': requeue_outcome.value,
+                    'claimed_at': claimed_at,
+                },
+            )
+        )
+
     def _make_finalize_error(
         self,
         *,
         task_id: str,
-        stage: str,
+        stage: FinalizeStage,
         message: str,
         retryable: bool,
         data: dict[str, Any] | None = None,
@@ -435,36 +1004,6 @@ class FinalizeMixin:
             data=data,
         )
 
-    def _finalize_error_from_retry_error(
-        self,
-        err: _RetryError,
-        *,
-        ok: bool,
-        result_json_str: str,
-        failed_reason: str | None,
-    ) -> _FinalizeError:
-        """Translate a retry-concern DB failure into a phase1 finalize error.
-
-        The outcome triple must ride along in ``data``: ``_retry_finalize_phase1``
-        replays ``_persist_task_terminal_state`` from ``data['outcome']`` and
-        abandons the retry if it is missing.
-        """
-        return _FinalizeError(
-            error_code=err.error_code,
-            message=err.message,
-            stage=_FINALIZE_STAGE_PHASE1,
-            task_id=err.task_id,
-            retryable=err.retryable,
-            data={
-                **(err.data or {}),
-                'outcome': {
-                    'ok': ok,
-                    'result_json_str': result_json_str,
-                    'failed_reason': failed_reason,
-                },
-            },
-        )
-
     def _with_finalize_context(
         self,
         err: _FinalizeError,
@@ -472,7 +1011,7 @@ class FinalizeMixin:
         queue_name: str,
         is_workflow_task: bool,
         task_name: str,
-        claimed_at: Optional[datetime] = None,
+        claimed_at: datetime,
     ) -> _FinalizeError:
         data = dict(err.data or {})
         data.setdefault('queue_name', queue_name or 'default')
@@ -491,27 +1030,30 @@ class FinalizeMixin:
     def _finalize_context_from_error(
         self,
         err: _FinalizeError,
-    ) -> tuple[str, bool, str, datetime | None]:
+    ) -> tuple[str, bool, str, datetime]:
         """Recover (queue_name, is_workflow_task, task_name, claimed_at)
         from error data.
 
         A missing task_name degrades to '' — the engine's ok_type
         resolution then falls back to ``Any`` (same degradation as a
-        broker-less completion), it does not fail the retry. A missing
-        claimed_at degrades to None, which disables the claim-generation
-        fence for the replay (pre-fence behavior).
+        broker-less completion), it does not fail the retry. The claim
+        time is required (``kept_claim_time``): ``_with_finalize_context``
+        keeps it on every phase-1 error, so data without it is a defect.
         """
         data = err.data or {}
         is_workflow_task_raw = data.get('is_workflow_task')
-        claimed_at_raw = data.get('claimed_at')
         return (
             str(data.get('queue_name') or 'default'),
             is_workflow_task_raw if isinstance(is_workflow_task_raw, bool) else True,
             str(data.get('task_name') or ''),
-            claimed_at_raw if isinstance(claimed_at_raw, datetime) else None,
+            kept_claim_time(err.data),
         )
 
-    def _clear_finalize_retry_attempts(self, task_id: str, stage: str) -> None:
+    def _clear_finalize_retry_attempts(
+        self,
+        task_id: str,
+        stage: FinalizeStage,
+    ) -> None:
         self._finalize_retry_attempts.pop((task_id, stage), None)
 
     async def _persist_task_terminal_state(
@@ -525,17 +1067,20 @@ class FinalizeMixin:
         task_name: str,
         queue_name: str,
         is_workflow_task: bool,
-        claimed_at: datetime | None = None,
+        claimed_at: datetime,
     ) -> Result[_PersistedTaskOutcome | None, _FinalizeError]:
         """Phase 1 of finalization: persist task terminal state/result durably.
 
         The child wire report is classified into a typed decision before any
         persistence statement is selected. Plain success uses the fused
-        operation. Every other normal terminal result uses the generation-
-        fenced locked read, an attempt write, and its operation function in one
-        caller-owned transaction. A retry of a committed phase 1 is classified
-        as ``AlreadyApplied`` and reloads the persisted result for phase 2;
-        ``LostClaim`` and other refusals do not advance the workflow.
+        operation. A failure, with or without a retry, uses one unlocked read
+        of the retry facts and ``horsies_finish_failed_attempt``
+        (``_persist_failed_attempt``). A workflow task's success is one
+        statement, ``horsies_finish_workflow_success``
+        (``_finish_workflow_success``). A retry of a
+        committed phase 1 is classified as ``AlreadyApplied`` and reloads the
+        persisted result for phase 2; ``LostClaim`` and other refusals do not
+        advance the workflow. ``Ok(None)``: nothing is owed to phase 2.
         """
         recovery_cfg = self.cfg.recovery_config
         context = FinalizeContext(
@@ -663,30 +1208,24 @@ class FinalizeMixin:
                 )
                 return Ok(None)
             case ReplayWorkflowPhase2():
-                load_r = await self._load_persisted_task_result(task_id)
-                if is_err(load_r):
-                    return Err(load_r.err_value)
-                return load_r
+                return _phase2_of_a_replay(
+                    await self._load_persisted_task_result(task_id),
+                )
             case ApplyTerminalization(command=CancelOwnedOrphan() as command):
                 try:
-                    async with self.sf() as s:
-                        outcome = await apply_async(
-                            await s.connection(),
-                            command,
-                        )
-                        match outcome:
-                            case Applied():
-                                terminated = True
-                            case (
-                                AlreadyApplied()
-                                | LostClaim()
-                                | SourceStateConflict()
-                                | TaskAbsent()
-                            ):
-                                terminated = False
-                            case _ as unreachable:
-                                assert_never(unreachable)
-                        await s.commit()
+                    outcome = await apply_in_autocommit(self.sf, command)
+                    match outcome:
+                        case Applied():
+                            terminated = True
+                        case (
+                            AlreadyApplied()
+                            | LostClaim()
+                            | SourceStateConflict()
+                            | TaskAbsent()
+                        ):
+                            terminated = False
+                        case _ as unreachable:
+                            assert_never(unreachable)
                 except Exception as exc:
                     return Err(
                         self._make_finalize_error(
@@ -734,272 +1273,348 @@ class FinalizeMixin:
                 assert_never(unreachable)
 
         if fused_command is not None:
-            try:
-                async with self.sf() as s:
-                    outcome = await apply_async(
-                        await s.connection(),
-                        fused_command,
-                    )
-                    match outcome:
-                        case Applied():
-                            await s.commit()
-                        case (
-                            AlreadyApplied()
-                            | LostClaim()
-                            | SourceStateConflict()
-                            | TaskAbsent()
-                        ):
-                            await s.rollback()
-                        case _ as unreachable:
-                            assert_never(unreachable)
-                    return Ok(None)
-            except Exception as exc:
-                return Err(
-                    self._make_finalize_error(
-                        task_id=task_id,
-                        stage=_FINALIZE_STAGE_PHASE1,
-                        message='Failed to persist terminal task state',
-                        retryable=is_retryable_connection_error(exc),
-                        data={
-                            'exception_type': type(exc).__name__,
-                            'exception': str(exc)[:500],
-                            'outcome': {
-                                'ok': ok,
-                                'result_json_str': result_json_str,
-                                'failed_reason': failed_reason,
-                            },
-                        },
-                    )
+            return await self._complete_plain_success(
+                fused_command,
+                outcome_data={
+                    'ok': ok,
+                    'result_json_str': result_json_str,
+                    'failed_reason': failed_reason,
+                },
+            )
+
+        match (locked_command, report):
+            case (CompleteLockedTask() as completion, ResultProduced()):
+                assert tr is not None
+                return await self._finish_workflow_success(
+                    completion,
+                    tr,
+                    claimed_at=claimed_at,
+                    child=_Phase1Input(ok, result_json_str, failed_reason),
+                )
+            case (
+                FailLockedTask() as failure,
+                WorkerLevelFailure()
+                | ResultUndecodable() as failure_report,
+            ):
+                assert tr is not None
+                return await self._persist_failed_attempt(
+                    failure,
+                    failure_report,
+                    tr,
+                    claimed_at=claimed_at,
+                    child=_Phase1Input(ok, result_json_str, failed_reason),
+                )
+            case (None, ErrorProduced() as failure_report) if (retry_error is not None):
+                assert tr is not None
+                return await self._persist_failed_attempt(
+                    _refused_retry_command(retry_error, context),
+                    failure_report,
+                    tr,
+                    claimed_at=claimed_at,
+                    child=_Phase1Input(ok, result_json_str, failed_reason),
+                )
+            case _:
+                raise AssertionError(
+                    'terminal report and locked command disagree: '
+                    f'{type(report).__name__} / {type(locked_command).__name__}'
                 )
 
+    async def _finish_workflow_success(
+        self,
+        completion: CompleteLockedTask,
+        tr: TaskResult[Any, TaskError],
+        *,
+        claimed_at: datetime,
+        child: _Phase1Input,
+    ) -> Result[_PersistedTaskOutcome | None, _FinalizeError]:
+        """Phase 1 of a workflow task's success: one statement.
+
+        ``finish_workflow_success`` runs ``horsies_finish_workflow_success``
+        in autocommit: the attempt row, the move and the phase-2 record of
+        the node commit together. ``SuccessApplied`` owes phase 2;
+        ``AlreadyApplied`` (a replay of a committed success) reloads the
+        persisted result for the phase-2 replay; a refusal wrote nothing and
+        owes nothing. Database errors become a phase-1 error, retryable when
+        the connection failed; its data keeps the child's report for the
+        replay.
+        """
         try:
-            async with self.sf() as s:
-                ctx_result = await s.execute(
-                    SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
-                    {
-                        'id': task_id,
-                        'wid': self.worker_instance_id,
-                        'claimed_at': claimed_at,
-                    },
+            outcome = await finish_workflow_success(
+                self.sf,
+                success_for(completion, claimed_at=claimed_at),
+            )
+        except Exception as exc:
+            return Err(
+                self._phase1_error(
+                    completion.task_id,
+                    'Failed to persist terminal task state',
+                    exc,
+                    child,
                 )
-                ctx_row = ctx_result.fetchone()
-                if ctx_row is None:
-                    miss_command = locked_command
-                    if miss_command is None:
-                        assert retry_error is not None
-                        miss_command = _refused_retry_command(
-                            retry_error,
-                            context,
-                        )
-                    miss_outcome = await classify_locked_read_miss_async(
-                        await s.connection(),
-                        miss_command,
-                        claimed_at=claimed_at,
+            )
+        match outcome:
+            case SuccessApplied(
+                phase_two=PhaseTwoOwed(task_name=task_name, queue_name=queue_name),
+            ):
+                return Ok(
+                    _PersistedTaskOutcome(
+                        result=tr,
+                        task_name=task_name,
+                        queue_name=queue_name,
                     )
-                    match miss_outcome:
-                        case AlreadyApplied():
-                            load_r = await self._load_persisted_task_result(
-                                task_id,
-                                session=s,
-                            )
-                            await s.rollback()
-                            if is_err(load_r):
-                                return Err(load_r.err_value)
-                            return load_r
-                        case LostClaim() | SourceStateConflict() | TaskAbsent():
-                            await s.rollback()
-                            return Ok(None)
-                        case Applied():
-                            await s.rollback()
-                            raise RuntimeError(
-                                'locked-read miss classifier returned APPLIED'
-                            )
-                        case _ as unreachable:
-                            assert_never(unreachable)
-                else:
-                    attempt_num = (ctx_row.retry_count or 0) + 1
-                    db_now = ctx_row.db_now or now
-                    attempt_started_at = ctx_row.started_at or db_now
-                    attempt_worker = {
-                        'worker_id': ctx_row.claimed_by_worker_id,
-                        'worker_hostname': ctx_row.worker_hostname,
-                        'worker_pid': ctx_row.worker_pid,
-                        'worker_process_name': ctx_row.worker_process_name,
-                    }
+                )
+            case AlreadyApplied(task_id=task_id):
+                return _phase2_of_a_replay(
+                    await self._load_persisted_task_result(task_id),
+                )
+            case LostClaim() | SourceStateConflict() | TaskAbsent():
+                return Ok(None)
+            case _ as unreachable:
+                assert_never(unreachable)
 
-                    if retry_error is not None:
-                        failure_command = _refused_retry_command(
-                            retry_error,
-                            context,
-                        )
-                        should_retry_r = await self._should_retry_task(
-                            task_id,
-                            retry_error,
-                            s,
-                        )
-                        if is_err(should_retry_r):
-                            return Err(
-                                self._finalize_error_from_retry_error(
-                                    should_retry_r.err_value,
-                                    ok=ok,
-                                    result_json_str=result_json_str,
-                                    failed_reason=failed_reason,
-                                ),
-                            )
-                        if should_retry_r.ok_value:
-                            retry_r = await self._schedule_retry(
-                                task_id,
-                                s,
-                                queue_name=ctx_row.queue_name or 'default',
-                            )
-                            if is_err(retry_r):
-                                return Err(
-                                    self._finalize_error_from_retry_error(
-                                        retry_r.err_value,
-                                        ok=ok,
-                                        result_json_str=result_json_str,
-                                        failed_reason=failed_reason,
-                                    ),
-                                )
-                            match retry_r.ok_value:
-                                case 'scheduled':
-                                    await s.execute(
-                                        UPSERT_TASK_ATTEMPT_SQL,
-                                        {
-                                            'task_id': task_id,
-                                            'attempt': attempt_num,
-                                            'outcome': 'FAILED',
-                                            'will_retry': True,
-                                            'started_at': attempt_started_at,
-                                            'finished_at': db_now,
-                                            'error_code': failure_command.error_code,
-                                            'error_message': retry_error.message,
-                                            'failed_reason': None,
-                                            **attempt_worker,
-                                        },
-                                    )
-                                    await s.commit()
-                                    return Ok(None)
-                                case 'reaper_reclaimed':
-                                    logger.warning(
-                                        'Task %s retry aborted during finalize: '
-                                        'task no longer RUNNING',
-                                        task_id,
-                                    )
-                                    await s.commit()
-                                    return Ok(None)
-                                case 'expired':
-                                    logger.info(
-                                        'Task %s retry skipped: good_until '
-                                        'exceeded; terminalizing failure',
-                                        task_id,
-                                    )
-                        locked_command = failure_command
+    async def _write_fused_batch(
+        self,
+        batch: FusedCompletionBatch,
+        runner: StatementRunner,
+    ) -> Result[tuple[TerminalizationOutcome, ...], BatchWriteError]:
+        """Write ``batch`` on ``runner``: a held connection of a steady
+        flusher, or a checkout per statement. The write of the batcher."""
+        return await apply_fused_batch(runner, batch)
 
-                    assert locked_command is not None
-                    assert tr is not None
-                    match (report, locked_command):
-                        case (
-                            WorkerLevelFailure(detail=detail),
-                            FailLockedTask(error_code=error_code),
-                        ):
-                            message = detail or 'Worker failure'
-                            attempt_outcome = 'WORKER_FAILURE'
-                            attempt_error_code = error_code
-                            attempt_error_message = message
-                            attempt_failed_reason = message
-                        case (
-                            ResultUndecodable(detail=detail),
-                            FailLockedTask(error_code=error_code),
-                        ):
-                            attempt_outcome = 'FAILED'
-                            attempt_error_code = error_code
-                            attempt_error_message = detail
-                            attempt_failed_reason = None
-                        case (
-                            ErrorProduced(error=error),
-                            FailLockedTask(error_code=error_code),
-                        ):
-                            attempt_outcome = 'FAILED'
-                            attempt_error_code = error_code
-                            attempt_error_message = error.message
-                            attempt_failed_reason = None
-                        case (ResultProduced(), CompleteLockedTask()):
-                            attempt_outcome = 'COMPLETED'
-                            attempt_error_code = None
-                            attempt_error_message = None
-                            attempt_failed_reason = None
-                        case unexpected:
-                            raise RuntimeError(
-                                'terminal report and locked command disagree: '
-                                f'{type(unexpected[0]).__name__} / '
-                                f'{type(unexpected[1]).__name__}'
-                            )
+    async def _complete_plain_success(
+        self,
+        command: CompleteTaskFused,
+        *,
+        outcome_data: dict[str, Any],
+    ) -> Result[_PersistedTaskOutcome | None, _FinalizeError]:
+        """Write a plain success through the finalize batcher.
 
-                    await s.execute(
-                        UPSERT_TASK_ATTEMPT_SQL,
-                        {
-                            'task_id': task_id,
-                            'attempt': attempt_num,
-                            'outcome': attempt_outcome,
-                            'will_retry': False,
-                            'started_at': attempt_started_at,
-                            'finished_at': db_now,
-                            'error_code': attempt_error_code,
-                            'error_message': attempt_error_message,
-                            'failed_reason': attempt_failed_reason,
-                            **attempt_worker,
-                        },
-                    )
-                    applied_outcome = await apply_async(
-                        await s.connection(),
-                        locked_command,
-                    )
-                    match applied_outcome:
-                        case Applied():
-                            await s.commit()
-                            return Ok(
-                                _PersistedTaskOutcome(
-                                    result=tr,
-                                    task_name=str(ctx_row.task_name or ''),
-                                    queue_name=str(ctx_row.queue_name or 'default'),
-                                    is_workflow_task=bool(ctx_row.is_workflow_task),
-                                )
-                            )
-                        case AlreadyApplied():
-                            load_r = await self._load_persisted_task_result(
-                                task_id,
-                                session=s,
-                            )
-                            await s.rollback()
-                            if is_err(load_r):
-                                return Err(load_r.err_value)
-                            return load_r
-                        case LostClaim() | SourceStateConflict() | TaskAbsent():
-                            await s.rollback()
-                            return Ok(None)
-                        case _ as unreachable:
-                            assert_never(unreachable)
+        Returns after the statement of the row's batch returned: ``Applied``
+        is committed, and a refusal wrote nothing. A plain success has no
+        phase 2: its capacity NOTIFY commits with the row. ``outcome_data``
+        is the child outcome that a phase-1 retry replays.
 
-            return Ok(None)
+        Outcomes:
+            Ok(None): the row has its outcome (any of the five).
+            Err(PHASE1): ``BatchRolledBack`` (retryable when its cause may
+                clear), ``BatchCommitUnknown`` (retryable: the replay finds
+                the row ``AlreadyApplied`` when it committed), or a defect of
+                the batch write (retryable when it is a connection error).
+        """
+        try:
+            written = await self._finalize_batcher.complete(command)
         except Exception as exc:
             return Err(
                 self._make_finalize_error(
-                    task_id=task_id,
+                    task_id=command.task_id,
                     stage=_FINALIZE_STAGE_PHASE1,
                     message='Failed to persist terminal task state',
                     retryable=is_retryable_connection_error(exc),
                     data={
                         'exception_type': type(exc).__name__,
                         'exception': str(exc)[:500],
-                        'outcome': {
-                            'ok': ok,
-                            'result_json_str': result_json_str,
-                            'failed_reason': failed_reason,
-                        },
+                        'outcome': outcome_data,
                     },
                 )
             )
+        match written:
+            case Ok(outcome):
+                match outcome:
+                    case (
+                        Applied()
+                        | AlreadyApplied()
+                        | LostClaim()
+                        | SourceStateConflict()
+                        | TaskAbsent()
+                    ):
+                        return Ok(None)
+                    case _ as unreachable:
+                        assert_never(unreachable)
+            case Err(error):
+                return Err(
+                    self._batch_write_error(command.task_id, error, outcome_data)
+                )
+
+    def _batch_write_error(
+        self,
+        task_id: str,
+        error: BatchWriteError,
+        outcome_data: dict[str, Any],
+    ) -> _FinalizeError:
+        """The phase-1 error of a failed batch write of ``task_id``. Pure."""
+        match error:
+            case BatchRolledBack(cause=cause):
+                retryable = error.retryable
+                write_state = 'ROLLED_BACK'
+            case BatchCommitUnknown(cause=cause):
+                retryable = True
+                write_state = 'COMMIT_UNKNOWN'
+            case _ as unreachable:
+                assert_never(unreachable)
+        return self._make_finalize_error(
+            task_id=task_id,
+            stage=_FINALIZE_STAGE_PHASE1,
+            message='Failed to persist terminal task state',
+            retryable=retryable,
+            data={
+                'batch_write': write_state,
+                'exception_type': type(cause.error).__name__,
+                'exception': str(cause.error)[:500],
+                'outcome': outcome_data,
+            },
+        )
+
+    async def _persist_failed_attempt(
+        self,
+        failure: FailLockedTask,
+        report: WorkerLevelFailure | ResultUndecodable | ErrorProduced,
+        tr: TaskResult[Any, TaskError],
+        *,
+        claimed_at: datetime,
+        child: _Phase1Input,
+    ) -> Result[_PersistedTaskOutcome | None, _FinalizeError]:
+        """Phase 1 of a failed attempt: one read and one statement.
+
+        For a task error the retry facts are read first, and the policy
+        decides the retry; a worker-level failure and an undecodable result
+        are never retried, so they skip the read. ``finish_failed_attempt``
+        writes the attempt row with the retry or the terminal failure, both
+        in autocommit. The result routes phase 2: a workflow task's failure
+        and a replay of a committed failure return the persisted outcome; a
+        plain task's failure (its capacity wake is sent), a retry and a
+        refusal return ``Ok(None)``. Database errors become a phase-1 error,
+        retryable when the connection failed; its data keeps the child's
+        report for the replay.
+        """
+        task_id = failure.task_id
+        try:
+            async with self.sf() as s:
+                connection = await autocommit_connection(s)
+                match report:
+                    case ErrorProduced():
+                        retry = await self._finalize_retry_request(
+                            connection,
+                            task_id,
+                            failure.error_code,
+                            claimed_at,
+                        )
+                    case WorkerLevelFailure() | ResultUndecodable():
+                        retry = NoRetry()
+                    case _ as unreachable:
+                        assert_never(unreachable)
+                outcome = await finish_failed_attempt(
+                    connection,
+                    finish_for(
+                        failure,
+                        claimed_at=claimed_at,
+                        retry=retry,
+                        attempt=_attempt_failure_of(report),
+                    ),
+                )
+                return await self._after_failed_attempt(s, outcome, retry, tr)
+        except Exception as exc:
+            return Err(
+                self._phase1_error(
+                    task_id,
+                    'Failed to persist terminal task state',
+                    exc,
+                    child,
+                )
+            )
+
+    async def _finalize_retry_request(
+        self,
+        connection: AsyncConnection,
+        task_id: str,
+        error_code: str | None,
+        claimed_at: datetime,
+    ) -> RetryRequest:
+        """The retry that the policy asks for, from the unlocked read.
+
+        A row that this claim generation does not hold RUNNING gets
+        ``NoRetry``: the finish then classifies it and writes nothing.
+        Database errors raise.
+        """
+        attempt = await read_in_flight_attempt(
+            connection,
+            task_id=task_id,
+            worker_id=self.worker_instance_id,
+            claimed_at=claimed_at,
+        )
+        match attempt:
+            case RunningAttempt():
+                return retry_request_for(
+                    attempt,
+                    error_code,
+                    RetryPlacement.SAME_CLASS,
+                )
+            case ClaimedAttempt() | AttemptNotHeld():
+                return NoRetry()
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    async def _after_failed_attempt(
+        self,
+        s: AsyncSession,
+        outcome: FailedAttemptOutcome,
+        retry: RetryRequest,
+        tr: TaskResult[Any, TaskError],
+    ) -> Result[_PersistedTaskOutcome | None, _FinalizeError]:
+        """Route the outcome of a failed-attempt finish to phase 2 or to done.
+
+        Database errors of the replay read raise.
+        """
+        match outcome:
+            case FailureApplied(after=after):
+                match after:
+                    case CapacityWoken():
+                        return Ok(None)
+                    case PhaseTwoOwed(task_name=task_name, queue_name=queue_name):
+                        return Ok(
+                            _PersistedTaskOutcome(
+                                result=tr,
+                                task_name=task_name,
+                                queue_name=queue_name,
+                            )
+                        )
+                    case _ as unreachable:
+                        assert_never(unreachable)
+            case RetryScheduled():
+                self._wake_when_retry_due(outcome, retry)
+                return Ok(None)
+            case AlreadyApplied(task_id=task_id):
+                return _phase2_of_a_replay(
+                    await self._load_persisted_task_result(task_id, session=s),
+                )
+            case LostClaim() | SourceStateConflict() | TaskAbsent():
+                return Ok(None)
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def _phase1_error(
+        self,
+        task_id: str,
+        message: str,
+        exc: Exception,
+        child: _Phase1Input,
+    ) -> _FinalizeError:
+        """The phase-1 error of a failed write. Its data keeps the child's
+        report, which the phase-1 retry replays. Pure."""
+        return self._make_finalize_error(
+            task_id=task_id,
+            stage=_FINALIZE_STAGE_PHASE1,
+            message=message,
+            retryable=is_retryable_connection_error(exc),
+            data={
+                'exception_type': type(exc).__name__,
+                'exception': str(exc)[:500],
+                'outcome': {
+                    'ok': child.ok,
+                    'result_json_str': child.result_json_str,
+                    'failed_reason': child.failed_reason,
+                },
+            },
+        )
 
     async def _finalize_workflow_phase(
         self,
@@ -1007,62 +1622,48 @@ class FinalizeMixin:
         tr: 'TaskResult[Any, TaskError]',
         *,
         queue_name: str = 'default',
-        is_workflow_task: bool = True,
         task_name: str,
     ) -> Result[None, _FinalizeError]:
-        """Phase 2 of finalization: workflow advancement and worker wake notifications.
+        """Phase 2 of a workflow task: advance its node and wake its queue, in
+        one transaction.
 
-        Parent propagation queued by the completion check is driven AFTER
-        this transaction commits, one fresh transaction per ancestor level
-        (_drive_parent_propagations) — the pre-denest in-transaction
-        recursion accumulated FOR UPDATE locks root-ward across the chain.
+        Only a workflow task reaches phase 2: the statement that ends a plain
+        task sends its capacity wake. The first statement of the transaction
+        sends this task's capacity wake (``QueueWake``), and the COMMIT
+        delivers it. Parent propagation queued by the
+        completion check is driven AFTER this transaction commits, one fresh
+        transaction per ancestor level (_drive_parent_propagations) — the
+        pre-denest in-transaction recursion accumulated FOR UPDATE locks
+        root-ward across the chain.
         """
-        from horsies.core.workflows.engine import pop_pending_parent_propagations
+        from horsies.core.workflows.engine import (
+            QueueWake,
+            pop_pending_parent_propagations,
+        )
 
         pending_propagations: list[str] = []
         try:
             async with self.sf() as s:
-                # Handle workflow task completion (if this task is part of a workflow)
+                # The wake makes the workers of this queue check their
+                # capacity and backlog (workers no longer listen on
+                # task_new). It is part of the first statement: when the
+                # server refuses it, the statement fails, and the error goes
+                # to the phase-2 error below, never past it.
                 await self._handle_workflow_task_if_needed(
                     s,
                     task_id,
                     tr,
-                    is_workflow_task=is_workflow_task,
                     task_name=task_name,
+                    wake=QueueWake(
+                        channel=f'task_queue_{queue_name or "default"}',
+                        payload=f'capacity:{task_id}',
+                    ),
                 )
-
-                # Proactively wake workers of this queue to re-check
-                # capacity/backlog (workers no longer listen on task_new).
-                try:
-                    payload = f'capacity:{task_id}'
-                    await s.execute(
-                        NOTIFY_TASK_QUEUE_SQL,
-                        {'c2': f'task_queue_{queue_name or "default"}', 'p': payload},
-                    )
-                except Exception:
-                    # Non-fatal if NOTIFY fails; workflow state is already persisted.
-                    pass
-
-                # Trigger automatically sends NOTIFY on UPDATE; commit to flush NOTIFYs
+                # The COMMIT delivers the NOTIFYs of the transaction.
                 await s.commit()
                 pending_propagations = pop_pending_parent_propagations(s)
         except Exception as exc:
-            return Err(
-                self._make_finalize_error(
-                    task_id=task_id,
-                    stage=_FINALIZE_STAGE_PHASE2,
-                    message='Workflow finalize phase failed after task terminal state persisted',
-                    retryable=is_retryable_connection_error(exc),
-                    data={
-                        'task_id': task_id,
-                        'phase': 'finalize_phase_2',
-                        'queue_name': queue_name or 'default',
-                        'is_workflow_task': is_workflow_task,
-                        'exception_type': type(exc).__name__,
-                        'exception': str(exc)[:500],
-                    },
-                )
-            )
+            return Err(self._phase2_error(task_id, queue_name, exc=exc))
 
         # Outside the try deliberately: a phase2 retry cannot re-reach
         # propagation past the task-level terminal CAS, so propagation must
@@ -1072,13 +1673,37 @@ class FinalizeMixin:
             await self._drive_parent_propagations(pending_propagations)
         return Ok(None)
 
+    def _phase2_error(
+        self,
+        task_id: str,
+        queue_name: str,
+        *,
+        exc: Exception,
+    ) -> _FinalizeError:
+        """The phase-2 error of ``exc``: retryable when it is a transient
+        connection error."""
+        return self._make_finalize_error(
+            task_id=task_id,
+            stage=_FINALIZE_STAGE_PHASE2,
+            message='Workflow finalize phase failed after task terminal state persisted',
+            retryable=is_retryable_connection_error(exc),
+            data={
+                'task_id': task_id,
+                'phase': 'finalize_phase_2',
+                'queue_name': queue_name or 'default',
+                'exception_type': type(exc).__name__,
+                'exception': str(exc)[:500],
+            },
+        )
+
     async def _load_persisted_task_result(
         self,
         task_id: str,
         *,
         session: AsyncSession | None = None,
-    ) -> Result[_PersistedTaskOutcome, _FinalizeError]:
-        """Load the typed terminal result and its phase-2 routing facts.
+    ) -> Result[_PersistedTerminal, _FinalizeError]:
+        """Load what a persisted terminal row owes: a workflow task's typed
+        result and phase-2 routing facts, or nothing for a plain task.
 
         Values come from the task row rather than retry metadata. A NULL task
         name becomes ``''``; the workflow engine then degrades to an ``Any``
@@ -1156,8 +1781,10 @@ class FinalizeMixin:
         self,
         task_id: str,
         session: AsyncSession,
-    ) -> Result[_PersistedTaskOutcome, _FinalizeError]:
-        """Read and decode a persisted result through the supplied transaction."""
+    ) -> Result[_PersistedTerminal, _FinalizeError]:
+        """Read and decode a persisted result through the supplied transaction.
+
+        A plain task owes nothing, so its result is not decoded."""
         row = await self._read_persisted_task_row(task_id, session)
         if row is None:
             return Err(
@@ -1168,6 +1795,11 @@ class FinalizeMixin:
                     retryable=False,
                 )
             )
+        match row.is_workflow_task:
+            case False:
+                return Ok(_PlainTaskDone())
+            case True:
+                pass
         status = row.status
         raw_result = row.result
         if status not in ('COMPLETED', 'FAILED', 'EXPIRED') or raw_result is None:
@@ -1229,7 +1861,6 @@ class FinalizeMixin:
                     result=TaskResult(err=err_value),
                     task_name=str(source_task_name or ''),
                     queue_name=str(row.queue_name or 'default'),
-                    is_workflow_task=bool(row.is_workflow_task),
                 )
             )
         source_task = (
@@ -1274,7 +1905,6 @@ class FinalizeMixin:
                 result=decoded_tr,
                 task_name=str(source_task_name or ''),
                 queue_name=str(row.queue_name or 'default'),
-                is_workflow_task=bool(row.is_workflow_task),
             )
         )
 
@@ -1283,10 +1913,13 @@ class FinalizeMixin:
 
         Total: ``err`` is ``Any`` because the background-task done-callback
         hands over an untyped ``Err`` payload; the isinstance guard is the
-        boundary defense. Retry coroutines are spawned on the running loop
-        (done-callbacks only execute while the loop runs, so there is no
-        closed-loop raise window); their failures terminate at the
-        done-callback.
+        boundary defense. Each ``FinalizeStage`` has its retry bound
+        (``_max_retries_of``) and its retry (``_spawn_finalize_retry``).
+        After the last retry of a TASK_TIMEOUT write, crash recovery writes
+        the row (``_recover_timed_out_row``). Retry coroutines are spawned on
+        the running loop (done-callbacks only execute while the loop runs, so
+        there is no closed-loop raise window); their failures terminate at
+        the done-callback.
         """
         if not isinstance(err, _FinalizeError):
             logger.error(
@@ -1296,20 +1929,7 @@ class FinalizeMixin:
 
         stage = err.stage
         task_id = err.task_id
-        if stage == _FINALIZE_STAGE_FUTURE:
-            max_attempts = _FINALIZE_FUTURE_MAX_RETRIES
-        elif stage == _FINALIZE_STAGE_PHASE1:
-            max_attempts = _FINALIZE_PHASE1_MAX_RETRIES
-        elif stage == _FINALIZE_STAGE_PHASE2:
-            max_attempts = _FINALIZE_PHASE2_MAX_RETRIES
-        elif stage == _FINALIZE_STAGE_PARENT:
-            max_attempts = _FINALIZE_PARENT_MAX_RETRIES
-        else:
-            logger.error(
-                f'Finalize error ({task_id}) stage={stage}: {err.message}; data={_finalize_data_for_log(err.data)}'
-            )
-            return
-
+        max_attempts = _max_retries_of(stage)
         key = (task_id, stage)
         attempts = self._finalize_retry_attempts.get(key, 0)
 
@@ -1332,6 +1952,7 @@ class FinalizeMixin:
                 f'{err.message}; data={_finalize_data_for_log(err.data)}'
             )
             self._clear_finalize_retry_attempts(task_id, stage)
+            self._after_the_last_retry(err)
             return
 
         attempt_no = attempts + 1
@@ -1344,31 +1965,49 @@ class FinalizeMixin:
             f'Finalize retry scheduled for task {task_id} stage={stage} '
             f'({attempt_no}/{max_attempts}) in {delay:.1f}s: {err.message}'
         )
+        self._spawn_finalize_retry(err, delay)
 
-        if stage == _FINALIZE_STAGE_FUTURE:
-            self._spawn_background(
-                self._retry_finalize_future(err, delay),
-                name=f'finalize-retry-future-{task_id}',
-                finalizer=True,
-            )
-        elif stage == _FINALIZE_STAGE_PHASE1:
-            self._spawn_background(
-                self._retry_finalize_phase1(err, delay),
-                name=f'finalize-retry-phase1-{task_id}',
-                finalizer=True,
-            )
-        elif stage == _FINALIZE_STAGE_PARENT:
-            self._spawn_background(
-                self._retry_finalize_parent(err, delay),
-                name=f'finalize-retry-parent-{task_id}',
-                finalizer=True,
-            )
-        else:
-            self._spawn_background(
-                self._retry_finalize_phase2(err, delay),
-                name=f'finalize-retry-phase2-{task_id}',
-                finalizer=True,
-            )
+    def _after_the_last_retry(self, err: _FinalizeError) -> None:
+        """Hand the row of a TASK_TIMEOUT write whose retries all failed to
+        crash recovery. The other stages end with the log of the caller."""
+        match err.stage:
+            case FinalizeStage.TIMEOUT:
+                self._spawn_background(
+                    self._recover_timed_out_row(err),
+                    name=f'finalize-timeout-recovery-{err.task_id}',
+                    finalizer=True,
+                )
+            case (
+                FinalizeStage.FUTURE
+                | FinalizeStage.PHASE1
+                | FinalizeStage.PHASE2
+                | FinalizeStage.PARENT
+            ):
+                return
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def _spawn_finalize_retry(self, err: _FinalizeError, delay_s: float) -> None:
+        """Spawn the retry of the stage of ``err`` after ``delay_s``."""
+        retry: Coroutine[Any, Any, None]
+        match err.stage:
+            case FinalizeStage.FUTURE:
+                retry, label = self._retry_finalize_future(err, delay_s), 'future'
+            case FinalizeStage.TIMEOUT:
+                retry, label = self._retry_finalize_timeout(err, delay_s), 'timeout'
+            case FinalizeStage.PHASE1:
+                retry, label = self._retry_finalize_phase1(err, delay_s), 'phase1'
+            case FinalizeStage.PARENT:
+                retry, label = self._retry_finalize_parent(err, delay_s), 'parent'
+            case FinalizeStage.PHASE2:
+                retry, label = self._retry_finalize_phase2(err, delay_s), 'phase2'
+            case _ as unreachable:
+                assert_never(unreachable)
+        self._spawn_background(
+            retry,
+            name=f'finalize-retry-{label}-{err.task_id}',
+            finalizer=True,
+        )
 
     async def _retry_finalize_future(self, err: _FinalizeError, delay_s: float) -> None:
         """Retry requeue after a child future failed before producing an outcome.
@@ -1382,13 +2021,13 @@ class FinalizeMixin:
         if self._stop.is_set():
             return
 
-        claimed_at_raw = (err.data or {}).get('claimed_at')
+        failure_code, retry = future_retry_write(err.data)
         outcome = await self._recover_worker_future_failure(
             err.task_id,
             f'Retry after future-stage finalize error: {err.message}',
-            claimed_at=(
-                claimed_at_raw if isinstance(claimed_at_raw, datetime) else None
-            ),
+            claimed_at=kept_claim_time(err.data),
+            failure_code=failure_code,
+            retry=retry,
         )
         if outcome in (
             _RequeueOutcome.REQUEUED,
@@ -1414,6 +2053,82 @@ class FinalizeMixin:
                 data=data,
             )
         )
+
+    async def _retry_finalize_timeout(
+        self,
+        err: _FinalizeError,
+        delay_s: float,
+    ) -> None:
+        """Run the failed TASK_TIMEOUT write of an ended attempt again.
+
+        The write is ``_record_task_timeout``, with the ``timeout_ms``, the
+        retry placement and the claim generation that the error kept. A
+        settled row clears the retries; a failed write goes back to
+        ``_handle_finalize_error``, which bounds the retries and hands the
+        row to crash recovery after the last one. A stop drops the retry,
+        as for every finalize retry.
+        """
+        await self._sleep_with_stop(delay_s)
+        if self._stop.is_set():
+            return
+        timeout_ms, retry, claimed_at = timeout_retry_write(err.data)
+        match await self._record_task_timeout(
+            err.task_id,
+            timeout_ms,
+            claimed_at,
+            retry=retry,
+        ):
+            case _TimeoutSettled():
+                self._clear_finalize_retry_attempts(
+                    err.task_id,
+                    _FINALIZE_STAGE_TIMEOUT,
+                )
+            case _TimeoutWriteFailed():
+                await self._handle_finalize_error(err)
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    async def _recover_timed_out_row(self, err: _FinalizeError) -> None:
+        """Crash recovery of an ended attempt whose TASK_TIMEOUT write failed
+        on every retry.
+
+        The writer of crash recovery reads the row under its lock and writes
+        TASK_TIMEOUT, so the retry policy decides on that code; the retry runs
+        at the placement that the error kept. A database error there becomes
+        a future-stage error whose data keeps the same code and placement
+        (``future_retry_data``).
+        """
+        timeout_ms, retry, claimed_at = timeout_retry_write(err.data)
+        code: CrashRecoveryCode = OutcomeCode.TASK_TIMEOUT
+        reason = (
+            f'Task reached timeout_ms={timeout_ms}, and the TASK_TIMEOUT write '
+            f'failed {_FINALIZE_TIMEOUT_MAX_RETRIES + 1} times'
+        )
+        match await self._recover_worker_future_failure(
+            err.task_id,
+            reason,
+            claimed_at=claimed_at,
+            failure_code=code,
+            retry=retry,
+        ):
+            case (
+                _RequeueOutcome.REQUEUED
+                | _RequeueOutcome.TERMINAL_REPLAYED
+                | _RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED
+            ):
+                return
+            case _RequeueOutcome.DB_ERROR:
+                await self._handle_finalize_error(
+                    self._make_finalize_error(
+                        task_id=err.task_id,
+                        stage=_FINALIZE_STAGE_FUTURE,
+                        message=reason,
+                        retryable=True,
+                        data=future_retry_data(code, retry, claimed_at),
+                    ),
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
 
     async def _retry_finalize_phase1(self, err: _FinalizeError, delay_s: float) -> None:
         """Retry phase-1 terminal persistence from captured child outcome payload.
@@ -1484,7 +2199,6 @@ class FinalizeMixin:
             err.task_id,
             persisted.result,
             queue_name=persisted.queue_name,
-            is_workflow_task=persisted.is_workflow_task,
             task_name=persisted.task_name,
         )
         if is_err(phase2_r):
@@ -1506,16 +2220,21 @@ class FinalizeMixin:
         if self._stop.is_set():
             return
 
-        load_r = await self._load_persisted_task_result(err.task_id)
+        load_r = _phase2_of_a_replay(
+            await self._load_persisted_task_result(err.task_id),
+        )
         if is_err(load_r):
             await self._handle_finalize_error(load_r.err_value)
             return
         persisted = load_r.ok_value
+        if persisted is None:
+            # A plain task: the statement that ended it sent its wake.
+            self._clear_finalize_retry_attempts(err.task_id, _FINALIZE_STAGE_PHASE2)
+            return
         phase2_r = await self._finalize_workflow_phase(
             err.task_id,
             persisted.result,
             queue_name=persisted.queue_name,
-            is_workflow_task=persisted.is_workflow_task,
             task_name=persisted.task_name,
         )
         if is_err(phase2_r):
@@ -1598,19 +2317,18 @@ class FinalizeMixin:
         task_id: str,
         result: 'TaskResult[Any, TaskError]',
         *,
-        is_workflow_task: bool = True,
         task_name: str,
+        wake: QueueWake,
     ) -> None:
         """
-        Check if task is part of a workflow and handle accordingly.
+        Advance the node of a workflow task that reached a terminal status,
+        and send ``wake`` in the same statement as the node write.
 
         This method is called after a task completes (success or failure).
         It updates the workflow_task record and triggers dependency resolution.
 
-        The old pre-flight existence check is gone: the engine's single
-        locate+lock+CAS statement returns zero rows for a non-workflow
-        task and the call no-ops, at the same one-statement cost the
-        check itself had.
+        The engine's single locate+lock+CAS statement returns no node for a
+        task whose node or workflow row is missing, and the call no-ops.
 
         Raises:
             Exception: DB and engine errors propagate to the single caller,
@@ -1620,14 +2338,11 @@ class FinalizeMixin:
         """
         from horsies.core.workflows.engine import on_workflow_task_complete
 
-        if not is_workflow_task:
-            return
-
-        # Handle workflow task completion
         await on_workflow_task_complete(
             session,
             task_id,
             result,
             self.broker,
             task_name=task_name,
+            wake=wake,
         )

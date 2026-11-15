@@ -123,7 +123,46 @@ list_schedules(broker)
   OUTCOME / DOMAIN) expands server-side from the library's own code registry —
   DOMAIN is the complement of every built-in code.
 - Worker/health surfaces reuse the app APIs: `list_worker_states_async`,
-  `ping_workers_async`, `ping_database_async`, `get_worker_state_history_async`.
+  `ping_workers_async`, `ping_database_async`, `get_worker_state_history_async`,
+  `get_class_report_async`.
+- A snapshot's `slot_health` is `AllSlotsServing()`, `SlotsDown(slots)` (the
+  worker is degraded) or `SlotHealthNotRecorded()` (a worker version without
+  the field). Each `DownSlot` has `slot`, `cause` (`ResourceShortage(errno_name)`
+  or `ThreadStartRefused()`), `detail` (at most 2400 characters),
+  `down_since` and `failed_boots`. A slot is down
+  when its child start failed for a cause that can clear; it takes no task and
+  boots again after a growing wait. Match all three variants.
+- A snapshot's `class_capacity` is `ClassBudgets(budgets)` or
+  `ClassCapacityNotRecorded()`. Each `ClassBudget` has `budget` (an
+  `Execution`), `capacity` (children or seats in service) and `serves` (the
+  classes whose rows it claims). Empty `budgets`: the worker serves no class.
+- Fleet check: `app.get_class_coverage_async()` →
+  `ClassCoverage(checked_at, live_workers, not_recorded, streams)`. One `StreamCoverage`
+  per (queue, class) with PENDING rows; `state` is
+  `StreamServed(workers, capacity)`, `StreamWithoutCapacity(workers)` (every
+  serving child or seat is down) or `StreamUnserved()` (no live worker has
+  the queue and a budget that serves the class). Live = latest snapshot at
+  most `WORKER_STATE_LIVE_WINDOW_S` (120) s old;
+  `worker_state_snapshot_interval_ms` is at most half of it (60,000 ms), so a
+  running worker stays live when a snapshot write is late by up to half the
+  window. Each reaper pass runs it and
+  logs unserved at error, without-capacity at warning, once per 5 min per
+  (queue, class) per worker. A live snapshot with no `class_capacity` (a
+  worker version that does not record budgets) leaves that worker out:
+  `not_recorded` holds `ClassesNotRecorded(worker_id, snapshot_at)` by id, it
+  is not in `live_workers`, and the reaper names it in one warning per 5 min.
+  Fix unserved `ISOLATED` with a worker that has
+  isolated children (shared rows go back to the queue as `ISOLATED` when
+  their task's class changed); a shared class with children of that class or
+  isolated children.
+- `app.get_class_report_async()` → `ClassReport(checked_at, streams,
+  workers, not_recorded)`. `PendingStream.wait` is `OldestWaiting(enqueued_at, wait)` or
+  `NoneDue(next_due_at)`; `WorkerClassLoad.budgets` holds `BudgetLoad(budget,
+  capacity, serves, in_flight)` with `.free` = `max(0, capacity -
+  in_flight)`. Both reads fail with `MONITORING_QUERY_FAILED`
+  (`retryable=False`) when a live snapshot has an unreadable
+  `class_capacity`, naming the worker. Web: `GET /api/workers/classes`
+  (`not_recorded` lists the left-out workers).
 - A snapshot's `recovery_config` embeds three health payloads:
   `partition_coverage` (coverage-ensure outcome; fails before fewer than two
   future partitions remain), `partition_pruning`
@@ -208,7 +247,8 @@ The web process holds ONE `PostgresListener` (~2 connections, lazy start) on
 coalesces notifies (250 ms), and fans out over `GET /api/events` (SSE).
 Events are invalidation signals — `{"topic", "ids"}` — never data. Client
 polling is a fallback that activates only while the stream is down; the
-schedules table always polls (its table has no trigger).
+schedules table always polls (its table has no trigger). A task's start
+(RUNNING) sends no event; its creation, other status changes and its end do.
 
 ## Deployment Footprint
 
@@ -246,7 +286,10 @@ from horsies.monitoring import (
     StatusCount, FacetValue, ErrorFacet, Facets, GroupRow, Breakdown,
     WorkflowRunSummary, WorkflowNodeInfo, WorkflowEdge, WorkflowRunDetail,
     WorkflowTaskDetail, WorkerStateInfo, WorkerPingInfo, LivenessReport,
-    ScheduleStateInfo, WorkerHistoryPoint,
+    ScheduleStateInfo, WorkerHistoryPoint, DownSlotInfo, ClassReportInfo,
+    PendingStreamInfo, WorkerClassLoadInfo, BudgetLoadInfo, StreamServedInfo,
+    StreamNoCapacityInfo, StreamUnservedInfo, StreamWaitingInfo,
+    StreamNoneDueInfo,
     # Page, limit and absence types
     TaskPage, BreakdownLimit, WorkflowRunsLimit,
     TaskDetailNotFound, TaskAbsenceReason, PageRefused,

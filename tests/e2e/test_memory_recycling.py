@@ -1,8 +1,8 @@
-"""E2E: max_memory_per_child_mb recycles children by retained RSS.
+"""E2E: a recycle-above memory limit recycles children by retained RSS.
 
 alloc_pid_task retains memory per child and returns its PID. With a memory
 threshold set, a child's RSS ratchets up across tasks until it crosses the
-threshold and the child recycles, so distinct PIDs exceed `processes` — while
+threshold and the child recycles, so distinct PIDs exceed the child count — while
 every task still reaches a terminal state. A task that raises after allocating
 is recorded as a failure without breaking the pool, and the worker keeps
 recycling and processing.
@@ -21,11 +21,13 @@ from horsies.core.types.result import is_err
 from tests.e2e.helpers.assertions import assert_err, assert_ok, unwrap_send
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.tasks import basic as basic_tasks
+from tests.e2e.tasks.profiles import RECYCLE_ABOVE_MEMORY
 
 DEFAULT_INSTANCE = 'tests.e2e.tasks.instance:app'
+# RECYCLE_ABOVE_MEMORY runs 2 isolated children, each replaced when its RSS
+# reaches profiles.MEMORY_RECYCLE_THRESHOLD_MB.
 PROCESSES = 2
 BURST = 16
-THRESHOLD_MB = 300
 ALLOC_MB = 120
 
 
@@ -49,8 +51,7 @@ def test_max_memory_per_child_rotates_pids() -> None:
     """Children recycle as retained RSS crosses the threshold; all tasks OK."""
     with run_worker(
         DEFAULT_INSTANCE,
-        processes=PROCESSES,
-        extra_args=[f'--max-memory-per-child-mb={THRESHOLD_MB}'],
+        profile=RECYCLE_ABOVE_MEMORY,
         ready_check=_ready_check(),
     ):
         handles = [
@@ -78,8 +79,7 @@ def test_memory_recycle_survives_task_exceptions() -> None:
     """
     with run_worker(
         DEFAULT_INSTANCE,
-        processes=PROCESSES,
-        extra_args=[f'--max-memory-per-child-mb={THRESHOLD_MB}'],
+        profile=RECYCLE_ABOVE_MEMORY,
         ready_check=_ready_check(),
     ):
         raise_handles = [

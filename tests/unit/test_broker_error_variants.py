@@ -26,6 +26,7 @@ from horsies.core.brokers.result_types import (
     BrokerInvalidJsonPayload,
     BrokerInvalidTaskOptions,
     BrokerListenerDisabled,
+    BrokerWaitInsideTask,
     BrokerLoopRunnerFailed,
     BrokerNoTypeAvailable,
     BrokerNotAttached,
@@ -98,6 +99,7 @@ def _every_variant(cause: BaseException) -> list[BrokerOperationError]:
         BrokerAsyncContext(message=message),
         BrokerLoopRunnerFailed(message=message, exception=cause),
         BrokerListenerDisabled(message=message),
+        BrokerWaitInsideTask(message=message),
     ]
 
 
@@ -332,6 +334,7 @@ RESULT_CODE_OF: dict[type[Any], tuple[BuiltInTaskCode, bool]] = {
     BrokerNoTypeAvailable: (ContractCode.NO_TYPE_AVAILABLE, True),
     BrokerInvalidJsonPayload: (OperationalErrorCode.RESULT_DESERIALIZATION_ERROR, True),
     BrokerEventLoopLimit: (RetrievalCode.EVENT_LOOP_LIMIT, False),
+    BrokerWaitInsideTask: (RetrievalCode.WAIT_INSIDE_TASK, False),
 }
 
 

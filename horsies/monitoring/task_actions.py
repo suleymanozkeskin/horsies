@@ -56,7 +56,7 @@ from horsies.core.lifecycle.outcomes import (
     SourceStateConflict,
     TaskAbsent,
 )
-from horsies.core.lifecycle.persistence import apply_async
+from horsies.core.lifecycle.persistence import LOCK_TASK_SQL, apply_async
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.types.status import TaskStatus
 from horsies.core.utils.db import is_retryable_connection_error
@@ -205,9 +205,10 @@ class TaskCancelled:
     was_status: TaskStatus
 
 
-# Locks the row for the rest of the transaction. The diagnosis reads
-# ``is_workflow_task`` here; the status it reports comes from the cancel
-# outcome, which decodes it.
+# Locks the row for the rest of the transaction, after the task advisory
+# lock (``LOCK_TASK_SQL``), which every move function takes before its row
+# lock. The diagnosis reads ``is_workflow_task`` here; the status it reports
+# comes from the cancel outcome, which decodes it.
 _LOCK_TASK_SQL = text("""
     SELECT is_workflow_task
     FROM horsies_tasks
@@ -373,6 +374,7 @@ async def cancel_task(
 
     try:
         async with resources.session_factory() as session:
+            await session.execute(LOCK_TASK_SQL, {'task_id': task_id})
             locked = (await session.execute(_LOCK_TASK_SQL, {'id': task_id})).first()
             if locked is None:
                 return await _diagnose_live_miss(

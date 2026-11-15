@@ -30,6 +30,11 @@ from horsies.core.utils.loop_runner import (
 )
 from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.utils.wait_timeout import wait_timeout_seconds
+from horsies.core.process_role import (
+    ProcessRole,
+    process_role,
+    wait_inside_task_message,
+)
 from horsies.core.brokers.listener import PostgresListener
 from horsies.core.brokers.resources import (
     BrokerResources,
@@ -277,6 +282,22 @@ def _event_loop_limit_task_result(
         err=TaskError(
             error_code=RetrievalCode.EVENT_LOOP_LIMIT,
             message=f'workflow {workflow_id}: {loop_limit.describe()}',
+        ),
+    )
+
+
+def _wait_inside_task_result(workflow_id: str, operation: str) -> TaskResult[Any, TaskError]:
+    """Build a TaskResult with WAIT_INSIDE_TASK for a workflow result wait.
+
+    Nothing ran, and nothing waited. The result is not cached anywhere.
+    """
+    return TaskResult(
+        err=TaskError(
+            error_code=RetrievalCode.WAIT_INSIDE_TASK,
+            message=wait_inside_task_message(
+                f'WorkflowHandle.{operation}() for workflow {workflow_id}',
+            ),
+            data={'workflow_id': workflow_id},
         ),
     )
 
@@ -921,7 +942,14 @@ class WorkflowHandle(Generic[OutT]):
             ``OutcomeCode.WORKFLOW_OUTPUT_SKIPPED``.
             Otherwise: TaskResult containing dict of terminal task results. A
             SKIPPED terminal task has an entry with that same code.
+            In a process that runs task bodies: ``RetrievalCode.WAIT_INSIDE_TASK``
+            at once, as the first check, with no wait.
         """
+        if process_role() is ProcessRole.RUNS_TASK_BODIES:
+            return cast(
+                'TaskResult[OutT, TaskError]',
+                _wait_inside_task_result(self.workflow_id, 'get'),
+            )
         return self._sync_task_result_call(self.get_async, 'get', timeout_ms)
 
     async def get_async(
@@ -929,9 +957,17 @@ class WorkflowHandle(Generic[OutT]):
     ) -> TaskResult[OutT, TaskError]:
         """Async version of get().
 
-        A timeout_ms that is not None or an int from 0 to MAX_TASK_TIMEOUT_MS
-        returns ``RetrievalCode.INVALID_INPUT`` before any read.
+        In a process that runs task bodies it returns
+        ``RetrievalCode.WAIT_INSIDE_TASK`` at once, as its first check, with
+        no wait. Elsewhere, a timeout_ms that is not None or an int from 0 to
+        MAX_TASK_TIMEOUT_MS returns ``RetrievalCode.INVALID_INPUT`` before any
+        read.
         """
+        if process_role() is ProcessRole.RUNS_TASK_BODIES:
+            return cast(
+                'TaskResult[OutT, TaskError]',
+                _wait_inside_task_result(self.workflow_id, 'get_async'),
+            )
 
         start = time.monotonic()
         # timeout_ms=0 means "0ms budget": return the result if already

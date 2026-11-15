@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Annotated, Any, ForwardRef, Literal, Optional
 from unittest.mock import MagicMock, patch
 
@@ -35,6 +36,10 @@ from horsies.core.task_decorator import create_task_wrapper
 from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.worker import child_runner
+from horsies.core.worker.task_loop import TaskLoop
+from tests.fixtures.run_return import wire_of
+
+CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
 
 Positive = Annotated[int, Field(gt=0)]
 Upper = Annotated[str, AfterValidator(str.upper)]
@@ -451,19 +456,20 @@ def _run_child(
             '_confirm_ownership_and_set_running',
             MagicMock(return_value=None),
         ),
-        patch.object(child_runner, '_start_heartbeat_thread', MagicMock()),
         patch.object(child_runner, '_mark_task_finalizing', MagicMock()),
         patch.object(child_runner, 'get_current_app', MagicMock(return_value=app)),
     ):
-        return child_runner._run_task_entry(
-            task_name=task_name,
-            args_json='[]',
-            kwargs_json=json.dumps(kwargs),
-            task_id='task-id',
-            database_url='postgresql://unused/unused',
-            master_worker_id='worker',
-            runner_heartbeat_interval_ms=100,
-            is_workflow_task=True,
+        return wire_of(
+            child_runner._run_task_entry(
+                task_name=task_name,
+                args_json='[]',
+                kwargs_json=json.dumps(kwargs),
+                task_id='task-id',
+                master_worker_id='worker',
+                is_workflow_task=True,
+                claimed_at=CLAIMED_AT,
+                task_loop=TaskLoop(),
+            )
         )
 
 

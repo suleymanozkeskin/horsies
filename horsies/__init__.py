@@ -4,7 +4,7 @@ from importlib.metadata import version as _pkg_version
 
 __version__: str = _pkg_version("horsies")
 
-from .core.app import Horsies, ChildProcessStartHook
+from .core.app import Horsies, ChildProcessStartHook, SharedAsyncChildStartHook
 from .core.models.app import AppConfig
 from .core.models.broker import PostgresConfig
 from .core.models.tasks import (
@@ -17,6 +17,7 @@ from .core.models.tasks import (
     BuiltInTaskCode,
     SubWorkflowError,
     RetryPolicy,
+    Execution,
     TaskInfo,
     TaskAttemptInfo,
 )
@@ -106,6 +107,31 @@ from .core.models.payload import PayloadPolicy
 from .core.models.recovery import RecoveryConfig
 from .core.models.retention import RetentionConfig
 from .core.models.resilience import WorkerResilienceConfig
+from .core.models.worker_profile import (
+    ClaimLimits,
+    ExecutorThreads,
+    ExecutorThreadsFromSeats,
+    IsolatedChildren,
+    IsolatedPool,
+    IsolatedRecycle,
+    MemoryLimit,
+    NoIsolatedChildren,
+    NoMemoryLimit,
+    NoSharedAsyncChildren,
+    NoSharedThreadChildren,
+    NoTaskLimit,
+    ParentPool,
+    PoolSize,
+    PoolSizeFromSeats,
+    SharedAsyncChildren,
+    SharedPool,
+    SharedRecycle,
+    SharedThreadChildren,
+    TaskLimit,
+    WorkerProfile,
+)
+from .core.worker.config import ChildPreload
+from .core.worker.cpu_placement import ParentCpu
 from .core.types.status import TaskStatus, TaskAttemptOutcome, TASK_TERMINAL_STATES
 from .core.errors import ErrorCode, ValidationReport, MultipleValidationErrors
 from .core.exception_mapper import ExceptionMapper
@@ -151,13 +177,48 @@ from .core.brokers.result_types import (
     BrokerAsyncContext,
     BrokerLoopRunnerFailed,
     BrokerListenerDisabled,
+    BrokerWaitInsideTask,
     broker_error_cause,
 )
 from .core.types.error_detail import NoCause
 from .core.models.health import (
+    WORKER_STATE_LIVE_WINDOW_S,
+    AllSlotsServing,
+    ClassBudget,
+    ClassBudgets,
+    ClassCapacity,
+    ClassCapacityNotRecorded,
     DatabasePing,
+    DownSlot,
+    SlotHealth,
+    SlotHealthNotRecorded,
+    SlotsDown,
     WorkerPong,
     WorkerStateSnapshot,
+)
+from .core.models.class_coverage import (
+    BudgetLoad,
+    ClassCoverage,
+    ClassesNotRecorded,
+    ClassReport,
+    NoneDue,
+    OldestWaiting,
+    PendingStream,
+    StreamCoverage,
+    StreamCoverageState,
+    StreamServed,
+    StreamUnserved,
+    StreamWait,
+    StreamWithoutCapacity,
+    WorkerClassLoad,
+)
+from .core.models.boot_failure import (
+    ClearableBootCause,
+    ResourceShortage,
+    ShortageErrno,
+    SpawnFailed,
+    TaskLoopCreateFailed,
+    ThreadStartRefused,
 )
 from .core.history.reads.detail import TaskAbsenceReason
 from .core.history.rerun.operations import (
@@ -186,6 +247,7 @@ __all__ = [
     # Core
     'Horsies',
     'ChildProcessStartHook',
+    'SharedAsyncChildStartHook',
     'AppConfig',
     'PostgresConfig',
     'TaskResult',
@@ -197,6 +259,7 @@ __all__ = [
     'BuiltInTaskCode',
     'SubWorkflowError',
     'RetryPolicy',
+    'Execution',
     'TaskInfo',
     'TaskAttemptInfo',
     'QueueMode',
@@ -289,6 +352,30 @@ __all__ = [
     'RetentionChoice',
     'RetentionConfig',
     'WorkerResilienceConfig',
+    # Worker profiles
+    'WorkerProfile',
+    'IsolatedChildren',
+    'NoIsolatedChildren',
+    'IsolatedRecycle',
+    'SharedAsyncChildren',
+    'NoSharedAsyncChildren',
+    'SharedThreadChildren',
+    'NoSharedThreadChildren',
+    'SharedRecycle',
+    'IsolatedPool',
+    'SharedPool',
+    'ParentPool',
+    'PoolSize',
+    'PoolSizeFromSeats',
+    'ExecutorThreads',
+    'ExecutorThreadsFromSeats',
+    'TaskLimit',
+    'NoTaskLimit',
+    'MemoryLimit',
+    'NoMemoryLimit',
+    'ClaimLimits',
+    'ChildPreload',
+    'ParentCpu',
     # Exception mapper
     'ExceptionMapper',
     # Task handle
@@ -332,11 +419,42 @@ __all__ = [
     'BrokerAsyncContext',
     'BrokerLoopRunnerFailed',
     'BrokerListenerDisabled',
+    'BrokerWaitInsideTask',
     'broker_error_cause',
     # Health / liveness API
     'DatabasePing',
     'WorkerPong',
     'WorkerStateSnapshot',
+    'SlotHealth',
+    'AllSlotsServing',
+    'SlotsDown',
+    'SlotHealthNotRecorded',
+    'DownSlot',
+    'ClassCapacity',
+    'ClassBudgets',
+    'ClassBudget',
+    'ClassCapacityNotRecorded',
+    'WORKER_STATE_LIVE_WINDOW_S',
+    'ClassCoverage',
+    'ClassesNotRecorded',
+    'StreamCoverage',
+    'StreamCoverageState',
+    'StreamServed',
+    'StreamWithoutCapacity',
+    'StreamUnserved',
+    'ClassReport',
+    'PendingStream',
+    'StreamWait',
+    'OldestWaiting',
+    'NoneDue',
+    'WorkerClassLoad',
+    'BudgetLoad',
+    'ClearableBootCause',
+    'ResourceShortage',
+    'ShortageErrno',
+    'SpawnFailed',
+    'TaskLoopCreateFailed',
+    'ThreadStartRefused',
     # Rerun
     'rerun_task',
     'RerunTask',

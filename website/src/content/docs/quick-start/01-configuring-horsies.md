@@ -9,6 +9,7 @@ tags: [quickstart, configuration]
 
 - PostgreSQL 14+
 - Python 3.13+
+- libpq 17+ for a time limit on the cancel request of an interrupted query. The `horsies[pg-binary]` extra bundles its own libpq. See [psycopg and libpq](/horsies/configuration/broker-config/#psycopg-and-libpq)
 
 ## Installation
 
@@ -20,16 +21,21 @@ uv add horsies
 
 ```python
 from pydantic import SecretStr
-from horsies import Horsies, AppConfig, PostgresConfig
+from horsies import Horsies, AppConfig, IsolatedChildren, PostgresConfig, WorkerProfile
 
 config = AppConfig(
     broker=PostgresConfig(
         database_url=SecretStr("postgresql+psycopg://user:password@localhost:5432/mydb"),
     ),
+    worker_profiles={
+        "default": WorkerProfile(isolated=IsolatedChildren(count=8)),
+    },
 )
 
 app = Horsies(config)
 ```
+
+`worker_profiles` names the settings that a worker starts with: here, one profile with 8 children. See [Worker Profiles](../../workers/worker-profiles).
 
 ## PgBouncer / Transaction Pooling
 
@@ -111,5 +117,5 @@ Or export the decorated functions from `myapp.tasks.__init__.py` so importing `m
 ## Running the Worker
 
 ```bash
-horsies worker myapp.config:app --processes=8 --loglevel=INFO
+horsies worker myapp.config:app --profile default --loglevel=INFO
 ```

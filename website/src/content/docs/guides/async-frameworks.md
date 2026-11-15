@@ -71,7 +71,7 @@ A sync call in this endpoint returns `Err` with `ASYNC_CONTEXT`. Nothing is enqu
 
 ### Use the Sync Forms Only in Plain `def` Endpoints
 
-FastAPI runs a plain `def` endpoint in a thread pool. That thread has no event loop, so the sync form is allowed. The sync form runs on the broker's own runner loop.
+FastAPI runs a plain `def` endpoint in a thread pool. That thread has no event loop, so the sync form is allowed. A sync send without an idempotency key writes on the endpoint's thread, through the sync send pool of the broker. The first send of the broker, a send with an idempotency key, and the other sync calls, for example `TaskHandle.get()`, run on the broker's own runner loop.
 
 ```python
 @api.post("/welcome-blocking/{address}")
@@ -83,11 +83,11 @@ def welcome_blocking(address: str) -> dict[str, str]:
             raise HTTPException(status_code=503, detail=send_error.code.value)
 ```
 
-Prefer one form per application. A mix of both forms opens one more connection set. See [Connection Ceiling](/horsies/configuration/broker-config/#connection-ceiling).
+Prefer one form per application. The async form opens connections in the set of the server's event loop. The sync form opens them in the set of the runner loop and in the sync send pool. A mix of both forms can open all three. See [Connection Ceiling](/horsies/configuration/broker-config/#connection-ceiling).
 
 ## The Event-Loop Limit
 
-A broker keeps one resource set (pools and a listener) for each event loop that calls it. It serves at most 5 open caller loops, plus its own sync runner loop (`MAX_CALLER_EVENT_LOOPS = 5`).
+A broker keeps one resource set (pools and a listener) for each event loop that calls it. It serves at most 5 open caller loops, plus its own sync runner loop and, in a worker child, the task loop (`MAX_CALLER_EVENT_LOOPS = 5`).
 
 A call from one more open loop returns `EVENT_LOOP_LIMIT` in the error type of that call. Nothing runs. The error clears when one of the open loops closes.
 

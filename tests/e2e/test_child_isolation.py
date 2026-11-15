@@ -31,11 +31,14 @@ from tests.e2e.helpers.db import wait_for_status
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.tasks import instance_child_isolation as isolation
 from tests.e2e.tasks import instance_child_isolation_prefetch as prefetch
+from tests.e2e.tasks.profiles import drain_profile_name, preload_profile_name
 
 INSTANCE = 'tests.e2e.tasks.instance_child_isolation:app'
 PREFETCH_INSTANCE = 'tests.e2e.tasks.instance_child_isolation_prefetch:app'
 SLOW_START_S = 60.0
 FINISH_TIMEOUT_S = 40.0
+# Past running_stale_threshold_ms of the isolation instance (6 s).
+GIL_HOLD_S = 8
 
 
 @dataclass(slots=True)
@@ -60,16 +63,21 @@ def start_path(request: pytest.FixtureRequest) -> Iterator[None]:
     _start_path.mode = ChildPreload.NONE
 
 
-def _worker(
-    instance_path: str,
-    *,
-    extra_args: list[str] | None = None,
-    **options: Any,
-) -> Any:
-    start_path_argument = f'--child-preload={_start_path.mode.value}'
+def _worker(instance_path: str, *, children: int, **options: Any) -> Any:
+    """Start a worker with ``children`` isolated children that start the way
+    the ``start_path`` parameter names."""
     return run_worker(
         instance_path,
-        extra_args=[*(extra_args or []), start_path_argument],
+        profile=preload_profile_name(children, _start_path.mode),
+        **options,
+    )
+
+
+def _drain_worker(instance_path: str, **options: Any) -> Any:
+    """Start a worker with one child and a drain timeout of 1 second."""
+    return run_worker(
+        instance_path,
+        profile=drain_profile_name(_start_path.mode),
         **options,
     )
 
@@ -174,7 +182,7 @@ async def test_timeout_leaves_healthy_siblings_running(
     """#375: one timeout does not touch the other children."""
     with _worker(
         INSTANCE,
-        processes=4,
+        children=4,
         ready_check=_ready_check(isolation.healthcheck),
         timeout=SLOW_START_S,
     ):
@@ -206,7 +214,7 @@ async def test_crash_leaves_healthy_siblings_running(
     """#375: one crash fails that task only, at once and without the reaper."""
     with _worker(
         INSTANCE,
-        processes=3,
+        children=3,
         ready_check=_ready_check(isolation.healthcheck),
         timeout=SLOW_START_S,
     ):
@@ -234,13 +242,29 @@ async def test_crash_leaves_healthy_siblings_running(
 
 @pytest.mark.e2e
 @pytest.mark.asyncio(loop_scope='function')
+async def test_a_child_refuses_a_result_wait_on_every_start_path() -> None:
+    """Each start path marks the child, so a task cannot wait for another task."""
+    with _worker(
+        INSTANCE,
+        children=1,
+        ready_check=_ready_check(isolation.healthcheck),
+        timeout=SLOW_START_S,
+    ):
+        handle = unwrap_send(await isolation.wait_refused_in_child.send_async())
+        result = await handle.get_async(timeout_ms=int(FINISH_TIMEOUT_S * 1000))
+
+        assert result.unwrap() is True
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
 async def test_child_stops_when_the_parent_dies(
     isolation_broker: PostgresBroker,
 ) -> None:
     """#410: no orphan keeps running, heartbeating, or stamping the row."""
     with _worker(
         INSTANCE,
-        processes=1,
+        children=1,
         ready_check=_ready_check(isolation.healthcheck),
         timeout=SLOW_START_S,
     ):
@@ -252,6 +276,50 @@ async def test_child_stops_when_the_parent_dies(
         await _until(lambda: not _alive(child), timeout_s=5.0)
 
 
+async def _beats_from_the_worker_process(broker: PostgresBroker, task_id: str) -> int:
+    """Runner beats that the worker process wrote. The child's first beat
+    names the child pid in its sender id; the worker's beats name the worker."""
+    async with current_resources(broker).session_factory() as session:
+        count = await session.scalar(
+            text("""
+                SELECT COUNT(*) FROM horsies_heartbeats
+                WHERE task_id = CAST(:id AS uuid)
+                  AND role = 'runner'
+                  AND position(':' IN sender_id) = 0
+            """),
+            {'id': task_id},
+        )
+    assert isinstance(count, int)
+    return count
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_a_task_that_holds_the_gil_is_not_failed_as_stale(
+    isolation_broker: PostgresBroker,
+) -> None:
+    """The worker process writes runner heartbeats, so C code that holds the
+    child's GIL past running_stale_threshold_ms (6 s here) cannot stop them."""
+    with _worker(
+        INSTANCE,
+        children=1,
+        ready_check=_ready_check(isolation.healthcheck),
+        timeout=SLOW_START_S,
+    ):
+        handle = unwrap_send(await isolation.gil_hold.send_async(seconds=GIL_HOLD_S))
+        await wait_for_status(
+            current_resources(isolation_broker).session_factory,
+            handle.task_id,
+            'COMPLETED',
+            timeout_s=FINISH_TIMEOUT_S,
+        )
+
+        assert await _beats_from_the_worker_process(
+            isolation_broker,
+            handle.task_id,
+        ) >= GIL_HOLD_S // 2
+
+
 @pytest.mark.e2e
 @pytest.mark.asyncio(loop_scope='function')
 async def test_sigterm_to_every_process_still_drains(
@@ -260,7 +328,7 @@ async def test_sigterm_to_every_process_still_drains(
     """#411: systemd and Heroku signal every process, and tasks must finish."""
     with _worker(
         INSTANCE,
-        processes=1,
+        children=1,
         ready_check=_ready_check(isolation.healthcheck),
         timeout=SLOW_START_S,
     ):
@@ -288,7 +356,7 @@ async def test_timeout_does_not_count_the_wait_for_a_slot(
     """#412: each task runs 1.5 s of its 2 s limit, wherever it waited."""
     with _worker(
         PREFETCH_INSTANCE,
-        processes=1,
+        children=1,
         ready_check=_ready_check(prefetch.healthcheck),
         timeout=SLOW_START_S,
     ):
@@ -317,7 +385,7 @@ async def test_timeout_kill_spares_the_next_task(
     session_factory = current_resources(isolation_prefetch_broker).session_factory
     with _worker(
         PREFETCH_INSTANCE,
-        processes=1,
+        children=1,
         ready_check=_ready_check(prefetch.healthcheck),
         timeout=SLOW_START_S,
     ):
@@ -344,7 +412,7 @@ async def test_timeout_kill_reaches_task_subprocesses(
     marker = tmp_path / 'subprocess_pid'
     with _worker(
         INSTANCE,
-        processes=1,
+        children=1,
         ready_check=_ready_check(isolation.healthcheck),
         timeout=SLOW_START_S,
     ):
@@ -372,7 +440,7 @@ async def test_forked_helper_does_not_hide_a_dead_child(
     """#415: the worker sees the death while the helper still lives."""
     with _worker(
         INSTANCE,
-        processes=1,
+        children=1,
         ready_check=_ready_check(isolation.healthcheck),
         timeout=SLOW_START_S,
     ):
@@ -402,7 +470,7 @@ async def test_multiprocessing_works_inside_a_task(
     """A task may start its own processes from the child program."""
     with _worker(
         INSTANCE,
-        processes=1,
+        children=1,
         ready_check=_ready_check(isolation.healthcheck),
         timeout=SLOW_START_S,
     ):
@@ -418,13 +486,11 @@ async def test_multiprocessing_works_inside_a_task(
 async def test_drain_deadline_records_the_crash_at_once(
     isolation_broker: PostgresBroker,
 ) -> None:
-    """A task past --drain-timeout fails now, with no wait for the reaper."""
-    with _worker(
+    """A task past the drain timeout fails now, with no wait for the reaper."""
+    with _drain_worker(
         INSTANCE,
-        processes=1,
         ready_check=_ready_check(isolation.healthcheck),
         timeout=SLOW_START_S,
-        extra_args=['--drain-timeout=1'],
     ):
         handle = unwrap_send(await isolation.sleep_task.send_async(seconds=60.0))
         child = await _running_child(isolation_broker, handle.task_id)

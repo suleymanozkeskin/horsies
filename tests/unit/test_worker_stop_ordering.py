@@ -6,14 +6,22 @@ then finish anyway, and its result would be dropped: the row would stay RUNNING
 until a reaper recorded the finished work as WORKER_CRASHED.
 """
 
+# pyright: reportPrivateUsage=false
+
 from __future__ import annotations
 
 import asyncio
+import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from horsies.core.worker.config import WorkerConfig
+from horsies.core.worker.finalize_batch import (
+    FINALIZE_BATCH_CLOSE_TIMEOUT_S,
+    FlushersCancelled,
+    FlushersDrained,
+)
 from horsies.core.worker.slots import StopReport
 from horsies.core.worker.worker import Worker
 
@@ -105,3 +113,48 @@ async def test_stop_force_cancels_finalizers_without_waiting() -> None:
     await worker.stop(force=True)
 
     assert persisted == [], 'force=True must not wait for finalizers'
+
+
+@pytest.mark.asyncio
+async def test_stop_closes_the_finalize_batcher_after_the_finalizer_drain() -> None:
+    """A finalizer that the drain cancels leaves its row in the batcher; the
+    batcher closes after the drain, so its flushers still write that row."""
+    worker = _make_worker()
+    finalizers_at_close: list[int] = []
+
+    async def close(timeout_s: float) -> FlushersDrained:
+        finalizers_at_close.append(len(worker._finalizer_tasks))
+        assert timeout_s == FINALIZE_BATCH_CLOSE_TIMEOUT_S
+        return FlushersDrained()
+
+    worker._finalize_batcher.close = close  # type: ignore[method-assign]
+    block = asyncio.Event()
+
+    async def finalizer() -> None:
+        await block.wait()
+
+    worker._spawn_background(finalizer(), name='finalize-test', finalizer=True)
+    await asyncio.sleep(0.05)
+
+    await worker.stop(finalizer_timeout_s=0.05)
+
+    assert finalizers_at_close == [0]
+
+
+@pytest.mark.asyncio
+async def test_stop_logs_the_rows_that_the_batcher_close_left(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    worker = _make_worker()
+    worker._finalize_batcher.close = AsyncMock(  # type: ignore[method-assign]
+        return_value=FlushersCancelled(rows_in_flight=3, rows_unsent=2),
+    )
+
+    with caplog.at_level(logging.WARNING, logger='horsies.worker'):
+        await worker.stop()
+
+    assert any(
+        '3 rows in a cancelled statement' in record.getMessage()
+        and '2 rows not sent' in record.getMessage()
+        for record in caplog.records
+    )

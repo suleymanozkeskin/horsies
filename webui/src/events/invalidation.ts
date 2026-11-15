@@ -32,8 +32,9 @@ export const TOPIC_INVALIDATIONS: Record<DataTopic, readonly QueryRoot[]> = {
 };
 
 /** Roots refreshed after a reconnect, when arbitrarily many events were missed.
- * Includes the task aggregates — they are event-decoupled, but a reconnect
- * means unbounded staleness, which is exactly when one refresh is due.
+ * Includes the task aggregates and the class report — they are
+ * event-decoupled, but a reconnect means unbounded staleness, which is
+ * exactly when one refresh is due.
  * Deliberately excludes the manual liveness ping (an active round trip the
  * operator triggers) and the fetch-once workflow-name list. */
 export const RECONNECT_SWEEP_ROOTS: readonly QueryRoot[] = [
@@ -44,6 +45,7 @@ export const RECONNECT_SWEEP_ROOTS: readonly QueryRoot[] = [
     QUERY_ROOT.taskStats,
     QUERY_ROOT.taskFacets,
     QUERY_ROOT.taskBreakdown,
+    QUERY_ROOT.classReport,
   ]),
 ];
 

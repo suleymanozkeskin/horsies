@@ -4,33 +4,39 @@ Sections:
 A. _serialization_error_response
 B. _debug_imports_log
 C. _child_initializer
-D. _heartbeat_worker
 E. _get_workflow_status_for_task
 F. _handle_workflow_stop_before_start (wildcard branch)
 I. _run_task_entry error paths
 J. Workflow injection deserialization errors in _run_task_entry
+K. Async task calls in _run_task_entry
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Generator
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pydantic import BaseModel, SecretStr, field_validator
 from pydantic_core import PydanticCustomError
 
 from horsies.core.app import Horsies
-from horsies.core.codec.json_io import SerializationError
+from horsies.core.codec.json_io import SerializationError, loads_json
+from horsies.core.codec.typed import decode_task_result
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.worker_profile import ResolvedPool
 from horsies.core.models.tasks import (
+    MAX_CANCEL_GRACE_MS,
     MAX_TASK_TIMEOUT_MS,
+    MIN_CANCEL_GRACE_MS,
     MIN_TASK_TIMEOUT_MS,
     OperationalErrorCode,
     OutcomeCode,
@@ -39,21 +45,24 @@ from horsies.core.models.tasks import (
 )
 from horsies.core.types.result import Err
 from horsies.core.worker.stored_timeout import (
-    NoTimeout,
+    CancelGraceInvalid,
     OptionsUnreadable,
-    StoredTimeout,
-    TaskTimeout,
     TimeoutRefusal,
     TimeoutValueInvalid,
 )
+from horsies.core.task_decorator import TaskBodyKind
+from horsies.core.worker.task_loop import LoopOpen, TaskLoop
 from horsies.core.worker.child_runner import (
     _debug_imports_log,
     _get_workflow_status_for_task,
     _handle_workflow_stop_before_start,
-    _heartbeat_worker,
     _run_task_entry,
     _serialization_error_response,
 )
+from horsies.core.worker.run_return import SetRunning, StoppedBeforeRunning
+from tests.fixtures.run_return import wire_of
+
+CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +112,12 @@ class _FakePool:
         self._conn = conn
 
     @contextmanager
-    def connection(self) -> Generator[_FakeConn, None, None]:
+    def connection(
+        self,
+        timeout: float | None = None,
+    ) -> Generator[_FakeConn, None, None]:
+        """``timeout`` is the wait for a connection, as in psycopg_pool."""
+        _ = timeout
         yield self._conn
 
 
@@ -124,6 +138,30 @@ class _SequenceCursor(_FakeCursor):
 
     def fetchone(self) -> Any:
         return self._rows.pop(0)
+
+
+class _OrderedConn(_FakeConn):
+    """Records each commit and rollback among the statements of its cursor,
+    so a test sees where a transaction ends."""
+
+    def commit(self) -> None:
+        super().commit()
+        self._cursor.queries.append(('COMMIT', ()))
+
+    def rollback(self) -> None:
+        super().rollback()
+        self._cursor.queries.append(('ROLLBACK', ()))
+
+
+def _apply_recording(outcomes: list[Any]) -> MagicMock:
+    """An ``apply_sync`` that records each command by its class name among
+    the statements of the cursor, and returns ``outcomes`` in order."""
+
+    def apply(cursor: _FakeCursor, command: object) -> Any:
+        cursor.queries.append((type(command).__name__, ()))
+        return outcomes.pop(0)
+
+    return MagicMock(side_effect=apply)
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +299,8 @@ class TestChildInitializer:
             sys_path_roots=[],
             loglevel=20,
             database_url='postgresql://localhost/test',
+            pool=ResolvedPool(min_size=0, max_size=2, check=True),
+            task_send_pool=2,
         )
 
         mock_set_level.assert_called_once_with(20)
@@ -299,10 +339,9 @@ class TestChildInitializer:
             sys_path_roots=[],
             loglevel=20,
             database_url='postgresql://localhost/test',
+            pool=ResolvedPool(min_size=0, max_size=1, check=False),
+            task_send_pool=2,
             connect_kwargs={'keepalives': 1, 'prepare_threshold': None},
-            child_pool_min_size=0,
-            child_pool_max_size=1,
-            child_pool_check=False,
         )
 
         mock_init_pool.assert_called_once_with(
@@ -341,11 +380,57 @@ class TestChildInitializer:
             sys_path_roots=[],
             loglevel=20,
             database_url='postgresql://localhost/test',
+            pool=ResolvedPool(min_size=0, max_size=2, check=True),
+            task_send_pool=2,
         )
 
         inherited_broker.discard_inherited_resources.assert_called_once_with()
         assert mocks['app']._broker is None
         mocks['app'].set_role.assert_called_once_with('worker')
+
+    @patch('horsies.core.worker.child_runner.set_current_app')
+    @patch('horsies.core.worker.child_runner._locate_app')
+    @patch('horsies.core.worker.child_runner.import_module')
+    @patch('horsies.core.logging.configure_logging')
+    def test_an_import_time_broker_opens_the_task_send_pool(
+        self,
+        _mock_logging: MagicMock,
+        mock_import_module: MagicMock,
+        mock_locate_app: MagicMock,
+        _mock_set_current: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The child sets the task-send pool of its kind before it imports
+        task modules, so a broker that an import builds through
+        ``app.get_broker()`` opens that pool, not the producer pool."""
+        from horsies.core.worker.child_runner import import_app_for_child
+
+        monkeypatch.delenv('HORSIES_CHILD_PROCESS', raising=False)
+        app = Horsies(
+            AppConfig(
+                broker=PostgresConfig(
+                    database_url=SecretStr('postgresql+psycopg://u:p@localhost/db'),
+                    pool_size=30,
+                    max_overflow=30,
+                ),
+            ),
+        )
+        mock_locate_app.return_value = app
+        built: list[tuple[int, int]] = []
+
+        def import_that_builds_a_broker(_name: str) -> None:
+            config = app.get_broker().config
+            built.append((config.pool_size, config.max_overflow))
+
+        mock_import_module.side_effect = import_that_builds_a_broker
+
+        returned = import_app_for_child('mymod:app', ['tasks_mod'], [], 20, 4)
+
+        try:
+            assert returned is app
+            assert built == [(4, 0)]
+        finally:
+            _ = app.get_broker().close()
 
     @patch('horsies.core.worker.child_runner._initialize_worker_pool')
     @patch('horsies.core.worker.child_runner.set_current_app')
@@ -372,6 +457,8 @@ class TestChildInitializer:
                 sys_path_roots=[],
                 loglevel=20,
                 database_url='postgresql://localhost/test',
+                pool=ResolvedPool(min_size=0, max_size=2, check=True),
+                task_send_pool=2,
             )
         mock_init_pool.assert_not_called()
 
@@ -400,6 +487,8 @@ class TestChildInitializer:
                 sys_path_roots=[],
                 loglevel=20,
                 database_url='postgresql://localhost/test',
+                pool=ResolvedPool(min_size=0, max_size=2, check=True),
+                task_send_pool=2,
             )
         mock_init_pool.assert_not_called()
 
@@ -428,6 +517,8 @@ class TestChildInitializer:
                 sys_path_roots=[],
                 loglevel=20,
                 database_url='postgresql://localhost/test',
+                pool=ResolvedPool(min_size=0, max_size=2, check=True),
+                task_send_pool=2,
             )
 
     @patch('horsies.core.worker.child_runner._initialize_worker_pool')
@@ -458,6 +549,8 @@ class TestChildInitializer:
             sys_path_roots=[],
             loglevel=20,
             database_url='postgresql://localhost/test',
+            pool=ResolvedPool(min_size=0, max_size=2, check=True),
+            task_send_pool=2,
         )
         # /tmp/tasks.py should be imported via import_by_path, not import_module
         assert mock_import_path.called
@@ -493,6 +586,8 @@ class TestChildInitializer:
             sys_path_roots=[],
             loglevel=20,
             database_url='postgresql://localhost/test',
+            pool=ResolvedPool(min_size=0, max_size=2, check=True),
+            task_send_pool=2,
         )
         # import_by_path should NOT be called because samefile returns True
         mock_import_path.assert_not_called()
@@ -538,9 +633,14 @@ class TestInitializeWorkerPoolConnectKwargs:
                 connect_kwargs=connect_kwargs,
             )
 
-        assert mock_pool.call_args.kwargs['kwargs'] == connect_kwargs
+        assert mock_pool.call_args.kwargs['kwargs'] == {
+            **connect_kwargs,
+            'autocommit': True,
+        }
 
-    def test_no_connect_kwargs_yields_empty_pool_kwargs(self) -> None:
+    def test_no_connect_kwargs_yields_an_autocommit_pool(self) -> None:
+        """Every connection of a child pool is in autocommit, and the
+        checkout check is off unless asked for."""
         from horsies.core.worker.child_pool import _initialize_worker_pool
 
         with self._reset_pool(), patch(
@@ -550,79 +650,56 @@ class TestInitializeWorkerPoolConnectKwargs:
         ):
             _initialize_worker_pool('postgresql://localhost/test')
 
-        assert mock_pool.call_args.kwargs['kwargs'] == {}
+        assert mock_pool.call_args.kwargs['kwargs'] == {'autocommit': True}
+        assert mock_pool.call_args.kwargs['check'] is None
 
+    @pytest.mark.asyncio
+    async def test_the_shared_async_pool_is_an_autocommit_pool(self) -> None:
+        from horsies.core.worker.child_pool import open_shared_async_pool
 
-# ===================================================================
-# D. _heartbeat_worker
-# ===================================================================
-
-
-@pytest.mark.unit
-class TestHeartbeatWorker:
-    """_heartbeat_worker loop and failure paths."""
-
-    def test_stops_on_event_set(self) -> None:
-        """Heartbeat thread exits without beating when stop_event is set.
-
-        The first heartbeat is inserted by the RUNNING transition
-        transaction, not by this thread, so a pre-stopped loop sends
-        nothing.
-        """
-        cursor = _FakeCursor()
-        conn = _FakeConn(cursor)
-        pool = _FakePool(conn)
-        stop = threading.Event()
-
-        with patch(
-            'horsies.core.worker.child_runner._get_worker_pool',
-            return_value=pool,
-        ):
-            stop.set()
-            _heartbeat_worker(
-                task_id='t-1',
-                database_url='unused',
-                stop_event=stop,
-                sender_worker_id='w-1',
-                heartbeat_interval_ms=100,
+        with patch('horsies.core.worker.child_pool.AsyncConnectionPool') as mock_pool:
+            mock_pool.return_value.open = AsyncMock()
+            _ = await open_shared_async_pool(
+                'postgresql://localhost/test',
+                connect_kwargs={'keepalives': 1},
+                min_size=0,
+                max_size=2,
+                check_on_checkout=False,
             )
 
-        assert cursor.queries == []
+        assert mock_pool.call_args.kwargs['kwargs'] == {
+            'keepalives': 1,
+            'autocommit': True,
+        }
+        assert mock_pool.call_args.kwargs['check'] is None
 
-    def test_continues_after_send_failure(self) -> None:
-        """Heartbeat thread keeps trying after a transient send failure."""
-        stop = threading.Event()
+    def test_a_refused_pool_thread_is_a_refused_thread_start(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The open starts the threads of the real pool. A refused start is
+        named as such, and no pool is kept."""
+        import horsies.core.worker.child_pool as child_pool
+        from horsies.core.models.boot_failure import ThreadStartRefusedError
 
-        call_count = 0
+        def refuse(_thread: threading.Thread) -> None:
+            raise RuntimeError("can't start new thread")
 
-        def _failing_pool() -> Any:
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                # First call succeeds (initial heartbeat)
-                cursor = _FakeCursor()
-                conn = _FakeConn(cursor)
-                return _FakePool(conn)
-            if call_count == 2:
-                raise RuntimeError('db down')
-            stop.set()
-            cursor = _FakeCursor()
-            conn = _FakeConn(cursor)
-            return _FakePool(conn)
-
-        with patch(
-            'horsies.core.worker.child_runner._get_worker_pool',
-            side_effect=_failing_pool,
+        with (
+            self._reset_pool(),
+            patch('horsies.core.worker.child_pool.atexit.register') as register,
         ):
-            _heartbeat_worker(
-                task_id='t-1',
-                database_url='unused',
-                stop_event=stop,
-                sender_worker_id='w-1',
-                heartbeat_interval_ms=50,  # Short interval for fast test
-            )
+            monkeypatch.setattr(threading.Thread, 'start', refuse)
+            with pytest.raises(ThreadStartRefusedError) as raised:
+                child_pool._initialize_worker_pool(  # pyright: ignore[reportPrivateUsage]
+                    'postgresql://localhost/test',
+                )
+            monkeypatch.undo()
 
-        assert call_count >= 3
+            assert raised.value.thread == 'a thread of the connection pool'
+            assert str(raised.value.refusal) == "can't start new thread"
+            assert child_pool._worker_pool is None  # pyright: ignore[reportPrivateUsage]
+            register.assert_not_called()
 
 
 # ===================================================================
@@ -678,6 +755,7 @@ class TestHandleWorkflowStopBeforeStart:
         ) as apply:
             result = _handle_workflow_stop_before_start(
                 cursor, conn, 'task-1', 'CANCELLED', 'worker-1',  # type: ignore[arg-type]
+                CLAIMED_AT,
             )
         assert result == (False, '', 'WORKFLOW_STOPPED')
         assert conn.commits == 1
@@ -705,6 +783,7 @@ class TestHandleWorkflowStopBeforeStart:
         ) as apply:
             result = _handle_workflow_stop_before_start(
                 cursor, conn, 'task-2', 'PAUSED', 'worker-1',  # type: ignore[arg-type]
+                CLAIMED_AT,
             )
         assert result == (False, '', 'WORKFLOW_STOPPED')
         assert conn.commits == 1
@@ -720,6 +799,7 @@ class TestHandleWorkflowStopBeforeStart:
         conn = _FakeConn(cursor)
         result = _handle_workflow_stop_before_start(
             cursor, conn, 'task-3', 'UNKNOWN_STATUS', 'worker-1',  # type: ignore[arg-type]
+            CLAIMED_AT,
         )
         assert result == (False, '', 'WORKFLOW_CHECK_FAILED')
         # No SQL should have been executed for the unknown branch
@@ -769,6 +849,7 @@ class TestHandleWorkflowStopBeforeStart:
         ) as apply:
             _handle_workflow_stop_before_start(
                 cursor, conn, 'task-5', 'CANCELLED', 'worker-7',  # type: ignore[arg-type]
+                CLAIMED_AT,
             )
         command = apply.call_args.args[1]
         assert isinstance(command, CancelOwnedNode)
@@ -794,7 +875,6 @@ def _make_run_task_patches(
         'horsies.core.worker.child_runner._confirm_ownership_and_set_running': MagicMock(
             return_value=ownership,
         ),
-        'horsies.core.worker.child_runner._start_heartbeat_thread': MagicMock(),
     }
 
     mock_app = MagicMock()
@@ -804,12 +884,14 @@ def _make_run_task_patches(
         )
     elif task_fn is not None:
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.__call__ = MagicMock(return_value=task_fn())
         mock_task._original_fn = task_fn
         mock_task._fn = task_fn
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
     else:
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.__call__ = MagicMock(return_value=TaskResult(ok='hello'))
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
@@ -827,9 +909,9 @@ def _run_entry_defaults() -> dict[str, Any]:
         'args_json': '[]',
         'kwargs_json': '{}',
         'task_id': 'tid-1',
-        'database_url': 'postgresql://localhost/test',
         'master_worker_id': 'w-1',
-        'runner_heartbeat_interval_ms': 100,
+        'claimed_at': CLAIMED_AT,
+        'task_loop': TaskLoop(),
     }
 
 
@@ -963,14 +1045,28 @@ class TestRunTaskEntryErrorPaths:
         self,
         _run_entry_defaults: dict[str, Any],
     ) -> None:
-        """When ownership returns a tuple, _run_task_entry returns it."""
+        """When ownership returns a tuple, _run_task_entry returns it as a
+        run that stopped before its RUNNING update."""
         sentinel = (False, '', 'CLAIM_LOST')
         patches = _make_run_task_patches(ownership=sentinel)
 
         with _apply_patches(patches):
             result = _run_task_entry(**_run_entry_defaults)
 
-        assert result == sentinel
+        assert result == StoppedBeforeRunning(sentinel)
+
+    def test_a_run_after_the_running_update_set_its_row_running(
+        self,
+        _run_entry_defaults: dict[str, Any],
+    ) -> None:
+        """A run past the ownership confirm returns SetRunning, also when the
+        task cannot be resolved."""
+        patches = _make_run_task_patches(task_missing=True)
+
+        with _apply_patches(patches):
+            result = _run_task_entry(**_run_entry_defaults)
+
+        assert isinstance(result, SetRunning)
 
     def test_task_resolution_failure(
         self,
@@ -980,7 +1076,7 @@ class TestRunTaskEntryErrorPaths:
         patches = _make_run_task_patches(task_missing=True)
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert 'KeyError' in (reason or '')
@@ -997,7 +1093,7 @@ class TestRunTaskEntryErrorPaths:
         _run_entry_defaults['args_json'] = '{{{invalid json'
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is not None and 'SerializationError' in reason
@@ -1014,7 +1110,7 @@ class TestRunTaskEntryErrorPaths:
         _run_entry_defaults['args_json'] = '"a string"'
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is not None and 'SerializationError' in reason
@@ -1045,7 +1141,7 @@ class TestRunTaskEntryErrorPaths:
         _run_entry_defaults['kwargs_json'] = '{{{bad'
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is not None and 'SerializationError' in reason
@@ -1059,7 +1155,7 @@ class TestRunTaskEntryErrorPaths:
         _run_entry_defaults['kwargs_json'] = r'{"x":"\ud800"}'
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is not None and 'lone surrogate' in reason
@@ -1076,7 +1172,7 @@ class TestRunTaskEntryErrorPaths:
         )
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is not None and 'nested deeper than' in reason
@@ -1091,7 +1187,7 @@ class TestRunTaskEntryErrorPaths:
         _run_entry_defaults['kwargs_json'] = '{"x":1e9999}'
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is not None and 'finite binary64' in reason
@@ -1106,7 +1202,7 @@ class TestRunTaskEntryErrorPaths:
         _run_entry_defaults['kwargs_json'] = '[1, 2]'
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is not None and 'SerializationError' in reason
@@ -1128,13 +1224,14 @@ class TestRunTaskEntryErrorPaths:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.task_ok_type = int
         mock_task.return_value = TaskResult(ok=42)
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
         _run_entry_defaults['kwargs_json'] = None
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         parsed = _parse_task_result(payload)
@@ -1152,12 +1249,13 @@ class TestRunTaskEntryErrorPaths:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.task_ok_type = int
         mock_task.return_value = 42
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with _apply_patches(patches):
-            ok, payload, _ = _run_task_entry(**_run_entry_defaults)
+            ok, payload, _ = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         err = _parse_task_result(payload)['err']
@@ -1174,11 +1272,12 @@ class TestRunTaskEntryErrorPaths:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.side_effect = ValueError('boom')
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is None  # exception path sets reason=None
@@ -1208,12 +1307,13 @@ class TestRunTaskEntryErrorPaths:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.task_ok_type = ok_type
         mock_task.return_value = returned
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is not None and 'holds a lone surrogate' in reason
@@ -1235,12 +1335,13 @@ class TestRunTaskEntryErrorPaths:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.task_ok_type = _EchoingModel
         mock_task.return_value = TaskResult(ok={'name': f'text{chr(0xd800)}'})
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with _apply_patches(patches):
-            ok, payload, _ = _run_task_entry(**_run_entry_defaults)
+            ok, payload, _ = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         parsed = _parse_task_result(payload)
@@ -1263,7 +1364,7 @@ class TestRunTaskEntryErrorPaths:
         )
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is None
@@ -1285,7 +1386,7 @@ class TestRunTaskEntryErrorPaths:
         )
 
         with _apply_patches(patches):
-            _, payload, _ = _run_task_entry(**_run_entry_defaults)
+            _, payload, _ = wire_of(_run_task_entry(**_run_entry_defaults))
 
         err = _parse_task_result(payload)['err']
         assert err['error_code'] == 'MY_ERROR'
@@ -1306,7 +1407,7 @@ class TestRunTaskEntryErrorPaths:
         )
 
         with _apply_patches(patches):
-            ok, payload, _ = _run_task_entry(**_run_entry_defaults)
+            ok, payload, _ = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         parsed = _parse_task_result(payload)
@@ -1326,7 +1427,7 @@ class TestRunTaskEntryErrorPaths:
         )
 
         with _apply_patches(patches):
-            _, payload, _ = _run_task_entry(**_run_entry_defaults)
+            _, payload, _ = wire_of(_run_task_entry(**_run_entry_defaults))
 
         err = _parse_task_result(payload)['err']
         assert err['error_code'] == 'MY_ERROR'
@@ -1345,7 +1446,7 @@ class TestRunTaskEntryErrorPaths:
         )
 
         with _apply_patches(patches):
-            ok, payload, _ = _run_task_entry(**_run_entry_defaults)
+            ok, payload, _ = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         parsed = _parse_task_result(payload)
@@ -1370,7 +1471,7 @@ class TestRunTaskEntryErrorPaths:
         )
 
         with _apply_patches(patches):
-            ok, payload, _ = _run_task_entry(**_run_entry_defaults)
+            ok, payload, _ = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         parsed = _parse_task_result(payload)
@@ -1385,12 +1486,13 @@ class TestRunTaskEntryErrorPaths:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task._original_fn = _constant_surrogate_task
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
         _run_entry_defaults['kwargs_json'] = json.dumps({'x': {'name': 'plain'}})
 
         with _apply_patches(patches):
-            ok, payload, _ = _run_task_entry(**_run_entry_defaults)
+            ok, payload, _ = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         parsed = _parse_task_result(payload)
@@ -1412,6 +1514,7 @@ class TestRunTaskEntryErrorPaths:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.task_ok_type = int
         mock_task.return_value = TaskResult(
             err=TaskError(
@@ -1421,7 +1524,7 @@ class TestRunTaskEntryErrorPaths:
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with _apply_patches(patches):
-            ok, payload, _ = _run_task_entry(**_run_entry_defaults)
+            ok, payload, _ = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         parsed = _parse_task_result(payload)
@@ -1436,12 +1539,13 @@ class TestRunTaskEntryErrorPaths:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.task_ok_type = str
         mock_task.side_effect = ValueError(f'text{chr(0xd800)}')
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with _apply_patches(patches):
-            ok, payload, _ = _run_task_entry(**_run_entry_defaults)
+            ok, payload, _ = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         _ = payload.encode('utf-8')
@@ -1471,6 +1575,7 @@ class TestRunTaskEntryErrorPaths:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.task_ok_type = int
 
         def _identity(x: Any) -> Any:
@@ -1482,7 +1587,7 @@ class TestRunTaskEntryErrorPaths:
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is not None and 'SerializationError' in reason
@@ -1501,11 +1606,12 @@ class TestRunTaskEntryErrorPaths:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.return_value = TaskResult(ok='success')
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is None
@@ -1518,13 +1624,14 @@ class TestRunTaskEntryErrorPaths:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.return_value = TaskResult(
             err=TaskError(error_code='CUSTOM_ERR', message='failed'),
         )
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is None
@@ -1537,6 +1644,7 @@ class TestRunTaskEntryErrorPaths:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.task_ok_type = str
         mock_task.return_value = TaskResult(ok='data')
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
@@ -1545,7 +1653,7 @@ class TestRunTaskEntryErrorPaths:
             'horsies.core.worker.child_runner.dumps_json',
             return_value=Err(SerializationError('cannot serialize')),
         ):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is not None and 'SerializationError' in reason
@@ -1574,7 +1682,7 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         })
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is not None and 'SerializationError' in reason
@@ -1593,7 +1701,7 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         })
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is not None and 'SerializationError' in reason
@@ -1617,6 +1725,7 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         patches = _make_run_task_patches(task_fn=_task_with_ctx)
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.return_value = TaskResult(ok='done')
         mock_task._original_fn = _task_with_ctx
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
@@ -1634,7 +1743,7 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         })
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is not None and 'SerializationError' in reason
@@ -1656,6 +1765,7 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         patches = _make_run_task_patches(task_fn=_task_with_ctx)
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.return_value = TaskResult(ok='done')
         mock_task._original_fn = _task_with_ctx
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
@@ -1673,7 +1783,7 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         })
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is not None and 'SerializationError' in reason
@@ -1692,6 +1802,7 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.return_value = TaskResult(ok='meta_ok')
         mock_task._original_fn = _task_with_meta
         mock_task._fn = _task_with_meta
@@ -1706,7 +1817,7 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         })
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is None
@@ -1933,7 +2044,11 @@ class TestOwnershipLostWorkflowBranch:
             'horsies.core.worker.child_runner.apply_sync',
             return_value=MagicMock(spec=Applied),
         ) as apply:
-            result = _confirm_ownership_and_set_running('task-1', 'worker-A')
+            result = _confirm_ownership_and_set_running(
+                'task-1',
+                'worker-A',
+                claimed_at=CLAIMED_AT,
+            )
 
         assert result is not None
         ok, _, reason = result
@@ -1965,11 +2080,16 @@ class TestOwnershipLostWorkflowBranch:
             'horsies.core.worker.child_runner._expire_claimed_task_before_start',
             side_effect=expire_and_commit,
         ):
-            result = _confirm_ownership_and_set_running('task-1', 'worker-A')
+            result = _confirm_ownership_and_set_running(
+                'task-1',
+                'worker-A',
+                claimed_at=CLAIMED_AT,
+            )
 
         assert result == (False, '', OutcomeCode.TASK_EXPIRED.value)
         assert conn.commits == 1
-        assert conn.rollbacks == 0
+        # The start that missed, before the expiry.
+        assert conn.rollbacks == 1
         assert not any('UPDATE horsies_workflow_tasks' in sql for sql, _ in cursor.queries)
         executed_sql = '\n'.join(sql for sql, _ in cursor.queries)
         assert 'good_until IS NULL OR good_until > now()' in executed_sql
@@ -2003,12 +2123,107 @@ class TestOwnershipLostWorkflowBranch:
             'horsies.core.worker.child_runner._expire_claimed_task_before_start',
             return_value=None,
         ):
-            result = _confirm_ownership_and_set_running('task-1', 'worker-A')
+            result = _confirm_ownership_and_set_running(
+                'task-1',
+                'worker-A',
+                claimed_at=CLAIMED_AT,
+            )
 
         assert result == (False, '', 'CLAIM_LOST')
         assert conn.commits == 0
-        assert conn.rollbacks == 1
+        # The start that missed, then the miss path.
+        assert conn.rollbacks == 2
         assert not any('UPDATE horsies_workflow_tasks' in sql for sql, _ in cursor.queries)
+
+    def test_a_missed_workflow_start_ends_its_transaction_before_the_miss_path(
+        self,
+    ) -> None:
+        """A start that returns no row can hold the row lock: its fence
+        failed after the row was locked, so its transaction ends first. The
+        expiry then runs alone in autocommit, and its task locks end with
+        it. The workflow read, the abandon and the node reset run in a new
+        transaction, which holds no task lock when the abandon asks for the
+        workflow row."""
+        from horsies.core.lifecycle.commands import AbandonOwnedNode, ExpireOwnedClaim
+        from horsies.core.lifecycle.outcomes import Applied, LostClaim
+        from horsies.core.worker.child_runner import (
+            BEGIN_SQL,
+            RESET_PAUSED_NODE_SQL,
+            WORKFLOW_STATUS_OF_TASK_SQL,
+            _confirm_ownership_and_set_running,
+            set_running_sql,
+        )
+
+        cursor = _SequenceCursor([None, _FakeRow(status='PAUSED')])
+        conn = _OrderedConn(cursor)
+        outcomes = [MagicMock(spec=LostClaim), MagicMock(spec=Applied)]
+
+        with (
+            patch(
+                'horsies.core.worker.child_runner._get_worker_pool',
+                return_value=_FakePool(conn),
+            ),
+            patch(
+                'horsies.core.worker.child_runner.apply_sync',
+                _apply_recording(outcomes),
+            ),
+        ):
+            result = _confirm_ownership_and_set_running(
+                'task-1',
+                'worker-A',
+                claimed_at=CLAIMED_AT,
+            )
+
+        assert result == (False, '', 'WORKFLOW_STOPPED')
+        assert [sql for sql, _ in cursor.queries] == [
+            BEGIN_SQL,
+            set_running_sql(True),
+            'ROLLBACK',
+            ExpireOwnedClaim.__name__,
+            BEGIN_SQL,
+            WORKFLOW_STATUS_OF_TASK_SQL,
+            AbandonOwnedNode.__name__,
+            RESET_PAUSED_NODE_SQL,
+            'COMMIT',
+        ]
+
+    def test_a_missed_plain_start_opens_no_transaction(self) -> None:
+        """A plain task starts in autocommit: the lock of its start ended with
+        the statement, and nothing is sent between the start and the
+        expiry."""
+        from horsies.core.lifecycle.commands import ExpireOwnedClaim
+        from horsies.core.lifecycle.outcomes import LostClaim
+        from horsies.core.worker.child_runner import (
+            _confirm_ownership_and_set_running,
+            set_running_sql,
+        )
+
+        cursor = _SequenceCursor([None])
+        conn = _OrderedConn(cursor)
+
+        with (
+            patch(
+                'horsies.core.worker.child_runner._get_worker_pool',
+                return_value=_FakePool(conn),
+            ),
+            patch(
+                'horsies.core.worker.child_runner.apply_sync',
+                _apply_recording([MagicMock(spec=LostClaim)]),
+            ),
+        ):
+            result = _confirm_ownership_and_set_running(
+                'task-1',
+                'worker-A',
+                is_workflow_task=False,
+                claimed_at=CLAIMED_AT,
+            )
+
+        assert result == (False, '', 'CLAIM_LOST')
+        assert [sql for sql, _ in cursor.queries] == [
+            set_running_sql(False),
+            ExpireOwnedClaim.__name__,
+            'ROLLBACK',
+        ]
 
 
 # ===================================================================
@@ -2034,7 +2249,11 @@ class TestWorkflowTaskRunningSyncFailureAborts:
             'horsies.core.worker.child_runner._get_worker_pool',
             return_value=pool,
         ):
-            result = _confirm_ownership_and_set_running('task-1', 'worker-A')
+            result = _confirm_ownership_and_set_running(
+                'task-1',
+                'worker-A',
+                claimed_at=CLAIMED_AT,
+            )
 
         assert result == (False, '', 'WORKFLOW_CHECK_FAILED')
         assert conn.commits == 0
@@ -2054,7 +2273,11 @@ class TestWorkflowTaskRunningSyncFailureAborts:
             'horsies.core.worker.child_runner._get_worker_pool',
             return_value=pool,
         ):
-            result = _confirm_ownership_and_set_running('task-1', 'worker-A')
+            result = _confirm_ownership_and_set_running(
+                'task-1',
+                'worker-A',
+                claimed_at=CLAIMED_AT,
+            )
 
         assert result is None  # None = proceed to user code
         sql_blob = '\n'.join(q[0] for q in cursor.queries)
@@ -2079,7 +2302,10 @@ class TestWorkflowTaskRunningSyncFailureAborts:
             return_value=pool,
         ):
             result = _confirm_ownership_and_set_running(
-                'task-1', 'worker-A', is_workflow_task=False,
+                'task-1',
+                'worker-A',
+                is_workflow_task=False,
+                claimed_at=CLAIMED_AT,
             )
 
         assert result is None
@@ -2139,6 +2365,7 @@ class TestRunTaskEntryWorkflowHappyPaths:
         # Consumer task whose kwarg gets injected. Real type for its
         # own return-encoding too.
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task._original_fn = _takes_upstream
         mock_task.task_ok_type = str
         mock_task.return_value = TaskResult(ok='processed')
@@ -2165,7 +2392,7 @@ class TestRunTaskEntryWorkflowHappyPaths:
         })
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is None
@@ -2182,6 +2409,7 @@ class TestRunTaskEntryWorkflowHappyPaths:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.return_value = TaskResult(ok='ctx_ok')
         mock_task._original_fn = _task_with_ctx
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
@@ -2213,7 +2441,7 @@ class TestRunTaskEntryWorkflowHappyPaths:
         })
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is None
@@ -2225,39 +2453,64 @@ class TestRunTaskEntryWorkflowHappyPaths:
     # model layer in test_workflow_handle_decode.py.)
 
 # ===================================================================
-# P. _start_heartbeat_thread
+# P. The child writes no runner heartbeat
 # ===================================================================
 
 
 @pytest.mark.unit
-class TestStartHeartbeatThread:
-    """_start_heartbeat_thread creates and starts a daemon thread."""
+class TestChildWritesNoRunnerHeartbeat:
+    """The worker process writes the runner heartbeats of a held task.
 
-    def test_creates_daemon_thread(self) -> None:
-        from horsies.core.worker.child_runner import _start_heartbeat_thread
+    The child writes only the first one, inside the RUNNING transition,
+    which is patched out here.
+    """
 
-        stop = threading.Event()
-        stop.set()  # Stop immediately
+    def test_no_heartbeat_thread_and_no_heartbeat_statement(
+        self,
+        _run_entry_defaults: dict[str, Any],
+    ) -> None:
+        names_during_run: list[str] = []
 
+        def body() -> TaskResult[str, TaskError]:
+            # Longer than two of the beat intervals the child used to have.
+            time.sleep(0.3)
+            names_during_run.extend(thread.name for thread in threading.enumerate())
+            return TaskResult(ok='done')
+
+        def call(*args: Any, **kwargs: Any) -> TaskResult[str, TaskError]:
+            return body()
+
+        task = MagicMock(side_effect=call)
+        task.task_body_kind = TaskBodyKind.DEF
+        task.task_ok_type = str
+        task._original_fn = body
+        app = MagicMock()
+        app.tasks.__getitem__ = MagicMock(return_value=task)
         cursor = _FakeCursor()
-        conn = _FakeConn(cursor)
-        pool = _FakePool(conn)
+        patches: dict[str, Any] = {
+            'horsies.core.worker.child_runner._confirm_ownership_and_set_running': MagicMock(
+                return_value=None,
+            ),
+            'horsies.core.worker.child_runner.get_current_app': MagicMock(
+                return_value=app,
+            ),
+            'horsies.core.worker.child_runner._get_worker_pool': MagicMock(
+                return_value=_FakePool(_FakeConn(cursor)),
+            ),
+        }
 
-        with patch(
-            'horsies.core.worker.child_runner._get_worker_pool',
-            return_value=pool,
-        ):
-            thread = _start_heartbeat_thread(
-                task_id='t-1',
-                database_url='unused',
-                heartbeat_stop_event=stop,
-                worker_id='w-1',
-                runner_heartbeat_interval_ms=100,
-            )
+        with _apply_patches(patches):
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
-        assert thread.daemon is True
-        assert 'heartbeat' in thread.name
-        thread.join(timeout=2)
+        assert (ok, reason) == (True, None)
+        assert _parse_task_result(payload)['ok'] == 'done'
+        assert names_during_run
+        assert not any(name.startswith('heartbeat') for name in names_during_run)
+        statements = [' '.join(sql.split()) for sql, _ in cursor.queries]
+        assert not any('horsies_heartbeats' in sql for sql in statements)
+        # The child writes the marker after the run has ended, with the work
+        # that the task left on its loop (child_main._report_run).
+        assert not any('SET finalizing_at = NOW()' in sql for sql in statements)
 
 
 # ===================================================================
@@ -2296,12 +2549,13 @@ class TestRunTaskEntryRefusalTextHoldsNoInput:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task._original_fn = _typed_count_task
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
         _run_entry_defaults['kwargs_json'] = json.dumps({'count': _INPUT_MARKER})
 
         with caplog.at_level(logging.DEBUG), _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         self._assert_no_marker(payload, reason, caplog)
@@ -2317,6 +2571,7 @@ class TestRunTaskEntryRefusalTextHoldsNoInput:
         source_task = MagicMock()
         source_task.task_ok_type = int
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.task_ok_type = str
 
         def _task_lookup(name: str) -> Any:
@@ -2333,7 +2588,7 @@ class TestRunTaskEntryRefusalTextHoldsNoInput:
         })
 
         with caplog.at_level(logging.DEBUG), _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         self._assert_no_marker(payload, reason, caplog)
@@ -2350,10 +2605,11 @@ class TestRunTaskEntryRefusalTextHoldsNoInput:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock(side_effect=refused.value)
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with caplog.at_level(logging.DEBUG), _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is None
@@ -2369,12 +2625,13 @@ class TestRunTaskEntryRefusalTextHoldsNoInput:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.task_ok_type = int
         mock_task.return_value = TaskResult(ok=_INPUT_MARKER)
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with caplog.at_level(logging.DEBUG), _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         self._assert_no_marker(payload, reason, caplog)
@@ -2393,6 +2650,7 @@ class TestRunTaskEntryStoredErrorRefusal:
         source_task = MagicMock()
         source_task.task_ok_type = str
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task._original_fn = _takes_upstream
         mock_task.task_ok_type = str
 
@@ -2414,7 +2672,7 @@ class TestRunTaskEntryStoredErrorRefusal:
         })
 
         with _apply_patches(patches):
-            ok, payload, _ = _run_task_entry(**_run_entry_defaults)
+            ok, payload, _ = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         err = _parse_task_result(payload)['err']
@@ -2434,6 +2692,7 @@ class TestRunTaskEntryStoredErrorRefusal:
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
+        mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.task_ok_type = str
         mock_task.return_value = TaskResult(ok='done')
         mock_task._original_fn = _task_with_ctx
@@ -2457,7 +2716,7 @@ class TestRunTaskEntryStoredErrorRefusal:
         })
 
         with _apply_patches(patches):
-            ok, _, reason = _run_task_entry(**_run_entry_defaults)
+            ok, _, reason = wire_of(_run_task_entry(**_run_entry_defaults))
 
         assert ok is True
         assert reason is None
@@ -2496,6 +2755,10 @@ _REFUSALS: list[tuple[TimeoutRefusal, str]] = [
         TimeoutValueInvalid(reason='stored timeout_ms is above the limit'),
         'timeout_ms',
     ),
+    (
+        CancelGraceInvalid(reason='stored cancel_grace_ms is below 100 ms'),
+        'cancel_grace_ms',
+    ),
 ]
 
 
@@ -2517,8 +2780,11 @@ class TestRunTaskEntryStoredTimeout:
         app_lookup = patches['horsies.core.worker.child_runner.get_current_app']
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(
-                **_run_entry_defaults, timeout=refusal,
+            ok, payload, reason = wire_of(
+                _run_task_entry(
+                    **_run_entry_defaults,
+                    timeout=refusal,
+                )
             )
 
         assert ok is True
@@ -2539,9 +2805,11 @@ class TestRunTaskEntryStoredTimeout:
         patches = _make_run_task_patches()
 
         with _apply_patches(patches):
-            _, payload, _ = _run_task_entry(
-                **_run_entry_defaults,
-                timeout=TimeoutValueInvalid(reason='stored timeout_ms is a bool'),
+            _, payload, _ = wire_of(
+                _run_task_entry(
+                    **_run_entry_defaults,
+                    timeout=TimeoutValueInvalid(reason='stored timeout_ms is a bool'),
+                )
             )
 
         data = _parse_task_result(payload)['err']['data']
@@ -2552,25 +2820,73 @@ class TestRunTaskEntryStoredTimeout:
             'max_ms': MAX_TASK_TIMEOUT_MS,
         }
 
-    @pytest.mark.parametrize(
-        ('timeout', 'deadline_ms'),
-        [
-            (NoTimeout(), None),
-            (TaskTimeout(ms=5_000), 5_000),
-            (OptionsUnreadable(reason='stored task_options do not parse'), None),
-            (TimeoutValueInvalid(reason='stored timeout_ms is a bool'), None),
-        ],
-    )
-    def test_only_a_task_timeout_gives_the_heartbeat_a_deadline(
+    def test_a_bad_grace_names_its_bounds(
         self,
         _run_entry_defaults: dict[str, Any],
-        timeout: StoredTimeout,
-        deadline_ms: int | None,
     ) -> None:
         patches = _make_run_task_patches()
-        heartbeat = patches['horsies.core.worker.child_runner._start_heartbeat_thread']
 
         with _apply_patches(patches):
-            _run_task_entry(**_run_entry_defaults, timeout=timeout)
+            _, payload, _ = wire_of(
+                _run_task_entry(
+                    **_run_entry_defaults,
+                    timeout=CancelGraceInvalid(
+                        reason='stored cancel_grace_ms is absent'
+                    ),
+                )
+            )
 
-        assert heartbeat.call_args.args[-1] == deadline_ms
+        data = _parse_task_result(payload)['err']['data']
+        assert data == {
+            'task_name': 'my_task',
+            'field': 'cancel_grace_ms',
+            'min_ms': MIN_CANCEL_GRACE_MS,
+            'max_ms': MAX_CANCEL_GRACE_MS,
+        }
+
+
+# ===================================================================
+# K. Async task calls in _run_task_entry
+# ===================================================================
+
+
+def _ok_value(payload: str, ok_type: Any) -> Any:
+    return decode_task_result(loads_json(payload).unwrap(), ok_type).unwrap()
+
+
+@pytest.mark.unit
+class TestRunTaskEntryCoroutineCall:
+    """The call of an `async def` task returns a coroutine."""
+
+    def test_the_coroutine_runs_on_the_given_task_loop(
+        self,
+        _run_entry_defaults: dict[str, Any],
+    ) -> None:
+        task_loop = TaskLoop()
+        task_loop.open().unwrap()
+        _run_entry_defaults['task_loop'] = task_loop
+        seen: list[asyncio.AbstractEventLoop] = []
+
+        async def body() -> TaskResult[int, TaskError]:
+            seen.append(asyncio.get_running_loop())
+            return TaskResult(ok=5)
+
+        patches = _make_run_task_patches()
+        mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
+        mock_task = MagicMock(side_effect=lambda: body())
+        mock_task.task_body_kind = TaskBodyKind.ASYNC_DEF
+        mock_task.task_ok_type = int
+        mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
+
+        try:
+            with _apply_patches(patches):
+                ok, payload, reason = wire_of(_run_task_entry(**_run_entry_defaults))
+            loop_state = task_loop.state
+        finally:
+            task_loop.close()
+
+        assert (ok, reason) == (True, None)
+        assert _ok_value(payload, int) == 5
+        assert isinstance(loop_state, LoopOpen)
+        assert seen == [loop_state.loop]
+

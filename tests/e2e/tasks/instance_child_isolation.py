@@ -5,6 +5,7 @@ Short heartbeat and stale settings, so recovery paths finish inside a test.
 
 from __future__ import annotations
 
+import ctypes
 import multiprocessing
 import os
 import subprocess
@@ -16,9 +17,11 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
 from horsies.core.models.recovery import RecoveryConfig
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import RetrievalCode, TaskError, TaskResult
+from horsies.core.types.result import is_err
 
 from tests.e2e.helpers.env import e2e_database_url
+from tests.e2e.tasks.profiles import E2E_WORKER_PROFILES, preload_profiles
 
 DB_URL = e2e_database_url('HORSES_E2E_DB_URL')
 
@@ -28,10 +31,13 @@ config = AppConfig(
     recovery=RecoveryConfig(
         runner_heartbeat_interval_ms=1_000,
         claimer_heartbeat_interval_ms=1_000,
-        running_stale_threshold_ms=5_000,
+        # The smallest threshold with auto_fail_stale_running on:
+        # 2 x (runner_heartbeat_interval_ms + 2 s).
+        running_stale_threshold_ms=6_000,
         finalizing_stale_threshold_ms=5_000,
         check_interval_ms=1_000,
     ),
+    worker_profiles={**E2E_WORKER_PROFILES, **preload_profiles()},
 )
 
 app = Horsies(config)
@@ -45,9 +51,31 @@ def healthcheck() -> TaskResult[str, TaskError]:
     return TaskResult(ok='ready')
 
 
+@app.task(task_name='e2e_isolation_wait_refused')
+def wait_refused_in_child() -> TaskResult[bool, TaskError]:
+    """Report whether a result wait in this worker child is refused at once."""
+    sent = healthcheck.send()
+    if is_err(sent):
+        return TaskResult(
+            err=TaskError(error_code='E2E_SEND_FAILED', message=str(sent.err_value)),
+        )
+    waited = sent.ok_value.get(timeout_ms=1000)
+    return TaskResult(
+        ok=waited.is_err()
+        and waited.unwrap_err().error_code is RetrievalCode.WAIT_INSIDE_TASK,
+    )
+
+
 @app.task(task_name='e2e_isolation_sleep')
 def sleep_task(*, seconds: float) -> TaskResult[str, TaskError]:
     time.sleep(seconds)
+    return TaskResult(ok=str(os.getpid()))
+
+
+@app.task(task_name='e2e_isolation_gil_hold')
+def gil_hold(*, seconds: int) -> TaskResult[str, TaskError]:
+    """Hold this child's GIL in C code: no other thread of the child runs."""
+    ctypes.PyDLL(None).sleep(seconds)
     return TaskResult(ok=str(os.getpid()))
 
 

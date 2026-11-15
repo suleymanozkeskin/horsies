@@ -37,7 +37,17 @@ DISPOSITIONS: dict[str, tuple[str, str]] = {
     'horsies_claim_candidates': (
         'type-agnostic',
         'identity returned through an explicit text cast, and the '
-        'return-order join compares the identity as text',
+        'dispatch order sorts by the identity in its own type',
+    ),
+    'horsies_claim_plan': (
+        'type-agnostic',
+        'orders by the identity and returns counts per stream, never '
+        'an identity value',
+    ),
+    'horsies_claim_in_flight': (
+        'type-agnostic',
+        'counts rows by status, worker, queue and execution class; '
+        'never reads or returns an identity value',
     ),
     'horsies_terminalization_miss': (
         'varchar-world-only',
@@ -123,4 +133,4 @@ class TestChainFunctionsDeclareTheirWorld:
     def test_the_claim_identity_is_declared_agnostic(self) -> None:
         source = inspect.getsource(migrations_module)
         assert 'id text,' in source
-        assert 'RETURNING t.id::text' in source
+        assert 't.id::text AS id' in source

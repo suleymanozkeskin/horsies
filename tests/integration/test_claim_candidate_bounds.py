@@ -4,7 +4,8 @@
   return; the rest stay claimable by other workers while it is open.
 - Rows come back in the global dispatch rank (queue priority, task
   priority, enqueue time, id), across the pending and expired arms.
-- Candidate selection reuses a generic plan; the parent does not.
+- Candidate selection (the plan and the take) reuses a generic plan; the
+  parent does not.
 - The bounded non-runnable lookup returns what the plain join returns.
 """
 
@@ -33,6 +34,12 @@ QUEUE = 'bounds_q'
 SEEDED_PENDING = 50
 CLAIM_PROCESSES = 10
 LEASE_MS = 60_000
+# A worker with isolated children only: every class goes to its budget.
+ISOLATED_ROUTES = {
+    'ISOLATED': 'ISOLATED',
+    'SHARED_ASYNC': 'ISOLATED',
+    'SHARED_THREAD': 'ISOLATED',
+}
 
 PLAIN_NON_RUNNABLE_JOIN_SQL = text("""
     SELECT t.id, w.status
@@ -114,7 +121,8 @@ def _claim_params(
         'p_queue_priority': json.dumps(queue_priority),
         'p_queue_max_concurrency': json.dumps(queue_max_concurrency),
         'p_hard_cap_mode': True,
-        'p_processes': CLAIM_PROCESSES,
+        'p_budgets': json.dumps({'ISOLATED': CLAIM_PROCESSES}),
+        'p_routes': json.dumps(ISOLATED_ROUTES),
         'p_prefetch_buffer': 0,
         'p_max_claim_per_worker': 0,
         'p_max_claim_batch': max_claim_batch,
@@ -248,16 +256,25 @@ async def test_only_candidate_selection_forces_a_generic_plan(
                     text("""
             SELECT proname, coalesce(array_to_string(proconfig, ','), '')
             FROM pg_proc
-            WHERE proname IN ('horsies_claim', 'horsies_claim_candidates')
+            WHERE proname IN (
+                'horsies_claim', 'horsies_claim_plan', 'horsies_claim_candidates',
+                'horsies_claim_in_flight'
+            )
         """)
                 )
             )
             .tuples()
             .all()
         )
+    # Both run without JIT: the generic plan's cost estimate would compile
+    # the statement on every pass.
+    # The in-flight count turns off bitmap and sequential scans, so its plan
+    # is the scan of the status index, which marks the dead entries it passes.
     assert settings == {
-        'horsies_claim': '',
-        'horsies_claim_candidates': 'plan_cache_mode=force_generic_plan',
+        'horsies_claim': 'jit=off',
+        'horsies_claim_plan': 'plan_cache_mode=force_generic_plan,jit=off',
+        'horsies_claim_candidates': 'plan_cache_mode=force_generic_plan,jit=off',
+        'horsies_claim_in_flight': 'jit=off,enable_bitmapscan=off,enable_seqscan=off',
     }
 
 

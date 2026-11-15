@@ -7,7 +7,7 @@ and environment variables.
 
 Root configuration passed to `Horsies(config=AppConfig(...))`.
 Pydantic `BaseModel`, frozen after construction.
-Every config model (`AppConfig`, `PostgresConfig`, `RecoveryConfig`, `PayloadPolicy`, `CustomQueueConfig`, `RetentionConfig`, `WorkerResilienceConfig`, `ScheduleConfig`, `TaskSchedule` and the schedule patterns) refuses unknown keys: a misspelled field raises `ValidationError` with the type `extra_forbidden`.
+Every config model (`AppConfig`, `PostgresConfig`, `RecoveryConfig`, `PayloadPolicy`, `CustomQueueConfig`, `RetentionConfig`, `WorkerResilienceConfig`, `ScheduleConfig`, `TaskSchedule`, the schedule patterns, and the worker profile types) refuses unknown keys: a misspelled field raises `ValidationError` with the type `extra_forbidden`.
 
 ```python
 from pydantic import SecretStr
@@ -42,6 +42,7 @@ string validates at runtime, but strict type checkers reject it — wrap with
 | `exception_mapper` | `ExceptionMapper` | `{}` | Global exception-to-error-code mapping |
 | `default_unhandled_error_code` | `str` | `"UNHANDLED_EXCEPTION"` | Must be `UPPER_SNAKE_CASE` |
 | `resend_on_transient_err` | `bool` | `False` | Auto-retry transient ENQUEUE_FAILED |
+| `worker_profiles` | `dict[str, WorkerProfile]` | `{}` | Named worker settings; `horsies worker <app> --profile <name>` runs one. See [Worker profiles](#worker-profiles) |
 
 ### Validation Rules
 
@@ -64,6 +65,152 @@ string validates at runtime, but strict type checkers reject it — wrap with
 - Keys must be `BaseException` subclasses.
 - Values must match `^[A-Z][A-Z0-9_]*$`.
 - Values that look like exception class names (e.g., `"TimeoutError"`) are rejected.
+
+**Worker profiles (HRS-218):** every profile is checked, and each error names
+the profile and the field path, e.g. `worker_profiles['batch'].claim.claimed_per_worker`.
+- Name: 1-64 characters of letters, digits, `_`, `.`, `-`; not starting with `.` or `-`.
+- At least one child.
+- Each `ClaimLimits` `TaskLimit` at or below the capacity: the sum of the claim budgets (the children, with isolated children only) + `prefetch_buffer`.
+- `pool=ParentPool(max_size=PoolSize(connections=N))` has N at least 5.
+
+## Worker profiles
+
+A worker starts with `horsies worker <app> --profile <name>`. `--profile` is
+required; there is no default profile. A missing or unknown name exits 1 before
+the app check and before any child starts, and lists the defined names.
+
+```python
+from datetime import timedelta
+
+from horsies import (
+    ChildPreload, ClaimLimits, IsolatedChildren, IsolatedRecycle,
+    MemoryLimit, NoTaskLimit, SharedAsyncChildren, SharedRecycle, TaskLimit,
+    WorkerProfile,
+)
+
+worker_profiles = {
+    'default': WorkerProfile(isolated=IsolatedChildren(count=4)),
+    'batch': WorkerProfile(
+        isolated=IsolatedChildren(
+            count=8,
+            recycle=IsolatedRecycle(after=TaskLimit(tasks=500), above=MemoryLimit(mb=1024)),
+        ),
+        claim=ClaimLimits(per_queue_per_pass=TaskLimit(tasks=4), claimed_per_worker=NoTaskLimit()),
+        drain_timeout=timedelta(seconds=120),
+        preload=ChildPreload.APP,
+    ),
+    'io': WorkerProfile(
+        isolated=IsolatedChildren(count=2),
+        shared_async=SharedAsyncChildren(
+            count=4,
+            seats=25,
+            recycle=SharedRecycle(after_per_seat=TaskLimit(tasks=200)),
+        ),
+    ),
+}
+```
+
+| Type | Field | Default | Bounds / meaning |
+|---|---|---|---|
+| `WorkerProfile` | `isolated` | `NoIsolatedChildren()` | `IsolatedChildren` or `NoIsolatedChildren` |
+| `WorkerProfile` | `shared_async` | `NoSharedAsyncChildren()` | `SharedAsyncChildren` or `NoSharedAsyncChildren` |
+| `WorkerProfile` | `shared_thread` | `NoSharedThreadChildren()` | `SharedThreadChildren` or `NoSharedThreadChildren`; at least one child of any mode is required |
+| `WorkerProfile` | `pool` | `ParentPool()` | The pool of the worker process, which writes the outcome of each task; no overflow |
+| `WorkerProfile` | `claim` | `ClaimLimits()` | Claim limits |
+| `WorkerProfile` | `drain_timeout` | `timedelta(seconds=300)` | Above 0, at most 24 h; then running children are killed |
+| `WorkerProfile` | `preload` | `ChildPreload.LIBRARY` | `LIBRARY`, `APP` or `NONE`; see [Child process model](#child-process-model) |
+| `IsolatedChildren` | `count` | required | 1-1024 children, one task at a time each |
+| `IsolatedChildren` | `recycle` | `IsolatedRecycle()` | See [Child process recycling](#child-process-recycling) |
+| `IsolatedChildren` | `pool` | `IsolatedPool()` | The sync connection pool of each child |
+| `IsolatedChildren` | `task_send_pool` | `PoolSize(connections=2)` | Pool of the app broker that task code opens in each child when it sends, per event loop; no overflow |
+| `IsolatedRecycle` | `after` | `TaskLimit(tasks=100)` | `TaskLimit` or `NoTaskLimit` |
+| `IsolatedRecycle` | `above` | `NoMemoryLimit()` | `MemoryLimit(mb=N)` or `NoMemoryLimit` |
+| `SharedAsyncChildren` | `count` | required | 1-1024 children |
+| `SharedAsyncChildren` | `seats` | required | 1-1000 `SHARED_ASYNC` tasks at once per child |
+| `SharedAsyncChildren` | `recycle` | `SharedRecycle()` | When a shared child is replaced |
+| `SharedAsyncChildren` | `pool` | `SharedPool()` | The async connection pool of each child, shared by its seats |
+| `SharedAsyncChildren` | `executor` | `ExecutorThreadsFromSeats()` | Threads of the default executor of the loop: `ExecutorThreads(threads=N)` (1-256) or derived from the seats; a start hook that sets its own default executor wins |
+| `SharedAsyncChildren` | `task_send_pool` | `PoolSize(connections=2)` | As for `IsolatedChildren`; the seats share it |
+| `SharedThreadChildren` | `count` | required | 1-1024 children |
+| `SharedThreadChildren` | `seats` | required | 1-256 `SHARED_THREAD` tasks at once per child, one OS thread each |
+| `SharedThreadChildren` | `recycle` | `SharedRecycle()` | When a shared child is replaced |
+| `SharedThreadChildren` | `pool` | `SharedPool()` | The sync connection pool of each child, shared by its seat threads |
+| `SharedThreadChildren` | `task_send_pool` | `PoolSize(connections=2)` | As for `IsolatedChildren`; the seat threads share it |
+| `IsolatedPool` | `min_size` | `0` | 0-1000 connections kept open; 0 opens on first use |
+| `IsolatedPool` | `max_size` | `PoolSize(connections=1)` | `PoolSize(connections=N)`, 1-1000; an isolated child writes one statement at a time, so 1 is enough |
+| `IsolatedPool` | `check` | `False` | Check each connection on checkout: one round trip each. Each child write is one statement in autocommit; with the check off a dead connection fails that write (RUNNING update: `OWNERSHIP_UNCONFIRMED`, the lease returns the task) |
+| `SharedPool` | `min_size` | `0` | 0-1000 connections kept open |
+| `SharedPool` | `max_size` | `PoolSizeFromSeats()` | `PoolSize(connections=N)` or derived from the seats |
+| `SharedPool` | `check` | `False` | As for `IsolatedPool` |
+| `ParentPool` | `max_size` | `PoolSizeFromSeats()` | `PoolSize(connections=N)`, N at least 5 (below fails with HRS-218), or derived from the seats of the whole profile |
+| `SharedRecycle` | `after_per_seat` | `TaskLimit(tasks=100)` | Replace after `tasks × seats` tasks; `NoTaskLimit` |
+| `SharedRecycle` | `above` | `NoMemoryLimit()` | RSS limit of the child, read after each task |
+| `ClaimLimits` | `per_queue_per_pass` | `NoTaskLimit()` | Most tasks one claim pass takes from one queue |
+| `ClaimLimits` | `claimed_per_worker` | `NoTaskLimit()` | Most CLAIMED tasks the worker holds; no limit = capacity |
+| `TaskLimit` | `tasks` | required | 1-2,147,483,647 |
+| `MemoryLimit` | `mb` | required | 1-16,777,216 |
+
+The number of children is `WorkerProfile.child_count()`, the sum over modes;
+`WorkerProfile.seat_count()` is one per isolated child plus `seats` per shared
+child, and the claim limits are checked against it plus `prefetch_buffer`
+(HRS-218). Three modes: isolated (one task per child), shared async (up to
+`seats` `SHARED_ASYNC` tasks as coroutines per child) and shared thread (up to
+`seats` `SHARED_THREAD` tasks per child, one seat thread each); see the tasks
+skill. A worker with no shared children of a class runs the tasks of that
+class in isolated children. A shared async child opens one async pool, and a
+shared thread child one sync pool that its seat threads share; each child
+counts the resolved `pool.max_size` of its mode in HRS-219. A derived size is
+`min(cap, max(floor, ceil(seats / seats_per_unit)))` with per-kind constants in
+`horsies.core.models.child_sizing` (shared async pool: 10 seats per
+connection, cap 40; shared thread pool: 10 seats per connection, cap 26;
+floor 2; shared async executor: 1 seat per thread, floor 2, cap 32). A child
+pool keeps about `2 x tasks per second x (RTT + server time)` connections busy
+(2 writes per task); the defaults are the measured knees at 3.5 ms RTT and
+leave more than a local database needs. The pool of the worker process
+(`WorkerProfile.pool`) derives from `seat_count()`: 10 seats per connection,
+floor 5, cap 20; it has no overflow and counts in HRS-219 as
+`parent pool max_size N`. A `PoolSize` below 5 fails with HRS-218: under load
+the claim loop holds 1 connection and the 2 steady flushers of the batched
+success write hold 1 each, and 2 stay free for the reaper (gate session and
+pass body) and the other writes; the batched success write runs at most
+`max_size - 3` flushers. Plain successes are written in batches and use few
+of its connections; failures, retries and workflow nodes are written per task.
+Set `pool=ParentPool(max_size=PoolSize(connections=N))` for a high RTT or many
+failures, retries or workflow nodes. Task code that sends opens the
+`task_send_pool` of its child kind (default 2) per event loop; HRS-219 states
+it but does not compare it. A `min_size`
+above the resolved `max_size` fails with HRS-218. The worker start log line
+states the resolved pool and task_send_pool of each kind, the executor
+threads, and the resolved pool of the worker process. Boot also
+warns (never refuses) when the sum over modes of `count × mb` is above the
+usable memory (container limit or host RAM), and when one worker opens more
+Postgres connections itself than the server has usable slots.
+
+Claim budgets per execution class. A worker has one budget for each class it
+runs children for; its capacity is the children (or shared seats) in service.
+Routing: a class with its own children → its own budget; a shared class with no
+children of its own → the `ISOLATED` budget, when the worker has isolated
+children (more isolation than the row asks, never less); otherwise not claimed
+(one log line at start names those classes; the worker still starts). Isolated
+children never take a class that has children of its own. Priority holds within
+one class: each (queue, class) is its own stream; a budget of several classes
+reads their merge in `(priority, enqueued_at, id)` order. Usage per budget is
+this worker's RUNNING + live CLAIMED rows of its classes. Worker capacity (for
+HRS-218 and `claimed_per_worker`) = sum over budgets + `prefetch_buffer`; with
+isolated children only, the sum is `count`, and every class goes to the
+`ISOLATED` budget. `ClaimLimits` apply to the worker as a whole; soft cap mode
+lets each budget prefetch up to `prefetch_buffer`, within the worker total.
+A claimed row of a shared class whose registered task here has another class
+(e.g. `SHARED_ASYNC` row, function now `def`) is written `ISOLATED`, returned to
+`PENDING` with the claim fence, and logged. `horsies_worker_states.class_capacity`
+(v55) holds `{budget: {"capacity": N, "serves": [classes]}}`.
+
+Removed flags and their fields: `--processes` → `IsolatedChildren.count`;
+`--max-tasks-per-child` → `IsolatedRecycle.after`; `--max-memory-per-child-mb`
+→ `IsolatedRecycle.above`; `--max-claim-batch` → `ClaimLimits.per_queue_per_pass`;
+`--max-claim-per-worker` → `ClaimLimits.claimed_per_worker`; `--drain-timeout`
+→ `WorkerProfile.drain_timeout`; `--child-preload` → `WorkerProfile.preload`.
+Old `0` (no limit / auto) is `NoTaskLimit()`; old memory-off is `NoMemoryLimit()`.
 
 ## Horsies App Methods
 
@@ -90,7 +237,23 @@ names = app.list_tasks()  # list[str]
 def reset_db_for_child() -> None: ...
 
 hooks = app.get_child_process_start_hooks()  # list[ChildProcessStartHook]
+
+# Per-shared-async-child hook: async zero-arg fn, runs on the event loop of
+# each shared async child, before its first task. Build long-lived async
+# clients here; isolated children do not run it.
+@app.on_shared_async_child_start
+async def open_clients() -> None: ...
+
+async_hooks = app.get_shared_async_child_start_hooks()  # list[SharedAsyncChildStartHook]
 ```
+
+`on_shared_async_child_start` rules: the call must return a coroutine, read
+without a call: an `async def` function, an object with an `async def`
+`__call__`, a function with an awaitable return annotation, or a lambda
+(checked when the child awaits it); anything else is `HRS-214`; runs
+after the `on_child_process_start` hooks and the child's async pool; same 10 s
+bound and fail-closed stop as the sync hooks (a hook that blocks the loop is
+also ended); work it leaves running belongs to no task.
 
 `on_child_process_start` rules: deduped by function identity; async functions
 rejected (`HRS-214`); hooks fire on every child start including replacement
@@ -126,7 +289,7 @@ info = broker.get_task_info("task-uuid", include_result=True)  # sync
 
 **Monitoring** (async only): `get_stale_tasks()`, `get_expired_tasks()`, `mark_stale_tasks_as_failed()`, `requeue_stale_claimed()`. See website docs `monitoring/broker-methods` for full signatures.
 
-**Health/liveness** (app, async + sync): `ping_database_async()` (DatabasePing latency), `ping_workers_async(target_worker_id=None, timeout_seconds=2.0, min_responses=None)` (list[WorkerPong] — active ping-pong; min_responses=1 = fast liveness gate, returns on first reply), `list_worker_states_async()` / `get_worker_state_async(worker_id)` / `get_worker_state_history_async(worker_id, limit=None)` (WorkerStateSnapshot, includes idle workers). Replaces the retired `get_worker_stats()`. `WorkerStateSnapshot.memory_usage_mb` is the parent process only; `children_memory_mb` is the summed RSS of executor children (the memory-quota driver — use it to size `max_tasks_per_child` / `max_memory_per_child_mb`). See website docs `monitoring/worker-health`. 
+**Health/liveness** (app, async + sync): `ping_database_async()` (DatabasePing latency), `ping_workers_async(target_worker_id=None, timeout_seconds=2.0, min_responses=None)` (list[WorkerPong] — active ping-pong; min_responses=1 = fast liveness gate, returns on first reply), `list_worker_states_async()` / `get_worker_state_async(worker_id)` / `get_worker_state_history_async(worker_id, limit=None)` (WorkerStateSnapshot, includes idle workers). `get_class_coverage_async()` (ClassCoverage — fleet check: each (queue, class) with PENDING rows is StreamServed / StreamWithoutCapacity / StreamUnserved by live workers; the reaper logs unserved at error), `get_class_report_async()` (ClassReport — oldest wait per pending (queue, class), budget capacity/in_flight/free per live worker). Replaces the retired `get_worker_stats()`. `WorkerStateSnapshot.memory_usage_mb` is the parent process only; `children_memory_mb` is the summed RSS of executor children (the memory-quota driver — use it to size `IsolatedRecycle.after` / `IsolatedRecycle.above`, and `SharedRecycle` for shared children). See website docs `monitoring/worker-health`. 
 
 ## PostgresConfig
 
@@ -148,14 +311,10 @@ config = PostgresConfig(
 | `pool_size` | `int` | `5` | Connection pool size (raise for high-throughput producers) |
 | `max_overflow` | `int` | `10` | Extra connections beyond pool_size |
 | `retain_rerun_input_default` | `bool` | `False` | App-level default for enqueue-time rerun-input retention; a per-task value overrides it and the resolved value is snapshotted at enqueue. A task enqueued without a retained input cannot be rerun later |
-| `worker_pool_size` | `int \| None` | `3` | Worker coordinator pool size; `None` inherits `pool_size` |
-| `worker_max_overflow` | `int \| None` | `2` | Worker coordinator overflow; `None` inherits `max_overflow` |
-| `worker_child_pool_min_size` | `int` | `0` | Minimum connections kept by each child worker process |
-| `worker_child_pool_max_size` | `int` | `2` | Maximum connections allowed per child worker process |
-| `worker_child_pool_check` | `bool` | `True` | Health-check child pool connections on checkout; one round trip per checkout, disable alongside `pool_pre_ping` on high-RTT links |
 | `pool_timeout` | `int` | `30` | Seconds to wait for a connection |
 | `pool_recycle` | `int` | `1800` | Seconds before connections are recycled |
-| `pool_pre_ping` | `bool` | `True` | Pre-ping connections before use |
+| `pool_pre_ping` | `bool` | `True` | Ping a pooled connection at checkout when it waited in the pool for more than 1 s (`PRE_PING_AFTER_IDLE_S`), in every engine but the worker process's |
+| `worker_pool_pre_ping` | `bool` | `False` | Ping a pooled connection of the worker process at checkout when it waited in the pool for more than 1 s. Off: a one-statement write is one round trip, and a dead connection fails its first statement as a retryable connection error |
 | `tcp_keepalives` | `bool` | `True` | Enable libpq TCP keepalives on broker and child-process connections |
 | `tcp_keepalives_idle` | `int` | `30` | Idle seconds before the first keepalive probe (libpq `keepalives_idle`) |
 | `tcp_keepalives_interval` | `int` | `10` | Seconds between keepalive probes (libpq `keepalives_interval`) |
@@ -165,10 +324,40 @@ config = PostgresConfig(
 
 Driver must be psycopg3 (async). `postgresql+psycopg2://` is rejected.
 
+`worker_child_pool_min_size`, `worker_child_pool_max_size` and
+`worker_child_pool_check` were removed in 0.7.0: each child kind has its own
+`pool` in the worker profile (`IsolatedPool`, `SharedPool`). `worker_pool_size`
+and `worker_max_overflow` were removed too: the worker process opens
+`WorkerProfile.pool`, and task code in a child the `task_send_pool` of its
+kind. A config that sets one fails at build with HRS-213, and the help names
+the replacement.
+
+horsies requires psycopg >= 3.3.7. psycopg >= 3.3.6 bounds the wait after an interrupted query (a cancelled asyncio
+task, `KeyboardInterrupt`, `SystemExit`): a cancel request of at most 5 s, then
+at most 5 s for the query, then it closes the connection. The 5 s limit on the
+cancel request needs libpq 17+; with an older libpq the request has no limit (in
+async code it runs in a default-executor thread, which a shared async attempt
+waits for). `horsies[pg-binary]` bundles its own libpq; `psycopg.pq.version()`
+reads the loaded version (`170000` = 17.0).
+
+Every connection of a child pool is in autocommit. The RUNNING update of a
+plain task and the finalizing marker are one statement each: one round trip
+with the checkout check off. The RUNNING update of a workflow task and the
+start of its node run in one transaction (BEGIN, update, node, COMMIT).
+
+The seats of a shared child share the pool of the child (`SharedPool`, derived
+from the seats by default) for the RUNNING update and the finalizing marker; a
+seat waits up to
+30 s for a connection, and a seat that gets none leaves its task claimed until
+the claim lease returns it. Average connections in use = tasks per second of
+the child x 2 writes x time of one write; keep the pool above it.
+
 `tcp_keepalives` (default on) keeps idle pooled sockets warm so a server-side
 or middlebox idle-reap is detected and recycled at the socket layer instead of
-surfacing as a mid-query `OperationalError`. `pool_pre_ping` and `pool_recycle`
-are checkout-time guards and cannot catch a connection that dies in-flight. The
+surfacing as a mid-query `OperationalError`. `pool_pre_ping`,
+`worker_pool_pre_ping` and `pool_recycle` are checkout-time guards and cannot
+catch a connection that dies in-flight. The pre-ping settings check only a
+connection that waited in the pool for more than 1 s. The
 keepalives apply to the broker engine pool and each child-process pool; the
 LISTEN/NOTIFY listener sets its own keepalives independently. Without them, the
 OS idle default (often 7200s) outlives a pooler's idle-reap window — e.g.
@@ -183,27 +372,41 @@ broker engines, each child-process pool, and the LISTEN/NOTIFY listener. A
 long query is not affected: the sent query is acknowledged while the client
 waits for the result.
 
-Worker processes use a separate connection profile by default. The worker
-coordinator uses `worker_pool_size + worker_max_overflow`; each child process
-creates its own psycopg pool bounded by
-`worker_child_pool_min_size..worker_child_pool_max_size`. Direct Postgres
-budget for one worker is approximately:
+Workers do not use `pool_size` and `max_overflow`. The worker process opens
+the resolved `WorkerProfile.pool` with no overflow; each child process creates
+its own psycopg pool bounded by the `pool` of its kind (`min_size..max_size`).
+Direct Postgres budget for one worker is approximately:
 
 ```text
-worker_pool_size + worker_max_overflow
+pool max_size (the pool of the worker process)
   + 2 listener/session connections
-  + processes * worker_child_pool_max_size
+  + 1 runner heartbeat connection (the worker process writes the beats)
+  + isolated children * isolated.pool max_size
+  + shared async children * shared_async.pool max_size
+  + shared thread children * shared_thread.pool max_size
   + task-code database connections
 ```
 
-Child DB connections are lazy by default (`worker_child_pool_min_size=0`). A child
+Task code that sends through the app opens the app's broker in its child: a
+pool of the `task_send_pool` of its child kind for each event loop it sends
+from (the broker's runner loop for sync tasks, the child's task loop for async
+tasks). `horsies check --live` compares the number without task-code
+connections for each worker profile with `max_connections` less the reserved
+slots and reports `HRS-219`; the error states the task-send term with one
+sending loop per child. A worker logs the same comparison at boot, as a
+warning when it is above the usable slots.
+Nothing is compared with `pgbouncer_transaction_mode=True`; then each worker
+opens the sum above less the 2 listener connections as clients of the pooler,
+and PgBouncer `max_client_conn` must hold the sum over workers.
+
+Child DB connections are lazy by default (`min_size=0` in each pool). A child
 inherits no database socket from the worker.
 
 ### Child process model
 
 A worker owns one child process and one private socket per slot. On Linux a
 preload parent imports code once and forks each child. Other platforms start
-each child with `exec`. `--child-preload` selects the mode:
+each child with `exec`. `WorkerProfile.preload` (`ChildPreload`) selects the mode:
 
 | Mode | Imports before the fork | Effect |
 |---|---|---|
@@ -235,9 +438,23 @@ Failures stay with one task:
 - SIGTERM to every process (Heroku, systemd `KillMode=control-group`) does not
   stop a running task. The worker drains it. Task subprocesses do get the signal.
 - A dead preload parent stops no task. New children use `exec` until it is back.
-- A child that cannot boot gets 3 attempts, then the worker exits non-zero. An
-  outside SIGKILL of a booting replacement child uses no attempt while another
-  child is serving. It does count at first start, and when no other child serves.
+- A child that cannot boot reports the cause. A cause that repeats (the app or
+  a task module does not import, the child pool cannot be set up, an event
+  loop that cannot be created for another cause than the errno values below, a
+  spawn that the OS refuses with another errno such as ENOENT, a death with no
+  report, not ready in 120 s) uses one of 3 attempts, then the worker exits
+  non-zero. A failed `on_child_process_start` hook stops the worker at once.
+- A cause that can clear (`OSError` EMFILE / ENFILE / ENOMEM / EAGAIN in any
+  start step, the spawn and the event loop among them, or a refused thread)
+  takes only that slot down: it takes no task, the claim budget leaves it out, and it
+  boots again after 1, 2, 4 ... up to 60 s. It uses an attempt only when every
+  other slot is down too; a failed boot while another slot is in service
+  starts the count again, so only 3 attempts in a row stop the worker. The worker starts degraded when one child is ready
+  and each other slot is down. `WorkerStateSnapshot.slot_health` names the
+  slots that are down (`SlotsDown`).
+- An outside SIGKILL of a booting replacement child uses no attempt while
+  another child is serving. It does count at first start, and when no other
+  child serves.
 
 A child differs from a `multiprocessing` process: `parent_process()` returns
 `None`, `current_process().name` is `horsies-child-<slot>`, and a `__main__:app`
@@ -251,13 +468,13 @@ boto3, openai, google-genai, firebase-admin, and lxml, with 4 children, uses
 goes to production, run it on staging with real calls to every client library
 inside tasks. Passing the guard does not prove that a library works after a fork.
 
-Traps with preload. Check each one before you change `--child-preload`:
+Traps with preload. Check each one before you change `WorkerProfile.preload`:
 
 - **Import-time settings in `.env`:** `library` and `app` import psycopg,
   SQLAlchemy, and pydantic before the app runs, so `load_dotenv()` in the app is
   too late for `PSYCOPG_IMPL`. Put such a value in the process environment.
 - **Monkeypatching:** a patch that must run before those imports, such as
-  gevent, is too late. Use `--child-preload=none`.
+  gevent, is too late. Use `preload=ChildPreload.NONE`.
 - **Clients built at import (`app` only):** module code runs once, in the preload
   parent. Build a client in an `on_child_process_start` hook, which runs in every
   child after the fork.
@@ -270,39 +487,39 @@ Traps with preload. Check each one before you change `--child-preload`:
   library code, so an in-place package upgrade needs a restart.
 - **Counting children:** process-name greps such as `multiprocessing-fork` find
   nothing. A forked child shows `preload_main`, and there is one more process than
-  `--processes`.
+  the profile has children.
 - **`children_memory_mb`:** it sums RSS, so with preload it counts each shared page
   once per child and reads above real use. Use it to see one child grow, and read
   the container or cgroup total for the footprint.
-- **Stop window:** set `--drain-timeout` below the supervisor's stop window. The
-  default of 300 s is above Docker's 10 s, and above Kubernetes' 30 s.
+- **Stop window:** set `WorkerProfile.drain_timeout` below the supervisor's stop
+  window. The default of 300 s is above Docker's 10 s, and above Kubernetes' 30 s.
 
 ### Child process recycling
 
-Two knobs recycle worker children to bound memory. Recycling is per-child and
+Two limits in `IsolatedRecycle` recycle worker children to bound memory. Recycling is per-child and
 staggered: each child has its own counter/threshold and is replaced
 individually, never in lockstep. The worker decides, from the task count and
 the RSS in each result. On Linux a recycle is cheap: with 10,000 no-op tasks and
 8 children, `N=100` drains 803 tasks/s against 853 with recycling off, and with
 `exec` it drains 437 against 819.
 
-RSS counts pages shared with the preload parent. Set the memory knob against
+RSS counts pages shared with the preload parent. Set the memory limit against
 RSS, and use the cgroup total or PSS for the real footprint.
 
-**Count — `WorkerConfig.max_tasks_per_child`** (CLI `--max-tasks-per-child`,
-default `100`): recycle each child after N tasks, returning retained memory
-(allocator high-water, C-extension caches, leaks) to the OS.
+**Count — `IsolatedRecycle.after`** (default `TaskLimit(tasks=100)`): recycle
+each child after N tasks, returning retained memory (allocator high-water,
+C-extension caches, leaks) to the OS.
 
-- `100` (default): recycle every 100 tasks. No universal value — raise for
-  high-throughput / connection-constrained apps (each recycle rebuilds the
-  child DB pool), lower for memory-heavy tasks. Size against
+- `TaskLimit(tasks=100)` (default): recycle every 100 tasks. No universal value —
+  raise for high-throughput / connection-constrained apps (each recycle rebuilds
+  the child DB pool), lower for memory-heavy tasks. Size against
   `children_memory_mb` (below).
-- `0`: disabled — children live for the worker's lifetime.
-- `1`: each task runs in a new child.
+- `NoTaskLimit()`: disabled — children live for the worker's lifetime.
+- `TaskLimit(tasks=1)`: each task runs in a new child.
 
-**Memory — `WorkerConfig.max_memory_per_child_mb`** (CLI
-`--max-memory-per-child-mb`, default off/`None`): recycle a child once its own
-RSS is at or above N MB after a real task finishes. The child reports its RSS
+**Memory — `IsolatedRecycle.above`** (default `NoMemoryLimit()`): with
+`MemoryLimit(mb=N)`, recycle a child once its own RSS is at or above N MB after
+a real task finishes. The child reports its RSS
 with each result; the worker stops only that child and starts a new one in its
 slot.
 
@@ -311,8 +528,18 @@ slot.
 - Startup **baseline guard**: each child samples its settled baseline RSS (after
   `gc.collect()`); the worker hard-fails if the threshold is at or below the
   warmed baseline (the app does not fit the per-child budget) and warns within
-  80% of it.
-- Positive int only — no fixed floor, the baseline guard is the real floor.
+  80% of it. A kind whose slots were all down at the start is checked when its
+  first child becomes ready; a breach then stops the worker (drain, exit
+  non-zero).
+- `mb` from 1 to 16,777,216 — no fixed floor, the baseline guard is the real floor.
+- At boot the worker warns (and still starts) when `count × mb` is above the
+  usable memory: the cgroup limit when it is below the host RAM, else the
+  host RAM. The cgroup is the one `/proc/self/cgroup` names (v1 memory group,
+  else v2 group); its limit is the smallest `memory.limit_in_bytes` /
+  `memory.max` of the group and its parents (`max` or no file = no limit),
+  so a systemd `MemoryMax` or `--cgroupns=host` counts; without
+  `/proc/self/cgroup`, the files at the mount point. The warning names the
+  source: `container limit` or `host RAM`.
 
 **Using both (OR semantics).** When both are set, a child exits when *either*
 limit is reached. Recommended default for memory-quota deployments (containers,
@@ -320,20 +547,30 @@ PaaS dynos): memory as the primary guard, count as a high backstop for slow
 leaks / connection churn that do not surface as RSS in time, tuned from
 `children_memory_mb`:
 
-```bash
-horsies worker app.instance:app --processes=6 --max-tasks-per-child=500 --max-memory-per-child-mb=180
+```python
+both_limits = WorkerProfile(
+    isolated=IsolatedChildren(
+        count=6,
+        recycle=IsolatedRecycle(after=TaskLimit(tasks=500), above=MemoryLimit(mb=180)),
+    ),
+)
 ```
 
 Memory-only — disable count explicitly:
 
-```bash
-horsies worker app.instance:app --processes=6 --max-tasks-per-child=0 --max-memory-per-child-mb=180
+```python
+memory_only = WorkerProfile(
+    isolated=IsolatedChildren(
+        count=6,
+        recycle=IsolatedRecycle(after=NoTaskLimit(), above=MemoryLimit(mb=180)),
+    ),
+)
 ```
 
 Sizing: the per-child peak is `threshold + task_peak` (RSS is sampled after the
 task that crosses the threshold, so the child holds the threshold plus that
 task's working set), and children peak together. Budget `(threshold + task_peak)
-× processes + parent + headroom < quota`; tune from `children_memory_mb`.
+× count + parent + headroom < quota`; tune from `children_memory_mb`.
 Example — 1024 MB quota, 4 procs, ~80 MB task: threshold=300 → ~1249 MB peak
 (over quota); threshold=200 → ~719 MB peak (within quota).
 
@@ -427,9 +664,9 @@ to `AppConfig.retention` — see RetentionConfig below.
 | `crashed_worker_recovery_grace_ms` | `int` | `10_000` | 0–1hr | Grace before recovering a terminal workflow task whose progression was not applied; `0` disables; not heartbeat-coupled |
 | `check_interval_ms` | `int` | `30_000` | 1s–10min | Reaper poll cadence |
 | `orphan_task_audit_interval_ms` | `int` | `60_000` | 1s–24hr | Ms between bounded orphan workflow-task audit pages; the audit runs only when `auto_terminate_orphaned_workflow_tasks` is `True` |
-| `runner_heartbeat_interval_ms` | `int` | `30_000` | 1s–2min | Heartbeat from running task process |
+| `runner_heartbeat_interval_ms` | `int` | `30_000` | 1s–2min | How often the worker process writes the heartbeats of its RUNNING tasks, from one thread that does not run on its event loop |
 | `claimer_heartbeat_interval_ms` | `int` | `30_000` | 1s–2min | Heartbeat for CLAIMED tasks |
-| `worker_state_snapshot_interval_ms` | `int` | `30_000` | 1s–5min | How often each worker inserts a monitoring snapshot row into `horsies_worker_states` |
+| `worker_state_snapshot_interval_ms` | `int` | `30_000` | 1s–1min | How often each worker inserts a monitoring snapshot row into `horsies_worker_states`. The cap is half the 120 s live window (`WORKER_STATE_LIVE_WINDOW_S`), so a running worker stays live when a snapshot write is late by up to half the window; a larger value fails with `HRS-204` |
 | `phase2_quarantine_after_attempts` | `int` | `25` | 3–1000 | Recovery passes an unresolvable workflow-progression row may retain before its evidence moves to the quarantine table and discovery stops retrying it. A persistent raise counts too, and at the bound the workflow fails closed |
 | `workflow_recovery_failure_limit` | `int` | `25` | 3–1000 | Reaper passes in which the recovery of a workflow may raise a persistent error before the workflow fails with `WORKFLOW_RECOVERY_LIMIT_REACHED`. A connection, lock or timeout error does not count. The count is stored. The count has no reset, so a later unrelated raise after a repair reaches the limit sooner |
 
@@ -452,7 +689,8 @@ never held up by a stalled consumer.
 
 ### Constraints (HRS-204)
 
-- `running_stale_threshold_ms >= runner_heartbeat_interval_ms * 2`
+- With `auto_fail_stale_running=True` (default): `running_stale_threshold_ms >= 2 * (runner_heartbeat_interval_ms + 2_000)`. The worker stops when no runner heartbeat lands for half of the threshold; that half holds one interval plus 2 s for the next heartbeat to land.
+- With `auto_fail_stale_running=False`: `running_stale_threshold_ms >= runner_heartbeat_interval_ms * 2`
 - `finalizing_stale_threshold_ms >= runner_heartbeat_interval_ms * 2`
 - `claimed_stale_threshold_ms >= claimer_heartbeat_interval_ms * 2`
 
@@ -462,10 +700,12 @@ The 2x factor ensures a task can miss one full heartbeat cycle without being inc
 
 Runs on `check_interval_ms` cadence:
 1. CLAIMED tasks without heartbeat for `claimed_stale_threshold_ms` → requeued to PENDING (if enabled).
-2. RUNNING tasks without heartbeat for `running_stale_threshold_ms` → retry on `WORKER_CRASHED` policy or mark FAILED (if enabled). Recent `finalizing_at` and live parent worker state suppress this recovery.
+2. RUNNING tasks without heartbeat for `running_stale_threshold_ms` → retry on `WORKER_CRASHED` policy or mark FAILED (if enabled). Recent `finalizing_at` suppresses this recovery.
 3. Retention pruning every `retention_sweep_interval_s` seconds (default 5 min): deletes old worker_state rows (`worker_state_retention_hours`) and terminal workflow rows with their workflow task rows (`terminal_record_retention_hours`). Heartbeat rows and terminal task records are not deleted here; partition maintenance drops their expired partitions every `partition_maintenance_interval_s` seconds (default 15 min). Deletes run in `retention_delete_batch_size`-row batches (default 500, one transaction each) under a 60s per-pass budget; a larger backlog drains across consecutive passes.
 
-**CPU/GIL-heavy tasks:** Increase `running_stale_threshold_ms`. GIL-bound tasks may not send heartbeats at the configured interval. Rule of thumb: >= 3–5x worst-case heartbeat gap. The stale threshold is based on missing runner heartbeats, not total task duration.
+**Runner heartbeats:** the worker process writes them for each RUNNING task whose child process runs and holds it, fenced on the worker and the claim generation; the child writes only the first one, in the RUNNING transaction. A task that holds the GIL does not delay them, so CPU-bound tasks need no extra margin. Beats end at the kill of the child, its exit, its finalizing mark, or the read of its result. The stale threshold is based on missing runner heartbeats, not total task duration.
+
+**Fail-closed exit:** with `auto_fail_stale_running=True` (default), if the heartbeat thread dies, or no heartbeat lands for half of `running_stale_threshold_ms`, the worker kills every child that holds a task, stops, and exits with code 1 (code 77 if it has not stopped within 120 s). So the reaper does not fail a task that still runs. The half counts from when the last heartbeat landed. Under a slow database, raise `running_stale_threshold_ms`. With `auto_fail_stale_running=False`, or no recovery config, no reaper fails a RUNNING row: the worker logs failed writes (at most once per 60 s) and keeps running.
 
 
 ## RetentionConfig
@@ -600,6 +840,8 @@ All `TaskSchedule.name` values must be unique (HRS-205).
 | `timezone` | `str` | `"UTC"` | IANA timezone (validated at scheduler startup; invalid names fail boot) |
 | `catch_up_missed` | `bool` | `False` | `True`: replay missed runs on restart. `False`: drop missed runs, fire only the most recent due slot |
 | `max_catch_up_runs` | `int` | `100` | 1–10000; max runs per tick during catch-up |
+
+A scheduled run stores the task's options (`timeout_ms`, `retry_policy`, `execution`, `cancel_grace_ms`), as a plain `.send()` does; `TaskSchedule` has no options of its own. A slot whose task id already holds a different command (`PAYLOAD_MISMATCH`: another horsies version, or changed kwargs or options) counts as fired: one warning, the run is recorded, the existing task is kept.
 
 ### Schedule Patterns
 
@@ -780,15 +1022,16 @@ Phases are fail-fast: errors in phase N stop later phases.
 
 | Phase | What | Errors |
 |---|---|---|
-| 1 — Config | `AppConfig` Pydantic validators (implicit — already validated at construction) | HRS-200–HRS-209, HRS-213, HRS-215, HRS-216 |
+| 1 — Config | `AppConfig` Pydantic validators, every worker profile (implicit — already validated at construction) | HRS-200–HRS-209, HRS-213, HRS-215, HRS-216, HRS-218 |
 | 2 — Imports | Import each discovered module | ImportError, HRS-210 |
-| 3 — Workflows | `WorkflowSpec` DAG validation during imports | HRS-001–HRS-031, HRS-033–HRS-035 |
+| 3 — Workflows | `WorkflowSpec` DAG validation during imports | HRS-001–HRS-031, HRS-033–HRS-038 |
 | 3.1 — Definitions | Validate imported `WorkflowDefinition` classes (each declares `definition_key`) | HRS-016 |
 | 3.2 — Builders | Execute `@app.workflow_builder` functions | HRS-027–HRS-030 |
 | 3.3 — Undecorated | Scan for functions returning WorkflowSpec without decorator | HRS-030 |
 | 3.5 — Policies | Re-validate exception_mapper after imports | HRS-209 |
 | 3.6 — Schedules | Validate timezone, task registration, queue and kwargs wire contract of each enabled schedule (not run for workers) | — |
 | 4 — Broker | `SELECT 1` against PostgreSQL (`--live` only) | HRS-211, Connection error |
+| 4.1 — Worker connections | Each worker profile against `max_connections` less reserved slots (`--live` only; skipped with no profiles or with `pgbouncer_transaction_mode=True`) | HRS-219 |
 
 **Guarantee model:**
 - **Strong:** `@app.workflow_builder` functions are fully executed and validated.
@@ -812,22 +1055,16 @@ Auto-discovery: exactly one `Horsies` instance → use it. Zero or multiple → 
 ### `horsies worker`
 
 ```bash
-horsies worker <module> [--processes N] [--loglevel LEVEL] [--max-claim-batch N] [--max-claim-per-worker N] [--max-tasks-per-child N] [--max-memory-per-child-mb N]
+horsies worker <module> --profile NAME [--loglevel LEVEL]
 ```
 
 | Flag | Default | Description |
 |---|---|---|
-| `--processes` | `1` | Worker process count |
+| `--profile` | required | Name of a profile in `AppConfig.worker_profiles`. See [Worker profiles](#worker-profiles) |
 | `--loglevel` | `INFO` | Log level |
-| `--max-claim-batch` | `0` | Max tasks per queue per claim pass; 0 = auto |
-| `--max-claim-per-worker` | `0` | Max claimed per worker; 0 = auto |
-| `--max-tasks-per-child` | `100` | Recycle a child after N tasks (`>= 1`, or `0` to disable). See [Child process recycling](#child-process-recycling) |
-| `--max-memory-per-child-mb` | _(off)_ | Recycle a child once its RSS reaches N MB; fails startup if N is at/below the warmed baseline. See [Child process recycling](#child-process-recycling) |
-| `--drain-timeout` | `300` | Seconds to wait for running tasks at shutdown (finite, `> 0`); then the worker kills their children. Set below the supervisor's stop window (Docker 10 s, Kubernetes 30 s, ECS 30 s, Heroku 30 s, Fly.io 5 s) |
-| `--child-preload` | `library` | What a Linux worker imports once before it forks children. `library`: library code. `app`: library and app, so children share module state; the worker refuses to start if the import leaves a Python thread or a socket. `none`: every child starts with `exec`. Other platforms always use `exec` |
 
-Startup: logging → import app → `app.check()` → schema init with retry → start processes.
-SIGTERM/SIGINT: graceful shutdown: stops claims, returns tasks that wait for a child to PENDING, waits up to `--drain-timeout` seconds for running tasks, then kills their children. On systemd set `KillMode=mixed`; in Docker use the exec form of `CMD`.
+Startup: logging → import app (builds `AppConfig`, validates every profile) → select `--profile` → `app.check()` → memory warning → schema init with retry → connection warning → start children.
+SIGTERM/SIGINT: graceful shutdown: stops claims, returns tasks that wait for a child to PENDING, waits up to the profile's `drain_timeout` for running tasks, then kills their children. On systemd set `KillMode=mixed`; in Docker use the exec form of `CMD`.
 
 ### `horsies scheduler`
 
@@ -843,7 +1080,7 @@ Requires `app.config.schedule` to be set and enabled. Same startup sequence as w
 horsies check <module> [--live] [--loglevel LEVEL]
 ```
 
-`--live` adds Phase 4 (broker connectivity). Default `--loglevel` is `WARNING`.
+`--live` adds Phase 4 (broker connectivity) and Phase 4.1 (worker connections). Default `--loglevel` is `WARNING`.
 
 ### `horsies web`
 
@@ -878,7 +1115,8 @@ Copies the skill folder from the installed package to `DIR/horsies/`. `--target`
 | Code | Meaning |
 |---|---|
 | `0` | Success |
-| `1` | Error |
+| `1` | Error, including a missing or unknown `--profile` |
+| `2` | Argparse error, including a removed worker flag |
 
 ## Environment Variables
 
@@ -903,6 +1141,9 @@ from horsies import (
     PayloadPolicy,
     # Recovery / Resilience
     RecoveryConfig, WorkerResilienceConfig,
+    # Worker profiles
+    WorkerProfile, IsolatedChildren, NoIsolatedChildren, IsolatedRecycle,
+    TaskLimit, NoTaskLimit, MemoryLimit, NoMemoryLimit, ClaimLimits, ChildPreload,
     # Scheduling
     ScheduleConfig, TaskSchedule,
     SchedulePattern,

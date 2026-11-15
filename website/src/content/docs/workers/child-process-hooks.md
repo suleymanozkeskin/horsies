@@ -51,7 +51,7 @@ def reset_db_for_child() -> None:  # idempotent, sync
 
 Hooks run in registration order and fire on every child start, including replacement children — bodies must be idempotent. Register hooks in the app module or a discovered task module; a module the child never imports cannot fire its hooks.
 
-With `--child-preload=app`, your app module runs once, in the preload parent, before any child exists. Hooks still run in every child, so build per-child engines in the hook, and do not open a connection at import: the worker refuses to start if the import leaves a socket. Build clients of native libraries, such as gRPC, in the hook too: the guard does not see their threads.
+With `preload=ChildPreload.APP` in the worker profile, your app module runs once, in the preload parent, before any child exists. Hooks still run in every child, so build per-child engines in the hook, and do not open a connection at import: the worker refuses to start if the import leaves a socket. Build clients of native libraries, such as gRPC, in the hook too: the guard does not see their threads.
 
 ### Pool policy
 
@@ -100,6 +100,34 @@ def report() -> TaskResult[int, TaskError]:
 - Engines created lazily after the hook runs, raw psycopg clients outside any pool, and pools hidden in C extensions are out of reach — only app-side close-per-use helps there.
 - A sync hook cannot set pool policy for an async engine driven via `asyncio.run` inside a task; choose that policy at construction.
 
+## Shared async child start hooks
+
+`@app.on_shared_async_child_start` registers an `async def` function that runs once in every [shared async child](/horsies/workers/shared-async-tasks/), on the event loop of that child, before the child takes its first task. Use it to build long-lived async clients: an HTTP client or an async database pool that it builds belongs to the loop that every task of the child uses.
+
+```python
+import asyncio
+
+from horsies import Execution, TaskError, TaskResult
+
+shared_state: dict[str, asyncio.AbstractEventLoop] = {}
+
+
+@app.on_shared_async_child_start
+async def remember_loop() -> None:
+    shared_state['loop'] = asyncio.get_running_loop()
+
+
+@app.task('loop_check', execution=Execution.SHARED_ASYNC, timeout_ms=5_000)
+async def loop_check() -> TaskResult[bool, TaskError]:
+    return TaskResult(ok=shared_state['loop'] is asyncio.get_running_loop())
+```
+
+- The hooks run after the `on_child_process_start` hooks and after the child opens its async connection pool, in registration order.
+- Each hook runs for at most 10 seconds. A hook that raises or runs longer ends the child and stops the worker, as for `on_child_process_start`. A hook that blocks the loop is ended by the same bound.
+- They run in every shared async child, also in a replacement child, so bodies must be idempotent.
+- Work that a hook starts and leaves running, such as a background task of a client, belongs to no task.
+- Isolated children do not run these hooks.
+
 ## API Reference
 
 ### `@app.on_child_process_start`
@@ -115,3 +143,24 @@ def report() -> TaskResult[int, TaskError]:
 ### `app.get_child_process_start_hooks() -> list[ChildProcessStartHook]`
 
 Snapshot of registered hooks in registration order.
+
+### `@app.on_shared_async_child_start`
+
+| Parameter | Type | Required | Description |
+| --------- | ---- | -------- | ----------- |
+| `fn` | `SharedAsyncChildStartHook` (`Callable[[], Coroutine[Any, Any, None]]`) | Yes | A callable with no arguments whose call returns a coroutine. Registered once per identity; duplicate registrations are ignored. |
+
+**Returns:** the function unchanged (usable as a decorator).
+
+**Raises:** `ConfigurationError` (`HRS-214`) — `fn` is not callable, or the registration can read that its call does not return a coroutine.
+
+The registration does not call `fn`. It accepts:
+
+- an `async def` function;
+- an object whose `__call__` is `async def`;
+- a function, or an object whose `__call__` is a function, whose return annotation is an awaitable type, such as `Coroutine[Any, Any, None]`;
+- a lambda, which can be neither `async def` nor annotated. The child awaits its value; when that value is not awaitable, the hook fails when the child starts, and the worker stops.
+
+### `app.get_shared_async_child_start_hooks() -> list[SharedAsyncChildStartHook]`
+
+Snapshot of registered shared async child start hooks in registration order.

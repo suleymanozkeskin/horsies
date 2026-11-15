@@ -172,7 +172,12 @@ async def test_a_start_writes_one_runner_beat(
     """The first runner heartbeat is part of the transition."""
     task_id, claimed_at = await _arrange(session, broker, 'ENQUEUED')
 
-    result = _confirm_ownership_and_set_running(task_id, WORKER_ID, True, claimed_at)
+    result = _confirm_ownership_and_set_running(
+        task_id,
+        WORKER_ID,
+        True,
+        claimed_at=claimed_at,
+    )
 
     assert result is None
     assert await _task_status(session, task_id) == 'RUNNING'
@@ -189,7 +194,7 @@ async def test_a_start_that_does_not_apply_writes_no_beat(
     task_id, claimed_at = await _arrange(session, broker, 'ENQUEUED')
 
     result = _confirm_ownership_and_set_running(
-        task_id, WORKER_ID, True, claimed_at + timedelta(seconds=1),
+        task_id, WORKER_ID, True, claimed_at=claimed_at + timedelta(seconds=1),
     )
 
     assert result == (False, '', 'CLAIM_LOST')
@@ -206,7 +211,12 @@ async def test_a_failed_workflow_check_keeps_no_beat(
     """The rollback of the workflow check removes the beat with the transition."""
     task_id, claimed_at = await _arrange(session, broker, 'COMPLETED')
 
-    result = _confirm_ownership_and_set_running(task_id, WORKER_ID, True, claimed_at)
+    result = _confirm_ownership_and_set_running(
+        task_id,
+        WORKER_ID,
+        True,
+        claimed_at=claimed_at,
+    )
 
     assert result == WORKFLOW_CHECK_FAILED
     assert await _task_status(session, task_id) == 'CLAIMED'
@@ -223,7 +233,12 @@ async def test_running_node_keeps_its_tuple_and_first_start(
     task_id, claimed_at = await _arrange(session, broker, 'RUNNING')
     _, _, ctid_before = await _node_state(session, task_id)
 
-    result = _confirm_ownership_and_set_running(task_id, WORKER_ID, True, claimed_at)
+    result = _confirm_ownership_and_set_running(
+        task_id,
+        WORKER_ID,
+        True,
+        claimed_at=claimed_at,
+    )
 
     assert result is None
     assert await _task_status(session, task_id) == 'RUNNING'
@@ -244,7 +259,12 @@ async def test_waiting_node_moves_to_running_with_a_new_start(
     """A node that is not RUNNING yet moves to RUNNING and is stamped now."""
     task_id, claimed_at = await _arrange(session, broker, node_status)
 
-    result = _confirm_ownership_and_set_running(task_id, WORKER_ID, True, claimed_at)
+    result = _confirm_ownership_and_set_running(
+        task_id,
+        WORKER_ID,
+        True,
+        claimed_at=claimed_at,
+    )
 
     assert result is None
     assert await _task_status(session, task_id) == 'RUNNING'
@@ -265,7 +285,12 @@ async def test_terminal_node_fails_the_workflow_check(
     task_id, claimed_at = await _arrange(session, broker, node_status)
     _, _, ctid_before = await _node_state(session, task_id)
 
-    result = _confirm_ownership_and_set_running(task_id, WORKER_ID, True, claimed_at)
+    result = _confirm_ownership_and_set_running(
+        task_id,
+        WORKER_ID,
+        True,
+        claimed_at=claimed_at,
+    )
 
     assert result == WORKFLOW_CHECK_FAILED
     assert await _task_status(session, task_id) == 'CLAIMED'
@@ -284,7 +309,12 @@ async def test_missing_node_fails_the_workflow_check(
     """A workflow task with no linked node rolls back to CLAIMED."""
     task_id, claimed_at = await _arrange(session, broker, None)
 
-    result = _confirm_ownership_and_set_running(task_id, WORKER_ID, True, claimed_at)
+    result = _confirm_ownership_and_set_running(
+        task_id,
+        WORKER_ID,
+        True,
+        claimed_at=claimed_at,
+    )
 
     assert result == WORKFLOW_CHECK_FAILED
     assert await _task_status(session, task_id) == 'CLAIMED'

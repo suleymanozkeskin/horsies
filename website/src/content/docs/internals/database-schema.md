@@ -1,6 +1,6 @@
 ---
 title: Database Schema
-summary: PostgreSQL tables for live tasks, the task-history archive, heartbeats, worker states, and schedules (schema v52).
+summary: PostgreSQL tables for live tasks, the task-history archive, heartbeats, worker states, and schedules (schema v61).
 related: [../../configuration/broker-config, ../../migrations/migration-to-0-5-0]
 tags: [internals, database, schema, PostgreSQL, task-history]
 ---
@@ -42,6 +42,7 @@ Live task storage. Holds only `PENDING`, `CLAIMED`, and `RUNNING` rows
 | `good_until` | TIMESTAMPTZ | Expiry deadline |
 | `retry_count`, `max_retries`, `next_retry_at` | — | Automatic retry state |
 | `task_options` | TEXT | Serialized TaskOptions |
+| `execution` | TEXT | The task's `Execution`: `ISOLATED`, `SHARED_ASYNC` or `SHARED_THREAD`. Required; every insert path reads it from the stored options; rows written before v54 read `ISOLATED` |
 | `enqueue_sha` | VARCHAR(64) | Required enqueue digest |
 | `command_fingerprint`, `command_fingerprint_version` | BYTEA, INT | Canonical enqueue fingerprint |
 | `retention_class_key` | TEXT | Retention class assigned at enqueue (required at rest; default is the 30-day class) |
@@ -51,6 +52,16 @@ Live task storage. Holds only `PENDING`, `CLAIMED`, and `RUNNING` rows
 | `retain_rerun_input`, `prepared_rerun_input_*` | — | Rerun-input envelope: disposition, version, codec, content type, digest, inline bytes or reference |
 | `worker_pid`, `worker_hostname`, `worker_process_name` | — | Executing process identity |
 | `created_at`, `updated_at` | TIMESTAMPTZ | Row bookkeeping |
+
+The claim reads one stream per queue and execution class:
+`idx_horsies_tasks_claim_pending_class` and
+`idx_horsies_tasks_claim_expired_class` key `(queue_name, execution, priority,
+enqueued_at, id)` over PENDING and CLAIMED rows, and
+`idx_horsies_tasks_claim_expired` keys `(queue_name, claim_expires_at)` over
+CLAIMED rows. The worker builds the two class indexes concurrently. A schema
+upgrade keeps an index whose catalog form matches its declaration; it builds
+one of another form under a temporary name and swaps it in, so the claim has
+an index of that name throughout.
 
 Enqueue-time facts (`enqueue_sha`, `retention_class_key`, the fingerprint
 pair) are required columns with their declared checks from the first row
@@ -81,8 +92,10 @@ idempotency-key registry with its expiry index), and
 ## Workflow progression outbox and quarantine
 
 `horsies_workflow_phase2_pending` records the workflow progression a
-terminal task's move owes its node — the crashed-worker recovery path
-consumes it. Rows carry `attempt_count`, `last_attempt_at`, and
+terminal task's move owes its node. The phase 2 of the worker that advances
+the node deletes the row in the same transaction; a row is left only when
+that phase 2 did not commit, and the crashed-worker recovery path consumes
+it. Rows carry `attempt_count`, `last_attempt_at`, and
 `last_failure_class`; a row that keeps refusing to resolve moves to
 `horsies_workflow_phase2_quarantine` after a bounded attempt count with
 its recovery evidence preserved. The pending row's locator is tied to
@@ -109,7 +122,12 @@ gone. See
 ## horsies_task_attempts
 
 Per-attempt execution history **for live tasks**. One row per finished
-attempt, written atomically with the task state transition. At
+attempt, written atomically with the task state transition. A failed attempt
+of a RUNNING task (a task error, a timeout, a crash) is written by one call
+of `horsies_finish_failed_attempt`, with its retry or its terminal failure;
+`will_retry` is true only when that call wrote the retry. The COMPLETED
+attempt of a workflow task is written by one call of
+`horsies_finish_workflow_success`, with the move of the task. At
 terminalization the attempts are archived into the history record's
 snapshot and the live rows are deleted — the snapshot is the attempt
 history's only home from then on.
@@ -171,6 +189,8 @@ Worker monitoring snapshots (timeseries). Each worker inserts one row per
 | `queue_max_concurrency` | JSONB | Per-queue concurrency limits |
 | `recovery_config` | JSONB | Recovery configuration snapshot |
 | `worker_started_at` | TIMESTAMP | Worker start time |
+| `slots_down` | JSONB | Each slot that is down for a cause that can clear: `{slot, cause, detail, down_since, failed_boots}`; an empty array when none is. NULL in a row from a worker before v53 |
+| `class_capacity` | JSONB | Each claim budget class to `{"capacity": N, "serves": [classes]}`: the children or seats in service, and the execution classes whose rows the budget claims. NULL in a row from a worker before v55 |
 
 ## horsies_schedule_state
 
@@ -211,7 +231,7 @@ credentials accordingly.
 
 Tables are created by the broker's first initialization and evolved by
 the versioned migration chain (`horsies_schema_version` records the installed
-version; the current schema is v52). The exact version and the
+version; the current schema is v61). The exact version and the
 `task_history_v1_validated_v1` row in `horsies_cutover_state` are both required
 after an offline upgrade; the integer watermark and the legacy
 `task_history_v1` row do not attest stage-6 validation. Creation is protected

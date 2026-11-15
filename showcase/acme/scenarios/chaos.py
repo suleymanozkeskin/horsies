@@ -73,7 +73,7 @@ def run() -> int:
     bullet('2. find the worker:   pgrep -f "horsies worker showcase.acme"')
     bullet('3. kill it outright:  kill -9 <pid>')
     bullet('4. watch the workers view: the worker stops reporting and goes stale')
-    bullet('5. restart it:        uv run horsies worker showcase.acme.app:app --processes 12')
+    bullet('5. restart it:        uv run horsies worker showcase.acme.app:app --profile default')
     bullet('6. CLAIMED tasks are requeued — user code never ran, so it is safe')
     bullet('7. RUNNING tasks are recovered against their retry policies')
     bullet(f'{WEB_BASE_URL}/workers   worker health, CPU and memory history')

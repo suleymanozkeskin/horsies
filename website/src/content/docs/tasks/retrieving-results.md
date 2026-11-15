@@ -157,4 +157,4 @@ if result.is_err():
 print(f"Success: {result.ok_value}")
 ```
 
-For detailed error handling patterns, see [error-handling](error-handling.md).
+For detailed error handling patterns, see [error-handling](/horsies/tasks/error-handling/).

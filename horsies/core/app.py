@@ -1,5 +1,7 @@
 # app/core/app.py
+from collections.abc import Awaitable, Coroutine
 from typing import (
+    Literal,
     Optional,
     Callable,
     TypeVar,
@@ -9,10 +11,12 @@ from typing import (
     Any,
     Union,
     cast,
+    get_origin,
 )
 from horsies.core.models.app import AppConfig
 from horsies.core.models.queues import QueueMode
 from horsies.core.models.tasks import (
+    Execution,
     TaskError,
     TaskOptions,
     RetryPolicy,
@@ -52,6 +56,7 @@ from horsies.core.errors import (
 import inspect
 import os
 import threading
+import types
 import importlib
 import glob
 import sys
@@ -64,20 +69,53 @@ from horsies.core.utils.loop_runner import (
     async_context_message,
     in_running_event_loop,
 )
+from horsies.core.process_role import (
+    ProcessRole,
+    process_role,
+    wait_inside_task_message,
+)
 from horsies.core.codec.json_io import loads_json
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import (
     decode_subworkflow_kwargs,
     fill_build_with_defaults,
 )
+from horsies.core.models.workflow.nesting_check import (
+    NestingPath,
+    NestingStep,
+    StopWithFinding,
+    StopWithoutFinding,
+    WalkChild,
+    child_start,
+    decide_nesting,
+)
 from horsies.core.models.workflow.nodes import stored_kwargs
 from horsies.core.codec.validation_errors import ValueValidationError, exception_text
 from horsies.core.types.result import is_err
+from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.worker_profile import WorkerProfile, profile_path
+from horsies.core.worker.profile_fit import (
+    CONNECTIONS_HELP,
+    ConnectionsExceedServer,
+    ConnectionsFit,
+    ServerConnectionLimit,
+    ServerConnectionLimitUnreadable,
+    compare_connections,
+    read_server_connection_limit,
+)
 
 if TYPE_CHECKING:
-    from horsies.core.task_decorator import TaskFunction
+    from horsies.core.task_decorator import (
+        AsyncTaskFunction,
+        CancelGraceRefusedDecorator,
+        SharedAsyncTaskDecorator,
+        SharedThreadTaskDecorator,
+        TaskDecorator,
+        TaskFunction,
+    )
     from horsies.core.models.tasks import TaskInfo, TaskResult, TaskError
     from horsies.core.brokers.result_types import BrokerResult
+    from horsies.core.models.class_coverage import ClassCoverage, ClassReport
     from horsies.core.models.health import (
         DatabasePing,
         WorkerPong,
@@ -94,15 +132,105 @@ _F = TypeVar('_F', bound=Callable[..., Any])
 # Sync, zero-argument callable run once per worker child process.
 ChildProcessStartHook = Callable[[], None]
 
+# Zero-argument coroutine function run once per shared async child, on the
+# event loop of that child, before its first task.
+SharedAsyncChildStartHook = Callable[[], Coroutine[Any, Any, None]]
+
+
+@dataclass(frozen=True, slots=True)
+class _HookReturnsCoroutine:
+    """The call of the hook returns a coroutine: an ``async def`` function,
+    an object whose ``__call__`` is ``async def``, or a function whose return
+    annotation is an awaitable type."""
+
+
+@dataclass(frozen=True, slots=True)
+class _HookIsLambda:
+    """A lambda, which can be neither ``async def`` nor annotated. The child
+    awaits its value, and a value that is not awaitable fails the hook when
+    the child starts."""
+
+
+@dataclass(frozen=True, slots=True)
+class _HookIsSync:
+    """The call of the hook runs its body with no event loop."""
+
+
+type _SharedAsyncHookKind = _HookReturnsCoroutine | _HookIsLambda | _HookIsSync
+
+
+def _returns_awaitable(fn: Callable[..., object]) -> bool:
+    """Whether the return annotation of ``fn`` is an awaitable type.
+
+    An annotation that is missing or does not resolve counts as not
+    awaitable. Does not call ``fn``.
+    """
+    try:
+        annotation = inspect.signature(fn, eval_str=True).return_annotation
+    except (NameError, TypeError, ValueError, SyntaxError, AttributeError):
+        return False
+    origin = get_origin(annotation) or annotation
+    return isinstance(origin, type) and issubclass(origin, Awaitable)
+
+
+def _shared_async_hook_kind(fn: object) -> _SharedAsyncHookKind:
+    """Whether the call of ``fn`` returns a coroutine, read without a call.
+
+    A call at registration could run a sync body in the process that imports
+    the app, so only the function, its ``__call__`` and its return
+    annotation are read.
+    """
+    if inspect.iscoroutinefunction(fn):
+        return _HookReturnsCoroutine()
+    if inspect.isgeneratorfunction(fn) or inspect.isasyncgenfunction(fn):
+        return _HookIsSync()
+    match fn:
+        case types.FunctionType() if fn.__name__ == '<lambda>':
+            return _HookIsLambda()
+        case types.FunctionType() | types.MethodType():
+            target: Callable[..., object] = fn
+        case _:
+            target = type(fn).__call__
+            if inspect.iscoroutinefunction(target):
+                return _HookReturnsCoroutine()
+    if _returns_awaitable(target):
+        return _HookReturnsCoroutine()
+    return _HookIsSync()
+
+
 # Sentinel attribute name stamped on functions decorated with @app.workflow_builder
 _BUILDER_ATTR = '__horsies_workflow_builder__'
 
-# Recursion backstop for check-time static subworkflow expansion (cycles are
-# guarded by definition_key; this caps pathological nesting depth).
-_CHECK_MAX_SUBWORKFLOW_DEPTH = 32
-
 # Attribute name for opt-out of undecorated builder detection
 _NO_CHECK_ATTR = '__horsies_no_check__'
+
+
+@dataclass(frozen=True, slots=True)
+class _ChildBuilt:
+    """A child spec that ``horsies check`` built from static kwargs."""
+
+    spec: WorkflowSpec[Any]
+
+
+@dataclass(frozen=True, slots=True)
+class _ChildNotBuilt:
+    """A child spec that ``horsies check`` did not build. The cause is in the
+    check findings, in the log, or left to the run time."""
+
+
+@dataclass(frozen=True, slots=True)
+class _ConfigBrokerPool:
+    """``get_broker()`` opens the pool that ``PostgresConfig`` sets:
+    ``pool_size`` plus ``max_overflow``."""
+
+
+@dataclass(frozen=True, slots=True)
+class _TaskSendBrokerPool:
+    """A worker child: ``get_broker()`` opens up to ``connections``
+    connections, with no overflow: the ``task_send_pool`` of the kind of the
+    child."""
+
+    connections: int
 
 
 @dataclass
@@ -125,6 +253,36 @@ def _no_location(error: _E) -> _E:
     return error
 
 
+def _worker_connection_errors(
+    profiles: Mapping[str, WorkerProfile],
+    limit: ServerConnectionLimit,
+) -> list[HorsiesError]:
+    """One error for each profile that needs more connections than the
+    server has usable slots, in name order."""
+    errors: list[HorsiesError] = []
+    for name in sorted(profiles):
+        match compare_connections(profiles[name], limit):
+            case ConnectionsExceedServer() as exceed:
+                errors.append(
+                    _no_location(
+                        ConfigurationError(
+                            message=f'{profile_path(name)}: {exceed.describe()}',
+                            code=ErrorCode.CHECK_WORKER_CONNECTIONS,
+                            notes=[
+                                exceed.need.formula(),
+                                exceed.need.task_sends_note(),
+                            ],
+                            help_text=CONNECTIONS_HELP,
+                        )
+                    )
+                )
+            case ConnectionsFit():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
+    return errors
+
+
 class Horsies:
     """
     Configuration-driven task management app.
@@ -138,7 +296,12 @@ class Horsies:
         self.run_schema_migrations = run_schema_migrations
         self._broker: Optional['PostgresBroker'] = None
         self._broker_init_lock = threading.Lock()
-        self.tasks: TaskRegistry['TaskFunction[Any, Any]'] = TaskRegistry()
+        # The pool that get_broker() opens. A worker child sets its
+        # task-send pool before it imports task modules.
+        self._broker_pool: _ConfigBrokerPool | _TaskSendBrokerPool = _ConfigBrokerPool()
+        self.tasks: TaskRegistry[
+            'TaskFunction[Any, Any] | AsyncTaskFunction[Any, Any]'
+        ] = TaskRegistry()
         self.logger = get_logger('app')
         self._discovered_task_modules: list[str] = []
         self._workflow_builders: list[_WorkflowBuilderMeta] = []
@@ -149,6 +312,9 @@ class Horsies:
         # Hooks run once per worker child process, after task imports and
         # before the child opens its own connection pool.
         self._child_process_start_hooks: list[ChildProcessStartHook] = []
+        # Hooks run once per shared async child, on its event loop, before it
+        # takes its first task.
+        self._shared_async_child_start_hooks: list[SharedAsyncChildStartHook] = []
 
         if os.getenv('HORSIES_CHILD_PROCESS') == '1':
             # Child processes re-run this on every recycle
@@ -173,6 +339,21 @@ class Horsies:
             self.logger.debug(f'horsies running as {role}')
         else:
             self.logger.info(f'horsies running as {role}')
+
+    def set_task_send_pool(self, connections: int) -> None:
+        """Make ``get_broker()`` open a pool of up to ``connections``
+        connections with no overflow, in place of the pool that
+        ``PostgresConfig`` sets.
+
+        A worker child calls this at start, before it imports task modules,
+        with the ``task_send_pool`` of its kind, so task code that sends
+        opens that pool. ``connections`` is from 1 to
+        ``MAX_CHILD_POOL_CONNECTIONS``: the child decoded it within that
+        bound. A broker that ``get_broker()`` built before the call keeps
+        its pool. Below 1 is a defect: ``AssertionError``.
+        """
+        assert connections >= 1, f'connections must be >= 1; got {connections}'
+        self._broker_pool = _TaskSendBrokerPool(connections=connections)
 
     def on_child_process_start(
         self,
@@ -218,6 +399,67 @@ class Horsies:
         """Snapshot of registered child-process start hooks, in order."""
         return list(self._child_process_start_hooks)
 
+    def on_shared_async_child_start(
+        self,
+        fn: SharedAsyncChildStartHook,
+    ) -> SharedAsyncChildStartHook:
+        """Register a hook that runs once in every shared async child.
+
+        The hook is an ``async def`` function with no arguments. It runs on
+        the event loop of the child, before the child takes its first task,
+        so a client that it builds (an HTTP client, an async database pool)
+        is bound to the loop that every task of the child shares. Keep such
+        a client in module state, and use it from the tasks.
+
+        Hooks run after the ``on_child_process_start`` hooks and after the
+        child opens its connection pool, in registration order, each for at
+        most 10 seconds. A hook that raises or runs longer ends the child and
+        stops the worker, as an ``on_child_process_start`` hook does. They
+        run in every shared async child, also in a replacement child, so
+        bodies must be idempotent. Work that a hook starts and leaves
+        running, such as a background task of a client, belongs to no task.
+        Isolated children do not run these hooks.
+
+        Accepted, read without a call: an ``async def`` function, an object
+        whose ``__call__`` is ``async def``, a function or an object whose
+        ``__call__`` has an awaitable return annotation, and a lambda. A
+        lambda cannot be checked here; when its value is not awaitable, the
+        hook fails when the child starts. Any other callable is refused with
+        ``HRS-214``.
+        """
+        if not callable(fn):
+            raise ConfigurationError(
+                message='on_shared_async_child_start requires a callable',
+                code=ErrorCode.CONFIG_INVALID_CHILD_HOOK,
+                notes=[f'got {type(fn).__name__!r}'],
+                help_text='register a zero-argument async def function',
+            )
+        match _shared_async_hook_kind(fn):
+            case _HookReturnsCoroutine() | _HookIsLambda():
+                pass
+            case _HookIsSync():
+                raise ConfigurationError(
+                    message='on_shared_async_child_start hooks must be async def',
+                    code=ErrorCode.CONFIG_INVALID_CHILD_HOOK,
+                    notes=[
+                        f"hook '{getattr(fn, '__name__', repr(fn))}' is not an "
+                        'async function, and its return annotation is not '
+                        'awaitable',
+                        'the hook runs on the event loop of the shared async child',
+                    ],
+                    help_text=(
+                        'use an async def function; for setup with no event '
+                        'loop, use on_child_process_start'
+                    ),
+                )
+        if all(existing is not fn for existing in self._shared_async_child_start_hooks):
+            self._shared_async_child_start_hooks.append(fn)
+        return fn
+
+    def get_shared_async_child_start_hooks(self) -> list[SharedAsyncChildStartHook]:
+        """Snapshot of registered shared async child start hooks, in order."""
+        return list(self._shared_async_child_start_hooks)
+
     def get_valid_queue_names(self) -> list[str]:
         """Get list of valid queue names based on configuration"""
         if self.config.queue_mode == QueueMode.DEFAULT:
@@ -259,8 +501,67 @@ class Horsies:
 
     @overload
     def task(
+        self,
+        task_name: str,
+        func: Callable[P, Coroutine[Any, Any, 'TaskResult[T, TaskError]']],
+    ) -> 'AsyncTaskFunction[P, T]': ...
+
+    @overload
+    def task(
         self, task_name: str, func: Callable[P, 'TaskResult[T, TaskError]']
     ) -> 'TaskFunction[P, T]': ...
+
+    # The last overload also accepts a literal SHARED_ASYNC with
+    # cancel_grace_ms, and its return type accepts more function kinds than
+    # this one. A type checker picks this overload first for the literal.
+    @overload
+    def task(  # pyright: ignore[reportOverlappingOverload]
+        self,
+        task_name: str,
+        *,
+        execution: Literal[Execution.SHARED_ASYNC],
+        timeout_ms: int,
+        cancel_grace_ms: Optional[int] = None,
+        queue_name: Optional[str] = None,
+        retry_policy: Optional['RetryPolicy'] = None,
+        exception_mapper: Optional['ExceptionMapper'] = None,
+        default_unhandled_error_code: Optional[str] = None,
+    ) -> 'SharedAsyncTaskDecorator': ...
+
+    # The last overload also accepts a literal SHARED_THREAD, and its return
+    # type accepts more function kinds than this one. A type checker picks
+    # this overload first for the literal, so the overlap only reaches a
+    # class known at run time, which the decorator checks at run time.
+    @overload
+    def task(  # pyright: ignore[reportOverlappingOverload]
+        self,
+        task_name: str,
+        *,
+        execution: Literal[Execution.SHARED_THREAD],
+        timeout_ms: int,
+        queue_name: Optional[str] = None,
+        retry_policy: Optional['RetryPolicy'] = None,
+        exception_mapper: Optional['ExceptionMapper'] = None,
+        default_unhandled_error_code: Optional[str] = None,
+    ) -> 'SharedThreadTaskDecorator': ...
+
+    # cancel_grace_ms with a literal class other than SHARED_ASYNC: the
+    # returned decorator takes no function, so the decoration is refused.
+    # The last overload also accepts these arguments, for a class known at
+    # run time; a type checker picks this overload first for the literal.
+    @overload
+    def task(  # pyright: ignore[reportOverlappingOverload]
+        self,
+        task_name: str,
+        *,
+        execution: Literal[Execution.SHARED_THREAD],
+        timeout_ms: int,
+        cancel_grace_ms: int,
+        queue_name: Optional[str] = None,
+        retry_policy: Optional['RetryPolicy'] = None,
+        exception_mapper: Optional['ExceptionMapper'] = None,
+        default_unhandled_error_code: Optional[str] = None,
+    ) -> 'CancelGraceRefusedDecorator': ...
 
     @overload
     def task(
@@ -272,30 +573,72 @@ class Horsies:
         exception_mapper: Optional['ExceptionMapper'] = None,
         default_unhandled_error_code: Optional[str] = None,
         timeout_ms: Optional[int] = None,
-    ) -> Callable[
-        [Callable[P, 'TaskResult[T, TaskError]']],
-        'TaskFunction[P, T]',
-    ]: ...
+        execution: Literal[Execution.ISOLATED] = Execution.ISOLATED,
+    ) -> 'TaskDecorator': ...
+
+    @overload
+    def task(  # pyright: ignore[reportOverlappingOverload]
+        self,
+        task_name: str,
+        *,
+        cancel_grace_ms: int,
+        queue_name: Optional[str] = None,
+        retry_policy: Optional['RetryPolicy'] = None,
+        exception_mapper: Optional['ExceptionMapper'] = None,
+        default_unhandled_error_code: Optional[str] = None,
+        timeout_ms: Optional[int] = None,
+        execution: Literal[Execution.ISOLATED] = Execution.ISOLATED,
+    ) -> 'CancelGraceRefusedDecorator': ...
+
+    # A class known only at run time: timeout_ms is required, because a
+    # shared class needs it. cancel_grace_ms is accepted, because the class
+    # may be SHARED_ASYNC. The decorator checks the rules at run time.
+    @overload
+    def task(
+        self,
+        task_name: str,
+        *,
+        execution: Execution,
+        timeout_ms: int,
+        cancel_grace_ms: Optional[int] = None,
+        queue_name: Optional[str] = None,
+        retry_policy: Optional['RetryPolicy'] = None,
+        exception_mapper: Optional['ExceptionMapper'] = None,
+        default_unhandled_error_code: Optional[str] = None,
+    ) -> 'TaskDecorator': ...
 
     def task(
         self,
         task_name: str,
-        func: Optional[Callable[P, 'TaskResult[T, TaskError]']] = None,
+        func: Optional[
+            Callable[..., 'TaskResult[Any, TaskError]']
+            | Callable[..., Coroutine[Any, Any, 'TaskResult[Any, TaskError]']]
+        ] = None,
         **task_options_kwargs: Any,
     ) -> Union[
-        'TaskFunction[P, T]',
-        Callable[
-            [Callable[P, 'TaskResult[T, TaskError]']],
-            'TaskFunction[P, T]',
-        ],
+        'TaskFunction[Any, Any]',
+        'AsyncTaskFunction[Any, Any]',
+        'TaskDecorator',
+        'SharedAsyncTaskDecorator',
+        'SharedThreadTaskDecorator',
+        'CancelGraceRefusedDecorator',
     ]:
         """
         Decorator to register a task with this app.
         Task options are validated against TaskOptions model and app configuration.
 
+        A `def` function gives a `TaskFunction`. An `async def` function
+        gives an `AsyncTaskFunction`, whose direct call returns a coroutine.
+
+        `execution` (an `Execution`, default `ISOLATED`) declares how a
+        worker runs the task. `SHARED_ASYNC` needs an `async def` function
+        and `timeout_ms`; `SHARED_THREAD` needs a `def` function and
+        `timeout_ms`; only `SHARED_ASYNC` takes `cancel_grace_ms`.
+
         Raises:
             TaskDefinitionError: empty task name, invalid options, mapper,
-                or error code.
+                or error code; or an execution declaration that breaks a
+                rule (HRS-107 to HRS-111, one code per rule).
             ConfigurationError: queue name not in app config.
             RegistryError: duplicate task name from a different source.
                 All three fire at import/definition time by design — a task
@@ -303,7 +646,20 @@ class Horsies:
                 at first send.
         """
 
-        def decorator(fn: Callable[P, 'TaskResult[T, TaskError]']):
+        @overload
+        def decorator(
+            fn: Callable[P, Coroutine[Any, Any, 'TaskResult[T, TaskError]']],
+        ) -> 'AsyncTaskFunction[P, T]': ...
+
+        @overload
+        def decorator(
+            fn: Callable[P, 'TaskResult[T, TaskError]'],
+        ) -> 'TaskFunction[P, T]': ...
+
+        def decorator(
+            fn: Callable[P, 'TaskResult[T, TaskError]']
+            | Callable[P, Coroutine[Any, Any, 'TaskResult[T, TaskError]']],
+        ) -> 'TaskFunction[P, T] | AsyncTaskFunction[P, T]':
             fn_location = SourceLocation.from_function(fn)
 
             if task_name == '':
@@ -451,9 +807,11 @@ class Horsies:
             never acts on schedules. Validates timezone, task registration,
             queue, and the kwargs wire contract for each enabled schedule.
         Phase 4 (if live): Broker connectivity — async SELECT 1.
+        Phase 4.1 (if live): Worker connections — each worker profile against
+            the server connection limit. Skipped through a transaction pooler.
 
         Args:
-            live: If True, also check broker connectivity (Phase 4).
+            live: If True, also run the live phases (Phase 4 and 4.1).
 
         Returns:
             List of all HorsiesError instances found across phases.
@@ -503,6 +861,10 @@ class Horsies:
         # Phase 4 (optional): broker connectivity
         if live:
             all_errors.extend(self._check_broker_connectivity())
+            if all_errors:
+                return all_errors
+            # Phase 4.1: worker profiles against the server connection limit
+            all_errors.extend(self._check_worker_connections())
 
         return all_errors
 
@@ -1056,12 +1418,74 @@ class Horsies:
             )
         return errors
 
+    def _check_worker_connections(self) -> list[HorsiesError]:
+        """Compare each worker profile with the server connection limit.
+
+        One worker of a profile opens its parent pool, its listener, its
+        runner heartbeat connection and the pools of its children. A profile
+        whose worker opens more than the server has usable slots is an error
+        here; each error also states what task code that sends adds. The
+        worker itself only warns at boot. With no profiles, or through a
+        transaction pooler, nothing is read. Runs after the connectivity
+        phase, so the server answered a moment before.
+        """
+        profiles = self.config.worker_profiles
+        broker_config = self.config.broker
+        if not profiles or broker_config.pgbouncer_transaction_mode:
+            return []
+
+        import asyncio
+
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+        async def _read_limit() -> (
+            ServerConnectionLimit | ServerConnectionLimitUnreadable
+        ):
+            engine_cfg = dict(broker_config.sqlalchemy_engine_kwargs())
+            engine_cfg['connect_args'] = broker_config.pooled_connect_args
+            engine = create_async_engine(
+                broker_config.database_url.get_secret_value(), **engine_cfg
+            )
+            try:
+                return await read_server_connection_limit(
+                    async_sessionmaker(engine, expire_on_commit=False),
+                )
+            finally:
+                await engine.dispose()
+
+        match asyncio.run(_read_limit()):
+            case ServerConnectionLimitUnreadable(reason=reason):
+                return [
+                    _no_location(
+                        ConfigurationError(
+                            message='the server connection limit could not be read',
+                            code=ErrorCode.CHECK_WORKER_CONNECTIONS,
+                            notes=[reason],
+                            help_text=(
+                                'the worker profiles were not compared with '
+                                'max_connections; check that the role can run '
+                                "current_setting('max_connections')"
+                            ),
+                        )
+                    )
+                ]
+            case ServerConnectionLimit() as limit:
+                return _worker_connection_errors(profiles, limit)
+            case _ as unreachable:
+                assert_never(unreachable)
+
     def list_tasks(self) -> list[str]:
         """List tasks registered with this app"""
         return list(self.tasks.keys_list())
 
     def get_broker(self) -> 'PostgresBroker':
         """Get the configured PostgreSQL broker for this app.
+
+        In a worker child the broker opens the task-send pool of the kind of
+        the child (``set_task_send_pool``). In every other process, the
+        worker process included, it opens the pool that ``PostgresConfig``
+        sets. The worker process opens its own pool, ``WorkerProfile.pool``,
+        on a broker of its own.
 
         Raises:
             HorsiesError: broker construction failed (BROKER_INIT_FAILED;
@@ -1075,11 +1499,7 @@ class Horsies:
                 # construct a PostgresBroker (one engine/pool leaks).
                 with self._broker_init_lock:
                     if self._broker is None:
-                        broker_config = (
-                            self.config.broker.worker_runtime_config()
-                            if self._role == 'worker'
-                            else self.config.broker
-                        )
+                        broker_config = self._broker_config()
                         broker = PostgresBroker(
                             broker_config,
                             run_schema_migrations=self.run_schema_migrations,
@@ -1097,6 +1517,16 @@ class Horsies:
                 help_text='check database_url in PostgresConfig; the note holds the cause',
             ) from e
 
+    def _broker_config(self) -> PostgresConfig:
+        """The config of the broker that ``get_broker()`` builds."""
+        match self._broker_pool:
+            case _ConfigBrokerPool():
+                return self.config.broker
+            case _TaskSendBrokerPool(connections=connections):
+                return self.config.broker.with_exact_pool(connections)
+            case _ as unreachable:
+                assert_never(unreachable)
+
     # ─── Strict-serde phase 6b: app-level result APIs ──────────────
 
     async def get_raw_result_async(
@@ -1111,9 +1541,15 @@ class Horsies:
         terminal rows). Cross-process monitoring / debugging callers
         use this to inspect payloads without importing user task
         modules.
+
+        In a process that runs task bodies it returns
+        ``Err(BrokerWaitInsideTask)`` at once, before the argument checks,
+        and does no I/O.
         """
         from horsies.core.types.result import Err, Ok, is_err
 
+        if process_role() is ProcessRole.RUNS_TASK_BODIES:
+            return self._wait_inside_task_err('get_raw_result_async', task_id)
         broker = self.get_broker()
         record_result = await broker.get_raw_result_record_async(
             task_id, timeout_ms,
@@ -1132,11 +1568,14 @@ class Horsies:
     ) -> 'BrokerResult[dict[str, Any] | None]':
         """Synchronous version of ``get_raw_result_async``.
 
-        On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
-        and does no I/O.
+        In a process that runs task bodies it returns
+        ``Err(BrokerWaitInsideTask)`` first. On a thread that runs an event
+        loop it returns ``Err(ASYNC_CONTEXT)``. Neither does I/O.
         """
         from horsies.core.types.result import Err, Ok, is_err
 
+        if process_role() is ProcessRole.RUNS_TASK_BODIES:
+            return self._wait_inside_task_err('get_raw_result', task_id)
         if in_running_event_loop():
             return self._async_context_err('get_raw_result')
         broker = self.get_broker()
@@ -1164,7 +1603,13 @@ class Horsies:
         when the ok slot is populated and ``task_name`` isn't in the
         local registry. Cross-process callers inspecting failed tasks
         can therefore decode without importing user code.
+
+        In a process that runs task bodies it returns
+        ``Ok(TaskResult(err=RetrievalCode.WAIT_INSIDE_TASK))`` at once and
+        does no I/O.
         """
+        if process_role() is ProcessRole.RUNS_TASK_BODIES:
+            return self._wait_inside_task_ok('get_result_async', task_id)
         from horsies.core.brokers.result_types import (
             BrokerInvalidJsonPayload,
             BrokerNoTypeAvailable,
@@ -1298,9 +1743,13 @@ class Horsies:
     ) -> 'BrokerResult[TaskResult[Any, TaskError]]':
         """Synchronous version of ``get_result_async``.
 
-        On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
-        and does no I/O.
+        In a process that runs task bodies it returns
+        ``Ok(TaskResult(err=RetrievalCode.WAIT_INSIDE_TASK))`` at once. On a
+        thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``.
+        Neither does I/O.
         """
+        if process_role() is ProcessRole.RUNS_TASK_BODIES:
+            return self._wait_inside_task_ok('get_result', task_id)
         if in_running_event_loop():
             return self._async_context_err('get_result')
         broker = self.get_broker()
@@ -1448,6 +1897,30 @@ class Horsies:
         return Err(BrokerLoopRunnerFailed(
             message=f'Loop runner failed for app.{label}(): {exc}',
             exception=exc,
+        ))
+
+    def _wait_inside_task_ok(
+        self, label: str, task_id: str,
+    ) -> 'BrokerResult[TaskResult[Any, TaskError]]':
+        """Refuse a result wait in a process that runs task bodies. Nothing ran."""
+        from horsies.core.models.tasks import RetrievalCode, TaskError, TaskResult
+        from horsies.core.types.result import Ok
+
+        return Ok(TaskResult(
+            err=TaskError(
+                error_code=RetrievalCode.WAIT_INSIDE_TASK,
+                message=wait_inside_task_message(f'app.{label}() for task {task_id}'),
+                data={'task_id': task_id},
+            ),
+        ))
+
+    def _wait_inside_task_err(self, label: str, task_id: str) -> 'BrokerResult[Any]':
+        """Refuse a raw result wait in a process that runs task bodies. Nothing ran."""
+        from horsies.core.brokers.result_types import BrokerWaitInsideTask
+        from horsies.core.types.result import Err
+
+        return Err(BrokerWaitInsideTask(
+            message=wait_inside_task_message(f'app.{label}() for task {task_id}'),
         ))
 
     def _async_context_err(self, label: str) -> 'BrokerResult[Any]':
@@ -1599,6 +2072,49 @@ class Horsies:
             )
         except LoopRunnerError as exc:
             return self._loop_runner_err('get_worker_state_history', exc)
+
+    async def get_class_coverage_async(self) -> 'BrokerResult[ClassCoverage]':
+        """For each (queue, class) with PENDING rows, whether a live worker serves it.
+
+        See ``PostgresBroker.get_class_coverage_async``.
+        """
+        return await self.get_broker().get_class_coverage_async()
+
+    def get_class_coverage(self) -> 'BrokerResult[ClassCoverage]':
+        """Synchronous version of ``get_class_coverage_async``.
+
+        On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
+        and does no I/O.
+        """
+        if in_running_event_loop():
+            return self._async_context_err('get_class_coverage')
+        broker = self.get_broker()
+        try:
+            return broker.run_sync(self.get_class_coverage_async)
+        except LoopRunnerError as exc:
+            return self._loop_runner_err('get_class_coverage', exc)
+
+    async def get_class_report_async(self) -> 'BrokerResult[ClassReport]':
+        """Pending streams with their oldest wait and coverage, and the budget
+        load of each live worker.
+
+        See ``PostgresBroker.get_class_report_async``.
+        """
+        return await self.get_broker().get_class_report_async()
+
+    def get_class_report(self) -> 'BrokerResult[ClassReport]':
+        """Synchronous version of ``get_class_report_async``.
+
+        On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
+        and does no I/O.
+        """
+        if in_running_event_loop():
+            return self._async_context_err('get_class_report')
+        broker = self.get_broker()
+        try:
+            return broker.run_sync(self.get_class_report_async)
+        except LoopRunnerError as exc:
+            return self._loop_runner_err('get_class_report', exc)
 
     def discover_tasks(
         self,
@@ -2097,7 +2613,7 @@ class Horsies:
                 )
             else:
                 result._require_definition_key()
-                self._validate_spec_bindings(result, errors, frozenset(), 0)
+                self._validate_spec_bindings(result, errors, ())
         except MultipleValidationErrors as exc:
             errors.extend(exc.report.errors)
         except HorsiesError as exc:
@@ -2121,99 +2637,126 @@ class Horsies:
         self,
         spec: Any,
         errors: list[HorsiesError],
-        seen: frozenset[tuple[str, str | None]],
-        depth: int,
+        path: NestingPath,
     ) -> None:
-        """Validate a spec's TaskNodes (queue binding) and recurse into
-        statically-parameterized SubWorkflowNodes (full child validation).
+        """Check the nodes of ``spec`` and append each finding to ``errors``.
 
-        TaskNodes are bound through the same resolver the runtime persist paths
-        use, so an invalid queue fails check instead of surfacing at enqueue
-        time. A SubWorkflowNode is expanded only when its build_with inputs are
-        fully static — no ``args_from`` mapping — so the child spec is
-        deterministic at check time; runtime-parameterized subworkflows are
-        skipped (register their build_with as a builder for coverage). Building
-        the child runs its full validation (queue/mode AND structural — empty
-        tasks, cycles, node ids); any resulting ``HorsiesError`` is surfaced, so
-        single- and multi-error failures are treated alike. Non-horsies
-        exceptions from build_with are out of scope (user-code/environmental).
-        ``seen`` (by definition_key + wire kwargs) guards cycles; ``depth``
-        is a backstop.
+        A TaskNode is bound through the resolver that the runtime persist
+        paths use, so an invalid queue fails check instead of surfacing at
+        enqueue time. A SubWorkflowNode goes to ``_check_subworkflow_node``.
+        ``path`` holds the SubWorkflowNodes from the root spec to ``spec``.
+        Raises nothing for a finding.
         """
         for node in getattr(spec, 'tasks', ()):
-            if not isinstance(node, SubWorkflowNode):
-                try:
-                    resolve_node_queue_and_priority(self, node)
-                except ConfigurationError as exc:
-                    errors.append(exc)
-                continue
-
-            if depth >= _CHECK_MAX_SUBWORKFLOW_DEPTH:
-                continue
-            # Only expand when build_with's inputs are fully static. args_from
-            # and from_node() markers are runtime injections (dependency
-            # results) the engine merges in at enqueue, absent at check.
-            if node.args_from:
+            if isinstance(node, SubWorkflowNode):
+                self._check_subworkflow_node(node, errors, path)
                 continue
             try:
-                def_key = node.workflow_def._require_definition_key()
-            except HorsiesError:
-                continue  # missing definition_key reported elsewhere
-            # Key the cycle guard on (definition_key, kwargs signature), not
-            # definition_key alone: a definition that self-references with
-            # DIFFERENT kwargs produces a different child spec whose queue
-            # binding must still be validated. Deduping by key alone would skip
-            # the parameter-varying instance (a false negative). The kwargs
-            # signature is a stable repr (workflow kwargs are serializable);
-            # the depth cap still bounds genuinely-unbounded parameterizations.
-            wire = stored_kwargs(node)
-            node_key = (def_key, repr(sorted(wire.items())))
-            if node_key in seen:
-                continue  # cycle (same definition AND same kwargs)
-            try:
-                # The engine's read of the same row: real containers and
-                # filled defaults, not the frozen snapshot on the node.
-                child_kwargs = fill_build_with_defaults(
-                    node.workflow_def,
-                    decode_subworkflow_kwargs(node.workflow_def, wire),
-                )
-            except (StrictJsonError, ValueValidationError) as exc:
-                # At run time this fails the parent node, so it is a finding.
-                errors.append(WorkflowValidationError(
-                    message='subworkflow kwargs do not fit build_with',
-                    code=ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
-                    notes=[f"node '{node.name}': {exc}"],
-                    help_text='fix the kwarg, or the default of the parameter',
-                ))
-                continue
-            except Exception as exc:
-                # No verdict on the value: a validator can need a service that
-                # is down at boot, so this must not stop the process.
-                self.logger.warning(
-                    f"check could not fill the defaults of node '{node.name}': "
-                    f'{type(exc).__name__}: {exception_text(exc)}',
-                )
-                continue
-            try:
-                child_spec = node.workflow_def.build_with(self, **child_kwargs)
-            except MultipleValidationErrors as exc:
-                errors.extend(exc.report.errors)
-                continue
-            except HorsiesError as exc:
-                # Any horsies validation error building the child — invalid
-                # queue/mode AND structural (empty tasks, cycle, bad node_id) —
-                # is a real check finding for this static subworkflow. Surface
-                # it so single- and multi-error failures are treated alike.
+                resolve_node_queue_and_priority(self, node)
+            except ConfigurationError as exc:
                 errors.append(exc)
-                continue
-            except Exception:
-                # A non-horsies exception from build_with is out of scope (a
-                # user-code or environmental failure, not workflow validation);
-                # it surfaces via the registered-builder path or at runtime.
-                continue
-            self._validate_spec_bindings(
-                child_spec, errors, seen | {node_key}, depth + 1,
+
+    def _check_subworkflow_node(
+        self,
+        node: SubWorkflowNode[Any],
+        errors: list[HorsiesError],
+        path: NestingPath,
+    ) -> None:
+        """Walk the child spec of ``node`` when check can build it.
+
+        A node with ``args_from`` takes kwargs from results at run time, so
+        its child is not built; register its build_with as a builder for
+        coverage. ``decide_nesting`` stops the walk at a repeated definition
+        and at the depth limit, and gives a finding only for a nesting that
+        fails for certain. Each finding goes to ``errors``.
+        """
+        # Only expand when build_with's inputs are fully static. args_from
+        # and from_node() markers are runtime injections (dependency
+        # results) the engine merges in at enqueue, absent at check.
+        if node.args_from:
+            return
+        try:
+            def_key = node.workflow_def._require_definition_key()
+        except HorsiesError:
+            return  # missing definition_key reported elsewhere
+        # Key a repeat on (definition_key, kwargs signature), not
+        # definition_key alone: a definition that includes itself with
+        # DIFFERENT kwargs produces a different child spec whose queue
+        # binding must still be validated. The kwargs signature is a stable
+        # repr (workflow kwargs are serializable).
+        wire = stored_kwargs(node)
+        step = NestingStep(
+            definition_key=def_key,
+            kwargs_signature=repr(sorted(wire.items())),
+            start=child_start(node),
+        )
+        match decide_nesting(path, node.name, step):
+            case StopWithoutFinding():
+                return
+            case StopWithFinding(finding=finding):
+                errors.append(finding)
+            case WalkChild(path=child_path):
+                match self._build_child_spec_for_check(node, wire, errors):
+                    case _ChildNotBuilt():
+                        return
+                    case _ChildBuilt(spec=child_spec):
+                        self._validate_spec_bindings(child_spec, errors, child_path)
+
+    def _build_child_spec_for_check(
+        self,
+        node: SubWorkflowNode[Any],
+        wire: dict[str, Any],
+        errors: list[HorsiesError],
+    ) -> _ChildBuilt | _ChildNotBuilt:
+        """Build the child spec of ``node`` the way the engine does.
+
+        Building the child runs its full validation (queue/mode AND
+        structural: empty tasks, cycles, node ids). Each finding goes to
+        ``errors``, and the result is then ``_ChildNotBuilt``. A non-horsies
+        exception gives no verdict on the workflow: it is logged, or left to
+        the run time, and the result is ``_ChildNotBuilt``.
+        """
+        try:
+            # The engine's read of the same row: real containers and
+            # filled defaults, not the frozen snapshot on the node.
+            child_kwargs = fill_build_with_defaults(
+                node.workflow_def,
+                decode_subworkflow_kwargs(node.workflow_def, wire),
             )
+        except (StrictJsonError, ValueValidationError) as exc:
+            # At run time this fails the parent node, so it is a finding.
+            errors.append(WorkflowValidationError(
+                message='subworkflow kwargs do not fit build_with',
+                code=ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
+                notes=[f"node '{node.name}': {exc}"],
+                help_text='fix the kwarg, or the default of the parameter',
+            ))
+            return _ChildNotBuilt()
+        except Exception as exc:
+            # No verdict on the value: a validator can need a service that
+            # is down at boot, so this must not stop the process.
+            self.logger.warning(
+                f"check could not fill the defaults of node '{node.name}': "
+                f'{type(exc).__name__}: {exception_text(exc)}',
+            )
+            return _ChildNotBuilt()
+        try:
+            child_spec = node.workflow_def.build_with(self, **child_kwargs)
+        except MultipleValidationErrors as exc:
+            errors.extend(exc.report.errors)
+            return _ChildNotBuilt()
+        except HorsiesError as exc:
+            # Any horsies validation error building the child is a real check
+            # finding for this static subworkflow. Surface it so single- and
+            # multi-error failures are treated alike.
+            errors.append(exc)
+            return _ChildNotBuilt()
+        except Exception:
+            # A non-horsies exception from build_with is out of scope (a
+            # user-code or environmental failure, not workflow validation);
+            # it surfaces via the registered-builder path or at runtime.
+            return _ChildNotBuilt()
+        return _ChildBuilt(child_spec)
 
     def _check_undecorated_builders(self) -> list[HorsiesError]:
         """Detect top-level functions returning WorkflowSpec without decorator.

@@ -15,10 +15,10 @@ from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.brokers.result_types import (
     BrokerEnqueueFailed,
     BrokerErrorCode,
+    BrokerInvalidTaskOptions,
     BrokerListenerDisabled,
     BrokerOperationError,
     BrokerOperationFailed,
-    BrokerPayloadMismatch,
 )
 from horsies.core.types.error_detail import NoCause
 from horsies.core.errors import ConfigurationError, ErrorCode, RegistryError
@@ -36,6 +36,7 @@ from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.workflow import WorkflowContext
 from horsies.core.scheduler.service import ScheduleLockDatabase, Scheduler
 from horsies.core.scheduler.validation import (
+    PreparedSchedule,
     _encode_schedule_kwargs,
     _signature_error,
 )
@@ -98,10 +99,14 @@ def _make_app(
 
 
 def _make_task_mock(fn: object) -> MagicMock:
-    """Create a mock task object with _original_fn pointing to a real function."""
+    """Create a mock task object with _original_fn pointing to a real function.
+
+    The task has no options: ``task_options_json`` is None.
+    """
     task = MagicMock()
     task._original_fn = fn
     task.task_queue_name = None
+    task.task_options_json = None
     return task
 
 
@@ -872,7 +877,7 @@ class TestValidateSchedules:
         assert exc_info.value.code == ErrorCode.CONFIG_INVALID_SCHEDULE
         assert 'payload.reject_bytes' in exc_info.value.message
 
-    def test_a_valid_schedule_keeps_its_encoded_kwargs(self) -> None:
+    def test_a_valid_schedule_keeps_its_prepared_text(self) -> None:
         def value_fn(*, value: int) -> None:
             return None
 
@@ -894,7 +899,12 @@ class TestValidateSchedules:
 
         scheduler._validate_schedules()
 
-        assert scheduler._encoded_kwargs == {'s': dumps_json({'value': 5}).ok_value}
+        assert scheduler._prepared_schedules == {
+            's': PreparedSchedule(
+                kwargs_json=dumps_json({'value': 5}).ok_value,
+                task_options_json=None,
+            ),
+        }
 
     def test_disabled_schedule_skipped(self) -> None:
         """Disabled schedules are not validated."""
@@ -2363,8 +2373,9 @@ class TestCheckScheduleAdditionalPaths:
         scheduler._enqueue_scheduled_task = AsyncMock(  # type: ignore[method-assign]
             side_effect=[
                 Ok('task-0'),
-                Err(BrokerPayloadMismatch(
-                    message='sha mismatch',
+                Err(BrokerInvalidTaskOptions(
+                    message='task_options refused',
+                    exception=NoCause(),
                 )),
             ],
         )
@@ -2688,7 +2699,7 @@ class TestEnqueueScheduledTask:
         scheduler = Scheduler(app)
         scheduler.broker = _make_broker_mock()
 
-        with pytest.raises(RuntimeError, match="Schedule 's' has no encoded kwargs"):
+        with pytest.raises(RuntimeError, match="Schedule 's' has no prepared wire text"):
             await scheduler._enqueue_scheduled_task(
                 schedule,
                 slot_time=_utc(2025, 6, 1, 12, 0, 0),

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from collections.abc import Coroutine
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -21,13 +23,30 @@ from horsies.core.defaults import DEFAULT_CLAIM_LEASE_MS
 import logging
 
 from horsies.core.worker.finalize import (
+    _Phase1Input,
     _PersistedTaskOutcome,
+    _PlainTaskDone,
     _finalize_data_for_log,
 )
+from horsies.core.worker.runtime import (
+    FinalizeStage,
+    _FINALIZE_STAGE_TIMEOUT,
+    _AttemptEndUnknown,
+    _TimeoutSettled,
+    _TimeoutWriteFailed,
+)
+from horsies.core.worker.shared_finalize import timeout_retry_write
+from horsies.core.worker.shared_stop import RetryPlacement
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.models.retention import RetentionConfig
-from horsies.core.worker.claiming import ClaimPass
+from horsies.core.worker.claiming import (
+    SHORT_PASS_REPASS_LIMIT,
+    ClaimPass,
+    claim_time_of,
+    read_claim_rows,
+)
 from horsies.core.worker.sql import DELETE_ORPHANED_RECOVERY_FAILURES_SQL
+from horsies.core.utils.db import PooledStatements
 from horsies.core.worker.worker import (
     Worker,
     WorkerConfig,
@@ -49,15 +68,23 @@ from horsies.core.worker.worker import (
     _FINALIZE_STAGE_PHASE1,
     _FINALIZE_STAGE_PHASE2,
     _RequeueOutcome,
-    _RetryError,
     ChildHookFailedError,
     ChildStartFailedError,
     MemoryBaselineExceedsThresholdError,
     ServiceLoopDiedError,
 )
 from horsies.core.models.recovery import OrphanTaskAuditReport, RecoveryConfig
-from horsies.core.models.tasks import OperationalErrorCode
+from horsies.core.models.tasks import Execution, OperationalErrorCode
+from horsies.core.models.boot_failure import (
+    ResourceShortage,
+    ShortageErrno,
+    TaskLoopCreateFailed,
+)
+from horsies.core.models.health import DownSlot, SlotsDown, parse_slot_health
+from horsies.core.models.worker_profile import ResolvedPool
 from horsies.core.worker.child_protocol import (
+    IsolatedChild,
+    NoTaskLoop,
     RssMb,
     RssUnreadable,
     RunFrame,
@@ -78,12 +105,14 @@ from horsies.core.worker.slots import (
     KilledBySignal,
     LossCause,
     NotDispatched,
-    NothingToKill,
     NotRunCause,
+    Down,
     PoolStopped,
+    PreloadRefused,
+    SlotDefectsRepeated,
     SlotHandle,
+    SlotPool,
     SlotOutcome,
-    SpawnFailed,
     TaskFinished,
 )
 from tests.broker_resources_support import (
@@ -92,6 +121,10 @@ from tests.broker_resources_support import (
     fake_resources,
     resources_of,
 )
+
+CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
+
+_POOL = ResolvedPool(min_size=0, max_size=2, check=True)
 
 
 def _empty_workflow_recovery_report() -> SimpleNamespace:
@@ -119,10 +152,9 @@ def _run_frame(task_id: str = 'task-1') -> RunFrame:
         args_json=None,
         kwargs_json=None,
         worker_id='worker-1',
-        runner_heartbeat_interval_ms=30_000,
         is_workflow_task=False,
         timeout=NoTimeout(),
-        claimed_at=None,
+        claimed_at=CLAIMED_AT,
     )
 
 
@@ -148,11 +180,60 @@ _LOST = ChildLost(
     cause=LossCause.CHILD_DIED,
     child_exit=KilledBySignal(9),
     partial_frame=False,
+    pid=4242,
 )
 
 
-_NO_CLAIM = ClaimPass(claimed=0, dropped=0)
-_ONE_CLAIM = ClaimPass(claimed=1, dropped=0)
+_NO_CLAIM = ClaimPass(claimed=0, dropped=0, short_of_plan=0)
+_ONE_CLAIM = ClaimPass(claimed=1, dropped=0, short_of_plan=0)
+_CLAIM_COLUMNS = [
+    'row_kind',
+    'id',
+    'task_name',
+    'args',
+    'kwargs',
+    'queue_name',
+    'is_workflow_task',
+    'task_options',
+    'claimed_at',
+    'execution',
+    'short_by',
+]
+
+
+def _claimed_row(task_id: str) -> tuple[object, ...]:
+    """A 'CLAIMED' row of HORSIES_CLAIM_SQL."""
+    return (
+        'CLAIMED',
+        task_id,
+        'task',
+        '[]',
+        '{}',
+        'default',
+        True,
+        None,
+        CLAIMED_AT,
+        'ISOLATED',
+        None,
+    )
+
+
+def _short_row(short_by: int) -> tuple[object, ...]:
+    """The 'SHORT' row of HORSIES_CLAIM_SQL."""
+    return ('SHORT', None, None, None, None, None, None, None, None, None, short_by)
+
+
+
+@pytest.fixture(autouse=True)
+def _keep_the_test_process_unfrozen(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``run_forever`` freezes the objects of its process after a completed
+    start. These tests run it in the test process, which every later test
+    shares, so the freeze is a no-op here. ``TestStartupObjectsFreeze``
+    checks the call."""
+    monkeypatch.setattr(
+        'horsies.core.worker.worker.freeze_startup_objects',
+        lambda: None,
+    )
 
 
 def _make_worker(
@@ -178,6 +259,22 @@ def _make_worker(
         session_factory=MagicMock(),
         listener=MagicMock(),
         cfg=cfg,
+    )
+
+
+def _unstarted_pool(worker: Worker) -> SlotPool:
+    """A pool with no child yet: every slot is ``Starting``. Needs a running loop."""
+    pool = SlotPool(worker._slot_pool_config(), pending_limit=1)  # pyright: ignore[reportPrivateUsage]
+    worker._slots = pool  # pyright: ignore[reportPrivateUsage]
+    return pool
+
+
+def _down(failed_boots: int = 1) -> Down:
+    return Down(
+        ResourceShortage(ShortageErrno.EMFILE),
+        'OSError: [Errno 24] Too many open files',
+        datetime(2026, 1, 1, tzinfo=timezone.utc),
+        failed_boots,
     )
 
 
@@ -1082,7 +1179,11 @@ class TestRequeueClaimedTask:
         session = _make_session_mock(rowcount=1)
         worker.sf = MagicMock(return_value=session)
 
-        outcome = await worker._requeue_claimed_task('task-1', 'test reason')
+        outcome = await worker._requeue_claimed_task(
+            'task-1',
+            'test reason',
+            CLAIMED_AT,
+        )
 
         assert outcome is _RequeueOutcome.REQUEUED
         session.execute.assert_awaited_once()
@@ -1090,6 +1191,7 @@ class TestRequeueClaimedTask:
         assert call_args[0] is UNCLAIM_CLAIMED_TASK_SQL
         assert call_args[1]['id'] == 'task-1'
         assert call_args[1]['wid'] == worker.worker_instance_id
+        assert call_args[1]['claimed_at'] == CLAIMED_AT
         session.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -1099,7 +1201,11 @@ class TestRequeueClaimedTask:
         session = _make_session_mock(rowcount=0)
         worker.sf = MagicMock(return_value=session)
 
-        outcome = await worker._requeue_claimed_task('task-2', 'owner mismatch')
+        outcome = await worker._requeue_claimed_task(
+            'task-2',
+            'owner mismatch',
+            CLAIMED_AT,
+        )
 
         assert outcome is _RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED
         session.commit.assert_awaited_once()
@@ -1113,7 +1219,7 @@ class TestRequeueClaimedTask:
         )
         worker.sf = MagicMock(return_value=session)
 
-        outcome = await worker._requeue_claimed_task('task-3', 'db failure')
+        outcome = await worker._requeue_claimed_task('task-3', 'db failure', CLAIMED_AT)
 
         assert outcome is _RequeueOutcome.DB_ERROR
         # No exception escaped — the method returned cleanly
@@ -1125,7 +1231,7 @@ class TestRequeueClaimedTask:
         session = _make_session_mock(execute_side_effect=RuntimeError('boom'))
         worker.sf = MagicMock(return_value=session)
 
-        await worker._requeue_claimed_task('task-4', 'no commit expected')
+        await worker._requeue_claimed_task('task-4', 'no commit expected', CLAIMED_AT)
 
         session.commit.assert_not_awaited()
 
@@ -1165,7 +1271,7 @@ class TestFinalizeResultPayloadWarn:
         )
 
         handle = _finished_handle(
-            TaskFinished(True, '{"big": "' + 'x' * 1024 + '"}', None, RssUnreadable()),
+            TaskFinished(True, '{"big": "' + 'x' * 1024 + '"}', None, RssUnreadable(), NoTaskLoop()),
         )
 
         with caplog.at_level(logging.WARNING):
@@ -1173,6 +1279,7 @@ class TestFinalizeResultPayloadWarn:
                 handle,
                 'task-w',
                 task_name='big_result_task',
+                claimed_at=CLAIMED_AT,
             )
 
         guard_records = [
@@ -1211,6 +1318,7 @@ class TestFinalizeAfterSlotOutcome:
             _finished_handle(_LOST),
             'task-10',
             task_name='helper_task',
+            claimed_at=CLAIMED_AT,
         )
 
         assert isinstance(result, Err)
@@ -1276,6 +1384,7 @@ class TestFinalizeAfterSlotOutcome:
             _finished_handle(NotDispatched(NotRunCause.POOL_STOPPING)),
             'task-13',
             task_name='helper_task',
+            claimed_at=CLAIMED_AT,
         )
 
         assert isinstance(result, Err)
@@ -1289,9 +1398,10 @@ class TestFinalizeAfterSlotOutcome:
         )
 
         await worker._finalize_after(
-            _finished_handle(TaskFinished(True, '{}', None, RssUnreadable())),
+            _finished_handle(TaskFinished(True, '{}', None, RssUnreadable(), NoTaskLoop())),
             'task-13',
             task_name='helper_task',
+            claimed_at=CLAIMED_AT,
         )
 
         kwargs = worker._persist_task_terminal_state.await_args.kwargs
@@ -1313,7 +1423,7 @@ class TestAwaitSlotOutcome:
         handle = SlotHandle(_run_frame(), asyncio.get_running_loop())
 
         waiter = asyncio.ensure_future(
-            worker._await_slot_outcome(handle, 'task-1', TaskTimeout(ms=1), None),
+            worker._await_slot_outcome(handle, 'task-1', TaskTimeout(ms=1), CLAIMED_AT),
         )
         await asyncio.sleep(0.05)
 
@@ -1322,36 +1432,99 @@ class TestAwaitSlotOutcome:
         assert await waiter == NotDispatched(NotRunCause.POOL_STOPPING)
 
     @pytest.mark.asyncio
-    async def test_timeout_handler_runs_then_the_slot_decides(self) -> None:
+    async def test_a_failed_timeout_write_drops_the_late_answer_of_the_slot(
+        self,
+    ) -> None:
+        """The deadline decides: a result that reached the slot after the
+        timer fired is not written, also when the TASK_TIMEOUT write failed."""
         worker = _make_worker()
         handle = SlotHandle(_run_frame(), asyncio.get_running_loop())
         handle.bind_child(MagicMock())
+        late = TaskFinished(True, '{"ok":1}', None, RssUnreadable(), NoTaskLoop())
 
-        async def _timeout_handler(*_args: Any, **_kwargs: Any) -> None:
-            handle.finish(_LOST)
+        async def _timeout_handler(*_args: Any, **_kwargs: Any) -> object:
+            handle.finish(late)
+            return _TimeoutWriteFailed()
 
         worker._handle_task_timeout = AsyncMock(  # type: ignore[method-assign]
             side_effect=_timeout_handler,
         )
 
-        outcome = await worker._await_slot_outcome(
-            handle, 'task-1', TaskTimeout(ms=1), None,
+        outcome = await worker._await_slot_outcome(  # pyright: ignore[reportPrivateUsage]
+            handle,
+            'task-1',
+            TaskTimeout(ms=1),
+            CLAIMED_AT,
         )
 
-        worker._handle_task_timeout.assert_awaited_once()
-        assert outcome == _LOST
+        worker._handle_task_timeout.assert_awaited_once()  # pyright: ignore[reportPrivateUsage]
+        assert outcome == _TimeoutWriteFailed()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_timeout_write_is_retried_as_that_write(self) -> None:
+        worker = _make_worker()
+        handle = SlotHandle(_run_frame(), asyncio.get_running_loop())
+        worker._await_slot_outcome = AsyncMock(  # type: ignore[method-assign]
+            return_value=_TimeoutWriteFailed(),
+        )
+        claimed_at = datetime(2026, 11, 11, tzinfo=timezone.utc)
+
+        result = await worker._finalize_after(  # pyright: ignore[reportPrivateUsage]
+            handle,
+            'task-1',
+            timeout=TaskTimeout(ms=1500),
+            task_name='t',
+            claimed_at=claimed_at,
+        )
+
+        match result:
+            case Err(err_value=error):
+                assert error.stage == _FINALIZE_STAGE_TIMEOUT
+                assert error.retryable is True
+                assert timeout_retry_write(error.data) == (
+                    1500,
+                    RetryPlacement.SAME_CLASS,
+                    claimed_at,
+                )
+            case Ok():
+                raise AssertionError(result)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        'timeout_outcome',
+        [_TimeoutSettled(), _AttemptEndUnknown()],
+    )
+    async def test_the_slot_outcome_is_not_read_when_the_timeout_path_owns_the_row(
+        self,
+        timeout_outcome: _TimeoutSettled | _AttemptEndUnknown,
+    ) -> None:
+        """The slot never answers here, so a read of its outcome would hang."""
+        worker = _make_worker()
+        handle = SlotHandle(_run_frame(), asyncio.get_running_loop())
+        handle.bind_child(MagicMock())
+        worker._handle_task_timeout = AsyncMock(  # type: ignore[method-assign]
+            return_value=timeout_outcome,
+        )
+
+        outcome = await asyncio.wait_for(
+            worker._await_slot_outcome(handle, 'task-1', TaskTimeout(ms=1), CLAIMED_AT),
+            5.0,
+        )
+
+        assert outcome == timeout_outcome
+        assert not handle.outcome.done()
 
     @pytest.mark.asyncio
     async def test_a_result_inside_the_limit_needs_no_timeout_handler(self) -> None:
         worker = _make_worker()
         worker._handle_task_timeout = AsyncMock()  # type: ignore[method-assign]
-        done = TaskFinished(True, '{}', None, RssUnreadable())
+        done = TaskFinished(True, '{}', None, RssUnreadable(), NoTaskLoop())
 
         outcome = await worker._await_slot_outcome(
             _finished_handle(done),
             'task-1',
             TaskTimeout(ms=1000),
-            None,
+            CLAIMED_AT,
         )
 
         assert outcome == done
@@ -1375,10 +1548,10 @@ class TestAwaitSlotOutcome:
         worker._handle_task_timeout = AsyncMock()  # type: ignore[method-assign]
         wait_for = AsyncMock()
         monkeypatch.setattr(asyncio, 'wait_for', wait_for)
-        done = TaskFinished(True, '{}', None, RssUnreadable())
+        done = TaskFinished(True, '{}', None, RssUnreadable(), NoTaskLoop())
 
         outcome = await worker._await_slot_outcome(
-            _finished_handle(done), 'task-1', timeout, None,
+            _finished_handle(done), 'task-1', timeout, CLAIMED_AT,
         )
 
         assert outcome == done
@@ -1405,6 +1578,7 @@ class TestRequeueDbErrorContainment:
                 _finished_handle(NotDispatched(NotRunCause.QUEUE_FULL)),
                 'task-20',
                 task_name='helper_task',
+                claimed_at=CLAIMED_AT,
             )
 
         critical_messages = [r for r in caplog.records if r.levelno == logging.CRITICAL]
@@ -1427,6 +1601,7 @@ class TestRequeueDbErrorContainment:
                 _finished_handle(NotDispatched(NotRunCause.POOL_STOPPING)),
                 'task-23',
                 task_name='helper_task',
+                claimed_at=CLAIMED_AT,
             )
 
         assert [r for r in caplog.records if r.levelno == logging.CRITICAL] == []
@@ -1454,6 +1629,8 @@ class TestDispatchOne:
             True,
             timeout=TaskTimeout(ms=1000),
             claimed_at=claimed_at,
+            execution=Execution.ISOLATED,
+            task_options=None,
         )
 
         frame = worker._slots.submit.call_args.args[0]
@@ -1463,7 +1640,6 @@ class TestDispatchOne:
             args_json='[1]',
             kwargs_json='{}',
             worker_id=worker.worker_instance_id,
-            runner_heartbeat_interval_ms=30_000,
             is_workflow_task=True,
             timeout=TaskTimeout(ms=1000),
             claimed_at=claimed_at,
@@ -1487,6 +1663,8 @@ class TestDispatchOne:
             False,
             timeout=TaskTimeout(ms=1000),
             claimed_at=claimed_at,
+            execution=Execution.ISOLATED,
+            task_options=None,
         )
 
         worker._finalize_after.assert_called_once_with(
@@ -1603,7 +1781,7 @@ class TestSlotPoolSetup:
     async def test_start_failure_raises_and_keeps_the_pool_for_cleanup(self) -> None:
         worker = _make_worker()
         pool = MagicMock()
-        pool.start = AsyncMock(return_value=Err(SpawnFailed('no such file')))
+        pool.start = AsyncMock(return_value=Err(PreloadRefused('no such file')))
 
         with patch('horsies.core.worker.worker.SlotPool', return_value=pool):
             with pytest.raises(ChildStartFailedError, match='no such file'):
@@ -1628,6 +1806,47 @@ class TestStopDuringStart:
 
 
 @pytest.mark.unit
+class TestStartupObjectsFreeze:
+    @pytest.mark.asyncio
+    async def test_a_completed_start_freezes_the_startup_objects_once(self) -> None:
+        worker = _make_worker()
+        worker._queues = [asyncio.Queue()]
+        worker._resilience = WorkerResilienceConfig(
+            notify_poll_interval_ms=_LONG_POLL_MS,
+        )
+        worker._start_with_resilience_config = AsyncMock()  # type: ignore[method-assign]
+        worker.stop = AsyncMock(side_effect=worker._stop.set)  # type: ignore[method-assign]
+
+        async def _claim_pass() -> ClaimPass:
+            worker._stop.set()
+            return _NO_CLAIM
+
+        worker._claim_and_dispatch_all = AsyncMock(side_effect=_claim_pass)  # type: ignore[method-assign]
+
+        with patch(
+            'horsies.core.worker.worker.freeze_startup_objects', autospec=True,
+        ) as freeze:
+            await asyncio.wait_for(worker.run_forever(), timeout=_WAKE_TIMEOUT_S)
+
+        freeze.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_a_start_that_ends_stopped_freezes_nothing(self) -> None:
+        worker = _make_worker()
+        worker._start_with_resilience_config = AsyncMock(  # type: ignore[method-assign]
+            side_effect=worker._stop.set,
+        )
+        worker.stop = AsyncMock()  # type: ignore[method-assign]
+
+        with patch(
+            'horsies.core.worker.worker.freeze_startup_objects', autospec=True,
+        ) as freeze:
+            await worker.run_forever()
+
+        freeze.assert_not_called()
+
+
+@pytest.mark.unit
 class TestSlotFailureLoop:
     @pytest.mark.asyncio
     async def test_hook_failure_stops_gracefully(self) -> None:
@@ -1642,7 +1861,16 @@ class TestSlotFailureLoop:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         'failure',
-        [SpawnFailed('x'), BootAttemptsExhausted(3, 'exit code 1')],
+        [
+            PreloadRefused('x'),
+            BootAttemptsExhausted(
+                3,
+                ResourceShortage(ShortageErrno.EMFILE),
+                'OSError: [Errno 24] Too many open files',
+            ),
+            SlotDefectsRepeated(0, 'UnicodeEncodeError: x'),
+        ],
+        ids=['preload-refused', 'attempts-exhausted', 'slot-defects'],
     )
     async def test_other_failures_are_fatal(self, failure: Any) -> None:
         worker = _make_worker()
@@ -1651,6 +1879,28 @@ class TestSlotFailureLoop:
 
         with pytest.raises(ChildStartFailedError):
             await worker._slot_failure_loop(pool)
+
+    @pytest.mark.asyncio
+    async def test_a_task_loop_failure_at_boot_names_its_cause(self) -> None:
+        """Replacement children that cannot create their task loop stop the
+        worker with the cause in the error."""
+        worker = _make_worker()
+        pool = MagicMock()
+        pool.wait_failed = AsyncMock(
+            return_value=BootAttemptsExhausted(
+                3,
+                TaskLoopCreateFailed(),
+                'OSError: [Errno 24] Too many open files',
+            ),
+        )
+
+        with pytest.raises(ChildStartFailedError) as stopped:
+            await worker._slot_failure_loop(pool)  # pyright: ignore[reportPrivateUsage]
+
+        assert (
+            'the child could not create the event loop for async tasks: '
+            'OSError: [Errno 24] Too many open files'
+        ) in str(stopped.value)
 
 
 @pytest.mark.unit
@@ -1661,16 +1911,23 @@ class TestMemoryBaselineGuard:
         return worker
 
     def test_no_threshold_skips_the_guard(self) -> None:
-        self._worker(None)._check_memory_baseline((ChildBaseline(1, RssMb(9999.0)),))
+        self._worker(None)._check_memory_baseline(
+            (ChildBaseline(1, RssMb(9999.0), IsolatedChild(pool=_POOL, task_send_pool=2)),)
+        )
 
     def test_baseline_at_the_threshold_is_refused(self) -> None:
         with pytest.raises(MemoryBaselineExceedsThresholdError, match='100MB'):
             self._worker(100)._check_memory_baseline(
-                (ChildBaseline(1, RssMb(50.0)), ChildBaseline(2, RssMb(100.0))),
+                (
+                    ChildBaseline(1, RssMb(50.0), IsolatedChild(pool=_POOL, task_send_pool=2)),
+                    ChildBaseline(2, RssMb(100.0), IsolatedChild(pool=_POOL, task_send_pool=2)),
+                ),
             )
 
     def test_baseline_below_the_threshold_passes(self) -> None:
-        self._worker(100)._check_memory_baseline((ChildBaseline(1, RssMb(10.0)),))
+        self._worker(100)._check_memory_baseline(
+            (ChildBaseline(1, RssMb(10.0), IsolatedChild(pool=_POOL, task_send_pool=2)),)
+        )
 
     def test_unreadable_rss_warns_and_passes(
         self,
@@ -1678,49 +1935,9 @@ class TestMemoryBaselineGuard:
     ) -> None:
         with caplog.at_level(logging.WARNING, logger='horsies.worker'):
             self._worker(100)._check_memory_baseline(
-                (ChildBaseline(1, RssUnreadable()),),
+                (ChildBaseline(1, RssUnreadable(), IsolatedChild(pool=_POOL, task_send_pool=2)),),
             )
         assert 'unreadable' in caplog.text
-
-
-@pytest.mark.unit
-class TestTimedOutChildKill:
-    @pytest.mark.asyncio
-    async def test_the_child_that_holds_the_task_is_killed(self) -> None:
-        worker = _make_worker()
-        handle = SlotHandle(_run_frame(), asyncio.get_running_loop())
-        child = MagicMock()
-        handle.bind_child(child)
-
-        worker._kill_timed_out_child(handle, 'task-1', 1000)
-
-        child.kill_for_caller.assert_called_once_with()
-
-    @pytest.mark.asyncio
-    async def test_a_database_error_at_the_timeout_still_kills_the_child(self) -> None:
-        """The slot is held until the child exits, so the kill cannot wait on the row."""
-        worker = _make_worker()
-        worker.sf = MagicMock(side_effect=OperationalError('db down'))
-        handle = SlotHandle(_run_frame(), asyncio.get_running_loop())
-        child = MagicMock()
-        handle.bind_child(child)
-
-        await worker._handle_task_timeout(handle, 'task-1', 1000)
-
-        child.kill_for_caller.assert_called_once_with()
-
-    def test_a_child_that_no_longer_holds_the_task_is_not_killed(
-        self,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        worker = _make_worker()
-        handle = MagicMock()
-        handle.kill.return_value = NothingToKill()
-
-        with caplog.at_level(logging.WARNING, logger='horsies.worker'):
-            worker._kill_timed_out_child(handle, 'task-1', 1000)
-
-        assert 'no longer holds it' in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -1802,7 +2019,7 @@ class TestLeaseRenewalAgeGuard:
 
 def _make_finalize_error(
     *,
-    stage: str = _FINALIZE_STAGE_PHASE1,
+    stage: FinalizeStage = _FINALIZE_STAGE_PHASE1,
     task_id: str = 'task-fe-1',
     retryable: bool = True,
     message: str = 'test error',
@@ -1844,22 +2061,53 @@ class TestHandleFinalizeError:
         assert worker._spawn_background.call_count == 0
         assert worker._finalize_retry_attempts == {}
 
-    # --- U-2b: unknown stage ---
+    # --- U-2b: each stage has its retry route ---
 
     @pytest.mark.asyncio
-    async def test_unknown_stage_logs_and_returns(
+    @pytest.mark.parametrize(
+        ('stage', 'label'),
+        [
+            (FinalizeStage.FUTURE, 'future'),
+            (FinalizeStage.TIMEOUT, 'timeout'),
+            (FinalizeStage.PHASE1, 'phase1'),
+            (FinalizeStage.PHASE2, 'phase2'),
+            (FinalizeStage.PARENT, 'parent'),
+        ],
+    )
+    async def test_each_stage_spawns_its_own_retry(
         self,
-        caplog: pytest.LogCaptureFixture,
+        stage: FinalizeStage,
+        label: str,
     ) -> None:
-        """Unknown stage value → logs error with stage info, returns."""
+        """The stages are a closed type: each one has a retry, and a stage
+        name that is not a member cannot reach the handler."""
         worker = _make_worker()
-        worker._spawn_background = MagicMock()  # type: ignore[assignment]
-        err = _make_finalize_error(stage='phase99_unknown')
-        with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
-            await worker._handle_finalize_error(err)
 
-        assert 'phase99_unknown' in caplog.text
-        assert worker._spawn_background.call_count == 0
+        def close_retry(
+            coroutine: Coroutine[Any, Any, None],
+            **_kwargs: object,
+        ) -> None:
+            coroutine.close()
+
+        spawn = MagicMock(side_effect=close_retry)
+        worker._spawn_background = spawn  # type: ignore[assignment]
+
+        await worker._handle_finalize_error(  # pyright: ignore[reportPrivateUsage]
+            _make_finalize_error(stage=stage),
+        )
+
+        assert spawn.call_args.kwargs['name'] == f'finalize-retry-{label}-task-fe-1'
+        attempts = worker._finalize_retry_attempts  # pyright: ignore[reportPrivateUsage]
+        assert attempts == {('task-fe-1', stage): 1}
+
+    def test_the_stages_are_the_closed_set_of_retry_routes(self) -> None:
+        assert {stage.value for stage in FinalizeStage} == {
+            'phase1_persist',
+            'phase2_workflow',
+            'future',
+            'parent_propagation',
+            'timeout_write',
+        }
 
     # --- U-2c: non-retryable error ---
 
@@ -2134,17 +2382,16 @@ class TestFinalizeErrorLogOmitsResult:
     @pytest.mark.parametrize(
         ('stage', 'retryable', 'prior_attempts'),
         [
-            ('phase99_unknown', True, 0),
             (_FINALIZE_STAGE_PHASE1, False, 0),
             (_FINALIZE_STAGE_PHASE1, True, _FINALIZE_PHASE1_MAX_RETRIES),
         ],
-        ids=['unknown_stage', 'not_reattempted', 'retries_exhausted'],
+        ids=['not_reattempted', 'retries_exhausted'],
     )
     @pytest.mark.asyncio
     async def test_log_line_has_result_length_not_result(
         self,
         caplog: pytest.LogCaptureFixture,
-        stage: str,
+        stage: FinalizeStage,
         retryable: bool,
         prior_attempts: int,
     ) -> None:
@@ -2191,13 +2438,11 @@ _SENTINEL_TASK_RESULT = MagicMock(name='TaskResult')
 def _persisted_outcome(
     *,
     queue_name: str = 'default',
-    is_workflow_task: bool = True,
 ) -> _PersistedTaskOutcome:
     return _PersistedTaskOutcome(
         result=_SENTINEL_TASK_RESULT,
         task_name='loaded_task',
         queue_name=queue_name,
-        is_workflow_task=is_workflow_task,
     )
 
 
@@ -2212,6 +2457,7 @@ class TestRetryFinalizeFuture:
             stage=_FINALIZE_STAGE_FUTURE,
             task_id=task_id,
             retryable=True,
+            data={'claimed_at': CLAIMED_AT},
         )
 
     @pytest.mark.asyncio
@@ -2251,6 +2497,9 @@ class TestRetryFinalizeFuture:
         await worker._retry_finalize_future(err, 0.0)
 
         worker._recover_worker_future_failure.assert_awaited_once()
+        recovery_args = worker._recover_worker_future_failure.await_args  # pyright: ignore[reportPrivateUsage]
+        assert recovery_args is not None
+        assert recovery_args.kwargs['claimed_at'] == CLAIMED_AT
         assert key not in worker._finalize_retry_attempts
 
     @pytest.mark.asyncio
@@ -2303,7 +2552,11 @@ class TestRetryFinalizePhase1:
         outcome: dict[str, Any] | None = None,
         task_id: str = 'task-rf-1',
     ) -> _FinalizeError:
-        data = {'outcome': outcome} if outcome is not None else None
+        data = (
+            {'outcome': outcome, 'claimed_at': CLAIMED_AT}
+            if outcome is not None
+            else None
+        )
         return _FinalizeError(
             error_code='TEST',
             message='test',
@@ -2396,11 +2649,13 @@ class TestRetryFinalizePhase1:
         await worker._retry_finalize_phase1(err, 0.0)
 
         worker._persist_task_terminal_state.assert_awaited_once()
+        persist_args = worker._persist_task_terminal_state.await_args  # pyright: ignore[reportPrivateUsage]
+        assert persist_args is not None
+        assert persist_args.kwargs['claimed_at'] == CLAIMED_AT
         worker._finalize_workflow_phase.assert_awaited_once_with(
             err.task_id,
             _SENTINEL_TASK_RESULT,
             queue_name='default',
-            is_workflow_task=True,
             task_name='loaded_task',
         )
         assert key_p1 not in worker._finalize_retry_attempts
@@ -2412,12 +2667,7 @@ class TestRetryFinalizePhase1:
         worker = _make_worker()
         worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
         worker._persist_task_terminal_state = AsyncMock(  # type: ignore[assignment]
-            return_value=Ok(
-                _persisted_outcome(
-                    queue_name='persisted-queue',
-                    is_workflow_task=True,
-                )
-            ),
+            return_value=Ok(_persisted_outcome(queue_name='persisted-queue')),
         )
         worker._finalize_workflow_phase = AsyncMock(  # type: ignore[assignment]
             return_value=Ok(None),
@@ -2437,6 +2687,7 @@ class TestRetryFinalizePhase1:
                 'queue_name': 'critical',
                 'is_workflow_task': False,
                 'task_name': 'ctx_task',
+                'claimed_at': CLAIMED_AT,
             },
         )
 
@@ -2446,7 +2697,6 @@ class TestRetryFinalizePhase1:
             err.task_id,
             _SENTINEL_TASK_RESULT,
             queue_name='persisted-queue',
-            is_workflow_task=True,
             task_name='loaded_task',
         )
 
@@ -2479,7 +2729,7 @@ class TestRetryFinalizePhase1:
             'queue_name': 'default',
             'is_workflow_task': True,
             'task_name': '',
-            'claimed_at': None,
+            'claimed_at': CLAIMED_AT,
         }
 
     # --- U-3f: _persist Ok(None) → clears phase1 only ---
@@ -2618,7 +2868,6 @@ class TestRetryFinalizePhase2:
             err.task_id,
             _SENTINEL_TASK_RESULT,
             queue_name='default',
-            is_workflow_task=True,
             task_name='loaded_task',
         )
         assert key not in worker._finalize_retry_attempts
@@ -2629,12 +2878,7 @@ class TestRetryFinalizePhase2:
         worker = _make_worker()
         worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
         worker._load_persisted_task_result = AsyncMock(  # type: ignore[assignment]
-            return_value=Ok(
-                _persisted_outcome(
-                    queue_name='critical',
-                    is_workflow_task=False,
-                )
-            ),
+            return_value=Ok(_persisted_outcome(queue_name='critical')),
         )
         worker._finalize_workflow_phase = AsyncMock(  # type: ignore[assignment]
             return_value=Ok(None),
@@ -2654,10 +2898,28 @@ class TestRetryFinalizePhase2:
             err.task_id,
             _SENTINEL_TASK_RESULT,
             queue_name='critical',
-            is_workflow_task=False,
             # Reloaded row name wins over error-data context.
             task_name='loaded_task',
         )
+
+    @pytest.mark.asyncio
+    async def test_a_plain_task_owes_no_phase_two(self) -> None:
+        """A reloaded plain task got its wake from the statement that ended
+        it: phase 2 does not run, and its retry count is cleared."""
+        worker = _make_worker()
+        worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
+        worker._load_persisted_task_result = AsyncMock(  # type: ignore[assignment]
+            return_value=Ok(_PlainTaskDone()),
+        )
+        worker._finalize_workflow_phase = AsyncMock()  # type: ignore[assignment]
+        err = self._make_err()
+        key = (err.task_id, _FINALIZE_STAGE_PHASE2)
+        worker._finalize_retry_attempts[key] = 3
+
+        await worker._retry_finalize_phase2(err, 0.0)
+
+        worker._finalize_workflow_phase.assert_not_awaited()
+        assert key not in worker._finalize_retry_attempts
 
     # --- U-3k: _finalize_workflow fails → delegates ---
 
@@ -3054,10 +3316,44 @@ class TestCapacityReleaseWake:
         assert passes == 1
 
     @pytest.mark.asyncio
+    async def test_short_passes_run_again_at_most_the_limit_in_a_row(self) -> None:
+        """Every pass takes fewer rows than it planned (another transaction
+        holds them): the worker runs SHORT_PASS_REPASS_LIMIT more passes with
+        no wait, then waits for a wake."""
+        worker = _make_worker()
+        worker._queues = [asyncio.Queue()]
+        worker._resilience = WorkerResilienceConfig(
+            notify_poll_interval_ms=_LONG_POLL_MS,
+        )
+        worker._start_with_resilience_config = AsyncMock()  # type: ignore[method-assign]
+        worker.stop = AsyncMock(side_effect=worker._stop.set)  # type: ignore[method-assign]
+        passes = 0
+
+        async def _claim_pass() -> ClaimPass:
+            nonlocal passes
+            passes += 1
+            if passes > SHORT_PASS_REPASS_LIMIT + 1:
+                # One pass past the bound: stop instead of spinning.
+                worker._stop.set()
+            await asyncio.sleep(0)
+            return ClaimPass(claimed=0, dropped=0, short_of_plan=1)
+
+        worker._claim_and_dispatch_all = AsyncMock(side_effect=_claim_pass)  # type: ignore[method-assign]
+        loop = asyncio.create_task(worker.run_forever())
+        await asyncio.sleep(0.05)
+        worker._stop.set()
+        await asyncio.wait_for(loop, timeout=_WAKE_TIMEOUT_S)
+
+        assert passes == SHORT_PASS_REPASS_LIMIT + 1
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize('max_claim_batch', [0, 1], ids=['no_cap', 'capped'])
     @pytest.mark.parametrize(
         'first_pass',
-        [ClaimPass(claimed=1, dropped=1), ClaimPass(claimed=3, dropped=1)],
+        [
+            ClaimPass(claimed=1, dropped=1, short_of_plan=0),
+            ClaimPass(claimed=3, dropped=1, short_of_plan=0),
+        ],
         ids=['all_dropped', 'partly_dropped'],
     )
     async def test_a_pass_that_dropped_a_row_runs_again_with_no_wait(
@@ -3092,17 +3388,84 @@ class TestCapacityReleaseWake:
 
 
 @pytest.mark.unit
+class TestReadClaimRows:
+    def test_claimed_rows_come_back_in_order_with_no_short_take(self) -> None:
+        rows = read_claim_rows(
+            _CLAIM_COLUMNS,
+            [_claimed_row('id-1'), _claimed_row('id-2')],
+        )
+
+        assert [task['id'] for task in rows.tasks] == ['id-1', 'id-2']
+        assert rows.short_of_plan == 0
+
+    def test_a_short_row_is_counted_and_is_not_a_task(self) -> None:
+        rows = read_claim_rows(_CLAIM_COLUMNS, [_claimed_row('id-1'), _short_row(3)])
+
+        assert [task['id'] for task in rows.tasks] == ['id-1']
+        assert rows.short_of_plan == 3
+
+    @pytest.mark.parametrize(
+        'rows',
+        [
+            [('OTHER',) + _claimed_row('id-1')[1:]],
+            [_short_row(1), _short_row(1)],
+            [_short_row(0)],
+        ],
+        ids=['unknown_kind', 'two_short_rows', 'short_by_zero'],
+    )
+    def test_rows_that_the_claim_function_never_returns_are_a_defect(
+        self,
+        rows: list[tuple[object, ...]],
+    ) -> None:
+        with pytest.raises(AssertionError):
+            read_claim_rows(_CLAIM_COLUMNS, rows)
+
+
+@pytest.mark.unit
+class TestClaimTimeOf:
+    """Every fence of a dispatch uses the claim time that its claim row
+    returned, so a row without one is a defect of the claim function."""
+
+    def test_a_claimed_row_gives_its_claim_time(self) -> None:
+        (row,) = read_claim_rows(_CLAIM_COLUMNS, [_claimed_row('id-1')]).tasks
+
+        assert claim_time_of(row) == CLAIMED_AT
+
+    def test_a_row_with_a_null_claim_time_is_a_defect(self) -> None:
+        (row,) = read_claim_rows(_CLAIM_COLUMNS, [_claimed_row('id-1')]).tasks
+        row['claimed_at'] = None
+
+        with pytest.raises(
+            AssertionError,
+            match="returned task 'id-1' without a claim time: claimed_at is None",
+        ):
+            claim_time_of(row)
+
+    def test_a_row_without_the_claim_time_column_is_a_defect(self) -> None:
+        (row,) = read_claim_rows(_CLAIM_COLUMNS, [_claimed_row('id-1')]).tasks
+        del row['claimed_at']
+
+        with pytest.raises(
+            AssertionError,
+            match="returned task 'id-1' without a claim time: claimed_at is 'missing'",
+        ):
+            claim_time_of(row)
+
+
+@pytest.mark.unit
 class TestClaimPass:
     @pytest.mark.parametrize(
         ('claim_pass', 'limited', 'expected'),
         [
-            (ClaimPass(claimed=0, dropped=0), False, False),
-            (ClaimPass(claimed=0, dropped=0), True, False),
-            (ClaimPass(claimed=3, dropped=0), False, False),
-            (ClaimPass(claimed=3, dropped=0), True, True),
-            (ClaimPass(claimed=3, dropped=1), False, True),
-            (ClaimPass(claimed=3, dropped=3), False, True),
-            (ClaimPass(claimed=3, dropped=3), True, True),
+            (ClaimPass(claimed=0, dropped=0, short_of_plan=0), False, False),
+            (ClaimPass(claimed=0, dropped=0, short_of_plan=0), True, False),
+            (ClaimPass(claimed=3, dropped=0, short_of_plan=0), False, False),
+            (ClaimPass(claimed=3, dropped=0, short_of_plan=0), True, True),
+            (ClaimPass(claimed=3, dropped=1, short_of_plan=0), False, True),
+            (ClaimPass(claimed=3, dropped=3, short_of_plan=0), False, True),
+            (ClaimPass(claimed=3, dropped=3, short_of_plan=0), True, True),
+            (ClaimPass(claimed=0, dropped=0, short_of_plan=2), False, True),
+            (ClaimPass(claimed=1, dropped=0, short_of_plan=1), False, True),
         ],
     )
     def test_it_states_when_work_can_remain_unannounced(
@@ -3111,15 +3474,57 @@ class TestClaimPass:
         limited: bool,
         expected: bool,
     ) -> None:
-        assert claim_pass.left_unannounced_work(limited=limited) is expected
+        assert (
+            claim_pass.left_unannounced_work(limited=limited, short_passes_before=0)
+            is expected
+        )
+
+    @pytest.mark.parametrize(
+        ('short_passes_before', 'expected'),
+        [
+            (0, True),
+            (SHORT_PASS_REPASS_LIMIT - 1, True),
+            (SHORT_PASS_REPASS_LIMIT, False),
+        ],
+        ids=['first', 'last_allowed', 'limit_reached'],
+    )
+    def test_a_short_take_asks_for_a_bounded_run_of_passes(
+        self,
+        short_passes_before: int,
+        expected: bool,
+    ) -> None:
+        claim_pass = ClaimPass(claimed=0, dropped=0, short_of_plan=1)
+
+        assert (
+            claim_pass.left_unannounced_work(
+                limited=False,
+                short_passes_before=short_passes_before,
+            )
+            is expected
+        )
+
+    @pytest.mark.parametrize(
+        ('claim_pass', 'expected'),
+        [
+            (ClaimPass(claimed=0, dropped=0, short_of_plan=1), 3),
+            (ClaimPass(claimed=2, dropped=0, short_of_plan=0), 0),
+        ],
+        ids=['short', 'full'],
+    )
+    def test_short_passes_count_the_run_that_ends_with_this_pass(
+        self,
+        claim_pass: ClaimPass,
+        expected: int,
+    ) -> None:
+        assert claim_pass.short_passes_after(2) == expected
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ('kept', 'expected'),
         [
-            (3, ClaimPass(claimed=3, dropped=0)),
-            (1, ClaimPass(claimed=3, dropped=2)),
-            (0, ClaimPass(claimed=3, dropped=3)),
+            (3, ClaimPass(claimed=3, dropped=0, short_of_plan=0)),
+            (1, ClaimPass(claimed=3, dropped=2, short_of_plan=0)),
+            (0, ClaimPass(claimed=3, dropped=3, short_of_plan=0)),
         ],
         ids=['none_dropped', 'partly_dropped', 'all_dropped'],
     )
@@ -3129,23 +3534,23 @@ class TestClaimPass:
         expected: ClaimPass,
     ) -> None:
         worker = _make_worker()
+        _unstarted_pool(worker)
         rows = [
-            ('id-1', 'task', '[]', '{}', 'default', True, None, None),
-            ('id-2', 'task', '[]', '{}', 'default', True, None, None),
-            ('id-3', 'task', '[]', '{}', 'default', True, None, None),
+            _claimed_row('id-1'),
+            _claimed_row('id-2'),
+            _claimed_row('id-3'),
         ]
         result = MagicMock()
-        result.keys.return_value = [
-            'id', 'task_name', 'args', 'kwargs', 'queue_name',
-            'is_workflow_task', 'task_options', 'claimed_at',
-        ]
+        result.keys.return_value = _CLAIM_COLUMNS
         result.fetchall.return_value = rows
         session = AsyncMock()
         session.execute = AsyncMock(return_value=result)
+        session.connection = AsyncMock(return_value=session)
         factory = MagicMock()
         factory.return_value.__aenter__ = AsyncMock(return_value=session)
         factory.return_value.__aexit__ = AsyncMock(return_value=False)
         worker.sf = factory
+        worker._claim_runner = PooledStatements(factory)  # pyright: ignore[reportPrivateUsage]
 
         async def _keep(claimed: list[dict[str, object]]) -> list[dict[str, object]]:
             return claimed[:kept]
@@ -3157,19 +3562,117 @@ class TestClaimPass:
         assert worker._dispatch_one.await_count == kept
 
     @pytest.mark.asyncio
+    async def test_a_short_take_is_reported_with_the_rows_it_took(self) -> None:
+        worker = _make_worker()
+        _unstarted_pool(worker)
+        result = MagicMock()
+        result.keys.return_value = _CLAIM_COLUMNS
+        result.fetchall.return_value = [_claimed_row('id-1'), _short_row(2)]
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=result)
+        session.connection = AsyncMock(return_value=session)
+        factory = MagicMock()
+        factory.return_value.__aenter__ = AsyncMock(return_value=session)
+        factory.return_value.__aexit__ = AsyncMock(return_value=False)
+        worker.sf = factory
+        worker._claim_runner = PooledStatements(factory)  # pyright: ignore[reportPrivateUsage]
+
+        async def _all_runnable(
+            claimed: list[dict[str, object]],
+        ) -> list[dict[str, object]]:
+            return claimed
+
+        worker._filter_nonrunnable_workflow_tasks = AsyncMock(side_effect=_all_runnable)  # type: ignore[method-assign]
+        worker._dispatch_one = AsyncMock()  # type: ignore[method-assign]
+
+        assert await worker._claim_and_dispatch_all() == ClaimPass(
+            claimed=1,
+            dropped=0,
+            short_of_plan=2,
+        )
+        assert [call.args[0] for call in worker._dispatch_one.await_args_list] == [
+            'id-1',
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_pass_that_took_nothing_still_reports_its_short_take(
+        self,
+    ) -> None:
+        worker = _make_worker()
+        _unstarted_pool(worker)
+        result = MagicMock()
+        result.keys.return_value = _CLAIM_COLUMNS
+        result.fetchall.return_value = [_short_row(2)]
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=result)
+        session.connection = AsyncMock(return_value=session)
+        factory = MagicMock()
+        factory.return_value.__aenter__ = AsyncMock(return_value=session)
+        factory.return_value.__aexit__ = AsyncMock(return_value=False)
+        worker.sf = factory
+        worker._claim_runner = PooledStatements(factory)  # pyright: ignore[reportPrivateUsage]
+
+        assert await worker._claim_and_dispatch_all() == ClaimPass(
+            claimed=0,
+            dropped=0,
+            short_of_plan=2,
+        )
+
+    @pytest.mark.asyncio
     async def test_an_empty_pass_reports_nothing(self) -> None:
         worker = _make_worker()
+        _unstarted_pool(worker)
         result = MagicMock()
         result.keys.return_value = []
         result.fetchall.return_value = []
         session = AsyncMock()
         session.execute = AsyncMock(return_value=result)
+        session.connection = AsyncMock(return_value=session)
         factory = MagicMock()
         factory.return_value.__aenter__ = AsyncMock(return_value=session)
         factory.return_value.__aexit__ = AsyncMock(return_value=False)
         worker.sf = factory
+        worker._claim_runner = PooledStatements(factory)  # pyright: ignore[reportPrivateUsage]
 
         assert await worker._claim_and_dispatch_all() == _NO_CLAIM
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ('down_slots', 'expected_processes'),
+        [((), 3), ((1,), 2), ((0, 2), 1), ((0, 1, 2), 0)],
+        ids=['none-down', 'one-down', 'two-down', 'all-down'],
+    )
+    async def test_the_claim_budget_leaves_out_the_slots_that_are_down(
+        self,
+        down_slots: tuple[int, ...],
+        expected_processes: int,
+    ) -> None:
+        worker = _make_worker()
+        worker.cfg.processes = 3
+        pool = _unstarted_pool(worker)
+        for index in down_slots:
+            pool._slots[index].state = _down()  # pyright: ignore[reportPrivateUsage]
+        result = MagicMock()
+        result.keys.return_value = []
+        result.fetchall.return_value = []
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=result)
+        session.connection = AsyncMock(return_value=session)
+        factory = MagicMock()
+        factory.return_value.__aenter__ = AsyncMock(return_value=session)
+        factory.return_value.__aexit__ = AsyncMock(return_value=False)
+        worker.sf = factory
+        worker._claim_runner = PooledStatements(factory)  # pyright: ignore[reportPrivateUsage]
+
+        await worker._claim_and_dispatch_all()  # pyright: ignore[reportPrivateUsage]
+
+        params = session.execute.await_args.args[1]
+        assert json.loads(params['p_budgets']) == {'ISOLATED': expected_processes}
+
+    def test_a_claim_before_the_slot_pool_exists_is_a_defect(self) -> None:
+        worker = _make_worker()
+        with pytest.raises(AssertionError, match='before the slot pool exists'):
+            worker._claim_slot_count()  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.unit
@@ -3419,6 +3922,56 @@ class TestStartupRegistersEveryClassItRuns:
 
 
 @pytest.mark.unit
+class TestStartGuardsKindsDownAtTheFirstStart:
+    """A kind whose slots were all down at the first start has no baseline
+    then. The test enters at ``worker.start()``: the guard of such a kind
+    runs only when the start spawns its loop as a service of the worker."""
+
+    @pytest.mark.asyncio
+    async def test_the_start_spawns_the_new_kind_baseline_loop(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from horsies.core.history.maintenance import coverage as coverage_module
+
+        async def _ensured(*_args: Any, **_kwargs: Any) -> Any:
+            return coverage_module.CoverageEnsured(
+                created_history_leaves=0,
+                created_heartbeat_leaves=0,
+                republished=False,
+                absent_leaves=(),
+                heartbeat_covered_now=True,
+                history_covered_through=datetime(2026, 1, 2, tzinfo=timezone.utc),
+                heartbeats_covered_through=datetime(2026, 1, 1, 1, tzinfo=timezone.utc),
+            )
+
+        monkeypatch.setattr(
+            coverage_module, 'ensure_startup_coverage_in_database', _ensured
+        )
+        worker = _make_worker()
+        worker.broker = MagicMock()
+        attach_resources(worker.broker, fake_resources())
+        worker.broker.validate_worker_database_paths = AsyncMock()
+        worker._preload_modules_main = MagicMock()  # type: ignore[assignment]
+        _stub_slot_start(worker)
+        worker.listener.start = AsyncMock(return_value=Ok(None))
+        worker.listener.listen_many = AsyncMock(return_value=Ok(None))
+        worker.listener.listen = AsyncMock(return_value=Ok(asyncio.Queue[object]()))
+        spawn = MagicMock()
+        worker._spawn_background = spawn  # type: ignore[assignment]
+
+        await worker.start()
+
+        calls = {call.kwargs['name']: call for call in spawn.call_args_list}
+        for call in spawn.call_args_list:
+            call.args[0].close()
+        watch = calls['new-kind-baseline-watch']
+        assert watch.kwargs['service'] is True
+        loop = Worker._new_kind_baseline_loop  # pyright: ignore[reportPrivateUsage]
+        assert watch.args[0].cr_code is loop.__code__
+
+
+@pytest.mark.unit
 class TestWorkerStartupCoverageOutcome:
     """The worker distinguishes fatal coverage from contained reports."""
 
@@ -3575,6 +4128,60 @@ class TestWorkerStartConnectionOrdering:
             'database-paths',
             'coverage-ensure',
             'listener-start',
+        ]
+
+    @pytest.mark.asyncio
+    async def test_start_logs_the_claim_plan(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The worker logs its claim plan once, when it starts."""
+        worker = _make_worker()
+        from horsies.core.history.maintenance import coverage as coverage_module
+
+        async def _ensured(*_args: Any, **_kwargs: Any) -> Any:
+            return coverage_module.CoverageEnsured(
+                created_history_leaves=0,
+                created_heartbeat_leaves=0,
+                republished=False,
+                absent_leaves=(),
+                heartbeat_covered_now=True,
+                history_covered_through=datetime(2026, 1, 2, tzinfo=timezone.utc),
+                heartbeats_covered_through=datetime(
+                    2026, 1, 1, 1, tzinfo=timezone.utc
+                ),
+            )
+
+        monkeypatch.setattr(
+            coverage_module, 'ensure_startup_coverage_in_database', _ensured
+        )
+        worker.broker = MagicMock()
+        attach_resources(worker.broker, fake_resources())
+        worker.broker.validate_worker_database_paths = AsyncMock()
+        worker._preload_modules_main = MagicMock()  # type: ignore[assignment]
+        _stub_slot_start(worker, lambda: None)
+        worker.listener.start = AsyncMock(return_value=Ok(None))
+        worker.listener.listen_many = AsyncMock(return_value=Ok([asyncio.Queue()]))
+        worker.listener.listen = AsyncMock(return_value=Ok(asyncio.Queue()))
+
+        def _close_spawned(coro, **kwargs):  # type: ignore[no-untyped-def]
+            coro.close()
+            return MagicMock()
+
+        worker._spawn_background = MagicMock(side_effect=_close_spawned)  # type: ignore[assignment]
+
+        with caplog.at_level(logging.INFO, logger='horsies.worker'):
+            await worker.start()
+
+        plan_lines = [
+            record.getMessage()
+            for record in caplog.records
+            if record.getMessage().startswith('Claim plan: ')
+        ]
+        assert plan_lines == [
+            'Claim plan: ISOLATED -> ISOLATED budget, SHARED_ASYNC -> '
+            'ISOLATED budget, SHARED_THREAD -> ISOLATED budget',
         ]
 
 
@@ -3899,7 +4506,8 @@ class TestReaperMatchArms:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """When worker.broker is absent, reaper constructs a worker-sized temp broker."""
+        """When worker.broker is absent, reaper constructs a temp broker with
+        the parent pool and no overflow."""
         worker = _make_reaper_worker(
             monkeypatch,
             auto_requeue=True,
@@ -3912,7 +4520,7 @@ class TestReaperMatchArms:
         created = worker._test_created_brokers  # type: ignore[attr-defined]
         assert len(created) == 1
         assert created[0].config.pool_size == worker.cfg.parent_pool_size
-        assert created[0].config.max_overflow == worker.cfg.parent_max_overflow
+        assert created[0].config.max_overflow == 0
         created[0].close_async.assert_awaited_once()
 
     # --- U-6f: loop-level exception → logged, continues ---
@@ -4192,6 +4800,33 @@ class TestPreloadModulesMain:
 
         mocks['import_module'].assert_called_once_with('auto.discovered')
 
+    def test_records_the_class_of_each_registered_task(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The preload keeps the Execution of each task for the claim's
+        class check."""
+        worker = _make_worker()
+        mocks = self._patch_preload(monkeypatch)
+        mocks['app'].tasks.items.return_value = [
+            ('plain', SimpleNamespace(task_options_json=None)),
+            (
+                'awaited',
+                SimpleNamespace(
+                    task_options_json=(
+                        '{"execution": "SHARED_ASYNC", "cancel_grace_ms": 5000}'
+                    ),
+                ),
+            ),
+        ]
+
+        worker._preload_modules_main()
+
+        assert worker._registered_classes == {
+            'plain': Execution.ISOLATED,
+            'awaited': Execution.SHARED_ASYNC,
+        }
+
     # --- U-5e: import error → logged + re-raised ---
 
     def test_import_error_logged_and_reraised(
@@ -4341,7 +4976,9 @@ class TestUpdateWorkerState:
     ) -> None:
         """Executes INSERT_WORKER_STATE_SQL with expected parameters."""
         worker = _make_worker()
+        worker.cfg.processes = 1
         worker._started_at = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        _unstarted_pool(worker)
 
         monkeypatch.setattr(
             'horsies.core.worker.health._collect_psutil_metrics',
@@ -4379,6 +5016,62 @@ class TestUpdateWorkerState:
         assert params['mem_pct'] == 5.5
         assert params['cpu_pct'] == 12.3
         assert params['children_mem_mb'] == 250.0
+        assert params['slots_down'].obj == []
+        assert params['class_capacity'].obj == {
+            'ISOLATED': {
+                'capacity': 1,
+                'serves': ['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD'],
+            },
+        }
+
+    @pytest.mark.asyncio
+    async def test_a_degraded_worker_reports_its_down_slots(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The snapshot names each slot that is down, with its typed cause."""
+        worker = _make_worker()
+        worker.cfg.processes = 2
+        pool = _unstarted_pool(worker)
+        pool._slots[1].state = _down(failed_boots=4)  # pyright: ignore[reportPrivateUsage]
+        monkeypatch.setattr(
+            'horsies.core.worker.health._collect_psutil_metrics',
+            lambda: (1.0, 1.0, 1.0, 1.0),
+        )
+        worker._count_only_running_for_worker = AsyncMock(return_value=0)  # type: ignore[assignment]
+        worker._count_claimed_for_worker = AsyncMock(return_value=0)  # type: ignore[assignment]
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.execute = AsyncMock(return_value=MagicMock(rowcount=1))
+        worker.sf = MagicMock(return_value=session)
+
+        await worker._update_worker_state()  # pyright: ignore[reportPrivateUsage]
+
+        params = session.execute.await_args.args[1]
+        assert params['slots_down'].obj == [
+            {
+                'slot': 1,
+                'cause': {'kind': 'resource_shortage', 'errno': 'EMFILE'},
+                'detail': 'OSError: [Errno 24] Too many open files',
+                'down_since': '2026-01-01T00:00:00+00:00',
+                'failed_boots': 4,
+            },
+        ]
+        assert parse_slot_health(params['slots_down'].obj, 2) == Ok(
+            SlotsDown(
+                (
+                    DownSlot(
+                        1,
+                        ResourceShortage(ShortageErrno.EMFILE),
+                        'OSError: [Errno 24] Too many open files',
+                        datetime(2026, 1, 1, tzinfo=timezone.utc),
+                        4,
+                    ),
+                ),
+            ),
+        )
+        assert params['class_capacity'].obj['ISOLATED']['capacity'] == 1
 
     # --- U-7c ---
 
@@ -4888,33 +5581,35 @@ class TestHandlePing:
 class TestReaperGatePoolCapacity:
     """The advisory gate needs two coordinator connections (gate + pass).
 
-    Regression: with parent_pool_size=1, max_overflow=0 the gate session
-    owned the pool's only connection while the pass body blocked on a
-    second checkout until pool timeout, every interval. Capacity below two
+    Regression: with a parent pool of 1 connection (no overflow) the gate
+    session owned the pool's only connection while the pass body blocked on
+    a second checkout until pool timeout, every interval. Capacity below two
     must run passes ungated (SKIP LOCKED keeps concurrent passes safe).
     """
 
     @staticmethod
-    def _capacity_worker(pool_size: int, max_overflow: int) -> Worker:
+    def _capacity_worker(pool_size: int) -> Worker:
         cfg = WorkerConfig(
             dsn='postgresql+psycopg://u:p@localhost/db',
             psycopg_dsn='postgresql://u:p@localhost/db',
             queues=['default'],
-            parent_pool_size=pool_size,
-            parent_max_overflow=max_overflow,
             recovery_config=RecoveryConfig(check_interval_ms=1_000),
         )
-        return Worker(
+        worker = Worker(
             session_factory=MagicMock(),
             listener=MagicMock(),
             cfg=cfg,
         )
+        # The worker refuses a pool below PARENT_POOL_MIN_CONNECTIONS when it
+        # is built; the reaper reads the pool size when its loop starts.
+        worker.cfg.parent_pool_size = pool_size
+        return worker
 
     def test_gate_disabled_for_single_connection_pool(self) -> None:
-        assert self._capacity_worker(1, 0)._reaper_gate_enabled() is False
+        assert self._capacity_worker(1)._reaper_gate_enabled() is False
 
-    def test_gate_enabled_with_overflow_headroom(self) -> None:
-        assert self._capacity_worker(1, 1)._reaper_gate_enabled() is True
+    def test_gate_enabled_with_two_connections(self) -> None:
+        assert self._capacity_worker(2)._reaper_gate_enabled() is True
 
     def test_gate_enabled_at_defaults(self) -> None:
         worker = _make_worker()
@@ -4923,7 +5618,7 @@ class TestReaperGatePoolCapacity:
     @pytest.mark.asyncio
     async def test_single_connection_pool_runs_pass_ungated(self) -> None:
         """Capacity 1: the pass runs without ever opening a gate session."""
-        worker = self._capacity_worker(1, 0)
+        worker = self._capacity_worker(1)
         worker.broker = MagicMock()  # temp_broker = self.broker, no real engine
         attach_resources(worker.broker, fake_resources())
 
@@ -4940,7 +5635,7 @@ class TestReaperGatePoolCapacity:
     @pytest.mark.asyncio
     async def test_two_connection_pool_gates_the_pass(self) -> None:
         """Capacity 2: the gate session is opened and the held lock runs the pass."""
-        worker = self._capacity_worker(1, 1)
+        worker = self._capacity_worker(2)
         worker.broker = MagicMock()
         attach_resources(worker.broker, fake_resources())
 
@@ -4975,11 +5670,13 @@ class TestReaperResourceSelection:
             dsn='postgresql+psycopg://u:p@localhost/db',
             psycopg_dsn='postgresql://u:p@localhost/db',
             queues=['default'],
-            parent_pool_size=1,
-            parent_max_overflow=0,
             recovery_config=RecoveryConfig(check_interval_ms=1_000),
         )
-        return Worker(session_factory=MagicMock(), listener=MagicMock(), cfg=cfg)
+        worker = Worker(session_factory=MagicMock(), listener=MagicMock(), cfg=cfg)
+        # One connection runs the passes without a gate session: the reaper
+        # reads the pool size when its loop starts.
+        worker.cfg.parent_pool_size = 1
+        return worker
 
     async def test_every_pass_gets_the_set_selected_at_start(self) -> None:
         worker = self._ungated_reaper_worker()
@@ -5046,105 +5743,62 @@ class TestReaperResourceSelection:
 
 
 # ---------------------------------------------------------------------------
-# Retry Err mapping at caller seams
+# Database errors of the failed-attempt write at the caller seams
 # ---------------------------------------------------------------------------
 
 
-def _make_running_ctx_session(worker: Worker) -> AsyncMock:
-    """Session whose first execute returns a RUNNING in-flight ctx row."""
-    now = datetime.now(timezone.utc)
-    ctx_row = SimpleNamespace(
-        status='RUNNING',
-        retry_count=0,
-        db_now=now,
-        started_at=now,
-        claimed_by_worker_id=worker.worker_instance_id,
-        worker_hostname='host',
-        worker_pid=123,
-        worker_process_name='proc',
-        queue_name='default',
-    )
-    ctx_result = MagicMock()
-    ctx_result.fetchone.return_value = ctx_row
-
-    session = AsyncMock()
-    session.__aenter__ = AsyncMock(return_value=session)
-    session.__aexit__ = AsyncMock(return_value=None)
-    session.execute = AsyncMock(return_value=ctx_result)
-    session.commit = AsyncMock()
-    return session
-
-
-def _retry_error(task_id: str = 'task-1') -> _RetryError:
-    return _RetryError(
-        error_code=OperationalErrorCode.BROKER_ERROR,
-        message='DB error reading retry info: boom',
-        task_id=task_id,
-        retryable=True,
-        data={'exception_type': 'OperationalError'},
-    )
+def _session_whose_connection_fails() -> MagicMock:
+    """A session factory result whose autocommit connection raises on its
+    first statement, as a database that went away."""
+    connection = MagicMock()
+    connection.execute = AsyncMock(side_effect=OperationalError('db down'))
+    session = MagicMock()
+    session.connection = AsyncMock(return_value=connection)
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=session)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+    return ctx
 
 
 @pytest.mark.unit
-class TestRecoverRetryErrMapping:
-    """_recover_worker_future_failure maps retry Err arms to DB_ERROR."""
+class TestRecoverDatabaseErrorMapping:
+    """_recover_worker_future_failure maps a database error to DB_ERROR."""
 
     @pytest.mark.asyncio
-    async def test_should_retry_err_returns_db_error(self) -> None:
-        """Err from the retry decision aborts recovery with DB_ERROR."""
+    async def test_a_failed_read_returns_db_error(self) -> None:
         worker = _make_worker()
-        session = _make_running_ctx_session(worker)
-        worker.sf = MagicMock(return_value=session)
-        worker._should_retry_task = AsyncMock(  # type: ignore[method-assign]
-            return_value=Err(_retry_error()),
-        )
+        worker.sf = MagicMock(return_value=_session_whose_connection_fails())
 
-        outcome = await worker._recover_worker_future_failure('task-1', 'pool broke')
+        outcome = await worker._recover_worker_future_failure(
+            'task-1',
+            'pool broke',
+            CLAIMED_AT,
+        )
 
         assert outcome is _RequeueOutcome.DB_ERROR
-        session.commit.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_schedule_retry_err_returns_db_error(self) -> None:
-        """Err from retry scheduling aborts recovery with DB_ERROR."""
-        worker = _make_worker()
-        session = _make_running_ctx_session(worker)
-        worker.sf = MagicMock(return_value=session)
-        worker._should_retry_task = AsyncMock(  # type: ignore[method-assign]
-            return_value=Ok(True),
-        )
-        worker._schedule_retry = AsyncMock(  # type: ignore[method-assign]
-            return_value=Err(_retry_error()),
-        )
-
-        outcome = await worker._recover_worker_future_failure('task-1', 'pool broke')
-
-        assert outcome is _RequeueOutcome.DB_ERROR
-        session.commit.assert_not_awaited()
 
 
 @pytest.mark.unit
-class TestFinalizeErrorFromRetryError:
-    """_finalize_error_from_retry_error translation preserves the failure."""
+class TestPhase1Error:
+    """_phase1_error keeps the child's report for the phase-1 replay."""
 
-    def test_translation_targets_phase1_and_preserves_fields(self) -> None:
+    def test_a_connection_error_is_retryable_and_keeps_the_report(self) -> None:
         worker = _make_worker()
-        retry_err = _retry_error(task_id='task-9')
 
-        finalize_err = worker._finalize_error_from_retry_error(
-            retry_err,
-            ok=False,
-            result_json_str='{"err": {"error_code": "BOOM"}}',
-            failed_reason=None,
+        finalize_err = worker._phase1_error(
+            'task-9',
+            'Failed to persist terminal task state',
+            OperationalError('connection lost'),
+            _Phase1Input(False, '{"err": {"error_code": "BOOM"}}', None),
         )
 
         assert finalize_err.stage == _FINALIZE_STAGE_PHASE1
         assert finalize_err.error_code == OperationalErrorCode.BROKER_ERROR
-        assert finalize_err.message == retry_err.message
         assert finalize_err.task_id == 'task-9'
         assert finalize_err.retryable is True
         assert finalize_err.data == {
             'exception_type': 'OperationalError',
+            'exception': 'connection lost',
             'outcome': {
                 'ok': False,
                 'result_json_str': '{"err": {"error_code": "BOOM"}}',
@@ -5152,49 +5806,37 @@ class TestFinalizeErrorFromRetryError:
             },
         }
 
-    def test_translation_preserves_non_retryable(self) -> None:
+    def test_another_error_is_not_retryable(self) -> None:
         worker = _make_worker()
-        retry_err = _RetryError(
-            error_code=OperationalErrorCode.BROKER_ERROR,
-            message='DB error persisting retry schedule: boom',
-            task_id='task-9',
-            retryable=False,
-        )
 
-        finalize_err = worker._finalize_error_from_retry_error(
-            retry_err,
-            ok=True,
-            result_json_str='{"ok": 1}',
-            failed_reason=None,
+        finalize_err = worker._phase1_error(
+            'task-9',
+            'Failed to persist terminal task state',
+            ValueError('bad row'),
+            _Phase1Input(True, '{"ok": 1}', None),
         )
 
         assert finalize_err.retryable is False
-        assert finalize_err.data == {
-            'outcome': {
-                'ok': True,
-                'result_json_str': '{"ok": 1}',
-                'failed_reason': None,
-            },
-        }
 
 
 @pytest.mark.unit
-class TestRetryErrPhase1Replay:
-    """Mapped retry-seam errors must carry the payload phase1 replay needs.
-
-    Regression: the first mapping passed _RetryError.data through bare, so
-    _retry_finalize_phase1 hit its missing-outcome guard and abandoned the
-    retry after one backoff sleep instead of replaying persistence.
-    """
+class TestPhase1ErrorReplay:
+    """A phase-1 error carries the payload that the phase-1 retry replays."""
 
     @pytest.mark.asyncio
-    async def test_phase1_retry_replays_persistence_from_mapped_error(self) -> None:
+    async def test_phase1_retry_replays_persistence_from_the_error(self) -> None:
         worker = _make_worker()
-        finalize_err = worker._finalize_error_from_retry_error(
-            _retry_error(task_id='task-1'),
-            ok=True,
-            result_json_str='{"ok": 42}',
-            failed_reason=None,
+        finalize_err = worker._with_finalize_context(  # pyright: ignore[reportPrivateUsage]
+            worker._phase1_error(
+                'task-1',
+                'Failed to persist terminal task state',
+                OperationalError('connection lost'),
+                _Phase1Input(True, '{"ok": 42}', None),
+            ),
+            queue_name='default',
+            is_workflow_task=False,
+            task_name='helper_task',
+            claimed_at=CLAIMED_AT,
         )
         worker._persist_task_terminal_state = AsyncMock(  # type: ignore[method-assign]
             return_value=Ok(None),
@@ -5209,19 +5851,36 @@ class TestRetryErrPhase1Replay:
         assert kwargs['ok'] is True
         assert kwargs['result_json_str'] == '{"ok": 42}'
         assert kwargs['failed_reason'] is None
+        assert kwargs['claimed_at'] == CLAIMED_AT
 
 
 # ---------------------------------------------------------------------------
 # _persist_task_terminal_state: typed normal-finalization operations
 # ---------------------------------------------------------------------------
 
-from horsies.core.lifecycle.commands import (
-    CompleteLockedTask,
-    CompleteTaskFused,
-)
+from horsies.core.lifecycle.fences import OwnedClaim
 from horsies.core.lifecycle.operations import TerminalizationKind
-from horsies.core.lifecycle.outcomes import Applied, LostClaim, ObservedTaskState
+from horsies.core.lifecycle.outcomes import (
+    Applied,
+    LostClaim,
+    ObservedTaskState,
+    PhaseTwoOwed,
+    SuccessApplied,
+)
+from horsies.core.lifecycle.persistence import (
+    BatchCommitUnknown,
+    BatchRolledBack,
+    BatchWriteError,
+    FusedCompletionBatch,
+)
+from horsies.core.types.result import Result
+from horsies.core.worker.workflow_success import FinishWorkflowSuccess
 from horsies.core.types.status import TaskStatus
+from horsies.core.utils.db import NotSent, OutcomeUnknown, StatementRefused
+import psycopg
+from sqlalchemy.exc import IntegrityError as SAIntegrityError
+from sqlalchemy.exc import OperationalError as SAOperationalError
+from sqlalchemy.exc import TimeoutError as SATimeoutError
 
 _OK_WIRE = '{"__h_task_result__":true,"ok":"hello","err":null}'
 _STOPPED_WIRE = (
@@ -5288,85 +5947,161 @@ def _lost_claim() -> LostClaim:
 class TestPersistTerminalStateFusedPath:
     """Plain-task ok results take the one-statement fused path."""
 
+    @staticmethod
+    async def _persist_plain_ok(worker: Worker) -> Result[Any, _FinalizeError]:
+        return await worker._persist_task_terminal_state(
+            task_id='task-1',
+            now=datetime.now(timezone.utc),
+            ok=True,
+            result_json_str=_OK_WIRE,
+            failed_reason=None,
+            task_name='my_task',
+            queue_name='q1',
+            is_workflow_task=False,
+            claimed_at=CLAIMED_AT,
+        )
+
     @pytest.mark.asyncio
     async def test_plain_ok_result_uses_fused_statement(self) -> None:
-        """Plain task + ok result → single fused statement, Ok(None)."""
+        """Plain task + ok result → the fused command, written by the batch
+        write of the finalize batcher on a held connection, Ok(None)."""
         worker, session = _make_session_worker(fetchone_results=[])
 
         with patch(
-            'horsies.core.worker.finalize.apply_async',
-            AsyncMock(return_value=_applied(TerminalizationKind.COMPLETE_FUSED)),
+            'horsies.core.worker.finalize.apply_fused_batch',
+            AsyncMock(
+                return_value=Ok((_applied(TerminalizationKind.COMPLETE_FUSED),)),
+            ),
         ) as apply:
-            result = await worker._persist_task_terminal_state(
-                task_id='task-1',
-                now=datetime.now(timezone.utc),
-                ok=True,
-                result_json_str=_OK_WIRE,
-                failed_reason=None,
-                task_name='my_task',
-                queue_name='q1',
-                is_workflow_task=False,
-            )
+            result = await self._persist_plain_ok(worker)
 
         assert result.ok_value is None
         apply.assert_awaited_once()
-        command = apply.await_args.args[1]
-        assert isinstance(command, CompleteTaskFused)
+        assert apply.await_args is not None
+        # A steady flusher writes on its held connection.
+        assert apply.await_args.args[0] in worker._batch_connections  # pyright: ignore[reportPrivateUsage]
+        batch = apply.await_args.args[1]
+        assert isinstance(batch, FusedCompletionBatch)
+        (command,) = batch.commands
         assert command.task_id == 'task-1'
+        assert command.fence == OwnedClaim(
+            worker_id=worker.worker_instance_id,
+            claimed_at=CLAIMED_AT,
+        )
         assert command.result_json == _OK_WIRE
         assert command.notify_channel == 'task_queue_q1'
         assert command.notify_payload == 'capacity:task-1'
+        # One statement in autocommit: no transaction of a session.
         session.execute.assert_not_awaited()
-        session.commit.assert_awaited_once()
+        session.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_fused_row_gone_skips_without_commit(self) -> None:
-        """Status/ownership changed → Ok(None), nothing committed."""
+    async def test_a_refused_fused_call_is_ok_with_nothing_to_roll_back(
+        self,
+    ) -> None:
+        """Status/ownership changed → Ok(None); the refused call wrote
+        nothing, so no transaction ends."""
         worker, session = _make_session_worker(fetchone_results=[])
 
         with patch(
-            'horsies.core.worker.finalize.apply_async',
-            AsyncMock(return_value=_lost_claim()),
+            'horsies.core.worker.finalize.apply_fused_batch',
+            AsyncMock(return_value=Ok((_lost_claim(),))),
         ):
-            result = await worker._persist_task_terminal_state(
-                task_id='task-1',
-                now=datetime.now(timezone.utc),
-                ok=True,
-                result_json_str=_OK_WIRE,
-                failed_reason=None,
-                task_name='my_task',
-                queue_name='q1',
-                is_workflow_task=False,
-            )
+            result = await self._persist_plain_ok(worker)
 
         assert result.ok_value is None
         session.commit.assert_not_awaited()
-        session.rollback.assert_awaited_once()
+        session.rollback.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ('error', 'retryable', 'write_state'),
+        [
+            (
+                BatchRolledBack(
+                    cause=NotSent(error=SATimeoutError('QueuePool limit reached')),
+                ),
+                True,
+                'ROLLED_BACK',
+            ),
+            (
+                BatchRolledBack(
+                    cause=StatementRefused(
+                        error=SAIntegrityError(
+                            'SELECT', {}, psycopg.IntegrityError('no partition'),
+                        ),
+                    ),
+                ),
+                False,
+                'ROLLED_BACK',
+            ),
+            (
+                BatchCommitUnknown(
+                    cause=OutcomeUnknown(
+                        error=SAOperationalError(
+                            'SELECT',
+                            {},
+                            psycopg.OperationalError('server closed the connection'),
+                            connection_invalidated=True,
+                        ),
+                    ),
+                ),
+                True,
+                'COMMIT_UNKNOWN',
+            ),
+        ],
+        ids=['not_sent', 'refused', 'commit_unknown'],
+    )
+    async def test_a_failed_batch_write_is_a_phase1_error_with_the_outcome(
+        self,
+        error: BatchWriteError,
+        retryable: bool,
+        write_state: str,
+    ) -> None:
+        """The error keeps the child outcome, so the phase-1 retry replays it."""
+        worker, _session = _make_session_worker(fetchone_results=[])
+
+        with patch(
+            'horsies.core.worker.finalize.apply_fused_batch',
+            AsyncMock(return_value=Err(error)),
+        ):
+            result = await self._persist_plain_ok(worker)
+
+        match result:
+            case Err(finalize_error):
+                assert finalize_error.stage is FinalizeStage.PHASE1
+                assert finalize_error.retryable is retryable
+                assert finalize_error.data is not None
+                assert finalize_error.data['batch_write'] == write_state
+                assert finalize_error.data['outcome'] == {
+                    'ok': True,
+                    'result_json_str': _OK_WIRE,
+                    'failed_reason': None,
+                }
+            case Ok(value):
+                raise AssertionError(f'expected a phase-1 error, got Ok({value!r})')
 
     @pytest.mark.asyncio
     async def test_workflow_ok_result_returns_persisted_routing_facts(self) -> None:
-        """The locked row supplies phase-2 routing after terminalization."""
-        ctx_row = SimpleNamespace(
-            task_name='persisted_task',
-            retry_count=0,
-            started_at=datetime.now(timezone.utc),
-            claimed_by_worker_id='w-1',
-            worker_hostname='host',
-            worker_pid=1,
-            worker_process_name='p',
-            queue_name='persisted_queue',
-            is_workflow_task=True,
-            db_now=datetime.now(timezone.utc),
-        )
-        worker, session = _make_session_worker(
-            # generation-fenced context SELECT, then attempt UPSERT
-            fetchone_results=[ctx_row, None],
+        """The success of a workflow task is one statement; the locked row
+        supplies the phase-2 routing facts."""
+        worker, session = _make_session_worker(fetchone_results=[])
+        claimed_at = datetime.now(timezone.utc)
+        applied = SuccessApplied(
+            task_id='task-1',
+            terminal_at=claimed_at,
+            observed=ObservedTaskState(
+                status=TaskStatus.RUNNING, worker_id='w-1', claimed_at=claimed_at
+            ),
+            phase_two=PhaseTwoOwed(
+                task_name='persisted_task', queue_name='persisted_queue'
+            ),
         )
 
         with patch(
-            'horsies.core.worker.finalize.apply_async',
-            AsyncMock(return_value=_applied(TerminalizationKind.COMPLETE_LOCKED)),
-        ) as apply:
+            'horsies.core.worker.finalize.finish_workflow_success',
+            AsyncMock(return_value=applied),
+        ) as finish:
             result = await worker._persist_task_terminal_state(
                 task_id='task-1',
                 now=datetime.now(timezone.utc),
@@ -5376,17 +6111,43 @@ class TestPersistTerminalStateFusedPath:
                 task_name='my_task',
                 queue_name='q1',
                 is_workflow_task=True,
+                claimed_at=claimed_at,
             )
 
         persisted = result.ok_value
         assert persisted is not None and persisted.result.is_ok()
         assert persisted.task_name == 'persisted_task'
         assert persisted.queue_name == 'persisted_queue'
-        assert persisted.is_workflow_task is True
-        command = apply.await_args.args[1]
-        assert isinstance(command, CompleteLockedTask)
-        assert session.execute.await_count == 2
-        session.commit.assert_awaited_once()
+        assert finish.await_args.args[1] == FinishWorkflowSuccess(
+            task_id='task-1',
+            fence=OwnedClaim(worker_id=worker.worker_instance_id, claimed_at=claimed_at),
+            result_json=_OK_WIRE,
+        )
+        session.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_workflow_ok_result_refused_owes_nothing(self) -> None:
+        """A refused success wrote nothing: no phase 2, no reload."""
+        worker, session = _make_session_worker(fetchone_results=[])
+
+        with patch(
+            'horsies.core.worker.finalize.finish_workflow_success',
+            AsyncMock(return_value=_lost_claim()),
+        ):
+            result = await worker._persist_task_terminal_state(  # pyright: ignore[reportPrivateUsage]
+                task_id='task-1',
+                now=datetime.now(timezone.utc),
+                ok=True,
+                result_json_str=_OK_WIRE,
+                failed_reason=None,
+                task_name='my_task',
+                queue_name='q1',
+                is_workflow_task=True,
+                claimed_at=CLAIMED_AT,
+            )
+
+        assert result == Ok(None)
+        session.execute.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_workflow_stopped_returns_none_without_sql(self) -> None:
@@ -5402,6 +6163,7 @@ class TestPersistTerminalStateFusedPath:
             task_name='my_task',
             queue_name='q1',
             is_workflow_task=True,
+            claimed_at=CLAIMED_AT,
         )
 
         assert result.ok_value is None

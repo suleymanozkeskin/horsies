@@ -121,6 +121,11 @@ class BrokerErrorCode(str, Enum):
     # listener, so an operation that needs one cannot run. Nothing ran. It
     # does not clear for this broker.
     LISTENER_DISABLED = 'LISTENER_DISABLED'
+    # A result wait was called in a process that runs task bodies (a worker
+    # child). A wait there can hold the child slot that the awaited task
+    # needs, so nothing ran. Every result wait in that process returns the
+    # same error; compose the tasks with a workflow.
+    WAIT_INSIDE_TASK = 'WAIT_INSIDE_TASK'
 
 
 type BrokerOperationFailedCode = Literal[
@@ -318,6 +323,19 @@ class BrokerListenerDisabled:
     message: str = field(repr=False)
 
 
+@dataclass(slots=True, frozen=True)
+class BrokerWaitInsideTask:
+    """A result wait was called in a process that runs task bodies. Nothing ran.
+
+    Every result wait in that process returns this error. Compose the tasks
+    with a workflow, or send the other task and return.
+    """
+
+    code: ClassVar[BrokerErrorCode] = BrokerErrorCode.WAIT_INSIDE_TASK
+    retryable: ClassVar[bool] = False
+    message: str = field(repr=False)
+
+
 type BrokerOperationError = (
     BrokerOperationFailed
     | BrokerEnqueueFailed
@@ -332,6 +350,7 @@ type BrokerOperationError = (
     | BrokerAsyncContext
     | BrokerLoopRunnerFailed
     | BrokerListenerDisabled
+    | BrokerWaitInsideTask
 )
 """Every failure of a broker operation: one variant per state."""
 
@@ -380,6 +399,7 @@ def broker_error_cause(error: BrokerOperationError) -> BaseException | NoCause:
             | BrokerEventLoopLimit()
             | BrokerAsyncContext()
             | BrokerListenerDisabled()
+            | BrokerWaitInsideTask()
         ):
             return NoCause()
         case _ as unreachable:

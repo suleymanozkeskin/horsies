@@ -23,10 +23,13 @@ from horsies.core.codec.json_io import dumps_json, loads_json
 from horsies.core.codec.validation_errors import validation_summary
 from horsies.core.logging import get_logger
 from horsies.core.models.health import (
+    DownSlot,
     WorkerPingRequest,
     WorkerPongPayload,
+    slots_down_json,
 )
 from horsies.core.types.result import is_err
+from horsies.core.worker.claim_plan import BudgetCapacity, class_capacity_json
 from horsies.core.worker.runtime import _collect_psutil_metrics
 from horsies.core.worker.sql import (
     INSERT_CLAIMER_HEARTBEAT_SQL,
@@ -80,6 +83,8 @@ class HealthMixin:
 
         # Cross-concern methods provided by sibling mixins / Worker.
         def _claim_lease_ms(self) -> int: ...
+        def _down_slots(self) -> tuple[DownSlot, ...]: ...
+        def _claim_capacity(self) -> tuple[BudgetCapacity, ...]: ...
         async def _count_claimed_for_worker(
             self, session: AsyncSession
         ) -> int: ...
@@ -186,7 +191,13 @@ class HealthMixin:
             await s.commit()
 
     async def _update_worker_state(self) -> None:
-        """Update worker state snapshot in database for monitoring."""
+        """Update worker state snapshot in database for monitoring.
+
+        ``slots_down`` lists each slot that is down, with its cause. An empty
+        list means that every slot serves or boots. ``class_capacity`` maps
+        each claim budget to the capacity that the claim counts and the
+        classes it serves.
+        """
         try:
             rss_mb, mem_pct, cpu_pct, children_rss_mb = await asyncio.to_thread(
                 _collect_psutil_metrics,
@@ -221,11 +232,11 @@ class HealthMixin:
                         'wid': self.worker_instance_id,
                         'host': socket.gethostname(),
                         'pid': os.getpid(),
-                        'procs': self.cfg.processes,
+                        'procs': self.cfg.child_count(),
                         'mcb': self.cfg.max_claim_batch,
                         'mcpw': self.cfg.max_claim_per_worker
                         if self.cfg.max_claim_per_worker > 0
-                        else self.cfg.processes,
+                        else self.cfg.seat_count(),
                         'cwc': self.cfg.cluster_wide_cap,
                         'queues': self.cfg.queues,
                         'qp': Jsonb(self.cfg.queue_priorities)
@@ -270,6 +281,13 @@ class HealthMixin:
                         'cpu_pct': cpu_pct,
                         'children_mem_mb': children_rss_mb,
                         'started': self._started_at,
+                        'slots_down': Jsonb(slots_down_json(self._down_slots())),
+                        'class_capacity': Jsonb(
+                            class_capacity_json(
+                                self.cfg.claim_plan(),
+                                self._claim_capacity(),
+                            )
+                        ),
                     },
                 )
                 await s.commit()

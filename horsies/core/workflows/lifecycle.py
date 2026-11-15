@@ -26,9 +26,9 @@ from horsies.core.lifecycle.outcomes import (
 )
 from horsies.core.lifecycle.persistence import apply_batch_async
 from horsies.core.codec.json_io import Json, dumps_json, loads_json, SerializationError, SerdeResult
-from horsies.core.codec.task_options import stored_max_retries
+from horsies.core.codec.task_options import stored_execution, stored_max_retries
 from horsies.core.codec.typed import encode_task_error
-from horsies.core.models.tasks import OutcomeCode, TaskError
+from horsies.core.models.tasks import Execution, OutcomeCode, TaskError
 from horsies.core.models.workflow.nodes import stored_kwargs
 from horsies.core.types.result import Ok, Err, is_err as _is_err
 from horsies.core.brokers.resources import EventLoopLimit
@@ -201,6 +201,38 @@ def root_retry_and_deadline(
                 exc,
             )
     return max_retries, good_until_str, good_until_dt
+
+
+def root_execution(
+    task_options_json: str | None,
+    node_name: str,
+) -> Execution:
+    """The `Execution` that a fast-path root stores, from its task options.
+
+    The JSON is the task decorator's own serialization of a validated
+    ``TaskOptions``, as in ``root_retry_and_deadline``, so options that do
+    not parse or do not validate are a defect: the ``SerializationError``
+    propagates and the caller's transaction rolls back. No options store
+    ``ISOLATED``.
+
+    Raises:
+        SerializationError: task_options_json does not parse, or its
+            ``execution`` or ``cancel_grace_ms`` does not validate.
+    """
+    if not task_options_json:
+        return Execution.ISOLATED
+    parsed_r = loads_json(task_options_json)
+    if _is_err(parsed_r):
+        raise SerializationError(
+            f'Corrupt task_options for root node {node_name}',
+        )
+    execution_r = stored_execution(parsed_r.ok_value)
+    if _is_err(execution_r):
+        raise SerializationError(
+            f'Invalid execution for root node {node_name}: '
+            f'{execution_r.err_value.detail}',
+        )
+    return execution_r.ok_value
 
 
 def _start_loop_limit(
@@ -574,6 +606,7 @@ async def start_workflow_async(
                         max_retries, good_until_str, good_until_dt = (
                             root_retry_and_deadline(task_options_json, task.name)
                         )
+                        root_class = root_execution(task_options_json, task.name)
                         # Task-row kwargs = node kwargs + workflow_meta
                         # (mirrors enqueue_workflow_task; args_from/ctx
                         # injection is structurally absent on fast roots).
@@ -610,6 +643,7 @@ async def start_workflow_async(
                             'sent_at': task_sent_at,
                             'max_retries': max_retries,
                             'task_options': task_options_json,
+                            'execution': root_class.value,
                             'good_until': good_until_str,
                             'enqueue_sha': sha,
                             **workflow_task_enqueue_stamp(

@@ -19,6 +19,7 @@ from horsies.core.brokers.result_types import (
     BrokerAsyncContext,
     BrokerLoopRunnerFailed,
     BrokerListenerDisabled,
+    BrokerWaitInsideTask,
     broker_error_cause,
 )
 
@@ -43,5 +44,6 @@ __all__ = [
     'BrokerAsyncContext',
     'BrokerLoopRunnerFailed',
     'BrokerListenerDisabled',
+    'BrokerWaitInsideTask',
     'broker_error_cause',
 ]

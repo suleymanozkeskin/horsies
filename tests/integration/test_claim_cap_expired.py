@@ -15,6 +15,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from horsies.core.models.tasks import Execution
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.worker.stored_timeout import NoTimeout, StoredTimeout
 from horsies.core.worker.config import WorkerConfig
@@ -26,6 +27,7 @@ from horsies.core.worker.sql import (
     COUNT_QUEUE_IN_FLIGHT_HARD_SQL,
 )
 from horsies.core.worker.worker import Worker
+from horsies.core.utils.db import PooledStatements
 from tests.integration.conftest import compute_test_enqueue_sha
 from tests.broker_resources_support import current_resources, listener_of
 
@@ -329,6 +331,10 @@ class TestReclaimUnderCap:
             listener=MagicMock(),
             cfg=cfg,
         )
+        # Claim semantics: one checkout per claim statement.
+        worker._claim_runner = PooledStatements(worker.sf)  # pyright: ignore[reportPrivateUsage]
+        # No slot pool: every configured slot counts.
+        worker._claim_slot_count = lambda: cfg.processes  # type: ignore[method-assign]
 
         dispatched_ids: list[str] = []
 
@@ -341,8 +347,12 @@ class TestReclaimUnderCap:
             is_workflow_task: bool = True,
             timeout: StoredTimeout = NoTimeout(),
             claimed_at: datetime | None = None,
+            *,
+            execution: Execution,
+            task_options: str | None,
         ) -> None:
             _ = (task_name, args_json, kwargs_json, queue_name, is_workflow_task, timeout, claimed_at)
+            _ = (execution, task_options)
             dispatched_ids.append(task_id)
 
         worker._dispatch_one = AsyncMock(side_effect=_fake_dispatch)  # type: ignore[method-assign]

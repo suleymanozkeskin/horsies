@@ -58,7 +58,7 @@ async def test_ping_database_real(broker: PostgresBroker) -> None:
 async def test_ping_workers_reaches_real_worker(broker: PostgresBroker) -> None:
     """A live worker replies to a broadcast ping (real responder round-trip)."""
     ready = _make_ready_check()
-    with run_worker(DEFAULT_INSTANCE, processes=1, ready_check=ready):
+    with run_worker(DEFAULT_INSTANCE, profile='isolated-1', ready_check=ready):
         # Retry the broadcast briefly: the worker is ready (healthcheck passed),
         # but allow for ping-subscription/dispatcher warmup.
         pongs: list = []
@@ -91,7 +91,7 @@ async def test_ping_workers_reaches_real_worker(broker: PostgresBroker) -> None:
 async def test_ping_and_worker_state_correlate(broker: PostgresBroker) -> None:
     """The responding worker also appears in list_worker_states (same worker_id)."""
     ready = _make_ready_check()
-    with run_worker(DEFAULT_INSTANCE, processes=1, ready_check=ready):
+    with run_worker(DEFAULT_INSTANCE, profile='isolated-1', ready_check=ready):
         # Get a responsive worker id via ping.
         responsive_id: str | None = None
         for _ in range(10):

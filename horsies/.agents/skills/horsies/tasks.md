@@ -15,6 +15,8 @@ Covers all parameters, error codes, serialization rules, retry patterns, and pit
     exception_mapper: dict[type[BaseException], str] | None = None,
     default_unhandled_error_code: str | None = None,
     timeout_ms: int | None = None,
+    execution: Execution = Execution.ISOLATED,
+    cancel_grace_ms: int | None = None,
 )
 def my_task(*, ...) -> TaskResult[T, TaskError]: ...
 ```
@@ -26,7 +28,9 @@ def my_task(*, ...) -> TaskResult[T, TaskError]: ...
 | `retry_policy` | `RetryPolicy \| None` | `None` | See RetryPolicy section. |
 | `exception_mapper` | `dict[type[BaseException], str] \| None` | `None` | Per-task exception-to-error-code mapping. See ExceptionMapper section. |
 | `default_unhandled_error_code` | `str \| None` | `None` | Override global default for unmapped exceptions. Must be `UPPER_SNAKE_CASE`. |
-| `timeout_ms` | `int \| None` | `None` | Execution time limit in ms, from 1000 to `MAX_TASK_TIMEOUT_MS` (4,294,967,295, about 49.7 days, the Rust port's `u32` limit), measured from the moment a child takes the task; time waiting for a free child does not count. On expiry the child and the subprocesses in its session are SIGKILLed and the task fails with `TASK_TIMEOUT`; retry is opt-in via `auto_retry_for`. A deadline that fires before user code starts requeues the task instead. Other tasks on the worker continue. Use it as a hang backstop, not as routine control flow. |
+| `timeout_ms` | `int \| None` | `None` | Execution time limit in ms, from 1000 to `MAX_TASK_TIMEOUT_MS` (4,294,967,295, about 49.7 days, the Rust port's `u32` limit), measured from the moment a child takes the task; time waiting for a free child does not count. On expiry the child and the subprocesses in its session are SIGKILLed, and after the child exits the task fails with `TASK_TIMEOUT`; retry is opt-in via `auto_retry_for`, and a retry never runs next to the killed attempt. A deadline that fires before user code starts requeues the task instead, also after the exit. If the child does not exit within 30 s of the kill, nothing is written and stale-task recovery takes the task; with stale RUNNING recovery off, the worker writes the row once it sees the exit (a stop ends that wait). Other tasks on the worker continue. Use it as a hang backstop, not as routine control flow. |
+| `execution` | `Execution` | `Execution.ISOLATED` | How a worker runs the task. `ISOLATED`: `def` or `async def`, `timeout_ms` optional. `SHARED_ASYNC`: `async def` only, `timeout_ms` required. `SHARED_THREAD`: `def` only, `timeout_ms` required. Every task row stores the class (`horsies_tasks.execution`), and a worker claims each class into the budget its claim plan routes it to (a worker with isolated children only runs every class isolated). |
+| `cancel_grace_ms` | `int \| None` | `None` | `SHARED_ASYNC` only: the time to stop after a cancel, from `MIN_CANCEL_GRACE_MS` (100) to `MAX_CANCEL_GRACE_MS` (10,000). `None` stores `DEFAULT_CANCEL_GRACE_MS` (1,000). The stored options hold the value in effect at send. |
 
 `good_until` is **not** accepted at definition time — it is a per-send concern. Passing it raises `HRS-102`. Use `.with_options(good_until=...)` at send time instead. For workflow nodes, use `.node(good_until=...)`.
 
@@ -34,13 +38,49 @@ def my_task(*, ...) -> TaskResult[T, TaskError]: ...
 
 - Return type annotation present and is `TaskResult[T, TaskError]` — missing raises `HRS-100`, wrong type raises `HRS-101`.
 - Pre-decorated functions (with `__wrapped__` chain) are rejected — `HRS-104`.
-- The function must be sync (`def`). An `async def` function, also one that yields, is rejected — `HRS-106`. Async task support is not available.
+- The function is `def` or `async def`. A function that yields is rejected — `HRS-101`, for a generator and for an async generator.
 - `exception_mapper` keys must be `BaseException` subclasses, values must be `UPPER_SNAKE_CASE`.
 - `queue_name` cross-validated against `AppConfig.queue_mode`.
 - `good_until` rejected — raises `HRS-102` with help text directing to `.with_options()` or `.node()`.
 - Top-level `auto_retry_for` kwarg is rejected — it belongs inside `RetryPolicy`.
+- `execution` rules, one code each, checked in this order (the first broken rule is reported): `SHARED_ASYNC` on a `def` function — `HRS-107`; `SHARED_THREAD` on an `async def` function — `HRS-108`; `SHARED_ASYNC` or `SHARED_THREAD` without `timeout_ms` — `HRS-109`; `cancel_grace_ms` with a class other than `SHARED_ASYNC` — `HRS-110`; `cancel_grace_ms` outside 100 to 10,000 — `HRS-111`. A value that is not an `Execution` member raises `HRS-102`.
+- With `execution` written as a member, a type checker refuses the same declarations: the overloads require `timeout_ms` for a shared class and take `cancel_grace_ms` only with `SHARED_ASYNC`, and the decorator they return accepts only the function kind of the class. A class known only at run time requires `timeout_ms`.
 
-Returns `TaskFunction[P, T]`.
+Returns `TaskFunction[P, T]` for a `def` function, and `AsyncTaskFunction[P, T]` for an `async def` function.
+
+### Shared async tasks
+
+- A worker profile with `shared_async=SharedAsyncChildren(count, seats)` runs `SHARED_ASYNC` rows on shared async children: one process runs up to `seats` such tasks at once, as coroutines on one event loop, and a free seat takes the next task at once. A worker with no shared async children runs them in isolated children. An isolated child of a worker with shared children never runs a `SHARED_ASYNC` row: the claim takes such rows into the `SHARED_ASYNC` budget (its seats in service). A `SHARED_ASYNC` row whose function is now `def` is written `ISOLATED` and returned to the queue before dispatch.
+- A new task goes to the open shared child with the fewest tasks in flight.
+- The default executor of the loop of a shared async child has `SharedAsyncChildren.executor` threads (`ExecutorThreads(threads=N)`, or derived from the seats by default). `to_thread` and `run_in_executor(None, ...)` calls of the tasks of one child share those threads. An `on_shared_async_child_start` hook that sets its own default executor replaces it; the child still tracks the calls in it.
+- An attempt ends when its coroutine has ended and no work that it started is alive: asyncio tasks it created (itself or through a library, also tasks built with `asyncio.Task(...)`) and default-executor calls (`to_thread`, `run_in_executor(None, ...)`, `getaddrinfo`). The child waits for that work before it reports the end. Work of the start hooks belongs to no task.
+- A return before the deadline (a value, or an exception that the mapper turns into a result) with that work alive keeps what it returned; the deadline no longer applies. The child waits up to G for the work, then cancels it in the cancel rounds below and closes (`CloseReason.LEFTOVER_WORK`; replaced after its tasks end). Work still alive 0.3 s after that cancel is stuck: the task keeps its seat, the worker kills the child when every task left in it is stuck, then writes what the task returned (no `TASK_TIMEOUT`, no isolated retry). Any other end of the child whose exit the worker saw (an out-of-memory kill, a crash) also writes what the task returned. One child log line per such task names the work (up to 10 coroutine names) and how it ended: within the grace, cancelled, or stuck.
+- Timeout (T = deadline, G = `cancel_grace_ms`): at T the child cancels the task. When the attempt has ended, the worker writes `TASK_TIMEOUT`, the retry and the workflow step; neighbours continue. A value returned after the cancel is still `TASK_TIMEOUT`. At T + G, when the attempt is alive: a second cancel to the task and its asyncio tasks, then 2 more rounds 0.1 s apart; the child closes (no new task, replaced after its tasks end). Still alive 0.3 s after the second cancel: stuck; it keeps its seat; the worker kills the child when every task left in it is stuck (no task has time left). Those tasks get `TASK_TIMEOUT`, and a retry runs isolated (`execution = 'ISOLATED'` written with the retry).
+- Blocked loop: a watchdog thread reports a loop that has not turned for 5 s, with the task and source line; the worker kills the child at once. The task that held it: `TASK_BLOCKED_LOOP` (retry isolated); other tasks before their deadline: `NEIGHBOUR_BLOCKED_LOOP` (retry only if `auto_retry_for` names it); tasks past their deadline: `TASK_TIMEOUT`. C code that holds the GIL stops the watchdog too: the worker timer at `timeout_ms + cancel_grace_ms + 10 s` kills a child that reported neither the second cancel nor the end, and a second check at `+ 20.3 s` kills a child that reported that cancel (or the cancel of left work) but neither the task stuck nor its end; tasks past their deadline get `TASK_TIMEOUT`, others the crash path; only a task already reported stuck retries isolated (at every kill by the worker whose exit was seen). A refusal still in flight 145 s after its placement kills its child; its writes are bounded below that. A crash with no known cause: every task `WORKER_CRASHED` (or its retry).
+- Author rules: let `CancelledError` propagate (catch only to clean up and re-raise; anyio shielded scopes do not stop a `Task.cancel()`); give each client call its own timeout below the task timeout (for `asyncio.to_thread()`, a cancel never stops the thread); open long-lived clients in `@app.on_shared_async_child_start` (a client opened in a task carries that task's mark: its background work is cancelled after the task returns, and each task that opens it costs one child restart); do not block the loop; send with `send_async()`; await what you start; `timeout_ms` is required; module state is shared by the tasks of the child.
+- The RUNNING update, the first runner heartbeat and the finalizing marker run on an async connection pool of the child, so they do not block the loop. The worker process writes the later runner heartbeats for every task of the child.
+- Recycling: `SharedRecycle.after_per_seat` (`tasks × seats` tasks) or `above` (RSS after a task). The child closes: no new task, its tasks finish, then a new child starts.
+
+### Shared thread tasks
+
+- A worker profile with `shared_thread=SharedThreadChildren(count, seats)` runs `SHARED_THREAD` rows on shared thread children: one process runs up to `seats` such `def` tasks at once, each on a seat thread started at boot, and a free seat takes the next task at once. `seats` is 1 to 256. A worker with no shared thread children runs them in isolated children; its other children never run one. A `SHARED_THREAD` row whose function is now `async def` is written `ISOLATED` and returned to the queue before dispatch. A row without a usable stored `timeout_ms` fails with `WORKER_SERIALIZATION_ERROR` on every worker.
+- When threads help (Linux, 4 CPUs, CPython 3.13 and 3.14): C code that releases the GIL (zlib, hashlib) scales with threads on every build, 4 threads 2.6 to 3.8 times one; pure-Python code gains nothing on a standard build (0.56 to 1.02 times) and scales on a free-threaded build (1.9 to 3.6 times); more threads than CPUs added nothing. Sync I/O waits release the GIL.
+- Timeout: a thread cannot be cancelled. At `timeout_ms` the child reports the deadline and closes (no new task); the task runs on. When every task still in the child is past its own deadline, the worker kills the child with its session; after the exit each of those tasks gets `TASK_TIMEOUT`, its retry and its workflow step; the task whose deadline closed the child retries isolated. A task alone in its child is killed at its deadline. A neighbour with time left runs to its end. A task that ends by itself after its deadline is `TASK_TIMEOUT`. A child that has not reported a deadline by `timeout_ms + 10 s` is frozen (C code holds the GIL) and killed: each task past its deadline gets `TASK_TIMEOUT`, the others take the crash path; no new culprit is named, and the task whose deadline already closed the child retries isolated (also at the drain deadline of a stop).
+- Author rules: the function runs next to itself on other threads; no module state without a lock; `timeout_ms` is required, and each blocking call needs its own timeout below it; a timeout closes the child and the kill ends every task still in it; a crash of the child ends every task in it.
+- The RUNNING update, the first runner heartbeat and the finalizing marker run on the seat thread, on the one sync pool of the child (`SharedThreadChildren.pool`, derived from the seats by default; a thread waits up to 30 s for a connection). The worker process writes the later runner heartbeats.
+- Recycling: as for shared async children (`SharedRecycle`).
+
+### Async tasks
+
+- This section is about `Execution.ISOLATED` (the default). An isolated child runs one task at a time, `def` or `async def`. The same RUNNING update, heartbeats, `timeout_ms` kill, recovery and retry policy apply. A `SHARED_ASYNC` task runs as described under Shared async tasks.
+- Each child keeps one event loop until the child stops. An `async def` task runs on it, so an async client that a module keeps stays open across the tasks of one child.
+- The loop runs only while an `async def` task runs. A `def` task runs with no running event loop and can call `asyncio.run()`. While the child runs a `def` task or waits for its next task, the timers of a module-level async client (a keepalive, a pool maintenance task) do not run.
+- An `async def` task must await the work that it starts. When its body returns (a value, or an exception that the mapper turns into a result) and asyncio tasks that it started (`asyncio.create_task()`) are still on the loop, the child waits up to 1 s for them (`ISOLATED_LEFTOVER_GRACE_S`; no option), then cancels what is alive in three rounds 0.1 s apart. The worker writes what the task returned only after that work ended, then the retry and the workflow step; the child is replaced, and the next task runs in a new child. The return ends the deadline: `timeout_ms` bounds the body, never this wait, so the outcome is never `TASK_TIMEOUT` here. The child marks the row finalizing only after that work ended (never for stuck work), so the worker beats the row while it runs and the reaper does not fail it. Work alive 0.3 s after the first cancel is stuck: the worker kills the child and writes what the task returned after the exit (no exit seen in 30 s: the timeout-kill rule). A child that reports nothing within 26.3 s of the return (that work blocks the loop) is killed the same way; a crash of the child in the wait also keeps what the task returned. A client that keeps its own background tasks on the loop (a keepalive, a consumer) delays each outcome by about 1 s and costs a replacement after each async task. Only asyncio tasks are seen: a `loop.call_soon()` / `loop.call_later()` callback, or `loop.run_in_executor()` work that the task did not await, is not waited for, causes no replacement, and can still run during a later task of the same child.
+- A child creates its event loop at boot, before it reports ready, when the app has an `async def` task; an app with none gets no loop. When the loop cannot be created, the child fails its boot and no task reaches it. EMFILE / ENFILE / ENOMEM / EAGAIN can clear, so only that slot is down: it takes no task and boots again after a growing wait, while other children serve; when every slot is down, the worker exits non-zero after three failed starts. The log names the slot and the cause: `Slot <n> is down: the OS ran short of a resource (EMFILE): <error>`. Any other failure, such as an event loop policy that raises, repeats (`TaskLoopCreateFailed`): each failed start counts one of three attempts, also while other children serve.
+- A task that cancels a helper task in `finally` must also await it, for example `helper.cancel()` then `await asyncio.gather(helper, return_exceptions=True)`. Without the await, a helper that awaits while it stops (a close) is still on the loop when the task returns: the outcome waits for it, and the worker replaces the child. One worker log line per such task names the coroutine of each task left (up to 10) and how that work ended: `Task <name> (<id>) returned and left <n> task(s) on the event loop of child pid=<pid> (<names>); that work <end>`.
+- A thread of `asyncio.to_thread()` that outlives its task is not waited for and does not cause a replacement. At the stop, the child does not wait for it past the close (at most 7 seconds): it exits, and `atexit` handlers do not run. An idle executor does not count: its shutdown gets at least 1 second, and so does the close of the async generators.
+- In an `async def` task, send with `.send_async()` / `.schedule_async()`. The sync `.send()` / `.schedule()` return `Err(TaskSendAsyncContext)` there and enqueue nothing.
+- An exception, a wrong return, and the exception mappers give the same `TaskResult` as in a `def` task.
 
 ## `TaskResult[T, TaskError]`
 
@@ -143,6 +183,9 @@ Infra-level failures during task execution, brokering, or worker processing:
 - `WORKFLOW_ENQUEUE_FAILED` — workflow node failed during enqueue
 - `SUBWORKFLOW_LOAD_FAILED` — sub-workflow definition could not be loaded
 - `WORKFLOW_RECOVERY_LIMIT_REACHED` — workflow recovery raised a persistent error in `workflow_recovery_failure_limit` reaper passes, so the workflow failed closed
+- `SUBWORKFLOW_DEPTH_LIMIT_REACHED` — the engine did not start a child workflow, because its depth would pass 32
+- `TASK_BLOCKED_LOOP` — the task held the event loop of its shared async child past the block limit (5 s), before its `timeout_ms`; the worker killed the child, and a retry runs in an isolated child
+- `NEIGHBOUR_BLOCKED_LOOP` — another task held the event loop of this task's shared async child past the block limit, before this task's `timeout_ms`; the worker killed the child
 
 ### `ContractCode`
 
@@ -166,6 +209,7 @@ Results from `handle.get()` / `handle.result_for()` when data is not (yet) avail
 - `EVENT_LOOP_LIMIT` — the broker serves its limit of open event loops and this is a new one; not cached, clears when one of those loops closes
 - `ASYNC_CONTEXT` — sync `get()` / `result_for()` called on a thread that runs an event loop; nothing ran, not cached — call `get_async()` / `result_for_async()`
 - `INVALID_INPUT` — an argument of `get()` / `get_async()` was refused before any read: `timeout_ms` must be None or an int from 0 to `MAX_TASK_TIMEOUT_MS` (4,294,967,295 ms); not cached
+- `WAIT_INSIDE_TASK` — a result wait (`TaskHandle.get()` / `get_async()`, `app.get_result()` / `get_result_async()`, `WorkflowHandle.get()` / `get_async()`) was called inside a worker child, also from a thread that the task started; it waited for nothing, not cached. It is the first check of the call, before `timeout_ms` and `ASYNC_CONTEXT`. The raw reads `app.get_raw_result()` and `broker.get_raw_result_record()` (and `*_async`) return `Err(BrokerWaitInsideTask)` there. A task never waits for another task: compose them as a workflow. `send()`, starting a workflow, `info()` and `workflow_ctx.result_for()` still work in a task
 
 ### `OutcomeCode`
 
@@ -203,6 +247,8 @@ task_name: str
 
 # Direct call — bypasses queue, use only in tests
 def __call__(*args: P.args, **kwargs: P.kwargs) -> TaskResult[T, TaskError]
+# AsyncTaskFunction[P, T] (an async def task) differs only here:
+# def __call__(*args: P.args, **kwargs: P.kwargs) -> Coroutine[Any, Any, TaskResult[T, TaskError]]
 
 # Enqueue for background execution
 def send(*args: P.args, **kwargs: P.kwargs) -> TaskSendResult[TaskHandle[T]]
@@ -243,7 +289,7 @@ def node(
 ) -> NodeFactory[P, T]
 ```
 
-**Direct call vs `.send()`**: Direct call runs synchronously in current process, no queue, no retry, no persistence. `.send()` enqueues for background execution by a worker.
+**Direct call vs `.send()`**: Direct call runs in current process, no queue, no retry, no persistence. For an `async def` task, the direct call returns a coroutine: `await` it. `.send()` enqueues for background execution by a worker.
 
 ## `TaskSendOptions[P, T]` — Per-Send Options
 
@@ -446,7 +492,7 @@ Validation failure text never contains the refused value: each failure is `<loc>
 | `PAYLOAD_MISMATCH` | Refused | The task id exists, and the command or the idempotency key differs from the original send — the payload was altered between send and retry |
 | `IDEMPOTENCY_KEY_CONFLICT` | Accepted | The idempotency key is reserved by another task with a different command; nothing was enqueued. `owner_task_id` names the owner task. A retry after the reservation ends is accepted |
 | `PAYLOAD_TOO_LARGE` | Refused | Serialized kwargs exceeded `payload.reject_bytes` (off by default); nothing was enqueued — shrink the payload (pass a reference to external storage) or raise the limit |
-| `EVENT_LOOP_LIMIT` | Refused | The broker serves its limit of open event loops (5, plus its sync runner loop) and this send ran on a new one; nothing was enqueued — close loops that are done |
+| `EVENT_LOOP_LIMIT` | Refused | The broker serves its limit of open event loops (5, plus its sync runner loop and, in a worker child, the task loop) and this send ran on a new one; nothing was enqueued — close loops that are done |
 | `LOOP_RUNNER_FAILED` | Accepted | Sync `.send()` / `.schedule()` (or a sync retry) could not run the enqueue on the broker's sync runner (stopped, thread did not start, or scheduling failed); nothing was enqueued. A stopped runner does not start again, so a sync retry returns the same error — `retry_send_async(err)` / `retry_schedule_async(err)` completes the same send |
 
 ### `TaskSendPayload`
@@ -565,6 +611,8 @@ exception_mapper={
 ```
 
 Only invoked for unhandled exceptions. If the task returns `TaskResult(err=...)` explicitly, the mapper is never called.
+
+A `KeyboardInterrupt` is never mapped. In a worker, every other exception of a `def` or an `async def` body is mapped, `GeneratorExit` and `CancelledError` included. A direct call of an `async def` task outside a worker lets `GeneratorExit` pass, and a `CancelledError` while its asyncio task has a cancel request.
 
 ### Validation
 

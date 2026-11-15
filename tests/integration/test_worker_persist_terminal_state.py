@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -28,6 +29,7 @@ from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.types.result import is_err, is_ok
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
+from tests.integration.autocommit_support import use_pooled_runners
 from tests.integration.conftest import compute_test_enqueue_sha
 from tests.integration.history_seeding import (
     force_terminal,
@@ -37,6 +39,9 @@ from tests.integration.history_seeding import (
 pytestmark = [pytest.mark.integration]
 
 NOW = datetime.now(timezone.utc)
+# The claim generation of a row seeded without one named, which the fences
+# of the worker check.
+CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +100,8 @@ def _make_worker(engine: AsyncEngine) -> Worker:
     worker = Worker(session_factory=sf, listener=MagicMock(), cfg=cfg)
     worker._app = _test_app()
     worker.worker_instance_id = TEST_WORKER_ID
+    # Terminal-state writes, one checkout per statement: no worker stop here.
+    use_pooled_runners(worker)
     return worker
 
 
@@ -102,7 +109,7 @@ async def _insert_running_task(
     session: AsyncSession,
     *,
     is_workflow_task: bool = False,
-    claimed_at: datetime | None = None,
+    claimed_at: datetime = CLAIMED_AT,
 ) -> str:
     """Insert a minimal horsies_tasks row in RUNNING state."""
     task_id = str(uuid.uuid4())
@@ -215,6 +222,7 @@ async def _insert_running_task_with_retry(
                 (id, task_name, queue_name, priority, args, kwargs, status, sent_at,
                  created_at, updated_at, claimed, retry_count, max_retries, started_at,
                  good_until, task_options, enqueue_sha, claimed_by_worker_id,
+                 claimed_at,
                  retention_class_key, command_fingerprint_version,
                  command_fingerprint, retain_rerun_input,
                  prepared_rerun_input_disposition)
@@ -222,6 +230,7 @@ async def _insert_running_task_with_retry(
                 (:id, 'persist_retry_test', 'default', 100, '[]', '{}', 'RUNNING', :sent_at,
                  NOW(), NOW(), FALSE, :retry_count, :max_retries, NOW(),
                  :good_until, :task_options, :enqueue_sha, :claimed_by_worker_id,
+                 :claimed_at,
                  'standard_30d', 1,
                  sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
                  FALSE, 'DECLINED_BY_POLICY')
@@ -235,6 +244,7 @@ async def _insert_running_task_with_retry(
             'good_until': good_until,
             'task_options': task_options,
             'claimed_by_worker_id': TEST_WORKER_ID,
+            'claimed_at': CLAIMED_AT,
         },
     )
     await session.commit()
@@ -336,6 +346,7 @@ async def test_claim_lost_skips(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
+        claimed_at=CLAIMED_AT,
     )
 
     assert is_ok(result)
@@ -363,6 +374,7 @@ async def test_ownership_unconfirmed_skips(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
+        claimed_at=CLAIMED_AT,
     )
 
     assert is_ok(result)
@@ -390,6 +402,7 @@ async def test_workflow_check_failed_skips(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
+        claimed_at=CLAIMED_AT,
     )
 
     assert is_ok(result)
@@ -417,6 +430,7 @@ async def test_workflow_stopped_reason_skips(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
+        claimed_at=CLAIMED_AT,
     )
 
     assert is_ok(result)
@@ -437,7 +451,7 @@ async def test_worker_failure_marks_failed(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """Generic worker failure → error TaskResult, task becomes FAILED with reason."""
+    """Generic worker failure → task becomes FAILED with reason, no phase 2."""
     task_id = await _insert_running_task(session)
     worker = _make_worker(engine)
 
@@ -450,11 +464,12 @@ async def test_worker_failure_marks_failed(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
+        claimed_at=CLAIMED_AT,
     )
 
     assert is_ok(result)
-    assert result.ok_value is not None
-    assert result.ok_value.result.is_err()
+    # A plain task owes no phase 2: the failure write sent its capacity wake.
+    assert result.ok_value is None
     status, _, failed_reason, _ = await _get_task_row(session, task_id)
     assert status == 'FAILED'
     assert failed_reason == 'Worker crash'
@@ -480,6 +495,7 @@ async def test_worker_failure_reaper_already_reclaimed(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
+        claimed_at=CLAIMED_AT,
     )
 
     assert is_ok(result)
@@ -513,11 +529,12 @@ async def test_corrupt_json_marks_serialization_error(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
+        claimed_at=CLAIMED_AT,
     )
 
     assert is_ok(result)
-    assert result.ok_value is not None
-    assert result.ok_value.result.is_err()
+    # A plain task owes no phase 2: the failure write sent its capacity wake.
+    assert result.ok_value is None
     status, result_json, _, _ = await _get_task_row(session, task_id)
     assert status == 'FAILED'
     assert result_json is not None
@@ -543,11 +560,12 @@ async def test_invalid_task_result_structure_marks_error(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
+        claimed_at=CLAIMED_AT,
     )
 
     assert is_ok(result)
-    assert result.ok_value is not None
-    assert result.ok_value.result.is_err()
+    # A plain task owes no phase 2: the failure write sent its capacity wake.
+    assert result.ok_value is None
     status, result_json, _, _ = await _get_task_row(session, task_id)
     assert status == 'FAILED'
     assert result_json is not None
@@ -580,6 +598,7 @@ async def test_err_workflow_stopped_code_skips(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
+        claimed_at=CLAIMED_AT,
     )
 
     assert is_ok(result)
@@ -600,7 +619,7 @@ async def test_err_no_retry_marks_failed(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """Error result with no retry config → Ok(tr) with tr.is_err(), task FAILED."""
+    """Error result with no retry config → task FAILED, Ok(None)."""
     task_id = await _insert_running_task(session)  # max_retries=0
     worker = _make_worker(engine)
     result_json = _serialize_err('TRANSIENT', 'some transient error')
@@ -614,12 +633,12 @@ async def test_err_no_retry_marks_failed(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
+        claimed_at=CLAIMED_AT,
     )
 
     assert is_ok(result)
-    persisted = result.ok_value
-    assert persisted is not None
-    assert persisted.result.is_err()
+    # A plain task owes no phase 2: the failure write sent its capacity wake.
+    assert result.ok_value is None
     status, db_result, _, _ = await _get_task_row(session, task_id)
     assert status == 'FAILED'
     assert db_result == result_json
@@ -653,6 +672,7 @@ async def test_err_retry_scheduled_to_pending(
         task_name='persist_retry_test',
         queue_name='default',
         is_workflow_task=False,
+        claimed_at=CLAIMED_AT,
     )
 
     assert is_ok(result)
@@ -691,12 +711,12 @@ async def test_err_retry_expired_falls_through_to_failed(
         task_name='persist_retry_test',
         queue_name='default',
         is_workflow_task=False,
+        claimed_at=CLAIMED_AT,
     )
 
     assert is_ok(result)
-    persisted = result.ok_value
-    assert persisted is not None
-    assert persisted.result.is_err()
+    # A plain task owes no phase 2: the failure write sent its capacity wake.
+    assert result.ok_value is None
     status, db_result, _, _ = await _get_task_row(session, task_id)
     assert status == 'FAILED'
     assert db_result == result_json
@@ -733,6 +753,7 @@ async def test_success_marks_completed(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
+        claimed_at=CLAIMED_AT,
     )
 
     assert is_ok(result)
@@ -763,6 +784,7 @@ async def test_success_reaper_reclaimed_no_mutation(
         task_name='persist_terminal_test',
         queue_name='default',
         is_workflow_task=False,
+        claimed_at=CLAIMED_AT,
     )
 
     assert is_ok(result)
@@ -825,6 +847,51 @@ async def test_workflow_phase1_replay_loads_the_persisted_result(
     assert kind == 'COMPLETE_LOCKED'
     # The move archives the attempts and purges the live rows, so the
     # snapshot is where the one attempt now lives.
+    assert len(await read_attempt_history(session, task_id)) == 1
+
+
+@pytest.mark.parametrize('is_workflow_task', [False, True], ids=['plain', 'workflow'])
+@pytest.mark.asyncio(loop_scope='function')
+async def test_failure_phase1_replay_after_a_lost_reply(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+    is_workflow_task: bool,
+) -> None:
+    """A second phase 1 of a committed failure writes nothing. A plain task
+    owes no phase 2 (its wake was sent by the committed write); a workflow
+    task gets the persisted result for its phase 2."""
+    generation = datetime.now(timezone.utc) - timedelta(seconds=1)
+    task_id = await _insert_running_task(
+        session,
+        is_workflow_task=is_workflow_task,
+        claimed_at=generation,
+    )
+    worker = _make_worker(engine)
+    result_json = _serialize_err('TRANSIENT', 'failed once')
+
+    async def phase1() -> Any:
+        return await worker._persist_task_terminal_state(
+            task_id=task_id,
+            now=NOW,
+            ok=True,
+            result_json_str=result_json,
+            failed_reason=None,
+            task_name='persist_terminal_test',
+            queue_name='default',
+            is_workflow_task=is_workflow_task,
+            claimed_at=generation,
+        )
+
+    first = await phase1()
+    replay = await phase1()
+
+    assert is_ok(first) and is_ok(replay)
+    if is_workflow_task:
+        assert first.ok_value is not None and replay.ok_value is not None
+        assert replay.ok_value.result.unwrap_err().message == 'failed once'
+    else:
+        assert (first.ok_value, replay.ok_value) == (None, None)
     assert len(await read_attempt_history(session, task_id)) == 1
 
 

@@ -31,6 +31,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from horsies.core.codec.json_io import dumps_canonical_json
+from horsies.core.codec.task_options import stored_execution
 
 from ..ddl.tables import FOREVER_CLASS_KEY
 from ..errors import HistoryContractError
@@ -303,6 +304,15 @@ async def rerun_task(
             return RerunInputCorrupt(
                 task_id=command.source_task_id, detail=corruption
             )
+    # The rerun runs with the execution class of the stored request.
+    match stored_execution(decoded.options):
+        case Err(err_value=invalid_execution):
+            return RerunInputCorrupt(
+                task_id=command.source_task_id,
+                detail=f'stored task options: {invalid_execution.detail}',
+            )
+        case Ok(ok_value=execution):
+            pass
 
     new_task_id = mint_task_id()
     root_task_id = detail.rerun_root_task_id or detail.task_id
@@ -375,7 +385,8 @@ async def rerun_task(
             f"""
             INSERT INTO {LIVE_TASKS} (
                 id, task_name, queue_name, priority, args, kwargs,
-                task_options, status, sent_at, enqueued_at, created_at,
+                task_options, execution, status, sent_at, enqueued_at,
+                created_at,
                 retry_count, max_retries, good_until, is_workflow_task,
                 enqueue_sha,
                 command_fingerprint_version, command_fingerprint,
@@ -389,7 +400,7 @@ async def rerun_task(
                 prepared_rerun_input_reference
             ) VALUES (
                 CAST(:id AS uuid), :task_name, :queue_name, :priority,
-                :args, :kwargs, :task_options, 'PENDING',
+                :args, :kwargs, :task_options, :execution, 'PENDING',
                 :sent_at, statement_timestamp(), statement_timestamp(),
                 0, :max_retries, :good_until, FALSE,
                 :enqueue_sha,
@@ -413,6 +424,7 @@ async def rerun_task(
             'args': args_json,
             'kwargs': kwargs_json,
             'task_options': options_json,
+            'execution': execution.value,
             'max_retries': detail.max_retries,
             'good_until': command.deadline,
             'fingerprint': fingerprint,

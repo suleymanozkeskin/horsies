@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from typing import Final
+
 from sqlalchemy import text
+
+from horsies.core.models.tasks import Execution
 
 
 # ---- Schema infrastructure ----
@@ -356,8 +360,63 @@ from sqlalchemy import text
 #      databases no longer build it.
 # v52: horsies_workflow_recovery_failures, the stored count of the workflow
 #      recovery limit.
+# v53: horsies_worker_states.slots_down, the worker slots that were down for a
+#      boot failure cause that can clear. Nullable, no backfill: a row from an
+#      earlier worker did not record it.
+# v54: horsies_tasks.execution, the Execution of each task, with a CHECK on
+#      its value domain. The constant default makes the ADD catalog-only on
+#      PostgreSQL 11+; existing rows, and rows from a process that does not
+#      know the column, read ISOLATED. idx_horsies_tasks_claim_pending_class
+#      (queue_name, execution, priority, enqueued_at, id) over PENDING rows is
+#      built concurrently: one ordered range per queue and class.
+# v55: the claim has a budget per execution class. horsies_claim takes
+#      p_budgets (each budget class to its capacity in service) and p_routes
+#      (each served class to the budget class that claims it) in place of
+#      p_processes, and returns each row's execution; the earlier signatures
+#      of the claim pair are dropped. Each (queue, class) is its own claim
+#      stream; horsies_claim_plan chooses the rows of a pass in one walk over
+#      the heads of all streams. idx_horsies_tasks_claim_expired_class
+#      (queue_name, execution, priority, enqueued_at, id) over CLAIMED rows
+#      is built concurrently;
+#      idx_horsies_tasks_claim_pending and
+#      idx_horsies_tasks_claim_expired_ordered are dropped concurrently.
+#      horsies_worker_states.class_capacity holds the capacity of each budget
+#      and the classes it serves. Nullable, no backfill: a row from an
+#      earlier worker did not record it.
+# v56: horsies_finish_failed_attempt writes a failed attempt of a RUNNING
+#      task in one statement: the attempt row, then the retry or the
+#      terminal failure, and the capacity NOTIFY of a plain task. It takes
+#      the task advisory lock before the row lock. Its row type is
+#      horsies_failed_attempt_outcome. horsies_lock_running_task is the
+#      locking read of a RUNNING task, with the advisory lock first. Both
+#      are dropped and created on every apply.
+# v57: horsies_complete_tasks_fused, the batched plain-success completion.
+#      It calls horsies_complete_task_fused once per row, in sorted task-id
+#      order, and returns each row at its input ordinality.
+# v58: horsies_finish_workflow_success writes the success of a RUNNING
+#      workflow task in one statement: the task advisory lock, the row lock
+#      under the full claim fence, the COMPLETED attempt row, and the move
+#      with kind COMPLETE_LOCKED, which writes the phase-2 record of the
+#      node. It sends no capacity NOTIFY; phase 2 sends it. Its row type
+#      is horsies_workflow_success_outcome. Both are dropped and created on
+#      every apply. horsies_lock_running_task (v56) is dropped: its one
+#      caller was the success of a workflow task.
+# v59: horsies_task_status_notify_update_trigger skips NEW.status =
+#      'RUNNING': a task's start commit sends no NOTIFY. The history move
+#      functions send horsies_task_status with the task id next to
+#      task_done, so the monitoring stream hears every terminal move.
+# v60: the completion and failure functions (horsies_complete_locked_task,
+#      horsies_complete_task_fused, horsies_fail_locked_task,
+#      horsies_finish_failed_attempt, horsies_finish_workflow_success) read
+#      their row by id alone and check the fence on the locked row, so only
+#      the primary key serves the read whatever the statistics say. Same
+#      signatures, outcomes and locks.
+# v61: the in-flight count of horsies_claim runs in horsies_claim_in_flight:
+#      one IN list on status, with bitmap and sequential scans off, so the
+#      count is a plain scan of ix_horsies_tasks_status that marks the dead
+#      entries it passes. Same rows and counts.
 
-SCHEMA_VERSION = 52
+SCHEMA_VERSION = 61
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,
@@ -544,21 +603,112 @@ ANALYZE_EXPRESSION_INDEXED_TABLES_SQL = text("""
     ANALYZE horsies_tasks, horsies_workflows;
 """)
 
+# The rows that count as in flight: RUNNING, and CLAIMED with a valid lease.
+# One IN list on status is one index condition of ix_horsies_tasks_status;
+# the lease is a filter. Same rows as "status = 'RUNNING' OR (status =
+# 'CLAIMED' AND <lease valid>)".
+CLAIM_IN_FLIGHT_ROWS_SQL: Final[str] = """SELECT t.queue_name, t.status, t.claimed_by_worker_id, t.execution
+        FROM horsies_tasks t
+        WHERE t.status IN ('RUNNING', 'CLAIMED')
+          AND (t.status = 'RUNNING'
+               OR t.claim_expires_at IS NULL OR t.claim_expires_at > now())"""
+
+# The in-flight count of horsies_claim (v61).
+#
+# A task that finishes leaves two dead entries in ix_horsies_tasks_status,
+# one CLAIMED and one RUNNING. A plain index scan marks each dead entry that
+# it passes, so later scans skip it, and nbtree removes the marked entries
+# before it splits the leaf page. A bitmap scan marks none: it reads the heap
+# for every dead entry until vacuum. An OR of two status conditions gets a
+# bitmap scan, so the count is one IN list on status, and the function turns
+# off bitmap and sequential scans: the plan is the scan of the status index
+# whatever the statistics say. Without them, statistics that show most rows
+# in flight give a sequential scan of the whole table. Each claim pass marks
+# the entries that died since the pass before.
+CREATE_CLAIM_IN_FLIGHT_FUNCTION_SQL = text(f"""
+CREATE OR REPLACE FUNCTION horsies_claim_in_flight(
+    p_worker_id text,
+    p_capped text[],
+    p_hard_cap_mode boolean,
+    p_routes jsonb
+)
+RETURNS TABLE(
+    my_claimed bigint,
+    my_in_flight bigint,
+    global_in_flight bigint,
+    queue_counts jsonb,
+    budget_counts jsonb
+)
+LANGUAGE plpgsql
+STABLE
+SET jit = off
+SET enable_bitmapscan = off
+SET enable_seqscan = off
+AS $func$
+#variable_conflict use_column
+BEGIN
+    RETURN QUERY
+    WITH in_flight AS (
+        {CLAIM_IN_FLIGHT_ROWS_SQL}
+    )
+    SELECT
+        COUNT(*) FILTER (
+            WHERE f.claimed_by_worker_id = p_worker_id AND f.status = 'CLAIMED'),
+        COUNT(*) FILTER (WHERE f.claimed_by_worker_id = p_worker_id),
+        COUNT(*),
+        COALESCE((
+            SELECT jsonb_object_agg(g.queue_name, g.cnt) FROM (
+                SELECT q.queue_name, COUNT(*) AS cnt
+                FROM in_flight q
+                WHERE q.queue_name = ANY(p_capped)
+                  AND (p_hard_cap_mode OR q.status = 'RUNNING')
+                GROUP BY q.queue_name
+            ) g
+        ), '{{}}'::jsonb),
+        COALESCE((
+            SELECT jsonb_object_agg(g.budget_class, g.cnt) FROM (
+                SELECT p_routes ->> m.execution AS budget_class, COUNT(*) AS cnt
+                FROM in_flight m
+                WHERE m.claimed_by_worker_id = p_worker_id
+                  AND p_routes ? m.execution
+                GROUP BY 1
+            ) g
+        ), '{{}}'::jsonb)
+    FROM in_flight f;
+END;
+$func$;
+""")
+
 # Collapsed claim. The advisory lock is the FIRST imperative statement (a
 # plpgsql function executes sequentially), guaranteeing acquisition before any
 # read with predictable ordering — a raw CTE cannot guarantee this. Held until
 # the caller COMMITs (xact-scoped); the only remaining client gap while held is
 # the commit round trip.
 #
-# Claim ordering (global rank: qprio, priority, enqueued_at, id):
-#   - Distinct queue priorities: queue priority dominates — identical to the
-#     prior per-queue loop.
-#   - EQUAL queue priorities: an intentional semantic change. The prior loop
-#     broke ties by configured queue order (arbitrary, can starve a queue);
-#     this pools the equal-priority band and orders by task priority then FIFO.
-#     So equal-importance tasks across such queues are FIFO, while an explicit
-#     task/workflow-node priority still preempts within the band. Pinned by
-#     tests/integration/test_claim_function.py.
+# Budgets (v55). p_budgets maps each budget class to its capacity in service;
+# p_routes maps each execution class that the worker serves to the budget class
+# that claims its rows. A class that is not a key of p_routes is not claimed.
+# This worker's RUNNING and live CLAIMED rows count against the budget that
+# their class routes to. The capacity of the worker is the sum over its
+# budgets. In soft cap mode each budget, and the worker, may hold
+# p_prefetch_buffer rows more than its capacity. A budget whose capacity in
+# service is 0 (every child or seat of it is down) gets no prefetch, and
+# neither does a worker whose budgets all have capacity 0: such a worker
+# would hold rows that no child of it can run, while other workers have
+# seats for them. p_max_claim_per_worker,
+# p_max_claim_batch, the queue caps and p_cluster_wide_cap keep their meaning
+# for the worker as a whole.
+#
+# Claim ordering (rank: qprio, priority, enqueued_at, id):
+#   - Each (queue, execution class) is its own stream in (priority,
+#     enqueued_at, id) order. Priority holds within one class only.
+#   - A budget that serves more than one class reads the merge of their
+#     streams in that order.
+#   - One walk in rank order takes each row whose queue, budget and pass
+#     have room left (horsies_claim_plan).
+#   - Distinct queue priorities: queue priority dominates.
+#   - EQUAL queue priorities: the equal-priority band is pooled and ordered by
+#     task priority, then FIFO. Pinned by tests/integration/test_claim_function.py.
 CREATE_CLAIM_FUNCTION_SQL = text("""
 CREATE OR REPLACE FUNCTION horsies_claim(
     p_worker_id text,
@@ -566,7 +716,8 @@ CREATE OR REPLACE FUNCTION horsies_claim(
     p_queue_priority jsonb,
     p_queue_max_concurrency jsonb,
     p_hard_cap_mode boolean,
-    p_processes int,
+    p_budgets jsonb,
+    p_routes jsonb,
     p_prefetch_buffer int,
     p_max_claim_per_worker int,
     p_max_claim_batch int,
@@ -575,6 +726,7 @@ CREATE OR REPLACE FUNCTION horsies_claim(
     p_lock_keys jsonb
 )
 RETURNS TABLE(
+    row_kind text,
     id text,
     task_name varchar,
     args text,
@@ -582,24 +734,42 @@ RETURNS TABLE(
     queue_name varchar,
     is_workflow_task boolean,
     task_options text,
-    claimed_at timestamptz
+    claimed_at timestamptz,
+    execution text,
+    short_by integer
 )
 LANGUAGE plpgsql
+SET jit = off
 AS $func$
 #variable_conflict use_column
 DECLARE
     v_key bigint;
     v_capped text[];
     v_my_claimed int;
-    v_my_running int;
     v_my_in_flight int;
     v_global_in_flight int;
     v_queue_counts jsonb;
+    v_budget_counts jsonb;
+    v_capacity int;
+    v_extra int;
     v_max_claimed int;
     v_local_available int;
     v_global_remaining int;
     v_total int;
+    v_available jsonb;
 BEGIN
+    -- 0. The worker builds both maps from one claim plan, so a route to a
+    --    budget that p_budgets does not hold is a defect of the caller.
+    IF EXISTS (
+        SELECT 1
+        FROM jsonb_each_text(p_routes) AS r(row_class, budget_class)
+        WHERE NOT (p_budgets ? r.budget_class)
+    ) THEN
+        RAISE EXCEPTION
+            'horsies_claim: p_routes names a budget class that p_budgets does not hold'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
     -- 1. Acquire advisory locks first, in deadlock-safe ascending order.
     FOR v_key IN
         SELECT elem::bigint AS k
@@ -613,53 +783,35 @@ BEGIN
     INTO v_capped
     FROM jsonb_object_keys(p_queue_max_concurrency) AS key;
 
-    -- 2. Cap accounting under the lock snapshot (mirrors CLAIM_PASS_COUNTS_SQL).
-    --    Per-queue counts: hard mode counts RUNNING+CLAIMED, soft counts RUNNING.
-    WITH in_flight AS (
-        SELECT queue_name, status, claimed_by_worker_id
-        FROM horsies_tasks
-        WHERE status = 'RUNNING'
-           OR (status = 'CLAIMED'
-               AND (claim_expires_at IS NULL OR claim_expires_at > now()))
-    )
-    SELECT
-        COUNT(*) FILTER (
-            WHERE claimed_by_worker_id = p_worker_id AND status = 'CLAIMED'),
-        COUNT(*) FILTER (
-            WHERE claimed_by_worker_id = p_worker_id AND status = 'RUNNING'),
-        COUNT(*) FILTER (WHERE claimed_by_worker_id = p_worker_id),
-        COUNT(*),
-        COALESCE((
-            SELECT jsonb_object_agg(g.queue_name, g.cnt) FROM (
-                SELECT queue_name, COUNT(*) AS cnt
-                FROM in_flight
-                WHERE queue_name = ANY(v_capped)
-                  AND (p_hard_cap_mode OR status = 'RUNNING')
-                GROUP BY queue_name
-            ) g
-        ), '{}'::jsonb)
-    INTO v_my_claimed, v_my_running, v_my_in_flight,
-         v_global_in_flight, v_queue_counts
-    FROM in_flight;
+    -- 2. Counts under the lock snapshot (horsies_claim_in_flight). Per-queue
+    --    counts: hard mode counts RUNNING+CLAIMED, soft counts RUNNING.
+    --    Per-budget counts: this worker's in-flight rows, by the budget that
+    --    their class routes to.
+    SELECT c.my_claimed, c.my_in_flight, c.global_in_flight, c.queue_counts,
+           c.budget_counts
+    INTO v_my_claimed, v_my_in_flight, v_global_in_flight, v_queue_counts,
+         v_budget_counts
+    FROM horsies_claim_in_flight(
+        p_worker_id, v_capped, p_hard_cap_mode, p_routes
+    ) AS c;
 
-    -- 3. Budget math (mirrors claiming.py worker-local / global budget).
+    -- 3. Budget math. The capacity of the worker is the sum over budgets.
+    SELECT COALESCE(SUM(b.capacity::int), 0)
+    INTO v_capacity
+    FROM jsonb_each_text(p_budgets) AS b(budget_class, capacity);
+    v_extra := CASE WHEN p_hard_cap_mode THEN 0 ELSE p_prefetch_buffer END;
     v_max_claimed := CASE
         WHEN p_max_claim_per_worker > 0 THEN p_max_claim_per_worker
-        WHEN p_prefetch_buffer > 0 THEN p_processes + p_prefetch_buffer
-        ELSE p_processes END;
+        WHEN p_prefetch_buffer > 0 THEN v_capacity + p_prefetch_buffer
+        ELSE v_capacity END;
     IF v_my_claimed >= v_max_claimed THEN
         RETURN;
     END IF;
 
-    IF p_hard_cap_mode THEN
-        v_local_available := p_processes - v_my_in_flight;
-    ELSE
-        v_local_available :=
-            (p_processes + p_prefetch_buffer) - v_my_running - v_my_claimed;
-    END IF;
-    IF v_local_available < 0 THEN
-        v_local_available := 0;
-    END IF;
+    -- A worker with no capacity in service gets no prefetch.
+    v_local_available := CASE
+        WHEN v_capacity = 0 THEN 0
+        ELSE GREATEST(0, v_capacity + v_extra - v_my_in_flight) END;
 
     IF p_cluster_wide_cap IS NOT NULL THEN
         v_global_remaining := GREATEST(0, p_cluster_wide_cap - v_global_in_flight);
@@ -673,35 +825,197 @@ BEGIN
         RETURN;
     END IF;
 
+    -- A budget with no capacity in service gets no prefetch.
+    SELECT COALESCE(jsonb_object_agg(
+               b.budget_class,
+               CASE WHEN b.capacity::int = 0 THEN 0
+                   ELSE GREATEST(0, b.capacity::int + v_extra
+                       - COALESCE((v_budget_counts ->> b.budget_class)::int, 0))
+                   END
+           ), '{}'::jsonb)
+    INTO v_available
+    FROM jsonb_each_text(p_budgets) AS b(budget_class, capacity);
+
     -- 4. Candidate selection runs in horsies_claim_candidates, which reuses
     --    one generic plan; the accounting above keeps parameter-specific
     --    plans. Everything stays in this transaction.
     RETURN QUERY
     SELECT * FROM horsies_claim_candidates(
-        v_total, p_queues, p_queue_priority, p_queue_max_concurrency,
-        v_queue_counts, p_max_claim_batch, p_worker_id, p_lease_ms
+        v_total, v_available, p_routes, p_queues, p_queue_priority,
+        p_queue_max_concurrency, v_queue_counts, p_max_claim_batch,
+        p_worker_id, p_lease_ms
     );
 END;
 $func$;
 """)
 
-# v39: candidate selection moved out of horsies_claim into a helper that is
-# planned once per connection (plan_cache_mode = force_generic_plan). The
-# parent keeps automatic planning: forcing a generic plan on the in-flight
-# accounting makes it slower under a large in-flight population. The helper
-# signature is stable, so CREATE OR REPLACE installs it on every apply.
-CREATE_CLAIM_CANDIDATES_FUNCTION_SQL = text("""
-CREATE OR REPLACE FUNCTION horsies_claim_candidates(
-    v_total integer,
+# v39: candidate selection runs in a helper that is planned once per
+# connection (plan_cache_mode = force_generic_plan). The parent keeps
+# automatic planning: forcing a generic plan on the in-flight accounting
+# makes it slower under a large in-flight population.
+#
+# The three functions run with jit = off. The generic plan does not know the
+# LIMIT of each stream, so its cost estimate passes jit_above_cost, and a
+# server with JIT compiles the statement on every pass: 28.8 ms for 0.3 ms
+# of work with the v54 pair, 630 ms with the first v55 pair, both at a
+# 90,000-row backlog on PostgreSQL 17.
+#
+# v55: two phases, so a claim locks only the rows it takes.
+#   1. horsies_claim_plan reads, without locks, the head of each (queue,
+#      class) stream: the pending and expired rows of the stream merged in
+#      (priority, enqueued_at, id) order, at most as many as the queue's room
+#      and the budget's available rows allow. One walk over all heads in
+#      rank order takes a row when its queue, its budget and the pass each
+#      have room left, and counts the row against all three. A row that one
+#      limit drops counts against none. It returns the rows to take from each
+#      stream and arm.
+#   2. horsies_claim_candidates takes that many rows from each stream and
+#      arm with FOR UPDATE SKIP LOCKED. A row that another claim holds is
+#      skipped and the walk goes on, so priority holds within each stream
+#      also under contention.
+# A stream takes a prefix of its rows: once one of its limits has no room,
+# no later row of the stream is taken. So the head of a stream, bounded by
+# its queue's room and its budget's available rows, holds every row that the
+# walk can take from it.
+# Every stream is one ordered range of idx_horsies_tasks_claim_pending_class
+# (pending) or idx_horsies_tasks_claim_expired_class (expired).
+CREATE_CLAIM_PLAN_FUNCTION_SQL = text("""
+CREATE OR REPLACE FUNCTION horsies_claim_plan(
+    p_total integer,
+    p_available jsonb,
+    p_routes jsonb,
     p_queues jsonb,
     p_queue_priority jsonb,
     p_queue_max_concurrency jsonb,
-    v_queue_counts jsonb,
+    p_queue_counts jsonb,
+    p_max_claim_batch integer
+)
+RETURNS TABLE(queue_name text, row_class text, arm text, take integer)
+LANGUAGE plpgsql
+SET plan_cache_mode = force_generic_plan
+SET jit = off
+AS $plan$
+#variable_conflict use_column
+DECLARE
+    -- Room left in each queue (by position in p_queues), in each budget
+    -- (by position in v_budgets), and in the pass.
+    v_queue_room int[];
+    v_budgets text[];
+    v_budget_room int[];
+    v_total_room int := p_total;
+    v_picked_queue text[] := ARRAY[]::text[];
+    v_picked_class text[] := ARRAY[]::text[];
+    v_picked_arm text[] := ARRAY[]::text[];
+    v_row record;
+BEGIN
+    SELECT array_agg(LEAST(
+               p_total,
+               CASE WHEN p_queue_max_concurrency ? q.name THEN
+                   GREATEST(0, (p_queue_max_concurrency ->> q.name)::int
+                       - COALESCE((p_queue_counts ->> q.name)::int, 0))
+                   ELSE p_total END,
+               CASE WHEN p_max_claim_batch > 0 THEN p_max_claim_batch
+                   ELSE p_total END
+           ) ORDER BY q.slot)
+    INTO v_queue_room
+    FROM jsonb_array_elements_text(p_queues) WITH ORDINALITY AS q(name, slot);
+
+    SELECT array_agg(b.budget_class ORDER BY b.budget_class),
+           array_agg(b.available::int ORDER BY b.budget_class)
+    INTO v_budgets, v_budget_room
+    FROM jsonb_each_text(p_available) AS b(budget_class, available);
+
+    FOR v_row IN
+        SELECT s.queue_slot, s.budget_slot, s.queue_name, s.row_class, c.arm
+        FROM (
+            SELECT q.slot::int AS queue_slot, q.name AS queue_name,
+                   COALESCE((p_queue_priority ->> q.name)::int, 100) AS qprio,
+                   r.row_class, b.budget_slot,
+                   LEAST(v_queue_room[q.slot::int],
+                         v_budget_room[b.budget_slot]) AS head
+            FROM jsonb_array_elements_text(p_queues) WITH ORDINALITY AS q(name, slot)
+            CROSS JOIN jsonb_each_text(p_routes) AS r(row_class, budget_class)
+            CROSS JOIN LATERAL (
+                SELECT array_position(v_budgets, r.budget_class) AS budget_slot
+            ) b
+            WHERE LEAST(v_queue_room[q.slot::int],
+                        v_budget_room[b.budget_slot]) > 0
+        ) s
+        CROSS JOIN LATERAL (
+            SELECT m.arm, m.priority, m.enqueued_at, m.id
+            FROM (
+                (SELECT 'PENDING'::text AS arm, t.priority, t.enqueued_at, t.id
+                 FROM horsies_tasks t
+                 WHERE t.queue_name = s.queue_name
+                   AND t.execution = s.row_class
+                   AND t.status = 'PENDING'
+                   AND t.enqueued_at <= now()
+                   AND (t.next_retry_at IS NULL OR t.next_retry_at <= now())
+                   AND (t.good_until IS NULL OR t.good_until > now())
+                 ORDER BY t.priority ASC, t.enqueued_at ASC, t.id ASC
+                 LIMIT s.head)
+                UNION ALL
+                (SELECT 'EXPIRED'::text AS arm, t.priority, t.enqueued_at, t.id
+                 FROM horsies_tasks t
+                 WHERE t.queue_name = s.queue_name
+                   AND t.execution = s.row_class
+                   AND t.status = 'CLAIMED'
+                   AND t.claim_expires_at IS NOT NULL
+                   AND t.claim_expires_at < now()
+                   AND t.enqueued_at <= now()
+                   AND (t.next_retry_at IS NULL OR t.next_retry_at <= now())
+                   AND (t.good_until IS NULL OR t.good_until > now())
+                 ORDER BY t.priority ASC, t.enqueued_at ASC, t.id ASC
+                 LIMIT s.head)
+            ) m
+            ORDER BY m.priority ASC, m.enqueued_at ASC, m.id ASC
+            LIMIT s.head
+        ) c
+        ORDER BY s.qprio ASC, c.priority ASC, c.enqueued_at ASC, c.id ASC
+    LOOP
+        EXIT WHEN v_total_room = 0;
+        CONTINUE WHEN v_queue_room[v_row.queue_slot] = 0
+            OR v_budget_room[v_row.budget_slot] = 0;
+        v_queue_room[v_row.queue_slot] := v_queue_room[v_row.queue_slot] - 1;
+        v_budget_room[v_row.budget_slot] := v_budget_room[v_row.budget_slot] - 1;
+        v_total_room := v_total_room - 1;
+        v_picked_queue := v_picked_queue || v_row.queue_name;
+        v_picked_class := v_picked_class || v_row.row_class;
+        v_picked_arm := v_picked_arm || v_row.arm;
+    END LOOP;
+
+    RETURN QUERY
+    SELECT p.queue_name, p.row_class, p.arm, count(*)::int
+    FROM unnest(v_picked_queue, v_picked_class, v_picked_arm)
+        AS p(queue_name, row_class, arm)
+    GROUP BY p.queue_name, p.row_class, p.arm;
+END;
+$plan$;
+""")
+
+# Phase 2 of the claim (see horsies_claim_plan). One 'CLAIMED' row per task
+# it took, in rank order: queue priority, task priority, enqueued_at, id.
+# The plan comes from an unlocked read, so another transaction can hold or
+# take a planned row before the take. When the take gets fewer rows than the
+# plan, one 'SHORT' row follows, whose short_by counts the rows it missed;
+# the worker then claims again with no wait, as no NOTIFY announces the
+# rows that remain. The task columns of a 'SHORT' row are NULL, and the
+# short_by of a 'CLAIMED' row is NULL.
+CREATE_CLAIM_CANDIDATES_FUNCTION_SQL = text("""
+CREATE OR REPLACE FUNCTION horsies_claim_candidates(
+    p_total integer,
+    p_available jsonb,
+    p_routes jsonb,
+    p_queues jsonb,
+    p_queue_priority jsonb,
+    p_queue_max_concurrency jsonb,
+    p_queue_counts jsonb,
     p_max_claim_batch integer,
     p_worker_id text,
     p_lease_ms bigint
 )
 RETURNS TABLE(
+    row_kind text,
     id text,
     task_name varchar,
     args text,
@@ -709,117 +1023,82 @@ RETURNS TABLE(
     queue_name varchar,
     is_workflow_task boolean,
     task_options text,
-    claimed_at timestamptz
+    claimed_at timestamptz,
+    execution text,
+    short_by integer
 )
 LANGUAGE plpgsql
 SET plan_cache_mode = force_generic_plan
+SET jit = off
 AS $candidates$
 #variable_conflict use_column
+DECLARE
+    v_queue text[];
+    v_class text[];
+    v_arm text[];
+    v_take int[];
+    v_planned int;
+    v_taken int;
 BEGIN
-    -- Two-arm eligibility per queue, each arm and the merge bounded by the
-    -- queue's remaining cap and the batch limit, so a queue never locks
-    -- more candidates than it can claim. Then the per-queue cap filter,
-    -- the global priority rank, and the global budget trim.
+    SELECT COALESCE(array_agg(p.queue_name), ARRAY[]::text[]),
+           COALESCE(array_agg(p.row_class), ARRAY[]::text[]),
+           COALESCE(array_agg(p.arm), ARRAY[]::text[]),
+           COALESCE(array_agg(p.take), ARRAY[]::int[]),
+           COALESCE(sum(p.take), 0)::int
+    INTO v_queue, v_class, v_arm, v_take, v_planned
+    FROM horsies_claim_plan(
+        p_total, p_available, p_routes, p_queues, p_queue_priority,
+        p_queue_max_concurrency, p_queue_counts, p_max_claim_batch
+    ) AS p;
+    IF v_planned = 0 THEN
+        RETURN;
+    END IF;
+
     RETURN QUERY
-    WITH cand AS (
-        SELECT c.id, qn.name AS queue_name, c.priority, c.enqueued_at,
-               COALESCE((p_queue_priority ->> qn.name)::int, 100) AS qprio
-        FROM jsonb_array_elements_text(p_queues) AS qn(name)
+    WITH planned AS (
+        SELECT p.queue_name, p.row_class, p.arm, p.take
+        FROM unnest(v_queue, v_class, v_arm, v_take)
+            AS p(queue_name, row_class, arm, take)
+    ),
+    -- FOR UPDATE is not allowed on UNION operands, so each arm locks in its
+    -- own CTE.
+    locked_pending AS (
+        SELECT l.id
+        FROM planned p
         CROSS JOIN LATERAL (
-            -- Two eligibility arms as separate CTEs (FOR UPDATE is not allowed
-            -- on UNION operands, so lock per-arm then union the references —
-            -- same shape as the standalone CLAIM_SQL).
-            WITH pend AS (
-                SELECT t.id, t.priority, t.enqueued_at
-                FROM horsies_tasks t
-                WHERE t.queue_name = qn.name
-                  AND t.status = 'PENDING'
-                  AND t.enqueued_at <= now()
-                  AND (t.next_retry_at IS NULL OR t.next_retry_at <= now())
-                  AND (t.good_until IS NULL OR t.good_until > now())
-                ORDER BY t.priority ASC, t.enqueued_at ASC, t.id ASC
-                FOR UPDATE SKIP LOCKED
-                LIMIT LEAST(
-                    v_total,
-                    CASE WHEN p_queue_max_concurrency ? qn.name THEN
-                        GREATEST(0,
-                            (p_queue_max_concurrency ->> qn.name)::int
-                            - COALESCE((v_queue_counts ->> qn.name)::int, 0))
-                        ELSE v_total END,
-                    CASE WHEN p_max_claim_batch > 0 THEN p_max_claim_batch
-                        ELSE v_total END
-                )
-            ),
-            expired AS (
-                SELECT t.id, t.priority, t.enqueued_at
-                FROM horsies_tasks t
-                WHERE t.queue_name = qn.name
-                  AND t.status = 'CLAIMED'
-                  AND t.claim_expires_at IS NOT NULL
-                  AND t.claim_expires_at < now()
-                  AND t.enqueued_at <= now()
-                  AND (t.next_retry_at IS NULL OR t.next_retry_at <= now())
-                  AND (t.good_until IS NULL OR t.good_until > now())
-                ORDER BY t.priority ASC, t.enqueued_at ASC, t.id ASC
-                FOR UPDATE SKIP LOCKED
-                LIMIT LEAST(
-                    v_total,
-                    CASE WHEN p_queue_max_concurrency ? qn.name THEN
-                        GREATEST(0,
-                            (p_queue_max_concurrency ->> qn.name)::int
-                            - COALESCE((v_queue_counts ->> qn.name)::int, 0))
-                        ELSE v_total END,
-                    CASE WHEN p_max_claim_batch > 0 THEN p_max_claim_batch
-                        ELSE v_total END
-                )
-            )
-            SELECT m.id, m.priority, m.enqueued_at
-            FROM (SELECT * FROM pend UNION ALL SELECT * FROM expired) m
-            ORDER BY m.priority ASC, m.enqueued_at ASC, m.id ASC
-            LIMIT LEAST(
-                    v_total,
-                    CASE WHEN p_queue_max_concurrency ? qn.name THEN
-                        GREATEST(0,
-                            (p_queue_max_concurrency ->> qn.name)::int
-                            - COALESCE((v_queue_counts ->> qn.name)::int, 0))
-                        ELSE v_total END,
-                    CASE WHEN p_max_claim_batch > 0 THEN p_max_claim_batch
-                        ELSE v_total END
-                )
-        ) c
+            SELECT t.id
+            FROM horsies_tasks t
+            WHERE t.queue_name = p.queue_name
+              AND t.execution = p.row_class
+              AND t.status = 'PENDING'
+              AND t.enqueued_at <= now()
+              AND (t.next_retry_at IS NULL OR t.next_retry_at <= now())
+              AND (t.good_until IS NULL OR t.good_until > now())
+            ORDER BY t.priority ASC, t.enqueued_at ASC, t.id ASC
+            FOR UPDATE SKIP LOCKED
+            LIMIT p.take
+        ) l
+        WHERE p.arm = 'PENDING'
     ),
-    per_queue AS (
-        SELECT cand.id, cand.queue_name, cand.priority, cand.enqueued_at,
-               cand.qprio,
-               row_number() OVER (
-                   PARTITION BY cand.queue_name
-                   ORDER BY cand.priority ASC, cand.enqueued_at ASC, cand.id ASC
-               ) AS rn_q
-        FROM cand
-    ),
-    capped AS (
-        SELECT per_queue.id, per_queue.qprio, per_queue.priority,
-               per_queue.enqueued_at
-        FROM per_queue
-        WHERE per_queue.rn_q <= LEAST(
-            CASE WHEN p_queue_max_concurrency ? per_queue.queue_name
-                THEN GREATEST(0,
-                    (p_queue_max_concurrency ->> per_queue.queue_name)::int
-                    - COALESCE((v_queue_counts ->> per_queue.queue_name)::int, 0))
-                ELSE v_total END,
-            CASE WHEN p_max_claim_batch > 0 THEN p_max_claim_batch ELSE v_total END
-        )
-    ),
-    ranked AS (
-        SELECT capped.id,
-               row_number() OVER (
-                   ORDER BY capped.qprio ASC, capped.priority ASC,
-                            capped.enqueued_at ASC, capped.id ASC
-               ) AS rn
-        FROM capped
-    ),
-    pick AS (
-        SELECT ranked.id FROM ranked WHERE ranked.rn <= v_total
+    locked_expired AS (
+        SELECT l.id
+        FROM planned p
+        CROSS JOIN LATERAL (
+            SELECT t.id
+            FROM horsies_tasks t
+            WHERE t.queue_name = p.queue_name
+              AND t.execution = p.row_class
+              AND t.status = 'CLAIMED'
+              AND t.claim_expires_at IS NOT NULL
+              AND t.claim_expires_at < now()
+              AND t.enqueued_at <= now()
+              AND (t.next_retry_at IS NULL OR t.next_retry_at <= now())
+              AND (t.good_until IS NULL OR t.good_until > now())
+            ORDER BY t.priority ASC, t.enqueued_at ASC, t.id ASC
+            FOR UPDATE SKIP LOCKED
+            LIMIT p.take
+        ) l
+        WHERE p.arm = 'EXPIRED'
     ),
     -- Targets are looked up by id; the selected batch never drives a scan
     -- of the live table.
@@ -833,32 +1112,64 @@ BEGIN
             finalizing_at = NULL,
             finalizing_by_worker_id = NULL,
             updated_at = now()
-        WHERE t.id = ANY(ARRAY(SELECT id FROM pick))
-        RETURNING t.id::text, t.task_name, t.args, t.kwargs, t.queue_name,
-                  t.is_workflow_task, t.task_options, t.claimed_at
-    ),
-    return_order AS (
-        SELECT ranked.id, min(ranked.rn) AS rn
-        FROM ranked
-        GROUP BY ranked.id
+        WHERE t.id = ANY(ARRAY(
+            SELECT locked_pending.id FROM locked_pending
+            UNION ALL
+            SELECT locked_expired.id FROM locked_expired
+        ))
+        RETURNING t.id AS task_key, t.id::text AS id, t.task_name, t.args,
+                  t.kwargs, t.queue_name, t.is_workflow_task, t.task_options,
+                  t.claimed_at, t.execution, t.priority, t.enqueued_at
     )
-    -- Dispatch order is the global rank. The id is compared as text so the
-    -- statement runs against both the varchar and the uuid identity.
-    SELECT updated.* FROM updated
-    JOIN return_order ON return_order.id::text = updated.id
-    ORDER BY return_order.rn;
+    SELECT 'CLAIMED'::text, u.id, u.task_name, u.args, u.kwargs,
+           u.queue_name, u.is_workflow_task, u.task_options, u.claimed_at,
+           u.execution, NULL::integer
+    FROM updated u
+    ORDER BY COALESCE((p_queue_priority ->> u.queue_name)::int, 100) ASC,
+             u.priority ASC, u.enqueued_at ASC, u.task_key ASC;
+
+    GET DIAGNOSTICS v_taken = ROW_COUNT;
+    IF v_taken < v_planned THEN
+        RETURN QUERY
+        SELECT 'SHORT'::text, NULL::text, NULL::varchar, NULL::text,
+               NULL::text, NULL::varchar, NULL::boolean, NULL::text,
+               NULL::timestamptz, NULL::text, v_planned - v_taken;
+    END IF;
 END;
 $candidates$;
 """)
 
-# v12: the RETURNS TABLE column set changed (claimed_at added), and
-# CREATE OR REPLACE cannot change a function's OUT columns — drop first.
-# The exact signature pins the drop to the v10/v11 definition.
-DROP_CLAIM_FUNCTION_SQL = text("""
+# The claim pair before v55: horsies_claim took one process count, and
+# neither function returned the execution class. A changed argument list
+# makes a second function next to the old one, and CREATE OR REPLACE cannot
+# change OUT columns, so each old signature is dropped by its exact argument
+# types. The horsies_claim signature is also the v10 to v11 one (v12 changed
+# only its OUT columns). The current signatures of the pair are dropped too,
+# so an apply installs their OUT columns also over a pair of the same
+# argument types and other OUT columns.
+DROP_PREVIOUS_CLAIM_FUNCTIONS_SQL = (
+    text("""
 DROP FUNCTION IF EXISTS horsies_claim(
     text, jsonb, jsonb, jsonb, boolean, int, int, int, int, int, bigint, jsonb
 )
-""")
+"""),
+    text("""
+DROP FUNCTION IF EXISTS horsies_claim_candidates(
+    integer, jsonb, jsonb, jsonb, jsonb, integer, text, bigint
+)
+"""),
+    text("""
+DROP FUNCTION IF EXISTS horsies_claim(
+    text, jsonb, jsonb, jsonb, boolean, jsonb, jsonb, int, int, int, int,
+    bigint, jsonb
+)
+"""),
+    text("""
+DROP FUNCTION IF EXISTS horsies_claim_candidates(
+    integer, jsonb, jsonb, jsonb, jsonb, jsonb, jsonb, integer, text, bigint
+)
+"""),
+)
 
 CREATE_SCHEMA_VERSION_TABLE_SQL = text("""
     CREATE TABLE IF NOT EXISTS horsies_schema_version (
@@ -1092,6 +1403,64 @@ ADD_TASK_TERMINAL_AT_COLUMN_SQL = text("""
     ADD COLUMN IF NOT EXISTS terminal_at TIMESTAMPTZ;
 """)
 
+# Migration (v54): the execution class of each task. The constant default
+# is a catalog-only change on PostgreSQL 11+. The default stays after the
+# migration: a process of an earlier version that inserts a task does not
+# know the column, and its rows run isolated.
+ADD_TASK_EXECUTION_COLUMN_SQL = text("""
+    ALTER TABLE horsies_tasks
+    ADD COLUMN IF NOT EXISTS execution TEXT NOT NULL DEFAULT 'ISOLATED';
+""")
+
+
+def _execution_domain() -> str:
+    """The Execution values as sorted SQL literals."""
+    return ', '.join(sorted(f"'{member.value}'" for member in Execution))
+
+
+# The CHECK is guarded on its definition, not on its name: a constraint of
+# this name with another value domain is dropped and added again, so a new
+# Execution member reaches every deployed database with the next version.
+# The expected definition comes from the same constraint on a temporary
+# table, so both sides are rendered by the same server.
+ADD_TASK_EXECUTION_CHECK_SQL = text(f"""
+DO $$
+DECLARE
+    v_actual text;
+    v_expected text;
+BEGIN
+    CREATE TEMP TABLE horsies_expected_task_execution (execution text)
+        ON COMMIT DROP;
+    ALTER TABLE horsies_expected_task_execution
+        ADD CONSTRAINT ck_horsies_tasks_execution
+        CHECK (execution IN ({_execution_domain()}));
+    SELECT pg_get_constraintdef(oid) INTO v_expected
+    FROM pg_constraint
+    WHERE conrelid = 'horsies_expected_task_execution'::regclass
+      AND conname = 'ck_horsies_tasks_execution';
+    SELECT pg_get_constraintdef(oid) INTO v_actual
+    FROM pg_constraint
+    WHERE conrelid = 'horsies_tasks'::regclass
+      AND conname = 'ck_horsies_tasks_execution'
+      AND convalidated;
+    DROP TABLE horsies_expected_task_execution;
+    IF v_actual IS DISTINCT FROM v_expected THEN
+        ALTER TABLE horsies_tasks
+        DROP CONSTRAINT IF EXISTS ck_horsies_tasks_execution;
+        ALTER TABLE horsies_tasks
+        ADD CONSTRAINT ck_horsies_tasks_execution
+        CHECK (execution IN ({_execution_domain()})) NOT VALID;
+    END IF;
+END
+$$""")
+
+# ADD and VALIDATE share the migration transaction. Validating a valid
+# constraint is a no-op, so a later release does not scan again.
+VALIDATE_TASK_EXECUTION_CHECK_SQL = text("""
+    ALTER TABLE horsies_tasks
+    VALIDATE CONSTRAINT ck_horsies_tasks_execution
+""")
+
 # Migration (v4): widen timeseries PKs to BIGINT. Both tables are
 # retention-bounded (hourly/periodic cleanup), so the type rewrite is cheap.
 WIDEN_HEARTBEATS_ID_TO_BIGINT_SQL = text("""
@@ -1150,4 +1519,19 @@ SET_WORKFLOW_SENT_AT_DEFAULT_SQL = text("""
 ADD_WORKER_STATES_CHILDREN_MEMORY_COLUMN_SQL = text("""
     ALTER TABLE horsies_worker_states
     ADD COLUMN IF NOT EXISTS children_memory_mb DOUBLE PRECISION;
+""")
+
+# Migration (v53): the slots that a worker reports as down. Nullable, no
+# backfill: a snapshot written before this column did not record slot health.
+ADD_WORKER_STATES_SLOTS_DOWN_COLUMN_SQL = text("""
+    ALTER TABLE horsies_worker_states
+    ADD COLUMN IF NOT EXISTS slots_down JSONB;
+""")
+
+# Migration (v55): the capacity of each claim budget of a worker, and the
+# classes it serves. Nullable, no backfill: a snapshot written before this
+# column did not record it.
+ADD_WORKER_STATES_CLASS_CAPACITY_COLUMN_SQL = text("""
+    ALTER TABLE horsies_worker_states
+    ADD COLUMN IF NOT EXISTS class_capacity JSONB;
 """)

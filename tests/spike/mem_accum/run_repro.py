@@ -3,9 +3,11 @@
 Runs the same retained-allocation burst under three worker configs and reports
 distinct child PIDs (rotation), peak process-tree RSS, and throughput:
 
-  - none:   no recycling
-  - count:  --max-tasks-per-child=N
-  - memory: --max-memory-per-child-mb=N
+  - none:   no recycling (recycle after=NoTaskLimit())
+  - count:  recycle after=TaskLimit(tasks=N)
+  - memory: recycle above=MemoryLimit(mb=N)
+
+Each mode is a worker profile in ``repro_app``; the mode name is the profile.
 
 The leaky task retains memory per child, so child RSS ratchets up. Count
 recycling rotates on a fixed task count regardless of bytes; memory recycling
@@ -29,15 +31,17 @@ from dataclasses import dataclass
 import psutil
 
 from horsies.core.types.result import is_err
-from tests.spike.mem_accum.repro_app import app  # noqa: F401  (registers tasks)
+from tests.spike.mem_accum.repro_app import (
+    COUNT_N,
+    MEMORY_THRESHOLD_MB,
+    PROCESSES,
+    app,  # noqa: F401  (registers tasks)
+)
 from tests.spike.mem_accum.repro_tasks import healthcheck, leaky_task
 
 LOCATOR = 'tests.spike.mem_accum.repro_app:app'
-PROCESSES = 2
 BURST = 40
 ALLOC_MB = 20
-COUNT_N = 8
-MEMORY_THRESHOLD_MB = 250
 READY_TIMEOUT_S = 30.0
 GET_TIMEOUT_MS = 30_000
 
@@ -75,12 +79,12 @@ def _sample_tree_rss_mb(root_pid: int) -> float:
     return total / 1024 / 1024
 
 
-def _run_mode(mode: str, extra_args: list[str]) -> Result:
+def _run_mode(mode: str) -> Result:
     worker_cmd = os.environ.get('HORSIES_WORKER_CMD', 'uv run horsies').split()
     worker = subprocess.Popen(
         [
             *worker_cmd, 'worker', LOCATOR,
-            f'--processes={PROCESSES}', '--loglevel=warning', *extra_args,
+            f'--profile={mode}', '--loglevel=warning',
         ],
         start_new_session=True,
     )
@@ -132,11 +136,7 @@ def _run_mode(mode: str, extra_args: list[str]) -> Result:
 
 
 def main() -> int:
-    modes = [
-        ('none', []),
-        ('count', [f'--max-tasks-per-child={COUNT_N}']),
-        ('memory', [f'--max-memory-per-child-mb={MEMORY_THRESHOLD_MB}']),
-    ]
+    modes = ['none', 'count', 'memory']
     print(
         f'workload: leaky, {BURST} tasks x {ALLOC_MB}MB retained, '
         f'{PROCESSES} processes\n'
@@ -145,9 +145,9 @@ def main() -> int:
     header = f'{"mode":<8} {"distinct_pids":>13} {"completed":>10} {"peak_tree_rss_mb":>17} {"elapsed_s":>10}'
     print(header)
     print('-' * len(header))
-    for mode, extra_args in modes:
+    for mode in modes:
         try:
-            r = _run_mode(mode, extra_args)
+            r = _run_mode(mode)
             print(
                 f'{r.mode:<8} {r.distinct_pids:>13} {r.completed:>10} '
                 f'{r.peak_tree_rss_mb:>17} {r.elapsed_s:>10}'

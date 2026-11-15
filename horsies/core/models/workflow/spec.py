@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import copy as copy_module
 import inspect
+from collections import deque
 from collections.abc import Mapping as MappingABC, Sequence
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
@@ -48,6 +49,7 @@ from horsies.core.utils.loop_runner import (
 )
 
 from .enums import OutT, OnError
+from .limits import MAX_WORKFLOW_NODES
 from .nodes import (
     TaskNode,
     SubWorkflowNode,
@@ -328,6 +330,12 @@ class WorkflowSpec(Generic[OutT]):
                 'WorkflowSpec has no tasks',
                 code=ErrorCode.WORKFLOW_NO_NODES,
                 help_text='add at least one TaskNode or SubWorkflowNode to tasks',
+            )
+        if len(self.tasks) > MAX_WORKFLOW_NODES:
+            raise WorkflowValidationError(
+                f'WorkflowSpec has {len(self.tasks)} nodes, more than the limit of {MAX_WORKFLOW_NODES}',
+                code=ErrorCode.WORKFLOW_TOO_MANY_NODES,
+                help_text='split the nodes into SubWorkflowNodes; each child workflow has its own limit',
             )
 
         originals = self._isolate_inputs()
@@ -864,20 +872,27 @@ class WorkflowSpec(Generic[OutT]):
             if task.index is not None
         }
 
-        queue = [idx for idx, deg in in_degree.items() if deg == 0]
+        # Dependents in task order, so the visit order is the same as a scan of
+        # self.tasks for each removed node, at O(nodes + edges) in place of
+        # O(nodes squared).
+        dependents_by_index: dict[int, list[int]] = {}
+        for task in self.tasks:
+            task_idx = task.index
+            if task_idx is None:
+                continue
+            for dep_idx in dep_indices_by_task[id(task)]:
+                dependents_by_index.setdefault(dep_idx, []).append(task_idx)
+
+        queue = deque(idx for idx, deg in in_degree.items() if deg == 0)
         visited = 0
 
         while queue:
-            node_idx = queue.pop(0)
+            node_idx = queue.popleft()
             visited += 1
-            for task in self.tasks:
-                task_idx = task.index
-                if task_idx is None:
-                    continue
-                if node_idx in dep_indices_by_task[id(task)]:
-                    in_degree[task_idx] -= 1
-                    if in_degree[task_idx] == 0:
-                        queue.append(task_idx)
+            for task_idx in dependents_by_index.get(node_idx, ()):
+                in_degree[task_idx] -= 1
+                if in_degree[task_idx] == 0:
+                    queue.append(task_idx)
 
         if visited != len(self.tasks):
             cycle_nodes = [

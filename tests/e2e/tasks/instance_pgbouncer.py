@@ -9,6 +9,8 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
 
+from tests.e2e.tasks.profiles import E2E_WORKER_PROFILES
+
 
 DB_URL = os.environ["HORSIES_TEST_DATABASE_URL_TRANSACTION"]
 SESSION_DB_URL = os.environ["HORSIES_TEST_DATABASE_URL_DIRECT"]
@@ -22,6 +24,7 @@ config = AppConfig(
         pool_size=5,
         max_overflow=5,
     ),
+    worker_profiles=E2E_WORKER_PROFILES,
 )
 
 app = Horsies(config)

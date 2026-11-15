@@ -8,10 +8,24 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Optional
 
-from horsies.core.defaults import MAX_CLAIM_RENEW_AGE_MS
+from horsies.core.defaults import DEFAULT_POOL_RECYCLE_S, MAX_CLAIM_RENEW_AGE_MS
+from horsies.core.models.child_sizing import (
+    DEFAULT_TASK_SEND_POOL_CONNECTIONS,
+    PARENT_POOL_CONNECTIONS_FLOOR,
+)
+from horsies.core.utils.db import HeldRecycle, held_recycle
+from horsies.core.worker.claim_plan import ClaimPlan, claim_plan_for_children
+from horsies.core.worker.cpu_placement import ParentCpu
 
 if TYPE_CHECKING:
     from horsies.core.models.recovery import RecoveryConfig
+    from horsies.core.models.worker_profile import (
+        NoSharedAsyncChildren,
+        NoSharedThreadChildren,
+        ResolvedPool,
+        SharedAsyncChildren,
+        SharedThreadChildren,
+    )
     from horsies.core.models.retention import RetentionConfig
     from horsies.core.models.resilience import WorkerResilienceConfig
 
@@ -26,6 +40,31 @@ def _default_str_int_dict() -> dict[str, int]:
 
 def _default_connect_kwargs() -> dict[str, object]:
     return {}
+
+
+def _default_parent_pool_recycle() -> HeldRecycle:
+    return held_recycle(DEFAULT_POOL_RECYCLE_S)
+
+
+def _default_isolated_pool() -> ResolvedPool:
+    # Imported here: the profile module imports ChildPreload from this one.
+    from horsies.core.models.worker_profile import IsolatedPool
+
+    return IsolatedPool().resolved()
+
+
+def _no_shared_async_children() -> NoSharedAsyncChildren:
+    # Imported here: the profile module imports ChildPreload from this one.
+    from horsies.core.models.worker_profile import NoSharedAsyncChildren
+
+    return NoSharedAsyncChildren()
+
+
+def _no_shared_thread_children() -> NoSharedThreadChildren:
+    # Imported here: the profile module imports ChildPreload from this one.
+    from horsies.core.models.worker_profile import NoSharedThreadChildren
+
+    return NoSharedThreadChildren()
 
 
 class ChildPreload(str, Enum):
@@ -49,12 +88,24 @@ class WorkerConfig:
     queues: list[str]  # which queues to serve
     session_dsn: str = ''  # SQLAlchemy async URL for session features
     pgbouncer_transaction_mode: bool = False
+    # The isolated children. 0 is valid when the worker has shared children.
     processes: int = os.cpu_count() or 2
-    parent_pool_size: int = 3
-    parent_max_overflow: int = 2
-    child_pool_min_size: int = 0
-    child_pool_max_size: int = 2
-    child_pool_check: bool = True
+    # The most connections of the pool of the worker process: the resolved
+    # WorkerProfile.pool. The pool has no overflow.
+    parent_pool_size: int = PARENT_POOL_CONNECTIONS_FLOOR
+    # The pool_recycle of that pool: the claim loop and the steady flushers
+    # of the batched success write give their held connection back at this
+    # age (HeldConnection).
+    parent_pool_recycle: HeldRecycle = field(
+        default_factory=_default_parent_pool_recycle
+    )
+    # The connection pool of each isolated child. The pool of each shared
+    # child comes from its setting in shared_async or shared_thread.
+    isolated_pool: ResolvedPool = field(default_factory=_default_isolated_pool)
+    # The connections of the pool that task code opens in an isolated child
+    # when it sends. Each shared kind carries its own in shared_async or
+    # shared_thread.
+    isolated_task_send_pool: int = DEFAULT_TASK_SEND_POOL_CONNECTIONS
     # psycopg connect kwargs for each child-pool connection (TCP keepalives,
     # plus prepare_threshold=None under PgBouncer transaction mode). Built
     # from PostgresConfig.pooled_connect_args.
@@ -127,10 +178,92 @@ class WorkerConfig:
     # takes the crash path. Set it below the supervisor's stop window.
     drain_timeout_s: float = 300.0
     child_preload: ChildPreload = ChildPreload.LIBRARY
+    # Where the worker process runs: WorkerProfile.parent_cpu.
+    parent_cpu: ParentCpu = ParentCpu.SHARED
+    # The shared async children of the worker profile, with their seats and
+    # their recycle limits.
+    shared_async: SharedAsyncChildren | NoSharedAsyncChildren = field(
+        default_factory=_no_shared_async_children,
+    )
+    # The shared thread children of the worker profile, with their seats and
+    # their recycle limits.
+    shared_thread: SharedThreadChildren | NoSharedThreadChildren = field(
+        default_factory=_no_shared_thread_children,
+    )
+
+    def shared_async_children(self) -> int:
+        """The number of shared async children."""
+        from horsies.core.models.worker_profile import (
+            NoSharedAsyncChildren,
+            SharedAsyncChildren,
+        )
+
+        match self.shared_async:
+            case SharedAsyncChildren(count=count):
+                return count
+            case NoSharedAsyncChildren():
+                return 0
+
+    def shared_thread_children(self) -> int:
+        """The number of shared thread children."""
+        from horsies.core.models.worker_profile import (
+            NoSharedThreadChildren,
+            SharedThreadChildren,
+        )
+
+        match self.shared_thread:
+            case SharedThreadChildren(count=count):
+                return count
+            case NoSharedThreadChildren():
+                return 0
+
+    def child_count(self) -> int:
+        """The children of the worker: the sum over the modes."""
+        return (
+            self.processes
+            + self.shared_async_children()
+            + self.shared_thread_children()
+        )
+
+    def claim_plan(self) -> ClaimPlan:
+        """Which budget claims the rows of each execution class: derived from
+        the children of this config (``claim_plan_for_children``)."""
+        return claim_plan_for_children(
+            self.processes,
+            self.shared_async_children(),
+            self.shared_thread_children(),
+        )
+
+    def seat_count(self) -> int:
+        """The tasks that the children run at once: one per isolated child,
+        and the seats of each shared child."""
+        from horsies.core.models.worker_profile import (
+            NoSharedAsyncChildren,
+            NoSharedThreadChildren,
+            SharedAsyncChildren,
+            SharedThreadChildren,
+        )
+
+        match self.shared_async:
+            case SharedAsyncChildren(count=count, seats=seats):
+                async_seats = count * seats
+            case NoSharedAsyncChildren():
+                async_seats = 0
+        match self.shared_thread:
+            case SharedThreadChildren(count=count, seats=seats):
+                thread_seats = count * seats
+            case NoSharedThreadChildren():
+                thread_seats = 0
+        return self.processes + async_seats + thread_seats
 
     def __post_init__(self) -> None:
-        if self.processes < 1:
-            raise ValueError(f'processes must be >= 1; got {self.processes}')
+        if self.processes < 0:
+            raise ValueError(f'processes must be >= 0; got {self.processes}')
+        if self.child_count() < 1:
+            raise ValueError(
+                'a worker needs at least one child: processes is 0 and there '
+                'are no shared children'
+            )
         if not math.isfinite(self.drain_timeout_s) or self.drain_timeout_s <= 0:
             raise ValueError(
                 'drain_timeout_s must be a finite number of seconds above 0; '
@@ -177,7 +310,6 @@ class WorkerConfig:
             'queues': self.queues,
             'processes': self.processes,
             'parent_pool_size': self.parent_pool_size,
-            'parent_max_overflow': self.parent_max_overflow,
             'prefetch_buffer': self.prefetch_buffer,
             'cluster_wide_cap': self.cluster_wide_cap,
         }

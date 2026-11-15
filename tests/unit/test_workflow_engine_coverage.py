@@ -14,10 +14,13 @@ import pytest
 
 from horsies.core.codec.json_io import SerializationError
 from horsies.core.models.tasks import OperationalErrorCode, TaskError, TaskResult
+from horsies.core.models.workflow.limits import MAX_SUBWORKFLOW_DEPTH
 from horsies.core.types.result import Err, Ok
 from horsies.core.workflows import engine
 from horsies.core.workflows.engine import (
     DependencyResults,
+    NoQueueWake,
+    QueueWake,
     _build_workflow_context_data,
     _decode_err_only,
     _deser_json,
@@ -71,9 +74,11 @@ def _plain_build_with(cls: Any, app: Any, *args: Any, **params: Any) -> Any:
 
 
 def _one_result(row: Any) -> MagicMock:
-    """Mock a session.execute result that returns a single row."""
+    """Mock a session.execute result that returns a single row, through
+    ``fetchone()`` and ``one()``."""
     result = MagicMock()
     result.fetchone.return_value = row
+    result.one.return_value = row
     return result
 
 
@@ -396,6 +401,59 @@ class TestEnqueueSubworkflowTask:
             parent_depth=0, root_workflow_id='root-wf',
         )
         assert result is None
+
+    @pytest.mark.asyncio
+    async def test_a_child_past_the_depth_limit_fails_the_node_and_loads_nothing(
+        self,
+    ) -> None:
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=_one_result(self._base_row()))
+        fail = AsyncMock()
+        load = MagicMock()
+
+        with patch(
+            'horsies.core.workflows.engine._fail_enqueued_task', new=fail,
+        ), patch(
+            'horsies.core.workflows.engine._load_workflow_def_from_key', new=load,
+        ):
+            result = await enqueue_subworkflow_task(
+                session, MagicMock(), 'wf-1', 0, {},
+                parent_depth=MAX_SUBWORKFLOW_DEPTH, root_workflow_id='root-wf',
+            )
+
+        assert result is None
+        load.assert_not_called()
+        fail.assert_awaited_once()
+        assert fail.await_args is not None
+        assert (
+            fail.await_args.kwargs['error_code']
+            is OperationalErrorCode.SUBWORKFLOW_DEPTH_LIMIT_REACHED
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_child_at_the_depth_limit_goes_on_to_load_its_definition(
+        self,
+    ) -> None:
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=_one_result(self._base_row()))
+        fail = AsyncMock()
+        load = MagicMock(return_value=None)
+
+        with patch(
+            'horsies.core.workflows.engine._fail_enqueued_task', new=fail,
+        ), patch(
+            'horsies.core.workflows.engine._load_workflow_def_from_key', new=load,
+        ), patch(
+            'horsies.core.workflows.engine._fail_subworkflow_load', new=AsyncMock(),
+        ):
+            result = await enqueue_subworkflow_task(
+                session, MagicMock(), 'wf-1', 0, {},
+                parent_depth=MAX_SUBWORKFLOW_DEPTH - 1, root_workflow_id='root-wf',
+            )
+
+        assert result is None
+        load.assert_called_once()
+        fail.assert_not_awaited()
 
     # The old test_workflow_name_not_found_fails case is structurally
     # unreachable now: the parent name rides the ENQUEUE CAS RETURNING,
@@ -1146,11 +1204,12 @@ class TestEnqueueSubworkflowTask:
 class TestOnWorkflowTaskComplete:
     @pytest.mark.asyncio
     async def test_task_or_workflow_not_found_returns_early(self) -> None:
-        """Zero rows from the merged statement covers both 'not a workflow
-        task' and 'workflow row missing' (the join eliminates either)."""
+        """A row with no workflow from the merged statement covers both 'not
+        a workflow task' and 'workflow row missing' (the join eliminates
+        either; the wake CTE keeps one row)."""
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
             if stmt is COMPLETE_WORKFLOW_TASK_SQL:
-                return _one_result(None)
+                return _one_result(SimpleNamespace(workflow_id=None))
             return _one_result(SimpleNamespace())
 
         session = AsyncMock()
@@ -1190,7 +1249,7 @@ class TestOnWorkflowTaskComplete:
                 return _one_result(SimpleNamespace(
                     workflow_id='wf-1', task_index=0, wf_status='PAUSED',
                     depth=0, root_workflow_id='wf-1', on_error='fail',
-                    cas_won=True,
+                    cas_won=True, has_dependents=True,
                 ))
             return _one_result(SimpleNamespace())
 
@@ -1209,6 +1268,108 @@ class TestOnWorkflowTaskComplete:
             )
         mock_proc.assert_not_awaited()
         mock_check.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        ('has_dependents', 'reads_dependents'),
+        [(True, True), (False, False)],
+        ids=['has_dependents', 'no_dependents'],
+    )
+    @pytest.mark.asyncio
+    async def test_the_dependents_are_read_only_for_a_node_that_has_some(
+        self,
+        has_dependents: bool,
+        reads_dependents: bool,
+    ) -> None:
+        """``has_dependents`` of the node write decides whether the
+        dependents are processed; the completion check runs either way."""
+
+        async def _dispatch(stmt: Any, params: Any) -> MagicMock:
+            if stmt is COMPLETE_WORKFLOW_TASK_SQL:
+                return _one_result(
+                    SimpleNamespace(
+                        workflow_id='wf-1',
+                        task_index=0,
+                        wf_status='RUNNING',
+                        depth=0,
+                        root_workflow_id='wf-1',
+                        on_error='fail',
+                        cas_won=True,
+                        has_dependents=has_dependents,
+                    )
+                )
+            return _one_result(SimpleNamespace())
+
+        session = AsyncMock()
+        session.execute = AsyncMock(side_effect=_dispatch)
+        with (
+            patch(
+                'horsies.core.workflows.engine._process_dependents',
+                new=AsyncMock(),
+            ) as mock_proc,
+            patch(
+                'horsies.core.workflows.engine.check_workflow_completion',
+                new=AsyncMock(),
+            ) as mock_check,
+        ):
+            await on_workflow_task_complete(
+                session,
+                'task-1',
+                TaskResult(ok='done'),
+                None,
+                task_name='task-a',
+            )
+        assert mock_proc.await_count == (1 if reads_dependents else 0)
+        mock_check.assert_awaited_once()
+
+
+    @pytest.mark.parametrize(
+        ('wake', 'channel', 'payload'),
+        [
+            (QueueWake(channel='task_queue_q1', payload='capacity:task-1'),
+             'task_queue_q1', 'capacity:task-1'),
+            (NoQueueWake(), None, None),
+        ],
+        ids=['queue_wake', 'no_wake'],
+    )
+    @pytest.mark.asyncio
+    async def test_the_node_statement_carries_the_wake(
+        self,
+        wake: QueueWake | NoQueueWake,
+        channel: str | None,
+        payload: str | None,
+    ) -> None:
+        """The wake rides on the node statement: no statement of its own. A
+        NULL channel sends none."""
+        session = AsyncMock()
+        session.execute = AsyncMock(
+            return_value=_one_result(SimpleNamespace(workflow_id=None)),
+        )
+
+        await on_workflow_task_complete(
+            session, 'task-1', TaskResult(ok='done'), None,
+            task_name='task-a', wake=wake,
+        )
+
+        assert session.execute.await_count == 1
+        statement, parameters = session.execute.await_args.args
+        assert statement is COMPLETE_WORKFLOW_TASK_SQL
+        assert (parameters['wake_channel'], parameters['wake_payload']) == (
+            channel, payload,
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_wake_is_the_default(self) -> None:
+        session = AsyncMock()
+        session.execute = AsyncMock(
+            return_value=_one_result(SimpleNamespace(workflow_id=None)),
+        )
+
+        await on_workflow_task_complete(
+            session, 'task-1', TaskResult(ok='done'), None, task_name='task-a',
+        )
+
+        parameters = session.execute.await_args.args[1]
+        assert parameters['wake_channel'] is None
 
 
 # ── 6. try_make_ready_and_enqueue ────────────────────────────────────

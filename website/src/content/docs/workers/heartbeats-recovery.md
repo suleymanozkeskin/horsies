@@ -25,11 +25,40 @@ Sent by the main worker process for CLAIMED tasks:
 
 ### Runner Heartbeat
 
-Sent by the child process for RUNNING tasks:
+Written by the worker process for the RUNNING tasks that its children hold:
 
-- Indicates task is actively executing
-- Sent at `runner_heartbeat_interval_ms` interval
-- From a separate thread within the task process
+- Indicates that the task's child process runs it
+- One thread of the worker writes one statement per `runner_heartbeat_interval_ms` for all of these tasks. The thread does not run on the worker's event loop
+- The child writes the first beat, in the statement that sets the row RUNNING
+- Task code cannot stop it: C code that holds the GIL in a child does not reach the worker process
+
+The statement beats a row only when all of these are true:
+
+- The row is RUNNING and owned by this worker, at the claim generation of the dispatch
+- The child marked no result as finalizing on the row
+- The child process runs: it did not exit, and the worker sent it no kill
+
+So the beats of a task end when the worker kills its child (for example at `timeout_ms`), when the child exits, when the child marks its result, and when the worker reads the result. An `async def` task in an isolated child that returns while asyncio tasks that it started still run is marked only after that work ended, so its beats cover that work (see [Async Tasks](/horsies/tasks/defining-tasks/#async-tasks)).
+
+### When the Worker Cannot Write Heartbeats
+
+The worker stops only when the reaper would fail its tasks, so the rule follows its recovery config. The worker decides it once, at start.
+
+With `auto_fail_stale_running=True` (the default), the worker fails closed, so the reaper does not fail a task that still runs. If the heartbeat thread dies, or no heartbeat lands for half of `running_stale_threshold_ms`, the worker:
+
+1. Logs the cause at critical level
+2. Kills every child that holds a task, with its session
+3. Stops, and exits with code 1, so that a supervisor restarts it
+
+If the worker has not stopped 120 seconds later, it exits with code 77. A failed write is tried again within that half, after 0.25 s and then after doubling waits of at most 5 s.
+
+The half counts from when the last heartbeat landed. Heartbeats land one `runner_heartbeat_interval_ms` apart, plus the time the next one takes to land. So `RecoveryConfig` refuses, with `HRS-204`, a `running_stale_threshold_ms` below `2 × (runner_heartbeat_interval_ms + 2 s)` while `auto_fail_stale_running` is on. At that smallest threshold, a heartbeat that takes more than 2 s to land stops the worker. The reaper may count a heartbeat from the start of its write. So after a heartbeat whose write took almost the whole half, the worker stops 0.5 s before `running_stale_threshold_ms` has passed from the start of that write.
+
+Each killed task takes the [child crash](#child-process-crash) path when the worker can still reach the database, and stale RUNNING recovery when it cannot.
+
+With `auto_fail_stale_running=False`, or with no recovery config, no reaper fails a RUNNING row, so a missing heartbeat puts no running task at risk. The worker keeps running. It logs failed writes and late heartbeats, and a dead heartbeat thread once.
+
+Failed writes are logged at the first failure of a run, then at most once per 60 seconds.
 
 ## Heartbeat Flow
 
@@ -39,7 +68,7 @@ Sent by the child process for RUNNING tasks:
 CLAIMED                          RUNNING
    │                               │
    │  Claimer heartbeat            │  Runner heartbeat
-   │  (from main process)          │  (from task process)
+   │  (from main process)          │  (from main process)
    │                               │
    ├──── HB ────┐                  ├──── HB ────┐
    │            │                  │            │
@@ -90,8 +119,16 @@ When a RUNNING task has no recent runner heartbeat:
   while the parent is still writing terminal state
 
 `running_stale_threshold_ms` measures missing heartbeats, not task wall-clock
-duration. A task can run longer than the threshold if it continues sending
-runner heartbeats.
+duration. A task can run longer than the threshold while its child holds it and
+the worker writes its runner heartbeats.
+
+A worker that stops after a task returned and before the outcome of the task
+committed loses that outcome. This is the case for an outcome that waits for a
+connection or for its batch, and for a batch statement that did not commit.
+The row stays RUNNING with its finalizing mark, and the reaper treats it as a
+crashed attempt after `finalizing_stale_threshold_ms`: `WORKER_CRASHED`, with a
+retry when the retry policy allows it. The body of the task ran, so its side
+effects happened.
 
 ### Child Process Crash
 
@@ -101,7 +138,9 @@ Each task runs in its own child process. When a child exits abnormally (a segfau
 - CLAIMED task (user code not started): returned to PENDING
 - RUNNING task (user code started): if the task has a retry policy with `WORKER_CRASHED` in `auto_retry_for` and retries remaining, scheduled for retry; otherwise marked as FAILED with `WORKER_CRASHED` error
 
-Other children and their tasks continue. The worker also kills the subprocesses that the lost child leaves in its session. A task that exceeded `timeout_ms` fails with `TASK_TIMEOUT` instead.
+The worker writes this only after it sees the child exit. If the child does not exit within 30 seconds of a kill by the worker, the worker writes nothing and logs at critical level. A RUNNING task then goes through the stale RUNNING recovery above, and a CLAIMED task is claimed again when its claim lease ends.
+
+Other children and their tasks continue. The worker also kills the subprocesses that the lost child leaves in its session. A task that exceeded `timeout_ms` fails with `TASK_TIMEOUT` instead, also only after the worker sees the child exit.
 
 ### Workflow Task Recovery
 
@@ -147,36 +186,34 @@ config = AppConfig(
 
 ## Timing Guidelines
 
-### Rule: Threshold >= 2x Interval
+### Rule: Thresholds Hold the Heartbeats
 
-Stale thresholds must be at least 2x the heartbeat interval:
+- With `auto_fail_stale_running=True` (the default): `running_stale_threshold_ms >= 2 × (runner_heartbeat_interval_ms + 2_000)`. The worker stops when no heartbeat lands for half of the threshold, and that half must hold one interval plus the time the next heartbeat takes to land.
+- With `auto_fail_stale_running=False`: `running_stale_threshold_ms >= 2 × runner_heartbeat_interval_ms`.
+- `finalizing_stale_threshold_ms >= 2 × runner_heartbeat_interval_ms`.
+- `claimed_stale_threshold_ms >= 2 × claimer_heartbeat_interval_ms`.
+
+A config that breaks a rule raises `ConfigurationError` with code `HRS-204`, which names the fields and the smallest valid value.
 
 <!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # Valid
 RecoveryConfig(
     runner_heartbeat_interval_ms=30_000,  # 30s
-    running_stale_threshold_ms=60_000,    # 60s (2x)
+    running_stale_threshold_ms=64_000,    # 64s = 2 x (30s + 2s)
     finalizing_stale_threshold_ms=60_000, # 60s (2x)
 )
 
-# Invalid - will raise ValueError
+# Invalid - raises ConfigurationError (HRS-204)
 RecoveryConfig(
     runner_heartbeat_interval_ms=30_000,  # 30s
-    running_stale_threshold_ms=30_000,    # 30s (too tight!)
+    running_stale_threshold_ms=60_000,    # half is 30s: no time for a heartbeat to land
 )
 ```
 
 ### For CPU-Heavy Tasks
 
-Long-running CPU tasks may block the heartbeat thread:
-
-```python
-RecoveryConfig(
-    runner_heartbeat_interval_ms=60_000,   # Heartbeat every minute
-    running_stale_threshold_ms=300_000,    # 5 minutes before stale
-)
-```
+A task that holds the GIL does not delay its runner heartbeats, because the worker process writes them. CPU-bound tasks need no extra margin in the thresholds.
 
 ### For Quick Tasks
 
@@ -185,9 +222,11 @@ Fast tasks can use tighter detection:
 ```python
 RecoveryConfig(
     runner_heartbeat_interval_ms=10_000,   # 10 seconds
-    running_stale_threshold_ms=30_000,     # 30 seconds
+    running_stale_threshold_ms=40_000,     # 40 seconds
 )
 ```
+
+The worker stops when no heartbeat lands for 20 seconds, so a heartbeat may take up to 10 seconds to land.
 
 ### Recovery Time After a Worker Stops
 
@@ -195,7 +234,7 @@ A child process crash is detected at once (see [Child Process Crash](#child-proc
 
 Until then, the `RUNNING` rows of the dead worker count against each queue's `max_concurrency`. A new worker has free children, but a queue at its limit waits for the reaper.
 
-To recover faster, lower `runner_heartbeat_interval_ms` and `running_stale_threshold_ms` together. A lower threshold also raises the risk of [false positives](#false-positives-tasks-marked-stale-but-running).
+To recover faster, lower `runner_heartbeat_interval_ms` and `running_stale_threshold_ms` together. A lower threshold also makes a worker stop sooner when it cannot reach the database (after half of the threshold, when `auto_fail_stale_running` is on; see [When the Worker Cannot Write Heartbeats](#when-the-worker-cannot-write-heartbeats)), and raises the risk of [false positives](#false-positives-tasks-marked-stale-but-running).
 
 ## Database Schema
 
@@ -205,11 +244,11 @@ Heartbeats are stored in the `horsies_heartbeats` table:
 | ------ | ---- | ----------- |
 | `id` | int | Auto-increment ID |
 | `task_id` | str | Task being tracked |
-| `sender_id` | str | Worker/process identifier |
+| `sender_id` | str | Worker id. The first runner beat, which the child writes, has `<worker id>:<child pid>` |
 | `role` | str | 'claimer' or 'runner' |
 | `sent_at` | datetime | Heartbeat timestamp |
 | `hostname` | str | Machine hostname |
-| `pid` | int | Process ID |
+| `pid` | int | Process ID of the sender |
 
 ## Manual Recovery
 
@@ -292,6 +331,11 @@ so the alarm precedes the lapse rather than reporting it.
 
 ### False Positives (Tasks Marked Stale But Running)
 
+With `auto_fail_stale_running` on, a worker that cannot write runner heartbeats kills its tasks before the reaper acts on them. A task can still be marked stale while it runs when the worker process itself cannot run its threads:
+
+- The worker process is paused, for example by SIGSTOP or a frozen container, while its children run
+- C code in the worker process, such as a C extension call in a workflow's `build_with()`, holds the GIL for longer than `running_stale_threshold_ms` minus one heartbeat interval. Python code does not: it lets other threads run
+
 Increase thresholds:
 
 ```python
@@ -300,11 +344,9 @@ RecoveryConfig(
 )
 ```
 
-Common causes:
+### Worker Exits With a Runner Heartbeat Error
 
-- CPU-bound tasks blocking heartbeat thread
-- Network latency to database
-- Database contention
+The log names the cause: the heartbeat thread died, or no heartbeat landed for half of `running_stale_threshold_ms`, with the last database error. Check the database connectivity of the worker host. Under a slow database, raise `running_stale_threshold_ms`: the worker stops after half of it, and a heartbeat may take that half less one `runner_heartbeat_interval_ms` to land.
 
 ### Tasks Not Recovering
 

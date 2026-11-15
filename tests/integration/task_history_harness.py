@@ -226,6 +226,7 @@ CREATE TABLE horsies_tasks (
     args text,
     kwargs text,
     task_options text,
+    execution text NOT NULL DEFAULT 'ISOLATED',
     enqueue_sha varchar(64),
     status text NOT NULL CHECK (status IN ('PENDING', 'CLAIMED', 'RUNNING')),
     result text,
@@ -353,6 +354,7 @@ def terminalization_schema_fixture(  # type: ignore[no-untyped-def]
         )
         from horsies.core.history.terminalization.move import (
             cancellation_family_fragments,
+            completion_batch_fragments,
             completion_family_fragments,
             expiry_family_fragments,
             failure_family_fragments,
@@ -396,6 +398,7 @@ def terminalization_schema_fixture(  # type: ignore[no-untyped-def]
                 *outcome_fragments(),
                 *duplicate_guard_fragments(),
                 *completion_family_fragments(),
+                *completion_batch_fragments(),
                 *failure_family_fragments(),
                 *expiry_family_fragments(),
                 *cancellation_family_fragments(),

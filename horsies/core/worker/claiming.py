@@ -1,10 +1,12 @@
-"""Claim pipeline: budgeted, capped, ordered claiming per queue.
+"""Claim pipeline: budgeted, capped, ordered claiming per queue and class.
 
-ClaimMixin runs the claim-and-dispatch pass: compute the worker budget,
-serialize cap accounting under scoped advisory locks when caps demand
-it, claim per-queue batches with CLAIM_SQL, filter non-runnable
-workflow tasks, and hand rows to dispatch. Worker-internal mixin: the
-``TYPE_CHECKING`` block declares the slice of ``Worker`` it relies on.
+ClaimMixin runs the claim-and-dispatch pass: pass the capacity of each
+budget of the claim plan and the plan's routes to horsies_claim, which
+serializes cap accounting under scoped advisory locks when caps demand it
+and claims one stream per (queue, execution class); filter non-runnable
+workflow tasks; return rows whose class does not fit their registered task;
+and hand the rest to dispatch. Worker-internal mixin: the ``TYPE_CHECKING``
+block declares the slice of ``Worker`` it relies on.
 """
 
 # pyright: reportPrivateUsage=false
@@ -13,9 +15,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Optional, assert_never
+from typing import TYPE_CHECKING, Any, Final, Optional, assert_never
 
 from horsies.core.defaults import DEFAULT_CLAIM_LEASE_MS
 from horsies.core.lifecycle.commands import AbandonOwnedNodes, CancelOwnedNodes
@@ -31,6 +34,20 @@ from horsies.core.lifecycle.outcomes import (
 )
 from horsies.core.lifecycle.persistence import apply_batch_async
 from horsies.core.logging import get_logger
+from horsies.core.models.tasks import Execution
+from horsies.core.utils.db import SingleStatement, StatementRunner, rows_or_raise
+from horsies.core.worker.claim_plan import (
+    BudgetCapacity,
+    budgets_json,
+    routes_json,
+)
+from horsies.core.worker.row_class import (
+    RowClassFits,
+    RowClassMismatch,
+    TaskNotRegistered,
+    check_row_class,
+    parse_row_class,
+)
 from horsies.core.worker.stored_timeout import (
     NoTimeout,
     StoredTimeout,
@@ -43,7 +60,9 @@ from horsies.core.worker.sql import (
     COUNT_RUNNING_FOR_WORKER_SQL,
     GET_NONRUNNABLE_WORKFLOW_TASK_IDS_SQL,
     HORSIES_CLAIM_SQL,
+    NOTIFY_TASK_QUEUE_SQL,
     RESET_PAUSED_WORKFLOW_TASKS_SQL,
+    RETURN_CLAIMED_TASK_AS_ISOLATED_SQL,
     SKIP_CANCELLED_WORKFLOW_TASKS_SQL,
 )
 
@@ -105,31 +124,124 @@ def _resumed_before_abandon_task_ids(
     return task_ids
 
 
+# The most claim passes in a row that run again with no wait because each
+# took fewer rows than it planned. A transaction that holds planned rows for
+# longer leaves the worker to its next wake: a NOTIFY, a capacity release, or
+# the poll interval.
+SHORT_PASS_REPASS_LIMIT: Final = 3
+
+
+@dataclass(frozen=True, slots=True)
+class ClaimRows:
+    """The rows of one ``horsies_claim`` call.
+
+    ``tasks`` holds the rows that the call took, in dispatch order.
+    ``short_of_plan`` counts the rows that its plan chose and its take did
+    not get: another transaction held or took them. 0 when the take got
+    every planned row.
+    """
+
+    tasks: list[dict[str, Any]]
+    short_of_plan: int
+
+
+def read_claim_rows(
+    columns: Sequence[str],
+    rows: Sequence[Sequence[Any]],
+) -> ClaimRows:
+    """Split the rows of ``HORSIES_CLAIM_SQL`` by their ``row_kind``.
+
+    A ``'CLAIMED'`` row is a task. At most one ``'SHORT'`` row carries
+    ``short_by``, 1 or more. Another ``row_kind``, a second ``'SHORT'`` row,
+    or a ``short_by`` below 1 is a defect of the claim function
+    (``AssertionError``). Does no I/O.
+    """
+    tasks: list[dict[str, Any]] = []
+    short_rows: list[int] = []
+    for values in rows:
+        row = dict(zip(columns, values))
+        match row['row_kind']:
+            case 'CLAIMED':
+                tasks.append(row)
+            case 'SHORT':
+                short_rows.append(int(row['short_by']))
+            case other:
+                raise AssertionError(f'horsies_claim returned row_kind {other!r}')
+    assert len(short_rows) <= 1, f'horsies_claim returned SHORT rows {short_rows}'
+    assert all(
+        short >= 1 for short in short_rows
+    ), f'horsies_claim returned short_by {short_rows}'
+    return ClaimRows(tasks=tasks, short_of_plan=sum(short_rows))
+
+
+def claim_time_of(row: Mapping[str, Any]) -> datetime:
+    """The claim time of a task row that ``horsies_claim`` took.
+
+    The claim sets ``claimed_at = now()`` and returns it, and every fence
+    of the dispatch uses it. A row without a claim time is a defect of the
+    claim function (``AssertionError``). Does no I/O.
+    """
+    match row:
+        case {'claimed_at': datetime() as claimed_at}:
+            return claimed_at
+        case _:
+            raise AssertionError(
+                f'horsies_claim returned task {row.get("id")!r} without a '
+                f'claim time: claimed_at is {row.get("claimed_at", "missing")!r}',
+            )
+
+
 @dataclass(frozen=True, slots=True)
 class ClaimPass:
     """What one claim pass did.
 
     ``claimed`` counts the rows that the claim statement took. ``dropped`` counts
-    the rows of those that the post-claim guard gave up: they used claim budget
-    and hold no slot.
+    the rows of those that the post-claim checks gave up: rows of a paused or
+    cancelled workflow, and rows returned to the queue because their class
+    does not fit the registered task. They used claim budget and hold no slot.
+    ``short_of_plan`` counts the rows that the claim planned and did not take
+    (``ClaimRows.short_of_plan``).
     """
 
     claimed: int
     dropped: int
+    short_of_plan: int
 
-    def left_unannounced_work(self, *, limited: bool) -> bool:
+    def left_unannounced_work(
+        self,
+        *,
+        limited: bool,
+        short_passes_before: int,
+    ) -> bool:
         """Whether ready work can remain that no wake would announce.
 
         A dropped row used budget that ready work could have had, and it frees
         no slot, so no capacity release follows. A pass under ``max_claim_batch``
-        can stop with free slots. In both cases the NOTIFY of that work was
-        already consumed. A dropped row cannot be claimed again until a resume,
-        so a loop on this ends.
+        can stop with free slots. A pass that took fewer rows than it planned
+        can stop with free slots while rows that its plan did not choose are
+        ready. In each case the NOTIFY of that work was already consumed. A row
+        of a paused workflow cannot be claimed again until a resume, and a row
+        returned for its class is ISOLATED, which always fits, so a loop on
+        these ends. A short take asks for another pass only while fewer than
+        ``SHORT_PASS_REPASS_LIMIT`` passes before it in a row were short.
 
         Args:
             limited: Whether ``max_claim_batch`` caps the pass.
+            short_passes_before: How many passes in a row before this one took
+                fewer rows than they planned (``short_passes_after``).
         """
-        return self.dropped > 0 or (limited and self.claimed > 0)
+        return (
+            self.dropped > 0
+            or (limited and self.claimed > 0)
+            or (
+                self.short_of_plan > 0 and short_passes_before < SHORT_PASS_REPASS_LIMIT
+            )
+        )
+
+    def short_passes_after(self, short_passes_before: int) -> int:
+        """How many passes in a row, ending with this one, took fewer rows
+        than they planned."""
+        return short_passes_before + 1 if self.short_of_plan > 0 else 0
 
 
 class ClaimMixin:
@@ -139,9 +251,14 @@ class ClaimMixin:
         # Worker state this mixin reads.
         sf: async_sessionmaker[AsyncSession]
         cfg: WorkerConfig
+        _claim_runner: StatementRunner
         worker_instance_id: str
+        _registered_classes: Mapping[str, Execution]
 
         # Cross-concern methods provided by sibling mixins / Worker.
+        def _claim_slot_count(self) -> int: ...
+        def _shared_async_seats_in_service(self) -> int: ...
+        def _shared_thread_seats_in_service(self) -> int: ...
         async def _dispatch_one(
             self,
             task_id: str,
@@ -151,16 +268,21 @@ class ClaimMixin:
             queue_name: str = 'default',
             is_workflow_task: bool = True,
             timeout: StoredTimeout = NoTimeout(),
-            claimed_at: Optional[datetime] = None,
+            *,
+            claimed_at: datetime,
+            execution: Execution,
+            task_options: str | None,
         ) -> None: ...
 
     async def _claim_and_dispatch_all(self) -> ClaimPass:
         """
         Claim tasks subject to:
+          - the budget of each execution class: the classes that the claim
+            plan routes to a budget count against its capacity in service
+            (``_claim_capacity``)
           - max_claim_per_worker guard (prevents over-claiming)
           - queue priorities (CUSTOM mode)
           - per-queue max_concurrency (CUSTOM mode)
-          - worker global concurrency (processes)
 
         Raises:
             Exception: DB errors propagate to the main loop, which
@@ -174,22 +296,67 @@ class ClaimMixin:
         """
         # TIER 1: the per-pass critical section (advisory-lock acquisition + cap
         # counts + budget math + windowed claim) is one server-side statement
-        # (horsies_claim). The xact-scoped advisory lock is held only across that
-        # statement plus this transaction's COMMIT — never across a client round
-        # trip, so a stalled worker cannot freeze the cluster mid-pass. Budget
-        # and cap semantics are computed in-function and mirror the prior Python
-        # path; see schemas/migrations.py::horsies_claim.
+        # (horsies_claim). It runs in autocommit, as its own transaction, so
+        # the xact-scoped advisory lock ends with the statement — never held
+        # across a client round trip, so a stalled worker cannot freeze the
+        # cluster mid-pass. Budget and cap semantics are computed in-function;
+        # see schemas/migrations.py::horsies_claim.
+        # The claim loop's held connection: one checkout for the passes that
+        # follow each other, given back after an idle period.
+        claim_result = rows_or_raise(
+            await self._claim_runner.run(
+                SingleStatement(
+                    statement=HORSIES_CLAIM_SQL,
+                    parameters=self._claim_params(),
+                ),
+            ),
+        )
+        claim_rows = read_claim_rows(claim_result.columns, claim_result.rows)
+
+        claimed_rows = claim_rows.tasks
+        if not claimed_rows:
+            return ClaimPass(
+                claimed=0,
+                dropped=0,
+                short_of_plan=claim_rows.short_of_plan,
+            )
+
+        # Post-claim guard: filter out tasks for non-runnable workflow states.
+        dispatchable_rows = await self._filter_nonrunnable_workflow_tasks(claimed_rows)
+        fitting_rows = await self._return_rows_of_another_class(dispatchable_rows)
+
+        for row in fitting_rows:
+            await self._dispatch_one(
+                row['id'],
+                row['task_name'],
+                row['args'],
+                row['kwargs'],
+                row.get('queue_name') or 'default',
+                bool(row.get('is_workflow_task', False)),
+                timeout=read_stored_timeout(row.get('task_options')),
+                claimed_at=claim_time_of(row),
+                execution=parse_row_class(str(row['id']), row['execution']),
+                task_options=row.get('task_options'),
+            )
+        return ClaimPass(
+            claimed=len(claimed_rows),
+            dropped=len(claimed_rows) - len(fitting_rows),
+            short_of_plan=claim_rows.short_of_plan,
+        )
+
+    def _claim_params(self) -> dict[str, Any]:
+        """The parameters of HORSIES_CLAIM_SQL for one pass. Does no I/O.
+
+        Per-queue caps are enforced for every queue in this pass that carries
+        a max_concurrency entry — independent of queue_priorities — so
+        exactly those go to the function and its cap filter matches 1:1.
+        """
         ordered_queues = self._ordered_claim_queues()
         lock_keys = self._claim_lock_keys(ordered_queues)
-        # Per-queue caps are enforced for every queue in this pass that carries
-        # a max_concurrency entry — independent of queue_priorities. Pass
-        # exactly those into the function so its cap filter matches 1:1.
         capped_queues = [
-            qname
-            for qname in ordered_queues
-            if qname in self.cfg.queue_max_concurrency
+            qname for qname in ordered_queues if qname in self.cfg.queue_max_concurrency
         ]
-        params: dict[str, Any] = {
+        return {
             'p_worker_id': self.worker_instance_id,
             'p_queues': json.dumps(ordered_queues, allow_nan=False),
             'p_queue_priority': json.dumps(
@@ -201,7 +368,14 @@ class ClaimMixin:
                 allow_nan=False,
             ),
             'p_hard_cap_mode': self.cfg.prefetch_buffer == 0,
-            'p_processes': int(self.cfg.processes),
+            'p_budgets': json.dumps(
+                budgets_json(self._claim_capacity()),
+                allow_nan=False,
+            ),
+            'p_routes': json.dumps(
+                routes_json(self.cfg.claim_plan()),
+                allow_nan=False,
+            ),
             'p_prefetch_buffer': int(self.cfg.prefetch_buffer),
             'p_max_claim_per_worker': int(self.cfg.max_claim_per_worker),
             'p_max_claim_batch': int(self.cfg.max_claim_batch),
@@ -214,34 +388,116 @@ class ClaimMixin:
             'p_lock_keys': json.dumps(lock_keys, allow_nan=False),
         }
 
-        async with self.sf() as s:
-            res = await s.execute(HORSIES_CLAIM_SQL, params)
-            cols = res.keys()
-            claimed_rows: list[dict[str, Any]] = [
-                dict(zip(cols, row)) for row in res.fetchall()
-            ]
-            await s.commit()
+    def _claim_capacity(self) -> tuple[BudgetCapacity, ...]:
+        """The capacity in service of each budget of the claim plan.
 
-        if not claimed_rows:
-            return ClaimPass(claimed=0, dropped=0)
-
-        # Post-claim guard: filter out tasks for non-runnable workflow states.
-        dispatchable_rows = await self._filter_nonrunnable_workflow_tasks(claimed_rows)
-
-        for row in dispatchable_rows:
-            await self._dispatch_one(
-                row['id'],
-                row['task_name'],
-                row['args'],
-                row['kwargs'],
-                row.get('queue_name') or 'default',
-                bool(row.get('is_workflow_task', False)),
-                timeout=read_stored_timeout(row.get('task_options')),
-                claimed_at=row.get('claimed_at'),
+        Usage is not counted here: the claim function counts this worker's
+        RUNNING and live CLAIMED rows of each budget. Reads only; a pass
+        before the slot pool exists is a defect (``AssertionError``).
+        """
+        return tuple(
+            BudgetCapacity(
+                budget=budget,
+                in_service=self._capacity_in_service(budget),
             )
-        return ClaimPass(
-            claimed=len(claimed_rows),
-            dropped=len(claimed_rows) - len(dispatchable_rows),
+            for budget in self.cfg.claim_plan().budgets()
+        )
+
+    def _capacity_in_service(self, budget: Execution) -> int:
+        """The children or seats of ``budget`` that take a task now.
+
+        This is the one place that maps a budget class to the children that
+        serve it: the isolated slots that are not down for ``ISOLATED``, the
+        seats of the shared async children in service for ``SHARED_ASYNC``
+        (``_shared_async_seats_in_service``), and the seats of the shared
+        thread children in service for ``SHARED_THREAD``
+        (``_shared_thread_seats_in_service``). The plan's budget classes come
+        from ``claim_plan_for_children`` (``WorkerConfig.claim_plan``).
+        """
+        match budget:
+            case Execution.ISOLATED:
+                return self._claim_slot_count()
+            case Execution.SHARED_ASYNC:
+                return self._shared_async_seats_in_service()
+            case Execution.SHARED_THREAD:
+                return self._shared_thread_seats_in_service()
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    async def _return_rows_of_another_class(
+        self,
+        rows: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Return each row whose class does not fit its registered task.
+
+        Such a row goes back to PENDING as ISOLATED, fenced to its claim
+        generation (``_return_row_as_isolated``). Rows that fit, and rows of
+        a task that this worker did not register, come back in their order.
+
+        Raises:
+            Exception: DB errors propagate to the main loop. This runs after
+                the claim committed; rows not yet returned or dispatched are
+                recovered by lease expiry.
+        """
+        fitting: list[dict[str, Any]] = []
+        for row in rows:
+            row_class = parse_row_class(str(row['id']), row['execution'])
+            check = check_row_class(
+                row_class,
+                row['task_name'],
+                self._registered_classes,
+            )
+            match check:
+                case RowClassMismatch():
+                    await self._return_row_as_isolated(row, check)
+                case RowClassFits() | TaskNotRegistered():
+                    fitting.append(row)
+                case _ as unreachable:
+                    assert_never(unreachable)
+        return fitting
+
+    async def _return_row_as_isolated(
+        self,
+        row: dict[str, Any],
+        mismatch: RowClassMismatch,
+    ) -> None:
+        """Write ISOLATED on ``row`` and return it to PENDING, then wake the
+        workers of its queue. Fenced to this worker and the row's claim
+        generation: a row whose claim this worker lost is not touched, and is
+        not dispatched either. Logs one warning per row.
+
+        Raises:
+            Exception: DB errors propagate to the caller.
+        """
+        queue_name = row.get('queue_name') or 'default'
+        async with self.sf() as s:
+            res = await s.execute(
+                RETURN_CLAIMED_TASK_AS_ISOLATED_SQL,
+                {
+                    'id': row['id'],
+                    'wid': self.worker_instance_id,
+                    'claimed_at': claim_time_of(row),
+                },
+            )
+            returned = (getattr(res, 'rowcount', 0) or 0) > 0
+            if returned:
+                await s.execute(
+                    NOTIFY_TASK_QUEUE_SQL,
+                    {'c2': f'task_queue_{queue_name}', 'p': f'class:{row["id"]}'},
+                )
+            await s.commit()
+        logger.warning(
+            'Task %s (%s) stores execution %s, and the registered function '
+            'is %s on this worker; %s',
+            row['id'],
+            row['task_name'],
+            mismatch.row_class.value,
+            mismatch.registered_class.value,
+            (
+                'wrote ISOLATED on the row and returned it to the queue'
+                if returned
+                else 'the claim was lost, so the row was left as it is'
+            ),
         )
 
     async def _filter_nonrunnable_workflow_tasks(
@@ -273,11 +529,11 @@ class ClaimMixin:
         task_ids = [row['id'] for row in workflow_rows]
         # The claim generation each row was dispatched from. This guard runs
         # after the claim transaction committed, so it fences the abandon to
-        # that generation (C10); without it a lapsed-and-re-claimed row is
-        # still CLAIMED by this worker and would be cancelled out from under
-        # its new claim.
-        claimed_at_by_task_id: dict[str, Any] = {
-            row['id']: row.get('claimed_at') for row in workflow_rows
+        # that generation; without it a lapsed-and-re-claimed row is still
+        # CLAIMED by this worker and would be cancelled out from under its
+        # new claim.
+        claimed_at_by_task_id: dict[str, datetime] = {
+            row['id']: claim_time_of(row) for row in workflow_rows
         }
         paused_task_ids: set[str] = set()
         cancelled_task_ids: set[str] = set()
@@ -307,7 +563,7 @@ class ClaimMixin:
                             claim_generations=tuple(
                                 (
                                     task_id,
-                                    claimed_at_by_task_id.get(task_id),
+                                    claimed_at_by_task_id[task_id],
                                 )
                                 for task_id in paused_ids
                             ),
@@ -340,7 +596,7 @@ class ClaimMixin:
                             claim_generations=tuple(
                                 (
                                     task_id,
-                                    claimed_at_by_task_id.get(task_id),
+                                    claimed_at_by_task_id[task_id],
                                 )
                                 for task_id in cancelled_ids
                             ),

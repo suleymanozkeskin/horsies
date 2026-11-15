@@ -24,7 +24,7 @@ Horsies closes the first window by one rule: send after commit. Horsies narrows 
 
 ## What Joins a Caller Transaction
 
-One function takes the caller's connection: `rerun_task(connection, command, policy)`. It runs in the transaction that the caller owns, and it enqueues a rerun of a terminal task. See [Action Semantics](../monitoring/action-semantics).
+One function takes the caller's connection: `rerun_task(connection, command, policy)`. It runs in the transaction that the caller owns, and it enqueues a rerun of a terminal task. See [Action Semantics](/horsies/monitoring/action-semantics/).
 
 No other function does this:
 
@@ -126,7 +126,7 @@ The key holds as long as its task is live (`PENDING`, `CLAIMED` or `RUNNING`). W
 
 The command compared on a repeat includes the task name, queue, priority, kwargs, `good_until`, delay and task options. A repeat with changed kwargs is a conflict, not a replay.
 
-A workflow start has no `idempotency_key`. `spec.start(workflow_id=...)` with a stable id is best-effort idempotent by id and does not compare the payload. See [Workflow API](../concepts/workflows/workflow-api).
+A workflow start has no `idempotency_key`. `spec.start(workflow_id=...)` with a stable id is best-effort idempotent by id and does not compare the payload. See [Workflow API](/horsies/concepts/workflows/workflow-api/).
 
 ## Things to Avoid
 
@@ -153,7 +153,7 @@ send_receipt.send(order_id=order_id)
 
 ### `with_options(*, idempotency_key: str | None = None, ...) -> TaskSendOptions[P, T]`
 
-See [Sending Tasks](../tasks/sending-tasks) for the full signature.
+See [Sending Tasks](/horsies/tasks/sending-tasks/) for the full signature.
 
 ### `PostgresBroker(config, *, idempotency_reservation_window: timedelta | None = None, ...)`
 
@@ -163,4 +163,4 @@ See [Sending Tasks](../tasks/sending-tasks) for the full signature.
 
 ### `AppConfig.resend_on_transient_err: bool`
 
-Default `False`. See [App Config](../configuration/app-config).
+Default `False`. See [App Config](/horsies/configuration/app-config/).

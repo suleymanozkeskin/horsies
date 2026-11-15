@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Annotated, Final, Self, cast
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from horsies.core.defaults import WORKER_STATE_LIVE_WINDOW_S
 from horsies.core.errors import (
     ConfigurationError,
     ErrorCode,
@@ -13,6 +14,67 @@ from horsies.core.errors import (
 
 DEFAULT_WORKFLOW_RECOVERY_FAILURE_LIMIT: Final = 25
 """Reaper passes with a persistent recovery raise before a workflow fails."""
+
+
+WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS: Final = WORKER_STATE_LIVE_WINDOW_S * 1_000 // 2
+"""Largest `worker_state_snapshot_interval_ms`: half the live window.
+
+A worker reads as live only while its latest snapshot is inside the live
+window. At half the window, the other half is room for a late snapshot
+write."""
+
+
+FAIL_CLOSED_WINDOW_DIVISOR: Final = 2
+"""The fail-closed window is `running_stale_threshold_ms` divided by this.
+
+With `auto_fail_stale_running` on, a worker stops when no runner heartbeat
+lands for this window. The rest of the threshold is the time left to kill
+its children before the reaper acts."""
+
+
+RUNNER_BEAT_LANDING_ALLOWANCE_MS: Final = 2_000
+"""Time a runner heartbeat may take to land, counted from its planned start.
+
+Two beats land one `runner_heartbeat_interval_ms` apart, plus the time the
+second one takes. So the fail-closed window must hold one interval plus
+this allowance, or the worker stops while every beat lands. The allowance
+holds the heartbeat statement, a reconnect, and the wake-up of the
+heartbeat thread."""
+
+
+SHOWN_VALUE_DIGITS_MAX: Final = 20
+"""The most digits of a refused value that a refusal message shows. Python
+refuses to turn an int of more than 4,300 digits into text, so a message
+that formats the value as given can fail itself."""
+
+
+def _snapshot_interval_above_cap(interval_ms: int) -> str:
+    """The refusal message of a snapshot interval above the cap.
+
+    It names the value, or its size when the value has more than
+    ``SHOWN_VALUE_DIGITS_MAX`` digits. The comparison needs no text.
+    """
+    cap_ms = WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS
+    if interval_ms < 10**SHOWN_VALUE_DIGITS_MAX:
+        return (
+            f'worker_state_snapshot_interval_ms={interval_ms}ms is above '
+            f'the cap of {cap_ms}ms'
+        )
+    return (
+        f'worker_state_snapshot_interval_ms has more than {SHOWN_VALUE_DIGITS_MAX} '
+        f'digits, above the cap of {cap_ms}ms'
+    )
+
+
+def fail_closed_threshold_floor_ms(runner_heartbeat_interval_ms: int) -> int:
+    """Smallest `running_stale_threshold_ms` with `auto_fail_stale_running` on.
+
+    Its fail-closed window holds one beat interval plus
+    `RUNNER_BEAT_LANDING_ALLOWANCE_MS`.
+    """
+    return FAIL_CLOSED_WINDOW_DIVISOR * (
+        runner_heartbeat_interval_ms + RUNNER_BEAT_LANDING_ALLOWANCE_MS
+    )
 
 
 MOVED_TO_RETENTION: frozenset[str] = frozenset({
@@ -74,9 +136,10 @@ class RecoveryConfig(BaseModel):
     - workflow_recovery_failure_limit: Reaper passes with a persistent recovery raise before a workflow fails closed
     - check_interval_ms: How often the reaper checks for stale tasks
     - orphan_task_audit_interval_ms: How often the orphan cursor scans one page
-    - runner_heartbeat_interval_ms: How often RUNNING tasks send heartbeats from inside the task process
+    - runner_heartbeat_interval_ms: How often the worker process writes the heartbeats of its RUNNING tasks
     - claimer_heartbeat_interval_ms: How often CLAIMED tasks send heartbeats
     - worker_state_snapshot_interval_ms: How often each worker persists a monitoring snapshot row
+      (at most WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS, half the live window)
 
     Retention fields live on `AppConfig.retention` (`RetentionConfig`).
     """
@@ -104,11 +167,20 @@ class RecoveryConfig(BaseModel):
 
     auto_fail_stale_running: bool = Field(
         default=True,
-        description='Automatically mark stale RUNNING tasks as FAILED (not safe to requeue)',
+        description=(
+            'Automatically mark stale RUNNING tasks as FAILED (not safe to requeue); '
+            'when on, a worker whose runner heartbeats cannot land for half of '
+            'running_stale_threshold_ms kills its tasks and stops'
+        ),
     )
     running_stale_threshold_ms: Annotated[int, Field(ge=1_000, le=7_200_000)] = Field(
         default=300_000,  # 5 minutes
-        description='Milliseconds without runner heartbeat before RUNNING task is considered stale (1s-2hr)',
+        description=(
+            'Milliseconds without runner heartbeat before RUNNING task is considered '
+            'stale (1s-2hr); with auto_fail_stale_running on, at least '
+            '2 x (runner_heartbeat_interval_ms + '
+            f'{RUNNER_BEAT_LANDING_ALLOWANCE_MS}ms)'
+        ),
     )
     finalizing_stale_threshold_ms: Annotated[
         int, Field(ge=1_000, le=7_200_000),
@@ -190,8 +262,8 @@ class RecoveryConfig(BaseModel):
     runner_heartbeat_interval_ms: Annotated[int, Field(ge=1_000, le=120_000)] = Field(
         default=30_000,  # 30 seconds
         description=(
-            'How often RUNNING tasks send heartbeats from inside the task process in milliseconds (1s-2min); '
-            'increase stale thresholds for CPU/GIL-heavy tasks to avoid false positives'
+            'How often the worker process writes the heartbeats of its RUNNING tasks in milliseconds (1s-2min); '
+            'a task that holds the GIL in its child does not delay them'
         ),
     )
 
@@ -200,11 +272,17 @@ class RecoveryConfig(BaseModel):
         description='How often worker sends heartbeats for CLAIMED tasks in milliseconds (1s-2min)',
     )
 
-    worker_state_snapshot_interval_ms: Annotated[int, Field(ge=1_000, le=300_000)] = Field(
+    # The upper bound is WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS. The
+    # after-validator checks it, so the refusal can state why.
+    worker_state_snapshot_interval_ms: Annotated[int, Field(ge=1_000)] = Field(
         default=30_000,  # 30 seconds
         description=(
             'How often each worker persists a worker-state snapshot (monitoring '
-            'timeseries) in milliseconds (1s-5min); each snapshot is one row in '
+            'timeseries) in milliseconds '
+            f'(1000-{WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS}); at most half the '
+            f'{WORKER_STATE_LIVE_WINDOW_S} s live window, so a running worker '
+            'stays live when a snapshot write is late by up to half the window; '
+            'each snapshot is one row in '
             'horsies_worker_states, so shorter intervals grow the table faster'
         ),
     )
@@ -281,30 +359,70 @@ class RecoveryConfig(BaseModel):
             return fields
         return data
 
+    def _running_threshold_errors(self) -> tuple[ConfigurationError, ...]:
+        """The refusal of `running_stale_threshold_ms`, or none.
+
+        With `auto_fail_stale_running` on, the floor is
+        `fail_closed_threshold_floor_ms`: below it the worker stops while
+        every runner heartbeat lands. With it off, the floor is two beat
+        intervals.
+        """
+        threshold_ms = self.running_stale_threshold_ms
+        interval_ms = self.runner_heartbeat_interval_ms
+        threshold_note = (
+            f'running_stale_threshold_ms={threshold_ms}ms ({threshold_ms / 1000:.1f}s)'
+        )
+        interval_note = (
+            f'runner_heartbeat_interval_ms={interval_ms}ms ({interval_ms / 1000:.1f}s)'
+        )
+        match self.auto_fail_stale_running:
+            case True:
+                floor_ms = fail_closed_threshold_floor_ms(interval_ms)
+                message = (
+                    'running_stale_threshold_ms too low for auto_fail_stale_running'
+                )
+                rule_notes = [
+                    'with auto_fail_stale_running on, the worker stops when no '
+                    'runner heartbeat lands for half of running_stale_threshold_ms',
+                    'that half must hold one runner_heartbeat_interval_ms plus '
+                    f'{RUNNER_BEAT_LANDING_ALLOWANCE_MS}ms for a beat to land: '
+                    'running_stale_threshold_ms >= 2 x (runner_heartbeat_interval_ms '
+                    f'+ {RUNNER_BEAT_LANDING_ALLOWANCE_MS}ms)',
+                ]
+                remedy = ', or set auto_fail_stale_running=False'
+            case False:
+                floor_ms = interval_ms * 2
+                message = 'running_stale_threshold_ms too low'
+                rule_notes = ['threshold must be at least 2x heartbeat interval']
+                remedy = ''
+        if threshold_ms >= floor_ms:
+            return ()
+        return (
+            ConfigurationError(
+                message=message,
+                code=ErrorCode.CONFIG_INVALID_RECOVERY,
+                notes=[threshold_note, interval_note, *rule_notes],
+                help_text=(
+                    f'set running_stale_threshold_ms >= {floor_ms}ms '
+                    f'({floor_ms / 1000:.1f}s){remedy}'
+                ),
+            ),
+        )
+
     @model_validator(mode='after')
     def validate_heartbeat_thresholds(self) -> Self:
-        """Ensure stale thresholds are at least 2x heartbeat intervals for reliability.
+        """Refuse stale thresholds that a heartbeat cannot keep.
 
-        Collects both errors (if present) and raises them together.
+        `running_stale_threshold_ms`: see `_running_threshold_errors`. The
+        finalizing and claimed thresholds are at least two intervals of
+        their heartbeat. Collects every error and raises them together.
         """
         report = ValidationReport('recovery')
         min_running = self.runner_heartbeat_interval_ms * 2
         min_claimed = self.claimer_heartbeat_interval_ms * 2
 
-        # Validate runner heartbeat vs running stale threshold
-        if self.running_stale_threshold_ms < min_running:
-            report.add(
-                ConfigurationError(
-                    message='running_stale_threshold_ms too low',
-                    code=ErrorCode.CONFIG_INVALID_RECOVERY,
-                    notes=[
-                        f'running_stale_threshold_ms={self.running_stale_threshold_ms}ms ({self.running_stale_threshold_ms/1000:.1f}s)',
-                        f'runner_heartbeat_interval_ms={self.runner_heartbeat_interval_ms}ms ({self.runner_heartbeat_interval_ms/1000:.1f}s)',
-                        'threshold must be at least 2x heartbeat interval',
-                    ],
-                    help_text=f'set running_stale_threshold_ms >= {min_running}ms ({min_running/1000:.1f}s)',
-                )
-            )
+        for error in self._running_threshold_errors():
+            report.add(error)
 
         if self.finalizing_stale_threshold_ms < min_running:
             report.add(
@@ -336,4 +454,31 @@ class RecoveryConfig(BaseModel):
             )
 
         raise_collected(report)
+        return self
+
+    @model_validator(mode='after')
+    def validate_snapshot_interval_within_live_window(self) -> Self:
+        """Refuse a snapshot interval above `WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS`.
+
+        A worker reads as live only while its latest snapshot is inside
+        the live window. A longer interval makes a live worker read as
+        not live between its snapshots.
+        """
+        interval_ms = self.worker_state_snapshot_interval_ms
+        if interval_ms > WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS:
+            raise ConfigurationError(
+                message=_snapshot_interval_above_cap(interval_ms),
+                code=ErrorCode.CONFIG_INVALID_RECOVERY,
+                notes=[
+                    'the cap is half the live window '
+                    f'(WORKER_STATE_LIVE_WINDOW_S={WORKER_STATE_LIVE_WINDOW_S}s)',
+                    'a worker reads as live only while its latest snapshot is '
+                    'inside the live window; the other half of the window is '
+                    'room for a late snapshot write',
+                ],
+                help_text=(
+                    'set worker_state_snapshot_interval_ms <= '
+                    f'{WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS}ms'
+                ),
+            )
         return self

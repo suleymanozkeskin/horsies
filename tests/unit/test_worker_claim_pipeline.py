@@ -28,14 +28,24 @@ from horsies.core.schemas.terminalization import (
     CREATE_ABANDON_OWNED_NODES_SQL,
     CREATE_CANCEL_OWNED_NODES_SQL,
 )
+from horsies.core.worker.child_runner import (
+    DeadlineBeforeStart,
+    StartAllowed,
+    StartCheck,
+    _confirm_ownership_and_set_running,
+)
 from horsies.core.worker.sql import (
     CLAIM_SQL,
     COUNT_CLAIMED_FOR_WORKER_SQL,
     COUNT_GLOBAL_IN_FLIGHT_SQL,
     COUNT_IN_FLIGHT_FOR_WORKER_SQL,
     COUNT_QUEUE_IN_FLIGHT_HARD_SQL,
+    READ_IN_FLIGHT_ATTEMPT_SQL,
+    RETURN_CLAIMED_TASK_AS_ISOLATED_SQL,
     UNCLAIM_CLAIMED_TASK_SQL,
 )
+
+CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
 
 BROKER = PostgresConfig(
     database_url='postgresql+psycopg://user:pass@localhost/db',
@@ -301,6 +311,7 @@ class TestOwnershipGateBehavioral:
                 'task-1',
                 'worker-A',
                 is_workflow_task=False,
+                claimed_at=CLAIMED_AT,
             )
 
         assert result is None, 'Ownership confirmed should return None'
@@ -334,13 +345,17 @@ class TestOwnershipGateBehavioral:
                 _confirm_ownership_and_set_running,
             )
 
-            result = _confirm_ownership_and_set_running('task-1', 'worker-A')
+            result = _confirm_ownership_and_set_running(
+                'task-1',
+                'worker-A',
+                claimed_at=CLAIMED_AT,
+            )
 
-        assert result is not None, 'Ownership lost should return a tuple'
+        assert isinstance(result, tuple), 'Ownership lost should return a tuple'
         ok, _result_json, reason = result
         assert ok is False
         assert reason == 'CLAIM_LOST'
-        assert conn.rollbacks == 1, 'Should rollback on ownership loss'
+        assert conn.rollbacks == 2, 'The start that missed, then the miss path'
         assert conn.commits == 0, 'No commit on ownership loss'
         assert not any('UPDATE horsies_workflow_tasks' in sql for sql, _ in cursor.queries)
 
@@ -354,12 +369,67 @@ class TestOwnershipGateBehavioral:
                 _confirm_ownership_and_set_running,
             )
 
-            result = _confirm_ownership_and_set_running('task-1', 'worker-A')
+            result = _confirm_ownership_and_set_running(
+                'task-1',
+                'worker-A',
+                claimed_at=CLAIMED_AT,
+            )
 
-        assert result is not None, 'Exception path should return a tuple'
+        assert isinstance(result, tuple), 'Exception path should return a tuple'
         ok, _result_json, reason = result
         assert ok is False
         assert reason == 'OWNERSHIP_UNCONFIRMED'
+
+    def test_a_deadline_before_start_runs_no_statement(self) -> None:
+        """The start check runs once the pool gave a connection. A deadline
+        that fired during the wait stops the run there: no RUNNING update,
+        no commit, and the row stays CLAIMED."""
+        cursor = _FakeCursor(fetchone_return=('task-1',))
+        conn = _FakeConn(cursor)
+        pool = _FakePool(conn)
+        checks: list[str] = []
+
+        def deadline_fired() -> StartCheck:
+            checks.append('checked')
+            return DeadlineBeforeStart()
+
+        with patch(
+            'horsies.core.worker.child_runner._get_worker_pool',
+            return_value=pool,
+        ):
+            result = _confirm_ownership_and_set_running(
+                'task-1',
+                'worker-A',
+                is_workflow_task=False,
+                claimed_at=CLAIMED_AT,
+                start_check=deadline_fired,
+            )
+
+        assert result == DeadlineBeforeStart()
+        assert checks == ['checked']
+        assert cursor.queries == []
+        assert conn.commits == 0
+
+    def test_an_allowed_start_runs_the_update(self) -> None:
+        cursor = _FakeCursor(fetchone_return=('task-1',))
+        conn = _FakeConn(cursor)
+        pool = _FakePool(conn)
+
+        with patch(
+            'horsies.core.worker.child_runner._get_worker_pool',
+            return_value=pool,
+        ):
+            result = _confirm_ownership_and_set_running(
+                'task-1',
+                'worker-A',
+                is_workflow_task=False,
+                claimed_at=CLAIMED_AT,
+                start_check=StartAllowed,
+            )
+
+        assert result is None
+        assert len(cursor.queries) == 1
+        assert conn.commits == 1
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +497,24 @@ class TestUnclaimSqlClearsLeaseExpiry:
         sql_text = UNCLAIM_CLAIMED_TASK_SQL.text
         normalised = ' '.join(sql_text.split())
         assert 'claim_expires_at = NULL' in normalised
+
+    @pytest.mark.parametrize(
+        'statement',
+        [
+            UNCLAIM_CLAIMED_TASK_SQL,
+            READ_IN_FLIGHT_ATTEMPT_SQL,
+            RETURN_CLAIMED_TASK_AS_ISOLATED_SQL,
+        ],
+        ids=['release', 'in-flight read', 'class return'],
+    )
+    def test_the_claim_time_fence_has_no_null_branch(self, statement: Any) -> None:
+        """Each statement fences on the claim time of the dispatch. A NULL
+        claim time matches no row: nothing can turn the check off."""
+        where = ' '.join(statement.text.split()).split(' WHERE ', 1)[1]
+
+        assert 'AND claimed_at = CAST(:claimed_at AS TIMESTAMPTZ)' in where
+        assert 'IS NULL' not in where
+        assert 'COALESCE' not in where
 
     def test_unclaim_claimed_task_matches_only_claimed_tasks(self) -> None:
         """Pre-execution unclaim must not reset potentially executed RUNNING rows."""

@@ -530,20 +530,11 @@ a ── b ─┤
 
 ## Limitations
 
-### Not Supported: Dynamic Task Generation
+### Dynamic Task Generation
 
-**Scenario:** "Generate tasks at runtime based on input data"
+A running workflow does not add nodes to its own DAG. The DAG of each workflow is fixed when that workflow starts.
 
-<!-- check: skip partial -- uses names that the page does not define -->
-```python
-# Wanted (not implemented):
-@workflow
-def process_items(items: list[str]):
-    for item in items:
-        yield TaskNode(fn=process_item, kwargs={'item': item})
-```
-
-**Current:** DAG is static at submission time. All tasks must be defined before workflow starts.
+To create nodes from runtime data, use a `SubWorkflowNode`. Its `build_with()` runs when the node becomes ready and receives the results of the `args_from` nodes. The child DAG can have one node per element of an upstream result. See [Dynamic Fan-Out with `args_from`](/horsies/concepts/workflows/subworkflows/#dynamic-fan-out-with-args_from).
 
 ## Support Matrix
 
@@ -557,7 +548,9 @@ def process_items(items: list[str]):
 | OR-join (any branch succeeds) | Yes | `join="any"` parameter |
 | Quorum join (N of M succeed) | Yes | `join="quorum"` with `min_success` |
 | Partial success workflow | Yes | Via `success_policy` with success cases |
-| Dynamic task generation | No | DAG is static at submission time |
+| Dynamic task generation | Yes, through subworkflows | `build_with()` builds the child DAG when the node becomes ready |
+| Nested subworkflows | Yes, to depth 32 | A deeper child fails its `SubWorkflowNode` with `SUBWORKFLOW_DEPTH_LIMIT_REACHED` |
+| Nodes per workflow | Up to 10,000 | Split more nodes into `SubWorkflowNode`s; each child workflow has its own limit |
 
 ## Retry Policies in Workflows
 
@@ -998,7 +991,7 @@ Put static values in `kwargs` instead.
 **Important:** `kwargs` and `args_from` keys must be disjoint. If the same key appears in both,
 validation fails with `HRS-021` (`WORKFLOW_KWARGS_ARGS_FROM_OVERLAP`).
 
-For type-safe node construction with static arguments, see [Typed Node Builder](typed-node-builder).
+For type-safe node construction with static arguments, see [Typed Node Builder](/horsies/concepts/workflows/typed-node-builder/).
 
 ### args_from: What the Receiving Function Gets
 

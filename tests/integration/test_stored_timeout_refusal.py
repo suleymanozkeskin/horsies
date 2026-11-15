@@ -24,6 +24,7 @@ from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.tasks import (
     MAX_TASK_TIMEOUT_MS,
+    Execution,
     OperationalErrorCode,
     RetryPolicy,
     TaskError,
@@ -42,6 +43,8 @@ from horsies.core.worker.stored_timeout import (
     TimeoutValueInvalid,
 )
 from horsies.core.worker.worker import Worker, _initialize_worker_pool, _run_task_entry
+from horsies.core.worker.task_loop import TaskLoop
+from tests.integration.autocommit_support import use_pooled_runners
 from tests.broker_resources_support import current_resources, listener_of
 from tests.fixtures.slots.handles import task_finished_handle
 from tests.integration.history_seeding import read_attempts
@@ -52,6 +55,7 @@ from tests.integration.conftest import (
     make_workflow_spec,
     start_ok,
 )
+from tests.fixtures.run_return import wire_of
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
 
@@ -72,6 +76,10 @@ def _make_worker(broker: PostgresBroker, app: Horsies) -> Worker:
     )
     worker._app = app
     worker.broker = broker
+    # No slot pool: every configured slot counts.
+    worker._claim_slot_count = lambda: cfg.processes  # type: ignore[method-assign]
+    # Terminal-state writes, one checkout per statement: no worker stop here.
+    use_pooled_runners(worker)
     return worker
 
 
@@ -92,19 +100,24 @@ def _run_in_process(
         queue_name: str = 'default',
         is_workflow_task: bool = True,
         timeout: StoredTimeout = NoTimeout(),
-        claimed_at: datetime | None = None,
+        *,
+        claimed_at: datetime,
+        execution: Execution,
+        task_options: str | None,
     ) -> None:
         seen.append(timeout)
-        wire = _run_task_entry(
-            task_name=task_name,
-            args_json=args_json,
-            kwargs_json=kwargs_json,
-            task_id=task_id,
-            database_url=database_url,
-            master_worker_id=worker.worker_instance_id,
-            is_workflow_task=is_workflow_task,
-            timeout=timeout,
-            claimed_at=claimed_at,
+        wire = wire_of(
+            _run_task_entry(
+                task_name=task_name,
+                args_json=args_json,
+                kwargs_json=kwargs_json,
+                task_id=task_id,
+                master_worker_id=worker.worker_instance_id,
+                is_workflow_task=is_workflow_task,
+                timeout=timeout,
+                claimed_at=claimed_at,
+                task_loop=TaskLoop(),
+            )
         )
         result = await worker._finalize_after(
             task_finished_handle(wire[0], wire[1], wire[2]),

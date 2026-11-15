@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib.util
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -16,9 +18,18 @@ from horsies.core.errors import (
 from horsies.core.models.app import AppConfig
 from datetime import timedelta
 
-from horsies.core.models.broker import PostgresConfig
+from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.models.broker import (
+    MOVED_TO_PARENT_POOL,
+    MOVED_TO_WORKER_PROFILE,
+    PostgresConfig,
+)
 from horsies.core.models.queues import CustomQueueConfig, QueueMode
-from horsies.core.models.recovery import RecoveryConfig
+from horsies.core.models.health import WORKER_STATE_LIVE_WINDOW_S
+from horsies.core.models.recovery import (
+    WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS,
+    RecoveryConfig,
+)
 from horsies.core.models.retention import RetentionConfig
 from horsies.core.models.schedule import (
     DailySchedule,
@@ -51,83 +62,218 @@ SHORT_HB_RECOVERY = RecoveryConfig(claimer_heartbeat_interval_ms=1_000)
 class TestPostgresConfigPgBouncer:
     """Tests for split PostgreSQL URL configuration."""
 
-    def test_worker_pool_defaults_are_smaller_than_producer_pool(self) -> None:
+    def test_the_producer_pool_defaults(self) -> None:
         config = PostgresConfig(
-            database_url='postgresql+psycopg://user:pass@localhost/db',
+            database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
         )
 
         # Producer defaults follow SQLAlchemy's (spec change, 0.1.7);
         # the old 30+30 let one producer pin 60 server connections.
         assert config.pool_size == 5
         assert config.max_overflow == 10
-        assert config.worker_pool_size == 3
-        assert config.worker_max_overflow == 2
-        assert config.worker_child_pool_min_size == 0
-        assert config.worker_child_pool_max_size == 2
 
-        worker_config = config.worker_runtime_config()
-
-        assert worker_config.pool_size == 3
-        assert worker_config.max_overflow == 2
-        assert worker_config.database_url == config.database_url
-
-    def test_worker_pool_can_inherit_producer_pool(self) -> None:
+    def test_sqlalchemy_engine_kwargs_exclude_the_worker_pre_ping(self) -> None:
         config = PostgresConfig(
-            database_url='postgresql+psycopg://user:pass@localhost/db',
-            pool_size=11,
-            max_overflow=7,
-            worker_pool_size=None,
-            worker_max_overflow=None,
+            database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
         )
 
-        worker_config = config.worker_runtime_config()
+        assert 'worker_pool_pre_ping' not in config.sqlalchemy_engine_kwargs()
 
-        assert worker_config.pool_size == 11
-        assert worker_config.max_overflow == 7
-
-    def test_sqlalchemy_engine_kwargs_excludes_worker_only_fields(self) -> None:
+    @pytest.mark.parametrize('pool_pre_ping', [True, False])
+    def test_sqlalchemy_engine_kwargs_leave_the_ping_to_the_broker(
+        self,
+        pool_pre_ping: bool,
+    ) -> None:
+        """SQLAlchemy's own pre-ping pings at every checkout; it stays off.
+        The broker registers the ping of idle connections itself."""
         config = PostgresConfig(
-            database_url='postgresql+psycopg://user:pass@localhost/db',
+            database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+            pool_pre_ping=pool_pre_ping,
         )
 
-        kwargs = config.sqlalchemy_engine_kwargs()
+        assert 'pool_pre_ping' not in config.sqlalchemy_engine_kwargs()
 
-        assert 'worker_pool_size' not in kwargs
-        assert 'worker_max_overflow' not in kwargs
-        assert 'worker_child_pool_min_size' not in kwargs
-        assert 'worker_child_pool_max_size' not in kwargs
+    def test_the_worker_process_does_not_pre_ping_by_default(self) -> None:
+        """The worker's writes are one statement in autocommit; a pre-ping
+        would double their round trips. Producer engines keep theirs, also
+        the one that task code in a child sends with (the task-send pool)."""
+        config = PostgresConfig(
+            database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+        )
 
+        assert config.worker_pool_pre_ping is False
+        assert config.pool_pre_ping is True
+        assert config.with_exact_pool(2).pool_pre_ping is True
+        worker = config.worker_process_config(7)
+        assert worker.pool_pre_ping is False
+        assert (worker.pool_size, worker.max_overflow) == (7, 0)
+
+    def test_the_worker_process_pre_pings_when_set(self) -> None:
+        config = PostgresConfig(
+            database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+            pool_pre_ping=False,
+            worker_pool_pre_ping=True,
+        )
+
+        assert config.pool_pre_ping is False
+        assert config.with_exact_pool(2).pool_pre_ping is False
+        worker = config.worker_process_config(7)
+        assert worker.pool_pre_ping is True
+        assert (worker.pool_size, worker.max_overflow) == (7, 0)
+
+    @pytest.mark.parametrize('parent_pool', [0, -1])
+    def test_a_worker_process_pool_below_one_is_a_defect(
+        self,
+        parent_pool: int,
+    ) -> None:
+        config = PostgresConfig(
+            database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+        )
+        with pytest.raises(AssertionError, match='connections must be >= 1'):
+            config.worker_process_config(parent_pool)
+
+    @pytest.mark.parametrize('value', [3, 0, None])
     @pytest.mark.parametrize(
-        ('field', 'value'),
+        ('field', 'note'),
         [
-            ('worker_pool_size', 0),
-            ('worker_max_overflow', -1),
-            ('worker_child_pool_min_size', -1),
-            ('worker_child_pool_max_size', 0),
+            (
+                'worker_pool_size',
+                'the worker process opens its pool with the resolved '
+                'pool.max_size of its worker profile',
+            ),
+            (
+                'worker_max_overflow',
+                'the pool of the worker process has no overflow: it holds at '
+                'most pool.max_size connections',
+            ),
         ],
     )
-    def test_worker_pool_rejects_invalid_bounds(
+    def test_a_removed_worker_pool_field_is_refused(
         self,
         field: str,
-        value: int,
+        note: str,
+        value: object,
     ) -> None:
+        """A config that still sets a worker pool field of 0.6, also to
+        None, fails at build, and the help names the pool of the worker
+        process in the profile."""
         with pytest.raises(ConfigurationError) as exc_info:
-            PostgresConfig(
-                database_url='postgresql+psycopg://user:pass@localhost/db',
-                **{field: value},
+            PostgresConfig.model_validate(
+                {
+                    'database_url': 'postgresql+psycopg://user:pass@localhost/db',
+                    field: value,
+                },
             )
 
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_BROKER_POOL
+        error = exc_info.value
+        assert error.code == ErrorCode.CONFIG_INVALID_BROKER_POOL
+        assert error.message == f'{field} was removed in 0.7.0'
+        assert error.notes[0] == note
+        assert error.notes[1] == (
+            'task code in a worker child that sends opens the task_send_pool '
+            'of its child kind, not this pool'
+        )
+        assert (
+            'WorkerProfile(pool=ParentPool(max_size=PoolSize(connections=N)))'
+            in (error.help_text or '')
+        )
 
-    def test_worker_child_pool_min_must_not_exceed_max(self) -> None:
-        with pytest.raises(ConfigurationError) as exc_info:
-            PostgresConfig(
-                database_url='postgresql+psycopg://user:pass@localhost/db',
-                worker_child_pool_min_size=3,
-                worker_child_pool_max_size=2,
+    def test_every_removed_pool_field_is_reported_at_once(self) -> None:
+        """The worker pool fields and the child pool fields of 0.6 are
+        refused in one report."""
+        with pytest.raises(MultipleValidationErrors) as exc_info:
+            PostgresConfig.model_validate(
+                {
+                    'database_url': 'postgresql+psycopg://user:pass@localhost/db',
+                    'worker_pool_size': 3,
+                    'worker_max_overflow': 2,
+                    'worker_child_pool_max_size': 2,
+                },
             )
 
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_BROKER_POOL
+        messages = [error.message for error in exc_info.value.report.errors]
+        assert messages == [
+            'worker_child_pool_max_size was removed in 0.7.0',
+            'worker_pool_size was removed in 0.7.0',
+            'worker_max_overflow was removed in 0.7.0',
+        ]
+
+    def test_the_removed_worker_pool_fields_are_no_fields(self) -> None:
+        assert set(MOVED_TO_PARENT_POOL) == {'worker_pool_size', 'worker_max_overflow'}
+        assert not set(MOVED_TO_PARENT_POOL) & set(PostgresConfig.model_fields)
+        kwargs = PostgresConfig(
+            database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+        ).sqlalchemy_engine_kwargs()
+        assert not set(MOVED_TO_PARENT_POOL) & set(kwargs)
+
+    @pytest.mark.parametrize(
+        ('field', 'value', 'pool_argument'),
+        [
+            ('worker_child_pool_min_size', 1, 'min_size=N'),
+            (
+                'worker_child_pool_max_size',
+                4,
+                'max_size=PoolSize(connections=N)',
+            ),
+            ('worker_child_pool_check', False, 'check=False'),
+        ],
+    )
+    def test_a_removed_child_pool_field_is_refused(
+        self,
+        field: str,
+        value: object,
+        pool_argument: str,
+    ) -> None:
+        """A config that still sets a child pool field of 0.6 fails at
+        build, and the help names the pool of each child kind."""
+        with pytest.raises(ConfigurationError) as exc_info:
+            PostgresConfig.model_validate(
+                {
+                    'database_url': 'postgresql+psycopg://user:pass@localhost/db',
+                    field: value,
+                },
+            )
+
+        error = exc_info.value
+        assert error.code == ErrorCode.CONFIG_INVALID_BROKER_POOL
+        assert error.message == f'{field} was removed in 0.7.0'
+        assert f'IsolatedChildren(pool=IsolatedPool({pool_argument}))' in (
+            error.help_text or ''
+        )
+        assert f'SharedAsyncChildren(pool=SharedPool({pool_argument}))' in (
+            error.help_text or ''
+        )
+        assert f'SharedThreadChildren(pool=SharedPool({pool_argument}))' in (
+            error.help_text or ''
+        )
+
+    def test_every_removed_child_pool_field_is_reported_at_once(self) -> None:
+        with pytest.raises(MultipleValidationErrors) as exc_info:
+            PostgresConfig.model_validate(
+                {
+                    'database_url': 'postgresql+psycopg://user:pass@localhost/db',
+                    'worker_child_pool_min_size': 0,
+                    'worker_child_pool_max_size': 2,
+                    'worker_child_pool_check': True,
+                },
+            )
+
+        messages = [error.message for error in exc_info.value.report.errors]
+        assert messages == [
+            'worker_child_pool_min_size was removed in 0.7.0',
+            'worker_child_pool_max_size was removed in 0.7.0',
+            'worker_child_pool_check was removed in 0.7.0',
+        ]
+
+    def test_the_removed_child_pool_fields_are_no_fields(self) -> None:
+        """The refusal list and the model agree: no removed field is still a
+        field of the model."""
+        assert set(MOVED_TO_WORKER_PROFILE) == {
+            'worker_child_pool_min_size',
+            'worker_child_pool_max_size',
+            'worker_child_pool_check',
+        }
+        assert not set(MOVED_TO_WORKER_PROFILE) & set(PostgresConfig.model_fields)
 
     def test_effective_session_database_url_defaults_to_database_url(self) -> None:
         config = PostgresConfig(
@@ -1290,29 +1436,108 @@ class TestFormatSchedulePattern:
 
 
 @pytest.mark.unit
+class TestExactPool:
+    """``PostgresConfig.with_exact_pool``: the pool of the worker process and
+    the task-send pool of a child hold exactly ``connections`` connections,
+    with no overflow."""
+
+    _CONFIG = PostgresConfig(
+        database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+        pool_size=30,
+        max_overflow=30,
+        pool_timeout=12,
+    )
+
+    def test_the_copy_has_the_pool_and_no_overflow(self) -> None:
+        exact = self._CONFIG.with_exact_pool(7)
+        assert (exact.pool_size, exact.max_overflow) == (7, 0)
+        assert exact.database_url == self._CONFIG.database_url
+        assert exact.pool_timeout == 12
+        assert (self._CONFIG.pool_size, self._CONFIG.max_overflow) == (30, 30)
+
+    @pytest.mark.parametrize('connections', [0, -1])
+    def test_below_one_is_a_defect(self, connections: int) -> None:
+        with pytest.raises(AssertionError, match='connections must be >= 1'):
+            self._CONFIG.with_exact_pool(connections)
+
+    @pytest.mark.asyncio
+    async def test_the_broker_engine_opens_with_the_pool_and_no_overflow(
+        self,
+    ) -> None:
+        """The engine that a broker of the copy builds: QueuePool of
+        ``pool_size`` 7 and ``max_overflow`` 0. No connection opens."""
+        from sqlalchemy.pool import QueuePool
+
+        broker = PostgresBroker(self._CONFIG.with_exact_pool(7))
+        resources = broker._build_resources()  # pyright: ignore[reportPrivateUsage]
+        try:
+            pool = resources.engine.sync_engine.pool
+            assert isinstance(pool, QueuePool)
+            assert pool.size() == 7
+            assert pool._max_overflow == 0  # pyright: ignore[reportPrivateUsage]
+            assert pool.checkedout() == 0
+        finally:
+            await resources.engine.dispose()
+
+
+@pytest.mark.unit
 class TestGetBrokerErrorHandling:
     """Regression tests for Horsies.get_broker() error wrapping (HRS-211)."""
 
-    def test_worker_role_get_broker_uses_worker_pool_profile(self) -> None:
-        """Worker app brokers should not use producer-sized pool defaults."""
+    def test_a_worker_child_opens_the_task_send_pool_of_its_kind(self) -> None:
+        """A worker child sets its task-send pool at start: the app broker
+        of its task code opens exactly that many, not the producer pool."""
         from horsies import Horsies
 
         config = PostgresConfig(
-            database_url='postgresql+psycopg://user:pass@localhost/db',
+            database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
             pool_size=30,
             max_overflow=30,
-            worker_pool_size=3,
-            worker_max_overflow=2,
         )
         app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, broker=config))
         app.set_role('worker')
+        app.set_task_send_pool(4)
 
         with patch('horsies.core.app.PostgresBroker') as mock_broker_cls:
             app.get_broker()
 
         broker_config = mock_broker_cls.call_args.args[0]
-        assert broker_config.pool_size == 3
-        assert broker_config.max_overflow == 2
+        assert (broker_config.pool_size, broker_config.max_overflow) == (4, 0)
+        assert broker_config.database_url == config.database_url
+        # A producer engine: it keeps pool_pre_ping, not worker_pool_pre_ping.
+        assert (config.pool_pre_ping, config.worker_pool_pre_ping) == (True, False)
+        assert broker_config.pool_pre_ping is True
+
+    @pytest.mark.parametrize('role', ['producer', 'scheduler', 'worker'])
+    def test_without_a_task_send_pool_the_broker_opens_the_config_pool(
+        self,
+        role: str,
+    ) -> None:
+        """A producer, the scheduler, and the worker process itself keep the
+        pool of PostgresConfig: the worker role alone does not resize it."""
+        from horsies import Horsies
+
+        config = PostgresConfig(
+            database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+            pool_size=30,
+            max_overflow=30,
+        )
+        app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, broker=config))
+        app.set_role(role)
+
+        with patch('horsies.core.app.PostgresBroker') as mock_broker_cls:
+            app.get_broker()
+
+        broker_config = mock_broker_cls.call_args.args[0]
+        assert (broker_config.pool_size, broker_config.max_overflow) == (30, 30)
+
+    @pytest.mark.parametrize('connections', [0, -1])
+    def test_a_task_send_pool_below_one_is_a_defect(self, connections: int) -> None:
+        from horsies import Horsies
+
+        app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, broker=BROKER))
+        with pytest.raises(AssertionError, match='connections must be >= 1'):
+            app.set_task_send_pool(connections)
 
     def test_non_horsies_error_wrapped_as_broker_init_failed(self) -> None:
         """Non-HorsiesError exceptions are wrapped with BROKER_INIT_FAILED."""
@@ -1366,16 +1591,93 @@ class TestWorkerStateSnapshotInterval:
             worker_state_snapshot_interval_ms=1_000,
         ).worker_state_snapshot_interval_ms == 1_000
         assert RecoveryConfig(
-            worker_state_snapshot_interval_ms=300_000,
-        ).worker_state_snapshot_interval_ms == 300_000
+            worker_state_snapshot_interval_ms=60_000,
+        ).worker_state_snapshot_interval_ms == 60_000
 
     def test_below_minimum_rejected(self) -> None:
         with pytest.raises(ValidationError):
             RecoveryConfig(worker_state_snapshot_interval_ms=999)
 
-    def test_above_maximum_rejected(self) -> None:
-        with pytest.raises(ValidationError):
-            RecoveryConfig(worker_state_snapshot_interval_ms=300_001)
+    def test_cap_is_60_seconds_half_the_120_second_live_window(self) -> None:
+        assert WORKER_STATE_LIVE_WINDOW_S == 120
+        assert WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS == 60_000
+
+    def test_cap_follows_the_live_window(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A changed live window moves the cap, so the two cannot drift.
+
+        Loads a second copy of the recovery module while the window reads
+        200 s. The real module and its RecoveryConfig stay untouched.
+        """
+        import horsies.core.defaults as defaults
+        import horsies.core.models.recovery as recovery
+
+        monkeypatch.setattr(defaults, 'WORKER_STATE_LIVE_WINDOW_S', 200)
+        spec = importlib.util.spec_from_file_location(
+            '_recovery_with_a_200_s_live_window',
+            recovery.__file__,
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        monkeypatch.setitem(sys.modules, spec.name, module)
+        spec.loader.exec_module(module)
+
+        assert module.WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS == 100_000
+        accepted = module.RecoveryConfig(worker_state_snapshot_interval_ms=100_000)
+        assert accepted.worker_state_snapshot_interval_ms == 100_000
+        with pytest.raises(ConfigurationError, match='above the cap of 100000ms'):
+            module.RecoveryConfig(worker_state_snapshot_interval_ms=100_001)
+
+    @pytest.mark.parametrize(
+        'interval_ms',
+        [10**20, 10**5_000],
+        ids=['21 digits', 'above the int text limit'],
+    )
+    def test_a_huge_value_is_refused_with_its_size(self, interval_ms: int) -> None:
+        """Python refuses to turn an int of more than 4,300 digits into text:
+        the refusal shows the size of the value, and stays HRS-204."""
+        with pytest.raises(ConfigurationError) as exc_info:
+            RecoveryConfig(worker_state_snapshot_interval_ms=interval_ms)
+
+        error = exc_info.value
+        assert error.code == ErrorCode.CONFIG_INVALID_RECOVERY
+        assert error.message == (
+            'worker_state_snapshot_interval_ms has more than 20 digits, above '
+            'the cap of 60000ms'
+        )
+
+    @pytest.mark.parametrize('interval_ms', [60_001, 120_000, 300_000])
+    def test_above_cap_refused_with_field_value_cap_and_reason(
+        self,
+        interval_ms: int,
+    ) -> None:
+        with pytest.raises(ConfigurationError) as exc_info:
+            RecoveryConfig(worker_state_snapshot_interval_ms=interval_ms)
+
+        error = exc_info.value
+        assert type(error) is ConfigurationError
+        assert error.code == ErrorCode.CONFIG_INVALID_RECOVERY
+        assert error.message == (
+            f'worker_state_snapshot_interval_ms={interval_ms}ms '
+            'is above the cap of 60000ms'
+        )
+        notes = ' '.join(error.notes)
+        assert 'half the live window' in notes
+        assert 'WORKER_STATE_LIVE_WINDOW_S=120s' in notes
+        assert 'latest snapshot is inside the live window' in notes
+        assert error.help_text == 'set worker_state_snapshot_interval_ms <= 60000ms'
+
+    def test_above_cap_refused_through_app_config(self) -> None:
+        with pytest.raises(ConfigurationError, match='above the cap of 60000ms'):
+            AppConfig.model_validate(
+                {
+                    'queue_mode': QueueMode.DEFAULT,
+                    'broker': BROKER,
+                    'recovery': {'worker_state_snapshot_interval_ms': 120_000},
+                },
+            )
 
 
 @pytest.mark.unit

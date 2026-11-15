@@ -20,6 +20,7 @@ from horsies.core.models.tasks import TaskResult, TaskError
 from horsies.core.utils.url import to_psycopg_url
 
 from tests.e2e.helpers.env import e2e_database_url
+from tests.e2e.tasks.profiles import E2E_WORKER_PROFILES
 
 DB_URL = e2e_database_url('HORSES_E2E_DB_URL')
 
@@ -35,6 +36,7 @@ config = AppConfig(
     # Short heartbeat to satisfy lease >= 2x heartbeat validation.
     # claim_lease_ms=2000 >= 2 * claimer_heartbeat_interval_ms=1000.
     recovery=RecoveryConfig(claimer_heartbeat_interval_ms=1_000),
+    worker_profiles=E2E_WORKER_PROFILES,
 )
 
 app = Horsies(config)

@@ -135,7 +135,7 @@ async def test_lower_priority_queue_backfills_when_high_queue_is_capped(
     """High queue cap must not block spare worker slots from lower queues."""
     with run_worker(
         CUSTOM_INSTANCE,
-        processes=8,
+        profile='isolated-8',
         ready_check=_make_ready_check(queues_custom.high_task),
     ):
         high_ids = [
@@ -186,7 +186,7 @@ async def test_wide_fanin_join_does_not_create_orphaned_join_tasks(
     """Concurrent dependency completion should enqueue one linked join task."""
     with run_worker(
         DEFAULT_INSTANCE,
-        processes=8,
+        profile='isolated-8',
         ready_check=_make_ready_check(healthcheck),
     ):
         handle = await start_ok_in_thread(wf_tasks.spec_wide_fanin_join)

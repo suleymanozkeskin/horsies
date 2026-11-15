@@ -116,6 +116,10 @@ export default defineConfig({
 					label: 'Workers',
 					items: [
 						{ label: 'Worker Architecture', slug: 'workers/worker-architecture' },
+						{ label: 'Choosing an Execution Mode', slug: 'workers/execution-modes' },
+						{ label: 'Worker Profiles', slug: 'workers/worker-profiles' },
+						{ label: 'Shared Async Tasks', slug: 'workers/shared-async-tasks' },
+						{ label: 'Shared Thread Tasks', slug: 'workers/shared-thread-tasks' },
 						{ label: 'Concurrency', slug: 'workers/concurrency' },
 						{ label: 'Heartbeats & Recovery', slug: 'workers/heartbeats-recovery' },
 						{ label: 'Child-Process Hooks', slug: 'workers/child-process-hooks' },
@@ -175,6 +179,7 @@ export default defineConfig({
 						{ label: 'Migrating to 0.1.2', slug: 'migrations/migration-to-0-1-2' },
 						{ label: 'Migrating to 0.5.0', slug: 'migrations/migration-to-0-5-0' },
 						{ label: 'Migrating to 0.6.0', slug: 'migrations/migration-to-0-6-0' },
+						{ label: 'Migrating to 0.7.0', slug: 'migrations/migration-to-0-7-0' },
 					],
 				},
 				{

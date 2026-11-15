@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import inspect
 import json
 from functools import wraps
 from datetime import datetime, timedelta, timezone
+from collections.abc import Callable
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -1265,21 +1267,20 @@ class TestCreateTaskWrapperValidation:
 
         assert exc_info.value.code == ErrorCode.TASK_NO_RETURN_TYPE
 
-    def test_async_function_rejected(self) -> None:
-        """An `async def` task function is refused with HRS-106, and the notes name it."""
+    def test_async_function_is_accepted(self) -> None:
+        """An `async def` task function registers with its declared types."""
 
-        async def async_fn(*, x: int) -> TaskResult[int, TaskError]:
+        async def async_fn(*, x: int, label: str = 'hi') -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
-        app = _make_app()
-        with pytest.raises(TaskDefinitionError) as exc_info:
-            create_task_wrapper(async_fn, app, 'test.async_fn')  # type: ignore[arg-type]
+        wrapper = create_task_wrapper(async_fn, _make_app(), 'test.async_fn')
 
-        assert exc_info.value.code == ErrorCode.TASK_ASYNC_FUNCTION_NOT_SUPPORTED
-        assert any("'async_fn'" in note for note in exc_info.value.notes)
+        assert wrapper.task_name == 'test.async_fn'
+        assert getattr(wrapper, 'task_ok_type') is int
+        assert list(inspect.signature(wrapper).parameters) == ['x', 'label']
 
     def test_async_generator_function_rejected(self) -> None:
-        """An `async def` task function that yields is refused with HRS-106."""
+        """An `async def` task function that yields is refused with HRS-101."""
 
         async def async_gen_fn(*, x: int):  # type: ignore[no-untyped-def]
             yield TaskResult(ok=x)
@@ -1288,10 +1289,24 @@ class TestCreateTaskWrapperValidation:
         with pytest.raises(TaskDefinitionError) as exc_info:
             create_task_wrapper(async_gen_fn, app, 'test.async_gen_fn')  # type: ignore[arg-type]
 
-        assert exc_info.value.code == ErrorCode.TASK_ASYNC_FUNCTION_NOT_SUPPORTED
+        assert exc_info.value.code == ErrorCode.TASK_INVALID_RETURN_TYPE
+        assert exc_info.value.message == 'task function must not be an async generator'
+        assert any("'async_gen_fn'" in note for note in exc_info.value.notes)
 
-    def test_async_function_check_runs_before_return_type_check(self) -> None:
-        """An `async def` without a return annotation gets HRS-106, not HRS-100."""
+    def test_async_generator_check_runs_before_return_type_check(self) -> None:
+        """An async generator with a TaskResult annotation is still refused."""
+
+        async def async_gen_fn(*, x: int) -> TaskResult[int, TaskError]:  # type: ignore[misc]
+            yield TaskResult(ok=x)  # type: ignore[misc]
+
+        app = _make_app()
+        with pytest.raises(TaskDefinitionError) as exc_info:
+            create_task_wrapper(async_gen_fn, app, 'test.async_gen_fn')  # type: ignore[arg-type]
+
+        assert exc_info.value.message == 'task function must not be an async generator'
+
+    def test_async_function_without_return_annotation_rejected(self) -> None:
+        """An `async def` without a return annotation gets HRS-100, as a `def` does."""
 
         async def async_fn(*, x: int):  # type: ignore[no-untyped-def]
             return x
@@ -1300,7 +1315,31 @@ class TestCreateTaskWrapperValidation:
         with pytest.raises(TaskDefinitionError) as exc_info:
             create_task_wrapper(async_fn, app, 'test.async_fn')  # type: ignore[arg-type]
 
-        assert exc_info.value.code == ErrorCode.TASK_ASYNC_FUNCTION_NOT_SUPPORTED
+        assert exc_info.value.code == ErrorCode.TASK_NO_RETURN_TYPE
+
+    def test_async_function_with_wrong_return_type_rejected(self) -> None:
+        """The declared result of an `async def` must be a TaskResult: HRS-101."""
+
+        async def async_fn(*, x: int) -> int:
+            return x
+
+        app = _make_app()
+        with pytest.raises(TaskDefinitionError) as exc_info:
+            create_task_wrapper(async_fn, app, 'test.async_fn')  # type: ignore[arg-type]
+
+        assert exc_info.value.code == ErrorCode.TASK_INVALID_RETURN_TYPE
+
+    def test_async_function_signature_is_strictly_checked(self) -> None:
+        """A positional parameter on an `async def` gets HRS-105, as on a `def`."""
+
+        async def async_fn(x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app()
+        with pytest.raises(TaskDefinitionError) as exc_info:
+            create_task_wrapper(async_fn, app, 'test.async_fn')
+
+        assert exc_info.value.code == ErrorCode.TASK_STRICT_SIGNATURE_VIOLATION
 
 
 # =============================================================================
@@ -1429,6 +1468,138 @@ class TestCreateTaskWrapperExecution:
 
 
 # =============================================================================
+# create_task_wrapper — direct call of an async def task
+# =============================================================================
+
+
+@pytest.mark.unit
+class TestCreateTaskWrapperAsyncExecution:
+    """The direct call of an `async def` task returns a coroutine.
+
+    The return check and the exception mapping are shared with `def` tasks,
+    so these tests prove that the coroutine goes through them, and cover the
+    outcomes that only a coroutine has.
+    """
+
+    def test_direct_call_returns_a_coroutine_of_the_result(self) -> None:
+        async def add_one(*, x: int) -> TaskResult[int, TaskError]:
+            await asyncio.sleep(0)
+            return TaskResult(ok=x + 1)
+
+        wrapper = create_task_wrapper(add_one, _make_app(), 'test.add_one')
+
+        coroutine = wrapper(x=5)
+        assert inspect.iscoroutine(coroutine)
+        result = asyncio.run(coroutine)
+        assert result.ok_value == 6
+
+    def test_a_wrong_return_is_a_return_type_mismatch(self) -> None:
+        async def bad_fn(*, x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok='not-an-int')  # type: ignore[arg-type]
+
+        wrapper = create_task_wrapper(bad_fn, _make_app(), 'test.bad_fn')
+
+        result = asyncio.run(wrapper(x=1))
+        assert result.err_value.error_code == ContractCode.RETURN_TYPE_MISMATCH
+
+    def test_an_exception_uses_the_exception_mapper(self) -> None:
+        class CustomError(Exception):
+            pass
+
+        async def failing_fn(*, x: int) -> TaskResult[int, TaskError]:
+            await asyncio.sleep(0)
+            raise CustomError('kaboom')
+
+        wrapper = create_task_wrapper(
+            failing_fn,
+            _make_app(),
+            'test.failing_fn',
+            exception_mapper={CustomError: 'CUSTOM_MAPPED'},
+        )
+
+        result = asyncio.run(wrapper(x=1))
+        assert result.err_value.error_code == 'CUSTOM_MAPPED'
+
+    def test_an_unmapped_exception_gets_the_default_code(self) -> None:
+        async def failing_fn(*, x: int) -> TaskResult[int, TaskError]:
+            raise ValueError('oops')
+
+        wrapper = create_task_wrapper(failing_fn, _make_app(), 'test.failing_fn')
+
+        err = asyncio.run(wrapper(x=1)).err_value
+        assert err.error_code == OperationalErrorCode.UNHANDLED_EXCEPTION
+        assert err.message == 'Unhandled exception in task failing_fn: ValueError: oops'
+
+    def test_keyboard_interrupt_propagates(self) -> None:
+        async def interrupting_fn(*, x: int) -> TaskResult[int, TaskError]:
+            raise KeyboardInterrupt
+
+        wrapper = create_task_wrapper(interrupting_fn, _make_app(), 'test.interrupt')
+
+        with pytest.raises(KeyboardInterrupt):
+            asyncio.run(wrapper(x=1))
+
+    def test_close_of_a_suspended_call_ends_it_with_no_result(self) -> None:
+        """`close()` throws GeneratorExit in at the await. The wrapper lets it
+        end the coroutine: it maps no error and returns no result, so
+        `close()` returns None."""
+        body_saw: list[type[BaseException]] = []
+
+        async def suspends(*, x: int) -> TaskResult[int, TaskError]:
+            try:
+                await asyncio.sleep(0)
+            except BaseException as exc:
+                body_saw.append(type(exc))
+                raise
+            return TaskResult(ok=x)
+
+        wrapper = create_task_wrapper(suspends, _make_app(), 'test.suspends')
+
+        coroutine = wrapper(x=1)
+        assert coroutine.send(None) is None
+        closed_with = coroutine.close()
+
+        assert closed_with is None
+        assert body_saw == [GeneratorExit]
+        assert inspect.getcoroutinestate(coroutine) == inspect.CORO_CLOSED
+
+    def test_a_cancelled_inner_task_is_an_error_result(self) -> None:
+        """No cancel request for the caller: the CancelledError is the
+        body's failure, mapped like any exception."""
+
+        async def awaits_a_cancelled_task(*, x: int) -> TaskResult[int, TaskError]:
+            inner = asyncio.get_running_loop().create_task(asyncio.sleep(60))
+            inner.cancel()
+            await inner
+            return TaskResult(ok=x)
+
+        wrapper = create_task_wrapper(
+            awaits_a_cancelled_task, _make_app(), 'test.awaits_cancelled',
+        )
+
+        err = asyncio.run(wrapper(x=1)).err_value
+        assert err.error_code == OperationalErrorCode.UNHANDLED_EXCEPTION
+        assert 'CancelledError' in (err.message or '')
+
+    def test_a_cancel_request_for_the_caller_propagates(self) -> None:
+        """A timeout around a direct call still raises: the wrapper does not
+        turn the caller's cancel into a result."""
+
+        async def slow_fn(*, x: int) -> TaskResult[int, TaskError]:
+            await asyncio.sleep(60)
+            return TaskResult(ok=x)
+
+        wrapper = create_task_wrapper(slow_fn, _make_app(), 'test.slow_fn')
+
+        async def call_with_timeout() -> TaskResult[int, TaskError]:
+            async with asyncio.timeout(0.01):
+                return await wrapper(x=1)
+
+        with pytest.raises(TimeoutError):
+            asyncio.run(call_with_timeout())
+
+
+# =============================================================================
 # create_task_wrapper — introspection (__wrapped__ / signature)
 # =============================================================================
 
@@ -1460,6 +1631,52 @@ class TestCreateTaskWrapperIntrospection:
         assert wrapper.__wrapped__ is my_task
         assert inspect.unwrap(wrapper) is my_task
 
+    @pytest.mark.parametrize('copier', [copy.copy, copy.deepcopy], ids=['copy', 'deepcopy'])
+    def test_a_copy_of_a_def_task_calls_the_same_function(
+        self,
+        copier: Callable[[Any], Any],
+    ) -> None:
+        def add_one(*, x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x + 1)
+
+        wrapper = create_task_wrapper(add_one, _make_app(), 'test.add_one')
+
+        copied = copier(wrapper)
+
+        assert copied is not wrapper
+        assert copied.task_name == 'test.add_one'
+        assert copied(x=1).ok_value == 2
+
+    @pytest.mark.parametrize('copier', [copy.copy, copy.deepcopy], ids=['copy', 'deepcopy'])
+    def test_a_copy_of_an_async_task_calls_the_same_function(
+        self,
+        copier: Callable[[Any], Any],
+    ) -> None:
+        async def add_one(*, x: int) -> TaskResult[int, TaskError]:
+            await asyncio.sleep(0)
+            return TaskResult(ok=x + 1)
+
+        wrapper = create_task_wrapper(add_one, _make_app(), 'test.add_one_async')
+
+        copied = copier(wrapper)
+
+        assert copied is not wrapper
+        assert copied.task_name == 'test.add_one_async'
+        assert asyncio.run(copied(x=1)).ok_value == 2
+
+    def test_an_instance_with_no_state_has_no_delegated_attribute(self) -> None:
+        """`copy` builds an instance with no state, then asks it for
+        `__setstate__`. The answer is AttributeError, which `hasattr` reads
+        as False, not a RecursionError, which `hasattr` lets through."""
+
+        def add_one(*, x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x + 1)
+
+        wrapper = create_task_wrapper(add_one, _make_app(), 'test.add_one')
+        bare = object.__new__(type(wrapper))
+
+        assert not hasattr(bare, '__setstate__')
+
 
 # =============================================================================
 # create_task_wrapper — send() paths
@@ -1484,7 +1701,10 @@ class TestReturnedValueWithALoneSurrogateInTheValidatorText:
         ],
         ids=['value-error', 'assertion-error', 'custom-error-context'],
     )
-    def test_it_is_a_return_type_mismatch(self, fn: Any) -> None:
+    def test_it_is_a_return_type_mismatch(
+        self,
+        fn: Callable[[], TaskResult[Any, TaskError]],
+    ) -> None:
         wrapper = create_task_wrapper(fn, _make_app(), 'test.returns_refused')
 
         result = wrapper()
@@ -1520,7 +1740,10 @@ class TestReturnedValueWithALoneSurrogateInTheValidatorText:
         ],
         ids=['value-error', 'assertion-error', 'custom-error-context'],
     )
-    def test_the_returned_value_is_not_stored(self, fn: Any) -> None:
+    def test_the_returned_value_is_not_stored(
+        self,
+        fn: Callable[[], TaskResult[Any, TaskError]],
+    ) -> None:
         wrapper = create_task_wrapper(fn, _make_app(), 'test.returns_refused')
 
         stored = serialize_error_payload(wrapper())

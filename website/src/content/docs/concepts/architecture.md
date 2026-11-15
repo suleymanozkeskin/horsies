@@ -54,11 +54,12 @@ Unlike Celery (which typically uses Redis or RabbitMQ), horsies uses PostgreSQL 
 
 Workers run tasks in child processes that they own, rather than threads:
 
-- Each task runs in an isolated child process
+- By default, each task runs in an isolated child process
 - GIL contention is avoided for CPU-bound tasks
-- A crashed or timed-out task takes down only its own child
+- A crashed or timed-out isolated task takes down only its own child
+- A task can opt in to a shared child, which runs many tasks as coroutines or on threads. See [Choosing an Execution Mode](../../workers/execution-modes)
 - On Linux, children fork from a preload parent, so they start in milliseconds and share memory
-- Child processes send their own heartbeats
+- The worker process writes the runner heartbeats of its children's tasks, so a task that holds the GIL cannot stop them
 
 ### Type-Safe Results
 
@@ -105,7 +106,7 @@ unavailable.
 | `@app.task` | Decorator to define tasks |
 | `TaskHandle` | Returned by `.send()` - use to retrieve results |
 | `TaskResult` | Return type of all tasks - contains success or error |
-| `Worker` (CLI) | Started via `horsies worker` command |
+| `Worker` (CLI) | Started via `horsies worker <app> --profile <name>` |
 | `Scheduler` (CLI) | Started via `horsies scheduler` command |
 
 ## Data Flow
@@ -136,8 +137,8 @@ unavailable.
 ## Concurrency Model
 
 - **Cluster level**: Optional `cluster_wide_cap` limits total RUNNING tasks
-- **Worker level**: `processes` setting limits concurrent executions per worker
+- **Worker level**: the children of the worker profile limit concurrent executions per worker
 - **Queue level**: `max_concurrency` per custom queue (CUSTOM mode only)
-- **Claiming**: `max_claim_batch` prevents one worker from starving others
+- **Claiming**: `ClaimLimits.per_queue_per_pass` prevents one worker from starving others
 
 See [Concurrency](../../workers/concurrency) for details.

@@ -168,7 +168,7 @@ Code under test must treat `Err(TaskSendSuppressed)` as a normal return. A test 
 
 ## Tests with a Database
 
-A broker keeps one set of connections for each open event loop. A broker serves at most 5 open loops, not counting its sync runner loop. A call from one more loop returns `EVENT_LOOP_LIMIT`. `pytest-asyncio` keeps one loop open per fixture scope. See [Broker Config](../configuration/broker-config#event-loops).
+A broker keeps one set of connections for each open event loop. A broker serves at most 5 open loops, not counting its sync runner loop. A call from one more loop returns `EVENT_LOOP_LIMIT`. `pytest-asyncio` keeps one loop open per fixture scope. See [Broker Config](/horsies/configuration/broker-config/#event-loops).
 
 ## Things to Avoid
 

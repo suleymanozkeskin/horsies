@@ -62,6 +62,7 @@ class TaskModel(Base):
     - max_retries: int # maximum number of retry attempts allowed
     - next_retry_at: datetime # when the task should be retried next
     - task_options: str # serialized TaskOptions configuration for retry policies
+    - execution: str # Execution value: ISOLATED, SHARED_ASYNC or SHARED_THREAD
     - worker_pid: int # process ID of the worker executing this task
     - worker_hostname: str # hostname of the machine running the worker
     - worker_process_name: str # name/identifier of the worker process
@@ -162,6 +163,13 @@ class TaskModel(Base):
         DateTime(timezone=True), nullable=True
     )  # filter inside claim index scans only; standalone index unused
     task_options: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # The task's `Execution` value (schema v54). Every insert path writes it
+    # from the stored options. The default serves rows written before v54
+    # and writers that do not know the column; the CHECK
+    # ck_horsies_tasks_execution (migration DDL) bounds the domain.
+    execution: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'ISOLATED'"),
+    )
 
     # Idempotent enqueue verification
     enqueue_sha: Mapped[str] = mapped_column(
@@ -385,6 +393,23 @@ class WorkerStateModel(Base):
     # Worker lifecycle metadata
     worker_started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
+    )
+
+    # The slots that were down for a cause that can clear: a JSON array of
+    # {slot, cause, detail, down_since, failed_boots}, empty when none was.
+    # NULL in a row from a worker version that did not record it.
+    slots_down: Mapped[Optional[list[dict[str, Any]]]] = mapped_column(
+        JSONB,
+        nullable=True,
+    )
+
+    # The claim budgets: each budget class to {capacity, serves}, where
+    # capacity counts the children or seats of that class in service and
+    # serves lists the execution classes whose rows the budget claims.
+    # NULL in a row from a worker version that did not record it.
+    class_capacity: Mapped[Optional[dict[str, Any]]] = mapped_column(
+        JSONB,
+        nullable=True,
     )
 
 

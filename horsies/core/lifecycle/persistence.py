@@ -14,16 +14,31 @@ type checker says so at the call site rather than at run time.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, assert_never
+from typing import Any, Final, LiteralString, assert_never, cast
 
+from psycopg import AsyncCursor
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
 
+from ..history.terminalization.move import TASK_LOCK_SEED
 from ..logging import get_logger
+from ..types.result import Err, Ok, Result
+from ..utils.db import (
+    AutocommitFailure,
+    NotSent,
+    OutcomeUnknown,
+    SingleStatement,
+    StatementRefused,
+    StatementRunner,
+    is_retryable_connection_error,
+    run_in_autocommit,
+)
 from .commands import (
     AbandonNodesOfPausedWorkflows,
     AbandonOwnedNode,
@@ -51,7 +66,7 @@ from .fences import (
     TerminalFence,
     WorkerOwned,
 )
-from .operations import equivalence_class_of, function_name_of, kind_of
+from .operations import function_name_of
 from .outcomes import (
     AlreadyApplied,
     Applied,
@@ -75,6 +90,13 @@ type ExecutableCommand = (
     | AbandonOwnedNode
     | CancelOwnedNode
 )
+
+# The commands that are complete in one statement: the function checks the
+# full claim generation itself, writes the coupled rows (attempt, history,
+# capacity NOTIFY) in the same call, and writes nothing when it refuses. Only
+# these may run in autocommit. A locked command relies on the caller's
+# SELECT ... FOR UPDATE in the same transaction, so it is not one of them.
+type AutocommitCommand = CompleteTaskFused | CancelOwnedOrphan
 
 # Batch operations return zero or more rows, so they cannot share the
 # single-task adapters: exactly-one-row is a contract worth keeping honest
@@ -103,6 +125,25 @@ _COMPLETE_TASK_FUSED_SQL = text("""
         CAST(:task_id AS uuid), :worker_id,
         CAST(:claimed_at AS TIMESTAMPTZ), :result,
         :notify_channel, :notify_payload
+    )
+""")
+
+# The batch arrives as one JSON parameter (``_fused_batch_parameters``): one
+# array per command, holding the six arguments of its row. Each ARRAY keeps the
+# input order, so the arguments of one command share one index.
+_COMPLETE_TASKS_FUSED_SQL = text("""
+    WITH batch AS MATERIALIZED (
+        SELECT entry.value AS fields, entry.ordinality AS input_order
+        FROM jsonb_array_elements(CAST(:batch AS jsonb))
+            WITH ORDINALITY AS entry(value, ordinality)
+    )
+    SELECT * FROM horsies_complete_tasks_fused(
+        ARRAY(SELECT CAST(fields->>0 AS uuid) FROM batch ORDER BY input_order),
+        ARRAY(SELECT fields->>1 FROM batch ORDER BY input_order),
+        ARRAY(SELECT CAST(fields->>2 AS TIMESTAMPTZ) FROM batch ORDER BY input_order),
+        ARRAY(SELECT fields->>3 FROM batch ORDER BY input_order),
+        ARRAY(SELECT fields->>4 FROM batch ORDER BY input_order),
+        ARRAY(SELECT fields->>5 FROM batch ORDER BY input_order)
     )
 """)
 
@@ -195,14 +236,17 @@ _CANCEL_NODES_OF_CANCELLED_WORKFLOW_SQL = text("""
     )
 """)
 
-_LOCKED_READ_MISS_SQL = text("""
-    SELECT * FROM horsies_terminalization_miss(
-        CAST(:task_id AS uuid), CAST(:equivalent_kinds AS TEXT[]),
-        :worker_id, CAST(:claimed_at AS TIMESTAMPTZ)
+# The task advisory lock, by the key every move function takes. A caller
+# whose transaction row-locks a task and then calls a move function runs this
+# first, in the same transaction: the advisory lock goes before any row lock
+# of the task. It waits while another transaction holds the lock, and is held
+# until the caller's transaction ends; on an autocommit connection it would
+# end with the statement, so it is used only inside a transaction.
+LOCK_TASK_SQL = text(f"""
+    SELECT pg_advisory_xact_lock(
+        hashtextextended(CAST(CAST(:task_id AS uuid) AS text), {TASK_LOCK_SEED})
     )
 """)
-
-type LockedReadCommand = CompleteLockedTask | FailLockedTask
 
 
 def call_for(command: ExecutableCommand) -> tuple[Any, dict[str, Any]]:
@@ -376,7 +420,7 @@ async def apply_batch_async(
             ordered_outcomes = _reconstruct_id_keyed_batch(
                 outcomes,
                 expected_count=len(fence.claim_generations),
-                command=command,
+                operation=type(command).__name__,
             )
         case (
             ExpirePendingTasks()
@@ -396,24 +440,22 @@ def _reconstruct_id_keyed_batch(
     outcomes: Sequence[TerminalizationOutcome],
     *,
     expected_count: int,
-    command: AbandonOwnedNodes | CancelOwnedNodes,
+    operation: str,
 ) -> list[TerminalizationOutcome]:
     """Verify the ordinal contract and restore caller input order.
 
     SQL result order is never trusted, even though the functions order their
     rows. The exact ordinal set proves there is one answer per input and no
     duplicate answer before the adapter gives the outcomes to its caller.
+    ``operation`` names the batch in the error.
     """
     by_ordinal: dict[int, TerminalizationOutcome] = {}
     for outcome in outcomes:
         if outcome.ordinality is None:
-            raise RuntimeError(
-                f'{type(command).__name__} returned a row without ordinality'
-            )
+            raise RuntimeError(f'{operation} returned a row without ordinality')
         if outcome.ordinality in by_ordinal:
             raise RuntimeError(
-                f'{type(command).__name__} returned duplicate ordinality '
-                f'{outcome.ordinality}'
+                f'{operation} returned duplicate ordinality {outcome.ordinality}'
             )
         by_ordinal[outcome.ordinality] = outcome
 
@@ -421,7 +463,7 @@ def _reconstruct_id_keyed_batch(
     actual = set(by_ordinal)
     if actual != expected:
         raise RuntimeError(
-            f'{type(command).__name__} ordinal set does not match its input: '
+            f'{operation} ordinal set does not match its input: '
             f'expected={sorted(expected)} actual={sorted(actual)}'
         )
     return [by_ordinal[ordinal] for ordinal in range(1, expected_count + 1)]
@@ -443,47 +485,219 @@ async def apply_async(
     return outcome
 
 
-async def classify_locked_read_miss_async(
-    connection: AsyncConnection,
-    command: LockedReadCommand,
-    *,
-    claimed_at: datetime | None,
+async def apply_in_autocommit(
+    session_factory: async_sessionmaker[AsyncSession],
+    command: AutocommitCommand,
 ) -> TerminalizationOutcome:
-    """Classify a failed generation-fenced locking read without mutating.
+    """Execute a one-statement command as its own transaction.
 
-    ``CompleteLockedTask`` and ``FailLockedTask`` intentionally carry only the
-    worker half of their fence: their generation was already checked by the
-    caller's ``SELECT ... FOR UPDATE``. If that read matched nothing, invoking
-    the operation function would be unsafe — the same worker may already own a
-    newer generation. The database's shared miss classifier accepts the full
-    dispatched generation and distinguishes an idempotent replay from that
-    lost claim while keeping terminal-before-fence ordering identical to every
-    operation function.
+    The call runs through ``run_in_autocommit``: one round trip with the
+    pool pre-ping off. ``Applied`` is committed when this returns. A refusal
+    (``AlreadyApplied``, ``LostClaim``, ``SourceStateConflict``,
+    ``TaskAbsent``) wrote nothing, so there is nothing to roll back.
+
+    Raises:
+        Exception: what ``run_in_autocommit`` raises. A connection error
+            after the call was sent leaves the outcome unknown; a replay of
+            the same command classifies it (``AlreadyApplied`` when it
+            committed).
     """
-    requested_kind = kind_of(command)
-    parameters = {
-        'task_id': command.task_id,
-        'equivalent_kinds': [
-            kind.value
-            for kind in sorted(
-                equivalence_class_of(requested_kind),
-                key=lambda member: member.value,
-            )
-        ],
-        'worker_id': command.fence.worker_id,
-        'claimed_at': claimed_at,
-    }
-    result = await connection.execute(_LOCKED_READ_MISS_SQL, parameters)
-    outcome = decode_outcome_row(_single_row(result.mappings().all(), command))
-    _log_outcome(
-        command,
-        outcome,
-        expected_fence=OwnedClaim(
-            worker_id=command.fence.worker_id,
-            claimed_at=claimed_at,
-        ),
+    statement, parameters = call_for(command)
+    rows = await run_in_autocommit(
+        session_factory,
+        SingleStatement(statement=statement, parameters=parameters),
     )
+    outcome = decode_outcome_row(_single_row(rows.mappings(), command))
+    _log_outcome(command, outcome)
     return outcome
+
+
+FUSED_BATCH_MAX_ROWS: Final = 64
+"""The most rows of one batched plain-success statement. Each row holds its
+task's advisory lock and row lock until the statement ends, so this bounds the
+locks and the server time of one statement."""
+
+
+@dataclass(frozen=True, slots=True)
+class FusedCompletionBatch:
+    """Plain-success completions that one statement writes, in input order.
+
+    Each command keeps its own fence, result and NOTIFY: the statement
+    (``horsies_complete_tasks_fused``) runs ``horsies_complete_task_fused``
+    once per row, in sorted task-id order.
+
+    Raises:
+        ValueError: no command, more than ``FUSED_BATCH_MAX_ROWS``, or a task
+            id twice. The statement refuses a repeated id; a repeat means two
+            writes of one row in one statement.
+    """
+
+    commands: tuple[CompleteTaskFused, ...]
+
+    def __post_init__(self) -> None:
+        if not 1 <= len(self.commands) <= FUSED_BATCH_MAX_ROWS:
+            raise ValueError(
+                f'a fused completion batch holds 1 to {FUSED_BATCH_MAX_ROWS} '
+                f'commands, got {len(self.commands)}'
+            )
+        task_ids = [command.task_id for command in self.commands]
+        if len(set(task_ids)) != len(task_ids):
+            raise ValueError(
+                f'a fused completion batch names a task id twice: {task_ids}'
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class BatchRolledBack:
+    """No row of the batch changed.
+
+    ``cause`` is ``NotSent`` (the pool or the connect failed) or
+    ``StatementRefused`` (the driver or the server refused the statement; a
+    row that raises refuses the whole statement).
+    """
+
+    cause: NotSent | StatementRefused
+
+    @property
+    def retryable(self) -> bool:
+        """Whether the cause may clear: a connection error, a pool timeout,
+        or a transient server error such as a deadlock."""
+        return is_retryable_connection_error(self.cause.error)
+
+
+@dataclass(frozen=True, slots=True)
+class BatchCommitUnknown:
+    """The connection broke after the statement was sent. Each row may have
+    committed or not; a replay of a row classifies it (``AlreadyApplied``
+    when it committed)."""
+
+    cause: OutcomeUnknown
+
+
+type BatchWriteError = BatchRolledBack | BatchCommitUnknown
+
+
+def _batch_write_error(failure: AutocommitFailure) -> BatchWriteError:
+    """The batch error of a failed autocommit run. Pure."""
+    match failure:
+        case NotSent() | StatementRefused():
+            return BatchRolledBack(cause=failure)
+        case OutcomeUnknown():
+            return BatchCommitUnknown(cause=failure)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _fused_batch_parameters(batch: FusedCompletionBatch) -> dict[str, object]:
+    """The one parameter of the batch statement: a JSON array with one array
+    per command, in input order. Each holds the six arguments of
+    ``horsies_complete_task_fused`` for its row, as text or null. Pure.
+
+    The driver sends one string, not six arrays that it dumps element by
+    element. Every value is a ``str`` or None, so ``json.dumps`` has no value
+    to refuse; ``ensure_ascii=False`` keeps each string as it is, apart from
+    the escapes of quotes, backslashes and control characters.
+    """
+    return {
+        'batch': json.dumps(
+            [
+                [
+                    command.task_id,
+                    command.fence.worker_id,
+                    _generation_text(command.fence.claimed_at),
+                    command.result_json,
+                    command.notify_channel,
+                    command.notify_payload,
+                ]
+                for command in batch.commands
+            ],
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(',', ':'),
+        ),
+    }
+
+
+def _generation_text(claimed_at: datetime) -> str:
+    """The claim generation as ISO 8601 text with its microseconds and its
+    UTC offset. Pure."""
+    return claimed_at.isoformat()
+
+
+async def apply_fused_batch(
+    runner: StatementRunner,
+    batch: FusedCompletionBatch,
+) -> Result[tuple[TerminalizationOutcome, ...], BatchWriteError]:
+    """Write a batch of plain-success completions as one statement.
+
+    One round trip in autocommit on ``runner``: a checkout per call
+    (``PooledStatements``) or a held connection (``HeldConnection``). A batch of
+    one row runs ``horsies_complete_task_fused`` itself; a batch of several
+    runs ``horsies_complete_tasks_fused``, which calls that function once per
+    row. The statement is atomic: every ``Applied`` row committed with it,
+    and a refused row (``AlreadyApplied``, ``LostClaim``,
+    ``SourceStateConflict``, ``TaskAbsent``) wrote nothing.
+
+    Outcomes:
+        Ok(outcomes): one outcome per command, in input order; the outcome at
+            position i is the outcome of the task of command i.
+        Err(BatchRolledBack): no row changed.
+        Err(BatchCommitUnknown): the commit of each row is unknown.
+
+    Raises:
+        OutcomeDecodeError, RuntimeError: the rows break the contract of the
+            statement (a row that does not decode, a missing or repeated
+            ordinality, an outcome for another task). These are defects; the
+            rows of the statement committed or wrote nothing.
+    """
+    match await runner.run(_fused_statement(batch)):
+        case Ok(rows):
+            pass
+        case Err(failure):
+            return Err(_batch_write_error(failure))
+    outcomes = _fused_outcomes(batch, rows.mappings())
+    for command, outcome in zip(batch.commands, outcomes, strict=True):
+        if outcome.task_id != command.task_id:
+            raise RuntimeError(
+                f'{FusedCompletionBatch.__name__} answered task '
+                f'{outcome.task_id} at the position of task {command.task_id}'
+            )
+        _log_outcome(command, outcome)
+    return Ok(tuple(outcomes))
+
+
+def _fused_statement(batch: FusedCompletionBatch) -> SingleStatement:
+    """The statement of ``batch``: the single fused completion for one row,
+    the batch function for several. Pure."""
+    match batch.commands:
+        case (command,):
+            statement, parameters = call_for(command)
+            return SingleStatement(statement=statement, parameters=parameters)
+        case _:
+            return SingleStatement(
+                statement=_COMPLETE_TASKS_FUSED_SQL,
+                parameters=_fused_batch_parameters(batch),
+            )
+
+
+def _fused_outcomes(
+    batch: FusedCompletionBatch,
+    rows: Sequence[Mapping[str, Any]],
+) -> list[TerminalizationOutcome]:
+    """Decode the rows of the statement of ``batch``, in input order.
+
+    The single fused completion answers one row with no ordinality; the
+    batch function answers one row per input at its ordinality.
+    """
+    match batch.commands:
+        case (command,):
+            return [decode_outcome_row(_single_row(rows, command))]
+        case _:
+            return _reconstruct_id_keyed_batch(
+                [decode_outcome_row(row) for row in rows],
+                expected_count=len(batch.commands),
+                operation=FusedCompletionBatch.__name__,
+            )
 
 
 def apply_sync(
@@ -505,13 +719,35 @@ def apply_sync(
     return outcome
 
 
+async def apply_psycopg_async(
+    cursor: AsyncCursor[Any],
+    command: ExecutableCommand,
+) -> TerminalizationOutcome:
+    """Execute a command on the async psycopg driver of a shared async child.
+
+    The async twin of ``apply_sync``: the same call, the same decoder, on a
+    cursor whose connection runs on the child's event loop. The transaction
+    stays the caller's.
+    """
+    statement, parameters = call_for(command)
+    # The text comes from the statement constants of this module, never from
+    # input, so it is a literal in all but its type.
+    query = cast('LiteralString', _as_psycopg(statement))
+    await cursor.execute(query, parameters)
+    description = cursor.description
+    assert description is not None, 'an operation function returns a row'
+    columns = [column.name for column in description]
+    rows = [dict(zip(columns, row)) for row in await cursor.fetchall()]
+    outcome = decode_outcome_row(_single_row(rows, command))
+    _log_outcome(command, outcome)
+    return outcome
+
+
 def _log_outcome(
     command: TerminalizationCommand,
     outcome: TerminalizationOutcome,
-    *,
-    expected_fence: TerminalFence | None = None,
 ) -> None:
-    """Emit the operation, expected fence, and locked observation together.
+    """Emit the operation, its fence, and the locked observation together.
 
     Applied transitions are debug-level steady-state traffic. Every refusal or
     replay is warning-level because its evidence is the only race diagnosis
@@ -549,40 +785,10 @@ def _log_outcome(
             evidence = None
         case _ as unreachable:
             assert_never(unreachable)
-    command_fence = fence_of(command)
-    match expected_fence:
-        case (
-            CallerHoldsRowLock()
-            | PriorLockedRead()
-            | WorkerOwned()
-            | OwnedClaim()
-            | OwnedClaimBatch()
-        ):
-            fence_type = type(expected_fence).__name__
-            logged_expected_fence = expected_fence
-        case None:
-            match command_fence:
-                case OwnedClaimBatch(
-                    worker_id=worker_id,
-                    claim_generations=claims,
-                ):
-                    generation_by_task = dict(claims)
-                    fence_type = OwnedClaimBatch.__name__
-                    logged_expected_fence: object | None = {
-                        'worker_id': worker_id,
-                        'claimed_at': generation_by_task.get(outcome.task_id),
-                    }
-                case None:
-                    fence_type = None
-                    logged_expected_fence = None
-                case (
-                    CallerHoldsRowLock()
-                    | PriorLockedRead()
-                    | WorkerOwned()
-                    | OwnedClaim()
-                ):
-                    fence_type = type(command_fence).__name__
-                    logged_expected_fence = command_fence
+    fence_type, logged_expected_fence = _logged_fence(
+        fence_of(command),
+        outcome.task_id,
+    )
     logger.log(
         level,
         'terminalization operation=%s function=%s outcome=%s task_id=%s '
@@ -599,6 +805,27 @@ def _log_outcome(
         observed,
         evidence,
     )
+
+
+def _logged_fence(
+    fence: TerminalFence | None,
+    task_id: str,
+) -> tuple[str | None, object | None]:
+    """The fence of a command as the outcome log shows it: its type name and
+    its value. A batch fence shows only the worker and the claim generation
+    of ``task_id``. Pure."""
+    match fence:
+        case OwnedClaimBatch(worker_id=worker_id, claim_generations=claims):
+            return OwnedClaimBatch.__name__, {
+                'worker_id': worker_id,
+                'claimed_at': dict(claims).get(task_id),
+            }
+        case None:
+            return None, None
+        case CallerHoldsRowLock() | PriorLockedRead() | WorkerOwned() | OwnedClaim():
+            return type(fence).__name__, fence
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _single_row(

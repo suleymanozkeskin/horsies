@@ -112,6 +112,37 @@ def parse_retry_policy(
         return None
 
 
+def admitted_retry_policy(
+    *,
+    retry_count: int,
+    max_retries: int,
+    task_options_json: str | None,
+    error_code: str | Enum | None,
+) -> dict[str, Any] | None:
+    """The retry policy of a task when it retries ``error_code`` now. Pure.
+
+    None when the retries are spent (``retry_count >= max_retries``, or
+    ``max_retries`` is 0), when the options hold no policy, or when the
+    policy's ``auto_retry_for`` does not name the code. The deadline is not
+    judged here.
+    """
+    if max_retries == 0 or retry_count >= max_retries:
+        return None
+
+    retry_policy = parse_retry_policy(task_options_json)
+    if retry_policy is None:
+        return None
+
+    auto_retry_for = retry_policy.get('auto_retry_for')
+    if not isinstance(auto_retry_for, list) or not auto_retry_for:
+        return None
+
+    code = error_code.value if isinstance(error_code, Enum) else error_code
+    if not code or code not in auto_retry_for:
+        return None
+    return retry_policy
+
+
 def check_retry_eligibility(
     *,
     retry_count: int,
@@ -136,19 +167,13 @@ def check_retry_eligibility(
     Returns:
         True if the task should be retried, False otherwise.
     """
-    if max_retries == 0 or retry_count >= max_retries:
-        return False
-
-    retry_policy = parse_retry_policy(task_options_json)
-    if retry_policy is None:
-        return False
-
-    auto_retry_for = retry_policy.get('auto_retry_for')
-    if not isinstance(auto_retry_for, list) or not auto_retry_for:
-        return False
-
-    code = error_code.value if isinstance(error_code, Enum) else error_code
-    if not code or code not in auto_retry_for:
+    admitted = admitted_retry_policy(
+        retry_count=retry_count,
+        max_retries=max_retries,
+        task_options_json=task_options_json,
+        error_code=error_code,
+    )
+    if admitted is None:
         return False
 
     if good_until is not None:

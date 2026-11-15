@@ -44,9 +44,9 @@ config = AppConfig(
 | `finalizing_stale_threshold_ms` | `int` | 300,000 | Ms a completed child may remain in finalization handoff before recovery |
 | `crashed_worker_recovery_grace_ms` | `int` | 10,000 | Grace before recovering a workflow task whose underlying task is terminal but whose workflow progression was not applied; `0` disables |
 | `check_interval_ms` | `int` | 30,000 | How often to check for stale tasks |
-| `runner_heartbeat_interval_ms` | `int` | 30,000 | RUNNING task heartbeat frequency |
+| `runner_heartbeat_interval_ms` | `int` | 30,000 | How often the worker process writes the heartbeats of its RUNNING tasks |
 | `claimer_heartbeat_interval_ms` | `int` | 30,000 | CLAIMED task heartbeat frequency |
-| `worker_state_snapshot_interval_ms` | `int` | 30,000 | How often each worker persists a monitoring snapshot row to `horsies_worker_states` (1s–5min) |
+| `worker_state_snapshot_interval_ms` | `int` | 30,000 | How often each worker persists a monitoring snapshot row to `horsies_worker_states` (1s–1min). The cap is half the 120 s [live window](/horsies/monitoring/worker-health/), so a running worker stays live when a snapshot write is late by up to half the window. A larger value fails with `HRS-204` |
 | `auto_terminate_orphaned_workflow_tasks` | `bool` | `True` | Terminate claimed tasks whose workflow node linkage no longer exists |
 | `phase2_quarantine_after_attempts` | `int` | 25 | Recovery passes an unresolvable crashed-worker progression row may retain before its evidence moves to the quarantine table and discovery stops retrying it (3–1,000) |
 | `workflow_recovery_failure_limit` | `int` | 25 | Reaper passes in which the recovery of a workflow may raise a persistent error before the workflow fails closed (3–1,000) |
@@ -61,7 +61,7 @@ retention class assigned at enqueue; per-queue row-delete windows no longer
 exist.
 
 Retention and partition-coverage fields moved to
-[`AppConfig.retention`](retention-config); this table lists only what
+[`AppConfig.retention`](/horsies/configuration/retention-config/); this table lists only what
 `RecoveryConfig` still owns.
 
 ## Recovery Behaviors
@@ -83,7 +83,13 @@ When a **regular** task is RUNNING but the runner heartbeat stops:
 - Otherwise: marked as FAILED with `WORKER_CRASHED` error
 
 `running_stale_threshold_ms` is based on missing runner heartbeats, not total
-task duration. Long tasks remain healthy as long as they continue heartbeating.
+task duration. Long tasks remain healthy as long as the worker writes their
+heartbeats. With `auto_fail_stale_running` on, a worker that cannot write them
+for half of `running_stale_threshold_ms` kills its tasks and exits non-zero, so
+the reaper does not fail a task that still runs. That half must hold one
+`runner_heartbeat_interval_ms` plus 2 s for a heartbeat to land, so the
+threshold is at least `2 × (runner_heartbeat_interval_ms + 2_000)`. With it
+off, the worker logs the failed writes and keeps running.
 After user code returns, the child marks the task as finalizing before the
 parent writes the terminal result. The reaper will not recover that task until
 `finalizing_stale_threshold_ms` has also elapsed.
@@ -163,7 +169,7 @@ and the ones with live nodes.
 Two heartbeat types:
 
 1. **Claimer heartbeat**: Sent by worker for CLAIMED tasks (not yet running)
-2. **Runner heartbeat**: Sent by child process for RUNNING tasks
+2. **Runner heartbeat**: Written by the worker process, from its own thread, for the RUNNING tasks that its children hold
 
 The reaper (running in each worker) checks for missing heartbeats.
 
@@ -171,8 +177,10 @@ The reaper (running in each worker) checks for missing heartbeats.
 
 | Threshold | Constraint |
 |-----------|------------|
-| Stale threshold | Must be >= 2x heartbeat interval |
+| Running stale, `auto_fail_stale_running` on | Must be >= 2 × (runner heartbeat interval + 2 s) |
+| Running stale, `auto_fail_stale_running` off | Must be >= 2x runner heartbeat interval |
 | Finalizing stale | Must be >= 2x runner heartbeat interval |
+| Claimed stale | Must be >= 2x claimer heartbeat interval |
 | Claimed stale | 1 second to 1 hour |
 | Running stale | 1 second to 2 hours |
 | Check interval | 1 second to 10 minutes |
@@ -180,14 +188,8 @@ The reaper (running in each worker) checks for missing heartbeats.
 
 ### For CPU-Heavy Tasks
 
-Long-running CPU tasks may block the heartbeat thread:
-
-```python
-RecoveryConfig(
-    runner_heartbeat_interval_ms=60_000,    # Heartbeat every minute
-    running_stale_threshold_ms=600_000,     # 10 minutes before considered stale
-)
-```
+A task that holds the GIL does not delay its runner heartbeats, because the
+worker process writes them. CPU-bound tasks need no extra margin.
 
 ### For Quick Tasks
 
@@ -196,26 +198,29 @@ Fast tasks can use tighter thresholds:
 ```python
 RecoveryConfig(
     runner_heartbeat_interval_ms=10_000,    # Heartbeat every 10s
-    running_stale_threshold_ms=30_000,      # 30s before considered stale
+    running_stale_threshold_ms=40_000,      # 40s before considered stale
 )
 ```
+
+The worker stops when no heartbeat lands for 20 s, so a heartbeat may take up
+to 10 s to land.
 
 ## Validation
 
 The config validates that thresholds are safe:
 
 ```python
-# This will raise ValueError:
+# This raises ConfigurationError (HRS-204):
 RecoveryConfig(
     runner_heartbeat_interval_ms=30_000,
-    running_stale_threshold_ms=30_000,  # Must be >= 60_000 (2x heartbeat)
+    running_stale_threshold_ms=60_000,  # Must be >= 64_000: 2 x (30s + 2s)
 )
 ```
 
 ## Retention
 
 Retention moved to its own configuration section:
-[`AppConfig.retention`](retention-config). It decides how long records
+[`AppConfig.retention`](/horsies/configuration/retention-config/). It decides how long records
 live and how their storage is prepared and reclaimed, which is a
 different question from the one this page answers — recovery is about
 work that went wrong, retention about work that went right and is now

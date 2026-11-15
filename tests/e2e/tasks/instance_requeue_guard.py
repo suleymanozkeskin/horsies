@@ -25,6 +25,7 @@ from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.tasks import TaskResult, TaskError
 
 from tests.e2e.helpers.env import e2e_database_url
+from tests.e2e.tasks.profiles import E2E_WORKER_PROFILES
 
 DB_URL = e2e_database_url('HORSES_E2E_DB_URL')
 
@@ -46,6 +47,7 @@ config = AppConfig(
         auto_requeue_stale_claimed=False,
         claimed_stale_threshold_ms=120_000,   # high, won't trigger
     ),
+    worker_profiles=E2E_WORKER_PROFILES,
 )
 
 app = Horsies(config)
@@ -82,6 +84,7 @@ def requeue_guard_task(*, token: str) -> TaskResult[str, TaskError]:
 # ---------------------------------------------------------------------------
 
 if os.environ.get('INJECT_REQUEUE_DB_ERROR') == '1':
+    from horsies.core.models.tasks import Execution
     from horsies.core.worker.stored_timeout import NoTimeout, StoredTimeout
     from horsies.core.worker.worker import Worker, _RequeueOutcome
     from typing import Optional
@@ -98,10 +101,17 @@ if os.environ.get('INJECT_REQUEUE_DB_ERROR') == '1':
         queue_name: str = 'default',  # noqa: ARG001
         is_workflow_task: bool = True,  # noqa: ARG001
         timeout: StoredTimeout = NoTimeout(),  # noqa: ARG001
-        claimed_at: Optional[datetime] = None,  # noqa: ARG001
+        *,
+        claimed_at: datetime,
+        execution: Execution,  # noqa: ARG001
+        task_options: Optional[str],  # noqa: ARG001
     ) -> None:
         # Simulate: no child takes the task → requeue → DB_ERROR
-        outcome = await self._requeue_claimed_task(task_id, 'INJECTED dispatch failure')
+        outcome = await self._requeue_claimed_task(
+            task_id,
+            'INJECTED dispatch failure',
+            claimed_at,
+        )
         if outcome is _RequeueOutcome.DB_ERROR:
             import logging
             logging.getLogger('horsies.worker').critical(
@@ -116,7 +126,7 @@ if os.environ.get('INJECT_REQUEUE_DB_ERROR') == '1':
         self: Worker,
         task_id: str,
         reason: str,
-        claimed_at: Optional[datetime] = None,  # noqa: ARG001
+        claimed_at: datetime,  # noqa: ARG001
     ) -> _RequeueOutcome:
         import logging
         logging.getLogger('horsies.worker').error(

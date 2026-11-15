@@ -53,6 +53,8 @@ After v52 is applied, a 0.5.5 `horsies worker` or `horsies scheduler` refuses to
 
 ## New settings and flags
 
+In 0.7.0 the worker flags below move into worker profiles. See [Migrating to 0.7.0](/horsies/migrations/migration-to-0-7-0/).
+
 | Name | Default | Where | Page |
 |------|---------|-------|------|
 | `workflow_recovery_failure_limit` | `25` (3-1,000) | `RecoveryConfig` | [Recovery Config](/horsies/configuration/recovery-config/) |

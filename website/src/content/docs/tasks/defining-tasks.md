@@ -7,9 +7,7 @@ tags: [tasks, decorator, definition]
 
 # Defining Tasks
 
-Define tasks by decorating functions with `@app.task()` and returning `TaskResult[T, TaskError]`. For argument serialization rules, see `sending-tasks`.
-
-**Note:** Task functions must be synchronous (`def`). `@app.task()` refuses an `async def` task function with `HRS-106`. Use `.send_async()` / `.get_async()` on the producer side for non-blocking I/O.
+Define tasks by decorating functions with `@app.task()` and returning `TaskResult[T, TaskError]`. A task function is a `def` or an `async def` function. For argument serialization rules, see `sending-tasks`.
 
 ## How To
 
@@ -29,6 +27,84 @@ def process_order(*, order_id: int) -> TaskResult[str, TaskError]:
     # Do work
     return TaskResult(ok=f"Order {order_id} processed")
 ```
+
+### Async Tasks
+
+Define a task with `async def` to await I/O in its body. `@app.task()` checks it as it checks a `def` task, and it returns a `TaskResult` in the same way.
+
+```python
+import asyncio
+
+@app.task("fetch_price", timeout_ms=30_000)
+async def fetch_price(*, symbol: str) -> TaskResult[float, TaskError]:
+    await asyncio.sleep(0.1)  # stands in for an awaited client call
+    return TaskResult(ok=101.5)
+```
+
+With `Execution.ISOLATED` (the default), a worker child runs one task at a time, `def` or `async def`. A `SHARED_ASYNC` task runs next to other tasks on the event loop of a shared async child instead: see [Shared Async Tasks](/horsies/workers/shared-async-tasks/). An isolated child keeps one event loop until the child stops, and an async task runs on that loop. An async client that a module keeps stays open across the tasks of one child.
+
+The loop runs only while an async task runs. A `def` task runs with no running event loop, so it can call `asyncio.run()`. While the child runs a `def` task or waits for its next task, the timers of a module-level async client, for example a keepalive or a pool maintenance task, do not run.
+
+An async task must await the work that it starts. When the body of an async task returns (a value, or an exception that the task maps to a result) and asyncio tasks that it started, for example with `asyncio.create_task()`, are still on the loop:
+
+1. The child waits up to 1 second for that work, also for the asyncio tasks that it starts meanwhile.
+2. Work that is still alive gets a cancel, and two more cancels 0.1 seconds apart.
+3. When the work has ended, the worker writes what the task returned. Only then do the retry and the next workflow node start, so they never run next to that work. The worker then replaces the child, and the next task runs in a new child: cancelled code can leave broken state in the process.
+4. Work that is still alive 0.3 seconds after the first cancel, for example a task that catches every cancel, is stuck. The worker kills the child, and writes what the task returned after it saw the exit. A child that reports neither the end of the work nor that it is stuck within 26.3 seconds of the return, for example because that work blocks the event loop, is killed the same way. When the exit is not seen within 30 seconds of the kill, the rule of a timeout kill applies (see [Set an Execution Timeout](#set-an-execution-timeout)).
+
+The worker writes runner heartbeats for the row while the child waits for that work: the child marks the row finalizing only after the work ended, and not at all when it did not stop. So [stale RUNNING recovery](/horsies/workers/heartbeats-recovery/#stale-running-recovery) does not fail the row while the work runs.
+
+The return ends the deadline of the task: `timeout_ms` bounds the body, and what the task returned stands while the child waits for the work. The outcome is never `TASK_TIMEOUT` then. A deadline that fires before the worker has read the return still kills the child, as for a result that arrives after the deadline. A crash of the child in that wait also keeps what the task returned, once the worker saw the exit.
+
+- The worker sees asyncio tasks only. A callback that `loop.call_soon()` or `loop.call_later()` scheduled, and work that `loop.run_in_executor()` started and the task did not await, are not waited for and cause no replacement. They can still run during a later task of the same child.
+- A client that keeps its own background tasks on the loop, for example a keepalive or a consumer task, delays the outcome of each async task by about 1 second, and causes a child replacement after it.
+- A thread that `asyncio.to_thread()` starts can outlive its task, for example when a timeout ends the wait for it. The thread is not an asyncio task, so it is not waited for and does not cause a replacement. When the worker stops the child, the child does not wait for that thread past the close, which takes at most 7 seconds: it exits, and its `atexit` handlers do not run. An idle executor thread does not count: the close of the async generators and the shutdown of the executor each get at least 1 second.
+- The worker logs one line for each task that left work: the task, the coroutine of each asyncio task that was left, for up to 10 tasks, and how that work ended, for example `Task watch_price (<id>) returned and left 1 task(s) on the event loop of child pid=4242 (refresh_session); that work ended with no cancel; the outcome is what the task returned, and the child is replaced`.
+
+A task that cancels a helper task in `finally` must also await it. `cancel()` only asks the helper to stop. A helper that awaits while it stops, for example to close a session, is still on the loop when the task returns: the outcome waits for it, and the worker replaces the child. Await the helper after the cancel:
+
+```python
+async def refresh_session() -> None:
+    try:
+        while True:
+            await asyncio.sleep(30)  # stands in for a keepalive call
+    finally:
+        await asyncio.sleep(0)  # stands in for closing the session
+
+
+@app.task("watch_price")
+async def watch_price(*, symbol: str) -> TaskResult[float, TaskError]:
+    helper = asyncio.create_task(refresh_session())
+    try:
+        await asyncio.sleep(0.1)  # stands in for the work of the task
+        return TaskResult(ok=101.5)
+    finally:
+        helper.cancel()
+        # gather returns the CancelledError of the helper instead of raising it.
+        await asyncio.gather(helper, return_exceptions=True)
+```
+
+A child creates its event loop at boot, before it reports ready, when the app has at least one `async def` task. A child of an app with no `async def` task creates no loop. When the loop cannot be created:
+
+- The child fails its boot, and no task reaches it.
+- An `OSError` with `EMFILE`, `ENFILE`, `ENOMEM` or `EAGAIN` (the process has no file descriptor left, for example) can clear, so the slot is down: it takes no task, and the worker starts a new child for it after a growing wait. Other children continue. When every slot is down, the worker exits non-zero after three failed attempts, so its supervisor restarts it. The log names the slot and the cause, for example `Slot 1 is down: the OS ran short of a resource (EMFILE): OSError: [Errno 24] Too many open files`.
+- Any other failure, such as an event loop policy that raises, is the same on every start, so it repeats (`TaskLoopCreateFailed`): each failed start counts one of three attempts, also while other children serve, and the third stops the worker. See [Child Start Failures](/horsies/workers/worker-architecture/#child-start-failures).
+
+In an async task, send with `.send_async()` or `.schedule_async()`. The sync `.send()` and `.schedule()` refuse a running event loop: they return `Err(TaskSendAsyncContext)` and enqueue nothing. See [Sending Tasks](/horsies/tasks/sending-tasks/).
+
+```python
+from horsies import Ok, Err
+
+@app.task("refresh_price")
+async def refresh_price(*, symbol: str) -> TaskResult[str, TaskError]:
+    match await fetch_price.send_async(symbol=symbol):
+        case Ok(handle):
+            return TaskResult(ok=handle.task_id)
+        case Err(send_err):
+            return TaskResult(err=TaskError(error_code="SEND_FAILED", message=send_err.message))
+```
+
+`timeout_ms` works as for a `def` task: on expiry, the worker kills the child. An `async def` function that uses `yield` is refused with `HRS-101`.
 
 ### Parameters are keyword-only
 
@@ -155,7 +231,7 @@ def resize_video(*, video_id: str) -> TaskResult[str, TaskError]:
     ...
 ```
 
-On expiry, the worker kills the child process and the task fails with `TASK_TIMEOUT`. If the deadline elapses before user code starts, the task is requeued instead. Timeouts are terminal by default; opt into retries by adding `"TASK_TIMEOUT"` to `auto_retry_for`:
+On expiry, the worker kills the child process, waits for it to exit, and then fails the task with `TASK_TIMEOUT`. A result that reaches the worker after the deadline does not change this. An `async def` body that returned before the deadline is not timed out while the child waits for the asyncio tasks that it left (see [Async Tasks](#async-tasks)). If the deadline elapses before user code starts, the task is requeued instead. Timeouts are terminal by default; opt into retries by adding `"TASK_TIMEOUT"` to `auto_retry_for`:
 
 ```python
 @app.task(
@@ -168,6 +244,55 @@ def resize_video(*, video_id: str) -> TaskResult[str, TaskError]:
 ```
 
 The kill goes to the child and to the subprocesses in its session. Other tasks on the same worker continue. A subprocess that calls `setsid` itself leaves the session, and the kill does not reach it. The worker starts a new child in that slot, so size `timeout_ms` as a hang backstop well above normal runtime, not as routine control flow.
+
+The worker writes the timeout only after the child has exited. So a retry never runs next to the attempt that it replaces, and a workflow node that runs after a failure does not start while that attempt runs. If the child does not exit within 30 seconds of the kill, the worker writes nothing and logs at critical level. Then [stale-task recovery](/horsies/workers/heartbeats-recovery/) handles the task: a started task as a crashed worker's task, and a task that had not started when its claim lease ends. With stale RUNNING recovery off (no `RecoveryConfig`, or `auto_fail_stale_running=False`), nothing else would move the row, so the worker waits for the exit and writes the row once it sees it; a stop of the worker ends that wait.
+
+A task with `Execution.SHARED_ASYNC` on a shared async child is different. On expiry its child cancels it: the task gets `asyncio.CancelledError` at its next `await`. The task fails with `TASK_TIMEOUT` when it has stopped, with the work that it started, also when it returns a value after the cancel. If it has not stopped `cancel_grace_ms` after the cancel (default 1 second), the child cancels it a second time, and takes no new task. A task that still has not stopped is stuck: the worker kills the child when every task left in it is stuck, so no other task in that child loses time that it still had. Each of those tasks then fails with `TASK_TIMEOUT`. A task that blocks the event loop of its child for 5 seconds makes the worker kill the child at once: that task fails with `TASK_BLOCKED_LOOP`, each other task before its deadline with `NEIGHBOUR_BLOCKED_LOOP`. See [Shared Async Tasks](/horsies/workers/shared-async-tasks/#the-timeout).
+
+A `SHARED_THREAD` task on a shared thread child cannot be cancelled. On expiry its child closes: it takes no new task. When no task in the child has time left, the worker kills the child, and each task that was still in it fails with `TASK_TIMEOUT`. A task alone in its child is killed at its deadline. See [Shared Thread Tasks](/horsies/workers/shared-thread-tasks/#the-timeout).
+
+### Choose the Execution Class
+
+`execution` declares how a worker runs the task. The value is an `Execution` member, and the default is `Execution.ISOLATED`. Every task row stores the class. To choose a class for the work of a task, see [Choosing an Execution Mode](/horsies/workers/execution-modes/).
+
+| `execution` | Runs | Function | `timeout_ms` | `cancel_grace_ms` |
+| ----------- | ---- | -------- | ------------ | ----------------- |
+| `Execution.ISOLATED` (default) | one task at a time in its own child process | `def` or `async def` | optional | not allowed |
+| `Execution.SHARED_ASYNC` | many tasks as coroutines in one child process | `async def` | required | optional |
+| `Execution.SHARED_THREAD` | many tasks on threads in one child process | `def` | required | not allowed |
+
+```python
+@app.task(
+    "fetch_quote",
+    execution=Execution.SHARED_ASYNC,
+    timeout_ms=10_000,
+    cancel_grace_ms=2_000,
+)
+async def fetch_quote(*, symbol: str) -> TaskResult[str, TaskError]:
+    ...
+
+
+@app.task("render_thumbnail", execution=Execution.SHARED_THREAD, timeout_ms=30_000)
+def render_thumbnail(*, image_id: str) -> TaskResult[str, TaskError]:
+    ...
+```
+
+A `SHARED_ASYNC` task runs on a seat of a shared async child when the worker profile has `shared_async=SharedAsyncChildren(...)`, and in an isolated child otherwise. See [Shared Async Tasks](/horsies/workers/shared-async-tasks/). A `SHARED_THREAD` task runs on a seat thread of a shared thread child when the profile has `shared_thread=SharedThreadChildren(...)`, and in an isolated child otherwise. See [Shared Thread Tasks](/horsies/workers/shared-thread-tasks/).
+
+`cancel_grace_ms` is the time that a `SHARED_ASYNC` task gets to stop after its cancel. After it, the child cancels the task a second time. A thread cannot be cancelled, so only `SHARED_ASYNC` takes it. The value is from `MIN_CANCEL_GRACE_MS` (100) to `MAX_CANCEL_GRACE_MS` (10,000). A `SHARED_ASYNC` task that sets none gets `DEFAULT_CANCEL_GRACE_MS` (1,000). The stored options of the task hold the value in effect when the task is sent, so a later change of the default does not change a queued task.
+
+`@app.task` refuses a declaration that breaks a rule with a `TaskDefinitionError`, one code per rule:
+
+<!-- members: ErrorCode subset -->
+| Code | Name | Rule |
+| ---- | ---- | ---- |
+| HRS-107 | `TASK_SHARED_ASYNC_REQUIRES_ASYNC_DEF` | `SHARED_ASYNC` needs an `async def` function |
+| HRS-108 | `TASK_SHARED_THREAD_REQUIRES_DEF` | `SHARED_THREAD` needs a `def` function |
+| HRS-109 | `TASK_SHARED_EXECUTION_REQUIRES_TIMEOUT` | `SHARED_ASYNC` and `SHARED_THREAD` need `timeout_ms` |
+| HRS-110 | `TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC` | only `SHARED_ASYNC` takes `cancel_grace_ms` |
+| HRS-111 | `TASK_CANCEL_GRACE_OUT_OF_RANGE` | `cancel_grace_ms` is from 100 to 10,000 |
+
+When a declaration breaks more than one rule, the first rule in this order is reported. A type checker refuses the same declarations when `execution` is written as a member: the overloads require `timeout_ms` for a shared class, and the decorator that they return accepts only the function kind of the class. With `cancel_grace_ms` and a member other than `SHARED_ASYNC`, the decorator accepts no function. A class that is known only at run time requires `timeout_ms` and takes `cancel_grace_ms`, and the decorator checks the other rules at run time.
 
 ### Register Tasks for Workers
 
@@ -222,7 +347,9 @@ def task_two() -> TaskResult[str, TaskError]:
 | `exception_mapper` | `dict[type[BaseException], str]` | No | Maps exception classes to error codes |
 | `default_unhandled_error_code` | `str` | No | Error code for unmapped exceptions (overrides global) |
 | `timeout_ms` | `int` | No | Execution time limit in milliseconds, from 1000 to `MAX_TASK_TIMEOUT_MS` (4,294,967,295), measured from the moment a child takes the task. On expiry the child process is killed and the task fails with `TASK_TIMEOUT` |
+| `execution` | `Execution` | No | How a worker runs the task: `ISOLATED` (default), `SHARED_ASYNC` or `SHARED_THREAD`. See [Choose the Execution Class](#choose-the-execution-class) |
+| `cancel_grace_ms` | `int` | No | `SHARED_ASYNC` only. The time to stop after a cancel, from 100 to 10,000 ms. Default 1,000 ms |
 
-**Returns:** Decorated function that can be called directly or via `.send()` / `.send_async()`.
+**Returns:** For a `def` function, a `TaskFunction`: a direct call returns the `TaskResult`. For an `async def` function, an `AsyncTaskFunction`: a direct call returns a coroutine, and `await` gives the `TaskResult`. Both send with `.send()` / `.send_async()`.
 
-`good_until` is not accepted here — task expiry deadlines are a per-send concern. See [Sending Tasks — Set a Task Deadline](sending-tasks#set-a-task-deadline).
+`good_until` is not accepted here — task expiry deadlines are a per-send concern. See [Sending Tasks — Set a Task Deadline](/horsies/tasks/sending-tasks/#set-a-task-deadline).

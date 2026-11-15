@@ -62,6 +62,9 @@ class ErrorCode(str, Enum):
     WORKFLOW_INVALID_DEFINITION_CONFIG = 'HRS-033'
     WORKFLOW_INVALID_PRIORITY = 'HRS-034'
     WORKFLOW_NAIVE_GOOD_UNTIL = 'HRS-035'
+    WORKFLOW_SUBWORKFLOW_DEPTH_LIMIT = 'HRS-036'
+    WORKFLOW_SUBWORKFLOW_SELF_NESTING = 'HRS-037'
+    WORKFLOW_TOO_MANY_NODES = 'HRS-038'
     WORKFLOW_SUBWORKFLOW_APP_MISSING = 'HRS-018'
 
     # Task definition (HRS-100-HRS-199)
@@ -71,7 +74,13 @@ class ErrorCode(str, Enum):
     TASK_INVALID_QUEUE = 'HRS-103'
     TASK_PREDECORATED_NOT_SUPPORTED = 'HRS-104'
     TASK_STRICT_SIGNATURE_VIOLATION = 'HRS-105'
-    TASK_ASYNC_FUNCTION_NOT_SUPPORTED = 'HRS-106'
+    # HRS-106 is retired and is not used again.
+    # The execution rules of `@app.task(execution=...)`, one code per rule.
+    TASK_SHARED_ASYNC_REQUIRES_ASYNC_DEF = 'HRS-107'
+    TASK_SHARED_THREAD_REQUIRES_DEF = 'HRS-108'
+    TASK_SHARED_EXECUTION_REQUIRES_TIMEOUT = 'HRS-109'
+    TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC = 'HRS-110'
+    TASK_CANCEL_GRACE_OUT_OF_RANGE = 'HRS-111'
 
     # Config/broker (HRS-200-HRS-299)
     CONFIG_INVALID_QUEUE_MODE = 'HRS-200'
@@ -94,6 +103,11 @@ class ErrorCode(str, Enum):
     # check(live=True) was called on a thread that runs an event loop; the
     # live connectivity check did not run.
     CHECK_LIVE_ASYNC_CONTEXT = 'HRS-217'
+    # A worker profile in AppConfig.worker_profiles is not valid.
+    CONFIG_INVALID_WORKER_PROFILE = 'HRS-218'
+    # check(live=True): a worker profile needs more Postgres connections than
+    # the server allows, or the server limit could not be read.
+    CHECK_WORKER_CONNECTIONS = 'HRS-219'
 
     # Registry (HRS-300-HRS-399)
     TASK_NOT_REGISTERED = 'HRS-300'

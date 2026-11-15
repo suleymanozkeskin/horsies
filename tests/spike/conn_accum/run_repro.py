@@ -27,10 +27,10 @@ from typing import Any
 
 import psycopg
 
+from tests.spike.conn_accum.repro_app import PROCESSES, REPRO_PROFILE
 from tests.spike.conn_accum.repro_db import APP_ENGINE_APPLICATION_NAME
 from tests.spike.conn_accum.repro_tasks import app_db_task
 
-PROCESSES = 4
 BURST = 40
 SLEEP_MS = 500
 WARMUP_S = 5.0
@@ -82,7 +82,7 @@ def main() -> int:
         worker_cmd = os.environ.get('HORSIES_WORKER_CMD', 'uv run horsies').split()
         worker = subprocess.Popen(
             [*worker_cmd, 'worker', LOCATOR,
-             f'--processes={PROCESSES}', '--loglevel=warning'],
+             f'--profile={REPRO_PROFILE}', '--loglevel=warning'],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             text=True,

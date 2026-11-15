@@ -15,7 +15,7 @@ Runtime errors are returned via `TaskResult[T, TaskError]`. The `TaskError.error
 
 When a task reaches a terminal `FAILED` state with a `TaskResult(err=TaskError(...))`, the `error_code` is persisted to `horsies_tasks.error_code` for queryability. This column is `NULL` for successful and non-terminal tasks. Worker/process failures synthesize a `TaskResult(err=TaskError(...))` where possible, so `WORKER_CRASHED` and serialization failures are queryable. Access it via `TaskInfo.error_code` from `handle.info()`.
 
-Each execution attempt is also recorded in `horsies_task_attempts` with per-attempt `error_code`, `error_message`, and outcome. See [Retrieving Results](retrieving-results#task-metadata-and-attempt-history) for API usage.
+Each execution attempt is also recorded in `horsies_task_attempts` with per-attempt `error_code`, `error_message`, and outcome. See [Retrieving Results](/horsies/tasks/retrieving-results/#task-metadata-and-attempt-history) for API usage.
 
 ### TaskError
 
@@ -44,11 +44,14 @@ Errors from task execution, broker, and worker internals.
 | `WORKER_CRASHED` | Worker process died during execution | Yes, if in `auto_retry_for` |
 | `BROKER_ERROR` | Database or broker failure during operation | No |
 | `WORKER_RESOLUTION_ERROR` | Failed to resolve task by name | No |
-| `WORKER_SERIALIZATION_ERROR` | Failed to serialize/deserialize task data: the stored arguments, or a stored timeout that the worker cannot use. No user code ran. A stored-data cause does not clear on a retry | Yes, if in `auto_retry_for` |
+| `WORKER_SERIALIZATION_ERROR` | Failed to serialize/deserialize task data: the stored arguments, or a stored timeout (or the stored cancel grace of a `SHARED_ASYNC` row) that the worker cannot use. No user code ran. A stored-data cause does not clear on a retry | Yes, if in `auto_retry_for` |
 | `RESULT_DESERIALIZATION_ERROR` | A stored result or a stored workflow error is corrupt or could not be deserialized | No |
-| `WORKFLOW_ENQUEUE_FAILED` | Workflow node failed after READY->ENQUEUED transition during enqueue/build | No |
+| `WORKFLOW_ENQUEUE_FAILED` | Workflow node failed after it went to ENQUEUED, while its task was built or enqueued | No |
 | `SUBWORKFLOW_LOAD_FAILED` | Subworkflow definition could not be loaded | No |
 | `WORKFLOW_RECOVERY_LIMIT_REACHED` | Workflow recovery raised a persistent error in `workflow_recovery_failure_limit` reaper passes, so the workflow failed closed | No |
+| `SUBWORKFLOW_DEPTH_LIMIT_REACHED` | The engine did not start a child workflow, because its depth would pass 32 | No |
+| `TASK_BLOCKED_LOOP` | The task held the event loop of its shared async child for the block limit (5 s) or longer, before its `timeout_ms`. The worker killed the child. The retry runs in an isolated child. See [Shared Async Tasks](/horsies/workers/shared-async-tasks/#a-blocked-event-loop) | Yes, if in `auto_retry_for` |
+| `NEIGHBOUR_BLOCKED_LOOP` | Another task held the event loop of this task's shared async child for the block limit (5 s) or longer, before this task's `timeout_ms`. The worker killed the child, with this task in it. See [Shared Async Tasks](/horsies/workers/shared-async-tasks/#a-blocked-event-loop) | Yes, if in `auto_retry_for` |
 
 #### ContractCode
 
@@ -80,6 +83,7 @@ Errors from `handle.get()` / `get_async()`. These indicate issues retrieving the
 | `EVENT_LOOP_LIMIT` | The broker serves its limit of open event loops (5) and this is a new one; not cached, clears when one of those loops closes | No |
 | `ASYNC_CONTEXT` | Sync `get()` / `result_for()` was called on a thread that runs an event loop; nothing ran; not cached. Call `await handle.get_async()` / `result_for_async()` | No |
 | `INVALID_INPUT` | An argument of `get()` / `get_async()` was refused before any read, for example a `timeout_ms` that is negative, not an int, or above `MAX_TASK_TIMEOUT_MS` (4,294,967,295 ms); not cached | No |
+| `WAIT_INSIDE_TASK` | A result wait was called inside a worker child, where task bodies run; it waited for nothing; not cached. Compose the tasks with a workflow: see [Waiting for a Result Inside a Task](/horsies/concepts/result-handling/#waiting-for-a-result-inside-a-task) | No |
 
 #### OutcomeCode
 
@@ -90,7 +94,7 @@ Terminal outcome codes for tasks and workflows.
 | ---- | ----------- | ----------- |
 | `TASK_CANCELLED` | Task was cancelled before completion | No |
 | `TASK_EXPIRED` | Task's `good_until` deadline passed before execution started (PENDING or CLAIMED) | No |
-| `TASK_TIMEOUT` | Task exceeded its `timeout_ms` execution limit; the child process was killed | Yes, if in `auto_retry_for` |
+| `TASK_TIMEOUT` | Task exceeded its `timeout_ms` execution limit: the worker killed its child process, or, for a `SHARED_ASYNC` task on a shared async child, cancelled it and ended its work | Yes, if in `auto_retry_for` |
 | `WORKFLOW_PAUSED` | Workflow was paused | No |
 | `WORKFLOW_EXPIRED` | A paused workflow passed `paused_workflow_auto_cancel_after` and expired; `data` holds the policy name and the age | No |
 | `WORKFLOW_FAILED` | Workflow failed | No |
@@ -147,9 +151,10 @@ Three broker methods return a subset of `BrokerOperationError`, their only failu
 | `LOOP_RUNNER_FAILED` | A sync method could not run the call on the broker's sync runner: the runner is stopped, its thread did not start, or scheduling failed. Nothing ran. `close()` and `close_async()` stop the runner, and a stopped runner does not start again: call the `*_async` form or use a new broker | No |
 | `NO_TYPE_AVAILABLE` | Typed decode at the `app` layer needs an `ok_type`, but `task_name` is not in the local task registry | No |
 | `INVALID_JSON_PAYLOAD` | Stored result JSON is malformed, not a JSON object, has an invalid strict-serde envelope, or fails app-level typed slot decode | No |
-| `INVALID_TASK_OPTIONS` | `enqueue_async` received task options that are not valid JSON, or a `retry_policy` that does not validate as `RetryPolicy` (strict types, no unknown fields). The message names each failing field. Nothing was written | No |
+| `INVALID_TASK_OPTIONS` | `enqueue_async` received task options that are not valid JSON or not a JSON object, a `retry_policy` that does not validate as `RetryPolicy` (strict types, no unknown fields), an `execution` that is not an `Execution` value, or a `cancel_grace_ms` that does not fit the class (100 to 10,000 ms for `SHARED_ASYNC`, absent or null for the others). The message names each failing field. Nothing was written | No |
 | `INVALID_INPUT` | An argument was refused before anything ran: a non-positive `timeout_seconds`, `min_responses` or history `limit`, a `target_worker_id` that is not a string, both `enqueued_at` and `enqueue_delay_seconds`, a future `sent_at` without either, a naive `sent_at`, `enqueued_at` or `good_until`, malformed args or kwargs JSON, args that are not null or an empty array, kwargs that are not an object or null, an empty task or queue name, a priority outside 1..100, a negative `enqueue_delay_seconds`, an empty `retention_class_key`, or an idempotency key that is empty or over 255 bytes. Nothing was written | No |
 | `LISTENER_DISABLED` | The broker was built with `assume_initialized=True` and has no listener, so `ping_workers` cannot run. Nothing ran | No |
+| `WAIT_INSIDE_TASK` | A raw result read (`app.get_raw_result()`, `broker.get_raw_result_record()` or an `*_async` form) was called in a worker child, where task bodies run. Nothing ran. Compose the tasks with a workflow: see [Waiting for a Result Inside a Task](/horsies/concepts/result-handling/#waiting-for-a-result-inside-a-task) | No |
 
 #### BrokerOperationError
 
@@ -170,6 +175,7 @@ Three broker methods return a subset of `BrokerOperationError`, their only failu
 | `BrokerAsyncContext` | `ASYNC_CONTEXT` | – | `False` | Nothing ran |
 | `BrokerLoopRunnerFailed` | `LOOP_RUNNER_FAILED` | `exception` | `False` | Nothing ran |
 | `BrokerListenerDisabled` | `LISTENER_DISABLED` | – | `False` | Nothing ran |
+| `BrokerWaitInsideTask` | `WAIT_INSIDE_TASK` | – | `False` | Nothing ran |
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
@@ -217,7 +223,7 @@ Send errors are returned via `TaskSendResult[TaskHandle[T]]` from `.send()`, `.s
 
 #### TaskSendError
 
-`TaskSendError` is a union with one frozen variant per `TaskSendErrorCode` member. Each variant has only the fields of its failure, and `err.code` names its member. Match on the variant; a `match` that omits a variant fails pyright's exhaustiveness check. The handling pattern is in [Sending Tasks](./sending-tasks#retrying-failed-sends).
+`TaskSendError` is a union with one frozen variant per `TaskSendErrorCode` member. Each variant has only the fields of its failure, and `err.code` names its member. Match on the variant; a `match` that omits a variant fails pyright's exhaustiveness check. The handling pattern is in [Sending Tasks](/horsies/tasks/sending-tasks/#retrying-failed-sends).
 
 | Variant | `code` | Fields |
 | ------- | ------ | ------ |
@@ -285,7 +291,7 @@ For a validation failure, the cause names the field, the message and the type, n
 
 Workflow-specific error codes are distributed across the four families above:
 
-- **OperationalErrorCode**: `WORKFLOW_ENQUEUE_FAILED`, `SUBWORKFLOW_LOAD_FAILED`, `WORKFLOW_RECOVERY_LIMIT_REACHED`
+- **OperationalErrorCode**: `WORKFLOW_ENQUEUE_FAILED`, `SUBWORKFLOW_LOAD_FAILED`, `WORKFLOW_RECOVERY_LIMIT_REACHED`, `SUBWORKFLOW_DEPTH_LIMIT_REACHED`
 - **ContractCode**: `WORKFLOW_CTX_MISSING_ID`
 - **RetrievalCode**: `WORKFLOW_NOT_FOUND`
 - **OutcomeCode**: `WORKFLOW_PAUSED`, `WORKFLOW_EXPIRED`, `WORKFLOW_FAILED`, `WORKFLOW_CANCELLED`, `UPSTREAM_SKIPPED`, `SUBWORKFLOW_FAILED`, `WORKFLOW_SUCCESS_CASE_NOT_MET`, `WORKFLOW_OUTPUT_SKIPPED`
@@ -413,7 +419,7 @@ session_database_url appears to be transaction-pooled; LISTEN notification was n
 `LISTEN` + `NOTIFY` behavior probe did not deliver a notification. Use a direct
 Postgres URL or a session-pooling URL for `session_database_url`.
 
-See [PgBouncer Troubleshooting](../troubleshooting/pgbouncer) for the full
+See [PgBouncer Troubleshooting](/horsies/troubleshooting/pgbouncer/) for the full
 deployment pattern.
 
 ### Reserved Built-In Code Enforcement
@@ -507,6 +513,9 @@ The full list of reserved strings is available at runtime via `BUILTIN_CODE_REGI
 | HRS-033 | `WORKFLOW_INVALID_DEFINITION_CONFIG` | A `WorkflowDefinition` class defines `Meta`, or sets `config` to a value that is not a `WorkflowDefinitionConfig`; raised when the class is created |
 | HRS-034 | `WORKFLOW_INVALID_PRIORITY` | A `TaskNode` sets a `priority` outside 1–100; raised when the spec is built |
 | HRS-035 | `WORKFLOW_NAIVE_GOOD_UNTIL` | A `TaskNode` sets a naive `good_until` (no `tzinfo`); raised when the spec is built |
+| HRS-036 | `WORKFLOW_SUBWORKFLOW_DEPTH_LIMIT` | `horsies check`: a subworkflow nesting with no `waits_for` on its path would start a child workflow deeper than 32 |
+| HRS-037 | `WORKFLOW_SUBWORKFLOW_SELF_NESTING` | `horsies check`: a subworkflow includes itself with the same kwargs and with no `waits_for` between, so its nesting never ends |
+| HRS-038 | `WORKFLOW_TOO_MANY_NODES` | A `WorkflowSpec` has more than 10,000 nodes; raised when the spec is built |
 
 ### Task Definition (HRS-100-HRS-199)
 
@@ -519,7 +528,11 @@ The full list of reserved strings is available at runtime via `BUILTIN_CODE_REGI
 | HRS-103 | `TASK_INVALID_QUEUE` | Invalid queue specification |
 | HRS-104 | `TASK_PREDECORATED_NOT_SUPPORTED` | Task function is pre-decorated: it has a `__wrapped__` chain. Apply `@app.task()` to the raw function |
 | HRS-105 | `TASK_STRICT_SIGNATURE_VIOLATION` | Task signature fails the strict check: a parameter that is not keyword-only (`*args`, `**kwargs`, positional), a type that is not allowed (for example `Any`, a bare container, `set`, `bytes`), or a return type that is not `TaskResult[OkT, TaskError]` |
-| HRS-106 | `TASK_ASYNC_FUNCTION_NOT_SUPPORTED` | Task function is defined with `async def`; task functions must be sync |
+| HRS-107 | `TASK_SHARED_ASYNC_REQUIRES_ASYNC_DEF` | `execution=Execution.SHARED_ASYNC` on a function defined with `def`. Define it with `async def`, or use `SHARED_THREAD` |
+| HRS-108 | `TASK_SHARED_THREAD_REQUIRES_DEF` | `execution=Execution.SHARED_THREAD` on a function defined with `async def`. Define it with `def`, or use `SHARED_ASYNC` |
+| HRS-109 | `TASK_SHARED_EXECUTION_REQUIRES_TIMEOUT` | `SHARED_ASYNC` or `SHARED_THREAD` without `timeout_ms` |
+| HRS-110 | `TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC` | `cancel_grace_ms` with an execution class other than `SHARED_ASYNC` |
+| HRS-111 | `TASK_CANCEL_GRACE_OUT_OF_RANGE` | `cancel_grace_ms` outside `MIN_CANCEL_GRACE_MS` (100) to `MAX_CANCEL_GRACE_MS` (10,000) |
 
 ### Configuration (HRS-200-HRS-299)
 
@@ -539,11 +552,13 @@ The full list of reserved strings is available at runtime via `BUILTIN_CODE_REGI
 | HRS-210 | `MODULE_EXEC_ERROR` | Module raised an error during import |
 | HRS-211 | `BROKER_INIT_FAILED` | Broker failed to initialize |
 | HRS-212 | `CHECK_RESERVED_CODE_COLLISION` | User config value collides with a reserved built-in error code |
-| HRS-213 | `CONFIG_INVALID_BROKER_POOL` | Invalid worker pool bounds: `worker_pool_size` below 1, `worker_max_overflow` below 0, `worker_child_pool_min_size` below 0, `worker_child_pool_max_size` below 1, or a minimum above the maximum |
+| HRS-213 | `CONFIG_INVALID_BROKER_POOL` | A `PostgresConfig` that sets a pool field removed in 0.7.0: `worker_pool_size` or `worker_max_overflow` (the help names `WorkerProfile.pool`), or `worker_child_pool_min_size`, `worker_child_pool_max_size` or `worker_child_pool_check` (the help names the `pool` field of each child kind that replaces it) |
 | HRS-214 | `CONFIG_INVALID_CHILD_HOOK` | `on_child_process_start` received a value that is not callable, or an async function |
 | HRS-215 | `CONFIG_INVALID_KEEPALIVE` | Invalid TCP keepalive settings: a keepalive value below 1 while `tcp_keepalives` is on, or a negative `tcp_user_timeout_ms` |
 | HRS-216 | `CONFIG_INVALID_RETENTION` | Invalid retention configuration |
 | HRS-217 | `CHECK_LIVE_ASYNC_CONTEXT` | `check(live=True)` was called on a thread that runs an event loop; the live check did not run |
+| HRS-218 | `CONFIG_INVALID_WORKER_PROFILE` | A worker profile in `AppConfig.worker_profiles` is not valid: a name a `--profile` argument cannot carry, a profile with no children, a claim limit above the capacity of the worker, a child pool whose `min_size` is above its resolved `max_size`, or a `PoolSize` below 5 (`PARENT_POOL_MIN_CONNECTIONS`) for the pool of the worker process (`ParentPool.max_size`). The message names the profile and the field path |
+| HRS-219 | `CHECK_WORKER_CONNECTIONS` | `check(live=True)`: one worker of a profile opens more Postgres connections itself than the server has usable slots (the error also states what task code that sends adds: the `task_send_pool` of each child kind), or the server limit could not be read |
 
 ### Registry (HRS-300-HRS-399)
 

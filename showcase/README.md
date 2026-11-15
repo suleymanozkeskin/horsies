@@ -20,7 +20,7 @@ Everything runs from the repository root.
 uv run python -m showcase.acme.scenarios seed
 
 # terminal 1
-uv run horsies worker showcase.acme.app:app --processes 12
+uv run horsies worker showcase.acme.app:app --profile default
 
 # terminal 2
 uv run horsies scheduler showcase.acme.app:app
@@ -343,9 +343,10 @@ view:
 | `notifications` | 50 | 3 |
 | `analytics` | 90 | 2 |
 
-`--processes 12` gives about 1.6x headroom over steady mode's demand, and sits
-just under the sum of the caps, so a burst still drives them into a visible
-backlog while steady stays smooth.
+The `default` worker profile (`AppConfig.worker_profiles` in `app.py`) runs 12
+isolated children. That gives about 1.6x headroom over steady mode's demand,
+and sits just under the sum of the caps, so a burst still drives them into a
+visible backlog while steady stays smooth.
 
 Recovery is demo-tuned: worker snapshots every 10 s (so the CPU and memory
 charts move), the reaper polling at the same cadence, and terminal rows kept for

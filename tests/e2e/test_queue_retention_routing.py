@@ -78,7 +78,7 @@ def test_a_mapped_queue_lands_the_record_in_its_period_partition() -> None:
         # below races that startup deliberately. A gate here would wait
         # for the very condition under test and pass whether or not
         # startup provided it.
-        with run_worker(INSTANCE, processes=1, timeout=60.0):
+        with run_worker(INSTANCE, profile='isolated-1', timeout=60.0):
             sent = mapped_task.send(x=21)
             assert sent.is_ok(), sent
             task_id = sent.ok_value.task_id

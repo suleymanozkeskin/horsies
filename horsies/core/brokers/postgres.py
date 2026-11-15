@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio, hashlib, contextlib, os, random, threading, time, uuid
 from collections.abc import AsyncGenerator, Callable, Coroutine
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Final, Optional, TYPE_CHECKING, assert_never, cast
 from datetime import datetime, timedelta, timezone
 import psycopg
@@ -12,7 +13,9 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
     async_sessionmaker,
 )
-from sqlalchemy import text, select
+from sqlalchemy import create_engine, text, select
+from sqlalchemy.dialects.postgresql.psycopg import PGDialect_psycopg
+from sqlalchemy.engine import Engine
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from pydantic import ValidationError
 from horsies.core.brokers.listener import PostgresListener
@@ -34,6 +37,10 @@ from horsies.core.brokers.resources import (
     split_closed_loops,
 )
 from horsies.core.brokers.session_capability import probe_session_capability
+from horsies.core.brokers.class_coverage_reads import (
+    read_class_coverage,
+    read_class_report,
+)
 from horsies.core.brokers.result_types import (
     BrokerAsyncContext,
     BrokerEnqueueError,
@@ -51,6 +58,7 @@ from horsies.core.brokers.result_types import (
     BrokerPayloadMismatch,
     BrokerResult,
     BrokerSyncCallError,
+    BrokerWaitInsideTask,
     RawResultRecord,
 )
 from horsies.core.models.broker import PostgresConfig
@@ -65,13 +73,13 @@ from horsies.core.types.error_detail import NoCause
 from horsies.core.types.status import TaskStatus, TaskAttemptOutcome
 from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.codec.json_io import Json, loads_json, dumps_json
-from horsies.core.codec.task_options import stored_max_retries
+from horsies.core.codec.task_options import stored_execution, stored_max_retries
 from horsies.core.codec.validation_errors import (
     exception_text,
     validation_summary,
     without_validation_input,
 )
-from horsies.core.models.tasks import TaskInfo, TaskAttemptInfo
+from horsies.core.models.tasks import Execution, TaskInfo, TaskAttemptInfo
 from horsies.core.lifecycle.commands import (
     CancelOrphanedTasks,
     ExpirePendingTasks,
@@ -84,7 +92,16 @@ from horsies.core.lifecycle.outcomes import (
     SourceStateConflict,
     TaskAbsent,
 )
-from horsies.core.lifecycle.persistence import apply_async, apply_batch_async
+from horsies.core.lifecycle.persistence import (
+    LOCK_TASK_SQL,
+    apply_async,
+    apply_batch_async,
+)
+from horsies.core.models.class_coverage import (
+    ClassCoverage,
+    ClassReadRefused,
+    ClassReport,
+)
 from horsies.core.models.health import (
     WORKER_PING_CHANNEL,
     DatabasePing,
@@ -92,6 +109,8 @@ from horsies.core.models.health import (
     WorkerPongPayload,
     WorkerPingRequest,
     WorkerStateSnapshot,
+    parse_class_capacity,
+    parse_slot_health,
 )
 from horsies.core.history.errors import HistoryContractError
 from horsies.core.history.periods import RetentionClassKey
@@ -109,11 +128,18 @@ from horsies.core.history.cutover.state import (
     MARK_CUTOVER_COMPLETE_SQL,
     cutover_complete,
 )
+from horsies.core.defaults import PRE_PING_AFTER_IDLE_S
 from horsies.core.utils.db import (
     is_retryable_connection_error,
     SessionSettings,
     register_identity_text_reads,
+    register_idle_ping,
     register_session_settings,
+)
+from horsies.core.process_role import (
+    ProcessRole,
+    process_role,
+    wait_inside_task_message,
 )
 from horsies.core.utils.loop_runner import (
     LoopRunner,
@@ -121,6 +147,7 @@ from horsies.core.utils.loop_runner import (
     async_context_message,
     in_running_event_loop,
 )
+from horsies.core.utils.task_loop_registry import is_task_loop
 from horsies.core.utils.url import to_psycopg_url
 from horsies.core.utils.wait_timeout import wait_timeout_seconds
 
@@ -235,16 +262,28 @@ def _check_enqueue_timing(
     return Ok(None)
 
 
+@dataclass(frozen=True, slots=True)
+class _EnqueueOptions:
+    """The task options of one enqueue, and the columns read from them."""
+
+    value: Json
+    max_retries: int
+    execution: Execution
+
+
 def _parse_enqueue_task_options(
     task_name: str, task_options: str | None,
-) -> Result[tuple[Json, int], BrokerInvalidTaskOptions]:
-    """Parse task options to their value and retry limit.
+) -> Result[_EnqueueOptions, BrokerInvalidTaskOptions]:
+    """Parse task options to their value, retry limit and execution class.
 
     ``serialize_task_options()`` always produces this text, so malformed JSON
     is a bug, not a runtime condition, and it must not be silently swallowed.
+    No options store no retries and ``ISOLATED``.
     """
     if not task_options:
-        return Ok((None, 0))
+        return Ok(_EnqueueOptions(
+            value=None, max_retries=0, execution=Execution.ISOLATED,
+        ))
     opts_r = loads_json(task_options)
     if is_err(opts_r):
         return Err(BrokerInvalidTaskOptions(
@@ -258,7 +297,18 @@ def _parse_enqueue_task_options(
             message=f'task_options refused for {task_name}: {detail}',
             exception=NoCause(),
         ))
-    return Ok((opts_r.ok_value, retry_limit_r.ok_value))
+    execution_r = stored_execution(opts_r.ok_value)
+    if is_err(execution_r):
+        detail = execution_r.err_value.detail
+        return Err(BrokerInvalidTaskOptions(
+            message=f'task_options refused for {task_name}: {detail}',
+            exception=NoCause(),
+        ))
+    return Ok(_EnqueueOptions(
+        value=opts_r.ok_value,
+        max_retries=retry_limit_r.ok_value,
+        execution=execution_r.ok_value,
+    ))
 
 
 def _parse_enqueue_json(
@@ -347,6 +397,22 @@ def _loop_limit_err(
     )
 
 
+def _class_read_refused(
+    operation: str,
+    refused: ClassReadRefused,
+) -> Err[BrokerOperationFailed]:
+    """Stored data that a class read cannot decide on, or a bound it reached.
+
+    Not retryable: the same rows give the same answer. Nothing changed.
+    """
+    message = f'{operation} refused: {refused.reason}'
+    return _operation_failed(
+        BrokerErrorCode.MONITORING_QUERY_FAILED,
+        message,
+        ValueError(message),
+    )
+
+
 def _loop_runner_err(
     sync_call: str, exc: LoopRunnerError,
 ) -> Err[BrokerLoopRunnerFailed]:
@@ -372,6 +438,20 @@ def _async_context_err(
     return Err(
         BrokerAsyncContext(
             message=async_context_message(sync_call, async_call),
+        )
+    )
+
+
+def _wait_inside_task_err(
+    operation: str, task_id: str,
+) -> Err[BrokerWaitInsideTask]:
+    """Build the broker error for a result wait in a process that runs task bodies.
+
+    Nothing ran, and nothing waited.
+    """
+    return Err(
+        BrokerWaitInsideTask(
+            message=wait_inside_task_message(f'{operation} for task {task_id}'),
         )
     )
 
@@ -424,9 +504,7 @@ from horsies.core.schemas.indexes import (
     CREATE_TASK_ATTEMPTS_ERROR_CODE_INDEX_SQL,
     CREATE_TASK_ATTEMPTS_FINISHED_AT_INDEX_SQL,
     CREATE_TASKS_CLAIM_EXPIRED_INDEX_SQL,
-    CREATE_TASKS_CLAIM_PENDING_INDEX_SQL,
     CREATE_HEARTBEATS_SENT_AT_INDEX_SQL,
-    CREATE_TASKS_CLAIM_EXPIRED_ORDERED_INDEX_SQL,
     CREATE_TASKS_ENQUEUED_AT_INDEX_SQL,
     CREATE_TASKS_ERROR_CODE_INDEX_SQL,
     CREATE_TASKS_TASK_NAME_INDEX_SQL,
@@ -443,12 +521,14 @@ from horsies.core.schemas.migrations import (
     ADD_TERMINALIZATION_KIND_COLUMN_SQL,
     BACKFILL_TERMINAL_AT_SQL,
     CREATE_CLAIM_CANDIDATES_FUNCTION_SQL,
+    CREATE_CLAIM_PLAN_FUNCTION_SQL,
     CREATE_CLAIM_FUNCTION_SQL,
+    CREATE_CLAIM_IN_FLIGHT_FUNCTION_SQL,
     CREATE_OUTCOME_TYPE_SQL,
     CREATE_TERMINALIZATION_FUNCTIONS_SQL,
     DROP_TASKS_RETENTION_STATISTICS_SQL,
     CREATE_WORKFLOWS_RETENTION_STATISTICS_SQL,
-    DROP_CLAIM_FUNCTION_SQL,
+    DROP_PREVIOUS_CLAIM_FUNCTIONS_SQL,
     DROP_TERMINALIZATION_FUNCTIONS_SQL,
     VALIDATE_TERMINAL_AT_CHECK_SQL,
     VALIDATE_TERMINALIZATION_KIND_CHECK_SQL,
@@ -460,6 +540,9 @@ from horsies.core.schemas.migrations import (
     ADD_ERROR_CODE_COLUMN_SQL,
     ADD_TASK_FINALIZING_COLUMNS_SQL,
     ADD_TASK_TERMINAL_AT_COLUMN_SQL,
+    ADD_TASK_EXECUTION_COLUMN_SQL,
+    ADD_TASK_EXECUTION_CHECK_SQL,
+    VALIDATE_TASK_EXECUTION_CHECK_SQL,
     ADD_TASK_IS_WORKFLOW_TASK_COLUMN_SQL,
     ADD_TRANSITIONAL_CUTOVER_COLUMNS_SQL,
     ADD_ATTEMPT_SNAPSHOT_COLUMNS_SQL,
@@ -488,6 +571,8 @@ from horsies.core.schemas.migrations import (
     ADD_TASK_OPTIONS_COLUMN_SQL,
     ADD_WORKFLOW_SENT_AT_COLUMN_SQL,
     ADD_WORKER_STATES_CHILDREN_MEMORY_COLUMN_SQL,
+    ADD_WORKER_STATES_SLOTS_DOWN_COLUMN_SQL,
+    ADD_WORKER_STATES_CLASS_CAPACITY_COLUMN_SQL,
     ADD_DEFINITION_KEY_COLUMN_SQL,
     BACKFILL_TASK_IS_WORKFLOW_TASK_SQL,
     BACKFILL_ENQUEUE_SHA_SQL,
@@ -519,7 +604,9 @@ from horsies.core.schemas.recovery import (
     CREATE_RECOVERY_SCAN_CURSORS_SQL,
     CREATE_WORKFLOW_RECOVERY_FAILURES_SQL,
     SEED_RECOVERY_SCAN_CURSORS_SQL,
+    VALIDATE_CLAIM_INDEXES_SQL,
     VALIDATE_RECOVERY_INDEXES_SQL,
+    install_claim_indexes,
     install_recovery_indexes,
     remove_retired_indexes,
 )
@@ -605,7 +692,9 @@ _WORKER_STATE_COLUMNS = """
         memory_percent,
         cpu_percent,
         children_memory_mb,
-        worker_started_at
+        worker_started_at,
+        slots_down,
+        class_capacity
 """
 
 # Recursive skip-scan: one (worker_id, snapshot_at DESC) index probe per
@@ -818,8 +907,8 @@ ENQUEUE_INSERT_SQL = text("""
     INSERT INTO horsies_tasks (
         idempotency_key_digest, id, task_name, queue_name, priority,
         args, kwargs, status, sent_at, enqueued_at, good_until,
-        claimed, retry_count, max_retries, task_options, enqueue_sha,
-        is_workflow_task, created_at, updated_at,
+        claimed, retry_count, max_retries, task_options, execution,
+        enqueue_sha, is_workflow_task, created_at, updated_at,
         command_fingerprint_version, command_fingerprint,
         retention_class_key, retain_rerun_input, input_digest,
         prepared_rerun_input_disposition, prepared_rerun_input_version,
@@ -833,8 +922,8 @@ ENQUEUE_INSERT_SQL = text("""
             NOW() + COALESCE(:enqueue_delay, INTERVAL '0 seconds')
         ),
         :good_until,
-        FALSE, 0, :max_retries, :task_options, :enqueue_sha,
-        FALSE, NOW(), NOW(),
+        FALSE, 0, :max_retries, :task_options, :execution,
+        :enqueue_sha, FALSE, NOW(), NOW(),
         :command_fingerprint_version, :command_fingerprint,
         :retention_class_key, :retain_rerun_input, :input_digest,
         :prepared_rerun_input_disposition, :prepared_rerun_input_version,
@@ -845,9 +934,42 @@ ENQUEUE_INSERT_SQL = text("""
     RETURNING id
 """)
 
+ENQUEUE_INSERT_DRIVER_SQL: Final[str] = ENQUEUE_INSERT_SQL.compile(
+    dialect=PGDialect_psycopg(),
+).string
+"""``ENQUEUE_INSERT_SQL`` as the psycopg dialect sends it (``%(name)s``
+binds): the statement of a sync send on the caller's thread."""
 
-# Most open event loops, other than the broker's sync runner loop, that get
-# their own resource set. pytest-asyncio keeps one event loop open per
+
+class SyncSendRoute(Enum):
+    """Where a sync ``enqueue`` writes its row."""
+
+    CALLER_THREAD = 'caller_thread'
+    """On the calling thread, through the broker's sync send engine."""
+    LOOP_RUNNER = 'loop_runner'
+    """On the sync runner's event loop, through ``enqueue_async``."""
+
+
+class _InsertOutcome(Enum):
+    """What the INSERT of an unkeyed send did."""
+
+    INSERTED = 'inserted'
+    ID_TAKEN = 'id_taken'
+    """A row with the task id exists: the payload is compared next."""
+
+
+@dataclass(frozen=True, slots=True)
+class _SyncSendEngineNotOpen:
+    """No sync send ran yet, or the broker closed the engine."""
+
+
+@dataclass(frozen=True, slots=True)
+class _SyncSendEngineOpen:
+    engine: Engine
+
+
+# Most open event loops, other than the broker's sync runner loop and a worker
+# child's task loop, that get their own resource set. pytest-asyncio keeps one event loop open per
 # fixture scope (session, package, module, class, function), so one test
 # run can hold five open loops on one thread. A loop beyond the limit gets
 # EVENT_LOOP_LIMIT instead of one more connection pool.
@@ -922,6 +1044,12 @@ class PostgresBroker:
         self._loop_sets_lock = threading.Lock()
 
         self._initialized = assume_initialized
+        # The engine of the sync sends that run on the caller's thread
+        # (send_route), opened by the first such send.
+        self._sync_send_engine: _SyncSendEngineNotOpen | _SyncSendEngineOpen = (
+            _SyncSendEngineNotOpen()
+        )
+        self._sync_send_lock = threading.Lock()
         # True once this broker saw the staged result function. Only a
         # positive answer is kept: until a worker publishes the readers,
         # each result probe checks again.
@@ -945,6 +1073,7 @@ class PostgresBroker:
         )
         register_identity_text_reads(engine)
         register_session_settings(engine, self._runtime_session_settings())
+        self._register_pre_ping(engine)
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
         session_url = self.config.effective_session_database_url
@@ -959,6 +1088,7 @@ class PostgresBroker:
             # The session URL must keep session state (LISTEN, session
             # advisory locks), so it keeps session settings too.
             register_session_settings(session_async_engine, SessionSettings.KEPT)
+            self._register_pre_ping(session_async_engine)
             session_engine = SessionEngineSeparate(engine=session_async_engine)
         partition_maintenance = PartitionMaintenanceDatabase(
             session_async_engine,
@@ -990,8 +1120,9 @@ class PostgresBroker:
         Call once at a public entry point and pass the value to helpers.
         Each open event loop gets its own set, built on its first call
         without I/O (engines and the listener connect on first use). The
-        broker's sync runner loop always gets a set. Other loops get one up
-        to ``MAX_CALLER_EVENT_LOOPS``; a loop beyond that gets
+        broker's sync runner loop, and in a worker child the task loop,
+        always get a set. Other loops get one up to
+        ``MAX_CALLER_EVENT_LOOPS``; a loop beyond that gets
         ``Err(EventLoopLimit)`` and nothing runs.
 
         Each call also releases the sets of loops that closed, each bounded
@@ -1012,12 +1143,7 @@ class PostgresBroker:
         self, loop: asyncio.AbstractEventLoop, thread_name: str,
     ) -> Result[BrokerResources, EventLoopLimit]:
         """Find or build the set for ``loop``. No I/O; it never releases a set."""
-        role: LoopRole
-        match self._loop_runner.runs_on(loop):
-            case True:
-                role = LoopRole.SYNC_RUNNER
-            case False:
-                role = LoopRole.CALLER
+        role = self._loop_role(loop)
         with self._loop_sets_lock:
             decision = decide_for_loop(
                 self._loop_sets, loop, thread_name, role, MAX_CALLER_EVENT_LOOPS,
@@ -1035,6 +1161,16 @@ class PostgresBroker:
                     )
                     self._loop_sets = (*self._loop_sets, entry)
                     return Ok(resources)
+
+    def _loop_role(self, loop: asyncio.AbstractEventLoop) -> LoopRole:
+        """The sync runner loop of this broker, a task loop, or a caller loop."""
+        match (self._loop_runner.runs_on(loop), is_task_loop(loop)):
+            case (True, _):
+                return LoopRole.SYNC_RUNNER
+            case (False, True):
+                return LoopRole.TASK_LOOP
+            case (False, False):
+                return LoopRole.CALLER
 
     def _take_closed_loop_sets(self) -> tuple[LoopResources, ...]:
         """Remove and return the entries whose event loop is closed."""
@@ -1254,7 +1390,18 @@ class PostgresBroker:
         )
         register_identity_text_reads(engine)
         register_session_settings(engine, self._runtime_session_settings())
+        self._register_pre_ping(engine)
         return engine
+
+    def _register_pre_ping(self, engine: AsyncEngine | Engine) -> None:
+        """With ``pool_pre_ping`` on, ping a pooled connection of ``engine``
+        at checkout when it waited in the pool for longer than
+        ``PRE_PING_AFTER_IDLE_S``. No I/O at registration."""
+        match self.config.pool_pre_ping:
+            case True:
+                register_idle_ping(engine, PRE_PING_AFTER_IDLE_S)
+            case False:
+                pass
 
     @property
     def app(self) -> 'Horsies | None':
@@ -1362,7 +1509,8 @@ class PostgresBroker:
         # Create trigger
         await conn.execute(CREATE_TASK_NOTIFY_TRIGGER_SQL)
 
-        # TUI notification triggers (broader: fires on ANY status change)
+        # Monitoring notification triggers: every insert and every status
+        # change but the start (RUNNING)
         await conn.execute(CREATE_TASK_STATUS_NOTIFY_FUNCTION_SQL)
         await conn.execute(CREATE_TASK_STATUS_NOTIFY_TRIGGER_SQL)
         await conn.execute(CREATE_WORKER_STATE_NOTIFY_FUNCTION_SQL)
@@ -1580,18 +1728,44 @@ class PostgresBroker:
             )
             if await self._read_schema_version_if_exists(engine) >= SCHEMA_VERSION:
                 return
+            # v54: the column comes before the concurrent index build that
+            # reads it.
+            await self._add_task_execution_column(engine)
             await install_recovery_indexes(engine)
+            # v54: the class-keyed pending claim index.
+            # v55: the class-keyed expired claim index.
+            await install_claim_indexes(engine)
+            await self._activate_bounded_recovery(engine)
+            # After the version row commits, so a failed upgrade leaves the
+            # earlier claim function the indexes it reads:
             # v43: drop the task retention indexes that no query reads.
             # v45: drop the workflow-node indexes that the workflow-scoped
             # indexes make redundant.
+            # v55: drop the claim indexes that have no class in their key.
+            # A removal that fails here leaves those indexes until the next
+            # schema upgrade, which runs it again.
             await remove_retired_indexes(engine)
-            await self._activate_bounded_recovery(engine)
+
+    async def _add_task_execution_column(self, engine: AsyncEngine) -> None:
+        """Add horsies_tasks.execution and its value domain (v54), in one
+        transaction. Idempotent: the column is added only when absent, and the
+        CHECK only when its definition differs. The pass before this one stops
+        at v35 on a database past it, so v54 cannot live there.
+        """
+        async with engine.begin() as conn:
+            await conn.execute(ADD_TASK_EXECUTION_COLUMN_SQL)
+            await conn.execute(ADD_TASK_EXECUTION_CHECK_SQL)
+            await conn.execute(VALIDATE_TASK_EXECUTION_CHECK_SQL)
 
     async def _activate_bounded_recovery(self, engine: AsyncEngine) -> None:
         from horsies.core.history.terminalization.move import (
             bounded_cancel_orphan_sweep_ddl,
+            completion_batch_replacement_ddl,
+            failed_attempt_program_ddl,
+            locking_read_replacement_ddl,
             pause_abandon_replacement_ddl,
             terminal_snapshot_replacement_ddl,
+            workflow_success_program_ddl,
         )
         from horsies.core.history.ddl.column_rules import (
             DROP_SINGLE_COLUMN_CHECKS_DDL,
@@ -1608,10 +1782,17 @@ class PostgresBroker:
         async with engine.begin() as conn:
             await close_workflow_node_status_set(conn)
             await conn.execute(VALIDATE_RECOVERY_INDEXES_SQL)
-            # v39 on a database already past the v35 apply path: the claim
-            # pair keeps its signatures and return columns, so CREATE OR
-            # REPLACE installs the current bodies.
+            await conn.execute(VALIDATE_CLAIM_INDEXES_SQL)
+            # v55 on a database already past the v35 apply path: the claim
+            # pair before v55 has other signatures, so it is dropped by its
+            # exact argument types, and the current claim functions are
+            # installed.
+            for drop_claim_function in DROP_PREVIOUS_CLAIM_FUNCTIONS_SQL:
+                await conn.execute(drop_claim_function)
+            await conn.execute(CREATE_CLAIM_PLAN_FUNCTION_SQL)
             await conn.execute(CREATE_CLAIM_CANDIDATES_FUNCTION_SQL)
+            # v61: the in-flight count that horsies_claim calls.
+            await conn.execute(CREATE_CLAIM_IN_FLIGHT_FUNCTION_SQL)
             await conn.execute(CREATE_CLAIM_FUNCTION_SQL)
             uuid_identity = bool(
                 (await conn.execute(FRESH_IDENTITY_PREDICATE_SQL)).scalar_one()
@@ -1637,14 +1818,36 @@ class PostgresBroker:
                     await conn.execute(text(statement))
                 for statement in terminal_snapshot_replacement_ddl():
                     await conn.execute(text(statement))
+                # v56: the failed-attempt finish and the locking read of a
+                # RUNNING task, both with the advisory lock first.
+                for statement in failed_attempt_program_ddl():
+                    await conn.execute(text(statement))
                 # v46: the update trigger cannot send task_done here.
                 await conn.execute(text(DROP_TASK_NOTIFY_UPDATE_TRIGGER_SQL))
+                # v57: the batched plain-success completion.
+                for statement in completion_batch_replacement_ddl():
+                    await conn.execute(text(statement))
+                # v60: the completion and failure functions read their row by
+                # id alone and check the fence on the locked row.
+                for statement in locking_read_replacement_ddl():
+                    await conn.execute(text(statement))
+                # v58: the success of a workflow task in one statement,
+                # with the advisory lock first.
+                for statement in workflow_success_program_ddl():
+                    await conn.execute(text(statement))
+            # v59: the status update trigger skips the start (RUNNING). Both
+            # programs keep the trigger, so it is replaced on every database.
+            await conn.execute(CREATE_TASK_STATUS_NOTIFY_TRIGGER_SQL)
             # v49: the writers hold the single-column history rules.
             await conn.execute(text(DROP_SINGLE_COLUMN_CHECKS_DDL))
             # v51: the task retention statistics have no reader.
             await conn.execute(DROP_TASKS_RETENTION_STATISTICS_SQL)
             # v52: the stored count of the workflow recovery limit.
             await conn.execute(CREATE_WORKFLOW_RECOVERY_FAILURES_SQL)
+            # v53: the slots that a worker reports as down.
+            await conn.execute(ADD_WORKER_STATES_SLOTS_DOWN_COLUMN_SQL)
+            # v55: the capacity of each claim budget of a worker.
+            await conn.execute(ADD_WORKER_STATES_CLASS_CAPACITY_COLUMN_SQL)
             await conn.execute(
                 INSERT_SCHEMA_VERSION_SQL,
                 {'version': SCHEMA_VERSION},
@@ -1720,11 +1923,10 @@ class PostgresBroker:
             await conn.execute(ADD_TASK_TERMINAL_AT_COLUMN_SQL)
             await conn.execute(CREATE_TASKS_ERROR_CODE_INDEX_SQL)
 
-            # Migration (v3): claim-path indexes.
-            await conn.execute(CREATE_TASKS_CLAIM_PENDING_INDEX_SQL)
+            # Migration (v3): claim-path indexes. The ordered claim indexes
+            # carry the execution class since v55 and are built
+            # concurrently (install_claim_indexes).
             await conn.execute(CREATE_TASKS_CLAIM_EXPIRED_INDEX_SQL)
-            # Migration (v7): ordered walk for deep expired backlogs.
-            await conn.execute(CREATE_TASKS_CLAIM_EXPIRED_ORDERED_INDEX_SQL)
             await conn.execute(CREATE_TASKS_WORKER_STATUS_INDEX_SQL)
             await conn.execute(CREATE_WORKER_STATES_WORKER_SNAPSHOT_INDEX_SQL)
 
@@ -1762,8 +1964,13 @@ class PostgresBroker:
             # (claim-generation fence, C10); the return-type change requires
             # dropping the v10/v11 definition first.
             # Migration (v39): candidate selection moved into its own helper.
-            await conn.execute(DROP_CLAIM_FUNCTION_SQL)
+            # Migration (v55): per-class budgets; the earlier signatures go.
+            for drop_claim_function in DROP_PREVIOUS_CLAIM_FUNCTIONS_SQL:
+                await conn.execute(drop_claim_function)
+            await conn.execute(CREATE_CLAIM_PLAN_FUNCTION_SQL)
             await conn.execute(CREATE_CLAIM_CANDIDATES_FUNCTION_SQL)
+            # v61: the in-flight count that horsies_claim calls.
+            await conn.execute(CREATE_CLAIM_IN_FLIGHT_FUNCTION_SQL)
             await conn.execute(CREATE_CLAIM_FUNCTION_SQL)
 
             # Migration (v18): terminal_at completeness. Backfill first, then
@@ -2240,7 +2447,8 @@ class PostgresBroker:
         options_r = _parse_enqueue_task_options(task_name, task_options)
         if is_err(options_r):
             return options_r
-        task_options_value, max_retries = options_r.ok_value
+        parsed_options = options_r.ok_value
+        task_options_value = parsed_options.value
 
         # The cutover payload: command fingerprint, retention
         # snapshot, and the prepared rerun-input envelope, computed
@@ -2290,8 +2498,9 @@ class PostgresBroker:
                 enqueued_at=enqueued_at,
                 enqueue_delay_seconds=enqueue_delay_seconds,
                 good_until=good_until,
-                max_retries=max_retries,
+                max_retries=parsed_options.max_retries,
                 task_options=task_options,
+                execution=parsed_options.execution,
                 enqueue_sha=enqueue_sha,
                 scoped_key_digest=scoped_key_digest,
                 cutover_values=cutover.ok_value,
@@ -2315,6 +2524,7 @@ class PostgresBroker:
         good_until: Optional[datetime],
         max_retries: Json,
         task_options: Optional[str],
+        execution: Execution,
         enqueue_sha: str,
         scoped_key_digest: Optional[bytes],
         cutover_values: dict[str, Any],
@@ -2345,6 +2555,7 @@ class PostgresBroker:
             'good_until': good_until,
             'max_retries': max_retries,
             'task_options': task_options,
+            'execution': execution.value,
             'enqueue_sha': enqueue_sha,
             'command_fingerprint_version': (
                 cutover_values['command_fingerprint_version']
@@ -3014,10 +3225,17 @@ class PostgresBroker:
         - ``Err(BrokerOperationError(INVALID_JSON_PAYLOAD, ...))``:
           stored JSON failed strict parse (malformed, non-finite
           float, non-object envelope).
+        - ``Err(BrokerWaitInsideTask)``: the call runs in a process that
+          runs task bodies (a worker child). This is the first check: it
+          comes before the argument checks. Nothing ran.
         - ``Err(BrokerInvalidInput)``: ``timeout_ms`` is not None or an int
           from 0 to ``MAX_TASK_TIMEOUT_MS``. Nothing ran.
         - ``Err(...)`` with other codes for DB / listener failures.
         """
+        if process_role() is ProcessRole.RUNS_TASK_BODIES:
+            return _wait_inside_task_err(
+                'PostgresBroker.get_raw_result_record_async()', task_id,
+            )
         match wait_timeout_seconds(timeout_ms):
             case Err(err_value=refused):
                 return Err(BrokerInvalidInput(
@@ -3149,9 +3367,14 @@ class PostgresBroker:
         """Synchronous wrapper around ``get_raw_result_record_async``.
 
         Runs the async path on the broker's background event loop via
-        ``LoopRunner``. On a thread that runs an event loop it returns
-        ``Err(ASYNC_CONTEXT)`` and does no I/O.
+        ``LoopRunner``. In a process that runs task bodies it returns
+        ``Err(BrokerWaitInsideTask)`` first. On a thread that runs an event
+        loop it returns ``Err(ASYNC_CONTEXT)``. Neither does I/O.
         """
+        if process_role() is ProcessRole.RUNS_TASK_BODIES:
+            return _wait_inside_task_err(
+                'PostgresBroker.get_raw_result_record()', task_id,
+            )
         if in_running_event_loop():
             return _async_context_err(
                 'PostgresBroker.get_raw_result_record()',
@@ -3206,6 +3429,19 @@ class PostgresBroker:
         errors: list[BaseException] = [
             error for set_errors in per_set_errors for error in set_errors
         ]
+        with self._sync_send_lock:
+            sync_send_engine = self._sync_send_engine
+            self._sync_send_engine = _SyncSendEngineNotOpen()
+        match sync_send_engine:
+            case _SyncSendEngineOpen(engine=engine):
+                try:
+                    await asyncio.to_thread(engine.dispose)
+                except _DRIVER_ERRORS as exc:
+                    errors.append(exc)
+            case _SyncSendEngineNotOpen():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
         # If sync APIs started the LoopRunner, close_async should also tear it down
         # when called from any thread except the loop-runner thread itself.
         # stop() joins the runner thread (up to 2 s), so it runs on a worker
@@ -3471,8 +3707,30 @@ class PostgresBroker:
 
     @staticmethod
     def _row_to_worker_snapshot(row: Any) -> WorkerStateSnapshot:
-        """Map a worker-states row to a typed snapshot."""
+        """Map a worker-states row to a typed snapshot.
+
+        Raises:
+            ValueError: the stored ``slots_down`` or ``class_capacity`` does
+                not have the shape that the worker writes. The read methods
+                catch it and return ``MONITORING_QUERY_FAILED``.
+        """
         m = row._mapping
+        match parse_slot_health(m['slots_down'], m['processes']):
+            case Ok(slot_health):
+                pass
+            case Err(unreadable):
+                raise ValueError(
+                    f'worker {m["worker_id"]} snapshot at {m["snapshot_at"]}: '
+                    f'slots_down is unreadable: {unreadable.reason}',
+                )
+        match parse_class_capacity(m['class_capacity']):
+            case Ok(class_capacity):
+                pass
+            case Err(unreadable):
+                raise ValueError(
+                    f'worker {m["worker_id"]} snapshot at {m["snapshot_at"]}: '
+                    f'class_capacity is unreadable: {unreadable.reason}',
+                )
         return WorkerStateSnapshot(
             worker_id=m['worker_id'],
             snapshot_at=m['snapshot_at'],
@@ -3493,6 +3751,8 @@ class PostgresBroker:
             cpu_percent=m['cpu_percent'],
             children_memory_mb=m['children_memory_mb'],
             worker_started_at=m['worker_started_at'],
+            slot_health=slot_health,
+            class_capacity=class_capacity,
         )
 
     async def list_worker_states_async(self) -> BrokerResult[list[WorkerStateSnapshot]]:
@@ -3586,6 +3846,70 @@ class PostgresBroker:
                 exc,
             )
 
+    async def get_class_coverage_async(self) -> BrokerResult[ClassCoverage]:
+        """The fleet check: for each (queue, class) with PENDING rows, whether
+        a live worker serves it.
+
+        A worker is live while its latest snapshot is at most
+        ``WORKER_STATE_LIVE_WINDOW_S`` old. It serves a (queue, class) when
+        the queue is one of its queues and one of its budgets serves the
+        class. A live worker whose snapshot has no ``class_capacity`` is left
+        out and named in ``ClassCoverage.not_recorded``. Reads only.
+        ``Err(MONITORING_QUERY_FAILED)``: a database or network error, a live
+        snapshot whose ``class_capacity`` is unreadable, or a read that
+        reached its bound (``retryable`` is ``False`` for the last two).
+        ``Err(EVENT_LOOP_LIMIT)``: nothing ran. A code defect raises.
+        """
+        match await self.select_resources():
+            case Err(loop_limit):
+                return _loop_limit_err('get_class_coverage', loop_limit)
+            case Ok(resources):
+                pass
+        try:
+            async with resources.session_factory() as session:
+                read = await read_class_coverage(session)
+        except _DRIVER_ERRORS as exc:
+            return _operation_failed(
+                BrokerErrorCode.MONITORING_QUERY_FAILED,
+                f'get_class_coverage failed: {exc}',
+                exc,
+            )
+        match read:
+            case Ok(coverage):
+                return Ok(coverage)
+            case Err(refused):
+                return _class_read_refused('get_class_coverage', refused)
+
+    async def get_class_report_async(self) -> BrokerResult[ClassReport]:
+        """Pending streams with the wait of their oldest due row and their
+        coverage, and the budget load of each live worker.
+
+        A live worker whose snapshot has no ``class_capacity`` is left out
+        and named in ``ClassReport.not_recorded``. Reads only.
+        ``Err(MONITORING_QUERY_FAILED)``: as ``get_class_coverage_async``, or
+        a live worker holds rows of a class that its recorded budgets do not
+        serve.
+        """
+        match await self.select_resources():
+            case Err(loop_limit):
+                return _loop_limit_err('get_class_report', loop_limit)
+            case Ok(resources):
+                pass
+        try:
+            async with resources.session_factory() as session:
+                read = await read_class_report(session)
+        except _DRIVER_ERRORS as exc:
+            return _operation_failed(
+                BrokerErrorCode.MONITORING_QUERY_FAILED,
+                f'get_class_report failed: {exc}',
+                exc,
+            )
+        match read:
+            case Ok(report):
+                return Ok(report)
+            case Err(refused):
+                return _class_read_refused('get_class_report', refused)
+
     async def get_expired_tasks(self) -> BrokerResult[list[dict[str, Any]]]:
         """Find tasks that expired before worker processing."""
         match await self.select_resources():
@@ -3614,8 +3938,11 @@ class PostgresBroker:
 
         Two-phase approach:
         1. Lightweight scan: identify stale task IDs (no lock hold after scan).
-        2. Per-task processing: re-acquire FOR UPDATE lock, re-read fresh state,
-           then upsert attempt + transition — all within one transaction per task.
+        2. Per-task processing: take the task advisory lock, then the row
+           lock, re-read fresh state, then upsert attempt + transition — all
+           within one transaction per task. The advisory lock goes first, as
+           in every move function, so this transaction cannot deadlock with
+           a finalize of the same task.
 
         This avoids holding row locks across the entire batch while still
         preventing races with concurrent worker finalizers.
@@ -3665,9 +3992,11 @@ class PostgresBroker:
             for task_id in candidate_ids:
                 try:
                     async with resources.session_factory() as session:
-                        # Lock the row and re-read current state (fresh db_now).
-                        # If the row is no longer RUNNING, a worker finalized it
-                        # between scan and now — skip it.
+                        # Advisory lock, then lock the row and re-read current
+                        # state (fresh db_now). If the row is no longer
+                        # RUNNING, a worker finalized it between scan and now
+                        # — skip it.
+                        await session.execute(LOCK_TASK_SQL, {'task_id': task_id})
                         ctx_result = await session.execute(
                             SELECT_STALE_TASK_FOR_UPDATE_SQL,
                             {
@@ -4074,6 +4403,151 @@ class PostgresBroker:
 
     # ----------------- Sync API Facades -----------------
 
+    def send_route(self, idempotency_key: Optional[str]) -> SyncSendRoute:
+        """Where a sync ``enqueue`` writes its row. Pure.
+
+        ``CALLER_THREAD`` for an unkeyed send of a process that runs no task
+        bodies, once this broker's schema is initialized. A send with an
+        idempotency key takes a key reservation in a transaction, and the
+        first send may run the schema setup: both stay on the loop runner.
+        Task code in a worker child sends through the child's
+        ``task_send_pool``, which the worker profile counts exactly, so it
+        stays on the loop runner too.
+        """
+        match (process_role(), idempotency_key, self._initialized):
+            case (ProcessRole.RUNS_NO_TASK_BODIES, None, True):
+                return SyncSendRoute.CALLER_THREAD
+            case _:
+                return SyncSendRoute.LOOP_RUNNER
+
+    def _sync_send_engine_open(self) -> Engine:
+        """The engine of the sync sends, opened on first use: the runtime
+        engine's URL, pool sizes, connect args and session settings, in
+        autocommit, and the idle ping of ``pool_pre_ping``. Thread-safe. No
+        I/O: connections open on first checkout."""
+        with self._sync_send_lock:
+            match self._sync_send_engine:
+                case _SyncSendEngineOpen(engine=engine):
+                    return engine
+                case _SyncSendEngineNotOpen():
+                    pass
+                case _ as unreachable:
+                    assert_never(unreachable)
+            engine = create_engine(
+                self.config.database_url.get_secret_value(),
+                **self._runtime_engine_config(),
+                isolation_level='AUTOCOMMIT',
+            )
+            register_session_settings(engine, self._runtime_session_settings())
+            self._register_pre_ping(engine)
+            self._sync_send_engine = _SyncSendEngineOpen(engine)
+            return engine
+
+    def _insert_on_caller_thread(self, insert_params: dict[str, Any]) -> _InsertOutcome:
+        """Run the unkeyed enqueue INSERT on this thread, one statement in
+        autocommit. Raises what the driver and SQLAlchemy raise: the caller
+        classifies it, as on the async path."""
+        engine = self._sync_send_engine_open()
+        with engine.connect() as connection:
+            row = connection.exec_driver_sql(
+                ENQUEUE_INSERT_DRIVER_SQL, insert_params,
+            ).fetchone()
+        match row:
+            case None:
+                return _InsertOutcome.ID_TAKEN
+            case _:
+                return _InsertOutcome.INSERTED
+
+    def _enqueue_on_caller_thread(
+        self,
+        task_name: str,
+        queue_name: str,
+        *,
+        task_id: str,
+        enqueue_sha: str,
+        args_json: str | None,
+        kwargs_json: str | None,
+        priority: int,
+        sent_at: Optional[datetime],
+        enqueued_at: Optional[datetime],
+        enqueue_delay_seconds: Optional[int],
+        good_until: Optional[datetime],
+        task_options: Optional[str],
+        retention_class_key: RetentionClassKey | None,
+        retain_rerun_input: Optional[bool],
+    ) -> Result[str, BrokerEnqueueError | BrokerSyncCallError]:
+        """The unkeyed path of ``enqueue_async``, on the calling thread: the
+        same row, the same statement and the same error classification. A
+        task id that is taken is compared on the loop runner
+        (``_verify_enqueue_conflict``)."""
+        resolved_retention_class_key = resolve_retention_class_key(
+            retention_class_key
+        )
+        if retain_rerun_input is None:
+            retain_rerun_input = self.config.retain_rerun_input_default
+        prepared_r = self._prepare_enqueue(
+            task_id=task_id,
+            enqueue_sha=enqueue_sha,
+            task_name=task_name,
+            queue_name=queue_name,
+            priority=priority,
+            args_json=args_json,
+            kwargs_json=kwargs_json,
+            sent_at=sent_at,
+            enqueued_at=enqueued_at,
+            enqueue_delay_seconds=enqueue_delay_seconds,
+            good_until=good_until,
+            task_options=task_options,
+            retention_class_key=resolved_retention_class_key,
+            retain_rerun_input=retain_rerun_input,
+            idempotency_key=None,
+        )
+        if is_err(prepared_r):
+            return prepared_r
+        prepared = prepared_r.ok_value
+        assert prepared.scoped_key_digest is None, 'an unkeyed send has no key'
+        try:
+            outcome = self._insert_on_caller_thread(prepared.insert_params)
+        except _ENQUEUE_WRITE_ERRORS as exc:
+            return _enqueue_failed(
+                f'Failed to enqueue task {task_name}: {exc}',
+                exc,
+            )
+        match outcome:
+            case _InsertOutcome.INSERTED:
+                return Ok(task_id)
+            case _InsertOutcome.ID_TAKEN:
+                pass
+        try:
+            return self.run_sync(
+                self._verify_taken_task_id, task_id, enqueue_sha, task_name,
+            )
+        except LoopRunnerError as exc:
+            return _loop_runner_err(f'PostgresBroker.enqueue({task_name!r})', exc)
+
+    async def _verify_taken_task_id(
+        self,
+        task_id: str,
+        enqueue_sha: str,
+        task_name: str,
+    ) -> Result[str, BrokerEnqueueError]:
+        """``_verify_enqueue_conflict`` on this loop's resource set, for a
+        sync send whose INSERT found the task id taken."""
+        match await self.select_resources():
+            case Err(loop_limit):
+                return _loop_limit_err('enqueue', loop_limit)
+            case Ok(resources):
+                pass
+        try:
+            return await self._verify_enqueue_conflict(
+                resources, task_id, enqueue_sha, task_name,
+            )
+        except _ENQUEUE_WRITE_ERRORS as exc:
+            return _enqueue_failed(
+                f'Failed to enqueue task {task_name}: {exc}',
+                exc,
+            )
+
     def enqueue(
         self,
         task_name: str,
@@ -4093,15 +4567,37 @@ class PostgresBroker:
         retention_class_key: RetentionClassKey | None = DEFAULT_RETENTION_CLASS_KEY,
         retain_rerun_input: Optional[bool] = None,
     ) -> Result[str, BrokerEnqueueError | BrokerSyncCallError]:
-        """Synchronous task submission (runs enqueue_async in background loop).
+        """Synchronous task submission, with the outcomes of ``enqueue_async``.
 
-        On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
-        and writes nothing.
+        ``send_route`` decides where the row is written: on the calling
+        thread, or on the sync runner's loop through ``enqueue_async``. On a
+        thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)`` and
+        writes nothing.
         """
         if in_running_event_loop():
             return _async_context_err(
                 'PostgresBroker.enqueue()', 'broker.enqueue_async(...)',
             )
+        match self.send_route(idempotency_key):
+            case SyncSendRoute.CALLER_THREAD:
+                return self._enqueue_on_caller_thread(
+                    task_name,
+                    queue_name,
+                    task_id=task_id,
+                    enqueue_sha=enqueue_sha,
+                    args_json=args_json,
+                    kwargs_json=kwargs_json,
+                    priority=priority,
+                    sent_at=sent_at,
+                    enqueued_at=enqueued_at,
+                    enqueue_delay_seconds=enqueue_delay_seconds,
+                    good_until=good_until,
+                    task_options=task_options,
+                    retention_class_key=retention_class_key,
+                    retain_rerun_input=retain_rerun_input,
+                )
+            case SyncSendRoute.LOOP_RUNNER:
+                pass
         try:
             return self.run_sync(
                 self.enqueue_async,
@@ -4310,6 +4806,7 @@ class PostgresBroker:
                     'worker_pid',
                     'worker_process_name',
                     'error_code',
+                    'execution',
                 ]
                 if include_result:
                     base_columns.append('result')
@@ -4377,6 +4874,10 @@ class PostgresBroker:
                 worker_process_name = row[idx]
                 idx += 1
                 error_code_value = row[idx]
+                idx += 1
+                # The CHECK on the column holds the domain. A value outside
+                # it raises here, and the read fails as a query failure.
+                execution = Execution(row[idx])
                 idx += 1
 
                 if include_result:
@@ -4466,6 +4967,7 @@ class PostgresBroker:
                         result_decoded=False,
                         failed_reason=failed_reason,
                         attempts=attempts,
+                        execution=execution,
                     )
                 )
         except Exception as exc:

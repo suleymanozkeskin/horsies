@@ -90,7 +90,7 @@ async def test_subworkflow_child_binds_queue_priority_and_claim_order(
 
     with run_worker(
         PB_INSTANCE,
-        processes=4,
+        profile='isolated-4',
         ready_check=_ready_check(),
     ):
         # 1. Occupy the single serial slot so scrape + direct queue behind it.

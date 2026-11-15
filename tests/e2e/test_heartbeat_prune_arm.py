@@ -154,7 +154,7 @@ def test_a_booted_worker_drops_an_overdue_leaf() -> None:
 
         with run_worker(
             INSTANCE,
-            processes=1,
+            profile='isolated-1',
             timeout=90.0,
             ready_check=_leaf_is_gone,
         ):

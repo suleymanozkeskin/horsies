@@ -22,6 +22,7 @@ from tests.e2e.tasks import instance_child_isolation_prefetch
 from tests.e2e.tasks import instance_custom
 from tests.e2e.tasks import instance_cluster_cap
 from tests.e2e.tasks import instance_recovery
+from tests.e2e.tasks import instance_left_work_marker
 from tests.e2e.tasks import instance_softcap
 from tests.e2e.tasks import instance_requeue_guard
 from tests.e2e.tasks import instance_scheduler
@@ -107,6 +108,17 @@ async def cluster_cap_broker() -> AsyncGenerator[PostgresBroker, None]:
 async def recovery_broker() -> AsyncGenerator[PostgresBroker, None]:
     """Broker instance with fast recovery thresholds for crash-detection tests."""
     brk = instance_recovery.broker
+    await _initialize_session_broker(brk)
+    yield brk
+    closed = await brk.close_async()
+    assert is_ok(closed), closed
+
+
+@pytest_asyncio.fixture(scope='session', loop_scope='session')
+async def left_work_marker_broker() -> AsyncGenerator[PostgresBroker, None]:
+    """Broker instance with small recovery thresholds for the finalizing
+    marker of an isolated async task that leaves work."""
+    brk = instance_left_work_marker.broker
     await _initialize_session_broker(brk)
     yield brk
     closed = await brk.close_async()

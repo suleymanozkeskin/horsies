@@ -14,7 +14,7 @@ the two cannot drift.
 from __future__ import annotations
 
 import dataclasses
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import get_args
 
 import pytest
@@ -52,6 +52,7 @@ from tests.lifecycle_matrix import MATRIX
 pytestmark = [pytest.mark.unit]
 
 _GENERATION = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+_LATER_GENERATION = _GENERATION + timedelta(seconds=1)
 _RESULT = '{"ok": null}'
 _OWNED = OwnedClaim(worker_id='w1', claimed_at=_GENERATION)
 _BATCH = OwnedClaimBatch(worker_id='w1', claim_generations=(('t1', _GENERATION),))
@@ -254,16 +255,16 @@ class TestClaimBatchPreconditions:
         with pytest.raises(ValueError, match='duplicate task id'):
             OwnedClaimBatch(
                 worker_id='w1',
-                claim_generations=(('t1', _GENERATION), ('t1', None)),
+                claim_generations=(('t1', _GENERATION), ('t1', _LATER_GENERATION)),
             )
 
     def test_distinct_task_ids_are_accepted(self) -> None:
         batch = OwnedClaimBatch(
             worker_id='w1',
-            claim_generations=(('t1', _GENERATION), ('t2', None)),
+            claim_generations=(('t1', _GENERATION), ('t2', _LATER_GENERATION)),
         )
         assert batch.task_ids() == ('t1', 't2')
-        assert batch.generations() == (_GENERATION, None)
+        assert batch.generations() == (_GENERATION, _LATER_GENERATION)
 
 
 class TestDiscoveryBatchPreconditions:

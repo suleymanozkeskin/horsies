@@ -21,6 +21,10 @@ from horsies.core.worker.worker import Worker
 from tests.integration.conftest import compute_test_enqueue_sha
 from tests.broker_resources_support import current_resources
 
+# The claim generation of every row seeded here, which the fences of the
+# worker check.
+CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
+
 
 async def _seed_orphaned_claimed_workflow_task(
     session: AsyncSession,
@@ -45,7 +49,7 @@ async def _seed_orphaned_claimed_workflow_task(
             ) VALUES (
                 :id, 'workflow_join_barrier', 'default', 100, '[]', '{}',
                 'CLAIMED', :sent_at, NOW(), NOW(), NOW(),
-                TRUE, NOW(), :worker_id, NOW() + INTERVAL '5 minutes',
+                TRUE, :claimed_at, :worker_id, NOW() + INTERVAL '5 minutes',
                 0, 0, :enqueue_sha, TRUE,
                 'standard_30d', 1,
                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
@@ -55,6 +59,7 @@ async def _seed_orphaned_claimed_workflow_task(
         {
             'id': task_id,
             'sent_at': sent_at,
+            'claimed_at': CLAIMED_AT,
             'worker_id': worker_id,
             'enqueue_sha': enqueue_sha,
         },
@@ -184,6 +189,7 @@ async def test_workflow_check_failed_cancels_orphan_and_frees_budget(
         task_name='workflow_join_barrier',
         queue_name='default',
         is_workflow_task=True,
+        claimed_at=CLAIMED_AT,
     )
 
     assert is_ok(result)
@@ -233,6 +239,7 @@ async def test_workflow_check_failed_disabled_leaves_orphan_claimed(
         task_name='workflow_join_barrier',
         queue_name='default',
         is_workflow_task=True,
+        claimed_at=CLAIMED_AT,
     )
 
     assert is_ok(result)
@@ -276,6 +283,7 @@ async def test_finalize_does_not_cancel_a_task_with_a_runnable_node_link(
         task_name='workflow_join_barrier',
         queue_name='default',
         is_workflow_task=True,
+        claimed_at=CLAIMED_AT,
     )
 
     assert is_ok(result)

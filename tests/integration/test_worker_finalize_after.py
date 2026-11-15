@@ -37,13 +37,17 @@ from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.current import set_current_app
 from horsies.core.worker.runtime import _RequeueOutcome
+from horsies.core.worker.child_protocol import SeatFinished
 from horsies.core.worker.slots import (
     ChildLost,
     KilledBySignal,
     LossCause,
+    LostAfterReturn,
     NotDispatched,
     NotRunCause,
 )
+from horsies.core.worker.stored_timeout import TaskTimeout
+from horsies.core.worker.task_loop import TaskLoop
 from horsies.core.worker.worker import (
     Worker,
     _FinalizeError,
@@ -62,7 +66,12 @@ from tests.integration.conftest import (
     start_ok,
 )
 from tests.broker_resources_support import listener_of
-from tests.fixtures.slots.handles import finished_handle, task_finished_handle
+from tests.fixtures.slots.handles import (
+    HANDLE_CLAIMED_AT,
+    finished_handle,
+    task_finished_handle,
+)
+from tests.fixtures.run_return import wire_of
 
 pytestmark = [pytest.mark.integration]
 
@@ -120,8 +129,59 @@ def _make_worker(engine: AsyncEngine) -> Worker:
     return worker
 
 
-async def _insert_running_task(session: AsyncSession) -> str:
-    """Insert a minimal horsies_tasks row in RUNNING state."""
+async def _link_workflow_node(
+    session: AsyncSession, task_id: str, task_name: str
+) -> None:
+    """Make ``task_id`` the task of a RUNNING node of a RUNNING workflow, as
+    the claim of a workflow task and its start leave it."""
+    workflow_id = str(uuid.uuid4())
+    await session.execute(
+        text("""
+            UPDATE horsies_tasks
+            SET is_workflow_task = TRUE,
+                prepared_rerun_input_disposition = 'NEVER_ELIGIBLE'
+            WHERE id = CAST(:id AS uuid)
+        """),
+        {'id': task_id},
+    )
+    await session.execute(
+        text("""
+            INSERT INTO horsies_workflows
+                (id, name, status, on_error, depth, root_workflow_id,
+                 sent_at, created_at, started_at, updated_at)
+            VALUES (:wf, 'finalize_after_wf', 'RUNNING', 'FAIL', 0, :wf,
+                    NOW(), NOW(), NOW(), NOW())
+        """),
+        {'wf': workflow_id},
+    )
+    await session.execute(
+        text("""
+            INSERT INTO horsies_workflow_tasks
+                (id, workflow_id, task_index, node_id, task_name, task_args,
+                 task_kwargs, queue_name, priority, dependencies,
+                 allow_failed_deps, join_type, is_subworkflow, status,
+                 task_id, created_at)
+            VALUES (:id, :wf, 0, 'node-0', :task_name, '[]', '{}', 'default',
+                    100, '{}', FALSE, 'all', FALSE, 'RUNNING',
+                    CAST(:task_id AS uuid), NOW())
+        """),
+        {
+            'id': str(uuid.uuid4()),
+            'wf': workflow_id,
+            'task_name': task_name,
+            'task_id': task_id,
+        },
+    )
+
+
+async def _insert_running_task(
+    session: AsyncSession, *, is_workflow_task: bool = True
+) -> str:
+    """Insert a minimal horsies_tasks row in RUNNING state.
+
+    A workflow task, with its node, unless ``is_workflow_task`` is False:
+    ``_finalize_after`` takes a workflow task unless told otherwise.
+    """
     task_id = str(uuid.uuid4())
     sent_at, sha = compute_test_enqueue_sha(task_name='finalize_after_test')
     await session.execute(
@@ -130,6 +190,7 @@ async def _insert_running_task(session: AsyncSession) -> str:
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
                  max_retries, started_at, enqueue_sha, claimed_by_worker_id,
+                 claimed_at,
                  retention_class_key, command_fingerprint_version,
                  command_fingerprint, retain_rerun_input,
                  prepared_rerun_input_disposition)
@@ -137,6 +198,7 @@ async def _insert_running_task(session: AsyncSession) -> str:
                 (:id, 'finalize_after_test', 'default', 100, '[]', '{}',
                  'RUNNING', :sent_at, NOW(), NOW(), FALSE, 0,
                  0, NOW(), :enqueue_sha, :claimed_by_worker_id,
+                 :claimed_at,
                  'standard_30d', 1,
                  sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
                  FALSE, 'DECLINED_BY_POLICY')
@@ -146,14 +208,20 @@ async def _insert_running_task(session: AsyncSession) -> str:
             'sent_at': sent_at,
             'enqueue_sha': sha,
             'claimed_by_worker_id': TEST_WORKER_ID,
+            'claimed_at': HANDLE_CLAIMED_AT,
         },
     )
+    if is_workflow_task:
+        await _link_workflow_node(session, task_id, 'finalize_after_test')
     await session.commit()
     return task_id
 
 
-async def _insert_owned_running_task(session: AsyncSession, worker_id: str) -> str:
-    """Insert a RUNNING task owned by a specific worker."""
+async def _insert_owned_running_task(
+    session: AsyncSession, worker_id: str, *, is_workflow_task: bool = True
+) -> str:
+    """Insert a RUNNING task owned by a specific worker; a workflow task, with
+    its node, unless ``is_workflow_task`` is False."""
     task_id = str(uuid.uuid4())
     sent_at, sha = compute_test_enqueue_sha(task_name='finalize_after_owned_test')
     await session.execute(
@@ -162,7 +230,7 @@ async def _insert_owned_running_task(session: AsyncSession, worker_id: str) -> s
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
                  max_retries, started_at, enqueue_sha, claimed_by_worker_id,
-                 worker_hostname, worker_pid, worker_process_name,
+                 claimed_at, worker_hostname, worker_pid, worker_process_name,
                  retention_class_key, command_fingerprint_version,
                  command_fingerprint, retain_rerun_input,
                  prepared_rerun_input_disposition)
@@ -170,7 +238,7 @@ async def _insert_owned_running_task(session: AsyncSession, worker_id: str) -> s
                 (:id, 'finalize_after_owned_test', 'default', 100, '[]', '{}',
                  'RUNNING', :sent_at, NOW(), NOW(), FALSE, 0,
                  0, NOW(), :enqueue_sha, :worker_id,
-                 'stale-host', 1234, 'stale-process',
+                 :claimed_at, 'stale-host', 1234, 'stale-process',
                  'standard_30d', 1,
                  sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
                  FALSE, 'DECLINED_BY_POLICY')
@@ -180,8 +248,11 @@ async def _insert_owned_running_task(session: AsyncSession, worker_id: str) -> s
             'sent_at': sent_at,
             'enqueue_sha': sha,
             'worker_id': worker_id,
+            'claimed_at': HANDLE_CLAIMED_AT,
         },
     )
+    if is_workflow_task:
+        await _link_workflow_node(session, task_id, 'finalize_after_owned_test')
     await session.commit()
     return task_id
 
@@ -205,6 +276,7 @@ _LOST = ChildLost(
     cause=LossCause.CHILD_DIED,
     child_exit=KilledBySignal(9),
     partial_frame=False,
+    pid=4242,
 )
 
 
@@ -255,6 +327,7 @@ async def test_happy_path_success_completes_and_clears(
 
     result = await worker._finalize_after(
         handle, task_id, task_name='finalize_after_test',
+        claimed_at=HANDLE_CLAIMED_AT,
     )
 
     assert is_ok(result)
@@ -286,6 +359,7 @@ async def test_phase1_skip_returns_ok_none(
 
     result = await worker._finalize_after(
         handle, task_id, task_name='finalize_after_test',
+        claimed_at=HANDLE_CLAIMED_AT,
     )
 
     assert is_ok(result)
@@ -323,6 +397,7 @@ async def test_phase1_err_propagated_with_finalize_context(
 
     result = await worker._finalize_after(
         handle, task_id, task_name='finalize_after_test',
+        claimed_at=HANDLE_CLAIMED_AT,
     )
 
     assert is_err(result)
@@ -333,7 +408,7 @@ async def test_phase1_err_propagated_with_finalize_context(
         'queue_name': 'default',
         'is_workflow_task': True,
         'task_name': 'finalize_after_test',
-        'claimed_at': None,
+        'claimed_at': HANDLE_CLAIMED_AT,
     }
     worker._finalize_workflow_phase.assert_not_awaited()
 
@@ -363,6 +438,7 @@ async def test_phase2_err_propagated_but_db_stays_terminal(
 
     result = await worker._finalize_after(
         handle, task_id, task_name='finalize_after_test',
+        claimed_at=HANDLE_CLAIMED_AT,
     )
 
     assert is_err(result)
@@ -391,6 +467,7 @@ async def test_child_lost_returns_err(
 
     result = await worker._finalize_after(
         finished_handle(_LOST), task_id, task_name='finalize_after_test',
+        claimed_at=HANDLE_CLAIMED_AT,
     )
 
     assert is_err(result)
@@ -416,6 +493,7 @@ async def test_child_lost_with_recovery_db_error_stays_retryable(
 
     result = await worker._finalize_after(
         finished_handle(_LOST), task_id, task_name='finalize_after_test',
+        claimed_at=HANDLE_CLAIMED_AT,
     )
 
     assert is_err(result)
@@ -434,6 +512,7 @@ async def test_child_lost_marks_non_retryable_running_task_failed(
 
     await worker._finalize_after(
         finished_handle(_LOST), task_id, task_name='finalize_after_owned_test',
+        claimed_at=HANDLE_CLAIMED_AT,
     )
 
     row = (
@@ -464,6 +543,51 @@ async def test_child_lost_marks_non_retryable_running_task_failed(
 
 
 @pytest.mark.asyncio(loop_scope='function')
+async def test_a_child_lost_after_the_return_writes_what_the_body_returned(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """The body returned with work left on its task loop, and its child was
+    killed because that work did not stop. The row gets what the body
+    returned, not WORKER_CRASHED and not TASK_TIMEOUT."""
+    worker = _make_worker(engine)
+    task_id = await _insert_owned_running_task(session, worker.worker_instance_id)
+    returned = SeatFinished(
+        ok=True, result_json=_serialize_ok('kept'), failed_reason=None
+    )
+    killed = ChildLost(
+        cause=LossCause.KILLED_BY_PARENT,
+        child_exit=KilledBySignal(9),
+        partial_frame=False,
+        pid=4242,
+    )
+
+    result = await worker._finalize_after(
+        finished_handle(LostAfterReturn(returned=returned, lost=killed)),
+        task_id,
+        timeout=TaskTimeout(ms=1_000),
+        task_name='finalize_after_owned_test',
+        claimed_at=HANDLE_CLAIMED_AT,
+    )
+
+    assert result == Ok(None)
+    row = (
+        await session.execute(
+            text("""
+                SELECT status, error_code, result
+                FROM itest_task_rows
+                WHERE id = CAST(:id AS uuid)
+            """),
+            {'id': task_id},
+        )
+    ).fetchone()
+    assert row is not None
+    assert (row.status, row.error_code) == ('COMPLETED', None)
+    assert row.result == returned.result_json
+
+
+@pytest.mark.asyncio(loop_scope='function')
 async def test_not_dispatched_returns_the_claimed_row_to_pending(
     engine: AsyncEngine,
     session: AsyncSession,
@@ -486,6 +610,7 @@ async def test_not_dispatched_returns_the_claimed_row_to_pending(
         finished_handle(NotDispatched(NotRunCause.POOL_STOPPING)),
         task_id,
         task_name='finalize_after_owned_test',
+        claimed_at=HANDLE_CLAIMED_AT,
     )
 
     assert result == Ok(None)
@@ -516,6 +641,7 @@ async def test_phase1_ok_none_clears_only_phase1_attempts(
 
     result = await worker._finalize_after(
         handle, task_id, task_name='finalize_after_test',
+        claimed_at=HANDLE_CLAIMED_AT,
     )
 
     assert is_ok(result)
@@ -597,14 +723,16 @@ async def test_task_expired_workflow_task_advances_workflow_without_reaper(
     set_current_app(app)
     database_url = listener_of(broker).database_url
     _initialize_worker_pool(database_url)
-    wire = _run_task_entry(
-        task_name=task_name,
-        args_json=args_json,
-        kwargs_json=kwargs_json,
-        task_id=task_id,
-        database_url=database_url,
-        master_worker_id=TEST_WORKER_ID,
-        claimed_at=claimed_at,
+    wire = wire_of(
+        _run_task_entry(
+            task_name=task_name,
+            args_json=args_json,
+            kwargs_json=kwargs_json,
+            task_id=task_id,
+            master_worker_id=TEST_WORKER_ID,
+            claimed_at=claimed_at,
+            task_loop=TaskLoop(),
+        )
     )
     assert wire == (False, '', 'TASK_EXPIRED')
     # The child self-expired the row before the parent finalizes.
@@ -649,7 +777,7 @@ async def test_task_expired_plain_task_skips_finalization(
 ) -> None:
     """Plain-task TASK_EXPIRED keeps the skip: Ok(None), no DB write,
     no phase 2, no persisted-result load."""
-    task_id = await _insert_running_task(session)
+    task_id = await _insert_running_task(session, is_workflow_task=False)
     worker = _make_worker(engine)
     handle = task_finished_handle(
         ok=False, result_json='', failed_reason='TASK_EXPIRED',
@@ -664,6 +792,7 @@ async def test_task_expired_plain_task_skips_finalization(
         task_id,
         is_workflow_task=False,
         task_name='finalize_after_test',
+        claimed_at=HANDLE_CLAIMED_AT,
     )
 
     assert is_ok(result)
@@ -699,6 +828,7 @@ async def test_task_expired_workflow_task_loader_error_propagates(
         task_id,
         is_workflow_task=True,
         task_name='finalize_after_test',
+        claimed_at=HANDLE_CLAIMED_AT,
     )
 
     assert is_err(result)
@@ -730,6 +860,7 @@ async def test_full_success_clears_both_retry_stages(
 
     result = await worker._finalize_after(
         handle, task_id, task_name='finalize_after_test',
+        claimed_at=HANDLE_CLAIMED_AT,
     )
 
     assert is_ok(result)

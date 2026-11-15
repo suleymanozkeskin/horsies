@@ -19,27 +19,52 @@ pooler, and the configuration that recovers throughput at high RTT.
 Each worker holds, under load:
 
 ```text
-worker_pool_size + worker_max_overflow   # coordinator engine
-+ 2                                      # LISTEN connections (tasks, ping)
-+ processes × worker_child_pool_max_size # per-child pools
+pool max_size                                           # pool of the worker process
++ 2                                                     # LISTEN connections (tasks, ping)
++ 1                                                     # runner heartbeat connection
++ isolated children × isolated.pool max_size            # isolated child pools
++ shared async children × shared_async.pool max_size    # shared async child pools
++ shared thread children × shared_thread.pool max_size  # shared thread child pools
 ```
 
-At defaults (`worker_pool_size=3`, `worker_max_overflow=2`,
-`worker_child_pool_max_size=2`) with `--processes=8`:
+Each `max_size` is the resolved value: a `PoolSize`, or the size that
+`PoolSizeFromSeats()` derives from the seats of a shared child or, for the
+pool of the worker process, of the profile (see
+[Sizes Derived from the Seats](/horsies/workers/worker-profiles/#sizes-derived-from-the-seats)).
+At defaults (a pool of the worker process of 5 for 8 seats, an isolated pool
+`max_size` of 1) with a profile of 8 isolated children:
 
 ```text
-3 + 2 + 2 + 8 × 2 = 23 connections per worker
+5 + 2 + 1 + 8 × 1 = 16 connections per worker
 ```
 
-Producers hold their own engine pool (`pool_size + max_overflow`, default
-5 + 10) per resource set: one set for each event loop that makes broker calls,
-plus one for sync calls (see [Broker Config](broker-config#event-loops)).
+Task code that sends through the app adds the `task_send_pool` of its child
+kind (default 2) in its child for each event loop that it sends from:
+`8 × 2 = 16` more with one sending loop per child, `32` in all. See
+[Worker Profiles](/horsies/workers/worker-profiles/#connections).
+
+The pool of the worker process writes the outcome of each task. At a high RTT
+each outcome holds a connection longer, so the worker process needs more
+connections for the same rate: set
+`WorkerProfile(pool=ParentPool(max_size=PoolSize(connections=N)))`. See
+[The Pool of the Worker Process](/horsies/workers/worker-profiles/#the-pool-of-the-worker-process).
+
+Producers hold their own engine pools of `pool_size + max_overflow`
+connections each (default 5 + 10): one in the resource set of each event loop
+that makes broker calls, one in the set of the sync runner loop for sync
+calls, and the sync send pool for sync sends without an idempotency key. A
+producer that sends only with `send()` can open `15 + 15 = 30` at the
+defaults. Each set adds 2 listener connections when it waits for a result,
+and one more pool of `pool_size + max_overflow` when `session_database_url`
+differs (see
+[Connection Ceiling](/horsies/configuration/broker-config/#connection-ceiling)).
 
 Size against the server's effective capacity, not its nominal
 `max_connections`: subtract superuser-reserved slots and any connections
 held by the provider's infrastructure. A managed instance with
-`max_connections=50` fits one 8-process worker on direct connections —
-not two.
+`max_connections=50` and 3 reserved slots fits two workers of 8 isolated
+children on direct connections (`2 × 16 = 32`), not three (`48`). When
+their task code sends, each worker can open 16 more, and one worker fits.
 
 When workers exhaust the server's slots, connection attempts fail with:
 
@@ -48,7 +73,7 @@ FATAL: remaining connection slots are reserved for roles with the SUPERUSER attr
 ```
 
 Workers retry through this, but tasks claimed during the outage wait for
-[recovery](../workers/heartbeats-recovery) instead of completing promptly.
+[recovery](/horsies/workers/heartbeats-recovery/) instead of completing promptly.
 If this appears in worker logs, the deployment needs a pooler or fewer
 direct consumers.
 
@@ -77,7 +102,9 @@ config = AppConfig(
 
 Direct slots consumed per worker drop to the 2 `LISTEN` connections;
 everything else multiplexes over the pooler's server pool. See
-[PgBouncer Troubleshooting](../troubleshooting/pgbouncer) for
+[PgBouncer pool size](/horsies/troubleshooting/pgbouncer/#pool-size) for
+`default_pool_size` and `max_client_conn`, and
+[PgBouncer Troubleshooting](/horsies/troubleshooting/pgbouncer/) for
 provider-specific endpoints and failure modes.
 
 Transaction pooling taxes per-worker throughput: a server connection is
@@ -91,9 +118,8 @@ inside a small slot budget.
 ## Prefetch Hides Round Trips
 
 With `prefetch_buffer=0` (the default), a worker claims new tasks only
-when a process slot is free, and each claim pass costs several round
-trips. At 30ms+ RTT this serializes into the task rate and caps
-throughput near `processes` tasks per second regardless of task duration.
+when a process slot is free, and each claim pass costs a round trip. At 30ms+ RTT this serializes into the task rate and caps
+throughput near the number of children in tasks per second, regardless of task duration.
 
 Set a prefetch buffer and claim lease for remote deployments:
 
@@ -101,7 +127,7 @@ Set a prefetch buffer and claim lease for remote deployments:
 from horsies import AppConfig, PostgresConfig
 
 config = AppConfig(
-    prefetch_buffer=24,        # claim ahead: 2–3× processes
+    prefetch_buffer=24,        # claim ahead: 2–3× the children
     claim_lease_ms=120_000,    # required when prefetch_buffer > 0
     broker=PostgresConfig(database_url=SecretStr(os.environ['DATABASE_URL'])),
 )
@@ -109,48 +135,90 @@ config = AppConfig(
 
 At 33ms RTT this raises drain throughput roughly 2–3× over the default.
 Soft-cap semantics and fairness trade-offs are covered in
-[Concurrency](../workers/concurrency).
+[Concurrency](/horsies/workers/concurrency/).
 
 ## Health Checks at High RTT
 
-Two settings health-check pooled connections on every checkout, costing
-one round trip each:
+Three settings can check a pooled connection at checkout, at one round trip
+each. The two pre-ping settings check a connection only when it waited in the
+pool for more than 1 s (`PRE_PING_AFTER_IDLE_S`). A connection checked in more
+recently is used with no check, so a burst of statements pays no checks. The
+`check` of a child pool runs at every checkout.
 
 | Setting | Default | Scope |
 |---------|---------|-------|
-| `pool_pre_ping` | `True` | coordinator and producer engines |
-| `worker_child_pool_check` | `True` | per-child psycopg pools |
+| `worker_pool_pre_ping` | `False` | the engine of the worker process |
+| `pool_pre_ping` | `True` | every other engine: producers, the web UI, task sends from a child |
+| `check` of `IsolatedPool` and `SharedPool` | `False` | the pool of each child, per child kind in the worker profile |
 
-On a low-latency network the cost is unmeasurable. At 30ms+ RTT the
-checks consume roughly 20% of the per-task statement budget. Disable both
-for busy remote workers:
+The worker and its children send most writes as one statement in
+autocommit, so a check doubles their round trips. At the defaults:
+
+| Write | Sender | Round trips |
+|-------|--------|-------------|
+| Finalize of a plain task that succeeded (attempt, history row, capacity wake) | worker | 1 |
+| Failure of a task, a timeout or a crash: the read of the retry facts, then the attempt with the retry or the history row (and the capacity wake of a plain task) | worker | 2 |
+| Failure that is never retried: a worker-level failure, a result that does not decode | worker | 1 |
+| Success of a workflow task, phase 1 (attempt, history row, phase-2 record of the node) | worker | 1 |
+| Phase 2 of a workflow task (node, dependents, workflow completion, capacity wake) | worker | 7 to 12, in one transaction; see [Worker Architecture](/horsies/workers/worker-architecture/#5-result-handling) |
+| Claim pass (`horsies_claim`) | worker | 1 |
+| Wake of a retry that comes due | worker | 1 |
+| RUNNING update of a plain task, with its first runner heartbeat | child | 1 |
+| Finalizing marker | child | 1 |
+| RUNNING update of a workflow task and the start of its node | child | 4 (BEGIN, update, node, COMMIT) |
+
+Without a check, a connection that died while idle fails the first
+statement instead of a transparent reconnect:
+
+- The finalize of the worker is a retryable connection error. The worker
+  runs it again on a new connection, and a statement whose reply was lost
+  is classified on that run, so it is not applied twice.
+- The claim loop retries a pass that failed with a connection error.
+- A RUNNING update of a child ends as `OWNERSHIP_UNCONFIRMED`: the task
+  stays `CLAIMED` until its claim lease returns it to the queue. A failed
+  finalizing marker is logged; the runner heartbeats of the worker cover
+  the row until the worker reads the end of the task.
+
+Turn the checks on for workers that sit idle for long stretches behind
+NAT or load balancers that kill idle connections, where stale connections
+occur:
 
 ```python
-from horsies import AppConfig, PostgresConfig
+from horsies import (
+    AppConfig,
+    IsolatedChildren,
+    IsolatedPool,
+    PostgresConfig,
+    SharedAsyncChildren,
+    SharedPool,
+    WorkerProfile,
+)
 
 config = AppConfig(
     broker=PostgresConfig(
         database_url=SecretStr(os.environ['DATABASE_URL']),
-        pool_pre_ping=False,
-        worker_child_pool_check=False,
+        worker_pool_pre_ping=True,
     ),
+    worker_profiles={
+        'idle_behind_nat': WorkerProfile(
+            isolated=IsolatedChildren(count=8, pool=IsolatedPool(check=True)),
+            shared_async=SharedAsyncChildren(
+                count=2,
+                seats=50,
+                pool=SharedPool(check=True),
+            ),
+        ),
+    },
 )
 ```
 
-Without checks, a connection that died while idle surfaces as a failed
-first statement instead of a transparent reconnect. Coordinator
-operations retry through the worker's resilience machinery; a failed
-pre-execution transition leaves the task `CLAIMED` until the
-[reaper](../workers/heartbeats-recovery) requeues it
-(`claimed_stale_threshold_ms`, default 120s). Keep the checks enabled for
-workers that sit idle for long stretches behind NAT or load balancers
-that kill idle connections — those are the deployments where stale
-connections actually occur.
-
 ## TCP Keepalives for Idle Pooled Connections
 
-`pool_pre_ping` and `worker_child_pool_check` are checkout-time guards: they
-detect a dead connection *before* a query runs, not one that dies in-flight.
+`pool_pre_ping`, `worker_pool_pre_ping` and the `check` of each child pool are
+checkout-time guards: they detect a dead connection *before* a query runs, not
+one that dies in-flight. The pre-ping settings check only a connection that
+waited in the pool for more than 1 s, so a connection that dies within 1 s of
+its check-in fails its next statement with a retryable connection error.
 An idle pooled connection reaped server-side between checkouts surfaces as a
 mid-query `OperationalError` on the next claim or heartbeat — absorbed by the
 worker's retry loop, but logged as noise.
@@ -180,14 +248,14 @@ config = AppConfig(
 
 Keepalives probe only an idle connection. When a connection dies without a
 reset from the server side and horsies then writes to it (for example, the
-child pool's health check on checkout), the sent data stays unacknowledged.
+first statement on a pooled connection), the sent data stays unacknowledged.
 Keepalives do not probe in that state, so the kernel retransmission limit
 decides: about 15 minutes on Linux with the default `tcp_retries2=15`. The
 worker process is blocked for that time, and the pool's 30-second checkout
 timeout applies only after the write fails.
 
 `tcp_user_timeout_ms` (default `30000`) sets libpq `tcp_user_timeout`. Data
-that stays unacknowledged for that time closes the connection, so the check
+that stays unacknowledged for that time closes the connection, so the write
 fails within 30 seconds and the pool opens a new connection. The setting
 applies to the broker engines, each child-process pool, and the
 LISTEN/NOTIFY listener. It has an effect only on systems that support

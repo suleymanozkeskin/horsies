@@ -1,5 +1,6 @@
 import { apiGet } from '@/lib/http';
 import type {
+  ClassReport,
   LivenessReport,
   ScheduleState,
   WorkerHistoryPoint,
@@ -27,3 +28,7 @@ export const getWorkerHistory = (
     `/workers/${encodeURIComponent(workerId)}/history`,
     limit === undefined ? {} : { limit }
   );
+
+/** Pending streams per (queue, class) and the budget load of each live worker. */
+export const getClassReport = (): Promise<ClassReport> =>
+  apiGet<ClassReport>('/workers/classes');

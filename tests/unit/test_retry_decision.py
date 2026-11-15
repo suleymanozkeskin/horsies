@@ -1,53 +1,30 @@
-"""Unit tests for retry decision logic.
+"""The retry policy of a failed attempt: ``retry_request_for``.
 
-Tests _should_retry_task() directly and the full chain:
-resolve_exception_error_code() → TaskError → _should_retry_task().
+The policy reads the facts of the unlocked read (``RunningAttempt``) and the
+error code, and asks for a retry with its delay, or for none. The deadline is
+judged by ``horsies_finish_failed_attempt`` under the lock (integration
+tests). Also the full chain: resolve_exception_error_code() -> the code ->
+retry_request_for().
 """
 
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from typing import Any
 
 import pytest
-from psycopg import OperationalError as PsycopgOperationalError
 
 from horsies.core.exception_mapper import ExceptionMapper, resolve_exception_error_code
-from horsies.core.models.tasks import OperationalErrorCode, TaskError
-from horsies.core.types.result import Ok, is_err
-from horsies.core.worker.worker import Worker
-
-
-def _mock_session(row: SimpleNamespace | None) -> AsyncMock:
-    """Return an AsyncMock session whose execute().fetchone() returns row."""
-    mock_result = MagicMock()
-    mock_result.fetchone.return_value = row
-
-    session = AsyncMock()
-    session.execute.return_value = mock_result
-    return session
-
-
-def _make_row(
-    retry_count: int,
-    max_retries: int,
-    task_options: str | None,
-    *,
-    good_until: datetime | None = None,
-    db_now: datetime | None = None,
-) -> SimpleNamespace:
-    """Build a fake DB row matching GET_TASK_RETRY_INFO_SQL columns."""
-    if db_now is None:
-        db_now = datetime.now(timezone.utc)
-    return SimpleNamespace(
-        retry_count=retry_count,
-        max_retries=max_retries,
-        task_options=task_options,
-        good_until=good_until,
-        db_now=db_now,
-    )
+from horsies.core.models.tasks import OperationalErrorCode
+from horsies.core.utils.retry import calculate_retry_delay
+from horsies.core.worker.failed_attempt import (
+    NoRetry,
+    RetryAfter,
+    RetryRequest,
+    RunningAttempt,
+    retry_request_for,
+)
+from horsies.core.worker.shared_stop import RetryPlacement
 
 
 def _task_options_json(
@@ -59,599 +36,304 @@ def _task_options_json(
 ) -> str:
     """Build a valid task_options JSON with retry_policy.auto_retry_for."""
     retry_policy: dict[str, object] = {
-        "auto_retry_for": auto_retry_for,
+        'auto_retry_for': auto_retry_for,
     }
     if intervals is not None:
-        retry_policy["intervals"] = intervals
+        retry_policy['intervals'] = intervals
     if backoff_strategy is not None:
-        retry_policy["backoff_strategy"] = backoff_strategy
+        retry_policy['backoff_strategy'] = backoff_strategy
     if jitter is not None:
-        retry_policy["jitter"] = jitter
-    return json.dumps({
-        "retry_policy": retry_policy,
-    })
+        retry_policy['jitter'] = jitter
+    return json.dumps(
+        {
+            'retry_policy': retry_policy,
+        }
+    )
+
+
+def _decide(
+    *,
+    retry_count: int,
+    max_retries: int,
+    task_options: str | None,
+    code: str | None,
+    placement: RetryPlacement = RetryPlacement.SAME_CLASS,
+) -> RetryRequest:
+    return retry_request_for(
+        RunningAttempt(
+            retry_count=retry_count,
+            max_retries=max_retries,
+            task_options=task_options,
+        ),
+        code,
+        placement,
+    )
+
+
+def _retries(request: RetryRequest) -> bool:
+    match request:
+        case RetryAfter():
+            return True
+        case NoRetry():
+            return False
 
 
 @pytest.mark.unit
-class TestShouldRetryTask:
-    """Direct tests for Worker._should_retry_task()."""
+class TestRetryRequestFor:
+    """The policy decision on the facts of the unlocked read."""
 
-    @pytest.mark.asyncio
-    async def test_matching_error_code_returns_true(self) -> None:
-        """Error code present in auto_retry_for with retries left returns True."""
-        row = _make_row(
+    def test_matching_error_code_asks_for_a_retry(self) -> None:
+        request = _decide(
             retry_count=0,
             max_retries=3,
-            task_options=_task_options_json(["RATE_LIMITED"]),
+            task_options=_task_options_json(['RATE_LIMITED']),
+            code='RATE_LIMITED',
         )
-        session = _mock_session(row)
-        error = TaskError(error_code="RATE_LIMITED")
+        assert _retries(request)
 
-        result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
-
-        assert result == Ok(True)
-
-    @pytest.mark.asyncio
-    async def test_non_matching_error_code_returns_false(self) -> None:
-        """Error code NOT in auto_retry_for returns False."""
-        row = _make_row(
+    def test_non_matching_error_code_asks_for_none(self) -> None:
+        request = _decide(
             retry_count=0,
             max_retries=3,
-            task_options=_task_options_json(["RATE_LIMITED"]),
+            task_options=_task_options_json(['RATE_LIMITED']),
+            code='TIMEOUT',
         )
-        session = _mock_session(row)
-        error = TaskError(error_code="TIMEOUT")
+        assert request == NoRetry()
 
-        result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
-
-        assert result == Ok(False)
-
-    @pytest.mark.asyncio
-    async def test_task_not_found_returns_false(self) -> None:
-        """fetchone() returning None means task not found, returns False."""
-        session = _mock_session(row=None)
-        error = TaskError(error_code="RATE_LIMITED")
-
-        result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
-
-        assert result == Ok(False)
-
-    @pytest.mark.asyncio
-    async def test_retries_exhausted_returns_false(self) -> None:
-        """retry_count >= max_retries means no retries left."""
-        row = _make_row(
+    def test_retries_exhausted_asks_for_none(self) -> None:
+        request = _decide(
             retry_count=3,
             max_retries=3,
-            task_options=_task_options_json(["RATE_LIMITED"]),
+            task_options=_task_options_json(['RATE_LIMITED']),
+            code='RATE_LIMITED',
         )
-        session = _mock_session(row)
-        error = TaskError(error_code="RATE_LIMITED")
+        assert request == NoRetry()
 
-        result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
-
-        assert result == Ok(False)
-
-    @pytest.mark.asyncio
-    async def test_max_retries_zero_returns_false(self) -> None:
-        """max_retries=0 means retries are disabled."""
-        row = _make_row(
+    def test_max_retries_zero_asks_for_none(self) -> None:
+        request = _decide(
             retry_count=0,
             max_retries=0,
-            task_options=_task_options_json(["RATE_LIMITED"]),
+            task_options=_task_options_json(['RATE_LIMITED']),
+            code='RATE_LIMITED',
         )
-        session = _mock_session(row)
-        error = TaskError(error_code="RATE_LIMITED")
+        assert request == NoRetry()
 
-        result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
-
-        assert result == Ok(False)
-
-    @pytest.mark.asyncio
-    async def test_library_error_code_enum_matches(self) -> None:
-        """OperationalErrorCode enum .value matches string in auto_retry_for."""
-        row = _make_row(
+    def test_library_error_code_value_matches(self) -> None:
+        """The callers pass the stored code text of an OperationalErrorCode."""
+        request = _decide(
             retry_count=0,
             max_retries=3,
-            task_options=_task_options_json(["UNHANDLED_EXCEPTION"]),
+            task_options=_task_options_json(['UNHANDLED_EXCEPTION']),
+            code=OperationalErrorCode.UNHANDLED_EXCEPTION.value,
         )
-        session = _mock_session(row)
-        error = TaskError(error_code=OperationalErrorCode.UNHANDLED_EXCEPTION)
+        assert _retries(request)
 
-        result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
-
-        assert result == Ok(True)
-
-    @pytest.mark.asyncio
-    async def test_malformed_task_options_json_returns_false(self) -> None:
-        """Invalid JSON in task_options returns False."""
-        row = _make_row(
+    @pytest.mark.parametrize(
+        'task_options',
+        [
+            None,
+            'NOT_JSON{',
+            '"just_a_string"',
+            json.dumps({'retry_policy': 'string'}),
+            _task_options_json([]),
+            json.dumps({'retry_policy': {'backoff_strategy': 'fixed'}}),
+        ],
+        ids=[
+            'no_options',
+            'malformed_json',
+            'options_not_a_dict',
+            'policy_not_a_dict',
+            'empty_auto_retry_for',
+            'auto_retry_for_missing',
+        ],
+    )
+    def test_options_without_a_usable_policy_ask_for_none(
+        self,
+        task_options: str | None,
+    ) -> None:
+        request = _decide(
             retry_count=0,
             max_retries=3,
-            task_options='NOT_JSON{',
+            task_options=task_options,
+            code='RATE_LIMITED',
         )
-        session = _mock_session(row)
-        error = TaskError(error_code="RATE_LIMITED")
+        assert request == NoRetry()
 
-        result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
-
-        assert result == Ok(False)
-
-    @pytest.mark.asyncio
-    async def test_task_options_not_dict_returns_false(self) -> None:
-        """task_options that deserializes to a non-dict returns False."""
-        row = _make_row(
+    @pytest.mark.parametrize('code', ['', None], ids=['empty', 'none'])
+    def test_an_empty_error_code_asks_for_none(self, code: str | None) -> None:
+        request = _decide(
             retry_count=0,
             max_retries=3,
-            task_options='"just_a_string"',
+            task_options=_task_options_json(['RATE_LIMITED']),
+            code=code,
         )
-        session = _mock_session(row)
-        error = TaskError(error_code="RATE_LIMITED")
+        assert request == NoRetry()
 
-        result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
-
-        assert result == Ok(False)
-
-    @pytest.mark.asyncio
-    async def test_retry_policy_not_dict_returns_false(self) -> None:
-        """retry_policy value that is not a dict returns False."""
-        row = _make_row(
+    def test_multiple_codes_match_any(self) -> None:
+        request = _decide(
             retry_count=0,
             max_retries=3,
-            task_options=json.dumps({"retry_policy": "string"}),
+            task_options=_task_options_json(['A_CODE', 'B_CODE', 'C_CODE']),
+            code='B_CODE',
         )
-        session = _mock_session(row)
-        error = TaskError(error_code="RATE_LIMITED")
+        assert _retries(request)
 
-        result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
-
-        assert result == Ok(False)
-
-    @pytest.mark.asyncio
-    async def test_empty_auto_retry_for_returns_false(self) -> None:
-        """Empty auto_retry_for list returns False."""
-        row = _make_row(
-            retry_count=0,
+    def test_the_request_carries_the_count_it_read_and_the_next_delay(self) -> None:
+        """The delay belongs to the next attempt: retry_count + 1."""
+        request = _decide(
+            retry_count=1,
             max_retries=3,
-            task_options=_task_options_json([]),
-        )
-        session = _mock_session(row)
-        error = TaskError(error_code="RATE_LIMITED")
-
-        result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
-
-        assert result == Ok(False)
-
-    @pytest.mark.asyncio
-    async def test_auto_retry_for_missing_returns_false(self) -> None:
-        """No auto_retry_for key in retry_policy returns False."""
-        row = _make_row(
-            retry_count=0,
-            max_retries=3,
-            task_options=json.dumps({"retry_policy": {"backoff_strategy": "fixed"}}),
-        )
-        session = _mock_session(row)
-        error = TaskError(error_code="RATE_LIMITED")
-
-        result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
-
-        assert result == Ok(False)
-
-    @pytest.mark.asyncio
-    async def test_empty_error_code_returns_false(self) -> None:
-        """TaskError with an empty error_code returns False (code is falsy)."""
-        row = _make_row(
-            retry_count=0,
-            max_retries=3,
-            task_options=_task_options_json(["RATE_LIMITED"]),
-        )
-        session = _mock_session(row)
-        error = TaskError(error_code="")
-
-        result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
-
-        assert result == Ok(False)
-
-    @pytest.mark.asyncio
-    async def test_multiple_codes_matches_any(self) -> None:
-        """auto_retry_for with multiple codes matches if error code is any of them."""
-        row = _make_row(
-            retry_count=0,
-            max_retries=3,
-            task_options=_task_options_json(["A_CODE", "B_CODE", "C_CODE"]),
-        )
-        session = _mock_session(row)
-        error = TaskError(error_code="B_CODE")
-
-        result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
-
-        assert result == Ok(True)
-
-    @pytest.mark.asyncio
-    async def test_good_until_already_expired_blocks_retry(self) -> None:
-        """Already-expired good_until blocks retry even when code matches."""
-        db_now = datetime.now(timezone.utc)
-        row = _make_row(
-            retry_count=0,
-            max_retries=3,
-            task_options=_task_options_json(["RATE_LIMITED"]),
-            good_until=db_now - timedelta(seconds=10),
-            db_now=db_now,
-        )
-        session = _mock_session(row)
-        error = TaskError(error_code="RATE_LIMITED")
-
-        result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
-
-        assert result == Ok(False)
-
-    @pytest.mark.asyncio
-    async def test_good_until_none_does_not_affect_retry(self) -> None:
-        """None good_until keeps existing retry eligibility behavior."""
-        row = _make_row(
-            retry_count=0,
-            max_retries=3,
-            task_options=_task_options_json(["RATE_LIMITED"]),
-            good_until=None,
-        )
-        session = _mock_session(row)
-        error = TaskError(error_code="RATE_LIMITED")
-
-        result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
-
-        assert result == Ok(True)
-
-    @pytest.mark.asyncio
-    async def test_good_until_in_future_allows_retry(self) -> None:
-        """Future good_until allows retry to proceed to scheduling step."""
-        db_now = datetime.now(timezone.utc)
-        row = _make_row(
-            retry_count=0,
-            max_retries=3,
-            task_options=_task_options_json(["RATE_LIMITED"]),
-            good_until=db_now + timedelta(seconds=120),
-            db_now=db_now,
-        )
-        session = _mock_session(row)
-        error = TaskError(error_code="RATE_LIMITED")
-
-        result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
-
-        assert result == Ok(True)
-
-
-@pytest.mark.unit
-class TestScheduleRetryExpiry:
-    """Tests for Worker._schedule_retry() good_until-aware outcomes."""
-
-    @staticmethod
-    def _make_schedule_session(
-        config_row: SimpleNamespace,
-        update_row: SimpleNamespace | None,
-        *,
-        postcheck_row: SimpleNamespace | None = None,
-    ) -> AsyncMock:
-        config_result = MagicMock()
-        config_result.fetchone.return_value = config_row
-        update_result = MagicMock()
-        update_result.fetchone.return_value = update_row
-        postcheck_result = MagicMock()
-        postcheck_result.fetchone.return_value = postcheck_row
-
-        session = AsyncMock()
-        if update_row is None:
-            session.execute = AsyncMock(
-                side_effect=[config_result, update_result, postcheck_result]
-            )
-        else:
-            session.execute = AsyncMock(side_effect=[config_result, update_result])
-        return session
-
-    @pytest.mark.asyncio
-    async def test_returns_expired_when_next_retry_exceeds_good_until(self) -> None:
-        db_now = datetime.now(timezone.utc)
-        config_row = SimpleNamespace(
-            retry_count=0,
             task_options=_task_options_json(
-                ["TRANSIENT"], intervals=[60], backoff_strategy="fixed", jitter=False
+                ['RATE_LIMITED'],
+                intervals=[10, 20, 30],
+                backoff_strategy='fixed',
+                jitter=False,
             ),
-            good_until=db_now + timedelta(seconds=5),
-            db_now=db_now,
+            code='RATE_LIMITED',
+            placement=RetryPlacement.ISOLATED,
         )
-        session = self._make_schedule_session(config_row, SimpleNamespace(id="task-1"))
+        assert request == RetryAfter(
+            retry_count=1,
+            delay_s=20.0,
+            placement=RetryPlacement.ISOLATED,
+        )
 
-        worker = MagicMock(spec=Worker)
-        worker.worker_instance_id = 'w-unit-test'
-        worker._calculate_retry_delay.return_value = 60.0
-        worker._spawn_background = MagicMock()
-        worker._schedule_delayed_notification = MagicMock(return_value=AsyncMock())
-
-        outcome = await Worker._schedule_retry(worker, "task-1", session, queue_name="default")
-
-        assert outcome == Ok('expired')
-        assert session.execute.await_count == 1
-        worker._spawn_background.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_returns_scheduled_when_within_good_until(self) -> None:
-        db_now = datetime.now(timezone.utc)
-        config_row = SimpleNamespace(
+    def test_a_policy_without_intervals_uses_the_default_intervals(self) -> None:
+        request = _decide(
             retry_count=0,
-            task_options=_task_options_json(
-                ["TRANSIENT"], intervals=[5], backoff_strategy="fixed", jitter=False
-            ),
-            good_until=db_now + timedelta(seconds=120),
-            db_now=db_now,
+            max_retries=3,
+            task_options=_task_options_json(['RATE_LIMITED'], jitter=False),
+            code='RATE_LIMITED',
         )
-        session = self._make_schedule_session(config_row, SimpleNamespace(id="task-1"))
-
-        worker = MagicMock(spec=Worker)
-        worker.worker_instance_id = 'w-unit-test'
-        worker._calculate_retry_delay.return_value = 5.0
-        worker._spawn_background = MagicMock()
-        worker._schedule_delayed_notification = MagicMock(return_value=AsyncMock())
-
-        outcome = await Worker._schedule_retry(worker, "task-1", session, queue_name="default")
-
-        assert outcome == Ok('scheduled')
-        assert session.execute.await_count == 2
-        worker._spawn_background.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_returns_scheduled_when_good_until_none(self) -> None:
-        db_now = datetime.now(timezone.utc)
-        config_row = SimpleNamespace(
+        assert request == RetryAfter(
             retry_count=0,
-            task_options=_task_options_json(
-                ["TRANSIENT"], intervals=[5], backoff_strategy="fixed", jitter=False
-            ),
-            good_until=None,
-            db_now=db_now,
-        )
-        session = self._make_schedule_session(config_row, SimpleNamespace(id="task-1"))
-
-        worker = MagicMock(spec=Worker)
-        worker.worker_instance_id = 'w-unit-test'
-        worker._calculate_retry_delay.return_value = 5.0
-        worker._spawn_background = MagicMock()
-        worker._schedule_delayed_notification = MagicMock(return_value=AsyncMock())
-
-        outcome = await Worker._schedule_retry(worker, "task-1", session, queue_name="default")
-
-        assert outcome == Ok('scheduled')
-        assert session.execute.await_count == 2
-        worker._spawn_background.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_returns_reaper_reclaimed_when_update_returns_none(self) -> None:
-        db_now = datetime.now(timezone.utc)
-        config_row = SimpleNamespace(
-            retry_count=0,
-            task_options=_task_options_json(
-                ["TRANSIENT"], intervals=[5], backoff_strategy="fixed", jitter=False
-            ),
-            good_until=None,
-            db_now=db_now,
-        )
-        session = self._make_schedule_session(
-            config_row,
-            update_row=None,
-            postcheck_row=SimpleNamespace(status='FAILED', good_until=None),
+            delay_s=60.0,
+            placement=RetryPlacement.SAME_CLASS,
         )
 
-        worker = MagicMock(spec=Worker)
-        worker.worker_instance_id = 'w-unit-test'
-        worker._calculate_retry_delay.return_value = 5.0
-        worker._spawn_background = MagicMock()
-        worker._schedule_delayed_notification = MagicMock(return_value=AsyncMock())
 
-        outcome = await Worker._schedule_retry(worker, "task-1", session, queue_name="default")
-
-        assert outcome == Ok('reaper_reclaimed')
-        assert session.execute.await_count == 3
-        worker._spawn_background.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_returns_expired_when_update_guard_rejects_due_to_good_until(self) -> None:
-        db_now = datetime.now(timezone.utc)
-        initial_good_until = db_now + timedelta(seconds=60)
-        postcheck_good_until = db_now + timedelta(seconds=4)
-        config_row = SimpleNamespace(
-            retry_count=0,
-            task_options=_task_options_json(
-                ["TRANSIENT"], intervals=[5], backoff_strategy="fixed", jitter=False
-            ),
-            good_until=initial_good_until,
-            db_now=db_now,
-        )
-        session = self._make_schedule_session(
-            config_row,
-            update_row=None,
-            postcheck_row=SimpleNamespace(status='RUNNING', good_until=postcheck_good_until),
-        )
-
-        worker = MagicMock(spec=Worker)
-        worker.worker_instance_id = 'w-unit-test'
-        worker._calculate_retry_delay.return_value = 5.0
-        worker._spawn_background = MagicMock()
-        worker._schedule_delayed_notification = MagicMock(return_value=AsyncMock())
-
-        outcome = await Worker._schedule_retry(worker, "task-1", session, queue_name="default")
-
-        assert outcome == Ok('expired')
-        assert session.execute.await_count == 3
-        worker._spawn_background.assert_not_called()
+def _resolved_code(
+    exc: Exception,
+    *,
+    task_mapper: ExceptionMapper | None,
+    global_mapper: ExceptionMapper | None,
+    task_default: str | None,
+    global_default: str,
+) -> str:
+    code = resolve_exception_error_code(
+        exc,
+        task_mapper=task_mapper,
+        global_mapper=global_mapper,
+        task_default=task_default,
+        global_default=global_default,
+    )
+    assert isinstance(code, str)
+    return code
 
 
 @pytest.mark.unit
 class TestRetryDecisionChain:
-    """Full pipeline: resolve_exception_error_code() → TaskError → _should_retry_task()."""
+    """Full pipeline: resolve_exception_error_code() -> retry_request_for()."""
 
-    @pytest.mark.asyncio
-    async def test_task_mapper_code_triggers_retry(self) -> None:
-        """Task mapper maps exception to code that is in auto_retry_for."""
-        task_mapper: ExceptionMapper = {ValueError: "VAL_ERROR"}
-        exc = ValueError("bad value")
-
-        code = resolve_exception_error_code(
-            exc,
-            task_mapper=task_mapper,
-            global_mapper=None,
-            task_default=None,
-            global_default="UNHANDLED",
-        )
-        error = TaskError(error_code=code)
-
-        row = _make_row(
-            retry_count=0,
-            max_retries=3,
-            task_options=_task_options_json(["VAL_ERROR"]),
-        )
-        session = _mock_session(row)
-
-        result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
-
-        assert code == "VAL_ERROR"
-        assert result == Ok(True)
-
-    @pytest.mark.asyncio
-    async def test_global_mapper_code_triggers_retry(self) -> None:
-        """Global mapper maps exception to code that is in auto_retry_for."""
-        global_mapper: ExceptionMapper = {ValueError: "VAL_ERROR"}
-        exc = ValueError("bad value")
-
-        code = resolve_exception_error_code(
-            exc,
-            task_mapper=None,
-            global_mapper=global_mapper,
-            task_default=None,
-            global_default="UNHANDLED",
-        )
-        error = TaskError(error_code=code)
-
-        row = _make_row(
-            retry_count=0,
-            max_retries=3,
-            task_options=_task_options_json(["VAL_ERROR"]),
-        )
-        session = _mock_session(row)
-
-        result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
-
-        assert code == "VAL_ERROR"
-        assert result == Ok(True)
-
-    @pytest.mark.asyncio
-    async def test_task_mapper_wins_over_global_for_retry(self) -> None:
-        """Task mapper code wins; since it's not in auto_retry_for, no retry."""
-        task_mapper: ExceptionMapper = {ValueError: "TASK_CODE"}
-        global_mapper: ExceptionMapper = {ValueError: "GLOBAL_CODE"}
-        exc = ValueError("bad value")
-
-        code = resolve_exception_error_code(
-            exc,
+    @pytest.mark.parametrize(
+        (
+            'task_mapper',
+            'global_mapper',
+            'task_default',
+            'listed',
+            'expected_code',
+            'retries',
+        ),
+        [
+            ({ValueError: 'VAL_ERROR'}, None, None, 'VAL_ERROR', 'VAL_ERROR', True),
+            (None, {ValueError: 'VAL_ERROR'}, None, 'VAL_ERROR', 'VAL_ERROR', True),
+            (
+                {ValueError: 'TASK_CODE'},
+                {ValueError: 'GLOBAL_CODE'},
+                None,
+                'GLOBAL_CODE',
+                'TASK_CODE',
+                False,
+            ),
+            (
+                {ValueError: 'TASK_CODE'},
+                {ValueError: 'GLOBAL_CODE'},
+                None,
+                'TASK_CODE',
+                'TASK_CODE',
+                True,
+            ),
+        ],
+        ids=[
+            'task_mapper_code_triggers_retry',
+            'global_mapper_code_triggers_retry',
+            'task_mapper_wins_over_global_for_retry',
+            'task_mapper_wins_over_global_positive',
+        ],
+    )
+    def test_mapped_code_decides(
+        self,
+        task_mapper: ExceptionMapper | None,
+        global_mapper: ExceptionMapper | None,
+        task_default: str | None,
+        listed: str,
+        expected_code: str,
+        retries: bool,
+    ) -> None:
+        code = _resolved_code(
+            ValueError('bad value'),
             task_mapper=task_mapper,
             global_mapper=global_mapper,
-            task_default=None,
-            global_default="UNHANDLED",
+            task_default=task_default,
+            global_default='UNHANDLED',
         )
-        error = TaskError(error_code=code)
-
-        row = _make_row(
+        request = _decide(
             retry_count=0,
             max_retries=3,
-            task_options=_task_options_json(["GLOBAL_CODE"]),
+            task_options=_task_options_json([listed]),
+            code=code,
         )
-        session = _mock_session(row)
+        assert code == expected_code
+        assert _retries(request) is retries
 
-        result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
-
-        assert code == "TASK_CODE"
-        assert result == Ok(False)
-
-    @pytest.mark.asyncio
-    async def test_task_mapper_wins_over_global_positive(self) -> None:
-        """Task mapper code wins and IS in auto_retry_for, so retry triggers."""
-        task_mapper: ExceptionMapper = {ValueError: "TASK_CODE"}
-        global_mapper: ExceptionMapper = {ValueError: "GLOBAL_CODE"}
-        exc = ValueError("bad value")
-
-        code = resolve_exception_error_code(
-            exc,
-            task_mapper=task_mapper,
-            global_mapper=global_mapper,
-            task_default=None,
-            global_default="UNHANDLED",
-        )
-        error = TaskError(error_code=code)
-
-        row = _make_row(
-            retry_count=0,
-            max_retries=3,
-            task_options=_task_options_json(["TASK_CODE"]),
-        )
-        session = _mock_session(row)
-
-        result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
-
-        assert code == "TASK_CODE"
-        assert result == Ok(True)
-
-    @pytest.mark.asyncio
-    async def test_unmapped_exception_uses_global_default(self) -> None:
-        """No mappers match, global default used, and it's in auto_retry_for."""
-        exc = RuntimeError("unexpected")
-
-        code = resolve_exception_error_code(
-            exc,
+    @pytest.mark.parametrize(
+        ('task_default', 'listed', 'expected_code', 'retries'),
+        [
+            (None, 'UNHANDLED', 'UNHANDLED', True),
+            ('TASK_DEFAULT', 'GLOBAL_DEFAULT', 'TASK_DEFAULT', False),
+        ],
+        ids=[
+            'unmapped_exception_uses_global_default',
+            'task_default_wins_over_global_default',
+        ],
+    )
+    def test_default_code_decides(
+        self,
+        task_default: str | None,
+        listed: str,
+        expected_code: str,
+        retries: bool,
+    ) -> None:
+        code = _resolved_code(
+            RuntimeError('unexpected'),
             task_mapper=None,
             global_mapper=None,
-            task_default=None,
-            global_default="UNHANDLED",
+            task_default=task_default,
+            global_default=('UNHANDLED' if task_default is None else 'GLOBAL_DEFAULT'),
         )
-        error = TaskError(error_code=code)
-
-        row = _make_row(
+        request = _decide(
             retry_count=0,
             max_retries=3,
-            task_options=_task_options_json(["UNHANDLED"]),
+            task_options=_task_options_json([listed]),
+            code=code,
         )
-        session = _mock_session(row)
-
-        result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
-
-        assert code == "UNHANDLED"
-        assert result == Ok(True)
-
-    @pytest.mark.asyncio
-    async def test_task_default_wins_over_global_default(self) -> None:
-        """Task default wins over global default; since it's not in auto_retry_for, no retry."""
-        exc = RuntimeError("unexpected")
-
-        code = resolve_exception_error_code(
-            exc,
-            task_mapper=None,
-            global_mapper=None,
-            task_default="TASK_DEFAULT",
-            global_default="GLOBAL_DEFAULT",
-        )
-        error = TaskError(error_code=code)
-
-        row = _make_row(
-            retry_count=0,
-            max_retries=3,
-            task_options=_task_options_json(["GLOBAL_DEFAULT"]),
-        )
-        session = _mock_session(row)
-
-        result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
-
-        assert code == "TASK_DEFAULT"
-        assert result == Ok(False)
+        assert code == expected_code
+        assert _retries(request) is retries
 
 
 @pytest.mark.unit
 class TestCalculateRetryDelay:
-    """Tests for Worker._calculate_retry_delay."""
+    """calculate_retry_delay, the delay that a RetryAfter carries."""
 
     def test_exponential_delays_strictly_increase_with_jitter(self) -> None:
         """Exponential backoff delays must strictly increase across attempts, even with jitter."""
@@ -662,15 +344,11 @@ class TestCalculateRetryDelay:
         }
         # Run many iterations to catch jitter-induced collisions
         for _ in range(200):
-            delay_1 = Worker._calculate_retry_delay(MagicMock(), 1, policy_data)
-            delay_2 = Worker._calculate_retry_delay(MagicMock(), 2, policy_data)
-            delay_3 = Worker._calculate_retry_delay(MagicMock(), 3, policy_data)
-            assert delay_2 > delay_1, (
-                f'delay_2={delay_2} must be > delay_1={delay_1}'
-            )
-            assert delay_3 > delay_2, (
-                f'delay_3={delay_3} must be > delay_2={delay_2}'
-            )
+            delay_1 = calculate_retry_delay(1, policy_data)
+            delay_2 = calculate_retry_delay(2, policy_data)
+            delay_3 = calculate_retry_delay(3, policy_data)
+            assert delay_2 > delay_1, f'delay_2={delay_2} must be > delay_1={delay_1}'
+            assert delay_3 > delay_2, f'delay_3={delay_3} must be > delay_2={delay_2}'
 
     def test_exponential_delay_returns_float(self) -> None:
         """Delay must be float to preserve sub-second precision from jitter."""
@@ -679,7 +357,7 @@ class TestCalculateRetryDelay:
             'backoff_strategy': 'exponential',
             'jitter': True,
         }
-        delay = Worker._calculate_retry_delay(MagicMock(), 1, policy_data)
+        delay = calculate_retry_delay(1, policy_data)
         assert isinstance(delay, float)
 
     def test_fixed_delay_returns_float(self) -> None:
@@ -689,7 +367,7 @@ class TestCalculateRetryDelay:
             'backoff_strategy': 'fixed',
             'jitter': False,
         }
-        delay = Worker._calculate_retry_delay(MagicMock(), 1, policy_data)
+        delay = calculate_retry_delay(1, policy_data)
         assert isinstance(delay, float)
 
     def test_minimum_delay_is_one_second(self) -> None:
@@ -700,7 +378,7 @@ class TestCalculateRetryDelay:
             'jitter': True,
         }
         for _ in range(200):
-            delay = Worker._calculate_retry_delay(MagicMock(), 1, policy_data)
+            delay = calculate_retry_delay(1, policy_data)
             assert delay >= 1.0, f'delay={delay} is below 1.0s minimum'
 
     # --- U-1a: fixed strategy picks intervals[index] ---
@@ -712,7 +390,7 @@ class TestCalculateRetryDelay:
             'backoff_strategy': 'fixed',
             'jitter': False,
         }
-        delay = Worker._calculate_retry_delay(MagicMock(), 1, policy_data)
+        delay = calculate_retry_delay(1, policy_data)
         assert delay == 10.0
 
     def test_fixed_second_attempt_uses_second_interval(self) -> None:
@@ -722,7 +400,7 @@ class TestCalculateRetryDelay:
             'backoff_strategy': 'fixed',
             'jitter': False,
         }
-        delay = Worker._calculate_retry_delay(MagicMock(), 2, policy_data)
+        delay = calculate_retry_delay(2, policy_data)
         assert delay == 30.0
 
     # --- U-1b: fixed strategy clamps out-of-bounds attempts ---
@@ -734,7 +412,7 @@ class TestCalculateRetryDelay:
             'backoff_strategy': 'fixed',
             'jitter': False,
         }
-        delay = Worker._calculate_retry_delay(MagicMock(), 5, policy_data)
+        delay = calculate_retry_delay(5, policy_data)
         assert delay == 30.0
 
     # --- U-1c: exponential exact values ---
@@ -746,10 +424,10 @@ class TestCalculateRetryDelay:
             'backoff_strategy': 'exponential',
             'jitter': False,
         }
-        assert Worker._calculate_retry_delay(MagicMock(), 1, policy_data) == 10.0
-        assert Worker._calculate_retry_delay(MagicMock(), 2, policy_data) == 20.0
-        assert Worker._calculate_retry_delay(MagicMock(), 3, policy_data) == 40.0
-        assert Worker._calculate_retry_delay(MagicMock(), 4, policy_data) == 80.0
+        assert calculate_retry_delay(1, policy_data) == 10.0
+        assert calculate_retry_delay(2, policy_data) == 20.0
+        assert calculate_retry_delay(3, policy_data) == 40.0
+        assert calculate_retry_delay(4, policy_data) == 80.0
 
     # --- U-1d: unknown strategy → fallback ---
 
@@ -760,7 +438,7 @@ class TestCalculateRetryDelay:
             'backoff_strategy': 'nonexistent_strategy',
             'jitter': False,
         }
-        delay = Worker._calculate_retry_delay(MagicMock(), 1, policy_data)
+        delay = calculate_retry_delay(1, policy_data)
         assert delay == 42.0
 
     # --- U-1e: jitter band ±25% ---
@@ -773,10 +451,10 @@ class TestCalculateRetryDelay:
             'jitter': True,
         }
         for _ in range(300):
-            delay = Worker._calculate_retry_delay(MagicMock(), 1, policy_data)
-            assert 75.0 <= delay <= 125.0, (
-                f'delay={delay} outside ±25% band of base=100'
-            )
+            delay = calculate_retry_delay(1, policy_data)
+            assert (
+                75.0 <= delay <= 125.0
+            ), f'delay={delay} outside ±25% band of base=100'
 
     # --- U-1f: jitter=False → deterministic ---
 
@@ -789,31 +467,31 @@ class TestCalculateRetryDelay:
         }
         # Repeated calls must all return the same value
         for attempt, expected in [(1, 60.0), (2, 300.0), (3, 900.0)]:
-            delay = Worker._calculate_retry_delay(MagicMock(), attempt, policy_data)
-            assert delay == expected, (
-                f'attempt={attempt}: expected {expected}, got {delay}'
-            )
+            delay = calculate_retry_delay(attempt, policy_data)
+            assert (
+                delay == expected
+            ), f'attempt={attempt}: expected {expected}, got {delay}'
 
     # --- U-1g: empty intervals → fallback 60 ---
 
     def test_exponential_empty_intervals_falls_back_to_60(self) -> None:
         """Exponential with empty intervals list uses 60 as base."""
-        policy_data = {
+        policy_data: dict[str, Any] = {
             'intervals': [],
             'backoff_strategy': 'exponential',
             'jitter': False,
         }
-        assert Worker._calculate_retry_delay(MagicMock(), 1, policy_data) == 60.0
-        assert Worker._calculate_retry_delay(MagicMock(), 2, policy_data) == 120.0
+        assert calculate_retry_delay(1, policy_data) == 60.0
+        assert calculate_retry_delay(2, policy_data) == 120.0
 
     def test_unknown_strategy_empty_intervals_falls_back_to_60(self) -> None:
         """Unknown strategy with empty intervals list uses 60 as fallback."""
-        policy_data = {
+        policy_data: dict[str, Any] = {
             'intervals': [],
             'backoff_strategy': 'bogus',
             'jitter': False,
         }
-        delay = Worker._calculate_retry_delay(MagicMock(), 1, policy_data)
+        delay = calculate_retry_delay(1, policy_data)
         assert delay == 60.0
 
     # --- U-1h: floor at 1.0 with small base and negative jitter ---
@@ -826,112 +504,5 @@ class TestCalculateRetryDelay:
             'jitter': True,
         }
         for _ in range(300):
-            delay = Worker._calculate_retry_delay(MagicMock(), 1, policy_data)
+            delay = calculate_retry_delay(1, policy_data)
             assert delay >= 1.0, f'delay={delay} below 1.0s floor'
-
-
-@pytest.mark.unit
-class TestRetryDbErrors:
-    """DB failures in retry decision/scheduling surface as Err, not raises."""
-
-    @staticmethod
-    def _worker_mock() -> MagicMock:
-        worker = MagicMock(spec=Worker)
-        worker.worker_instance_id = 'w-unit-test'
-        worker._calculate_retry_delay.return_value = 60.0
-        worker._spawn_background = MagicMock()
-        return worker
-
-    @pytest.mark.asyncio
-    async def test_should_retry_db_error_returns_err(self) -> None:
-        """A failing retry-info read maps to Err(BROKER_ERROR), not a raise."""
-        session = AsyncMock()
-        session.execute = AsyncMock(side_effect=RuntimeError('boom'))
-        error = TaskError(error_code="RATE_LIMITED")
-
-        result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
-
-        assert is_err(result)
-        retry_error = result.err_value
-        assert retry_error.error_code == OperationalErrorCode.BROKER_ERROR
-        assert retry_error.task_id == "task-1"
-        assert retry_error.retryable is False
-        assert retry_error.data == {'exception_type': 'RuntimeError'}
-
-    @pytest.mark.asyncio
-    async def test_should_retry_connection_error_is_retryable(self) -> None:
-        """Transient connection errors are flagged retryable on the Err."""
-        session = AsyncMock()
-        session.execute = AsyncMock(
-            side_effect=PsycopgOperationalError('server closed the connection')
-        )
-        error = TaskError(error_code="RATE_LIMITED")
-
-        result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
-
-        assert is_err(result)
-        assert result.err_value.retryable is True
-
-    @pytest.mark.asyncio
-    async def test_schedule_retry_config_read_db_error_returns_err(self) -> None:
-        """A failing retry-config read maps to Err instead of raising."""
-        session = AsyncMock()
-        session.execute = AsyncMock(side_effect=RuntimeError('boom'))
-
-        result = await Worker._schedule_retry(
-            self._worker_mock(), "task-1", session, queue_name="default"
-        )
-
-        assert is_err(result)
-        assert result.err_value.error_code == OperationalErrorCode.BROKER_ERROR
-        assert 'retry config' in result.err_value.message
-
-    @pytest.mark.asyncio
-    async def test_schedule_retry_update_db_error_returns_err(self) -> None:
-        """A failing schedule UPDATE maps to Err; no notification is spawned."""
-        config_result = MagicMock()
-        config_result.fetchone.return_value = SimpleNamespace(
-            retry_count=0,
-            task_options=_task_options_json(
-                ["TRANSIENT"], intervals=[5], backoff_strategy="fixed", jitter=False
-            ),
-            good_until=None,
-            db_now=datetime.now(timezone.utc),
-        )
-        session = AsyncMock()
-        session.execute = AsyncMock(side_effect=[config_result, RuntimeError('boom')])
-        worker = self._worker_mock()
-
-        result = await Worker._schedule_retry(
-            worker, "task-1", session, queue_name="default"
-        )
-
-        assert is_err(result)
-        assert 'retry schedule' in result.err_value.message
-        worker._spawn_background.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_schedule_retry_postcheck_db_error_returns_err(self) -> None:
-        """A failing post-rejection check maps to Err instead of raising."""
-        config_result = MagicMock()
-        config_result.fetchone.return_value = SimpleNamespace(
-            retry_count=0,
-            task_options=_task_options_json(
-                ["TRANSIENT"], intervals=[5], backoff_strategy="fixed", jitter=False
-            ),
-            good_until=None,
-            db_now=datetime.now(timezone.utc),
-        )
-        update_result = MagicMock()
-        update_result.fetchone.return_value = None
-        session = AsyncMock()
-        session.execute = AsyncMock(
-            side_effect=[config_result, update_result, RuntimeError('boom')]
-        )
-
-        result = await Worker._schedule_retry(
-            self._worker_mock(), "task-1", session, queue_name="default"
-        )
-
-        assert is_err(result)
-        assert 'post-checking' in result.err_value.message

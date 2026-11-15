@@ -12,11 +12,23 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { useNow } from '@/hooks/use-now';
-import { useSchedules, useWorkerLiveness, useWorkers } from '@/hooks/use-workers';
+import {
+  useClassReport,
+  useSchedules,
+  useWorkerLiveness,
+  useWorkers,
+} from '@/hooks/use-workers';
 import { formatElapsed, formatRelative, formatTime } from '@/lib/format-duration';
 import { cn } from '@/lib/utils';
-import type { WorkerState } from '@/types/workers';
+import type { BudgetLoad, WorkerState } from '@/types/workers';
 
+import { budgetsOf } from './class-coverage';
+import {
+  BudgetChips,
+  BudgetTable,
+  ClassCoveragePanel,
+  DownSlotList,
+} from './class-coverage-panel';
 import { ErrorState } from './states';
 import { WorkerHistoryChart } from './worker-history-chart';
 
@@ -84,11 +96,14 @@ function MetricBar({
 /** Compact, clickable worker card for the left rail. */
 function WorkerCard({
   worker,
+  budgets,
   responsive,
   focused,
   onSelect,
 }: {
   worker: WorkerState;
+  /** `undefined` when the class report has no live snapshot of the worker. */
+  budgets: BudgetLoad[] | undefined;
   responsive: boolean;
   focused: boolean;
   onSelect: () => void;
@@ -146,6 +161,24 @@ function WorkerCard({
         </span>
       </div>
 
+      {(budgets !== undefined || worker.down_slots.length > 0) && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          {budgets !== undefined && <BudgetChips budgets={budgets} />}
+          {worker.down_slots.length > 0 && (
+            <span
+              className="rounded border px-1.5 py-0.5 text-10 font-medium"
+              style={{
+                borderColor: 'var(--warning-dark)',
+                color: 'var(--warning-dark)',
+              }}
+            >
+              {worker.down_slots.length} slot
+              {worker.down_slots.length === 1 ? '' : 's'} down
+            </span>
+          )}
+        </div>
+      )}
+
       <MetricBar label="CPU" percent={worker.cpu_percent} icon={Cpu} />
       <MetricBar
         label="Memory"
@@ -162,9 +195,11 @@ function WorkerCard({
 /** The focused worker, shown on the right half with history charts expanded. */
 function WorkerFocus({
   worker,
+  budgets,
   responsive,
 }: {
   worker: WorkerState;
+  budgets: BudgetLoad[] | undefined;
   responsive: boolean;
 }) {
   const status = workerStatus(worker, responsive);
@@ -233,6 +268,34 @@ function WorkerFocus({
           : { detail: `${worker.memory_usage_mb.toFixed(0)} MB` })}
         icon={MemoryStick}
       />
+
+      <div className="flex flex-col gap-2 border-t border-border pt-3">
+        <span className="text-11 font-medium text-muted-foreground">
+          Execution classes
+        </span>
+        {budgets === undefined ? (
+          <p className="text-xs text-muted-foreground">
+            No live snapshot of this worker in the class report.
+          </p>
+        ) : (
+          <BudgetTable budgets={budgets} />
+        )}
+      </div>
+
+      {worker.slot_health !== 'all_serving' && (
+        <div className="flex flex-col gap-2 border-t border-border pt-3">
+          <span className="text-11 font-medium text-muted-foreground">
+            Down slots
+          </span>
+          {worker.slot_health === 'slots_down' ? (
+            <DownSlotList slots={worker.down_slots} />
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              This worker version does not record its slot health.
+            </p>
+          )}
+        </div>
+      )}
 
       <div className="border-t border-border pt-3">
         <WorkerHistoryChart workerId={worker.worker_id} />
@@ -364,8 +427,10 @@ function SchedulesTable() {
   );
 }
 
-/** Worker + scheduler overview: liveness banner, a worker list, a focused
- * active worker with history charts on the right, and the schedules table. */
+/** Worker + scheduler overview: liveness banner, the pending rows per
+ * execution class with fleet warnings, a worker list, a focused active worker
+ * with its budgets, down slots and history charts on the right, and the
+ * schedules table. */
 export function WorkerOverview() {
   const { workers, isLoading, isError, refetch } = useWorkers();
   const {
@@ -375,6 +440,12 @@ export function WorkerOverview() {
     lastPingedAt,
     refresh,
   } = useWorkerLiveness();
+  const {
+    report,
+    isLoading: reportLoading,
+    isError: reportError,
+    refetch: refetchReport,
+  } = useClassReport();
   const [focusId, setFocusId] = useState<string | null>(null);
   const [showStale, setShowStale] = useState(false);
 
@@ -414,13 +485,21 @@ export function WorkerOverview() {
     null;
 
   const banner = (
-    <LivenessBanner
-      responsiveCount={responsiveIds.size}
-      isFetching={isFetching}
-      isError={pingError}
-      lastPingedAt={lastPingedAt}
-      onPing={refresh}
-    />
+    <>
+      <LivenessBanner
+        responsiveCount={responsiveIds.size}
+        isFetching={isFetching}
+        isError={pingError}
+        lastPingedAt={lastPingedAt}
+        onPing={refresh}
+      />
+      <ClassCoveragePanel
+        report={report}
+        isLoading={reportLoading}
+        isError={reportError}
+        onRetry={refetchReport}
+      />
+    </>
   );
 
   if (isError && workers.length === 0) {
@@ -466,6 +545,7 @@ export function WorkerOverview() {
                 <WorkerCard
                   key={worker.worker_id}
                   worker={worker}
+                  budgets={budgetsOf(report, worker.worker_id)}
                   responsive={isResponsive(worker)}
                   focused={focusWorker?.worker_id === worker.worker_id}
                   onSelect={() => setFocusId(worker.worker_id)}
@@ -490,6 +570,7 @@ export function WorkerOverview() {
                       <WorkerCard
                         key={worker.worker_id}
                         worker={worker}
+                        budgets={budgetsOf(report, worker.worker_id)}
                         responsive={false}
                         focused={focusWorker?.worker_id === worker.worker_id}
                         onSelect={() => setFocusId(worker.worker_id)}
@@ -507,6 +588,7 @@ export function WorkerOverview() {
             <aside className="shrink-0 self-start lg:sticky lg:top-4 lg:w-1/2">
               <WorkerFocus
                 worker={focusWorker}
+                budgets={budgetsOf(report, focusWorker.worker_id)}
                 responsive={isResponsive(focusWorker)}
               />
             </aside>

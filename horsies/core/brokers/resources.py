@@ -85,14 +85,15 @@ class BrokerResources:
 class EventLoopLimit:
     """The broker already holds resource sets for its limit of open event loops.
 
-    The broker's sync runner loop does not count against the limit.
+    The broker's sync runner loop and, in a worker child, the task loop do not
+    count against the limit.
 
     Retry condition: repeating the call on the current loop returns the
     same error until one of the loops that hold a set closes.
 
     Fields:
         limit: the number of open event loops, other than the sync runner
-            loop, that a broker serves.
+            loop and the task loop, that a broker serves.
         held_thread_names: thread of each open loop that holds a set and
             counts against the limit.
         current_thread_name: thread of the loop that made this call.
@@ -119,6 +120,9 @@ class LoopRole(Enum):
 
     # The broker's own sync runner loop. It does not count against the limit.
     SYNC_RUNNER = 'sync_runner'
+    # The one loop that runs the ``async def`` tasks of a worker child. The
+    # library owns it, and it does not count against the limit.
+    TASK_LOOP = 'task_loop'
     # Any other event loop.
     CALLER = 'caller'
 
@@ -133,7 +137,8 @@ class LoopResources:
     Fields:
         loop: the event loop the set was built for.
         thread_name: thread that ran ``loop`` when the set was built.
-        role: whether ``loop`` is the broker's sync runner loop.
+        role: whether ``loop`` is the broker's sync runner loop, a task loop,
+            or a caller loop.
         resources: the set.
     """
 
@@ -175,13 +180,14 @@ def decide_for_loop(
     """Decide how ``loop`` gets its resource set. Pure: no I/O, no state change.
 
     Entries whose loop is closed do not count against ``limit``; the caller
-    releases them. A ``SYNC_RUNNER`` loop never reaches the limit.
+    releases them. A ``SYNC_RUNNER`` or ``TASK_LOOP`` loop never reaches the
+    limit, and only ``CALLER`` entries count against it.
     """
     for entry in entries:
         if entry.loop is loop:
             return UseExisting(resources=entry.resources)
     match role:
-        case LoopRole.SYNC_RUNNER:
+        case LoopRole.SYNC_RUNNER | LoopRole.TASK_LOOP:
             return BuildForLoop()
         case LoopRole.CALLER:
             held = tuple(

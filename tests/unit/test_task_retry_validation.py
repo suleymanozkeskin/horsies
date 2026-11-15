@@ -179,17 +179,18 @@ class TestTaskDecoratorValidation:
 
         assert exc_info.value.code == ErrorCode.TASK_PREDECORATED_NOT_SUPPORTED
 
-    def test_async_task_function_rejected(self) -> None:
-        """`@app.task()` refuses an `async def` function with HRS-106."""
+    def test_async_task_function_registers_with_its_options(self) -> None:
+        """`@app.task()` registers an `async def` function like a `def` one."""
         app = _make_app()
 
+        @app.task('async_task_function', timeout_ms=5_000)
         async def async_task_function() -> TaskResult[str, TaskError]:
             return TaskResult(ok='ok')
 
-        with pytest.raises(TaskDefinitionError) as exc_info:
-            app.task('async_task_function')(async_task_function)  # type: ignore[arg-type]
-
-        assert exc_info.value.code == ErrorCode.TASK_ASYNC_FUNCTION_NOT_SUPPORTED
+        assert app.tasks['async_task_function'] is async_task_function
+        options_json = async_task_function.task_options_json
+        assert options_json is not None
+        assert json.loads(options_json)['timeout_ms'] == 5_000
 
     def test_inner_decorator_without_wraps_missing_return_type_rejected(self) -> None:
         """A no-wraps wrapper is rejected if it no longer satisfies the task contract."""

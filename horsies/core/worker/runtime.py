@@ -9,23 +9,28 @@ from __future__ import annotations
 
 import os
 import random
-from dataclasses import dataclass
-from enum import Enum
-from typing import Any, Optional
+from dataclasses import dataclass, field
+from enum import Enum, StrEnum
+from typing import Any, Literal, Optional, TypeAlias
 
 from horsies.core.logging import get_logger
-from horsies.core.models.tasks import BuiltInTaskCode
+from horsies.core.models.tasks import BuiltInTaskCode, OperationalErrorCode, OutcomeCode
+from horsies.core.worker.class_coverage_log import CoverageLogBound
 
 logger = get_logger('worker')
 
 # Underscore names are deliberate: these are worker-internal symbols whose
 # privacy boundary is the worker package, not this module.
 __all__ = [
+    'FinalizeStage',
     '_FINALIZE_STAGE_PHASE1',
     '_FINALIZE_STAGE_PHASE2',
     '_FINALIZE_STAGE_FUTURE',
     '_FINALIZE_STAGE_PARENT',
+    '_FINALIZE_STAGE_TIMEOUT',
     '_FINALIZE_FUTURE_MAX_RETRIES',
+    '_FINALIZE_TIMEOUT_MAX_RETRIES',
+    'CrashRecoveryCode',
     '_FINALIZE_PHASE1_MAX_RETRIES',
     '_FINALIZE_PHASE2_MAX_RETRIES',
     '_FINALIZE_PARENT_MAX_RETRIES',
@@ -36,24 +41,54 @@ __all__ = [
     'ChildStartFailedError',
     '_RetryBackoff',
     '_FinalizeError',
-    '_RetryError',
     '_RequeueOutcome',
+    '_TimeoutSettled',
+    '_TimeoutWriteFailed',
+    '_AttemptEndUnknown',
+    '_TimeoutOutcome',
     '_ReaperPassState',
     '_collect_psutil_metrics',
     '_read_current_rss_mb',
     'MemoryBaselineExceedsThresholdError',
 ]
 
-_FINALIZE_STAGE_PHASE1 = 'phase1_persist'
-_FINALIZE_STAGE_PHASE2 = 'phase2_workflow'
-_FINALIZE_STAGE_FUTURE = 'future'
-_FINALIZE_STAGE_PARENT = 'parent_propagation'
+
+class FinalizeStage(StrEnum):
+    """The step of a finalize that failed, and that its retry runs again.
+    The values are the stage names of the logs and of the retry keys."""
+
+    PHASE1 = 'phase1_persist'
+    """The write of the outcome of the task to its row."""
+    PHASE2 = 'phase2_workflow'
+    """The workflow step after the outcome was written."""
+    FUTURE = 'future'
+    """Crash recovery, or a write through its writer."""
+    PARENT = 'parent_propagation'
+    """The end of a child workflow, passed to its parent."""
+    TIMEOUT = 'timeout_write'
+    """The TASK_TIMEOUT write of an attempt that has ended. Its retries run
+    that write again; when they all fail, crash recovery writes the row with
+    TASK_TIMEOUT."""
+
+
+_FINALIZE_STAGE_PHASE1 = FinalizeStage.PHASE1
+_FINALIZE_STAGE_PHASE2 = FinalizeStage.PHASE2
+_FINALIZE_STAGE_FUTURE = FinalizeStage.FUTURE
+_FINALIZE_STAGE_PARENT = FinalizeStage.PARENT
+_FINALIZE_STAGE_TIMEOUT = FinalizeStage.TIMEOUT
 _FINALIZE_FUTURE_MAX_RETRIES = 3
+_FINALIZE_TIMEOUT_MAX_RETRIES = 3
 _FINALIZE_PHASE1_MAX_RETRIES = 3
 _FINALIZE_PHASE2_MAX_RETRIES = 5
 _FINALIZE_PARENT_MAX_RETRIES = 5
 _FINALIZE_RETRY_BASE_DELAY_S = 0.5
 _FINALIZE_RETRY_MAX_DELAY_S = 15.0
+
+
+CrashRecoveryCode: TypeAlias = OperationalErrorCode | Literal[OutcomeCode.TASK_TIMEOUT]
+"""The code that crash recovery writes, and decides the retry on:
+``WORKER_CRASHED`` for a crash, the code of a killed run, or ``TASK_TIMEOUT``
+for a timed-out attempt whose own write failed."""
 
 
 @dataclass
@@ -86,24 +121,7 @@ class _RetryBackoff:
 class _FinalizeError:
     error_code: BuiltInTaskCode | str
     message: str
-    stage: str
-    task_id: str
-    retryable: bool = False
-    data: dict[str, Any] | None = None
-
-
-@dataclass(frozen=True)
-class _RetryError:
-    """DB failure while deciding or persisting a task retry.
-
-    Owned by the retry concern; callers translate it into their own error
-    domain at the seam (finalize -> _FinalizeError, dispatch recovery ->
-    _RequeueOutcome.DB_ERROR). ``retryable`` reports whether the underlying
-    failure was a transient connection error.
-    """
-
-    error_code: BuiltInTaskCode | str
-    message: str
+    stage: FinalizeStage
     task_id: str
     retryable: bool = False
     data: dict[str, Any] | None = None
@@ -116,6 +134,24 @@ class _RequeueOutcome(str, Enum):
     DB_ERROR = 'DB_ERROR'
 
 
+@dataclass(frozen=True, slots=True)
+class _TimeoutSettled:
+    """The timed-out attempt had ended, then the timeout path settled the row."""
+
+
+@dataclass(frozen=True, slots=True)
+class _TimeoutWriteFailed:
+    """The timed-out attempt had ended, and the timeout write did not complete."""
+
+
+@dataclass(frozen=True, slots=True)
+class _AttemptEndUnknown:
+    """SIGKILL was sent, and no exit of the child was seen. Nothing was written."""
+
+
+_TimeoutOutcome: TypeAlias = _TimeoutSettled | _TimeoutWriteFailed | _AttemptEndUnknown
+
+
 # After this many consecutive permanent failures, a reaper operation is
 # disabled for the process lifetime to avoid spamming logs every interval.
 _REAPER_MAX_PERMANENT_FAILURES = 3
@@ -123,7 +159,7 @@ _REAPER_MAX_PERMANENT_FAILURES = 3
 
 @dataclass
 class _ReaperPassState:
-    """Per-process reaper failure counters and retention schedule."""
+    """Per-process reaper failure counters, schedules and log bounds."""
 
     requeue_permanent_failures: int = 0
     requeue_disabled: bool = False
@@ -134,6 +170,11 @@ class _ReaperPassState:
     next_orphan_task_audit_at: float = 0.0
     next_retention_cleanup_at: float = 0.0
     next_partition_maintenance_at: float = 0.0
+    # The pass checks class coverage from this time on. The reaper loop sets
+    # it one check interval after its start, so the workers that start with
+    # this one have written their first snapshot.
+    class_coverage_checks_from: float = 0.0
+    coverage_log: CoverageLogBound = field(default_factory=CoverageLogBound)
 
 
 # Per-child latch so a broken RSS reader logs once, not once per task.

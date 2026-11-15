@@ -35,6 +35,20 @@ class _LibraryRefusals(logging.Handler):
 
 
 @pytest.fixture(autouse=True)
+def restore_process_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give the process role back after each test.
+
+    A test that runs the worker child start in this process marks the process
+    as one that runs task bodies, and result waits then fail closed. Later
+    tests in the same process must see the role from before. The import is
+    here so that the test environment loads before any horsies module.
+    """
+    from horsies.core import process_role as process_role_module
+
+    monkeypatch.setattr(process_role_module, '_role', process_role_module.process_role())
+
+
+@pytest.fixture(autouse=True)
 def no_library_data_refusal(request: pytest.FixtureRequest) -> Iterator[None]:
     """Fail a test in which library code builds a `TaskError.data` that is refused.
 

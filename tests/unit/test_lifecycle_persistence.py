@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -12,6 +13,7 @@ import pytest
 from horsies.core.lifecycle.commands import (
     AbandonOwnedNodes,
     CompleteLockedTask,
+    CompleteTaskFused,
     ExpireOwnedClaim,
 )
 from horsies.core.lifecycle.fences import (
@@ -30,12 +32,15 @@ from horsies.core.lifecycle.outcomes import (
     SourceStateConflict,
 )
 from horsies.core.lifecycle.persistence import (
+    FusedCompletionBatch,
+    _fused_batch_parameters,  # pyright: ignore[reportPrivateUsage]
+    _fused_outcomes,  # pyright: ignore[reportPrivateUsage]
+    _fused_statement,  # pyright: ignore[reportPrivateUsage]
     _log_outcome,  # pyright: ignore[reportPrivateUsage]
     _reconstruct_id_keyed_batch,  # pyright: ignore[reportPrivateUsage]
     apply_async,
     apply_batch_async,
     apply_sync,
-    classify_locked_read_miss_async,
 )
 from horsies.core.types.status import TaskStatus
 
@@ -94,7 +99,7 @@ def test_reconstructs_by_ordinal_instead_of_result_order() -> None:
     outcomes = _reconstruct_id_keyed_batch(
         [_outcome('two', 2), _outcome('one', 1)],
         expected_count=2,
-        command=_command(),
+        operation=type(_command()).__name__,
     )
 
     assert [outcome.task_id for outcome in outcomes] == ['one', 'two']
@@ -117,42 +122,8 @@ def test_rejects_an_invalid_ordinal_contract(
         _reconstruct_id_keyed_batch(
             outcomes,
             expected_count=2,
-            command=_command(),
+            operation=type(_command()).__name__,
         )
-
-
-@pytest.mark.asyncio
-async def test_locked_read_miss_keeps_and_logs_the_dispatched_generation(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """The read-only classifier gets the fence half absent from the command."""
-    result = MagicMock()
-    result.mappings.return_value.all.return_value = [_wire_row()]
-    connection = MagicMock()
-    connection.execute = AsyncMock(return_value=result)
-    command = CompleteLockedTask(
-        task_id='one',
-        fence=PriorLockedRead(worker_id='worker'),
-        result_json='{"ok": 1}',
-    )
-
-    with caplog.at_level(logging.WARNING, logger='horsies.lifecycle'):
-        outcome = await classify_locked_read_miss_async(
-            connection,
-            command,
-            claimed_at=_NOW,
-        )
-
-    assert isinstance(outcome, AlreadyApplied)
-    parameters = connection.execute.await_args.args[1]
-    assert parameters == {
-        'task_id': 'one',
-        'equivalent_kinds': ['COMPLETE_FUSED', 'COMPLETE_LOCKED'],
-        'worker_id': 'worker',
-        'claimed_at': _NOW,
-    }
-    expected_fence = OwnedClaim(worker_id='worker', claimed_at=_NOW)
-    assert f'expected_fence={expected_fence!r}' in caplog.records[-1].getMessage()
 
 
 @pytest.mark.asyncio
@@ -298,7 +269,7 @@ def test_batch_outcome_log_contains_only_that_tasks_expected_fence(
             worker_id='worker',
             claim_generations=(
                 ('one', _NOW),
-                ('other-task-must-not-repeat', None),
+                ('other-task-must-not-repeat', _NOW + timedelta(seconds=1)),
             ),
         ),
     )
@@ -311,3 +282,84 @@ def test_batch_outcome_log_contains_only_that_tasks_expected_fence(
     assert "'worker_id': 'worker'" in message
     assert "'claimed_at':" in message
     assert 'other-task-must-not-repeat' not in message
+
+
+def _fused_command(task_id: str) -> CompleteTaskFused:
+    return CompleteTaskFused(
+        task_id=task_id,
+        fence=OwnedClaim(worker_id='worker-1', claimed_at=_NOW),
+        result_json='{"ok":null}',
+        notify_channel='task_queue_default',
+        notify_payload=f'capacity:{task_id}',
+    )
+
+
+def test_a_batch_of_one_row_runs_the_single_fused_completion() -> None:
+    statement = _fused_statement(FusedCompletionBatch(commands=(_fused_command('a'),)))
+
+    assert 'horsies_complete_task_fused(' in str(statement.statement)
+    assert 'horsies_complete_tasks_fused(' not in str(statement.statement)
+    assert statement.parameters['task_id'] == 'a'
+
+
+def test_a_batch_of_several_rows_runs_the_batch_function() -> None:
+    statement = _fused_statement(
+        FusedCompletionBatch(commands=(_fused_command('a'), _fused_command('b'))),
+    )
+
+    assert 'horsies_complete_tasks_fused(' in str(statement.statement)
+    batch_text = statement.parameters['batch']
+    assert isinstance(batch_text, str)
+    assert [fields[0] for fields in json.loads(batch_text)] == ['a', 'b']
+
+
+def test_the_batch_parameter_holds_each_command_in_input_order() -> None:
+    """Six text-or-null fields per command; the generation keeps its
+    microseconds and its UTC offset."""
+    generation = datetime(
+        2026, 11, 12, 9, 30, 0, 123456, tzinfo=timezone(timedelta(hours=5, minutes=30)),
+    )
+    later = CompleteTaskFused(
+        task_id='b',
+        fence=OwnedClaim(worker_id='worker-2', claimed_at=generation),
+        result_json='{"ok":"quote \\" é 𝄞"}',
+        notify_channel='task_queue_other',
+        notify_payload='capacity:b',
+    )
+
+    parameters = _fused_batch_parameters(
+        FusedCompletionBatch(commands=(later, _fused_command('a'))),
+    )
+
+    assert list(parameters) == ['batch']
+    batch_text = parameters['batch']
+    assert isinstance(batch_text, str)
+    assert json.loads(batch_text) == [
+        [
+            'b',
+            'worker-2',
+            '2026-11-12T09:30:00.123456+05:30',
+            '{"ok":"quote \\" é 𝄞"}',
+            'task_queue_other',
+            'capacity:b',
+        ],
+        [
+            'a',
+            'worker-1',
+            '2026-08-04T00:00:00+00:00',
+            '{"ok":null}',
+            'task_queue_default',
+            'capacity:a',
+        ],
+    ]
+
+
+def test_the_single_fused_completion_answers_without_ordinality() -> None:
+    command = _fused_command('one')
+
+    outcomes = _fused_outcomes(
+        FusedCompletionBatch(commands=(command,)),
+        [_wire_row(task_id='one', outcome='APPLIED', observed_status='RUNNING')],
+    )
+
+    assert [outcome.task_id for outcome in outcomes] == ['one']

@@ -59,9 +59,9 @@ from horsies.core.models.tasks import (
     TaskError,
     TaskResult,
 )
+from horsies.core.lifecycle.persistence import LOCK_TASK_SQL
 from horsies.core.worker.sql import (
     NOTIFY_TASK_QUEUE_SQL,
-    SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
     UPSERT_TASK_ATTEMPT_SQL,
 )
 from horsies.core.workflows.engine import on_workflow_task_complete
@@ -668,6 +668,7 @@ def _run_stale_failure(*, candidate: bool) -> Callable[[Connection, str], int]:
     invocation_for = _stale_failure_invocation(candidate=candidate)
 
     def run(connection: Connection, task_id: str) -> int:
+        connection.execute(LOCK_TASK_SQL, {'task_id': task_id})
         context = connection.execute(
             SELECT_STALE_TASK_FOR_UPDATE_SQL,
             {
@@ -719,9 +720,24 @@ def _run_terminal_invocation(
     return run
 
 
+# The locking read of a RUNNING task of one claim generation, after the task
+# advisory lock: the order of every move function.
+_LOCK_RUNNING_CONTEXT_SQL = text("""
+    SELECT retry_count, started_at, claimed_by_worker_id, worker_hostname,
+           worker_pid, worker_process_name, clock_timestamp() AS db_now
+    FROM horsies_tasks
+    WHERE id = CAST(:id AS uuid)
+      AND status = 'RUNNING'
+      AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
+      AND claimed_at = CAST(:claimed_at AS TIMESTAMPTZ)
+    FOR UPDATE
+""")
+
+
 def _upsert_completed_attempt(connection: Connection, task_id: str) -> None:
+    connection.execute(LOCK_TASK_SQL, {'task_id': task_id})
     context = connection.execute(
-        SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
+        _LOCK_RUNNING_CONTEXT_SQL,
         {'id': task_id, 'wid': WORKER_ID, 'claimed_at': CLAIMED_AT},
     ).fetchone()
     if context is None:

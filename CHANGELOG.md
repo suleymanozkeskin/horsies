@@ -8,6 +8,1107 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-15
+
+0.7.0 runs a task in one of three execution modes: in an isolated child,
+in a shared async child, or in a shared thread child. A task names its
+mode, and a worker profile sets the children of each kind; a worker starts
+with `--profile`, which replaces the execution flags. A task takes fewer
+round trips, and plain successes are written in batches. The schema moves
+from v52 to v61, and the first 0.7.0 process that connects upgrades it.
+The release is breaking: read the migration guide to 0.7.0 before you
+upgrade.
+
+### Added
+
+- **`WorkerProfile.parent_cpu` gives the worker process a core of its own.**
+  `ParentCpu.OWN_CORE` (Linux) puts every thread of the worker process on
+  one physical core of the CPUs that the worker may use, both SMT threads,
+  and every child, recycled children too, on the other CPUs. The worker
+  sets the CPUs of each child before the child's first frame. The worker
+  start fails on another platform or with fewer than 2 physical cores.
+  `ParentCpu.SHARED` (the default) changes nothing. The children lose the
+  CPUs of that core: on 8 CPUs (4 physical cores with 2 SMT threads each),
+  8 isolated children that ran pure-Python work went from 52 to 39 tasks/s,
+  and one shared thread child with 8 seats that ran C work that releases
+  the GIL went from 71 to 56. Use it when the worker process is the limit.
+
+- **A task can be an `async def` function.** `@app.task()` registers it and
+  returns an `AsyncTaskFunction`. A worker child runs it as it runs a `def`
+  task: one task at a time, with the same RUNNING update, heartbeats,
+  `timeout_ms` kill, recovery and retry policy. Each child keeps one event
+  loop until the child stops, and an async task runs on that loop, so an
+  async client that a module keeps stays open across the tasks of one
+  child. The loop runs only while an async task runs. A `def` task still
+  runs with no running event loop and can call `asyncio.run()`. In an async
+  task, send with `send_async()`: the sync `send()` returns
+  `Err(TaskSendAsyncContext)` there.
+  - A direct call of an async task returns a coroutine of the `TaskResult`.
+    The return check and the exception mappers are the same as for a `def`
+    task. In a worker, a `CancelledError` of a body that cancelled its own
+    task, and a `GeneratorExit` that the body raises, go through the
+    exception mappers too; the direct call lets them pass.
+  - `TaskNode.fn`, `.node()` and the task registry take both kinds.
+  - An `async def` function that uses `yield` is refused with `HRS-101`, as
+    a generator function is.
+  - A child whose app has an `async def` task creates its event loop at
+    boot, before it reports ready. A child whose app has none creates no
+    loop. When the loop cannot be created, the child fails its boot, and no
+    task reaches it. An `OSError` with `EMFILE`, `ENFILE`, `ENOMEM` or
+    `EAGAIN` can clear, so only that slot is down (see the change to child
+    start failures below). The log names the slot and the cause, for example
+    `Slot 1 is down: the OS ran short of a resource (EMFILE): OSError:
+    [Errno 24] Too many open files`. Any other failure, such as an event loop
+    policy that raises, repeats (`TaskLoopCreateFailed`) and counts one of
+    three attempts.
+  - The task loop of a worker child does not count against the broker's
+    limit of 5 open caller loops (`EVENT_LOOP_LIMIT`), as the broker's sync
+    runner loop does not. An async task that calls the broker gives the task
+    loop a resource set, which it keeps until the child stops.
+  - A task must await the work that it starts. When the body of an async
+    task returns (a value, or an exception that its exception mapper turns
+    into a result) and asyncio tasks that it started are still on the loop,
+    the child waits up to 1 second for them (`ISOLATED_LEFTOVER_GRACE_S`;
+    an isolated task has no grace option), then cancels the work that is
+    alive in three rounds 0.1 s apart. The worker writes what the task
+    returned only after that work ended, and only then the retry and the
+    next workflow step, so they never run next to that work. The worker
+    then replaces the child: cancelled code can leave broken state in it.
+    The return ends the deadline: `timeout_ms` bounds the body, and the
+    outcome is never `TASK_TIMEOUT` in this wait. Work still alive 0.3 s
+    after the first cancel is stuck: the worker kills the child and writes
+    what the task returned after it saw the exit. A child that reports
+    neither the end of that work nor that it is stuck within 26.3 s of the
+    return, and a child that ends in the wait, also end with what the task
+    returned once the exit was seen; no exit seen within 30 s of a kill
+    follows the rule of a timeout kill. The child writes the finalizing
+    marker of the row only after that work ended, and not at all for work
+    that did not stop, so the worker beats the row while the work runs and
+    the reaper does not fail it, also with small stale thresholds. A client
+    that keeps its own background tasks on the loop delays the outcome of
+    each async task by
+    about 1 second and causes a child replacement after it. The worker logs
+    one line for each task that left work: the coroutine of each task left,
+    up to 10, and how that work ended. A task that cancels a helper task in
+    `finally` must also await it. The check sees asyncio tasks only: a
+    callback that `loop.call_soon()` or `loop.call_later()` scheduled, and
+    `loop.run_in_executor()` work that the task did not await, are not
+    waited for, cause no replacement, and can still run during a later task
+    of the same child.
+  - When the worker stops a child, the child cancels what is left on its
+    loop and closes the loop, in at most 7 seconds. A thread of
+    `asyncio.to_thread()` that still runs after that time does not hold the
+    child: the child exits without waiting for it, and its `atexit` handlers
+    do not run. The close of the async generators and the shutdown of the
+    default executor each get at least 1 second, also when the cancel of
+    left tasks used the first 5 seconds. So the `finally` of an open async
+    generator runs, and an idle executor does not count as a running
+    thread.
+- **The worker state names the slots that are down.**
+  `WorkerStateSnapshot.slot_health` is `AllSlotsServing()`,
+  `SlotsDown(slots)`, or `SlotHealthNotRecorded()` for a snapshot that a
+  worker without this field wrote. Each `DownSlot` holds the slot index, the
+  cause (`ResourceShortage(errno_name)` or `ThreadStartRefused()`), the
+  error text of the last failed start (at most 2400 characters),
+  `down_since`, and `failed_boots`.
+  `list_worker_states()`, `get_worker_state()` and
+  `get_worker_state_history()` return it. A stored value of another shape
+  fails the read with `MONITORING_QUERY_FAILED`. Schema v53 adds the column
+  `horsies_worker_states.slots_down` (`jsonb`, nullable, no backfill).
+- **The worker state reads the claim budgets, and a fleet check finds the
+  pending classes that no live worker can run.** No schema change.
+  - `WorkerStateSnapshot.class_capacity` is `ClassBudgets(budgets)`, with one
+    `ClassBudget(budget, capacity, serves)` per budget in `Execution` order,
+    or `ClassCapacityNotRecorded()` for a snapshot without the column value.
+    A stored value of another shape (an unknown class name, a capacity that
+    is not a whole number of 0 or more, a `serves` list without its own class,
+    or a class in two budgets) fails the read with `MONITORING_QUERY_FAILED`,
+    and the message names the worker.
+  - `get_class_coverage()` gives each (queue, class) with `PENDING` rows one
+    state: `StreamServed(workers, capacity)`, `StreamWithoutCapacity(workers)`
+    (every child or seat of the serving budgets is down) or `StreamUnserved()`.
+    A worker is live while its latest snapshot is at most 120 seconds old
+    (`WORKER_STATE_LIVE_WINDOW_S`, the threshold at which the web UI already
+    marked a worker stale). A live snapshot without `class_capacity`, from a
+    worker version that does not record its budgets, leaves that worker out:
+    it serves no stream, is not in `live_workers`, and `not_recorded` names
+    it (`ClassesNotRecorded(worker_id, snapshot_at)`, by worker id). A live
+    snapshot whose value is unreadable fails the read and names the worker.
+  - Each reaper pass runs the check, one check interval after the worker
+    starts. An unserved (queue, class) logs an error, one without capacity a
+    warning; each worker logs one (queue, class) at most once per 5 minutes.
+    The workers left out log one warning per 5 minutes that names up to 10 of
+    them.
+    This covers a shared task that went back to the queue as `ISOLATED` while
+    no live worker has isolated children.
+  - `get_class_report()` adds the wait of each stream's oldest due row
+    (`OldestWaiting` or `NoneDue`) and, per live worker, each budget's
+    capacity, rows in flight and free capacity (`BudgetLoad`). It names the
+    workers left out in `not_recorded` too; `GET /api/workers/classes`
+    returns them in `not_recorded`.
+  - Both reads probe `idx_horsies_tasks_claim_pending_class`: the check once
+    per pending (queue, class), the report once per (queue, class, priority).
+    Each read has a bound and fails closed at it.
+  - The web UI shows the pending rows per execution class with fleet
+    warnings, each live worker's budgets with free capacity, and each
+    worker's down slots (`GET /api/workers/classes`; `WorkerStateInfo` gains
+    `slot_health` and `down_slots`).
+- **`horsies check --live` compares every worker profile with the server
+  connection limit.** One worker opens the pool of the worker process (the
+  resolved `WorkerProfile.pool`), 2 listener connections, 1
+  runner heartbeat connection and the resolved `pool.max_size` of its mode
+  for each child. A profile whose worker opens
+  more than `max_connections` less `superuser_reserved_connections`
+  and `reserved_connections` fails with `HRS-219`
+  (`CHECK_WORKER_CONNECTIONS`). Task code that sends opens the app's broker
+  in its child, the `task_send_pool` of its child kind for each event loop
+  it sends from. The comparison does not count it; the error and the boot
+  log state it, with one sending loop per child. With `pgbouncer_transaction_mode=True`
+  nothing is compared. At boot, before any child starts, a worker logs the
+  same comparison as a warning. It also warns when the per-child memory
+  limits of its profile add up to more than the memory that it can use: the
+  container (cgroup v2 or v1) memory limit when that is below the host RAM,
+  else the host RAM. The cgroup is the one that `/proc/self/cgroup` names,
+  and its limit is the smallest on the path from it up to the mount point,
+  so a systemd `MemoryMax` and a container seen with `--cgroupns=host`
+  count. The warning names the source. It starts in both cases.
+
+- **Each task declares its execution class, and each task row stores it.**
+  `@app.task(..., execution=...)` takes an `Execution` member:
+  `Execution.ISOLATED` (the default: one task at a time in its own child
+  process), `Execution.SHARED_ASYNC` (many `async def` tasks as coroutines in
+  one child process) or `Execution.SHARED_THREAD` (many `def` tasks on threads
+  in one child process). `Execution` is exported from `horsies`.
+  - The decorator checks the rules when the task is defined, one code per
+    rule: `SHARED_ASYNC` needs an `async def` function (`HRS-107`),
+    `SHARED_THREAD` needs a `def` function (`HRS-108`), both shared classes
+    need `timeout_ms` (`HRS-109`), only `SHARED_ASYNC` takes `cancel_grace_ms`
+    (`HRS-110`), and `cancel_grace_ms` is from 100 to 10,000 ms (`HRS-111`).
+    `horsies check` reports them. With `execution` written as a member, a
+    type checker refuses the same declarations. A class known only at run
+    time needs `timeout_ms` and takes `cancel_grace_ms`; the decorator checks
+    it at run time.
+  - `cancel_grace_ms` is the time that a `SHARED_ASYNC` task gets to stop
+    after its cancel. A task that sets none gets 1,000 ms. The stored task
+    options hold the class (`"execution"`) and the grace in effect at send
+    (`"cancel_grace_ms"`, null for the other classes).
+  - Schema v54 adds `horsies_tasks.execution` (TEXT, NOT NULL, default
+    `'ISOLATED'`, a CHECK on the three values) and builds
+    `idx_horsies_tasks_claim_pending_class` on
+    `(queue_name, execution, priority, enqueued_at, id)` over PENDING rows,
+    concurrently. A send, a delayed send, a workflow node and a rerun write
+    the column from the stored task options. Rows written before v54, and
+    rows that a process of an earlier version writes, read `ISOLATED`.
+  - `TaskInfo.execution` and the monitoring `LeafTaskInfo.execution` give the
+    class of a live task. Both are `None` for a task read from history, which
+    does not keep the class.
+  - The stored task options have two more keys, so the command fingerprint
+    and the enqueue digest of a send change. A keyed resend of a request that
+    an earlier version sent is a conflict, not a replay.
+  - Enqueue refuses, with `INVALID_TASK_OPTIONS`, task options that are not a
+    JSON object, and an `execution` or a `cancel_grace_ms` that does not fit
+    the rules above.
+- **Shared async children run `SHARED_ASYNC` tasks, many at once.**
+  `WorkerProfile.shared_async` takes `SharedAsyncChildren(count, seats,
+  recycle=SharedRecycle(after_per_seat, above))` or `NoSharedAsyncChildren()`
+  (the default). A shared async child is one process that runs up to `seats`
+  `SHARED_ASYNC` tasks at once, as coroutines on one event loop, from its
+  start to its stop; a free seat takes the next task at once. `count` is 1 to
+  1024 and `seats` is 1 to 1000. A profile with only shared async children is
+  valid. `SharedAsyncChildren`, `NoSharedAsyncChildren`, `SharedRecycle` and
+  `SharedAsyncChildStartHook` are exported from `horsies`.
+  - A worker with shared async children claims `SHARED_ASYNC` rows into a
+    `SHARED_ASYNC` budget, whose capacity is the seats of its shared children
+    in service (a closing child counts only the tasks it still runs), and runs
+    each on a seat; its isolated children never run one. A worker with none
+    runs `SHARED_ASYNC` rows in isolated children. A new task goes to the
+    open shared child with the fewest tasks in flight.
+  - An attempt ends when its coroutine has ended and no work that it
+    started is alive: the asyncio tasks that it created, itself or through a
+    library (found by a task factory and by a scan of the live tasks, so a
+    task built with `asyncio.Task(...)` counts too), and its calls in the
+    default executor. The child reports the end only then, so a retry never
+    runs next to work of the attempt that it replaces. The end checks of
+    one loop turn share one scan of the live tasks.
+  - A task that returns before its deadline (a value, or an exception that
+    its exception mapper turns into a result) while such work is alive
+    keeps what it returned: its deadline no longer applies. The child waits
+    up to `cancel_grace_ms` for that work. Work still alive then is
+    cancelled in the cancel rounds below, and the child closes (the new
+    `CloseReason.LEFTOVER_WORK`): it takes no new task and is replaced when
+    its tasks end. Work still alive 0.3 s after that cancel is stuck: the
+    task keeps its seat, the worker kills the child when every task left in
+    it is stuck, and then writes what the task returned, with no
+    `TASK_TIMEOUT` and no retry in an isolated child. The report of that
+    cancel carries what the task returned, so from then on any kill of the
+    child whose exit the worker saw writes what the task returned. Each
+    task that opens a client on first use, outside
+    `on_shared_async_child_start`, so costs one child restart. The child logs one line for each task that left work:
+    the coroutine names of that work, up to 10, and whether it ended within
+    the grace, was cancelled, or was stuck.
+  - The child holds the deadline of each task. At `timeout_ms` it cancels
+    the task; when the attempt has ended, the worker writes `TASK_TIMEOUT`,
+    the retry and the workflow step, and the other tasks of the child
+    continue. A task that returns a value after its deadline fired still
+    fails with `TASK_TIMEOUT`. At `timeout_ms + cancel_grace_ms`, when the
+    attempt is alive, the child sends a second cancel to the task and to its
+    asyncio tasks, then two more rounds 0.1 s apart, and the child closes: it
+    takes no new task and is replaced when its tasks end. An attempt still
+    alive 0.3 s after the second cancel is stuck: it keeps its seat, and the
+    worker kills the child when every task left in it is stuck. Those tasks
+    fail with `TASK_TIMEOUT`, and their retry runs in an isolated child (the
+    retry write sets `execution = 'ISOLATED'` on the row).
+  - A thread in each shared child watches its event loop. A loop that has
+    not turned for 5 s is reported with the task that holds it and the
+    source line, and the worker kills the child at once. That task fails
+    with the new `TASK_BLOCKED_LOOP` and retries in an isolated child; each
+    other task before its deadline fails with the new
+    `NEIGHBOUR_BLOCKED_LOOP`, and runs again only when `auto_retry_for`
+    names that code; a task past its deadline fails with `TASK_TIMEOUT`.
+  - A call in the default executor stays the work of its task when an
+    `on_shared_async_child_start` hook set a default executor of its own:
+    after the hooks the child wraps that executor, which still runs the
+    calls. A default executor that is not a `ThreadPoolExecutor` after the
+    hooks (set past `loop.set_default_executor()`) ends the child with the
+    exit code of a failed hook. `anyio.to_thread.run_sync()` work is not
+    seen as the work of its task.
+  - The watching thread names a task only when that task held the loop for
+    the whole block: once the loop has not turned for 0.2 s it reads the
+    task that runs every 0.1 s, and at the report, and names it only when
+    every reading saw the same task. Many short steps of several tasks in
+    one turn name no task: each task before its deadline then takes the
+    crash path, as for code of no task.
+  - The worker kills a child that has reported neither the second cancel
+    nor the end of a task `timeout_ms + cancel_grace_ms + 10 s` after its
+    placement: C code holds the GIL in it. A child that reported that cancel,
+    or the cancel of the work that a task left after its return, and then
+    reports neither the task stuck nor its end by `timeout_ms +
+    cancel_grace_ms + 20.3 s` after its placement (the first check, then
+    0.3 s for the cancel rounds and the stuck check, and the same 10 s
+    margin) froze after the report, and is killed as well. A child that
+    still holds a refusal 145 s after its placement is killed as well: the
+    writes of a refusal end within 120 s on a shared async child and 135 s
+    on a shared thread child (two attempts of the RUNNING update and the
+    finalizing marker, each at most 30 s for a connection, 10 s for its
+    statements, and 5 to 10 s for a cancelled statement to end), and the
+    block limit with its margin comes after them. At these kills a
+    task past its deadline fails with `TASK_TIMEOUT`, and every other task
+    takes the crash path. A task that the child reported stuck keeps its
+    retry in an isolated child at every kill by the worker whose exit it
+    saw: this backstop, the drain deadline of a stop, and a blocked loop of
+    another task. No other retry moves to an isolated child.
+  - A crash of a shared child that the worker did not cause ends every task
+    in it through crash recovery (`WORKER_CRASHED`, or its retry), after the
+    worker saw the exit. A task that returned before its deadline, and whose
+    left work the child reported in its cancel rounds or stuck, ends with
+    what it returned at every end of its child whose exit the worker saw,
+    also at an out-of-memory kill or a crash.
+  - A task that cancels its own asyncio task and returns before an `await`
+    takes the cancel ends as that cancel, through its exception mapper, as
+    a cancel that reaches the body at an `await` does. The request is
+    cleared, so the seat does not end cancelled, and the child serves on.
+  - The child writes the finalizing marker of a task when its attempt ends:
+    after its coroutine and the work that it started, and only when the
+    task returned before its deadline and that work ended within the grace.
+    The child reports the end after the marker, and waits for it at most
+    until the deadline of the task. A task that timed out, or whose work
+    needed a cancel, gets no marker: the child reports its end at once, and
+    the runner heartbeats of the worker cover the row until the worker reads
+    that end. So the heartbeats of a row never stop while work of its
+    attempt still runs, a marker that waits for a pooled connection never
+    turns a returned value into `TASK_TIMEOUT`, and no marker uses the
+    cancel grace of a task.
+  - A `SHARED_ASYNC` row without a usable stored `timeout_ms` or
+    `cancel_grace_ms` fails with `WORKER_SERIALIZATION_ERROR` on every
+    worker, after its RUNNING update and before the task resolves; the data
+    of the error names the field. It never runs, and it does not return to
+    the queue.
+  - The RUNNING update with the first runner heartbeat and the finalizing
+    marker of a shared task run on an async connection pool that the child
+    opens on its loop, sized by `SharedAsyncChildren.pool`. An
+    attempt of the RUNNING update that does not end within 40 s (30 s for a
+    connection, 10 s for its statements, for example an UPDATE that waits on
+    a row lock) ends with `OWNERSHIP_UNCONFIRMED`: the task does not start,
+    and its row stays `CLAIMED` until its lease ends. The child writes its
+    frames from a thread, so a slow worker never stops the loop. A shared
+    child runs only `async def` tasks; a row that reaches one with a `def`
+    function fails with `WORKER_RESOLUTION_ERROR`.
+  - `@app.on_shared_async_child_start` registers an `async def` hook that
+    runs on the loop of each shared async child before its first task, for
+    long-lived async clients. Same 10 s bound and fail-closed stop as
+    `on_child_process_start`. It also accepts an object whose `__call__` is
+    `async def`, a function with an awaitable return annotation, and a
+    lambda; it refuses another callable with `HRS-214`.
+  - Recycling counts per seat: a shared child closes after
+    `after_per_seat.tasks × seats` tasks (default 100 per seat) or when its
+    RSS after a task reaches `above`. A closing child takes no new task, its
+    tasks finish, then a new child starts.
+  - `WorkerProfile.seat_count()` is one per isolated child plus `seats` per
+    shared child. The claim limit check (`HRS-218`) compares with it plus
+    `prefetch_buffer`; the connection check (`HRS-219`) and the memory
+    warning count the shared children; the boot memory guard compares each
+    mode's limit with the baseline of a child of that mode. A mode whose
+    children were all down at the start is compared when its first child
+    becomes ready, and a breach then stops the worker non-zero.
+
+- **Shared thread children run `SHARED_THREAD` tasks, many at once.**
+  `WorkerProfile.shared_thread` takes `SharedThreadChildren(count, seats,
+  recycle=SharedRecycle(after_per_seat, above))` or `NoSharedThreadChildren()`
+  (the default). A shared thread child is one process that runs up to `seats`
+  `def` tasks at once, each on a seat thread that the child starts at boot; a
+  free seat takes the next task at once. `count` is 1 to 1024 and `seats` is 1
+  to 256 (each seat is an OS thread with its own stack). A profile with only
+  shared thread children is valid. `SharedThreadChildren` and
+  `NoSharedThreadChildren` are exported from `horsies`.
+  - A worker with shared thread children claims `SHARED_THREAD` rows into a
+    `SHARED_THREAD` budget, whose capacity is the seats of its thread children
+    in service (a closing child counts only the tasks it still runs); its other
+    children never run one. A worker with none runs `SHARED_THREAD` rows in
+    isolated children. A new task goes to the open thread child with the
+    fewest tasks in flight.
+  - A thread cannot be cancelled. The child holds the deadline of each task:
+    at `timeout_ms` it reports the deadline and closes (it takes no new task),
+    and the task runs on. When every task still in the child is past its own
+    deadline, the worker kills the child with its session; after the exit,
+    each of those tasks fails with `TASK_TIMEOUT`, with its retry and its
+    workflow step. The task whose deadline closed the child retries in an
+    isolated child. A task alone in its child is killed at its deadline; a
+    neighbour with time left runs to its end. A task that ends by itself after
+    its deadline fails with `TASK_TIMEOUT`. A child that has not reported a
+    deadline by `timeout_ms + 10 s` is frozen (C code holds the GIL): the
+    worker kills it, each task past its deadline fails with `TASK_TIMEOUT`,
+    and every other task of the child takes the crash path. The task whose
+    deadline closed the child keeps its retry in an isolated child at every
+    kill by the worker whose exit it saw, also at this one and at the drain
+    deadline of a stop.
+  - A crash or a kill of a thread child ends every task in it, each through
+    crash recovery after the worker saw the exit.
+  - A `SHARED_THREAD` row without a usable stored `timeout_ms` fails with
+    `WORKER_SERIALIZATION_ERROR` on every worker, also on an isolated child,
+    after its RUNNING update and before the task resolves.
+  - A thread child boots as an isolated child does and opens one sync pool,
+    sized by `SharedThreadChildren.pool`; its seat threads share it for
+    the RUNNING update and the finalizing marker, and wait up to 30 s for a
+    connection. A thread child runs only `def` tasks; a row that reaches one
+    with an `async def` function fails with `WORKER_RESOLUTION_ERROR`.
+  - The outcome of a thread task is fixed when it returns, and a task that
+    returned has no deadline left. The seat then writes the finalizing
+    marker, only for a task that returned before its deadline, and waits for
+    a pooled connection for it at most until that deadline. A task that
+    timed out gets no marker: the child reports its end at once, and the
+    runner heartbeats of the worker cover the row until the worker reads
+    it. A marker that waits for a connection never turns a returned value
+    into `TASK_TIMEOUT`.
+  - A seat thread whose task reaches its deadline while the thread waits
+    for a pooled connection does not start the task: right before the
+    RUNNING update it reads the deadline of the run, and the row stays
+    `CLAIMED`. The child reports the deadline, and the worker returns the
+    row to the queue with no `TASK_TIMEOUT`.
+  - Recycling is per seat, as for shared async children. The claim limit
+    check (`HRS-218`), the connection check (`HRS-219`), the memory warning
+    and the boot memory guard count the thread children.
+  - New docs page "Shared Thread Tasks", with
+    when threads help (C code that releases the GIL scales on every build;
+    pure-Python code needs a free-threaded build) and the rules for task
+    authors.
+
+- **A worker claims per execution class.** A worker has one claim budget
+  for each execution class that it runs children for. Its capacity is the
+  children (`ISOLATED`) or seats (a shared class) of that class in service.
+  The worker builds its claim plan once at start from its profile and logs it:
+  - A class with children of its own is claimed into its own budget.
+  - A shared class with no children of its own is claimed into the
+    `ISOLATED` budget, when the worker runs isolated children. Isolated
+    children never take a class that has children of its own.
+  - Any other class is not claimed. The worker still starts, and logs one
+    line that names those classes.
+  - A profile with isolated children only claims every class into the
+    `ISOLATED` budget.
+  - Priority holds within one class. Each (queue, class) is its own claim
+    stream in `(priority, enqueued_at, id)` order, and a budget of several
+    classes reads their merge in that order.
+  - The use of each budget is counted from the rows: this worker's RUNNING
+    and live CLAIMED rows of the classes that the budget claims.
+  - `ClaimLimits.per_queue_per_pass`, `ClaimLimits.claimed_per_worker`, the
+    queue caps and `cluster_wide_cap` apply to the worker as a whole. In soft
+    cap mode each budget, and the worker, may hold `prefetch_buffer` rows
+    more than its capacity. A budget whose capacity in service is 0 (every
+    child or seat of it is down) gets no prefetch, and neither does a worker
+    whose budgets are all at 0: their rows stay for a worker with seats. The
+    capacity that `HRS-218` compares with is the sum of the budgets plus
+    `prefetch_buffer`.
+  - A claimed row of a shared class whose task, as this worker registered it,
+    has another class (for example `SHARED_ASYNC` on the row, and the
+    function is now `def`) is written `ISOLATED` and returned to `PENDING`,
+    fenced to its claim generation, with one warning. A row of a task that
+    the worker did not register is dispatched as before.
+  - Schema v55 adds `horsies_worker_states.class_capacity` (`jsonb`,
+    nullable, no backfill): each budget class with its `capacity` and the
+    classes it `serves`.
+
+- **Each child kind has its own connection pool, and a shared async child
+  sizes its default executor.** `IsolatedChildren.pool` takes an
+  `IsolatedPool(min_size, max_size=PoolSize(connections=N), check)`;
+  `SharedAsyncChildren.pool` and `SharedThreadChildren.pool` take a
+  `SharedPool(min_size, max_size, check)` whose `max_size` is
+  `PoolSize(connections=N)` or `PoolSizeFromSeats()`.
+  `SharedAsyncChildren.executor` takes `ExecutorThreads(threads=N)` or
+  `ExecutorThreadsFromSeats()`, and sizes the default executor of the event
+  loop of each shared async child (`asyncio.to_thread`,
+  `loop.run_in_executor(None, ...)`). An `on_shared_async_child_start` hook
+  that sets its own default executor still replaces it.
+  - Defaults: an isolated child opens a pool of 0 to 1 connections, with
+    no checkout check: its two writes run one after the other. A shared child
+    derives its pool `max_size`, and a shared async child its executor
+    threads, from its seats:
+    `min(cap, max(floor, ceil(seats / seats_per_unit)))`, with constants of
+    each kind in `horsies.core.models.child_sizing`: one connection per 10
+    seats, from 2 to 40 for a shared async child and from 2 to 26 for a
+    shared thread child; one executor thread per seat, from 2 to 32.
+  - The pool sizes are the measured knees with tasks that sleep 0.1 s,
+    3.5 ms from Postgres 17: a shared async child of 100 seats gives 790-810
+    tasks/s with 10 connections, as with 20, and 570-590 with 5; a shared
+    async child of 1000 seats gives 1,700-1,760 tasks/s with 40 connections,
+    1,715-1,720 with 80 and 970 with 10.
+  - Bounds: `PoolSize.connections` is 1 to 1000, `min_size` is 0 to 1000,
+    and `ExecutorThreads.threads` is 1 to 256. A `min_size` above the
+    resolved `max_size` fails `horsies check` with `HRS-218` and names the
+    field path, for example `worker_profiles['batch'].shared_async.pool.min_size`.
+  - The connection check (`HRS-219`) and the boot warning count each child
+    with the resolved `pool.max_size` of its mode, one term per mode:
+    `parent pool max_size 5 + listener 2 + runner heartbeat 1 + 4 isolated
+    children x isolated.pool max_size 1 + 2 shared async children x
+    shared_async.pool max_size 5 = 22`.
+  - The start log line of the worker states the resolved pool of each kind
+    and the executor threads of the shared async children, with `derived
+    from seats` for a derived size.
+  - `IsolatedPool`, `SharedPool`, `PoolSize`, `PoolSizeFromSeats`,
+    `ExecutorThreads` and `ExecutorThreadsFromSeats` are exported from
+    `horsies`.
+
+- **The worker process sizes its own pool in the profile, and task code in a
+  child opens a task-send pool of its kind.** `WorkerProfile.pool` takes a
+  `ParentPool(max_size)` whose `max_size` is `PoolSize(connections=N)` or
+  `PoolSizeFromSeats()`, the default. The worker process claims tasks and
+  writes the outcome of each task through this pool. It opens with
+  `pool_size = max_size`, `max_overflow = 0` and the pre-ping of
+  `worker_pool_pre_ping`, so the connection check counts it exactly.
+  - The default derives the size from the seats of the whole profile:
+    `min(20, max(5, ceil(seat_count() / 10)))`, with the constants
+    `PARENT_POOL_CONNECTIONS_CAP`, `PARENT_POOL_CONNECTIONS_FLOOR` and
+    `PARENT_SEATS_PER_POOL_CONNECTION` in
+    `horsies.core.models.child_sizing`. 8 isolated children: 5; 64 isolated
+    children: 7; one shared async child of 100 seats: 10; of 1000 seats:
+    20. `WorkerProfile.resolved_parent_pool()` returns the size.
+  - An explicit size has a minimum of 5 (`PARENT_POOL_MIN_CONNECTIONS`):
+    while the worker is busy, the claim loop holds 1 connection and the 2
+    steady flushers of the batched success write hold 1 each, and 2 stay
+    free for the reaper and the writes per task. A smaller
+    `PoolSize(connections=N)` fails with HRS-218; a size derived from the
+    seats is never below it.
+  - Plain successes are written in batches: a worker of 1000 seats kept at
+    most 3 to 8 of its 20 connections busy at 970-1,760 tasks/s. A failure is
+    written per task: a worker of 1000 seats whose tasks all fail, 3.5 ms
+    from Postgres, gives 1,010 tasks/s with 20 connections and 500 with 5.
+  - `IsolatedChildren`, `SharedAsyncChildren` and `SharedThreadChildren`
+    take `task_send_pool: PoolSize`, default `PoolSize(connections=2)`.
+    Task code that sends through the app (`app.get_broker()`) opens the
+    app's broker in its child with that many connections and no overflow,
+    for each event loop that it sends from. That broker keeps
+    `pool_pre_ping`. The child sets it before it
+    imports its task modules, so a broker that an import builds opens it
+    too. The pool of `PostgresConfig` does not apply in a child. In every
+    other process, the worker process included, `app.get_broker()` opens the
+    pool of `PostgresConfig`.
+  - The connection check (`HRS-219`) and the boot warning count the parent
+    pool as `parent pool max_size N`, and state the task-send pool of each
+    mode as a ceiling for children whose tasks send:
+    `8 isolated children x isolated.task_send_pool 2 = 16 more, 32 in all`.
+  - The start log line of the worker states the resolved parent pool, with
+    the seats it derives from, and the `task_send_pool` of each kind:
+    `pool=20 connections (derived from 1000 seats)`.
+  - `ParentPool` is exported from `horsies`.
+
+### Changed
+
+- **The worker process and its children spend less CPU per task.** The
+  worker process counts the tasks that each child holds, reads child frames
+  from one buffer and writes a small frame in one call, probes its listener
+  connection at most once per interval of activity, freezes the objects of
+  its start for the garbage collector, and sends a batch of fused
+  completions as one JSON parameter. A child keeps the resolved hints and
+  signature of each task function and reads parent frames through one
+  buffer. One frame parser serves both sides.
+
+- **A sync send of a producer writes its row on the calling thread.**
+  `send()` ran its INSERT on the broker's sync runner thread: each send handed
+  the work to that thread and waited for it. On a VM, the hand-offs across
+  CPUs around the database wait cost CPU: with 5,000 sequential sends to one
+  Postgres 18 server, 411-419 sends/s and 1,441-1,479 µs of CPU per send. In
+  a process that runs no task bodies, an unkeyed `send()` now prepares the
+  row and runs the same INSERT on the calling thread, through a sync pool of
+  the broker with the same URL, pool sizes, connect args, session settings
+  and idle ping: 637-660 sends/s and 619-672 µs of CPU per send.
+  - The first send of a broker (it checks the schema), a send with an
+    idempotency key, and a send from task code in a worker child keep the
+    sync runner. A task id that is taken is compared on the sync runner, as
+    before. The outcomes and errors are those of `enqueue_async`.
+  - The sync pool opens on first use and holds up to
+    `pool_size + max_overflow` connections, next to the pool of the sync
+    runner's set. `close()` closes it.
+
+- **A stopped child ends without the interpreter teardown.** After a stop
+  frame, a child that has no executor threads left waits for its non-daemon
+  threads, runs its `atexit` handlers and flushes its output, as `sys.exit(0)`
+  did, then ends with `os._exit(0)`. The teardown freed every object, which
+  wrote to the pages that a forked child shares with the preload parent, so
+  each ending child copied them, and the peak memory of the worker rose while
+  children were replaced. An object that still exists at the stop no longer
+  gets `__del__` in a child; Python does not promise those calls at exit.
+  Close or flush files in the task: buffered files that task code left
+  open are not flushed at the stop. The child looks up these steps,
+  private CPython functions, at the stop; on a Python without them it logs
+  the missing name and ends through `sys.exit`.
+
+- **`pool_pre_ping` pings only a connection that waited in the pool for more
+  than 1 s.** SQLAlchemy's `pool_pre_ping` pinged at every checkout: one
+  round trip more for each send of a producer. The broker now registers its
+  own checkout hook (`register_idle_ping`), with SQLAlchemy's ping off: a
+  connection checked in within `PRE_PING_AFTER_IDLE_S` (1 s), and a new
+  connection, are used with no ping. `worker_pool_pre_ping` has the same
+  meaning for the engine of the worker process.
+  - A ping that finds a dead connection replaces it and every connection
+    checked in before it, and the checkout takes a new one, as before.
+  - A connection that dies within 1 s of its check-in fails its next
+    statement with a retryable connection error; for a send,
+    `TaskSendEnqueueFailed(retryable=True)`. The ping never covered a
+    connection that dies after it.
+
+- **The worker keeps one connection for its claim loop and for each steady
+  finalize flusher.** Each claim pass and each batched completion took a
+  connection from the worker pool and gave it back, so each statement paid
+  a checkout, and a ping when `worker_pool_pre_ping` is on. The claim loop
+  and the two steady flushers of the finalize batcher now hold one pool
+  connection each, in autocommit, and send each statement on its psycopg
+  connection. A flusher started for a surge takes a connection per
+  statement, as before.
+  - A held connection goes back to the pool after 1 s with no statement,
+    when it reaches the `pool_recycle` age, and at the worker stop.
+  - A connection error on a held connection is a lost outcome
+    (`OutcomeUnknown`). The claim loop retries the pass, and finalize
+    retries and classifies the replay, as before. SQLAlchemy's disconnect
+    handling then replaces every connection of the pool. A cancelled
+    statement drops its held connection.
+  - A plain success finalize is one round trip, with `worker_pool_pre_ping`
+    on or off: the held connection needs no checkout.
+  - With 20,000 no-op tasks, 3 runs each: 8 isolated children 1,540-1,674 →
+    1,799-1,925 tasks/s, Postgres CPU per task 1.49-1.62 → 1.32-1.42 ms;
+    8 shared async children of 100 slots 4,109-4,204 → 4,150-4,288
+    tasks/s.
+
+- **A task row is read by its id alone (schema v60).** The start of a task,
+  its finalizing marker, and the completion and failure functions
+  (`horsies_complete_task_fused`, `horsies_complete_locked_task`,
+  `horsies_fail_locked_task`, `horsies_finish_failed_attempt`,
+  `horsies_finish_workflow_success`) read the row by id and check the claim
+  on the locked row. With the statistics that Postgres takes while every row
+  is PENDING, for example after a burst of sends, the planner served the
+  earlier statements from the status index or a partial index: 113 index and
+  table pages per call for the start, 258 for the marker and 179 for the read
+  of the completion, against 27, 10 and 5 with the statistics of a working
+  queue. Outcomes and locks are the same, except that a start or a marker
+  whose claim changed now locks the row until its transaction ends.
+
+- **A task's start sends no `horsies_task_status` event (schema v59).** The
+  status update trigger skips the change to RUNNING. A task's start commit is
+  one transaction per task, and its NOTIFY made Postgres commit it one at a
+  time with every other notifying commit. The web app sees RUNNING when it
+  next re-reads the tasks. A listener of `horsies_task_status` that needs the
+  start reads the row.
+
+- **A failed attempt, a timeout and their retry are one read and one
+  statement (schema v56).** `horsies_finish_failed_attempt` takes the task
+  advisory lock, then the row lock under the claim fence, and writes the
+  attempt row with the retry or the terminal failure. The worker reads the
+  retry facts of the attempt first, without a lock and fenced on the claim
+  generation; the retry policy and its jittered delay are decided in Python,
+  as before. Both statements run in autocommit. Counted at the wire with the
+  default `worker_pool_pre_ping=False`:
+  - a task error, a timeout or a crash, failed or retried: 2 round trips,
+    before 7 (BEGIN, the locked read, one or two reads of the retry facts,
+    the retry or the attempt row and the move, COMMIT, and the capacity wake
+    of a failed plain task);
+  - a worker-level failure or a result that does not decode, which are
+    never retried: 1 round trip, before 6.
+  With the pre-ping on, each is 1 round trip more, before 2 more.
+  - The terminal failure of a plain task sends its capacity wake in the same
+    statement, so it has no phase 2. A workflow task's failure runs phase 2
+    as before, which sends its wake. A scheduled retry still wakes its queue
+    when the retry is due.
+  - `will_retry` of the attempt row is true only when the same statement
+    wrote the retry. A retry whose next attempt would start at or after
+    `good_until` is written as the terminal failure; the log names both
+    instants. `good_until` is judged against the database clock under the
+    row lock.
+  - The retry count that the worker read is part of the fence: a write for
+    another attempt of the same task writes nothing.
+  - A replay of a committed failure (the reply was lost) writes nothing and
+    runs the phase 2 of a workflow task again; a plain task gets no second
+    wake. A replay of a committed retry writes nothing: the retry ended the
+    claim generation, so the replay is a lost claim.
+- **Breaking: worker child exit codes 74 to 76.** In 0.6.x, 74 meant only a
+  forked child that does not reparent to the worker. In 0.7.0:
+  - 74: a child that stopped while threads of the executor of its task loop
+    still ran. It leaves without waiting for them. New.
+  - 75: a child that failed its boot, after it reported the cause. New.
+  - 76: a forked child that does not reparent to the worker. It was 74.
+  A worker that cannot write runner heartbeats and has not stopped 120 s
+  after it started to stop exits with 77, also new.
+- **Breaking: the claim function takes a budget per execution class.**
+  `horsies_claim` takes `p_budgets` and `p_routes` in place of `p_processes`.
+  It returns a `row_kind` column: one `'CLAIMED'` row per task it took, with
+  the row's `execution`, and one `'SHORT'` row when it took fewer rows than
+  it chose, with that count in `short_by`. Schema v55 drops the earlier
+  signature, so a 0.6.x worker fails every claim pass after a 0.7.0 process
+  migrates.
+  Stop every 0.6.x worker before the first 0.7.0 worker starts.
+  - A claim pass reads the head of each (queue, class) stream without locks:
+    its pending rows and its rows with an expired lease, in one order. One
+    walk over all heads in rank order (queue priority, priority,
+    `enqueued_at`, id) takes a row when its queue, its budget and the pass
+    each have room left, so a row that one limit drops takes no room that
+    another class could use. The pass then takes the chosen rows from each
+    stream with `FOR UPDATE SKIP LOCKED`. It locks only the rows it takes.
+    Before, a pass over two queues of equal priority could lock up to its
+    batch in each queue and return one batch.
+  - A row that another claim holds at the take is skipped, and the stream
+    goes on to its next row. When a pass takes fewer rows than it chose,
+    because another transaction held or took them, the worker runs the next
+    pass at once, as no `NOTIFY` announces the rows that remain. At most 3
+    such passes run in a row; after that the worker waits for its next
+    wake.
+  - v55 builds `idx_horsies_tasks_claim_expired_class` on `(queue_name,
+    execution, priority, enqueued_at, id)` over CLAIMED rows concurrently,
+    and drops `idx_horsies_tasks_claim_pending` and
+    `idx_horsies_tasks_claim_expired_ordered` concurrently after its version
+    row commits, so an upgrade that fails leaves the earlier claim function
+    the indexes it reads. Each claim stream
+    is one range of `idx_horsies_tasks_claim_pending_class` or of the new
+    index. With 50,000 expired leases in one queue, the expired stream of a
+    class with no rows reads 142 buffers on the new index and 7,848 on the
+    unclassed one.
+  - The claim functions `horsies_claim`, `horsies_claim_plan` and
+    `horsies_claim_candidates` run with `jit = off`. Their generic plan passed
+    `jit_above_cost`, so a server with JIT compiled the statement on every
+    pass: 26 to 47 ms per pass against 0.7 to 1.8 ms of work, at a 90,000-row
+    backlog on PostgreSQL 17.
+- **Breaking: the worker and its children send a one-statement write in one
+  round trip.** The write runs in autocommit, as its own transaction, with no
+  pre-ping, no BEGIN and no COMMIT. A write that needs several statements to
+  commit together keeps its transaction.
+  - Worker process: the finalize of a plain task that succeeded
+    (`horsies_complete_task_fused`: attempt, history row and capacity wake in
+    one call) is 1 round trip, before 4 (pre-ping, BEGIN, the call,
+    COMMIT). The claim statement, the orphan cancel and the wake of a retry
+    that comes due are 1 round trip each, before 4 each.
+  - `PostgresConfig.worker_pool_pre_ping` (default `False`) sets the
+    pre-ping of the worker process's engine. `pool_pre_ping` (default
+    `True`) applies to the other engines only: producers, the web UI, and
+    the engine that task code in a child sends with. Set
+    `worker_pool_pre_ping=True` to keep the pre-ping of 0.6.x.
+  - With the pre-ping off, a pooled connection that died while idle fails
+    the first statement. The finalize returns a retryable connection error
+    and runs again on a new connection; a statement whose reply was lost is
+    classified on that run (`AlreadyApplied`) and is not applied twice. The
+    claim loop retries a pass that failed with a connection error.
+  - Child pools: every connection is in autocommit. The RUNNING update of a
+    plain task, with its first runner heartbeat, and the finalizing marker
+    are 1 round trip each, before 4 each with the checkout check (3
+    without). The RUNNING update of a workflow task and the start of its
+    node run in one transaction: BEGIN, update, node, COMMIT.
+  - `IsolatedPool.check` and `SharedPool.check` default to `False` (they
+    were `True`). A dead pooled connection then fails the write that takes
+    it: the RUNNING update ends as `OWNERSHIP_UNCONFIRMED` and the claim
+    lease returns the task; a failed finalizing marker is logged. Set
+    `check=True` on the `pool` of a kind to check each checkout.
+  - The advisory lock of `horsies_claim` ends with the claim statement. It
+    was held until the COMMIT one round trip later.
+- **The worker process writes the outcomes of plain tasks that succeeded in
+  batches.** Schema v57 adds `horsies_complete_tasks_fused`: one statement
+  calls `horsies_complete_task_fused` once per row, in task-id order, so each
+  row keeps its claim-generation check, attempt row, history move and capacity
+  wake. A batch holds up to 64 rows and is one round trip; a batch of one row
+  runs `horsies_complete_task_fused` itself.
+  - There is no timer. Two flushers write whenever rows wait, each on a
+    connection of the worker pool. A lone row is written at once; the rows
+    that come while both flushers write form the next batch.
+  - When a full batch of 64 rows waits while both flushers write, one more
+    flusher starts, up to the size of the worker pool. It writes full batches
+    only.
+  - A finalizer ends, and frees its seat, only after the statement of its
+    batch returned.
+  - A row that the server refuses (for example, no history partition for its
+    retention class) refuses the whole statement. The batch is then written
+    row by row, once each: the other rows commit, and the refused row takes a
+    phase-1 error. A lost reply or a broken connection is a retryable error
+    for each row of the batch; the retry finds a committed row already
+    applied.
+  - At a stop, the batcher closes after the finalizers and writes the queued
+    rows, for at most 10 seconds. A row that it does not write stays RUNNING
+    and goes to stale RUNNING recovery.
+- **The success of a workflow task is one statement (schema v58), and its
+  phase 2 is shorter.** `horsies_finish_workflow_success` takes
+  the task advisory lock, then the row lock under the claim fence (worker and
+  claimed_at), writes the COMPLETED attempt row, and moves the task to the
+  history with the phase-2 record of its node, in autocommit. It sends no
+  wake: phase 2 sends it after the dependents are enqueued. A refusal writes
+  nothing; a replay after a lost reply is already applied, reads the stored
+  result and runs phase 2. Counted at the wire with the default
+  `worker_pool_pre_ping=False` (one more per phase with it on):
+  - phase 1 of a success: 1 round trip, before 5 (BEGIN, the locking read,
+    the attempt row, `horsies_complete_locked_task`, COMMIT);
+  - phase 2, one transaction under the workflow row lock: a node that
+    promotes its dependents 8, before 11; the last node of a workflow 7,
+    before 9; a failed node whose dependent is skipped 12, before 13; a
+    failed last node 8, before 10. The capacity wake is part of the node
+    write, and the insert of each promoted task links its node in the same
+    statement. The node write also returns whether a node of the workflow
+    waits for the node: a node that no node waits for does not read its
+    dependents. The dependencies of a workflow are written once, when it
+    starts. One update moves a promoted dependent from PENDING to ENQUEUED,
+    where a READY write and an ENQUEUED write did; the committed rows, their
+    timestamps and the NOTIFYs are the same.
+  - `horsies_lock_running_task` (schema v56) is dropped: its one caller was
+    this success.
+  - A row that is not a workflow task is refused (SQLSTATE 22023) with no
+    write.
+- **A schema upgrade keeps each claim and recovery index whose form
+  matches.** An index whose catalog form matches its declaration is kept. One
+  of another form, or an invalid one, is built concurrently under a temporary
+  name; then one transaction renames the old index away and the new one to
+  its name, and the old one is dropped concurrently. Running workers keep an
+  index of that name throughout. Before, each upgrade dropped the recovery
+  indexes and built them again, and the scans that read them ran without
+  them meanwhile.
+- **Breaking: a slot that cannot start a child for a cause that can clear no
+  longer stops the worker.** A child that fails its start now reports the
+  cause to the worker before it exits.
+  - A cause that is the same on every attempt still counts one of three
+    attempts, and the third stops the worker: the app or a task module does
+    not import, the child connection pool cannot be set up, the event loop
+    for `async def` tasks cannot be created for a cause other than the
+    errno values below (for example an event loop policy that raises), the
+    OS refuses the spawn with another errno (for example `ENOENT` or
+    `EACCES` for the interpreter), a forked child does not reach the worker
+    in 5 seconds, the child dies with no report, or it is not ready within
+    120 seconds. A failed `on_child_process_start` hook still stops the
+    worker at once.
+  - A cause that can clear takes only that slot down: `OSError` with
+    `EMFILE`, `ENFILE`, `ENOMEM` or `EAGAIN` in a start step of the child or
+    of the worker (the socket pair of the child, the spawn, the event loop),
+    or a thread that the OS refuses at the start (the control thread, the
+    watchdog of a start hook, a thread of the connection pool). Before, each
+    of these used an attempt, and the worker stopped after three, also while
+    other children served tasks. A spawn refusal stopped the worker at once.
+  - A slot that is down takes no task, and the claim passes only the slots
+    that are not down as the worker's process count. The worker starts a new
+    child for that slot after 1 second, then 2, 4, up to 60 seconds, and
+    logs one line per failed attempt with the slot, the cause and the next
+    wait. The slot returns to service when a child starts.
+  - When every slot is down, a failed start for a cause that can clear
+    counts an attempt, so a worker that serves no task stops after three in
+    a row. A failed start while another slot is in service starts the count
+    again.
+    A worker with 1 process has no other slot, so each of its failed starts
+    counts.
+  - At the first start, the worker starts degraded when at least one child
+    is ready and each other slot is down. When no child starts, it exits
+    non-zero.
+  - The error of a worker that stops names the cause and the error text of
+    the last attempt.
+- **Breaking: a result wait inside a task is refused at once.** In a worker
+  child, `TaskHandle.get()` and `get_async()` on a sent task,
+  `app.get_result()` and `get_result_async()`, and `WorkflowHandle.get()` and
+  `get_async()` return `RetrievalCode.WAIT_INSIDE_TASK`. The raw result reads
+  `app.get_raw_result()`, `broker.get_raw_result_record()` and their `*_async`
+  forms return `Err(BrokerWaitInsideTask)`. The refusal is the first check of
+  each call, before the `timeout_ms` and `ASYNC_CONTEXT` checks, and nothing
+  waits. This covers the threads that a task starts and the
+  `on_child_process_start` hooks. Before, such a wait kept its child: when
+  enough tasks waited for other tasks, no child was free for those tasks, and
+  nothing moved until timeouts ended the waits. `send()`, starting a
+  workflow, `TaskHandle.info()` and `workflow_ctx.result_for()` still work.
+  Compose the steps as a workflow; the result-handling page lists the forms.
+- **An exhaustive `match` on `RetrievalCode` needs a `WAIT_INSIDE_TASK`
+  case, and one on `BrokerOperationError` needs a `BrokerWaitInsideTask`
+  case.** `BrokerErrorCode` has the new member `WAIT_INSIDE_TASK`. The
+  `RetrievalCode` string is reserved: an `exception_mapper` or
+  `default_unhandled_error_code` with that value fails `horsies check` with
+  `HRS-212`.
+- **Breaking: a child workflow has at most depth 32.** A top-level workflow
+  has depth 0, and a child workflow has the depth of its parent plus 1. A
+  `SubWorkflowNode` whose child would have depth 33 does not start its child:
+  the node goes `FAILED` with the new
+  `OperationalErrorCode.SUBWORKFLOW_DEPTH_LIMIT_REACHED`, and the `on_error`
+  policy of its workflow applies. Before, nesting had no limit at run time,
+  and a definition that included itself as a root node nested in one
+  transaction until Python's recursion limit.
+- **Breaking: a `WorkflowSpec` holds at most 10,000 nodes.** A spec with more
+  nodes raises `HRS-038` (`WORKFLOW_TOO_MANY_NODES`) when it is built. In
+  `build_with()`, that raise fails the `SubWorkflowNode` with
+  `WORKFLOW_ENQUEUE_FAILED`. Split more nodes into `SubWorkflowNode`s: each
+  child workflow has its own limit.
+- **`horsies check` reports two nesting errors.** `HRS-036`
+  (`WORKFLOW_SUBWORKFLOW_DEPTH_LIMIT`): a nesting would start a child deeper
+  than 32, and no `SubWorkflowNode` on its path has `waits_for`. `HRS-037`
+  (`WORKFLOW_SUBWORKFLOW_SELF_NESTING`): a definition includes itself with the
+  same kwargs, and no `SubWorkflowNode` from one level to the next has
+  `waits_for`, so the nesting never ends once it starts. Before, the check
+  stopped at both with no finding. Through a node with `waits_for`, the results
+  of its dependencies decide the depth, so the check does not report the
+  nesting, and the engine applies the limit at run time.
+- **An exhaustive `match` on `OperationalErrorCode` needs
+  `SUBWORKFLOW_DEPTH_LIMIT_REACHED`, `TASK_BLOCKED_LOOP` and
+  `NEIGHBOUR_BLOCKED_LOOP` cases.** The code strings are now reserved: an
+  `exception_mapper` or `default_unhandled_error_code` with one of these values
+  fails `horsies check` with `HRS-212`. A process of an earlier version cannot
+  decode an error stored with one of these codes.
+- **The worker process writes the runner heartbeats of its RUNNING tasks.**
+  One thread of the worker, not on its event loop, writes one statement per
+  `runner_heartbeat_interval_ms` for the tasks that its children hold. A row
+  gets a beat only while it is `RUNNING`, owned by this worker at the claim
+  generation of the dispatch, and without the finalizing mark, and only while
+  its child process runs. So the beats of a task end when the worker sends
+  its child a kill, when the child exits, when the child marks its result
+  finalizing, and when the worker reads the result. The child writes only the
+  first beat, in the transaction that sets the row `RUNNING`, and runs no
+  heartbeat thread. A child now uses one connection of its pool at a time,
+  and the worker process uses one more connection, for the heartbeats. A
+  timed-out task's beats end with the kill at its deadline; the child no
+  longer stops them one interval after `timeout_ms`.
+- **A worker that cannot write runner heartbeats stops, when its reaper
+  fails stale RUNNING rows.** With `auto_fail_stale_running=True` (the
+  default), when the heartbeat thread dies, or no heartbeat lands for half of
+  `running_stale_threshold_ms`, the worker logs the cause at critical level,
+  kills every child that holds a task, stops, and exits with code 1. It exits
+  with code 77 if it has not stopped 120 s later. A failed write is tried
+  again within that half. The half counts from when the last heartbeat
+  landed. After a heartbeat whose write took almost the whole half, the
+  worker stops 0.5 s before `running_stale_threshold_ms` has passed from the
+  start of that write, because the reaper may count from there. Before, the reaper failed such tasks with
+  `WORKER_CRASHED` while they still ran, and a retry could run next to them.
+  A killed task takes the child crash path, or stale-task recovery when the
+  database cannot be reached. With `auto_fail_stale_running=False`, or no
+  recovery config, no reaper fails a RUNNING row, so the worker logs failed
+  writes, at most once per 60 s, and keeps running.
+- **Breaking: worker settings move from `horsies worker` flags into named
+  worker profiles.** `AppConfig.worker_profiles` maps a name to a
+  `WorkerProfile`, and `horsies worker <app> --profile <name>` is required.
+  There is no default profile: a missing or unknown name exits 1 before the
+  app check and before any child starts, and the message lists the defined
+  names. A profile holds `isolated=IsolatedChildren(count, recycle=
+  IsolatedRecycle(after, above))`, `claim=ClaimLimits(per_queue_per_pass,
+  claimed_per_worker)`, `drain_timeout` (a `timedelta`) and `preload`
+  (`ChildPreload`). A limit is `TaskLimit(tasks=N)` or `NoTaskLimit()`, and
+  `MemoryLimit(mb=N)` or `NoMemoryLimit()`, in place of `0` and `None`. The
+  number of children is the sum of the per-mode counts. `AppConfig`
+  validation checks every profile and names the profile and the field path
+  (`HRS-218`, `CONFIG_INVALID_WORKER_PROFILE`): a name that `--profile`
+  cannot carry, a profile with no children, and a claim limit above the
+  capacity of the worker (children plus `prefetch_buffer`), which before had
+  no effect. The bounds of the old flags still apply; new upper bounds are
+  1024 children, 2,147,483,647 tasks, 16,777,216 MB and a drain timeout of
+  24 hours. Migrating to 0.7.0 has the table from each flag to its field.
+- **Breaking: the enqueue fingerprint of a scheduled run covers the task's
+  options.** A slot keeps its task id, but its `enqueue_sha` changes for
+  every schedule. This includes a task that declares no options, because its
+  stored options text is not null. A slot that a scheduler before this
+  release enqueued, and did not record because it stopped before it saved the
+  schedule state, gets `PAYLOAD_MISMATCH` when this release fires it.
+  - A slot whose task id already holds a different command counts as fired.
+    The scheduler logs one warning, records the run with that task id, and
+    moves to the next slot. In catch-up, the next due slots are enqueued in
+    the same tick. Before, the scheduler logged the slot as a permanent
+    enqueue failure, did not record a run, and stopped the catch-up of that
+    tick at the slot. The same applies when a change to the schedule's kwargs
+    or to the task's options meets a slot that is already enqueued.
+  - The task of such a slot keeps the row that the earlier scheduler wrote:
+    it runs with no timeout, no retries, and as `ISOLATED`. Later slots carry
+    the task's options.
+- **Breaking: with `auto_fail_stale_running=True`,
+  `RecoveryConfig.running_stale_threshold_ms` is at least
+  `2 × (runner_heartbeat_interval_ms + 2,000 ms)`.** The worker stops when no
+  runner heartbeat lands for half of the threshold. Heartbeats land one
+  interval apart, plus the time the next one takes to land, so that half must
+  hold one interval plus 2 s. A smaller value raises `ConfigurationError`
+  with `HRS-204` (`CONFIG_INVALID_RECOVERY`); the message names both fields
+  and the smallest valid value. Before, the bound was
+  `2 × runner_heartbeat_interval_ms`. At that bound the half was one interval,
+  and the worker stopped and killed its tasks while every heartbeat landed.
+  With `auto_fail_stale_running=False`, the bound stays
+  `2 × runner_heartbeat_interval_ms`.
+- **Breaking: `RecoveryConfig.worker_state_snapshot_interval_ms` is at most
+  60,000 ms.** A worker is live while its latest snapshot is at most
+  `WORKER_STATE_LIVE_WINDOW_S` (120) seconds old. The cap is half of that
+  window, so a running worker stays live when a snapshot write is late by up
+  to half the window. A larger value raises `ConfigurationError` with
+  `HRS-204` (`CONFIG_INVALID_RECOVERY`); the message names the value, the cap
+  and the window. Before, the bound was
+  300,000 ms, and a value above it raised a pydantic `ValidationError`. An
+  interval above 120,000 ms made a live worker read as not live between its
+  snapshots: the fleet check reported its streams as unserved, and the web UI
+  marked it stale.
+- **horsies requires psycopg 3.3.7 or later.** The floor of `psycopg`, and
+  of `psycopg-binary` and `psycopg-c` (the `pg-binary` and `pg-c` extras), is
+  3.3.7, up from 3.3.2. When a running query is interrupted by a cancelled
+  asyncio task, `KeyboardInterrupt` or `SystemExit`, psycopg 3.3.6 and later
+  wait at most 10 s: up to 5 s to send the cancel request and up to 5 s for
+  the query to end. Then they close the connection. Before 3.3.6, psycopg
+  waited for the query to end with no limit. 3.3.7 also sends the cancel
+  request when the cancel connection is not ready at once; 3.3.6 skipped the
+  request in that case. The 5 s limit on the cancel request needs
+  libpq 17 or later; with an older libpq, psycopg sends the cancel with a
+  blocking call that has no limit. `psycopg-binary` bundles its own libpq.
+
+### Removed
+
+- **`ErrorCode.TASK_ASYNC_FUNCTION_NOT_SUPPORTED` (`HRS-106`).** No code
+  raises it, because `@app.task()` accepts an `async def` function. The
+  number is retired and is not used again. Remove the member from each
+  `match` on `ErrorCode`.
+- **The `horsies worker` flags `--processes`, `--max-claim-batch`,
+  `--max-claim-per-worker`, `--max-tasks-per-child`,
+  `--max-memory-per-child-mb`, `--drain-timeout` and `--child-preload`.**
+  Each one exits 2 with a message that names the profile field that
+  replaces it. `--loglevel` and the app locator stay.
+- **`PostgresConfig.worker_child_pool_min_size`, `worker_child_pool_max_size`
+  and `worker_child_pool_check`.** The `pool` of each child kind in a worker
+  profile replaces them. A config that still sets one fails when it is built
+  with `HRS-213` (`CONFIG_INVALID_BROKER_POOL`), and the help names the
+  replacement, for example `IsolatedChildren(pool=IsolatedPool(min_size=N))`.
+  Every such field is reported at once.
+- **`PostgresConfig.worker_pool_size`, `worker_max_overflow` and
+  `worker_runtime_config()`.** `WorkerProfile.pool` replaces them for the
+  worker process, and the `task_send_pool` of each child kind for task code
+  that sends in a child. A config that still sets one, also to `None`,
+  fails when it is built with `HRS-213` (`CONFIG_INVALID_BROKER_POOL`), and
+  the help names `WorkerProfile(pool=ParentPool(max_size=PoolSize(connections=N)))`.
+  These fields and the removed child pool fields are reported at once.
+
+### Fixed
+
+- **A child that starts a task of a paused workflow no longer deadlocks
+  with a cancel of that workflow.** At the start, the child ran its expiry
+  check and the abandon of the task in one transaction: it held the task's
+  advisory lock and row lock while it asked for the workflow row. A cancel
+  of the workflow and the expiry of paused workflows lock the workflow row
+  first and then the task rows, so Postgres aborted one of the two. The
+  expiry check now runs alone, and the abandon locks the workflow row
+  before the task locks.
+
+- **The claim's in-flight count marks the dead entries of the status index
+  (schema v61).** `horsies_claim` counted the in-flight rows with
+  `status = 'RUNNING' OR (status = 'CLAIMED' AND <valid lease>)`, which
+  Postgres runs as a bitmap scan. A bitmap scan does not mark dead index
+  entries, so each claim read the heap for every task that finished since
+  the last vacuum: two dead entries per task. The count now runs in
+  `horsies_claim_in_flight`, with one IN list on `status` and bitmap and
+  sequential scans off. It is a plain scan of `ix_horsies_tasks_status`,
+  which marks the dead entries that it passes. Same rows and counts. With 8
+  isolated children and 20,000 no-op tasks: 867-902 pages per count before,
+  21 after.
+
+- **A history probe uses the task id index of a new leaf.** The duplicate
+  guard of every terminal move (`horsies_task_history_duplicate_staged`) and
+  the four history readers kept the plan of each leaf probe. On a new leaf
+  that statistics showed as empty, that plan was a sequential scan, kept
+  until an ANALYZE of the leaf, so each probe read the whole leaf. The five
+  generated functions run with `enable_seqscan = off`; every probe has an
+  index.
+
+- **`horsies[pg-binary]` and `horsies[pg-c]` install the C build of the
+  installed psycopg version.** The extras asked for `psycopg-binary` or
+  `psycopg-c` 3.3.7 or later, with no tie to the version of `psycopg`. A
+  resolver could pair psycopg 3.3.8 with psycopg-binary 3.3.9, and psycopg
+  then fails at import. The extras ask for `psycopg[binary]` and `psycopg[c]`,
+  which pin the C build to the psycopg version.
+
+- **The live web UI sees a task finish (schema v59).** A terminal move
+  deletes the live row, so no status change sent `horsies_task_status`, and in
+  live mode a finished task stayed RUNNING on screen until another task
+  changed. The single move and each batch move send the event with the task
+  id, in the transaction that already sends `task_done`.
+
+- **A finalize no longer deadlocks with stale recovery or a cancel of the
+  same task.** Every move function takes the task advisory lock before the
+  row lock. The locked read of a workflow task's success, the failure paths,
+  the reaper's stale recovery and the monitoring cancel took the row lock
+  first and called a move function later, so two of them on the same task
+  could deadlock (SQLSTATE 40P01), and Postgres aborted one. All of them now
+  take the advisory lock first: the success of a workflow task calls
+  `horsies_finish_workflow_success`, the failure paths call
+  `horsies_finish_failed_attempt`, and stale recovery and the cancel take
+  the advisory lock before their locked read.
+- **The phase 2 that advances a workflow node deletes the node's outbox
+  row.** The terminal move of a workflow task records the progression it
+  owes in `horsies_workflow_phase2_pending`. Phase 2 advanced the node and
+  left the row, so a later recovery pass consumed it as already applied. The
+  statement that writes the node now deletes the row in the same
+  transaction; a phase 2 that fails leaves it for the recovery pass.
+- **A capacity wake that the server refuses in the phase 2 of a workflow
+  task is a phase-2 error.** The wake ran in the transaction of the node
+  write, and its error was dropped before the commit. A statement that fails
+  on the server aborts the transaction, so the commit rolled the node write
+  back without an error, and phase 2 returned as if it had committed. The
+  error is now a phase-2 error with the usual retry classification.
+- **A timed-out task's row moves only after its child has exited.** At the
+  deadline the worker kills the child, waits up to 30 s for its exit, and
+  only then writes `TASK_TIMEOUT`, the retry and the attempt row, or requeues
+  a task whose code had not started. The workflow step that follows the
+  failure runs after that write. Before, the worker wrote the row first and
+  killed the child last: a retry was kept apart from the attempt that it
+  replaced only by its retry delay of at least 1 s, and an `on_error` or
+  `allow_failed_deps` successor could start while the timed-out child still
+  ran. If the child does not exit within 30 s, the worker writes nothing and
+  logs at critical level, and stale-task recovery takes the task. A timed-out
+  task no longer also goes through crash recovery, which replayed its
+  workflow step and logged a finalize error. When the `TASK_TIMEOUT` write
+  fails after the exit, the worker runs that write again up to 3 times, with
+  growing waits; only then does crash recovery write the row, with
+  `TASK_TIMEOUT` as the code that the retry policy reads. A result that the
+  child sent after the deadline is never written.
+- **Crash recovery moves a lost child's row only after it saw the child
+  exit.** When the worker kills a child and does not see it exit within
+  30 s (the socket to the child was lost, the child sent a bad frame, or the
+  slot was cleared at a stop or after a defect), it writes nothing and logs
+  the task id and pid at critical level. Stale-task recovery then takes the
+  task. With stale RUNNING recovery off (no `RecoveryConfig`, or
+  `auto_fail_stale_running=False`), nothing else would move the row, so the
+  worker waits for the exit and writes the row once it sees it, for a timed
+  out task and for a lost child alike; a stop of the worker ends that wait.
+  Before, the worker wrote `WORKER_CRASHED` or scheduled a retry at once, so
+  the retry could run next to a child that was still alive.
+- **A child that the worker killed takes no next task.** A kill can land
+  after the child's result arrived and before the worker read it. The worker
+  then gave the next queued task to the dying child, and that task was lost
+  and requeued. Now the worker starts a new child for it.
+- **The cycle check of a `WorkflowSpec` takes time linear in its nodes and
+  dependencies.** It scanned every node for each node that it removed. On an
+  Apple M2 with Python 3.13, a spec of 10,000 nodes took about 7.5 s to build,
+  and now takes 0.23 s. The findings do not change.
+- **A task that holds the GIL is no longer failed as stale while it runs.**
+  C code that held the GIL in a child stopped the child's heartbeat thread,
+  so after `running_stale_threshold_ms` the reaper failed the task with
+  `WORKER_CRASHED`, and a retry could run next to it. CPU-bound tasks need no
+  extra margin in the stale thresholds.
+- **A scheduled run carries the options of its task.** The scheduler
+  enqueued each slot with no task options, so the run had no timeout, no
+  retries (`max_retries` 0), and ran as `ISOLATED`, whatever `timeout_ms`,
+  `retry_policy`, `execution` and `cancel_grace_ms` the task declared. A
+  scheduled run now stores the options text that a plain `.send()` of the
+  task stores, and the worker applies these options. The scheduler takes
+  that text once at start, so every slot of a schedule sends the same text.
+
 ## [0.6.1] - 2026-11-08
 
 0.6.1 identifies a retention class by its period and makes the windowed

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import ctypes
 import errno
 import logging
@@ -14,8 +15,10 @@ import subprocess
 import sys
 import textwrap
 from collections.abc import AsyncIterator, Callable, Iterator
+from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import cast
+from typing import NoReturn, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import psutil
@@ -24,7 +27,9 @@ import pytest_asyncio
 
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker import preload, preload_main, slots
+from horsies.core.models.worker_profile import ResolvedPool
 from horsies.core.worker.child_protocol import (
+    IsolatedChild,
     ChildForkedFrame,
     ForkFailedFrame,
     InitFrame,
@@ -45,16 +50,19 @@ from horsies.core.worker.preload import (
     reap_landed_orphans,
 )
 from horsies.core.worker.preload_main import REPARENT_FAILED_EXIT_CODE, parse_arguments
+from horsies.core.models.boot_failure import SpawnFailed
 from horsies.core.worker.slots import (
     PRELOAD_ENTRY,
+    BootAttemptsExhausted,
     Child,
     SlotPool,
     SlotPoolConfig,
-    SpawnFailed,
     TaskFinished,
 )
 
 pytestmark = [pytest.mark.unit]
+
+CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
 
 FIXTURES = Path(__file__).parent.parent / 'fixtures' / 'slots'
 SCRIPTED_CHILD = str(FIXTURES / 'scripted_child.py')
@@ -83,10 +91,11 @@ def _init(app_locator: str = 'ok') -> InitFrame:
         loglevel=30,
         database_url='postgresql://user:secret@localhost/none',
         connect_kwargs={},
-        child_pool_min_size=0,
-        child_pool_max_size=1,
-        child_pool_check=False,
         process_name='horsies-child',
+        child_kind=IsolatedChild(
+            pool=ResolvedPool(min_size=0, max_size=1, check=False),
+            task_send_pool=2,
+        ),
     )
 
 
@@ -120,10 +129,9 @@ def _frame(task_name: str, argument: str | None = None) -> RunFrame:
         args_json=None,
         kwargs_json=argument,
         worker_id='worker-1',
-        runner_heartbeat_interval_ms=30_000,
         is_workflow_task=False,
         timeout=NoTimeout(),
-        claimed_at=None,
+        claimed_at=CLAIMED_AT,
     )
 
 
@@ -447,7 +455,10 @@ class TestForkedChild:
         self,
         started_pools: list[SlotPool],
     ) -> None:
-        pool = await _started(started_pools, _config())
+        """No socket of another child or of the preload parent. The app has
+        no async task, so the child has no task loop and its socket pair."""
+        config = replace(_config(), init=_init('no_async'))
+        pool = await _started(started_pools, config)
         assert await _result(pool, 'socket_count') == '1'
 
     async def test_an_exited_child_leaves_the_registry(
@@ -549,7 +560,10 @@ class TestPreloadParentDeath:
         started_pools: list[SlotPool],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """The only slot cannot spawn its replacement, so the failed spawns
+        count, and the pool fails."""
         monkeypatch.setattr(slots, 'PRELOAD_RESTART_DELAY_S', 60.0)
+        monkeypatch.setattr(slots, 'SLOT_DOWN_FIRST_DELAY_S', 0.01)
         pool = await _started(started_pools, _config(max_tasks_per_child=1))
         parent = await _running_preload(pool)
         parent.process.kill()
@@ -560,7 +574,11 @@ class TestPreloadParentDeath:
         await asyncio.wait_for(handle.outcome, OUTCOME_TIMEOUT_S)
         failure = await asyncio.wait_for(pool.wait_failed(), OUTCOME_TIMEOUT_S)
 
-        assert isinstance(failure, SpawnFailed)
+        match failure:
+            case BootAttemptsExhausted(cause=SpawnFailed()):
+                pass
+            case other:
+                raise AssertionError(other)
 
     async def test_a_refused_fork_uses_exec_and_keeps_the_parent(
         self,
@@ -865,9 +883,14 @@ class TestChildSteps:
 
             return note
 
+        def serve_then_exit(*_args: object) -> NoReturn:
+            """``serve`` ends the process after a stop frame."""
+            steps.append('serve')
+            raise SystemExit(0)
+
         monkeypatch.setattr(preload_main.os, 'setsid', record('setsid'))
         monkeypatch.setattr(preload_main, '_wait_for_reparent', record('reparent'))
-        monkeypatch.setattr(preload_main, 'serve', record('serve'))
+        monkeypatch.setattr(preload_main, 'serve', serve_then_exit)
         monkeypatch.setattr(preload_main.socket, 'socket', MagicMock())
 
         with pytest.raises(SystemExit) as stopped:
@@ -875,6 +898,49 @@ class TestChildSteps:
 
         assert stopped.value.code == 0
         assert steps == ['setsid', 'reparent', 'serve']
+
+
+def _cli_exit_literals() -> set[int]:
+    """The codes that the CLI passes to ``sys.exit`` as literals."""
+    from horsies.core import cli
+
+    tree = ast.parse(Path(cli.__file__).read_text(encoding='utf-8'))
+    return {
+        node.args[0].value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and ast.unparse(node.func) == 'sys.exit'
+        and len(node.args) == 1
+        and isinstance(node.args[0], ast.Constant)
+        and isinstance(node.args[0].value, int)
+    }
+
+
+class TestChildExitCodes:
+    def test_every_named_exit_code_is_distinct(self) -> None:
+        """A forked child can exit through ``preload_main`` before the
+        reparent and through ``child_main`` after it, and the worker process
+        exits with its own code when its runner heartbeats fail closed. A
+        reader tells the cause from the code, so no two causes share one,
+        and none is a code the CLI exits with."""
+        from horsies.core.worker import child_main, runner_heartbeat
+        from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
+
+        codes = {
+            name: value
+            for module in (child_main, preload_main, runner_heartbeat)
+            for name, value in vars(module).items()
+            if name.endswith('_EXIT_CODE') and isinstance(value, int)
+        }
+        codes['CHILD_HOOK_FAILURE_EXIT_CODE'] = CHILD_HOOK_FAILURE_EXIT_CODE
+        cli_codes = _cli_exit_literals()
+
+        assert 'REPARENT_FAILED_EXIT_CODE' in codes
+        assert 'STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE' in codes
+        assert 'RUNNER_HEARTBEAT_LOST_EXIT_CODE' in codes
+        assert {0, 1, 2} <= cli_codes
+        assert len(set(codes.values())) == len(codes), codes
+        assert not set(codes.values()) & cli_codes, (codes, cli_codes)
 
 
 @linux_only
@@ -897,6 +963,7 @@ class TestKillBeforeSession:
         child = Child.__new__(Child)
         child.pid = 4321
         child.process = MagicMock(returncode=returncode)
+        child.on_kill_sent = None
         return child
 
     @pytest.fixture

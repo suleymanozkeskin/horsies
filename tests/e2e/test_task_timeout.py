@@ -1,8 +1,9 @@
 """E2E: per-task timeout_ms enforcement through a real worker.
 
 A task declared with timeout_ms outruns its deadline; the worker's
-parent-side enforcement persists TASK_TIMEOUT, SIGKILLs the child, and
-the process pool restarts. The worker must stay functional afterwards.
+parent-side enforcement SIGKILLs the child, waits for its exit, persists
+TASK_TIMEOUT, and the slot restarts. The worker must stay functional
+afterwards.
 """
 
 from __future__ import annotations
@@ -60,7 +61,7 @@ async def test_timeout_fails_task_and_worker_survives(
     survives the pool restart and completes a subsequent task."""
     with run_worker(
         DEFAULT_INSTANCE,
-        processes=1,
+        profile='isolated-1',
         ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         handle = unwrap_send(await basic_tasks.timeout_sleeper.send_async(duration_ms=60_000))
@@ -126,7 +127,7 @@ async def test_timeout_backlog_drains_without_killing_worker(
     backlog_size = 24
     with run_worker(
         DEFAULT_INSTANCE,
-        processes=6,
+        profile='isolated-6',
         ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         # Staggered sends desynchronize the deadline kills: instead of one
@@ -200,7 +201,7 @@ async def test_pool_breaker_storm_does_not_kill_worker(
     storm_size = 12
     with run_worker(
         DEFAULT_INSTANCE,
-        processes=6,
+        profile='isolated-6',
         ready_check=_make_ready_check(basic_tasks.healthcheck),
     ):
         handles: list[TaskHandle[str]] = []

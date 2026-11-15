@@ -20,6 +20,7 @@ import pytest
 
 from sqlalchemy.exc import OperationalError as SAOperationalError
 from sqlalchemy.exc import TimeoutError as SATimeoutError
+from horsies.core.brokers.postgres import SyncSendRoute
 from horsies.core.brokers.resources import ListenerDisabled, ListenerEnabled
 from horsies.core.brokers.result_types import (
     BrokerEnqueueFailed,
@@ -30,6 +31,16 @@ from horsies.core.brokers.result_types import (
     BrokerListenerDisabled,
 )
 from horsies.core.codec.json_io import SerializationError
+from horsies.core.models.boot_failure import ResourceShortage, ShortageErrno
+from horsies.core.models.health import (
+    AllSlotsServing,
+    ClassBudget,
+    ClassBudgets,
+    ClassCapacityNotRecorded,
+    DownSlot,
+    SlotHealthNotRecorded,
+    SlotsDown,
+)
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.task_send_types import (
     TaskSendErrorCode,
@@ -42,6 +53,7 @@ from horsies.core.history.archive.versions import archive_digest
 from horsies.core.history.reads.detail import HistoryTaskDetail
 from horsies.core.types.error_detail import NoCause
 from horsies.core.models.tasks import (
+    Execution,
     OperationalErrorCode,
     OutcomeCode,
     RetrievalCode,
@@ -51,6 +63,7 @@ from horsies.core.models.tasks import (
 )
 from horsies.core.lifecycle.commands import FailStaleTask
 from horsies.core.lifecycle.operations import TerminalizationKind
+from horsies.core.lifecycle.persistence import LOCK_TASK_SQL
 from horsies.core.lifecycle.outcomes import (
     Applied,
     ObservedStaleness,
@@ -60,7 +73,11 @@ from horsies.core.lifecycle.outcomes import (
 from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.types.status import TaskStatus
 from horsies.core.utils.loop_runner import LoopRunnerError
-from tests.broker_resources_support import pin_resources, resources_of
+from tests.broker_resources_support import (
+    attach_loop_limit,
+    pin_resources,
+    resources_of,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -507,6 +524,10 @@ class TestPostgresBrokerPgBouncerWiring:
                 'horsies.core.brokers.postgres.install_recovery_indexes',
                 new=AsyncMock(),
             ),
+            patch(
+                'horsies.core.brokers.postgres.install_claim_indexes',
+                new=AsyncMock(),
+            ),
             patch.object(
                 PostgresBroker,
                 '_activate_bounded_recovery',
@@ -567,6 +588,10 @@ class TestPostgresBrokerPgBouncerWiring:
             ),
             patch(
                 'horsies.core.brokers.postgres.install_recovery_indexes',
+                new=AsyncMock(),
+            ),
+            patch(
+                'horsies.core.brokers.postgres.install_claim_indexes',
                 new=AsyncMock(),
             ),
             patch.object(
@@ -634,6 +659,10 @@ class TestPostgresBrokerPgBouncerWiring:
             ),
             patch(
                 'horsies.core.brokers.postgres.install_recovery_indexes',
+                new=AsyncMock(),
+            ),
+            patch(
+                'horsies.core.brokers.postgres.install_claim_indexes',
                 new=AsyncMock(),
             ),
             patch.object(
@@ -1743,6 +1772,13 @@ def _worker_state_row(**overrides: Any) -> Any:
         'cpu_percent': 3.0,
         'children_memory_mb': 250.0,
         'worker_started_at': now,
+        'slots_down': [],
+        'class_capacity': {
+            'ISOLATED': {
+                'capacity': 4,
+                'serves': ['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD'],
+            },
+        },
     }
     mapping.update(overrides)
     return SimpleNamespace(_mapping=mapping)
@@ -1862,6 +1898,162 @@ class TestWorkerStateReads:
 
         assert is_ok(result)
         assert len(result.ok_value) == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ('stored', 'expected'),
+        [
+            (None, SlotHealthNotRecorded()),
+            ([], AllSlotsServing()),
+            (
+                [
+                    {
+                        'slot': 3,
+                        'cause': {'kind': 'resource_shortage', 'errno': 'EAGAIN'},
+                        'detail': 'OSError: [Errno 11] Resource temporarily unavailable',
+                        'down_since': '2026-01-01T00:00:00+00:00',
+                        'failed_boots': 5,
+                    },
+                ],
+                SlotsDown(
+                    (
+                        DownSlot(
+                            3,
+                            ResourceShortage(ShortageErrno.EAGAIN),
+                            'OSError: [Errno 11] Resource temporarily unavailable',
+                            datetime(2026, 1, 1, tzinfo=timezone.utc),
+                            5,
+                        ),
+                    ),
+                ),
+            ),
+        ],
+        ids=['not-recorded', 'all-serving', 'one-down'],
+    )
+    async def test_the_snapshot_carries_the_slot_health(
+        self,
+        stored: object,
+        expected: object,
+    ) -> None:
+        broker = _make_broker()
+        _setup_session_returning(broker, fetchone=_worker_state_row(slots_down=stored))
+
+        result = await broker.get_worker_state_async('worker-1')
+
+        assert is_ok(result)
+        assert result.ok_value is not None
+        assert result.ok_value.slot_health == expected
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_slot_health_fails_the_read(self) -> None:
+        broker = _make_broker()
+        _setup_session_returning(
+            broker,
+            fetchone=_worker_state_row(slots_down=[{'slot': 9}]),
+        )
+
+        result = await broker.get_worker_state_async('worker-1')
+
+        assert is_err(result)
+        assert 'slots_down is unreadable' in result.err_value.message
+        assert 'worker-1' in result.err_value.message
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ('stored', 'expected'),
+        [
+            (None, ClassCapacityNotRecorded()),
+            ({}, ClassBudgets(())),
+            (
+                {'ISOLATED': {'capacity': 2, 'serves': ['ISOLATED']}},
+                ClassBudgets(
+                    (ClassBudget(Execution.ISOLATED, 2, (Execution.ISOLATED,)),),
+                ),
+            ),
+        ],
+        ids=['not-recorded', 'serves-no-class', 'one-budget'],
+    )
+    async def test_the_snapshot_carries_the_class_capacity(
+        self,
+        stored: object,
+        expected: object,
+    ) -> None:
+        broker = _make_broker()
+        _setup_session_returning(
+            broker,
+            fetchone=_worker_state_row(class_capacity=stored),
+        )
+
+        result = await broker.get_worker_state_async('worker-1')
+
+        assert is_ok(result)
+        assert result.ok_value is not None
+        assert result.ok_value.class_capacity == expected
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_class_capacity_fails_the_read(self) -> None:
+        broker = _make_broker()
+        _setup_session_returning(
+            broker,
+            fetchone=_worker_state_row(class_capacity={'ISOLATED': {'capacity': -1}}),
+        )
+
+        result = await broker.get_worker_state_async('worker-1')
+
+        assert is_err(result)
+        assert 'class_capacity is unreadable' in result.err_value.message
+        assert 'worker-1' in result.err_value.message
+
+
+@pytest.mark.unit
+class TestClassReadOutcomes:
+    """The error side of ``get_class_coverage_async`` and
+    ``get_class_report_async``. The Ok side and the refusals run against a
+    real database in ``tests/integration/test_class_coverage.py``."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('method', ['get_class_coverage_async', 'get_class_report_async'])
+    async def test_a_driver_error_is_a_retryable_monitoring_failure(
+        self,
+        method: str,
+    ) -> None:
+        broker = _make_broker()
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.execute = AsyncMock(
+            side_effect=SAOperationalError('SELECT', None, Exception('conn lost')),
+        )
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
+
+        result = await getattr(broker, method)()
+
+        assert is_err(result)
+        assert result.err_value.code == BrokerErrorCode.MONITORING_QUERY_FAILED
+        assert result.err_value.retryable is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('method', ['get_class_coverage_async', 'get_class_report_async'])
+    async def test_the_loop_limit_runs_nothing(self, method: str) -> None:
+        broker = _make_broker()
+        attach_loop_limit(broker)
+
+        result = await getattr(broker, method)()
+
+        assert is_err(result)
+        assert result.err_value.code == BrokerErrorCode.EVENT_LOOP_LIMIT
+
+    @pytest.mark.asyncio
+    async def test_a_code_defect_is_not_turned_into_a_monitoring_failure(self) -> None:
+        broker = _make_broker()
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.execute = AsyncMock(side_effect=AssertionError('defect'))
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
+
+        with pytest.raises(AssertionError):
+            await broker.get_class_coverage_async()
 
 
 @pytest.mark.unit
@@ -2025,6 +2217,10 @@ class TestPingWorkers:
 # ---------------------------------------------------------------------------
 
 
+_LOCKED = MagicMock()
+"""The result of the task advisory lock, the first statement of each task."""
+
+
 @pytest.mark.unit
 class TestMarkStaleTasksAsFailed:
     """Tests for mark_stale_tasks_as_failed stale detection and cleanup."""
@@ -2113,7 +2309,7 @@ class TestMarkStaleTasksAsFailed:
             ts = AsyncMock()
             ts.__aenter__ = AsyncMock(return_value=ts)
             ts.__aexit__ = AsyncMock(return_value=None)
-            ts.execute = AsyncMock(side_effect=[ctx_result, MagicMock()])
+            ts.execute = AsyncMock(side_effect=[_LOCKED, ctx_result, MagicMock()])
             return ts
 
         task_sessions = [
@@ -2172,7 +2368,7 @@ class TestMarkStaleTasksAsFailed:
         task_session = AsyncMock()
         task_session.__aenter__ = AsyncMock(return_value=task_session)
         task_session.__aexit__ = AsyncMock(return_value=None)
-        task_session.execute = AsyncMock(side_effect=[ctx_result, MagicMock()])
+        task_session.execute = AsyncMock(side_effect=[_LOCKED, ctx_result, MagicMock()])
 
         _set_resources(broker, session_factory=MagicMock(side_effect=[scan_session, task_session]))
 
@@ -2180,9 +2376,10 @@ class TestMarkStaleTasksAsFailed:
         with patch('horsies.core.brokers.postgres.apply_async', new=apply_mock):
             await broker.mark_stale_tasks_as_failed()
 
-        # Per-task SQL: [0]=SELECT FOR UPDATE, [1]=UPSERT_ATTEMPT. The terminal
-        # transition itself crosses the typed operation boundary.
-        attempt_call = task_session.execute.call_args_list[1]
+        # Per-task SQL: [0]=the task advisory lock, [1]=SELECT FOR UPDATE,
+        # [2]=UPSERT_ATTEMPT. The terminal transition itself crosses the
+        # typed operation boundary.
+        attempt_call = task_session.execute.call_args_list[2]
         attempt_params = attempt_call[0][1]
         assert attempt_params['task_id'] == 'task-1'
         assert attempt_params['outcome'] == 'FAILED'
@@ -2229,7 +2426,7 @@ class TestMarkStaleTasksAsFailed:
         task_session = AsyncMock()
         task_session.__aenter__ = AsyncMock(return_value=task_session)
         task_session.__aexit__ = AsyncMock(return_value=None)
-        task_session.execute = AsyncMock(side_effect=[ctx_result, MagicMock()])
+        task_session.execute = AsyncMock(side_effect=[_LOCKED, ctx_result, MagicMock()])
         _set_resources(broker, session_factory=MagicMock(
             side_effect=[scan_session, task_session],
         ))
@@ -2314,7 +2511,7 @@ class TestMarkStaleTasksAsFailed:
         task_session.__aenter__ = AsyncMock(return_value=task_session)
         task_session.__aexit__ = AsyncMock(return_value=None)
         task_session.execute = AsyncMock(
-            side_effect=[ctx_result, MagicMock(), retry_result]
+            side_effect=[_LOCKED, ctx_result, MagicMock(), retry_result]
         )
 
         # notify session (best-effort pg_notify after retry commit)
@@ -2333,7 +2530,7 @@ class TestMarkStaleTasksAsFailed:
         task_session.commit.assert_awaited_once()
 
         # [1] = UPSERT_ATTEMPT with will_retry=True
-        attempt_call = task_session.execute.call_args_list[1]
+        attempt_call = task_session.execute.call_args_list[2]
         attempt_params = attempt_call[0][1]
         assert attempt_params['will_retry'] is True
         assert attempt_params['error_code'] == 'WORKER_CRASHED'
@@ -2386,7 +2583,7 @@ class TestMarkStaleTasksAsFailed:
         task_session = AsyncMock()
         task_session.__aenter__ = AsyncMock(return_value=task_session)
         task_session.__aexit__ = AsyncMock(return_value=None)
-        task_session.execute = AsyncMock(side_effect=[ctx_result, MagicMock()])
+        task_session.execute = AsyncMock(side_effect=[_LOCKED, ctx_result, MagicMock()])
 
         _set_resources(broker, session_factory=MagicMock(side_effect=[scan_session, task_session]))
 
@@ -2404,7 +2601,7 @@ class TestMarkStaleTasksAsFailed:
         assert result.ok_value == 1
 
         # [1] = UPSERT_ATTEMPT with will_retry=False (exhausted)
-        attempt_call = task_session.execute.call_args_list[1]
+        attempt_call = task_session.execute.call_args_list[2]
         attempt_params = attempt_call[0][1]
         assert attempt_params['will_retry'] is False
 
@@ -2463,7 +2660,9 @@ class TestMarkStaleTasksAsFailed:
 
         assert is_ok(result)
         assert result.ok_value == 0
-        select_params = task_session.execute.call_args_list[0][0][1]
+        lock_call, select_call = task_session.execute.call_args_list[:2]
+        assert lock_call[0] == (LOCK_TASK_SQL, {'task_id': 'task-fresh'})
+        select_params = select_call[0][1]
         assert select_params['stale_threshold'] == 300.0
         task_session.commit.assert_not_awaited()
 
@@ -2824,11 +3023,51 @@ class TestRequeueStaleClaimed:
 class TestSyncFacades:
     """Tests for sync wrappers: enqueue, get_result, get_task_info."""
 
-    def test_enqueue_delegates_to_loop_runner(self) -> None:
-        """enqueue() should call _loop_runner.call with enqueue_async."""
+    def test_enqueue_on_the_caller_thread_route_skips_the_loop_runner(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """On ``SyncSendRoute.CALLER_THREAD``, enqueue() writes through
+        ``_enqueue_on_caller_thread`` and does not call the loop runner."""
+        broker = _make_broker()
+        broker._loop_runner = MagicMock()
+
+        def _route(_key: str | None) -> SyncSendRoute:
+            return SyncSendRoute.CALLER_THREAD
+
+        monkeypatch.setattr(broker, 'send_route', _route)
+        on_caller = MagicMock(return_value='task-id-456')
+        monkeypatch.setattr(broker, '_enqueue_on_caller_thread', on_caller)
+
+        result = broker.enqueue(
+            'my_task',
+            'queue',
+            task_id='test-task-id',
+            enqueue_sha='test-sha',
+            kwargs_json='{"k": "v"}',
+            priority=50,
+        )
+
+        assert result == 'task-id-456'
+        broker._loop_runner.call.assert_not_called()
+        assert on_caller.call_args.args == ('my_task', 'queue')
+        assert on_caller.call_args.kwargs['task_id'] == 'test-task-id'
+        assert on_caller.call_args.kwargs['priority'] == 50
+
+    def test_enqueue_delegates_to_loop_runner(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """On ``SyncSendRoute.LOOP_RUNNER``, enqueue() calls
+        _loop_runner.call with enqueue_async."""
         broker = _make_broker()
         broker._loop_runner = MagicMock()
         broker._loop_runner.call = MagicMock(return_value='task-id-123')
+
+        def _route(_key: str | None) -> SyncSendRoute:
+            return SyncSendRoute.LOOP_RUNNER
+
+        monkeypatch.setattr(broker, 'send_route', _route)
 
         result = broker.enqueue(
             'my_task',
@@ -2935,10 +3174,10 @@ class TestGetTaskInfoAsync:
         """Basic task (no optional includes) should return Ok(TaskInfo) with base fields."""
         broker = _make_broker()
         now = datetime.now(timezone.utc)
-        # 18 base columns: id, task_name, status, queue_name, priority,
+        # 19 base columns: id, task_name, status, queue_name, priority,
         # retry_count, max_retries, next_retry_at, sent_at, enqueued_at, claimed_at,
         # started_at, completed_at, failed_at, worker_hostname, worker_pid,
-        # worker_process_name, error_code
+        # worker_process_name, error_code, execution
         row = (
             'task-abc',
             'compute',
@@ -2958,6 +3197,7 @@ class TestGetTaskInfoAsync:
             9999,
             'worker-0',
             None,
+            'ISOLATED',
         )
         self._setup_task_info_session(broker, row=row)
 
@@ -2981,6 +3221,7 @@ class TestGetTaskInfoAsync:
         assert info.decoded_result is None
         assert info.result_decoded is False
         assert info.failed_reason is None
+        assert info.execution is Execution.ISOLATED
 
     @pytest.mark.asyncio
     async def test_include_result_populates_raw_result(self) -> None:
@@ -2995,7 +3236,7 @@ class TestGetTaskInfoAsync:
         broker = _make_broker()
         now = datetime.now(timezone.utc)
         result_json = '{"__h_task_result__":true,"ok":"hello","err":null}'
-        # 18 base + 1 result column
+        # 19 base + 1 result column
         row = (
             'task-abc',
             'compute',
@@ -3015,6 +3256,7 @@ class TestGetTaskInfoAsync:
             9999,
             'worker-0',
             None,
+            'ISOLATED',
             result_json,
         )
         self._setup_task_info_session(broker, row=row)
@@ -3038,7 +3280,7 @@ class TestGetTaskInfoAsync:
         """include_failed_reason=True should add failed_reason to Ok(TaskInfo)."""
         broker = _make_broker()
         now = datetime.now(timezone.utc)
-        # 18 base + 1 failed_reason column
+        # 19 base + 1 failed_reason column
         row = (
             'task-abc',
             'compute',
@@ -3058,6 +3300,7 @@ class TestGetTaskInfoAsync:
             9999,
             'worker-0',
             None,
+            'ISOLATED',
             'Worker crashed unexpectedly',
         )
         self._setup_task_info_session(broker, row=row)
@@ -3076,7 +3319,7 @@ class TestGetTaskInfoAsync:
         """include_result=True with NULL result in DB should return Ok(TaskInfo) with result=None."""
         broker = _make_broker()
         now = datetime.now(timezone.utc)
-        # 18 base + 1 result column (None)
+        # 19 base + 1 result column (None)
         row = (
             'task-abc',
             'compute',
@@ -3096,6 +3339,7 @@ class TestGetTaskInfoAsync:
             None,
             None,
             None,
+            'ISOLATED',
             None,
         )
         self._setup_task_info_session(broker, row=row)
@@ -3119,7 +3363,7 @@ class TestGetTaskInfoAsync:
             '{"error_code":{"__builtin_task_code__":"TASK_EXCEPTION"},'
             '"message":"fail","data":null,"exception":null}}'
         )
-        # 18 base + 1 result + 1 failed_reason
+        # 19 base + 1 result + 1 failed_reason
         row = (
             'task-abc',
             'compute',
@@ -3139,6 +3383,7 @@ class TestGetTaskInfoAsync:
             9999,
             'worker-0',
             'TASK_EXCEPTION',
+            'ISOLATED',
             result_json,
             'Something broke',
         )
@@ -3679,6 +3924,7 @@ class TestEnqueueInsertStatement:
             good_until=None,
             max_retries=0,
             task_options=None,
+            execution=Execution.SHARED_THREAD,
             enqueue_sha='sha',
             scoped_key_digest=None,
             cutover_values=cutover_values,
@@ -3736,6 +3982,14 @@ class TestEnqueueInsertStatement:
         )
         assert explicit['enqueued_at'] == explicit_ts
         assert explicit['enqueue_delay'] is None
+
+    def test_the_execution_class_binds_its_value(self) -> None:
+        params = self._params(
+            enqueued_at=None,
+            enqueue_delay_seconds=None,
+            cutover_values=self._cutover_values(inline=False),
+        )
+        assert params['execution'] == 'SHARED_THREAD'
 
     def test_declined_disposition_binds_null_inline_fields(self) -> None:
         params = self._params(

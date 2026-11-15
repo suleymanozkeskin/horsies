@@ -5,6 +5,7 @@ import dataclasses
 import inspect
 import time
 from dataclasses import dataclass
+from enum import Enum
 from typing import (
     Callable,
     Final,
@@ -20,11 +21,13 @@ from typing import (
     TYPE_CHECKING,
     Optional,
     Any,
+    Never,
     assert_never,
     cast,
+    overload,
 )
 from abc import abstractmethod
-from collections.abc import Mapping
+from collections.abc import Coroutine, Mapping
 from types import MappingProxyType
 from datetime import datetime, timedelta, timezone
 from pydantic import TypeAdapter, ValidationError
@@ -42,6 +45,11 @@ from horsies.core.codec.payload_guard import (
     warn_if_payload_large,
 )
 from horsies.core.codec.task_options import serialize_task_options
+from horsies.core.process_role import (
+    ProcessRole,
+    process_role,
+    wait_inside_task_message,
+)
 from horsies.core.codec.typed import (
     Json,
     TypeAnnotation,
@@ -98,6 +106,7 @@ from horsies.core.brokers.result_types import (
     BrokerPayloadMismatch,
     BrokerResult,
     BrokerSyncCallError,
+    BrokerWaitInsideTask,
     RawResultRecord,
     broker_error_cause,
 )
@@ -127,6 +136,10 @@ if TYPE_CHECKING:
     )
 
 from horsies.core.models.tasks import (
+    DEFAULT_CANCEL_GRACE_MS,
+    MAX_CANCEL_GRACE_MS,
+    MIN_CANCEL_GRACE_MS,
+    Execution,
     TaskResult,
     TaskError,
     TaskOptions,
@@ -496,6 +509,8 @@ class TaskHandle(Generic[T]):
                     )
                 case BrokerEventLoopLimit():
                     err_code, cache = RetrievalCode.EVENT_LOOP_LIMIT, False
+                case BrokerWaitInsideTask():
+                    err_code, cache = RetrievalCode.WAIT_INSIDE_TASK, False
                 case BrokerAsyncContext():
                     raise AssertionError(
                         f'TaskHandle result read for task {self.task_id} got '
@@ -652,6 +667,29 @@ class TaskHandle(Generic[T]):
         self._result_fetched = True
         return decoded_tr
 
+    def _waits_are_refused(self) -> bool:
+        """Return whether a result wait on this handle is refused here.
+
+        A broker-backed handle waits on the broker. In a process that runs
+        task bodies, that wait is refused.
+        """
+        return (
+            self._broker_mode
+            and self._app is not None
+            and process_role() is ProcessRole.RUNS_TASK_BODIES
+        )
+
+    def _wait_inside_task_result(self, operation: str) -> TaskResult[T, TaskError]:
+        """Return ``WAIT_INSIDE_TASK`` for a refused wait. Not cached; nothing ran."""
+        return self._error_result(
+            error_code=RetrievalCode.WAIT_INSIDE_TASK,
+            message=wait_inside_task_message(
+                f'TaskHandle.{operation}() for task {self.task_id}',
+            ),
+            data={'task_id': self.task_id},
+            cache=False,
+        )
+
     def get(
         self,
         timeout_ms: Optional[int] = None,
@@ -659,9 +697,11 @@ class TaskHandle(Generic[T]):
         """
         Get the task result (blocking).
 
-        A broker-backed handle without its result returns
-        ``RetrievalCode.ASYNC_CONTEXT`` (not cached) on a thread that runs an
-        event loop; use ``get_async()`` there.
+        A broker-backed handle returns ``RetrievalCode.WAIT_INSIDE_TASK`` (not
+        cached) in a process that runs task bodies, as its first check, before
+        the ``timeout_ms`` check; compose tasks with a workflow there. It
+        returns ``RetrievalCode.ASYNC_CONTEXT`` (not cached) on a thread that
+        runs an event loop; use ``get_async()`` there.
 
         Args:
             timeout_ms: Maximum time to wait for result (milliseconds)
@@ -672,6 +712,8 @@ class TaskHandle(Generic[T]):
             A timeout_ms that is not None or an int from 0 to MAX_TASK_TIMEOUT_MS
             returns ``RetrievalCode.INVALID_INPUT`` (not cached) before any read.
         """
+        if self._waits_are_refused():
+            return self._wait_inside_task_result('get')
         match wait_timeout_seconds(timeout_ms):
             case Err(err_value=refused):
                 return self._error_result(
@@ -728,6 +770,10 @@ class TaskHandle(Generic[T]):
         """
         Get the task result asynchronously.
 
+        A broker-backed handle returns ``RetrievalCode.WAIT_INSIDE_TASK`` (not
+        cached) in a process that runs task bodies, as its first check, before
+        the ``timeout_ms`` check; compose tasks with a workflow there.
+
         Args:
             timeout_ms: Maximum time to wait for result (milliseconds)
 
@@ -737,6 +783,8 @@ class TaskHandle(Generic[T]):
             A timeout_ms that is not None or an int from 0 to MAX_TASK_TIMEOUT_MS
             returns ``RetrievalCode.INVALID_INPUT`` (not cached) before any read.
         """
+        if self._waits_are_refused():
+            return self._wait_inside_task_result('get_async')
         match wait_timeout_seconds(timeout_ms):
             case Err(err_value=refused):
                 return self._error_result(
@@ -865,7 +913,7 @@ class NodeFactory(Generic[P, T]):
         # Type checker validates 'value' against my_task's signature
     """
 
-    _fn: 'TaskFunction[P, T]'
+    _fn: 'TaskFunction[P, T] | AsyncTaskFunction[P, T]'
     _waits_for: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] | None
     _workflow_ctx_from: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] | None
     _args_from: dict[str, 'TaskNode[Any] | SubWorkflowNode[Any]'] | None
@@ -879,7 +927,7 @@ class NodeFactory(Generic[P, T]):
 
     def __init__(
         self,
-        fn: 'TaskFunction[P, T]',
+        fn: 'TaskFunction[P, T] | AsyncTaskFunction[P, T]',
         *,
         waits_for: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] | None,
         workflow_ctx_from: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] | None,
@@ -974,25 +1022,16 @@ class NodeFactory(Generic[P, T]):
         )
 
 
-class TaskFunction(Protocol[P, T]):
-    """
-    A TaskFunction is a function that gets a @task decorator applied to it.
-    Protocol extends the simple function signature to include the send and send_async methods,
-    thus being able to be called with or without the @task decorator.
+class _TaskFunctionMembers(Protocol[P, T]):
+    """The members that a `def` task and an `async def` task share.
 
-    The generic parameter T represents the success type in TaskResult[T, TaskError].
+    `TaskFunction` and `AsyncTaskFunction` add the direct call. The generic
+    parameter T represents the success type in TaskResult[T, TaskError].
     """
 
     task_name: str
     task_queue_name: str | None
     task_options_json: str | None
-
-    @abstractmethod
-    def __call__(
-        self,
-        *args: P.args,
-        **kwargs: P.kwargs,
-    ) -> TaskResult[T, TaskError]: ...
 
     @abstractmethod
     def send(
@@ -1072,6 +1111,99 @@ class TaskFunction(Protocol[P, T]):
         good_until: datetime | None = None,
         node_id: str | None = None,
     ) -> 'NodeFactory[P, T]': ...
+
+
+class TaskFunction(_TaskFunctionMembers[P, T], Protocol[P, T]):
+    """
+    A TaskFunction is a `def` function that gets a @task decorator applied to it.
+    Protocol extends the simple function signature to include the send and send_async methods,
+    thus being able to be called with or without the @task decorator.
+
+    The generic parameter T represents the success type in TaskResult[T, TaskError].
+    """
+
+    @abstractmethod
+    def __call__(
+        self,
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> TaskResult[T, TaskError]: ...
+
+
+class AsyncTaskFunction(_TaskFunctionMembers[P, T], Protocol[P, T]):
+    """An `async def` function that gets a @task decorator applied to it.
+
+    A direct call returns a coroutine. Await it to get the `TaskResult`.
+    The send methods and `node()` are the same as on `TaskFunction`.
+    """
+
+    @abstractmethod
+    def __call__(
+        self,
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> Coroutine[Any, Any, TaskResult[T, TaskError]]: ...
+
+
+class TaskDecorator(Protocol):
+    """What `app.task(task_name, **options)` returns.
+
+    It registers one task function: a `def` function gives a
+    `TaskFunction`, and an `async def` function gives an `AsyncTaskFunction`.
+    """
+
+    @overload
+    def __call__(
+        self,
+        fn: Callable[P, Coroutine[Any, Any, TaskResult[T, TaskError]]],
+        /,
+    ) -> AsyncTaskFunction[P, T]: ...
+
+    @overload
+    def __call__(
+        self,
+        fn: Callable[P, TaskResult[T, TaskError]],
+        /,
+    ) -> TaskFunction[P, T]: ...
+
+
+class SharedAsyncTaskDecorator(Protocol):
+    """What `app.task(task_name, execution=Execution.SHARED_ASYNC, ...)` returns.
+
+    It accepts only an `async def` function, so a type checker refuses a
+    `def` function. The decorator refuses it at run time too (HRS-107).
+    """
+
+    def __call__(
+        self,
+        fn: Callable[P, Coroutine[Any, Any, TaskResult[T, TaskError]]],
+        /,
+    ) -> AsyncTaskFunction[P, T]: ...
+
+
+class SharedThreadTaskDecorator(Protocol):
+    """What `app.task(task_name, execution=Execution.SHARED_THREAD, ...)` returns.
+
+    It accepts only a `def` function, so a type checker refuses an
+    `async def` function. The decorator refuses it at run time too (HRS-108).
+    """
+
+    def __call__(
+        self,
+        fn: Callable[P, TaskResult[T, TaskError]],
+        /,
+    ) -> TaskFunction[P, T]: ...
+
+
+class CancelGraceRefusedDecorator(Protocol):
+    """What `app.task(task_name, cancel_grace_ms=..., ...)` returns for a
+    literal class other than `SHARED_ASYNC`.
+
+    It accepts no function, so a type checker refuses the decoration. The
+    decorator refuses it at run time too (HRS-110).
+    """
+
+    def __call__(self, fn: Never, /) -> Never: ...
 
 
 class TaskSendOptions(Protocol[P, T]):
@@ -1191,6 +1323,386 @@ def _returned_type_name(returned: object) -> str:
     return returned_type.__name__
 
 
+class TaskBodyKind(Enum):
+    """How a task function was defined, which decides how a worker runs it.
+
+    The decorator sets it as ``task_body_kind`` on the class of the task
+    function. A worker child reads it from the registry at boot, and creates
+    its event loop only when the app has an ``async def`` task.
+    """
+
+    DEF = 'def'
+    ASYNC_DEF = 'async_def'
+
+
+@dataclass(frozen=True, slots=True)
+class _SyncTaskBody(Generic[P, T]):
+    """A task function defined with `def`."""
+
+    fn: Callable[P, TaskResult[T, TaskError]]
+
+
+@dataclass(frozen=True, slots=True)
+class _AsyncTaskBody(Generic[P, T]):
+    """A task function defined with `async def`."""
+
+    fn: Callable[P, Coroutine[Any, Any, TaskResult[T, TaskError]]]
+
+
+def _task_body(
+    fn: Callable[P, TaskResult[T, TaskError]]
+    | Callable[P, Coroutine[Any, Any, TaskResult[T, TaskError]]],
+) -> _SyncTaskBody[P, T] | _AsyncTaskBody[P, T]:
+    """Sort a task function by the way it is called.
+
+    `create_task_wrapper` refuses generator and async generator functions
+    before this, so a function that is not a coroutine function is a `def`
+    function that returns its result.
+    """
+    if inspect.iscoroutinefunction(fn):
+        return _AsyncTaskBody(
+            cast('Callable[P, Coroutine[Any, Any, TaskResult[T, TaskError]]]', fn),
+        )
+    return _SyncTaskBody(cast('Callable[P, TaskResult[T, TaskError]]', fn))
+
+
+def _task_body_kind(
+    fn: Callable[P, TaskResult[T, TaskError]]
+    | Callable[P, Coroutine[Any, Any, TaskResult[T, TaskError]]],
+) -> TaskBodyKind:
+    """The kind of a task function, as `_task_body` sorts it."""
+    match _task_body(fn):
+        case _SyncTaskBody():
+            return TaskBodyKind.DEF
+        case _AsyncTaskBody():
+            return TaskBodyKind.ASYNC_DEF
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+@dataclass(frozen=True, slots=True)
+class SharedAsyncOnDef:
+    """`execution=SHARED_ASYNC` on a function defined with `def`."""
+
+
+@dataclass(frozen=True, slots=True)
+class SharedThreadOnAsyncDef:
+    """`execution=SHARED_THREAD` on a function defined with `async def`."""
+
+
+@dataclass(frozen=True, slots=True)
+class SharedWithoutTimeout:
+    """A shared class without `timeout_ms`."""
+
+    execution: Execution
+
+
+@dataclass(frozen=True, slots=True)
+class CancelGraceWithoutSharedAsync:
+    """`cancel_grace_ms` with a class other than `SHARED_ASYNC`."""
+
+    execution: Execution
+
+
+@dataclass(frozen=True, slots=True)
+class CancelGraceOutOfRange:
+    """`cancel_grace_ms` outside MIN_CANCEL_GRACE_MS to MAX_CANCEL_GRACE_MS."""
+
+
+type ExecutionRuleViolation = (
+    SharedAsyncOnDef
+    | SharedThreadOnAsyncDef
+    | SharedWithoutTimeout
+    | CancelGraceWithoutSharedAsync
+    | CancelGraceOutOfRange
+)
+"""A task declaration that breaks one of the execution rules."""
+
+
+def check_execution_rules(
+    kind: TaskBodyKind,
+    options: TaskOptions,
+) -> Result[None, ExecutionRuleViolation]:
+    """Check the execution declaration of one task against its function.
+
+    The rules, checked in this order, give the first violation:
+    `SHARED_ASYNC` needs an `async def` function and `SHARED_THREAD` a `def`
+    function; a shared class needs `timeout_ms`; only `SHARED_ASYNC` takes
+    `cancel_grace_ms`; and a `cancel_grace_ms` is from MIN_CANCEL_GRACE_MS
+    to MAX_CANCEL_GRACE_MS. `ISOLATED` takes both kinds and no timeout.
+    Pure: it does not read or change any state.
+    """
+    match options.execution:
+        case Execution.ISOLATED:
+            pass
+        case Execution.SHARED_ASYNC | Execution.SHARED_THREAD:
+            kind_r = _check_function_kind(options.execution, kind)
+            if is_err(kind_r):
+                return kind_r
+            if options.timeout_ms is None:
+                return Err(SharedWithoutTimeout(execution=options.execution))
+        case _ as unreachable:
+            assert_never(unreachable)
+    return _check_cancel_grace(options.execution, options.cancel_grace_ms)
+
+
+def _check_function_kind(
+    execution: Literal[Execution.SHARED_ASYNC, Execution.SHARED_THREAD],
+    kind: TaskBodyKind,
+) -> Result[None, SharedAsyncOnDef | SharedThreadOnAsyncDef]:
+    """A shared class runs only the function kind that it is for."""
+    match execution, kind:
+        case Execution.SHARED_ASYNC, TaskBodyKind.DEF:
+            return Err(SharedAsyncOnDef())
+        case Execution.SHARED_THREAD, TaskBodyKind.ASYNC_DEF:
+            return Err(SharedThreadOnAsyncDef())
+        case _:
+            return Ok(None)
+
+
+def _check_cancel_grace(
+    execution: Execution,
+    cancel_grace_ms: int | None,
+) -> Result[None, CancelGraceWithoutSharedAsync | CancelGraceOutOfRange]:
+    """Only `SHARED_ASYNC` takes a grace, and the grace is in its bounds."""
+    match cancel_grace_ms:
+        case None:
+            return Ok(None)
+        case int():
+            pass
+    match execution:
+        case Execution.SHARED_ASYNC:
+            if MIN_CANCEL_GRACE_MS <= cancel_grace_ms <= MAX_CANCEL_GRACE_MS:
+                return Ok(None)
+            return Err(CancelGraceOutOfRange())
+        case Execution.ISOLATED | Execution.SHARED_THREAD:
+            return Err(CancelGraceWithoutSharedAsync(execution=execution))
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+@dataclass(frozen=True, slots=True)
+class _RuleText:
+    """The code and the text of one execution rule error."""
+
+    code: ErrorCode
+    message: str
+    notes: tuple[str, ...]
+    help_text: str
+
+
+def execution_rule_error(
+    violation: ExecutionRuleViolation,
+    *,
+    task_name: str,
+    location: SourceLocation | None,
+) -> TaskDefinitionError:
+    """The definition error, with its own code, for one rule violation.
+
+    The text names the rule and the fix, never the declared grace: an int
+    with more than 4300 digits cannot be converted to a string.
+    """
+    match violation:
+        case SharedAsyncOnDef() | SharedThreadOnAsyncDef() | SharedWithoutTimeout():
+            rule = _function_rule_text(violation)
+        case CancelGraceWithoutSharedAsync() | CancelGraceOutOfRange():
+            rule = _grace_rule_text(violation)
+        case _ as unreachable:
+            assert_never(unreachable)
+    return TaskDefinitionError(
+        message=rule.message,
+        code=rule.code,
+        location=location,
+        notes=[f"task '{task_name}'", *rule.notes],
+        help_text=rule.help_text,
+    )
+
+
+def _function_rule_text(
+    violation: SharedAsyncOnDef | SharedThreadOnAsyncDef | SharedWithoutTimeout,
+) -> _RuleText:
+    """The text of a rule about the function kind or the timeout."""
+    match violation:
+        case SharedAsyncOnDef():
+            return _RuleText(
+                code=ErrorCode.TASK_SHARED_ASYNC_REQUIRES_ASYNC_DEF,
+                message='execution=SHARED_ASYNC requires an `async def` function',
+                notes=(
+                    'the function is defined with `def`',
+                    'SHARED_ASYNC runs many tasks as coroutines in one child process',
+                ),
+                help_text=(
+                    'define the function with `async def`, or use '
+                    'Execution.SHARED_THREAD for a `def` function'
+                ),
+            )
+        case SharedThreadOnAsyncDef():
+            return _RuleText(
+                code=ErrorCode.TASK_SHARED_THREAD_REQUIRES_DEF,
+                message='execution=SHARED_THREAD requires a `def` function',
+                notes=(
+                    'the function is defined with `async def`',
+                    'SHARED_THREAD runs many tasks on threads in one child process',
+                ),
+                help_text=(
+                    'define the function with `def`, or use '
+                    'Execution.SHARED_ASYNC for an `async def` function'
+                ),
+            )
+        case SharedWithoutTimeout(execution=execution):
+            return _RuleText(
+                code=ErrorCode.TASK_SHARED_EXECUTION_REQUIRES_TIMEOUT,
+                message=f'execution={execution.value} requires timeout_ms',
+                notes=('a shared task runs in one child process with other tasks',),
+                help_text=(
+                    'set timeout_ms, for example @app.task(..., '
+                    f'execution=Execution.{execution.value}, timeout_ms=30_000)'
+                ),
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _grace_rule_text(
+    violation: CancelGraceWithoutSharedAsync | CancelGraceOutOfRange,
+) -> _RuleText:
+    """The text of a rule about `cancel_grace_ms`."""
+    match violation:
+        case CancelGraceWithoutSharedAsync(execution=execution):
+            return _RuleText(
+                code=ErrorCode.TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC,
+                message='cancel_grace_ms requires execution=SHARED_ASYNC',
+                notes=(
+                    f'execution is {execution.value}',
+                    'only a SHARED_ASYNC task is cancelled and gets a grace '
+                    'to stop; a thread cannot be cancelled',
+                ),
+                help_text=(
+                    'remove cancel_grace_ms, or use '
+                    'Execution.SHARED_ASYNC with an `async def` function'
+                ),
+            )
+        case CancelGraceOutOfRange():
+            return _RuleText(
+                code=ErrorCode.TASK_CANCEL_GRACE_OUT_OF_RANGE,
+                message='cancel_grace_ms is out of range',
+                notes=(
+                    f'cancel_grace_ms must be from {MIN_CANCEL_GRACE_MS} to '
+                    f'{MAX_CANCEL_GRACE_MS} ms',
+                ),
+                help_text=(
+                    'set a value in the range, or remove cancel_grace_ms to '
+                    f'use the default of {DEFAULT_CANCEL_GRACE_MS} ms'
+                ),
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _sync_task_call(
+    body: Callable[P, TaskResult[T, TaskError]],
+    checked_result: Callable[[object], TaskResult[T, TaskError]],
+    exception_result: Callable[[BaseException], TaskResult[T, TaskError]],
+) -> Callable[P, TaskResult[T, TaskError]]:
+    """The direct call of a `def` task: run the body, then check its return.
+
+    An exception from the body or from the check becomes an error result.
+    `KeyboardInterrupt` propagates, for worker shutdown.
+    """
+
+    def call(*args: P.args, **kwargs: P.kwargs) -> TaskResult[T, TaskError]:
+        try:
+            return checked_result(body(*args, **kwargs))
+        except KeyboardInterrupt:
+            raise
+        except BaseException as exc:
+            return exception_result(exc)
+
+    return call
+
+
+def _async_task_call(
+    body: Callable[P, Coroutine[Any, Any, TaskResult[T, TaskError]]],
+    checked_result: Callable[[object], TaskResult[T, TaskError]],
+    exception_result: Callable[[BaseException], TaskResult[T, TaskError]],
+) -> Callable[P, Coroutine[Any, Any, TaskResult[T, TaskError]]]:
+    """The direct call of an `async def` task: a coroutine that awaits the
+    body, then checks its return.
+
+    Exceptions become error results as in `_sync_task_call`. A
+    `CancelledError` propagates when the asyncio task that awaits this
+    coroutine has a cancel request, so a timeout or a task group around the
+    call works. A `CancelledError` with no cancel request, for example from
+    an inner task that was cancelled, becomes an error result.
+    `GeneratorExit` propagates, so `close()` on a suspended call ends it.
+    """
+
+    async def call(*args: P.args, **kwargs: P.kwargs) -> TaskResult[T, TaskError]:
+        try:
+            return checked_result(await body(*args, **kwargs))
+        except (KeyboardInterrupt, GeneratorExit):
+            raise
+        except asyncio.CancelledError as exc:
+            if _cancel_requested():
+                raise
+            return exception_result(exc)
+        except BaseException as exc:
+            return exception_result(exc)
+
+    return call
+
+
+async def await_task_call_in_worker(
+    called: Coroutine[Any, Any, TaskResult[T, TaskError]],
+    map_exception: Callable[[BaseException], TaskResult[T, TaskError]],
+) -> TaskResult[T, TaskError]:
+    """Await the direct call of an `async def` task inside a worker child.
+
+    `called` is the coroutine of the direct call, and `map_exception` the
+    exception mapping of the same task (`_map_exception` of the task
+    function). The direct call maps every exception of the body, but lets a
+    `CancelledError` pass while the awaiting asyncio task has a cancel
+    request. In a worker child that request can come from the body itself:
+    a body that cancels its own task. So the worker maps that
+    `CancelledError` through the exception mappers as well. A cancel that
+    the worker sends at a deadline is mapped the same way here; the worker
+    then drops the result and records `TASK_TIMEOUT`.
+
+    A `GeneratorExit` that leaves the body goes through the exception
+    mappers too, as it does for a `def` body. The direct call lets it pass,
+    so that `close()` on a suspended call ends it. A `close()` of this
+    coroutine still ends it: the mapped result returns into `close()`,
+    which drops it, and no code runs after it. `KeyboardInterrupt`
+    propagates. The direct call outside a worker does not change.
+    """
+    try:
+        return await called
+    except (asyncio.CancelledError, GeneratorExit) as exc:
+        return map_exception(exc)
+
+
+def _cancel_requested() -> bool:
+    """True when the current asyncio task has a cancel request."""
+    match asyncio.current_task():
+        case None:
+            return False
+        case task:
+            return task.cancelling() > 0
+
+
+@overload
+def create_task_wrapper(
+    fn: Callable[P, Coroutine[Any, Any, TaskResult[T, TaskError]]],
+    app: 'Horsies',
+    task_name: str,
+    task_options: Optional['TaskOptions'] = None,
+    *,
+    exception_mapper: ExceptionMapper | None = None,
+    default_unhandled_error_code: str | None = None,
+) -> 'AsyncTaskFunction[P, T]': ...
+
+
+@overload
 def create_task_wrapper(
     fn: Callable[P, TaskResult[T, TaskError]],
     app: 'Horsies',
@@ -1199,10 +1711,25 @@ def create_task_wrapper(
     *,
     exception_mapper: ExceptionMapper | None = None,
     default_unhandled_error_code: str | None = None,
-) -> 'TaskFunction[P, T]':
+) -> 'TaskFunction[P, T]': ...
+
+
+def create_task_wrapper(
+    fn: Callable[P, TaskResult[T, TaskError]]
+    | Callable[P, Coroutine[Any, Any, TaskResult[T, TaskError]]],
+    app: 'Horsies',
+    task_name: str,
+    task_options: Optional['TaskOptions'] = None,
+    *,
+    exception_mapper: ExceptionMapper | None = None,
+    default_unhandled_error_code: str | None = None,
+) -> 'TaskFunction[P, T] | AsyncTaskFunction[P, T]':
     """
     Create a task wrapper for a specific app instance.
     Called by app.task() decorator.
+
+    A `def` function gives a `TaskFunction`. An `async def` function gives
+    an `AsyncTaskFunction`, whose direct call returns a coroutine.
     """
 
     fn_location = SourceLocation.from_function(fn)
@@ -1222,18 +1749,18 @@ def create_task_wrapper(
             help_text='remove inner decorators and apply @app.task() directly to the raw function',
         )
 
-    # The worker calls the task function synchronously. An async function
-    # returns a coroutine or an async generator, so every run would fail.
-    if inspect.iscoroutinefunction(fn) or inspect.isasyncgenfunction(fn):
+    # An async generator function returns an async generator, so the body
+    # never runs and every run would fail.
+    if inspect.isasyncgenfunction(fn):
         raise TaskDefinitionError(
-            message='task function must be a sync function',
-            code=ErrorCode.TASK_ASYNC_FUNCTION_NOT_SUPPORTED,
+            message='task function must not be an async generator',
+            code=ErrorCode.TASK_INVALID_RETURN_TYPE,
             location=fn_location,
             notes=[
-                f"function '{fn.__name__}' is defined with `async def`",
-                'async task functions are not supported',
+                f"function '{fn.__name__}' is defined with `async def` and uses `yield`",
+                'a task returns one TaskResult',
             ],
-            help_text='define the task with `def`; async task support is not available',
+            help_text='collect the items and return them in one TaskResult',
         )
 
     # A generator function returns a generator, so the body never runs and
@@ -1249,6 +1776,20 @@ def create_task_wrapper(
             ],
             help_text='collect the items and return them in one TaskResult',
         )
+
+    # The execution class must fit the function kind, which is known only
+    # now that generator functions are refused.
+    match task_options:
+        case None:
+            pass
+        case declared_options:
+            rules_r = check_execution_rules(_task_body_kind(fn), declared_options)
+            if is_err(rules_r):
+                raise execution_rule_error(
+                    rules_r.err_value,
+                    task_name=task_name,
+                    location=fn_location,
+                )
 
     hints = get_type_hints(fn, include_extras=True)
 
@@ -1372,97 +1913,98 @@ def create_task_wrapper(
             )
         )
 
-    # Create a wrapper function that preserves the exact signature
-    def wrapped_function(
-        *args: P.args,
-        **kwargs: P.kwargs,
-    ) -> TaskResult[T, TaskError]:
+    def checked_result(returned: object) -> TaskResult[T, TaskError]:
+        """Check one return of the task body against the declared types.
+
+        A return that is not a `TaskResult`, or that does not fit the types,
+        becomes a RETURN_TYPE_MISMATCH result. A `def` task and an
+        `async def` task share this check.
+        """
+        if not isinstance(returned, TaskResult):
+            return not_a_task_result(returned)
+        result = cast('TaskResult[T, TaskError]', returned)
+
+        # Runtime type validation: validate result against declared types
         try:
-            returned: object = fn(*args, **kwargs)
-
-            if not isinstance(returned, TaskResult):
-                return not_a_task_result(returned)
-            result = cast('TaskResult[T, TaskError]', returned)
-
-            # Runtime type validation: validate result against declared types
             try:
-                try:
-                    if result.is_ok():
-                        # Validate the ok value against T. A validator can
-                        # transform it, so return the validated value: an
-                        # in-process caller then sees the value that a wire
-                        # consumer decodes.
-                        validated_ok = ok_type_adapter.validate_python(
-                            result.ok,
-                            strict=True,
-                            extra='forbid',
-                        )
-                        if validated_ok is not result.ok:
-                            result = TaskResult(ok=validated_ok)
-                    else:
-                        # Validate err value against E
-                        err_type_adapter.validate_python(result.err)
-                except ValidationError as ve:
-                    # Type validation failed - return error result.
-                    return return_type_mismatch(
-                        result,
-                        validation_summary(ve),
-                        validation_error_entries(ve),
-                        ve.error_count(),
+                if result.is_ok():
+                    # Validate the ok value against T. A validator can
+                    # transform it, so return the validated value: an
+                    # in-process caller then sees the value that a wire
+                    # consumer decodes.
+                    validated_ok = ok_type_adapter.validate_python(
+                        result.ok,
+                        strict=True,
+                        extra='forbid',
                     )
-            except UnicodeEncodeError:
-                # A validator wrote a lone surrogate in its error text, so
-                # pydantic cannot build that text: validate_python raises
-                # this for a ValueError, and ValidationError.errors() for the
-                # context of a PydanticCustomError. It is the same refusal.
-                # The task body is outside this try, so its own
-                # UnicodeEncodeError is an unhandled exception.
-                text = lone_surrogate_text('a validation error', ())
+                    if validated_ok is not result.ok:
+                        result = TaskResult(ok=validated_ok)
+                else:
+                    # Validate err value against E
+                    err_type_adapter.validate_python(result.err)
+            except ValidationError as ve:
+                # Type validation failed - return error result.
                 return return_type_mismatch(
                     result,
-                    text,
-                    [{'loc': [], 'msg': text, 'type': 'lone_surrogate'}],
-                    1,
+                    validation_summary(ve),
+                    validation_error_entries(ve),
+                    ve.error_count(),
                 )
+        except UnicodeEncodeError:
+            # A validator wrote a lone surrogate in its error text, so
+            # pydantic cannot build that text: validate_python raises
+            # this for a ValueError, and ValidationError.errors() for the
+            # context of a PydanticCustomError. It is the same refusal.
+            # The task body is outside this try, so its own
+            # UnicodeEncodeError is an unhandled exception.
+            text = lone_surrogate_text('a validation error', ())
+            return return_type_mismatch(
+                result,
+                text,
+                [{'loc': [], 'msg': text, 'type': 'lone_surrogate'}],
+                1,
+            )
 
-            return result
+        return result
 
-        except KeyboardInterrupt:
-            # Allow KeyboardInterrupt to propagate for graceful worker shutdown
-            raise
-        except WorkflowContextMissingIdError as e:
-            error_result: TaskResult[T, TaskError] = TaskResult(
-                err=TaskError(
-                    exception=e,
-                    error_code=ContractCode.WORKFLOW_CTX_MISSING_ID,
-                    message=str(e),
-                    data={'task_name': task_name},
+    def exception_result(exc: BaseException) -> TaskResult[T, TaskError]:
+        """The error result of an exception from the task body or its check.
+
+        A `def` task and an `async def` task share this mapping: the
+        exception mappers decide the code, as `resolve_exception_error_code`
+        states.
+        """
+        match exc:
+            case WorkflowContextMissingIdError():
+                return TaskResult(
+                    err=TaskError(
+                        exception=exc,
+                        error_code=ContractCode.WORKFLOW_CTX_MISSING_ID,
+                        message=str(exc),
+                        data={'task_name': task_name},
+                    )
                 )
-            )
-            return error_result
-        except BaseException as e:
-            # Catch SystemExit, GeneratorExit, Exception, etc.
-            error_code = resolve_exception_error_code(
-                exc=e,
-                task_mapper=exception_mapper,
-                global_mapper=app.config.exception_mapper,
-                task_default=default_unhandled_error_code,
-                global_default=app.config.default_unhandled_error_code,
-            )
-            from horsies.core.models.tasks import BUILTIN_CODE_REGISTRY
-
-            resolved_code: BuiltInTaskCode | str = BUILTIN_CODE_REGISTRY.get(
-                error_code, error_code,
-            )
-            error_result: TaskResult[T, TaskError] = TaskResult(
-                err=TaskError(
-                    exception=e,
-                    error_code=resolved_code,
-                    message=f'Unhandled exception in task {fn.__name__}: {type(e).__name__}: {exception_text(e)}',
-                    data={'exception_type': type(e).__name__},
+            case _:
+                error_code = resolve_exception_error_code(
+                    exc=exc,
+                    task_mapper=exception_mapper,
+                    global_mapper=app.config.exception_mapper,
+                    task_default=default_unhandled_error_code,
+                    global_default=app.config.default_unhandled_error_code,
                 )
-            )
-            return error_result
+                from horsies.core.models.tasks import BUILTIN_CODE_REGISTRY
+
+                resolved_code: BuiltInTaskCode | str = BUILTIN_CODE_REGISTRY.get(
+                    error_code, error_code,
+                )
+                return TaskResult(
+                    err=TaskError(
+                        exception=exc,
+                        error_code=resolved_code,
+                        message=f'Unhandled exception in task {fn.__name__}: {type(exc).__name__}: {exception_text(exc)}',
+                        data={'exception_type': type(exc).__name__},
+                    )
+                )
 
     # Pre-serialize task_options once so the send/send_async/schedule closures
     # below can reuse the JSON string instead of re-serializing on every call.
@@ -1498,6 +2040,12 @@ def create_task_wrapper(
                 good_until=good_until,
                 retry_policy=task_options.retry_policy if task_options else None,
                 timeout_ms=task_options.timeout_ms if task_options else None,
+                execution=(
+                    task_options.execution if task_options else Execution.ISOLATED
+                ),
+                cancel_grace_ms=(
+                    task_options.cancel_grace_ms if task_options else None
+                ),
             )
         except Exception as exc:
             cause = without_validation_input(exc)
@@ -2410,7 +2958,11 @@ def create_task_wrapper(
         return await _do_schedule_async(task_id, payload)
 
     class TaskFunctionImpl:
-        def __init__(self) -> None:
+        """The members that both kinds share. A subclass adds `__call__`."""
+
+        def __init__(self, call: Callable[..., object]) -> None:
+            # `__getattr__` reads `_call`, so it is set first.
+            self._call = call
             self.__name__ = fn.__name__
             self.__doc__ = fn.__doc__
             self.__annotations__ = fn.__annotations__
@@ -2435,13 +2987,9 @@ def create_task_wrapper(
                 MappingProxyType(exception_mapper) if exception_mapper is not None else None
             )
             self.default_unhandled_error_code: str | None = default_unhandled_error_code
-
-        def __call__(
-            self,
-            *args: P.args,
-            **kwargs: P.kwargs,
-        ) -> TaskResult[T, TaskError]:
-            return wrapped_function(*args, **kwargs)
+            # The exception mapping of this task, for the worker's await of
+            # an async call (`await_task_call_in_worker`).
+            self._map_exception = exception_result
 
         def send(
             self,
@@ -2538,10 +3086,48 @@ def create_task_wrapper(
                 node_id=node_id,
             )
 
-        # Copy metadata
         def __getattr__(self, name: str) -> Any:
-            return getattr(wrapped_function, name)
+            """Read other attributes from the call function.
 
-    task_func = TaskFunctionImpl()
+            An instance that `copy` builds has no `_call` until its state is
+            set. `self._call` would then call this method again, so `_call`
+            is read from the instance dict.
+            """
+            instance_fields = vars(self)
+            if '_call' not in instance_fields:
+                raise AttributeError(
+                    f'{type(self).__name__!r} object has no attribute {name!r}',
+                )
+            return getattr(instance_fields['_call'], name)
 
-    return task_func
+    match _task_body(fn):
+        case _SyncTaskBody(fn=sync_body):
+            sync_call = _sync_task_call(sync_body, checked_result, exception_result)
+
+            class SyncTaskFunctionImpl(TaskFunctionImpl):
+                task_body_kind = TaskBodyKind.DEF
+
+                def __call__(
+                    self,
+                    *args: P.args,
+                    **kwargs: P.kwargs,
+                ) -> TaskResult[T, TaskError]:
+                    return sync_call(*args, **kwargs)
+
+            return SyncTaskFunctionImpl(sync_call)
+        case _AsyncTaskBody(fn=async_body):
+            async_call = _async_task_call(async_body, checked_result, exception_result)
+
+            class AsyncTaskFunctionImpl(TaskFunctionImpl):
+                task_body_kind = TaskBodyKind.ASYNC_DEF
+
+                def __call__(
+                    self,
+                    *args: P.args,
+                    **kwargs: P.kwargs,
+                ) -> Coroutine[Any, Any, TaskResult[T, TaskError]]:
+                    return async_call(*args, **kwargs)
+
+            return AsyncTaskFunctionImpl(async_call)
+        case _ as unreachable:
+            assert_never(unreachable)

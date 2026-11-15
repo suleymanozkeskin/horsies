@@ -134,11 +134,13 @@ Yes — and read the version number as an API-contract statement, not an engine-
 
 ## What happens to other tasks when one task crashes or hangs?
 
-Nothing. Each task runs in its own child process, and the worker talks to each child over its own socket. A crash, an out-of-memory kill, or a timeout kill ends that child only. The other tasks finish, and the slot gets a new child. See [Failure Isolation](../workers/worker-architecture#failure-isolation).
+Nothing, for a task with `Execution.ISOLATED` (the default). Each such task runs in its own child process, and the worker talks to each child over its own socket. A crash, an out-of-memory kill, or a timeout kill ends that child only. The other tasks finish, and the slot gets a new child. See [Failure Isolation](../workers/worker-architecture#failure-isolation).
+
+A task with `Execution.SHARED_ASYNC` or `Execution.SHARED_THREAD` shares its child process with other tasks. A crash of that process ends every task in it. See [Choosing an Execution Mode](../workers/execution-modes).
 
 ## How much memory does a worker use?
 
-It depends on your app. On Linux, a preload parent imports code once and forks each child, so children share those pages. With 4 children, the whole worker at start measured 159 MiB on a small app and 342 MiB on an app with pandas, against 290 MiB and 445 MiB with `--child-preload=none`. With `--child-preload=app`, the pandas app measured 212 MiB. See [Preload Parent](../workers/worker-architecture#preload-parent).
+It depends on your app. On Linux, a preload parent imports code once and forks each child, so children share those pages. With 4 children, the whole worker at start measured 159 MiB on a small app and 342 MiB on an app with pandas, against 290 MiB and 445 MiB with `preload=ChildPreload.NONE`. With `preload=ChildPreload.APP`, the pandas app measured 212 MiB. See [Preload Parent](../workers/worker-architecture#preload-parent).
 
 ## Throughput expectations and comparisons
 

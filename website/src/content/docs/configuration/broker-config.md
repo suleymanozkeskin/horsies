@@ -25,21 +25,19 @@ broker = PostgresConfig(
 | `pgbouncer_transaction_mode` | `bool` | `False` | Disable prepared statements for transaction-pooled PgBouncer |
 | `pool_size` | `int` | 5 | Connection pool size (raise for high-throughput producers) |
 | `max_overflow` | `int` | 10 | Additional connections beyond pool_size |
-| `worker_pool_size` | `int \| None` | 3 | Worker coordinator pool size; `None` inherits `pool_size` |
-| `worker_max_overflow` | `int \| None` | 2 | Worker coordinator overflow; `None` inherits `max_overflow` |
-| `worker_child_pool_min_size` | `int` | 0 | Minimum connections kept by each child worker process |
-| `worker_child_pool_max_size` | `int` | 2 | Maximum connections allowed per child worker process |
-| `worker_child_pool_check` | `bool` | `True` | Health-check child pool connections on checkout; see [Remote PostgreSQL](remote-postgres) |
 | `pool_timeout` | `int` | 30 | Seconds to wait for connection |
-| `pool_pre_ping` | `bool` | `True` | Pre-ping connections before use; see [Remote PostgreSQL](remote-postgres) |
-| `tcp_keepalives` | `bool` | `True` | Enable libpq TCP keepalives on broker and child-process connections; see [Remote PostgreSQL](remote-postgres) |
+| `pool_pre_ping` | `bool` | `True` | Ping a pooled connection at checkout when it waited in the pool for more than 1 s (`PRE_PING_AFTER_IDLE_S`), in every engine but the one of the worker process; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
+| `worker_pool_pre_ping` | `bool` | `False` | Ping a pooled connection of the worker process at checkout when it waited in the pool for more than 1 s. Off: the worker sends a one-statement write in one round trip, and a dead pooled connection fails its first statement with a connection error that the worker retries; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/#health-checks-at-high-rtt) |
+| `tcp_keepalives` | `bool` | `True` | Enable libpq TCP keepalives on broker and child-process connections; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
 | `tcp_keepalives_idle` | `int` | 30 | Idle seconds before the first keepalive probe (libpq `keepalives_idle`) |
 | `tcp_keepalives_interval` | `int` | 10 | Seconds between keepalive probes (libpq `keepalives_interval`) |
 | `tcp_keepalives_count` | `int` | 3 | Unacknowledged probes before the connection is dropped (libpq `keepalives_count`) |
-| `tcp_user_timeout_ms` | `int` | 30000 | Milliseconds that sent data may stay unacknowledged before the connection is closed (libpq `tcp_user_timeout`); `0` uses the operating system default; see [Remote PostgreSQL](remote-postgres) |
+| `tcp_user_timeout_ms` | `int` | 30000 | Milliseconds that sent data may stay unacknowledged before the connection is closed (libpq `tcp_user_timeout`); `0` uses the operating system default; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
 | `retain_rerun_input_default` | `bool` | `False` | App-level default for rerun-input retention at enqueue; a per-task value overrides it |
 | `echo` | `bool` | `False` | Echo SQL statements to logs. Bound values are not shown |
 | `pool_recycle` | `int` | 1800 | Recycle connections after N seconds |
+
+The pools of a worker are not `PostgresConfig` fields. Each child kind has its own `pool` and `task_send_pool` in the worker profile, and the worker process has `WorkerProfile.pool`. See [Connection Pools and the Default Executor](/horsies/workers/worker-profiles/#connection-pools-and-the-default-executor). `worker_child_pool_min_size`, `worker_child_pool_max_size`, `worker_child_pool_check`, `worker_pool_size` and `worker_max_overflow` were removed in 0.7.0; a config that sets one fails with `HRS-213`, and the error names the profile field that replaces it.
 
 ## Connection URL Format
 
@@ -53,6 +51,26 @@ Components:
 - `user:password` - Credentials
 - `host:port` - Server location (default port: 5432)
 - `database` - Database name
+
+## psycopg and libpq
+
+horsies needs psycopg 3.3.7 or later. The install sets where the libpq of psycopg comes from:
+
+| Install | psycopg loads |
+|---------|---------------|
+| `horsies` | the libpq of the system |
+| `horsies[pg-binary]` | the libpq that `psycopg-binary` bundles |
+| `horsies[pg-c]` | the libpq of the system, through `psycopg-c` |
+
+When a cancelled asyncio task, `KeyboardInterrupt` or `SystemExit` interrupts a running query, psycopg:
+
+1. Sends a cancel request to the server, for at most 5 seconds.
+2. Waits for the query to end, for at most 5 seconds.
+3. Closes the connection, when the query has not ended.
+
+The 5-second limit of step 1 needs libpq 17 or later. With an older libpq, the cancel request has no limit, and in async code psycopg sends it from a thread of the default executor. The 5-second limit of step 2 applies with every libpq. Read the version that psycopg loaded with `psycopg.pq.version()`: libpq 17.0 reads `170000`.
+
+In a [shared async child](/horsies/workers/shared-async-tasks/#the-timeout), that thread is work of the task: the attempt ends only when the cancel request returns. A second cancel does not stop a thread.
 
 ## Examples
 
@@ -146,9 +164,9 @@ The broker uses SQLAlchemy's async connection pool:
 ### Sizing Guidelines
 
 `pool_size` and `max_overflow` size the general broker used by producers,
-web processes, schedulers, and app-level APIs. Workers use the smaller
-`worker_pool_size` and `worker_max_overflow` profile by default so an idle or
-moderately loaded worker does not reserve a web-sized pool.
+web processes, schedulers, and app-level APIs. They do not size the pools of a
+worker: the worker process opens `WorkerProfile.pool`, and task code in a worker
+child opens the `task_send_pool` of its child kind.
 
 | Deployment | pool_size | max_overflow |
 |------------|-----------|--------------|
@@ -159,19 +177,30 @@ moderately loaded worker does not reserve a web-sized pool.
 For direct PostgreSQL connections, budget a worker roughly as:
 
 ```
-worker_pool_size + worker_max_overflow
+pool max_size (the pool of the worker process)
   + 2 session/LISTEN connections
-  + processes * worker_child_pool_max_size
-  + task-code database connections
+  + 1 runner heartbeat connection
+  + isolated children * isolated.pool max_size
+  + shared async children * shared_async.pool max_size
+  + shared thread children * shared_thread.pool max_size
+  + task code that sends: children * task_send_pool of their kind, per event loop
 ```
 
-With the defaults and `--processes=8`, the framework ceiling is about
-`3 + 2 + 2 + 8 * 2 = 23` direct connections, before application task code.
-Idle child processes keep no database connection by default because
-`worker_child_pool_min_size=0`; connections are opened lazily when task
-lifecycle work starts. Set `worker_child_pool_max_size=1` only after testing heartbeat and task
-lifecycle latency for your workload; `2` leaves one connection for task
-lifecycle work and one for heartbeat overlap.
+Each `max_size` is the resolved value: a `PoolSize`, or the size that
+`PoolSizeFromSeats()` derives from the seats; see
+[Connections](/horsies/workers/worker-profiles/#connections). With the defaults
+and a profile of 8 isolated children, the framework ceiling is about
+`5 + 2 + 1 + 8 * 1 = 16` direct connections, and `8 * 2 = 16` more when every
+child sends from one event loop.
+Idle child processes keep no database connection by default because the
+`min_size` of each pool is 0; connections are opened lazily when task
+lifecycle work starts. An isolated child uses one connection at a time, for the
+RUNNING update and the finalizing mark: the worker process writes the runner
+heartbeats over its own connection. So the default
+`IsolatedPool(max_size=PoolSize(connections=1))` is enough for the own work of
+an isolated child. The seats of a shared child share the pool of their child;
+see [Connections](/horsies/workers/shared-thread-tasks/#connections) for its
+size.
 
 When using PgBouncer transaction pooling, those client-side pool slots are
 multiplexed onto fewer server backends. Connections are still not safe to share
@@ -185,14 +214,18 @@ runtime engine with its own pool, a session engine when `session_database_url`
 differs from `database_url`, and a LISTEN/NOTIFY listener. Sync calls
 (`send()`, `TaskHandle.get()`, `spec.start()`, the sync `WorkflowHandle`
 methods, `app.ping_workers()`) run on the broker's own sync runner loop, which
-has its own set.
+has its own set. One exception: in a process that runs no task bodies, a sync
+send without an idempotency key writes on the calling thread, through the
+sync send pool of the broker, once the broker checked the schema. See
+[Connection Ceiling](#connection-ceiling).
 
 - A set is built on the first call from its loop. Its pools open connections
   on demand, so a set that makes no database call opens none.
 - When a loop closes, the next broker call from any loop releases that loop's
   set: its idle connections and its listener connections close. A connection
   that a task of the closed loop still held is closed by garbage collection.
-- A broker serves at most 5 open loops other than its sync runner loop. A call
+- A broker serves at most 5 open loops other than its sync runner loop and, in
+  a worker child, the task loop that runs `async def` tasks. A call
   from one more open loop returns `EVENT_LOOP_LIMIT` in the error type of that
   call, and nothing runs. The error clears when one of those loops closes.
   The limit covers pytest-asyncio, which keeps one loop open per fixture scope
@@ -241,18 +274,38 @@ result = await handle.get_async(timeout_ms=5000)
 Each set can open:
 
 ```text
-pool_size + max_overflow
-+ pool_size + max_overflow    # only when session_database_url differs
-+ 2                           # listener connections
+pool_size + max_overflow      # runtime engine
++ pool_size + max_overflow    # session engine, only when session_database_url differs
++ 2                           # listener, from the first result wait, workflow wait or worker ping
 ```
 
-A process can open this once per set:
+In a process that runs no task bodies, the broker has one more pool, the
+sync send pool: up to `pool_size + max_overflow` connections, with the same
+URL, connect args and idle ping as the runtime engine. A sync send without an
+idempotency key (`send()`, `schedule()`, `retry_send()`, `retry_schedule()`)
+writes on the calling thread through this pool, once the broker checked the
+schema. The first send of a broker (it checks the schema), a send with an
+idempotency key, and the other sync calls use the set of the sync runner.
+Task code in a worker child sends through the set of its `task_send_pool`
+only, and has no sync send pool.
 
-| Process | Sets |
-|---|---|
-| Sync calls only, or async calls from one loop only | 1 |
-| ASGI app with async endpoints and sync calls in a thread pool | 2 |
-| pytest run with a session-scoped broker and function-scoped async tests | 2 (session loop, current test loop), plus 1 when tests make sync calls |
+```text
+connections of one process = sets × (the ceiling of one set)
+                           + pool_size + max_overflow    # sync send pool, when the table says Yes
+```
+
+| Process | Sets | Sync send pool |
+|---|---|---|
+| Sync calls only, for example a WSGI app or a script | 1 (the sync runner loop) | Yes, when it sends without an idempotency key |
+| Async calls from one loop only | 1 | No |
+| ASGI app with async endpoints and sync calls in a thread pool | 2 | Yes, when the sync calls send without an idempotency key |
+| pytest run with a session-scoped broker and function-scoped async tests | 2 (session loop, current test loop), plus 1 when tests make sync calls | Yes, when tests send with `send()` without an idempotency key |
+| Worker child whose task code sends | 1 for the sync tasks (the runner loop), plus 1 for the async tasks (the task loop) | No |
+
+At the defaults (`pool_size=5`, `max_overflow=10`, no `session_database_url`),
+a process that sends only with `send()` opens up to `15 + 15 = 30`
+connections, and 2 more when it waits for a result. Each pool opens a
+connection only when a call finds none free.
 
 ### Things to Avoid
 

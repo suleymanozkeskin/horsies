@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, TypeGuard
 
 import pytest
@@ -25,10 +26,12 @@ from horsies.core.models.workflow import (
 from horsies.core.workflows.engine import on_workflow_task_complete
 from horsies.core.worker.current import set_current_app
 from horsies.core.worker.worker import _run_task_entry, _initialize_worker_pool
+from horsies.core.worker.task_loop import TaskLoop
 
 from .conftest import make_simple_task, make_no_ctx_task, make_workflow_spec, start_ok
 from tests.integration.conftest import task_name_for
 from tests.broker_resources_support import listener_of
+from tests.fixtures.run_return import wire_of
 
 
 def _is_str_keyed_dict(value: object) -> TypeGuard[dict[str, Any]]:
@@ -63,21 +66,29 @@ class TestWorkflowCtx:
         session: AsyncSession,
         task_id: str,
         worker_id: str,
-    ) -> None:
-        """Helper to claim a task for a worker (required before _run_task_entry)."""
-        await session.execute(
-            text("""
-                UPDATE horsies_tasks
-                SET status = 'CLAIMED',
-                    claimed = TRUE,
-                    claimed_at = NOW(),
-                    claimed_by_worker_id = :worker_id,
-                    claim_expires_at = NULL
-                WHERE id = :task_id
-            """),
-            {'task_id': task_id, 'worker_id': worker_id},
-        )
+    ) -> datetime:
+        """Helper to claim a task for a worker (required before _run_task_entry).
+
+        Returns the claim time, as the claim of a worker returns it.
+        """
+        claimed_at = (
+            await session.execute(
+                text("""
+                    UPDATE horsies_tasks
+                    SET status = 'CLAIMED',
+                        claimed = TRUE,
+                        claimed_at = NOW(),
+                        claimed_by_worker_id = :worker_id,
+                        claim_expires_at = NULL
+                    WHERE id = :task_id
+                    RETURNING claimed_at
+                """),
+                {'task_id': task_id, 'worker_id': worker_id},
+            )
+        ).scalar_one()
         await session.commit()
+        assert isinstance(claimed_at, datetime)
+        return claimed_at
 
     async def _complete_task(
         self,
@@ -519,18 +530,21 @@ class TestWorkflowCtx:
         assert isinstance(kwargs_json, str)
 
         # Claim the task before running (required by ownership check)
-        await self._claim_task(session, task_id, 'test-worker')
+        claimed_at = await self._claim_task(session, task_id, 'test-worker')
 
         set_current_app(app)
         database_url = listener_of(broker).database_url
         _initialize_worker_pool(database_url)
-        ok, result_json, worker_failure = _run_task_entry(
-            task_name=task_name,
-            args_json=args_json,
-            kwargs_json=kwargs_json,
-            task_id=task_id,
-            database_url=database_url,
-            master_worker_id='test-worker',
+        ok, result_json, worker_failure = wire_of(
+            _run_task_entry(
+                task_name=task_name,
+                args_json=args_json,
+                kwargs_json=kwargs_json,
+                task_id=task_id,
+                master_worker_id='test-worker',
+                claimed_at=claimed_at,
+                task_loop=TaskLoop(),
+            )
         )
         assert ok is True
         assert worker_failure is None
@@ -588,18 +602,21 @@ class TestWorkflowCtx:
         assert isinstance(kwargs_json, str)
 
         # Claim the task before running (required by ownership check)
-        await self._claim_task(session, task_id, 'test-worker')
+        claimed_at = await self._claim_task(session, task_id, 'test-worker')
 
         set_current_app(app)
         database_url = listener_of(broker).database_url
         _initialize_worker_pool(database_url)
-        ok, result_json, worker_failure = _run_task_entry(
-            task_name=task_name,
-            args_json=args_json,
-            kwargs_json=kwargs_json,
-            task_id=task_id,
-            database_url=database_url,
-            master_worker_id='test-worker',
+        ok, result_json, worker_failure = wire_of(
+            _run_task_entry(
+                task_name=task_name,
+                args_json=args_json,
+                kwargs_json=kwargs_json,
+                task_id=task_id,
+                master_worker_id='test-worker',
+                claimed_at=claimed_at,
+                task_loop=TaskLoop(),
+            )
         )
         assert ok is True
         assert worker_failure is None
@@ -660,18 +677,21 @@ class TestWorkflowCtx:
         assert isinstance(kwargs_json, str)
 
         # Claim the task before running (required by ownership check)
-        await self._claim_task(session, task_id, 'test-worker')
+        claimed_at = await self._claim_task(session, task_id, 'test-worker')
 
         set_current_app(app)
         database_url = listener_of(broker).database_url
         _initialize_worker_pool(database_url)
-        ok, result_json, worker_failure = _run_task_entry(
-            task_name=task_name,
-            args_json=args_json,
-            kwargs_json=kwargs_json,
-            task_id=task_id,
-            database_url=database_url,
-            master_worker_id='test-worker',
+        ok, result_json, worker_failure = wire_of(
+            _run_task_entry(
+                task_name=task_name,
+                args_json=args_json,
+                kwargs_json=kwargs_json,
+                task_id=task_id,
+                master_worker_id='test-worker',
+                claimed_at=claimed_at,
+                task_loop=TaskLoop(),
+            )
         )
         assert ok is True
         assert worker_failure is None
@@ -947,18 +967,21 @@ class TestWorkflowCtx:
         }
         modified_kwargs_json = dumps_json(original_kwargs).unwrap()
 
-        await self._claim_task(session, task_id, 'test-worker')
+        claimed_at = await self._claim_task(session, task_id, 'test-worker')
 
         set_current_app(app)
         database_url = listener_of(broker).database_url
         _initialize_worker_pool(database_url)
-        ok, result_json, worker_failure = _run_task_entry(
-            task_name=task_name,
-            args_json=args_json,
-            kwargs_json=modified_kwargs_json,
-            task_id=task_id,
-            database_url=database_url,
-            master_worker_id='test-worker',
+        ok, result_json, worker_failure = wire_of(
+            _run_task_entry(
+                task_name=task_name,
+                args_json=args_json,
+                kwargs_json=modified_kwargs_json,
+                task_id=task_id,
+                master_worker_id='test-worker',
+                claimed_at=claimed_at,
+                task_loop=TaskLoop(),
+            )
         )
         assert ok is True
         assert worker_failure is None

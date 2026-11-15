@@ -16,8 +16,10 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from collections.abc import Awaitable, Callable, Sequence
-from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, assert_never, cast
+from enum import Enum
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypeVar, assert_never, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,7 +37,7 @@ from horsies.core.codec.json_io import (
     loads_json,
 )
 from horsies.core.codec.payload_guard import warn_if_payload_large
-from horsies.core.codec.task_options import stored_max_retries
+from horsies.core.codec.task_options import stored_execution, stored_max_retries
 from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.codec.typed import (
     Json,
@@ -49,6 +51,7 @@ from horsies.core.codec.typed import (
     validate_task_result_envelope,
 )
 from horsies.core.codec.validation_errors import ValueValidationError
+from horsies.core.models.workflow.limits import MAX_SUBWORKFLOW_DEPTH
 from horsies.core.models.workflow.nodes import stored_kwargs
 from horsies.core.utils.fingerprint import enqueue_fingerprint
 from horsies.core.types.result import Err, Ok, Result, is_err
@@ -71,9 +74,8 @@ from horsies.core.workflows.sql import (
     COUNT_CTX_TERMINAL_DEPS_SQL,
     ENQUEUE_SUBWORKFLOW_TASK_SQL,
     ENQUEUE_WORKFLOW_TASK_SQL,
-    ENQUEUE_WORKFLOW_TASKS_BATCH_SQL,
     GET_DEPENDENTS_EVAL_SQL,
-    MARK_TASKS_READY_BATCH_SQL,
+    PROMOTE_DEPENDENTS_BATCH_SQL,
     REVERT_ENQUEUED_TO_READY_BATCH_SQL,
     SKIP_PENDING_TASKS_BATCH_SQL,
     SKIP_READY_TASKS_BATCH_SQL,
@@ -94,11 +96,11 @@ from horsies.core.workflows.sql import (
     GET_WORKFLOW_DEPTH_SQL,
     GET_WORKFLOW_ON_ERROR_SQL,
     GET_WORKFLOW_STATUS_SQL,
+    INSERT_AND_LINK_WORKFLOW_TASK_SQL,
     INSERT_CHILD_WORKFLOW_SQL,
     INSERT_TASK_FOR_WORKFLOW_SQL,
     INSERT_WORKFLOW_TASKS_BULK_SQL,
     LINK_SUB_WORKFLOW_SQL,
-    LINK_WORKFLOW_TASK_SQL,
     LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL,
     MARK_TASK_READY_SQL,
     MARK_WORKFLOW_COMPLETED_SQL,
@@ -122,7 +124,7 @@ logger = get_logger('workflow.engine')
 #   debug — when routine completion paths hit one (broker callback redelivery /
 #     replay: on_workflow_task_complete, on_subworkflow_complete).
 
-from horsies.core.models.tasks import OperationalErrorCode, OutcomeCode
+from horsies.core.models.tasks import Execution, OperationalErrorCode, OutcomeCode
 
 if TYPE_CHECKING:
     from horsies.core.app import Horsies
@@ -696,16 +698,13 @@ async def enqueue_workflow_task(
         return None
     insert_params = build_r.ok_value
 
-    await session.execute(INSERT_TASK_FOR_WORKFLOW_SQL, insert_params)
-
-    # Link workflow_task to actual task
-    task_id = str(insert_params['id'])
+    # The task row and the link of the node to it, in one statement.
     await session.execute(
-        LINK_WORKFLOW_TASK_SQL,
-        {'tid': task_id, 'wf_id': workflow_id, 'idx': task_index},
+        INSERT_AND_LINK_WORKFLOW_TASK_SQL,
+        {**insert_params, 'wf_id': workflow_id, 'idx': task_index},
     )
 
-    return task_id
+    return str(insert_params['id'])
 
 
 
@@ -745,6 +744,7 @@ async def _build_enqueued_task_params(
             defect, not stored data that does not parse.
     """
     max_retries = 0
+    execution = Execution.ISOLATED
     good_until_str: str | None = None
     good_until_dt: datetime | None = None
     if task_options_str:
@@ -762,7 +762,9 @@ async def _build_enqueued_task_params(
         # A retry_policy that does not validate (corrupt row) is refused
         # here; a limit that cannot be stored would otherwise surface as an
         # INSERT error and loop the finalize retries.
-        retry_limit_r = stored_max_retries(options_data)
+        # `_deser_json` returns the parsed JSON value typed as Any.
+        stored_options = cast(Json, options_data)
+        retry_limit_r = stored_max_retries(stored_options)
         if is_err(retry_limit_r):
             return Err(_EnqueueBuildError(
                 (
@@ -772,6 +774,16 @@ async def _build_enqueued_task_params(
                 error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
             ))
         max_retries = retry_limit_r.ok_value
+        execution_r = stored_execution(stored_options)
+        if is_err(execution_r):
+            return Err(_EnqueueBuildError(
+                (
+                    f'Invalid execution for task {task_index}: '
+                    f'{execution_r.err_value.detail}'
+                ),
+                error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+            ))
+        execution = execution_r.ok_value
         good_until_raw = options_data.get('good_until')
         if good_until_raw is not None:
             good_until_str = str(good_until_raw)
@@ -952,6 +964,7 @@ async def _build_enqueued_task_params(
         'sent_at': sent_at,
         'max_retries': max_retries,
         'task_options': task_options_str,
+        'execution': execution.value,
         'good_until': good_until_str,
         'enqueue_sha': sha,
         **workflow_task_enqueue_stamp(
@@ -1034,6 +1047,23 @@ async def enqueue_subworkflow_task(
     # Parent name rides the CAS RETURNING (the statement already joins
     # horsies_workflows); a CAS hit implies the workflow row exists.
     workflow_name = row.parent_workflow_name
+    # The depth bound also bounds the recursion below: a child root that is a
+    # SubWorkflowNode starts its own child one level deeper.
+    child_depth = parent_depth + 1
+    if child_depth > MAX_SUBWORKFLOW_DEPTH:
+        await _fail_enqueued_task(
+            session,
+            workflow_id,
+            task_index,
+            (
+                f'Subworkflow not started: the child workflow would have depth '
+                f'{child_depth}, and the limit is {MAX_SUBWORKFLOW_DEPTH} '
+                f'(workflow {workflow_name}:{task_index})'
+            ),
+            broker,
+            error_code=OperationalErrorCode.SUBWORKFLOW_DEPTH_LIMIT_REACHED,
+        )
+        return None
     # 2. Load the child workflow definition by its explicit definition_key.
 
     workflow_def: type[WorkflowDefinition[Any]] | None = None
@@ -1258,7 +1288,10 @@ async def enqueue_subworkflow_task(
     # roots recurse. Task options that do not parse are a defect (they come
     # from the task function) and raise SerializationError before any
     # INSERT; the caller's transaction rolls back.
-    from horsies.core.workflows.lifecycle import root_retry_and_deadline
+    from horsies.core.workflows.lifecycle import (
+        root_execution,
+        root_retry_and_deadline,
+    )
 
     child_node_params: list[dict[str, Any]] = []
     child_root_task_params: list[dict[str, Any]] = []
@@ -1406,6 +1439,9 @@ async def enqueue_subworkflow_task(
                     )
                 )
             if is_fast_root and child_task.index is not None:
+                child_root_class = root_execution(
+                    child_task_options_json, child_task.name,
+                )
                 child_task_id = mint_task_id()
                 # Task-row kwargs = node kwargs + workflow_meta (mirrors
                 # enqueue_workflow_task; args_from/ctx injection is
@@ -1443,6 +1479,7 @@ async def enqueue_subworkflow_task(
                     'sent_at': root_sent_at,
                     'max_retries': max_retries,
                     'task_options': child_task_options_json,
+                    'execution': child_root_class.value,
                     'good_until': good_until_str,
                     'enqueue_sha': sha,
                     **workflow_task_enqueue_stamp(
@@ -1726,6 +1763,61 @@ def node_status_for_terminal_task(task_status: str) -> str:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class QueueWake:
+    """The capacity wake of a finished task's queue: ``pg_notify(channel,
+    payload)``, sent in the transaction that advances the node."""
+
+    channel: str
+    payload: str
+
+
+@dataclass(frozen=True, slots=True)
+class NoQueueWake:
+    """The caller sends no capacity wake."""
+
+
+type NodeCompletionWake = QueueWake | NoQueueWake
+
+
+@dataclass(frozen=True, slots=True)
+class NodeHasNoDependents:
+    """No node of the workflow lists the node in its dependencies.
+
+    The dependencies of a workflow are written with its nodes, in the
+    transaction that starts it, and never change, so this holds for the
+    life of the workflow. The progression does not read the dependents."""
+
+
+@dataclass(frozen=True, slots=True)
+class NodeMayHaveDependents:
+    """A node of the workflow may list the node in its dependencies: the
+    progression reads the dependents."""
+
+
+type NodeDependents = NodeHasNoDependents | NodeMayHaveDependents
+
+
+def _node_dependents(has_dependents: bool) -> NodeDependents:
+    """The dependents of a node, from ``has_dependents`` of
+    ``COMPLETE_WORKFLOW_TASK_SQL``. Pure."""
+    if has_dependents:
+        return NodeMayHaveDependents()
+    return NodeHasNoDependents()
+
+
+def _wake_parameters(wake: NodeCompletionWake) -> dict[str, str | None]:
+    """The wake parameters of ``COMPLETE_WORKFLOW_TASK_SQL``; NULL sends
+    none. Pure."""
+    match wake:
+        case QueueWake(channel=channel, payload=payload):
+            return {'wake_channel': channel, 'wake_payload': payload}
+        case NoQueueWake():
+            return {'wake_channel': None, 'wake_payload': None}
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 async def on_workflow_task_complete(
     session: AsyncSession,
     task_id: str,
@@ -1733,6 +1825,7 @@ async def on_workflow_task_complete(
     broker: 'PostgresBroker | None',
     *,
     task_name: str,
+    wake: NodeCompletionWake = NoQueueWake(),
 ) -> None:
     """
     Called from worker._finalize_after when a task completes.
@@ -1756,6 +1849,10 @@ async def on_workflow_task_complete(
     binds the encoded result, and encoding resolves the source task's
     ``task_ok_type`` from this name.
 
+    ``wake`` is sent by the first statement, whether or not the task has a
+    node: the worker's phase 2 passes the capacity wake of the task's queue,
+    so the wake costs no round trip of its own. It is delivered at COMMIT.
+
     Strict-serde phase 7: ``broker`` is required (explicit `None` allowed for
     unit-test branches that return before dependency propagation). Removing
     the implicit default surfaces missing-broker bugs at the call site instead
@@ -1764,69 +1861,34 @@ async def on_workflow_task_complete(
     `task_ok_type`.
     """
     # 1. Decide terminal status and encode the result envelope before any
-    # statement. Strict-serde phase 7: re-encode through the wire envelope
-    # so downstream readers (`_decode_stored_task_result`, `_decode_err_only`,
-    # child→parent pass-through at on_subworkflow_complete) see the
-    # `__h_task_result__` marker. Prefer the source task's declared
-    # `task_ok_type` for write-time validation; fall back to `Any` when the
-    # broker/app is unavailable (test/recovery paths) so completion never
-    # fails on missing type metadata.
-    new_status = 'COMPLETED' if result.is_ok() else 'FAILED'
-    ok_type_for_encode: Any = Any
-    if broker is not None and broker.app is not None:
-        resolved = _resolve_source_ok_type(broker.app, task_name)
-        if resolved is not None:
-            ok_type_for_encode = resolved
-    try:
-        encoded_result = encode_task_result(result, ok_type_for_encode)
-    except Exception as exc:
-        # A deterministic encode failure would otherwise loop the worker's
-        # phase-2 finalize retries forever (this is the only completion-path
-        # encode that was unwrapped). Degrade to a FAILED node carrying a
-        # serialization error; the err-only envelope encode below is
-        # fixed-schema and total. The text of ``exc`` can come from user
-        # code, for example a validator, so a lone surrogate in it is
-        # escaped: this encode refuses one.
-        from horsies.core.models.tasks import TaskError, TaskResult
-
-        logger.error(
-            'Failed to encode completion result for task=%s '
-            'task_name=%s: %s; storing a serialization-error envelope',
-            task_id,
-            task_name,
-            exc,
-        )
-        result = TaskResult(
-            err=TaskError(
-                error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
-                message=(
-                    'Failed to encode completion result: '
-                    f'{escape_lone_surrogates(str(exc))}'
-                ),
-                data={'task_id': task_id, 'task_name': task_name},
-            ),
-        )
-        new_status = 'FAILED'
-        encoded_result = encode_task_result(result, type(None))
+    # statement.
+    encoded = _encode_node_result(
+        result,
+        broker,
+        task_id=task_id,
+        task_name=task_name,
+    )
 
     # 2. One statement: locate the workflow task, take the workflow row's
     # FOR UPDATE lock (serializes completion handling per workflow so
     # concurrent completions don't race dependency promotion), CAS-update
     # the node to its terminal status, and return the progression context.
-    row_result = await session.execute(
-        COMPLETE_WORKFLOW_TASK_SQL,
-        {
-            'tid': task_id,
-            'status': new_status,
-            'result': _ser_or_raise(
-                dumps_json(encoded_result),
-                f'completion result for task {task_id}',
-            ),
-            'terminal_states': WF_TASK_TERMINAL_VALUES,
-        },
-    )
-    row = row_result.fetchone()
-    if row is None:
+    row = (
+        await session.execute(
+            COMPLETE_WORKFLOW_TASK_SQL,
+            {
+                'tid': task_id,
+                'status': encoded.status,
+                'result': _ser_or_raise(
+                    dumps_json(encoded.envelope),
+                    f'completion result for task {task_id}',
+                ),
+                'terminal_states': WF_TASK_TERMINAL_VALUES,
+                **_wake_parameters(wake),
+            },
+        )
+    ).one()
+    if row.workflow_id is None:
         return  # Not a workflow task (or its workflow row is missing)
 
     workflow_id = row.workflow_id
@@ -1847,12 +1909,87 @@ async def on_workflow_task_complete(
         broker,
         workflow_id=workflow_id,
         task_index=task_index,
-        failure=result if result.is_err() else None,
+        failure=encoded.result if encoded.result.is_err() else None,
         on_error=row.on_error,
         workflow_status=row.wf_status,
         depth=row.depth,
         root_workflow_id=row.root_workflow_id,
+        dependents=_node_dependents(row.has_dependents),
     )
+
+
+@dataclass(frozen=True, slots=True)
+class _EncodedNodeResult:
+    """The terminal write of a node and the result its progression sees."""
+
+    status: Literal['COMPLETED', 'FAILED']
+    envelope: dict[str, Json]
+    """The wire envelope of ``result``, which the node stores."""
+    result: 'TaskResult[Any, TaskError]'
+    """The task's result, or the serialization error that replaced it."""
+
+
+def _encode_node_result(
+    result: 'TaskResult[Any, TaskError]',
+    broker: 'PostgresBroker | None',
+    *,
+    task_id: str,
+    task_name: str,
+) -> _EncodedNodeResult:
+    """Encode the result of a node's task into the wire envelope.
+
+    The envelope carries the ``__h_task_result__`` marker that the readers of
+    a stored node result (``_decode_stored_task_result``,
+    ``_decode_err_only``, the child to parent pass-through of
+    ``on_subworkflow_complete``) expect. The source task's declared
+    ``task_ok_type`` validates the value when the broker has an app; ``Any``
+    is used otherwise (test and recovery paths), so a missing type never
+    fails the completion.
+
+    A result that does not encode is logged and replaced by a FAILED result
+    with ``WORKER_SERIALIZATION_ERROR``: a deterministic encode failure
+    would otherwise repeat on every phase-2 retry. The encode of that error
+    is fixed-schema and total. No I/O besides the log.
+    """
+    ok_type_for_encode: Any = Any
+    if broker is not None and broker.app is not None:
+        resolved = _resolve_source_ok_type(broker.app, task_name)
+        if resolved is not None:
+            ok_type_for_encode = resolved
+    try:
+        return _EncodedNodeResult(
+            status='COMPLETED' if result.is_ok() else 'FAILED',
+            envelope=encode_task_result(result, ok_type_for_encode),
+            result=result,
+        )
+    except Exception as exc:
+        # The text of ``exc`` can come from user code, for example a
+        # validator, so a lone surrogate in it is escaped: the encode of
+        # the error refuses one.
+        from horsies.core.models.tasks import TaskError, TaskResult
+
+        logger.error(
+            'Failed to encode completion result for task=%s '
+            'task_name=%s: %s; storing a serialization-error envelope',
+            task_id,
+            task_name,
+            exc,
+        )
+        failure: TaskResult[Any, TaskError] = TaskResult(
+            err=TaskError(
+                error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+                message=(
+                    'Failed to encode completion result: '
+                    f'{escape_lone_surrogates(str(exc))}'
+                ),
+                data={'task_id': task_id, 'task_name': task_name},
+            ),
+        )
+        return _EncodedNodeResult(
+            status='FAILED',
+            envelope=encode_task_result(failure, type(None)),
+            result=failure,
+        )
 
 
 async def apply_node_progression(
@@ -1866,6 +2003,7 @@ async def apply_node_progression(
     workflow_status: str | None,
     depth: int | None,
     root_workflow_id: str | None,
+    dependents: NodeDependents,
 ) -> None:
     """Everything a workflow does after one of its nodes goes terminal.
 
@@ -1878,7 +2016,9 @@ async def apply_node_progression(
     where the database-owned consumption function wrote the node and
     returned this same context. ``failure`` is the task's error when the
     node went terminal unsuccessfully and ``None`` otherwise — the
-    policy step is the only one that needs it.
+    policy step is the only one that needs it. ``dependents`` is
+    ``NodeHasNoDependents`` when no node of the workflow waits for the
+    node: the dependents read is not sent, as it would return no row.
     """
     # 3. Handle failure based on on_error policy. The locked row's
     # on_error is authoritative: the held lock freezes the workflow row.
@@ -1896,11 +2036,20 @@ async def apply_node_progression(
         return  # Don't propagate - workflow is paused
 
     # 5. Find and potentially enqueue dependent tasks
-    await _process_dependents(
-        session, workflow_id, task_index, broker,
-        depth=depth if depth is not None else 0,
-        root_workflow_id=root_workflow_id or workflow_id,
-    )
+    match dependents:
+        case NodeHasNoDependents():
+            pass
+        case NodeMayHaveDependents():
+            await _process_dependents(
+                session,
+                workflow_id,
+                task_index,
+                broker,
+                depth=depth if depth is not None else 0,
+                root_workflow_id=root_workflow_id or workflow_id,
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
 
     # 6. Check if workflow is complete (this transaction already holds the
     # workflow lock taken in step 2)
@@ -1988,16 +2137,18 @@ async def _promote_dependents_level(
       2. join/skip classification in Python — including the skip-on-ready
          branch (join='all', failed deps, not allow_failed_deps), decided
          BEFORE any enqueue so those nodes never get task rows,
-      3. batched PENDING->SKIPPED / PENDING->READY / READY->SKIPPED CAS
-         writes (per-row CAS preserved; CAS losers drop out via RETURNING),
+      3. batched PENDING->SKIPPED CAS write, then one promotion write
+         (PENDING->ENQUEUED for the nodes to enqueue, PENDING->READY for
+         the skip-on-ready ones) RETURNING the insert payloads — strictly
+         before any horsies_tasks INSERT, so a node that did not move never
+         gets a task row — then the READY->SKIPPED CAS write (per-row CAS
+         preserved; CAS losers drop out via RETURNING),
       4. one grouped dependency-results read for the union of dep sets,
-      5. batched READY->ENQUEUED CAS RETURNING the insert payloads —
-         strictly before any horsies_tasks INSERT, so a missed guard can
-         never orphan a task row,
-      6. per-row payload build in Python via the shared builder; a node
+      5. per-row payload build in Python via the shared builder; a node
          whose build fails diverts to ``_fail_enqueued_task`` (per-node
          failure isolation, same as the sequential path),
-      7. one bulk task INSERT + one bulk LINK (executemany).
+      6. one executemany of the task INSERT with the node LINK, one
+         statement per node, in one round trip.
 
     SubWorkflowNode and workflow_ctx_from dependents take the per-node
     ``try_make_ready_and_enqueue`` path unchanged.
@@ -2014,11 +2165,70 @@ async def _promote_dependents_level(
     if not eval_rows:
         return []
 
+    plan = _plan_level(eval_rows)
+    newly_skipped: list[int] = []
+
+    if plan.skip_pending:
+        res = await session.execute(
+            SKIP_PENDING_TASKS_BATCH_SQL,
+            {'wf_id': workflow_id, 'idxs': list(plan.skip_pending)},
+        )
+        newly_skipped.extend(r.task_index for r in res.fetchall())
+
+    if plan.enqueue or plan.skip_after_ready:
+        promoted = await _write_promotions(session, workflow_id, plan)
+        newly_skipped.extend(promoted.skipped)
+        if promoted.enqueued:
+            await _enqueue_promoted(
+                session,
+                broker,
+                workflow_id,
+                promoted.enqueued,
+                plan.dependencies,
+            )
+
+    for task_index in plan.per_node:
+        await try_make_ready_and_enqueue(
+            session,
+            broker,
+            workflow_id,
+            task_index,
+            depth,
+            root_workflow_id,
+        )
+
+    return newly_skipped
+
+
+@dataclass(frozen=True, slots=True)
+class _LevelPlan:
+    """What one promotion level does with each PENDING dependent of its
+    sources, decided from the dependents read alone. Each index is in at
+    most one of the four sets; a dependent in none stays PENDING."""
+
+    skip_pending: tuple[int, ...]
+    """The join can no longer be met: PENDING -> SKIPPED."""
+    enqueue: tuple[int, ...]
+    """The join is met and the node is a plain task node: it is enqueued."""
+    skip_after_ready: tuple[int, ...]
+    """The join ``all`` is met with a failed or skipped dependency and no
+    ``allow_failed_deps``: READY -> SKIPPED, never enqueued."""
+    per_node: tuple[int, ...]
+    """The join is met and the node is a subworkflow node or has
+    ``workflow_ctx_from``: ``try_make_ready_and_enqueue`` handles it."""
+    dependencies: Mapping[int, tuple[int, ...]]
+    """The dependencies of each node in ``enqueue``."""
+
+
+def _plan_level(eval_rows: Sequence[Any]) -> _LevelPlan:
+    """Classify the rows of ``GET_DEPENDENTS_EVAL_SQL`` by the join of each
+    dependent. Pure; the join evaluation is the one of
+    ``try_make_ready_and_enqueue``."""
     skip_pending: list[int] = []
-    ready_indexes: list[int] = []
-    skip_after_ready: set[int] = set()
+    enqueue: list[int] = []
+    skip_after_ready: list[int] = []
     slow_indexes: list[int] = []
-    deps_by_index: dict[int, list[int]] = {}
+    deps_by_index: dict[int, tuple[int, ...]] = {}
 
     for row in eval_rows:
         task_index: int = row.task_index
@@ -2036,42 +2246,26 @@ async def _promote_dependents_level(
             row.allow_failed_deps if row.allow_failed_deps is not None else False
         )
         join_type: str = row.join_type or 'all'
-        min_success: int | None = row.min_success
-
-        completed = status_counts.get(WorkflowTaskStatus.COMPLETED.value, 0)
         failed = status_counts.get(WorkflowTaskStatus.FAILED.value, 0)
         skipped = status_counts.get(WorkflowTaskStatus.SKIPPED.value, 0)
-        terminal = completed + failed + skipped
-        total_deps = len(dependencies)
 
-        # Same join evaluation as try_make_ready_and_enqueue.
-        should_become_ready = False
-        should_skip = False
-        match join_type:
-            case 'all':
-                if terminal == total_deps:
-                    should_become_ready = True
-            case 'any':
-                if completed >= 1:
-                    should_become_ready = True
-                elif terminal == total_deps and completed == 0:
-                    should_skip = True
-            case 'quorum':
-                threshold = min_success or 1
-                if completed >= threshold:
-                    should_become_ready = True
-                else:
-                    remaining = total_deps - terminal
-                    if completed + remaining < threshold:
-                        should_skip = True
-            case _:
-                continue  # unknown join type: stay PENDING (matches the per-node path)
-
-        if should_skip:
-            skip_pending.append(task_index)
-            continue
-        if not should_become_ready:
-            continue  # stay PENDING
+        match _evaluate_join(
+            join_type,
+            row.min_success,
+            total_deps=len(dependencies),
+            completed=status_counts.get(WorkflowTaskStatus.COMPLETED.value, 0),
+            failed=failed,
+            skipped=skipped,
+        ):
+            case _JoinVerdict.WAITING:
+                continue  # stay PENDING
+            case _JoinVerdict.IMPOSSIBLE:
+                skip_pending.append(task_index)
+                continue
+            case _JoinVerdict.MET:
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
 
         is_subworkflow: bool = (
             row.is_subworkflow if row.is_subworkflow is not None else False
@@ -2083,101 +2277,167 @@ async def _promote_dependents_level(
             slow_indexes.append(task_index)
             continue
 
-        ready_indexes.append(task_index)
-        deps_by_index[task_index] = dependencies
         if join_type == 'all' and (failed + skipped) > 0 and not allow_failed_deps:
             # Will be marked READY then SKIPPED (history-equivalent with
             # the sequential path); never enqueued.
-            skip_after_ready.add(task_index)
+            skip_after_ready.append(task_index)
+            continue
+        enqueue.append(task_index)
+        deps_by_index[task_index] = tuple(dependencies)
 
-    newly_skipped: list[int] = []
+    return _LevelPlan(
+        skip_pending=tuple(skip_pending),
+        enqueue=tuple(enqueue),
+        skip_after_ready=tuple(skip_after_ready),
+        per_node=tuple(slow_indexes),
+        dependencies=MappingProxyType(deps_by_index),
+    )
 
-    if skip_pending:
-        res = await session.execute(
-            SKIP_PENDING_TASKS_BATCH_SQL,
-            {'wf_id': workflow_id, 'idxs': skip_pending},
-        )
-        newly_skipped.extend(r.task_index for r in res.fetchall())
 
-    enqueue_indexes: list[int] = []
-    if ready_indexes:
-        res = await session.execute(
-            MARK_TASKS_READY_BATCH_SQL,
-            {'wf_id': workflow_id, 'idxs': ready_indexes},
-        )
-        ready_won = {r.task_index for r in res.fetchall()}
-        ready_to_skip = sorted(skip_after_ready & ready_won)
-        enqueue_indexes = sorted(ready_won - skip_after_ready)
+class _JoinVerdict(Enum):
+    """The join of a PENDING dependent against the states of its
+    dependencies."""
 
-        if ready_to_skip:
-            res = await session.execute(
-                SKIP_READY_TASKS_BATCH_SQL,
-                {'wf_id': workflow_id, 'idxs': ready_to_skip},
-            )
-            newly_skipped.extend(r.task_index for r in res.fetchall())
+    MET = 'met'
+    """The node can run."""
+    IMPOSSIBLE = 'impossible'
+    """The join can no longer be met: the node is skipped."""
+    WAITING = 'waiting'
+    """The node stays PENDING. An unknown join type also waits, as in the
+    per-node path."""
 
-    if enqueue_indexes:
-        dep_union = sorted({
-            dep for idx in enqueue_indexes for dep in deps_by_index[idx]
-        })
-        dep_results, dep_task_names, dep_definition_keys = (
-            await get_dependency_results(
-                session,
-                workflow_id,
-                dep_union,
-                app=broker.app if broker is not None else None,
-            )
-        )
 
-        cas_rows = (
-            await session.execute(
-                ENQUEUE_WORKFLOW_TASKS_BATCH_SQL,
-                {'wf_id': workflow_id, 'idxs': enqueue_indexes},
-            )
-        ).fetchall()
+def _evaluate_join(
+    join_type: str,
+    min_success: int | None,
+    *,
+    total_deps: int,
+    completed: int,
+    failed: int,
+    skipped: int,
+) -> _JoinVerdict:
+    """The join of ``try_make_ready_and_enqueue``: ``all`` when every
+    dependency is terminal, ``any`` on the first success, ``quorum`` at
+    ``min_success`` successes (1 when unset). Pure."""
+    terminal = completed + failed + skipped
+    match join_type:
+        case 'all':
+            if terminal == total_deps:
+                return _JoinVerdict.MET
+            return _JoinVerdict.WAITING
+        case 'any':
+            if completed >= 1:
+                return _JoinVerdict.MET
+            if terminal == total_deps and completed == 0:
+                return _JoinVerdict.IMPOSSIBLE
+            return _JoinVerdict.WAITING
+        case 'quorum':
+            threshold = min_success or 1
+            if completed >= threshold:
+                return _JoinVerdict.MET
+            if completed + (total_deps - terminal) < threshold:
+                return _JoinVerdict.IMPOSSIBLE
+            return _JoinVerdict.WAITING
+        case _:
+            return _JoinVerdict.WAITING
 
-        insert_params: list[dict[str, Any]] = []
-        link_params: list[dict[str, Any]] = []
-        paused_mid_level = False
-        for cas_row in cas_rows:
-            build_r = await _build_enqueued_task_params(
-                session,
-                workflow_id,
-                cas_row.task_index,
-                task_name=cas_row.task_name,
-                task_args=cas_row.task_args,
-                task_kwargs=cas_row.task_kwargs,
-                queue_name=cas_row.queue_name,
-                priority=cas_row.priority,
-                args_from=cas_row.args_from,
-                workflow_ctx_from=cas_row.workflow_ctx_from,
-                task_options_str=cas_row.task_options,
-                all_dep_results=dep_results,
-                all_dep_task_names=dep_task_names,
-                broker=broker,
-                all_dep_definition_keys=dep_definition_keys,
-            )
-            if is_err(build_r):
-                err = build_r.err_value
-                should_continue = await _fail_enqueued_task(
-                    session, workflow_id, cas_row.task_index, err.message,
-                    broker, error_code=err.error_code,
-                )
-                if not should_continue:
-                    # on_error=PAUSE paused the workflow: stop processing
-                    # this level (the pause contract) and revert below.
-                    paused_mid_level = True
-                    break
-                continue
-            params = build_r.ok_value
-            insert_params.append(params)
-            link_params.append({
-                'tid': params['id'],
+
+@dataclass(frozen=True, slots=True)
+class _Promoted:
+    """The plain task dependents of a level after the promotion write."""
+
+    enqueued: tuple[Any, ...]
+    """The rows that went to ENQUEUED, with the payload of their task."""
+    skipped: tuple[int, ...]
+    """The nodes of ``_LevelPlan.skip_after_ready`` that went to SKIPPED."""
+
+
+async def _write_promotions(
+    session: AsyncSession,
+    workflow_id: str,
+    plan: _LevelPlan,
+) -> _Promoted:
+    """Promote the plain task dependents of a level.
+
+    Two statements. ``PROMOTE_DEPENDENTS_BATCH_SQL`` moves the PENDING rows
+    of ``plan.enqueue`` to ENQUEUED and those of ``plan.skip_after_ready``
+    to READY (every row to READY while the workflow is not RUNNING); a row
+    that is no longer PENDING drops out of its RETURNING. Then one SKIPPED
+    write over the skip-on-ready rows that it moved. Does not commit.
+
+    Raises:
+        AssertionError: the promotion write returned a status it does not
+            write. This is a defect.
+    """
+    rows = (
+        await session.execute(
+            PROMOTE_DEPENDENTS_BATCH_SQL,
+            {
                 'wf_id': workflow_id,
-                'idx': cas_row.task_index,
-            })
+                'idxs': sorted({*plan.enqueue, *plan.skip_after_ready}),
+                'enqueue_idxs': list(plan.enqueue),
+            },
+        )
+    ).fetchall()
+    enqueued: list[Any] = []
+    ready: set[int] = set()
+    for row in rows:
+        match row.status:
+            case 'ENQUEUED':
+                enqueued.append(row)
+            case 'READY':
+                ready.add(row.task_index)
+            case status:
+                raise AssertionError(
+                    f'promotion write returned status {status!r} for node '
+                    f'{row.task_index} of workflow {workflow_id}'
+                )
+    ready_to_skip = sorted(ready & set(plan.skip_after_ready))
+    skipped: list[int] = []
+    if ready_to_skip:
+        res = await session.execute(
+            SKIP_READY_TASKS_BATCH_SQL,
+            {'wf_id': workflow_id, 'idxs': ready_to_skip},
+        )
+        skipped = [r.task_index for r in res.fetchall()]
+    return _Promoted(enqueued=tuple(enqueued), skipped=tuple(skipped))
 
-        if paused_mid_level:
+
+async def _enqueue_promoted(
+    session: AsyncSession,
+    broker: 'PostgresBroker | None',
+    workflow_id: str,
+    enqueued: tuple[Any, ...],
+    deps_by_index: Mapping[int, tuple[int, ...]],
+) -> None:
+    """Insert the task of each node that the promotion write enqueued.
+
+    One read of the dependency results, the build of each payload from the
+    row of the promotion write, then one executemany of the insert with its
+    link. A node whose build fails is failed alone. When that failure pauses
+    the workflow (``on_error=PAUSE``), the nodes of the level that were not
+    inserted go back to READY and no task row is inserted. Does not commit.
+    """
+    enqueue_indexes = [row.task_index for row in enqueued]
+    dep_union = sorted({dep for idx in enqueue_indexes for dep in deps_by_index[idx]})
+    dep_results, dep_task_names, dep_definition_keys = await get_dependency_results(
+        session,
+        workflow_id,
+        dep_union,
+        app=broker.app if broker is not None else None,
+    )
+
+    built = await _build_level_inserts(
+        session,
+        broker,
+        workflow_id,
+        enqueued,
+        dep_results=dep_results,
+        dep_task_names=dep_task_names,
+        dep_definition_keys=dep_definition_keys,
+    )
+    match built:
+        case _LevelPaused():
             # Revert every CAS'd-but-uninserted sibling of this level to
             # READY (the recoverable state: resume step 3 re-enqueues
             # READY nodes; recovery case 1 covers READY-not-enqueued).
@@ -2189,16 +2449,91 @@ async def _promote_dependents_level(
                 REVERT_ENQUEUED_TO_READY_BATCH_SQL,
                 {'wf_id': workflow_id, 'idxs': enqueue_indexes},
             )
-        elif insert_params:
-            await session.execute(INSERT_TASK_FOR_WORKFLOW_SQL, insert_params)
-            await session.execute(LINK_WORKFLOW_TASK_SQL, link_params)
+        case _LevelInserts(params=insert_params):
+            if insert_params:
+                # Each task row and the link of its node, one statement per
+                # node, sent in one round trip.
+                await session.execute(
+                    INSERT_AND_LINK_WORKFLOW_TASK_SQL, list(insert_params)
+                )
+        case _ as unreachable:
+            assert_never(unreachable)
 
-    for task_index in slow_indexes:
-        await try_make_ready_and_enqueue(
-            session, broker, workflow_id, task_index, depth, root_workflow_id,
+
+@dataclass(frozen=True, slots=True)
+class _LevelInserts:
+    """The insert parameters of each node whose payload was built."""
+
+    params: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _LevelPaused:
+    """A payload-build failure paused the workflow (``on_error=PAUSE``):
+    the level inserts no task row."""
+
+
+type _LevelBuild = _LevelInserts | _LevelPaused
+
+
+async def _build_level_inserts(
+    session: AsyncSession,
+    broker: 'PostgresBroker | None',
+    workflow_id: str,
+    cas_rows: Sequence[Any],
+    *,
+    dep_results: dict[int, 'TaskResult[Any, TaskError]'],
+    dep_task_names: dict[int, str],
+    dep_definition_keys: dict[int, str | None],
+) -> _LevelBuild:
+    """Build the insert parameters of each ENQUEUED row of a level, from the
+    maps of ``get_dependency_results``.
+
+    A node whose build fails goes to ``_fail_enqueued_task``, which fails
+    it alone. When that failure pauses the workflow, the build stops and
+    returns ``_LevelPaused``: the pause contract stops the level. Does not
+    commit.
+    """
+    insert_params: list[dict[str, Any]] = []
+    for cas_row in cas_rows:
+        build_r = await _build_enqueued_task_params(
+            session,
+            workflow_id,
+            cas_row.task_index,
+            task_name=cas_row.task_name,
+            task_args=cas_row.task_args,
+            task_kwargs=cas_row.task_kwargs,
+            queue_name=cas_row.queue_name,
+            priority=cas_row.priority,
+            args_from=cas_row.args_from,
+            workflow_ctx_from=cas_row.workflow_ctx_from,
+            task_options_str=cas_row.task_options,
+            all_dep_results=dep_results,
+            all_dep_task_names=dep_task_names,
+            broker=broker,
+            all_dep_definition_keys=dep_definition_keys,
         )
-
-    return newly_skipped
+        if is_err(build_r):
+            err = build_r.err_value
+            should_continue = await _fail_enqueued_task(
+                session,
+                workflow_id,
+                cas_row.task_index,
+                err.message,
+                broker,
+                error_code=err.error_code,
+            )
+            if not should_continue:
+                return _LevelPaused()
+            continue
+        insert_params.append(
+            {
+                **build_r.ok_value,
+                'wf_id': workflow_id,
+                'idx': cas_row.task_index,
+            }
+        )
+    return _LevelInserts(params=tuple(insert_params))
 
 
 

@@ -69,7 +69,11 @@ def _make_ready_check() -> Callable[[], bool]:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_args_from_single_dependency(broker: PostgresBroker) -> None:
     """T5.1: B receives A's result via args_from and computes correctly."""
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         # spec_args_from_single: A produces 5, B doubles it to 10
         handle = await start_ok_in_thread(wf_tasks.spec_args_from_single)
 
@@ -103,7 +107,11 @@ async def test_args_from_single_dependency(broker: PostgresBroker) -> None:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_args_from_multiple_dependencies(broker: PostgresBroker) -> None:
     """T5.2: C receives A and B's results via args_from and sums correctly."""
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         # spec_args_from_multi: A produces 10, B produces 20, C sums to 30
         handle = await start_ok_in_thread(wf_tasks.spec_args_from_multi)
 
@@ -135,7 +143,11 @@ async def test_args_from_multiple_dependencies(broker: PostgresBroker) -> None:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_workflow_ctx_single_dependency(broker: PostgresBroker) -> None:
     """T5.3: B accesses A's result via workflow_ctx.result_for()."""
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         # spec_ctx_single: A produces 42, B reads it via workflow_ctx
         handle = await start_ok_in_thread(wf_tasks.spec_ctx_single)
 
@@ -167,7 +179,11 @@ async def test_workflow_ctx_single_dependency(broker: PostgresBroker) -> None:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_workflow_ctx_multiple_dependencies(broker: PostgresBroker) -> None:
     """T5.4: C accesses both A and B via workflow_ctx and sums them."""
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         # spec_ctx_multi: A produces 100, B produces 200, C sums via ctx to 300
         handle = await start_ok_in_thread(wf_tasks.spec_ctx_multi)
 
@@ -199,7 +215,11 @@ async def test_workflow_ctx_multiple_dependencies(broker: PostgresBroker) -> Non
 @pytest.mark.asyncio(loop_scope='function')
 async def test_failed_propagation(broker: PostgresBroker) -> None:
     """T5.5: B runs despite A failure and receives original error."""
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         # spec_failed_propagation: A fails with DELIBERATE_FAIL, B has allow_failed_deps=True
         handle = await start_ok_in_thread(wf_tasks.spec_failed_propagation)
 
@@ -246,7 +266,11 @@ async def test_failed_propagation(broker: PostgresBroker) -> None:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_skipped_propagation(broker: PostgresBroker) -> None:
     """T5.6: C receives UPSTREAM_SKIPPED when B is SKIPPED due to A failure."""
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         # spec_skipped_propagation: A fails, B is SKIPPED (no allow_failed_deps),
         # C has allow_failed_deps=True and should see UPSTREAM_SKIPPED for B
         handle = await start_ok_in_thread(wf_tasks.spec_skipped_propagation)
@@ -299,7 +323,11 @@ async def test_skipped_propagation(broker: PostgresBroker) -> None:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_join_ctx_gating(broker: PostgresBroker) -> None:
     """T5.7: C waits for B (ctx dep) even though join=any and A completes first."""
-    with run_worker(DEFAULT_INSTANCE, processes=2, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-2',
+        ready_check=_make_ready_check(),
+    ):
         # spec_join_ctx_gating: A (100ms), B (300ms), C waits for both with join=any
         # but workflow_ctx_from=[B], so C must wait for B
         handle = await start_ok_in_thread(wf_tasks.spec_join_ctx_gating)
@@ -351,7 +379,11 @@ async def test_join_ctx_gating(broker: PostgresBroker) -> None:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_mixed_args_from_and_ctx(broker: PostgresBroker) -> None:
     """T5.8: D receives data from both args_from (B) and workflow_ctx (C)."""
-    with run_worker(DEFAULT_INSTANCE, processes=2, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-2',
+        ready_check=_make_ready_check(),
+    ):
         # spec_mixed_dataflow: A produces 7, B doubles (14), C produces 3
         # D receives B via args_from and C via workflow_ctx
         handle = await start_ok_in_thread(wf_tasks.spec_mixed_dataflow)
@@ -393,7 +425,11 @@ async def test_mixed_args_from_and_ctx(broker: PostgresBroker) -> None:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_args_from_transitive_chain(broker: PostgresBroker) -> None:
     """T5.9: args_from result survives 2-hop serialization: A→B(double)→C(double)."""
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         # A produces 3, B doubles to 6, C doubles to 12
         handle = await start_ok_in_thread(wf_tasks.spec_args_from_chain)
 
@@ -427,7 +463,11 @@ async def test_args_from_failed_dep_skips_and_fails_workflow(
     broker: PostgresBroker,
 ) -> None:
     """T5.10: A fails, B (allow_failed_deps=False) is SKIPPED, workflow FAILED."""
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(wf_tasks.spec_args_from_fail_workflow)
 
         status = await wait_for_workflow_completion(
@@ -460,7 +500,11 @@ async def test_args_from_failed_dep_skips_and_fails_workflow(
 @pytest.mark.asyncio(loop_scope='function')
 async def test_args_from_dict_serialization(broker: PostgresBroker) -> None:
     """T5.11: Nested dict survives serialization through args_from injection."""
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(wf_tasks.spec_args_from_dict)
 
         status = await wait_for_workflow_completion(
@@ -502,7 +546,11 @@ async def test_args_from_dict_serialization(broker: PostgresBroker) -> None:
 @pytest.mark.asyncio(loop_scope='function')
 async def test_dual_injection_same_node(broker: PostgresBroker) -> None:
     """T5.12: B reads A via both args_from and workflow_ctx without interference."""
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    with run_worker(
+        DEFAULT_INSTANCE,
+        profile='isolated-1',
+        ready_check=_make_ready_check(),
+    ):
         handle = await start_ok_in_thread(wf_tasks.spec_dual_injection)
 
         status = await wait_for_workflow_completion(
