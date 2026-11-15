@@ -214,7 +214,10 @@ runtime engine with its own pool, a session engine when `session_database_url`
 differs from `database_url`, and a LISTEN/NOTIFY listener. Sync calls
 (`send()`, `TaskHandle.get()`, `spec.start()`, the sync `WorkflowHandle`
 methods, `app.ping_workers()`) run on the broker's own sync runner loop, which
-has its own set.
+has its own set. One exception: in a process that runs no task bodies, a sync
+send without an idempotency key writes on the calling thread, through the
+sync send pool of the broker, once the broker checked the schema. See
+[Connection Ceiling](#connection-ceiling).
 
 - A set is built on the first call from its loop. Its pools open connections
   on demand, so a set that makes no database call opens none.
@@ -271,27 +274,38 @@ result = await handle.get_async(timeout_ms=5000)
 Each set can open:
 
 ```text
-pool_size + max_overflow
-+ pool_size + max_overflow    # only when session_database_url differs
-+ 2                           # listener connections
+pool_size + max_overflow      # runtime engine
++ pool_size + max_overflow    # session engine, only when session_database_url differs
++ 2                           # listener, from the first result wait, workflow wait or worker ping
 ```
 
-A process can open this once per set:
+In a process that runs no task bodies, the broker has one more pool, the
+sync send pool: up to `pool_size + max_overflow` connections, with the same
+URL, connect args and idle ping as the runtime engine. A sync send without an
+idempotency key (`send()`, `schedule()`, `retry_send()`, `retry_schedule()`)
+writes on the calling thread through this pool, once the broker checked the
+schema. The first send of a broker (it checks the schema), a send with an
+idempotency key, and the other sync calls use the set of the sync runner.
+Task code in a worker child sends through the set of its `task_send_pool`
+only, and has no sync send pool.
 
-| Process | Sets |
-|---|---|
-| Sync calls only, or async calls from one loop only | 1 |
-| ASGI app with async endpoints and sync calls in a thread pool | 2 |
-| pytest run with a session-scoped broker and function-scoped async tests | 2 (session loop, current test loop), plus 1 when tests make sync calls |
-| Worker child whose task code sends | 1 for the sync tasks (the runner loop), plus 1 for the async tasks (the task loop) |
+```text
+connections of one process = sets × (the ceiling of one set)
+                           + pool_size + max_overflow    # sync send pool, when the table says Yes
+```
 
-A process that runs no task bodies writes a sync `send()` without an
-idempotency key on the calling thread, through one more pool of the broker:
-up to `pool_size + max_overflow` more connections, opened on first use, with
-the same URL, connect args and idle ping. The first send of a broker (it
-checks the schema), a send with an idempotency key, and the other sync calls
-use the set of the sync runner. Task code in a worker child sends through
-the set of its `task_send_pool` only.
+| Process | Sets | Sync send pool |
+|---|---|---|
+| Sync calls only, for example a WSGI app or a script | 1 (the sync runner loop) | Yes, when it sends without an idempotency key |
+| Async calls from one loop only | 1 | No |
+| ASGI app with async endpoints and sync calls in a thread pool | 2 | Yes, when the sync calls send without an idempotency key |
+| pytest run with a session-scoped broker and function-scoped async tests | 2 (session loop, current test loop), plus 1 when tests make sync calls | Yes, when tests send with `send()` without an idempotency key |
+| Worker child whose task code sends | 1 for the sync tasks (the runner loop), plus 1 for the async tasks (the task loop) | No |
+
+At the defaults (`pool_size=5`, `max_overflow=10`, no `session_database_url`),
+a process that sends only with `send()` opens up to `15 + 15 = 30`
+connections, and 2 more when it waits for a result. Each pool opens a
+connection only when a call finds none free.
 
 ### Things to Avoid
 

@@ -49,10 +49,15 @@ connections for the same rate: set
 `WorkerProfile(pool=ParentPool(max_size=PoolSize(connections=N)))`. See
 [The Pool of the Worker Process](/horsies/workers/worker-profiles/#the-pool-of-the-worker-process).
 
-Producers hold their own engine pool (`pool_size + max_overflow`, default
-5 + 10) per resource set: one set for each event loop that makes broker calls,
-plus one for sync calls, and one more pool of the same size for sync sends
-(see [Connection Ceiling](/horsies/configuration/broker-config/#connection-ceiling)).
+Producers hold their own engine pools of `pool_size + max_overflow`
+connections each (default 5 + 10): one in the resource set of each event loop
+that makes broker calls, one in the set of the sync runner loop for sync
+calls, and the sync send pool for sync sends without an idempotency key. A
+producer that sends only with `send()` can open `15 + 15 = 30` at the
+defaults. Each set adds 2 listener connections when it waits for a result,
+and one more pool of `pool_size + max_overflow` when `session_database_url`
+differs (see
+[Connection Ceiling](/horsies/configuration/broker-config/#connection-ceiling)).
 
 Size against the server's effective capacity, not its nominal
 `max_connections`: subtract superuser-reserved slots and any connections

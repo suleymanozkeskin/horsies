@@ -90,13 +90,14 @@ class PostgresConfig(BaseModel):
             'pool_pre_ping applies to other engines'
         ),
     )
-    # Producer-side defaults match SQLAlchemy's (5 + 10). The previous
-    # 30 + 30 let a single enqueue-only producer pin up to 60 server
-    # connections; several producer processes then pressed Postgres
-    # max_connections. High-throughput producers should raise these
-    # explicitly. A worker process sizes its own pool in its worker profile
-    # (WorkerProfile.pool), and task code in a worker child opens the
-    # task_send_pool of its child kind.
+    # The producer defaults match SQLAlchemy's (5 + 10) for each pool. A
+    # producer can hold several pools of this size: one in the resource set
+    # of each event loop that calls the broker (two when
+    # session_database_url differs), and the sync send pool. See Connection
+    # Ceiling in the broker config docs. Raise them for producers that send
+    # at a high rate. A worker process sizes its own pool in its worker
+    # profile (WorkerProfile.pool), and task code in a worker child opens
+    # the task_send_pool of its child kind.
     pool_size: int = Field(
         default=5, description='The size of the database connection pool'
     )
