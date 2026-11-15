@@ -2120,9 +2120,11 @@ class TestOwnershipLostWorkflowBranch:
         self,
     ) -> None:
         """A start that returns no row can hold the row lock: its fence
-        failed after the row was locked. The miss path takes the task
-        advisory lock before the row, so it runs in a new transaction, after
-        the rollback of the start."""
+        failed after the row was locked, so its transaction ends first. The
+        expiry then runs alone in autocommit, and its task locks end with
+        it. The workflow read, the abandon and the node reset run in a new
+        transaction, which holds no task lock when the abandon asks for the
+        workflow row."""
         from horsies.core.lifecycle.commands import AbandonOwnedNode, ExpireOwnedClaim
         from horsies.core.lifecycle.outcomes import Applied, LostClaim
         from horsies.core.worker.child_runner import (
@@ -2154,8 +2156,8 @@ class TestOwnershipLostWorkflowBranch:
             BEGIN_SQL,
             set_running_sql(True),
             'ROLLBACK',
-            BEGIN_SQL,
             ExpireOwnedClaim.__name__,
+            BEGIN_SQL,
             WORKFLOW_STATUS_OF_TASK_SQL,
             AbandonOwnedNode.__name__,
             RESET_PAUSED_NODE_SQL,

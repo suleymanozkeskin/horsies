@@ -706,7 +706,7 @@ SKIP_CANCELLED_NODE_SQL: Final[LiteralString] = """
 # transaction ends. The move functions take the task advisory lock before
 # the row lock, so no move function runs in a transaction that holds this
 # lock: a workflow start that returns no row ends its transaction before
-# its miss path (``_begin_miss_path_when_workflow``), and the marker is one
+# its miss path (``_end_start_when_workflow``), and the marker is one
 # statement in autocommit.
 _SET_RUNNING_HEAD_SQL: Final[LiteralString] = """
                 WITH target AS MATERIALIZED (
@@ -837,17 +837,16 @@ def _begin_when_workflow(cursor: Cursor[Any], is_workflow_task: bool) -> None:
     The pool of a child is in autocommit. The transition of a plain task is
     one statement, its own transaction, and its miss path runs one function
     that writes only when it applies: nothing is opened. A workflow task also
-    writes its node (``START_WORKFLOW_NODE_SQL``); a node that is not linked
-    must undo the row update, and the abandon or cancel of a node on a miss
-    writes two statements that commit together. So a workflow task sends
-    ``BEGIN_SQL`` before the update, and each branch ends the transaction
-    with ``commit()`` or ``rollback()``.
+    writes its node (``START_WORKFLOW_NODE_SQL``), and a node that is not
+    linked must undo the row update. So a workflow task sends ``BEGIN_SQL``
+    before the update, and each branch ends the transaction with
+    ``commit()`` or ``rollback()``.
 
     The update can lock the row and return no row: its fence fails after
     the row is locked, and the lock lasts until this transaction ends. The
     move functions of the miss path take the task advisory lock before the
     row lock, so a start that returns no row ends this transaction before
-    them (``_begin_miss_path_when_workflow``).
+    them (``_end_start_when_workflow``).
 
     Raises:
         Exception: what the driver raises for the BEGIN.
@@ -859,30 +858,42 @@ def _begin_when_workflow(cursor: Cursor[Any], is_workflow_task: bool) -> None:
             pass
 
 
-def _begin_miss_path_when_workflow(
-    cursor: Cursor[Any],
-    conn: Connection[Any],
-    is_workflow_task: bool,
-) -> None:
-    """Release the row lock of a workflow start that returned no row.
+def _end_start_when_workflow(conn: Connection[Any], is_workflow_task: bool) -> None:
+    """End the transaction of a workflow start that returned no row.
 
-    A workflow task rolls back the transaction of its start, then opens a
-    new one with ``BEGIN_SQL`` for the miss path. The rollback loses no
-    write: the update and the first beat apply only to a started row. The
-    miss path then waits for the task advisory lock while it holds no lock
-    on the row. A transaction that holds the advisory lock and waits for
-    the row gets it, and no deadlock occurs. A plain task sends nothing:
-    its start ran in autocommit, and its lock ended with the statement.
+    A workflow task rolls back the transaction of its start. The rollback
+    releases the row lock that the start can hold, and loses no write: the
+    update and the first beat apply only to a started row. The expiry of
+    the miss path then runs alone in autocommit, as for a plain task, so
+    its task advisory lock and row lock end with its statement. A plain
+    task sends nothing: its start ran in autocommit, and its lock ended
+    with the statement.
 
     Raises:
-        Exception: what the driver raises for the ROLLBACK or the BEGIN.
+        Exception: what the driver raises for the ROLLBACK.
     """
     match is_workflow_task:
         case True:
             conn.rollback()
-            cursor.execute(BEGIN_SQL)
         case False:
             pass
+
+
+def _begin_workflow_stop(cursor: Cursor[Any]) -> None:
+    """Open the transaction of the workflow part of a miss path.
+
+    The workflow read, then the abandon or the cancel of the task and the
+    write of its node, which commit together. The expiry before it ran in
+    autocommit, so this transaction holds no task lock when the abandon
+    asks for the workflow row. The abandon locks the workflow row before
+    the task locks, as the cancel of a workflow and the expiry of a paused
+    workflow do (``LOCK_WORKFLOW_ROW_FOR_CANCEL_SQL``, then the backing task
+    rows).
+
+    Raises:
+        Exception: what the driver raises for the BEGIN.
+    """
+    cursor.execute(BEGIN_SQL)
 
 
 def set_running_params(
@@ -1179,7 +1190,7 @@ def _confirm_ownership_and_set_running(
             )
             updated_row = cursor.fetchone()
             if updated_row is None:
-                _begin_miss_path_when_workflow(cursor, conn, is_workflow_task)
+                _end_start_when_workflow(conn, is_workflow_task)
                 expired_result = _expire_claimed_task_before_start(
                     cursor,
                     conn,
@@ -1190,6 +1201,7 @@ def _confirm_ownership_and_set_running(
                     return expired_result
 
                 if is_workflow_task:
+                    _begin_workflow_stop(cursor)
                     workflow_status = _get_workflow_status_for_task(cursor, task_id)
                     match workflow_status:
                         case 'PAUSED' | 'CANCELLED':
