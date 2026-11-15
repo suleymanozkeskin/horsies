@@ -14,7 +14,12 @@ two locks and start the other side, so a wrong order deadlocks every time:
   holds its locks in an open transaction, against the stale recovery's move
   (``horsies_fail_stale_task``; the recovery's scan skips a locked row, so
   the move is called directly);
-- a monitoring cancel that holds its locks, against a failure finalize.
+- a monitoring cancel that holds its locks, against a failure finalize;
+- a transaction that holds the task advisory lock and then locks the row,
+  against the start of a workflow task in an isolated child and in a shared
+  async child: the claim of the child is of an older generation, so the
+  start locks the row and returns no row, and its miss path waits for the
+  advisory lock in ``horsies_expire_owned_claim``.
 
 A free race of a finalize and a stale recovery of the same task then runs
 many times, and no deadlock may occur.
@@ -30,29 +35,55 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Final
 from unittest.mock import MagicMock
 
+import psycopg
 import pytest
 import pytest_asyncio
+from psycopg_pool import AsyncConnectionPool
 from pydantic import SecretStr
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+)
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec import JsonValue, encode_task_result
 from horsies.core.codec.json_io import dumps_json
+from horsies.core.history.terminalization.move import (
+    EXPIRE_OWNED_FUNCTION,
+    TASK_LOCK_SEED,
+)
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.lifecycle.fences import OwnedClaim
 from horsies.core.types.result import Ok, is_ok
+from horsies.core.worker import child_runner
+from horsies.core.worker.child_pool import (
+    _initialize_worker_pool,
+    open_shared_async_pool,
+)
+from horsies.core.worker.child_protocol import WireResult
+from horsies.core.worker.child_runner import DeadlineBeforeStart
 from horsies.core.worker.config import WorkerConfig
+from horsies.core.worker.shared_lifecycle import confirm_until_not_resumed
 from horsies.core.worker.worker import Worker
 from horsies.core.worker.workflow_success import (
     FinishWorkflowSuccess,
     success_statement,
 )
 from horsies.monitoring.task_actions import cancel_task
+from tests.broker_resources_support import listener_of
 from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.test_workflow_node_handoff import (
+    WORKER_ID as NODE_WORKER_ID,
+    _seed_claimed_workflow_task,
+    _seed_running_workflow_with_node,
+)
 
 pytestmark = [pytest.mark.integration]
 
@@ -63,6 +94,17 @@ WAIT_POLL_S: Final = 0.02
 WAIT_POLLS: Final = 250
 """Bounds the wait for a backend to block on a lock: 5 s."""
 FREE_RACE_ROUNDS: Final = 50
+ROW_LOCK_TIMEOUT: Final = '3s'
+"""The longest wait of the holder of the task advisory lock for the row."""
+START_END_S: Final = 10.0
+"""Bounds the wait for a child start to end once the holder commits."""
+POOL_CLOSE_S: Final = 5.0
+"""Bounds the close of the async pool of a shared async child."""
+OLDER_CLAIM: Final = timedelta(seconds=30)
+"""How much older the claim of a child is than the claim on its row."""
+
+type StartResult = WireResult | DeadlineBeforeStart | None
+"""What the start of a child returns: None starts the task."""
 
 _APP_CACHE: dict[str, Horsies] = {}
 
@@ -449,6 +491,165 @@ async def test_a_failure_finalize_waits_for_a_monitoring_cancel_that_holds_its_l
     assert is_ok(cancelled)
     assert is_ok(finalized) and finalized.ok_value is None
     assert await _history(engine, task_id) == [('CANCELLED', 'CANCEL_ADMIN')]
+
+
+@pytest_asyncio.fixture(loop_scope='function')
+async def shared_child_pool(
+    broker: PostgresBroker,
+) -> AsyncIterator[AsyncConnectionPool[psycopg.AsyncConnection[Any]]]:
+    """The async pool of a shared async child, on the loop of the test."""
+    pool = await open_shared_async_pool(
+        listener_of(broker).database_url,
+        connect_kwargs={},
+        min_size=0,
+        max_size=2,
+        check_on_checkout=True,
+    )
+    yield pool
+    await pool.close(timeout=POOL_CLOSE_S)
+
+
+async def _row_lock_error(holder: AsyncConnection, task_id: str) -> str | None:
+    """Lock the task row FOR UPDATE from ``holder``, waiting at most
+    ``ROW_LOCK_TIMEOUT``. None: the holder got the row. Otherwise the
+    database error that ended the wait: a deadlock or the lock timeout."""
+    await holder.execute(text(f"SET LOCAL lock_timeout = '{ROW_LOCK_TIMEOUT}'"))
+    try:
+        await holder.execute(
+            text('SELECT 1 FROM horsies_tasks WHERE id = CAST(:id AS uuid) FOR UPDATE'),
+            {'id': task_id},
+        )
+    except DBAPIError as error:
+        return f'{type(error.orig).__name__}: {error.orig}'
+    return None
+
+
+async def _start_while_a_holder_takes_the_row(
+    engine: AsyncEngine,
+    task_id: str,
+    start: Callable[[], Awaitable[StartResult]],
+) -> tuple[str | None, StartResult]:
+    """Run ``start`` while another transaction holds the task advisory lock.
+
+    The holder takes the advisory lock and ``start`` begins. Once the start
+    waits on that lock in the expiry of its miss path, the holder locks the
+    row and commits. Returns the error of the row lock of the holder (None:
+    the holder got the row) and the result of the start.
+    """
+    async with engine.connect() as holder:
+        async with holder.begin():
+            await holder.execute(
+                text(
+                    'SELECT pg_advisory_xact_lock(hashtextextended('
+                    'CAST(CAST(:id AS uuid) AS text), CAST(:seed AS bigint)))'
+                ),
+                {'id': task_id, 'seed': TASK_LOCK_SEED},
+            )
+            started = asyncio.ensure_future(start())
+            await _until_a_backend_waits_on_a_lock(engine, EXPIRE_OWNED_FUNCTION)
+            row_lock_error = await _row_lock_error(holder, task_id)
+    return row_lock_error, await asyncio.wait_for(started, START_END_S)
+
+
+async def _seed_reclaimed_workflow_task(session: AsyncSession) -> tuple[str, datetime]:
+    """A CLAIMED task of ``NODE_WORKER_ID`` with its node ENQUEUED in a RUNNING
+    workflow. Returns the task and a claim time ``OLDER_CLAIM`` before the
+    claim on the row: the claim of a child dispatched before the row was
+    claimed again. The workflow guard of the start passes and its fence
+    fails, so the start locks the row and returns no row."""
+    claimed_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    task_id = await _seed_claimed_workflow_task(session, claimed_at)
+    await _seed_running_workflow_with_node(session, task_id, 'ENQUEUED')
+    await session.commit()
+    return task_id, claimed_at - OLDER_CLAIM
+
+
+async def _task_and_node(engine: AsyncEngine, task_id: str) -> tuple[str, str]:
+    """The status of the live task row and the status of its node."""
+    async with engine.connect() as connection:
+        row = (
+            await connection.execute(
+                text("""
+                    SELECT t.status, wt.status
+                    FROM horsies_tasks t
+                    JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
+                    WHERE t.id = CAST(:id AS uuid)
+                """),
+                {'id': task_id},
+            )
+        ).one()
+    return str(row[0]), str(row[1])
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_the_row_lock_of_an_isolated_start_ends_before_its_miss_path(
+    engine: AsyncEngine,
+    broker: PostgresBroker,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The start of a workflow task locks the row and returns no row. Its
+    miss path waits for the task advisory lock, and the holder of that lock
+    then locks the row: the holder gets the row at once and commits, and
+    the miss path ends the start with CLAIM_LOST."""
+    task_id, child_claimed_at = await _seed_reclaimed_workflow_task(session)
+    _initialize_worker_pool(listener_of(broker).database_url)
+
+    async def start() -> StartResult:
+        return await asyncio.to_thread(
+            child_runner._confirm_until_not_resumed,
+            task_id,
+            NODE_WORKER_ID,
+            True,
+            child_claimed_at,
+        )
+
+    with caplog.at_level(logging.ERROR):
+        row_lock_error, started = await _start_while_a_holder_takes_the_row(
+            engine,
+            task_id,
+            start,
+        )
+
+    assert row_lock_error is None
+    assert _deadlocks(caplog) == []
+    assert started == (False, '', 'CLAIM_LOST')
+    assert await _task_and_node(engine, task_id) == ('CLAIMED', 'ENQUEUED')
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_the_row_lock_of_a_shared_async_start_ends_before_its_miss_path(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    shared_child_pool: AsyncConnectionPool[psycopg.AsyncConnection[Any]],
+    clean_workflow_tables: None,  # noqa: ARG001
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The same case as the isolated start, on the async pool of a shared
+    async child."""
+    task_id, child_claimed_at = await _seed_reclaimed_workflow_task(session)
+
+    async def start() -> StartResult:
+        return await confirm_until_not_resumed(
+            shared_child_pool,
+            task_id,
+            NODE_WORKER_ID,
+            True,
+            child_claimed_at,
+        )
+
+    with caplog.at_level(logging.ERROR):
+        row_lock_error, started = await _start_while_a_holder_takes_the_row(
+            engine,
+            task_id,
+            start,
+        )
+
+    assert row_lock_error is None
+    assert _deadlocks(caplog) == []
+    assert started == (False, '', 'CLAIM_LOST')
+    assert await _task_and_node(engine, task_id) == ('CLAIMED', 'ENQUEUED')
 
 
 @pytest.mark.parametrize('kind', ['failure', 'workflow_completion'])
