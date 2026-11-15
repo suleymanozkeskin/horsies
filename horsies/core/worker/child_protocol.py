@@ -1023,13 +1023,21 @@ def encode_preload_frame(frame: PreloadFrame) -> EncodedFrame:
             assert_never(unreachable)
 
 
+def sizes_in_bounds(meta_bytes: int, body_bytes: int) -> bool:
+    """Whether the sizes of a header are in the bounds: ``MIN_META_BYTES`` to
+    ``MAX_META_BYTES`` of metadata, and at most ``MAX_BODY_BYTES`` of body."""
+    return (
+        MIN_META_BYTES <= meta_bytes <= MAX_META_BYTES and body_bytes <= MAX_BODY_BYTES
+    )
+
+
 def parse_header(raw: bytes) -> Result[FrameSizes, FrameOverBound]:
     """Check a header against the bounds, before any buffer is allocated.
 
     ``raw`` must be ``FRAME_HEADER.size`` bytes: the caller reads exactly that.
     """
     meta_bytes, body_bytes = FRAME_HEADER.unpack(raw)
-    if not MIN_META_BYTES <= meta_bytes <= MAX_META_BYTES or body_bytes > MAX_BODY_BYTES:
+    if not sizes_in_bounds(meta_bytes, body_bytes):
         return Err(FrameOverBound(meta_bytes=meta_bytes, body_bytes=body_bytes))
     return Ok(FrameSizes(meta_bytes=meta_bytes, body_bytes=body_bytes))
 

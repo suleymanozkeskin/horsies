@@ -76,10 +76,9 @@ from horsies.core.worker.stored_timeout import NoTimeout, TaskTimeout
 from horsies.core.worker.task_loop import ISOLATED_LEFTOVER_GRACE_S
 from horsies.core.worker.worker import Worker, WorkerConfig
 from horsies.core.worker import slots
+from horsies.core.worker.frame_parser import DIRECT_BODY_BYTES, FRAME_READ_BUFFER_BYTES
 from horsies.core.worker.slots import (
     CHILD_BOOT_ATTEMPTS,
-    DIRECT_BODY_BYTES,
-    FRAME_READ_BUFFER_BYTES,
     JOINED_WRITE_BODY_BYTES,
     CHILD_BOOT_KILL_DELAY_MAX_S,
     SLOT_DEFECT_LIMIT,
@@ -436,6 +435,32 @@ class TestFrameProtocol:
 
         assert frames == []
         assert protocol.has_partial_frame()
+
+    def test_a_header_split_at_the_buffer_end_moves_to_the_front_for_one_read(
+        self,
+    ) -> None:
+        """2 bytes of a header at hand and 3 free bytes at the end of the read
+        buffer: the bytes move to the front, and one read completes the next
+        frame."""
+        protocol, frames, _, _ = self._protocol()
+        head_bytes = len(self._result_bytes(''))
+        first = self._result_bytes('f' * (FRAME_READ_BUFFER_BYTES - 5 - head_bytes))
+        data = first + self._result_bytes('second')
+        cut = FRAME_READ_BUFFER_BYTES - 3
+
+        target = protocol.get_buffer(-1)
+        target[:cut] = data[:cut]
+        protocol.buffer_updated(cut)
+        assert len(first) == FRAME_READ_BUFFER_BYTES - 5
+        assert len(frames) == 1
+
+        target = protocol.get_buffer(-1)
+        assert len(target) == FRAME_READ_BUFFER_BYTES - 2
+        target[: len(data) - cut] = data[cut:]
+        protocol.buffer_updated(len(data) - cut)
+
+        assert self._results(frames)[1:] == ['second']
+        assert not protocol.has_partial_frame()
 
     def test_a_frame_that_closes_the_channel_ends_delivery_of_that_read(self) -> None:
         frames: list[object] = []

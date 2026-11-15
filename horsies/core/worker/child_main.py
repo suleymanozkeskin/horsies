@@ -53,7 +53,6 @@ from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.child_protocol import (
     FRAME_HEADER,
     MAX_BODY_BYTES,
-    MAX_META_BYTES,
     BodyReturnedFrame,
     BootFailedFrame,
     ChildFrame,
@@ -86,6 +85,18 @@ from horsies.core.worker.child_protocol import (
     parse_header,
 )
 from horsies.core.worker.child_inbox import ParentFrameInbox
+from horsies.core.worker.frame_parser import (
+    FRAME_READ_BUFFER_BYTES,
+    MoveAndGrow,
+    MoveToFront,
+    NeedBytes,
+    ReadBodyDirectly,
+    ReadFromFront,
+    ReadIntoTail,
+    WholeFrame,
+    next_step,
+    plan_read,
+)
 from horsies.core.worker.run_return import (
     IsolatedMarkerWindow,
     MarkerAfterLeftWork,
@@ -121,17 +132,6 @@ STOPPED_WITH_EXECUTOR_THREADS_EXIT_CODE: Final = 74
 # At boot, after ``BootFailedFrame``: the frame names the cause.
 BOOT_FAILED_EXIT_CODE: Final = 75
 INIT_FRAME_TIMEOUT_S: Final = 30.0
-CONTROL_READ_BUFFER_BYTES: Final = 1 << 16
-"""The first size of the read buffer of the control thread. Every complete
-parent frame of one read is taken from it before the next read."""
-CONTROL_DIRECT_BODY_BYTES: Final = 1 << 16
-"""A parent frame body larger than this is read straight into a buffer of its
-own size, not into the read buffer."""
-CONTROL_READ_BUFFER_BOUND: Final = (
-    FRAME_HEADER.size + MAX_META_BYTES + CONTROL_DIRECT_BODY_BYTES
-)
-"""The largest size of the read buffer: a header, the largest metadata, and a
-body that is not read straight into its own buffer."""
 JOINED_CHILD_WRITE_BODY_BYTES: Final = 1 << 16
 """A child frame with a body up to this size goes to the socket in one write:
 header, metadata and body joined. A larger body goes in a write of its own, so
@@ -179,6 +179,13 @@ def _recv_exact(sock: socket.socket, count: int) -> bytes:
     return bytes(data)
 
 
+def _exit_over_bound(over: FrameOverBound) -> NoReturn:
+    """A parent frame header over the bounds is a defect of the parent: exit
+    loud."""
+    logger.critical('Parent sent a frame over the bounds: %s', over)
+    os._exit(BAD_PARENT_FRAME_EXIT_CODE)
+
+
 def _sizes_or_exit(header: bytes) -> FrameSizes:
     """The sizes of a parent frame header. A header over the bounds is a
     defect of the parent: exit loud."""
@@ -186,8 +193,7 @@ def _sizes_or_exit(header: bytes) -> FrameSizes:
         case Ok(sizes):
             return sizes
         case Err(FrameOverBound() as over):
-            logger.critical('Parent sent a frame over the bounds: %s', over)
-            os._exit(BAD_PARENT_FRAME_EXIT_CODE)
+            _exit_over_bound(over)
 
 
 def _parent_frame_or_exit(meta: bytes, body: bytes) -> ParentFrame:
@@ -214,16 +220,16 @@ class ParentFrameReader:
     """Reads the parent frames of the control thread from a blocking socket.
 
     One ``recv_into`` fills the free tail of the read buffer, and
-    ``next_frame`` takes the frames from it in order: it reads again only when
-    the next frame has not fully arrived. A body larger than
-    ``CONTROL_DIRECT_BODY_BYTES`` is read straight into a buffer of its own.
-    The read buffer stays within ``CONTROL_READ_BUFFER_BOUND``. Not safe to
-    share between threads.
+    ``next_frame`` takes the frames from it in order with
+    ``frame_parser.next_step``: it reads again only when the next frame is not
+    fully at hand. A body larger than ``DIRECT_BODY_BYTES`` is read straight
+    into a buffer of its own. ``frame_parser.plan_read`` keeps the read buffer
+    within ``READ_BUFFER_BOUND``. Not safe to share between threads.
     """
 
     def __init__(self, sock: socket.socket) -> None:
         self._sock = sock
-        self._buffer = bytearray(CONTROL_READ_BUFFER_BYTES)
+        self._buffer = bytearray(FRAME_READ_BUFFER_BYTES)
         self._start: int = 0
         """The first byte of the read buffer that no returned frame used."""
         self._end: int = 0
@@ -236,62 +242,68 @@ class ParentFrameReader:
             EOFError: the parent closed the socket.
             OSError: the socket failed.
 
-        A bad frame from the parent ends the process (``_sizes_or_exit``,
+        A bad frame from the parent ends the process (``_exit_over_bound``,
         ``_parent_frame_or_exit``).
-        """
-        header_end = FRAME_HEADER.size
-        self._fill_to(header_end)
-        sizes = _sizes_or_exit(
-            bytes(self._buffer[self._start : self._start + header_end]),
-        )
-        meta_end = header_end + sizes.meta_bytes
-        if sizes.body_bytes > CONTROL_DIRECT_BODY_BYTES:
-            self._fill_to(meta_end)
-            meta = bytes(self._buffer[self._start + header_end : self._start + meta_end])
-            self._start += meta_end
-            return _parent_frame_or_exit(meta, self._take_body(sizes.body_bytes))
-        frame_end = meta_end + sizes.body_bytes
-        self._fill_to(frame_end)
-        meta = bytes(self._buffer[self._start + header_end : self._start + meta_end])
-        body = bytes(self._buffer[self._start + meta_end : self._start + frame_end])
-        self._start += frame_end
-        return _parent_frame_or_exit(meta, body)
 
-    def _fill_to(self, count: int) -> None:
-        """Read until ``count`` bytes from ``_start`` have arrived. The bytes
-        at hand move to the front first when the frame would not fit the
-        buffer, and the buffer grows to ``count`` when it is smaller."""
-        assert count <= CONTROL_READ_BUFFER_BOUND, (
-            f'a read of {count} bytes is over the read buffer bound of '
-            f'{CONTROL_READ_BUFFER_BOUND} bytes'
-        )
-        if self._start == self._end:
-            self._start = self._end = 0
-        if self._end - self._start >= count:
-            return
-        if len(self._buffer) - self._start < count:
-            pending = self._end - self._start
-            self._buffer[:pending] = self._buffer[self._start : self._end]
-            self._start, self._end = 0, pending
-            if len(self._buffer) < count:
-                self._buffer.extend(bytes(count - len(self._buffer)))
+        The loop runs at most three times: for the header, then for the header
+        and metadata or for the whole frame, then for the frame or its large
+        body.
+        """
+        while True:
+            match next_step(self._buffer, self._start, self._end):
+                case WholeFrame() as whole:
+                    meta = bytes(self._buffer[whole.meta_at : whole.body_at])
+                    body = bytes(self._buffer[whole.body_at : whole.frame_end])
+                    self._start = whole.frame_end
+                    return _parent_frame_or_exit(meta, body)
+                case NeedBytes() as waiting:
+                    self._fill_to(waiting.wanted)
+                case ReadBodyDirectly() as direct:
+                    meta = bytes(self._buffer[direct.meta_at : direct.body_at])
+                    return _parent_frame_or_exit(meta, self._take_body(direct))
+                case FrameOverBound() as over:
+                    _exit_over_bound(over)
+                case _ as unreachable:
+                    assert_never(unreachable)
+
+    def _fill_to(self, wanted: int) -> None:
+        """Read until ``wanted`` bytes from ``_start`` have arrived, after the
+        move or the growth that ``plan_read`` names."""
+        match plan_read(len(self._buffer), self._start, self._end, wanted):
+            case ReadIntoTail():
+                pass
+            case ReadFromFront():
+                self._start = self._end = 0
+            case MoveToFront():
+                self._move_to_front()
+            case MoveAndGrow(buffer_bytes=buffer_bytes):
+                self._move_to_front()
+                self._buffer.extend(bytes(buffer_bytes - len(self._buffer)))
+            case _ as unreachable:
+                assert_never(unreachable)
         view = memoryview(self._buffer)
-        while self._end - self._start < count:
+        while self._end - self._start < wanted:
             got = self._sock.recv_into(view[self._end :])
             if got == 0:
                 raise EOFError
             self._end += got
 
-    def _take_body(self, body_bytes: int) -> bytes:
-        """A large body: the part at hand, then the rest read straight into
-        a buffer of the body's size."""
-        body = bytearray(body_bytes)
-        at_hand = min(self._end - self._start, body_bytes)
-        body[:at_hand] = self._buffer[self._start : self._start + at_hand]
-        self._start += at_hand
+    def _move_to_front(self) -> None:
+        """Move the bytes at hand to the front of the read buffer."""
+        pending = self._end - self._start
+        self._buffer[:pending] = self._buffer[self._start : self._end]
+        self._start, self._end = 0, pending
+
+    def _take_body(self, direct: ReadBodyDirectly) -> bytes:
+        """The large body of ``direct``: the part at hand, then the rest read
+        straight into a buffer of the body's size. The read buffer is empty
+        after this: every byte at hand belongs to that body."""
+        body = bytearray(direct.body_bytes)
+        filled = self._end - direct.body_at
+        body[:filled] = self._buffer[direct.body_at : self._end]
+        self._start = self._end = 0
         view = memoryview(body)
-        filled = at_hand
-        while filled < body_bytes:
+        while filled < direct.body_bytes:
             got = self._sock.recv_into(view[filled:])
             if got == 0:
                 raise EOFError

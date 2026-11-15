@@ -103,7 +103,6 @@ from horsies.core.worker.thread_slots import (
     ThreadRunRequest,
 )
 from horsies.core.worker.child_protocol import (
-    FRAME_HEADER,
     BlockingRun,
     BodyReturnedFrame,
     BootFailedFrame,
@@ -111,7 +110,6 @@ from horsies.core.worker.child_protocol import (
     ChildFrame,
     ChildKind,
     FrameOverBound,
-    MAX_META_BYTES,
     InitFrame,
     LeftoverCancelFrame,
     LeftoverStuckFrame,
@@ -149,7 +147,19 @@ from horsies.core.worker.child_protocol import (
     ThreadSeatTask,
     decode_child_frame,
     encode_parent_frame,
-    parse_header,
+)
+from horsies.core.worker.frame_parser import (
+    FRAME_READ_BUFFER_BYTES,
+    NEED_HEADER,
+    MoveAndGrow,
+    MoveToFront,
+    NeedBytes,
+    ReadBodyDirectly,
+    ReadFromFront,
+    ReadIntoTail,
+    WholeFrame,
+    next_step,
+    plan_read,
 )
 from horsies.core.worker.loop_watchdog import LOOP_BLOCK_LIMIT_MS
 from horsies.core.worker.task_loop import (
@@ -1055,18 +1065,6 @@ def interpreter_flags() -> tuple[str, ...]:
     return tuple(args)
 
 
-FRAME_READ_BUFFER_BYTES: Final = 1 << 16
-"""The first size of the read buffer of a child channel. The frames are parsed
-from it: every complete frame of one read, in one call."""
-
-DIRECT_BODY_BYTES: Final = 1 << 16
-"""A frame body larger than this is read straight into a buffer of its own
-size, so a large result is not first copied into the read buffer."""
-
-READ_BUFFER_BOUND: Final = FRAME_HEADER.size + MAX_META_BYTES + DIRECT_BODY_BYTES
-"""The largest size of the read buffer: a header, the largest metadata, and a
-body that is not read straight into its own buffer."""
-
 JOINED_WRITE_BODY_BYTES: Final = 1 << 16
 """A parent frame with a body up to this size goes to the channel in one write:
 header, metadata and body joined. A larger body goes in a write of its own, so
@@ -1094,11 +1092,12 @@ _ReadState: TypeAlias = _BufferedFrames | _DirectBody
 class FrameProtocol(asyncio.BufferedProtocol):
     """Reads the frames of one child channel.
 
-    Frames with a body up to ``DIRECT_BODY_BYTES`` are parsed from one read
-    buffer: every complete frame of a read is delivered in that call, in order.
-    A larger body is read straight into a buffer of its own size. A header
-    over the bounds aborts the channel before anything is allocated for its
-    frame. The read buffer stays within ``READ_BUFFER_BOUND``.
+    ``frame_parser.next_step`` parses the read buffer: every whole frame of a
+    read is delivered in that call, in order. A body larger than
+    ``DIRECT_BODY_BYTES`` that is not fully at hand is read straight into a
+    buffer of its own size. A header over the bounds aborts the channel before
+    anything is allocated for its frame. ``frame_parser.plan_read`` keeps the
+    read buffer within ``READ_BUFFER_BOUND``.
     """
 
     def __init__(
@@ -1114,9 +1113,9 @@ class FrameProtocol(asyncio.BufferedProtocol):
         """The first byte of the read buffer that no delivered frame used."""
         self._end: int = 0
         """The end of the bytes that arrived in the read buffer."""
-        self._needed: int = 0
-        """The size of the frame that starts at ``_start`` when its header has
-        arrived and the frame does not fit the bytes at hand; else 0."""
+        self._waiting: NeedBytes = NEED_HEADER
+        """The bytes from ``_start`` that the next step needs, from the last
+        parse that stopped for more bytes."""
         self._state: _ReadState = _BufferedFrames()
         self.bytes_received = 0
         self.violation: FrameOverBound | MalformedFrame | None = None
@@ -1134,23 +1133,32 @@ class FrameProtocol(asyncio.BufferedProtocol):
                 assert_never(unreachable)
 
     def _free_space(self) -> memoryview:
-        """The free tail of the read buffer, with room for the frame that
-        waits: the bytes at hand move to the front, and the buffer grows to
-        the size of that frame, at most ``READ_BUFFER_BOUND``."""
-        if self._start == self._end:
-            self._start = self._end = 0
-        pending = self._end - self._start
-        wanted = max(self._needed, pending + 1)
-        if len(self._buffer) - self._start < wanted or self._end == len(self._buffer):
-            self._buffer[:pending] = self._buffer[self._start : self._end]
-            self._start, self._end = 0, pending
-            if len(self._buffer) < wanted:
-                assert wanted <= READ_BUFFER_BOUND, (
-                    f'a frame of {wanted} bytes is over the read buffer bound '
-                    f'of {READ_BUFFER_BOUND} bytes'
-                )
-                self._buffer.extend(bytes(wanted - len(self._buffer)))
+        """The free tail of the read buffer, after the move or the growth that
+        ``plan_read`` names for the bytes that the next step needs."""
+        match plan_read(
+            len(self._buffer),
+            self._start,
+            self._end,
+            self._waiting.wanted,
+        ):
+            case ReadIntoTail():
+                pass
+            case ReadFromFront():
+                self._start = self._end = 0
+            case MoveToFront():
+                self._move_to_front()
+            case MoveAndGrow(buffer_bytes=buffer_bytes):
+                self._move_to_front()
+                self._buffer.extend(bytes(buffer_bytes - len(self._buffer)))
+            case _ as unreachable:
+                assert_never(unreachable)
         return memoryview(self._buffer)[self._end :]
+
+    def _move_to_front(self) -> None:
+        """Move the bytes at hand to the front of the read buffer."""
+        pending = self._end - self._start
+        self._buffer[:pending] = self._buffer[self._start : self._end]
+        self._start, self._end = 0, pending
 
     def buffer_updated(self, nbytes: int) -> None:
         self.bytes_received += nbytes
@@ -1167,47 +1175,44 @@ class FrameProtocol(asyncio.BufferedProtocol):
                 assert_never(unreachable)
 
     def _parse(self) -> None:
-        """Deliver every complete frame of the read buffer, in order. Stop at
-        a frame that has not fully arrived, at a violation, when the channel
-        closes, and at a large body that has not fully arrived: that body is
-        read straight into its own buffer from then on."""
-        header_size = FRAME_HEADER.size
-        while self._end - self._start >= header_size:
-            header = bytes(self._buffer[self._start : self._start + header_size])
-            match parse_header(header):
-                case Ok(sizes):
-                    pass
-                case Err(over):
+        """Deliver every whole frame of the read buffer, in order. Stop at a
+        frame that is not fully at hand, at a violation, when the channel
+        closes, and at a large body that is not fully at hand: that body is
+        read straight into its own buffer from then on.
+
+        Each whole frame moves ``_start`` forward, so the loop ends within
+        the bytes at hand.
+        """
+        while True:
+            match next_step(self._buffer, self._start, self._end):
+                case WholeFrame() as whole:
+                    meta = bytes(self._buffer[whole.meta_at : whole.body_at])
+                    body = bytes(self._buffer[whole.body_at : whole.frame_end])
+                    self._start = whole.frame_end
+                    if not self._deliver(meta, body):
+                        return
+                case NeedBytes() as waiting:
+                    self._waiting = waiting
+                    return
+                case ReadBodyDirectly() as direct:
+                    self._read_body_directly(direct)
+                    return
+                case FrameOverBound() as over:
                     self._fail(over)
                     return
-            meta_at = self._start + header_size
-            body_at = meta_at + sizes.meta_bytes
-            frame_end = body_at + sizes.body_bytes
-            if self._end < frame_end:
-                if sizes.body_bytes > DIRECT_BODY_BYTES and self._end >= body_at:
-                    self._read_body_directly(meta_at, body_at, sizes.body_bytes)
-                else:
-                    self._needed = (
-                        body_at if sizes.body_bytes > DIRECT_BODY_BYTES else frame_end
-                    ) - self._start
-                return
-            meta = bytes(self._buffer[meta_at:body_at])
-            body = bytes(self._buffer[body_at:frame_end])
-            self._start = frame_end
-            self._needed = 0
-            if not self._deliver(meta, body):
-                return
+                case _ as unreachable:
+                    assert_never(unreachable)
 
-    def _read_body_directly(self, meta_at: int, body_at: int, body_bytes: int) -> None:
+    def _read_body_directly(self, direct: ReadBodyDirectly) -> None:
         """Move the arrived part of a large body into a buffer of the body's
         size, and read the rest of the body into it. The read buffer is empty
         after this: every byte at hand belongs to that body."""
-        body = bytearray(body_bytes)
-        arrived = self._end - body_at
-        body[:arrived] = self._buffer[body_at : self._end]
-        meta = bytes(self._buffer[meta_at:body_at])
+        body = bytearray(direct.body_bytes)
+        arrived = self._end - direct.body_at
+        body[:arrived] = self._buffer[direct.body_at : self._end]
+        meta = bytes(self._buffer[direct.meta_at : direct.body_at])
         self._start = self._end = 0
-        self._needed = 0
+        self._waiting = NEED_HEADER
         self._state = _DirectBody(meta=meta, body=body, filled=arrived)
 
     def _deliver(self, meta: bytes, body: bytes) -> bool:
