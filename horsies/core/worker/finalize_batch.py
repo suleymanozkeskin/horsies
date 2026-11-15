@@ -3,7 +3,7 @@
 A finalizer whose task returned a plain success hands its ``CompleteTaskFused``
 to ``FinalizeBatcher.complete`` and waits for the outcome of its own row. The
 batcher writes the queued rows with one statement per batch
-(``apply_fused_batch_in_autocommit``): one round trip for up to
+(``apply_fused_batch``): one round trip for up to
 ``FUSED_BATCH_MAX_ROWS`` rows.
 
 Flush rule, with no timer:

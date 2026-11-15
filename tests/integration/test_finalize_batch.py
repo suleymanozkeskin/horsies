@@ -2,9 +2,9 @@
 
 Each test enters through the worker (``_finalize_task_result``,
 ``_finalize_after``, ``_retry_finalize_phase1``) or through the batch write
-itself (``apply_fused_batch_in_autocommit``), against the real schema. The
-finalizers of one test submit in one loop turn, so the first flusher takes
-their rows as one batch.
+itself (``apply_fused_batch`` on a runner of the worker), against the real
+schema. The finalizers of one test submit in one loop turn, so the first
+flusher takes their rows as one batch.
 
 Per row, the tests pin:
 
@@ -27,7 +27,7 @@ import uuid
 from collections.abc import AsyncGenerator, Generator, Sequence
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from typing import Any, Final
+from typing import Any, Final, assert_never
 
 import psycopg
 import pytest
@@ -49,13 +49,16 @@ from horsies.core.lifecycle.persistence import (
     BatchWriteError,
     FusedCompletionBatch,
     apply_fused_batch,
-    apply_fused_batch_in_autocommit,
 )
 from horsies.core.models.child_sizing import parent_pool_flusher_bound
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker import finalize as finalize_module
 from horsies.core.worker.child_protocol import NoTaskLoop, RssUnreadable
-from horsies.core.worker.finalize_batch import FinalizeBatcher, FlushersCancelled
+from horsies.core.worker.finalize_batch import (
+    FinalizeBatcher,
+    FlusherRole,
+    FlushersCancelled,
+)
 from horsies.core.worker.runtime import FinalizeStage, _FinalizeError
 from horsies.core.worker.slots import Assigned, TaskFinished
 from horsies.core.worker.worker import Worker
@@ -94,6 +97,13 @@ QUEUE_ROOM: Final = 4 * BATCH_ROWS
 claim budget, which is 2 for the one-slot test worker; these tests finalize
 more rows at once than one slot ever holds."""
 
+FLUSHER_ROLES: Final = pytest.mark.parametrize(
+    'role',
+    list(FlusherRole),
+    ids=[role.value.lower() for role in FlusherRole],
+)
+"""Runs a test once on the runner of each flusher role (``_runner_of``)."""
+
 type Case = list[tuple[str, datetime]]
 
 
@@ -123,6 +133,20 @@ async def _open_worker(database_url: str) -> ProxiedWorker:
         max_flushers=parent_pool_flusher_bound(worker.cfg.parent_pool_size),
     )
     return opened
+
+
+def _runner_of(worker: Worker, role: FlusherRole) -> StatementRunner:
+    """The runner of ``worker`` that a flusher of ``role`` writes on: a held
+    connection of a steady flusher, or a checkout per statement for a surge
+    flusher. The held connection is also a runner of the batcher: a test that
+    uses it must not write rows through the batcher."""
+    match role:
+        case FlusherRole.STEADY:
+            return worker._batch_connections[0]
+        case FlusherRole.SURGE:
+            return PooledStatements(worker.sf)
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 @pytest_asyncio.fixture(loop_scope='function')
@@ -468,10 +492,12 @@ async def test_each_row_keeps_its_own_fence_in_one_batch(
     assert set(await _history(session, [mine, foreign, stale, done])) == {mine, done}
 
 
+@FLUSHER_ROLES
 async def test_a_batch_writes_each_result_text_as_given(
     direct: ProxiedWorker,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
+    role: FlusherRole,
 ) -> None:
     """Escapes, whitespace and characters outside ASCII reach the row
     unchanged."""
@@ -487,28 +513,32 @@ async def test_a_batch_writes_each_result_text_as_given(
         ),
     )
 
-    written = await apply_fused_batch_in_autocommit(direct.worker.sf, batch)
+    written = await apply_fused_batch(_runner_of(direct.worker, role), batch)
 
     assert _written(written) == [Applied, Applied]
     assert await _history_results(session, [first, second]) == texts
 
 
+@FLUSHER_ROLES
 async def test_a_claim_generation_keeps_its_microseconds_and_its_offset(
     direct: ProxiedWorker,
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
+    role: FlusherRole,
 ) -> None:
     """The fence compares instants: the same instant at another UTC offset
     matches, one microsecond later does not."""
     (same, same_at), (later, later_at) = await _running_tasks(session, 2)
     batch = FusedCompletionBatch(
         commands=(
-            _command(same, same_at.astimezone(timezone(timedelta(hours=5, minutes=30)))),
+            _command(
+                same, same_at.astimezone(timezone(timedelta(hours=5, minutes=30)))
+            ),
             _command(later, later_at + timedelta(microseconds=1)),
         ),
     )
 
-    written = await apply_fused_batch_in_autocommit(direct.worker.sf, batch)
+    written = await apply_fused_batch(_runner_of(direct.worker, role), batch)
 
     assert _written(written) == [Applied, LostClaim]
     assert await _live_statuses(session, [same, later]) == {later: 'RUNNING'}
@@ -911,7 +941,7 @@ async def test_the_batch_locks_its_rows_in_sorted_task_id_order(
         ),
     )
     writing = asyncio.create_task(
-        apply_fused_batch_in_autocommit(direct.worker.sf, batch),
+        apply_fused_batch(PooledStatements(direct.worker.sf), batch),
     )
     pid = await _batch_backend_waiting(session)
 

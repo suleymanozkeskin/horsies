@@ -33,7 +33,6 @@ from ..utils.db import (
     AutocommitFailure,
     NotSent,
     OutcomeUnknown,
-    PooledStatements,
     SingleStatement,
     StatementRefused,
     StatementRunner,
@@ -627,15 +626,6 @@ def _generation_text(claimed_at: datetime | None) -> str | None:
             return None
         case datetime():
             return claimed_at.isoformat()
-
-
-async def apply_fused_batch_in_autocommit(
-    session_factory: async_sessionmaker[AsyncSession],
-    batch: FusedCompletionBatch,
-) -> Result[tuple[TerminalizationOutcome, ...], BatchWriteError]:
-    """``apply_fused_batch`` on one checkout of ``session_factory``
-    (``PooledStatements``). Outcomes and failures as ``apply_fused_batch``."""
-    return await apply_fused_batch(PooledStatements(session_factory), batch)
 
 
 async def apply_fused_batch(
