@@ -82,6 +82,8 @@ from horsies.core.worker.slots import (
 from horsies.core.worker.shared_finalize import (
     future_retry_data,
     future_retry_write,
+    kept_claim_time,
+    timeout_retry_data,
     timeout_retry_write,
 )
 from horsies.core.worker.shared_stop import (
@@ -730,8 +732,33 @@ class TestFinalizeKilledRun:
             RetryPlacement.ISOLATED,
         )
 
+    async def test_the_retry_of_an_error_without_a_claim_time_fails_loud(
+        self,
+    ) -> None:
+        """Every writer of a future-stage error keeps the claim time, so a
+        retry without one is a defect: it never runs unfenced."""
+        writes = _KillWrites()
+        data = future_retry_data(
+            OperationalErrorCode.TASK_BLOCKED_LOOP,
+            RetryPlacement.ISOLATED,
+            CLAIMED_AT,
+        )
+        del data['claimed_at']
+        error = writes.worker._make_finalize_error(
+            task_id='task-1',
+            stage=_FINALIZE_STAGE_FUTURE,
+            message='kill write failed',
+            retryable=True,
+            data=data,
+        )
+
+        with pytest.raises(AssertionError, match='has no claim time'):
+            await writes.worker._retry_finalize_future(error, 0.0)
+
+        writes.recovery.assert_not_awaited()
+
     async def test_a_crash_error_retries_as_a_crash(self) -> None:
-        assert future_retry_write({'claimed_at': None}) == (
+        assert future_retry_write({'claimed_at': CLAIMED_AT}) == (
             OperationalErrorCode.WORKER_CRASHED,
             RetryPlacement.SAME_CLASS,
         )
@@ -1116,7 +1143,50 @@ class TestTimeoutWriteRetry:
 
 def test_the_data_of_a_timeout_write_is_a_closed_shape() -> None:
     with pytest.raises(AssertionError, match='no TASK_TIMEOUT write'):
-        timeout_retry_write({'claimed_at': None})
+        timeout_retry_write({'claimed_at': CLAIMED_AT})
+
+
+def test_the_data_of_a_timeout_write_needs_a_claim_time() -> None:
+    data = timeout_retry_data(1500, RetryPlacement.SAME_CLASS, CLAIMED_AT)
+    data['claimed_at'] = None
+
+    with pytest.raises(AssertionError, match='no TASK_TIMEOUT write'):
+        timeout_retry_write(data)
+
+
+class TestKeptClaimTime:
+    """The claim time that the data of a finalize error kept for its retry."""
+
+    def test_the_kept_claim_time_is_returned(self) -> None:
+        data = future_retry_data(
+            OperationalErrorCode.WORKER_CRASHED,
+            RetryPlacement.SAME_CLASS,
+            CLAIMED_AT,
+        )
+
+        assert kept_claim_time(data) == CLAIMED_AT
+
+    @pytest.mark.parametrize(
+        ('data', 'keys'),
+        [
+            (None, '[]'),
+            ({'requeue_outcome': 'DB_ERROR'}, "['requeue_outcome']"),
+            ({'claimed_at': None}, "['claimed_at']"),
+            ({'claimed_at': '2026-11-10T09:00:00+00:00'}, "['claimed_at']"),
+        ],
+        ids=['no_data', 'no_claim_time', 'null_claim_time', 'claim_time_as_text'],
+    )
+    def test_data_without_a_claim_time_is_a_defect(
+        self,
+        data: dict[str, Any] | None,
+        keys: str,
+    ) -> None:
+        with pytest.raises(AssertionError) as raised:
+            kept_claim_time(data)
+
+        assert str(raised.value) == (
+            f'the data of a finalize error has no claim time; its keys are {keys}'
+        )
 
 
 class TestCapacityAndConfig:

@@ -24,7 +24,7 @@ pytestmark = [pytest.mark.unit]
 CLAIMED_AT = datetime(2026, 11, 10, 9, 30, 0, 125, tzinfo=timezone.utc)
 
 
-def _frame(task_id: str, claimed_at: datetime | None = CLAIMED_AT) -> RunFrame:
+def _frame(task_id: str, claimed_at: datetime = CLAIMED_AT) -> RunFrame:
     return RunFrame(
         task_id=task_id,
         task_name='registry_test',

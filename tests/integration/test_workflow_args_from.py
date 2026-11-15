@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 import pytest
@@ -56,21 +57,29 @@ class TestArgsFromInjection:
         session: AsyncSession,
         task_id: str,
         worker_id: str,
-    ) -> None:
-        """Helper to claim a task for a worker (required before _run_task_entry)."""
-        await session.execute(
-            text("""
-                UPDATE horsies_tasks
-                SET status = 'CLAIMED',
-                    claimed = TRUE,
-                    claimed_at = NOW(),
-                    claimed_by_worker_id = :worker_id,
-                    claim_expires_at = NULL
-                WHERE id = :task_id
-            """),
-            {'task_id': task_id, 'worker_id': worker_id},
-        )
+    ) -> datetime:
+        """Helper to claim a task for a worker (required before _run_task_entry).
+
+        Returns the claim time, as the claim of a worker returns it.
+        """
+        claimed_at = (
+            await session.execute(
+                text("""
+                    UPDATE horsies_tasks
+                    SET status = 'CLAIMED',
+                        claimed = TRUE,
+                        claimed_at = NOW(),
+                        claimed_by_worker_id = :worker_id,
+                        claim_expires_at = NULL
+                    WHERE id = :task_id
+                    RETURNING claimed_at
+                """),
+                {'task_id': task_id, 'worker_id': worker_id},
+            )
+        ).scalar_one()
         await session.commit()
+        assert isinstance(claimed_at, datetime)
+        return claimed_at
 
     async def _complete_task(
         self,
@@ -483,7 +492,7 @@ class TestArgsFromInjection:
         assert isinstance(kwargs_json, str)
 
         # Claim the task before running (required by ownership check)
-        await self._claim_task(session, task_id, 'test-worker')
+        claimed_at = await self._claim_task(session, task_id, 'test-worker')
 
         set_current_app(app)
         database_url = listener_of(broker).database_url
@@ -495,6 +504,7 @@ class TestArgsFromInjection:
                 kwargs_json=kwargs_json,
                 task_id=task_id,
                 master_worker_id='test-worker',
+                claimed_at=claimed_at,
                 task_loop=TaskLoop(),
             )
         )
@@ -571,7 +581,7 @@ class TestArgsFromInjection:
         assert isinstance(args_json, str)
         assert isinstance(kwargs_json, str)
 
-        await self._claim_task(session, task_id, 'test-worker')
+        claimed_at = await self._claim_task(session, task_id, 'test-worker')
 
         set_current_app(app)
         database_url = listener_of(broker).database_url
@@ -583,6 +593,7 @@ class TestArgsFromInjection:
                 kwargs_json=kwargs_json,
                 task_id=task_id,
                 master_worker_id='test-worker',
+                claimed_at=claimed_at,
                 task_loop=TaskLoop(),
             )
         )
@@ -738,7 +749,7 @@ class TestArgsFromInjection:
         assert isinstance(args_json, str)
         assert isinstance(kwargs_json, str)
 
-        await self._claim_task(session, task_id, 'test-worker')
+        claimed_at = await self._claim_task(session, task_id, 'test-worker')
 
         set_current_app(app)
         database_url = listener_of(broker).database_url
@@ -750,6 +761,7 @@ class TestArgsFromInjection:
                 kwargs_json=kwargs_json,
                 task_id=task_id,
                 master_worker_id='test-worker',
+                claimed_at=claimed_at,
                 task_loop=TaskLoop(),
             )
         )
@@ -823,7 +835,7 @@ class TestArgsFromInjection:
         assert isinstance(args_json, str)
         assert isinstance(kwargs_json, str)
 
-        await self._claim_task(session, task_id, 'test-worker')
+        claimed_at = await self._claim_task(session, task_id, 'test-worker')
 
         set_current_app(app)
         database_url = listener_of(broker).database_url
@@ -835,6 +847,7 @@ class TestArgsFromInjection:
                 kwargs_json=kwargs_json,
                 task_id=task_id,
                 master_worker_id='test-worker',
+                claimed_at=claimed_at,
                 task_loop=TaskLoop(),
             )
         )

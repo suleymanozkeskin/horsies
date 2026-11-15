@@ -77,6 +77,8 @@ from horsies.core.workflows.sql import (
 
 pytestmark = [pytest.mark.unit]
 
+CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
+
 _DECLARED: dict[str, Json] = {'error_code': 'MY_CODE', 'message': 'm'}
 
 _NOT_A_TASK_ERROR: list[tuple[dict[str, Json], str]] = [
@@ -872,6 +874,7 @@ class TestRecoveryReaders:
                 task_name='t',
                 queue_name='default',
                 is_workflow_task=False,
+                claimed_at=CLAIMED_AT,
             )
 
         assert outcome == Ok(None)

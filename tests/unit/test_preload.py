@@ -16,6 +16,7 @@ import sys
 import textwrap
 from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import NoReturn, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -60,6 +61,8 @@ from horsies.core.worker.slots import (
 )
 
 pytestmark = [pytest.mark.unit]
+
+CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
 
 FIXTURES = Path(__file__).parent.parent / 'fixtures' / 'slots'
 SCRIPTED_CHILD = str(FIXTURES / 'scripted_child.py')
@@ -128,7 +131,7 @@ def _frame(task_name: str, argument: str | None = None) -> RunFrame:
         worker_id='worker-1',
         is_workflow_task=False,
         timeout=NoTimeout(),
-        claimed_at=None,
+        claimed_at=CLAIMED_AT,
     )
 
 

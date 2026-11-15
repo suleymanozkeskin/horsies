@@ -199,7 +199,7 @@ class TestCommand:
         statement = success_statement(
             FinishWorkflowSuccess(
                 task_id=TASK_ID,
-                fence=OwnedClaim(worker_id='w-1', claimed_at=None),
+                fence=OwnedClaim(worker_id='w-1', claimed_at=NOW),
                 result_json='{"ok": 1}',
             ),
         )
@@ -208,7 +208,7 @@ class TestCommand:
         assert dict(statement.parameters) == {
             'task_id': TASK_ID,
             'worker_id': 'w-1',
-            'claimed_at': None,
+            'claimed_at': NOW,
             'result': '{"ok": 1}',
         }
 

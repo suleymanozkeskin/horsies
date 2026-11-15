@@ -352,7 +352,12 @@ class _Rig:
 
     async def handle_timeout(self) -> object:
         return await asyncio.wait_for(
-            self.worker._handle_task_timeout(self.handle, TASK_ID, TIMEOUT_MS),
+            self.worker._handle_task_timeout(
+                self.handle,
+                TASK_ID,
+                TIMEOUT_MS,
+                self.handle.frame.claimed_at,
+            ),
             TEST_WAIT_S,
         )
 
@@ -367,6 +372,7 @@ class _Rig:
                 TASK_ID,
                 timeout=TaskTimeout(ms=1),
                 task_name='timeout_task',
+                claimed_at=self.handle.frame.claimed_at,
             ),
             TEST_WAIT_S,
         )

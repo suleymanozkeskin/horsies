@@ -269,7 +269,7 @@ def test_batch_outcome_log_contains_only_that_tasks_expected_fence(
             worker_id='worker',
             claim_generations=(
                 ('one', _NOW),
-                ('other-task-must-not-repeat', None),
+                ('other-task-must-not-repeat', _NOW + timedelta(seconds=1)),
             ),
         ),
     )
@@ -287,7 +287,7 @@ def test_batch_outcome_log_contains_only_that_tasks_expected_fence(
 def _fused_command(task_id: str) -> CompleteTaskFused:
     return CompleteTaskFused(
         task_id=task_id,
-        fence=OwnedClaim(worker_id='worker-1', claimed_at=None),
+        fence=OwnedClaim(worker_id='worker-1', claimed_at=_NOW),
         result_json='{"ok":null}',
         notify_channel='task_queue_default',
         notify_payload=f'capacity:{task_id}',
@@ -343,7 +343,14 @@ def test_the_batch_parameter_holds_each_command_in_input_order() -> None:
             'task_queue_other',
             'capacity:b',
         ],
-        ['a', 'worker-1', None, '{"ok":null}', 'task_queue_default', 'capacity:a'],
+        [
+            'a',
+            'worker-1',
+            '2026-08-04T00:00:00+00:00',
+            '{"ok":null}',
+            'task_queue_default',
+            'capacity:a',
+        ],
     ]
 
 

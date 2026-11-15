@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -56,6 +57,7 @@ WORKER_ID = 'w-shared-kill-test'
 FAKE_DEAD_PID = 2**22 - 1
 TIMEOUT_MS = 5_000
 WORK = SeatTask(timeout_ms=TIMEOUT_MS, cancel_grace_ms=1_000)
+CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
 
 
 def _options(auto_retry_for: list[str]) -> str:
@@ -106,7 +108,7 @@ async def _insert_shared_task(
                 (id, task_name, queue_name, priority, args, kwargs, status,
                  sent_at, created_at, updated_at, claimed, retry_count,
                  max_retries, started_at, enqueue_sha, claimed_by_worker_id,
-                 worker_pid, task_options, execution,
+                 claimed_at, worker_pid, task_options, execution,
                  retention_class_key, command_fingerprint_version,
                  command_fingerprint, retain_rerun_input,
                  prepared_rerun_input_disposition)
@@ -114,7 +116,7 @@ async def _insert_shared_task(
                 (:id, 'shared_kill', 'default', 100, '[]', '{}', :status,
                  :sent_at, NOW(), NOW(), TRUE, 0,
                  3, NOW(), :sha, :owner,
-                 :worker_pid, :options, 'SHARED_ASYNC',
+                 :claimed_at, :worker_pid, :options, 'SHARED_ASYNC',
                  'standard_30d', 1,
                  sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
                  FALSE, 'DECLINED_BY_POLICY')
@@ -125,6 +127,7 @@ async def _insert_shared_task(
             'sent_at': sent_at,
             'sha': sha,
             'owner': WORKER_ID,
+            'claimed_at': CLAIMED_AT,
             'worker_pid': FAKE_DEAD_PID,
             'options': options,
         },
@@ -141,7 +144,7 @@ async def _finalize(worker: Worker, task_id: str, outcome: SharedOutcome) -> Non
         kwargs_json=None,
         worker_id=WORKER_ID,
         is_workflow_task=False,
-        claimed_at=None,
+        claimed_at=CLAIMED_AT,
         work=WORK,
     )
     handle = SharedHandle(request.frame_for(1), asyncio.get_running_loop())
@@ -153,7 +156,7 @@ async def _finalize(worker: Worker, task_id: str, outcome: SharedOutcome) -> Non
         False,
         WORK,
         task_name='shared_kill',
-        claimed_at=None,
+        claimed_at=CLAIMED_AT,
     )
 
 

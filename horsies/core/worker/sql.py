@@ -232,9 +232,8 @@ GET_NONRUNNABLE_WORKFLOW_TASK_IDS_SQL = text("""
     FROM horsies_find_non_runnable_workflow_tasks(CAST(:ids AS uuid[]))
 """)
 
-# The optional :claimed_at fence scopes the release to a specific claim
-# generation (C10); NULL disables it. Every caller passes its dispatch's
-# generation, so it cannot release a re-claimed row.
+# Fenced to this worker and the claim generation of the dispatch
+# (:claimed_at), so it cannot release a row that was claimed again.
 UNCLAIM_CLAIMED_TASK_SQL = text("""
     UPDATE horsies_tasks
     SET status = 'PENDING',
@@ -252,8 +251,7 @@ UNCLAIM_CLAIMED_TASK_SQL = text("""
     WHERE id = :id
       AND status = 'CLAIMED'
       AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
-      AND (CAST(:claimed_at AS TIMESTAMPTZ) IS NULL
-           OR claimed_at = CAST(:claimed_at AS TIMESTAMPTZ))
+      AND claimed_at = CAST(:claimed_at AS TIMESTAMPTZ)
 """)
 
 # A claimed row whose class does not fit the task that this worker
@@ -312,8 +310,7 @@ READ_IN_FLIGHT_ATTEMPT_SQL = text("""
     WHERE id = :id
       AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
       AND status IN ('CLAIMED', 'RUNNING')
-      AND (CAST(:claimed_at AS TIMESTAMPTZ) IS NULL
-           OR claimed_at = CAST(:claimed_at AS TIMESTAMPTZ))
+      AND claimed_at = CAST(:claimed_at AS TIMESTAMPTZ)
 """)
 
 SCHEDULE_STALE_TASK_RETRY_SQL = text("""

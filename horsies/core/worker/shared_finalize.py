@@ -26,7 +26,7 @@ declares the slice of ``Worker`` it relies on.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Optional, assert_never
+from typing import TYPE_CHECKING, Any, assert_never
 
 from horsies.core.logging import get_logger
 from horsies.core.models.tasks import OperationalErrorCode, OutcomeCode
@@ -74,20 +74,20 @@ class SharedKillFinalizeMixin:
             queue_name: str,
             is_workflow_task: bool,
             task_name: str,
-            claimed_at: Optional[datetime],
+            claimed_at: datetime,
         ) -> Result[None, _FinalizeError]: ...
         async def _finalize_shared_timeout(
             self,
             task_id: str,
             timeout_ms: int,
-            claimed_at: Optional[datetime],
+            claimed_at: datetime,
             retry: RetryPlacement,
         ) -> Result[None, _FinalizeError]: ...
         async def _recover_worker_future_failure(
             self,
             task_id: str,
             reason: str,
-            claimed_at: Optional[datetime] = None,
+            claimed_at: datetime,
             *,
             failure_code: CrashRecoveryCode = OperationalErrorCode.WORKER_CRASHED,
             retry: RetryPlacement = RetryPlacement.SAME_CLASS,
@@ -108,7 +108,7 @@ class SharedKillFinalizeMixin:
         task_id: str,
         killed: SeatKilled,
         work: SharedWork,
-        claimed_at: Optional[datetime],
+        claimed_at: datetime,
         *,
         queue_name: str,
         is_workflow_task: bool,
@@ -179,7 +179,7 @@ class SharedKillFinalizeMixin:
         task_id: str,
         killed_by: str,
         work: SharedWork,
-        claimed_at: Optional[datetime],
+        claimed_at: datetime,
         retry: RetryPlacement,
     ) -> Result[None, _FinalizeError]:
         """Write ``TASK_TIMEOUT`` for a run that was past its deadline at the
@@ -217,7 +217,7 @@ class SharedKillFinalizeMixin:
         self,
         task_id: str,
         reason: str,
-        claimed_at: Optional[datetime],
+        claimed_at: datetime,
         failure_code: OperationalErrorCode,
         retry: RetryPlacement,
     ) -> Result[None, _FinalizeError]:
@@ -258,7 +258,7 @@ class SharedKillFinalizeMixin:
 def future_retry_data(
     failure_code: CrashRecoveryCode,
     retry: RetryPlacement,
-    claimed_at: Optional[datetime],
+    claimed_at: datetime,
 ) -> dict[str, Any]:
     """The data of a future-stage error whose retry must write
     ``failure_code`` with ``retry``. Pure."""
@@ -288,7 +288,7 @@ def future_retry_write(
 def timeout_retry_data(
     timeout_ms: int,
     retry: RetryPlacement,
-    claimed_at: Optional[datetime],
+    claimed_at: datetime,
 ) -> dict[str, Any]:
     """The data of a timeout-stage error: the TASK_TIMEOUT write that its
     retry runs again, for an attempt of ``timeout_ms`` whose retry runs at
@@ -302,7 +302,7 @@ def timeout_retry_data(
 
 def timeout_retry_write(
     data: dict[str, Any] | None,
-) -> tuple[int, RetryPlacement, Optional[datetime]]:
+) -> tuple[int, RetryPlacement, datetime]:
     """The ``timeout_ms``, the retry placement and the claim generation that
     ``timeout_retry_data`` kept. Data of another shape is a defect: only
     ``timeout_retry_data`` builds the data of a timeout-stage error.
@@ -311,10 +311,28 @@ def timeout_retry_write(
         case {
             'timeout_ms': int() as timeout_ms,
             'retry': str() as placement,
-            'claimed_at': datetime() | None as claimed_at,
+            'claimed_at': datetime() as claimed_at,
         }:
             return timeout_ms, RetryPlacement(placement), claimed_at
         case _:
             raise AssertionError(
                 f'the data of a timeout-stage error has no TASK_TIMEOUT write: {data!r}',
+            )
+
+
+def kept_claim_time(data: dict[str, Any] | None) -> datetime:
+    """The claim generation that the data of a finalize error kept, for the
+    fence of its retry.
+
+    Each writer of the data of a phase-1, future-stage or timeout-stage
+    error keeps the claim time of the dispatch. Data without one is a
+    defect: ``AssertionError``, which names the keys the data has. Pure.
+    """
+    match data:
+        case {'claimed_at': datetime() as claimed_at}:
+            return claimed_at
+        case _:
+            raise AssertionError(
+                'the data of a finalize error has no claim time; its keys are '
+                f'{sorted(data or {})}',
             )

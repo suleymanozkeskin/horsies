@@ -40,8 +40,12 @@ from horsies.core.worker.sql import (
     COUNT_GLOBAL_IN_FLIGHT_SQL,
     COUNT_IN_FLIGHT_FOR_WORKER_SQL,
     COUNT_QUEUE_IN_FLIGHT_HARD_SQL,
+    READ_IN_FLIGHT_ATTEMPT_SQL,
+    RETURN_CLAIMED_TASK_AS_ISOLATED_SQL,
     UNCLAIM_CLAIMED_TASK_SQL,
 )
+
+CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
 
 BROKER = PostgresConfig(
     database_url='postgresql+psycopg://user:pass@localhost/db',
@@ -307,6 +311,7 @@ class TestOwnershipGateBehavioral:
                 'task-1',
                 'worker-A',
                 is_workflow_task=False,
+                claimed_at=CLAIMED_AT,
             )
 
         assert result is None, 'Ownership confirmed should return None'
@@ -340,7 +345,11 @@ class TestOwnershipGateBehavioral:
                 _confirm_ownership_and_set_running,
             )
 
-            result = _confirm_ownership_and_set_running('task-1', 'worker-A')
+            result = _confirm_ownership_and_set_running(
+                'task-1',
+                'worker-A',
+                claimed_at=CLAIMED_AT,
+            )
 
         assert isinstance(result, tuple), 'Ownership lost should return a tuple'
         ok, _result_json, reason = result
@@ -360,7 +369,11 @@ class TestOwnershipGateBehavioral:
                 _confirm_ownership_and_set_running,
             )
 
-            result = _confirm_ownership_and_set_running('task-1', 'worker-A')
+            result = _confirm_ownership_and_set_running(
+                'task-1',
+                'worker-A',
+                claimed_at=CLAIMED_AT,
+            )
 
         assert isinstance(result, tuple), 'Exception path should return a tuple'
         ok, _result_json, reason = result
@@ -388,6 +401,7 @@ class TestOwnershipGateBehavioral:
                 'task-1',
                 'worker-A',
                 is_workflow_task=False,
+                claimed_at=CLAIMED_AT,
                 start_check=deadline_fired,
             )
 
@@ -409,6 +423,7 @@ class TestOwnershipGateBehavioral:
                 'task-1',
                 'worker-A',
                 is_workflow_task=False,
+                claimed_at=CLAIMED_AT,
                 start_check=StartAllowed,
             )
 
@@ -482,6 +497,24 @@ class TestUnclaimSqlClearsLeaseExpiry:
         sql_text = UNCLAIM_CLAIMED_TASK_SQL.text
         normalised = ' '.join(sql_text.split())
         assert 'claim_expires_at = NULL' in normalised
+
+    @pytest.mark.parametrize(
+        'statement',
+        [
+            UNCLAIM_CLAIMED_TASK_SQL,
+            READ_IN_FLIGHT_ATTEMPT_SQL,
+            RETURN_CLAIMED_TASK_AS_ISOLATED_SQL,
+        ],
+        ids=['release', 'in-flight read', 'class return'],
+    )
+    def test_the_claim_time_fence_has_no_null_branch(self, statement: Any) -> None:
+        """Each statement fences on the claim time of the dispatch. A NULL
+        claim time matches no row: nothing can turn the check off."""
+        where = ' '.join(statement.text.split()).split(' WHERE ', 1)[1]
+
+        assert 'AND claimed_at = CAST(:claimed_at AS TIMESTAMPTZ)' in where
+        assert 'IS NULL' not in where
+        assert 'COALESCE' not in where
 
     def test_unclaim_claimed_task_matches_only_claimed_tasks(self) -> None:
         """Pre-execution unclaim must not reset potentially executed RUNNING rows."""

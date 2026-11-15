@@ -92,6 +92,8 @@ from horsies.core.worker import child_runner
 from horsies.core.worker.task_loop import TaskLoop
 from tests.fixtures.run_return import wire_of
 
+CLAIMED_AT = datetime.datetime(2026, 11, 10, 9, 0, tzinfo=datetime.timezone.utc)
+
 Positive = Annotated[int, Field(gt=0)]
 Upper = Annotated[str, AfterValidator(str.upper)]
 T = TypeVar('T')
@@ -1170,6 +1172,7 @@ def _run_child(app: Horsies, task_name: str) -> tuple[bool, str, str | None]:
                 task_id='task-id',
                 master_worker_id='worker',
                 is_workflow_task=False,
+                claimed_at=CLAIMED_AT,
                 task_loop=TaskLoop(),
             )
         )

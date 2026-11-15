@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Annotated, Any, ForwardRef, Literal, Optional
 from unittest.mock import MagicMock, patch
 
@@ -37,6 +38,8 @@ from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.worker import child_runner
 from horsies.core.worker.task_loop import TaskLoop
 from tests.fixtures.run_return import wire_of
+
+CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
 
 Positive = Annotated[int, Field(gt=0)]
 Upper = Annotated[str, AfterValidator(str.upper)]
@@ -464,6 +467,7 @@ def _run_child(
                 task_id='task-id',
                 master_worker_id='worker',
                 is_workflow_task=True,
+                claimed_at=CLAIMED_AT,
                 task_loop=TaskLoop(),
             )
         )

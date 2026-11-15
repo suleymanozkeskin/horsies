@@ -32,13 +32,13 @@ from horsies.core.worker.child_protocol import RunFrame, SharedRunFrame
 class LiveDispatch:
     """One task that a live worker child holds.
 
-    ``claimed_at`` is the claim generation of the dispatch. None disables the
-    generation half of the heartbeat fence, as in ``OwnedClaim``.
+    ``claimed_at`` is the claim generation of the dispatch, which the
+    heartbeat fence checks with the worker, as ``OwnedClaim`` does.
     """
 
     ticket: int
     task_id: str
-    claimed_at: datetime | None
+    claimed_at: datetime
     pid: int
 
 

@@ -8,6 +8,7 @@ horsies_tasks and horsies_workflow_tasks rows accordingly.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -20,6 +21,10 @@ from horsies.core.worker.worker import Worker
 from tests.integration.conftest import compute_test_enqueue_sha
 
 pytestmark = [pytest.mark.integration]
+
+# The claim time of every claimed row seeded here. The claim rows handed to
+# the guard carry it, as the rows of ``horsies_claim`` do.
+CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
 
 
 # ---------------------------------------------------------------------------
@@ -58,7 +63,7 @@ async def _insert_claimed_task(
             VALUES
                 (:id, 'filter_test', 'default', 100, '[]', '{}',
                  'CLAIMED', :sent_at, NOW(), NOW(), TRUE, 0,
-                 0, NOW(), :claimed_by_worker_id, :enqueue_sha,
+                 0, :claimed_at, :claimed_by_worker_id, :enqueue_sha,
                  'standard_30d', 1,
                  sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
                  FALSE, 'DECLINED_BY_POLICY')
@@ -66,6 +71,7 @@ async def _insert_claimed_task(
         {
             'id': task_id,
             'sent_at': sent_at,
+            'claimed_at': CLAIMED_AT,
             'claimed_by_worker_id': claimed_by_worker_id,
             'enqueue_sha': sha,
         },
@@ -162,7 +168,16 @@ async def _get_task_claim_row(session: AsyncSession, task_id: str) -> tuple[str,
 
 def _make_rows(*task_ids: str) -> list[dict[str, Any]]:
     """Build the minimal claimed-row dicts the method expects."""
-    return [{'id': tid, 'task_name': 'filter_test', 'args': '[]', 'kwargs': '{}'} for tid in task_ids]
+    return [
+        {
+            'id': tid,
+            'task_name': 'filter_test',
+            'args': '[]',
+            'kwargs': '{}',
+            'claimed_at': CLAIMED_AT,
+        }
+        for tid in task_ids
+    ]
 
 
 # ---------------------------------------------------------------------------

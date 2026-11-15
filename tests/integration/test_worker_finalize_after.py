@@ -66,7 +66,11 @@ from tests.integration.conftest import (
     start_ok,
 )
 from tests.broker_resources_support import listener_of
-from tests.fixtures.slots.handles import finished_handle, task_finished_handle
+from tests.fixtures.slots.handles import (
+    HANDLE_CLAIMED_AT,
+    finished_handle,
+    task_finished_handle,
+)
 from tests.fixtures.run_return import wire_of
 
 pytestmark = [pytest.mark.integration]
@@ -186,6 +190,7 @@ async def _insert_running_task(
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
                  max_retries, started_at, enqueue_sha, claimed_by_worker_id,
+                 claimed_at,
                  retention_class_key, command_fingerprint_version,
                  command_fingerprint, retain_rerun_input,
                  prepared_rerun_input_disposition)
@@ -193,6 +198,7 @@ async def _insert_running_task(
                 (:id, 'finalize_after_test', 'default', 100, '[]', '{}',
                  'RUNNING', :sent_at, NOW(), NOW(), FALSE, 0,
                  0, NOW(), :enqueue_sha, :claimed_by_worker_id,
+                 :claimed_at,
                  'standard_30d', 1,
                  sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
                  FALSE, 'DECLINED_BY_POLICY')
@@ -202,6 +208,7 @@ async def _insert_running_task(
             'sent_at': sent_at,
             'enqueue_sha': sha,
             'claimed_by_worker_id': TEST_WORKER_ID,
+            'claimed_at': HANDLE_CLAIMED_AT,
         },
     )
     if is_workflow_task:
@@ -223,7 +230,7 @@ async def _insert_owned_running_task(
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
                  max_retries, started_at, enqueue_sha, claimed_by_worker_id,
-                 worker_hostname, worker_pid, worker_process_name,
+                 claimed_at, worker_hostname, worker_pid, worker_process_name,
                  retention_class_key, command_fingerprint_version,
                  command_fingerprint, retain_rerun_input,
                  prepared_rerun_input_disposition)
@@ -231,7 +238,7 @@ async def _insert_owned_running_task(
                 (:id, 'finalize_after_owned_test', 'default', 100, '[]', '{}',
                  'RUNNING', :sent_at, NOW(), NOW(), FALSE, 0,
                  0, NOW(), :enqueue_sha, :worker_id,
-                 'stale-host', 1234, 'stale-process',
+                 :claimed_at, 'stale-host', 1234, 'stale-process',
                  'standard_30d', 1,
                  sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
                  FALSE, 'DECLINED_BY_POLICY')
@@ -241,6 +248,7 @@ async def _insert_owned_running_task(
             'sent_at': sent_at,
             'enqueue_sha': sha,
             'worker_id': worker_id,
+            'claimed_at': HANDLE_CLAIMED_AT,
         },
     )
     if is_workflow_task:
@@ -319,6 +327,7 @@ async def test_happy_path_success_completes_and_clears(
 
     result = await worker._finalize_after(
         handle, task_id, task_name='finalize_after_test',
+        claimed_at=HANDLE_CLAIMED_AT,
     )
 
     assert is_ok(result)
@@ -350,6 +359,7 @@ async def test_phase1_skip_returns_ok_none(
 
     result = await worker._finalize_after(
         handle, task_id, task_name='finalize_after_test',
+        claimed_at=HANDLE_CLAIMED_AT,
     )
 
     assert is_ok(result)
@@ -387,6 +397,7 @@ async def test_phase1_err_propagated_with_finalize_context(
 
     result = await worker._finalize_after(
         handle, task_id, task_name='finalize_after_test',
+        claimed_at=HANDLE_CLAIMED_AT,
     )
 
     assert is_err(result)
@@ -397,7 +408,7 @@ async def test_phase1_err_propagated_with_finalize_context(
         'queue_name': 'default',
         'is_workflow_task': True,
         'task_name': 'finalize_after_test',
-        'claimed_at': None,
+        'claimed_at': HANDLE_CLAIMED_AT,
     }
     worker._finalize_workflow_phase.assert_not_awaited()
 
@@ -427,6 +438,7 @@ async def test_phase2_err_propagated_but_db_stays_terminal(
 
     result = await worker._finalize_after(
         handle, task_id, task_name='finalize_after_test',
+        claimed_at=HANDLE_CLAIMED_AT,
     )
 
     assert is_err(result)
@@ -455,6 +467,7 @@ async def test_child_lost_returns_err(
 
     result = await worker._finalize_after(
         finished_handle(_LOST), task_id, task_name='finalize_after_test',
+        claimed_at=HANDLE_CLAIMED_AT,
     )
 
     assert is_err(result)
@@ -480,6 +493,7 @@ async def test_child_lost_with_recovery_db_error_stays_retryable(
 
     result = await worker._finalize_after(
         finished_handle(_LOST), task_id, task_name='finalize_after_test',
+        claimed_at=HANDLE_CLAIMED_AT,
     )
 
     assert is_err(result)
@@ -498,6 +512,7 @@ async def test_child_lost_marks_non_retryable_running_task_failed(
 
     await worker._finalize_after(
         finished_handle(_LOST), task_id, task_name='finalize_after_owned_test',
+        claimed_at=HANDLE_CLAIMED_AT,
     )
 
     row = (
@@ -553,6 +568,7 @@ async def test_a_child_lost_after_the_return_writes_what_the_body_returned(
         task_id,
         timeout=TaskTimeout(ms=1_000),
         task_name='finalize_after_owned_test',
+        claimed_at=HANDLE_CLAIMED_AT,
     )
 
     assert result == Ok(None)
@@ -594,6 +610,7 @@ async def test_not_dispatched_returns_the_claimed_row_to_pending(
         finished_handle(NotDispatched(NotRunCause.POOL_STOPPING)),
         task_id,
         task_name='finalize_after_owned_test',
+        claimed_at=HANDLE_CLAIMED_AT,
     )
 
     assert result == Ok(None)
@@ -624,6 +641,7 @@ async def test_phase1_ok_none_clears_only_phase1_attempts(
 
     result = await worker._finalize_after(
         handle, task_id, task_name='finalize_after_test',
+        claimed_at=HANDLE_CLAIMED_AT,
     )
 
     assert is_ok(result)
@@ -774,6 +792,7 @@ async def test_task_expired_plain_task_skips_finalization(
         task_id,
         is_workflow_task=False,
         task_name='finalize_after_test',
+        claimed_at=HANDLE_CLAIMED_AT,
     )
 
     assert is_ok(result)
@@ -809,6 +828,7 @@ async def test_task_expired_workflow_task_loader_error_propagates(
         task_id,
         is_workflow_task=True,
         task_name='finalize_after_test',
+        claimed_at=HANDLE_CLAIMED_AT,
     )
 
     assert is_err(result)
@@ -840,6 +860,7 @@ async def test_full_success_clears_both_retry_stages(
 
     result = await worker._finalize_after(
         handle, task_id, task_name='finalize_after_test',
+        claimed_at=HANDLE_CLAIMED_AT,
     )
 
     assert is_ok(result)

@@ -41,6 +41,10 @@ from tests.integration.history_seeding import read_attempts
 
 pytestmark = [pytest.mark.integration]
 
+# The claim generation of every RUNNING row seeded here, which the fences of
+# the worker check.
+CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
+
 
 class _TaskRow(TypedDict):
     status: str
@@ -93,7 +97,7 @@ async def _insert_owned_running_task(
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, enqueued_at, created_at, updated_at,
                  claimed, retry_count, max_retries, started_at, enqueue_sha,
-                 claimed_by_worker_id, worker_hostname, worker_pid,
+                 claimed_by_worker_id, claimed_at, worker_hostname, worker_pid,
                  worker_process_name, task_options, finalizing_at,
                  finalizing_by_worker_id, is_workflow_task,
                  retention_class_key, command_fingerprint_version,
@@ -103,7 +107,7 @@ async def _insert_owned_running_task(
                 (:id, 'lifecycle_regression_task', 'default', 100, '[]', '{}',
                  'RUNNING', :sent_at, NOW(), NOW(), NOW(),
                  FALSE, 0, :max_retries, :started_at, :enqueue_sha,
-                 :worker_id, 'itest-host', 4321,
+                 :worker_id, :claimed_at, 'itest-host', 4321,
                  'itest-process', :task_options, :finalizing_at,
                  :finalizing_by_worker_id, :is_workflow_task,
                  'standard_30d', 1,
@@ -115,6 +119,7 @@ async def _insert_owned_running_task(
             'sent_at': sent_at,
             'enqueue_sha': sha,
             'worker_id': worker_id,
+            'claimed_at': CLAIMED_AT,
             'max_retries': max_retries,
             'task_options': task_options,
             'started_at': started_at or datetime.now(timezone.utc),
@@ -278,7 +283,11 @@ async def test_future_failure_on_non_retryable_running_task_is_terminal_failed(
         max_retries=0,
     )
 
-    outcome = await worker._recover_worker_future_failure(task_id, 'process died')
+    outcome = await worker._recover_worker_future_failure(
+        task_id,
+        'process died',
+        CLAIMED_AT,
+    )
 
     assert outcome is _RequeueOutcome.REQUEUED
     row = await _task_row(session, task_id)
@@ -311,9 +320,17 @@ async def test_future_failure_retry_replays_committed_terminal_phase(
         is_workflow_task=True,
     )
 
-    first = await worker._recover_worker_future_failure(task_id, 'process died')
+    first = await worker._recover_worker_future_failure(
+        task_id,
+        'process died',
+        CLAIMED_AT,
+    )
     worker._finalize_workflow_phase.reset_mock()  # type: ignore[attr-defined]
-    replay = await worker._recover_worker_future_failure(task_id, 'process died')
+    replay = await worker._recover_worker_future_failure(
+        task_id,
+        'process died',
+        CLAIMED_AT,
+    )
 
     assert first is _RequeueOutcome.REQUEUED
     assert replay is _RequeueOutcome.TERMINAL_REPLAYED
@@ -343,8 +360,16 @@ async def test_future_failure_replay_of_a_plain_task_sends_no_second_wake(
         max_retries=0,
     )
 
-    first = await worker._recover_worker_future_failure(task_id, 'process died')
-    replay = await worker._recover_worker_future_failure(task_id, 'process died')
+    first = await worker._recover_worker_future_failure(
+        task_id,
+        'process died',
+        CLAIMED_AT,
+    )
+    replay = await worker._recover_worker_future_failure(
+        task_id,
+        'process died',
+        CLAIMED_AT,
+    )
 
     assert first is _RequeueOutcome.REQUEUED
     assert replay is _RequeueOutcome.TERMINAL_REPLAYED
@@ -379,7 +404,11 @@ async def test_future_failure_on_retryable_running_task_respects_retry_policy(
         max_retries=1,
     )
 
-    outcome = await worker._recover_worker_future_failure(task_id, 'process died')
+    outcome = await worker._recover_worker_future_failure(
+        task_id,
+        'process died',
+        CLAIMED_AT,
+    )
 
     assert outcome is _RequeueOutcome.REQUEUED
     row = await _task_row(session, task_id)
@@ -414,7 +443,11 @@ async def test_future_failure_terminal_phase2_error_schedules_finalize_retry(
     )
     worker._handle_finalize_error = AsyncMock()  # type: ignore[method-assign]
 
-    outcome = await worker._recover_worker_future_failure(task_id, 'process died')
+    outcome = await worker._recover_worker_future_failure(
+        task_id,
+        'process died',
+        CLAIMED_AT,
+    )
 
     assert outcome is _RequeueOutcome.REQUEUED
     row = await _task_row(session, task_id)
@@ -456,6 +489,7 @@ async def test_finalize_worker_failure_runs_phase2(
         queue_name='default',
         is_workflow_task=True,
         task_name='lifecycle_regression_test',
+        claimed_at=CLAIMED_AT,
     )
 
     assert is_ok(result)
@@ -495,6 +529,7 @@ async def test_plain_worker_failure_wakes_the_queue_in_its_write(
             queue_name='default',
             is_workflow_task=False,
             task_name='lifecycle_regression_test',
+            claimed_at=CLAIMED_AT,
         )
 
         payloads = [notify.payload async for notify in listener.notifies(timeout=0.5)]

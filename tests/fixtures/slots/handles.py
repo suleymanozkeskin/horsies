@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
+from typing import Final
 
 from horsies.core.worker.child_protocol import NoTaskLoop, RssUnreadable, RunFrame
 from horsies.core.worker.stored_timeout import NoTimeout
 from horsies.core.worker.slots import SlotHandle, SlotOutcome, TaskFinished
+
+HANDLE_CLAIMED_AT: Final = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
+"""The claim time of the run frame of every handle built here."""
 
 
 def _run_frame(task_id: str) -> RunFrame:
@@ -18,7 +23,7 @@ def _run_frame(task_id: str) -> RunFrame:
         worker_id='worker-1',
         is_workflow_task=False,
         timeout=NoTimeout(),
-        claimed_at=None,
+        claimed_at=HANDLE_CLAIMED_AT,
     )
 
 

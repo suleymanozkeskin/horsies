@@ -100,8 +100,8 @@ def _run_in_process(
         queue_name: str = 'default',
         is_workflow_task: bool = True,
         timeout: StoredTimeout = NoTimeout(),
-        claimed_at: datetime | None = None,
         *,
+        claimed_at: datetime,
         execution: Execution,
         task_options: str | None,
     ) -> None:

@@ -23,6 +23,7 @@ Per row, the tests pin:
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from collections.abc import AsyncGenerator, Generator, Sequence
 from dataclasses import replace
@@ -45,7 +46,9 @@ from horsies.core.lifecycle.outcomes import (
     TaskAbsent,
     TerminalizationOutcome,
 )
+from horsies.core.lifecycle.outcomes import decode_outcome_row
 from horsies.core.lifecycle.persistence import (
+    _COMPLETE_TASKS_FUSED_SQL,
     BatchWriteError,
     FusedCompletionBatch,
     apply_fused_batch,
@@ -222,7 +225,7 @@ def recorded(monkeypatch: pytest.MonkeyPatch) -> _RecordedBatches:
     return recording
 
 
-def _command(task_id: str, claimed_at: datetime | None) -> CompleteTaskFused:
+def _command(task_id: str, claimed_at: datetime) -> CompleteTaskFused:
     return CompleteTaskFused(
         task_id=task_id,
         fence=OwnedClaim(worker_id=WORKER_ID, claimed_at=claimed_at),
@@ -235,7 +238,7 @@ def _command(task_id: str, claimed_at: datetime | None) -> CompleteTaskFused:
 async def _finalize(
     worker: Worker,
     task_id: str,
-    claimed_at: datetime | None,
+    claimed_at: datetime,
 ) -> Result[None, _FinalizeError]:
     return await worker._finalize_task_result(
         task_id,
@@ -251,7 +254,7 @@ async def _finalize(
 
 async def _finalize_together(
     worker: Worker,
-    rows: Sequence[tuple[str, datetime | None]],
+    rows: Sequence[tuple[str, datetime]],
 ) -> list[Result[None, _FinalizeError]]:
     """Finalize ``rows`` from finalizers that all submit in one loop turn."""
     return list(
@@ -544,23 +547,50 @@ async def test_a_claim_generation_keeps_its_microseconds_and_its_offset(
     assert await _live_statuses(session, [same, later]) == {later: 'RUNNING'}
 
 
-async def test_a_row_without_a_claim_generation_is_fenced_on_its_worker(
+def _batch_row(task_id: str, claimed_at: str | None) -> list[str | None]:
+    """One row of the batch parameter, as ``_fused_batch_parameters`` builds
+    it, with ``claimed_at`` as given."""
+    return [
+        task_id,
+        WORKER_ID,
+        claimed_at,
+        ok_result_json(),
+        CHANNEL,
+        f'capacity:{task_id}',
+    ]
+
+
+async def test_the_stored_batch_function_fences_a_null_generation_on_its_worker(
     direct: ProxiedWorker,
     session: AsyncSession,
-    recorded: _RecordedBatches,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """A NULL claimed_at in the array disables the generation half for its
-    row only, as in the single function."""
+    """The stored function keeps its contract: a NULL claimed_at in the
+    array disables the generation half for its row only, as in the single
+    function. The worker never sends one: each command carries a claim
+    time, so this calls the statement with a hand-built parameter."""
     (first, _), (second, second_at) = await _running_tasks(session, 2)
-
-    results = await _finalize_together(
-        direct.worker,
-        [(first, None), (second, second_at)],
+    batch = json.dumps(
+        [_batch_row(first, None), _batch_row(second, second_at.isoformat())],
     )
 
-    assert results == [Ok(None), Ok(None)]
-    assert recorded.outcomes() == {first: [Applied], second: [Applied]}
+    async with direct.worker.sf() as statement_session:
+        result = await statement_session.execute(
+            _COMPLETE_TASKS_FUSED_SQL,
+            {'batch': batch},
+        )
+        rows = result.mappings().all()
+        await statement_session.commit()
+
+    outcomes = {
+        outcome.task_id: type(outcome)
+        for outcome in (
+            decode_outcome_row({str(key): value for key, value in row.items()})
+            for row in rows
+        )
+    }
+    assert outcomes == {first: Applied, second: Applied}
+    assert await _live_statuses(session, [first, second]) == {}
 
 
 async def test_a_replay_of_a_whole_batch_is_already_applied_and_writes_nothing(

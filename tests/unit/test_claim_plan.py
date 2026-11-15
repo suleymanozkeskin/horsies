@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 # pyright: reportPrivateUsage=false
+from datetime import datetime, timedelta, timezone
 
 import json
 import logging
@@ -69,6 +70,8 @@ from horsies.core.worker.worker import Worker, _log_claim_plan
 from pydantic import SecretStr
 
 pytestmark = [pytest.mark.unit]
+
+CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
 
 ISOLATED = Execution.ISOLATED
 SHARED_ASYNC = Execution.SHARED_ASYNC
@@ -439,6 +442,11 @@ def _session(
     return session
 
 
+def _claim_time(task_id: str) -> datetime:
+    """The claim time that the claim returns for ``task_id``: one per task."""
+    return CLAIMED_AT + timedelta(minutes=int(task_id.removeprefix('t')))
+
+
 def _row(task_id: str, task_name: str, execution: str) -> tuple[object, ...]:
     return (
         'CLAIMED',
@@ -449,7 +457,7 @@ def _row(task_id: str, task_name: str, execution: str) -> tuple[object, ...]:
         'q',
         False,
         None,
-        'GEN-' + task_id,
+        _claim_time(task_id),
         execution,
         None,
     )
@@ -505,7 +513,11 @@ class TestClaimPassWithClasses:
             if call.args[0] is RETURN_CLAIMED_TASK_AS_ISOLATED_SQL
         ]
         assert returns == [
-            {'id': 't1', 'wid': worker.worker_instance_id, 'claimed_at': 'GEN-t1'},
+            {
+                'id': 't1',
+                'wid': worker.worker_instance_id,
+                'claimed_at': _claim_time('t1'),
+            },
         ]
         notifies = [
             call.args[1]

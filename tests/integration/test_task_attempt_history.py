@@ -45,6 +45,10 @@ from tests.integration.conftest import compute_test_enqueue_sha
 
 pytestmark = [pytest.mark.integration]
 
+# The claim generation of every RUNNING row seeded here, which the fences of
+# the worker check.
+CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
+
 NOW = datetime.now(timezone.utc)
 
 
@@ -146,7 +150,7 @@ async def _insert_running_task(
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
                  max_retries, started_at, enqueue_sha,
-                 claimed_by_worker_id, worker_hostname, worker_pid,
+                 claimed_by_worker_id, claimed_at, worker_hostname, worker_pid,
                  worker_process_name, good_until, task_options,
                  retention_class_key, command_fingerprint_version,
                  command_fingerprint, retain_rerun_input,
@@ -155,7 +159,7 @@ async def _insert_running_task(
                 (:id, :task_name, 'default', 100, '[]', '{}',
                  'RUNNING', :sent_at, NOW(), NOW(), FALSE, :retry_count,
                  :max_retries, NOW(), :enqueue_sha,
-                 :worker_id, :worker_hostname, :worker_pid,
+                 :worker_id, :claimed_at, :worker_hostname, :worker_pid,
                  :worker_process_name, :good_until, :task_options,
                  'standard_30d', 1,
                  sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
@@ -169,6 +173,7 @@ async def _insert_running_task(
             'retry_count': retry_count,
             'max_retries': max_retries,
             'worker_id': worker_id,
+            'claimed_at': CLAIMED_AT,
             'worker_hostname': worker_hostname,
             'worker_pid': worker_pid,
             'worker_process_name': worker_process_name,
@@ -405,6 +410,7 @@ async def test_success_writes_completed_attempt(
         task_name='attempt_history_test',
         queue_name='default',
         is_workflow_task=False,
+        claimed_at=CLAIMED_AT,
     )
 
     assert is_ok(result)
@@ -451,6 +457,7 @@ async def test_terminal_failure_writes_failed_attempt_and_error_code(
         task_name='attempt_history_test',
         queue_name='default',
         is_workflow_task=False,
+        claimed_at=CLAIMED_AT,
     )
 
     assert is_ok(result)
@@ -507,6 +514,7 @@ async def test_retryable_failure_writes_attempt_with_will_retry(
         task_name='attempt_retry_test',
         queue_name='default',
         is_workflow_task=False,
+        claimed_at=CLAIMED_AT,
     )
 
     assert is_ok(result)
@@ -551,6 +559,7 @@ async def test_worker_failure_writes_worker_failure_attempt(
         task_name='attempt_history_test',
         queue_name='default',
         is_workflow_task=False,
+        claimed_at=CLAIMED_AT,
     )
 
     assert is_ok(result)
@@ -760,6 +769,7 @@ async def test_replay_does_not_create_duplicate_attempt(
         task_name='attempt_history_test',
         queue_name='default',
         is_workflow_task=False,
+        claimed_at=CLAIMED_AT,
     )
     assert is_ok(r1)
 
@@ -777,6 +787,7 @@ async def test_replay_does_not_create_duplicate_attempt(
         task_name='attempt_history_test',
         queue_name='default',
         is_workflow_task=False,
+        claimed_at=CLAIMED_AT,
     )
     assert is_ok(r2)
     assert r2.ok_value is None  # guard caught it
@@ -809,6 +820,7 @@ async def test_claim_lost_writes_no_attempt(
         task_name='attempt_history_test',
         queue_name='default',
         is_workflow_task=False,
+        claimed_at=CLAIMED_AT,
     )
 
     assert is_ok(result)
@@ -837,6 +849,7 @@ async def test_workflow_stopped_error_code_writes_no_attempt(
         task_name='attempt_history_test',
         queue_name='default',
         is_workflow_task=False,
+        claimed_at=CLAIMED_AT,
     )
 
     assert is_ok(result)
@@ -869,6 +882,7 @@ async def test_corrupt_json_writes_serialization_error_attempt(
         task_name='attempt_history_test',
         queue_name='default',
         is_workflow_task=False,
+        claimed_at=CLAIMED_AT,
     )
 
     assert is_ok(result)
@@ -918,6 +932,7 @@ async def test_attempt_number_reflects_retry_count(
         task_name='attempt_history_test',
         queue_name='default',
         is_workflow_task=False,
+        claimed_at=CLAIMED_AT,
     )
 
     assert is_ok(result)

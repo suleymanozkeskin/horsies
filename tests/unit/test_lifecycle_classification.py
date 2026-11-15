@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import ast
 import dataclasses
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -184,13 +184,14 @@ class TestOrphanedWorkflowTask:
 
     def test_orphan_cancel_fences_on_the_dispatched_generation(self) -> None:
         """A re-claim since this dispatch is a different generation's row."""
+        dispatched = _GENERATION + timedelta(microseconds=1)
         decision = classify(
             AbortedBeforeResult(reason=AbortReason.WORKFLOW_CHECK_FAILED),
-            _context(claimed_at=None),
+            _context(claimed_at=dispatched),
         )
         command = _command(decision)
         assert isinstance(command, CancelOwnedOrphan)
-        assert command.fence == OwnedClaim(worker_id='w1', claimed_at=None)
+        assert command.fence == OwnedClaim(worker_id='w1', claimed_at=dispatched)
 
 
 class TestSuccess:

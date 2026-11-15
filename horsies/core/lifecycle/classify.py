@@ -144,7 +144,7 @@ class FinalizeContext:
 
     task_id: str
     worker_id: str
-    claimed_at: datetime | None
+    claimed_at: datetime
     is_workflow_task: bool
     queue_name: str
     result_json: str

@@ -18,7 +18,7 @@ from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.types.result import is_err
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
-from tests.fixtures.slots.handles import task_finished_handle
+from tests.fixtures.slots.handles import HANDLE_CLAIMED_AT, task_finished_handle
 from tests.integration.conftest import compute_test_enqueue_sha
 
 _TEST_APP: Horsies | None = None
@@ -65,14 +65,14 @@ async def _insert_running_task(session: AsyncSession) -> str:
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
                  max_retries, started_at, enqueue_sha, claimed_by_worker_id,
-                 is_workflow_task,
+                 claimed_at, is_workflow_task,
                  retention_class_key, command_fingerprint_version,
                  command_fingerprint, retain_rerun_input,
                  prepared_rerun_input_disposition)
             VALUES
                 (:id, 'two_phase_finalize_test', 'default', 100, '[]', '{}',
                  'RUNNING', :sent_at, NOW(), NOW(), FALSE, 0,
-                 3, NOW(), :enqueue_sha, :claimed_by_worker_id, TRUE,
+                 3, NOW(), :enqueue_sha, :claimed_by_worker_id, :claimed_at, TRUE,
                  'standard_30d', 1,
                  sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
                  FALSE, 'DECLINED_BY_POLICY')
@@ -82,6 +82,7 @@ async def _insert_running_task(session: AsyncSession) -> str:
             'sent_at': sent_at,
             'enqueue_sha': sha,
             'claimed_by_worker_id': TEST_WORKER_ID,
+            'claimed_at': HANDLE_CLAIMED_AT,
         },
     )
     # The workflow and its node. A workflow task whose node row is
@@ -161,6 +162,7 @@ async def test_finalize_phase2_failure_keeps_terminal_task_result_durable(
         handle,
         task_id,
         task_name='two_phase_finalize_test',
+        claimed_at=HANDLE_CLAIMED_AT,
     )
     assert is_err(finalize_r)
 
@@ -246,6 +248,7 @@ async def test_phase2_deletes_the_outbox_row_of_the_node(
         task_finished_handle(True, wire.ok_value, None),
         task_id,
         task_name='two_phase_finalize_test',
+        claimed_at=HANDLE_CLAIMED_AT,
     )
 
     assert not is_err(finalize_r)
@@ -273,6 +276,7 @@ async def test_a_failed_phase2_keeps_the_outbox_row(
         task_finished_handle(True, wire.ok_value, None),
         task_id,
         task_name='two_phase_finalize_test',
+        claimed_at=HANDLE_CLAIMED_AT,
     )
 
     assert is_err(finalize_r)

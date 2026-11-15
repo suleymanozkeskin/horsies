@@ -20,7 +20,7 @@ import threading
 import time
 from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1256,7 +1256,8 @@ def test_the_statement_fences_each_row() -> None:
 
     assert "WHERE t.status = 'RUNNING'" in statement
     assert 'AND t.claimed_by_worker_id = CAST(%(worker_id)s AS VARCHAR)' in statement
-    assert 'AND (d.claimed_at IS NULL OR t.claimed_at = d.claimed_at)' in statement
+    assert 'AND t.claimed_at = d.claimed_at' in statement
+    assert 'IS NULL OR' not in statement
     assert 'AND t.finalizing_at IS NULL' in statement
     assert "SELECT t.id, CAST(%(worker_id)s AS VARCHAR), 'runner', NOW()" in statement
 
@@ -1264,12 +1265,19 @@ def test_the_statement_fences_each_row() -> None:
 def test_dispatch_rows_carry_the_claim_generation() -> None:
     held = (
         LiveDispatch(ticket=1, task_id='a', claimed_at=CLAIMED_AT, pid=1),
-        LiveDispatch(ticket=2, task_id='b', claimed_at=None, pid=2),
+        LiveDispatch(
+            ticket=2,
+            task_id='b',
+            claimed_at=datetime(
+                2026, 11, 10, 11, 31, tzinfo=timezone(timedelta(hours=2))
+            ),
+            pid=2,
+        ),
     )
 
     assert _dispatches_json(held) == (
         '[{"task_id":"a","claimed_at":"2026-11-10T09:30:00.000125+00:00"},'
-        '{"task_id":"b","claimed_at":null}]'
+        '{"task_id":"b","claimed_at":"2026-11-10T11:31:00+02:00"}]'
     )
 
 
@@ -1306,7 +1314,7 @@ def test_an_unreachable_database_is_a_failed_write() -> None:
         connect_kwargs={},
         worker_id='worker-1',
     )
-    held = (LiveDispatch(ticket=1, task_id='a', claimed_at=None, pid=1),)
+    held = (LiveDispatch(ticket=1, task_id='a', claimed_at=CLAIMED_AT, pid=1),)
 
     first = writer.write(held)
     second = writer.write(held)

@@ -121,6 +121,8 @@ from horsies.core.worker.slots import (
     outside_kill_delay_s,
 )
 
+CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
+
 SCRIPTED_CHILD = str(Path(__file__).parent.parent / 'fixtures' / 'slots' / 'scripted_child.py')
 SCRIPTED_PRELOAD = str(Path(__file__).parent.parent / 'fixtures' / 'slots' / 'scripted_preload.py')
 linux_only = pytest.mark.skipif(
@@ -206,7 +208,7 @@ def _frame(task_name: str, argument: str | None = None) -> RunFrame:
         worker_id='worker-1',
         is_workflow_task=False,
         timeout=NoTimeout(),
-        claimed_at=None,
+        claimed_at=CLAIMED_AT,
     )
 
 
@@ -540,7 +542,7 @@ class TestChildSend:
             worker_id='worker-1',
             is_workflow_task=False,
             timeout=NoTimeout(),
-            claimed_at=None,
+            claimed_at=CLAIMED_AT,
         )
 
     async def test_a_frame_with_a_small_body_is_one_write(self) -> None:
@@ -1966,7 +1968,7 @@ class TestLeftWork:
                 handle,
                 handle.frame.task_id,
                 deadline,
-                None,
+                handle.frame.claimed_at,
             ),
             OUTCOME_TIMEOUT_S,
         )

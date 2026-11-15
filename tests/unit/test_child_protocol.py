@@ -297,8 +297,8 @@ class TestSharedFrames:
         meta, body = _split(encode_parent_frame(frame))
         assert decode_parent_frame(meta, body) == Ok(frame)
 
-    def test_shared_run_frame_without_claim_or_arguments(self) -> None:
-        frame = _shared_run_frame(claimed_at=None, kwargs_json=None)
+    def test_shared_run_frame_without_arguments(self) -> None:
+        frame = _shared_run_frame(kwargs_json=None)
         meta, body = _split(encode_parent_frame(frame))
         assert body == b''
         assert decode_parent_frame(meta, body) == Ok(frame)
@@ -940,8 +940,8 @@ class TestParentFrames:
         meta, body = _split(encode_parent_frame(frame))
         assert decode_parent_frame(meta, body) == Ok(frame)
 
-    def test_run_frame_without_claim_or_timeout(self) -> None:
-        frame = _run_frame(claimed_at=None, timeout=NoTimeout())
+    def test_run_frame_without_timeout(self) -> None:
+        frame = _run_frame(timeout=NoTimeout())
         meta, body = _split(encode_parent_frame(frame))
         assert decode_parent_frame(meta, body) == Ok(frame)
 
@@ -976,6 +976,49 @@ class TestParentFrames:
     def test_child_frame_is_refused_by_the_parent_decoder(self) -> None:
         meta, body = _split(encode_child_frame(ReadyFrame(1, RssUnreadable())))
         assert isinstance(decode_parent_frame(meta, body), Err)
+
+
+def _run_frame_fields(kind: str) -> tuple[dict[str, object], bytes]:
+    """The metadata fields and the body of an encoded ``kind`` run frame."""
+    match kind:
+        case 'run':
+            frame: RunFrame | SharedRunFrame = _run_frame()
+        case 'shared_run':
+            frame = _shared_run_frame()
+        case _:
+            raise AssertionError(f'no run frame of kind {kind!r}')
+    meta, body = _split(encode_parent_frame(frame))
+    return json.loads(meta), body
+
+
+class TestRunFrameClaimTime:
+    """Every write of an attempt in the child is fenced on the claim time
+    of its run frame. A run frame without one is malformed, and the decoder
+    refuses it as it refuses any other bad field."""
+
+    @pytest.mark.parametrize('kind', ['run', 'shared_run'])
+    def test_a_null_claim_time_is_refused(self, kind: str) -> None:
+        fields, body = _run_frame_fields(kind)
+        fields['claimed_at'] = None
+
+        decoded = decode_parent_frame(json.dumps(fields).encode(), body)
+
+        assert decoded == Err(MalformedFrame('_BadField: claimed_at'))
+
+    @pytest.mark.parametrize('kind', ['run', 'shared_run'])
+    def test_a_missing_claim_time_is_refused(self, kind: str) -> None:
+        fields, body = _run_frame_fields(kind)
+        del fields['claimed_at']
+
+        decoded = decode_parent_frame(json.dumps(fields).encode(), body)
+
+        assert decoded == Err(MalformedFrame('_BadField: claimed_at'))
+
+    @pytest.mark.parametrize('kind', ['run', 'shared_run'])
+    def test_the_claim_time_is_on_the_wire(self, kind: str) -> None:
+        fields, _ = _run_frame_fields(kind)
+
+        assert fields['claimed_at'] == '2026-11-01T12:30:15.000250+00:00'
 
 
 class TestChildFrames:

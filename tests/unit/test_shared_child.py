@@ -21,6 +21,7 @@ import socket
 import threading
 import time
 from collections.abc import Callable
+from datetime import datetime, timezone
 from typing import Any, NoReturn
 from unittest.mock import MagicMock
 
@@ -86,6 +87,8 @@ def _kind(seats: int, executor_threads: int) -> SharedAsyncChild:
     )
 
 pytestmark = [pytest.mark.unit]
+
+CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
 
 RUN_TIMEOUT_S = 10.0
 
@@ -168,7 +171,7 @@ def _frame(
         kwargs_json=None,
         worker_id='worker-1',
         is_workflow_task=False,
-        claimed_at=None,
+        claimed_at=CLAIMED_AT,
         work=SeatTask(timeout_ms=timeout_ms, cancel_grace_ms=grace_ms),
     )
 
@@ -1584,7 +1587,7 @@ class TestParentDefects:
             worker_id='w',
             is_workflow_task=False,
             timeout=NoTimeout(),
-            claimed_at=None,
+            claimed_at=CLAIMED_AT,
         )
         self._serve_until_exit(2, [isolated])
         assert exits[0][1] == child_main.BAD_PARENT_FRAME_EXIT_CODE

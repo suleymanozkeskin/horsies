@@ -103,12 +103,11 @@ async def read_in_flight_attempt(
     *,
     task_id: str,
     worker_id: str,
-    claimed_at: datetime | None,
+    claimed_at: datetime,
 ) -> InFlightAttempt:
     """Read the row of this claim generation, without a lock.
 
-    ``claimed_at`` None disables the generation half of the fence. Writes
-    nothing. Database errors raise to the caller.
+    Writes nothing. Database errors raise to the caller.
     """
     row = (
         await connection.execute(
@@ -238,7 +237,7 @@ class FinishFailedAttempt:
 def finish_for(
     failure: FailLockedTask,
     *,
-    claimed_at: datetime | None,
+    claimed_at: datetime,
     retry: RetryRequest,
     attempt: AttemptFailure,
 ) -> FinishFailedAttempt:

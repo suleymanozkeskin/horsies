@@ -1049,7 +1049,7 @@ def run_child_task(frame: RunFrame, init: InitFrame, task_loop: TaskLoop) -> Run
         frame.worker_id,
         frame.is_workflow_task,
         frame.timeout,
-        frame.claimed_at,
+        claimed_at=frame.claimed_at,
         task_loop=task_loop,
     )
 

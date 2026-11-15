@@ -101,13 +101,17 @@ if os.environ.get('INJECT_REQUEUE_DB_ERROR') == '1':
         queue_name: str = 'default',  # noqa: ARG001
         is_workflow_task: bool = True,  # noqa: ARG001
         timeout: StoredTimeout = NoTimeout(),  # noqa: ARG001
-        claimed_at: Optional[datetime] = None,  # noqa: ARG001
         *,
+        claimed_at: datetime,
         execution: Execution,  # noqa: ARG001
         task_options: Optional[str],  # noqa: ARG001
     ) -> None:
         # Simulate: no child takes the task → requeue → DB_ERROR
-        outcome = await self._requeue_claimed_task(task_id, 'INJECTED dispatch failure')
+        outcome = await self._requeue_claimed_task(
+            task_id,
+            'INJECTED dispatch failure',
+            claimed_at,
+        )
         if outcome is _RequeueOutcome.DB_ERROR:
             import logging
             logging.getLogger('horsies.worker').critical(
@@ -122,7 +126,7 @@ if os.environ.get('INJECT_REQUEUE_DB_ERROR') == '1':
         self: Worker,
         task_id: str,
         reason: str,
-        claimed_at: Optional[datetime] = None,  # noqa: ARG001
+        claimed_at: datetime,  # noqa: ARG001
     ) -> _RequeueOutcome:
         import logging
         logging.getLogger('horsies.worker').error(

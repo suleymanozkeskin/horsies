@@ -62,6 +62,8 @@ from horsies.core.worker.child_runner import (
 from horsies.core.worker.run_return import SetRunning, StoppedBeforeRunning
 from tests.fixtures.run_return import wire_of
 
+CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
+
 
 # ---------------------------------------------------------------------------
 # Shared fakes
@@ -753,6 +755,7 @@ class TestHandleWorkflowStopBeforeStart:
         ) as apply:
             result = _handle_workflow_stop_before_start(
                 cursor, conn, 'task-1', 'CANCELLED', 'worker-1',  # type: ignore[arg-type]
+                CLAIMED_AT,
             )
         assert result == (False, '', 'WORKFLOW_STOPPED')
         assert conn.commits == 1
@@ -780,6 +783,7 @@ class TestHandleWorkflowStopBeforeStart:
         ) as apply:
             result = _handle_workflow_stop_before_start(
                 cursor, conn, 'task-2', 'PAUSED', 'worker-1',  # type: ignore[arg-type]
+                CLAIMED_AT,
             )
         assert result == (False, '', 'WORKFLOW_STOPPED')
         assert conn.commits == 1
@@ -795,6 +799,7 @@ class TestHandleWorkflowStopBeforeStart:
         conn = _FakeConn(cursor)
         result = _handle_workflow_stop_before_start(
             cursor, conn, 'task-3', 'UNKNOWN_STATUS', 'worker-1',  # type: ignore[arg-type]
+            CLAIMED_AT,
         )
         assert result == (False, '', 'WORKFLOW_CHECK_FAILED')
         # No SQL should have been executed for the unknown branch
@@ -844,6 +849,7 @@ class TestHandleWorkflowStopBeforeStart:
         ) as apply:
             _handle_workflow_stop_before_start(
                 cursor, conn, 'task-5', 'CANCELLED', 'worker-7',  # type: ignore[arg-type]
+                CLAIMED_AT,
             )
         command = apply.call_args.args[1]
         assert isinstance(command, CancelOwnedNode)
@@ -904,6 +910,7 @@ def _run_entry_defaults() -> dict[str, Any]:
         'kwargs_json': '{}',
         'task_id': 'tid-1',
         'master_worker_id': 'w-1',
+        'claimed_at': CLAIMED_AT,
         'task_loop': TaskLoop(),
     }
 
@@ -2037,7 +2044,11 @@ class TestOwnershipLostWorkflowBranch:
             'horsies.core.worker.child_runner.apply_sync',
             return_value=MagicMock(spec=Applied),
         ) as apply:
-            result = _confirm_ownership_and_set_running('task-1', 'worker-A')
+            result = _confirm_ownership_and_set_running(
+                'task-1',
+                'worker-A',
+                claimed_at=CLAIMED_AT,
+            )
 
         assert result is not None
         ok, _, reason = result
@@ -2069,7 +2080,11 @@ class TestOwnershipLostWorkflowBranch:
             'horsies.core.worker.child_runner._expire_claimed_task_before_start',
             side_effect=expire_and_commit,
         ):
-            result = _confirm_ownership_and_set_running('task-1', 'worker-A')
+            result = _confirm_ownership_and_set_running(
+                'task-1',
+                'worker-A',
+                claimed_at=CLAIMED_AT,
+            )
 
         assert result == (False, '', OutcomeCode.TASK_EXPIRED.value)
         assert conn.commits == 1
@@ -2108,7 +2123,11 @@ class TestOwnershipLostWorkflowBranch:
             'horsies.core.worker.child_runner._expire_claimed_task_before_start',
             return_value=None,
         ):
-            result = _confirm_ownership_and_set_running('task-1', 'worker-A')
+            result = _confirm_ownership_and_set_running(
+                'task-1',
+                'worker-A',
+                claimed_at=CLAIMED_AT,
+            )
 
         assert result == (False, '', 'CLAIM_LOST')
         assert conn.commits == 0
@@ -2149,7 +2168,11 @@ class TestOwnershipLostWorkflowBranch:
                 _apply_recording(outcomes),
             ),
         ):
-            result = _confirm_ownership_and_set_running('task-1', 'worker-A')
+            result = _confirm_ownership_and_set_running(
+                'task-1',
+                'worker-A',
+                claimed_at=CLAIMED_AT,
+            )
 
         assert result == (False, '', 'WORKFLOW_STOPPED')
         assert [sql for sql, _ in cursor.queries] == [
@@ -2192,6 +2215,7 @@ class TestOwnershipLostWorkflowBranch:
                 'task-1',
                 'worker-A',
                 is_workflow_task=False,
+                claimed_at=CLAIMED_AT,
             )
 
         assert result == (False, '', 'CLAIM_LOST')
@@ -2225,7 +2249,11 @@ class TestWorkflowTaskRunningSyncFailureAborts:
             'horsies.core.worker.child_runner._get_worker_pool',
             return_value=pool,
         ):
-            result = _confirm_ownership_and_set_running('task-1', 'worker-A')
+            result = _confirm_ownership_and_set_running(
+                'task-1',
+                'worker-A',
+                claimed_at=CLAIMED_AT,
+            )
 
         assert result == (False, '', 'WORKFLOW_CHECK_FAILED')
         assert conn.commits == 0
@@ -2245,7 +2273,11 @@ class TestWorkflowTaskRunningSyncFailureAborts:
             'horsies.core.worker.child_runner._get_worker_pool',
             return_value=pool,
         ):
-            result = _confirm_ownership_and_set_running('task-1', 'worker-A')
+            result = _confirm_ownership_and_set_running(
+                'task-1',
+                'worker-A',
+                claimed_at=CLAIMED_AT,
+            )
 
         assert result is None  # None = proceed to user code
         sql_blob = '\n'.join(q[0] for q in cursor.queries)
@@ -2270,7 +2302,10 @@ class TestWorkflowTaskRunningSyncFailureAborts:
             return_value=pool,
         ):
             result = _confirm_ownership_and_set_running(
-                'task-1', 'worker-A', is_workflow_task=False,
+                'task-1',
+                'worker-A',
+                is_workflow_task=False,
+                claimed_at=CLAIMED_AT,
             )
 
         assert result is None

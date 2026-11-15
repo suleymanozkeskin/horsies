@@ -174,6 +174,23 @@ def read_claim_rows(
     return ClaimRows(tasks=tasks, short_of_plan=sum(short_rows))
 
 
+def claim_time_of(row: Mapping[str, Any]) -> datetime:
+    """The claim time of a task row that ``horsies_claim`` took.
+
+    The claim sets ``claimed_at = now()`` and returns it, and every fence
+    of the dispatch uses it. A row without a claim time is a defect of the
+    claim function (``AssertionError``). Does no I/O.
+    """
+    match row:
+        case {'claimed_at': datetime() as claimed_at}:
+            return claimed_at
+        case _:
+            raise AssertionError(
+                f'horsies_claim returned task {row.get("id")!r} without a '
+                f'claim time: claimed_at is {row.get("claimed_at", "missing")!r}',
+            )
+
+
 @dataclass(frozen=True, slots=True)
 class ClaimPass:
     """What one claim pass did.
@@ -251,8 +268,8 @@ class ClaimMixin:
             queue_name: str = 'default',
             is_workflow_task: bool = True,
             timeout: StoredTimeout = NoTimeout(),
-            claimed_at: Optional[datetime] = None,
             *,
+            claimed_at: datetime,
             execution: Execution,
             task_options: str | None,
         ) -> None: ...
@@ -317,7 +334,7 @@ class ClaimMixin:
                 row.get('queue_name') or 'default',
                 bool(row.get('is_workflow_task', False)),
                 timeout=read_stored_timeout(row.get('task_options')),
-                claimed_at=row.get('claimed_at'),
+                claimed_at=claim_time_of(row),
                 execution=parse_row_class(str(row['id']), row['execution']),
                 task_options=row.get('task_options'),
             )
@@ -459,7 +476,7 @@ class ClaimMixin:
                 {
                     'id': row['id'],
                     'wid': self.worker_instance_id,
-                    'claimed_at': row['claimed_at'],
+                    'claimed_at': claim_time_of(row),
                 },
             )
             returned = (getattr(res, 'rowcount', 0) or 0) > 0
@@ -512,11 +529,11 @@ class ClaimMixin:
         task_ids = [row['id'] for row in workflow_rows]
         # The claim generation each row was dispatched from. This guard runs
         # after the claim transaction committed, so it fences the abandon to
-        # that generation (C10); without it a lapsed-and-re-claimed row is
-        # still CLAIMED by this worker and would be cancelled out from under
-        # its new claim.
-        claimed_at_by_task_id: dict[str, Any] = {
-            row['id']: row.get('claimed_at') for row in workflow_rows
+        # that generation; without it a lapsed-and-re-claimed row is still
+        # CLAIMED by this worker and would be cancelled out from under its
+        # new claim.
+        claimed_at_by_task_id: dict[str, datetime] = {
+            row['id']: claim_time_of(row) for row in workflow_rows
         }
         paused_task_ids: set[str] = set()
         cancelled_task_ids: set[str] = set()
@@ -546,7 +563,7 @@ class ClaimMixin:
                             claim_generations=tuple(
                                 (
                                     task_id,
-                                    claimed_at_by_task_id.get(task_id),
+                                    claimed_at_by_task_id[task_id],
                                 )
                                 for task_id in paused_ids
                             ),
@@ -579,7 +596,7 @@ class ClaimMixin:
                             claim_generations=tuple(
                                 (
                                     task_id,
-                                    claimed_at_by_task_id.get(task_id),
+                                    claimed_at_by_task_id[task_id],
                                 )
                                 for task_id in cancelled_ids
                             ),
