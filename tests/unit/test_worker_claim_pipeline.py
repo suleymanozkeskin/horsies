@@ -40,6 +40,8 @@ from horsies.core.worker.sql import (
     COUNT_GLOBAL_IN_FLIGHT_SQL,
     COUNT_IN_FLIGHT_FOR_WORKER_SQL,
     COUNT_QUEUE_IN_FLIGHT_HARD_SQL,
+    READ_IN_FLIGHT_ATTEMPT_SQL,
+    RETURN_CLAIMED_TASK_AS_ISOLATED_SQL,
     UNCLAIM_CLAIMED_TASK_SQL,
 )
 
@@ -495,6 +497,24 @@ class TestUnclaimSqlClearsLeaseExpiry:
         sql_text = UNCLAIM_CLAIMED_TASK_SQL.text
         normalised = ' '.join(sql_text.split())
         assert 'claim_expires_at = NULL' in normalised
+
+    @pytest.mark.parametrize(
+        'statement',
+        [
+            UNCLAIM_CLAIMED_TASK_SQL,
+            READ_IN_FLIGHT_ATTEMPT_SQL,
+            RETURN_CLAIMED_TASK_AS_ISOLATED_SQL,
+        ],
+        ids=['release', 'in-flight read', 'class return'],
+    )
+    def test_the_claim_time_fence_has_no_null_branch(self, statement: Any) -> None:
+        """Each statement fences on the claim time of the dispatch. A NULL
+        claim time matches no row: nothing can turn the check off."""
+        where = ' '.join(statement.text.split()).split(' WHERE ', 1)[1]
+
+        assert 'AND claimed_at = CAST(:claimed_at AS TIMESTAMPTZ)' in where
+        assert 'IS NULL' not in where
+        assert 'COALESCE' not in where
 
     def test_unclaim_claimed_task_matches_only_claimed_tasks(self) -> None:
         """Pre-execution unclaim must not reset potentially executed RUNNING rows."""
