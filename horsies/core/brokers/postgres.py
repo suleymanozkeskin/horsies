@@ -1,7 +1,7 @@
 # app/core/brokers/postgres.py
 from __future__ import annotations
 import asyncio, hashlib, contextlib, os, random, threading, time, uuid
-from collections.abc import AsyncGenerator, Callable, Coroutine
+from collections.abc import AsyncGenerator, Callable, Coroutine, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Final, Optional, TYPE_CHECKING, assert_never, cast
@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy import create_engine, text, select
 from sqlalchemy.dialects.postgresql.psycopg import PGDialect_psycopg
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Engine, RowMapping
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from pydantic import ValidationError
 from horsies.core.brokers.listener import PostgresListener
@@ -608,28 +608,11 @@ async def _acquire_session_advisory_lock(
 
 # ---- Monitoring queries ----
 
-GET_STALE_TASKS_SQL = text("""
-    SELECT
-        t.id,
-        t.worker_hostname,
-        t.worker_pid,
-        t.worker_process_name,
-        hb.last_heartbeat,
-        t.started_at,
-        t.task_name
-    FROM horsies_tasks t
-    LEFT JOIN LATERAL (
-        SELECT sent_at AS last_heartbeat
-        FROM horsies_heartbeats h
-        WHERE h.task_id = t.id AND h.role = 'runner'
-        ORDER BY sent_at DESC
-        LIMIT 1
-    ) hb ON TRUE
-    WHERE t.status = 'RUNNING'
-      AND t.started_at IS NOT NULL
-      AND COALESCE(hb.last_heartbeat, t.started_at) < NOW() - make_interval(mins => :stale_threshold)
-    ORDER BY hb.last_heartbeat NULLS FIRST
-    LIMIT :row_reach
+LIST_STALE_TASKS_SQL = text("""
+    SELECT row_kind, task_id, worker_hostname, worker_pid, worker_process_name,
+           last_heartbeat, started_at, task_name, list_state, row_bound
+    FROM horsies_list_stale_tasks(CAST(:threshold_minutes AS integer))
+    ORDER BY row_position NULLS LAST
 """)
 
 # Latest snapshot per worker (includes idle workers). The retired
@@ -708,26 +691,39 @@ GET_WORKER_STATE_HISTORY_SQL = text(f"""
     LIMIT :limit
 """)
 
-GET_EXPIRED_TASKS_SQL = text("""
-    SELECT
-        id,
-        task_name,
-        queue_name,
-        priority,
-        sent_at,
-        enqueued_at,
-        good_until,
-        NOW() - good_until as expired_for
-    FROM horsies_tasks
-    WHERE status = 'PENDING'
-      AND good_until <= NOW()
-    ORDER BY good_until ASC
-    LIMIT :row_reach
+LIST_EXPIRED_TASKS_SQL = text("""
+    SELECT row_kind, task_id, task_name, queue_name, priority, sent_at, enqueued_at,
+           good_until, expired_for, list_state, row_bound
+    FROM horsies_list_expired_tasks()
+    ORDER BY row_position NULLS LAST
 """)
 
-# The most rows that ``get_stale_tasks`` and ``get_expired_tasks`` return. A
-# longer list is cut, and the cut is logged as a warning.
+# The most rows that ``get_stale_tasks`` and ``get_expired_tasks`` return
+# (the row bound of ``horsies_list_stale_tasks`` and
+# ``horsies_list_expired_tasks``). A longer list is cut, and the cut is logged
+# as a warning.
 MONITORING_LIST_ROW_BOUND: Final = 10_000
+
+# (dict key, result column) of each list row, in the order of the dict.
+_STALE_TASK_KEYS: Final = (
+    ('id', 'task_id'),
+    ('worker_hostname', 'worker_hostname'),
+    ('worker_pid', 'worker_pid'),
+    ('worker_process_name', 'worker_process_name'),
+    ('last_heartbeat', 'last_heartbeat'),
+    ('started_at', 'started_at'),
+    ('task_name', 'task_name'),
+)
+_EXPIRED_TASK_KEYS: Final = (
+    ('id', 'task_id'),
+    ('task_name', 'task_name'),
+    ('queue_name', 'queue_name'),
+    ('priority', 'priority'),
+    ('sent_at', 'sent_at'),
+    ('enqueued_at', 'enqueued_at'),
+    ('good_until', 'good_until'),
+    ('expired_for', 'expired_for'),
+)
 
 # The largest stale threshold of ``get_stale_tasks``: one year in minutes.
 STALE_THRESHOLD_MAX_MINUTES: Final = 525_600
@@ -2651,22 +2647,19 @@ class PostgresBroker:
                 pass
         try:
             async with resources.session_factory() as session:
-                result = await session.execute(
-                    GET_STALE_TASKS_SQL,
-                    {
-                        'stale_threshold': stale_threshold_minutes,
-                        'row_reach': MONITORING_LIST_ROW_BOUND + 1,
-                    },
+                connection = await autocommit_connection(session)
+                result = await connection.execute(
+                    LIST_STALE_TASKS_SQL,
+                    {'threshold_minutes': stale_threshold_minutes},
                 )
-                columns = result.keys()
-                rows = [dict(zip(columns, row)) for row in result.fetchall()]
-                return Ok(self._bounded_list('get_stale_tasks', rows))
+                rows = result.mappings().all()
         except Exception as exc:
             return _operation_failed(
                 BrokerErrorCode.MONITORING_QUERY_FAILED,
                 f'get_stale_tasks failed: {exc}',
                 exc,
             )
+        return Ok(self._function_list('get_stale_tasks', rows, _STALE_TASK_KEYS))
 
     async def ping_database_async(self) -> BrokerResult[DatabasePing]:
         """Probe Postgres reachability with ``SELECT 1`` through the live pool.
@@ -3085,17 +3078,38 @@ class PostgresBroker:
             case Err(refused):
                 return _class_read_refused('get_class_report', refused)
 
-    def _bounded_list(
-        self, operation: str, rows: list[dict[str, Any]],
+    def _function_list(
+        self,
+        operation: str,
+        rows: Sequence[RowMapping],
+        keys: tuple[tuple[str, str], ...],
     ) -> list[dict[str, Any]]:
-        """The first ``MONITORING_LIST_ROW_BOUND`` rows; a warning when more were read."""
-        if len(rows) > MONITORING_LIST_ROW_BOUND:
-            self.logger.warning(
-                '%s: the list is cut at %d rows; more exist and are not returned',
-                operation,
-                MONITORING_LIST_ROW_BOUND,
-            )
-        return rows[:MONITORING_LIST_ROW_BOUND]
+        """The TASK rows of a list function as dicts, logging a cut list.
+
+        ``keys`` maps each dict key to its result column, in dict order. The
+        last row is the LIST_END row: ``TRUNCATED`` means the function cut
+        the list at ``MONITORING_LIST_ROW_BOUND`` rows.
+        """
+        match rows:
+            case [*items, end]:
+                pass
+            case _:
+                raise AssertionError(f'{operation}: the list function answered no LIST_END row')
+        assert end['row_kind'] == 'LIST_END', end['row_kind']
+        assert end['row_bound'] == MONITORING_LIST_ROW_BOUND, end['row_bound']
+        match end['list_state']:
+            case 'COMPLETE':
+                pass
+            case 'TRUNCATED':
+                self.logger.warning(
+                    '%s: the list is cut at %d rows; more exist and are not returned',
+                    operation,
+                    MONITORING_LIST_ROW_BOUND,
+                )
+            case other:
+                raise AssertionError(f'{operation}: list state {other!r} is not COMPLETE or TRUNCATED')
+        assert all(item['row_kind'] == 'TASK' for item in items), operation
+        return [{key: item[column] for key, column in keys} for item in items]
 
     async def get_expired_tasks(self) -> BrokerResult[list[dict[str, Any]]]:
         """Find tasks that expired before worker processing.
@@ -3110,19 +3124,16 @@ class PostgresBroker:
                 pass
         try:
             async with resources.session_factory() as session:
-                result = await session.execute(
-                    GET_EXPIRED_TASKS_SQL,
-                    {'row_reach': MONITORING_LIST_ROW_BOUND + 1},
-                )
-                columns = result.keys()
-                rows = [dict(zip(columns, row)) for row in result.fetchall()]
-                return Ok(self._bounded_list('get_expired_tasks', rows))
+                connection = await autocommit_connection(session)
+                result = await connection.execute(LIST_EXPIRED_TASKS_SQL)
+                rows = result.mappings().all()
         except Exception as exc:
             return _operation_failed(
                 BrokerErrorCode.MONITORING_QUERY_FAILED,
                 f'get_expired_tasks failed: {exc}',
                 exc,
             )
+        return Ok(self._function_list('get_expired_tasks', rows, _EXPIRED_TASK_KEYS))
 
     async def mark_stale_tasks_as_failed(
         self,

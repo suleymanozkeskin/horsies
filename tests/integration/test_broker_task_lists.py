@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncGenerator
+from datetime import timedelta
 from typing import Final, LiteralString
 
 import pytest
@@ -23,6 +24,13 @@ from horsies.core.brokers.postgres import (
     PostgresBroker,
 )
 from horsies.core.brokers.result_types import BrokerInvalidInput
+from horsies.core.history.heartbeats.partitioning import (
+    CreateHourlyHeartbeatLeaf,
+    create_hourly_heartbeat_leaf,
+    hourly_leaf_ref,
+)
+from horsies.core.history.outcomes import LeafAlreadyConformant, LeafCreated
+from horsies.core.history.partitions.catalog import database_now
 from horsies.core.types.result import Err, Ok
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
@@ -103,7 +111,18 @@ async def clean_tasks(
     session: AsyncSession,
     broker: PostgresBroker,  # noqa: ARG001 - the schema and the leaves exist
 ) -> AsyncGenerator[None, None]:
+    """No task and no beat; a heartbeat leaf for the previous hour, so a beat 30 minutes back has a leaf."""
     _ = await session.execute(text('TRUNCATE horsies_tasks, horsies_heartbeats CASCADE'))
+    connection = await session.connection()
+    now = await database_now(connection)
+    previous_hour = now.replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
+    match await create_hourly_heartbeat_leaf(
+        connection, CreateHourlyHeartbeatLeaf(leaf=hourly_leaf_ref(previous_hour)),
+    ):
+        case LeafCreated() | LeafAlreadyConformant():
+            pass
+        case refused:
+            raise AssertionError(f'the previous hour heartbeat leaf: {refused!r}')
     await session.commit()
     yield
 
