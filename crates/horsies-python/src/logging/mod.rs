@@ -13,6 +13,9 @@
 //! - Python `logging` is the only configuration surface: the forwarder reads
 //!   `getEffectiveLevel()` of each logger at start, every
 //!   [`forwarder::LEVEL_REFRESH_INTERVAL`], and on `refresh_log_levels()`.
+//! - Before a worker process aborts, it waits up to a bound until the
+//!   forwarder has handled every record in the channel
+//!   ([`LogBridge::wait_for_drain`]).
 //!
 //! The subscriber is the default dispatcher of the runtime threads and of
 //! every bridged operation; it is never the process-global default, so it
@@ -24,7 +27,7 @@ mod names;
 mod subscriber;
 
 use std::io::Write;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -52,6 +55,9 @@ const HIGH_RECORD_RETRY_PAUSE: Duration = Duration::from_millis(1);
 /// [`HIGH_RECORD_RETRY_PAUSE`].
 const HIGH_RECORD_ATTEMPTS: u128 =
     HIGH_RECORD_WAIT.as_millis() / HIGH_RECORD_RETRY_PAUSE.as_millis();
+
+/// The pause between two reads of the channel count while a drain wait runs.
+const DRAIN_POLL_PAUSE: Duration = Duration::from_millis(5);
 
 /// Largest message of one record, in bytes. A longer message is cut at a
 /// character boundary and marked.
@@ -110,12 +116,31 @@ pub struct DropCounts {
     pub spilled_high: u64,
 }
 
+/// How a wait for the forwarder to empty the channel ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DrainOutcome {
+    /// The forwarder handled every record that was in the channel: each one
+    /// reached Python `logging` or stderr.
+    Drained,
+    /// The forwarder thread is not running, so `left` records stay in the
+    /// channel.
+    ForwarderStopped { left: u64 },
+    /// The bound passed with `left` records still in the channel.
+    BoundReached { left: u64 },
+}
+
 /// The sending side of the channel, the level snapshot and the counters.
 pub struct LogSink {
     sender: SyncSender<CoreLogRecord>,
     levels: LevelSnapshot,
     dropped_low: AtomicU64,
     spilled_high: AtomicU64,
+    /// Records in the channel that the forwarder has not handled yet. A push
+    /// counts a record before it sends it and uncounts it when the send
+    /// fails, so the forwarder never uncounts a record that was not counted.
+    in_channel: AtomicU64,
+    /// The forwarder thread runs its service loop.
+    forwarder_running: AtomicBool,
 }
 
 impl LogSink {
@@ -127,7 +152,7 @@ impl LogSink {
     /// Push one record. Never waits for the GIL; a WARNING or ERROR record
     /// in a full channel waits up to [`HIGH_RECORD_WAIT`].
     pub fn push(&self, record: CoreLogRecord) {
-        match self.sender.try_send(record) {
+        match self.try_enqueue(record) {
             Ok(()) => {}
             Err(TrySendError::Full(record)) => match record.level.waits_when_full() {
                 false => {
@@ -143,7 +168,7 @@ impl LogSink {
         let mut waiting = record;
         for _attempt in 0..HIGH_RECORD_ATTEMPTS {
             std::thread::sleep(HIGH_RECORD_RETRY_PAUSE);
-            match self.sender.try_send(waiting) {
+            match self.try_enqueue(waiting) {
                 Ok(()) => return,
                 Err(TrySendError::Full(record)) => waiting = record,
                 Err(TrySendError::Disconnected(record)) => {
@@ -154,6 +179,50 @@ impl LogSink {
         }
         let _previous = self.spilled_high.fetch_add(1, Ordering::Relaxed);
         self.spill(&waiting);
+    }
+
+    /// Send one record into the channel, counted while it is there.
+    fn try_enqueue(&self, record: CoreLogRecord) -> Result<(), TrySendError<CoreLogRecord>> {
+        let _previous = self.in_channel.fetch_add(1, Ordering::SeqCst);
+        let sent = self.sender.try_send(record);
+        if sent.is_err() {
+            let _previous = self.in_channel.fetch_sub(1, Ordering::SeqCst);
+        }
+        sent
+    }
+
+    /// The forwarder handled `count` records: they reached Python `logging`
+    /// or stderr.
+    pub fn records_handled(&self, count: usize) {
+        let _previous = self.in_channel.fetch_sub(count as u64, Ordering::SeqCst);
+    }
+
+    /// The forwarder thread entered its service loop.
+    pub fn mark_forwarder_running(&self) {
+        self.forwarder_running.store(true, Ordering::SeqCst);
+    }
+
+    /// The forwarder thread left its service loop, or never started.
+    pub fn mark_forwarder_stopped(&self) {
+        self.forwarder_running.store(false, Ordering::SeqCst);
+    }
+
+    /// Wait until the forwarder has handled every record in the channel, the
+    /// forwarder stops, or `bound` passes. Reads only counters; the caller
+    /// must not be attached to Python, or the forwarder cannot take the GIL.
+    pub fn wait_for_drain(&self, bound: Duration) -> DrainOutcome {
+        let polls = bound.as_millis() / DRAIN_POLL_PAUSE.as_millis();
+        for _poll in 0..=polls {
+            let left = self.in_channel.load(Ordering::SeqCst);
+            match (left, self.forwarder_running.load(Ordering::SeqCst)) {
+                (0, _) => return DrainOutcome::Drained,
+                (_, false) => return DrainOutcome::ForwarderStopped { left },
+                (_, true) => std::thread::sleep(DRAIN_POLL_PAUSE),
+            }
+        }
+        DrainOutcome::BoundReached {
+            left: self.in_channel.load(Ordering::SeqCst),
+        }
     }
 
     /// Write a record that cannot reach Python to stderr, with the counts.
@@ -206,6 +275,8 @@ impl LogBridge {
             levels: LevelSnapshot::new(),
             dropped_low: AtomicU64::new(0),
             spilled_high: AtomicU64::new(0),
+            in_channel: AtomicU64::new(0),
+            forwarder_running: AtomicBool::new(false),
         });
         let dispatch = tracing::Dispatch::new(subscriber::CoreSubscriber::new(Arc::clone(&sink)));
         (Self { sink, dispatch }, receiver)
@@ -232,6 +303,12 @@ impl LogBridge {
     /// attached.
     pub fn refresh_levels(&self, py: Python<'_>) -> PyResult<()> {
         self.sink.refresh_levels(py)
+    }
+
+    /// Wait up to `bound` until the forwarder has handled every record in
+    /// the channel. The caller is not attached to Python.
+    pub fn wait_for_drain(&self, bound: Duration) -> DrainOutcome {
+        self.sink.wait_for_drain(bound)
     }
 }
 
@@ -274,8 +351,59 @@ mod tests {
             levels: LevelSnapshot::new(),
             dropped_low: AtomicU64::new(0),
             spilled_high: AtomicU64::new(0),
+            in_channel: AtomicU64::new(0),
+            forwarder_running: AtomicBool::new(false),
         };
         (sink, receiver)
+    }
+
+    #[test]
+    fn only_a_record_that_entered_the_channel_is_counted() {
+        let (sink, _receiver) = sink_with_capacity(1);
+        sink.push(record(RecordLevel::Info));
+        sink.push(record(RecordLevel::Debug));
+        assert_eq!(sink.in_channel.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_drain_wait_ends_when_the_forwarder_handled_every_record() {
+        let (sink, receiver) = sink_with_capacity(4);
+        let sink = Arc::new(sink);
+        sink.mark_forwarder_running();
+        sink.push(record(RecordLevel::Info));
+        sink.push(record(RecordLevel::Error));
+        let forwarder_sink = Arc::clone(&sink);
+        let forwarder = std::thread::spawn(move || {
+            let taken = receiver.iter().take(2).count();
+            forwarder_sink.records_handled(taken);
+        });
+        assert_eq!(
+            sink.wait_for_drain(Duration::from_secs(5)),
+            DrainOutcome::Drained
+        );
+        forwarder.join().expect("the forwarder stand-in ends");
+    }
+
+    #[test]
+    fn a_drain_wait_with_a_stopped_forwarder_names_the_records_left() {
+        let (sink, _receiver) = sink_with_capacity(4);
+        sink.push(record(RecordLevel::Error));
+        sink.mark_forwarder_stopped();
+        assert_eq!(
+            sink.wait_for_drain(Duration::from_secs(5)),
+            DrainOutcome::ForwarderStopped { left: 1 }
+        );
+    }
+
+    #[test]
+    fn a_drain_wait_ends_at_its_bound() {
+        let (sink, _receiver) = sink_with_capacity(4);
+        sink.mark_forwarder_running();
+        sink.push(record(RecordLevel::Error));
+        assert_eq!(
+            sink.wait_for_drain(Duration::from_millis(20)),
+            DrainOutcome::BoundReached { left: 1 }
+        );
     }
 
     #[test]
