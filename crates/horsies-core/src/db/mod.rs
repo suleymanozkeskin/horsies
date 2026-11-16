@@ -59,9 +59,10 @@ pub use listener::{
     MAX_SUBSCRIPTIONS,
 };
 pub use pool::{
-    CheckoutClass, ConnectionAge, CorePool, IdlePing, PoolPlan, PoolRole, PoolSizing,
+    CheckoutClass, ConnectionAge, CorePool, IdlePing, KeptOpen, PoolPlan, PoolRole, PoolSizing,
     PoolSizingError, PoolStatus, PooledConnection, Reserve, DEFAULT_IDLE_PING_AFTER,
-    IDLE_PING_BOUND, KEPT_SESSION_SETUP_SQL, POSTGRES_MAX_BACKENDS, WORKER_RESERVED_CONNECTIONS,
+    IDLE_PING_BOUND, KEPT_OPEN_CHECK_INTERVAL, KEPT_SESSION_SETUP_SQL, POSTGRES_MAX_BACKENDS,
+    WORKER_RESERVED_CONNECTIONS,
 };
 pub use pooling_check::STATEMENT_POOLING_CHECK_BOUND;
 pub use statement::{
