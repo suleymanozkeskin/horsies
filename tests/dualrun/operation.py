@@ -27,6 +27,7 @@ from horsies.core.types.result import Err, Ok, Result
 from tests.dualrun.capture import Connection
 from tests.dualrun.compare import SnapshotDiff, compare_snapshots
 from tests.dualrun.databases import DualRunDatabase, install_baseline_schema
+from tests.dualrun.seeds import SeedCoverage, cover
 from tests.dualrun.selfcheck import (
     SelfCheckRun,
     SelfCheckStepFailed,
@@ -80,8 +81,10 @@ def run_side[S, R](
     database: DualRunDatabase,
     seed: Callable[[Connection], S],
     side: OperationSide[S, R],
+    coverage: SeedCoverage,
 ) -> Result[SideRun[R], SelfCheckStepFailed]:
-    """Install the baseline, write the seed in one transaction, run ``side``, capture.
+    """Install the baseline, create the leaves of ``coverage``, write the seed in
+    one transaction, run ``side``, capture.
 
     ``seed`` raises ``psycopg.Error`` on a database error; its transaction then
     rolls back. A failed step leaves the database as the step left it.
@@ -97,6 +100,10 @@ def run_side[S, R](
                 return Err(SelfCheckStepFailed(step='install the baseline', cause=str(failed)))
             case Ok():
                 pass
+        try:
+            cover(database.url, coverage)
+        except (psycopg.Error, SQLAlchemyError) as exc:
+            return _failed('create the seed coverage', exc)
         try:
             with connection.transaction():
                 facts = seed(connection)
@@ -122,6 +129,7 @@ def dual_run[S, RR, CR](
     seed: Callable[[Connection], S],
     reference: OperationSide[S, RR],
     candidate: OperationSide[S, CR],
+    coverage: SeedCoverage = SeedCoverage.NONE,
 ) -> Result[OperationDualRun[RR, CR], SelfCheckStepFailed]:
     """Run ``reference`` and ``candidate`` on two fresh databases with the same seed, and compare.
 
@@ -130,12 +138,12 @@ def dual_run[S, RR, CR](
     """
     attempts = BOUNDARY_RETRY_LIMIT + 1
     for attempt in range(1, attempts + 1):
-        match run_side(make_database(), seed, reference):
+        match run_side(make_database(), seed, reference, coverage):
             case Err(failed):
                 return Err(failed)
             case Ok(reference_run):
                 pass
-        match run_side(make_database(), seed, candidate):
+        match run_side(make_database(), seed, candidate, coverage):
             case Err(failed):
                 return Err(failed)
             case Ok(candidate_run):
