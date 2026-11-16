@@ -599,7 +599,8 @@ async def test_not_dispatched_returns_the_claimed_row_to_pending(
     await session.execute(
         text("""
             UPDATE horsies_tasks
-            SET status = 'CLAIMED', started_at = NULL
+            SET status = 'CLAIMED', started_at = NULL,
+                claim_expires_at = NOW() + INTERVAL '1 hour'
             WHERE id = CAST(:id AS uuid)
         """),
         {'id': task_id},
@@ -684,7 +685,7 @@ async def test_task_expired_workflow_task_advances_workflow_without_reaper(
     task_row = (
         await session.execute(
             text("""
-                SELECT t.id, t.task_name, t.args, t.kwargs
+                SELECT t.id, t.task_name, t.input
                 FROM horsies_tasks t
                 JOIN horsies_workflow_tasks wt ON t.id = wt.task_id
                 WHERE wt.workflow_id = :wf_id AND wt.task_index = 0
@@ -693,7 +694,7 @@ async def test_task_expired_workflow_task_advances_workflow_without_reaper(
         )
     ).fetchone()
     assert task_row is not None
-    task_id, task_name, args_json, kwargs_json = task_row
+    task_id, task_name, input_json = task_row
 
     # Claim node 0's backing task with a good_until about to pass.
     await session.execute(
@@ -702,7 +703,7 @@ async def test_task_expired_workflow_task_advances_workflow_without_reaper(
             SET status = 'CLAIMED',
                 claimed_at = NOW(),
                 claimed_by_worker_id = :wid,
-                claim_expires_at = NULL,
+                claim_expires_at = NOW() + interval '1 hour',
                 good_until = NOW() + interval '1 second'
             WHERE id = :tid
         """),
@@ -725,8 +726,8 @@ async def test_task_expired_workflow_task_advances_workflow_without_reaper(
     wire = wire_of(
         _run_task_entry(
             task_name=task_name,
-            args_json=args_json,
-            kwargs_json=kwargs_json,
+            args_json=None,
+            kwargs_json=input_json,
             task_id=task_id,
             master_worker_id=TEST_WORKER_ID,
             claimed_at=claimed_at,
