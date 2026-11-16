@@ -2555,9 +2555,16 @@ BEGIN
         'a task id repeats'
     );
 
+    -- One probe of the node by task_id and one of its workflow by primary key per task: the LATERAL with OFFSET 0
+    -- keeps each workflow read tied to its node, so no plan reads the workflows by status.
     SELECT array_agg(DISTINCT w.id) INTO v_lookup_workflows
     FROM horsies_workflow_tasks n
-    JOIN horsies_workflows w ON w.id = n.workflow_id
+    CROSS JOIN LATERAL (
+        SELECT workflow.id, workflow.status
+        FROM horsies_workflows workflow
+        WHERE workflow.id = n.workflow_id
+        OFFSET 0
+    ) AS w
     WHERE n.task_id = ANY(p_task_ids)
       AND w.status IN ('PAUSED', 'CANCELLED');
     IF v_lookup_workflows IS NULL THEN
