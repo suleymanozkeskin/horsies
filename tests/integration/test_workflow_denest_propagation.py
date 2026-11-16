@@ -94,10 +94,10 @@ async def _insert_subworkflow_node(
         text("""
             INSERT INTO horsies_workflow_tasks
                 (id, workflow_id, task_index, node_id, task_name,
-                 task_args, task_kwargs, queue_name, priority,
+                 input, queue_name, priority,
                  dependencies, allow_failed_deps, join_type,
                  is_subworkflow, sub_workflow_id, status, created_at)
-            VALUES (:id, :wf, :idx, :node, 'denest_sub', '[]', '{}',
+            VALUES (:id, :wf, :idx, :node, 'denest_sub', '{}',
                     'default', 100, '{}', FALSE, 'all',
                     TRUE, :sub_id, 'RUNNING', NOW())
         """),

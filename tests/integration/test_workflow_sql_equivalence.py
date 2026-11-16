@@ -77,12 +77,14 @@ async def _seed_random_workflow(
             text("""
                 INSERT INTO horsies_workflow_tasks
                     (id, workflow_id, task_index, node_id, task_name,
-                     task_args, task_kwargs, queue_name, priority,
+                     input, queue_name, priority,
                      dependencies, allow_failed_deps, join_type,
-                     is_subworkflow, status, created_at)
-                VALUES (:id, :wf, :idx, :node, 'equiv_task', '[]', '{}',
+                     is_subworkflow, status, created_at,
+                     max_retries, execution, retention_class_key)
+                VALUES (:id, :wf, :idx, :node, 'equiv_task', '{}',
                         'default', 100, :deps, FALSE, 'all',
-                        FALSE, :status, NOW())
+                        FALSE, :status, NOW(),
+                        0, 'ISOLATED', 'standard_30d')
             """),
             {
                 'id': str(uuid.uuid4()),

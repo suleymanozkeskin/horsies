@@ -748,16 +748,22 @@ class TestWorkflowHandleSubWorkflowFields:
         child_wf_id = str(uuid.uuid4())
         await session.execute(
             text("""
-                INSERT INTO horsies_workflows (id, name, status, on_error, depth, created_at, updated_at)
-                VALUES (:child_id, 'child_wf', 'RUNNING', 'fail', 1, NOW(), NOW())
+                INSERT INTO horsies_workflows
+                    (id, name, status, on_error, depth, parent_workflow_id,
+                     parent_task_index, root_workflow_id, sent_at, created_at,
+                     updated_at)
+                VALUES (:child_id, 'child_wf', 'RUNNING', 'fail', 1, :wf_id, 0,
+                        :wf_id, NOW(), NOW(), NOW())
             """),
-            {'child_id': child_wf_id},
+            {'child_id': child_wf_id, 'wf_id': handle.workflow_id},
         )
         # Simulate: engine linked a child workflow to this node
         await session.execute(
             text("""
                 UPDATE horsies_workflow_tasks
-                SET is_subworkflow = TRUE, sub_workflow_id = :child_id
+                SET is_subworkflow = TRUE, sub_workflow_id = :child_id,
+                    task_id = NULL, max_retries = NULL, execution = NULL,
+                    good_until = NULL, retention_class_key = NULL
                 WHERE workflow_id = :wf_id AND task_index = 0
             """),
             {'child_id': child_wf_id, 'wf_id': handle.workflow_id},
@@ -789,10 +795,14 @@ class TestWorkflowHandleSubWorkflowFields:
         child_wf_id = str(uuid.uuid4())
         await session.execute(
             text("""
-                INSERT INTO horsies_workflows (id, name, status, on_error, depth, created_at, updated_at)
-                VALUES (:child_id, 'child_wf', 'COMPLETED', 'fail', 1, NOW(), NOW())
+                INSERT INTO horsies_workflows
+                    (id, name, status, on_error, depth, parent_workflow_id,
+                     parent_task_index, root_workflow_id, sent_at, created_at,
+                     updated_at)
+                VALUES (:child_id, 'child_wf', 'COMPLETED', 'fail', 1, :wf_id, 0,
+                        :wf_id, NOW(), NOW(), NOW())
             """),
-            {'child_id': child_wf_id},
+            {'child_id': child_wf_id, 'wf_id': handle.workflow_id},
         )
         # Bare summary dict — the shape SubWorkflowSummary.to_json() now writes
         # (the legacy __dataclass__ envelope was retired).
@@ -807,7 +817,9 @@ class TestWorkflowHandleSubWorkflowFields:
                 UPDATE horsies_workflow_tasks
                 SET is_subworkflow = TRUE,
                     sub_workflow_id = :child_id,
-                    sub_workflow_summary = :summary
+                    sub_workflow_summary = :summary,
+                    task_id = NULL, max_retries = NULL, execution = NULL,
+                    good_until = NULL, retention_class_key = NULL
                 WHERE workflow_id = :wf_id AND task_index = 0
             """),
             {
@@ -851,17 +863,23 @@ class TestWorkflowHandleSubWorkflowFields:
         child_wf_id = str(uuid.uuid4())
         await session.execute(
             text("""
-                INSERT INTO horsies_workflows (id, name, status, on_error, depth, created_at, updated_at)
-                VALUES (:child_id, 'child_wf', 'FAILED', 'fail', 1, NOW(), NOW())
+                INSERT INTO horsies_workflows
+                    (id, name, status, on_error, depth, parent_workflow_id,
+                     parent_task_index, root_workflow_id, sent_at, created_at,
+                     updated_at)
+                VALUES (:child_id, 'child_wf', 'FAILED', 'fail', 1, :wf_id, 0,
+                        :wf_id, NOW(), NOW(), NOW())
             """),
-            {'child_id': child_wf_id},
+            {'child_id': child_wf_id, 'wf_id': handle.workflow_id},
         )
         await session.execute(
             text("""
                 UPDATE horsies_workflow_tasks
                 SET is_subworkflow = TRUE,
                     sub_workflow_id = :child_id,
-                    sub_workflow_summary = :summary
+                    sub_workflow_summary = :summary,
+                    task_id = NULL, max_retries = NULL, execution = NULL,
+                    good_until = NULL, retention_class_key = NULL
                 WHERE workflow_id = :wf_id AND task_index = 0
             """),
             {
@@ -904,17 +922,23 @@ class TestWorkflowHandleSubWorkflowFields:
         child_wf_id = str(uuid.uuid4())
         await session.execute(
             text("""
-                INSERT INTO horsies_workflows (id, name, status, on_error, depth, created_at, updated_at)
-                VALUES (:child_id, 'child_wf', 'COMPLETED', 'fail', 1, NOW(), NOW())
+                INSERT INTO horsies_workflows
+                    (id, name, status, on_error, depth, parent_workflow_id,
+                     parent_task_index, root_workflow_id, sent_at, created_at,
+                     updated_at)
+                VALUES (:child_id, 'child_wf', 'COMPLETED', 'fail', 1, :wf_id, 0,
+                        :wf_id, NOW(), NOW(), NOW())
             """),
-            {'child_id': child_wf_id},
+            {'child_id': child_wf_id, 'wf_id': handle.workflow_id},
         )
         await session.execute(
             text("""
                 UPDATE horsies_workflow_tasks
                 SET is_subworkflow = TRUE,
                     sub_workflow_id = :child_id,
-                    sub_workflow_summary = :summary
+                    sub_workflow_summary = :summary,
+                    task_id = NULL, max_retries = NULL, execution = NULL,
+                    good_until = NULL, retention_class_key = NULL
                 WHERE workflow_id = :wf_id AND task_index = 0
             """),
             {
@@ -1206,14 +1230,16 @@ class TestWorkflowHandleCancel:
             text("""
                 INSERT INTO horsies_workflow_tasks
                     (id, workflow_id, task_index, node_id, task_name,
-                     task_args, task_kwargs, queue_name, priority,
+                     input, queue_name, priority,
                      dependencies, allow_failed_deps, join_type,
-                     is_subworkflow, status, created_at)
+                     is_subworkflow, status, created_at,
+                     max_retries, execution, retention_class_key)
                 VALUES
                     (:node_id, :child_id, 0, 'child_node',
-                     'descendant_cancel_lock_order_a', '[]', '{}',
+                     'descendant_cancel_lock_order_a', '{}',
                      'default', 100, '{}', FALSE, 'all', FALSE,
-                     'PENDING', NOW())
+                     'PENDING', NOW(),
+                     0, 'ISOLATED', 'standard_30d')
             """),
             {'node_id': child_node_id, 'child_id': child_workflow_id},
         )

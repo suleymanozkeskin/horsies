@@ -163,14 +163,16 @@ async def _insert_running_task(
             text("""
                 INSERT INTO horsies_workflow_tasks
                     (id, workflow_id, task_index, node_id, task_name,
-                     task_args, task_kwargs, queue_name, priority,
+                     input, queue_name, priority,
                      dependencies, allow_failed_deps, join_type,
-                     is_subworkflow, status, task_id, created_at)
+                     is_subworkflow, status, task_id, created_at,
+                     max_retries, execution, retention_class_key)
                 VALUES
                     (:id, :wf_id, 0, 'node-0', 'persist_terminal_test',
-                     '[]', '{}', 'default', 100,
+                     '{}', 'default', 100,
                      '{}', FALSE, 'all',
-                     FALSE, 'RUNNING', CAST(:task_id AS uuid), NOW())
+                     FALSE, 'RUNNING', CAST(:task_id AS uuid), NOW(),
+                     0, 'ISOLATED', 'standard_30d')
             """),
             {
                 'id': str(uuid.uuid4()),

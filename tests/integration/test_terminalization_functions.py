@@ -1650,15 +1650,17 @@ async def _link_workflow_task(
     await session.execute(
         text("""
             INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, task_args,
-                task_kwargs, queue_name, priority, dependencies,
+                id, workflow_id, task_index, node_id, task_name, input,
+                queue_name, priority, dependencies,
                 allow_failed_deps, join_type, is_subworkflow, status,
-                task_id, created_at
+                task_id, created_at,
+                max_retries, execution, retention_class_key
             )
             VALUES (
                 :id, :workflow_id, 0, 'node_0', 'terminalization.test',
-                '[]', '{}', 'default', 100, '{}', FALSE, 'all', FALSE,
-                :node_status, :task_id, NOW()
+                '{}', 'default', 100, '{}', FALSE, 'all', FALSE,
+                :node_status, :task_id, NOW(),
+                0, 'ISOLATED', 'standard_30d'
             )
         """),
         {

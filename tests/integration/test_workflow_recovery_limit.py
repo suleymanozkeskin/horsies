@@ -100,15 +100,17 @@ INSERT_WORKFLOW_SQL = text("""
 
 INSERT_NODE_SQL = text("""
     INSERT INTO horsies_workflow_tasks (
-        id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
+        id, workflow_id, task_index, node_id, task_name, input,
         queue_name, priority, dependencies, allow_failed_deps, join_type,
         task_options, status, is_subworkflow, sub_workflow_id,
-        sub_definition_key, task_id, created_at
+        sub_definition_key, task_id, created_at,
+        max_retries, execution, retention_class_key
     ) VALUES (
-        :id, :workflow_id, :index, :node_id, :task_name, '[]', '{}',
+        :id, :workflow_id, :index, :node_id, :task_name, '{}',
         'default', 100, :dependencies, FALSE, 'all',
         :options, :status, :is_subworkflow, :sub_workflow_id,
-        :sub_definition_key, :task_id, NOW()
+        :sub_definition_key, :task_id, NOW(),
+        :max_retries, :execution, :retention_class_key
     )
 """)
 
@@ -202,6 +204,7 @@ async def _seed_node(
     is_subworkflow: bool = False,
     task_id: str | None = None,
 ) -> None:
+    subworkflow_node = is_subworkflow or sub_workflow_id is not None
     async with harness.sessions() as session:
         await session.execute(
             INSERT_NODE_SQL,
@@ -214,10 +217,14 @@ async def _seed_node(
                 'dependencies': list(dependencies),
                 'options': options,
                 'status': status,
-                'is_subworkflow': is_subworkflow or sub_workflow_id is not None,
+                'is_subworkflow': subworkflow_node,
                 'sub_workflow_id': sub_workflow_id,
                 'sub_definition_key': sub_definition_key,
                 'task_id': task_id,
+                # A task node carries its typed facts; a sub-workflow node has none.
+                'max_retries': None if subworkflow_node else 0,
+                'execution': None if subworkflow_node else 'ISOLATED',
+                'retention_class_key': None if subworkflow_node else 'standard_30d',
             },
         )
         await session.commit()

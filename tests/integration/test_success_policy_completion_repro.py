@@ -38,14 +38,16 @@ async def test_success_policy_does_not_finalize_with_live_non_required_task(
     await session.execute(
         text("""
             INSERT INTO horsies_workflow_tasks
-                (id, workflow_id, task_index, node_id, task_name, task_args,
-                 task_kwargs, queue_name, priority, dependencies,
+                (id, workflow_id, task_index, node_id, task_name, input,
+                 queue_name, priority, dependencies,
                  allow_failed_deps, join_type, is_subworkflow, status,
-                 created_at)
+                 created_at,
+                 max_retries, execution, retention_class_key)
             VALUES
                 (:completed_id, :workflow_id, 0, 'required', 'required_task',
-                 '[]', '{}', 'default', 100, '{}', FALSE, 'all', FALSE,
-                 'COMPLETED', NOW()),
+                 '{}', 'default', 100, '{}', FALSE, 'all', FALSE,
+                 'COMPLETED', NOW(),
+                 0, 'ISOLATED', 'standard_30d'),
                 (:live_id, :workflow_id, 1, 'non_required', 'non_required_task',
                  '[]', '{}', 'default', 100, '{}', FALSE, 'all', FALSE,
                  'ENQUEUED', NOW())
