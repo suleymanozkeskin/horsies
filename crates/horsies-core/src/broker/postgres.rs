@@ -2751,6 +2751,10 @@ impl PostgresBroker {
     /// One statement through the staged result function. While that function
     /// is not published (an upgraded schema before its next coverage pass),
     /// falls back to the live read plus the staged detail read.
+    ///
+    /// An absence from the result reader is confirmed by the detail reader: a
+    /// result reader rendered before a leaf existed does not probe that leaf,
+    /// and only the detail reader's absence is final.
     async fn fetch_result_row(&self, task_id: Uuid) -> Result<ResultRowProbe, BrokerError> {
         let mut connection = self.pool.acquire().await.map_err(BrokerError::Database)?;
         let read = read_task_result(&mut connection, task_id)
@@ -2767,8 +2771,20 @@ impl PostgresBroker {
             TaskResultRead::History(history) => Ok(ResultRowProbe::Row(history_task_result_row(
                 task_id, history,
             )?)),
-            TaskResultRead::Absent => Ok(ResultRowProbe::Absent),
+            TaskResultRead::Absent => self.confirm_result_absence(task_id).await,
             TaskResultRead::NotPublished => self.fetch_result_row_unstaged(task_id).await,
+        }
+    }
+
+    /// The detail reader's answer for a task id the result reader did not
+    /// find: absent, live again, or the history row's result.
+    async fn confirm_result_absence(&self, task_id: Uuid) -> Result<ResultRowProbe, BrokerError> {
+        match self.fetch_history_detail(task_id).await? {
+            None | Some(TaskDetailResult::Absent { .. }) => Ok(ResultRowProbe::Absent),
+            Some(TaskDetailResult::Live { .. }) => Ok(ResultRowProbe::Live),
+            Some(TaskDetailResult::History(detail)) => {
+                Ok(ResultRowProbe::Row(history_result_row(detail)?))
+            }
         }
     }
 
@@ -2784,14 +2800,7 @@ impl PostgresBroker {
         if let Some(row) = live {
             return Ok(ResultRowProbe::Row(row));
         }
-
-        match self.fetch_history_detail(task_id).await? {
-            None | Some(TaskDetailResult::Absent { .. }) => Ok(ResultRowProbe::Absent),
-            Some(TaskDetailResult::Live { .. }) => Ok(ResultRowProbe::Live),
-            Some(TaskDetailResult::History(detail)) => {
-                Ok(ResultRowProbe::Row(history_result_row(detail)?))
-            }
-        }
+        self.confirm_result_absence(task_id).await
     }
 
     async fn raw_result_probe(&self, task_id: Uuid) -> BrokerResult<RawResultProbe> {

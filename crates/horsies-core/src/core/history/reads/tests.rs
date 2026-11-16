@@ -1595,6 +1595,66 @@ fn result_wire_decode_is_typed_and_fail_closed() {
 
 #[tokio::test]
 #[serial]
+async fn result_absence_from_a_stale_reader_is_confirmed_by_detail() {
+    use crate::broker::postgres::PostgresBroker;
+    use crate::core::TaskResult;
+
+    let database = TestDatabase::create().await;
+    let class_key = "standard_30d";
+    let mut transaction = database
+        .pool
+        .begin()
+        .await
+        .expect("begin stale reader setup");
+    let now = database_now(&mut transaction).await.expect("database now");
+    let today = utc_day(now);
+    let parent = register_test_class(&mut transaction, class_key, 30).await;
+    let _leaf = create_test_leaf(&mut transaction, &parent, class_key, today).await;
+    let completed_id = v7_with_birth(today + Duration::hours(2));
+    let completed_json =
+        serde_json::to_string(&TaskResult::<i32>::Ok(7)).expect("encode completed result");
+    seed_history_row_with_payload(
+        &mut transaction,
+        completed_id,
+        class_key,
+        today + Duration::hours(3),
+        "COMPLETED",
+        "COMPLETE_FUSED",
+        completed_json.as_bytes(),
+    )
+    .await;
+    // A result reader rendered before the leaf existed: it probes no leaf.
+    let stale_reader = super::lookup_generation::render_staged_result_function(
+        &LookupManifest::new(Vec::new()).expect("empty manifest"),
+    );
+    sqlx::query(&stale_reader)
+        .execute(&mut *transaction)
+        .await
+        .expect("install a stale result reader");
+    transaction
+        .commit()
+        .await
+        .expect("commit stale reader setup");
+
+    let mut connection = database.pool.acquire().await.expect("acquire result read");
+    assert_eq!(
+        read_task_result(&mut connection, completed_id)
+            .await
+            .expect("stale result read"),
+        TaskResultRead::Absent
+    );
+    drop(connection);
+    let broker = PostgresBroker::from_pool(database.pool.clone());
+    let confirmed = broker
+        .get_result::<i32>(completed_id, None)
+        .await
+        .expect("the detail reader confirms the history row");
+    assert!(matches!(confirmed, TaskResult::Ok(7)));
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
 async fn result_reader_resolves_each_location_and_falls_back_while_unpublished() {
     use crate::broker::postgres::PostgresBroker;
     use crate::core::TaskResult;
