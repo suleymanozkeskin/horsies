@@ -530,3 +530,50 @@ async def test_two_schedulers_that_fire_one_slot_write_one_task_and_one_run(
     assert await _slot_task_count(session, task_name) == 1
     assert (row.last_task_id, row.run_count) == (str(schedule_slot_task_id(schedule_name, slot)), 1)
     assert row.next_run_at == slot + timedelta(seconds=SCHEDULE_INTERVAL_SECONDS)
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_a_fire_repeated_after_its_commit_writes_nothing_once_the_task_left_the_live_table(
+    session: AsyncSession,
+    broker: PostgresBroker,  # noqa: ARG001 - initializes the schema
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A slot fire is the first send of the slot's task id and reads no
+    history. The scheduler repeats a fire whose commit it did not see (a lost
+    reply), after the slot's task finished and left ``horsies_tasks``. The
+    state row moved in the same commit as the slot, so the repeat finds the
+    row moved and the slot does not run a second time; the next tick's due
+    read does not show the slot either."""
+    task_name, schedule_name = _names()
+    scheduler = Scheduler(_app_with_schedule(task_name, schedule_name))
+    await scheduler.start()
+    try:
+        assert scheduler.state_manager is not None
+        schedule = scheduler.schedule_config.schedules[0]
+        slot = (await _database_now(session)).replace(microsecond=0) - timedelta(seconds=1)
+        await _set_next_run(session, schedule_name, slot)
+        read = await scheduler.state_manager.read_due_schedules([schedule_name])
+        [due] = read.due
+        await scheduler._check_schedule(schedule, due, read.database_now)
+        task_id = str(schedule_slot_task_id(schedule_name, slot))
+        assert await _slot_task_count(session, task_name) == 1
+        _ = await session.execute(
+            text('DELETE FROM horsies_tasks WHERE id = CAST(:task_id AS uuid)'),
+            {'task_id': task_id},
+        )
+        await session.commit()
+
+        with caplog.at_level(logging.DEBUG, logger='horsies.scheduler'):
+            await scheduler._check_schedule(schedule, due, read.database_now)
+        assert any(
+            'was moved by another scheduler' in record.getMessage()
+            for record in caplog.records
+        )
+        await scheduler._check_and_run_schedules()
+    finally:
+        await scheduler.stop()
+
+    row = await _state_row(session, schedule_name)
+    assert await _slot_task_count(session, task_name) == 0
+    assert (row.last_task_id, row.run_count) == (task_id, 1)
+    assert row.next_run_at == slot + timedelta(seconds=SCHEDULE_INTERVAL_SECONDS)

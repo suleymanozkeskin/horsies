@@ -389,6 +389,8 @@ async fn a_first_generation_baseline_at_its_limit_fails_the_start() {
 
     let started = start_children(
         &board,
+        &CpuPlacement::SharedCpus,
+        &no_threads(),
         &limits(limit(100), MemoryLimit::Off, MemoryLimit::Off),
     )
     .await;

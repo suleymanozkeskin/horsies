@@ -151,10 +151,11 @@ impl Gate {
 
     async fn pass(&self) {
         let mut receiver = self.open.subscribe();
+        // The `;` drops the borrow that `wait_for` returns before `receiver`.
         match receiver.wait_for(|open| *open).await {
             Ok(_open) => {}
             Err(_closed) => panic!("the gate lives as long as the write"),
-        }
+        };
     }
 }
 

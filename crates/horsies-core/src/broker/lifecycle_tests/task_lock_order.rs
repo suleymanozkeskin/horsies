@@ -17,8 +17,7 @@ use uuid::Uuid;
 
 use super::support::*;
 use crate::broker::attempt_writes::{
-    finish_failed_attempt, finish_workflow_success, AttemptFailure, AttemptFailureKind,
-    FinishFailedAttempt, FinishWorkflowSuccess, RetryRequest,
+    AttemptFailure, AttemptFailureKind, FinishFailedAttempt, FinishWorkflowSuccess, RetryRequest,
 };
 use crate::broker::postgres::PostgresBroker;
 use crate::broker::terminalization::on_test_pool::terminalize;
@@ -170,7 +169,7 @@ async fn a_failure_finalize_waits_for_a_stale_recovery_that_holds_its_locks() {
 
     let finalize_pool = pool.clone();
     let finalize =
-        tokio::spawn(async move { finish_failed_attempt(&finalize_pool, &failure(task_id)).await });
+        tokio::spawn(async move { write_failed_attempt(&finalize_pool, &failure(task_id)).await });
     let waited = a_backend_waits_on(&pool, recovery_pid).await;
     let moved = stale_move_in(&mut *recovery, task_id).await;
     recovery.commit().await.expect("commit the recovery");
@@ -211,7 +210,7 @@ async fn a_workflow_success_waits_for_a_stale_recovery_that_holds_its_locks() {
     let finalize_pool = pool.clone();
     let finalize =
         tokio::spawn(
-            async move { finish_workflow_success(&finalize_pool, &success(task_id)).await },
+            async move { write_workflow_success(&finalize_pool, &success(task_id)).await },
         );
     let waited = a_backend_waits_on(&pool, recovery_pid).await;
     let moved = stale_move_in(&mut *recovery, task_id).await;
@@ -514,13 +513,13 @@ async fn a_free_race_of_finalize_and_stale_recovery_never_deadlocks() {
             let finalize_pool = pool.clone();
             let finalize = tokio::spawn(async move {
                 match origin {
-                    Origin::Send => finish_failed_attempt(&finalize_pool, &failure(task_id))
+                    Origin::Send => write_failed_attempt(&finalize_pool, &failure(task_id))
                         .await
                         .map(|outcome| {
                             matches!(outcome, FailedAttemptOutcome::FailureApplied { .. })
                         }),
                     Origin::WorkflowNode => {
-                        finish_workflow_success(&finalize_pool, &success(task_id))
+                        write_workflow_success(&finalize_pool, &success(task_id))
                             .await
                             .map(|outcome| {
                                 matches!(outcome, WorkflowSuccessOutcome::SuccessApplied { .. })
