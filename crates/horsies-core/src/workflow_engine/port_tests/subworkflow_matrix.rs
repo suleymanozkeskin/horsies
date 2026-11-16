@@ -339,7 +339,7 @@ pub(super) fn assert_subworkflow_error(
     }
     assert_eq!(details.sub_workflow_summary.status, "FAILED");
     assert!(details.sub_workflow_summary.failed_tasks >= 1);
-    details.sub_workflow_summary
+    details.sub_workflow_summary.clone()
 }
 
 pub(super) fn assert_ok_value(result: &TaskResult<serde_json::Value>, expected: serde_json::Value) {
