@@ -10,6 +10,7 @@ use crate::core::history::ddl::classes::PERIOD_CLASS_KIND;
 use crate::core::history::errors::HistoryError;
 use crate::core::history::names::{LEAF_CATALOG, RETENTION_CLASSES, TASK_DETAIL_FUNCTION};
 use crate::core::history::reads::lookup_generation::CLOCK_BOUND_SECONDS;
+use crate::core::types::status::TaskStatus;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryTaskDetail {
@@ -17,7 +18,9 @@ pub struct HistoryTaskDetail {
     pub task_name: String,
     pub queue_name: String,
     pub priority: i32,
-    pub status: String,
+    /// Parsed at the read: a stored text that is not a task status is a
+    /// contract error of the read.
+    pub status: TaskStatus,
     pub terminalization_kind: String,
     pub terminal_at: DateTime<Utc>,
     pub retention_class_key: String,
@@ -172,8 +175,19 @@ pub async fn read_task_detail(
     }
 }
 
+/// The stored status of a history row as a `TaskStatus`; any other text is a
+/// contract error.
+fn history_status(task_id: Uuid, value: &str) -> Result<TaskStatus, HistoryError> {
+    value.parse::<TaskStatus>().map_err(|_| {
+        HistoryError::contract(format!(
+            "history row {task_id} has status {value:?}, which is not a task status"
+        ))
+    })
+}
+
 fn decode_history_detail(row: &sqlx::postgres::PgRow) -> Result<HistoryTaskDetail, HistoryError> {
     let row = HistoryDetailWireRow::from_row(row)?;
+    let status = history_status(row.task_id, &row.status)?;
     // Archive format version 1 implies the json-utf8 codec and the
     // application/json content type; the decode refuses any other version.
     let attempts = decode_attempt_snapshot(
@@ -190,7 +204,7 @@ fn decode_history_detail(row: &sqlx::postgres::PgRow) -> Result<HistoryTaskDetai
         task_name: row.task_name,
         queue_name: row.queue_name,
         priority: row.priority,
-        status: row.status,
+        status,
         terminalization_kind: row.terminalization_kind,
         terminal_at: row.terminal_at,
         retention_class_key: row.retention_class_key,

@@ -2389,7 +2389,7 @@ class TestSubworkflowKwargsTypedSerde:
 
         res = await session.execute(
             text(
-                'SELECT task_kwargs FROM horsies_workflow_tasks '
+                'SELECT input FROM horsies_workflow_tasks '
                 'WHERE workflow_id = :wf_id AND task_index = 0',
             ),
             {'wf_id': handle.workflow_id},
