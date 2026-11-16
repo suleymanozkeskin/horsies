@@ -23,6 +23,7 @@ use crate::broker::attempt_writes::{
     finish_failed_attempt, finish_workflow_success, AttemptFailure, AttemptFailureKind,
     FinishFailedAttempt, FinishWorkflowSuccess, RetryPlacement, RetryRequest,
 };
+use crate::broker::error::is_retryable_sqlx_error;
 use crate::broker::listener::notify_task_queue;
 use crate::broker::terminalization::terminalize;
 use crate::broker::{ClaimedTaskRow, PostgresBroker, SetRunningRow};
@@ -42,7 +43,9 @@ use crate::core::types::status::TaskStatus;
 use crate::core::workflow::context::{WORKFLOW_CTX_KWARG, WORKFLOW_META_KWARG};
 use crate::db::CheckoutClass;
 use crate::workflow_engine::args_merge::unwrap_args_from_entries;
-use crate::workflow_engine::phase2_recovery::terminal_status_of_pending_kind;
+use crate::workflow_engine::phase2_recovery::{
+    send_phase2_wake, terminal_status_of_pending_kind, Phase2Wake,
+};
 use crate::workflow_engine::steps::{
     advance_parents, node_finish_alone, node_finish_in_transaction, Dependents, EngineContext,
     NodeFinishDisposition, ParentAdvance, ParentAdvanceFailure, StepOutcome, TransactionStep,
@@ -834,14 +837,12 @@ async fn persist_workflow_success(
         fence,
         result_json,
     };
-    let outcome = {
-        let (open, _write) = broker
-            .core_pools_for_write()
-            .map_err(|error| phase1_error(task_id, "workflow success", error))?;
-        finish_workflow_success(open.main(), broker.statement_log(), &command)
-            .await
-            .map_err(|error| phase1_error(task_id, "workflow success", error))?
-    };
+    let (open, _write) = broker
+        .core_pools_for_write()
+        .map_err(|error| phase1_error(task_id, "workflow success", error))?;
+    let outcome = finish_workflow_success(open.main(), broker.statement_log(), &command)
+        .await
+        .map_err(|error| phase1_error(task_id, "workflow success", error))?;
     match outcome {
         WorkflowSuccessOutcome::SuccessApplied { phase_two, .. } => Ok(FinalizeOutcome::Terminal {
             is_success: true,
@@ -902,14 +903,12 @@ pub(crate) async fn persist_failed_attempt(
     command: &FinishFailedAttempt,
     is_workflow_task: bool,
 ) -> Result<FinalizeOutcome, FinalizeError> {
-    let outcome = {
-        let (open, _write) = broker
-            .core_pools_for_write()
-            .map_err(|error| phase1_error(command.task_id, "failed attempt", error))?;
-        finish_failed_attempt(open.main(), broker.statement_log(), command)
-            .await
-            .map_err(|error| phase1_error(command.task_id, "failed attempt", error))?
-    };
+    let (open, _write) = broker
+        .core_pools_for_write()
+        .map_err(|error| phase1_error(command.task_id, "failed attempt", error))?;
+    let outcome = finish_failed_attempt(open.main(), broker.statement_log(), command)
+        .await
+        .map_err(|error| phase1_error(command.task_id, "failed attempt", error))?;
     match outcome {
         FailedAttemptOutcome::FailureApplied {
             after: AfterFailure::CapacityWoken,
@@ -1023,12 +1022,15 @@ fn envelope_error(task_id: Uuid, error: serde_json::Error) -> FinalizeError {
 
 /// Classify whether a `WorkflowError` is transient (retryable).
 ///
-/// Mirrors Python's `is_retryable_connection_error(exc)` — only DB/broker
-/// connection errors are considered transient. Logic errors (serialization,
-/// not-found, invalid status) are permanent.
+/// Mirrors Python's `is_retryable_connection_error(exc)`
+/// (`core/worker/finalize.py:1676-1697`) — only DB/broker connection errors
+/// are considered transient, by the core's SQLSTATE rule
+/// (`is_retryable_sqlx_error`). Logic errors (serialization, not-found,
+/// invalid status) and a database refusal (for example a wake on a channel
+/// name the server refuses) are permanent.
 fn is_retryable_workflow_error(e: &crate::workflow_engine::WorkflowError) -> bool {
     match e {
-        crate::workflow_engine::WorkflowError::Database(_) => true,
+        crate::workflow_engine::WorkflowError::Database(error) => is_retryable_sqlx_error(error),
         crate::workflow_engine::WorkflowError::Broker(be) => be.is_retryable(),
         crate::workflow_engine::WorkflowError::Serialization(_)
         | crate::workflow_engine::WorkflowError::WorkflowNotFound { .. }
@@ -1041,19 +1043,23 @@ fn is_retryable_workflow_error(e: &crate::workflow_engine::WorkflowError) -> boo
 }
 
 /// Phase 2 of finalization: the node finish of a workflow task, or the
-/// capacity wake of a plain task.
+/// capacity wake of a plain task (Python `_finalize_workflow_phase`,
+/// `core/worker/finalize.py:1619-1674`).
 ///
 /// Separate from phase 1. If this fails after phase 1 committed, the terminal
 /// task result and its phase-2 record are durable and phase-2 recovery
 /// applies them.
 ///
 /// A workflow task runs `horsies_workflow_node_finish` on the worker reserve
-/// ([`finish_workflow_node`]). A plain task sends the capacity wake when
-/// phase 1 did not. Returns the parent advance that the step owes after its
-/// commit.
+/// ([`finish_workflow_node`]), which sends the capacity wake when phase 1 did
+/// not. A plain task sends the wake as one statement when phase 1 did not; an
+/// error of the wake is a phase-2 error, never dropped, retryable when the
+/// database error is transient (`is_retryable_sqlx_error`, Python
+/// `_phase2_error`, `core/worker/finalize.py:1676-1697`). Returns the parent
+/// advance that the step owes after its commit.
 ///
 /// Errors: [`FinalizeError`] at [`FinalizeStage::Phase2Workflow`], retryable
-/// when the statement failure may clear.
+/// when the failure may clear.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn finalize_workflow_phase(
     broker: &PostgresBroker,
@@ -1090,11 +1096,31 @@ pub(crate) async fn finalize_workflow_phase(
         false => {
             // Skipped when phase 1's statement already sent the wake in the
             // same commit as the transition.
-            if !capacity_notified {
-                notify_worker_capacity(broker.pool(), queue_name, task_id).await;
-            }
+            let wake = match capacity_notified {
+                true => Phase2Wake::NoWake,
+                false => capacity_wake(queue_name, task_id),
+            };
+            send_phase2_wake(broker.pool(), &wake)
+                .await
+                .map_err(|error| FinalizeError {
+                    stage: FinalizeStage::Phase2Workflow,
+                    task_id,
+                    message: format!("capacity wake of queue {queue_name:?} failed: {error}"),
+                    retryable: is_retryable_sqlx_error(&error),
+                })?;
             Ok(ParentAdvance::NotOwed)
         }
+    }
+}
+
+/// The capacity wake of `queue_name` for `task_id`: the workers of the
+/// queue check their capacity and backlog. It goes only to the queue's
+/// channel; workers do not listen on `task_new` (Python
+/// `core/worker/finalize.py:1657-1660`).
+pub(crate) fn capacity_wake(queue_name: &str, task_id: Uuid) -> Phase2Wake {
+    Phase2Wake::Queue {
+        channel: format!("task_queue_{queue_name}"),
+        payload: format!("capacity:{task_id}"),
     }
 }
 
@@ -1194,9 +1220,10 @@ fn node_finish_outcome(
 }
 
 /// Phase 2 on the engine code, for a step that owes child starts: one sqlx
-/// transaction with the record consume and the Rust progression, then the
-/// capacity wake when `wake`. The engine code advances ended child workflows
-/// inside its own transaction, so no parent advance is owed after it.
+/// transaction with the capacity wake when `wake` (delivered at its commit),
+/// the record consume and the Rust progression. The engine code advances
+/// ended child workflows inside its own transaction, so no parent advance is
+/// owed after it.
 async fn finish_workflow_node_on_engine(
     broker: &PostgresBroker,
     engine: EngineContext<'_>,
@@ -1205,10 +1232,15 @@ async fn finish_workflow_node_on_engine(
     queue_name: &str,
     wake: bool,
 ) -> Result<ParentAdvance, FinalizeError> {
+    let phase2_wake = match wake {
+        true => capacity_wake(queue_name, task_id),
+        false => Phase2Wake::NoWake,
+    };
     let _disposition = crate::workflow_engine::phase2_recovery::finalize_phase2(
         broker.pool(),
         task_id,
         if is_success { "COMPLETED" } else { "FAILED" },
+        &phase2_wake,
         engine.registry,
         engine.payload,
         engine.retention,
@@ -1220,9 +1252,6 @@ async fn finish_workflow_node_on_engine(
         message: format!("workflow callback failed: {error}"),
         retryable: is_retryable_workflow_error(&error),
     })?;
-    if wake {
-        notify_worker_capacity(broker.pool(), queue_name, task_id).await;
-    }
     Ok(ParentAdvance::NotOwed)
 }
 
@@ -1279,27 +1308,6 @@ async fn load_pending_phase_two(
 
 #[cfg(test)]
 mod replay_read_tests;
-
-pub(crate) async fn notify_worker_capacity(pool: &sqlx::PgPool, queue_name: &str, task_id: Uuid) {
-    // Wake workers of this queue to re-check capacity/backlog. The capacity
-    // signal is sent only on the per-queue channel; workers no longer listen on
-    // task_new. Parity with horsies PR #101 cafc9200.
-    let payload = format!("capacity:{}", task_id);
-    let channel = format!("task_queue_{}", queue_name);
-    if let Err(e) = sqlx::query("SELECT pg_notify($1, $2)")
-        .bind(&channel)
-        .bind(&payload)
-        .execute(pool)
-        .await
-    {
-        tracing::warn!(
-            task_id = %task_id,
-            channel = %channel,
-            error = %e,
-            "queue-specific capacity NOTIFY failed; worker polling fallback will recover",
-        );
-    }
-}
 
 pub(crate) async fn finalize_pre_execution_failure(
     broker: Arc<PostgresBroker>,
