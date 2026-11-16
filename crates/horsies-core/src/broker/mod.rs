@@ -13,6 +13,7 @@ pub mod postgres;
 pub mod result_types;
 pub mod row;
 pub mod shared_listener;
+pub mod task_lists;
 pub mod terminalization;
 #[cfg(test)]
 pub(crate) mod terminalization_matrix;
