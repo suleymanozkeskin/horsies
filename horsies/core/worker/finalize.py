@@ -642,20 +642,20 @@ class FinalizeMixin:
     async def _release_unconfirmed_claim(
         self,
         task_id: str,
-        claimed_at: datetime,
+        claim: DispatchClaim,
     ) -> None:
         """Release the claim of a start that the child did not confirm.
 
         One fenced release (``_requeue_claimed_task``): status CLAIMED, this
-        worker, the generation ``claimed_at``. A row outside the fence is not
-        touched. A database error is logged; the claim lease then returns
-        the row, as before this release existed. Nothing is owed to phase 2:
-        no task code ran.
+        worker, the generation ``claim.claimed_at``. A row outside the fence
+        is not touched. A database error is logged; the claim lease then
+        returns the row, as before this release existed. Nothing is owed to
+        phase 2: no task code ran.
         """
         outcome = await self._requeue_claimed_task(
             task_id,
             'the start of the attempt was not confirmed',
-            claimed_at=claimed_at,
+            claim=claim,
         )
         match outcome:
             case _RequeueOutcome.REQUEUED | _RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED:
@@ -1238,8 +1238,8 @@ class FinalizeMixin:
                     reason.value,
                 )
                 return Ok(None)
-            case ReleaseUnconfirmedClaim(claimed_at=release_generation):
-                await self._release_unconfirmed_claim(task_id, release_generation)
+            case ReleaseUnconfirmedClaim():
+                await self._release_unconfirmed_claim(task_id, claim)
                 return Ok(None)
             case ReplayWorkflowPhase2():
                 return _phase2_of_a_replay(

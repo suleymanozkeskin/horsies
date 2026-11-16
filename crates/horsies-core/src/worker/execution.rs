@@ -322,17 +322,23 @@ async fn cancel_orphan_before_start(
     worker_id: &str,
     claimed_at: chrono::DateTime<Utc>,
 ) {
-    let cancelled = terminalize(
-        broker.pool(),
-        &TerminalizationCommand::CancelOwnedOrphan {
-            task_id,
-            fence: OwnedClaim {
-                worker_id: worker_id.to_owned(),
-                claimed_at,
-            },
-        },
-    )
-    .await;
+    let cancelled = match broker.core_pools_for_write() {
+        Ok((open, _write)) => {
+            terminalize(
+                open.main(),
+                broker.statement_log(),
+                &TerminalizationCommand::CancelOwnedOrphan {
+                    task_id,
+                    fence: OwnedClaim {
+                        worker_id: worker_id.to_owned(),
+                        claimed_at,
+                    },
+                },
+            )
+            .await
+        }
+        Err(error) => Err(error),
+    };
     match cancelled {
         Ok(outcomes) => match outcomes.first() {
             Some(TerminalizationOutcome::Applied { .. }) => tracing::warn!(
@@ -825,9 +831,9 @@ pub(crate) async fn persist_ok_result(
     }
 }
 
-/// The success of a plain task: one statement locks the RUNNING row under the
-/// full fence, writes the attempt, moves the row and sends the capacity wake
-/// of the row's queue.
+/// The success of a plain task: one statement on the main core pool locks the
+/// RUNNING row under the full fence, writes the attempt, moves the row and
+/// sends the capacity wake of the row's queue.
 async fn persist_plain_success(
     broker: &PostgresBroker,
     task_id: Uuid,
@@ -839,7 +845,10 @@ async fn persist_plain_success(
         fence,
         result_json,
     };
-    let outcomes = terminalize(broker.pool(), &command)
+    let (open, _write) = broker
+        .core_pools_for_write()
+        .map_err(|error| phase1_error(task_id, "complete-fused", error))?;
+    let outcomes = terminalize(open.main(), broker.statement_log(), &command)
         .await
         .map_err(|error| phase1_error(task_id, "complete-fused", error))?;
     match outcomes.into_iter().next() {

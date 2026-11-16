@@ -1881,12 +1881,17 @@ impl PostgresBroker {
     /// Runs through `horsies_expire_owned_claim`, which fences on worker
     /// ownership but deliberately not on the claim generation: once the
     /// deadline has passed, expiry is the correct outcome for whichever
-    /// generation holds the row. `Applied` and `AlreadyApplied` both mean the
-    /// task is expired, as Python's `_expire_claimed_task_before_start`
+    /// generation holds the row. One statement on the main core pool,
+    /// checked out as reserved work. `Applied` and `AlreadyApplied` both mean
+    /// the task is expired, as Python's `_expire_claimed_task_before_start`
     /// (`core/worker/child_runner.py`) reads them; any other outcome is
     /// logged with its evidence at the adapter boundary. The stored error is
     /// Python's: `TASK_EXPIRED` with its message and the task and worker ids
     /// as `data`.
+    ///
+    /// Errors: [`BrokerError::Statement`], or
+    /// [`BrokerError::TerminalizationContract`] for a row outside the wire
+    /// contract.
     pub async fn expire_claimed_task_before_start(
         &self,
         task_id: Uuid,
@@ -1904,8 +1909,10 @@ impl PostgresBroker {
         let result_json =
             serde_json::to_string(&task_result).map_err(BrokerError::Serialization)?;
 
+        let (open, _write) = self.core_pools_for_write()?;
         let outcomes = crate::broker::terminalization::terminalize(
-            &self.pool,
+            open.main(),
+            self.statement_log,
             &crate::core::lifecycle::TerminalizationCommand::ExpireOwnedClaim {
                 task_id,
                 fence: crate::core::lifecycle::WorkerOwned {
@@ -5055,7 +5062,7 @@ mod fused_finalize_tests {
     //! locks the RUNNING row, writes the COMPLETED attempt from the locked
     //! row, transitions, and fires the capacity notify.
     use super::*;
-    use crate::broker::terminalization::terminalize;
+    use crate::broker::terminalization::on_test_pool::terminalize;
     use crate::core::lifecycle::{OwnedClaim, TerminalizationCommand, TerminalizationOutcome};
     use serial_test::serial;
     use uuid::Uuid;
@@ -6118,7 +6125,7 @@ mod terminal_at_stamp_tests {
         .await
         .expect("stamp claim generation");
 
-        let outcomes = crate::broker::terminalization::terminalize(
+        let outcomes = crate::broker::terminalization::on_test_pool::terminalize(
             &pool,
             &crate::core::lifecycle::TerminalizationCommand::CompleteTaskFused {
                 task_id: Uuid::parse_str(&id).expect("test identity must be UUID"),
@@ -6154,7 +6161,7 @@ mod terminal_at_stamp_tests {
         let id = Uuid::new_v4().to_string();
         seed(&pool, &id, "RUNNING", Some("w1"), None).await;
 
-        let outcomes = crate::broker::terminalization::terminalize(
+        let outcomes = crate::broker::terminalization::on_test_pool::terminalize(
             &pool,
             &crate::core::lifecycle::TerminalizationCommand::FailLockedTask {
                 task_id: Uuid::parse_str(&id).expect("test identity must be UUID"),

@@ -16,7 +16,8 @@ use super::support::*;
 use crate::broker::attempt_writes::{
     AttemptFailure, AttemptFailureKind, FinishFailedAttempt, FinishWorkflowSuccess, RetryRequest,
 };
-use crate::broker::terminalization::{terminalize, terminalize_in_tx};
+use crate::broker::terminalization::on_test_pool::terminalize;
+use crate::broker::terminalization::terminalize_in_tx;
 use crate::core::lifecycle::outcomes::{ObservedClaim, ObservedWorkflowLink};
 use crate::core::lifecycle::{
     AttemptWriteRefusal, BatchSize, CallerHoldsRowLock, FailedAttemptOutcome, GuardEvidence,

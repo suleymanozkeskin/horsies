@@ -17,6 +17,7 @@ use crate::workflow_engine::start::{
     child_workflow_depth, materialize_child_spec, start_child_workflow_in_tx,
     stored_sub_workflow_params,
 };
+use crate::workflow_engine::start_statement::child_spec_failure_text;
 
 use crate::broker::PostgresBroker;
 use crate::db::CheckoutClass;
@@ -662,7 +663,7 @@ pub(crate) async fn apply_phase2_progression_in_tx(
         return Ok(());
     }
 
-    promote_phase2_dependents_in_tx(
+    match promote_phase2_dependents_in_tx(
         transaction,
         workflow_id,
         task_index,
@@ -670,8 +671,174 @@ pub(crate) async fn apply_phase2_progression_in_tx(
         payload,
         retention,
     )
-    .await?;
-    complete_phase2_workflow_in_tx(transaction, workflow_id, registry, payload, retention).await
+    .await?
+    {
+        PromotionStep::Continue => {
+            complete_phase2_workflow_in_tx(transaction, workflow_id, registry, payload, retention)
+                .await
+        }
+        PromotionStep::WorkflowPaused => Ok(()),
+    }
+}
+
+/// Whether a promotion may go on after one node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PromotionStep {
+    Continue,
+    /// A node failure paused the workflow (`on_error = pause`): no other node of the step is promoted. Nodes
+    /// that the step did not reach stay PENDING, and resume evaluates them again (Python reverts the nodes of
+    /// the level that it moved and did not build to READY, `horsies/core/workflows/engine.py:474-533`).
+    WorkflowPaused,
+}
+
+/// A promoted node, prepared from its own stored data, or refused. Python: `_EnqueueBuildError`
+/// (`horsies/core/workflows/engine.py:620-631`).
+pub(crate) enum Preparation<T> {
+    Built(T),
+    Refused(NodeRefusal),
+}
+
+/// Why the promotion refuses a node. The node fails alone with the error of
+/// [`NodeRefusal::task_node_error`] or [`NodeRefusal::subworkflow_node_error`].
+pub(crate) enum NodeRefusal {
+    /// The node's own data cannot be prepared: its stored options, input or `args_from` do not read, or its
+    /// child cannot be built or started. The text of the refusal.
+    NotPrepared(String),
+    /// An `args_from` key names a member of the node's static input (Python
+    /// `horsies/core/workflows/engine.py:834-839`, `:1151-1163`).
+    StaticMemberConflict(ArgsFromConflict),
+}
+
+impl NodeRefusal {
+    /// The error that a refused task node stores: `WORKER_SERIALIZATION_ERROR` with the text of the refusal
+    /// (Python `horsies/core/workflows/engine.py:746-790`), or `WORKFLOW_ENQUEUE_FAILED` for an `args_from`
+    /// conflict (`:834-839`).
+    pub(crate) fn task_node_error(self, workflow_id: Uuid, task_index: i32) -> TaskError {
+        match self {
+            NodeRefusal::NotPrepared(message) => node_not_prepared_error(
+                workflow_id,
+                task_index,
+                OperationalErrorCode::WorkerSerializationError,
+                message,
+            ),
+            NodeRefusal::StaticMemberConflict(conflict) => {
+                conflict.node_error(workflow_id, task_index, MergedNodeKind::Task)
+            }
+        }
+    }
+
+    /// The error that a refused sub-workflow node stores, `WORKFLOW_ENQUEUE_FAILED` in both cases: the build
+    /// failure with the name of the workflow that holds the node, `workflow_name` (Python
+    /// `horsies/core/workflows/engine.py:1180-1251`), or the `args_from` conflict (`:1151-1163`).
+    pub(crate) fn subworkflow_node_error(
+        self,
+        workflow_id: Uuid,
+        task_index: i32,
+        workflow_name: &str,
+    ) -> TaskError {
+        match self {
+            NodeRefusal::NotPrepared(message) => node_not_prepared_error(
+                workflow_id,
+                task_index,
+                OperationalErrorCode::WorkflowEnqueueFailed,
+                format!(
+                    "Subworkflow build failed: {message} (workflow {workflow_name}:{task_index})"
+                ),
+            ),
+            NodeRefusal::StaticMemberConflict(conflict) => {
+                conflict.node_error(workflow_id, task_index, MergedNodeKind::SubWorkflow)
+            }
+        }
+    }
+}
+
+/// Why the preparation of a promoted node stopped.
+pub(crate) enum PreparationStop {
+    /// The node's own data refuses it: the node fails alone.
+    Refused(NodeRefusal),
+    /// An error of the step (a failed read, for example): the step's transaction rolls back.
+    Failed(WorkflowError),
+}
+
+/// A `Validation` or `Serialization` error of a preparation step is a refusal of the node's own data; every
+/// other error is an error of the step.
+impl From<WorkflowError> for PreparationStop {
+    fn from(error: WorkflowError) -> Self {
+        match error {
+            WorkflowError::Validation(message) => {
+                PreparationStop::Refused(NodeRefusal::NotPrepared(message))
+            }
+            WorkflowError::Serialization(error) => {
+                PreparationStop::Refused(NodeRefusal::NotPrepared(error.to_string()))
+            }
+            error @ (WorkflowError::Database(_)
+            | WorkflowError::Broker(_)
+            | WorkflowError::WorkflowNotFound { .. }
+            | WorkflowError::WorkflowTimeout { .. }
+            | WorkflowError::WorkflowError(_)
+            | WorkflowError::InvalidStatus(_)
+            | WorkflowError::StepContract(_)) => PreparationStop::Failed(error),
+        }
+    }
+}
+
+/// The node input after the `args_from` merge; an `args_from` key that names a member of the static input
+/// refuses the node. Pure.
+pub(crate) fn merged_input_or_refusal(merge: ArgsFromMerge) -> Result<String, PreparationStop> {
+    match merge {
+        ArgsFromMerge::Merged(input) => Ok(input),
+        ArgsFromMerge::StaticMemberConflict(conflict) => Err(PreparationStop::Refused(
+            NodeRefusal::StaticMemberConflict(conflict),
+        )),
+    }
+}
+
+/// Splits the outcome of a preparation: a refusal fails the node alone ([`Preparation::Refused`]); an error
+/// of the step is returned, and the step's transaction rolls back. A `WorkflowError` is split as
+/// [`PreparationStop`] splits it. Pure.
+pub(crate) fn preparation<T, E: Into<PreparationStop>>(
+    result: Result<T, E>,
+) -> Result<Preparation<T>, WorkflowError> {
+    let result: Result<T, PreparationStop> = result.map_err(Into::into);
+    match result {
+        Ok(built) => Ok(Preparation::Built(built)),
+        Err(PreparationStop::Refused(refusal)) => Ok(Preparation::Refused(refusal)),
+        Err(PreparationStop::Failed(error)) => Err(error),
+    }
+}
+
+/// The child spec of a promoted sub-workflow node: its input after the `args_from` merge, its stored params,
+/// then the build (Python checks the merge and its conflict, `horsies/core/workflows/engine.py:1048-1163`,
+/// before the build, `:1165-1215`). Pure.
+pub(crate) fn prepare_child_spec(
+    registered: crate::core::registry::workflow::ResolvedChildWorkflow<'_>,
+    merge: Result<ArgsFromMerge, WorkflowError>,
+    sub_workflow_params: Option<&str>,
+    registry: &WorkflowSpecRegistry,
+) -> Result<crate::core::WorkflowSpec, PreparationStop> {
+    let merged_input = merged_input_or_refusal(merge?)?;
+    let params = stored_sub_workflow_params(sub_workflow_params)?;
+    materialize_child_spec(registered, params, &merged_input, registry).map_err(|error| {
+        PreparationStop::Refused(NodeRefusal::NotPrepared(child_spec_failure_text(&error)))
+    })
+}
+
+/// The error that a node stores when the promotion cannot prepare it (Python `_fail_enqueued_task`,
+/// `horsies/core/workflows/engine.py:474-533`): the code, the message, and the workflow id and the node
+/// index in `data`.
+pub(crate) fn node_not_prepared_error(
+    workflow_id: Uuid,
+    task_index: i32,
+    code: OperationalErrorCode,
+    message: String,
+) -> TaskError {
+    TaskError {
+        data: Some(serde_json::json!({
+            "workflow_id": workflow_id.to_string(),
+            "task_index": task_index,
+        })),
+        ..TaskError::builtin(code, message)
+    }
 }
 
 async fn promote_phase2_dependents_in_tx(
@@ -681,7 +848,7 @@ async fn promote_phase2_dependents_in_tx(
     registry: &WorkflowSpecRegistry,
     payload: &PayloadPolicy,
     retention: &RetentionConfig,
-) -> Result<(), WorkflowError> {
+) -> Result<PromotionStep, WorkflowError> {
     let mut source_indexes = vec![completed_index];
     while !source_indexes.is_empty() {
         let eval_rows: Vec<DependentEvalRow> = sqlx::query_as(GET_DEPENDENTS_EVAL_SQL)
@@ -726,7 +893,7 @@ async fn promote_phase2_dependents_in_tx(
                     }
                 }
                 Some(true) => {
-                    enqueue_phase2_dependent_in_tx(
+                    match enqueue_phase2_dependent_in_tx(
                         transaction,
                         workflow_id,
                         &node,
@@ -734,14 +901,18 @@ async fn promote_phase2_dependents_in_tx(
                         payload,
                         retention,
                     )
-                    .await?;
+                    .await?
+                    {
+                        PromotionStep::Continue => {}
+                        PromotionStep::WorkflowPaused => return Ok(PromotionStep::WorkflowPaused),
+                    }
                 }
                 None => {}
             }
         }
         source_indexes = next_skipped;
     }
-    Ok(())
+    Ok(PromotionStep::Continue)
 }
 
 async fn enqueue_phase2_dependent_in_tx(
@@ -751,7 +922,7 @@ async fn enqueue_phase2_dependent_in_tx(
     registry: &WorkflowSpecRegistry,
     payload: &PayloadPolicy,
     retention: &RetentionConfig,
-) -> Result<(), WorkflowError> {
+) -> Result<PromotionStep, WorkflowError> {
     if let Some(ctx_ids) = node
         .workflow_ctx_from
         .as_ref()
@@ -763,7 +934,7 @@ async fn enqueue_phase2_dependent_in_tx(
             .fetch_one(transaction.as_mut())
             .await?;
         if terminal != ctx_ids.len() as i32 {
-            return Ok(());
+            return Ok(PromotionStep::Continue);
         }
     }
     let won = sqlx::query(UPDATE_WORKFLOW_TASK_READY_SQL)
@@ -772,7 +943,7 @@ async fn enqueue_phase2_dependent_in_tx(
         .execute(transaction.as_mut())
         .await?;
     if won.rows_affected() == 0 {
-        return Ok(());
+        return Ok(PromotionStep::Continue);
     }
     let dep_rows: Vec<DepResult> = sqlx::query_as(GET_DEP_RESULTS_SQL)
         .bind(workflow_id)
@@ -806,14 +977,28 @@ async fn enqueue_phase2_dependent_in_tx(
         )
         .await;
     }
-    let merged_input = match merge_args_from(&node.input, &node.args_from, &dep_results)? {
-        ArgsFromMerge::Merged(merged_input) => merged_input,
-        ArgsFromMerge::StaticMemberConflict(conflict) => {
-            return fail_phase2_node_at_enqueue_in_tx(
+    // A mint refusal is an error of the step, not of the node: it is not passed through `preparation`.
+    let task_id = crate::core::history::identity::uuid7::mint_task_id()
+        .map_err(|error| WorkflowError::Validation(error.to_string()))?;
+    let prepared = preparation(
+        prepare_phase2_task_row(
+            transaction,
+            workflow_id,
+            node,
+            &dep_results,
+            payload,
+            retention,
+        )
+        .await,
+    )?;
+    let row = match prepared {
+        Preparation::Built(row) => row,
+        Preparation::Refused(refusal) => {
+            return fail_phase2_node_in_tx(
                 transaction,
                 workflow_id,
                 node.task_index,
-                conflict.node_error(workflow_id, node.task_index, MergedNodeKind::Task),
+                refusal.task_node_error(workflow_id, node.task_index),
                 registry,
                 payload,
                 retention,
@@ -821,43 +1006,17 @@ async fn enqueue_phase2_dependent_in_tx(
             .await;
         }
     };
-    let merged_input =
-        inject_phase2_workflow_context_in_tx(transaction, workflow_id, node, merged_input).await?;
-    enforce_payload_policy(
-        payload,
-        &node.task_name,
-        PayloadKind::Kwargs,
-        merged_input.len(),
-    );
-    let task_id = crate::core::history::identity::uuid7::mint_task_id()
-        .map_err(|error| WorkflowError::Validation(error.to_string()))?;
-    let good_until = crate::workflow_engine::node_good_until(
-        node.task_index,
-        &node.task_name,
-        node.task_options.as_deref(),
-    )?;
-    let facts = prepare_workflow_task_facts(
-        &merged_input,
-        node.task_options.as_deref(),
-        retention.resolve_queue_class(&node.queue_name).as_deref(),
-    )
-    .map_err(|error| WorkflowError::Validation(error.to_string()))?;
-    let max_retries = crate::workflow_engine::node_max_retries(
-        node.task_index,
-        &node.task_name,
-        node.task_options.as_deref(),
-    )?;
     sqlx::query(ENQUEUE_TASK_SQL)
         .bind(task_id)
         .bind(&node.task_name)
         .bind(&node.queue_name)
         .bind(node.priority)
-        .bind(&merged_input)
+        .bind(&row.input)
         .bind(&node.task_options)
-        .bind(facts.execution.as_str())
-        .bind(&facts.retention_class_key)
-        .bind(max_retries)
-        .bind(good_until)
+        .bind(row.facts.execution.as_str())
+        .bind(&row.facts.retention_class_key)
+        .bind(row.max_retries)
+        .bind(row.good_until)
         .bind(workflow_id)
         .execute(transaction.as_mut())
         .await?;
@@ -872,7 +1031,123 @@ async fn enqueue_phase2_dependent_in_tx(
             "phase-2 dependent link lost its READY/RUNNING guard".to_owned(),
         ));
     }
-    Ok(())
+    Ok(PromotionStep::Continue)
+}
+
+/// The values of a promoted task node's task row that come from the node's own stored data.
+pub(crate) struct PreparedTaskRow {
+    /// The node's input with its `args_from` and workflow context members.
+    pub(crate) input: String,
+    pub(crate) good_until: Option<chrono::DateTime<chrono::Utc>>,
+    pub(crate) max_retries: i32,
+    pub(crate) facts: WorkflowTaskFacts,
+}
+
+/// The stored data of a READY task node that resume or recovery case 1 enqueues.
+pub(crate) struct ReadyNodeData<'a> {
+    pub(crate) task_index: i32,
+    pub(crate) task_name: &'a str,
+    pub(crate) input: &'a str,
+    pub(crate) args_from: &'a Option<serde_json::Value>,
+    pub(crate) dependencies: &'a [i32],
+    pub(crate) workflow_ctx_from: Option<&'a [String]>,
+    pub(crate) task_options: Option<&'a str>,
+    pub(crate) queue_name: &'a str,
+}
+
+/// Builds the task row values of a READY task node that resume or recovery case 1 enqueues: the input
+/// (`args_from` from the dependency rows, then the workflow context), the deadline, the retry limit and the
+/// facts. A refusal of the node's own data, or an `args_from` key that names a member of its static input,
+/// is [`PreparationStop::Refused`]; a failed read is [`PreparationStop::Failed`]. Reads on `pool`; writes
+/// nothing.
+pub(crate) async fn prepare_ready_task_row(
+    pool: &PgPool,
+    workflow_id: Uuid,
+    node: ReadyNodeData<'_>,
+    retention: &RetentionConfig,
+) -> Result<PreparedTaskRow, PreparationStop> {
+    let merged_input = merged_input_or_refusal(
+        crate::workflow_engine::args_merge::merge_args_from_async(
+            pool,
+            workflow_id,
+            node.input,
+            node.args_from,
+            node.dependencies,
+        )
+        .await?,
+    )?;
+    let input = inject_workflow_ctx_into_input(
+        pool,
+        workflow_id,
+        node.task_index,
+        node.task_name,
+        node.workflow_ctx_from,
+        merged_input,
+    )
+    .await?;
+    let good_until = crate::workflow_engine::node_good_until(
+        node.task_index,
+        node.task_name,
+        node.task_options,
+    )?;
+    let facts = prepare_workflow_task_facts(
+        &input,
+        node.task_options,
+        retention.resolve_queue_class(node.queue_name).as_deref(),
+    )
+    .map_err(|error| WorkflowError::Validation(error.to_string()))?;
+    let max_retries = crate::workflow_engine::node_max_retries(
+        node.task_index,
+        node.task_name,
+        node.task_options,
+    )?;
+    Ok(PreparedTaskRow {
+        input,
+        good_until,
+        max_retries,
+        facts,
+    })
+}
+
+/// Builds the task row values of a promoted task node: its input (`args_from`, then the workflow context,
+/// read in the transaction), its deadline, its retry limit and its facts. A refusal of the node's own data,
+/// or an `args_from` key that names a member of its static input, is [`PreparationStop::Refused`]; a failed
+/// read is [`PreparationStop::Failed`]. Writes nothing.
+async fn prepare_phase2_task_row(
+    transaction: &mut Transaction<'_, Postgres>,
+    workflow_id: Uuid,
+    node: &DependentRow,
+    dep_results: &HashMap<i32, DepResultValue>,
+    payload: &PayloadPolicy,
+    retention: &RetentionConfig,
+) -> Result<PreparedTaskRow, PreparationStop> {
+    let merged_input =
+        merged_input_or_refusal(merge_args_from(&node.input, &node.args_from, dep_results)?)?;
+    let input =
+        inject_phase2_workflow_context_in_tx(transaction, workflow_id, node, merged_input).await?;
+    enforce_payload_policy(payload, &node.task_name, PayloadKind::Kwargs, input.len());
+    let good_until = crate::workflow_engine::node_good_until(
+        node.task_index,
+        &node.task_name,
+        node.task_options.as_deref(),
+    )?;
+    let facts = prepare_workflow_task_facts(
+        &input,
+        node.task_options.as_deref(),
+        retention.resolve_queue_class(&node.queue_name).as_deref(),
+    )
+    .map_err(|error| WorkflowError::Validation(error.to_string()))?;
+    let max_retries = crate::workflow_engine::node_max_retries(
+        node.task_index,
+        &node.task_name,
+        node.task_options.as_deref(),
+    )?;
+    Ok(PreparedTaskRow {
+        input,
+        good_until,
+        max_retries,
+        facts,
+    })
 }
 
 async fn inject_phase2_workflow_context_in_tx(
@@ -908,7 +1183,7 @@ async fn enqueue_phase2_subworkflow_in_tx(
     dep_results: &HashMap<i32, DepResultValue>,
     payload: &PayloadPolicy,
     retention: &RetentionConfig,
-) -> Result<(), WorkflowError> {
+) -> Result<PromotionStep, WorkflowError> {
     let depth: DepthRow = sqlx::query_as(GET_WORKFLOW_DEPTH_SQL)
         .bind(workflow_id)
         .fetch_one(transaction.as_mut())
@@ -921,7 +1196,7 @@ async fn enqueue_phase2_subworkflow_in_tx(
     ) {
         Ok(child_depth) => child_depth,
         Err(error) => {
-            return fail_phase2_node_at_enqueue_in_tx(
+            return fail_phase2_node_in_tx(
                 transaction,
                 workflow_id,
                 node.task_index,
@@ -938,7 +1213,7 @@ async fn enqueue_phase2_subworkflow_in_tx(
         .as_deref()
         .and_then(|key| registry.resolve_child_registration(key))
     else {
-        return fail_phase2_node_at_enqueue_in_tx(
+        return fail_phase2_node_in_tx(
             transaction,
             workflow_id,
             node.task_index,
@@ -953,14 +1228,20 @@ async fn enqueue_phase2_subworkflow_in_tx(
         )
         .await;
     };
-    let merged_input = match merge_args_from(&node.input, &node.args_from, dep_results)? {
-        ArgsFromMerge::Merged(merged_input) => merged_input,
-        ArgsFromMerge::StaticMemberConflict(conflict) => {
-            return fail_phase2_node_at_enqueue_in_tx(
+    let built = preparation(prepare_child_spec(
+        registered,
+        merge_args_from(&node.input, &node.args_from, dep_results),
+        node.sub_workflow_params.as_deref(),
+        registry,
+    ))?;
+    let child_spec = match built {
+        Preparation::Built(child_spec) => child_spec,
+        Preparation::Refused(refusal) => {
+            return fail_phase2_node_in_tx(
                 transaction,
                 workflow_id,
                 node.task_index,
-                conflict.node_error(workflow_id, node.task_index, MergedNodeKind::SubWorkflow),
+                refusal.subworkflow_node_error(workflow_id, node.task_index, &depth.name),
                 registry,
                 payload,
                 retention,
@@ -968,20 +1249,42 @@ async fn enqueue_phase2_subworkflow_in_tx(
             .await;
         }
     };
-    let params = stored_sub_workflow_params(node.sub_workflow_params.as_deref())?;
-    let child_spec = materialize_child_spec(registered, params, &merged_input, registry)?;
     let root = depth.root_workflow_id.unwrap_or(workflow_id);
-    let child_id = start_child_workflow_in_tx(
-        transaction,
-        &child_spec,
-        workflow_id,
-        node.task_index,
-        child_depth,
-        root,
-        registry,
-        retention,
-    )
-    .await?;
+    // The child start writes in a savepoint: a child that cannot be prepared (a node with no resolved queue,
+    // for example) leaves no child row, and its node fails alone. A database error ends the step.
+    let mut savepoint = sqlx::Acquire::begin(&mut **transaction).await?;
+    let started = preparation(
+        start_child_workflow_in_tx(
+            &mut savepoint,
+            &child_spec,
+            workflow_id,
+            node.task_index,
+            child_depth,
+            root,
+            registry,
+            retention,
+        )
+        .await,
+    )?;
+    let child_id = match started {
+        Preparation::Built(child_id) => {
+            savepoint.commit().await?;
+            child_id
+        }
+        Preparation::Refused(refusal) => {
+            savepoint.rollback().await?;
+            return fail_phase2_node_in_tx(
+                transaction,
+                workflow_id,
+                node.task_index,
+                refusal.subworkflow_node_error(workflow_id, node.task_index, &depth.name),
+                registry,
+                payload,
+                retention,
+            )
+            .await;
+        }
+    };
     let linked = sqlx::query(UPDATE_SUBWORKFLOW_LINK_SQL)
         .bind(&child_id)
         .bind(workflow_id)
@@ -993,14 +1296,15 @@ async fn enqueue_phase2_subworkflow_in_tx(
             "phase-2 sub-workflow link lost its READY/RUNNING guard".to_owned(),
         ));
     }
-    Ok(())
+    Ok(PromotionStep::Continue)
 }
 
-/// Fails a node at its enqueue step, inside the phase-2 transaction, and applies the failure as a node
-/// finish (failure policy, dependents, completion): a sub-workflow node whose child cannot start, or a
-/// node whose `args_from` names a member of its static input. Nothing is written when the node is already
-/// terminal.
-async fn fail_phase2_node_at_enqueue_in_tx(
+/// Fails a promoted node inside the phase-2 transaction and applies the failure as a node finish (failure
+/// policy, dependents, completion): a node that the promotion refuses ([`NodeRefusal`]), or a sub-workflow
+/// node whose child cannot start. Nothing is written when the node is already terminal (Python
+/// `_fail_enqueued_task`, `horsies/core/workflows/engine.py:474-533`). Returns
+/// [`PromotionStep::WorkflowPaused`] when the failure paused the workflow.
+async fn fail_phase2_node_in_tx(
     transaction: &mut Transaction<'_, Postgres>,
     workflow_id: Uuid,
     task_index: i32,
@@ -1008,7 +1312,7 @@ async fn fail_phase2_node_at_enqueue_in_tx(
     registry: &WorkflowSpecRegistry,
     payload: &PayloadPolicy,
     retention: &RetentionConfig,
-) -> Result<(), WorkflowError> {
+) -> Result<PromotionStep, WorkflowError> {
     let result_json = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(error))?;
     let updated: Option<IdRow> = sqlx::query_as(UPDATE_WORKFLOW_TASK_FAILED_SQL)
         .bind(&result_json)
@@ -1017,7 +1321,7 @@ async fn fail_phase2_node_at_enqueue_in_tx(
         .fetch_optional(transaction.as_mut())
         .await?;
     let Some(updated) = updated else {
-        return Ok(());
+        return Ok(PromotionStep::Continue);
     };
     let context: Option<(String, String)> =
         sqlx::query_as("SELECT on_error, status FROM horsies_workflows WHERE id = $1")
@@ -1025,7 +1329,7 @@ async fn fail_phase2_node_at_enqueue_in_tx(
             .fetch_optional(transaction.as_mut())
             .await?;
     let Some((on_error, status)) = context else {
-        return Ok(());
+        return Ok(PromotionStep::Continue);
     };
     Box::pin(apply_phase2_progression_in_tx(
         transaction,
@@ -1040,7 +1344,15 @@ async fn fail_phase2_node_at_enqueue_in_tx(
         payload,
         retention,
     ))
-    .await
+    .await?;
+    let status_after: Option<WorkflowStatusRow> = sqlx::query_as(GET_WORKFLOW_STATUS_SQL)
+        .bind(workflow_id)
+        .fetch_optional(transaction.as_mut())
+        .await?;
+    match status_after.as_ref().map(|row| row.status.as_str()) {
+        Some("PAUSED") => Ok(PromotionStep::WorkflowPaused),
+        Some(_) | None => Ok(PromotionStep::Continue),
+    }
 }
 
 /// The error of the sub-workflow node `task_index` of the workflow named `parent_workflow_name` whose
@@ -1284,9 +1596,10 @@ fn dep_status_count(counts: &serde_json::Value, status: &str) -> i32 {
 /// READY->ENQUEUED CAS, one bulk task INSERT + one bulk LINK — all writes in a
 /// single transaction so a crash rolls back atomically (no orphan task row, no
 /// stranded ENQUEUED). SubWorkflowNode and `workflow_ctx_from` dependents take the
-/// per-node `try_make_ready_and_enqueue` path unchanged. A plain dependent whose
-/// `args_from` names a member of its static input is failed before the level's
-/// transaction (`fail_node_at_enqueue`).
+/// per-node `try_make_ready_and_enqueue` path unchanged. A plain dependent that the
+/// build refuses ([`NodeRefusal`]) fails before the level's transaction
+/// (`fail_workflow_node`); a failure that pauses the workflow ends the level before
+/// it writes.
 async fn promote_dependents_level(
     pool: &PgPool,
     workflow_id: Uuid,
@@ -1388,23 +1701,46 @@ async fn promote_dependents_level(
         get_dependency_results(pool, workflow_id, &dep_union).await?
     };
 
-    // Build the task row of each ready plain node before the level writes; these nodes take no
-    // workflow context, so the build reads no row. A node whose `args_from` names a member of its
-    // static input fails here, before the level writes, as Python fails it inside its level
-    // (`core/workflows/engine.py:834-839`, `:2516-2527`). When that failure pauses the workflow,
-    // the ENQUEUED write below (guarded on RUNNING) moves no sibling: they stay READY with no task
-    // row, as Python's level moves them back to READY (`:2440-2451`). A build failure leaves the
-    // node READY (recovery/resume re-enqueue it) — same as the per-node path.
+    // Build the task row of each ready plain node before the level writes: these nodes take no
+    // workflow context, so the build reads no row. A node that the build refuses ([`NodeRefusal`])
+    // fails alone here (Python `_fail_enqueued_task`, `horsies/core/workflows/engine.py:474-533`):
+    // its own data does not read, or its `args_from` names a member of its static input
+    // (`:834-839`). A failure that pauses the workflow ends the level before it writes: no node
+    // of the level is promoted and no sibling gets a task row; the nodes stay PENDING and resume
+    // evaluates them again (Python reverts the level's nodes to READY and inserts no task row,
+    // `:2365-2378`). A task-id mint failure or any other build error leaves the node without
+    // insert values: it becomes READY below and recovery case 1 enqueues it.
     let mut built_by_index: HashMap<i32, EnqueueInsertParams> = HashMap::new();
-    let mut refused: Vec<(i32, TaskError)> = Vec::new();
+    let mut refused: Vec<(i32, NodeRefusal)> = Vec::new();
     for node in &ready_plain {
-        match build_enqueued_task_params(pool, workflow_id, node, &dep_results, payload, retention)
-            .await
-        {
-            Ok(NodeEnqueueBuild::Ready(params)) => {
+        let task_id = match crate::core::history::identity::uuid7::mint_task_id() {
+            Ok(task_id) => task_id,
+            Err(error) => {
+                tracing::error!(
+                    workflow_id = %workflow_id,
+                    task_index = node.task_index,
+                    error = %error,
+                    "task identity mint failed; node stays READY",
+                );
+                continue;
+            }
+        };
+        match preparation(
+            build_enqueued_task_params(
+                pool,
+                workflow_id,
+                node,
+                task_id,
+                &dep_results,
+                payload,
+                retention,
+            )
+            .await,
+        ) {
+            Ok(Preparation::Built(params)) => {
                 built_by_index.insert(node.task_index, params);
             }
-            Ok(NodeEnqueueBuild::Refused(error)) => refused.push((node.task_index, error)),
+            Ok(Preparation::Refused(refusal)) => refused.push((node.task_index, refusal)),
             Err(e) => {
                 tracing::error!(
                     workflow_id = %workflow_id,
@@ -1418,17 +1754,21 @@ async fn promote_dependents_level(
     let refused_indexes: std::collections::HashSet<i32> =
         refused.iter().map(|(task_index, _)| *task_index).collect();
     ready_plain.retain(|node| !refused_indexes.contains(&node.task_index));
-    for (task_index, error) in refused {
-        fail_node_at_enqueue(
+    for (task_index, refusal) in refused {
+        let step = fail_workflow_node(
             pool,
             workflow_id,
             task_index,
-            error,
+            refusal.task_node_error(workflow_id, task_index),
             registry,
             payload,
             retention,
         )
         .await?;
+        match step {
+            PromotionStep::Continue => {}
+            PromotionStep::WorkflowPaused => return Ok(Vec::new()),
+        }
     }
 
     let mut newly_skipped: Vec<i32> = Vec::new();
@@ -1828,47 +2168,27 @@ struct EnqueueInsertParams {
     facts: WorkflowTaskFacts,
 }
 
-/// What the build of a ready task node gives.
-enum NodeEnqueueBuild {
-    /// The insert values of the node's task row.
-    Ready(EnqueueInsertParams),
-    /// The node cannot be enqueued and fails with this error: its `args_from` names a member of its
-    /// static input (Python `core/workflows/engine.py:834-839`).
-    Refused(TaskError),
-}
-
 /// Build the `horsies_tasks` INSERT params for a workflow node ready to enqueue.
 ///
 /// Shared by `enqueue_workflow_task` (single-node) and the batched promotion
 /// pipeline. Merges `args_from` dependency results into the node's input, injects
 /// `workflow_ctx` when configured (the only DB read here), parses retry/good_until
-/// and the execution class from task_options, and generates the task id. An
-/// `args_from` key that the static input also sets gives `Refused`; the caller
-/// fails the node. Errors are per-node and propagate to the caller exactly as the
-/// inline code did.
+/// and the execution class from task_options, with the task id the caller minted.
+/// A refusal of the node's own data, or an `args_from` key that names a member of
+/// its static input, is [`PreparationStop::Refused`] (the node fails alone,
+/// [`preparation`]); a failed read is [`PreparationStop::Failed`]. Writes nothing.
 async fn build_enqueued_task_params(
     pool: &PgPool,
     workflow_id: Uuid,
     task: &DependentRow,
+    task_id: Uuid,
     dep_results: &HashMap<i32, DepResultValue>,
     payload: &PayloadPolicy,
     retention: &RetentionConfig,
-) -> Result<NodeEnqueueBuild, WorkflowError> {
-    let task_id = crate::core::history::identity::uuid7::mint_task_id().map_err(|error| {
-        WorkflowError::Validation(format!("task identity mint failed: {error}"))
-    })?;
-
+) -> Result<EnqueueInsertParams, PreparationStop> {
     // Merge args_from into the node's input.
-    let merged_input = match merge_args_from(&task.input, &task.args_from, dep_results)? {
-        ArgsFromMerge::Merged(merged_input) => merged_input,
-        ArgsFromMerge::StaticMemberConflict(conflict) => {
-            return Ok(NodeEnqueueBuild::Refused(conflict.node_error(
-                workflow_id,
-                task.task_index,
-                MergedNodeKind::Task,
-            )));
-        }
-    };
+    let merged_input =
+        merged_input_or_refusal(merge_args_from(&task.input, &task.args_from, dep_results)?)?;
 
     // Inject workflow_ctx if configured (shared with the resume/recovery
     // re-enqueue paths via inject_workflow_ctx_into_input, so all three paths
@@ -1914,7 +2234,7 @@ async fn build_enqueued_task_params(
     )
     .map_err(|error| WorkflowError::Validation(error.to_string()))?;
 
-    Ok(NodeEnqueueBuild::Ready(EnqueueInsertParams {
+    Ok(EnqueueInsertParams {
         task_id,
         task_name: task.task_name.clone(),
         queue_name: task.queue_name.clone(),
@@ -1924,7 +2244,7 @@ async fn build_enqueued_task_params(
         max_retries,
         task_options: task.task_options.clone(),
         facts,
-    }))
+    })
 }
 
 /// Inject the `workflow_ctx` payload into a node's input when `workflow_ctx_from`
@@ -1958,8 +2278,8 @@ pub(crate) async fn inject_workflow_ctx_into_input(
 
 /// Create a horsies_tasks row for a workflow task and link it.
 ///
-/// Merges `args_from` results into the task's input. A node whose `args_from` names a member of its
-/// static input is failed instead (`fail_node_at_enqueue`).
+/// Merges `args_from` results into the task's input. A node that the build refuses ([`NodeRefusal`])
+/// fails alone instead (`fail_workflow_node`).
 async fn enqueue_workflow_task(
     pool: &PgPool,
     workflow_id: Uuid,
@@ -1969,24 +2289,38 @@ async fn enqueue_workflow_task(
     payload: &PayloadPolicy,
     retention: &RetentionConfig,
 ) -> Result<(), WorkflowError> {
-    let params =
-        match build_enqueued_task_params(pool, workflow_id, task, dep_results, payload, retention)
-            .await?
-        {
-            NodeEnqueueBuild::Ready(params) => params,
-            NodeEnqueueBuild::Refused(error) => {
-                return fail_node_at_enqueue(
-                    pool,
-                    workflow_id,
-                    task.task_index,
-                    error,
-                    registry,
-                    payload,
-                    retention,
-                )
-                .await;
-            }
-        };
+    let task_id = crate::core::history::identity::uuid7::mint_task_id().map_err(|error| {
+        WorkflowError::Validation(format!("task identity mint failed: {error}"))
+    })?;
+    let built = preparation(
+        build_enqueued_task_params(
+            pool,
+            workflow_id,
+            task,
+            task_id,
+            dep_results,
+            payload,
+            retention,
+        )
+        .await,
+    )?;
+    let params = match built {
+        Preparation::Built(params) => params,
+        Preparation::Refused(refusal) => {
+            // The step's outcome (paused or not) has no further node to stop here.
+            return fail_workflow_node(
+                pool,
+                workflow_id,
+                task.task_index,
+                refusal.task_node_error(workflow_id, task.task_index),
+                registry,
+                payload,
+                retention,
+            )
+            .await
+            .map(|_step| ());
+        }
+    };
 
     // INSERT + LINK in a single transaction to prevent orphaned horsies_task rows
     // if the workflow is paused/cancelled between INSERT and LINK.
@@ -2049,17 +2383,22 @@ async fn enqueue_workflow_task(
 /// Launch a child workflow for a sub-workflow node.
 ///
 /// Looks up the child spec in the registry, builds it dynamically if a
-/// Mark a node FAILED at its enqueue step: a sub-workflow node whose child definition is not registered
-/// under the node's key (`SUBWORKFLOW_LOAD_FAILED`) or whose child would pass the depth limit
-/// (`SUBWORKFLOW_DEPTH_LIMIT_REACHED`), or a node whose `args_from` names a member of its static input
-/// (`WORKFLOW_ENQUEUE_FAILED`).
+/// Mark a promoted node FAILED and apply the failure: a node that the promotion refuses ([`NodeRefusal`]:
+/// `WORKER_SERIALIZATION_ERROR` for a task node whose own data does not read, `WORKFLOW_ENQUEUE_FAILED` for a
+/// sub-workflow node whose child cannot be built or started and for a node whose `args_from` names a member
+/// of its static input), or a sub-workflow node whose child cannot start: its definition is not registered
+/// under the node's key (`SUBWORKFLOW_LOAD_FAILED`), or the child would pass the depth limit
+/// (`SUBWORKFLOW_DEPTH_LIMIT_REACHED`).
 ///
-/// Mirrors Python's `_fail_subworkflow_load` and `_fail_enqueued_task`: writes FAILED via the terminal-state
-/// CAS guard (`UPDATE_WORKFLOW_TASK_FAILED_SQL`), then runs the failure-propagation
-/// chain (handle failure policy → process dependents → check completion). On a
-/// CAS-miss (row already terminal), skips propagation because whichever path set
-/// the terminal state has already propagated the appropriate outcome.
-pub(crate) async fn fail_node_at_enqueue(
+/// Mirrors Python's `_fail_enqueued_task` and `_fail_subworkflow_load`
+/// (`horsies/core/workflows/engine.py:474-584`): writes FAILED via the terminal-state CAS guard
+/// (`UPDATE_WORKFLOW_TASK_FAILED_SQL`), then runs the failure-propagation chain (handle failure policy →
+/// process dependents → check completion). On a CAS-miss (row already terminal), skips propagation because
+/// whichever path set the terminal state has already propagated the appropriate outcome.
+///
+/// Returns [`PromotionStep::WorkflowPaused`] when the failure paused the workflow (or found it paused), so a
+/// caller that promotes more nodes stops.
+pub(crate) async fn fail_workflow_node(
     pool: &PgPool,
     workflow_id: Uuid,
     task_index: i32,
@@ -2067,12 +2406,12 @@ pub(crate) async fn fail_node_at_enqueue(
     registry: &WorkflowSpecRegistry,
     payload: &PayloadPolicy,
     retention: &RetentionConfig,
-) -> Result<(), WorkflowError> {
+) -> Result<PromotionStep, WorkflowError> {
     let error_code = Some(error.error_code.to_string());
     let error_json = serde_json::to_string(&error)?;
     let result_json = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(error))?;
 
-    // Mark the parent workflow_task FAILED via the terminal-state CAS guard.
+    // Mark the workflow_task FAILED via the terminal-state CAS guard.
     let updated: Option<IdRow> = sqlx::query_as(UPDATE_WORKFLOW_TASK_FAILED_SQL)
         .bind(&result_json)
         .bind(workflow_id)
@@ -2085,16 +2424,16 @@ pub(crate) async fn fail_node_at_enqueue(
         tracing::warn!(
             workflow_id = %workflow_id,
             task_index,
-            "skipped the enqueue failure mark for a terminal workflow task",
+            "skipped failure mark for terminal workflow task",
         );
-        return Ok(());
+        return Ok(PromotionStep::Continue);
     }
 
     tracing::error!(
         workflow_id = %workflow_id,
         task_index,
         error_code = ?error_code,
-        "workflow node failed at its enqueue step",
+        "workflow node could not be prepared or its child could not start; node marked FAILED",
     );
 
     // Run the failure-propagation chain (same shape as on_workflow_task_complete).
@@ -2112,7 +2451,7 @@ pub(crate) async fn fail_node_at_enqueue(
             .await?;
     if !should_continue {
         // on_error=pause — workflow paused, no further processing.
-        return Ok(());
+        return Ok(PromotionStep::WorkflowPaused);
     }
 
     // PAUSED guard before propagating to dependents.
@@ -2120,16 +2459,14 @@ pub(crate) async fn fail_node_at_enqueue(
         .bind(workflow_id)
         .fetch_optional(pool)
         .await?;
-    if let Some(row) = &status_row {
-        if row.status == "PAUSED" {
-            return Ok(());
-        }
+    if status_row.as_ref().map(|row| row.status.as_str()) == Some("PAUSED") {
+        return Ok(PromotionStep::WorkflowPaused);
     }
 
     process_dependents(pool, workflow_id, task_index, registry, payload, retention).await?;
     check_workflow_completion(pool, workflow_id, registry, payload, retention).await?;
 
-    Ok(())
+    Ok(PromotionStep::Continue)
 }
 
 /// `spec_builder` is registered (supporting runtime parameterization),
@@ -2164,7 +2501,7 @@ async fn enqueue_subworkflow_task(
     ) {
         Ok(child_depth) => child_depth,
         Err(error) => {
-            return fail_node_at_enqueue(
+            return fail_workflow_node(
                 pool,
                 workflow_id,
                 task.task_index,
@@ -2173,7 +2510,8 @@ async fn enqueue_subworkflow_task(
                 payload,
                 retention,
             )
-            .await;
+            .await
+            .map(|_step| ());
         }
     };
 
@@ -2186,7 +2524,7 @@ async fn enqueue_subworkflow_task(
         // workflow_task FAILED and propagate, rather than returning an error
         // that leaves the parent stuck in READY and the workflow RUNNING
         // forever (parity with Python's _fail_subworkflow_load / PR #39).
-        return fail_node_at_enqueue(
+        return fail_workflow_node(
             pool,
             workflow_id,
             task.task_index,
@@ -2199,29 +2537,36 @@ async fn enqueue_subworkflow_task(
             payload,
             retention,
         )
-        .await;
+        .await
+        .map(|_step| ());
     };
 
     // Build child spec: use spec_builder if available for dynamic parameterization,
-    // otherwise use the static registered spec.
-    let params = stored_sub_workflow_params(task.sub_workflow_params.as_deref())?;
-
-    let merged_input = match merge_args_from(&task.input, &task.args_from, dep_results)? {
-        ArgsFromMerge::Merged(merged_input) => merged_input,
-        ArgsFromMerge::StaticMemberConflict(conflict) => {
-            return fail_node_at_enqueue(
+    // otherwise use the static registered spec. A child that cannot be built or started,
+    // or an `args_from` key that names a member of the static input, fails the node alone
+    // with WORKFLOW_ENQUEUE_FAILED (Python `horsies/core/workflows/engine.py:1151-1215`).
+    let built = preparation(prepare_child_spec(
+        registered,
+        merge_args_from(&task.input, &task.args_from, dep_results),
+        task.sub_workflow_params.as_deref(),
+        registry,
+    ))?;
+    let child_spec = match built {
+        Preparation::Built(child_spec) => child_spec,
+        Preparation::Refused(refusal) => {
+            return fail_workflow_node(
                 pool,
                 workflow_id,
                 task.task_index,
-                conflict.node_error(workflow_id, task.task_index, MergedNodeKind::SubWorkflow),
+                refusal.subworkflow_node_error(workflow_id, task.task_index, &depth_row.name),
                 registry,
                 payload,
                 retention,
             )
-            .await;
+            .await
+            .map(|_step| ());
         }
     };
-    let child_spec = materialize_child_spec(registered, params, &merged_input, registry)?;
 
     let root_wf_id = depth_row.root_workflow_id.unwrap_or(workflow_id);
 
@@ -2230,17 +2575,37 @@ async fn enqueue_subworkflow_task(
     // child creation and link (matching Python's atomic pattern).
     let mut tx = pool.begin().await?;
 
-    let child_id = start_child_workflow_in_tx(
-        &mut tx,
-        &child_spec,
-        workflow_id,
-        task.task_index,
-        child_depth,
-        root_wf_id,
-        registry,
-        retention,
-    )
-    .await?;
+    let started = preparation(
+        start_child_workflow_in_tx(
+            &mut tx,
+            &child_spec,
+            workflow_id,
+            task.task_index,
+            child_depth,
+            root_wf_id,
+            registry,
+            retention,
+        )
+        .await,
+    )?;
+    let child_id = match started {
+        Preparation::Built(child_id) => child_id,
+        Preparation::Refused(refusal) => {
+            // No child row stays: the child's writes roll back before the node fails.
+            tx.rollback().await?;
+            return fail_workflow_node(
+                pool,
+                workflow_id,
+                task.task_index,
+                refusal.subworkflow_node_error(workflow_id, task.task_index, &depth_row.name),
+                registry,
+                payload,
+                retention,
+            )
+            .await
+            .map(|_step| ());
+        }
+    };
 
     // Link parent workflow_task to child workflow (inside same tx).
     // Guards on the node being READY AND the parent workflow being RUNNING — if
@@ -3467,7 +3832,7 @@ async fn get_dependency_results(
 
 use crate::workflow_engine::args_merge::input_object;
 use crate::workflow_engine::args_merge::merge_args_from_sync as merge_args_from;
-use crate::workflow_engine::args_merge::{ArgsFromMerge, MergedNodeKind};
+use crate::workflow_engine::args_merge::{ArgsFromConflict, ArgsFromMerge, MergedNodeKind};
 
 /// The workflow context payload under `WORKFLOW_CTX_KWARG`, in Python's shape (`_build_workflow_context_data`,
 /// `core/workflows/engine.py:1629-1721`): the result envelope, the task name and the definition key of each
@@ -3775,7 +4140,7 @@ mod p7_exact_error_tests {
             &mut transaction,
             workflow_id,
             &unresolved_subworkflow_node(),
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &HashMap::new(),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
@@ -3851,7 +4216,7 @@ mod p7_exact_error_tests {
             &mut transaction,
             workflow_id,
             &unresolved_subworkflow_node(),
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &HashMap::new(),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
@@ -3928,7 +4293,7 @@ mod p7_exact_error_tests {
             child_id,
             "FAILED",
             None,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -3983,7 +4348,7 @@ mod p7_exact_error_tests {
             Some("FAILED"),
             Some("pause"),
             Some("RUNNING"),
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -4073,7 +4438,8 @@ mod guard_tests {
         insert_parent_workflow(&pool, &child_id).await;
         insert_subworkflow_task(&pool, &parent_id, &child_id).await;
 
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         let result = on_subworkflow_complete(
             &pool,
             Uuid::parse_str(&parent_id).unwrap(),
@@ -4112,7 +4478,8 @@ mod guard_tests {
         insert_parent_workflow(&pool, &child_id).await;
         insert_subworkflow_task(&pool, &parent_id, &child_id).await;
 
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         let result = on_subworkflow_complete(
             &pool,
             Uuid::parse_str(&parent_id).unwrap(),
@@ -4152,7 +4519,8 @@ mod guard_tests {
         insert_parent_workflow(&pool, &child_id).await;
         insert_subworkflow_task(&pool, &parent_id, &child_id).await;
 
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         // Child finalized with the terminal-results map (the outputless shape).
         let child_result = "{\"Ok\":{\"node_0\":{\"Ok\":42}}}";
         on_subworkflow_complete(
@@ -4530,7 +4898,8 @@ WHERE wt.workflow_id = $1
             PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         let parent = Uuid::new_v4().to_string();
         let child = Uuid::new_v4().to_string();
         let task_id = Uuid::new_v4().to_string();
@@ -4648,7 +5017,8 @@ WHERE wt.workflow_id = $1
             PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
 
         async fn seed(pool: &sqlx::PgPool, wf: &str, node_status: &str) {
             sqlx::query(
@@ -4843,7 +5213,8 @@ mod promotion_batch_tests {
     #[serial]
     async fn p6_workflow_enqueue_engine_batch_persists_never_eligible_facts() {
         let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         let wf_id = Uuid::new_v4().to_string();
         insert_workflow(&pool, &wf_id).await;
         insert_node(&pool, &wf_id, 0, vec![], "COMPLETED", "all", false).await;
@@ -4968,7 +5339,7 @@ mod promotion_batch_tests {
             &pool,
             test_uuid(&wf_id),
             0,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -4990,8 +5361,9 @@ mod promotion_batch_tests {
         cleanup(&pool, &wf_id).await;
     }
 
-    /// With `on_error=pause`, the conflict pauses the workflow before the level writes: the sibling
-    /// stays READY with no task row, as Python's level moves its siblings back to READY.
+    /// With `on_error=pause`, the conflict pauses the workflow before the level writes: the level
+    /// promotes no node, so the sibling stays PENDING with no task row for resume. Python's level
+    /// moves its siblings back to READY and inserts no task row.
     #[tokio::test]
     #[serial]
     async fn an_args_from_conflict_that_pauses_leaves_the_level_without_task_rows() {
@@ -5012,7 +5384,7 @@ mod promotion_batch_tests {
             &pool,
             test_uuid(&wf_id),
             0,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -5027,7 +5399,67 @@ mod promotion_batch_tests {
                 .expect("workflow status");
         assert_eq!(workflow_status, "PAUSED");
         assert_eq!(failed_node(&pool, &wf_id, 1).await.0, "FAILED");
-        assert_eq!(node_status(&pool, &wf_id, 2).await, "READY");
+        assert_eq!(node_status(&pool, &wf_id, 2).await, "PENDING");
+        assert!(task_id_of(&pool, &wf_id, 2).await.is_none());
+
+        cleanup(&pool, &wf_id).await;
+    }
+
+    /// A node of the batched level whose stored deadline does not read fails alone with
+    /// `WORKER_SERIALIZATION_ERROR` before the level writes. With `on_error=pause` the failure
+    /// pauses the workflow and ends the level: the sibling stays PENDING and gets no task row
+    /// (Python `_enqueue_promoted`, `horsies/core/workflows/engine.py:2331-2378`, inserts no task
+    /// row for the level).
+    #[tokio::test]
+    #[serial]
+    async fn a_refused_node_that_pauses_the_workflow_ends_the_level_before_it_writes() {
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let wf_id = Uuid::new_v4().to_string();
+        insert_workflow(&pool, &wf_id).await;
+        sqlx::query("UPDATE horsies_workflows SET on_error = 'pause' WHERE id = $1::uuid")
+            .bind(test_uuid(&wf_id))
+            .execute(&pool)
+            .await
+            .expect("on_error=pause");
+        insert_node(&pool, &wf_id, 0, vec![], "COMPLETED", "all", false).await;
+        insert_node(&pool, &wf_id, 1, vec![0], "PENDING", "all", false).await;
+        insert_node(&pool, &wf_id, 2, vec![0], "PENDING", "all", false).await;
+        sqlx::query(
+            r#"UPDATE horsies_workflow_tasks SET task_options = '{"good_until": 12345}'
+               WHERE workflow_id = $1::uuid AND task_index = 1"#,
+        )
+        .bind(test_uuid(&wf_id))
+        .execute(&pool)
+        .await
+        .expect("store a deadline that does not read");
+
+        process_dependents(
+            &pool,
+            test_uuid(&wf_id),
+            0,
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await
+        .expect("process dependents");
+
+        let workflow_status: String =
+            sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1::uuid")
+                .bind(test_uuid(&wf_id))
+                .fetch_one(&pool)
+                .await
+                .expect("workflow status");
+        assert_eq!(workflow_status, "PAUSED");
+        let (status, error) = failed_node(&pool, &wf_id, 1).await;
+        assert_eq!(status, "FAILED");
+        assert_eq!(error.error_code.to_string(), "WORKER_SERIALIZATION_ERROR");
+        assert_eq!(
+            error.data,
+            Some(serde_json::json!({"workflow_id": wf_id.as_str(), "task_index": 1}))
+        );
+        assert!(task_id_of(&pool, &wf_id, 1).await.is_none());
+        assert_eq!(node_status(&pool, &wf_id, 2).await, "PENDING");
         assert!(task_id_of(&pool, &wf_id, 2).await.is_none());
 
         cleanup(&pool, &wf_id).await;
@@ -5049,7 +5481,7 @@ mod promotion_batch_tests {
             &mut transaction,
             test_uuid(&wf_id),
             0,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -5077,7 +5509,8 @@ mod promotion_batch_tests {
     async fn an_args_from_conflict_fails_a_subworkflow_node_before_its_child_starts() {
         let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
         let child_key = "tests.args_from_conflict.child.v1";
-        let mut registry = WorkflowSpecRegistry::new();
+        let mut registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         registry
             .register(crate::core::registry::workflow::RegisteredWorkflowSpec {
                 spec: crate::core::WorkflowSpec {
@@ -5150,7 +5583,8 @@ mod promotion_batch_tests {
     #[serial]
     async fn a_promoted_task_row_stores_the_start_call_time_of_its_workflow() {
         let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         let started = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
             .expect("fixed start call time")
             .with_timezone(&chrono::Utc);
@@ -5230,7 +5664,8 @@ mod promotion_batch_tests {
             PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         let wf_id = Uuid::new_v4().to_string();
         insert_workflow(&pool, &wf_id).await;
         insert_node(&pool, &wf_id, 0, vec![], "FAILED", "all", false).await;
@@ -5268,7 +5703,8 @@ mod promotion_batch_tests {
     #[serial]
     async fn a_promoted_node_holds_its_enqueue_time() {
         let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         let level_wf = Uuid::new_v4().to_string();
         let phase2_wf = Uuid::new_v4().to_string();
         for wf_id in [&level_wf, &phase2_wf] {
@@ -5340,7 +5776,8 @@ mod promotion_batch_tests {
             PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         let wf_id = Uuid::new_v4().to_string();
         insert_workflow(&pool, &wf_id).await;
         insert_node(&pool, &wf_id, 0, vec![], "FAILED", "all", false).await;
@@ -5372,7 +5809,8 @@ mod promotion_batch_tests {
             PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         let wf_id = Uuid::new_v4().to_string();
         insert_workflow(&pool, &wf_id).await;
         sqlx::query("UPDATE horsies_workflows SET status = 'PAUSED' WHERE id = $1")
@@ -5417,7 +5855,8 @@ mod finalization_contract_tests {
             .await
             .unwrap();
         listener.listen("workflow_done").await.unwrap();
-        let registry = WorkflowSpecRegistry::new();
+        let registry =
+            WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
         let payload = PayloadPolicy::default();
         let retention = RetentionConfig::default();
         for deferred in [false, true] {
@@ -6045,7 +6484,7 @@ mod completion_rule_tests {
         check_workflow_completion(
             &pool,
             workflow_id,
-            &WorkflowSpecRegistry::new(),
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )

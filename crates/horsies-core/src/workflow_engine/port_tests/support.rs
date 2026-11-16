@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use crate::broker::client_family::ClientFamily;
 use crate::broker::migrations::install_schema;
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
@@ -716,7 +716,8 @@ pub(super) fn required(cases: &[&[usize]]) -> SuccessPolicy {
 
 /// A registry that resolves each of `children` by its definition key.
 pub(super) fn registry_of(children: &[WorkflowSpec]) -> WorkflowSpecRegistry {
-    let mut registry = WorkflowSpecRegistry::new();
+    let mut registry =
+        WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     for child in children {
         registry
             .register(RegisteredWorkflowSpec {
@@ -793,7 +794,9 @@ pub(super) fn handle(pool: &PgPool, workflow_id: Uuid) -> WorkflowHandle<serde_j
     WorkflowHandle::new(
         workflow_id,
         broker(pool),
-        Arc::new(WorkflowSpecRegistry::new()),
+        Arc::new(WorkflowSpecRegistry::new(
+            crate::core::registry::BuilderHookName::SPEC_BUILDER,
+        )),
         PayloadPolicy::default(),
         RetentionConfig::default(),
     )

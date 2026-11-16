@@ -636,7 +636,7 @@ async fn an_expired_child_task_fails_the_child_and_the_parent() {
     let child_id = child_of(&db.pool, workflow_id, 0).await;
 
     assert!(
-        expire_pending_tasks(&db.pool)
+        expire_pending_tasks(&core_pool_for_test_pool(&db.pool), StatementLog::Off)
             .await
             .expect("expire_pending_tasks")
             >= 1

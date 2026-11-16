@@ -18,7 +18,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::broker::enqueue_history_tests::migrated_pool;
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::broker::{BrokerError, PostgresBroker};
 use crate::core::config::retention::{EnqueueRetention, RetentionConfig};
 use crate::core::history::identity::uuid7::mint_task_id;

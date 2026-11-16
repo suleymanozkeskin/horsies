@@ -21,7 +21,7 @@ use crate::broker::attempt_writes::{
     FinishFailedAttempt, FinishWorkflowSuccess, RetryRequest,
 };
 use crate::broker::postgres::PostgresBroker;
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::lifecycle::{
     AttemptWriteRefusal, FailedAttemptOutcome, GuardEvidence, TerminalizationCommand,
     TerminalizationKind, TerminalizationOutcome, WorkerOwned, WorkflowSuccessOutcome,

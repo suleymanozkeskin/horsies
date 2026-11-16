@@ -152,7 +152,7 @@ async fn start_stores_the_caller_start_time_as_sent_at() {
     let workflow_id = start(
         &pool,
         &spec("sent_at_wf", vec![task_node(0, "sent_at_task")]),
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
     )
     .await;
 
@@ -175,7 +175,7 @@ async fn start_uses_the_caller_workflow_id() {
         &pool,
         &spec("custom_id_wf", vec![task_node(0, "custom_id_task")]),
         Some(workflow_id),
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
     )
     .await
     .expect("start");
@@ -193,7 +193,12 @@ async fn start_stores_the_failure_policy() {
         let mut workflow_spec = spec("on_error_wf", vec![task_node(0, "on_error_task")]);
         workflow_spec.on_error = on_error;
 
-        let workflow_id = start(&pool, &workflow_spec, &WorkflowSpecRegistry::new()).await;
+        let workflow_id = start(
+            &pool,
+            &workflow_spec,
+            &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+        )
+        .await;
 
         assert_eq!(stored_workflow(&pool, workflow_id).await.on_error, stored);
     }
@@ -210,7 +215,7 @@ async fn start_stores_the_output_index_or_null() {
     let mut with_output = spec("output_wf", vec![task_node(0, "output_a"), second]);
     with_output.output_index = Some(1);
     let without_output = spec("no_output_wf", vec![task_node(0, "no_output_a")]);
-    let registry = WorkflowSpecRegistry::new();
+    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
 
     let with_id = start(&pool, &with_output, &registry).await;
     let without_id = start(&pool, &without_output, &registry).await;
@@ -243,7 +248,7 @@ async fn start_stores_the_edges_and_the_dataflow_of_each_node() {
             "edges_wf",
             vec![task_node(0, "edges_a"), task_node(1, "edges_b"), join],
         ),
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
     )
     .await;
 
@@ -272,7 +277,7 @@ async fn a_root_node_stores_its_retry_options_and_its_task_gets_max_retries() {
     let workflow_id = start(
         &pool,
         &spec("retry_policy_test", vec![root]),
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
     )
     .await;
 
@@ -293,7 +298,7 @@ async fn a_root_node_stores_its_retry_options_and_its_task_gets_max_retries() {
 #[serial]
 async fn a_promoted_node_task_gets_its_max_retries() {
     let pool = shared_pool().await;
-    let registry = WorkflowSpecRegistry::new();
+    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     let mut child = task_node(1, "retry_child");
     child.dependencies = vec![0];
     child.task_options_json = Some(retry_options(4));
@@ -317,7 +322,7 @@ async fn a_promoted_node_task_gets_its_max_retries() {
 #[serial]
 async fn a_second_start_with_the_same_id_and_name_returns_the_existing_workflow() {
     let pool = shared_pool().await;
-    let registry = WorkflowSpecRegistry::new();
+    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     let workflow_id = Uuid::new_v4();
     let first = spec("idempotent_wf", vec![task_node(0, "idempotent_a")]);
     let mut second = spec(
@@ -346,7 +351,7 @@ async fn a_second_start_with_the_same_id_and_name_returns_the_existing_workflow(
 #[serial]
 async fn a_start_with_an_id_of_another_workflow_name_is_an_id_conflict() {
     let pool = shared_pool().await;
-    let registry = WorkflowSpecRegistry::new();
+    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     let workflow_id = Uuid::new_v4();
     let first = spec("idempotent_name_guard_first", vec![task_node(0, "guard_a")]);
     let second = spec(
@@ -381,7 +386,7 @@ async fn a_start_with_an_id_of_another_workflow_name_is_an_id_conflict() {
 #[serial]
 async fn two_concurrent_starts_with_one_id_make_one_workflow() {
     let pool = shared_pool().await;
-    let registry = WorkflowSpecRegistry::new();
+    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     let workflow_id = Uuid::new_v4();
     let workflow_spec = spec(
         "idempotent_wf_concurrent",
@@ -409,7 +414,7 @@ async fn two_concurrent_starts_with_one_id_make_one_workflow() {
 #[serial]
 async fn two_concurrent_starts_with_no_id_make_two_workflows() {
     let pool = shared_pool().await;
-    let registry = WorkflowSpecRegistry::new();
+    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     let name = unique_name("auto_id_wf");
     let workflow_spec = spec(&name, vec![task_node(0, "auto_id_a")]);
 
@@ -432,7 +437,7 @@ async fn plain_roots_start_enqueued_with_linked_pending_tasks_and_a_dependent_wa
     let workflow_id = start(
         &pool,
         &fanout("batched_start", 3, true),
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
     )
     .await;
 
@@ -467,7 +472,7 @@ async fn start_writes_the_workflow_meta_into_each_root_task() {
     let workflow_id = start(
         &pool,
         &fanout("batched_start_meta", 3, false),
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
     )
     .await;
 
@@ -488,7 +493,7 @@ async fn start_writes_the_workflow_meta_into_each_root_task() {
 #[serial]
 async fn a_restart_with_the_same_id_writes_nothing_more() {
     let pool = shared_pool().await;
-    let registry = WorkflowSpecRegistry::new();
+    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     let workflow_id = Uuid::new_v4();
     let workflow_spec = fanout("batched_restart", 3, true);
     let _first = try_start(&pool, &workflow_spec, Some(workflow_id), &registry)
@@ -522,9 +527,14 @@ async fn a_node_input_that_cannot_be_stored_fails_the_start_and_leaves_no_row() 
     let mut workflow_spec = fanout(&name, 2, false);
     workflow_spec.tasks[1].input_json = "{not json".to_owned();
 
-    let error = try_start(&pool, &workflow_spec, None, &WorkflowSpecRegistry::new())
-        .await
-        .expect_err("the second node's input does not parse");
+    let error = try_start(
+        &pool,
+        &workflow_spec,
+        None,
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
+    )
+    .await
+    .expect_err("the second node's input does not parse");
 
     assert_eq!(error.code, WorkflowStartErrorCode::ValidationFailed);
     assert_eq!(workflow_rows_named(&pool, &name).await, 0);
@@ -542,7 +552,7 @@ async fn a_plain_root_task_carries_its_retries_deadline_and_options() {
     let workflow_id = start(
         &pool,
         &spec("batched_retry_wf", vec![root]),
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
     )
     .await;
 
@@ -577,7 +587,7 @@ async fn task_options_that_do_not_parse_fail_the_start_and_leave_no_row() {
         &pool,
         &spec(&name, vec![root]),
         None,
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
     )
     .await
     .expect_err("the root's task options do not parse");
@@ -645,7 +655,7 @@ async fn assert_paused_before_plain_roots_got_tasks(
 #[ignore = "waits on #887"]
 async fn a_root_child_that_cannot_load_pauses_the_workflow_before_plain_roots_get_tasks() {
     let db = IsolatedDatabase::create().await;
-    let registry = WorkflowSpecRegistry::new();
+    let registry = WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     let missing_child = spec(
         "pause_gate_child_wf",
         vec![task_node(0, "pause_gate_child")],
@@ -896,7 +906,7 @@ async fn a_task_node_stores_its_input_as_one_value() {
     let workflow_id = start(
         &pool,
         &spec("kwargs_only_wf", vec![root]),
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
     )
     .await;
 
@@ -947,7 +957,7 @@ async fn recovery_enqueues_a_ready_node_with_its_input() {
 
     let report = recover_stuck_workflows(
         &db.pool,
-        &WorkflowSpecRegistry::new(),
+        &WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER),
         0,
         3,
         &PayloadPolicy::default(),
@@ -973,7 +983,8 @@ const SCRAPING_PRIORITY: i32 = 30;
 /// and a child definition that builds its spec directly, with no queue or
 /// priority on the node (Python `ClientSync.build_with`).
 fn scraping_registry(child_key: &str) -> WorkflowSpecRegistry {
-    let mut registry = WorkflowSpecRegistry::new();
+    let mut registry =
+        WorkflowSpecRegistry::new(crate::core::registry::BuilderHookName::SPEC_BUILDER);
     registry.set_task_defaults_map(HashMap::from([(
         "scrape_task".to_owned(),
         TaskDefaults {
