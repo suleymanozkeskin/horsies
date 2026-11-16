@@ -364,6 +364,29 @@ pub(super) fn act_on_runs_then(
     format!("{}{tail}", one_run.repeat(runs))
 }
 
+/// Read the init frame of any kind of child, then answer ready: one script
+/// for every child of a worker, whose pools send init frames of different
+/// lengths.
+pub(crate) fn boot_any_kind() -> String {
+    let ready = ChildFrame::Ready(ReadyFrame {
+        pid: ProcessId::new(1).unwrap(),
+        rss: RssReading::Unreadable,
+    });
+    format!("{}{}", read_frame(), send(&[ready]))
+}
+
+/// A child of any kind that boots, then serves nothing: it exits at the
+/// stop frame.
+pub(crate) fn idle_child_of_any_kind() -> ChildCommand {
+    shell(&format!("{}{}exit 3", boot_any_kind(), read_frame()))
+}
+
+/// A child of any kind whose start hook fails: it reads its init frame and
+/// exits with the hook failure code (173).
+pub(crate) fn hook_failing_child_of_any_kind() -> ChildCommand {
+    shell(&format!("{}exit 173", read_frame()))
+}
+
 /// Boot, then serve nothing: exit at the stop frame.
 pub(super) fn idle_child(init: &InitFrame) -> String {
     format!("{}{}exit 3", boot(init), read_frame())

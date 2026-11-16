@@ -16,15 +16,19 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
-use super::{wait_for_claim_wake, ClaimWake, StartOutcome, Worker};
+use super::{wait_for_claim_wake, ClaimWake, ClaimWakes, StartOutcome, Worker};
 use crate::broker::PostgresBroker;
+use crate::core::config::worker_profile::SelectedProfile;
 use crate::core::config::{AppConfig, WorkerResilienceConfig};
 use crate::core::registry::workflow::WorkflowSpecRegistry;
-use crate::core::TaskRegistry;
+use crate::worker::children::ChildLaunch;
+use crate::worker::claim_pass::RegisteredClasses;
 use crate::worker::config::WorkerConfig;
+use crate::worker::executor::protocol::{ChildLogLevel, ChildProgram, DatabaseUrl};
+use crate::worker::executor::slots::scripted::idle_child_of_any_kind;
 
 /// The longest wait for an event a test expects.
 const WAIT: Duration = Duration::from_secs(30);
@@ -38,17 +42,40 @@ fn resilience(initial_ms: u64, max_attempts: u64) -> WorkerResilienceConfig {
     }
 }
 
+/// A worker on `broker` of one isolated child that boots, then exits at the
+/// next frame it reads.
 fn worker_on(broker: Arc<PostgresBroker>, resilience: WorkerResilienceConfig) -> Worker {
     let mut app_config = AppConfig::for_database_url("postgresql://horsies@127.0.0.1:1/horsies");
     app_config.resilience = resilience;
+    let database_url = DatabaseUrl::new(app_config.broker.database_url.clone());
     Worker::new(
         broker,
-        Arc::new(TaskRegistry::new()),
         Arc::new(WorkflowSpecRegistry::new()),
         app_config,
         WorkerConfig::default(),
+        SelectedProfile {
+            name: "default".to_owned(),
+            profile: serde_json::from_value(serde_json::json!({
+                "isolated": {"kind": "isolated_children", "count": 1}
+            }))
+            .expect("a valid test profile"),
+        },
+        ChildLaunch {
+            command: idle_child_of_any_kind(),
+            program: ChildProgram::Rust,
+            log_level: ChildLogLevel::Info,
+            database_url,
+        },
+        RegisteredClasses::default(),
     )
     .expect("a valid worker config")
+}
+
+/// Claim wakes with no queue subscription: the wake branch never fires.
+fn no_claim_wakes() -> ClaimWakes {
+    ClaimWakes {
+        subscriptions: Vec::new(),
+    }
 }
 
 /// A broker on a port where no server listens: each statement fails after
@@ -174,13 +201,13 @@ async fn request_stop_cancels_the_worker_token() {
 async fn a_stop_ends_the_claim_wait() {
     let cancel = CancellationToken::new();
     cancel.cancel();
-    let (_sender, mut notifications) = mpsc::channel(1);
+    let claim_wakes = no_claim_wakes();
     let wake = tokio::time::timeout(
         WAIT,
         wait_for_claim_wake(
             &cancel,
             &Notify::new(),
-            &mut notifications,
+            &claim_wakes,
             Duration::from_secs(3_600),
         ),
     )
@@ -192,12 +219,12 @@ async fn a_stop_ends_the_claim_wait() {
 /// Python `TestWaitForAnyNotify::test_timeout_no_done_cancels_and_returns`.
 #[tokio::test]
 async fn the_claim_wait_ends_at_the_poll_interval() {
-    let (_sender, mut notifications) = mpsc::channel(1);
+    let claim_wakes = no_claim_wakes();
     let started = Instant::now();
     let wake = wait_for_claim_wake(
         &CancellationToken::new(),
         &Notify::new(),
-        &mut notifications,
+        &claim_wakes,
         Duration::from_millis(50),
     )
     .await;
