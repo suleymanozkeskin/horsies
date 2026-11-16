@@ -312,8 +312,6 @@ async def complete_fused(
             task_id=task_id,
             fence=OwnedClaim(worker_id=WORKER_ID, claimed_at=claimed_at),
             result_json=result_json,
-            notify_channel='task_queue_default',
-            notify_payload=task_id,
         ),
     )
 

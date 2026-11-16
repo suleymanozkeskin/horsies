@@ -8,6 +8,7 @@ use serde_json::value::RawValue;
 use super::error::{
     BuiltInTaskCode, OperationalErrorCode, StoredErrorRefused, TaskError, TaskErrorCode,
 };
+use crate::core::codec::user_value::{check_user_value, MAX_VALUE_JSON_DEPTH};
 use crate::core::codec::{JsonReadError, StrictJsonError};
 
 /// Outcome of a task or workflow result retrieval.
@@ -25,7 +26,7 @@ use crate::core::codec::{JsonReadError, StrictJsonError};
 /// `{"__h_task_result__": true, "ok": null, "err": {...}}`. A read refuses any other shape
 /// (`validate_task_result_envelope`, `core/codec/typed.py:1133-1180`): not an object, the marker missing or not
 /// `true`, a missing or an extra key, or both slots set. A non-null `err` slot is an error; otherwise the `ok`
-/// slot is the value, `null` included.
+/// slot is the value, `null` included, under the rules of a user value (no engine key, at most 200 levels).
 #[derive(Debug, Clone)]
 pub enum TaskResult<T> {
     Ok(T),
@@ -92,9 +93,14 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for TaskResult<T> {
             ));
         };
         match (ok_slot, err_slot) {
-            (ok_slot, serde_json::Value::Null) => T::deserialize(ok_slot)
-                .map(Self::Ok)
-                .map_err(D::Error::custom),
+            (ok_slot, serde_json::Value::Null) => {
+                // Python `decode_value` on the ok slot: the rules of a user value
+                // (`core/codec/typed.py:590-629`).
+                check_user_value(&ok_slot, MAX_VALUE_JSON_DEPTH).map_err(D::Error::custom)?;
+                T::deserialize(ok_slot)
+                    .map(Self::Ok)
+                    .map_err(D::Error::custom)
+            }
             (serde_json::Value::Null, err_slot) => TaskError::from_stored_value(err_slot)
                 .map(Self::Err)
                 .map_err(D::Error::custom),
@@ -299,8 +305,10 @@ mod tests {
 
     #[test]
     fn err_predicates() {
-        let result: TaskResult<i32> =
-            TaskResult::Err(TaskError::builtin(OperationalErrorCode::TaskError, "boom"));
+        let result: TaskResult<i32> = TaskResult::Err(TaskError::builtin(
+            OperationalErrorCode::TaskException,
+            "boom",
+        ));
         assert!(!result.is_ok());
         assert!(result.is_err());
     }
@@ -314,19 +322,21 @@ mod tests {
     #[test]
     #[should_panic(expected = "called unwrap() on TaskResult::Err")]
     fn unwrap_err_panics() {
-        let result: TaskResult<i32> =
-            TaskResult::Err(TaskError::builtin(OperationalErrorCode::TaskError, "boom"));
+        let result: TaskResult<i32> = TaskResult::Err(TaskError::builtin(
+            OperationalErrorCode::TaskException,
+            "boom",
+        ));
         result.unwrap();
     }
 
     #[test]
     fn unwrap_err_ok() {
-        let err = TaskError::builtin(OperationalErrorCode::TaskError, "boom");
+        let err = TaskError::builtin(OperationalErrorCode::TaskException, "boom");
         let result: TaskResult<i32> = TaskResult::Err(err);
         let extracted = result.unwrap_err();
         assert_eq!(
             extracted.error_code,
-            TaskErrorCode::from(OperationalErrorCode::TaskError),
+            TaskErrorCode::from(OperationalErrorCode::TaskException),
         );
     }
 
@@ -338,8 +348,10 @@ mod tests {
 
     #[test]
     fn ok_returns_none_for_err() {
-        let result: TaskResult<i32> =
-            TaskResult::Err(TaskError::builtin(OperationalErrorCode::TaskError, "boom"));
+        let result: TaskResult<i32> = TaskResult::Err(TaskError::builtin(
+            OperationalErrorCode::TaskException,
+            "boom",
+        ));
         assert_eq!(result.ok(), None);
     }
 
@@ -352,8 +364,10 @@ mod tests {
 
     #[test]
     fn map_preserves_err() {
-        let result: TaskResult<i32> =
-            TaskResult::Err(TaskError::builtin(OperationalErrorCode::TaskError, "boom"));
+        let result: TaskResult<i32> = TaskResult::Err(TaskError::builtin(
+            OperationalErrorCode::TaskException,
+            "boom",
+        ));
         let mapped = result.map(|v| v * 2);
         assert!(mapped.is_err());
     }
@@ -367,8 +381,10 @@ mod tests {
 
     #[test]
     fn and_then_short_circuits_err() {
-        let result: TaskResult<i32> =
-            TaskResult::Err(TaskError::builtin(OperationalErrorCode::TaskError, "boom"));
+        let result: TaskResult<i32> = TaskResult::Err(TaskError::builtin(
+            OperationalErrorCode::TaskException,
+            "boom",
+        ));
         let chained = result.and_then(|v| TaskResult::Ok(v * 2));
         assert!(chained.is_err());
     }
@@ -383,14 +399,16 @@ mod tests {
 
     #[test]
     fn serde_round_trip_err() {
-        let result: TaskResult<i32> =
-            TaskResult::Err(TaskError::builtin(OperationalErrorCode::TaskError, "boom"));
+        let result: TaskResult<i32> = TaskResult::Err(TaskError::builtin(
+            OperationalErrorCode::TaskException,
+            "boom",
+        ));
         let json = serde_json::to_string(&result).unwrap();
         let back: TaskResult<i32> = serde_json::from_str(&json).unwrap();
         let err = back.unwrap_err();
         assert_eq!(
             err.error_code,
-            TaskErrorCode::from(OperationalErrorCode::TaskError),
+            TaskErrorCode::from(OperationalErrorCode::TaskException),
         );
         assert_eq!(err.message.as_deref(), Some("boom"));
     }
@@ -445,6 +463,29 @@ mod tests {
                 "{text} must be refused"
             );
         }
+    }
+
+    /// Python `decode_value` on the ok slot: an engine key at any depth, or a value deeper than 200 levels,
+    /// does not read (`tests/unit/test_typed_codec.py:474-610`).
+    #[test]
+    fn an_ok_slot_follows_the_user_value_rules() {
+        for text in [
+            r#"{"__h_task_result__":true,"ok":{"__h_task_result__":true},"err":null}"#,
+            r#"{"__h_task_result__":true,"ok":[{"__builtin_task_code__":"X"}],"err":null}"#,
+            r#"{"__h_task_result__":true,"ok":{"a":{"__horsies_x":1}},"err":null}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<TaskResult<serde_json::Value>>(text).is_err(),
+                "{text} must be refused"
+            );
+        }
+        let depth = crate::core::codec::MAX_VALUE_JSON_DEPTH + 1;
+        let deep = format!(
+            r#"{{"__h_task_result__":true,"ok":{}{},"err":null}}"#,
+            "[".repeat(depth),
+            "]".repeat(depth)
+        );
+        assert!(serde_json::from_str::<TaskResult<serde_json::Value>>(&deep).is_err());
     }
 
     /// The core's strict reader reads the envelope: a repeated key is refused, and a value deeper than
@@ -617,8 +658,10 @@ mod tests {
 
     #[test]
     fn task_exception_is_terminal() {
-        let r: TaskResult<i32> =
-            TaskResult::Err(TaskError::builtin(OperationalErrorCode::TaskError, "boom"));
+        let r: TaskResult<i32> = TaskResult::Err(TaskError::builtin(
+            OperationalErrorCode::TaskException,
+            "boom",
+        ));
         assert!(r.is_terminal());
         assert!(!r.is_transient());
     }

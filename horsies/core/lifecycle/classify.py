@@ -312,15 +312,12 @@ def _success_command(context: FinalizeContext) -> TerminalizationCommand:
             fence=PriorLockedRead(worker_id=context.worker_id),
             result_json=context.result_json,
         )
-    queue_name = context.queue_name or 'default'
     return CompleteTaskFused(
         task_id=context.task_id,
         fence=OwnedClaim(
             worker_id=context.worker_id, claimed_at=context.claimed_at,
         ),
         result_json=context.result_json,
-        notify_channel=f'task_queue_{queue_name}',
-        notify_payload=f'capacity:{context.task_id}',
     )
 
 
