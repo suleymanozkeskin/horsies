@@ -380,6 +380,51 @@ END $$;
 
 DO $$
 DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000272';
+    v_top uuid := '00000000-0000-7000-8000-000000000273';
+    v_mid uuid := '00000000-0000-7000-8000-000000000274';
+    v_child_starts bigint;
+    v_named bigint;
+    v_unnamed bigint;
+BEGIN
+    -- Phase 2 owes the child start of a promoted node: the CHILD_START row names the workflow of the node; the
+    -- SOURCE and OUTCOME rows carry no name.
+    PERFORM * FROM wft_start(
+        jsonb_build_array(jsonb_build_object('id', v_wf, 'name', 'parent.wf', 'on_error', 'fail')),
+        '[{"idx":0},{"idx":1,"deps":[0],"sub":true,"args_from":{"x":0}}]'
+    );
+    PERFORM wft_phase1(wft_task_of(v_wf, 0), wft_ok('5'));
+    SELECT count(*) FILTER (WHERE row_kind = 'CHILD_START'),
+           count(*) FILTER (WHERE row_kind = 'CHILD_START' AND workflow_name = 'parent.wf'),
+           count(*) FILTER (WHERE row_kind IN ('OUTCOME', 'SOURCE') AND workflow_name IS NULL)
+    INTO v_child_starts, v_named, v_unnamed
+    FROM horsies_workflow_node_finish(wft_task_of(v_wf, 0), FALSE, 'READ');
+    PERFORM wft_check(v_child_starts = 1 AND v_named = 1,
+                      'workflow name: the CHILD_START row of a phase 2 carries the parent workflow name');
+    PERFORM wft_check(v_unnamed = 2, 'workflow name: the OUTCOME and SOURCE rows carry NULL');
+
+    -- A start owes the child start of a pre-built child's sub-workflow root: the row names the pre-built child that
+    -- holds the node, not the top-level workflow.
+    SELECT count(*) FILTER (WHERE row_kind = 'CHILD_START'),
+           count(*) FILTER (WHERE row_kind = 'CHILD_START' AND workflow_id = v_mid AND workflow_name = 'mid.wf'),
+           count(*) FILTER (WHERE row_kind = 'OUTCOME' AND workflow_name IS NULL)
+    INTO v_child_starts, v_named, v_unnamed
+    FROM wft_start(
+        jsonb_build_array(
+            jsonb_build_object('id', v_top, 'name', 'top.wf', 'on_error', 'fail'),
+            jsonb_build_object('id', v_mid, 'name', 'mid.wf', 'on_error', 'fail', 'parent', v_top,
+                               'parent_index', 0, 'depth', 1)),
+        jsonb_build_array(
+            jsonb_build_object('idx', 0, 'sub', true),
+            jsonb_build_object('wf', v_mid, 'idx', 0, 'sub', true))
+    );
+    PERFORM wft_check(v_child_starts = 1 AND v_named = 1,
+                      'workflow name: the CHILD_START row of a start names the workflow that holds the node');
+    PERFORM wft_check(v_unnamed = 1, 'workflow name: the OUTCOME row of a start carries NULL');
+END $$;
+
+DO $$
+DECLARE
     v_parent uuid;
     v_wf uuid := '00000000-0000-7000-8000-000000000281';
     v_depth integer;

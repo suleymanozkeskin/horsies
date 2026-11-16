@@ -35,18 +35,22 @@
 -- - OUTCOME (exactly one per call): disposition, workflow_id (the workflow of the step), workflow_status (after the
 --   step), advance_child_workflow_id (a workflow that this step ended and that has a parent: the caller advances its
 --   parent node after the commit with horsies_workflow_child_finish), detail.
--- - CHILD_START (one per owed child start): workflow_id (the parent workflow), task_index (the sub-workflow node),
+-- - CHILD_START (one per owed child start): workflow_id (the parent workflow), workflow_name (the name of the parent
+--   workflow, never NULL: the errors of a child that cannot start name the workflow by it; Python reads it in the
+--   node CAS as parent_workflow_name, core/workflows/engine.py:1014-1016), task_index (the sub-workflow node),
 --   node_input, args_from (JSON text or NULL), sub_workflow_name, sub_definition_key, sub_workflow_params (GIVEN or
 --   NOT_GIVEN), parent_depth, root_workflow_id.
 -- - SOURCE (one per terminal dependency of a CHILD_START node): workflow_id, task_index (the CHILD_START node),
 --   source_task_index, source_node_id, source_status, source_task_name, source_definition_key, source_result (the
 --   stored text, copied), source_summary (the stored child summary text of a sub-workflow source).
+-- workflow_name is NULL on OUTCOME and SOURCE rows.
 -- A row type, not a function: no locks. Python: the composite horsies_phase2_disposition and the in-memory results of
 -- the engine (core/workflows/engine.py); the rows replace the arrays of composite types of the first design.
 CREATE TYPE horsies_workflow_step_row AS (
     row_kind text,
     disposition text,
     workflow_id uuid,
+    workflow_name text,
     workflow_status text,
     advance_child_workflow_id uuid,
     detail text,
@@ -694,7 +698,7 @@ CREATE FUNCTION horsies_workflow_child_start_rows(p_workflow_id uuid, p_task_ind
     RETURNS SETOF horsies_workflow_step_row
     LANGUAGE sql STABLE
 AS $$
-    SELECT 'CHILD_START'::text, NULL::text, p_workflow_id, NULL::text, NULL::uuid, NULL::text,
+    SELECT 'CHILD_START'::text, NULL::text, p_workflow_id, w.name::text, NULL::text, NULL::uuid, NULL::text,
            n.task_index, n.input, n.args_from::text, n.sub_workflow_name::text, n.sub_definition_key::text,
            n.sub_workflow_params::text, w.depth, coalesce(w.root_workflow_id, w.id),
            NULL::integer, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text
@@ -706,7 +710,7 @@ AS $$
       AND n.is_subworkflow
       AND n.sub_workflow_id IS NULL
     UNION ALL
-    SELECT 'SOURCE'::text, NULL::text, p_workflow_id, NULL::text, NULL::uuid, NULL::text,
+    SELECT 'SOURCE'::text, NULL::text, p_workflow_id, NULL::text, NULL::text, NULL::uuid, NULL::text,
            n.task_index, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::integer, NULL::uuid,
            s.task_index, s.node_id::text, s.status::text, s.task_name::text, s.sub_definition_key::text,
            s.result, s.sub_workflow_summary
@@ -1131,7 +1135,7 @@ CREATE FUNCTION horsies_workflow_outcome_row(
     LANGUAGE sql STABLE
 AS $$
     SELECT ROW(
-        'OUTCOME', p_disposition, p_workflow_id, w.status::text,
+        'OUTCOME', p_disposition, p_workflow_id, NULL, w.status::text,
         CASE WHEN p_ended_check AND w.status IN ('COMPLETED', 'FAILED') AND w.parent_workflow_id IS NOT NULL
              THEN w.id END,
         p_detail,
