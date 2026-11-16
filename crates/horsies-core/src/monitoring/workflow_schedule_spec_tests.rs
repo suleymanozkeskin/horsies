@@ -484,14 +484,16 @@ async fn no_schedule_state_gives_an_empty_schedule_list() {
 }
 
 /// Python `TestListSchedules::test_ordered_by_next_run`: the schedule that
-/// runs first comes first, with its run count.
+/// runs first comes first, with its run count. The schedule that ran carries
+/// the id of its last task, read from the `uuid` column; the one that never
+/// ran carries none.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #859"]
 async fn schedules_come_in_next_run_order_with_their_run_count() {
     let database = SpecDatabase::create().await;
+    let last_task_id = Uuid::new_v4();
     seed_schedule(&database.pool, "later", 3 * 3_600, None).await;
-    seed_schedule(&database.pool, "soon", 300, Some((Uuid::new_v4(), 4))).await;
+    seed_schedule(&database.pool, "soon", 300, Some((last_task_id, 4))).await;
 
     let schedules = list_schedules(&database.broker())
         .await
@@ -502,7 +504,14 @@ async fn schedules_come_in_next_run_order_with_their_run_count() {
         .map(|schedule| schedule.schedule_name.as_str())
         .collect();
     assert_eq!(names, ["soon", "later"]);
+    assert!(schedules[0].next_run_at < schedules[1].next_run_at);
     assert_eq!(schedules[0].run_count, 4);
+    assert_eq!(schedules[0].last_task_id, Some(last_task_id));
+    assert_eq!(schedules[1].last_task_id, None);
+    assert_eq!(
+        serde_json::to_value(&schedules[0]).expect("encode the schedule")["last_task_id"],
+        serde_json::Value::String(last_task_id.to_string())
+    );
     database.drop().await;
 }
 
