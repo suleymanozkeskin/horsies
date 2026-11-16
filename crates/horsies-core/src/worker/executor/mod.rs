@@ -13,6 +13,7 @@
 //!   each attempt's end to the outcome writers.
 //! - [`child_host`]: child mode of a Rust worker binary, which runs its
 //!   registered tasks of the three classes.
+//! - [`placement`]: the CPUs of the worker process and of its children.
 
 // The worker loop still runs task bodies in its own process; it switches to
 // this executor in a later change. Until then only the tests call these
@@ -20,6 +21,7 @@
 #![allow(dead_code)]
 
 pub mod child_host;
+pub mod placement;
 pub mod protocol;
 pub mod slots;
 pub mod supervisor;

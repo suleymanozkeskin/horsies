@@ -46,6 +46,7 @@ from horsies.core.worker.claim_plan import (
     budgets_json,
     routes_json,
 )
+from horsies.core.worker.dispatch_claim import DispatchClaim, dispatch_claim_of
 from horsies.core.worker.release import (
     HeldClaim,
     ReleaseOutcome,
@@ -278,9 +279,8 @@ class ClaimMixin:
             is_workflow_task: bool = True,
             timeout: StoredTimeout = NoTimeout(),
             *,
-            claimed_at: datetime,
+            claim: DispatchClaim,
             execution: Execution,
-            task_options: str | None,
         ) -> None: ...
 
     async def _claim_and_dispatch_all(self) -> ClaimPass:
@@ -309,7 +309,7 @@ class ClaimMixin:
         # the xact-scoped advisory lock ends with the statement — never held
         # across a client round trip, so a stalled worker cannot freeze the
         # cluster mid-pass. Budget and cap semantics are computed in-function;
-        # see schemas/migrations.py::horsies_claim.
+        # see horsies_claim in the baseline SQL.
         # The claim loop's held connection: one checkout for the passes that
         # follow each other, given back after an idle period.
         claim_result = rows_or_raise(
@@ -346,9 +346,8 @@ class ClaimMixin:
                 row.get('queue_name') or 'default',
                 bool(row.get('is_workflow_task', False)),
                 timeout=read_stored_timeout(row.get('task_options')),
-                claimed_at=claim_time_of(row),
+                claim=dispatch_claim_of(row),
                 execution=parse_row_class(str(row['id']), row['execution']),
-                task_options=row.get('task_options'),
             )
         return ClaimPass(
             claimed=len(claimed_rows),
