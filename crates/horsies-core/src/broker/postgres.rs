@@ -4790,65 +4790,6 @@ mod fused_finalize_tests {
             cleanup(&pool, id).await;
         }
     }
-
-    /// C10: the retry requeue CAS is likewise fenced by `started_at`, so a stale
-    /// attempt cannot requeue a task the worker is re-running under a new claim.
-    #[tokio::test]
-    #[serial]
-    async fn requeue_in_tx_fenced_by_started_at() {
-        let broker =
-            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
-        broker.ensure_schema_initialized().await.expect("schema");
-        let pool = broker.pool().clone();
-        let id = Uuid::new_v4().to_string();
-        seed(&pool, &id, "RUNNING", Some("w1"), 0).await;
-
-        let current: DateTime<Utc> =
-            sqlx::query_scalar("SELECT started_at FROM horsies_tasks WHERE id = $1")
-                .bind(test_uuid(&id))
-                .fetch_one(&pool)
-                .await
-                .expect("started_at");
-        let stale = current - chrono::Duration::minutes(1);
-
-        // Stale generation: fenced out.
-        let mut tx = pool.begin().await.expect("begin");
-        let applied = broker
-            .requeue_in_tx(
-                &mut tx,
-                Uuid::parse_str(&id).unwrap(),
-                Some(Utc::now()),
-                "w1",
-                Some(stale),
-            )
-            .await
-            .expect("requeue");
-        tx.commit().await.expect("commit");
-        assert!(!applied, "stale started_at must not requeue");
-
-        // Current generation: applies.
-        let mut tx = pool.begin().await.expect("begin");
-        let applied = broker
-            .requeue_in_tx(
-                &mut tx,
-                Uuid::parse_str(&id).unwrap(),
-                Some(Utc::now()),
-                "w1",
-                Some(current),
-            )
-            .await
-            .expect("requeue");
-        tx.commit().await.expect("commit");
-        assert!(applied, "matching started_at must requeue");
-        let status: String = sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
-            .bind(test_uuid(&id))
-            .fetch_one(&pool)
-            .await
-            .expect("status");
-        assert_eq!(status, "PENDING");
-
-        cleanup(&pool, &id).await;
-    }
 }
 
 #[cfg(test)]
@@ -6542,3 +6483,6 @@ mod task_info_code_tests {
         assert!(!undecodable.retryable);
     }
 }
+
+#[cfg(test)]
+mod result_read_spec_tests;

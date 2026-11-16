@@ -9,6 +9,8 @@ pub(crate) mod enqueue_history_tests;
 pub mod error;
 pub mod health;
 pub(crate) mod history_reads;
+#[cfg(test)]
+mod lifecycle_tests;
 pub mod listener;
 pub mod migrations;
 #[cfg(test)]
