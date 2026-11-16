@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Optional, assert_never
 
@@ -28,6 +27,7 @@ from horsies.core.lifecycle.fences import PriorLockedRead
 from horsies.core.lifecycle.outcomes import (
     AlreadyApplied,
     CapacityWoken,
+    ClaimReleased,
     FailedAttemptOutcome,
     FailureApplied,
     LostClaim,
@@ -55,17 +55,13 @@ from horsies.core.worker.child_protocol import (
     ThreadSeatTask,
     ThreadSeatWork,
 )
+from horsies.core.worker.dispatch_claim import DispatchClaim
 from horsies.core.worker.failed_attempt import (
     AttemptFailure,
     AttemptFailureKind,
-    AttemptNotHeld,
-    ClaimedAttempt,
-    NoRetry,
     RetryRequest,
-    RunningAttempt,
-    finish_failed_attempt,
+    finish_ended_attempt,
     finish_for,
-    read_in_flight_attempt,
     retry_request_for,
 )
 from horsies.core.worker.dispatch_route import (
@@ -111,6 +107,12 @@ from horsies.core.worker.slots import (
     TaskFinished,
     describe_exit,
 )
+from horsies.core.worker.release import (
+    HeldClaim,
+    ReleaseOutcome,
+    ReleasePlacement,
+    release_claims,
+)
 from horsies.core.worker.runner_heartbeat import (
     StaleRunningRecoveryOff,
     StaleRunningRecoveryOn,
@@ -119,7 +121,6 @@ from horsies.core.worker.runner_heartbeat import (
 from horsies.core.worker.shared_stop import RetryPlacement, TimedOutAtKill
 from horsies.core.worker.stored_timeout import NoTimeout, StoredTimeout
 from horsies.core.worker.thread_slots import ThreadRunRequest
-from horsies.core.worker.sql import UNCLAIM_CLAIMED_TASK_SQL
 from horsies.core.worker.finalize import _phase2_of_a_replay
 
 if TYPE_CHECKING:
@@ -173,11 +174,6 @@ class _AttemptUnclaimed:
 
 
 @dataclass(frozen=True, slots=True)
-class _UnclaimMissed:
-    """The row was CLAIMED when read, and the requeue matched no row."""
-
-
-@dataclass(frozen=True, slots=True)
 class _AttemptFinished:
     """``horsies_finish_failed_attempt`` answered, with the request it got."""
 
@@ -185,7 +181,7 @@ class _AttemptFinished:
     request: RetryRequest
 
 
-type _EndedAttemptWrite = _AttemptUnclaimed | _UnclaimMissed | _AttemptFinished
+type _EndedAttemptWrite = _AttemptUnclaimed | _AttemptFinished
 
 
 class DispatchMixin:
@@ -209,7 +205,7 @@ class DispatchMixin:
             timeout: StoredTimeout = NoTimeout(),
             *,
             task_name: str,
-            claimed_at: datetime,
+            claim: DispatchClaim,
         ) -> Result[None, _FinalizeError]: ...
         async def _finalize_shared_after(
             self,
@@ -220,7 +216,7 @@ class DispatchMixin:
             work: SharedWork,
             *,
             task_name: str,
-            claimed_at: datetime,
+            claim: DispatchClaim,
         ) -> Result[None, _FinalizeError]: ...
         async def _finalize_workflow_phase(
             self,
@@ -255,21 +251,24 @@ class DispatchMixin:
         self,
         task_id: str,
         reason: str,
-        claimed_at: datetime,
+        claim: DispatchClaim,
     ) -> _RequeueOutcome:
+        """Return a claimed row that no child started to the queue.
+
+        One ``horsies_release_claims`` statement in autocommit, fenced on
+        this worker and the dispatch's claim generation; the row keeps its
+        execution class. ``DB_ERROR``: a database error, logged here; the
+        row is unchanged, or the release committed and its reply was lost.
+        """
+        held = HeldClaim(task_id=task_id, claimed_at=claim.claimed_at)
         try:
             async with self.sf() as s:
-                res = await s.execute(
-                    UNCLAIM_CLAIMED_TASK_SQL,
-                    {
-                        'id': task_id,
-                        'wid': self.worker_instance_id,
-                        'claimed_at': claimed_at,
-                    },
+                (released,) = await release_claims(
+                    await autocommit_connection(s),
+                    worker_id=self.worker_instance_id,
+                    claims=(held,),
+                    placement=ReleasePlacement.SAME_CLASS,
                 )
-                await s.commit()
-                rowcount = getattr(res, 'rowcount', 0) or 0
-                requeued = rowcount > 0
         except Exception as exc:
             logger.error(
                 'DB error while requeueing task %s (%s): %s',
@@ -279,26 +278,29 @@ class DispatchMixin:
             )
             return _RequeueOutcome.DB_ERROR
 
-        if requeued:
-            logger.warning(
-                'Requeued worker-owned in-flight task %s: %s',
-                task_id,
-                reason,
-            )
-            return _RequeueOutcome.REQUEUED
-        else:
-            logger.warning(
-                'Failed to requeue task %s (not owned or not requeueable): %s',
-                task_id,
-                reason,
-            )
-            return _RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED
+        match released.outcome:
+            case ReleaseOutcome.RELEASED:
+                logger.warning(
+                    'Requeued worker-owned in-flight task %s: %s',
+                    task_id,
+                    reason,
+                )
+                return _RequeueOutcome.REQUEUED
+            case ReleaseOutcome.NOT_HELD:
+                logger.warning(
+                    'Failed to requeue task %s (not owned or not requeueable): %s',
+                    task_id,
+                    reason,
+                )
+                return _RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED
+            case _ as unreachable:
+                assert_never(unreachable)
 
     async def _recover_worker_future_failure(
         self,
         task_id: str,
         reason: str,
-        claimed_at: datetime,
+        claim: DispatchClaim,
         *,
         failure_code: CrashRecoveryCode = OperationalErrorCode.WORKER_CRASHED,
         retry: RetryPlacement = RetryPlacement.SAME_CLASS,
@@ -314,9 +316,10 @@ class DispatchMixin:
         the attempt must end before its row moves. ``retry`` is where that
         retry runs.
 
-        ``claimed_at`` fences every statement to the dispatch's claim
-        generation. ``DB_ERROR``: a database error, logged here; the row is
-        unchanged, or the write committed and its reply was lost.
+        ``claim`` fences every statement to the dispatch's claim
+        generation, and its retry facts decide the retry. ``DB_ERROR``: a
+        database error, logged here; the row is unchanged, or the write
+        committed and its reply was lost.
         """
         task_error = TaskError(
             error_code=failure_code,
@@ -330,7 +333,7 @@ class DispatchMixin:
             written = await self._write_ended_attempt(
                 task_id,
                 task_error,
-                claimed_at,
+                claim,
                 retry,
             )
         except Exception as exc:
@@ -344,8 +347,6 @@ class DispatchMixin:
         match written:
             case _AttemptUnclaimed():
                 return _RequeueOutcome.REQUEUED
-            case _UnclaimMissed():
-                return _RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED
             case _AttemptFinished():
                 return await self._settle_finished_attempt(
                     written,
@@ -358,19 +359,19 @@ class DispatchMixin:
         self,
         task_id: str,
         task_error: TaskError,
-        claimed_at: datetime,
+        claim: DispatchClaim,
         retry: RetryPlacement,
     ) -> _EndedAttemptWrite:
-        """Write the failure of an attempt whose child has ended.
+        """Write the end of an attempt whose child has ended.
 
-        One unlocked read of the row of this claim generation, in autocommit.
-        A CLAIMED row goes back to the queue (``UNCLAIM_CLAIMED_TASK_SQL``).
-        Any other row goes to ``horsies_finish_failed_attempt``: a RUNNING
-        row with the retry that its policy asks for (placed by ``retry``),
-        and a row that this claim does not hold with ``NoRetry``, which the
-        function classifies without a write. The attempt row records the
-        error message as its message and its reason; the task's summary
-        reason is not written. Database errors raise.
+        One ``horsies_finish_failed_attempt`` statement in autocommit, with
+        the ``RELEASE`` rule and no read before it: a row that this claim
+        still holds CLAIMED (no task code ran) goes back to the queue; a
+        RUNNING row gets the retry that its policy asks for from the retry
+        facts of ``claim`` (placed by ``retry``), or the failure; a row that
+        this claim does not hold is classified with no write. The attempt row
+        records the error message as its message and its reason; the task's
+        summary reason is not written. Database errors raise.
         """
         failure = FailLockedTask(
             task_id=task_id,
@@ -379,38 +380,13 @@ class DispatchMixin:
             error_code=_error_code_text(task_error),
             failed_reason=None,
         )
+        request = retry_request_for(claim, failure.error_code, retry)
         async with self.sf() as s:
-            connection = await autocommit_connection(s)
-            attempt = await read_in_flight_attempt(
-                connection,
-                task_id=task_id,
-                worker_id=self.worker_instance_id,
-                claimed_at=claimed_at,
-            )
-            match attempt:
-                case ClaimedAttempt():
-                    unclaimed = await connection.execute(
-                        UNCLAIM_CLAIMED_TASK_SQL,
-                        {
-                            'id': task_id,
-                            'wid': self.worker_instance_id,
-                            'claimed_at': claimed_at,
-                        },
-                    )
-                    if (unclaimed.rowcount or 0) > 0:
-                        return _AttemptUnclaimed()
-                    return _UnclaimMissed()
-                case RunningAttempt():
-                    request = retry_request_for(attempt, failure.error_code, retry)
-                case AttemptNotHeld():
-                    request = NoRetry()
-                case _ as unreachable:
-                    assert_never(unreachable)
-            outcome = await finish_failed_attempt(
-                connection,
+            outcome = await finish_ended_attempt(
+                await autocommit_connection(s),
                 finish_for(
                     failure,
-                    claimed_at=claimed_at,
+                    claimed_at=claim.claimed_at,
                     retry=request,
                     attempt=AttemptFailure(
                         kind=AttemptFailureKind.FAILED,
@@ -419,7 +395,20 @@ class DispatchMixin:
                     ),
                 ),
             )
-        return _AttemptFinished(outcome=outcome, request=request)
+        match outcome:
+            case ClaimReleased():
+                return _AttemptUnclaimed()
+            case (
+                FailureApplied()
+                | RetryScheduled()
+                | AlreadyApplied()
+                | LostClaim()
+                | SourceStateConflict()
+                | TaskAbsent()
+            ):
+                return _AttemptFinished(outcome=outcome, request=request)
+            case _ as unreachable:
+                assert_never(unreachable)
 
     async def _settle_finished_attempt(
         self,
@@ -494,22 +483,22 @@ class DispatchMixin:
         is_workflow_task: bool = True,
         timeout: StoredTimeout = NoTimeout(),
         *,
-        claimed_at: datetime,
+        claim: DispatchClaim,
         execution: Execution,
-        task_options: str | None,
     ) -> None:
         """Submit to the slot pool and spawn the finalizer.
 
         Never raises for a task: the pool answers every submit, and the
         finalizer handles that answer. ``execution`` is the class column of
-        the row, and ``task_options`` its stored options; with the claim plan
-        and ``timeout`` they decide the kind of child that runs the row
-        (``dispatch_route``).
+        the row, and ``claim.task_options`` its stored options; with the
+        claim plan and ``timeout`` they decide the kind of child that runs
+        the row (``dispatch_route``).
 
-        ``claimed_at`` is the claim generation this dispatch was born from
-        (the claim statement's RETURNING); it fences the child's ownership
-        confirm and every parent-side finalize/recovery statement so a
-        stale dispatch cannot touch a re-claimed row.
+        ``claim`` is the claim this dispatch was born from (the rows of the
+        claim statement): its generation fences the child's ownership
+        confirm and every parent-side finalize/recovery statement, so a
+        stale dispatch cannot touch a re-claimed row, and its retry facts
+        decide the retry of a failed attempt.
 
         ``timeout`` is the stored timeout as the claim read it. A refusal is
         sent to the child, which sets the row RUNNING and fails the task with
@@ -520,7 +509,7 @@ class DispatchMixin:
         slots = self._slots
         assert slots is not None, 'dispatch before the slot pool started'
 
-        match dispatch_route(execution, self.cfg.claim_plan(), task_options, timeout):
+        match dispatch_route(execution, self.cfg.claim_plan(), claim.task_options, timeout):
             case RunShared(work=work):
                 self._dispatch_shared(
                     slots,
@@ -531,7 +520,7 @@ class DispatchMixin:
                     kwargs_json,
                     queue_name,
                     is_workflow_task,
-                    claimed_at,
+                    claim,
                 )
                 return
             case RunSharedThread(work=thread_work):
@@ -544,7 +533,7 @@ class DispatchMixin:
                         kwargs_json=kwargs_json,
                         worker_id=self.worker_instance_id,
                         is_workflow_task=is_workflow_task,
-                        claimed_at=claimed_at,
+                        claim=claim,
                         work=thread_work,
                     ),
                     queue_name,
@@ -563,7 +552,7 @@ class DispatchMixin:
                 worker_id=self.worker_instance_id,
                 is_workflow_task=is_workflow_task,
                 timeout=isolated_timeout,
-                claimed_at=claimed_at,
+                claimed_at=claim.claimed_at,
             ),
         )
 
@@ -576,7 +565,7 @@ class DispatchMixin:
                 is_workflow_task,
                 timeout=isolated_timeout,
                 task_name=task_name,
-                claimed_at=claimed_at,
+                claim=claim,
             ),
             name=f'finalize-{task_id}',
             finalizer=True,
@@ -592,7 +581,7 @@ class DispatchMixin:
         kwargs_json: Optional[str],
         queue_name: str,
         is_workflow_task: bool,
-        claimed_at: datetime,
+        claim: DispatchClaim,
     ) -> None:
         """Submit a ``SHARED_ASYNC`` row to the shared async children, and
         spawn its finalizer. ``work`` is the task with its deadline, or the
@@ -605,7 +594,7 @@ class DispatchMixin:
                 kwargs_json=kwargs_json,
                 worker_id=self.worker_instance_id,
                 is_workflow_task=is_workflow_task,
-                claimed_at=claimed_at,
+                claim=claim,
                 work=work,
             ),
         )
@@ -617,7 +606,7 @@ class DispatchMixin:
                 is_workflow_task,
                 work,
                 task_name=task_name,
-                claimed_at=claimed_at,
+                claim=claim,
             ),
             name=f'finalize-{task_id}',
             finalizer=True,
@@ -642,7 +631,7 @@ class DispatchMixin:
                 request.is_workflow_task,
                 work,
                 task_name=request.task_name,
-                claimed_at=request.claimed_at,
+                claim=request.claim,
             ),
             name=f'finalize-{request.task_id}',
             finalizer=True,
@@ -795,7 +784,7 @@ class DispatchMixin:
         handle: SlotHandle,
         task_id: str,
         timeout_ms: int,
-        claimed_at: datetime,
+        claim: DispatchClaim,
     ) -> _TimeoutOutcome | ReturnSeen:
         """End a timed-out attempt, then record the timeout.
 
@@ -847,7 +836,7 @@ class DispatchMixin:
                 return await self._record_task_timeout(
                     task_id,
                     timeout_ms,
-                    claimed_at,
+                    claim,
                     retry=RetryPlacement.SAME_CLASS,
                 )
             case ChildEndUnknown(pid=pid):
@@ -856,7 +845,7 @@ class DispatchMixin:
                         return await self._record_task_timeout(
                             task_id,
                             timeout_ms,
-                            claimed_at,
+                            claim,
                             retry=RetryPlacement.SAME_CLASS,
                         )
                     case _AttemptEndUnknown() as unknown:
@@ -868,7 +857,7 @@ class DispatchMixin:
                     handle,
                     task_id,
                     timeout_ms,
-                    claimed_at,
+                    claim,
                     outcome,
                 )
             case ReturnSeen() as seen:
@@ -892,7 +881,7 @@ class DispatchMixin:
         handle: SlotHandle,
         task_id: str,
         timeout_ms: int,
-        claimed_at: datetime,
+        claim: DispatchClaim,
         outcome: SlotOutcome,
     ) -> _TimeoutOutcome:
         """Record the timeout of a task whose slot answered after the deadline fired.
@@ -912,7 +901,7 @@ class DispatchMixin:
                         return await self._record_task_timeout(
                             task_id,
                             timeout_ms,
-                            claimed_at,
+                            claim,
                             retry=RetryPlacement.SAME_CLASS,
                         )
                     case _AttemptEndUnknown() as unknown:
@@ -929,7 +918,7 @@ class DispatchMixin:
                 return await self._record_task_timeout(
                     task_id,
                     timeout_ms,
-                    claimed_at,
+                    claim,
                     retry=RetryPlacement.SAME_CLASS,
                 )
             case NotDispatched():
@@ -1041,14 +1030,14 @@ class DispatchMixin:
         self,
         task_id: str,
         timeout_ms: int,
-        claimed_at: datetime,
+        claim: DispatchClaim,
         *,
         retry: RetryPlacement,
     ) -> _TimeoutSettled | _TimeoutWriteFailed:
         """Record the timeout of an attempt whose child has exited.
 
         Ownership-guarded like every finalize path, and fenced to the claim
-        generation ``claimed_at``. ``retry`` is where the retry runs, when
+        generation of ``claim``. ``retry`` is where the retry runs, when
         the policy retries the timeout.
 
         ``_TimeoutSettled`` covers each way the row is settled:
@@ -1072,7 +1061,7 @@ class DispatchMixin:
             return await self._settle_timed_out_row(
                 task_id,
                 timeout_ms,
-                claimed_at,
+                claim,
                 retry,
             )
         except Exception as exc:
@@ -1088,7 +1077,7 @@ class DispatchMixin:
         self,
         task_id: str,
         timeout_ms: int,
-        claimed_at: datetime,
+        claim: DispatchClaim,
         retry: RetryPlacement,
     ) -> _TimeoutSettled:
         """Settle this claim's row for a timeout.
@@ -1104,20 +1093,13 @@ class DispatchMixin:
         written = await self._write_ended_attempt(
             task_id,
             task_error,
-            claimed_at,
+            claim,
             retry,
         )
         match written:
             case _AttemptUnclaimed():
                 logger.warning(
                     'Task %s hit timeout_ms=%s before user code started; requeued',
-                    task_id,
-                    timeout_ms,
-                )
-            case _UnclaimMissed():
-                logger.warning(
-                    'Task %s hit timeout_ms=%s before user code started; the '
-                    'requeue found no row of this claim',
                     task_id,
                     timeout_ms,
                 )

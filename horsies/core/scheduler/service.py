@@ -6,16 +6,17 @@ import importlib
 import os
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from horsies.core.app import Horsies
+from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.retention import resolve_queue_retention_class
 from horsies.core.models.schedule import ScheduleConfig, TaskSchedule
 from horsies.core.errors import ConfigurationError, ErrorCode
-from horsies.core.scheduler.state import ScheduleStateManager
+from horsies.core.scheduler.state import ScheduleStateManager, ScheduleStateWrite
 from horsies.core.scheduler.validation import (
     PreparedSchedule,
     PreparedSchedules,
@@ -52,6 +53,32 @@ SCHEDULE_ADVISORY_LOCK_SQL = text(
 # any row is missing or a re-init failed, the check reruns every tick
 # until healthy.
 _EXISTENCE_CHECK_INTERVAL_S = 60.0
+
+
+def _log_start_writes(
+    writes: list[ScheduleStateWrite],
+    written: tuple[str, ...],
+    stored: dict[str, bytes],
+) -> None:
+    """Log each row of the start write: created, moved to a changed pattern,
+    or left to the row another scheduler wrote first."""
+    for write in writes:
+        match (write.schedule_name in written, write.schedule_name in stored):
+            case (True, False):
+                logger.info(
+                    f"Initialized new schedule '{write.schedule_name}', "
+                    f'next_run={write.next_run_at}',
+                )
+            case (True, True):
+                logger.warning(
+                    f"Schedule '{write.schedule_name}' configuration changed "
+                    f'(pattern or timezone); new next_run={write.next_run_at}',
+                )
+            case (False, _):
+                logger.debug(
+                    f"Schedule '{write.schedule_name}' was written by another "
+                    f'scheduler first',
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,7 +237,7 @@ class Scheduler:
     async def run_forever(self) -> None:
         """Main scheduler loop — the scheduler's recovery seam.
 
-        Per-tick errors (get_due_states, per-schedule escapes) are logged
+        Per-tick errors (the due read, the heal, per-schedule escapes) are logged
         and the next tick retries; no error type changes the response, so
         no classification happens here. start() failures and anything
         escaping the tick handler propagate to the CLI boundary (exit 1).
@@ -245,14 +272,21 @@ class Scheduler:
 
     async def _initialize_schedules(self) -> None:
         """
-        Initialize state for all configured schedules.
+        Store the state row of each enabled schedule that is new or whose
+        pattern or timezone changed, in two statements.
 
-        Detects configuration changes and recalculates next_run_at when pattern or timezone changes.
+        1. One read of every row's name and digest, with the database time.
+        2. One write of the new and changed rows, each with its first run
+           computed from that database time. A changed row keeps
+           run_count, last_run_at and last_task_id.
 
-        Per-schedule isolation: one schedule's init/recalc failure is logged
-        and the rest proceed; a schedule left without a state row is
-        recreated by the tick loop's missing-row check
-        (`_ensure_states_exist`).
+        Rows of names that are not in this config are kept and logged.
+
+        Errors: a schedule whose first run cannot be computed is left out
+        and logged, and the others are stored. A database error of either
+        statement is logged and start goes on; the tick loop's existence
+        heal (`_ensure_states_exist`) then creates the missing rows, and a
+        changed digest waits for the next start.
 
         Raises:
             RuntimeError: state manager not initialized (programmer error;
@@ -261,115 +295,114 @@ class Scheduler:
         if not self.state_manager:
             raise RuntimeError('State manager not initialized')
 
-        now = datetime.now(timezone.utc)
         configured_names = {schedule.name for schedule in self.schedule_config.schedules}
+        try:
+            read = await self.state_manager.read_start_states()
+        except Exception as e:
+            logger.error(
+                f'Failed to read schedule state rows at start: {e}; the tick '
+                f'loop creates missing rows',
+                exc_info=True,
+            )
+            return
 
         # State rows not in this scheduler's config are left untouched:
         # deleting them breaks rolling deploys (the still-running old-config
         # scheduler loses its rows and silently stops firing) and shared-DB
         # topologies (one app's scheduler wiping another app's schedules).
-        # Orphan rows are inert — get_due_states filters to configured
+        # Orphan rows are inert — the due read filters to configured
         # names — so we only surface them for operators.
-        try:
-            existing_states = await self.state_manager.get_all_states()
-            orphaned = [
-                state.schedule_name
-                for state in existing_states
-                if state.schedule_name not in configured_names
-            ]
-            if orphaned:
-                logger.warning(
-                    f'{len(orphaned)} schedule_state row(s) not in this '
-                    f"scheduler's config (other scheduler, or removed "
-                    f'schedules): {orphaned}. Rows are kept; delete '
-                    f'manually if the schedules are gone for good.'
-                )
-        except Exception as e:
-            logger.warning(f'Failed to inspect schedule state rows: {e}')
+        stored = {row.schedule_name: row.config_hash for row in read.rows}
+        orphaned = sorted(stored.keys() - configured_names)
+        if orphaned:
+            logger.warning(
+                f'{len(orphaned)} schedule_state row(s) not in this '
+                f"scheduler's config (other scheduler, or removed "
+                f'schedules): {orphaned}. Rows are kept; delete '
+                f'manually if the schedules are gone for good.'
+            )
 
+        writes = self._start_writes(stored, read.database_now)
+        if not writes:
+            return
+        try:
+            written = await self.state_manager.store_start_states(writes)
+        except Exception as e:
+            logger.error(
+                f'Failed to store schedule state rows at start: {e}; the tick '
+                f'loop creates missing rows',
+                exc_info=True,
+            )
+            return
+        _log_start_writes(writes, written, stored)
+
+    def _start_writes(
+        self,
+        stored: dict[str, bytes],
+        database_now: datetime,
+    ) -> list[ScheduleStateWrite]:
+        """The start write's rows: each enabled schedule whose stored digest
+        is missing or differs, with its first run after ``database_now``.
+
+        A schedule whose first run cannot be computed is left out and
+        logged. Does no I/O.
+        """
+        writes: list[ScheduleStateWrite] = []
         failed_schedules: list[str] = []
         for schedule in self.schedule_config.schedules:
             if not schedule.enabled:
                 logger.debug(f'Skipping disabled schedule: {schedule.name}')
                 continue
-
+            config_hash = self._compute_config_hash(schedule)
+            if stored.get(schedule.name) == config_hash:
+                logger.debug(f"Schedule '{schedule.name}' already initialized")
+                continue
             try:
-                await self._initialize_single_schedule(schedule, now)
-            except Exception as e:
+                next_run = calculate_next_run(
+                    schedule.pattern, database_now, schedule.timezone,
+                )
+            except (ValueError, RuntimeError) as e:
                 logger.error(
                     f"Failed to initialize schedule '{schedule.name}': {e}",
                     exc_info=True,
                 )
                 failed_schedules.append(schedule.name)
-
+                continue
+            writes.append(
+                ScheduleStateWrite(
+                    schedule_name=schedule.name,
+                    next_run_at=next_run,
+                    config_hash=config_hash,
+                ),
+            )
         if failed_schedules:
             logger.error(
                 f'{len(failed_schedules)} schedule(s) failed to initialize: '
                 f'{failed_schedules}; remaining schedules will proceed',
             )
-
-    async def _initialize_single_schedule(
-        self, schedule: TaskSchedule, now: datetime,
-    ) -> None:
-        """Initialize or update state for a single schedule.
-
-        Raises on failure so the caller can isolate per-schedule errors.
-        """
-        if not self.state_manager:
-            raise RuntimeError('State manager not initialized')
-
-        config_hash = self._compute_config_hash(schedule)
-        state = await self.state_manager.get_state(schedule.name)
-
-        if state is None:
-            next_run = calculate_next_run(schedule.pattern, now, schedule.timezone)
-            await self.state_manager.initialize_state(
-                schedule.name, next_run, config_hash,
-            )
-            logger.info(
-                f"Initialized new schedule '{schedule.name}', next_run={next_run}",
-            )
-        elif state.config_hash != config_hash:
-            logger.warning(
-                f"Schedule '{schedule.name}' configuration changed "
-                f'(pattern or timezone), recalculating next_run_at',
-            )
-            next_run = calculate_next_run(
-                schedule.pattern, now, schedule.timezone,
-            )
-            await self.state_manager.update_next_run(
-                schedule.name, next_run, config_hash,
-            )
-            logger.info(
-                f"Updated schedule '{schedule.name}' due to config change, "
-                f'new next_run={next_run}',
-            )
-        else:
-            logger.debug(
-                f"Schedule '{schedule.name}' already initialized, "
-                f'next_run={state.next_run_at}',
-            )
+        return writes
 
     async def _check_and_run_schedules(self) -> None:
         """Check all schedules and execute those that are due.
 
+        The due read returns the database time with the due rows. That
+        time is the tick's only clock: the existence heal computes first
+        runs from it, and each due schedule computes its slots from it.
+
         Per-schedule isolation: _check_schedule errors are logged and the
-        remaining due schedules still run. The existence and due-states
-        reads raise to run_forever's tick handler (retry next tick); a
-        raise on the existence read leaves its countdown at zero, so the
-        retried tick re-runs the check. The existence check itself runs
-        on a ~_EXISTENCE_CHECK_INTERVAL_S wall-clock cadence while
-        healthy (every tick while unhealthy), not per tick; the tick
+        remaining due schedules still run. The due read and the heal raise
+        to run_forever's tick handler (retry next tick); a raise in the
+        heal leaves its countdown at zero, so the retried tick re-runs it.
+        The heal runs on a ~_EXISTENCE_CHECK_INTERVAL_S wall-clock cadence
+        while healthy (every tick while unhealthy), not per tick; the tick
         count is derived at init from check_interval_seconds.
 
         Raises:
             RuntimeError: scheduler not initialized (programmer error).
-            Exception: DB failure reading state rows.
+            Exception: DB failure of the due read or the heal.
         """
         if not self.state_manager or not self.broker:
             raise RuntimeError('Scheduler not properly initialized')
-
-        now = datetime.now(timezone.utc)
 
         enabled_schedules: dict[str, TaskSchedule] = {
             schedule.name: schedule
@@ -379,26 +412,25 @@ class Scheduler:
         if not enabled_schedules:
             return
 
+        due_read = await self.state_manager.read_due_schedules(
+            list(enabled_schedules.keys()),
+        )
+        database_now = due_read.database_now
+
         if self._ticks_until_existence_check <= 0:
-            healthy = await self._ensure_states_exist(enabled_schedules, now)
+            healthy = await self._ensure_states_exist(enabled_schedules, database_now)
             self._ticks_until_existence_check = (
                 self._existence_check_interval_ticks if healthy else 1
             )
         self._ticks_until_existence_check -= 1
 
-        # Bulk fetch due states to avoid O(N) per-tick queries
-        due_states = await self.state_manager.get_due_states(
-            list(enabled_schedules.keys()),
-            now,
-        )
-
-        for state in due_states:
-            schedule = enabled_schedules.get(state.schedule_name)
+        for due in due_read.due:
+            schedule = enabled_schedules.get(due.schedule_name)
             if schedule is None:
                 continue
 
             try:
-                await self._check_schedule(schedule, now)
+                await self._check_schedule(schedule, database_now)
             except Exception as e:
                 logger.error(
                     f"Error checking schedule '{schedule.name}': {e}", exc_info=True
@@ -407,61 +439,69 @@ class Scheduler:
     async def _ensure_states_exist(
         self,
         enabled_schedules: dict[str, TaskSchedule],
-        now: datetime,
+        database_now: datetime,
     ) -> bool:
-        """Recreate state rows missing for enabled schedules (self-heal).
+        """Create the state rows missing for enabled schedules (self-heal).
 
         Closes the startup-init liveness gap: a schedule whose state-row
         creation failed during start() — or whose row was deleted
-        externally — was invisible to get_due_states and stayed dormant
-        until a restart. Initialization is idempotent (existing-row guard;
-        a concurrent scheduler's IntegrityError lands in the per-schedule
-        except below and a later check sees the winner's row).
+        externally — was invisible to the due read and stayed dormant
+        until a restart. One statement: ``INSERT ... ON CONFLICT DO
+        NOTHING``, with no read before it. A row that exists is not
+        written; a concurrent scheduler's row stands.
+
+        ``database_now`` is the database time of this tick's due read; each
+        missing row gets the first run after it.
 
         Runs on a cadence, not every tick: while healthy the caller
         re-checks roughly every ``_EXISTENCE_CHECK_INTERVAL_S`` seconds
-        (tick count derived at init from ``check_interval_seconds``); a
-        failed re-init makes the caller re-check every tick until a fully
-        healthy pass. Worst-case dormancy for an externally deleted row
-        is therefore one check interval instead of one tick, and the
-        bound does not scale with tick length.
-
-        Per-schedule isolation: one schedule's init failure is logged and
-        retried on the next check; the rest of the tick proceeds.
+        (tick count derived at init from ``check_interval_seconds``); an
+        unhealthy pass makes the caller re-check every tick until a fully
+        healthy pass.
 
         Returns:
-            True when every enabled schedule had a state row or was
-            re-initialized without error in this pass.
+            True when the first run of every enabled schedule was computed
+            and the statement ran. A schedule whose first run cannot be
+            computed is left out and logged, and the pass is unhealthy.
 
         Raises:
             RuntimeError: state manager not initialized (programmer error).
-            Exception: DB failure on the existence read — raises to
+            Exception: DB failure of the heal statement — raises to
                 run_forever's tick handler (retry next tick).
         """
         if not self.state_manager:
             raise RuntimeError('State manager not initialized')
 
-        existing = await self.state_manager.get_existing_names(
-            list(enabled_schedules.keys()),
-        )
-        missing = enabled_schedules.keys() - existing
+        writes: list[ScheduleStateWrite] = []
         healthy = True
-        for name in sorted(missing):
-            logger.warning(
-                f"Schedule '{name}' has no state row (failed startup init "
-                f'or external delete); initializing now',
-            )
+        for name in sorted(enabled_schedules):
+            schedule = enabled_schedules[name]
             try:
-                await self._initialize_single_schedule(
-                    enabled_schedules[name], now,
+                next_run = calculate_next_run(
+                    schedule.pattern, database_now, schedule.timezone,
                 )
-            except Exception as e:
+            except (ValueError, RuntimeError) as e:
                 healthy = False
                 logger.error(
-                    f"Failed to initialize schedule '{name}' "
+                    f"Failed to compute the first run of schedule '{name}' "
                     f'(will retry next tick): {e}',
                     exc_info=True,
                 )
+                continue
+            writes.append(
+                ScheduleStateWrite(
+                    schedule_name=name,
+                    next_run_at=next_run,
+                    config_hash=self._compute_config_hash(schedule),
+                ),
+            )
+
+        healed = await self.state_manager.heal_missing_states(writes)
+        for name in healed:
+            logger.warning(
+                f"Schedule '{name}' had no state row (failed startup init "
+                f'or external delete); created it',
+            )
         return healthy
 
     def _schedule_advisory_key(self, schedule_name: str) -> int:
@@ -943,8 +983,9 @@ class Scheduler:
         sent_at is set to slot_time (the logical schedule slot), not wall clock.
         The row stores the task's options text, as a plain ``.send()`` does,
         and the fingerprint covers it. This ensures crash-and-retry produces
-        the same task_id + same SHA, making the INSERT idempotent via ON
-        CONFLICT DO NOTHING.
+        the same task_id + same SHA: a fire of a slot whose task is live
+        answers with that task. A slot fire is a ``SendKind.FIRST`` send, so
+        it does not read history.
 
         Returns Ok(task_id) when the slot's task is enqueued, or already
         exists (with the same command, or with a different command; see
@@ -1006,6 +1047,7 @@ class Scheduler:
             queue_name=validated_queue_name,
             task_id=task_id,
             enqueue_sha=enqueue_sha,
+            send_kind=SendKind.FIRST,
             args_json=None,
             kwargs_json=prepared.kwargs_json,
             priority=priority,

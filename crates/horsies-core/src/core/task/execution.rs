@@ -5,6 +5,7 @@
 //! (`horsies/core/models/tasks.py`), and `stored_execution`
 //! (`horsies/core/codec/task_options.py`).
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 /// Least cancel grace of a `SHARED_ASYNC` task, in milliseconds.
@@ -17,7 +18,24 @@ pub const MAX_CANCEL_GRACE_MS: i64 = 10_000;
 /// The executor of the worker uses this type too (`ExecutionClass` there):
 /// the class of a row, the budget of a claim and the kind of a child are
 /// one set of values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+///
+/// The order is the order of Python's `Execution` members: `ISOLATED`,
+/// `SHARED_ASYNC`, `SHARED_THREAD`. Reports list classes in this order. It
+/// serializes as its stored value.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    horsies_macros::ManifestSchema,
+)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Execution {
     /// One task at a time in its own child process. The default class.
     Isolated,
