@@ -436,6 +436,8 @@ TaskError(error_code="MY_CUSTOM_CODE", message="card declined")             # co
 TaskError(error_code="BROKER_ERROR", message="db down")                     # ValueError — reserved
 ```
 
+`WORKFLOW_STOPPED` is also reserved, and it is not a task code: it names a workflow task that stopped before its body ran. `TaskError(error_code="WORKFLOW_STOPPED", ...)` raises `ValueError`, and a stored task error with this code does not decode. An `exception_mapper` value, a `default_unhandled_error_code` or an `auto_retry_for` entry with this name is refused like any other invalid code.
+
 **Serialization**: built-in codes are serialized as tagged dicts `{"__builtin_task_code__": "BROKER_ERROR"}` so round-trip identity is preserved through standard `model_validate()` / `model_validate_json()`. User strings are serialized as plain strings. This tagged format eliminates wire-format ambiguity between built-in and user codes, allowing `model_validate()` to work correctly everywhere — including nested models.
 
 `horsies check` detects reserved-code collisions in statically visible configuration:

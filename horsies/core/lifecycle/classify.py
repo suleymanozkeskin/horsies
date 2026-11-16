@@ -227,8 +227,8 @@ def classify(report: ChildReport, context: FinalizeContext) -> FinalizeDecision:
         case ResultUndecodable(detail=detail):
             return ApplyTerminalization(_undecodable_command(detail, context))
         case ErrorProduced(error=error):
-            if _is_workflow_stopped(error):
-                return NoTerminalAction(reason=FinalizeNoOpReason.WORKFLOW_STOPPED)
+            # No task error carries WORKFLOW_STOPPED (RESERVED_NON_TASK_CODES):
+            # a stop travels only as the abort reason, before the task ran.
             return ScheduleAutomaticRetry(task_id=context.task_id, error=error)
         case ResultProduced():
             return ApplyTerminalization(_success_command(context))
@@ -370,11 +370,6 @@ def _undecodable_command(
         error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
         failed_reason=None,
     )
-
-
-def _is_workflow_stopped(error: TaskError) -> bool:
-    """The workflow-stop sentinel also travels inside a decoded payload."""
-    return _error_code_of(error) == _WORKFLOW_STOPPED
 
 
 def _error_code_of(error: TaskError) -> str:

@@ -130,15 +130,11 @@ class TestAbortsThatWriteNothing:
         decision = classify(AbortedBeforeResult(reason=reason), _context())
         assert decision == NoTerminalAction(reason=expected)
 
-    def test_workflow_stopped_inside_a_payload_is_also_a_no_op(self) -> None:
-        """The same sentinel travels two ways and must mean one thing."""
-        error = TaskError(
-            error_code='WORKFLOW_STOPPED', message='stopped', data={},
-        )
-        decision = classify(ErrorProduced(error=error), _context())
-        assert decision == NoTerminalAction(
-            reason=FinalizeNoOpReason.WORKFLOW_STOPPED,
-        )
+    def test_workflow_stopped_travels_only_as_an_abort_reason(self) -> None:
+        """No task error carries the stop code, so no returned error reads as a
+        stop: a finalize that took one for a stop left the row RUNNING."""
+        with pytest.raises(ValueError, match='reserved error code name'):
+            TaskError(error_code='WORKFLOW_STOPPED', message='stopped', data={})
 
 
 class TestExpiryRoutesByTaskKind:

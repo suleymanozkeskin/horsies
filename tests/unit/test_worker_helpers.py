@@ -5910,11 +5910,6 @@ from sqlalchemy.exc import OperationalError as SAOperationalError
 from sqlalchemy.exc import TimeoutError as SATimeoutError
 
 _OK_WIRE = '{"__h_task_result__":true,"ok":"hello","err":null}'
-_STOPPED_WIRE = (
-    '{"__h_task_result__":true,"ok":null,'
-    '"err":{"exception":null,"error_code":"WORKFLOW_STOPPED",'
-    '"data":null,"message":"stop"}}'
-)
 
 
 def _make_session_worker(
@@ -6174,27 +6169,6 @@ class TestPersistTerminalStateFusedPath:
             )
 
         assert result == Ok(None)
-        session.execute.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_workflow_stopped_returns_none_without_sql(self) -> None:
-        """WORKFLOW_STOPPED err result → Ok(None) before any session opens."""
-        worker, session = _make_session_worker(fetchone_results=[])
-
-        result = await worker._persist_task_terminal_state(
-            task_id='task-1',
-            now=datetime.now(timezone.utc),
-            ok=True,
-            result_json_str=_STOPPED_WIRE,
-            failed_reason=None,
-            task_name='my_task',
-            queue_name='q1',
-            is_workflow_task=True,
-            claimed_at=CLAIMED_AT,
-        )
-
-        assert result.ok_value is None
-        worker.sf.assert_not_called()
         session.execute.assert_not_awaited()
 
 
