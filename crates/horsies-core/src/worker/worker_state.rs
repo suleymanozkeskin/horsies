@@ -493,3 +493,6 @@ mod tests {
         written.expect("the first snapshot must land well before one 60 s interval");
     }
 }
+
+#[cfg(test)]
+mod state_read_spec_tests;
