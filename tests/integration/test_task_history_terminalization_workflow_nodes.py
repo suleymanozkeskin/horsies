@@ -17,9 +17,10 @@ from __future__ import annotations
 from typing import Any
 from uuid import uuid4
 
+import psycopg
 import pytest
 from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from tests.integration.task_history_harness import (
@@ -149,6 +150,31 @@ class TestWorkflowCancelSingle:
             assert row.status == 'CANCELLED'
             assert row.error_code is None
             assert row.final_failed_reason is None
+
+
+    @pytest.mark.asyncio
+    async def test_the_database_refuses_a_cancelled_node_status(
+        self, terminalization_schema: HistorySchema
+    ) -> None:
+        """A node has no CANCELLED status: the CHECK
+        horsies_workflow_tasks_status_known refuses it. The node of a
+        requeued PENDING task in a cancelled workflow is ENQUEUED, as the
+        carve-out test seeds it."""
+        async with terminalization_schema.engine.begin() as connection:
+            await prepare_move_storage(connection, CLASS_KEY)
+            with pytest.raises(IntegrityError) as raised:
+                await seeded_workflow_task(
+                    connection,
+                    workflow_status='CANCELLED',
+                    node_status='CANCELLED',
+                    task_status='PENDING',
+                    worker=None,
+                )
+            assert isinstance(raised.value.orig, psycopg.errors.CheckViolation)
+            assert (
+                raised.value.orig.diag.constraint_name
+                == 'horsies_workflow_tasks_status_known'
+            )
 
 
 class TestIdKeyedBatch:

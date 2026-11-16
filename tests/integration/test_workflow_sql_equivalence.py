@@ -62,7 +62,7 @@ async def _seed_random_workflow(
             INSERT INTO horsies_workflows
                 (id, name, status, on_error, depth, root_workflow_id,
                  sent_at, created_at, started_at, updated_at)
-            VALUES (:id, 'equiv_wf', 'RUNNING', 'FAIL', 0, :id,
+            VALUES (:id, 'equiv_wf', 'RUNNING', 'fail', 0, :id,
                     NOW(), NOW(), NOW(), NOW())
         """),
         {'id': wf_id},
@@ -77,12 +77,14 @@ async def _seed_random_workflow(
             text("""
                 INSERT INTO horsies_workflow_tasks
                     (id, workflow_id, task_index, node_id, task_name,
-                     task_args, task_kwargs, queue_name, priority,
+                     input, queue_name, priority,
                      dependencies, allow_failed_deps, join_type,
-                     is_subworkflow, status, created_at)
-                VALUES (:id, :wf, :idx, :node, 'equiv_task', '[]', '{}',
+                     is_subworkflow, status, created_at,
+                     max_retries, execution, retention_class_key)
+                VALUES (:id, :wf, :idx, :node, 'equiv_task', '{}',
                         'default', 100, :deps, FALSE, 'all',
-                        FALSE, :status, NOW())
+                        FALSE, :status, NOW(),
+                        0, 'ISOLATED', 'standard_30d')
             """),
             {
                 'id': str(uuid.uuid4()),
@@ -182,7 +184,7 @@ async def test_terminal_two_step_handles_zero_task_workflow(
             INSERT INTO horsies_workflows
                 (id, name, status, on_error, depth, root_workflow_id,
                  sent_at, created_at, started_at, updated_at)
-            VALUES (:id, 'empty_wf', 'RUNNING', 'FAIL', 0, :id,
+            VALUES (:id, 'empty_wf', 'RUNNING', 'fail', 0, :id,
                     NOW(), NOW(), NOW(), NOW())
         """),
         {'id': wf_id},
@@ -217,7 +219,7 @@ async def test_child_info_counts_zero_for_taskless_workflow(
             INSERT INTO horsies_workflows
                 (id, name, status, on_error, depth, root_workflow_id,
                  sent_at, created_at, started_at, updated_at)
-            VALUES (:id, 'taskless_wf', 'RUNNING', 'FAIL', 0, :id,
+            VALUES (:id, 'taskless_wf', 'RUNNING', 'fail', 0, :id,
                     NOW(), NOW(), NOW(), NOW())
         """),
         {'id': wf_id},
