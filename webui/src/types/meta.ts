@@ -4,7 +4,6 @@
 export type ServerSchemaState =
   | 'MATCH'
   | 'MISMATCH'
-  | 'CUTOVER_REQUIRED'
   | 'ABSENT'
   | 'UNKNOWN';
 

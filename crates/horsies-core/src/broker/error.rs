@@ -50,8 +50,12 @@ pub enum BrokerError {
     #[error("invalid connection settings: {0}")]
     InvalidConnectionSettings(#[from] crate::core::config::PostgresConfigError),
 
-    /// Enqueue conflict: same task_id but different payload (SHA mismatch).
-    #[error("payload mismatch for task_id {task_id}: existing row has different enqueue_sha")]
+    /// The task id exists with a different command, or is bound to a
+    /// different idempotency key. Nothing was written.
+    #[error(
+        "payload mismatch for task_id {task_id}: the existing task has a different command \
+         or idempotency key"
+    )]
     PayloadMismatch { task_id: Uuid },
 
     /// Enqueue observed a conflict, but the conflicting row disappeared before
@@ -90,6 +94,11 @@ pub enum BrokerError {
     /// read contract.
     #[error("task-history read contract violation: {0}")]
     HistoryReadContract(String),
+
+    /// A claim-pass argument is outside the range that the claim function
+    /// takes. It is refused, never clamped.
+    #[error("invalid claim argument: {0}")]
+    InvalidClaimArgument(String),
 }
 
 impl BrokerError {
@@ -126,7 +135,8 @@ impl BrokerError {
             | Self::EnqueueContract(_)
             | Self::InvalidIdempotencyReservationWindow(_)
             | Self::TerminalizationContract(_)
-            | Self::HistoryReadContract(_) => false,
+            | Self::HistoryReadContract(_)
+            | Self::InvalidClaimArgument(_) => false,
         }
     }
 }

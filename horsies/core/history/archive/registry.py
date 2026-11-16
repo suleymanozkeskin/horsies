@@ -1,12 +1,9 @@
 """The retained-version registry: one authority for what must decode.
 
-Decoder retirement is an offline transcode concern, but its precondition
-lives here: a version is retained until an explicit transcode proves zero
-rows require it, and while retained it must decode. The transcode decoder
-set reads this mapping rather than hard-coding version literals, so retiring
-a version is one change with one review.
+A retained version must decode. No mechanism rewrites stored rows to
+another version, so a version that stored rows may hold stays retained.
 
-At the 0.5.0 cutover every domain retains exactly version 1.
+Every domain retains exactly version 1.
 """
 
 from __future__ import annotations

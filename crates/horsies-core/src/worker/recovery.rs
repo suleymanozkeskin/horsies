@@ -12,6 +12,9 @@ use crate::broker::listener::notify_task_queue;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::recovery::RecoveryConfig;
 use crate::core::config::retention::RetentionConfig;
+use crate::core::history::identity::reservations::{
+    cleanup_expired_reservations_pass, ReservationCleanupPass, RESERVATION_CLEANUP_BATCHES_PER_PASS,
+};
 use crate::core::history::maintenance::coverage::{
     ensure_partition_coverage_in_pool, CoverageOutcome,
 };
@@ -73,24 +76,55 @@ FOR UPDATE OF t";
 
 use crate::broker::UPSERT_TASK_ATTEMPT_SQL;
 
-/// SQL: Requeue a stale RUNNING task for retry (clears all claim fields).
+/// SQL: Requeue a stale RUNNING task for retry.
+///
+/// Python's `SCHEDULE_STALE_TASK_RETRY_SQL` (`core/worker/sql.py`): every
+/// claim and run field and the finalizing marker are cleared, and the
+/// staleness is judged again in the UPDATE itself (no recent runner beat,
+/// no fresh finalizing marker), so a beat that landed after the locked read
+/// keeps the task RUNNING. $4 is the stale threshold in seconds, $5 the
+/// finalizing threshold in seconds.
 const SCHEDULE_STALE_TASK_RETRY_SQL: &str = "\
-UPDATE horsies_tasks
+UPDATE horsies_tasks AS t
 SET status = 'PENDING',
     retry_count = $2,
     next_retry_at = $3,
     enqueued_at = $3,
-    error_code = NULL,
-    claimed = FALSE,
     claimed_at = NULL,
     claimed_by_worker_id = NULL,
     claim_expires_at = NULL,
+    started_at = NULL,
+    worker_pid = NULL,
+    worker_hostname = NULL,
+    worker_process_name = NULL,
     finalizing_at = NULL,
     finalizing_by_worker_id = NULL,
+    error_code = NULL,
     updated_at = NOW()
-WHERE id = $1
-  AND status = 'RUNNING'
-  AND (good_until IS NULL OR $3 < good_until)";
+WHERE t.id = $1
+  AND t.status = 'RUNNING'
+  AND t.started_at IS NOT NULL
+  AND (
+      t.finalizing_at IS NULL
+      OR t.finalizing_at < NOW() - $5 * INTERVAL '1 second'
+  )
+  AND COALESCE(
+      (
+          SELECT h.sent_at
+          FROM horsies_heartbeats h
+          WHERE h.task_id = t.id AND h.role = 'runner'
+          ORDER BY h.sent_at DESC
+          LIMIT 1
+      ),
+      t.started_at
+  ) < NOW() - $4 * INTERVAL '1 second'
+  AND (t.good_until IS NULL OR $3 < t.good_until)";
+
+/// SQL: The task advisory lock, taken before the row lock of a stale
+/// recovery, in the order of every move function (Python
+/// `core/brokers/postgres.py`, the stale recovery). With the row lock first,
+/// the recovery could deadlock with a fused success or a failed attempt.
+const LOCK_TASK_SQL: &str = "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 731))";
 
 // The terminal stale-failure statement is `horsies_fail_stale_task`
 // (broker/terminalization.rs): the function re-captures heartbeat/finalizing
@@ -142,19 +176,26 @@ mod p7_maintenance_tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, args, kwargs, status,
-                sent_at, enqueued_at, started_at, claimed, claimed_at,
-                claimed_by_worker_id, is_workflow_task, retry_count, max_retries,
-                enqueue_sha, command_fingerprint_version, command_fingerprint,
-                retention_class_key, retain_rerun_input,
-                prepared_rerun_input_disposition, created_at, updated_at
-             ) VALUES ($1, 'p7_retention_task', 'default', 100, '[]', '{}', 'RUNNING',
-                       NOW(), NOW(), NOW(), TRUE, NOW(), 'p7-retention-worker', TRUE,
-                       0, 0, $1::text, 1, $2, 'forever', FALSE,
-                       'NEVER_ELIGIBLE', NOW(), NOW())",
+                 id, task_name, queue_name, priority, input, task_options, execution,
+                 retention_class_key, sent_at, created_at,
+                 command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                 status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                 started_at, finalizing_at, finalizing_by_worker_id,
+                 worker_pid, worker_hostname, worker_process_name,
+                 retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                 updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
+             ) VALUES (
+                 $1, 'p7_retention_task', 'default', 100, '{}', NULL, 'ISOLATED',
+                 'forever', NOW(), NOW(),
+                 NULL, NULL, NULL,
+                 'RUNNING', NOW(), NOW(), 'p7-retention-worker', NULL,
+                 NOW(), NULL, NULL,
+                 4242, 'p7-host', 'p7-process',
+                 0, 0, NULL, NULL, TRUE,
+                 NOW(), FALSE, NULL, NULL
+             )",
         )
         .bind(task_id)
-        .bind(vec![23_u8; 32])
         .execute(pool)
         .await
         .unwrap();
@@ -589,6 +630,7 @@ mod p7_maintenance_tests {
             .unwrap()
             .contains(history_leaves[0].leaf_name()));
         assert_eq!(pruning["errors"].as_array().unwrap().len(), 0);
+        assert_eq!(pruning["key_reservations"]["state"], "complete");
         let phase2 = snapshot.phase2_recovery.unwrap();
         assert_eq!(phase2["considered"], 0);
         assert_eq!(phase2["applied"], 0);
@@ -692,35 +734,63 @@ struct StaleTaskContext {
     db_now: DateTime<Utc>,
 }
 
-/// SQL: Requeue stale CLAIMED tasks back to PENDING.
+/// SQL: Requeue stale CLAIMED tasks back to PENDING, at most `$2` rows.
 ///
-/// A task is stale if:
-/// - it has a lease (`claim_expires_at`) and the lease has expired, OR
-/// - it has no lease and `claimed_at` is older than the threshold.
-///
-/// We intentionally ignore claimer heartbeats for CLAIMED tasks without a lease.
-/// Otherwise a worker can keep a task CLAIMED forever even if it never starts.
+/// Python's `REQUEUE_STALE_CLAIMED_SQL` (`core/brokers/postgres.py`): a
+/// claimed row is stale when its newest claimer beat is older than the
+/// threshold, or when it has no claimer beat and was claimed longer ago. An
+/// orphaned workflow task (no node in a runnable status) is never requeued:
+/// a new dispatch can only fail its node check again; the orphan audit
+/// cancels it instead. The staleness predicate sits inside the locking
+/// subquery, so only stale rows are locked. The requeue clears the claim
+/// fields and the finalizing marker.
 const REQUEUE_STALE_CLAIMED_SQL: &str = "\
 WITH stale AS (
-    SELECT t.id
-    FROM horsies_tasks t
-    WHERE t.status = 'CLAIMED'
+    SELECT t2.id
+    FROM horsies_tasks t2
+    LEFT JOIN LATERAL (
+        SELECT h.sent_at AS last_heartbeat
+        FROM horsies_heartbeats h
+        WHERE h.task_id = t2.id AND h.role = 'claimer'
+        ORDER BY h.sent_at DESC
+        LIMIT 1
+    ) hb ON TRUE
+    WHERE t2.status = 'CLAIMED'
       AND (
-        (t.claim_expires_at IS NOT NULL AND t.claim_expires_at < NOW())
-        OR (t.claim_expires_at IS NULL
-            AND t.claimed_at < NOW() - $1 * INTERVAL '1 second')
+        (hb.last_heartbeat IS NULL
+            AND t2.claimed_at IS NOT NULL
+            AND t2.claimed_at < NOW() - $1 * INTERVAL '1 second')
+        OR (hb.last_heartbeat IS NOT NULL
+            AND hb.last_heartbeat < NOW() - $1 * INTERVAL '1 second')
       )
-    FOR UPDATE OF t SKIP LOCKED
+      AND NOT (
+          t2.is_workflow_task
+          AND NOT EXISTS (
+              SELECT 1 FROM horsies_workflow_tasks wt
+              WHERE wt.task_id = t2.id
+                AND wt.status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')
+          )
+      )
+    ORDER BY t2.id
+    LIMIT $2
+    FOR UPDATE OF t2 SKIP LOCKED
 )
-UPDATE horsies_tasks
+UPDATE horsies_tasks AS t
 SET status = 'PENDING',
-    claimed = FALSE,
     claimed_at = NULL,
     claimed_by_worker_id = NULL,
     claim_expires_at = NULL,
+    finalizing_at = NULL,
+    finalizing_by_worker_id = NULL,
     updated_at = NOW()
 FROM stale
-WHERE horsies_tasks.id = stale.id";
+WHERE t.id = stale.id";
+
+/// Rows per stale-CLAIMED requeue statement.
+const STALE_CLAIMED_REQUEUE_BATCH: i64 = 500;
+/// Statements per reaper pass; a pass that reaches it stops, and the next
+/// pass goes on.
+const STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS: u32 = 200;
 
 // ---------------------------------------------------------------------------
 // Retention cleanup SQL
@@ -1237,12 +1307,33 @@ async fn run_reaper_pass(
         // Coverage and pruning are independently contained: either half runs
         // and publishes health even when the other refuses.
         let prune = prune_expired_partitions(maintenance_pool, &StagedLoaderPublisher).await;
+        // Expired key reservations are removed after pruning, in bounded
+        // batches; the rest waits for the next pass.
+        let key_reservations = match cleanup_expired_reservations_pass(
+            maintenance_pool,
+            i32::try_from(retention.retention_delete_batch_size).unwrap_or(i32::MAX),
+            RESERVATION_CLEANUP_BATCHES_PER_PASS,
+        )
+        .await
+        {
+            Ok(ReservationCleanupPass::Complete { deleted }) => {
+                serde_json::json!({"state": "complete", "deleted": deleted})
+            }
+            Ok(ReservationCleanupPass::Truncated { deleted }) => {
+                serde_json::json!({"state": "truncated", "deleted": deleted})
+            }
+            Err(error) => {
+                tracing::error!(%error, "expired key reservation cleanup failed");
+                serde_json::json!({"state": "error", "error": error.to_string()})
+            }
+        };
         health.write().await.partition_pruning = Some(serde_json::json!({
             "finalized": prune.finalized_leaves.len(),
             "detached": prune.detached_count(),
             "dropped": prune.dropped_count(),
             "refusals": prune.refusals,
             "errors": prune.errors,
+            "key_reservations": key_reservations,
         }));
         *next_partition_maintenance = tokio::time::Instant::now()
             + Duration::from_secs(retention.partition_maintenance_interval_s);
@@ -1330,6 +1421,13 @@ async fn process_single_stale_task(
         .await
         .map_err(crate::broker::BrokerError::Database)?;
 
+    // The task advisory lock first, then the row lock: the order of every
+    // move function, so this recovery cannot deadlock with them.
+    sqlx::query(LOCK_TASK_SQL)
+        .bind(task_id)
+        .execute(&mut *tx)
+        .await?;
+
     // Re-acquire row with full context. Returns None if the task is no longer
     // RUNNING, if a fresh heartbeat arrived after the Phase 1 scan, or if the
     // task is actively finalizing within finalizing_threshold_secs.
@@ -1386,6 +1484,8 @@ async fn process_single_stale_task(
             .bind(task_id)
             .bind(new_count)
             .bind(next_retry_at)
+            .bind(threshold_secs)
+            .bind(finalizing_threshold_secs)
             .execute(&mut *tx)
             .await?;
 
@@ -1394,7 +1494,7 @@ async fn process_single_stale_task(
             sqlx::query(UPSERT_TASK_ATTEMPT_SQL)
                 .bind(task_id)
                 .bind(attempt_num)
-                .bind("WORKER_FAILURE")
+                .bind("FAILED")
                 .bind(true) // will_retry
                 .bind(attempt_started)
                 .bind(detected_at)
@@ -1426,7 +1526,7 @@ async fn process_single_stale_task(
         // good_until guard blocked the retry — fall through to fail path.
         tracing::info!(
             task_id = %task_id,
-            "stale task retry blocked by good_until, falling through to fail",
+            "stale task retry not applied (good_until, or a beat that landed after the scan); the failure path judges again",
         );
     }
 
@@ -1461,7 +1561,7 @@ async fn process_single_stale_task(
         sqlx::query(UPSERT_TASK_ATTEMPT_SQL)
             .bind(task_id)
             .bind(attempt_num)
-            .bind("WORKER_FAILURE")
+            .bind("FAILED")
             .bind(false) // will_retry
             .bind(attempt_started)
             .bind(detected_at)
@@ -1764,13 +1864,31 @@ pub async fn expire_pending_tasks(pool: &PgPool) -> Result<u64, crate::broker::B
     Ok(total)
 }
 
-/// Requeue stale CLAIMED tasks back to PENDING. Returns the number of affected rows.
+/// Requeue stale CLAIMED tasks back to PENDING, in batches of
+/// [`STALE_CLAIMED_REQUEUE_BATCH`] rows until a batch is short, and at most
+/// [`STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS`] batches. Each batch commits
+/// alone. Returns the number of requeued rows.
 pub async fn requeue_stale_claimed(pool: &PgPool, threshold_secs: f64) -> Result<u64, sqlx::Error> {
-    let result = sqlx::query(REQUEUE_STALE_CLAIMED_SQL)
-        .bind(threshold_secs)
-        .execute(pool)
-        .await?;
-    Ok(result.rows_affected())
+    let mut total: u64 = 0;
+    for _ in 0..STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS {
+        let requeued = sqlx::query(REQUEUE_STALE_CLAIMED_SQL)
+            .bind(threshold_secs)
+            .bind(STALE_CLAIMED_REQUEUE_BATCH)
+            .execute(pool)
+            .await?
+            .rows_affected();
+        total += requeued;
+        match requeued < STALE_CLAIMED_REQUEUE_BATCH.unsigned_abs() {
+            true => return Ok(total),
+            false => continue,
+        }
+    }
+    tracing::warn!(
+        requeued = total,
+        batches = STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS,
+        "stale CLAIMED requeue reached its per-pass bound; the next pass goes on",
+    );
+    Ok(total)
 }
 
 /// The drained signal for one retention DELETE's batching loop.
@@ -1988,18 +2106,23 @@ mod tests {
     async fn insert_stale_running_task(pool: &PgPool, task_id: Uuid, finalizing_at_sql: &str) {
         let sql = format!(
             "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, args, kwargs, status,
-                sent_at, started_at, created_at, updated_at, claimed,
-                claimed_by_worker_id, retry_count, max_retries, enqueue_sha,
-                finalizing_at, command_fingerprint_version, command_fingerprint,
-                retention_class_key, retain_rerun_input, prepared_rerun_input_disposition
+                id, task_name, queue_name, priority, input, task_options, execution,
+                retention_class_key, sent_at, created_at,
+                command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                started_at, finalizing_at, finalizing_by_worker_id,
+                worker_pid, worker_hostname, worker_process_name,
+                retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
             ) VALUES (
-                $1, 'reaper_test', 'default', 100, '[]', '{{}}', 'RUNNING',
-                NOW() - INTERVAL '1 hour', NOW() - INTERVAL '1 hour', NOW(), NOW(), TRUE,
-                'worker-1', 0, 0,
-                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
-                {finalizing_at_sql}, 1, decode(repeat('00', 32), 'hex'),
-                'standard_30d', FALSE, 'NEVER_ELIGIBLE'
+                $1, 'reaper_test', 'default', 100, '{{}}', NULL, 'ISOLATED',
+                'standard_30d', NOW() - INTERVAL '1 hour', NOW(),
+                1, decode(repeat('00', 32), 'hex'), NULL,
+                'RUNNING', NOW() - INTERVAL '1 hour', NOW() - INTERVAL '1 hour', 'worker-1', NULL,
+                NOW() - INTERVAL '1 hour', {finalizing_at_sql}, NULL,
+                4242, 'reaper-host', 'reaper-process',
+                0, 0, NULL, NULL, FALSE,
+                NOW(), FALSE, NULL, NULL
             )"
         );
         sqlx::query(&sql).bind(task_id).execute(pool).await.unwrap();
@@ -2174,15 +2297,23 @@ mod tests {
         // A still-live (RUNNING) backing task row + its workflow_task linkage.
         sqlx::query(
             "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, args, kwargs, status,
-                sent_at, started_at, created_at, updated_at, retry_count, max_retries, enqueue_sha,
-                command_fingerprint_version, command_fingerprint, retention_class_key,
-                retain_rerun_input, prepared_rerun_input_disposition
+                id, task_name, queue_name, priority, input, task_options, execution,
+                retention_class_key, sent_at, created_at,
+                command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                started_at, finalizing_at, finalizing_by_worker_id,
+                worker_pid, worker_hostname, worker_process_name,
+                retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
             ) VALUES (
-                $1, 'ret_task', 'default', 100, '[]', '{}', 'RUNNING',
-                NOW() - INTERVAL '2 hours', NOW() - INTERVAL '2 hours',
-                NOW() - INTERVAL '2 hours', NOW() - INTERVAL '2 hours', 0, 0, $1,
-                1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
+                $1, 'ret_task', 'default', 100, '{}', NULL, 'ISOLATED',
+                'standard_30d', NOW() - INTERVAL '2 hours', NOW() - INTERVAL '2 hours',
+                1, decode(repeat('00', 32), 'hex'), NULL,
+                'RUNNING', NOW() - INTERVAL '2 hours', NULL, NULL, NULL,
+                NOW() - INTERVAL '2 hours', NULL, NULL,
+                NULL, NULL, NULL,
+                0, 0, NULL, NULL, FALSE,
+                NOW() - INTERVAL '2 hours', FALSE, NULL, NULL
             )",
         )
         .bind(task_id)
@@ -2509,5 +2640,200 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+    }
+
+    // --- stale CLAIMED requeue and stale RUNNING retry (baseline seeds) ----
+
+    /// A `reaper_test` task with every column of the baseline task row named.
+    /// `stale_since` is how long ago it was claimed and started.
+    async fn seed_baseline_task(
+        pool: &PgPool,
+        task_id: Uuid,
+        status: &str,
+        is_workflow_task: bool,
+        max_retries: i32,
+        task_options: Option<&str>,
+    ) {
+        let fingerprint: Option<Vec<u8>> = match is_workflow_task {
+            true => None,
+            false => Some(vec![9_u8; 32]),
+        };
+        let fingerprint_version: Option<i16> = match is_workflow_task {
+            true => None,
+            false => Some(1),
+        };
+        sqlx::query(
+            "INSERT INTO horsies_tasks (
+                id, task_name, queue_name, priority, input, task_options, execution,
+                retention_class_key, sent_at, created_at,
+                command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                started_at, finalizing_at, finalizing_by_worker_id,
+                worker_pid, worker_hostname, worker_process_name,
+                retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
+             ) VALUES (
+                $1, 'reaper_test', 'default', 100, '{}', $2, 'ISOLATED',
+                'forever', NOW() - interval '2 hours', NOW() - interval '2 hours',
+                $3, $4, NULL,
+                $5, NOW() - interval '2 hours', NOW() - interval '1 hour', 'worker-1',
+                CASE WHEN $5 = 'CLAIMED' THEN NOW() + interval '1 minute' END,
+                CASE WHEN $5 = 'RUNNING' THEN NOW() - interval '1 hour' END, NULL, NULL,
+                CASE WHEN $5 = 'RUNNING' THEN 4242 END,
+                CASE WHEN $5 = 'RUNNING' THEN 'reaper-host' END,
+                CASE WHEN $5 = 'RUNNING' THEN 'reaper-process' END,
+                0, $6, NULL, NULL, $7,
+                NOW(), FALSE, NULL, NULL
+             )",
+        )
+        .bind(task_id)
+        .bind(task_options)
+        .bind(fingerprint_version)
+        .bind(fingerprint)
+        .bind(status)
+        .bind(max_retries)
+        .bind(is_workflow_task)
+        .execute(pool)
+        .await
+        .expect("seed baseline task");
+    }
+
+    /// Python `core/brokers/postgres.py` `REQUEUE_STALE_CLAIMED_SQL` and
+    /// `test_orphaned_workflow_task_repro.py::test_requeue_skips_orphaned_workflow_task`:
+    /// staleness is judged by claimer beats, an orphaned workflow task is
+    /// never requeued, and the requeue clears the finalizing marker.
+    #[tokio::test]
+    #[serial]
+    async fn stale_claimed_requeue_follows_claimer_beats_and_skips_orphans() {
+        let pool = test_pool().await;
+        let silent = Uuid::new_v4();
+        let beating = Uuid::new_v4();
+        let orphan = Uuid::new_v4();
+        let marked = Uuid::new_v4();
+        for (task_id, is_workflow_task) in [
+            (silent, false),
+            (beating, false),
+            (orphan, true),
+            (marked, false),
+        ] {
+            seed_baseline_task(&pool, task_id, "CLAIMED", is_workflow_task, 0, None).await;
+        }
+        sqlx::query(
+            "INSERT INTO horsies_heartbeats (task_id, role, sent_at, sender_id, hostname, pid)
+             VALUES ($1, 'claimer', NOW(), 'worker-1', 'reaper-host', 4242)",
+        )
+        .bind(beating)
+        .execute(&pool)
+        .await
+        .expect("fresh claimer beat");
+        sqlx::query(
+            "UPDATE horsies_tasks
+             SET finalizing_at = NOW() - interval '1 hour', finalizing_by_worker_id = 'worker-1'
+             WHERE id = $1",
+        )
+        .bind(marked)
+        .execute(&pool)
+        .await
+        .expect("stamp marker");
+
+        let requeued = requeue_stale_claimed(&pool, 60.0).await.expect("requeue");
+
+        // The shared test database can hold stale claims of other modules.
+        assert!(requeued >= 2, "requeued {requeued}");
+        assert_eq!(task_status(&pool, silent).await, "PENDING");
+        assert_eq!(task_status(&pool, beating).await, "CLAIMED");
+        assert_eq!(task_status(&pool, orphan).await, "CLAIMED");
+        assert_eq!(task_status(&pool, marked).await, "PENDING");
+        let (claimed_at, owner, marker): (
+            Option<chrono::DateTime<Utc>>,
+            Option<String>,
+            Option<chrono::DateTime<Utc>>,
+        ) = sqlx::query_as(
+            "SELECT claimed_at, claimed_by_worker_id, finalizing_at FROM horsies_tasks WHERE id = $1",
+        )
+        .bind(marked)
+        .fetch_one(&pool)
+        .await
+        .expect("requeued row");
+        assert_eq!((claimed_at, owner, marker), (None, None, None));
+        sqlx::query("DELETE FROM horsies_heartbeats WHERE task_id = $1")
+            .bind(beating)
+            .execute(&pool)
+            .await
+            .expect("delete beat");
+    }
+
+    /// Python `test_task_attempt_history.py::test_stale_cleanup_with_retry_policy_schedules_retry`
+    /// and `::test_stale_cleanup_writes_failed_attempt_worker_crashed`: a
+    /// policy that names WORKER_CRASHED retries a stale RUNNING task (the
+    /// built-in code compares by value, horsies-rust #68), the attempt
+    /// outcome is FAILED, and the retried row keeps no claim or run field.
+    #[tokio::test]
+    #[serial]
+    async fn a_stale_running_task_retries_when_its_policy_names_the_crash() {
+        let pool = test_pool().await;
+        let task_id = Uuid::new_v4();
+        let task_options = serde_json::json!({
+            "retry_policy": {
+                "max_retries": 1,
+                "intervals": [5],
+                "backoff_strategy": "fixed",
+                "jitter": false,
+                "max_delay_seconds": null,
+                "auto_retry_for": ["WORKER_CRASHED"]
+            }
+        })
+        .to_string();
+        seed_baseline_task(&pool, task_id, "RUNNING", false, 1, Some(&task_options)).await;
+
+        let processed = mark_stale_running_as_failed(&pool, 1.0, 300.0, STALE_RUNNING_SCAN_LIMIT)
+            .await
+            .expect("stale recovery");
+
+        // The shared test database can hold stale rows of other modules.
+        assert!(processed >= 1, "processed {processed}");
+        let row: serde_json::Value =
+            sqlx::query_scalar("SELECT to_jsonb(t) FROM horsies_tasks t WHERE id = $1")
+                .bind(task_id)
+                .fetch_one(&pool)
+                .await
+                .expect("retried row");
+        assert_eq!(row["status"], "PENDING");
+        assert_eq!(row["retry_count"], 1);
+        for cleared in [
+            "claimed_at",
+            "claimed_by_worker_id",
+            "claim_expires_at",
+            "started_at",
+            "worker_pid",
+            "worker_hostname",
+            "worker_process_name",
+            "finalizing_at",
+            "finalizing_by_worker_id",
+        ] {
+            assert!(row[cleared].is_null(), "a stale retry must clear {cleared}");
+        }
+        let attempts: Vec<(i32, String, bool, Option<String>)> = sqlx::query_as(
+            "SELECT attempt, outcome::text, will_retry, error_code
+             FROM horsies_task_attempts WHERE task_id = $1",
+        )
+        .bind(task_id)
+        .fetch_all(&pool)
+        .await
+        .expect("attempts");
+        assert_eq!(
+            attempts,
+            vec![(
+                1,
+                "FAILED".to_owned(),
+                true,
+                Some("WORKER_CRASHED".to_owned())
+            )]
+        );
+        sqlx::query("DELETE FROM horsies_task_attempts WHERE task_id = $1")
+            .bind(task_id)
+            .execute(&pool)
+            .await
+            .expect("delete attempts");
     }
 }
