@@ -14,22 +14,28 @@ use crate::core::workflow::sub_workflow::SubWorkflowNode;
 // Slugify helper
 // ---------------------------------------------------------------------------
 
-/// Convert a task name to a slug suitable for auto-generated node IDs.
-/// Replaces non-alphanumeric characters with `_`.
 /// The most nodes that one workflow spec holds. A larger workflow splits its nodes into sub-workflows; each
 /// child workflow has its own limit.
 pub const MAX_WORKFLOW_NODES: usize = 10_000;
 
+/// The workflow name as the first part of an auto node id
+/// (`<slug>:<index>`). A space becomes `_`; every other character outside
+/// `[A-Za-z0-9_\-:.]` is removed; an empty result is `_`. The result always
+/// matches the node id pattern. Python: `slugify`
+/// (`core/models/workflow/typing_utils.py:36-49`). Pure.
 fn slugify(name: &str) -> String {
-    name.chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '_'
-            }
+    let slug: String = name
+        .chars()
+        .filter_map(|c| match c {
+            ' ' => Some('_'),
+            c if c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':' | '.') => Some(c),
+            _ => None,
         })
-        .collect()
+        .collect();
+    match slug.is_empty() {
+        true => "_".to_owned(),
+        false => slug,
+    }
 }
 
 /// Regex-like check for node_id pattern: `[A-Za-z0-9_\-:.]+`
@@ -286,10 +292,13 @@ impl WorkflowSpecBuilder {
             return;
         }
 
-        // Auto-assign node_ids where missing.
+        // A node with no node_id gets `<slug of the workflow name>:<index>`;
+        // an explicit node_id is kept as given. Python:
+        // WorkflowSpec._collect_node_id_errors (core/models/workflow/spec.py:742).
+        let workflow_slug = slugify(&self.name);
         for task in &mut self.tasks {
             if task.node_id.is_none() {
-                task.node_id = Some(format!("{}:{}", slugify(&task.task_name), task.index));
+                task.node_id = Some(format!("{}:{}", workflow_slug, task.index));
             }
         }
 
@@ -861,7 +870,6 @@ mod tests {
     /// Python `test_workflow_models.py::TestWorkflowSpecValidation::test_node_id_auto_assigned`:
     /// a node with no id gets `<slug of the workflow name>:<index>`.
     #[test]
-    #[ignore = "waits on #1016"]
     fn auto_assign_node_ids() {
         let mut b = WorkflowSpecBuilder::new("node_id_auto");
         b.task(simple_node("fetch_data"));
@@ -879,11 +887,37 @@ mod tests {
         assert_eq!(spec.tasks[0].node_id.as_deref(), Some("step-1:sub_task.v2"),);
     }
 
+    /// Python `test_workflow_models.py::TestSlugify` (spaces, valid
+    /// characters, invalid characters, mixed input, empty result, the node id
+    /// pattern), and a letter outside ASCII, which Python's
+    /// `[^A-Za-z0-9_\-:.]` removes.
+    #[test]
+    fn slugify_follows_python() {
+        let cases = [
+            ("Hello World", "Hello_World"),
+            ("My Workflow Name", "My_Workflow_Name"),
+            ("task:v2.0", "task:v2.0"),
+            ("my-task-name", "my-task-name"),
+            ("prefix.suffix", "prefix.suffix"),
+            ("Hello!World", "HelloWorld"),
+            ("test@#$%chars", "testchars"),
+            ("parentheses(removed)", "parenthesesremoved"),
+            ("My App: v2.0!", "My_App:_v2.0"),
+            ("Company Name (Inc.)", "Company_Name_Inc."),
+            ("!@#$%", "_"),
+            ("", "_"),
+            ("caf\u{e9}", "caf"),
+        ];
+        for (name, slug) in cases {
+            assert_eq!(slugify(name), slug, "{name:?}");
+            assert!(is_valid_node_id(&slugify(name)), "{name:?}");
+        }
+    }
+
     /// Python `test_workflow_models.py::TestSlugify`: in the workflow name of
     /// an auto node id, a space becomes `_` and a character outside
     /// `[A-Za-z0-9_\-:.]` is removed.
     #[test]
-    #[ignore = "waits on #1016"]
     fn slugify_special_chars() {
         let mut b = WorkflowSpecBuilder::new("my flow/v2.0");
         b.task(simple_node("a"));
@@ -1496,7 +1530,6 @@ mod tests {
     /// Python `test_workflow_spec_isolation.py::TestSpecIsolation::test_node_reuse_across_specs_independent_ids`:
     /// the same node in two specs gets the auto id of each spec.
     #[test]
-    #[ignore = "waits on #1016"]
     fn node_reuse_across_specs_independent_ids() {
         let mut b1 = WorkflowSpecBuilder::new("alpha");
         b1.task(TaskNode::<()>::raw("task_a", "null"));
