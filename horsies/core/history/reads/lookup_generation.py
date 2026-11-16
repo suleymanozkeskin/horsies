@@ -293,11 +293,12 @@ def render_staged_result_function(manifest: LookupManifest) -> str:
     """Render the result lookup: the result columns of one task, as flat
     output columns.
 
-    A live hit returns the live status, result and failed reason; a history
-    hit returns the stored result envelope columns. Both carry the task
-    name, which the caller needs to decode a typed result. Absence returns
-    no rows. Every column reference is qualified: the output column names
-    are PL/pgSQL variables inside the body.
+    A live hit returns the live status; a live row stores no result and
+    no failed reason, so those two columns are NULL. A history hit returns
+    the stored result envelope columns. Both carry the task name, which
+    the caller needs to decode a typed result. Absence returns no rows.
+    Every column reference is qualified: the output column names are
+    PL/pgSQL variables inside the body.
     """
 
     def history_probe(relation: str) -> str:
@@ -309,7 +310,6 @@ def render_staged_result_function(manifest: LookupManifest) -> str:
         RETURN QUERY SELECT
             'HISTORY'::text, h.status::text, NULL::text,
             h.final_failed_reason::text, h.result_envelope_version,
-            h.result_codec::text, h.result_content_type::text,
             h.result_payload, h.result_digest, h.task_name::text
         FROM {relation} h WHERE h.task_id = p_task_id;
         IF FOUND THEN
@@ -319,8 +319,8 @@ def render_staged_result_function(manifest: LookupManifest) -> str:
 
     live_probe = f"""
         RETURN QUERY SELECT
-            'LIVE'::text, t.status::text, t.result::text,
-            t.failed_reason::text, NULL::smallint, NULL::text, NULL::text,
+            'LIVE'::text, t.status::text, NULL::text,
+            NULL::text, NULL::smallint,
             NULL::bytea, NULL::bytea, t.task_name::text
         FROM {LIVE_TASKS} t WHERE t.id = p_task_id;
         IF FOUND THEN
@@ -333,7 +333,6 @@ def render_staged_result_function(manifest: LookupManifest) -> str:
         return_type=(
             'TABLE (location text, status text, live_result text, '
             'failed_reason text, result_envelope_version smallint, '
-            'result_codec text, result_content_type text, '
             'result_payload bytea, result_digest bytea, task_name text)'
         ),
         declares=(),
