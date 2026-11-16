@@ -885,9 +885,9 @@ def _begin_workflow_stop(cursor: Cursor[Any]) -> None:
     write of its node, which commit together. The expiry before it ran in
     autocommit, so this transaction holds no task lock when the abandon
     asks for the workflow row. The abandon locks the workflow row before
-    the task locks, as the cancel of a workflow and the expiry of a paused
-    workflow do (``LOCK_WORKFLOW_ROW_FOR_CANCEL_SQL``, then the backing task
-    rows).
+    the task locks, as the cancel of a workflow (``horsies_workflow_cancel``)
+    and the expiry of a paused workflow (``LOCK_WORKFLOW_ROW_FOR_CANCEL_SQL``,
+    then the backing task rows) do.
 
     Raises:
         Exception: what the driver raises for the BEGIN.

@@ -20,7 +20,11 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Final, LiteralString
 
+from horsies.core.types.result import Err, Ok, Result
 from tests.dualrun.capture import Connection
+from tests.dualrun.databases import DualRunDatabase
+from tests.dualrun.operation import OperationDualRun
+from tests.dualrun.selfcheck import SelfCheckStepFailed, seed_history
 
 _TASK_OPTIONS: Final = '{"retry":"none"}'
 _QUEUE: Final = 'default'
@@ -266,3 +270,27 @@ def pause_workflow_row(connection: Connection, workflow_id: uuid.UUID) -> None:
     """Set one RUNNING workflow row PAUSED; its descendants and tasks stay."""
     cursor = connection.execute(_PAUSE_WORKFLOW_SQL, {'wf': workflow_id})
     assert cursor.rowcount == 1, f'workflow {workflow_id} is not RUNNING'
+
+
+def cover_history(database: DualRunDatabase) -> None:
+    """The production coverage pass, which publishes the staged history readers.
+
+    A side runs it before its operation: a task cancel or abandon moves the
+    task to history. Raises ``AssertionError`` when the pass fails.
+    """
+    match seed_history(database):
+        case Err(failed):
+            raise AssertionError(f'{failed.step}: {failed.cause}')
+        case Ok():
+            pass
+
+
+def run_or_fail[RR, CR](
+    result: Result[OperationDualRun[RR, CR], SelfCheckStepFailed],
+) -> OperationDualRun[RR, CR]:
+    """The dual-run, or ``AssertionError`` naming the failed step."""
+    match result:
+        case Ok(value):
+            return value
+        case Err(failed):
+            raise AssertionError(f'{failed.step}: {failed.cause}')

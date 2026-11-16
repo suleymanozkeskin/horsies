@@ -473,8 +473,9 @@ GET_SUBWORKFLOW_SUMMARIES_SQL = text("""
 # transaction that locks both horsies_workflows and horsies_workflow_tasks
 # rows must take them in that order — workflows before workflow_tasks — or it
 # can deadlock against this path (Postgres aborts one side, SQLSTATE 40P01).
-# The cancel transaction (LOCK_WORKFLOW_ROW_FOR_CANCEL_SQL in
-# models/workflow/handle.py) is held to the same order.
+# The cancel (horsies_workflow_cancel) and the paused expiry
+# (LOCK_WORKFLOW_ROW_FOR_CANCEL_SQL in models/workflow/handle.py) are held to
+# the same order.
 COMPLETE_WORKFLOW_TASK_SQL = text(f"""
     WITH woken AS (
         SELECT pg_notify(

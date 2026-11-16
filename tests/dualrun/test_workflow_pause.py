@@ -26,17 +26,18 @@ from tests.dualrun.capture import Connection
 from tests.dualrun.clients import open_broker
 from tests.dualrun.compare import render_diff
 from tests.dualrun.databases import DualRunDatabase
-from tests.dualrun.operation import OperationDualRun, OperationSide, dual_run
+from tests.dualrun.operation import OperationSide, dual_run
 from tests.dualrun.reference import workflow_pause as reference
-from tests.dualrun.selfcheck import SelfCheckStepFailed, seed_history
 from tests.dualrun.workflow_seeds import (
     ChildOf,
     OnError,
     TopLevel,
     WorkflowSeed,
     claim_node_task,
+    cover_history,
     pause_workflow_row,
     run_node_task,
+    run_or_fail,
     start_tree,
     subworkflow_node,
     task_node,
@@ -141,17 +142,8 @@ def _targets(seed: _Seed) -> tuple[uuid.UUID, ...]:
     return (seed.tree, seed.paused, seed.unknown)
 
 
-def _covered(database: DualRunDatabase) -> None:
-    """The production coverage pass, which publishes the staged history readers."""
-    match seed_history(database):
-        case Err(failed):
-            raise AssertionError(f'{failed.step}: {failed.cause}')
-        case Ok():
-            pass
-
-
 def _reference(database: DualRunDatabase, seed: _Seed) -> tuple[reference.PauseReport, ...]:
-    _covered(database)
+    cover_history(database)
     with psycopg.connect(database.url, autocommit=True) as connection:
         return tuple(reference.pause(connection, target) for target in _targets(seed))
 
@@ -186,24 +178,14 @@ async def _candidate_async(
 
 
 def _candidate(database: DualRunDatabase, seed: _Seed) -> tuple[reference.PauseReport, ...]:
-    _covered(database)
+    cover_history(database)
     return asyncio.run(_candidate_async(database, seed))
-
-
-def _ok[RR, CR](
-    result: Result[OperationDualRun[RR, CR], SelfCheckStepFailed],
-) -> OperationDualRun[RR, CR]:
-    match result:
-        case Ok(value):
-            return value
-        case Err(failed):
-            pytest.fail(f'{failed.step}: {failed.cause}')
 
 
 def test_pause_writes_what_the_session_statements_wrote(
     empty_database: MakeDatabase,
 ) -> None:
-    run = _ok(
+    run = run_or_fail(
         dual_run(
             empty_database,
             _seed,

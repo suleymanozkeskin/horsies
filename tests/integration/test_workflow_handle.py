@@ -2361,10 +2361,12 @@ class TestWorkflowHandleInfraErrors:
         )
         handle = await start_ok(spec, broker)
 
-        mock_session = AsyncMock()
-        mock_session.execute.side_effect = OperationalError(
+        mock_connection = AsyncMock()
+        mock_connection.execute.side_effect = OperationalError(
             'connection lost', {}, Exception('test'),
         )
+        mock_session = AsyncMock()
+        mock_session.connection = AsyncMock(return_value=mock_connection)
         mock_ctx = AsyncMock()
         mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
         mock_ctx.__aexit__ = AsyncMock(return_value=False)

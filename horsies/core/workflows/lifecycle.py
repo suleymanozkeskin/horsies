@@ -1396,8 +1396,8 @@ async def expire_paused_workflows(
         LOCK_WORKFLOW_TASKS_FOR_CANCEL_SQL,
         SKIP_CANCELLED_ENQUEUED_WORKFLOW_TASKS_SQL,
         SKIP_WORKFLOW_TASKS_ON_CANCEL_SQL,
-        WF_TASK_TERMINAL_VALUES,
     )
+    from horsies.core.models.workflow.enums import WF_TASK_TERMINAL_VALUES
     from horsies.core.lifecycle.commands import (
         CancelNodesOfCancelledWorkflow,
     )
