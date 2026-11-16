@@ -48,7 +48,8 @@ use crate::broker::row::task::{
     TaskInfoRow, TaskResultRow, TaskRunningContextRow,
 };
 
-use crate::broker::shared_listener::SharedNotifyListener;
+use crate::broker::shared_listener::{SharedNotifyListener, Subscription};
+use crate::broker::wait_limit::WaitLimit;
 
 #[cfg(test)]
 fn test_uuid(value: &str) -> Uuid {
@@ -564,8 +565,11 @@ pub(crate) const PRE_PING_AFTER_IDLE: Duration = Duration::from_secs(1);
 /// holds at most the cache capacity and closes the oldest name on eviction.
 /// PgBouncer transaction mode therefore requires `max_prepared_statements > 0`.
 fn pg_connect_options(database_url: &str, echo: bool) -> Result<PgConnectOptions, BrokerError> {
-    let mut connect_options = PgConnectOptions::from_str(database_url)
-        .map_err(|e| BrokerError::ConnectionFailed(e.to_string()))?;
+    let mut connect_options = PgConnectOptions::from_str(database_url).map_err(|error| {
+        BrokerError::InvalidConnectionSettings(
+            crate::core::config::PostgresConfigError::UnparseableUrl(error.to_string()),
+        )
+    })?;
 
     if echo {
         connect_options = connect_options.log_statements(log::LevelFilter::Debug);
@@ -800,7 +804,11 @@ impl PostgresBroker {
     }
 
     /// Connect using a raw database URL.
+    ///
+    /// A URL whose scheme is not `postgresql://` or `postgres://` is refused
+    /// with [`BrokerError::InvalidConnectionSettings`] before any connection.
     pub async fn connect(database_url: &str) -> Result<Self, BrokerError> {
+        PostgresConfig::from_url(database_url).validate()?;
         let pool = PgPool::connect(database_url)
             .await
             .map_err(BrokerError::Database)?;
@@ -827,9 +835,7 @@ impl PostgresBroker {
         config: &PostgresConfig,
         schema_initialization_mode: SchemaInitializationMode,
     ) -> Result<Self, BrokerError> {
-        config
-            .validate()
-            .map_err(|err| BrokerError::ConnectionFailed(err.to_string()))?;
+        config.validate()?;
         let connect_options = pg_connect_options(&config.database_url, config.echo)?;
         let pool = pg_pool_options(config)
             .connect_with(connect_options)
@@ -1856,9 +1862,13 @@ impl PostgresBroker {
 
     /// Fetch a typed task result, optionally waiting for completion.
     ///
-    /// 1. Quick-checks the database for a terminal status.
-    /// 2. If not done, subscribes to the shared `task_done` listener and waits.
-    /// 3. On timeout, returns `TaskResult::Err(TaskError(WaitTimeout))`.
+    /// 1. Parses `timeout` into a [`WaitLimit`]. A limit above
+    ///    [`MAX_WAIT_LIMIT_MS`](crate::broker::wait_limit::MAX_WAIT_LIMIT_MS)
+    ///    returns `RetrievalCode::InvalidInput` before any read.
+    /// 2. Quick-checks the database for a terminal status.
+    /// 3. If not done, subscribes to the shared `task_done` listener, reads
+    ///    again, and waits. A listener that cannot start makes the wait poll.
+    /// 4. On timeout, returns `TaskResult::Err(TaskError(WaitTimeout))`.
     ///
     /// All concurrent callers share a single `PgListener` connection via
     /// [`SharedNotifyListener`], avoiding pool exhaustion under load.
@@ -1868,16 +1878,22 @@ impl PostgresBroker {
         timeout: Option<Duration>,
     ) -> Result<TaskResult<T>, BrokerError> {
         let start = Instant::now();
+        let limit = match WaitLimit::parse(timeout) {
+            Ok(limit) => limit,
+            Err(refused) => {
+                return Ok(TaskResult::Err(TaskError::builtin(
+                    RetrievalCode::InvalidInput,
+                    refused.to_string(),
+                )));
+            }
+        };
 
         // Quick check — task may already be done, or may not exist.
         if let Some(outcome) = self.poll_result(task_id).await? {
             return Ok(outcome);
         }
 
-        // Subscribe to the shared task_done listener.
-        let shared = self.task_done_listener().await?;
-        let task_id_text = task_id.to_string();
-        let mut subscription = shared.subscribe(&task_id_text);
+        let mut wait_mode = self.result_wait_mode(task_id).await;
 
         // Re-check after subscribing to avoid a race where the task completes
         // between our first check and the subscribe.
@@ -1885,7 +1901,7 @@ impl PostgresBroker {
             return Ok(outcome);
         }
 
-        let deadline = timeout.map(|t| Instant::now() + t);
+        let deadline = limit.deadline_from(start);
 
         loop {
             // For a timed wait, stop once the deadline has passed (terminal /
@@ -1898,26 +1914,16 @@ impl PostgresBroker {
                 }
             }
 
-            // Cap each wait at the re-poll interval so a lost NOTIFY (listener
-            // reconnect) is recovered by a fresh poll rather than hanging — this
-            // is what makes the no-timeout wait safe (C3). Never wait past the
-            // deadline for a timed wait.
+            // Cap each wait at the repoll interval of the mode, so a lost
+            // NOTIFY costs at most one interval. Never wait past the deadline.
+            let interval = wait_mode.repoll_interval();
             let wait = match deadline {
-                Some(d) => d
-                    .saturating_duration_since(Instant::now())
-                    .min(RESULT_WAIT_REPOLL),
-                None => RESULT_WAIT_REPOLL,
+                Some(d) => d.saturating_duration_since(Instant::now()).min(interval),
+                None => interval,
             };
-
-            match tokio::time::timeout(wait, subscription.recv()).await {
-                // NOTIFY delivered, or the re-poll interval elapsed — re-check.
-                Ok(Ok(())) | Err(_) => {
-                    if let Some(outcome) = self.poll_result(task_id).await? {
-                        return Ok(outcome);
-                    }
-                }
-                // Listener error propagates.
-                Ok(Err(e)) => return Err(e),
+            wait_mode.pause(wait).await;
+            if let Some(outcome) = self.poll_result(task_id).await? {
+                return Ok(outcome);
             }
         }
     }
@@ -1927,24 +1933,25 @@ impl PostgresBroker {
     /// A terminal history row is resolved through the staged detail reader.
     /// When `timeout` expires for a live non-terminal task, the latest status is
     /// returned with no result. A task absent from both live and retained
-    /// history returns `Ok(None)`.
+    /// history returns `Ok(None)`. A limit above
+    /// [`MAX_WAIT_LIMIT_MS`](crate::broker::wait_limit::MAX_WAIT_LIMIT_MS) is
+    /// `INVALID_INPUT` before any read. A listener that cannot start makes the
+    /// wait poll.
     pub async fn get_raw_result_record(
         &self,
         task_id: Uuid,
         timeout: Option<Duration>,
     ) -> BrokerResult<Option<RawResultRecord>> {
+        let start = Instant::now();
+        let limit =
+            WaitLimit::parse(timeout).map_err(|refused| invalid_input(refused.to_string()))?;
         match self.raw_result_probe(task_id).await? {
             RawResultProbe::Record(record) => return Ok(Some(record)),
             RawResultProbe::Absent => return Ok(None),
             RawResultProbe::Waiting(_) | RawResultProbe::Retry => {}
         }
 
-        let shared = self
-            .task_done_listener()
-            .await
-            .map_err(raw_result_operation_error)?;
-        let task_id_text = task_id.to_string();
-        let mut subscription = shared.subscribe(&task_id_text);
+        let mut wait_mode = self.result_wait_mode(task_id).await;
 
         match self.raw_result_probe(task_id).await? {
             RawResultProbe::Record(record) => return Ok(Some(record)),
@@ -1952,7 +1959,7 @@ impl PostgresBroker {
             RawResultProbe::Waiting(_) | RawResultProbe::Retry => {}
         }
 
-        let deadline = timeout.map(|duration| Instant::now() + duration);
+        let deadline = limit.deadline_from(start);
         loop {
             if deadline.is_some_and(|at| Instant::now() >= at) {
                 return match self.raw_result_probe(task_id).await? {
@@ -1966,19 +1973,32 @@ impl PostgresBroker {
                     }
                 };
             }
+            let interval = wait_mode.repoll_interval();
             let wait = deadline
-                .map(|at| {
-                    at.saturating_duration_since(Instant::now())
-                        .min(RESULT_WAIT_REPOLL)
-                })
-                .unwrap_or(RESULT_WAIT_REPOLL);
-            match tokio::time::timeout(wait, subscription.recv()).await {
-                Ok(Ok(())) | Err(_) => match self.raw_result_probe(task_id).await? {
-                    RawResultProbe::Record(record) => return Ok(Some(record)),
-                    RawResultProbe::Absent => return Ok(None),
-                    RawResultProbe::Waiting(_) | RawResultProbe::Retry => {}
-                },
-                Ok(Err(error)) => return Err(raw_result_operation_error(error)),
+                .map(|at| at.saturating_duration_since(Instant::now()).min(interval))
+                .unwrap_or(interval);
+            wait_mode.pause(wait).await;
+            match self.raw_result_probe(task_id).await? {
+                RawResultProbe::Record(record) => return Ok(Some(record)),
+                RawResultProbe::Absent => return Ok(None),
+                RawResultProbe::Waiting(_) | RawResultProbe::Retry => {}
+            }
+        }
+    }
+
+    /// Subscribe a result wait to the shared `task_done` listener. A listener
+    /// that cannot start is logged and the wait polls instead, as Python
+    /// (`horsies/core/brokers/postgres.py:3276-3281`).
+    async fn result_wait_mode(&self, task_id: Uuid) -> ResultWaitMode {
+        match self.task_done_listener().await {
+            Ok(shared) => ResultWaitMode::Subscribed(shared.subscribe(&task_id.to_string())),
+            Err(error) => {
+                tracing::warn!(
+                    %task_id,
+                    error = %error,
+                    "task_done listener cannot start; the result wait polls instead",
+                );
+                ResultWaitMode::Polling
             }
         }
     }
@@ -2467,7 +2487,7 @@ impl PostgresBroker {
             Err(e) => Err(BrokerOperationError {
                 code: BrokerErrorCode::DbPingFailed,
                 message: format!("database ping failed: {}", e),
-                retryable: true,
+                retryable: is_retryable_sqlx_error(&e),
             }),
         }
     }
@@ -2499,18 +2519,14 @@ impl PostgresBroker {
         min_responses: Option<usize>,
     ) -> BrokerResult<Vec<WorkerPong>> {
         if timeout.is_zero() {
-            return Err(BrokerOperationError {
-                code: BrokerErrorCode::WorkerPingFailed,
-                message: "ping_workers timeout must be positive".to_owned(),
-                retryable: false,
-            });
+            return Err(invalid_input(
+                "ping_workers timeout must be positive, got 0".to_owned(),
+            ));
         }
         if min_responses == Some(0) {
-            return Err(BrokerOperationError {
-                code: BrokerErrorCode::WorkerPingFailed,
-                message: "ping_workers min_responses must be >= 1 when set".to_owned(),
-                retryable: false,
-            });
+            return Err(invalid_input(
+                "ping_workers min_responses must be >= 1 when set, got 0".to_owned(),
+            ));
         }
 
         let correlation_id = Uuid::new_v4().simple().to_string();
@@ -2699,12 +2715,18 @@ impl PostgresBroker {
     /// State-snapshot history for one worker, newest first.
     ///
     /// `limit` of `None` returns all retained rows; pass `Some(n)` to bound the
-    /// fetch. Mirrors Python's `get_worker_state_history_async`.
+    /// fetch. A limit of 0 or less is `INVALID_INPUT`, with no database call.
+    /// Mirrors Python's `get_worker_state_history_async`.
     pub async fn get_worker_state_history(
         &self,
         worker_id: &str,
         limit: Option<i64>,
     ) -> BrokerResult<Vec<WorkerStateSnapshot>> {
+        if let Some(refused) = limit.filter(|value| *value <= 0) {
+            return Err(invalid_input(format!(
+                "limit must be positive when set, got {refused}"
+            )));
+        }
         sqlx::query_as(GET_WORKER_STATE_HISTORY_SQL)
             .bind(worker_id)
             .bind(limit)
@@ -3241,20 +3263,33 @@ fn is_terminal_status(status: &str) -> bool {
 }
 
 /// Build a `MONITORING_QUERY_FAILED` broker error for a failed read query.
+/// `retryable` is the driver classification of the cause, as Python's
+/// `_operation_failed`.
 fn monitoring_query_error(operation: &str, err: sqlx::Error) -> BrokerOperationError {
     BrokerOperationError {
         code: BrokerErrorCode::MonitoringQueryFailed,
         message: format!("{} failed: {}", operation, err),
-        retryable: true,
+        retryable: is_retryable_sqlx_error(&err),
     }
 }
 
 /// Build a `WORKER_PING_FAILED` broker error for a failed ping-pong step.
+/// `retryable` is the driver classification of the cause.
 fn worker_ping_error(operation: &str, err: sqlx::Error) -> BrokerOperationError {
     BrokerOperationError {
         code: BrokerErrorCode::WorkerPingFailed,
         message: format!("ping_workers {} failed: {}", operation, err),
-        retryable: true,
+        retryable: is_retryable_sqlx_error(&err),
+    }
+}
+
+/// Build an `INVALID_INPUT` broker error: an argument was refused before
+/// anything ran, and the same argument is refused again.
+fn invalid_input(message: String) -> BrokerOperationError {
+    BrokerOperationError {
+        code: BrokerErrorCode::InvalidInput,
+        message,
+        retryable: false,
     }
 }
 
@@ -3334,11 +3369,59 @@ use crate::core::task::retry_utils::parse_max_retries;
 // Transient retry helper
 // ---------------------------------------------------------------------------
 
-/// Re-poll interval for a result wait, bounding each `subscription.recv()` so a
-/// NOTIFY lost during a listener reconnect is recovered by a fresh terminal
-/// -status poll instead of hanging the caller forever (C3). Shared by the task
-/// (`get_result`) and workflow (`get_workflow_result`) wait loops.
+/// Re-poll interval of the workflow result wait (`get_workflow_result`),
+/// bounding each `subscription.recv()` so a NOTIFY lost during a listener
+/// reconnect is recovered by a fresh terminal-status poll instead of hanging
+/// the caller forever.
 pub(crate) const RESULT_WAIT_REPOLL: Duration = Duration::from_secs(30);
+
+/// Repoll interval of a task result wait whose listener works: a lost
+/// notification costs at most this long (Python's 5 s,
+/// `horsies/core/brokers/postgres.py:3285`).
+pub(crate) const TASK_RESULT_REPOLL_SUBSCRIBED: Duration = Duration::from_secs(5);
+
+/// Repoll interval of a task result wait with no listener (Python's 0.2 s,
+/// `horsies/core/brokers/postgres.py:3285`).
+pub(crate) const TASK_RESULT_REPOLL_POLLING: Duration = Duration::from_millis(200);
+
+/// How a task result wait learns that the task may have ended.
+enum ResultWaitMode {
+    /// A wake on the shared `task_done` listener. The listener also wakes
+    /// every subscriber after it reconnects, because notifications sent while
+    /// it was down are lost.
+    Subscribed(Subscription),
+    /// No listener: the wait reads again at [`TASK_RESULT_REPOLL_POLLING`].
+    Polling,
+}
+
+impl ResultWaitMode {
+    /// The longest pause between two reads in this mode.
+    fn repoll_interval(&self) -> Duration {
+        match self {
+            Self::Subscribed(_) => TASK_RESULT_REPOLL_SUBSCRIBED,
+            Self::Polling => TASK_RESULT_REPOLL_POLLING,
+        }
+    }
+
+    /// Pause until a wake for the task or until `wait` passes. A listener
+    /// that has stopped turns the wait into polling, so a closed
+    /// subscription never makes the loop spin.
+    async fn pause(&mut self, wait: Duration) {
+        match self {
+            Self::Subscribed(subscription) => {
+                let woken = tokio::time::timeout(wait, subscription.recv()).await;
+                if let Ok(Err(stopped)) = woken {
+                    tracing::warn!(
+                        error = %stopped,
+                        "task_done listener stopped; the result wait polls instead",
+                    );
+                    *self = Self::Polling;
+                }
+            }
+            Self::Polling => tokio::time::sleep(wait).await,
+        }
+    }
+}
 
 /// Retry count for `resend_on_transient_err` (1 initial + 3 retries = 4 total).
 const SEND_RETRY_COUNT: u32 = 3;
@@ -5855,7 +5938,11 @@ mod connect_options_tests {
     #[serial]
     async fn transaction_mode_runtime_pool_prepares_a_repeated_query_once() {
         let url = crate::broker::terminalization_matrix::migrated_database_url().await;
-        let config = PostgresConfig::from_pgbouncer_urls(url.clone(), url);
+        // PgBouncer mode refuses a session URL equal to `database_url`; a
+        // distinct application name keeps the same server.
+        let separator = if url.contains('?') { '&' } else { '?' };
+        let session_url = format!("{url}{separator}application_name=prepared_session");
+        let config = PostgresConfig::from_pgbouncer_urls(url, session_url);
         let broker = PostgresBroker::connect_with(&config)
             .await
             .expect("connect broker");
@@ -5883,6 +5970,231 @@ mod connect_options_tests {
         );
         drop(connection);
         broker.pool().close().await;
+    }
+}
+
+#[cfg(test)]
+mod broker_operation_error_tests {
+    //! Python's catalog for broker operations: a refused argument is
+    //! `INVALID_INPUT` with no database call, refused connection settings are
+    //! not retryable, and a database failure carries the driver
+    //! classification of its cause (`core/brokers/postgres.py`,
+    //! `_operation_failed`).
+    use super::*;
+
+    /// No server listens on port 1, so a call that reached the pool would
+    /// fail with a pool timeout instead of the refusal under test.
+    const UNREACHABLE_URL: &str = "postgresql://horsies@127.0.0.1:1/horsies";
+
+    fn unreachable_broker() -> PostgresBroker {
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(1))
+            .connect_lazy(UNREACHABLE_URL)
+            .expect("a lazy pool opens no connection");
+        PostgresBroker::from_pool(pool)
+    }
+
+    #[tokio::test]
+    async fn connect_refuses_a_driver_suffix_scheme_before_any_connection() {
+        let refused = PostgresBroker::connect("postgresql+psycopg://horsies@127.0.0.1:1/horsies")
+            .await
+            .err()
+            .expect("the scheme is refused");
+
+        assert!(matches!(
+            &refused,
+            BrokerError::InvalidConnectionSettings(
+                crate::core::config::PostgresConfigError::InvalidUrlScheme(scheme)
+            ) if scheme == "postgresql+psycopg"
+        ));
+        assert!(!refused.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn connect_with_refuses_a_config_rule_as_not_retryable() {
+        let config = PostgresConfig::from_url("mysql://horsies@127.0.0.1:1/horsies");
+
+        let refused = PostgresBroker::connect_with(&config)
+            .await
+            .err()
+            .expect("the scheme is refused");
+
+        assert!(matches!(
+            refused,
+            BrokerError::InvalidConnectionSettings(
+                crate::core::config::PostgresConfigError::InvalidUrlScheme(_)
+            )
+        ));
+        assert!(!refused.is_retryable());
+    }
+
+    #[test]
+    fn an_unparseable_url_is_refused_as_not_retryable() {
+        let refused = pg_connect_options("postgresql://horsies@127.0.0.1:notaport/horsies", false)
+            .err()
+            .expect("the port does not parse");
+
+        assert!(matches!(
+            refused,
+            BrokerError::InvalidConnectionSettings(
+                crate::core::config::PostgresConfigError::UnparseableUrl(_)
+            )
+        ));
+        assert!(!refused.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn ping_workers_refuses_a_zero_timeout_as_invalid_input() {
+        let broker = unreachable_broker();
+
+        let Err(refused) = broker.ping_workers(None, Duration::ZERO, None).await else {
+            panic!("a zero timeout must be refused");
+        };
+
+        assert_eq!(refused.code, BrokerErrorCode::InvalidInput);
+        assert!(!refused.retryable);
+    }
+
+    #[tokio::test]
+    async fn ping_workers_refuses_zero_min_responses_as_invalid_input() {
+        let broker = unreachable_broker();
+
+        let Err(refused) = broker
+            .ping_workers(None, Duration::from_secs(1), Some(0))
+            .await
+        else {
+            panic!("min_responses of 0 must be refused");
+        };
+
+        assert_eq!(refused.code, BrokerErrorCode::InvalidInput);
+        assert!(!refused.retryable);
+    }
+
+    /// Python `test_broker_postgres.py::test_history_rejects_nonpositive_limit`.
+    #[tokio::test]
+    async fn worker_state_history_refuses_a_limit_of_zero_or_less() {
+        let broker = unreachable_broker();
+
+        for limit in [0, -1, i64::MIN] {
+            let Err(refused) = broker.get_worker_state_history("w1", Some(limit)).await else {
+                panic!("limit {limit} must be refused");
+            };
+            assert_eq!(refused.code, BrokerErrorCode::InvalidInput, "{limit}");
+            assert!(!refused.retryable, "{limit}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_database_ping_on_a_closed_pool_is_not_retryable() {
+        let broker = unreachable_broker();
+        broker.pool().close().await;
+
+        let Err(failed) = broker.ping_database().await else {
+            panic!("a closed pool cannot ping");
+        };
+
+        assert_eq!(failed.code, BrokerErrorCode::DbPingFailed);
+        assert!(!failed.retryable);
+    }
+
+    #[test]
+    fn a_monitoring_read_failure_carries_the_driver_classification() {
+        assert!(monitoring_query_error("read", sqlx::Error::PoolTimedOut).retryable);
+        assert!(!monitoring_query_error("read", sqlx::Error::PoolClosed).retryable);
+        assert!(!monitoring_query_error("read", sqlx::Error::RowNotFound).retryable);
+        assert!(worker_ping_error("notify", sqlx::Error::PoolTimedOut).retryable);
+        assert!(!worker_ping_error("notify", sqlx::Error::PoolClosed).retryable);
+    }
+}
+
+#[cfg(test)]
+mod result_wait_tests {
+    //! The result wait: Python's limit bound (`horsies/core/utils/wait_timeout.py`)
+    //! before any read, Python's repoll intervals, and polling when the
+    //! listener stops (`horsies/core/brokers/postgres.py:3265-3285`).
+    use super::*;
+    use crate::broker::wait_limit::MAX_WAIT_LIMIT_MS;
+
+    /// No server listens on port 1, so a call that reached the pool would
+    /// fail with a pool timeout instead of the refusal under test.
+    fn unreachable_broker() -> PostgresBroker {
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(1))
+            .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies")
+            .expect("a lazy pool opens no connection");
+        PostgresBroker::from_pool(pool)
+    }
+
+    fn refused_limits() -> [Duration; 2] {
+        [Duration::from_millis(MAX_WAIT_LIMIT_MS + 1), Duration::MAX]
+    }
+
+    /// Python `test_wait_timeout.py::TestTaskHandle::test_get_refuses_before_any_read`.
+    /// `Duration::MAX` used to panic on `Instant + Duration`.
+    #[tokio::test]
+    async fn get_result_refuses_a_limit_above_the_bound_before_any_read() {
+        let broker = unreachable_broker();
+        let expected = TaskError::builtin(RetrievalCode::InvalidInput, "").error_code;
+
+        for limit in refused_limits() {
+            let outcome = broker
+                .get_result::<i32>(Uuid::new_v4(), Some(limit))
+                .await
+                .expect("a refused limit is an outcome, not a broker error");
+            let error = outcome.unwrap_err();
+            assert_eq!(error.error_code, expected, "{limit:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn get_raw_result_record_refuses_a_limit_above_the_bound_before_any_read() {
+        let broker = unreachable_broker();
+
+        for limit in refused_limits() {
+            let Err(refused) = broker
+                .get_raw_result_record(Uuid::new_v4(), Some(limit))
+                .await
+            else {
+                panic!("limit {limit:?} must be refused");
+            };
+            assert_eq!(refused.code, BrokerErrorCode::InvalidInput, "{limit:?}");
+            assert!(!refused.retryable);
+        }
+    }
+
+    #[test]
+    fn the_repoll_intervals_are_python_s() {
+        assert_eq!(TASK_RESULT_REPOLL_SUBSCRIBED, Duration::from_secs(5));
+        assert_eq!(TASK_RESULT_REPOLL_POLLING, Duration::from_millis(200));
+        assert_eq!(
+            ResultWaitMode::Polling.repoll_interval(),
+            TASK_RESULT_REPOLL_POLLING
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pause_without_a_wake_keeps_the_subscription() {
+        let listener = SharedNotifyListener::new_for_test();
+        let mut mode = ResultWaitMode::Subscribed(listener.subscribe("task"));
+        assert_eq!(mode.repoll_interval(), TASK_RESULT_REPOLL_SUBSCRIBED);
+
+        mode.pause(Duration::from_millis(10)).await;
+
+        assert!(matches!(mode, ResultWaitMode::Subscribed(_)));
+    }
+
+    /// A stopped listener turns the wait into polling, so the loop does not
+    /// spin on a closed subscription and the waiter still sees the result.
+    #[tokio::test]
+    async fn a_stopped_listener_turns_the_wait_into_polling() {
+        let listener = SharedNotifyListener::stopped_for_test().await;
+        let mut mode = ResultWaitMode::Subscribed(listener.subscribe("task"));
+
+        mode.pause(Duration::from_secs(1)).await;
+
+        assert!(matches!(mode, ResultWaitMode::Polling));
     }
 }
 
