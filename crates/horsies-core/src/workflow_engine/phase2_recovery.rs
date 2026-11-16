@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
+use crate::core::history::errors::HistoryError;
 use crate::core::history::phase2::consumption::{
     consume_phase2, Phase2Disposition, Phase2DispositionKind,
 };
@@ -199,22 +200,82 @@ async fn apply_progression(
     .await
 }
 
-/// Healthy finalizer path: consume one pending row and apply every remaining
-/// workflow effect in one caller-owned transaction. The outbox row is crash
-/// evidence, not a second progression mechanism for successful finalizers.
+/// A history error of the phase-2 consume or quarantine as a workflow error.
+///
+/// A database error keeps its cause, so `WorkflowError::Database` is
+/// classified by the SQLSTATE rule: a transient error (a lost connection, a
+/// lock timeout) is retried (Python `_finalize_workflow_phase` and
+/// `_phase2_error`, `core/worker/finalize.py:1645-1697`, with
+/// `is_retryable_connection_error`, `core/utils/db.py:232-247`). A contract
+/// or decode error is not transient and stays `WorkflowError::Validation`.
+fn workflow_error_of(error: HistoryError) -> WorkflowError {
+    match error {
+        HistoryError::Database(database_error) => WorkflowError::Database(database_error),
+        HistoryError::ArchiveDecode(_)
+        | HistoryError::Contract(_)
+        | HistoryError::LeafLockNotHeld
+        | HistoryError::LeafLockBusy { .. }
+        | HistoryError::HistoryParentAbsent(_) => WorkflowError::Validation(error.to_string()),
+    }
+}
+
+/// The statement of a phase-2 wake.
+const SEND_WAKE_SQL: &str = "SELECT pg_notify($1, $2)";
+
+/// The capacity wake that phase 2 sends (Python `QueueWake | NoQueueWake`,
+/// `core/workflows/engine.py:1766-1780`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Phase2Wake {
+    /// `pg_notify(channel, payload)`. Inside a transaction, PostgreSQL
+    /// delivers it at COMMIT and drops it at rollback.
+    Queue { channel: String, payload: String },
+    /// The caller sends no wake.
+    NoWake,
+}
+
+/// Send `wake` as one statement on `executor`. Writes nothing else.
+///
+/// Errors: the database error of the statement, for example a dead
+/// connection or a channel name that the server refuses.
+pub(crate) async fn send_phase2_wake(
+    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
+    wake: &Phase2Wake,
+) -> Result<(), sqlx::Error> {
+    match wake {
+        Phase2Wake::Queue { channel, payload } => sqlx::query(SEND_WAKE_SQL)
+            .bind(channel.as_str())
+            .bind(payload.as_str())
+            .execute(executor)
+            .await
+            .map(|_notified| ()),
+        Phase2Wake::NoWake => Ok(()),
+    }
+}
+
+/// Healthy finalizer path: send `wake`, consume one pending row and apply
+/// every remaining workflow effect in one transaction. The outbox row is
+/// crash evidence, not a second progression mechanism for successful
+/// finalizers.
+///
+/// The wake is the first statement of the transaction (Python
+/// `core/worker/finalize.py:1645-1666`): PostgreSQL delivers it at COMMIT
+/// with the node write, and a rollback drops it. A wake that fails is
+/// `WorkflowError::Database`, and the transaction then writes nothing.
 pub async fn finalize_phase2(
     pool: &PgPool,
     task_id: Uuid,
     terminal_status: &str,
+    wake: &Phase2Wake,
     registry: &crate::core::registry::workflow::WorkflowSpecRegistry,
     payload: &PayloadPolicy,
     retention: &RetentionConfig,
 ) -> Result<Phase2Disposition, WorkflowError> {
     let node_status = node_status_for_terminal_task(terminal_status)?;
     let mut transaction = pool.begin().await?;
+    send_phase2_wake(transaction.as_mut(), wake).await?;
     let disposition = consume_phase2(&mut transaction, task_id, node_status)
         .await
-        .map_err(|error| WorkflowError::Validation(error.to_string()))?;
+        .map_err(workflow_error_of)?;
     if disposition.disposition == Phase2DispositionKind::AppliedToNode {
         apply_progression(&mut transaction, &disposition, registry, payload, retention).await?;
     }
@@ -275,7 +336,7 @@ pub async fn drive_phase2_recovery(
         let row_result: Result<(Phase2Disposition, QuarantineStep), WorkflowError> = async {
             let disposition = consume_phase2(&mut transaction, candidate.task_id, node_status)
                 .await
-                .map_err(|error| WorkflowError::Validation(error.to_string()))?;
+                .map_err(workflow_error_of)?;
             if disposition.disposition == Phase2DispositionKind::AppliedToNode {
                 apply_progression(&mut transaction, &disposition, registry, payload, retention)
                     .await?;
@@ -290,7 +351,7 @@ pub async fn drive_phase2_recovery(
                 if attempt_count >= quarantine_after_attempts as i32 {
                     let outcome = quarantine_one(&mut transaction, candidate.task_id)
                         .await
-                        .map_err(|error| WorkflowError::Validation(error.to_string()))?;
+                        .map_err(workflow_error_of)?;
                     quarantine = quarantine_step(
                         candidate.task_id,
                         attempt_count,
@@ -617,6 +678,7 @@ mod tests {
             &pool,
             task_id,
             "COMPLETED",
+            &Phase2Wake::NoWake,
             &crate::core::WorkflowSpecRegistry::new(),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
@@ -661,6 +723,7 @@ mod tests {
             &pool,
             task_id,
             "COMPLETED",
+            &Phase2Wake::NoWake,
             &crate::core::WorkflowSpecRegistry::new(),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
@@ -958,6 +1021,7 @@ mod tests {
             &pool,
             current_task,
             "FAILED",
+            &Phase2Wake::NoWake,
             &crate::core::WorkflowSpecRegistry::new(),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
@@ -1380,6 +1444,7 @@ mod tests {
             &pool,
             task_id,
             "COMPLETED",
+            &Phase2Wake::NoWake,
             &crate::core::WorkflowSpecRegistry::new(),
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
