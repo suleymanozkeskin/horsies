@@ -95,7 +95,7 @@ def _app(database: DualRunDatabase, catch_up: bool) -> Horsies:
     app = Horsies(
         AppConfig(
             queue_mode=QueueMode.DEFAULT,
-            broker=PostgresConfig(database_url=SecretStr(sqlalchemy_url(database))),
+            broker=PostgresConfig(database_url=SecretStr(database.url)),
             schedule=ScheduleConfig(
                 schedules=[
                     TaskSchedule(
