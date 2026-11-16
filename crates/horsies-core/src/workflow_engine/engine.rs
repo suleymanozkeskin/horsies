@@ -170,11 +170,12 @@ WHERE wt.workflow_id = $2::uuid AND wt.task_index = $3
   AND w.id = wt.workflow_id
   AND w.status = 'RUNNING'";
 
+/// Every dependency row, with its task name and definition key for the `args_from` wrap; a dependency that is
+/// not terminal is classified by its status (`args_merge::dependency_result`).
 const GET_DEP_RESULTS_SQL: &str = "\
-SELECT task_index, status, result
+SELECT task_index, node_id, task_name, sub_definition_key, status, result
 FROM horsies_workflow_tasks
-WHERE workflow_id = $1 AND task_index = ANY($2)
-  AND status IN ('COMPLETED', 'FAILED', 'SKIPPED')";
+WHERE workflow_id = $1 AND task_index = ANY($2)";
 
 const COUNT_CTX_TERMINAL_SQL: &str = "\
 SELECT COUNT(*)::int as cnt
@@ -184,7 +185,7 @@ WHERE workflow_id = $1
   AND status IN ('COMPLETED', 'FAILED', 'SKIPPED')";
 
 const GET_CTX_RESULTS_BY_NODE_ID_SQL: &str = "\
-SELECT node_id, task_index, status, result, sub_workflow_summary
+SELECT node_id, task_index, task_name, sub_definition_key, status, result, sub_workflow_summary
 FROM horsies_workflow_tasks
 WHERE workflow_id = $1
   AND node_id = ANY($2)
@@ -208,7 +209,7 @@ FROM horsies_workflows
 WHERE id = $1";
 
 const GET_OUTPUT_NODE_SQL: &str = "\
-SELECT node_id, result, status, task_index, task_name
+SELECT node_id, result, status, task_index, task_name, sub_definition_key
 FROM horsies_workflow_tasks
 WHERE workflow_id = $1 AND task_index = $2";
 
@@ -224,7 +225,7 @@ WHERE workflow_id = $1";
 
 /// Fetch the terminal tasks' results by index (companion to `ALL_EDGES_SQL`).
 const TERMINAL_RESULTS_BY_INDEX_SQL: &str = "\
-SELECT node_id, result, status, task_index, task_name
+SELECT node_id, result, status, task_index, task_name, sub_definition_key
 FROM horsies_workflow_tasks
 WHERE workflow_id = $1 AND task_index = ANY($2)";
 
@@ -386,6 +387,9 @@ struct StatusCount {
 #[derive(Debug, sqlx::FromRow)]
 struct DepResult {
     task_index: i32,
+    node_id: Option<String>,
+    task_name: String,
+    sub_definition_key: Option<String>,
     status: String,
     result: Option<String>,
 }
@@ -413,6 +417,7 @@ struct NodeResult {
     status: String,
     task_index: i32,
     task_name: String,
+    sub_definition_key: Option<String>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -425,6 +430,8 @@ struct EdgeRow {
 struct CtxResultRow {
     node_id: Option<String>,
     task_index: i32,
+    task_name: String,
+    sub_definition_key: Option<String>,
     status: String,
     result: Option<String>,
     sub_workflow_summary: Option<String>,
@@ -491,6 +498,7 @@ pub async fn on_workflow_task_complete(
         pool,
         task_id,
         if is_success { "COMPLETED" } else { "FAILED" },
+        &crate::workflow_engine::phase2_recovery::Phase2Wake::NoWake,
         registry,
         payload,
         retention,
@@ -697,6 +705,9 @@ async fn enqueue_phase2_dependent_in_tx(
             (
                 row.task_index,
                 DepResultValue {
+                    node_id: row.node_id,
+                    task_name: row.task_name,
+                    sub_definition_key: row.sub_definition_key,
                     status: row.status,
                     result: row.result,
                 },
@@ -802,14 +813,8 @@ async fn inject_phase2_workflow_context_in_tx(
         .bind(ctx_ids)
         .fetch_all(transaction.as_mut())
         .await?;
-    let (results_by_id, summaries_by_id) = collect_ctx_maps(rows)?;
-    let context = WorkflowContextData {
-        workflow_id,
-        task_index: node.task_index,
-        task_name: node.task_name.clone(),
-        results_by_id,
-        summaries_by_id,
-    };
+    let context =
+        WorkflowContextData::from_rows(workflow_id, node.task_index, &node.task_name, rows);
     let mut object = input_object(&merged_input)?;
     object.insert(WORKFLOW_CTX_KWARG.to_owned(), context.to_payload()?);
     Ok(serde_json::to_string(&object)?)
@@ -2397,7 +2402,7 @@ fn subworkflow_failed_error(
 /// is not JSON or is JSON `null`; none for other JSON and for no text.
 fn child_error_summary(child_error: Option<&str>) -> Option<String> {
     let text = child_error.filter(|text| !text.is_empty())?;
-    match serde_json::from_str::<serde_json::Value>(text) {
+    match crate::core::codec::from_json_str::<serde_json::Value>(text) {
         Ok(serde_json::Value::Object(fields)) => fields
             .get("message")
             .and_then(serde_json::Value::as_str)
@@ -2908,26 +2913,62 @@ fn check_workflow_completion_inner<'a>(
     })
 }
 
+/// The success policy that a workflow row stores, read at completion.
+#[derive(Debug, PartialEq, Eq)]
+enum StoredSuccessPolicy {
+    /// SQL NULL or JSON null: a FAILED node or a stored workflow error fails the workflow.
+    NoPolicy,
+    /// The form that the workflow start stores.
+    Policy(SuccessPolicy),
+}
+
+/// Read the stored `success_policy` column by one rule, the rule of Python `read_stored_success_policy`
+/// (`core/workflows/stored_success_policy.py`) and of the baseline function `horsies_workflow_success_cases`
+/// (`0005_workflow_functions.sql`): SQL NULL or JSON null is no policy; otherwise an object whose `cases` is an
+/// array of objects, each with `required_indices`, an array of integers from 0; `optional_indices`, when
+/// present and not null, the same kind of array. Other keys are ignored. Pure.
+///
+/// Errors: [`WorkflowError::Serialization`] for any other value. The step fails, and the recovery failure bound
+/// then fails the workflow closed; no reader falls back to the default rule (decided rule).
+fn read_stored_success_policy(
+    stored: &Option<serde_json::Value>,
+) -> Result<StoredSuccessPolicy, WorkflowError> {
+    match stored {
+        None | Some(serde_json::Value::Null) => Ok(StoredSuccessPolicy::NoPolicy),
+        Some(value) => Ok(StoredSuccessPolicy::Policy(serde_json::from_value(
+            value.clone(),
+        )?)),
+    }
+}
+
+/// The node indexes that some case of `policy` requires, as `task_index` values. An index above the `i32`
+/// range names no node and is left out. Pure.
+fn required_task_indexes(policy: &SuccessPolicy) -> Vec<i32> {
+    policy
+        .cases
+        .iter()
+        .flat_map(|case| case.required_indices.iter())
+        .filter_map(|index| i32::try_from(*index).ok())
+        .collect()
+}
+
 /// Evaluate whether the workflow should be considered successful.
 ///
-/// Python: `evaluate_workflow_success` (`core/workflows/engine.py:3466-3520`).
+/// Python: `evaluate_workflow_success` (`core/workflows/engine.py`). The stored policy is read with
+/// [`read_stored_success_policy`].
 /// - No policy: success only with no FAILED node and no stored workflow error.
 /// - A policy: success when one case with at least one required node has every required node COMPLETED.
 /// - A stored policy that does not parse is an error: the step fails, and the recovery failure bound then
-///   fails the workflow closed. Python treats it as no policy; the core does not turn stored data that does
-///   not parse into a success decision (decided rule).
+///   fails the workflow closed.
 fn evaluate_workflow_success(
     success_policy_json: &Option<serde_json::Value>,
     has_stored_error: bool,
     has_failure: bool,
     statuses: &[TaskStatusRow],
 ) -> Result<bool, WorkflowError> {
-    match success_policy_json {
-        None => Ok(!has_stored_error && !has_failure),
-        Some(policy_json) => {
-            // Parse policy and evaluate.
-            let policy: SuccessPolicy = serde_json::from_value(policy_json.clone())?;
-
+    match read_stored_success_policy(success_policy_json)? {
+        StoredSuccessPolicy::NoPolicy => Ok(!has_stored_error && !has_failure),
+        StoredSuccessPolicy::Policy(policy) => {
             let status_vec: Vec<WorkflowTaskStatus> = statuses
                 .iter()
                 .map(|s| parse_workflow_task_status(&s.status))
@@ -2941,9 +2982,7 @@ fn evaluate_workflow_success(
 /// Get the workflow's final result JSON.
 ///
 /// - An output node (`output_task_index`): the outcome of [`explicit_output_result`].
-/// - No output node: a `TaskResult` holding a JSON object of the terminal nodes (nodes that no other node
-///   depends on), keyed by node id; a SKIPPED terminal node holds a `WORKFLOW_OUTPUT_SKIPPED` error envelope,
-///   any other node its parsed stored result or `null` (Python `_terminal_entry`).
+/// - No output node: [`outputless_result`] over the terminal nodes (nodes that no other node depends on).
 async fn get_workflow_final_result(
     conn: &mut sqlx::PgConnection,
     workflow_id: Uuid,
@@ -2974,28 +3013,111 @@ async fn get_workflow_final_result(
         .fetch_all(&mut *conn)
         .await?;
 
-    let mut result_map = serde_json::Map::new();
-    for row in &rows {
-        if let Some(node_id) = &row.node_id {
-            let value = match (row.status.as_str(), &row.result) {
-                ("SKIPPED", _) => serde_json::to_value(TaskResult::<serde_json::Value>::Err(
-                    output_error(
-                        OutcomeCode::WorkflowOutputSkipped.into(),
-                        format!(
-                            "Workflow {workflow_id} is COMPLETED and its terminal node {node_id:?} is SKIPPED"
-                        ),
-                        workflow_id,
-                        row,
-                    ),
-                ))?,
-                (_, Some(json)) => serde_json::from_str(json).unwrap_or(serde_json::Value::Null),
-                (_, None) => serde_json::Value::Null,
-            };
-            result_map.insert(node_id.clone(), value);
+    Ok(serde_json::to_string(&outputless_result(
+        workflow_id,
+        &rows,
+    )?)?)
+}
+
+/// The marker key of the result of a workflow with no output node (Python `__h_outputless_terminals__`,
+/// `core/workflows/engine.py:3973-3983`).
+pub(crate) const OUTPUTLESS_TERMINALS_KEY: &str = "__h_outputless_terminals__";
+
+/// The stored result of a COMPLETED workflow with no output node, in Python's shape
+/// (`core/workflows/engine.py:3935-3983`): the result envelope marker, the outputless marker, and an `ok`
+/// slot with the entry, the task name and the definition key of each terminal node.
+#[derive(Debug, serde::Serialize)]
+struct OutputlessResult {
+    #[serde(rename = "__h_task_result__")]
+    result_marker: bool,
+    #[serde(rename = "__h_outputless_terminals__")]
+    outputless_marker: bool,
+    ok: OutputlessTerminals,
+    err: (),
+}
+
+#[derive(Debug, serde::Serialize)]
+struct OutputlessTerminals {
+    results_by_id: serde_json::Map<String, serde_json::Value>,
+    task_name_by_id: std::collections::BTreeMap<String, String>,
+    /// `null` for a task node.
+    definition_key_by_id: std::collections::BTreeMap<String, Option<String>>,
+}
+
+/// The outputless result over the terminal node rows. Pure. A row with no node id has no entry.
+fn outputless_result(
+    workflow_id: Uuid,
+    rows: &[NodeResult],
+) -> Result<OutputlessResult, serde_json::Error> {
+    let mut terminals = OutputlessTerminals {
+        results_by_id: serde_json::Map::new(),
+        task_name_by_id: std::collections::BTreeMap::new(),
+        definition_key_by_id: std::collections::BTreeMap::new(),
+    };
+    for row in rows {
+        let Some(node_id) = &row.node_id else {
+            continue;
+        };
+        terminals
+            .task_name_by_id
+            .insert(node_id.clone(), row.task_name.clone());
+        terminals
+            .definition_key_by_id
+            .insert(node_id.clone(), row.sub_definition_key.clone());
+        terminals.results_by_id.insert(
+            node_id.clone(),
+            outputless_terminal_entry(workflow_id, node_id, row)?,
+        );
+    }
+    Ok(OutputlessResult {
+        result_marker: true,
+        outputless_marker: true,
+        ok: terminals,
+        err: (),
+    })
+}
+
+/// The entry of one terminal node of an outputless workflow (Python `_terminal_entry`,
+/// `core/workflows/engine.py:3870-3907`):
+/// - SKIPPED: an error envelope with `WORKFLOW_OUTPUT_SKIPPED`;
+/// - a stored text that parses to an object with `__h_task_result__: true`: that object;
+/// - any other row: `null`; the workflow handle reads it as `RESULT_DESERIALIZATION_ERROR`.
+fn outputless_terminal_entry(
+    workflow_id: Uuid,
+    node_id: &str,
+    row: &NodeResult,
+) -> Result<serde_json::Value, serde_json::Error> {
+    if row.status == "SKIPPED" {
+        return serde_json::to_value(TaskResult::<serde_json::Value>::Err(output_error(
+            OutcomeCode::WorkflowOutputSkipped.into(),
+            format!(
+                "Workflow {workflow_id} is COMPLETED and its terminal node {node_id:?} is SKIPPED"
+            ),
+            workflow_id,
+            row,
+        )));
+    }
+    let parsed = row
+        .result
+        .as_deref()
+        .filter(|text| !text.is_empty())
+        .and_then(|text| crate::core::codec::from_json_str::<serde_json::Value>(text).ok());
+    match parsed {
+        Some(value)
+            if value.get(crate::core::task::result::TASK_RESULT_ENVELOPE_KEY)
+                == Some(&serde_json::Value::Bool(true)) =>
+        {
+            Ok(value)
+        }
+        Some(_) | None => {
+            tracing::warn!(
+                workflow_id = %workflow_id,
+                node_id,
+                "terminal node result is not a result envelope; its outputless entry is null",
+            );
+            Ok(serde_json::Value::Null)
         }
     }
-    let wrapped = TaskResult::Ok(serde_json::Value::Object(result_map));
-    Ok(serde_json::to_string(&wrapped)?)
 }
 
 /// The result text of a COMPLETED workflow with an explicit output node. Python: `_explicit_output_result` and
@@ -3073,7 +3195,8 @@ fn output_error(
 
 /// Get a specific error for a failed workflow.
 ///
-/// Matches Python's `get_workflow_failure_error()` (`core/workflows/engine.py:3523-3620`):
+/// Matches Python's `get_workflow_failure_error()` (`core/workflows/engine.py`). The stored policy is read
+/// with [`read_stored_success_policy`]; one that does not parse is an error.
 /// - Without success_policy: the first failed task's error (by index). With no such error, `None`: the
 ///   caller keeps the stored workflow error. A phase-2 recovery that knows the task's terminal status
 ///   (`recovered_terminal_status`) gets an error named from that status instead.
@@ -3085,8 +3208,8 @@ async fn get_workflow_failure_error(
     success_policy_json: &Option<serde_json::Value>,
     recovered_terminal_status: Option<&str>,
 ) -> Result<Option<String>, WorkflowError> {
-    match success_policy_json {
-        None => {
+    match read_stored_success_policy(success_policy_json)? {
+        StoredSuccessPolicy::NoPolicy => {
             // Default: get first failed task's error by index.
             let row: Option<TaskResultOnly> = sqlx::query_as(FIRST_FAILED_TASK_ERROR_SQL)
                 .bind(workflow_id)
@@ -3127,21 +3250,9 @@ async fn get_workflow_failure_error(
             };
             Ok(Some(serde_json::to_string(&fallback)?))
         }
-        Some(policy_json) => {
-            // With success_policy: find first failed required task.
-            // Collect all required_indices across all cases.
-            let mut all_required: Vec<i32> = Vec::new();
-            if let Some(cases) = policy_json.get("cases").and_then(|c| c.as_array()) {
-                for case in cases {
-                    if let Some(indices) = case.get("required_indices").and_then(|i| i.as_array()) {
-                        for idx in indices {
-                            if let Some(n) = idx.as_i64() {
-                                all_required.push(n as i32);
-                            }
-                        }
-                    }
-                }
-            }
+        StoredSuccessPolicy::Policy(policy) => {
+            // With success_policy: find the first failed task that some case requires.
+            let all_required = required_task_indexes(&policy);
 
             if !all_required.is_empty() {
                 let row: Option<TaskResultOnly> =
@@ -3246,6 +3357,9 @@ async fn get_dependency_results(
         map.insert(
             row.task_index,
             DepResultValue {
+                node_id: row.node_id,
+                task_name: row.task_name,
+                sub_definition_key: row.sub_definition_key,
                 status: row.status,
                 result: row.result,
             },
@@ -3258,36 +3372,123 @@ use crate::workflow_engine::args_merge::input_object;
 use crate::workflow_engine::args_merge::merge_args_from_sync as merge_args_from;
 use crate::workflow_engine::args_merge::{ArgsFromMerge, MergedNodeKind};
 
-#[derive(Debug)]
+/// The workflow context payload under `WORKFLOW_CTX_KWARG`, in Python's shape (`_build_workflow_context_data`,
+/// `core/workflows/engine.py:1629-1721`): the result envelope, the task name and the definition key of each
+/// context node, and the stored summary text of each sub-workflow node. One entry that does not read does not
+/// stop the node: it holds a `RESULT_DESERIALIZATION_ERROR` that names the node (Python
+/// `_decode_stored_task_result`, `:175-260`).
+#[derive(Debug, serde::Serialize)]
 struct WorkflowContextData {
     workflow_id: Uuid,
     task_index: i32,
     task_name: String,
-    results_by_id: HashMap<String, TaskResult<serde_json::Value>>,
-    summaries_by_id: HashMap<String, SubWorkflowSummary>,
+    results_by_id: std::collections::BTreeMap<String, TaskResult<serde_json::Value>>,
+    task_name_by_id: std::collections::BTreeMap<String, String>,
+    /// `null` for a task node.
+    definition_key_by_id: std::collections::BTreeMap<String, Option<String>>,
+    /// The stored text, unparsed: the receiving task parses it (Python `core/worker/child_runner.py:1740-1757`).
+    summaries_by_id: std::collections::BTreeMap<String, String>,
 }
 
 impl WorkflowContextData {
+    /// The payload of a node from the rows of its terminal context nodes. Pure.
+    fn from_rows(
+        workflow_id: Uuid,
+        task_index: i32,
+        task_name: &str,
+        rows: Vec<CtxResultRow>,
+    ) -> Self {
+        let mut context = Self {
+            workflow_id,
+            task_index,
+            task_name: task_name.to_owned(),
+            results_by_id: std::collections::BTreeMap::new(),
+            task_name_by_id: std::collections::BTreeMap::new(),
+            definition_key_by_id: std::collections::BTreeMap::new(),
+            summaries_by_id: std::collections::BTreeMap::new(),
+        };
+        for row in rows {
+            let Some(node_id) = row.node_id.clone() else {
+                continue;
+            };
+            // Python: `get_dependency_results_with_names` (`core/workflows/engine.py`), with the decided entry
+            // for a terminal node whose stored result is NULL or empty.
+            let entry = match (row.status.as_str(), row.result.as_deref()) {
+                ("SKIPPED", _) => TaskResult::Err(
+                    crate::workflow_engine::args_merge::upstream_skipped_error(row.task_index),
+                ),
+                (_, Some(text)) if !text.is_empty() => stored_ctx_entry(workflow_id, &row, text),
+                (status, _) => {
+                    TaskResult::Err(crate::workflow_engine::args_merge::missing_result_error(
+                        row.task_index,
+                        Some(node_id.as_str()),
+                        &row.task_name,
+                        status,
+                    ))
+                }
+            };
+            context.results_by_id.insert(node_id.clone(), entry);
+            context
+                .task_name_by_id
+                .insert(node_id.clone(), row.task_name.clone());
+            context
+                .definition_key_by_id
+                .insert(node_id.clone(), row.sub_definition_key.clone());
+            if let Some(summary) = row.sub_workflow_summary.filter(|text| !text.is_empty()) {
+                context.summaries_by_id.insert(node_id, summary);
+            }
+        }
+        context
+    }
+
     fn to_payload(&self) -> Result<serde_json::Value, WorkflowError> {
-        let mut results_by_id: HashMap<String, String> =
-            HashMap::with_capacity(self.results_by_id.len());
-        for (node_id, result) in &self.results_by_id {
-            results_by_id.insert(node_id.clone(), serde_json::to_string(result)?);
-        }
+        Ok(serde_json::to_value(self)?)
+    }
+}
 
-        let mut summaries_by_id: HashMap<String, String> =
-            HashMap::with_capacity(self.summaries_by_id.len());
-        for (node_id, summary) in &self.summaries_by_id {
-            summaries_by_id.insert(node_id.clone(), serde_json::to_string(summary)?);
+/// The context entry of a node with a stored result (Python `_decode_stored_task_result`,
+/// `core/workflows/engine.py:175-260`): the stored envelope, or a `RESULT_DESERIALIZATION_ERROR` naming the node
+/// when the text is not strict JSON (`stage: json_parse`) or not a result envelope (`stage: decode`).
+fn stored_ctx_entry(
+    workflow_id: Uuid,
+    row: &CtxResultRow,
+    text: &str,
+) -> TaskResult<serde_json::Value> {
+    let unreadable = |stage: &str, message: String| -> TaskResult<serde_json::Value> {
+        TaskResult::Err(TaskError {
+            exception: None,
+            error_code: OperationalErrorCode::ResultDeserializationError.into(),
+            data: Some(serde_json::json!({
+                "workflow_id": workflow_id.to_string(),
+                "task_index": row.task_index,
+                "status": row.status,
+                "stage": stage,
+            })),
+            message: Some(message),
+            kind: TaskErrorKind::Plain,
+        })
+    };
+    let value: serde_json::Value = match crate::core::codec::from_json_str(text) {
+        Ok(value) => value,
+        Err(_) => {
+            return unreadable(
+                "json_parse",
+                format!(
+                    "Stored TaskResult JSON corrupt for task '{}'",
+                    row.task_name
+                ),
+            )
         }
-
-        Ok(serde_json::json!({
-            "workflow_id": self.workflow_id.clone(),
-            "task_index": self.task_index,
-            "task_name": self.task_name.clone(),
-            "results_by_id": results_by_id,
-            "summaries_by_id": summaries_by_id,
-        }))
+    };
+    match serde_json::from_value::<TaskResult<serde_json::Value>>(value) {
+        Ok(result) => result,
+        Err(error) => unreadable(
+            "decode",
+            format!(
+                "decode_task_result failed for task '{}': {error}",
+                row.task_name
+            ),
+        ),
     }
 }
 
@@ -3299,13 +3500,12 @@ async fn build_workflow_context_data(
     ctx_from_ids: &[String],
 ) -> Result<WorkflowContextData, WorkflowError> {
     if ctx_from_ids.is_empty() {
-        return Ok(WorkflowContextData {
+        return Ok(WorkflowContextData::from_rows(
             workflow_id,
             task_index,
-            task_name: task_name.to_owned(),
-            results_by_id: HashMap::new(),
-            summaries_by_id: HashMap::new(),
-        });
+            task_name,
+            Vec::new(),
+        ));
     }
 
     let rows: Vec<CtxResultRow> = sqlx::query_as(GET_CTX_RESULTS_BY_NODE_ID_SQL)
@@ -3314,56 +3514,12 @@ async fn build_workflow_context_data(
         .fetch_all(pool)
         .await?;
 
-    let (results_by_id, summaries_by_id) = collect_ctx_maps(rows)?;
-
-    Ok(WorkflowContextData {
+    Ok(WorkflowContextData::from_rows(
         workflow_id,
         task_index,
-        task_name: task_name.to_owned(),
-        results_by_id,
-        summaries_by_id,
-    })
-}
-
-#[allow(clippy::type_complexity)]
-fn collect_ctx_maps(
-    rows: Vec<CtxResultRow>,
-) -> Result<
-    (
-        HashMap<String, TaskResult<serde_json::Value>>,
-        HashMap<String, SubWorkflowSummary>,
-    ),
-    WorkflowError,
-> {
-    let mut results_by_id = HashMap::with_capacity(rows.len());
-    let mut summaries_by_id = HashMap::with_capacity(rows.len());
-
-    for row in rows {
-        let Some(node_id) = row.node_id else { continue };
-        let status = row.status.as_str();
-
-        // Python: `_build_workflow_context_data` (`core/workflows/engine.py:2895-2916`), with the decided
-        // entry for a terminal node with no stored result.
-        let wrapped: TaskResult<serde_json::Value> = match (status, row.result) {
-            ("SKIPPED", _) => TaskResult::Err(
-                crate::workflow_engine::args_merge::upstream_skipped_error(row.task_index),
-            ),
-            (_, Some(json)) => serde_json::from_str(&json)?,
-            (_, None) => TaskResult::Err(crate::workflow_engine::args_merge::missing_result_error(
-                row.task_index,
-                status,
-            )),
-        };
-
-        results_by_id.insert(node_id.clone(), wrapped);
-
-        if let Some(summary_json) = row.sub_workflow_summary {
-            let summary: SubWorkflowSummary = serde_json::from_str(&summary_json)?;
-            summaries_by_id.insert(node_id, summary);
-        }
-    }
-
-    Ok((results_by_id, summaries_by_id))
+        task_name,
+        rows,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -3454,11 +3610,11 @@ mod p7_exact_error_tests {
         let result = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(prior)).unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, result, is_subworkflow,
                 completed_at, created_at, max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 0, 'prior', 'prior', 'null', 'default', 100, '{}', FALSE, 'all',
+                'NONE', $1, $2, 0, 'prior', 'prior', 'null', 'default', 100, '{}', FALSE, 'all',
                 'FAILED', $3, FALSE, NOW(), NOW(), 0, 'ISOLATED', 'standard_30d'
             )",
         )
@@ -3502,11 +3658,11 @@ mod p7_exact_error_tests {
         seed_prior_failure(&pool, workflow_id).await;
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, sub_workflow_params,
                 sub_workflow_name, sub_definition_key, created_at
             ) VALUES (
-                $1, $2, 1, 'missing_child', '__sub_workflow:p7_missing_child', 'null',
+                'NONE', $1, $2, 1, 'missing_child', '__sub_workflow:p7_missing_child', 'null',
                 'default', 100, '{}', FALSE, 'all', 'READY', TRUE, 'NOT_GIVEN', 'p7_missing_child',
                 'missing.definition', NOW()
             )",
@@ -3580,10 +3736,10 @@ mod p7_exact_error_tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, node_id, task_name, input, queue_name,
+                 downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name,
                  priority, dependencies, allow_failed_deps, join_type, status,
                  is_subworkflow, sub_workflow_params, sub_workflow_name, sub_definition_key, created_at
-             ) VALUES ($1, $2, 1, 'missing_child', 'p7_missing_child', '{}',
+             ) VALUES ('NONE', $1, $2, 1, 'missing_child', 'p7_missing_child', '{}',
                        'default', 100, '{}', FALSE, 'all', 'READY', TRUE, 'NOT_GIVEN',
                        'p7_missing_child', 'missing.definition', NOW())",
         )
@@ -3645,10 +3801,10 @@ mod p7_exact_error_tests {
         seed_prior_failure(&pool, parent_id).await;
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, sub_workflow_params, created_at
             ) VALUES (
-                $1, $2, 1, 'child', '__sub_workflow:p7_child', 'null', 'default', 100, '{}',
+                'NONE', $1, $2, 1, 'child', '__sub_workflow:p7_child', 'null', 'default', 100, '{}',
                 FALSE, 'all', 'RUNNING', TRUE, 'NOT_GIVEN', NOW()
             )",
         )
@@ -3776,11 +3932,11 @@ mod guard_tests {
     async fn insert_subworkflow_task(pool: &PgPool, wf_id: &str, child_id: &str) {
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, sub_workflow_params,
                 sub_workflow_id, created_at
             ) VALUES (
-                $1, $2, 0, 'node_0', 'subwf_node', 'null', 'default', 100, '{}', FALSE, 'all',
+                'NONE', $1, $2, 0, 'node_0', 'subwf_node', 'null', 'default', 100, '{}', FALSE, 'all',
                 'RUNNING', TRUE, 'NOT_GIVEN', $3, NOW()
             )",
         )
@@ -4045,11 +4201,11 @@ WHERE wt.workflow_id = $1
     async fn insert_task(pool: &PgPool, wf_id: &str, idx: i32, deps: Vec<i32>) {
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at,
                 max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, $3, $4, 'qw_task', 'null', 'default', 100, $5, FALSE, 'all',
+                'NONE', $1, $2, $3, $4, 'qw_task', 'null', 'default', 100, $5, FALSE, 'all',
                 'COMPLETED', FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
             )",
         )
@@ -4128,10 +4284,10 @@ WHERE wt.workflow_id = $1
         // A READY sub-workflow node.
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, sub_workflow_params, created_at
             ) VALUES (
-                $1, $2, 0, 'node_0', 'sub', 'null', 'default', 100, '{}', FALSE, 'all',
+                'NONE', $1, $2, 0, 'node_0', 'sub', 'null', 'default', 100, '{}', FALSE, 'all',
                 'READY', TRUE, 'NOT_GIVEN', NOW()
             )",
         )
@@ -4219,10 +4375,10 @@ WHERE wt.workflow_id = $1
         .expect("insert workflow");
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                 queue_name, priority, dependencies, allow_failed_deps, join_type,
                 status, is_subworkflow, sub_workflow_params, sub_workflow_name, sub_definition_key, created_at
-            ) VALUES ($1, $2, 0, 'node_0', 'child', '{}',
+            ) VALUES ('NONE', $1, $2, 0, 'node_0', 'child', '{}',
                       'default', 100, '{}', FALSE, 'all',
                       'RUNNING', TRUE, 'NOT_GIVEN', 'child', 'tests.child.v1', NOW())",
         )
@@ -4307,11 +4463,11 @@ WHERE wt.workflow_id = $1
         // A RUNNING node on the parent, linked to the backing task id.
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, task_id,
                 created_at, max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 0, 'node_0', 'c16c_task', 'null', 'default', 100, '{}', FALSE, 'all',
+                'NONE', $1, $2, 0, 'node_0', 'c16c_task', 'null', 'default', 100, '{}', FALSE, 'all',
                 'RUNNING', FALSE, $3, NOW(), 0, 'ISOLATED', 'standard_30d'
             )",
         )
@@ -4411,11 +4567,11 @@ WHERE wt.workflow_id = $1
             .expect("insert workflow");
             sqlx::query(
                 "INSERT INTO horsies_workflow_tasks (
-                    id, workflow_id, task_index, node_id, task_name, input, queue_name,
+                    downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name,
                     priority, dependencies, allow_failed_deps, join_type, status,
                     is_subworkflow, created_at, max_retries, execution, retention_class_key
                 ) VALUES (
-                    $1, $2, 0, 'node_0', 'p3_task', 'null', 'default', 100, '{}', FALSE, 'all',
+                    'NONE', $1, $2, 0, 'node_0', 'p3_task', 'null', 'default', 100, '{}', FALSE, 'all',
                     $3, FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
                 )",
             )
@@ -4523,11 +4679,11 @@ mod promotion_batch_tests {
     ) {
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at,
                 max_retries, execution, retention_class_key
             ) VALUES (
-                $1::uuid, $2::uuid, $3, $4, 'promo_task', 'null', 'default', 100, $5, $6, $7,
+                'NONE', $1::uuid, $2::uuid, $3, $4, 'promo_task', 'null', 'default', 100, $5, $6, $7,
                 $8, FALSE, NOW(), 0, 'ISOLATED', 'standard_30d'
             )",
         )
@@ -4689,14 +4845,7 @@ mod promotion_batch_tests {
 
     /// The node failed with Python's conflict error (`core/workflows/engine.py:834-839`, `:1151-1163`).
     fn assert_conflict_error(error: &TaskError, wf_id: &str, idx: i32, message: &str) {
-        assert_eq!(
-            error
-                .error_code
-                .as_ref()
-                .map(ToString::to_string)
-                .as_deref(),
-            Some("WORKFLOW_ENQUEUE_FAILED")
-        );
+        assert_eq!(error.error_code.to_string(), "WORKFLOW_ENQUEUE_FAILED");
         assert_eq!(error.message.as_deref(), Some(message));
         assert_eq!(
             error.data,
@@ -4850,11 +4999,11 @@ mod promotion_batch_tests {
         insert_node(&pool, &wf_id, 0, vec![], "COMPLETED", "all", false).await;
         sqlx::query(
             r#"INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, args_from, allow_failed_deps, join_type, status, is_subworkflow,
                 sub_workflow_params, sub_workflow_name, sub_definition_key, created_at
             ) VALUES (
-                $1, $2::uuid, 1, 'child', 'args_from_conflict_child', '{"x": 5}', 'default',
+                'NONE', $1, $2::uuid, 1, 'child', 'args_from_conflict_child', '{"x": 5}', 'default',
                 100, '{0}', '{"x": 0}'::jsonb, FALSE, 'all', 'PENDING', TRUE, 'GIVEN',
                 'args_from_conflict_child', $3, NOW()
             )"#,
@@ -5204,12 +5353,12 @@ mod finalization_contract_tests {
                             };
                             sqlx::query(
                                 "INSERT INTO horsies_workflow_tasks (
-                                    id, workflow_id, task_index, node_id, task_name, input,
+                                    downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                                     status, result, queue_name, priority, dependencies,
                                     allow_failed_deps, join_type, is_subworkflow, created_at,
                                     max_retries, execution, retention_class_key
                                 ) VALUES (
-                                    $1, $2, $3, $4, 'finalization_contract', 'null', $5, $6,
+                                    'NONE', $1, $2, $3, $4, 'finalization_contract', 'null', $5, $6,
                                     'default', 100, '{}', FALSE, 'all', FALSE, NOW(), 0,
                                     'ISOLATED', 'standard_30d'
                                 )",
@@ -5282,25 +5431,38 @@ mod finalization_contract_tests {
                         .fetch_one(&pool)
                         .await
                         .unwrap();
-                        let expected = match (success, output) {
-                            (false, _) => None,
-                            (true, Some(_)) => Some(result.clone()),
-                            (true, None) => {
-                                let value: serde_json::Value =
-                                    serde_json::from_str(&result).unwrap();
-                                let map = (0..8)
-                                    .map(|index| (format!("node_{index}"), value.clone()))
-                                    .collect::<serde_json::Map<_, _>>();
-                                Some(
-                                    serde_json::to_string(&TaskResult::Ok(
-                                        serde_json::Value::Object(map),
-                                    ))
-                                    .unwrap(),
-                                )
-                            }
-                        };
                         assert_eq!(status, if success { "COMPLETED" } else { "FAILED" });
-                        assert_eq!(stored, expected);
+                        match (success, output) {
+                            (false, _) => assert_eq!(stored, None),
+                            (true, Some(_)) => assert_eq!(stored, Some(result.clone())),
+                            (true, None) => {
+                                // Python's outputless result (`core/workflows/engine.py:3973-3983`).
+                                let entry: serde_json::Value =
+                                    serde_json::from_str(&result).unwrap();
+                                let per_node = |value: serde_json::Value| {
+                                    (0..8)
+                                        .map(|index| (format!("node_{index}"), value.clone()))
+                                        .collect::<serde_json::Map<_, _>>()
+                                };
+                                let stored: serde_json::Value =
+                                    serde_json::from_str(stored.as_deref().unwrap()).unwrap();
+                                assert_eq!(
+                                    stored,
+                                    serde_json::json!({
+                                        "__h_task_result__": true,
+                                        "__h_outputless_terminals__": true,
+                                        "ok": {
+                                            "results_by_id": per_node(entry),
+                                            "task_name_by_id": per_node(serde_json::json!(
+                                                "finalization_contract"
+                                            )),
+                                            "definition_key_by_id": per_node(serde_json::Value::Null),
+                                        },
+                                        "err": null,
+                                    })
+                                );
+                            }
+                        }
                         let notification = tokio::time::timeout(
                             std::time::Duration::from_secs(5),
                             listener.recv(),
@@ -5549,6 +5711,7 @@ mod completion_rule_tests {
             status: status.to_owned(),
             task_index: 2,
             task_name: "produce".to_owned(),
+            sub_definition_key: None,
         }
     }
 
@@ -5560,6 +5723,37 @@ mod completion_rule_tests {
         }
     }
 
+    /// A context node whose stored result is NULL or empty gets the entry of `horsies_workflow_source_value`
+    /// (0005) and Python `_missing_result_entry`.
+    #[test]
+    fn a_context_node_with_no_stored_result_gets_the_missing_result_entry() {
+        for status in ["COMPLETED", "FAILED"] {
+            for result in [None, Some(String::new())] {
+                let row = CtxResultRow {
+                    node_id: Some("source".to_owned()),
+                    task_index: 1,
+                    task_name: "produce".to_owned(),
+                    sub_definition_key: None,
+                    status: status.to_owned(),
+                    result: result.clone(),
+                    sub_workflow_summary: None,
+                };
+                let context = WorkflowContextData::from_rows(Uuid::nil(), 2, "receive", vec![row]);
+                let Some(TaskResult::Err(error)) = context.results_by_id.get("source") else {
+                    panic!(
+                        "a {status} context node with result {result:?} must give an error entry"
+                    );
+                };
+                let expected = format!(
+                    "Dependency node source (index 1, task produce) is {status} with no stored result"
+                );
+                assert_eq!(error.error_code.to_string(), "RESULT_DESERIALIZATION_ERROR");
+                assert_eq!(error.message.as_deref(), Some(expected.as_str()));
+                assert_eq!(error.data, Some(serde_json::json!({"dependency_index": 1})));
+            }
+        }
+    }
+
     #[test]
     fn the_default_rule_needs_no_failed_node_and_no_stored_error() {
         let all_completed = statuses(&["COMPLETED", "COMPLETED"]);
@@ -5567,6 +5761,85 @@ mod completion_rule_tests {
         // A stored workflow error fails the workflow even with no FAILED node.
         assert!(!evaluate_workflow_success(&None, true, false, &all_completed).unwrap());
         assert!(!evaluate_workflow_success(&None, false, true, &all_completed).unwrap());
+    }
+
+    /// JSON null is no policy, as SQL NULL is (Python `read_stored_success_policy`, the baseline function
+    /// `horsies_workflow_success_cases`).
+    #[test]
+    fn a_json_null_policy_is_no_policy() {
+        let null = Some(serde_json::Value::Null);
+        let all_completed = statuses(&["COMPLETED", "COMPLETED"]);
+        assert_eq!(
+            read_stored_success_policy(&null).unwrap(),
+            StoredSuccessPolicy::NoPolicy
+        );
+        assert!(evaluate_workflow_success(&null, false, false, &all_completed).unwrap());
+        assert!(!evaluate_workflow_success(&null, false, true, &all_completed).unwrap());
+        assert!(!evaluate_workflow_success(&null, true, false, &all_completed).unwrap());
+    }
+
+    /// The forms of Python's reader: each refused form fails the step, each accepted form reads as a policy.
+    #[test]
+    fn the_stored_policy_is_read_by_python_s_rule() {
+        let refused = [
+            serde_json::json!([1, 2, 3]),
+            serde_json::json!("text"),
+            serde_json::json!(7),
+            serde_json::json!({}),
+            serde_json::json!({"cases": "not a list"}),
+            serde_json::json!({"cases": null}),
+            serde_json::json!({"cases": [1]}),
+            serde_json::json!({"cases": [{}]}),
+            serde_json::json!({"cases": [{"required_indices": null}]}),
+            serde_json::json!({"cases": [{"required_indices": [0]}, {"required_indices": [true]}]}),
+            serde_json::json!({"cases": [{"required_indices": [0, -1]}]}),
+            serde_json::json!({"cases": [{"required_indices": [1.0]}]}),
+            serde_json::json!({"cases": [{"required_indices": ["0"]}]}),
+            serde_json::json!({"cases": [], "optional_indices": "x"}),
+        ];
+        for value in refused {
+            assert!(
+                matches!(
+                    read_stored_success_policy(&Some(value.clone())),
+                    Err(WorkflowError::Serialization(_))
+                ),
+                "{value} must not read"
+            );
+        }
+        let accepted = [
+            serde_json::json!({"cases": [], "optional_indices": null}),
+            serde_json::json!({"cases": [], "extra": 1}),
+            serde_json::json!({"cases": [{"required_indices": [], "extra": "x"}]}),
+            serde_json::json!({"cases": [{"required_indices": [0, 3_000_000_000_u64]}], "optional_indices": [1]}),
+        ];
+        for value in accepted {
+            assert!(
+                matches!(
+                    read_stored_success_policy(&Some(value.clone())),
+                    Ok(StoredSuccessPolicy::Policy(_))
+                ),
+                "{value} must read"
+            );
+        }
+    }
+
+    /// An index above the `i32` range names no node: the failure-error read leaves it out instead of
+    /// wrapping it to another index.
+    #[test]
+    fn a_required_index_above_the_i32_range_names_no_node() {
+        let above = i32::MAX as usize + 1;
+        let policy = SuccessPolicy {
+            cases: vec![
+                crate::core::SuccessCase {
+                    required_indices: vec![1, above],
+                },
+                crate::core::SuccessCase {
+                    required_indices: vec![0],
+                },
+            ],
+            optional_indices: None,
+        };
+        assert_eq!(required_task_indexes(&policy), vec![1, 0]);
     }
 
     #[test]
@@ -5657,11 +5930,11 @@ mod completion_rule_tests {
         let ok = serde_json::to_string(&TaskResult::Ok(serde_json::json!(1))).unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, node_id, task_name, input,
+                 downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                  queue_name, priority, dependencies, allow_failed_deps, join_type,
                  max_retries, execution, retention_class_key, status, result,
                  is_subworkflow, created_at, completed_at
-             ) VALUES ($1, $2, 0, 'only', 'only_task', '{}', 'default', 100, '{}',
+             ) VALUES ('NONE', $1, $2, 0, 'only', 'only_task', '{}', 'default', 100, '{}',
                        FALSE, 'all', 0, 'ISOLATED', 'forever', 'COMPLETED', $3,
                        FALSE, NOW(), NOW())",
         )

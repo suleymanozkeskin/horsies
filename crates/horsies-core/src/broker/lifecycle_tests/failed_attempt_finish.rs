@@ -22,7 +22,7 @@ use crate::broker::attempt_writes::{
 };
 use crate::core::lifecycle::{
     AfterFailure, AttemptWriteRefusal, FailedAttemptOutcome, OwnedClaim, PhaseTwoOwed,
-    RetryRefusal, TerminalizationKind,
+    PhaseTwoStep, RetryRefusal, TerminalizationKind,
 };
 use crate::core::types::status::TaskStatus;
 
@@ -179,6 +179,7 @@ mod terminal_failure {
                 AfterFailure::PhaseTwoOwed(PhaseTwoOwed {
                     task_name,
                     queue_name,
+                    step,
                 }),
             ..
         } = outcome
@@ -189,6 +190,7 @@ mod terminal_failure {
             (task_name.as_str(), queue_name.as_str()),
             ("lifecycle.test", QUEUE)
         );
+        assert_eq!(step, PhaseTwoStep::NoDependents);
         assert_eq!(
             history_row(&pool, task_id)
                 .await

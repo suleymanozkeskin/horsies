@@ -600,14 +600,14 @@ pub(super) async fn try_seed_node(
     let node_row_id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO horsies_workflow_tasks (
-            id, workflow_id, task_index, node_id, task_name, input, queue_name,
+            downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name,
             priority, dependencies, args_from, workflow_ctx_from, allow_failed_deps,
             join_type, min_success, task_options, max_retries, execution, good_until,
             retention_class_key, status, task_id, is_subworkflow, sub_workflow_id,
             sub_workflow_name, sub_definition_key, sub_workflow_summary, result, error,
             created_at, started_at, completed_at
         ) VALUES (
-            $1, $2,
+            'NONE', $1, $2,
             COALESCE((SELECT MAX(task_index) + 1 FROM horsies_workflow_tasks
                       WHERE workflow_id = $2), 0),
             'node_' || $1::text, 'lifecycle.test', '{}', 'default',
@@ -1193,6 +1193,34 @@ pub(super) fn claim_pass(queue: &str) -> crate::broker::postgres::ClaimPassParam
         queue_max_concurrency: std::collections::HashMap::new(),
         hard_cap_mode: true,
         processes: 10,
+        prefetch_buffer: 0,
+        max_claim_per_worker: 0,
+        max_claim_batch: 0,
+        cluster_wide_cap: None,
+        claim_lease_ms: std::num::NonZeroU32::new(60_000).expect("positive lease"),
+        lock_keys: Vec::new(),
+    }
+}
+
+/// The request of one 0004 claim pass of `WORKER` over `queue`, with no
+/// cap: one `ISOLATED` budget of 10 that every class routes to.
+pub(super) fn claim_request(queue: &str) -> crate::broker::claims::ClaimPassRequest {
+    use crate::core::task::Execution;
+    crate::broker::claims::ClaimPassRequest {
+        worker_id: WORKER.to_owned(),
+        queues: vec![queue.to_owned()],
+        queue_priority: std::iter::once((queue.to_owned(), 100)).collect(),
+        queue_max_concurrency: std::collections::HashMap::new(),
+        hard_cap_mode: true,
+        classes: crate::broker::claims::ClaimClasses::new(
+            std::collections::HashMap::from([(Execution::Isolated, 10)]),
+            std::collections::HashMap::from([
+                (Execution::Isolated, Execution::Isolated),
+                (Execution::SharedAsync, Execution::Isolated),
+                (Execution::SharedThread, Execution::Isolated),
+            ]),
+        )
+        .expect("every route names the ISOLATED budget"),
         prefetch_buffer: 0,
         max_claim_per_worker: 0,
         max_claim_batch: 0,

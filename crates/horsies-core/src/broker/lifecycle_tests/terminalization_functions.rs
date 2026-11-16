@@ -43,8 +43,6 @@ fn fused_completion(task_id: Uuid) -> TerminalizationCommand {
         task_id,
         fence: owned_claim(),
         result_json: r#"{"ok": 2}"#.to_owned(),
-        notify_channel: "task_queue_default".to_owned(),
-        notify_payload: format!("capacity:{task_id}"),
     }
 }
 

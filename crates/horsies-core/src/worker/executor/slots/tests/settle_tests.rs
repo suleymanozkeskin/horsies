@@ -29,12 +29,15 @@ const WORKER: &str = "worker-1";
 const OTHER_WORKER: &str = "worker-2";
 
 fn writer(broker: Arc<PostgresBroker>) -> OutcomeWriter {
+    let successes = crate::worker::executor::slots::outcome::test_successes(&broker, WORKER);
     OutcomeWriter::new(
         broker,
         Arc::new(WorkflowSpecRegistry::new()),
         WORKER.to_owned(),
         PayloadPolicy::default(),
         RetentionConfig::default(),
+        successes,
+        OrphanSelfHeal::On,
     )
 }
 

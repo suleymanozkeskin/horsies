@@ -26,6 +26,7 @@ pub mod monitoring;
 #[cfg(feature = "web")]
 pub mod web;
 pub(crate) mod worker;
+pub mod worker_manifest;
 pub(crate) mod workflow_engine;
 
 // ---------------------------------------------------------------------------
@@ -67,8 +68,8 @@ pub use crate::broker::{
     ExpiredTaskRow, HeartbeatRow, ListenError, ListenerPlanError, PostgresBroker, RawResultRecord,
     SchemaInitializationMode, SessionCheckFailure, StaleTaskRow, TaskAttemptRow, TaskHandle,
     TaskInfoRow, TaskResultRow, TaskRunningContextRow, WorkerPingRequest, WorkerPong,
-    WorkerPongPayload, WorkerStateRow, WorkerStateSnapshot, WorkflowRow, WorkflowTaskRow,
-    MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
+    WorkerPongPayload, WorkerStateSnapshot, WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE,
+    WORKER_PING_CHANNEL,
 };
 pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
 
@@ -77,7 +78,7 @@ pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
 // start work that belongs to their run with `spawn_in_run`.
 pub use crate::worker::executor::child_host::{
     child_mode, run_child_host, spawn_in_run, ChildApp, ChildArgs, ChildArgsError, ChildHostExit,
-    ChildMode, OrphanSelfHeal, RunSpawnRefused, CHILD_MODE_ARGUMENT, MAX_RUN_WORK,
+    ChildMode, RunSpawnRefused, CHILD_MODE_ARGUMENT, MAX_RUN_WORK,
 };
 
 // worker re-exports
