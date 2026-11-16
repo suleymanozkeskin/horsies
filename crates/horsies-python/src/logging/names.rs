@@ -8,6 +8,12 @@
 //! prefix to the logger of the same component in Python
 //! (`horsies.<component>`, `horsies/core/logging.py`). An event whose target
 //! is neither is not forwarded: it comes from another crate.
+//!
+//! `horsies.sql` holds the statement log of the broker (`echo=True`): one
+//! record per statement, with its name and SQL text, never its bound values.
+//! It is a logger of its own, so the statement log is turned on and off
+//! apart from the connection records of `horsies.db`, as Python's `echo`
+//! goes to SQLAlchemy's own `sqlalchemy.engine` logger.
 
 /// A Python logger of the `horsies` namespace.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -23,6 +29,7 @@ pub enum LoggerName {
     Listener,
     Scheduler,
     SchedulerState,
+    Sql,
     Web,
     Worker,
     WorkflowEngine,
@@ -32,7 +39,7 @@ pub enum LoggerName {
 
 impl LoggerName {
     /// The number of loggers.
-    pub const COUNT: usize = 16;
+    pub const COUNT: usize = 17;
 
     /// Every logger, in declaration order.
     pub const ALL: [LoggerName; Self::COUNT] = [
@@ -47,6 +54,7 @@ impl LoggerName {
         Self::Listener,
         Self::Scheduler,
         Self::SchedulerState,
+        Self::Sql,
         Self::Web,
         Self::Worker,
         Self::WorkflowEngine,
@@ -68,6 +76,7 @@ impl LoggerName {
             Self::Listener => "horsies.listener",
             Self::Scheduler => "horsies.scheduler",
             Self::SchedulerState => "horsies.scheduler.state",
+            Self::Sql => "horsies.sql",
             Self::Web => "horsies.web",
             Self::Worker => "horsies.worker",
             Self::WorkflowEngine => "horsies.workflow.engine",
@@ -85,9 +94,9 @@ impl LoggerName {
 /// Target prefixes and their loggers. A prefix matches a target that equals
 /// it or continues with `::`. The first match wins, so a longer prefix comes
 /// before a shorter one of the same module.
-const TARGET_ROUTES: [(&str, LoggerName); 21] = [
+const TARGET_ROUTES: [(&str, LoggerName); 22] = [
     (
-        "horsies_core::broker::shared_listener",
+        "horsies_core::broker::process_listener",
         LoggerName::Listener,
     ),
     ("horsies_core::broker::listener", LoggerName::Listener),
@@ -125,8 +134,10 @@ const TARGET_ROUTES: [(&str, LoggerName); 21] = [
         LoggerName::WorkflowHandle,
     ),
     ("horsies_core::workflow_engine", LoggerName::WorkflowEngine),
-    // The one explicit target of the core: the claim pass of the worker.
+    // The explicit targets of the core: the claim pass of the worker, and
+    // the listener of the statement layer (`horsies_core::db`).
     ("horsies::claim", LoggerName::Worker),
+    ("horsies.listener", LoggerName::Listener),
     ("_core", LoggerName::Bridge),
     ("horsies_core", LoggerName::Core),
 ];
@@ -176,9 +187,10 @@ mod tests {
         let cases = [
             ("horsies_core::broker::postgres", LoggerName::Broker),
             (
-                "horsies_core::broker::shared_listener",
+                "horsies_core::broker::process_listener",
                 LoggerName::Listener,
             ),
+            ("horsies.listener", LoggerName::Listener),
             (
                 "horsies_core::worker::scheduler::service",
                 LoggerName::Scheduler,
@@ -220,8 +232,18 @@ mod tests {
     }
 
     #[test]
+    fn the_statement_log_goes_to_its_own_logger() {
+        // The broker's statement log (`StatementLog::Debug`, `echo=True`)
+        // names the target `horsies.sql`.
+        assert_eq!(route("horsies.sql"), Some(LoggerName::Sql));
+        assert_eq!(LoggerName::Sql.python_name(), "horsies.sql");
+        assert_ne!(route("horsies.sql"), route("horsies.db"));
+    }
+
+    #[test]
     fn a_dotted_target_outside_the_set_is_not_forwarded() {
         assert_eq!(route("horsies.db.pool"), None);
+        assert_eq!(route("horsies.sql.statement"), None);
         assert_eq!(route("horsies.unknown"), None);
     }
 

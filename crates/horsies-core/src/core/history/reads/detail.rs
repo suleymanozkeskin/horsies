@@ -11,6 +11,7 @@ use crate::core::history::errors::HistoryError;
 use crate::core::history::names::{LEAF_CATALOG, RETENTION_CLASSES, TASK_DETAIL_FUNCTION};
 use crate::core::history::reads::lookup_generation::CLOCK_BOUND_SECONDS;
 use crate::core::history::reads::result::FUNCTION_PUBLISHED_SQL;
+use crate::core::types::status::TaskStatus;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryTaskDetail {
@@ -18,7 +19,9 @@ pub struct HistoryTaskDetail {
     pub task_name: String,
     pub queue_name: String,
     pub priority: i32,
-    pub status: String,
+    /// Parsed at the read: a stored text that is not a task status is a
+    /// contract error of the read.
+    pub status: TaskStatus,
     pub terminalization_kind: String,
     pub terminal_at: DateTime<Utc>,
     pub retention_class_key: String,
@@ -190,16 +193,27 @@ pub async fn read_task_detail(
     }
 }
 
+/// The stored status of a history row as a `TaskStatus`; any other text is a
+/// contract error.
+fn history_status(task_id: Uuid, value: &str) -> Result<TaskStatus, HistoryError> {
+    value.parse::<TaskStatus>().map_err(|_| {
+        HistoryError::contract(format!(
+            "history row {task_id} has status {value:?}, which is not a task status"
+        ))
+    })
+}
+
 fn decode_history_detail(row: &sqlx::postgres::PgRow) -> Result<HistoryTaskDetail, HistoryError> {
     history_detail_from_wire(HistoryDetailWireRow::from_row(row)?)
 }
 
-/// The detail of a history row from its stored columns: decodes the attempt
-/// snapshot (digest first) and adds the codec and content type that the
-/// stored versions imply. Pure.
+/// The detail of a history row from its stored columns: reads the stored
+/// status as a `TaskStatus`, decodes the attempt snapshot (digest first) and
+/// adds the codec and content type that the stored versions imply. Pure.
 pub(crate) fn history_detail_from_wire(
     row: HistoryDetailWireRow,
 ) -> Result<HistoryTaskDetail, HistoryError> {
+    let status = history_status(row.task_id, &row.status)?;
     // Archive format version 1 implies the json-utf8 codec and the
     // application/json content type; the decode refuses any other version.
     let attempts = decode_attempt_snapshot(
@@ -216,7 +230,7 @@ pub(crate) fn history_detail_from_wire(
         task_name: row.task_name,
         queue_name: row.queue_name,
         priority: row.priority,
-        status: row.status,
+        status,
         terminalization_kind: row.terminalization_kind,
         terminal_at: row.terminal_at,
         retention_class_key: row.retention_class_key,

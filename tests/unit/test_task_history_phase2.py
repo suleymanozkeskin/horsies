@@ -13,21 +13,28 @@ import pytest
 from horsies.core.history.errors import HistoryContractError
 from horsies.core.history.phase2.consumption import (
     EVIDENCE_RETAINING_DISPOSITIONS,
-    PHASE2_CONSUME_FUNCTION_DDL,
-    PHASE2_DISPOSITION_TYPE_DDL,
-    consumption_fragments,
     decode_phase2_row,
 )
 from horsies.core.history.phase2.quarantine import (
     DRAINED_VERDICTS,
     KNOWN_QUARANTINE_VERDICTS,
-    PHASE2_QUARANTINE_FUNCTION_DDL,
     REFUSAL_VERDICTS,
     REPOINTED,
-    quarantine_fragments,
 )
+from tests.baseline_sql import baseline_function, baseline_sql, baseline_type
 
 pytestmark = [pytest.mark.unit]
+
+PHASE2_CONSUME_FUNCTION_DDL = baseline_function('horsies_phase2_consume')
+PHASE2_DISPOSITION_TYPE_DDL = baseline_type('horsies_phase2_disposition')
+PHASE2_QUARANTINE_FUNCTION_DDL = baseline_function('horsies_phase2_quarantine_one')
+
+
+def _created_before(type_name: str, function_name: str) -> bool:
+    sql = baseline_sql()
+    return sql.index(f'CREATE TYPE {type_name} AS') < sql.index(
+        f'CREATE FUNCTION {function_name}('
+    )
 
 
 class TestLockOrder:
@@ -35,7 +42,7 @@ class TestLockOrder:
         body = PHASE2_CONSUME_FUNCTION_DDL
         # The replay path (no pending) takes no locks; the main path's
         # acquisitions must follow the engine's documented invariant.
-        workflow_lock = body.index('FROM horsies_workflows w', body.index('N6'))
+        workflow_lock = body.index('FROM horsies_workflows w', body.index('Lock order:'))
         node_lock = body.index(
             'FROM horsies_workflow_tasks wt', workflow_lock
         )
@@ -51,7 +58,7 @@ class TestPrunedProbe:
     def test_history_read_carries_both_partition_keys(self) -> None:
         body = PHASE2_CONSUME_FUNCTION_DDL
         probe = body.index('h.retention_class_key = v_pending.history_class')
-        assert 'h.retention_anchor_at = v_pending.history_anchor' in body
+        assert 'h.terminal_at = v_pending.history_anchor' in body
         assert 'h.task_id = p_task_id' in body
         comment = body.index('NOT the rejected fan-out')
         assert comment < probe
@@ -76,10 +83,8 @@ class TestDispositionVocabulary:
         body = PHASE2_CONSUME_FUNCTION_DDL
         assert body.count('DELETE FROM horsies_workflow_phase2_pending') == 2
 
-    def test_fragment_order(self) -> None:
-        first, second = consumption_fragments()
-        assert 'CREATE TYPE' in first
-        assert 'CREATE FUNCTION' in second
+    def test_the_type_is_created_before_the_function(self) -> None:
+        assert _created_before('horsies_phase2_disposition', 'horsies_phase2_consume')
 
     def test_type_carries_the_progression_context(self) -> None:
         for column in (
@@ -114,7 +119,7 @@ class TestQuarantineLockPosture:
     def test_history_probe_carries_both_partition_keys(self) -> None:
         body = PHASE2_QUARANTINE_FUNCTION_DDL
         probe = body.index('h.retention_class_key = v_pending.history_class')
-        assert 'h.retention_anchor_at = v_pending.history_anchor' in body
+        assert 'h.terminal_at = v_pending.history_anchor' in body
         assert 'h.task_id = p_task_id' in body
         assert body.index('NOT the rejected fan-out') < probe
 
@@ -152,8 +157,8 @@ class TestQuarantineVocabulary:
         assert REFUSAL_VERDICTS < KNOWN_QUARANTINE_VERDICTS
         assert not DRAINED_VERDICTS & REFUSAL_VERDICTS
 
-    def test_fragment_order(self) -> None:
-        first, second = quarantine_fragments()
-        assert 'CREATE TYPE' in first
-        assert 'CREATE FUNCTION' in second
+    def test_the_type_is_created_before_the_function(self) -> None:
+        assert _created_before(
+            'horsies_phase2_quarantine_verdict', 'horsies_phase2_quarantine_one'
+        )
 

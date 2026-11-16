@@ -6,8 +6,8 @@
 -- Rules that hold for every function of this file:
 -- - Parameters and result columns have built-in types only, so the core's statement layer can bind and read them
 --   under PgBouncer transaction mode with no prepared-statement tracking. A function is called as
---   SELECT * FROM fn(...). A variant argument is a kind text plus the built-in columns of each kind. A JSON value in a
---   result column is text.
+--   SELECT * FROM fn(...). A variant argument is a kind text plus the built-in columns of each kind. The evidence of
+--   a refusal (observed_guard) is jsonb, as in every function that returns the shared outcome columns.
 -- - A malformed argument is refused with SQLSTATE 22023 (invalid_parameter_value) before any lock. An error message
 --   names no argument value, so a statement error carries no bound values.
 -- - Times that decide behaviour come from the database clock.
@@ -978,7 +978,7 @@ $$;
 --
 -- Locks: the task advisory lock, then the row by id alone (FOR UPDATE; the primary key serves it), then the move.
 -- A row that fails the fence stays locked for the miss classifier, which locks it by id too.
--- Returns one row of the shared outcome columns (ordinality NULL; observed_guard as JSON text).
+-- Returns one row of the shared outcome columns (ordinality NULL).
 -- Python: horsies_complete_task_fused (core/history/terminalization/move.py:678-763), its call
 -- (core/lifecycle/persistence.py:123-133), the plain success (core/worker/finalize.py:1384-1436).
 CREATE FUNCTION horsies_complete_task_fused(
@@ -997,7 +997,7 @@ CREATE FUNCTION horsies_complete_task_fused(
     observed_worker_id text,
     observed_claimed_at timestamp with time zone,
     guard_kind text,
-    observed_guard text
+    observed_guard jsonb
 )
     LANGUAGE plpgsql
     AS $$
@@ -1025,9 +1025,10 @@ BEGIN
     ) IS NOT TRUE THEN
         RETURN QUERY
         SELECT m.task_id, m.ordinality, m.outcome, m.terminal_at, m.terminalization_kind, m.observed_status,
-               m.observed_worker_id::text, m.observed_claimed_at, m.guard_kind, m.observed_guard::text
+               m.observed_worker_id::text, m.observed_claimed_at, m.guard_kind, m.observed_guard
         FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['COMPLETE_FUSED', 'COMPLETE_LOCKED']::text[], p_worker_id, p_claimed_at
+            p_task_id, ARRAY['COMPLETE_FUSED', 'COMPLETE_LOCKED']::text[], 'OWNER_AND_GENERATION', p_worker_id,
+            p_claimed_at
         ) AS m;
         RETURN;
     END IF;
@@ -1063,7 +1064,7 @@ BEGIN
     END IF;
     RETURN QUERY SELECT
         p_task_id, NULL::bigint, 'APPLIED'::text, v_terminal_at, 'COMPLETE_FUSED'::text,
-        'RUNNING'::text, v_ctx.claimed_by_worker_id::text, v_ctx.claimed_at, NULL::text, NULL::text;
+        'RUNNING'::text, v_ctx.claimed_by_worker_id::text, v_ctx.claimed_at, NULL::text, NULL::jsonb;
 END
 $$;
 
@@ -1096,7 +1097,7 @@ CREATE FUNCTION horsies_complete_tasks_fused(
     observed_worker_id text,
     observed_claimed_at timestamp with time zone,
     guard_kind text,
-    observed_guard text
+    observed_guard jsonb
 )
     LANGUAGE plpgsql
     AS $$
@@ -1169,7 +1170,7 @@ CREATE FUNCTION horsies_finish_workflow_success(
     observed_worker_id text,
     observed_claimed_at timestamp with time zone,
     guard_kind text,
-    observed_guard text,
+    observed_guard jsonb,
     queue_name text,
     task_name text,
     node_has_dependents boolean,
@@ -1205,15 +1206,17 @@ BEGIN
     ) IS NOT TRUE THEN
         RETURN QUERY
         SELECT m.task_id, m.ordinality, m.outcome, m.terminal_at, m.terminalization_kind, m.observed_status,
-               m.observed_worker_id::text, m.observed_claimed_at, m.guard_kind, m.observed_guard::text,
+               m.observed_worker_id::text, m.observed_claimed_at, m.guard_kind, m.observed_guard,
                NULL::text, NULL::text, NULL::boolean, NULL::text
         FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['COMPLETE_FUSED', 'COMPLETE_LOCKED']::text[], p_worker_id, p_claimed_at
+            p_task_id, ARRAY['COMPLETE_FUSED', 'COMPLETE_LOCKED']::text[], 'OWNER_AND_GENERATION', p_worker_id,
+            p_claimed_at
         ) AS m;
         RETURN;
     END IF;
     IF NOT v_ctx.is_workflow_task THEN
-        RAISE EXCEPTION 'horsies_finish_workflow_success: a plain task finishes with horsies_complete_task_fused'
+        RAISE EXCEPTION
+            'horsies_finish_workflow_success: the task is not a workflow task; its success is the fused completion'
             USING ERRCODE = 'invalid_parameter_value';
     END IF;
 
@@ -1245,7 +1248,7 @@ BEGIN
     );
     RETURN QUERY SELECT
         p_task_id, NULL::bigint, 'APPLIED'::text, v_terminal_at, 'COMPLETE_LOCKED'::text,
-        'RUNNING'::text, v_ctx.claimed_by_worker_id::text, v_ctx.claimed_at, NULL::text, NULL::text,
+        'RUNNING'::text, v_ctx.claimed_by_worker_id::text, v_ctx.claimed_at, NULL::text, NULL::jsonb,
         v_ctx.queue_name::text, v_ctx.task_name::text, horsies_node_has_dependents(p_task_id),
         horsies_node_downstream_subworkflow(p_task_id);
 END
@@ -1317,7 +1320,7 @@ CREATE FUNCTION horsies_finish_failed_attempt(
     observed_worker_id text,
     observed_claimed_at timestamp with time zone,
     guard_kind text,
-    observed_guard text,
+    observed_guard jsonb,
     retry_disposition text,
     retry_count integer,
     next_retry_at timestamp with time zone,
@@ -1414,7 +1417,7 @@ BEGIN
         WHERE t.id = p_task_id;
         RETURN QUERY SELECT
             p_task_id, NULL::bigint, 'RELEASED'::text, NULL::timestamptz, NULL::text,
-            'CLAIMED'::text, v_ctx.claimed_by_worker_id::text, v_ctx.claimed_at, NULL::text, NULL::text,
+            'CLAIMED'::text, v_ctx.claimed_by_worker_id::text, v_ctx.claimed_at, NULL::text, NULL::jsonb,
             NULL::text, NULL::integer, NULL::timestamptz, NULL::timestamptz,
             NULL::boolean, v_ctx.queue_name::text, NULL::text, NULL::boolean, NULL::text;
         RETURN;
@@ -1428,11 +1431,11 @@ BEGIN
     ) IS NOT TRUE THEN
         RETURN QUERY
         SELECT m.task_id, m.ordinality, m.outcome, m.terminal_at, m.terminalization_kind, m.observed_status,
-               m.observed_worker_id::text, m.observed_claimed_at, m.guard_kind, m.observed_guard::text,
+               m.observed_worker_id::text, m.observed_claimed_at, m.guard_kind, m.observed_guard,
                NULL::text, NULL::integer, NULL::timestamptz, NULL::timestamptz,
                NULL::boolean, NULL::text, NULL::text, NULL::boolean, NULL::text
         FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['FAIL_RUNNING']::text[], p_worker_id, p_claimed_at
+            p_task_id, ARRAY['FAIL_RUNNING']::text[], 'OWNER_AND_GENERATION', p_worker_id, p_claimed_at
         ) AS m;
         RETURN;
     END IF;
@@ -1491,7 +1494,7 @@ BEGIN
         WHERE t.id = p_task_id;
         RETURN QUERY SELECT
             p_task_id, NULL::bigint, 'RETRY_SCHEDULED'::text, NULL::timestamptz, NULL::text,
-            'RUNNING'::text, v_ctx.claimed_by_worker_id::text, v_ctx.claimed_at, NULL::text, NULL::text,
+            'RUNNING'::text, v_ctx.claimed_by_worker_id::text, v_ctx.claimed_at, NULL::text, NULL::jsonb,
             NULL::text, v_ctx.retry_count + 1, v_next_retry_at, NULL::timestamptz,
             NULL::boolean, v_ctx.queue_name::text, NULL::text, NULL::boolean, NULL::text;
         RETURN;
@@ -1506,7 +1509,7 @@ BEGIN
     END IF;
     RETURN QUERY SELECT
         p_task_id, NULL::bigint, 'APPLIED'::text, v_terminal_at, 'FAIL_RUNNING'::text,
-        'RUNNING'::text, v_ctx.claimed_by_worker_id::text, v_ctx.claimed_at, NULL::text, NULL::text,
+        'RUNNING'::text, v_ctx.claimed_by_worker_id::text, v_ctx.claimed_at, NULL::text, NULL::jsonb,
         v_retry_disposition, NULL::integer, v_next_retry_at, v_good_until,
         v_ctx.is_workflow_task, v_ctx.queue_name::text, v_ctx.task_name::text,
         CASE WHEN v_ctx.is_workflow_task THEN horsies_node_has_dependents(p_task_id) END,
@@ -1642,7 +1645,7 @@ CREATE FUNCTION horsies_finish_stale_attempt(
     observed_worker_id text,
     observed_claimed_at timestamp with time zone,
     guard_kind text,
-    observed_guard text,
+    observed_guard jsonb,
     retry_disposition text,
     retry_count integer,
     next_retry_at timestamp with time zone,
@@ -1722,11 +1725,11 @@ BEGIN
     IF NOT FOUND OR v_ctx.status <> 'RUNNING' THEN
         RETURN QUERY
         SELECT m.task_id, m.ordinality, m.outcome, m.terminal_at, m.terminalization_kind, m.observed_status,
-               m.observed_worker_id::text, m.observed_claimed_at, m.guard_kind, m.observed_guard::text,
+               m.observed_worker_id::text, m.observed_claimed_at, m.guard_kind, m.observed_guard,
                NULL::text, NULL::integer, NULL::timestamptz, NULL::timestamptz,
                NULL::boolean, NULL::text, NULL::text, NULL::boolean, NULL::text
         FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['FAIL_STALE']::text[], NULL::text, NULL::timestamptz
+            p_task_id, ARRAY['FAIL_STALE']::text[], 'NONE', NULL::text, NULL::timestamptz
         ) AS m;
         RETURN;
     END IF;
@@ -1750,7 +1753,7 @@ BEGIN
                 'stale_after_ms', p_stale_after_ms,
                 'finalizing_stale_after_ms', p_finalizing_stale_after_ms,
                 'evaluated_at', v_ctx.evaluated_at
-            )::text,
+            ),
             NULL::text, NULL::integer, NULL::timestamptz, NULL::timestamptz,
             NULL::boolean, NULL::text, NULL::text, NULL::boolean, NULL::text;
         RETURN;
@@ -1763,7 +1766,7 @@ BEGIN
             jsonb_build_object(
                 'expected_retry_count', p_expected_retry_count,
                 'retry_count', v_ctx.retry_count
-            )::text,
+            ),
             NULL::text, NULL::integer, NULL::timestamptz, NULL::timestamptz,
             NULL::boolean, NULL::text, NULL::text, NULL::boolean, NULL::text;
         RETURN;
@@ -1822,7 +1825,7 @@ BEGIN
         WHERE t.id = p_task_id;
         RETURN QUERY SELECT
             p_task_id, NULL::bigint, 'RETRY_SCHEDULED'::text, NULL::timestamptz, NULL::text,
-            'RUNNING'::text, v_ctx.claimed_by_worker_id::text, v_ctx.claimed_at, NULL::text, NULL::text,
+            'RUNNING'::text, v_ctx.claimed_by_worker_id::text, v_ctx.claimed_at, NULL::text, NULL::jsonb,
             NULL::text, v_ctx.retry_count + 1, v_next_retry_at, NULL::timestamptz,
             NULL::boolean, v_ctx.queue_name::text, NULL::text, NULL::boolean, NULL::text;
         RETURN;
@@ -1834,7 +1837,7 @@ BEGIN
     );
     RETURN QUERY SELECT
         p_task_id, NULL::bigint, 'APPLIED'::text, v_terminal_at, 'FAIL_STALE'::text,
-        'RUNNING'::text, v_ctx.claimed_by_worker_id::text, v_ctx.claimed_at, NULL::text, NULL::text,
+        'RUNNING'::text, v_ctx.claimed_by_worker_id::text, v_ctx.claimed_at, NULL::text, NULL::jsonb,
         v_retry_disposition, NULL::integer, v_next_retry_at, v_good_until,
         v_ctx.is_workflow_task, v_ctx.queue_name::text, v_ctx.task_name::text,
         CASE WHEN v_ctx.is_workflow_task THEN horsies_node_has_dependents(p_task_id) END,
@@ -2054,7 +2057,7 @@ CREATE FUNCTION horsies_cancel_task(p_task_id uuid, p_include_running boolean) R
     observed_worker_id text,
     observed_claimed_at timestamp with time zone,
     guard_kind text,
-    observed_guard text
+    observed_guard jsonb
 )
     LANGUAGE plpgsql
     AS $$
@@ -2081,7 +2084,7 @@ BEGIN
         IF NOT v_provenance.found THEN
             RETURN QUERY SELECT
                 p_task_id, NULL::bigint, 'TASK_ABSENT'::text, NULL::timestamptz, NULL::text,
-                NULL::text, NULL::text, NULL::timestamptz, NULL::text, NULL::text;
+                NULL::text, NULL::text, NULL::timestamptz, NULL::text, NULL::jsonb;
             RETURN;
         END IF;
         IF v_provenance.location <> 'HISTORY' THEN
@@ -2096,7 +2099,7 @@ BEGIN
             -- The leaf that held the row was dropped between the two reads.
             RETURN QUERY SELECT
                 p_task_id, NULL::bigint, 'TASK_ABSENT'::text, NULL::timestamptz, NULL::text,
-                NULL::text, NULL::text, NULL::timestamptz, NULL::text, NULL::text;
+                NULL::text, NULL::text, NULL::timestamptz, NULL::text, NULL::jsonb;
             RETURN;
         END IF;
         RETURN QUERY SELECT
@@ -2113,7 +2116,7 @@ BEGIN
                 WHEN v_provenance.terminalization_kind = 'CANCEL_ADMIN' THEN NULL
                 ELSE 'FOREIGN_TERMINALIZATION'
             END::text,
-            NULL::text;
+            NULL::jsonb;
         RETURN;
     END IF;
 
@@ -2121,13 +2124,13 @@ BEGIN
         RETURN QUERY SELECT
             p_task_id, NULL::bigint, 'SOURCE_STATE_CONFLICT'::text, NULL::timestamptz, NULL::text,
             v_task.status::text, v_task.claimed_by_worker_id::text, v_task.claimed_at, 'WORKFLOW_TASK'::text,
-            NULL::text;
+            NULL::jsonb;
         RETURN;
     END IF;
     IF NOT (v_task.status IN ('PENDING', 'CLAIMED') OR (p_include_running AND v_task.status = 'RUNNING')) THEN
         RETURN QUERY SELECT
             p_task_id, NULL::bigint, 'SOURCE_STATE_CONFLICT'::text, NULL::timestamptz, NULL::text,
-            v_task.status::text, v_task.claimed_by_worker_id::text, v_task.claimed_at, NULL::text, NULL::text;
+            v_task.status::text, v_task.claimed_by_worker_id::text, v_task.claimed_at, NULL::text, NULL::jsonb;
         RETURN;
     END IF;
 
@@ -2137,6 +2140,6 @@ BEGIN
     );
     RETURN QUERY SELECT
         p_task_id, NULL::bigint, 'APPLIED'::text, v_terminal_at, 'CANCEL_ADMIN'::text,
-        v_task.status::text, v_task.claimed_by_worker_id::text, v_task.claimed_at, NULL::text, NULL::text;
+        v_task.status::text, v_task.claimed_by_worker_id::text, v_task.claimed_at, NULL::text, NULL::jsonb;
 END
 $$;

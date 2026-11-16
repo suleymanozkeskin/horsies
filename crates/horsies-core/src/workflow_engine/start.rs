@@ -11,7 +11,6 @@ use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::history::enqueue::{prepare_workflow_task_facts, WorkflowTaskFacts};
-use crate::core::task::retry_utils::parse_max_retries;
 use crate::core::workflow::node::SubWorkflowParams;
 use crate::core::{
     AnyNode, ErrorCategory, HorsiesError, OnError, OperationalErrorCode, TaskError, WorkflowSpec,
@@ -21,9 +20,9 @@ use crate::core::{
 use crate::db::CheckoutClass;
 use crate::workflow_engine::bound_handle::WorkflowHandle;
 use crate::workflow_engine::error::WorkflowError;
-use crate::workflow_engine::parse_good_until_from_options;
 use crate::workflow_engine::start_statement::{start_arguments, start_tree, StartOutcome};
 use crate::workflow_engine::steps::{advance_parents, ChildBuild};
+use crate::workflow_engine::{node_good_until, node_max_retries};
 
 // ---------------------------------------------------------------------------
 // SQL constants
@@ -42,6 +41,7 @@ VALUES ($1::uuid, $2, 'RUNNING', $3, $4, $5, $6, $7::uuid, $8, $9, $10::uuid,
 
 // An engine-minted task row carries no command fingerprint, no idempotency
 // key and no retained input (horsies_tasks_command_fingerprint_by_origin).
+// `sent_at` ($11) is the start call time of the node's workflow.
 const ENQUEUE_ROOT_TASK_SQL: &str = "\
 INSERT INTO horsies_tasks (
     id, task_name, queue_name, priority, input, task_options, execution,
@@ -51,7 +51,7 @@ INSERT INTO horsies_tasks (
     is_workflow_task, updated_at,
     retain_rerun_input, rerun_of_task_id, rerun_root_task_id
 )
-VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), NULL, NULL, NULL,
+VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $11, NOW(), NULL, NULL, NULL,
         'PENDING', NOW(), 0, $9, $10, TRUE, NOW(), FALSE, NULL, NULL)";
 
 /// A node's `started_at` is its enqueue time (Python `ENQUEUE_WORKFLOW_TASK_SQL`,
@@ -122,8 +122,8 @@ pub(crate) fn node_task_facts(
     )
     .map_err(|error| WorkflowError::Validation(error.to_string()))?;
     Ok(NodeTaskFacts {
-        max_retries: parse_max_retries(merged_task_options),
-        good_until: parse_good_until_from_options(merged_task_options),
+        max_retries: node_max_retries(node.index, &node.task_name, merged_task_options)?,
+        good_until: node_good_until(node.index, &node.task_name, merged_task_options)?,
         facts,
     })
 }
@@ -624,11 +624,15 @@ fn resolve_insert_priority(node: &AnyNode) -> Result<i32, WorkflowError> {
 /// and immediately enqueued into horsies_tasks. Root sub-workflow nodes
 /// are detected and launched as child workflows.
 ///
+/// `workflow_sent_at` is the start call time of the workflow (its stored `sent_at`); every root task row
+/// stores it as its own `sent_at`.
+///
 /// Returns a boxed future because this function is mutually recursive with
 /// `launch_root_subworkflow` → `start_child_workflow_in_tx`.
 fn insert_workflow_tasks<'a>(
     tx: &'a mut sqlx::Transaction<'_, sqlx::Postgres>,
     workflow_id: Uuid,
+    workflow_sent_at: DateTime<Utc>,
     tasks: &'a [AnyNode],
     registry: &'a WorkflowSpecRegistry,
     retention: &'a RetentionConfig,
@@ -647,9 +651,11 @@ fn insert_workflow_tasks<'a>(
 
             // Merge good_until into task_options_json (mirrors Python's lifecycle.py).
             let merged_task_options = crate::workflow_engine::merge_good_until_into_options(
+                task.index,
+                &task.task_name,
                 task.good_until,
                 task.task_options_json.as_deref(),
-            );
+            )?;
 
             let args_from_json = if task.args_from.is_empty() {
                 None
@@ -820,12 +826,13 @@ fn insert_workflow_tasks<'a>(
                     .push_bind(p.node.input_json.clone())
                     .push_bind(p.merged_task_options.clone())
                     .push_bind(task_facts.facts.execution.as_str())
-                    .push_bind(task_facts.facts.retention_class_key.clone());
-                // sent_at, created_at, the fingerprint pair and the key digest,
-                // status, enqueued_at, retry_count as literals — NOW() is
+                    .push_bind(task_facts.facts.retention_class_key.clone())
+                    // sent_at: the start call time of the workflow.
+                    .push_bind(workflow_sent_at);
+                // created_at, the fingerprint pair and the key digest, status,
+                // enqueued_at, retry_count as literals — NOW() is
                 // transaction-stable, so claim ordering matches the per-row shape.
                 b.push("NOW()")
-                    .push("NOW()")
                     .push("NULL")
                     .push("NULL")
                     .push("NULL")
@@ -859,6 +866,7 @@ fn insert_workflow_tasks<'a>(
                     p.priority,
                     p.merged_task_options.as_deref(),
                     retention,
+                    workflow_sent_at,
                 )
                 .await?;
                 sqlx::query(LINK_WORKFLOW_TASK_SQL)
@@ -882,7 +890,8 @@ fn insert_workflow_tasks<'a>(
 }
 
 /// Create a horsies_tasks row for a root workflow task.
-/// Returns the task_id.
+/// Returns the task_id. `workflow_sent_at` is the start call time of the node's workflow, which the row
+/// stores as its `sent_at`.
 async fn enqueue_root_task(
     executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
     node: &AnyNode,
@@ -890,6 +899,7 @@ async fn enqueue_root_task(
     priority: i32,
     merged_task_options: Option<&str>,
     retention: &RetentionConfig,
+    workflow_sent_at: DateTime<Utc>,
 ) -> Result<Uuid, WorkflowError> {
     let task_id = crate::core::history::identity::uuid7::mint_task_id().map_err(|error| {
         WorkflowError::Validation(format!("task identity mint failed: {error}"))
@@ -907,6 +917,7 @@ async fn enqueue_root_task(
         .bind(&task_facts.facts.retention_class_key)
         .bind(task_facts.max_retries)
         .bind(task_facts.good_until)
+        .bind(workflow_sent_at)
         .execute(executor)
         .await?;
 
@@ -1045,7 +1056,7 @@ pub async fn start_child_workflow_in_tx(
     );
 
     // Insert all workflow_task rows and enqueue roots within same tx.
-    insert_workflow_tasks(tx, child_id, &spec.tasks, registry, retention).await?;
+    insert_workflow_tasks(tx, child_id, sent_at, &spec.tasks, registry, retention).await?;
 
     Ok(child_id)
 }
@@ -1104,10 +1115,11 @@ pub(crate) fn stored_sub_workflow_params(
     }
 }
 
-/// The Python exception class that names a failed child build in the node error: Python's
-/// `type(exc).__name__` (`core/workflows/engine.py:1196-1211`). A [`HorsiesError`] takes the class of
-/// its error category, the subclass of Python's `HorsiesError` that the category stands for
-/// ([`ErrorCategory`]); an error with no code takes the base class.
+/// What names a failed child build in the node error. A builder failure takes the Python exception
+/// class, Python's `type(exc).__name__` (`core/workflows/engine.py:1196-1211`): a [`HorsiesError`]
+/// takes the class of its error category, the subclass of Python's `HorsiesError` that the category
+/// stands for ([`ErrorCategory`]); an error with no code takes the base class. A stored node input
+/// that the core refuses ([`Self::StoredInputRefused`]) names no class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ChildSpecErrorType {
     /// A [`HorsiesError`] with no error code.
@@ -1123,6 +1135,11 @@ pub(crate) enum ChildSpecErrorType {
     /// A node that gives params to a child registered without a builder. Python raises
     /// `RuntimeError` for the same node (`core/workflows/engine.py:1185-1189`).
     RuntimeError,
+    /// A stored node input from which the core cannot make the builder input
+    /// ([`child_builder_input`](crate::workflow_engine::args_merge::child_builder_input)): the text
+    /// does not read, or an `args_from` entry is malformed. Python has no such case: its builder
+    /// gets typed values, and the stored input is corrupt data, not a user error.
+    StoredInputRefused,
 }
 
 impl ChildSpecErrorType {
@@ -1137,7 +1154,8 @@ impl ChildSpecErrorType {
         }
     }
 
-    /// The class name, as Python's `type(exc).__name__` gives it.
+    /// The label before the text in the node error: the class name, as Python's
+    /// `type(exc).__name__` gives it, or `stored node input refused`, which is no class.
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::HorsiesError => "HorsiesError",
@@ -1146,12 +1164,14 @@ impl ChildSpecErrorType {
             Self::ConfigurationError => "ConfigurationError",
             Self::RegistryError => "RegistryError",
             Self::RuntimeError => "RuntimeError",
+            Self::StoredInputRefused => "stored node input refused",
         }
     }
 }
 
-/// Why a registered child gave no spec: the exception class and the text, as Python's
-/// `type(exc).__name__` and `str(exc)` (`core/workflows/engine.py:1196-1211`).
+/// Why a registered child gave no spec: the label and the text. For a builder failure they are
+/// Python's `type(exc).__name__` and `str(exc)` (`core/workflows/engine.py:1196-1211`); for a
+/// refused stored input, `stored node input refused` and the refusal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ChildSpecError {
     pub(crate) error_type: ChildSpecErrorType,
@@ -1168,9 +1188,17 @@ impl ChildSpecError {
             text: error.to_string(),
         }
     }
+
+    /// A stored node input from which the builder input cannot be made. Pure.
+    fn of_stored_input(refused: crate::workflow_engine::args_merge::StoredInputRefused) -> Self {
+        Self {
+            error_type: ChildSpecErrorType::StoredInputRefused,
+            text: refused.refusal,
+        }
+    }
 }
 
-/// A child build that fails on a path that refuses the step instead of failing the node: the class and
+/// A child build that fails on a path that refuses the step instead of failing the node: the label and
 /// the text in one validation message.
 impl From<ChildSpecError> for WorkflowError {
     fn from(error: ChildSpecError) -> Self {
@@ -1182,9 +1210,14 @@ impl From<ChildSpecError> for WorkflowError {
 /// as the client encoded it). A child registered without a `spec_builder`
 /// refuses a node that gives params (`SubWorkflowParams::Given`).
 ///
+/// The builder takes the input with each `args_from` entry replaced by its
+/// `inner` result envelope.
+///
 /// Errors: [`ChildSpecError`] when the builder fails, when the built spec does
-/// not pass the registry's check, or for params given to a child without a
-/// builder ([`ChildSpecErrorType::RuntimeError`]). Does no I/O; it runs the
+/// not pass the registry's check, for params given to a child without a
+/// builder ([`ChildSpecErrorType::RuntimeError`]), or for a stored input from
+/// which the builder input cannot be made
+/// ([`ChildSpecErrorType::StoredInputRefused`]). Does no I/O; it runs the
 /// registered builder.
 pub(crate) fn materialize_child_spec(
     resolved: crate::core::registry::workflow::ResolvedChildWorkflow<'_>,
@@ -1192,6 +1225,9 @@ pub(crate) fn materialize_child_spec(
     input_json: &str,
     registry: &WorkflowSpecRegistry,
 ) -> Result<WorkflowSpec, ChildSpecError> {
+    let builder_input = crate::workflow_engine::args_merge::child_builder_input(input_json)
+        .map_err(ChildSpecError::of_stored_input)?;
+    let input_json = builder_input.as_str();
     match resolved {
         crate::core::registry::workflow::ResolvedChildWorkflow::Dynamic(registered) => {
             built_child_spec(&registered.spec_builder, input_json, registry)
@@ -1532,6 +1568,52 @@ mod tests {
         }
     }
 
+    /// A stored input with an `args_from` entry that has no `inner` is a refused stored input: the
+    /// builder does not run, and the node fails with `WORKFLOW_ENQUEUE_FAILED` and the refusal.
+    #[test]
+    fn a_stored_input_with_a_malformed_entry_is_a_refused_stored_input() {
+        let builder: crate::core::SpecBuilderFn =
+            Arc::new(|_input: &str| -> Result<WorkflowSpec, HorsiesError> {
+                panic!("the builder does not run for a refused stored input")
+            });
+        let mut registry = WorkflowSpecRegistry::new();
+        let mut registered = child_registered_static();
+        registered.spec_builder = Some(builder);
+        registry.register(registered).unwrap();
+        let resolved = registry
+            .resolve_child_registration("tests.child_static.v1")
+            .expect("the child is registered");
+        let input = r#"{"value": {"__h_taskresult_envelope__": true, "source_task_name": "t"}}"#;
+
+        let failure = materialize_child_spec(resolved, SubWorkflowParams::Given, input, &registry)
+            .unwrap_err();
+
+        assert_eq!(failure.error_type, ChildSpecErrorType::StoredInputRefused);
+        assert_eq!(
+            failure.text,
+            "args_from envelope for kwarg 'value' has no inner result"
+        );
+        let workflow_id = Uuid::new_v4();
+        let error = crate::workflow_engine::start_statement::build_failed_error(
+            workflow_id,
+            "parent_workflow",
+            3,
+            &failure,
+        );
+        assert_eq!(error.error_code.to_string(), "WORKFLOW_ENQUEUE_FAILED");
+        assert_eq!(
+            error.message.as_deref(),
+            Some(
+                "Subworkflow build failed: stored node input refused: args_from envelope for \
+                 kwarg 'value' has no inner result (workflow parent_workflow:3)"
+            )
+        );
+        assert_eq!(
+            error.data,
+            Some(serde_json::json!({"workflow_id": workflow_id.to_string(), "task_index": 3}))
+        );
+    }
+
     /// A start through a handle of the other client family is refused before its first write:
     /// `ENQUEUE_FAILED`, not retryable, and no workflow row.
     #[tokio::test]
@@ -1611,9 +1693,213 @@ mod tests {
         assert!(require_definition_key(&keyed_spec(Some("tests.keyed.v1"), vec![keyed])).is_ok());
     }
 
-    /// A root node that the start enqueues holds its enqueue time as `started_at`: a root with no
-    /// context source and a root that names one. `horsies_workflow_start` writes the node and mints its
-    /// task row in one statement, so the time equals `enqueued_at` of the node's task row.
+    /// Python refuses a node whose stored retry policy does not validate, and the start's transaction rolls
+    /// back (`horsies/core/workflows/lifecycle.py:152-203`, `root_retry_and_deadline`; the reader is
+    /// `stored_max_retries`, `horsies/core/codec/task_options.py:80-103`). Each options text here is a JSON
+    /// object, so `prepare_workflow_task_facts` accepts it; only the retry limit refuses it. A reader that
+    /// guesses a limit (3 for a policy without an integer `max_retries`) lets the start write its rows, and
+    /// passes 21 on to the baseline CHECK (`max_retries BETWEEN 0 AND 20`) as a database error.
+    #[tokio::test]
+    #[serial]
+    async fn a_node_whose_retry_policy_does_not_fit_is_refused_before_any_row() {
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+        let task_name = "start_refused_retry_policy_node";
+        let exponential = |max_retries: &str| {
+            format!(
+                r#"{{"retry_policy": {{"max_retries": {max_retries}, "intervals": [60],
+                    "backoff_strategy": "exponential", "jitter": true, "auto_retry_for": ["X"]}}}}"#
+            )
+        };
+        let cases = [
+            (
+                "no max_retries",
+                r#"{"retry_policy": {"backoff_strategy": "exponential"}}"#.to_owned(),
+            ),
+            ("max_retries is text", exponential("\"5\"")),
+            ("max_retries above 20", exponential("21")),
+            ("policy is a number", r#"{"retry_policy": 5}"#.to_owned()),
+        ];
+        for (case, options) in cases {
+            let mut root = node_with(false, Some(17));
+            root.task_name = task_name.to_owned();
+            root.task_options_json = Some(options);
+            let spec = keyed_spec(Some("tests.start.refused_retry_policy.v1"), vec![root]);
+            let workflow_id = Uuid::new_v4();
+
+            let started = start_workflow::<serde_json::Value>(
+                &broker,
+                &spec,
+                Some(workflow_id),
+                &WorkflowSpecRegistry::new(),
+                &PayloadPolicy::default(),
+                &RetentionConfig::default(),
+            )
+            .await;
+
+            let refused = match started {
+                Ok(_) => panic!("{case}: the start must be refused"),
+                Err(refused) => refused,
+            };
+            assert_eq!(
+                refused.code,
+                WorkflowStartErrorCode::ValidationFailed,
+                "{case}"
+            );
+            assert!(!refused.retryable, "{case}");
+            assert!(
+                refused.message.contains(&format!(
+                    "task_options of workflow node 0 ({task_name}) refused"
+                )),
+                "{case}: {}",
+                refused.message
+            );
+            let rows: (i64, i64, i64) = sqlx::query_as(
+                "SELECT (SELECT count(*) FROM horsies_workflows WHERE id = $1),
+                        (SELECT count(*) FROM horsies_workflow_tasks WHERE workflow_id = $1),
+                        (SELECT count(*) FROM horsies_tasks WHERE task_name = $2)",
+            )
+            .bind(workflow_id)
+            .bind(task_name)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(rows, (0, 0, 0), "{case}");
+        }
+    }
+
+    /// Python raises when a node's options are not a JSON object and the start rolls back
+    /// (`horsies/core/workflows/lifecycle.py:576-604`); a deadline the database cannot read fails the
+    /// insert. The core refuses both before any row: options that do not read are not replaced when a
+    /// deadline is merged in, and a stored `good_until` that is not an RFC 3339 text is not read as no
+    /// deadline.
+    #[tokio::test]
+    #[serial]
+    async fn a_node_whose_options_or_deadline_do_not_read_is_refused_before_any_row() {
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+        let task_name = "start_refused_deadline_node";
+        let deadline = chrono::Utc::now() + chrono::Duration::hours(1);
+        let cases = [
+            (
+                "options are a list, with a node deadline",
+                Some(deadline),
+                "[1]",
+            ),
+            (
+                "good_until is not a time",
+                None,
+                r#"{"good_until": "not-a-date"}"#,
+            ),
+            ("good_until is a number", None, r#"{"good_until": 12345}"#),
+        ];
+        for (case, good_until, options) in cases {
+            let mut root = node_with(false, Some(17));
+            root.task_name = task_name.to_owned();
+            root.good_until = good_until;
+            root.task_options_json = Some(options.to_owned());
+            let spec = keyed_spec(Some("tests.start.refused_deadline.v1"), vec![root]);
+            let workflow_id = Uuid::new_v4();
+
+            let started = start_workflow::<serde_json::Value>(
+                &broker,
+                &spec,
+                Some(workflow_id),
+                &WorkflowSpecRegistry::new(),
+                &PayloadPolicy::default(),
+                &RetentionConfig::default(),
+            )
+            .await;
+
+            let refused = match started {
+                Ok(_) => panic!("{case}: the start must be refused"),
+                Err(refused) => refused,
+            };
+            assert_eq!(
+                refused.code,
+                WorkflowStartErrorCode::ValidationFailed,
+                "{case}"
+            );
+            assert!(!refused.retryable, "{case}");
+            assert!(
+                refused.message.contains(&format!(
+                    "task_options of workflow node 0 ({task_name}) refused"
+                )),
+                "{case}: {}",
+                refused.message
+            );
+            let rows: (i64, i64, i64) = sqlx::query_as(
+                "SELECT (SELECT count(*) FROM horsies_workflows WHERE id = $1),
+                        (SELECT count(*) FROM horsies_workflow_tasks WHERE workflow_id = $1),
+                        (SELECT count(*) FROM horsies_tasks WHERE task_name = $2)",
+            )
+            .bind(workflow_id)
+            .bind(task_name)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(rows, (0, 0, 0), "{case}");
+        }
+    }
+
+    /// A node whose retry policy fits stores its `max_retries` on the node row and on its task row, from
+    /// the same reader as a task row (Python `stored_max_retries`).
+    #[tokio::test]
+    #[serial]
+    async fn a_node_whose_retry_policy_fits_stores_its_limit_on_both_rows() {
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+        let mut root = node_with(false, Some(17));
+        root.task_name = "start_fitting_retry_policy_node".to_owned();
+        root.task_options_json = Some(
+            r#"{"retry_policy": {"max_retries": 4, "intervals": [60],
+                "backoff_strategy": "exponential", "jitter": true, "auto_retry_for": ["X"]}}"#
+                .to_owned(),
+        );
+        let spec = keyed_spec(Some("tests.start.fitting_retry_policy.v1"), vec![root]);
+        let workflow_id = Uuid::new_v4();
+
+        let _: WorkflowHandle<serde_json::Value> = start_workflow(
+            &broker,
+            &spec,
+            Some(workflow_id),
+            &WorkflowSpecRegistry::new(),
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await
+        .expect("start a workflow whose node policy fits");
+
+        let limits: (i32, i32) = sqlx::query_as(
+            "SELECT wt.max_retries, t.max_retries
+             FROM horsies_workflow_tasks wt
+             JOIN horsies_tasks t ON t.id = wt.task_id
+             WHERE wt.workflow_id = $1 AND wt.task_index = 0",
+        )
+        .bind(workflow_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "DELETE FROM horsies_tasks WHERE id IN (
+                SELECT task_id FROM horsies_workflow_tasks WHERE workflow_id = $1
+             )",
+        )
+        .bind(workflow_id)
+        .execute(&pool)
+        .await
+        .ok();
+        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+            .bind(workflow_id)
+            .execute(&pool)
+            .await
+            .ok();
+        assert_eq!(limits, (4, 4));
+    }
+
+    /// A root node that the start enqueues holds its enqueue time as `started_at`: a root that names no
+    /// context source and a root that names one. The start statement writes both node rows and their task
+    /// rows, so the time equals `enqueued_at` of the node's task row.
     #[tokio::test]
     #[serial]
     async fn an_enqueued_root_node_holds_its_enqueue_time() {
@@ -1802,9 +2088,17 @@ mod tests {
         )
         .await
         .expect("start workflow with fast-path root");
-        let slow_id = enqueue_root_task(&pool, &root, "bulk", 17, None, &retention)
-            .await
-            .expect("enqueue slow-path workflow root");
+        let slow_id = enqueue_root_task(
+            &pool,
+            &root,
+            "bulk",
+            17,
+            None,
+            &retention,
+            chrono::Utc::now(),
+        )
+        .await
+        .expect("enqueue slow-path workflow root");
 
         let rows: Vec<(String, String, Option<i32>, Option<i16>, bool)> = sqlx::query_as(
             "SELECT id::text, retention_class_key,
@@ -1825,6 +2119,79 @@ mod tests {
             assert!(!row.4);
             assert_eq!(Uuid::parse_str(&row.0).unwrap().get_version_num(), 7);
         }
+    }
+
+    /// A root task row stores the start call time of its workflow as `sent_at`, on the fast path (bulk
+    /// insert) and on the slow path (`enqueue_root_task`), not the time the engine built the row.
+    #[tokio::test]
+    #[serial]
+    async fn a_root_task_row_stores_the_start_call_time_of_its_workflow() {
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let task_name = "sent_at_root_task";
+        sqlx::query("DELETE FROM horsies_tasks WHERE task_name = $1")
+            .bind(task_name)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut root = node_with(false, Some(17));
+        root.task_name = task_name.to_owned();
+        let spec = keyed_spec(Some("tests.sent_at.root.v1"), vec![root.clone()]);
+        let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+        let workflow_id = Uuid::new_v4();
+        let started = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .expect("fixed start call time")
+            .with_timezone(&chrono::Utc);
+
+        let _: WorkflowHandle<serde_json::Value> = start_workflow_attempt(
+            &broker,
+            &spec,
+            workflow_id,
+            started,
+            &WorkflowSpecRegistry::new(),
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await
+        .expect("start workflow with a fast-path root");
+        let slow_id = enqueue_root_task(
+            &pool,
+            &root,
+            "default",
+            17,
+            None,
+            &RetentionConfig::default(),
+            started,
+        )
+        .await
+        .expect("enqueue a slow-path workflow root");
+
+        let stored: Vec<(Uuid, chrono::DateTime<chrono::Utc>)> =
+            sqlx::query_as("SELECT id, sent_at FROM horsies_tasks WHERE task_name = $1")
+                .bind(task_name)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored.len(), 2, "{stored:?}");
+        assert!(stored.iter().any(|(id, _)| *id == slow_id));
+        for (id, sent_at) in &stored {
+            assert_eq!(*sent_at, started, "task {id}");
+        }
+
+        sqlx::query("DELETE FROM horsies_tasks WHERE task_name = $1")
+            .bind(task_name)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
+            .bind(workflow_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+            .bind(workflow_id)
+            .execute(&pool)
+            .await
+            .ok();
     }
 
     #[test]

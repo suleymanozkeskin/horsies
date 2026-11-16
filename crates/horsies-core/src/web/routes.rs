@@ -1,6 +1,5 @@
 //! Monitoring read, action, and event routes.
 
-use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::time::Duration;
 
@@ -15,6 +14,8 @@ use axum::{Json, Router};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use uuid::Uuid;
 
+use crate::broker::health::ListedWorkerState;
+use crate::core::defaults::WORKER_STATE_LIVE_WINDOW_S;
 use crate::monitoring::{
     cancel_task_action, cancel_workflow_action, elapsed_s, get_task_detail, get_workflow_node,
     get_workflow_run, list_schedules, list_tasks, list_workflow_names, list_workflow_runs,
@@ -23,6 +24,7 @@ use crate::monitoring::{
     TaskFilters, TaskListQuery, TaskStatsQuery, WorkerHistoryPoint, WorkerPingInfo,
     WorkerStateInfo, WorkflowRunsQuery,
 };
+use crate::monitoring::{class_report_info, slot_health_info, ClassReportInfo};
 
 use super::app::WebState;
 use super::common::{
@@ -48,6 +50,7 @@ pub(crate) fn read_router() -> Router<WebState> {
         )
         .route("/workers/ping", get(read_worker_ping))
         .route("/workers/schedules", get(read_schedules))
+        .route("/workers/classes", get(read_class_report))
         .route("/workers", get(read_workers))
         .route("/workers/{worker_id}/history", get(read_worker_history))
         .route("/events", get(read_events))
@@ -500,49 +503,68 @@ async fn read_schedules(
         .map_err(|error| query_failed("Schedule state", error))
 }
 
-fn queue_concurrency(
-    value: Option<serde_json::Value>,
-) -> Result<Option<BTreeMap<String, i32>>, ApiError> {
-    value
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(|error| ApiError::unavailable(format!("Worker state query failed: {error}")))
+/// Pending streams per (queue, class) with their oldest wait and coverage,
+/// and the budget load of each live worker (Python `read_class_report`,
+/// `horsies/web/routes/workers.py:84-94`). A failed or refused read is 503.
+async fn read_class_report(
+    State(state): State<WebState>,
+) -> Result<Json<ClassReportInfo>, ApiError> {
+    let report = state.broker.get_class_report().await.map_err(|error| {
+        ApiError::unavailable(format!("Class report query failed: {}", error.message))
+    })?;
+    Ok(Json(class_report_info(&report)))
 }
 
-fn worker_state(snapshot: crate::broker::WorkerStateSnapshot) -> Result<WorkerStateInfo, ApiError> {
-    let age = elapsed_s(Some(snapshot.snapshot_at), None);
-    Ok(WorkerStateInfo {
+/// A snapshot older than this is stale: the worker stopped reporting. The
+/// fleet check counts the same workers as live (Python
+/// `STALE_SNAPSHOT_THRESHOLD_S`, `horsies/web/routes/workers.py:31-35`).
+const STALE_SNAPSHOT_THRESHOLD_S: i64 = WORKER_STATE_LIVE_WINDOW_S as i64;
+
+/// One entry of the worker list (Python `read_workers`,
+/// `horsies/web/routes/workers.py:96-133`).
+///
+/// The snapshot age, the staleness and the uptime are measured to `read_at`,
+/// the database clock of the list statement: `snapshot_at` and
+/// `worker_started_at` are database times too. Python measures them to the
+/// web host clock (`workers.py:108-119`).
+pub(super) fn worker_state(listed: ListedWorkerState) -> WorkerStateInfo {
+    let ListedWorkerState { snapshot, read_at } = listed;
+    let age = elapsed_s(Some(snapshot.snapshot_at), Some(read_at));
+    let (slot_health, down_slots) = slot_health_info(&snapshot.slot_health);
+    WorkerStateInfo {
         worker_id: snapshot.worker_id,
         hostname: snapshot.hostname,
         pid: snapshot.pid,
         snapshot_at: snapshot.snapshot_at,
         snapshot_age_s: age,
-        stale: age.unwrap_or_default() > 120,
+        stale: age.unwrap_or_default() > STALE_SNAPSHOT_THRESHOLD_S,
         worker_started_at: snapshot.worker_started_at,
-        uptime_s: elapsed_s(Some(snapshot.worker_started_at), None),
+        uptime_s: elapsed_s(Some(snapshot.worker_started_at), Some(read_at)),
         processes: snapshot.processes,
         queues: snapshot.queues,
-        queue_max_concurrency: queue_concurrency(snapshot.queue_max_concurrency)?,
+        queue_max_concurrency: snapshot.queue_max_concurrency,
         tasks_running: snapshot.tasks_running,
         tasks_claimed: snapshot.tasks_claimed,
         cluster_wide_cap: snapshot.cluster_wide_cap,
         memory_usage_mb: snapshot.memory_usage_mb,
         memory_percent: snapshot.memory_percent,
         cpu_percent: snapshot.cpu_percent,
-    })
+        slot_health,
+        down_slots,
+    }
 }
 
 async fn read_workers(
     State(state): State<WebState>,
 ) -> Result<Json<Vec<WorkerStateInfo>>, ApiError> {
-    let snapshots = state.broker.list_worker_states().await.map_err(|error| {
-        ApiError::unavailable(format!("Worker state query failed: {}", error.message))
-    })?;
-    snapshots
-        .into_iter()
-        .map(worker_state)
-        .collect::<Result<Vec<_>, _>>()
-        .map(Json)
+    let listed = state
+        .broker
+        .list_worker_states_with_read_time()
+        .await
+        .map_err(|error| {
+            ApiError::unavailable(format!("Worker state query failed: {}", error.message))
+        })?;
+    Ok(Json(listed.into_iter().map(worker_state).collect()))
 }
 
 #[derive(Debug)]
