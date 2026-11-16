@@ -589,10 +589,11 @@ pub(crate) fn merge_kwarg_value(
     let mut map = match existing_kwargs_json {
         None => serde_json::Map::new(),
         Some(kwargs_json) => {
-            let parsed = serde_json::from_str::<serde_json::Value>(&kwargs_json).map_err(|e| {
-                HorsiesError::new(format!("kwargs_json is not valid JSON: {}", e))
-                    .with_help("ensure the node's kwargs payload is valid JSON")
-            })?;
+            let parsed = crate::core::codec::from_json_str::<serde_json::Value>(&kwargs_json)
+                .map_err(|e| {
+                    HorsiesError::new(format!("kwargs_json is not valid JSON: {}", e))
+                        .with_help("ensure the node's kwargs payload is valid JSON")
+                })?;
             match parsed {
                 serde_json::Value::Object(map) => map,
                 _ => {

@@ -192,15 +192,20 @@ pub(crate) fn prepare_enqueue_facts_with_lineage(
     })
 }
 
+/// Read an input text with the core's strict reader: 300 levels of room, so a user value of 200 levels inside
+/// the input reads (Python `core/codec/json_value.py:54-75`); serde_json alone stops at 128.
+fn read_input_text(field: &'static str, value: &str) -> Result<Value, EnqueuePreparationError> {
+    crate::core::codec::from_json_str(value).map_err(|error| EnqueuePreparationError::Json {
+        field,
+        source: serde::de::Error::custom(error),
+    })
+}
+
 fn parse_args(value: Option<&str>) -> Result<Vec<Value>, EnqueuePreparationError> {
     let Some(value) = value else {
         return Ok(Vec::new());
     };
-    let parsed: Value =
-        serde_json::from_str(value).map_err(|source| EnqueuePreparationError::Json {
-            field: "args",
-            source,
-        })?;
+    let parsed: Value = read_input_text("args", value)?;
     validate_integer_domain(value).map_err(|detail| EnqueuePreparationError::NumberDomain {
         field: "args",
         detail,
@@ -221,8 +226,7 @@ fn parse_object(
     let Some(value) = value else {
         return Ok(Map::new());
     };
-    let parsed: Value = serde_json::from_str(value)
-        .map_err(|source| EnqueuePreparationError::Json { field, source })?;
+    let parsed: Value = read_input_text(field, value)?;
     validate_integer_domain(value)
         .map_err(|detail| EnqueuePreparationError::NumberDomain { field, detail })?;
     match parsed {
@@ -238,11 +242,7 @@ fn parse_optional_object(
     let Some(value) = value else {
         return Ok(None);
     };
-    let parsed: Value =
-        serde_json::from_str(value).map_err(|source| EnqueuePreparationError::Json {
-            field: "task_options",
-            source,
-        })?;
+    let parsed: Value = read_input_text("task_options", value)?;
     validate_integer_domain(value).map_err(|detail| EnqueuePreparationError::NumberDomain {
         field: "task_options",
         detail,
