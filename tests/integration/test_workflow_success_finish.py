@@ -490,7 +490,8 @@ class TestNoWrite:
 
 _DIRECT_SQL: Final = """
     SELECT * FROM horsies_finish_workflow_success(
-        CAST(:id AS uuid), :worker, NULL, :result
+        CAST(:id AS uuid), :worker,
+        (SELECT claimed_at FROM horsies_tasks WHERE id = CAST(:id AS uuid)), :result
     )
 """
 

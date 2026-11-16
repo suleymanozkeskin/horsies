@@ -2636,15 +2636,17 @@ class TestIdKeyedWorkflowBatches:
         assert status == 'CLAIMED'
 
     @pytest.mark.parametrize('command_type', [AbandonOwnedNodes, CancelOwnedNodes])
-    async def test_a_null_generation_keeps_the_per_task_worker_fence(
+    async def test_a_null_generation_is_refused(
         self,
         session: AsyncSession,
         command_type: type[AbandonOwnedNodes] | type[CancelOwnedNodes],
     ) -> None:
-        """The stored function keeps its contract: a NULL entry of the
-        generations array fences its task on the worker alone. The worker
-        never sends one, so the statement runs with NULL in its place."""
+        """Every entry of the generations array is required: a NULL entry
+        refuses the statement (22023) before any lock, and the row stays
+        CLAIMED. The worker never sends one, so the statement runs with NULL
+        in its place."""
         task_id = await _seed(session, status='CLAIMED', is_workflow_task=True)
+        await session.commit()
         command = command_type(
             fence=OwnedClaimBatch(
                 worker_id=WORKER,
@@ -2652,15 +2654,19 @@ class TestIdKeyedWorkflowBatches:
             ),
         )
         statement, parameters = batch_call_for(command)
-        result = await session.execute(statement, {**parameters, 'claimed_ats': [None]})
-        outcomes = [
-            decode_outcome_row({str(key): value for key, value in row.items()})
-            for row in result.mappings().all()
-        ]
-        await session.commit()
-        assert len(outcomes) == 1
-        assert isinstance(outcomes[0], Applied)
-        assert outcomes[0].observed.claimed_at == GENERATION
+        with pytest.raises(DBAPIError) as raised:
+            await session.execute(statement, {**parameters, 'claimed_ats': [None]})
+        await session.rollback()
+        original = raised.value.orig
+        assert isinstance(original, psycopg.Error)
+        assert original.sqlstate == '22023'
+        status = (
+            await session.execute(
+                text('SELECT status FROM itest_task_rows WHERE id = CAST(:id AS uuid)'),
+                {'id': task_id},
+            )
+        ).scalar_one()
+        assert status == 'CLAIMED'
 
     @pytest.mark.parametrize('command_type', [AbandonOwnedNodes, CancelOwnedNodes])
     async def test_empty_input_is_valid(

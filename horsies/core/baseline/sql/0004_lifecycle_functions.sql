@@ -1198,7 +1198,8 @@ BEGIN
         RETURN;
     END IF;
     IF NOT v_ctx.is_workflow_task THEN
-        RAISE EXCEPTION 'horsies_finish_workflow_success: a plain task finishes with horsies_complete_task_fused'
+        RAISE EXCEPTION
+            'horsies_finish_workflow_success: the task is not a workflow task; its success is the fused completion'
             USING ERRCODE = 'invalid_parameter_value';
     END IF;
 
