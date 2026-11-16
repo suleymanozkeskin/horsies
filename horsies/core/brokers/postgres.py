@@ -605,6 +605,69 @@ async def _acquire_session_advisory_lock(
 
 # ---- Monitoring queries ----
 
+TASK_LIST_ROW_BOUND: Final = 10_000
+"""The most rows that ``get_stale_tasks`` and ``get_expired_tasks`` return."""
+
+MAX_STALE_THRESHOLD_MINUTES: Final = 525_600
+"""The largest ``stale_threshold_minutes`` of ``get_stale_tasks``: one year
+of 365 days."""
+
+_TASK_LIST_READ_LIMIT: Final = TASK_LIST_ROW_BOUND + 1
+"""The ``LIMIT`` of a task list read. One row more than the bound tells a
+truncated list from a complete one."""
+
+
+@dataclass(frozen=True, slots=True)
+class _CompleteTaskList:
+    """Every matching row."""
+
+    rows: list[dict[str, Any]]
+
+
+@dataclass(frozen=True, slots=True)
+class _TruncatedTaskList:
+    """The first ``TASK_LIST_ROW_BOUND`` matching rows; more rows match."""
+
+    rows: list[dict[str, Any]]
+
+
+type _BoundedTaskList = _CompleteTaskList | _TruncatedTaskList
+
+
+def _bounded_task_list(rows: list[dict[str, Any]]) -> _BoundedTaskList:
+    """Cut a read of at most ``_TASK_LIST_READ_LIMIT`` rows to the bound. Pure."""
+    if len(rows) > TASK_LIST_ROW_BOUND:
+        return _TruncatedTaskList(rows=rows[:TASK_LIST_ROW_BOUND])
+    return _CompleteTaskList(rows=rows)
+
+
+def _stale_threshold_minutes(value: object) -> Result[int, BrokerInvalidInput]:
+    """Check the stale threshold: whole minutes from 0 to
+    ``MAX_STALE_THRESHOLD_MINUTES``. Pure.
+
+    The refusal text holds no value, because an int with more than 4300
+    digits cannot be converted to a string.
+    """
+    match value:
+        case bool():
+            cause = 'is a bool, not an int'
+        case int() if value < 0:
+            cause = 'is below 0'
+        case int() if value > MAX_STALE_THRESHOLD_MINUTES:
+            cause = f'is above {MAX_STALE_THRESHOLD_MINUTES} (one year)'
+        case int():
+            return Ok(value)
+        case _:
+            cause = f'is a {type(value).__name__}, not an int'
+    return Err(BrokerInvalidInput(
+        message=(
+            f'stale_threshold_minutes {cause}; give whole minutes from 0 '
+            f'to {MAX_STALE_THRESHOLD_MINUTES}'
+        ),
+        exception=NoCause(),
+    ))
+
+
 GET_STALE_TASKS_SQL = text("""
     SELECT
         t.id,
@@ -625,7 +688,8 @@ GET_STALE_TASKS_SQL = text("""
     WHERE t.status = 'RUNNING'
       AND t.started_at IS NOT NULL
       AND COALESCE(hb.last_heartbeat, t.started_at) < NOW() - CAST(:stale_threshold || ' minutes' AS INTERVAL)
-    ORDER BY hb.last_heartbeat NULLS FIRST
+    ORDER BY hb.last_heartbeat NULLS FIRST, t.id
+    LIMIT :row_limit
 """)
 
 # Latest snapshot per worker (includes idle workers). The retired
@@ -717,7 +781,8 @@ GET_EXPIRED_TASKS_SQL = text("""
     FROM horsies_tasks
     WHERE status = 'PENDING'
       AND good_until <= NOW()
-    ORDER BY good_until ASC
+    ORDER BY good_until ASC, id
+    LIMIT :row_limit
 """)
 
 # ---- Cleanup queries ----
@@ -2669,7 +2734,23 @@ class PostgresBroker:
         self,
         stale_threshold_minutes: int = 2,
     ) -> BrokerResult[list[dict[str, Any]]]:
-        """Identify potentially crashed tasks based on heartbeat absence."""
+        """RUNNING tasks whose latest runner heartbeat, or their start when
+        they have no heartbeat, is older than the threshold. Reads only.
+
+        Rows come ordered by the latest heartbeat, rows with none first, then
+        by id. At most ``TASK_LIST_ROW_BOUND`` rows come back; when more rows
+        match, the first ``TASK_LIST_ROW_BOUND`` come back and a warning is
+        logged.
+
+        - ``Err(INVALID_INPUT)``: ``stale_threshold_minutes`` is not an int
+          from 0 to ``MAX_STALE_THRESHOLD_MINUTES``. Nothing ran.
+        - ``Err(MONITORING_QUERY_FAILED)``: the read failed.
+        """
+        match _stale_threshold_minutes(stale_threshold_minutes):
+            case Err() as refused:
+                return refused
+            case Ok(ok_value=threshold):
+                pass
         match await self.select_resources():
             case Err(loop_limit):
                 return _loop_limit_err('get_stale_tasks', loop_limit)
@@ -2679,16 +2760,40 @@ class PostgresBroker:
             async with resources.session_factory() as session:
                 result = await session.execute(
                     GET_STALE_TASKS_SQL,
-                    {'stale_threshold': stale_threshold_minutes},
+                    {
+                        'stale_threshold': threshold,
+                        'row_limit': _TASK_LIST_READ_LIMIT,
+                    },
                 )
                 columns = result.keys()
-                return Ok([dict(zip(columns, row)) for row in result.fetchall()])
+                rows = [dict(zip(columns, row)) for row in result.fetchall()]
         except Exception as exc:
             return _operation_failed(
                 BrokerErrorCode.MONITORING_QUERY_FAILED,
                 f'get_stale_tasks failed: {exc}',
                 exc,
             )
+        return Ok(self._rows_within_bound('get_stale_tasks', rows))
+
+    def _rows_within_bound(
+        self,
+        operation: str,
+        rows: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """The rows of a task list read, cut to ``TASK_LIST_ROW_BOUND``.
+
+        A cut list logs a warning that names ``operation`` and the bound.
+        """
+        match _bounded_task_list(rows):
+            case _CompleteTaskList(rows=complete):
+                return complete
+            case _TruncatedTaskList(rows=first_rows):
+                self.logger.warning(
+                    '%s returned the first %d rows; more rows match',
+                    operation,
+                    TASK_LIST_ROW_BOUND,
+                )
+                return first_rows
 
     async def ping_database_async(self) -> BrokerResult[DatabasePing]:
         """Probe Postgres reachability with ``SELECT 1`` through the live pool.
@@ -3108,7 +3213,15 @@ class PostgresBroker:
                 return _class_read_refused('get_class_report', refused)
 
     async def get_expired_tasks(self) -> BrokerResult[list[dict[str, Any]]]:
-        """Find tasks that expired before worker processing."""
+        """PENDING tasks whose ``good_until`` passed before a worker took
+        them. Reads only.
+
+        Rows come ordered by ``good_until``, oldest first, then by id. At
+        most ``TASK_LIST_ROW_BOUND`` rows come back; when more rows match,
+        the first ``TASK_LIST_ROW_BOUND`` come back and a warning is logged.
+
+        - ``Err(MONITORING_QUERY_FAILED)``: the read failed.
+        """
         match await self.select_resources():
             case Err(loop_limit):
                 return _loop_limit_err('get_expired_tasks', loop_limit)
@@ -3116,15 +3229,19 @@ class PostgresBroker:
                 pass
         try:
             async with resources.session_factory() as session:
-                result = await session.execute(GET_EXPIRED_TASKS_SQL)
+                result = await session.execute(
+                    GET_EXPIRED_TASKS_SQL,
+                    {'row_limit': _TASK_LIST_READ_LIMIT},
+                )
                 columns = result.keys()
-                return Ok([dict(zip(columns, row)) for row in result.fetchall()])
+                rows = [dict(zip(columns, row)) for row in result.fetchall()]
         except Exception as exc:
             return _operation_failed(
                 BrokerErrorCode.MONITORING_QUERY_FAILED,
                 f'get_expired_tasks failed: {exc}',
                 exc,
             )
+        return Ok(self._rows_within_bound('get_expired_tasks', rows))
 
     async def mark_stale_tasks_as_failed(
         self,

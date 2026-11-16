@@ -1609,6 +1609,154 @@ class TestMonitoringQueries:
         assert len(result.ok_value) == 1
         assert result.ok_value[0]['task_name'] == 'slow_task'
 
+    def _setup_session_with_ids(self, broker: Any, count: int) -> AsyncMock:
+        """Configure the session to return ``count`` rows of one ``id`` column."""
+        mock_result = MagicMock()
+        mock_result.keys.return_value = ['id']
+        mock_result.fetchall.return_value = [(f'task-{n}',) for n in range(count)]
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.execute = AsyncMock(return_value=mock_result)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
+        return session
+
+    @pytest.mark.asyncio
+    async def test_stale_list_reads_one_row_past_the_bound(self) -> None:
+        """The read asks for the bound plus one row, and passes the threshold."""
+        from horsies.core.brokers.postgres import TASK_LIST_ROW_BOUND
+
+        broker = _make_broker()
+        session = self._setup_session_with_ids(broker, 0)
+
+        result = await broker.get_stale_tasks(stale_threshold_minutes=7)
+
+        assert is_ok(result)
+        parameters = session.execute.await_args.args[1]
+        assert parameters == {
+            'stale_threshold': 7,
+            'row_limit': TASK_LIST_ROW_BOUND + 1,
+        }
+
+    @pytest.mark.asyncio
+    async def test_expired_list_reads_one_row_past_the_bound(self) -> None:
+        from horsies.core.brokers.postgres import TASK_LIST_ROW_BOUND
+
+        broker = _make_broker()
+        session = self._setup_session_with_ids(broker, 0)
+
+        result = await broker.get_expired_tasks()
+
+        assert is_ok(result)
+        parameters = session.execute.await_args.args[1]
+        assert parameters == {'row_limit': TASK_LIST_ROW_BOUND + 1}
+
+    @pytest.mark.asyncio
+    async def test_stale_list_at_the_bound_is_complete(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Exactly the bound of rows: every row comes back, no warning."""
+        from horsies.core.brokers.postgres import TASK_LIST_ROW_BOUND
+
+        broker = _make_broker()
+        self._setup_session_with_ids(broker, TASK_LIST_ROW_BOUND)
+
+        with caplog.at_level('WARNING'):
+            result = await broker.get_stale_tasks(stale_threshold_minutes=5)
+
+        assert is_ok(result)
+        assert len(result.ok_value) == TASK_LIST_ROW_BOUND
+        assert not [r for r in caplog.records if r.levelname == 'WARNING']
+
+    @pytest.mark.asyncio
+    async def test_stale_list_past_the_bound_is_cut_with_a_warning(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """One row past the bound: the first rows up to the bound, and a warning."""
+        from horsies.core.brokers.postgres import TASK_LIST_ROW_BOUND
+
+        broker = _make_broker()
+        self._setup_session_with_ids(broker, TASK_LIST_ROW_BOUND + 1)
+
+        with caplog.at_level('WARNING'):
+            result = await broker.get_stale_tasks(stale_threshold_minutes=5)
+
+        assert is_ok(result)
+        assert len(result.ok_value) == TASK_LIST_ROW_BOUND
+        assert result.ok_value[-1] == {'id': f'task-{TASK_LIST_ROW_BOUND - 1}'}
+        warnings = [r.getMessage() for r in caplog.records if r.levelname == 'WARNING']
+        assert warnings == [
+            f'get_stale_tasks returned the first {TASK_LIST_ROW_BOUND} rows; '
+            'more rows match',
+        ]
+
+    @pytest.mark.asyncio
+    async def test_expired_list_past_the_bound_is_cut_with_a_warning(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from horsies.core.brokers.postgres import TASK_LIST_ROW_BOUND
+
+        broker = _make_broker()
+        self._setup_session_with_ids(broker, TASK_LIST_ROW_BOUND + 1)
+
+        with caplog.at_level('WARNING'):
+            result = await broker.get_expired_tasks()
+
+        assert is_ok(result)
+        assert len(result.ok_value) == TASK_LIST_ROW_BOUND
+        warnings = [r.getMessage() for r in caplog.records if r.levelname == 'WARNING']
+        assert warnings == [
+            f'get_expired_tasks returned the first {TASK_LIST_ROW_BOUND} rows; '
+            'more rows match',
+        ]
+
+    @pytest.mark.asyncio
+    async def test_stale_threshold_bounds_are_accepted(self) -> None:
+        """0 and one year of minutes are both inside the rule."""
+        from horsies.core.brokers.postgres import MAX_STALE_THRESHOLD_MINUTES
+
+        assert MAX_STALE_THRESHOLD_MINUTES == 365 * 24 * 60
+        for minutes in (0, MAX_STALE_THRESHOLD_MINUTES):
+            broker = _make_broker()
+            session = self._setup_session_with_ids(broker, 0)
+
+            result = await broker.get_stale_tasks(stale_threshold_minutes=minutes)
+
+            assert is_ok(result), minutes
+            assert session.execute.await_args.args[1]['stale_threshold'] == minutes
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ('minutes', 'cause'),
+        [
+            (-1, 'stale_threshold_minutes is below 0'),
+            (525_601, 'stale_threshold_minutes is above 525600 (one year)'),
+            (10 ** 5000, 'stale_threshold_minutes is above 525600 (one year)'),
+            (True, 'stale_threshold_minutes is a bool, not an int'),
+            (2.5, 'stale_threshold_minutes is a float, not an int'),
+            ('5', 'stale_threshold_minutes is a str, not an int'),
+        ],
+        ids=['negative', 'above-one-year', 'huge-int', 'bool', 'float', 'str'],
+    )
+    async def test_stale_threshold_outside_the_rule_is_invalid_input(
+        self, minutes: object, cause: str,
+    ) -> None:
+        """A refused threshold is INVALID_INPUT before any database call."""
+        broker = _make_broker()
+        session = self._setup_session_with_ids(broker, 0)
+
+        result = await broker.get_stale_tasks(stale_threshold_minutes=cast(int, minutes))
+
+        assert is_err(result)
+        match result.err_value:
+            case BrokerInvalidInput(message=message, exception=NoCause()):
+                assert message == (
+                    f'{cause}; give whole minutes from 0 to 525600'
+                )
+            case other:
+                raise AssertionError(f'expected INVALID_INPUT, got {other!r}')
+        session.execute.assert_not_awaited()
+
 
 # ---------------------------------------------------------------------------
 # TestHealthApi
