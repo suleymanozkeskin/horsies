@@ -18,7 +18,7 @@ from typing import Final
 
 import pytest
 
-from tests.baseline_sql import baseline_function
+from tests.baseline_sql import baseline_function, baseline_overload
 from tests.lifecycle_matrix import (
     MATRIX,
     Attempt,
@@ -60,6 +60,8 @@ FUNCTION_OF_WRITER: Final[dict[str, str]] = {
 """The baseline function that implements each writer contract."""
 
 _MOVE_FUNCTION: Final = 'horsies_move_task_to_history'
+_MOVE_BY_ID: Final = 'p_task_id uuid'
+"""The first parameter of the move overload that the writers call."""
 _MOVE_CALL_RE: Final = re.compile(
     rf'\b{_MOVE_FUNCTION}\(\s*[\w.]+,\s*\'(\w+)\'',
 )
@@ -251,7 +253,7 @@ class TestDeclaredGuardsMatchTheStatements:
         assert calls_move or sends_events, row.writer_id
 
     def test_the_move_sends_the_status_events(self) -> None:
-        sql = ' '.join(baseline_function(_MOVE_FUNCTION).split())
+        sql = ' '.join(baseline_overload(_MOVE_FUNCTION, _MOVE_BY_ID).split())
         for event in _MOVE_EVENTS:
             assert event in sql, event
 

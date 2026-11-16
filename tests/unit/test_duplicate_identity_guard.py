@@ -14,7 +14,7 @@ from horsies.core.history.reads.lookup_generation import (
     render_staged_duplicate_guard_function,
     render_staged_provenance_function,
 )
-from tests.baseline_sql import baseline_function
+from tests.baseline_sql import baseline_function, baseline_overload
 
 pytestmark = [pytest.mark.unit]
 
@@ -57,7 +57,7 @@ def test_absence_consults_the_clock_skew_exceptions() -> None:
 @pytest.mark.parametrize(
     'body',
     [
-        baseline_function('horsies_move_task_to_history'),
+        baseline_overload('horsies_move_task_to_history', 'p_task_id uuid'),
         baseline_function('horsies_expire_pending_tasks'),
     ],
     ids=['single_move', 'batch_move'],

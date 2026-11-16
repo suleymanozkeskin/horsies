@@ -12,7 +12,7 @@ reach these inserts, and is cross-checked against this allowlist.
 
 Two scans:
 
-- The baseline functions (``tests/baseline_sql.baseline_functions``): their
+- The baseline functions (``tests/baseline_sql.baseline_function_statements``): their
   history inserts, with the status each one writes (a literal, or ``PARAM``
   for a status bound from a parameter), and their UPDATEs of
   ``horsies_tasks``, which must assign no terminal status.
@@ -37,7 +37,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.baseline_sql import baseline_functions
+from tests.baseline_sql import baseline_function_statements
 
 pytestmark = [pytest.mark.unit]
 
@@ -80,9 +80,12 @@ _InventoryKey = tuple[str, str, str]
 # the history insert, and the status it writes. The count catches an insert
 # being duplicated or removed within the same function.
 FROZEN_TERMINAL_WRITERS: dict[_InventoryKey, int] = {
-    # The single-row move: every single-row terminal operation calls it with
-    # its own status literal.
-    (_BASELINE, 'horsies_move_task_to_history', 'PARAM'): 1,
+    # The single-row move, one insert in each of its two overloads: by task
+    # id, which every single-row terminal operation calls with its own status
+    # literal, and by locked row.
+    (_BASELINE, 'horsies_move_task_to_history', 'PARAM'): 2,
+    # The batch move of locked rows, by task ids.
+    (_BASELINE, 'horsies_move_tasks_to_history', 'PARAM'): 1,
     # The batch moves: each inserts its history rows itself.
     (_BASELINE, 'horsies_abandon_nodes_of_paused_workflows', 'CANCELLED'): 1,
     (_BASELINE, 'horsies_abandon_owned_nodes', 'CANCELLED'): 1,
@@ -199,7 +202,7 @@ def history_insert_columns(body: str) -> list[list[str]]:
 def _scan_baseline_history_inserts() -> Counter[_InventoryKey]:
     """History inserts of the baseline functions, keyed by the status written."""
     found: Counter[_InventoryKey] = Counter()
-    for name, body in baseline_functions().items():
+    for name, body in baseline_function_statements():
         for status in history_insert_statuses(body):
             found[(_BASELINE, name, status)] += 1
     return found
@@ -485,7 +488,7 @@ class TestTerminalWriterInventory:
         """
         writers = sorted(
             (name, sorted(statuses), parameterized)
-            for name, body in baseline_functions().items()
+            for name, body in baseline_function_statements()
             for statuses, parameterized in (_set_clause_statuses(body),)
             if statuses & _TERMINAL_STATUSES or parameterized
         )
@@ -617,7 +620,7 @@ class TestTerminalWriterInventory:
         """
         inserts = [
             (name, columns)
-            for name, body in baseline_functions().items()
+            for name, body in baseline_function_statements()
             for columns in history_insert_columns(body)
         ]
         assert len(inserts) == sum(FROZEN_TERMINAL_WRITERS.values()), (
@@ -639,7 +642,7 @@ class TestTerminalWriterInventory:
         """
         windows = _scan_runtime_revival_windows() + [
             (_BASELINE, name, window)
-            for name, body in baseline_functions().items()
+            for name, body in baseline_function_statements()
             for window, predicate in update_clauses(body)
             if _revives(window, predicate)
         ]
@@ -681,7 +684,7 @@ class TestTerminalWriterInventory:
         """
         updates = _scan_runtime_history_updates() + [
             (f'{_BASELINE} {name}', window)
-            for name, body in baseline_functions().items()
+            for name, body in baseline_function_statements()
             for window in _scan_history_updates(body)
         ]
         assert not updates, (

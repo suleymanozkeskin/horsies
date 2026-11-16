@@ -16,6 +16,7 @@ import pytest
 from horsies.core.lifecycle.operations import TerminalizationKind
 from tests.baseline_sql import (
     baseline_function,
+    baseline_overload,
     baseline_sql,
     baseline_table,
     baseline_type,
@@ -26,6 +27,8 @@ pytestmark = [pytest.mark.unit]
 
 # The functions under test, read from the baseline migration, grouped as the
 # families they were written in.
+MOVE_BODY = baseline_overload('horsies_move_task_to_history', 'p_task_id uuid')
+"""The move overload that the writers call: it takes the task id."""
 ATTEMPT_ENCODER_FUNCTION = 'horsies_encode_task_attempts'
 COMPLETE_LOCKED_FUNCTION = 'horsies_complete_locked_task'
 COMPLETE_FUSED_FUNCTION = 'horsies_complete_task_fused'
@@ -40,12 +43,12 @@ def _functions(*names: str) -> list[str]:
 
 
 def completion_family_fragments() -> list[str]:
-    return _functions(
-        ATTEMPT_ENCODER_FUNCTION,
-        'horsies_move_task_to_history',
-        COMPLETE_LOCKED_FUNCTION,
-        COMPLETE_FUSED_FUNCTION,
-    )
+    return [
+        baseline_function(ATTEMPT_ENCODER_FUNCTION),
+        MOVE_BODY,
+        baseline_function(COMPLETE_LOCKED_FUNCTION),
+        baseline_function(COMPLETE_FUSED_FUNCTION),
+    ]
 
 
 def failure_family_fragments() -> list[str]:
@@ -103,7 +106,6 @@ def outcome_fragments() -> list[str]:
 OUTCOME_TYPE_DDL = baseline_type('horsies_terminalization_outcome')
 MISS_CLASSIFIER_DDL = baseline_function('horsies_terminalization_miss')
 ATTEMPT_ENCODER_DDL = baseline_function(ATTEMPT_ENCODER_FUNCTION)
-MOVE_BODY = baseline_function('horsies_move_task_to_history')
 
 
 class TestOutcomeLayer:
