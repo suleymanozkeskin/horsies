@@ -36,7 +36,7 @@ from tests.integration.task_history_harness import (
 
 pytestmark = [pytest.mark.integration]
 
-CLASS_KEY = 'it_phase2'
+CLASS_KEY = 'standard_30d'
 WORKER = 'worker-p2-1'
 FAILURE_RESULT = '{"error":{"code":"BOOM"}}'
 

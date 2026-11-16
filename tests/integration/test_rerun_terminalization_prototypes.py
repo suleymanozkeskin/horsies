@@ -72,7 +72,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 _WORKER = 'worker-1'
 _RESULT = '{"ok": "' + 'x' * 184 + '"}'
 _ENVELOPE = b'{"v":"' + b'q' * (INLINE_BOUND_BYTES - 8) + b'"}'
-_FINITE_CLASS = 'finite_30d_v1'
+_FINITE_CLASS = 'standard_30d'
 
 # Small enough to run in a review loop, large enough that the interleaving,
 # the discarded warm-up block and the counters are all genuinely exercised.

@@ -1407,6 +1407,9 @@ async fn workflow_link(
     .await
 }
 
+/// The history row of a task, or `None`. A history status that is not a
+/// task status is a contract violation, as Python's detail decode
+/// (`horsies/monitoring/queries.py:1404-1499`).
 async fn history_detail_or_none(
     connection: &mut PgConnection,
     task_id: Uuid,
@@ -1415,7 +1418,12 @@ async fn history_detail_or_none(
         return Ok(None);
     }
     match read_task_detail(connection, task_id).await? {
-        TaskDetailResult::History(detail) => Ok(Some(detail)),
+        TaskDetailResult::History(detail) => match detail.status.parse::<TaskStatus>() {
+            Ok(_) => Ok(Some(detail)),
+            Err(reason) => Err(HistoryError::contract(format!(
+                "history row of task {task_id} has an unknown status: {reason}"
+            ))),
+        },
         TaskDetailResult::Live { .. } | TaskDetailResult::Absent { .. } => Ok(None),
     }
 }

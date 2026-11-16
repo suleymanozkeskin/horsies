@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from horsies.core.history.commands import AnchoredLowerBound
 from horsies.core.history.ddl.conditional import (
     GatedFragment,
     gated_fragment,
@@ -51,11 +52,10 @@ LOWER = datetime(2026, 8, 1, tzinfo=UTC)
 def make_manifest() -> LookupManifest:
     leaf = LookupLeaf(
         relation_name='horsies_task_history_x_2026_08_01',
-        lower_anchor=LOWER,
+        lower_bound=AnchoredLowerBound(LOWER),
         upper_anchor=LOWER + timedelta(days=1),
-        min_birth_at=LOWER,
     )
-    return LookupManifest(leaves=(leaf,), birth_floor=LOWER)
+    return LookupManifest(leaves=(leaf,))
 
 
 def make_window() -> HistoryWindow:
@@ -71,7 +71,7 @@ ENVELOPE_COLUMNS = (
 
 
 class TestDetailRendersFromTheSharedSkeleton:
-    def test_same_v7_discriminator_and_birth_floor_prune(self) -> None:
+    def test_same_v7_discriminator_and_birth_prune(self) -> None:
         manifest = make_manifest()
         detail = render_staged_detail_function(manifest)
         identity = render_staged_lookup_function(manifest)
@@ -80,7 +80,6 @@ class TestDetailRendersFromTheSharedSkeleton:
             '(get_byte(v_uuid_bytes, 8) & 192) = 128',
             "v_birth_at - INTERVAL '5 seconds'",
             'IF v_effective_birth <',
-            "IF v_birth_at < TIMESTAMPTZ '2026-08-01T00:00:00Z'",
         ):
             assert skeleton_fragment in identity
             assert skeleton_fragment in detail

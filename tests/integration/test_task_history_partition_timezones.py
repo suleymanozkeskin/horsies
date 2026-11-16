@@ -60,7 +60,7 @@ from tests.integration.task_history_harness import (
 
 pytestmark = [pytest.mark.integration]
 
-CLASS_KEY = 'it_tz'
+CLASS_KEY = 'standard_30d'
 WEST_OF_UTC = 'Etc/GMT+12'
 EAST_OF_UTC = 'Etc/GMT-12'
 

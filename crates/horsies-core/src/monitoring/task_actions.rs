@@ -23,6 +23,12 @@ pub enum TaskActionErrorCode {
     TaskNotCancellable,
     TaskIsWorkflowTask,
     DbOperationFailed,
+    /// Stored task data does not parse: a history status that is not a task
+    /// status, or a cancel outcome row that does not decode. Nothing changed:
+    /// the transaction did not commit. Not retryable: a repeat gives the
+    /// same result until the stored row changes (Python
+    /// `horsies/monitoring/task_actions.py:69-197`).
+    StoredDataInvalid,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -51,6 +57,19 @@ struct LockedTask {
     expiry_passed: bool,
 }
 
+/// Seed of the task advisory lock. Every move function of the baseline
+/// takes `pg_advisory_xact_lock(hashtextextended(<task id>::text, 731))`
+/// before its row lock (for example `horsies_cancel_locked_task`), as
+/// Python's `TASK_LOCK_SEED`.
+const TASK_LOCK_SEED: i64 = 731;
+
+/// The task advisory lock, by the key every move function takes. It runs
+/// before the row lock of `LOCK_TASK_SQL`, in the same transaction, so the
+/// cancel takes the two locks in the order of the move functions and cannot
+/// deadlock with a finalize (Python `horsies/core/lifecycle/persistence.py:
+/// 245-256`, `horsies/monitoring/task_actions.py:377-378`).
+const LOCK_TASK_ADVISORY_SQL: &str = "SELECT pg_advisory_xact_lock(hashtextextended($1::text, $2))";
+
 const LOCK_TASK_SQL: &str = "SELECT status,
             is_workflow_task,
             (good_until IS NOT NULL AND good_until <= NOW()) AS expiry_passed
@@ -68,13 +87,13 @@ fn not_found(task_id: Uuid) -> TaskActionError {
     }
 }
 
-fn workflow_bound(task_id: Uuid) -> TaskActionError {
+fn workflow_bound(task_id: Uuid, current_status: Option<TaskStatus>) -> TaskActionError {
     TaskActionError {
         code: TaskActionErrorCode::TaskIsWorkflowTask,
         message: format!("Task {task_id} belongs to a workflow; use the workflow actions instead."),
         retryable: false,
         task_id,
-        current_status: None,
+        current_status,
     }
 }
 
@@ -103,27 +122,52 @@ fn sqlx_failure(task_id: Uuid, error: sqlx::Error) -> TaskActionError {
 }
 
 fn history_failure(task_id: Uuid, error: HistoryError) -> TaskActionError {
-    let retryable = match &error {
-        HistoryError::Database(database) => is_retryable_sqlx_error(database),
-        _ => false,
-    };
+    match error {
+        HistoryError::Database(database) => sqlx_failure(task_id, database),
+        HistoryError::ArchiveDecode(_)
+        | HistoryError::Contract(_)
+        | HistoryError::LeafLockNotHeld
+        | HistoryError::LeafLockBusy { .. }
+        | HistoryError::HistoryParentAbsent(_) => stored_data_invalid(task_id, error.to_string()),
+    }
+}
+
+fn broker_failure(task_id: Uuid, error: crate::broker::BrokerError) -> TaskActionError {
+    match error {
+        crate::broker::BrokerError::TerminalizationContract(detail) => {
+            stored_data_invalid(task_id, detail)
+        }
+        other => TaskActionError {
+            code: TaskActionErrorCode::DbOperationFailed,
+            message: format!("Task cancel failed: {other}"),
+            retryable: other.is_retryable(),
+            task_id,
+            current_status: None,
+        },
+    }
+}
+
+/// Stored data that does not parse. Nothing changed: the transaction rolls
+/// back.
+fn stored_data_invalid(task_id: Uuid, detail: impl Into<String>) -> TaskActionError {
     TaskActionError {
-        code: TaskActionErrorCode::DbOperationFailed,
-        message: format!("Task cancel failed: {error}"),
-        retryable,
+        code: TaskActionErrorCode::StoredDataInvalid,
+        message: format!(
+            "Task cancel failed: stored data does not parse: {}",
+            detail.into()
+        ),
+        retryable: false,
         task_id,
         current_status: None,
     }
 }
 
-fn broker_failure(task_id: Uuid, error: crate::broker::BrokerError) -> TaskActionError {
-    TaskActionError {
-        code: TaskActionErrorCode::DbOperationFailed,
-        message: format!("Task cancel failed: {error}"),
-        retryable: error.is_retryable(),
-        task_id,
-        current_status: None,
-    }
+/// Parse a stored status; a value that is not a task status is
+/// [`TaskActionErrorCode::StoredDataInvalid`].
+fn parse_stored_status(task_id: Uuid, stored: &str) -> Result<TaskStatus, TaskActionError> {
+    TaskStatus::from_str(stored).map_err(|reason| {
+        stored_data_invalid(task_id, format!("status of task {task_id}: {reason}"))
+    })
 }
 
 fn contract_failure(task_id: Uuid, detail: impl Into<String>) -> TaskActionError {
@@ -150,14 +194,13 @@ async fn diagnose_live_miss<T>(
         .await
         .map_err(|error| history_failure(task_id, error))?
     {
-        TaskDetailResult::History(detail) if detail.is_workflow_task => {
-            Err(workflow_bound(task_id))
+        TaskDetailResult::History(detail) => {
+            let status = parse_stored_status(task_id, &detail.status)?;
+            match detail.is_workflow_task {
+                true => Err(workflow_bound(task_id, Some(status))),
+                false => Err(state_conflict(task_id, &detail.status, Some(status))),
+            }
         }
-        TaskDetailResult::History(detail) => Err(state_conflict(
-            task_id,
-            &detail.status,
-            TaskStatus::from_str(&detail.status).ok(),
-        )),
         TaskDetailResult::Live { .. } | TaskDetailResult::Absent { .. } => Err(not_found(task_id)),
     }
 }
@@ -201,6 +244,12 @@ pub(super) async fn cancel_task_in_tx(
     task_id: Uuid,
     include_running: bool,
 ) -> TaskActionResult<TaskCancelled> {
+    sqlx::query(LOCK_TASK_ADVISORY_SQL)
+        .bind(task_id)
+        .bind(TASK_LOCK_SEED)
+        .execute(transaction.as_mut())
+        .await
+        .map_err(|error| sqlx_failure(task_id, error))?;
     let locked: Option<LockedTask> = sqlx::query_as(LOCK_TASK_SQL)
         .bind(task_id)
         .fetch_optional(transaction.as_mut())
@@ -210,7 +259,7 @@ pub(super) async fn cancel_task_in_tx(
         return diagnose_live_miss(transaction.as_mut(), task_id).await;
     };
 
-    let current_status = TaskStatus::from_str(&locked.status).ok();
+    let current_status = parse_stored_status(task_id, &locked.status)?;
     let mut permitted_source_statuses = vec![TaskStatus::Pending, TaskStatus::Claimed];
     if include_running {
         permitted_source_statuses.push(TaskStatus::Running);
@@ -233,29 +282,19 @@ pub(super) async fn cancel_task_in_tx(
     })?;
 
     match outcome {
-        TerminalizationOutcome::Applied { .. } => {
-            let Some(was_status) = current_status else {
-                return Err(contract_failure(
-                    task_id,
-                    format!(
-                        "administrative cancellation applied from unknown status {:?}",
-                        locked.status
-                    ),
-                ));
-            };
-            Ok(TaskCancelled {
-                task_id,
-                was_status,
-            })
-        }
+        TerminalizationOutcome::Applied { .. } => Ok(TaskCancelled {
+            task_id,
+            was_status: current_status,
+        }),
         TerminalizationOutcome::AlreadyApplied { .. }
-        | TerminalizationOutcome::SourceStateConflict { .. } => {
-            if locked.is_workflow_task {
-                Err(workflow_bound(task_id))
-            } else {
-                Err(state_conflict(task_id, &locked.status, current_status))
-            }
-        }
+        | TerminalizationOutcome::SourceStateConflict { .. } => match locked.is_workflow_task {
+            true => Err(workflow_bound(task_id, Some(current_status))),
+            false => Err(state_conflict(
+                task_id,
+                &locked.status,
+                Some(current_status),
+            )),
+        },
         TerminalizationOutcome::LostClaim { .. } | TerminalizationOutcome::TaskAbsent { .. } => {
             Err(contract_failure(
                 task_id,

@@ -61,7 +61,7 @@ pytestmark = [
 ]
 
 UTC = timezone.utc
-CLASS_KEY = 'it_ordering_idx'
+CLASS_KEY = 'standard_30d'
 
 history_schema = task_history_schema_fixture('task_history_it_ordering_idx')
 

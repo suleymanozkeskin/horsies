@@ -639,12 +639,15 @@ CREATE TABLE horsies_task_history_forever PARTITION OF horsies_task_history
 
 -- The one static forever leaf. Its two indexes are in 0002_indexes.sql.
 CREATE TABLE horsies_task_history_forever_open PARTITION OF horsies_task_history_forever
-    FOR VALUES FROM ('-infinity') TO ('9999-01-01 00:00:00+00');
+    FOR VALUES FROM (MINVALUE) TO ('9999-01-01 00:00:00+00');
 
+-- The lower bound is typed: OPEN (the partition starts at MINVALUE, no anchor) or AT (lower_anchor holds it).
+-- An open bound is never stored as a sentinel time.
 CREATE TABLE horsies_task_history_leaf_catalog (
     leaf_name text NOT NULL,
     class_key character varying(64) NOT NULL,
-    lower_anchor timestamp with time zone NOT NULL,
+    lower_bound_kind character varying(4) NOT NULL,
+    lower_anchor timestamp with time zone,
     upper_anchor timestamp with time zone NOT NULL,
     index_schema_version smallint NOT NULL,
     created_at timestamp with time zone NOT NULL,
@@ -652,7 +655,14 @@ CREATE TABLE horsies_task_history_leaf_catalog (
     dropped_at timestamp with time zone,
     CONSTRAINT horsies_task_history_leaf_catalog_pkey PRIMARY KEY (leaf_name),
     CONSTRAINT horsies_task_history_leaf_catalog_interval_unique UNIQUE (class_key, lower_anchor, upper_anchor),
-    CONSTRAINT horsies_task_history_leaf_catalog_bounds_ordered CHECK (lower_anchor < upper_anchor),
+    -- Each arm names IS NULL or IS NOT NULL: the anchor is set exactly when the kind is AT.
+    CONSTRAINT horsies_task_history_leaf_catalog_lower_bound_pair CHECK (
+        (lower_bound_kind = 'OPEN' AND lower_anchor IS NULL)
+        OR (lower_bound_kind = 'AT' AND lower_anchor IS NOT NULL)
+    ),
+    CONSTRAINT horsies_task_history_leaf_catalog_bounds_ordered CHECK (
+        lower_anchor IS NULL OR lower_anchor < upper_anchor
+    ),
     CONSTRAINT horsies_task_history_leaf_catalog_drop_after_detach CHECK (
         dropped_at IS NULL OR detached_at IS NOT NULL
     ),
@@ -663,12 +673,14 @@ CREATE TABLE horsies_task_history_leaf_catalog (
 -- Catalog row of the forever leaf. index_schema_version 1 is the leaf index shape of 0002_indexes.sql
 -- (INDEX_SCHEMA_VERSION in horsies/core/history/partitions/catalog.py).
 INSERT INTO horsies_task_history_leaf_catalog (
-    leaf_name, class_key, lower_anchor, upper_anchor, index_schema_version, created_at, detached_at, dropped_at
+    leaf_name, class_key, lower_bound_kind, lower_anchor, upper_anchor, index_schema_version, created_at,
+    detached_at, dropped_at
 )
 VALUES (
     'horsies_task_history_forever_open',
     'forever',
-    '-infinity',
+    'OPEN',
+    NULL,
     '9999-01-01 00:00:00+00',
     1,
     statement_timestamp(),
@@ -676,16 +688,24 @@ VALUES (
     NULL
 );
 
+-- The lower bound is typed as in the leaf catalog.
 CREATE TABLE horsies_task_lookup_manifest (
     leaf_name text NOT NULL,
     probe_position integer NOT NULL,
-    lower_anchor timestamp with time zone NOT NULL,
+    lower_bound_kind character varying(4) NOT NULL,
+    lower_anchor timestamp with time zone,
     upper_anchor timestamp with time zone NOT NULL,
     published_at timestamp with time zone NOT NULL,
     CONSTRAINT horsies_task_lookup_manifest_pkey PRIMARY KEY (leaf_name),
     CONSTRAINT horsies_task_lookup_manifest_position_unique UNIQUE (probe_position),
     CONSTRAINT horsies_task_lookup_manifest_position_valid CHECK (probe_position >= 0),
-    CONSTRAINT horsies_task_lookup_manifest_bounds_ordered CHECK (lower_anchor < upper_anchor)
+    CONSTRAINT horsies_task_lookup_manifest_lower_bound_pair CHECK (
+        (lower_bound_kind = 'OPEN' AND lower_anchor IS NULL)
+        OR (lower_bound_kind = 'AT' AND lower_anchor IS NOT NULL)
+    ),
+    CONSTRAINT horsies_task_lookup_manifest_bounds_ordered CHECK (
+        lower_anchor IS NULL OR lower_anchor < upper_anchor
+    )
 );
 
 -- The single-column length and positivity checks of v61 live in horsies_key_reservation_claim, the only inserter.
