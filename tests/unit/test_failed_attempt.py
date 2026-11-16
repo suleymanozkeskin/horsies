@@ -9,10 +9,6 @@ from typing import Any
 
 import pytest
 
-from horsies.core.history.cutover.program import (
-    installation_fragments,
-    teardown_statements,
-)
 from horsies.core.history.terminalization.move import (
     FAILED_ATTEMPT_OUTCOME_TYPE,
     FAILED_ATTEMPT_OUTCOME_TYPE_DDL,
@@ -60,6 +56,7 @@ from horsies.core.lifecycle.classify import (
     WorkerLevelFailure,
 )
 from horsies.core.worker.shared_stop import RetryPlacement
+from tests.baseline_sql import baseline_sql
 
 pytestmark = [pytest.mark.unit]
 
@@ -402,31 +399,12 @@ class TestProgram:
         assert 'IF NOT v_ctx.is_workflow_task THEN' in body[move:]
 
     def test_installation_has_the_type_before_the_function(self) -> None:
-        fragments = installation_fragments()
-        type_at = next(
-            index
-            for index, fragment in enumerate(fragments)
-            if f'CREATE TYPE {FAILED_ATTEMPT_OUTCOME_TYPE}' in fragment
-        )
-        function_at = next(
-            index
-            for index, fragment in enumerate(fragments)
-            if f'CREATE FUNCTION {FINISH_FAILED_ATTEMPT_FUNCTION}' in fragment
-        )
+        sql = baseline_sql()
+        type_at = sql.index(f'CREATE TYPE {FAILED_ATTEMPT_OUTCOME_TYPE}')
+        function_at = sql.index(f'CREATE FUNCTION {FINISH_FAILED_ATTEMPT_FUNCTION}')
 
         assert type_at < function_at
-        assert not any(
-            f'CREATE FUNCTION {LOCK_RUNNING_TASK_FUNCTION}' in fragment
-            for fragment in fragments
-        )
-
-    def test_teardown_drops_the_finish_and_the_retired_locking_read(self) -> None:
-        statements = teardown_statements()
-
-        assert (
-            f'DROP TYPE IF EXISTS {FAILED_ATTEMPT_OUTCOME_TYPE} CASCADE' in statements
-        )
-        assert any(LOCK_RUNNING_TASK_FUNCTION in statement for statement in statements)
+        assert f'CREATE FUNCTION {LOCK_RUNNING_TASK_FUNCTION}' not in sql
 
     def test_the_upgrade_drops_before_it_creates(self) -> None:
         statements = failed_attempt_program_ddl()

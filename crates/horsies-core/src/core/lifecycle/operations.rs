@@ -35,8 +35,6 @@ pub enum TerminalizationKind {
     WorkflowCancelClaim,
     WorkflowCancelClaimBatch,
     WorkflowCancelWorkflow,
-    /// Relocated by the one-time cutover without recorded wire provenance.
-    LegacyTerminal,
 }
 
 impl TerminalizationKind {
@@ -58,7 +56,6 @@ impl TerminalizationKind {
             Self::WorkflowCancelClaim => "WORKFLOW_CANCEL_CLAIM",
             Self::WorkflowCancelClaimBatch => "WORKFLOW_CANCEL_CLAIM_BATCH",
             Self::WorkflowCancelWorkflow => "WORKFLOW_CANCEL_WORKFLOW",
-            Self::LegacyTerminal => "LEGACY_TERMINAL",
         }
     }
 
@@ -81,13 +78,12 @@ impl TerminalizationKind {
             "WORKFLOW_CANCEL_CLAIM" => Some(Self::WorkflowCancelClaim),
             "WORKFLOW_CANCEL_CLAIM_BATCH" => Some(Self::WorkflowCancelClaimBatch),
             "WORKFLOW_CANCEL_WORKFLOW" => Some(Self::WorkflowCancelWorkflow),
-            "LEGACY_TERMINAL" => Some(Self::LegacyTerminal),
             _ => None,
         }
     }
 
     /// Every kind, for domain tests and rendering.
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 15] = [
         Self::CompleteLocked,
         Self::CompleteFused,
         Self::FailRunning,
@@ -103,7 +99,6 @@ impl TerminalizationKind {
         Self::WorkflowCancelClaim,
         Self::WorkflowCancelClaimBatch,
         Self::WorkflowCancelWorkflow,
-        Self::LegacyTerminal,
     ];
 }
 
@@ -117,7 +112,7 @@ impl TerminalizationKind {
 /// commit the same effect on the row they touch. Families do: an orphan
 /// sweep and a workflow cancellation reaching the same row are different
 /// events.
-pub const EQUIVALENCE_CLASSES: [&[TerminalizationKind]; 9] = [
+pub const EQUIVALENCE_CLASSES: [&[TerminalizationKind]; 8] = [
     &[
         TerminalizationKind::CompleteLocked,
         TerminalizationKind::CompleteFused,
@@ -143,7 +138,6 @@ pub const EQUIVALENCE_CLASSES: [&[TerminalizationKind]; 9] = [
         TerminalizationKind::WorkflowCancelClaimBatch,
         TerminalizationKind::WorkflowCancelWorkflow,
     ],
-    &[TerminalizationKind::LegacyTerminal],
 ];
 
 /// The kinds interchangeable with this one, including itself.
@@ -170,24 +164,16 @@ pub fn equivalence_class_of(kind: TerminalizationKind) -> &'static [Terminalizat
         TerminalizationKind::WorkflowCancelClaim
         | TerminalizationKind::WorkflowCancelClaimBatch
         | TerminalizationKind::WorkflowCancelWorkflow => EQUIVALENCE_CLASSES[7],
-        TerminalizationKind::LegacyTerminal => EQUIVALENCE_CLASSES[8],
     }
 }
 
 /// Whether a terminal row's committed kind satisfies a repeated request.
 ///
-/// A `None` committed kind is a row written before the kind column existed.
-/// Its provenance is unknown and is never inferred, so it answers `false`:
-/// the caller is told the state conflicts rather than told its own coupled
-/// write committed when nothing proves it did.
-pub fn is_already_applied(
-    requested: TerminalizationKind,
-    committed: Option<TerminalizationKind>,
-) -> bool {
-    match committed {
-        None => false,
-        Some(kind) => equivalence_class_of(requested).contains(&kind),
-    }
+/// Every history row carries the kind of the function that moved it (the
+/// column is NOT NULL with the fifteen wire kinds), so the committed kind is
+/// always known.
+pub fn is_already_applied(requested: TerminalizationKind, committed: TerminalizationKind) -> bool {
+    equivalence_class_of(requested).contains(&committed)
 }
 
 /// The kind the database function for this command hardcodes.

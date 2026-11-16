@@ -2,23 +2,18 @@
 //
 // The monitoring layer never runs DDL: a missing or mismatched schema is a
 // condition to report, never one to repair. `mismatch` degrades the UI to
-// read-only, and so does `cutover_required` (versions equal, offline cutover
-// incomplete); `absent` and `unknown` are dead ends for the whole UI.
+// read-only; `absent` and `unknown` are dead ends for the whole UI.
 
 import type { MonitoringMeta } from '@/types/meta';
 
 export type SchemaState =
   | 'match'
   | 'mismatch'
-  | 'cutover_required'
   | 'absent'
   | 'unknown';
 
 /** The states that show the persistent read-only banner. */
-export type BannerSchemaState = Extract<
-  SchemaState,
-  'mismatch' | 'cutover_required'
->;
+export type BannerSchemaState = Extract<SchemaState, 'mismatch'>;
 
 /** Maps the server's verdict to the UI state. Every server state has one
  * UI state, and a new server state fails the typecheck here. */
@@ -28,8 +23,6 @@ export function schemaState(meta: MonitoringMeta): SchemaState {
       return 'match';
     case 'MISMATCH':
       return 'mismatch';
-    case 'CUTOVER_REQUIRED':
-      return 'cutover_required';
     case 'ABSENT':
       return 'absent';
     case 'UNKNOWN':
@@ -59,17 +52,6 @@ export function schemaMismatchMessage(meta: MonitoringMeta): string {
   );
 }
 
-/** Persistent read-only banner shown while the offline task-history cutover
- * is incomplete. The versions are equal, so only one is named. */
-export function schemaCutoverMessage(meta: MonitoringMeta): string {
-  return (
-    `Schema v${meta.schema_version} is current, but the offline task-history ` +
-    'cutover is not complete. Read-only mode: actions are disabled. ' +
-    'Run the cutover stages through tighten and validation. ' +
-    'See the 0.5.0 migration guide.'
-  );
-}
-
 /** Banner text for each state that shows the banner. */
 export function schemaBannerMessage(
   meta: MonitoringMeta,
@@ -78,8 +60,6 @@ export function schemaBannerMessage(
   switch (state) {
     case 'mismatch':
       return schemaMismatchMessage(meta);
-    case 'cutover_required':
-      return schemaCutoverMessage(meta);
     default: {
       const unhandled: never = state;
       return unhandled;

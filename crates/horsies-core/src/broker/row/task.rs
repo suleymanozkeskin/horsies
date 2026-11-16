@@ -198,6 +198,8 @@ pub struct TaskAttemptRow {
 ///
 /// Represents a RUNNING task whose worker has not sent a heartbeat within
 /// the configured threshold, indicating the worker may have crashed.
+/// `started_at` is set: the query selects only rows that started before the
+/// threshold. `last_heartbeat` is `None` for a task with no runner beat.
 #[derive(Debug, Clone, Serialize, FromRow)]
 pub struct StaleTaskRow {
     pub id: Uuid,
@@ -205,7 +207,7 @@ pub struct StaleTaskRow {
     pub worker_hostname: Option<String>,
     pub worker_pid: Option<i32>,
     pub worker_process_name: Option<String>,
-    pub started_at: Option<DateTime<Utc>>,
+    pub started_at: DateTime<Utc>,
     pub last_heartbeat: Option<DateTime<Utc>>,
 }
 
@@ -219,8 +221,12 @@ pub struct ExpiredTaskRow {
     pub task_name: String,
     pub queue_name: String,
     pub priority: i32,
-    pub sent_at: Option<DateTime<Utc>>,
-    pub good_until: Option<DateTime<Utc>>,
+    pub sent_at: DateTime<Utc>,
+    pub enqueued_at: DateTime<Utc>,
+    pub good_until: DateTime<Utc>,
+    /// How long ago `good_until` passed, in milliseconds, on the database
+    /// clock (Python's `expired_for`).
+    pub expired_for_ms: i64,
 }
 
 #[cfg(test)]

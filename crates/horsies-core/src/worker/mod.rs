@@ -8,6 +8,7 @@ pub mod execution;
 pub mod heartbeat;
 pub mod recovery;
 pub mod retry;
+pub mod runner_beats;
 pub mod scheduler;
 mod supervision;
 pub mod worker;
