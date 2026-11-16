@@ -70,24 +70,19 @@ async fn clean_w3(pool: &PgPool) {
 async fn seed_task(pool: &PgPool, seed: &TaskSeed) {
     sqlx::query(
         "INSERT INTO horsies_tasks (
-             id, task_name, queue_name, priority, args, kwargs, status,
-             sent_at, enqueued_at, started_at, claimed, claimed_at,
-             claimed_by_worker_id, claim_expires_at, is_workflow_task,
-             retry_count, max_retries, enqueue_sha,
-             command_fingerprint_version, command_fingerprint,
-             retention_class_key, retain_rerun_input,
-             prepared_rerun_input_disposition, created_at, updated_at
-         ) VALUES (
-             $1, $2, 'default', 100, '[]', '{}', $3, NOW(),
-             NOW() - INTERVAL '60 seconds',
-             CASE WHEN $3 = 'RUNNING' THEN NOW() - INTERVAL '30 seconds' END,
-             $4::text IS NOT NULL,
-             CASE WHEN $4::text IS NOT NULL THEN NOW() - INTERVAL '40 seconds' END,
-             $4,
-             CASE WHEN $4::text IS NOT NULL THEN NOW() + INTERVAL '1 minute' END,
-             $5, 0, 3, $1::text, 1, decode(repeat('0c', 32), 'hex'),
-             'forever', FALSE, 'DECLINED_BY_POLICY', NOW(), NOW()
-         )",
+            id, task_name, queue_name, priority, input, status, sent_at, enqueued_at,
+            started_at, claimed_at, claimed_by_worker_id, claim_expires_at, is_workflow_task,
+            retry_count, max_retries, command_fingerprint_version, command_fingerprint,
+            retention_class_key, retain_rerun_input, created_at, updated_at, execution
+        ) VALUES (
+            $1, $2, 'default', 100, 'null', $3, NOW(), NOW() - INTERVAL '60 seconds',
+            CASE WHEN $3 = 'RUNNING' THEN NOW() - INTERVAL '30 seconds' END,
+            CASE WHEN $4::text IS NOT NULL THEN NOW() - INTERVAL '40 seconds' END, $4,
+            CASE WHEN $4::text IS NOT NULL THEN NOW() + INTERVAL '1 minute' END, $5, 0, 3,
+            CASE WHEN $5 THEN NULL ELSE 1 END,
+            CASE WHEN $5 THEN NULL ELSE decode(repeat('0c', 32), 'hex') END, 'forever', FALSE,
+            NOW(), NOW(), 'ISOLATED'
+        )",
     )
     .bind(seed.id)
     .bind(format!("w3_task_{}", seed.id.simple()))
@@ -204,14 +199,15 @@ async fn workflow_status(pool: &PgPool, workflow_id: Uuid) -> String {
 async fn seed_workflow_task_link(pool: &PgPool, workflow_id: Uuid, task_id: Uuid, status: &str) {
     sqlx::query(
         "INSERT INTO horsies_workflow_tasks (
-             id, workflow_id, task_index, node_id, task_name, queue_name,
-             priority, dependencies, allow_failed_deps, join_type, status,
-             task_id, is_subworkflow, created_at, started_at
-         ) VALUES (
-             $1, $2, 0, 'w3-node', 'w3_node_task', 'default', 100,
-             ARRAY[]::integer[], FALSE, 'all', $3, $4, FALSE, NOW(),
-             CASE WHEN $3 = 'RUNNING' THEN NOW() - INTERVAL '30 seconds' END
-         )",
+            id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+            dependencies, allow_failed_deps, join_type, status, task_id, is_subworkflow,
+            created_at, started_at, max_retries, execution, retention_class_key
+        ) VALUES (
+            $1, $2, 0, 'w3-node', 'w3_node_task', 'null', 'default', 100, ARRAY[]::integer[],
+            FALSE, 'all', $3, $4, FALSE, NOW(),
+            CASE WHEN $3 = 'RUNNING' THEN NOW() - INTERVAL '30 seconds' END, 0, 'ISOLATED',
+            'standard_30d'
+        )",
     )
     .bind(Uuid::new_v4())
     .bind(workflow_id)

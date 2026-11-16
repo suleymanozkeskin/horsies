@@ -1903,15 +1903,15 @@ async fn pending_blocker_refuses_then_detach_restores_timeout_and_drop_reconcile
     let workflow_id = Uuid::new_v4();
     let node_row_id = Uuid::new_v4();
     let pending_task_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO horsies_workflows (id, name) VALUES ($1, 'p3 blocker')")
+    sqlx::query("INSERT INTO horsies_workflows (id, name, status, on_error, depth, root_workflow_id, sent_at, created_at, updated_at) VALUES ($1, 'p3 blocker', 'PENDING', 'fail', 0, $1, NOW(), NOW(), NOW())")
         .bind(workflow_id)
         .execute(&mut *transaction)
         .await
         .expect("insert blocker workflow");
     sqlx::query(
         "INSERT INTO horsies_workflow_tasks
-             (id, workflow_id, task_index, task_name)
-         VALUES ($1, $2, 0, 'p3 blocker node')",
+             (id, workflow_id, task_index, task_name, input, queue_name, priority, dependencies, allow_failed_deps, join_type, status, is_subworkflow, created_at, max_retries, execution, retention_class_key)
+         VALUES ($1, $2, 0, 'p3 blocker node', 'null', 'default', 100, '{}', FALSE, 'all', 'PENDING', FALSE, NOW(), 0, 'ISOLATED', 'standard_30d')",
     )
     .bind(node_row_id)
     .bind(workflow_id)

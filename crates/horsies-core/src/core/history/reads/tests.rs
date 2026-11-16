@@ -690,14 +690,14 @@ async fn seed_live_row(
 ) {
     sqlx::query(
         "INSERT INTO horsies_tasks (
-             id, task_name, queue_name, status, sent_at, enqueued_at,
-             enqueue_sha, command_fingerprint_version, command_fingerprint,
-             retention_class_key, retain_rerun_input,
-             prepared_rerun_input_disposition
-         ) VALUES (
-             $1, 'p4.live', 'default', 'PENDING', $2, $2,
-             'p4-live-sha', 1, $3, $4, FALSE, 'NEVER_ELIGIBLE'
-         )",
+            id, task_name, queue_name, status, input, sent_at, enqueued_at,
+            command_fingerprint_version, command_fingerprint, retention_class_key,
+            retain_rerun_input, execution, priority, retry_count, max_retries,
+            is_workflow_task, created_at, updated_at
+        ) VALUES (
+            $1, 'p4.live', 'default', 'PENDING', 'null', $2, $2, 1, $3, $4, FALSE, 'ISOLATED',
+            100, 0, 0, FALSE, NOW(), NOW()
+        )",
     )
     .bind(task_id)
     .bind(anchor)

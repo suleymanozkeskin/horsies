@@ -10,16 +10,17 @@ async fn seed(pool: &PgPool) -> (Uuid, DateTime<Utc>) {
     let id = Uuid::new_v4();
     let generation = sqlx::query_scalar(
         "INSERT INTO horsies_tasks (
-            id, task_name, queue_name, status, started_at, claimed_at,
+            id, task_name, queue_name, status, input, started_at, claimed_at,
             claimed_by_worker_id, finalizing_at, finalizing_by_worker_id,
-            enqueue_sha, command_fingerprint_version, command_fingerprint,
-            retention_class_key, retain_rerun_input, prepared_rerun_input_disposition
-         ) VALUES (
-            $1, 'finalizing_test', 'default', 'RUNNING', NOW() - interval '1 hour',
+            command_fingerprint_version, command_fingerprint, retention_class_key,
+            retain_rerun_input, execution, priority, sent_at, enqueued_at, retry_count,
+            max_retries, is_workflow_task, created_at, updated_at
+        ) VALUES (
+            $1, 'finalizing_test', 'default', 'RUNNING', 'null', NOW() - interval '1 hour',
             NOW() - interval '1 hour', 'current-worker', NOW() - interval '1 hour',
-            'current-worker', 'fixture', 1, decode(repeat('00', 32), 'hex'),
-            'forever', FALSE, 'NEVER_ELIGIBLE'
-         ) RETURNING claimed_at",
+            'current-worker', 1, decode(repeat('00', 32), 'hex'), 'forever', FALSE, 'ISOLATED',
+            100, NOW(), NOW(), 0, 0, FALSE, NOW(), NOW()
+        ) RETURNING claimed_at",
     )
     .bind(id)
     .fetch_one(pool)

@@ -843,18 +843,14 @@ async fn seed_pending(pool: &PgPool, prefix: &str) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO horsies_tasks (
-             id, task_name, queue_name, priority, args, kwargs, status,
-             sent_at, enqueued_at, claimed, is_workflow_task,
-             retry_count, max_retries, enqueue_sha,
-             command_fingerprint_version, command_fingerprint,
-             retention_class_key, retain_rerun_input,
-             prepared_rerun_input_disposition, created_at, updated_at
-         ) VALUES (
-             $1, $2, 'default', 100, '[]', '{}', 'PENDING',
-             NOW(), NOW(), FALSE, FALSE, 0, 3, $1::text,
-             1, decode(repeat('0d', 32), 'hex'), 'forever', FALSE,
-             'DECLINED_BY_POLICY', NOW(), NOW()
-         )",
+            id, task_name, queue_name, priority, input, status, sent_at, enqueued_at,
+            is_workflow_task, retry_count, max_retries, command_fingerprint_version,
+            command_fingerprint, retention_class_key, retain_rerun_input, created_at,
+            updated_at, execution
+        ) VALUES (
+            $1, $2, 'default', 100, 'null', 'PENDING', NOW(), NOW(), FALSE, 0, 3, 1,
+            decode(repeat('0d', 32), 'hex'), 'forever', FALSE, NOW(), NOW(), 'ISOLATED'
+        )",
     )
     .bind(id)
     .bind(format!("{prefix}task_{}", id.simple()))

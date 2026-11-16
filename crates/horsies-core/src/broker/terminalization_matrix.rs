@@ -461,7 +461,6 @@ struct Seed {
     good_until: Option<DateTime<Utc>>,
     is_workflow_task: bool,
     started_at: Option<DateTime<Utc>>,
-    failed_reason: Option<String>,
     idempotency_key_digest: Option<Vec<u8>>,
 }
 
@@ -474,7 +473,6 @@ impl Default for Seed {
             good_until: None,
             is_workflow_task: false,
             started_at: Some(Utc::now()),
-            failed_reason: None,
             idempotency_key_digest: None,
         }
     }
@@ -484,19 +482,16 @@ async fn seed_task(pool: &PgPool, id: &str, seed: Seed) {
     let task_id = Uuid::parse_str(id).expect("UUID task id");
     sqlx::query(
         "INSERT INTO horsies_tasks (
-            id, task_name, queue_name, priority, args, kwargs, status,
-            sent_at, enqueued_at, started_at, claimed, claimed_at,
-            claimed_by_worker_id, good_until, is_workflow_task,
-            failed_reason, retry_count, max_retries, enqueue_sha,
-            command_fingerprint_version, command_fingerprint,
-            retention_class_key, idempotency_key_digest, retain_rerun_input,
-            prepared_rerun_input_disposition, created_at, updated_at
+            id, task_name, queue_name, priority, input, status, sent_at, enqueued_at,
+            started_at, claimed_at, claimed_by_worker_id, good_until, is_workflow_task,
+            retry_count, max_retries, command_fingerprint_version, command_fingerprint,
+            retention_class_key, idempotency_key_digest, retain_rerun_input, created_at,
+            updated_at, execution, claim_expires_at
         ) VALUES (
-            $1, 'matrix_task', 'default', 100, '[]', '{}', $2,
-            NOW(), NOW(), $3, $4 IS NOT NULL, $5,
-            $4, $6, $7,
-            $8, 0, 3, $1::text, 1, $9,
-            'forever', $10, TRUE, 'DECLINED_BY_POLICY', NOW(), NOW()
+            $1, 'matrix_task', 'default', 100, 'null', $2, NOW(), NOW(), $3, $5, $4, $6, $7, 0,
+            3, CASE WHEN $7 THEN NULL ELSE 1 END, CASE WHEN $7 THEN NULL ELSE $8 END,
+            'forever', $9, TRUE, NOW(), NOW(), 'ISOLATED',
+            CASE WHEN $2 = 'CLAIMED' THEN NOW() + interval '1 hour' END
         )",
     )
     .bind(task_id)
@@ -506,7 +501,6 @@ async fn seed_task(pool: &PgPool, id: &str, seed: Seed) {
     .bind(seed.claimed_at)
     .bind(seed.good_until)
     .bind(seed.is_workflow_task)
-    .bind(&seed.failed_reason)
     .bind(vec![7_u8; 32])
     .bind(seed.idempotency_key_digest)
     .execute(pool)
@@ -535,15 +529,15 @@ async fn seed_workflow(pool: &PgPool, id: &str, status: &str) {
 async fn seed_wf_task(pool: &PgPool, wf_id: &str, task_id: &str, status: &str) {
     sqlx::query(
         "INSERT INTO horsies_workflow_tasks (
-            id, workflow_id, task_index, node_id, task_name, task_args,
-            task_kwargs, queue_name, priority, dependencies, allow_failed_deps,
-            join_type, status, is_subworkflow, task_id, created_at
+            id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+            dependencies, allow_failed_deps, join_type, status, is_subworkflow, task_id,
+            created_at, max_retries, execution, retention_class_key
         ) VALUES (
             $1, $2,
             COALESCE((SELECT MAX(task_index) + 1 FROM horsies_workflow_tasks
                       WHERE workflow_id = $2), 0),
-            'node_' || $1, 'matrix_task', '[]', '{}',
-            'default', 100, '{}', FALSE, 'all', $3, FALSE, $4, NOW()
+            'node_' || $1, 'matrix_task', 'null', 'default', 100, '{}', FALSE, 'all', $3,
+            FALSE, $4, NOW(), 0, 'ISOLATED', 'standard_30d'
         )",
     )
     .bind(Uuid::new_v4())
@@ -691,7 +685,6 @@ async fn complete_locked_moves_to_history_and_preserves_last_claim_evidence() {
         &pool,
         &id,
         Seed {
-            failed_reason: Some("stale reason from an earlier attempt".to_owned()),
             claimed_at: Some(claimed_at),
             ..Seed::default()
         },
@@ -1087,15 +1080,7 @@ async fn fused_on_matching_claim_outside_source_state_is_conflict() {
 async fn fail_locked_assigns_failed_reason_unconditionally() {
     let pool = migrated_pool().await;
     let id = Uuid::new_v4().to_string();
-    seed_task(
-        &pool,
-        &id,
-        Seed {
-            failed_reason: Some("reason from a requeued earlier attempt".to_owned()),
-            ..Seed::default()
-        },
-    )
-    .await;
+    seed_task(&pool, &id, Seed { ..Seed::default() }).await;
 
     let outcomes = terminalize(
         &pool,
@@ -1993,17 +1978,16 @@ async fn orphan_sweep_cursor_bounds_and_completes_a_fifty_thousand_row_audit() {
              FROM generate_series(1, 50001) AS g
          )
          INSERT INTO horsies_tasks (
-             id, task_name, queue_name, priority, args, kwargs, status,
-             sent_at, enqueued_at, claimed, is_workflow_task,
-             retry_count, max_retries, enqueue_sha,
+             id, task_name, queue_name, priority, input, execution, status,
+             sent_at, enqueued_at, is_workflow_task,
+             retry_count, max_retries,
              command_fingerprint_version, command_fingerprint,
-             retention_class_key, retain_rerun_input,
-             prepared_rerun_input_disposition, created_at, updated_at
+             retention_class_key, retain_rerun_input, created_at, updated_at
          )
-         SELECT task_id, 'bounded_recovery_cursor_task', 'default', 100, '[]', '{}',
-                'PENDING', NOW(), NOW(), FALSE, TRUE,
-                0, 3, task_id::text, 1, decode(repeat('07', 32), 'hex'),
-                'forever', TRUE, 'DECLINED_BY_POLICY', NOW(), NOW()
+         SELECT task_id, 'bounded_recovery_cursor_task', 'default', 100, 'null', 'ISOLATED',
+                'PENDING', NOW(), NOW(), TRUE,
+                0, 3, NULL, NULL,
+                'forever', TRUE, NOW(), NOW()
          FROM generated",
     )
     .execute(&pool)
@@ -2019,13 +2003,15 @@ async fn orphan_sweep_cursor_bounds_and_completes_a_fifty_thousand_row_audit() {
              FROM generate_series(1, 50000) AS g
          )
          INSERT INTO horsies_workflow_tasks (
-             id, workflow_id, task_index, node_id, task_name,
+             id, workflow_id, task_index, node_id, task_name, input,
              queue_name, priority, dependencies, allow_failed_deps,
-             join_type, status, is_subworkflow, task_id, created_at
+             join_type, status, is_subworkflow, max_retries, execution,
+             retention_class_key, task_id, created_at
          )
-         SELECT node_row_id, $1, g, 'node_' || g, 'bounded_recovery_cursor_task',
+         SELECT node_row_id, $1, g, 'node_' || g, 'bounded_recovery_cursor_task', 'null',
                 'default', 100, '{}'::integer[], FALSE,
-                'all', 'PENDING', FALSE, task_id, NOW()
+                'all', 'PENDING', FALSE, 3, 'ISOLATED',
+                'standard_30d', task_id, NOW()
          FROM generated",
     )
     .bind(workflow_id)
