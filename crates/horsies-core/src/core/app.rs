@@ -1454,7 +1454,8 @@ where
 }
 
 /// Decode a child workflow's params from the parent node's encoded input
-/// (`null` when the node sets no params).
+/// (`{}` when the node sets no params), with the stored-input read rule of
+/// task inputs.
 fn decode_parameterized_workflow_input<P>(
     workflow_name: &str,
     input_json: &str,
@@ -1462,13 +1463,17 @@ fn decode_parameterized_workflow_input<P>(
 where
     P: DeserializeOwned,
 {
-    serde_json::from_str(input_json).map_err(|e| {
-        HorsiesError::new(format!(
-            "failed to decode params for workflow '{}': {}",
-            workflow_name, e,
-        ))
-        .with_help("ensure the child workflow params type matches the parent-provided input shape")
-    })
+    serde_json::from_str::<serde_json::Value>(input_json)
+        .and_then(|value| crate::core::task::macros::deserialize_stored_input::<P>(&value))
+        .map_err(|e| {
+            HorsiesError::new(format!(
+                "failed to decode params for workflow '{}': {}",
+                workflow_name, e,
+            ))
+            .with_help(
+                "ensure the child workflow params type matches the parent-provided input shape",
+            )
+        })
 }
 
 /// Builder for registering typed workflow builders on the app.

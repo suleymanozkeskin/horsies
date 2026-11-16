@@ -3,8 +3,9 @@ use serde::{de::DeserializeOwned, Serialize};
 /// Deserialize a task's declared input type from the task input bytes.
 ///
 /// The bytes are the task row's `input`: one JSON value, as the send encoded
-/// it (`null` for a task without input). The value is decoded as stored:
-/// `null` and `{}` stay different, and an array is one input value.
+/// it (`null` for a task without input). The value is decoded as stored by
+/// [`deserialize_stored_input`]: an array is one input value, and `null` is
+/// never read as `{}`.
 ///
 /// This helper keeps attribute-macro generated wrappers and the low-level
 /// `async_task_fn!` / `blocking_task_fn!` macros on exactly the same
@@ -23,7 +24,7 @@ where
 
     // Deserialize by reference (`&Value` implements `Deserializer`), so the
     // candidate stays available for the error payload without a clone.
-    T::deserialize(&candidate).map_err(|e| crate::core::task::TaskError {
+    deserialize_stored_input::<T>(&candidate).map_err(|e| crate::core::task::TaskError {
         error_code: Some(crate::core::task::TaskErrorCode::from(
             crate::core::task::ContractCode::ArgumentTypeMismatch,
         )),
@@ -38,6 +39,28 @@ where
             "validation_error": e.to_string(),
         })),
     })
+}
+
+/// Deserialize a stored input value as `T`.
+///
+/// The value is read as stored, with one rule from Python's keyword input:
+/// an empty object `{}` is a call with no arguments, so a type that does not
+/// take an object (a unit input, or an `Option` of a non-map input) reads `{}`
+/// as `null`. `null` is never read as `{}`, so a `None` map input stays `None`.
+/// A workflow node without static input stores `{}`.
+pub(crate) fn deserialize_stored_input<T>(value: &serde_json::Value) -> Result<T, serde_json::Error>
+where
+    T: DeserializeOwned,
+{
+    match T::deserialize(value) {
+        Ok(decoded) => Ok(decoded),
+        Err(error) => match value {
+            serde_json::Value::Object(map) if map.is_empty() => {
+                T::deserialize(&serde_json::Value::Null).map_err(|_| error)
+            }
+            _ => Err(error),
+        },
+    }
 }
 
 /// Serialize a task's success value and verify it round-trips through the
@@ -342,9 +365,18 @@ mod tests {
         let empty: Option<std::collections::HashMap<String, i32>> =
             decode_task_input(b"{}").unwrap();
         assert_eq!(empty, Some(std::collections::HashMap::new()));
-        let unit_from_object = decode_task_input::<()>(b"{}").unwrap_err();
+    }
+
+    #[test]
+    fn an_empty_object_is_no_input_for_a_type_that_takes_no_object() {
+        // A workflow node without static input stores `{}`, Python's empty
+        // keyword input; a unit input reads it as no arguments.
+        decode_task_input::<()>(b"{}").unwrap();
+        let absent: Option<i32> = decode_task_input(b"{}").unwrap();
+        assert!(absent.is_none());
+        let refused = decode_task_input::<i32>(b"{}").unwrap_err();
         assert_eq!(
-            unit_from_object.error_code,
+            refused.error_code,
             Some(crate::core::task::TaskErrorCode::from(
                 crate::core::task::ContractCode::ArgumentTypeMismatch,
             )),

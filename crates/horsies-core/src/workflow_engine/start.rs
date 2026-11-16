@@ -1027,7 +1027,7 @@ pub(crate) fn build_child_spec(
 }
 
 /// Build the child spec from the parent node's encoded input
-/// (`input_json`, `null` when the node sets none). `has_child_inputs` is true
+/// (`input_json`, `{}` when the node sets none). `has_child_inputs` is true
 /// when the node sets a static input or takes `args_from` members.
 pub(crate) fn materialize_child_spec(
     resolved: crate::core::registry::workflow::ResolvedChildWorkflow<'_>,

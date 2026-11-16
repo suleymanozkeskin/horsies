@@ -8,7 +8,7 @@ use crate::core::workflow::spec::WorkflowSpec;
 /// Callback type for dynamically building a child WorkflowSpec at runtime.
 ///
 /// Receives the parent sub-workflow node's encoded input as one JSON value
-/// (after `args_from` merging; `null` when the node sets no params) and
+/// (after `args_from` merging; `{}` when the node sets no params) and
 /// returns a new `WorkflowSpec`.
 /// This enables sub-workflows to be parameterized by upstream results.
 ///

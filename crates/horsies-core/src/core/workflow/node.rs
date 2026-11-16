@@ -188,9 +188,9 @@ pub struct AnyNode {
 
     /// The encoded input of the node's task as one JSON value.
     ///
-    /// `None`: the node sets no static input. The node row then stores `null`,
-    /// and `args_from` and workflow context members merge into an object at
-    /// enqueue.
+    /// `None`: the node sets no static input. The node row then stores `{}`
+    /// (Python's empty keyword input), and `args_from` and workflow context
+    /// members merge into it at enqueue.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_json: Option<String>,
 
@@ -252,9 +252,10 @@ pub struct AnyNode {
 }
 
 /// The text that a node row stores as its `input` when the node sets no
-/// static input (a task without input; `args_from` and workflow context
-/// members merge into an object at enqueue).
-pub const NO_NODE_INPUT: &str = "null";
+/// static input: `{}`, Python's empty keyword input. `args_from` and workflow
+/// context members merge into it at enqueue; a task whose input type takes no
+/// object reads it as `null` (`decode_task_input`).
+pub const NO_NODE_INPUT: &str = "{}";
 
 impl AnyNode {
     /// The node row's `input`: the static input as written, or
