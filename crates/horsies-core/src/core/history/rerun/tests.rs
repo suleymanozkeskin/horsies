@@ -815,6 +815,40 @@ async fn non_inline_and_corrupt_input_shapes_fail_without_writes() {
     cleanup(&pool, &[source], &[]).await;
 }
 
+async fn rerun_count(pool: &PgPool, source: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE rerun_of_task_id = $1")
+        .bind(source)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+#[serial]
+async fn an_unknown_stored_status_is_source_corrupt() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let broker = PostgresBroker::from_pool(pool.clone());
+    let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
+    sqlx::query("UPDATE horsies_task_history SET status = 'BOGUS' WHERE task_id = $1")
+        .bind(source)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(matches!(
+        broker
+            .rerun_task(
+                RerunTask::new(source, None, None),
+                policy(SOURCE_CLASS, true)
+            )
+            .await
+            .unwrap(),
+        RerunOutcome::SourceCorrupt { task_id, ref detail }
+            if task_id == source && detail.contains("BOGUS")
+    ));
+    assert_eq!(rerun_count(&pool, source).await, 0);
+    cleanup(&pool, &[source], &[]).await;
+}
+
 #[tokio::test]
 #[serial]
 async fn keyed_replay_and_source_owned_key_conflict_are_exact() {
@@ -1254,6 +1288,7 @@ fn public_facade_exports_the_complete_typed_surface() {
             crate::RerunOutcome::Enqueued { .. }
             | crate::RerunOutcome::SourceLive { .. }
             | crate::RerunOutcome::SourceAbsent { .. }
+            | crate::RerunOutcome::SourceCorrupt { .. }
             | crate::RerunOutcome::NotEligible { .. }
             | crate::RerunOutcome::InputUnavailable { .. }
             | crate::RerunOutcome::InputCorrupt { .. }

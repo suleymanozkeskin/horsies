@@ -121,6 +121,14 @@ pub enum RerunOutcome {
         task_id: Uuid,
         reason: TaskAbsenceReason,
     },
+    /// The source history row does not decode: a stored status that is not a
+    /// task status, an attempt snapshot that fails its check, or a location
+    /// the staged read does not define. Nothing is written; a repeat gives the
+    /// same outcome until the stored row or the server changes.
+    SourceCorrupt {
+        task_id: Uuid,
+        detail: String,
+    },
     NotEligible {
         task_id: Uuid,
         reason: NotEligibleReason,
@@ -181,12 +189,24 @@ pub async fn rerun_task_in_tx(
         ));
     }
 
-    let detail = match read_task_detail(connection, command.source_task_id).await? {
-        TaskDetailResult::Live { task_id } => return Ok(RerunOutcome::SourceLive { task_id }),
-        TaskDetailResult::Absent { task_id, reason } => {
+    let detail = match read_task_detail(connection, command.source_task_id).await {
+        Ok(TaskDetailResult::Live { task_id }) => return Ok(RerunOutcome::SourceLive { task_id }),
+        Ok(TaskDetailResult::Absent { task_id, reason }) => {
             return Ok(RerunOutcome::SourceAbsent { task_id, reason });
         }
-        TaskDetailResult::History(detail) => detail,
+        Ok(TaskDetailResult::History(detail)) => detail,
+        Err(error @ (HistoryError::Contract(_) | HistoryError::ArchiveDecode(_))) => {
+            return Ok(RerunOutcome::SourceCorrupt {
+                task_id: command.source_task_id,
+                detail: error.to_string(),
+            });
+        }
+        Err(
+            error @ (HistoryError::Database(_)
+            | HistoryError::LeafLockNotHeld
+            | HistoryError::LeafLockBusy { .. }
+            | HistoryError::HistoryParentAbsent(_)),
+        ) => return Err(error.into()),
     };
 
     if detail.is_workflow_task {
