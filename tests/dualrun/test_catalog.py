@@ -128,6 +128,7 @@ def test_baseline_catalog_ignores_exactly_these_columns_with_a_reason() -> None:
         ('horsies_worker_states', 'memory_percent'),
         ('horsies_worker_states', 'cpu_percent'),
         ('horsies_worker_states', 'children_memory_mb'),
+        ('horsies_workflow_phase2_pending', 'result_digest'),
     }
     assert all(len(reason) > 20 for reason in ignored.values())
 
