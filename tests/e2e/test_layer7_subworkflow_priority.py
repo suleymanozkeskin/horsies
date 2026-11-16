@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 import pytest
 from sqlalchemy import text
 
+from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.task_decorator import TaskHandle
@@ -101,6 +102,7 @@ async def test_subworkflow_child_binds_queue_priority_and_claim_order(
             queue_name='serial',
             task_id=str(uuid4()),
             enqueue_sha=f'pb-blocker-{uuid4().hex[:8]}',
+            send_kind=SendKind.FIRST,
             sent_at=datetime.now(timezone.utc),
             kwargs_json=dumps_json({'duration_ms': 6000}).unwrap(),
         )).unwrap()
@@ -116,7 +118,7 @@ async def test_subworkflow_child_binds_queue_priority_and_claim_order(
         # 3. Direct-send a task on serial AFTER scrape exists (later enqueued_at).
         #    .send() resolves priority through the queue config (→ 30).
         direct_handle = unwrap_send(await pb.direct_task.send_async())
-        direct_id = direct_handle.task_id
+        direct_id = str(direct_handle.task_id)
 
         # 4. Drain: blocker finishes, worker claims scrape then direct.
         await wait_for_all_terminal(

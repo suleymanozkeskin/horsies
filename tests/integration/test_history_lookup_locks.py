@@ -66,7 +66,7 @@ history_schema = task_history_schema_fixture('task_history_it_lookup_locks')
 
 def v7_with_birth(birth: datetime) -> str:
     milliseconds = int(birth.timestamp() * 1_000)
-    return MonotonicUuid7Generator(clock_ms=lambda: milliseconds).mint()
+    return str(MonotonicUuid7Generator(clock_ms=lambda: milliseconds).mint())
 
 
 async def create_past_leaf(

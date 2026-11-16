@@ -5,7 +5,7 @@
 -- then; and a two-argument provenance stand-in that answers "not found", as the function-call script of that
 -- commit defined it.
 --
--- Each definition is the text of program/0.8.0 at commit a1e20e95 (0004_lifecycle_functions.sql,
+-- Each definition is the text of program/0.8.0 at commit cc5a40aa (0004_lifecycle_functions.sql,
 -- 0003_interim_functions.sql, tests/integration/baseline_function_calls.sql), unchanged except CREATE OR REPLACE
 -- for the six 0004 functions and no DEFAULT on the stand-in (a DEFAULT would make a one-argument call ambiguous next
 -- to the stand-in of the script). The file runs after interim_miss_classifier.sql (the composite type
@@ -411,7 +411,8 @@ CREATE OR REPLACE FUNCTION horsies_finish_workflow_success(
     observed_guard jsonb,
     queue_name text,
     task_name text,
-    node_has_dependents boolean
+    node_has_dependents boolean,
+    downstream_subworkflow text
 )
     LANGUAGE plpgsql
     AS $$
@@ -444,7 +445,7 @@ BEGIN
         RETURN QUERY
         SELECT m.task_id, m.ordinality, m.outcome, m.terminal_at, m.terminalization_kind, m.observed_status,
                m.observed_worker_id::text, m.observed_claimed_at, m.guard_kind, m.observed_guard,
-               NULL::text, NULL::text, NULL::boolean
+               NULL::text, NULL::text, NULL::boolean, NULL::text
         FROM horsies_terminalization_miss(
             p_task_id, ARRAY['COMPLETE_FUSED', 'COMPLETE_LOCKED']::text[], 'OWNER_AND_GENERATION', p_worker_id,
             p_claimed_at
@@ -486,7 +487,8 @@ BEGIN
     RETURN QUERY SELECT
         p_task_id, NULL::bigint, 'APPLIED'::text, v_terminal_at, 'COMPLETE_LOCKED'::text,
         'RUNNING'::text, v_ctx.claimed_by_worker_id::text, v_ctx.claimed_at, NULL::text, NULL::jsonb,
-        v_ctx.queue_name::text, v_ctx.task_name::text, horsies_node_has_dependents(p_task_id);
+        v_ctx.queue_name::text, v_ctx.task_name::text, horsies_node_has_dependents(p_task_id),
+        horsies_node_downstream_subworkflow(p_task_id);
 END
 $$;
 
@@ -524,7 +526,8 @@ CREATE OR REPLACE FUNCTION horsies_finish_failed_attempt(
     is_workflow_task boolean,
     queue_name text,
     task_name text,
-    node_has_dependents boolean
+    node_has_dependents boolean,
+    downstream_subworkflow text
 )
     LANGUAGE plpgsql
     AS $$
@@ -614,7 +617,7 @@ BEGIN
             p_task_id, NULL::bigint, 'RELEASED'::text, NULL::timestamptz, NULL::text,
             'CLAIMED'::text, v_ctx.claimed_by_worker_id::text, v_ctx.claimed_at, NULL::text, NULL::jsonb,
             NULL::text, NULL::integer, NULL::timestamptz, NULL::timestamptz,
-            NULL::boolean, v_ctx.queue_name::text, NULL::text, NULL::boolean;
+            NULL::boolean, v_ctx.queue_name::text, NULL::text, NULL::boolean, NULL::text;
         RETURN;
     END IF;
 
@@ -628,7 +631,7 @@ BEGIN
         SELECT m.task_id, m.ordinality, m.outcome, m.terminal_at, m.terminalization_kind, m.observed_status,
                m.observed_worker_id::text, m.observed_claimed_at, m.guard_kind, m.observed_guard,
                NULL::text, NULL::integer, NULL::timestamptz, NULL::timestamptz,
-               NULL::boolean, NULL::text, NULL::text, NULL::boolean
+               NULL::boolean, NULL::text, NULL::text, NULL::boolean, NULL::text
         FROM horsies_terminalization_miss(
             p_task_id, ARRAY['FAIL_RUNNING']::text[], 'OWNER_AND_GENERATION', p_worker_id, p_claimed_at
         ) AS m;
@@ -691,7 +694,7 @@ BEGIN
             p_task_id, NULL::bigint, 'RETRY_SCHEDULED'::text, NULL::timestamptz, NULL::text,
             'RUNNING'::text, v_ctx.claimed_by_worker_id::text, v_ctx.claimed_at, NULL::text, NULL::jsonb,
             NULL::text, v_ctx.retry_count + 1, v_next_retry_at, NULL::timestamptz,
-            NULL::boolean, v_ctx.queue_name::text, NULL::text, NULL::boolean;
+            NULL::boolean, v_ctx.queue_name::text, NULL::text, NULL::boolean, NULL::text;
         RETURN;
     END IF;
 
@@ -707,7 +710,8 @@ BEGIN
         'RUNNING'::text, v_ctx.claimed_by_worker_id::text, v_ctx.claimed_at, NULL::text, NULL::jsonb,
         v_retry_disposition, NULL::integer, v_next_retry_at, v_good_until,
         v_ctx.is_workflow_task, v_ctx.queue_name::text, v_ctx.task_name::text,
-        CASE WHEN v_ctx.is_workflow_task THEN horsies_node_has_dependents(p_task_id) END;
+        CASE WHEN v_ctx.is_workflow_task THEN horsies_node_has_dependents(p_task_id) END,
+        CASE WHEN v_ctx.is_workflow_task THEN horsies_node_downstream_subworkflow(p_task_id) END;
 END
 $$;
 
@@ -741,7 +745,8 @@ CREATE OR REPLACE FUNCTION horsies_finish_stale_attempt(
     is_workflow_task boolean,
     queue_name text,
     task_name text,
-    node_has_dependents boolean
+    node_has_dependents boolean,
+    downstream_subworkflow text
 )
     LANGUAGE plpgsql
     AS $$
@@ -814,7 +819,7 @@ BEGIN
         SELECT m.task_id, m.ordinality, m.outcome, m.terminal_at, m.terminalization_kind, m.observed_status,
                m.observed_worker_id::text, m.observed_claimed_at, m.guard_kind, m.observed_guard,
                NULL::text, NULL::integer, NULL::timestamptz, NULL::timestamptz,
-               NULL::boolean, NULL::text, NULL::text, NULL::boolean
+               NULL::boolean, NULL::text, NULL::text, NULL::boolean, NULL::text
         FROM horsies_terminalization_miss(
             p_task_id, ARRAY['FAIL_STALE']::text[], 'NONE', NULL::text, NULL::timestamptz
         ) AS m;
@@ -842,7 +847,7 @@ BEGIN
                 'evaluated_at', v_ctx.evaluated_at
             ),
             NULL::text, NULL::integer, NULL::timestamptz, NULL::timestamptz,
-            NULL::boolean, NULL::text, NULL::text, NULL::boolean;
+            NULL::boolean, NULL::text, NULL::text, NULL::boolean, NULL::text;
         RETURN;
     END IF;
 
@@ -855,7 +860,7 @@ BEGIN
                 'retry_count', v_ctx.retry_count
             ),
             NULL::text, NULL::integer, NULL::timestamptz, NULL::timestamptz,
-            NULL::boolean, NULL::text, NULL::text, NULL::boolean;
+            NULL::boolean, NULL::text, NULL::text, NULL::boolean, NULL::text;
         RETURN;
     END IF;
 
@@ -914,7 +919,7 @@ BEGIN
             p_task_id, NULL::bigint, 'RETRY_SCHEDULED'::text, NULL::timestamptz, NULL::text,
             'RUNNING'::text, v_ctx.claimed_by_worker_id::text, v_ctx.claimed_at, NULL::text, NULL::jsonb,
             NULL::text, v_ctx.retry_count + 1, v_next_retry_at, NULL::timestamptz,
-            NULL::boolean, v_ctx.queue_name::text, NULL::text, NULL::boolean;
+            NULL::boolean, v_ctx.queue_name::text, NULL::text, NULL::boolean, NULL::text;
         RETURN;
     END IF;
 
@@ -927,7 +932,8 @@ BEGIN
         'RUNNING'::text, v_ctx.claimed_by_worker_id::text, v_ctx.claimed_at, NULL::text, NULL::jsonb,
         v_retry_disposition, NULL::integer, v_next_retry_at, v_good_until,
         v_ctx.is_workflow_task, v_ctx.queue_name::text, v_ctx.task_name::text,
-        CASE WHEN v_ctx.is_workflow_task THEN horsies_node_has_dependents(p_task_id) END;
+        CASE WHEN v_ctx.is_workflow_task THEN horsies_node_has_dependents(p_task_id) END,
+        CASE WHEN v_ctx.is_workflow_task THEN horsies_node_downstream_subworkflow(p_task_id) END;
 END
 $$;
 

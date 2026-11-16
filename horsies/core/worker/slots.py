@@ -73,6 +73,7 @@ from horsies.core.worker.child_runner import (
     LEFT_WORK_MARKER_BOUND_S,
 )
 from horsies.core.worker.config import ChildPreload
+from horsies.core.worker.dispatch_claim import DispatchClaim
 from horsies.core.worker.cpu_placement import (
     CpuPlacement,
     OwnCore,
@@ -446,7 +447,7 @@ class SharedRunRequest:
     kwargs_json: str | None
     worker_id: str
     is_workflow_task: bool
-    claimed_at: datetime
+    claim: DispatchClaim
     work: SeatWork
 
     def __post_init__(self) -> None:
@@ -474,7 +475,7 @@ class SharedRunRequest:
             kwargs_json=self.kwargs_json,
             worker_id=self.worker_id,
             is_workflow_task=self.is_workflow_task,
-            claimed_at=self.claimed_at,
+            claimed_at=self.claim.claimed_at,
             work=self.work,
         )
 
@@ -2413,6 +2414,18 @@ def _shared_capacity_of(slot: _SharedSlot) -> int:
             assert_never(unreachable)
 
 
+def _free_seats_of(state: SharedSlotState) -> int:
+    """The seats of a shared slot that take a task at once: the free seats of
+    an open child. A closing, booting, retiring or down slot takes none."""
+    match state:
+        case Open(runs=runs):
+            return runs.free()
+        case Starting() | Closing() | Retiring() | Down():
+            return 0
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def _runs_of(state: SharedSlotState) -> SeatRuns:
     """The tasks in flight of a shared slot in this state: an empty table for
     a state that holds none."""
@@ -3033,6 +3046,40 @@ class SlotPool:
         """The ``SHARED_THREAD`` tasks that the shared thread slots can hold
         now, counted as in ``shared_async_capacity``. Reads only."""
         return sum(_shared_capacity_of(slot) for slot in self._thread_slots)
+
+    def free_slots(self) -> int:
+        """The isolated slots that take a task at once: the slots whose child
+        is ``Idle``, less the tasks that wait for a slot. 0 once the pool
+        stops or failed. Reads only.
+
+        An idle child takes the next waiting task when its coroutine runs, so
+        a task submitted since then still counts against it.
+        """
+        if self._stopping or self._failure is not None:
+            return 0
+        idle = sum(1 for slot in self._slots if isinstance(slot.state, Idle))
+        return max(0, idle - len(self._pending))
+
+    def free_shared_async_seats(self) -> int:
+        """The ``SHARED_ASYNC`` seats that take a task at once: the free seats
+        of the open shared async children, less the tasks that wait for a
+        seat. 0 once the pool stops or failed. Reads only."""
+        return self._free_seats(self._shared_slots, self._shared_pending)
+
+    def free_shared_thread_seats(self) -> int:
+        """The ``SHARED_THREAD`` seats that take a task at once, counted as in
+        ``free_shared_async_seats``. Reads only."""
+        return self._free_seats(self._thread_slots, self._thread_pending)
+
+    def _free_seats(
+        self,
+        slots: list[_SharedSlot],
+        pending: deque[SharedHandle],
+    ) -> int:
+        if self._stopping or self._failure is not None:
+            return 0
+        free = sum(_free_seats_of(slot.state) for slot in slots)
+        return max(0, free - len(pending))
 
     def down_slots(self) -> tuple[DownSlot, ...]:
         """Each slot in ``Down``, in slot order, for the health report. Reads only."""

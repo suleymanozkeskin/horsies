@@ -3,7 +3,9 @@
 `to_producer_manifest` is the one place where the user config (Pydantic)
 meets the core's input (the manifest generated from horsies-core). It maps
 `PostgresConfig` field by field, and turns SQLAlchemy's `pool_recycle=-1`
-into the typed "never" value. The two inputs that `PostgresConfig` does
+into the typed "never" value, `tcp_keepalives` with its three values into
+the typed keepalive value, and `tcp_user_timeout_ms=0` into the typed
+"system default" value. The two inputs that `PostgresConfig` does
 not hold, the schema mode and the idempotency reservation window, are
 parameters: the caller decides them. `schema_mode_of` gives the schema mode
 of the broker flags `run_schema_migrations` and `assume_initialized`.
@@ -31,6 +33,12 @@ from horsies._catalog.manifest import (
     SessionDatabase,
     SessionDatabaseSameAsDatabaseUrl,
     SessionDatabaseSeparate,
+    TcpKeepalivesConfig,
+    TcpKeepalivesConfigOff,
+    TcpKeepalivesConfigOn,
+    TcpUserTimeoutConfig,
+    TcpUserTimeoutConfigAfter,
+    TcpUserTimeoutConfigSystemDefault,
 )
 from horsies.core.models.broker import SQLALCHEMY_NEVER_RECYCLE, PostgresConfig
 
@@ -131,6 +139,8 @@ def _database_manifest(config: PostgresConfig) -> DatabaseManifest:
         pool_timeout=config.pool_timeout,
         pool_recycle=pool_recycle_of(config.pool_recycle),
         echo=config.echo,
+        tcp_keepalives=tcp_keepalives_of(config),
+        tcp_user_timeout=tcp_user_timeout_of(config.tcp_user_timeout_ms),
     )
 
 
@@ -150,6 +160,53 @@ def pool_recycle_of(value: int) -> PoolRecycle:
                 'admits only -1 and a number of seconds'
             )
             return PoolRecycleAfterSeconds(seconds=value)
+
+
+def tcp_keepalives_of(config: PostgresConfig) -> TcpKeepalivesConfig:
+    """The typed form of the validated keepalive settings: off, or on with
+    the idle time, the interval and the probe count. The three values are
+    not read when `tcp_keepalives` is False.
+
+    The `PostgresConfig` validator admits only values of at least 1 when
+    keepalives are on, so another value is a defect and raises
+    `AssertionError`. Pure.
+    """
+    match config.tcp_keepalives:
+        case False:
+            return TcpKeepalivesConfigOff()
+        case True:
+            values = (
+                config.tcp_keepalives_idle,
+                config.tcp_keepalives_interval,
+                config.tcp_keepalives_count,
+            )
+            assert min(values) >= 1, (
+                f'keepalive values {values} passed the PostgresConfig validator, '
+                'which admits only values of at least 1 when tcp_keepalives is True'
+            )
+            return TcpKeepalivesConfigOn(
+                idle_seconds=config.tcp_keepalives_idle,
+                interval_seconds=config.tcp_keepalives_interval,
+                probes=config.tcp_keepalives_count,
+            )
+
+
+def tcp_user_timeout_of(milliseconds: int) -> TcpUserTimeoutConfig:
+    """The typed form of a validated `tcp_user_timeout_ms`: `0` is the
+    operating system's timeout, any other value a number of milliseconds.
+
+    The `PostgresConfig` validator admits only values of at least 0, so
+    another value is a defect and raises `AssertionError`. Pure.
+    """
+    match milliseconds:
+        case 0:
+            return TcpUserTimeoutConfigSystemDefault()
+        case _:
+            assert milliseconds > 0, (
+                f'tcp_user_timeout_ms={milliseconds} passed the PostgresConfig '
+                'validator, which admits only values of at least 0'
+            )
+            return TcpUserTimeoutConfigAfter(milliseconds=milliseconds)
 
 
 def _session_database(config: PostgresConfig) -> SessionDatabase:

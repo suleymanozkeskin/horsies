@@ -153,9 +153,9 @@ class TestDetail:
                 {'task_id': task_id, 'worker': WORKER},
             )
             await fail_task(connection, task_id)
-            detail = await read_task_detail(connection, task_id=task_id)
+            detail = await read_task_detail(connection, task_id=UUID(task_id))
             assert isinstance(detail, HistoryTaskDetail)
-            assert detail.task_id == task_id
+            assert detail.task_id == UUID(task_id)
             assert detail.status is TaskStatus.FAILED
             assert detail.terminalization_kind == 'FAIL_RUNNING'
             assert detail.retention_class_key == CLASS_KEY
@@ -185,7 +185,7 @@ class TestDetail:
                 input_text='{"x":1}',
             )
             await fail_task(connection, task_id)
-            detail = await read_task_detail(connection, task_id=task_id)
+            detail = await read_task_detail(connection, task_id=UUID(task_id))
             assert isinstance(detail, HistoryTaskDetail)
             assert detail.rerun_input_disposition == 'INLINE'
             assert detail.rerun_input_version == 1
@@ -201,8 +201,8 @@ class TestDetail:
             task_id = await insert_live_task(
                 connection, class_key=CLASS_KEY, worker=WORKER
             )
-            detail = await read_task_detail(connection, task_id=task_id)
-            assert detail == LiveTaskLocation(task_id=task_id)
+            detail = await read_task_detail(connection, task_id=UUID(task_id))
+            assert detail == LiveTaskLocation(task_id=UUID(task_id))
 
     @pytest.mark.asyncio
     async def test_unknown_uuidv7_task_with_no_detached_leaf_is_within_retained_history(
@@ -211,9 +211,9 @@ class TestDetail:
         async with terminalization_schema.engine.begin() as connection:
             await prepare_move_storage(connection, CLASS_KEY)
             ghost = v7_with_birth(datetime.now(UTC))
-            detail = await read_task_detail(connection, task_id=ghost)
+            detail = await read_task_detail(connection, task_id=UUID(ghost))
             assert detail == TaskDetailAbsent(
-                task_id=ghost, reason=TaskAbsenceReason.WITHIN_RETAINED_HISTORY
+                task_id=UUID(ghost), reason=TaskAbsenceReason.WITHIN_RETAINED_HISTORY
             )
 
     @pytest.mark.asyncio
@@ -222,7 +222,7 @@ class TestDetail:
     ) -> None:
         async with terminalization_schema.engine.begin() as connection:
             await prepare_move_storage(connection, CLASS_KEY)
-            ghost = str(uuid4())
+            ghost = uuid4()
             detail = await read_task_detail(connection, task_id=ghost)
             assert detail == TaskDetailAbsent(
                 task_id=ghost, reason=TaskAbsenceReason.NOT_CLASSIFIED
@@ -274,7 +274,7 @@ class TestDetail:
                     'seed': seed,
                 },
             )
-            resolved = await read_task_detail(connection, task_id=old_task)
+            resolved = await read_task_detail(connection, task_id=UUID(old_task))
             assert isinstance(resolved, HistoryTaskDetail)
 
         detached = await detach_expired_leaf(
@@ -296,9 +296,9 @@ class TestDetail:
             )
             assert dropped == LeafDropped(leaf_name=ref.leaf_name)
             await publisher.republish(connection)
-            absent = await read_task_detail(connection, task_id=old_task)
+            absent = await read_task_detail(connection, task_id=UUID(old_task))
             assert absent == TaskDetailAbsent(
-                task_id=old_task,
+                task_id=UUID(old_task),
                 reason=TaskAbsenceReason.PREDATES_RETAINED_HISTORY,
             )
         assert detached is not None

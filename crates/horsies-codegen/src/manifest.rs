@@ -1,6 +1,7 @@
-//! Render a manifest of horsies-core as `_catalog/manifest.py`: one frozen
-//! dataclass per manifest type, the integer bounds the core's parser
-//! enforces, and the dump function that gives the manifest's JSON text.
+//! Render a manifest of horsies-core as a module of `_catalog`
+//! (`manifest.py`, `worker_manifest.py`): one frozen dataclass per manifest
+//! type, the integer bounds the core's parser enforces, and the dump
+//! function that gives the manifest's JSON text.
 
 use horsies_core::manifest_schema::{
     ChoiceValue, IntBound, ManifestField, ManifestModule, ManifestShape, ManifestType, PythonValue,
@@ -9,8 +10,11 @@ use horsies_core::manifest_schema::{
 
 use crate::python_text::{docstring, string_literal, GENERATED_HEADER};
 
-/// The file name of the manifest module, inside `_catalog`.
+/// The file name of the producer manifest module, inside `_catalog`.
 pub const MANIFEST_MODULE_FILE: &str = "manifest.py";
+
+/// The file name of the worker manifest module, inside `_catalog`.
+pub const WORKER_MANIFEST_MODULE_FILE: &str = "worker_manifest.py";
 
 /// The decorator of every generated dataclass. `kw_only` lets a tag field
 /// with a default come before the fields without one.
@@ -25,8 +29,9 @@ pub fn render_manifest_module(module: &ManifestModule) -> String {
         "\"\"\"The {} of horsies-core, generated from its Rust types.\n\n\
          One frozen dataclass per manifest type, the integer bounds that the core's\n\
          parser enforces, and `{dump}`, which gives the JSON text that\n\
-         `horsies._core.CoreHandle` takes.\n\"\"\"\n\n",
-        words(module.root)
+         {} takes.\n\"\"\"\n\n",
+        words(module.root),
+        module.reader
     ));
     text.push_str(
         "from __future__ import annotations\n\nimport dataclasses\nimport json\n\
@@ -50,9 +55,10 @@ pub fn render_manifest_module(module: &ManifestModule) -> String {
     }
     text.push_str(&format!(
         "\n\ndef {dump}(manifest: {root}) -> str:\n    \
-         \"\"\"The JSON text of `manifest`, in the form that `CoreHandle` takes.\"\"\"\n    \
+         \"\"\"The JSON text of `manifest`, in the form that {reader} takes.\"\"\"\n    \
          return json.dumps(dataclasses.asdict(manifest), separators=(',', ':'), allow_nan=False)\n",
-        root = module.root
+        root = module.root,
+        reader = module.reader_short
     ));
     text
 }
@@ -202,12 +208,16 @@ fn render_dataclass(
     text
 }
 
-fn python_type(value: PythonValue) -> &'static str {
+/// The annotation of a field: a `Vec` is a tuple of any length, a map a
+/// `dict` with text keys.
+fn python_type(value: PythonValue) -> String {
     match value {
-        PythonValue::Bool => "bool",
-        PythonValue::Str => "str",
-        PythonValue::Int(_) => "int",
-        PythonValue::Named(name) => name,
+        PythonValue::Bool => "bool".to_owned(),
+        PythonValue::Str => "str".to_owned(),
+        PythonValue::Int(_) => "int".to_owned(),
+        PythonValue::Named(name) => name.to_owned(),
+        PythonValue::List(item) => format!("tuple[{}, ...]", python_type(item.value())),
+        PythonValue::Map(item) => format!("dict[str, {}]", python_type(item.value())),
     }
 }
 
@@ -234,7 +244,7 @@ fn snake_case(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use horsies_core::manifest_schema::PRODUCER_MANIFEST;
+    use horsies_core::manifest_schema::{PythonItem, PRODUCER_MANIFEST, WORKER_MANIFEST};
 
     use super::*;
 
@@ -340,5 +350,39 @@ mod tests {
             "dump_producer_manifest"
         );
         assert_eq!(words("ProducerManifest"), "producer manifest");
+        assert_eq!(dump_function_name("WorkerManifest"), "dump_worker_manifest");
+    }
+
+    #[test]
+    fn a_container_field_is_a_tuple_or_a_dict_of_its_item() {
+        assert_eq!(
+            python_type(PythonValue::List(PythonItem::Str)),
+            "tuple[str, ...]"
+        );
+        assert_eq!(
+            python_type(PythonValue::Map(PythonItem::Named("Execution"))),
+            "dict[str, Execution]"
+        );
+    }
+
+    #[test]
+    fn the_worker_manifest_module_has_every_type_bound_and_the_dump() {
+        let rendered = render_manifest_module(&WORKER_MANIFEST);
+        assert!(rendered.starts_with(GENERATED_HEADER));
+        for manifest_type in WORKER_MANIFEST.types {
+            let defined = match manifest_type.shape {
+                ManifestShape::Record { .. } => format!("\nclass {}:\n", manifest_type.python_name),
+                ManifestShape::Tagged { .. } | ManifestShape::Choice { .. } => {
+                    format!("\ntype {} = ", manifest_type.python_name)
+                }
+            };
+            assert!(rendered.contains(&defined), "{}", manifest_type.python_name);
+        }
+        for bound in WORKER_MANIFEST.int_bounds() {
+            assert!(rendered.contains(&format!("\n{}_MIN: Final = {}\n", bound.name, bound.min)));
+        }
+        assert!(rendered.contains("\ndef dump_worker_manifest(manifest: WorkerManifest) -> str:\n"));
+        assert!(rendered.contains("    profiles: dict[str, WorkerProfileManifest]\n"));
+        assert!(rendered.contains("JSON text that\nthe worker of the core takes."));
     }
 }

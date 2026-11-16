@@ -13,9 +13,10 @@ hint and still search every retained leaf before reporting absence.
 Monotonicity holds across threads and async tasks sharing the process
 generator. No cross-process total order is promised.
 
-The public surface is the canonical lowercase hyphenated string; `uuid.UUID`
-never crosses a public boundary. The birth decoder is the same arithmetic
-the generated staged-lookup function performs in SQL.
+A minted ID is a `uuid.UUID`, the type of every task ID in the public API.
+SQL binds take its canonical lowercase hyphenated text, `str(task_id)`. The
+birth decoder is the same arithmetic the generated staged-lookup function
+performs in SQL.
 """
 
 from __future__ import annotations
@@ -61,8 +62,8 @@ class MonotonicUuid7Generator:
         self._last_ms = -1
         self._counter = 0
 
-    def mint(self) -> str:
-        """Mint one canonical lowercase hyphenated UUIDv7 string."""
+    def mint(self) -> UUID:
+        """Mint one UUIDv7."""
         with self._lock:
             milliseconds, counter = self._advance()
             entropy = self._entropy_62_bits()
@@ -75,7 +76,7 @@ class MonotonicUuid7Generator:
             | (0b10 << 62)
             | entropy
         )
-        return str(UUID(int=value))
+        return UUID(int=value)
 
     def _advance(self) -> tuple[int, int]:
         now = self._clock_ms()
@@ -100,7 +101,7 @@ class MonotonicUuid7Generator:
 _PROCESS_GENERATOR = MonotonicUuid7Generator()
 
 
-def mint_task_id() -> str:
+def mint_task_id() -> UUID:
     """Mint a task ID from the process-global generator.
 
     Called once per prepared-send construction; the minted ID travels with

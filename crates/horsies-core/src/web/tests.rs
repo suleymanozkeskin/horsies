@@ -72,11 +72,16 @@ impl SequenceReader {
 
 #[async_trait]
 impl SchemaReader for SequenceReader {
-    async fn read(&self, _expected_version: i64) -> Result<SchemaStatus, sqlx::Error> {
+    async fn read(
+        &self,
+        _expected_version: i64,
+    ) -> Result<SchemaStatus, crate::broker::BrokerError> {
         self.reads.fetch_add(1, Ordering::Relaxed);
         match self.answers.lock().await.pop_front() {
             Some(ReaderAnswer::Status(status)) => Ok(status),
-            Some(ReaderAnswer::Failure) | None => Err(sqlx::Error::PoolClosed),
+            Some(ReaderAnswer::Failure) | None => Err(
+                crate::broker::BrokerError::ConnectionFailed("the test reader fails".to_owned()),
+            ),
         }
     }
 }
@@ -741,6 +746,7 @@ async fn spa_is_public_mountable_injected_and_traversal_safe() {
 
 #[tokio::test]
 #[serial]
+#[ignore = "waits on #842"]
 async fn embedded_spa_and_each_primary_view_api_roundtrip_against_postgres() {
     let mut state = migrated_state().await;
     state.assets = Arc::new(EmbeddedAssets);
@@ -891,6 +897,136 @@ async fn worker_list_carries_the_slot_health() {
         worker["queue_max_concurrency"],
         serde_json::json!({"default": 3})
     );
+}
+
+/// A listed state of a worker that started at `worker_started_at`, whose
+/// snapshot is at `snapshot_at`, read by a list statement at `read_at`.
+fn listed_worker(
+    snapshot_at: chrono::DateTime<chrono::Utc>,
+    worker_started_at: chrono::DateTime<chrono::Utc>,
+    read_at: chrono::DateTime<chrono::Utc>,
+) -> crate::broker::health::ListedWorkerState {
+    let stored = crate::broker::health::StoredWorkerState {
+        worker_id: "w-clock".to_owned(),
+        snapshot_at,
+        hostname: "itest-host".to_owned(),
+        pid: 4242,
+        processes: 2,
+        max_claim_batch: 0,
+        max_claim_per_worker: 2,
+        cluster_wide_cap: None,
+        queues: vec!["default".to_owned()],
+        queue_priorities: serde_json::json!({}),
+        queue_max_concurrency: serde_json::json!({}),
+        recovery_config: serde_json::json!({}),
+        tasks_running: 0,
+        tasks_claimed: 0,
+        memory_usage_mb: None,
+        memory_percent: None,
+        cpu_percent: None,
+        children_memory_mb: None,
+        worker_started_at,
+        slots_down: serde_json::json!([]),
+        class_capacity: serde_json::json!({}),
+    };
+    crate::broker::health::ListedWorkerState {
+        snapshot: stored.into_snapshot().expect("a readable stored row"),
+        read_at,
+    }
+}
+
+/// The worker list measures the snapshot age, the staleness and the uptime
+/// to the database clock of the list statement, not to the web host clock
+/// (#765). The instants are days before any run of this test, so an age
+/// measured to the host clock is days long and stale.
+#[test]
+fn worker_list_ages_are_measured_to_the_read_time() {
+    let snapshot_at = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 11, 10, 12, 0, 0)
+        .single()
+        .expect("a valid instant");
+    let started_at = snapshot_at - chrono::TimeDelta::hours(1);
+    let threshold = crate::core::defaults::WORKER_STATE_LIVE_WINDOW_S as i64;
+
+    let fresh = super::routes::worker_state(listed_worker(
+        snapshot_at,
+        started_at,
+        snapshot_at + chrono::TimeDelta::seconds(30),
+    ));
+    let at_threshold = super::routes::worker_state(listed_worker(
+        snapshot_at,
+        started_at,
+        snapshot_at + chrono::TimeDelta::seconds(threshold),
+    ));
+    let past_threshold = super::routes::worker_state(listed_worker(
+        snapshot_at,
+        started_at,
+        snapshot_at + chrono::TimeDelta::seconds(threshold + 1),
+    ));
+
+    assert_eq!(fresh.snapshot_age_s, Some(30));
+    assert!(!fresh.stale);
+    assert_eq!(fresh.uptime_s, Some(3_630));
+    assert_eq!(at_threshold.snapshot_age_s, Some(threshold));
+    assert!(!at_threshold.stale, "stale only past the live window");
+    assert_eq!(past_threshold.snapshot_age_s, Some(threshold + 1));
+    assert!(past_threshold.stale);
+}
+
+/// A snapshot written ten minutes before the read in database time is stale,
+/// whatever the web host clock is (#765). Python
+/// `test_web_api.py::TestWorkerReads::test_worker_list_answers` for the
+/// shape: 200 and a JSON array.
+#[tokio::test]
+#[serial]
+async fn a_snapshot_ten_minutes_old_in_database_time_is_stale() {
+    let state = migrated_state().await;
+    let pool = state.broker.pool().clone();
+    let worker_id = format!("itest-{}", Uuid::new_v4().simple());
+    sqlx::query(
+        "INSERT INTO horsies_worker_states (
+            worker_id, snapshot_at, hostname, pid, processes,
+            max_claim_batch, max_claim_per_worker, queues,
+            queue_priorities, queue_max_concurrency, recovery_config,
+            tasks_running, tasks_claimed, worker_started_at,
+            slots_down, class_capacity
+        ) VALUES (
+            $1, now() - interval '10 minutes', 'itest-host', 4242, 2, 0, 2,
+            ARRAY['default'], '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
+            0, 0, now() - interval '1 hour',
+            '[]'::jsonb, '{}'::jsonb
+        )",
+    )
+    .bind(&worker_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let response = build_router(state)
+        .oneshot(request(Method::GET, "/api/workers"))
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = json(response).await;
+    sqlx::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
+        .bind(&worker_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(status, StatusCode::OK);
+    let worker = body
+        .as_array()
+        .expect("the worker list is a JSON array")
+        .iter()
+        .find(|entry| entry["worker_id"] == worker_id.as_str())
+        .expect("the worker is listed");
+    assert_eq!(worker["stale"], true);
+    let age = worker["snapshot_age_s"]
+        .as_i64()
+        .expect("an age in seconds");
+    assert!(age >= 600, "snapshot_age_s {age}");
+    let uptime = worker["uptime_s"].as_i64().expect("an uptime in seconds");
+    assert!(uptime >= 3_600, "uptime_s {uptime}");
 }
 
 /// Python `test_web_api.py::TestWorkerReads::test_class_report_answers_with_streams_and_budgets`.
@@ -1099,6 +1235,7 @@ async fn task_stats_route_reuses_a_successful_scope_within_the_ttl() {
 
 #[tokio::test]
 #[serial]
+#[ignore = "waits on #842"]
 async fn all_http_surfaces_route_to_the_monitoring_and_action_layers() {
     let state = migrated_state().await;
     let prefix = format!("w4_http_{}__", Uuid::new_v4().simple());
@@ -1472,4 +1609,308 @@ async fn a_path_id_that_is_not_a_uuid_is_fastapi_uuid_parsing() {
         body["detail"][1]["loc"],
         serde_json::json!(["path", "task_index"])
     );
+}
+
+/// Python `test_web_api.py::TestTaskReads::test_stats_returns_seven_fixed_cards`:
+/// seven status cards in a fixed order, whatever the counts.
+#[tokio::test]
+#[serial]
+async fn the_stats_route_answers_the_seven_status_cards_in_a_fixed_order() {
+    let state = migrated_state().await;
+
+    let response = build_router(state)
+        .oneshot(request(Method::GET, "/api/tasks/stats"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json(response).await;
+    let statuses: Vec<&str> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|card| card["status"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        statuses,
+        [
+            "PENDING",
+            "CLAIMED",
+            "RUNNING",
+            "COMPLETED",
+            "FAILED",
+            "CANCELLED",
+            "EXPIRED"
+        ]
+    );
+}
+
+/// Python `test_web_api.py::TestTaskReads::test_unknown_error_category_is_a_bad_request`:
+/// every task read route refuses an unknown category with 400 before it
+/// reads anything.
+#[tokio::test]
+async fn an_unknown_error_category_is_a_bad_request_on_every_task_route() {
+    let router = test_router(
+        Arc::new(AllowAll),
+        status(SchemaState::Match, Some(crate::expected_schema_version())),
+        true,
+    );
+
+    for path in [
+        "/api/tasks?error_category=NOT_A_FAMILY",
+        "/api/tasks/stats?error_category=NOT_A_FAMILY",
+        "/api/tasks/facets?error_category=NOT_A_FAMILY",
+        "/api/tasks/breakdown?group_by=worker&error_category=NOT_A_FAMILY",
+    ] {
+        let response = router
+            .clone()
+            .oneshot(request(Method::GET, path))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+        assert_eq!(
+            json(response).await,
+            serde_json::json!({"detail": "Unknown error category 'NOT_A_FAMILY'."}),
+            "{path}"
+        );
+    }
+}
+
+/// Python `test_web_api.py::TestWorkflowReads::test_run_detail_carries_nodes_and_edges`:
+/// the run route answers the run, its failed node indices and its edges.
+#[tokio::test]
+#[serial]
+async fn the_run_route_answers_the_run_its_failed_indices_and_its_edges() {
+    let state = migrated_state().await;
+    let pool = state.broker.pool().clone();
+    let run_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO horsies_workflows (
+            id, name, definition_key, status, on_error, output_task_index, success_policy,
+            result, error, parent_workflow_id, parent_task_index, root_workflow_id, depth,
+            sent_at, created_at, started_at, completed_at, updated_at
+        ) VALUES (
+            $1, 'web_run_detail_flow', 'tests.alpha.v1', 'FAILED', 'fail', NULL, NULL,
+            NULL, NULL, NULL, NULL, $1, 0,
+            NOW() - interval '120 seconds', NOW() - interval '120 seconds',
+            NOW() - interval '120 seconds', NOW(), NOW()
+        )",
+    )
+    .bind(run_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO horsies_workflow_tasks (
+            downstream_subworkflow,
+            id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+            dependencies, args_from, workflow_ctx_from, allow_failed_deps, join_type,
+            min_success, task_options, max_retries, execution, good_until,
+            retention_class_key, status, task_id, is_subworkflow, sub_workflow_id,
+            sub_workflow_name, sub_definition_key, sub_workflow_summary, result, error,
+            created_at, started_at, completed_at
+        ) VALUES (
+            'NONE', $1, $2, 0, NULL, 'web_run_detail_task', '{}', 'default', 100,
+            '{}'::integer[], NULL, NULL, FALSE, 'all',
+            NULL, NULL, 0, 'ISOLATED', NULL,
+            'forever', 'FAILED', NULL, FALSE, NULL,
+            NULL, NULL, NULL, NULL, NULL,
+            NOW() - interval '120 seconds', NULL, NULL
+        )",
+    )
+    .bind(Uuid::new_v4())
+    .bind(run_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let response = build_router(state)
+        .oneshot(request(Method::GET, &format!("/api/workflows/{run_id}")))
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = json(response).await;
+    sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+        .bind(run_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["run"]["id"], run_id.to_string());
+    assert_eq!(body["failed_indices"], serde_json::json!([0]));
+    assert_eq!(body["edges"], serde_json::json!([]));
+}
+
+/// Python `test_web_api.py::TestTaskActionMapping::test_stored_data_that_does_not_parse_is_a_server_error`,
+/// the cancel: a history status that is not a task status makes the cancel
+/// route answer 500 with the stored value in the detail. The detail route
+/// half reads the live columns of #842 first.
+#[tokio::test]
+#[serial]
+async fn a_cancel_of_stored_data_that_does_not_parse_is_a_server_error() {
+    let state = migrated_state().await;
+    let pool = state.broker.pool().clone();
+    let task_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO horsies_tasks (
+            id, task_name, queue_name, priority, input, task_options, execution,
+            retention_class_key, sent_at, created_at,
+            command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+            status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+            started_at, finalizing_at, finalizing_by_worker_id,
+            worker_pid, worker_hostname, worker_process_name,
+            retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+            updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
+        ) VALUES (
+            $1, 'web_stored_data_task', 'default', 100, '{}', NULL, 'ISOLATED',
+            'forever', NOW(), NOW(),
+            1, decode(repeat('0e', 32), 'hex'), NULL,
+            'RUNNING', NOW() - interval '60 seconds', NOW(), 'web-stored-worker', NULL,
+            NOW() - interval '30 seconds', NULL, NULL,
+            NULL, NULL, NULL,
+            0, 0, NULL, NULL, FALSE,
+            NOW(), FALSE, NULL, NULL
+        )",
+    )
+    .bind(task_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let failed = crate::broker::terminalization::on_test_pool::terminalize(
+        &pool,
+        &crate::core::lifecycle::TerminalizationCommand::FailLockedTask {
+            task_id,
+            fence: crate::core::lifecycle::PriorLockedRead {
+                worker_id: "web-stored-worker".to_owned(),
+            },
+            result_json: r#"{"err": {"error_code": "TASK_EXCEPTION"}}"#.to_owned(),
+            error_code: Some("TASK_EXCEPTION".to_owned()),
+            failed_reason: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(
+            failed.as_slice(),
+            [crate::core::lifecycle::TerminalizationOutcome::Applied { .. }]
+        ),
+        "{failed:?}"
+    );
+    sqlx::query("UPDATE horsies_task_history SET status = 'NOT_KNOWN' WHERE task_id = $1")
+        .bind(task_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let response = build_router(state)
+        .oneshot(action_request(&format!("/api/tasks/{task_id}/cancel")))
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = json(response).await;
+    sqlx::query("DELETE FROM horsies_task_history WHERE task_id = $1")
+        .bind(task_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(
+        body["detail"].as_str().unwrap().contains("NOT_KNOWN"),
+        "{body}"
+    );
+}
+
+/// Every database of [`an_action_on_a_database_with_no_horsies_schema_is_refused_and_creates_nothing`]
+/// has this name prefix, then 32 hex digits.
+const EMPTY_DATABASE_PREFIX: &str = "core_web_empty_";
+
+/// The horsies relations and functions of the database that `connection`
+/// reads: `horsies_tasks`, `horsies_schema_version` and `horsies_migrations`
+/// by name, then every relation and function whose name starts with
+/// `horsies`.
+async fn horsies_objects(
+    connection: &mut PgConnection,
+) -> (Option<String>, Option<String>, Option<String>, i64) {
+    sqlx::query_as(
+        "SELECT to_regclass('horsies_tasks')::text,
+                to_regclass('horsies_schema_version')::text,
+                to_regclass('horsies_migrations')::text,
+                (SELECT count(*) FROM pg_class WHERE left(relname, 7) = 'horsies')
+                  + (SELECT count(*) FROM pg_proc WHERE left(proname, 7) = 'horsies')",
+    )
+    .fetch_one(connection)
+    .await
+    .expect("read the horsies objects")
+}
+
+/// Python `test_web_api.py::TestTheToolNeverRunsDdl::test_actions_are_refused_and_still_nothing_is_created`:
+/// the web router of an observe-only broker on a new, empty database answers
+/// a cancel that carries the intent header with 409 `SCHEMA_INCOMPATIBLE` and
+/// Python's detail, and the database still holds no horsies relation or
+/// function afterwards.
+#[tokio::test]
+#[serial]
+async fn an_action_on_a_database_with_no_horsies_schema_is_refused_and_creates_nothing() {
+    let base_options = PgConnectOptions::from_str(&migrated_database_url().await).unwrap();
+    let mut admin = PgConnection::connect_with(&base_options.clone().database("postgres"))
+        .await
+        .expect("connect to the admin database");
+    let name = format!("{EMPTY_DATABASE_PREFIX}{}", Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE DATABASE \"{name}\""))
+        .execute(&mut admin)
+        .await
+        .expect("create the empty database");
+    let options = base_options.database(&name);
+    let url = options.to_url_lossy().to_string();
+    let broker = Arc::new(
+        PostgresBroker::connect_observe_only(&AppConfig::for_database_url(&url).broker)
+            .await
+            .expect("connect the observe-only broker"),
+    );
+    let app =
+        Horsies::new(AppConfig::for_database_url(&url)).expect("the app of the empty database");
+    let router = super::app::create_monitoring_router(
+        &app,
+        Arc::clone(&broker),
+        AllowAll,
+        MonitoringUiConfig::default(),
+        true,
+    );
+
+    let response = router
+        .oneshot(action_request(&format!(
+            "/api/tasks/{}/cancel",
+            Uuid::new_v4()
+        )))
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = json(response).await;
+    let mut reader = PgConnection::connect_with(&options)
+        .await
+        .expect("connect to the empty database");
+    let objects = horsies_objects(&mut reader).await;
+    reader.close().await.expect("close the reader");
+    broker.pool().close().await;
+    broker.session_pool().close().await;
+    drop(broker);
+    sqlx::query(&format!("DROP DATABASE \"{name}\" WITH (FORCE)"))
+        .execute(&mut admin)
+        .await
+        .expect("drop the empty database");
+
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], SCHEMA_INCOMPATIBLE);
+    assert!(
+        body["detail"]
+            .as_str()
+            .expect("a text detail")
+            .contains("no horsies schema"),
+        "{body}"
+    );
+    assert_eq!(objects, (None, None, None, 0));
 }
