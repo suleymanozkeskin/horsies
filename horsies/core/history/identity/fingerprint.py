@@ -33,7 +33,9 @@ class EnqueueCommandV1:
 
     Serialized inputs travel as their canonical JSON strings — the
     fingerprint covers the bytes the request actually carries, not a
-    re-serialization.
+    re-serialization. A send stores its input in the one ``input`` column,
+    so it passes ``args_json=None`` and the stored ``input`` text as
+    ``kwargs_json``: the fingerprint is then a function of the stored row.
     """
 
     task_name: str
