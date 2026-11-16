@@ -109,6 +109,41 @@ pub const HISTORY_COLUMN_RULES: [HistoryColumnRule; 24] = [
     },
     HistoryColumnRule {
         name: "horsies_task_history_terminalization_kind_check",
-        predicate: "((terminalization_kind)::text = ANY ((ARRAY['COMPLETE_LOCKED'::character varying, 'COMPLETE_FUSED'::character varying, 'FAIL_RUNNING'::character varying, 'FAIL_STALE'::character varying, 'EXPIRE_CLAIMED'::character varying, 'EXPIRE_PENDING'::character varying, 'CANCEL_ADMIN'::character varying, 'CANCEL_ORPHAN'::character varying, 'CANCEL_ORPHAN_SWEEP'::character varying, 'PAUSE_ABANDON_CLAIM'::character varying, 'PAUSE_ABANDON_CLAIM_BATCH'::character varying, 'PAUSE_ABANDON_WORKFLOW'::character varying, 'WORKFLOW_CANCEL_CLAIM'::character varying, 'WORKFLOW_CANCEL_CLAIM_BATCH'::character varying, 'WORKFLOW_CANCEL_WORKFLOW'::character varying, 'LEGACY_TERMINAL'::character varying])::text[]))",
+        predicate: "((terminalization_kind)::text = ANY ((ARRAY['COMPLETE_LOCKED'::character varying, 'COMPLETE_FUSED'::character varying, 'FAIL_RUNNING'::character varying, 'FAIL_STALE'::character varying, 'EXPIRE_CLAIMED'::character varying, 'EXPIRE_PENDING'::character varying, 'CANCEL_ADMIN'::character varying, 'CANCEL_ORPHAN'::character varying, 'CANCEL_ORPHAN_SWEEP'::character varying, 'PAUSE_ABANDON_CLAIM'::character varying, 'PAUSE_ABANDON_CLAIM_BATCH'::character varying, 'PAUSE_ABANDON_WORKFLOW'::character varying, 'WORKFLOW_CANCEL_CLAIM'::character varying, 'WORKFLOW_CANCEL_CLAIM_BATCH'::character varying, 'WORKFLOW_CANCEL_WORKFLOW'::character varying])::text[]))",
     },
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::HISTORY_COLUMN_RULES;
+
+    /// The fifteen kinds a move writes into history.
+    const HISTORY_KINDS: [&str; 15] = [
+        "COMPLETE_LOCKED",
+        "COMPLETE_FUSED",
+        "FAIL_RUNNING",
+        "FAIL_STALE",
+        "EXPIRE_CLAIMED",
+        "EXPIRE_PENDING",
+        "CANCEL_ADMIN",
+        "CANCEL_ORPHAN",
+        "CANCEL_ORPHAN_SWEEP",
+        "PAUSE_ABANDON_CLAIM",
+        "PAUSE_ABANDON_CLAIM_BATCH",
+        "PAUSE_ABANDON_WORKFLOW",
+        "WORKFLOW_CANCEL_CLAIM",
+        "WORKFLOW_CANCEL_CLAIM_BATCH",
+        "WORKFLOW_CANCEL_WORKFLOW",
+    ];
+
+    #[test]
+    fn kind_rule_names_exactly_the_fifteen_history_kinds() {
+        let predicate = HISTORY_COLUMN_RULES
+            .iter()
+            .find(|rule| rule.name == "horsies_task_history_terminalization_kind_check")
+            .expect("kind rule")
+            .predicate;
+        let named: Vec<&str> = predicate.split('\'').skip(1).step_by(2).collect();
+        assert_eq!(named, HISTORY_KINDS);
+    }
+}
