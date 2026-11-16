@@ -28,6 +28,7 @@ from horsies.core.lifecycle.classify import (
     FinalizeDecision,
     FinalizeNoOpReason,
     NoTerminalAction,
+    ReleaseUnconfirmedClaim,
     ReplayWorkflowPhase2,
     ResultProduced,
     ResultUndecodable,
@@ -114,10 +115,6 @@ class TestAbortsThatWriteNothing:
         'reason,expected',
         [
             (AbortReason.CLAIM_LOST, FinalizeNoOpReason.CLAIM_LOST),
-            (
-                AbortReason.OWNERSHIP_UNCONFIRMED,
-                FinalizeNoOpReason.OWNERSHIP_UNCONFIRMED,
-            ),
             (AbortReason.WORKFLOW_STOPPED, FinalizeNoOpReason.WORKFLOW_STOPPED),
         ],
     )
@@ -129,6 +126,20 @@ class TestAbortsThatWriteNothing:
         """Another party owns the row's next state; touching it clobbers."""
         decision = classify(AbortedBeforeResult(reason=reason), _context())
         assert decision == NoTerminalAction(reason=expected)
+
+    def test_an_unconfirmed_start_releases_the_claim_of_its_generation(
+        self,
+    ) -> None:
+        """The start did not confirm and no task code ran: the claim goes
+        back at once, fenced on the generation of this dispatch. It used to
+        be a no-op that waited for the claim lease."""
+        decision = classify(
+            AbortedBeforeResult(reason=AbortReason.OWNERSHIP_UNCONFIRMED),
+            _context(),
+        )
+        assert decision == ReleaseUnconfirmedClaim(
+            task_id='t1', claimed_at=_GENERATION,
+        )
 
     def test_workflow_stopped_travels_only_as_an_abort_reason(self) -> None:
         """No task error carries the stop code, so no returned error reads as a
@@ -197,15 +208,7 @@ class TestSuccess:
             task_id='t1',
             fence=OwnedClaim(worker_id='w1', claimed_at=_GENERATION),
             result_json=_RESULT,
-            notify_channel='task_queue_default',
-            notify_payload='capacity:t1',
         )
-
-    def test_queue_name_falls_back_to_default_channel(self) -> None:
-        decision = classify(ResultProduced(), _context(queue_name=''))
-        command = _command(decision)
-        assert isinstance(command, CompleteTaskFused)
-        assert command.notify_channel == 'task_queue_default'
 
     def test_workflow_node_completion_cannot_fuse(self) -> None:
         """Phase 2 still owes work on this row, so the fast path is unsound."""

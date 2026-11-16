@@ -26,7 +26,7 @@ use sqlx::Connection;
 use uuid::Uuid;
 
 use super::support::*;
-use crate::broker::attempt_writes::{finish_workflow_success, FinishWorkflowSuccess};
+use crate::broker::attempt_writes::FinishWorkflowSuccess;
 use crate::broker::error::BrokerError;
 use crate::broker::postgres::PostgresBroker;
 use crate::broker::terminalization::{terminalize, terminalize_in_tx};
@@ -43,8 +43,6 @@ fn fused(task_id: Uuid) -> TerminalizationCommand {
         task_id,
         fence: owned_claim(),
         result_json: RESULT.to_owned(),
-        notify_channel: "task_queue_default".to_owned(),
-        notify_payload: format!("capacity:{task_id}"),
     }
 }
 
@@ -319,7 +317,6 @@ async fn orphan_sweep_is_bounded_and_replays_through_single_variant() {
 /// production code (the abandon applies), so it is not asserted.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #785"]
 async fn coupled_node_failure_rolls_back_history_and_live_delete() {
     let pool = pool().await;
     let task_id = seed_task(
@@ -336,6 +333,38 @@ async fn coupled_node_failure_rolls_back_history_and_live_delete() {
         .handle_workflow_stop_before_start(task_id, "PAUSED", WORKER, generation())
         .await
         .expect("stop before start");
+
+    assert_eq!(
+        node_state(&pool, workflow_id).await,
+        ("COMPLETED".to_owned(), Some(task_id))
+    );
+    cleanup_tasks(&pool, &[task_id]).await;
+    cleanup_workflows(&pool, &[workflow_id]).await;
+}
+
+/// The node half of `coupled_node_failure_rolls_back_history_and_live_delete`
+/// on the post-claim path: the post-claim abandon of a task of a PAUSED
+/// workflow whose node is already COMPLETED leaves the node COMPLETED with
+/// its task link (#785; Python `RESET_PAUSED_WORKFLOW_TASKS_SQL`,
+/// `horsies/core/worker/sql.py:291-296`).
+#[tokio::test]
+#[serial]
+async fn post_claim_abandon_keeps_a_finished_node() {
+    let pool = pool().await;
+    let task_id = seed_task(
+        &pool,
+        &TaskSeed {
+            origin: Origin::WorkflowNode,
+            ..TaskSeed::claimed()
+        },
+    )
+    .await;
+    let workflow_id = link_workflow_task(&pool, task_id, "COMPLETED", "PAUSED").await;
+
+    PostgresBroker::from_pool(pool.clone())
+        .filter_non_runnable_workflow_tasks(&[(task_id, generation())], WORKER)
+        .await
+        .expect("post-claim workflow check");
 
     assert_eq!(
         node_state(&pool, workflow_id).await,
@@ -516,37 +545,50 @@ async fn terminalization_boundary_failure_rolls_back_every_relation() {
     }
 }
 
-/// Python `test_capacity_notification_failure_rolls_back_fused_completion`:
-/// a capacity wake that the server refuses (a payload over 8000 bytes)
-/// fails the fused completion, and nothing of the move stays.
+/// Python `test_capacity_notification_failure_rolls_back_fused_completion`.
+/// The baseline function builds the wake from the locked row: channel
+/// `task_queue_<queue>`, payload `capacity`. The queue name CHECK bounds the
+/// name to 52 bytes, so the channel fits PostgreSQL's 63-byte limit and the
+/// wake cannot be refused: the CHECK refuses a 53-byte queue name, and the
+/// completion of a seeded row applies with its wake.
 #[tokio::test]
 #[serial]
 async fn capacity_notification_failure_rolls_back_fused_completion() {
     let pool = pool().await;
     let task_id = seed_task(&pool, &TaskSeed::running()).await;
-    record_failed_first_attempt(&pool, task_id, "attempt one crashed").await;
     let before = live_row(&pool, task_id).await;
 
-    let refused = terminalize(
+    let refused = sqlx::query("UPDATE horsies_tasks SET queue_name = $2 WHERE id = $1")
+        .bind(task_id)
+        .bind("q".repeat(53))
+        .execute(&pool)
+        .await
+        .map(|done| done.rows_affected());
+    assert_refused(
+        refused,
+        "23514",
+        Constraint::Named("horsies_tasks_queue_name_length"),
+    );
+    assert_eq!(live_row(&pool, task_id).await, before);
+
+    let outcomes = terminalize(
         &pool,
         &TerminalizationCommand::CompleteTaskFused {
             task_id,
             fence: owned_claim(),
             result_json: RESULT.to_owned(),
-            notify_channel: "task_queue_default".to_owned(),
-            notify_payload: "x".repeat(9_000),
         },
     )
-    .await;
-
-    assert_refused_with_message(
-        Err::<(), _>(database_error(refused)),
-        "22023",
-        "payload string too long",
+    .await
+    .expect("fused completion");
+    assert!(
+        matches!(
+            outcomes.as_slice(),
+            [TerminalizationOutcome::Applied { .. }]
+        ),
+        "{outcomes:?}"
     );
-    assert_eq!(live_row(&pool, task_id).await, before);
-    assert_eq!(live_attempts(&pool, task_id).await.len(), 1);
-    assert_eq!(history_row(&pool, task_id).await, None);
+    assert_eq!(live_row(&pool, task_id).await, None);
     cleanup_tasks(&pool, &[task_id]).await;
 }
 
@@ -569,7 +611,7 @@ async fn completion_equivalence_replays_from_history() {
         matches!(first.as_slice(), [TerminalizationOutcome::Applied { .. }]),
         "{first:?}"
     );
-    let replay = finish_workflow_success(&pool, &success(plain))
+    let replay = write_workflow_success(&pool, &success(plain))
         .await
         .expect("workflow success replay");
     assert!(
@@ -588,7 +630,7 @@ async fn completion_equivalence_replays_from_history() {
     // The workflow-success writer first, then fused.
     let workflow_task = seed_task(&pool, &running_workflow_task()).await;
     let workflow_id = link_workflow_task(&pool, workflow_task, "RUNNING", "RUNNING").await;
-    let applied = finish_workflow_success(&pool, &success(workflow_task))
+    let applied = write_workflow_success(&pool, &success(workflow_task))
         .await
         .expect("workflow success");
     assert!(

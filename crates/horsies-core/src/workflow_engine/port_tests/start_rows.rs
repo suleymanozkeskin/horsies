@@ -626,7 +626,7 @@ async fn assert_paused_before_plain_roots_got_tasks(
     assert_eq!(linked_task_count(pool, workflow_id).await, 0);
 
     let resumed = resume_workflow(
-        pool,
+        &broker(pool),
         workflow_id,
         registry,
         &PayloadPolicy::default(),

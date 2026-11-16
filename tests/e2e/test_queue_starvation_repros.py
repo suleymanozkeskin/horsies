@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import pytest
 from sqlalchemy import text
 
+from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.task_send_types import TaskSendResult
 from horsies.core.task_decorator import TaskHandle
@@ -146,6 +147,7 @@ async def test_lower_priority_queue_backfills_when_high_queue_is_capped(
                 queue_name='high',
                 task_id=str(uuid4()),
                 enqueue_sha=f'high-{idx}',
+                send_kind=SendKind.FIRST,
                 sent_at=datetime.now(timezone.utc),
                 kwargs_json=json.dumps({'duration_ms': 3000}),
             )).unwrap()
@@ -163,6 +165,7 @@ async def test_lower_priority_queue_backfills_when_high_queue_is_capped(
                 queue_name='normal',
                 task_id=str(uuid4()),
                 enqueue_sha=f'normal-{idx}',
+                send_kind=SendKind.FIRST,
                 sent_at=datetime.now(timezone.utc),
                 kwargs_json=json.dumps({'duration_ms': 1000}),
             )).unwrap()

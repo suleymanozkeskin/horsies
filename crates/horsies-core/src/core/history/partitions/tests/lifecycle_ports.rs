@@ -1,0 +1,1041 @@
+//! Ports of the Python partition lifecycle tests: class registration, leaf
+//! inspection, lock contention, session time zones, DST folds and the
+//! ordering index.
+//!
+//! Python specification: `tests/integration/test_task_history_partition_lifecycle.py`,
+//! `test_task_history_partition_timezones.py`, `test_partition_dst_session.py`,
+//! `test_task_history_ordering_index.py`, `test_task_history_heartbeat_partitions.py`
+//! and the core rows of `test_task_history_partition_lifecycle_prototypes.py`.
+
+use std::time::Instant;
+
+use chrono::{DateTime, TimeZone};
+use sqlx::postgres::PgConnectOptions;
+
+use super::*;
+use crate::core::history::outcomes::LeafAttachment;
+use crate::core::history::partitions::catalog::read_leaf_ordering_index_exists;
+
+const WEST_OF_UTC: &str = "Etc/GMT+12";
+const EAST_OF_UTC: &str = "Etc/GMT-12";
+const DST_ZONE: &str = "Europe/Berlin";
+const LEAF_ATTACHED_SQL: &str =
+    "SELECT EXISTS (SELECT 1 FROM pg_inherits WHERE inhrelid = to_regclass($1))";
+
+/// The first pass of the repeated hour in Europe/Berlin in 2026: 02:00+02.
+fn coming_fold() -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 10, 25, 0, 0, 0)
+        .single()
+        .expect("fold instant")
+}
+
+/// The same instant in 2025.
+fn past_fold() -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2025, 10, 26, 0, 0, 0)
+        .single()
+        .expect("fold instant")
+}
+
+fn test_options(database: &TestDatabase) -> PgConnectOptions {
+    PgConnectOptions::from_str(&database_url())
+        .expect("invalid test database URL")
+        .database(&database.database_name)
+}
+
+/// A pool on the test database whose sessions run in `zone`.
+async fn pool_in_zone(database: &TestDatabase, zone: &'static str, max: u32) -> PgPool {
+    let pool = PgPoolOptions::new()
+        .max_connections(max)
+        .after_connect(move |connection, _metadata| {
+            Box::pin(async move {
+                sqlx::query("SELECT set_config('timezone', $1, false)")
+                    .bind(zone)
+                    .execute(&mut *connection)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect_with(test_options(database))
+        .await
+        .expect("connect zoned pool");
+    let session_zone: String = sqlx::query_scalar("SHOW TimeZone")
+        .fetch_one(&pool)
+        .await
+        .expect("read session time zone");
+    assert_eq!(session_zone, zone, "the pool's sessions run in the zone");
+    pool
+}
+
+async fn set_local_zone(connection: &mut PgConnection, zone: &str) {
+    sqlx::query("SELECT set_config('timezone', $1, true)")
+        .bind(zone)
+        .execute(connection)
+        .await
+        .expect("set the transaction time zone");
+}
+
+async fn database_today(pool: &PgPool) -> DateTime<Utc> {
+    let mut connection = pool.acquire().await.expect("acquire clock");
+    utc_day_start(database_now(&mut connection).await.expect("database now"))
+}
+
+async fn database_hour(pool: &PgPool) -> DateTime<Utc> {
+    let mut connection = pool.acquire().await.expect("acquire clock");
+    let now = database_now(&mut connection).await.expect("database now");
+    now.with_minute(0)
+        .and_then(|value| value.with_second(0))
+        .and_then(|value| value.with_nanosecond(0))
+        .expect("truncate to the hour")
+}
+
+async fn is_attached(pool: &PgPool, leaf_name: &str) -> bool {
+    sqlx::query_scalar(LEAF_ATTACHED_SQL)
+        .bind(leaf_name)
+        .fetch_one(pool)
+        .await
+        .expect("read leaf attachment")
+}
+
+async fn relation_exists(pool: &PgPool, relation: &str) -> bool {
+    sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+        .bind(relation)
+        .fetch_one(pool)
+        .await
+        .expect("read relation presence")
+}
+
+async fn catalog_row_count(pool: &PgPool, leaf_name: &str) -> i64 {
+    sqlx::query_scalar(&format!(
+        "SELECT count(*) FROM {LEAF_CATALOG} WHERE leaf_name = $1"
+    ))
+    .bind(leaf_name)
+    .fetch_one(pool)
+    .await
+    .expect("count catalog rows")
+}
+
+/// A RUNNING workflow, one node and one HISTORY pending row whose anchor is
+/// inside the leaf that starts at `leaf_lower`. Every baseline column is named.
+async fn seed_history_pending_row(pool: &PgPool, class_key: &str, leaf_lower: DateTime<Utc>) {
+    let workflow_id = Uuid::new_v4();
+    let node_row_id = Uuid::new_v4();
+    let mut transaction = pool.begin().await.expect("begin pending seed");
+    sqlx::query(
+        "INSERT INTO horsies_workflows (
+             id, name, definition_key, status, on_error, depth, root_workflow_id,
+             sent_at, created_at, started_at, updated_at
+         ) VALUES ($1, 'port pending', NULL, 'RUNNING', 'fail', 0, $1,
+                   NOW(), NOW(), NOW(), NOW())",
+    )
+    .bind(workflow_id)
+    .execute(transaction.as_mut())
+    .await
+    .expect("insert pending workflow");
+    sqlx::query(
+        "INSERT INTO horsies_workflow_tasks (
+             downstream_subworkflow,
+             id, workflow_id, task_index, task_name, input, queue_name, priority,
+             dependencies, allow_failed_deps, join_type, max_retries, execution,
+             retention_class_key, status, is_subworkflow, created_at
+         ) VALUES ('NONE', $1, $2, 0, 'port pending node', '{}', 'default', 100,
+                   '{}', FALSE, 'all', 0, 'ISOLATED',
+                   $3, 'RUNNING', FALSE, NOW())",
+    )
+    .bind(node_row_id)
+    .bind(workflow_id)
+    .bind(class_key)
+    .execute(transaction.as_mut())
+    .await
+    .expect("insert pending node");
+    sqlx::query(
+        "INSERT INTO horsies_workflow_phase2_pending (
+             task_id, workflow_id, workflow_node_row_id, terminalization_kind,
+             recovery_source, history_class, history_anchor, history_schema_version,
+             result_digest, quarantine_task_id, created_at, attempt_count,
+             last_attempt_at, last_failure_class
+         ) VALUES ($1, $2, $3, 'COMPLETE_LOCKED', 'HISTORY',
+                   $4, $5, 1, $6, NULL, statement_timestamp(), 0, NULL, NULL)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(workflow_id)
+    .bind(node_row_id)
+    .bind(class_key)
+    .bind(leaf_lower + Duration::hours(1))
+    .bind(vec![7_u8; 32])
+    .execute(transaction.as_mut())
+    .await
+    .expect("insert pending row");
+    transaction.commit().await.expect("commit pending seed");
+}
+
+/// `TestClassRegistration.test_register_verify_and_conflict`: a second
+/// registration of a period is `AlreadyRegistered`. The conflict half cannot
+/// be planted on the baseline: the key fixes the period, and the database
+/// refuses a row whose key and days disagree.
+#[tokio::test]
+#[serial]
+async fn a_registered_period_registers_again_as_already_registered() {
+    let database = TestDatabase::create().await;
+    let period = RetentionDays::parse_period(Duration::days(30)).expect("thirty days");
+    let mut transaction = database.pool.begin().await.expect("begin registration");
+    let first = register_period_class(&mut transaction, period)
+        .await
+        .expect("first registration");
+    let second = register_period_class(&mut transaction, period)
+        .await
+        .expect("second registration");
+    transaction.commit().await.expect("commit registration");
+    match first {
+        ClassRegistration::Registered {
+            class_key,
+            finite_parent_name,
+        } => {
+            assert_eq!(class_key, "standard_30d");
+            assert_eq!(finite_parent_name, "horsies_task_history_standard_30d");
+        }
+        ClassRegistration::AlreadyRegistered { class_key } => {
+            panic!("a fresh database has no {class_key} row before the first coverage pass")
+        }
+    }
+    assert_eq!(
+        second,
+        ClassRegistration::AlreadyRegistered {
+            class_key: "standard_30d".to_owned(),
+        }
+    );
+    let stored: i16 = sqlx::query_scalar(&format!(
+        "SELECT retention_days FROM {RETENTION_CLASSES} WHERE class_key = 'standard_30d'"
+    ))
+    .fetch_one(&database.pool)
+    .await
+    .expect("read stored period");
+    assert_eq!(stored, 30);
+
+    let refused = sqlx::query(&format!(
+        "INSERT INTO {RETENTION_CLASSES} (
+             class_key, class_kind, retention_days, heartbeat_horizon_hours, created_at
+         ) VALUES ('standard_31d', 'PERIOD', 7, NULL, statement_timestamp())"
+    ))
+    .execute(&database.pool)
+    .await
+    .expect_err("a key that does not name its period is refused");
+    assert_eq!(
+        refused
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("horsies_retention_classes_kind_shape")
+    );
+    database.drop().await;
+}
+
+/// `TestCreateAndCoverage.test_mismatched_request_is_a_catalog_conflict`: the
+/// cataloged name with bounds shifted by one day is a metadata conflict, and
+/// the leaf is unchanged.
+#[tokio::test]
+#[serial]
+async fn a_request_whose_bounds_differ_from_the_catalog_is_a_catalog_conflict() {
+    let database = TestDatabase::create().await;
+    let class_key = "standard_30d";
+    let parent = register_class(&database.pool, class_key, 30).await;
+    let lower = database_today(&database.pool).await - Duration::days(40);
+    let leaf = leaf_ref(&parent, class_key, lower);
+    assert!(matches!(
+        create_leaf(&database.pool, &leaf).await,
+        LeafCreation::Created { .. }
+    ));
+    let shifted = LeafRef::new(
+        leaf.leaf_name(),
+        class_key,
+        LeafBounds::new(lower - Duration::days(1), lower).expect("shifted bounds"),
+    )
+    .expect("shifted leaf ref");
+    let outcome = create_leaf(&database.pool, &shifted).await;
+    assert!(
+        matches!(
+            &outcome,
+            LeafCreation::CatalogConflict {
+                leaf_name,
+                kind: CatalogConflictKind::MetadataMismatch,
+                ..
+            } if leaf_name == leaf.leaf_name()
+        ),
+        "{outcome:?}"
+    );
+    let row = catalog_row_where(&database.pool, "class_key = $1", class_key).await;
+    assert!(row.describes(class_key, leaf.bounds()));
+    database.drop().await;
+}
+
+/// `test_catalog_rejects_caller_supplied_bounds_that_do_not_match_leaf`
+/// (prototype): a detach whose bounds differ from the cataloged leaf is
+/// refused as a metadata conflict, and the leaf stays attached.
+#[tokio::test]
+#[serial]
+async fn a_detach_whose_bounds_differ_from_the_catalog_is_refused() {
+    let database = TestDatabase::create().await;
+    let class_key = "standard_30d";
+    let parent = register_class(&database.pool, class_key, 30).await;
+    let lower = database_today(&database.pool).await - Duration::days(40);
+    let leaf = leaf_ref(&parent, class_key, lower);
+    assert!(matches!(
+        create_leaf(&database.pool, &leaf).await,
+        LeafCreation::Created { .. }
+    ));
+    let shifted = LeafRef::new(
+        leaf.leaf_name(),
+        class_key,
+        LeafBounds::new(lower + Duration::days(1), lower + Duration::days(2))
+            .expect("shifted bounds"),
+    )
+    .expect("shifted leaf ref");
+    let command = DetachExpiredHistoryLeaf::new(shifted, None, Some(5_000)).expect("detach");
+    let outcome = detach_expired_leaf(&database.pool, &command, &UnpublishedLoader, &NoQuarantine)
+        .await
+        .expect("detach outcome");
+    assert!(
+        matches!(
+            outcome,
+            DetachExpiredLeafOutcome::Inspection(LeafInspection::CatalogConflict {
+                kind: CatalogConflictKind::MetadataMismatch,
+                ..
+            })
+        ),
+        "{outcome:?}"
+    );
+    assert!(is_attached(&database.pool, leaf.leaf_name()).await);
+    database.drop().await;
+}
+
+/// `TestInspection.test_unknown_class_and_forever_class`.
+#[tokio::test]
+#[serial]
+async fn inspection_of_an_unknown_class_and_of_the_forever_class() {
+    let database = TestDatabase::create().await;
+    let today = database_today(&database.pool).await;
+    let bounds = LeafBounds::new(today, today + Duration::days(1)).expect("one day");
+    let mut connection = database.pool.acquire().await.expect("acquire inspector");
+    let ghost = LeafRef::new(
+        "horsies_task_history_ghost_2026_01_01",
+        "ghost",
+        bounds.clone(),
+    )
+    .expect("ghost leaf ref");
+    assert_eq!(
+        inspect_leaf(&mut connection, &InspectHistoryLeaf::new(ghost))
+            .await
+            .expect("inspect an unknown class"),
+        LeafInspection::RetentionClassAbsent {
+            class_key: "ghost".to_owned(),
+        }
+    );
+    let forever =
+        LeafRef::new("horsies_task_history_forever_x", FOREVER_CLASS_KEY, bounds).expect("ref");
+    assert_eq!(
+        inspect_leaf(&mut connection, &InspectHistoryLeaf::new(forever))
+            .await
+            .expect("inspect the forever class"),
+        LeafInspection::ForeverClassLeaf {
+            class_key: FOREVER_CLASS_KEY.to_owned(),
+        }
+    );
+    drop(connection);
+    database.drop().await;
+}
+
+/// `TestInspection.test_fresh_leaf_is_not_expired` and
+/// `test_unexpired_leaf_is_not_detachable` (prototype): today's leaf is not
+/// expired until its upper bound plus the class period, and a detach keeps it.
+#[tokio::test]
+#[serial]
+async fn a_fresh_leaf_is_not_expired_and_a_detach_keeps_it() {
+    let database = TestDatabase::create().await;
+    let class_key = "standard_30d";
+    let parent = register_class(&database.pool, class_key, 30).await;
+    let today = database_today(&database.pool).await;
+    let leaf = leaf_ref(&parent, class_key, today);
+    assert!(matches!(
+        create_leaf(&database.pool, &leaf).await,
+        LeafCreation::Created { .. }
+    ));
+    let mut connection = database.pool.acquire().await.expect("acquire inspector");
+    let inspection = inspect_leaf(&mut connection, &InspectHistoryLeaf::new(leaf.clone()))
+        .await
+        .expect("inspect today's leaf");
+    drop(connection);
+    assert_eq!(
+        inspection,
+        LeafInspection::NotExpired {
+            leaf_name: leaf.leaf_name().to_owned(),
+            eligible_at: today + Duration::days(31),
+        }
+    );
+    let command = DetachExpiredHistoryLeaf::new(leaf.clone(), None, Some(5_000)).expect("detach");
+    let outcome = detach_expired_leaf(&database.pool, &command, &UnpublishedLoader, &NoQuarantine)
+        .await
+        .expect("detach outcome");
+    assert!(
+        matches!(
+            outcome,
+            DetachExpiredLeafOutcome::Inspection(LeafInspection::NotExpired { .. })
+        ),
+        "{outcome:?}"
+    );
+    assert!(is_attached(&database.pool, leaf.leaf_name()).await);
+    database.drop().await;
+}
+
+/// `TestLockContention.test_detach_relation_wait_is_bounded_and_restores_timeouts`:
+/// a parent held in SHARE mode makes the detach busy within the 2 s DDL lock
+/// timeout, and the session's statement and lock timeouts are the ones it had
+/// before the call.
+#[tokio::test]
+#[serial]
+async fn a_busy_detach_is_bounded_and_restores_both_timeouts() {
+    let database = TestDatabase::create_with_connections(2).await;
+    let class_key = "standard_1d";
+    let parent = register_class(&database.pool, class_key, 1).await;
+    let lower = database_today(&database.pool).await - Duration::days(5);
+    let leaf = leaf_ref(&parent, class_key, lower);
+    assert!(matches!(
+        create_leaf(&database.pool, &leaf).await,
+        LeafCreation::Created { .. }
+    ));
+    // One connection: the detach takes the session whose timeouts are set here.
+    let detach_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(test_options(&database))
+        .await
+        .expect("connect detach pool");
+    sqlx::query("SET statement_timeout = '13s'")
+        .execute(&detach_pool)
+        .await
+        .expect("set session statement timeout");
+    sqlx::query("SET lock_timeout = '17s'")
+        .execute(&detach_pool)
+        .await
+        .expect("set session lock timeout");
+
+    let mut holder = database.pool.begin().await.expect("begin parent holder");
+    sqlx::query(&format!("LOCK TABLE {parent} IN SHARE MODE"))
+        .execute(holder.as_mut())
+        .await
+        .expect("hold the parent in SHARE mode");
+    let command = DetachExpiredHistoryLeaf::new(leaf.clone(), None, Some(9_000)).expect("detach");
+    let started = Instant::now();
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        detach_expired_leaf(&detach_pool, &command, &UnpublishedLoader, &NoQuarantine),
+    )
+    .await
+    .expect("the detach returns")
+    .expect("detach outcome");
+    let elapsed = started.elapsed();
+    holder.rollback().await.expect("release the parent");
+
+    assert_eq!(
+        outcome,
+        DetachExpiredLeafOutcome::Busy {
+            leaf_name: leaf.leaf_name().to_owned(),
+        }
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "the detach waited {elapsed:?}"
+    );
+    let statement_timeout: String = sqlx::query_scalar("SHOW statement_timeout")
+        .fetch_one(&detach_pool)
+        .await
+        .expect("read statement timeout");
+    let lock_timeout: String = sqlx::query_scalar("SHOW lock_timeout")
+        .fetch_one(&detach_pool)
+        .await
+        .expect("read lock timeout");
+    assert_eq!(statement_timeout, "13s");
+    assert_eq!(lock_timeout, "17s");
+    assert!(is_attached(&database.pool, leaf.leaf_name()).await);
+    detach_pool.close().await;
+    database.drop().await;
+}
+
+/// `TestLockContention.test_cancelled_lock_acquisition_invalidates_session`:
+/// a detach cancelled right after it took the leaf's session lock closes its
+/// connection, so the lock is free again.
+#[tokio::test]
+#[serial]
+async fn a_detach_cancelled_right_after_the_lock_frees_the_lock() {
+    let database = TestDatabase::create_with_connections(2).await;
+    let class_key = "standard_1d";
+    let parent = register_class(&database.pool, class_key, 1).await;
+    let lower = database_today(&database.pool).await - Duration::days(5);
+    let leaf = leaf_ref(&parent, class_key, lower);
+    assert!(matches!(
+        create_leaf(&database.pool, &leaf).await,
+        LeafCreation::Created { .. }
+    ));
+    // The first statement after the session lock is the class read of the
+    // inspection; the proxy holds its response.
+    let (proxy, detach_pool, pause) = pausing_proxied_pool(
+        &database,
+        "SELECT class_key, class_kind, retention_days, heartbeat_horizon_hours",
+    )
+    .await;
+    let command = DetachExpiredHistoryLeaf::new(leaf.clone(), None, Some(5_000)).expect("detach");
+    let detach = tokio::spawn(async move {
+        detach_expired_leaf(&detach_pool, &command, &UnpublishedLoader, &NoQuarantine).await
+    });
+    pause.wait_until_entered().await;
+
+    let try_xact = format!("SELECT pg_try_advisory_xact_lock({LEAF_LOCK_KEY_FUNCTION}($1, $2))");
+    let mut probe = database.pool.begin().await.expect("begin lock probe");
+    let free_while_held: bool = sqlx::query_scalar(&try_xact)
+        .bind(class_key)
+        .bind(lower)
+        .fetch_one(probe.as_mut())
+        .await
+        .expect("probe the held lock");
+    probe.rollback().await.expect("end lock probe");
+    assert!(
+        !free_while_held,
+        "the detach holds the leaf lock at the pause"
+    );
+
+    detach.abort();
+    assert!(detach
+        .await
+        .expect_err("the detach is cancelled")
+        .is_cancelled());
+    let mut acquired = false;
+    for _ in 0..40 {
+        let mut probe = database.pool.begin().await.expect("begin lock probe");
+        acquired = sqlx::query_scalar(&try_xact)
+            .bind(class_key)
+            .bind(lower)
+            .fetch_one(probe.as_mut())
+            .await
+            .expect("probe the released lock");
+        probe.rollback().await.expect("end lock probe");
+        if acquired {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(acquired, "the cancelled detach released its session lock");
+    proxy.stop().await;
+    database.drop().await;
+}
+
+/// `test_drop_refuses_out_of_band_detach_with_pending_locator` (prototype): a
+/// leaf detached outside maintenance that a HISTORY pending row still points
+/// into is not dropped.
+#[tokio::test]
+#[serial]
+async fn a_drop_keeps_an_out_of_band_detached_leaf_with_a_pending_row() {
+    let database = TestDatabase::create().await;
+    let class_key = "standard_1d";
+    let parent = register_class(&database.pool, class_key, 1).await;
+    let lower = database_today(&database.pool).await - Duration::days(5);
+    let leaf = leaf_ref(&parent, class_key, lower);
+    assert!(matches!(
+        create_leaf(&database.pool, &leaf).await,
+        LeafCreation::Created { .. }
+    ));
+    seed_history_pending_row(&database.pool, class_key, lower).await;
+    sqlx::query(&format!(
+        "ALTER TABLE {parent} DETACH PARTITION {}",
+        leaf.leaf_name()
+    ))
+    .execute(&database.pool)
+    .await
+    .expect("detach out of band");
+
+    let mut transaction = database.pool.begin().await.expect("begin drop");
+    let outcome = drop_detached_leaf(
+        &mut transaction,
+        &DropDetachedHistoryLeaf::new(leaf.clone()),
+        &UnpublishedLoader,
+    )
+    .await
+    .expect("drop outcome");
+    transaction.commit().await.expect("commit drop");
+    assert!(
+        matches!(
+            outcome,
+            LeafDrop::Inspection(LeafInspection::PendingBlocked {
+                blocker_count: 1,
+                attachment: LeafAttachment::Detached,
+                ..
+            })
+        ),
+        "{outcome:?}"
+    );
+    assert!(relation_exists(&database.pool, leaf.leaf_name()).await);
+    database.drop().await;
+}
+
+/// `test_worker_and_operator_partition_privilege_modes_are_distinct`
+/// (prototype), worker half: a role without CREATE on the schema cannot
+/// create a leaf, and no catalog row is written. The privilege report of the
+/// operator half belonged to the partition health survey, which the core
+/// leaves out.
+#[tokio::test]
+#[serial]
+async fn a_role_without_create_privilege_cannot_create_a_leaf() {
+    let database = TestDatabase::create().await;
+    let class_key = "standard_30d";
+    let parent = register_class(&database.pool, class_key, 30).await;
+    let leaf = leaf_ref(
+        &parent,
+        class_key,
+        database_today(&database.pool).await + Duration::days(3),
+    );
+    let role = format!("port_worker_{}", Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE ROLE {role} NOLOGIN"))
+        .execute(&database.pool)
+        .await
+        .expect("create worker role");
+    sqlx::query(&format!("GRANT USAGE ON SCHEMA public TO {role}"))
+        .execute(&database.pool)
+        .await
+        .expect("grant schema usage");
+    sqlx::query(&format!(
+        "GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA public TO {role}"
+    ))
+    .execute(&database.pool)
+    .await
+    .expect("grant row privileges only");
+
+    let mut transaction = database.pool.begin().await.expect("begin worker session");
+    sqlx::query(&format!("SET LOCAL ROLE {role}"))
+        .execute(transaction.as_mut())
+        .await
+        .expect("become the worker role");
+    let refused = create_daily_leaf(
+        &mut transaction,
+        &CreateDailyHistoryLeaf::new(leaf.clone()).expect("daily command"),
+        &UnpublishedLoader,
+    )
+    .await
+    .expect_err("a worker role cannot run partition DDL");
+    transaction.rollback().await.expect("end worker session");
+    match refused {
+        crate::core::history::errors::HistoryError::Database(error) => {
+            assert_eq!(
+                error
+                    .as_database_error()
+                    .and_then(|database_error| database_error.code())
+                    .as_deref(),
+                Some("42501"),
+                "{error}"
+            );
+        }
+        other => panic!("expected a database privilege error, got {other:?}"),
+    }
+    assert!(!relation_exists(&database.pool, leaf.leaf_name()).await);
+    assert_eq!(catalog_row_count(&database.pool, leaf.leaf_name()).await, 0);
+
+    sqlx::query(&format!("DROP OWNED BY {role}"))
+        .execute(&database.pool)
+        .await
+        .expect("drop the role's grants");
+    sqlx::query(&format!("DROP ROLE {role}"))
+        .execute(&database.pool)
+        .await
+        .expect("drop worker role");
+    database.drop().await;
+}
+
+/// `TestRenderingDivergesWithoutThePin.test_raw_rendering_differs_across_the_probe_timezones`:
+/// the premise of the time-zone tests. PostgreSQL renders a partition bound in
+/// the session time zone.
+#[tokio::test]
+#[serial]
+async fn raw_bound_rendering_differs_across_the_probe_time_zones() {
+    let database = TestDatabase::create().await;
+    let class_key = "standard_30d";
+    let parent = register_class(&database.pool, class_key, 30).await;
+    let leaf = leaf_ref(&parent, class_key, database_today(&database.pool).await);
+    assert!(matches!(
+        create_leaf(&database.pool, &leaf).await,
+        LeafCreation::Created { .. }
+    ));
+    let mut renderings = Vec::new();
+    for zone in [WEST_OF_UTC, EAST_OF_UTC] {
+        let mut transaction = database.pool.begin().await.expect("begin rendering");
+        set_local_zone(&mut transaction, zone).await;
+        let rendering: String = sqlx::query_scalar(
+            "SELECT pg_get_expr(c.relpartbound, c.oid) FROM pg_class AS c
+             WHERE c.oid = to_regclass($1)",
+        )
+        .bind(leaf.leaf_name())
+        .fetch_one(transaction.as_mut())
+        .await
+        .expect("render the bound");
+        transaction.rollback().await.expect("end rendering");
+        renderings.push(rendering);
+    }
+    assert_ne!(renderings[0], renderings[1]);
+    database.drop().await;
+}
+
+/// `TestConformanceIsSessionIndependent.test_leaf_created_on_one_side_is_conformant_on_the_other`,
+/// both directions: a leaf created from one side of UTC is conformant and
+/// inspectable from the other side. One class per direction.
+#[tokio::test]
+#[serial]
+async fn a_leaf_created_on_one_side_of_utc_is_conformant_on_the_other() {
+    let database = TestDatabase::create().await;
+    for (class_key, days, creating, inspecting) in [
+        ("standard_30d", 30, WEST_OF_UTC, EAST_OF_UTC),
+        ("standard_31d", 31, EAST_OF_UTC, WEST_OF_UTC),
+    ] {
+        let parent = register_class(&database.pool, class_key, days).await;
+        let mut transaction = database.pool.begin().await.expect("begin creation");
+        set_local_zone(&mut transaction, creating).await;
+        let created = ensure_leaf_coverage(
+            &mut transaction,
+            &EnsureLeafCoverage::new(class_key, 3).expect("coverage command"),
+            &UnpublishedLoader,
+        )
+        .await
+        .expect("create from one side");
+        transaction.commit().await.expect("commit creation");
+        assert_eq!(created.len(), 4);
+        assert!(created
+            .iter()
+            .all(|outcome| matches!(outcome, LeafCreation::Created { .. })));
+
+        let leaf = leaf_ref(&parent, class_key, database_today(&database.pool).await);
+        let mut transaction = database.pool.begin().await.expect("begin verification");
+        set_local_zone(&mut transaction, inspecting).await;
+        let verified = create_daily_leaf(
+            &mut transaction,
+            &CreateDailyHistoryLeaf::new(leaf.clone()).expect("daily command"),
+            &UnpublishedLoader,
+        )
+        .await
+        .expect("verify from the other side");
+        assert_eq!(
+            verified,
+            LeafCreation::AlreadyConformant {
+                leaf_name: leaf.leaf_name().to_owned(),
+            },
+            "{creating} -> {inspecting}"
+        );
+        let inspection = inspect_leaf(&mut transaction, &InspectHistoryLeaf::new(leaf))
+            .await
+            .expect("inspect from the other side");
+        transaction.rollback().await.expect("end verification");
+        assert!(
+            matches!(
+                inspection,
+                LeafInspection::NotExpired { .. } | LeafInspection::Detachable { .. }
+            ),
+            "{creating} -> {inspecting}: {inspection:?}"
+        );
+    }
+    database.drop().await;
+}
+
+/// `TestConformanceIsSessionIndependent.test_heartbeat_leaf_conformance_crosses_utc_both_ways`.
+#[tokio::test]
+#[serial]
+async fn a_heartbeat_leaf_is_conformant_across_utc_both_ways() {
+    let database = TestDatabase::create().await;
+    let hour = database_hour(&database.pool).await;
+    for (offset_hours, creating, inspecting) in
+        [(0, WEST_OF_UTC, EAST_OF_UTC), (3, EAST_OF_UTC, WEST_OF_UTC)]
+    {
+        let leaf = hourly_leaf_ref(hour + Duration::hours(offset_hours)).expect("hourly leaf");
+        let command = CreateHourlyHeartbeatLeaf::new(leaf.clone()).expect("hourly command");
+        let mut transaction = database.pool.begin().await.expect("begin creation");
+        set_local_zone(&mut transaction, creating).await;
+        register_heartbeat_class(&mut transaction, hours(2))
+            .await
+            .expect("register heartbeat class");
+        let created = create_hourly_heartbeat_leaf(&mut transaction, &command)
+            .await
+            .expect("create from one side");
+        transaction.commit().await.expect("commit creation");
+        assert!(
+            matches!(created, LeafCreation::Created { .. }),
+            "{created:?}"
+        );
+
+        let mut transaction = database.pool.begin().await.expect("begin verification");
+        set_local_zone(&mut transaction, inspecting).await;
+        let verified = create_hourly_heartbeat_leaf(&mut transaction, &command)
+            .await
+            .expect("verify from the other side");
+        transaction.rollback().await.expect("end verification");
+        assert_eq!(
+            verified,
+            LeafCreation::AlreadyConformant {
+                leaf_name: leaf.leaf_name().to_owned(),
+            },
+            "{creating} -> {inspecting}"
+        );
+    }
+    database.drop().await;
+}
+
+/// `test_daily_leaves_at_the_fold_verify_as_conformant`: from Europe/Berlin
+/// sessions, the daily leaves on both sides of the 2026 fold are created,
+/// then verify as conformant and inspect as not expired or detachable.
+#[tokio::test]
+#[serial]
+async fn daily_leaves_at_the_fold_verify_as_conformant() {
+    let database = TestDatabase::create().await;
+    let class_key = "standard_30d";
+    let parent = register_class(&database.pool, class_key, 30).await;
+    let berlin = pool_in_zone(&database, DST_ZONE, 1).await;
+    let leaves = [
+        leaf_ref(&parent, class_key, coming_fold() - Duration::days(1)),
+        leaf_ref(&parent, class_key, coming_fold()),
+    ];
+    for leaf in &leaves {
+        assert!(matches!(
+            create_leaf(&berlin, leaf).await,
+            LeafCreation::Created { .. }
+        ));
+    }
+    for leaf in &leaves {
+        assert_eq!(
+            create_leaf(&berlin, leaf).await,
+            LeafCreation::AlreadyConformant {
+                leaf_name: leaf.leaf_name().to_owned(),
+            }
+        );
+        let mut connection = berlin.acquire().await.expect("acquire inspector");
+        let inspection = inspect_leaf(&mut connection, &InspectHistoryLeaf::new(leaf.clone()))
+            .await
+            .expect("inspect a fold leaf");
+        assert!(
+            matches!(
+                inspection,
+                LeafInspection::NotExpired { .. } | LeafInspection::Detachable { .. }
+            ),
+            "{inspection:?}"
+        );
+    }
+    berlin.close().await;
+    database.drop().await;
+}
+
+async fn create_hourly(pool: &PgPool, leaf: &LeafRef) -> LeafCreation {
+    let mut transaction = pool.begin().await.expect("begin hourly creation");
+    let outcome = create_hourly_heartbeat_leaf(
+        &mut transaction,
+        &CreateHourlyHeartbeatLeaf::new(leaf.clone()).expect("hourly command"),
+    )
+    .await
+    .expect("create hourly leaf");
+    transaction.commit().await.expect("commit hourly creation");
+    outcome
+}
+
+async fn register_heartbeats(pool: &PgPool) {
+    let mut transaction = pool.begin().await.expect("begin heartbeat registration");
+    register_heartbeat_class(&mut transaction, hours(2))
+        .await
+        .expect("register heartbeat class");
+    transaction
+        .commit()
+        .await
+        .expect("commit heartbeat registration");
+}
+
+/// `test_hourly_leaves_at_the_fold_verify_as_conformant`.
+#[tokio::test]
+#[serial]
+async fn hourly_leaves_at_the_fold_verify_as_conformant() {
+    let database = TestDatabase::create().await;
+    let berlin = pool_in_zone(&database, DST_ZONE, 1).await;
+    register_heartbeats(&berlin).await;
+    let leaves = [
+        hourly_leaf_ref(coming_fold()).expect("fold hour"),
+        hourly_leaf_ref(coming_fold() + Duration::hours(1)).expect("repeated hour"),
+    ];
+    for leaf in &leaves {
+        let created = create_hourly(&berlin, leaf).await;
+        assert!(
+            matches!(created, LeafCreation::Created { .. }),
+            "{created:?}"
+        );
+    }
+    for leaf in &leaves {
+        assert_eq!(
+            create_hourly(&berlin, leaf).await,
+            LeafCreation::AlreadyConformant {
+                leaf_name: leaf.leaf_name().to_owned(),
+            }
+        );
+    }
+    berlin.close().await;
+    database.drop().await;
+}
+
+/// `test_the_heartbeat_sweep_drops_leaves_across_a_fold`: the sweep, run from
+/// Europe/Berlin sessions, detaches and drops the two hourly leaves of the
+/// 2025 fold.
+#[tokio::test]
+#[serial]
+async fn the_heartbeat_sweep_drops_leaves_across_a_fold() {
+    let database = TestDatabase::create().await;
+    let berlin = pool_in_zone(&database, DST_ZONE, 2).await;
+    register_heartbeats(&berlin).await;
+    let leaves = [
+        hourly_leaf_ref(past_fold()).expect("fold hour"),
+        hourly_leaf_ref(past_fold() + Duration::hours(1)).expect("repeated hour"),
+    ];
+    for leaf in &leaves {
+        let created = create_hourly(&berlin, leaf).await;
+        assert!(
+            matches!(created, LeafCreation::Created { .. }),
+            "{created:?}"
+        );
+    }
+    let sweep = sweep_expired_heartbeat_leaves(&berlin, &UnpublishedLoader, 64)
+        .await
+        .expect("sweep expired heartbeat leaves");
+    assert!(sweep.errors.is_empty(), "{:?}", sweep.errors);
+    assert_eq!(
+        sweep
+            .swept
+            .iter()
+            .map(|entry| entry.leaf_name.as_str())
+            .collect::<Vec<_>>(),
+        leaves
+            .iter()
+            .map(|leaf| leaf.leaf_name())
+            .collect::<Vec<_>>()
+    );
+    for entry in &sweep.swept {
+        assert_eq!(
+            entry.detach,
+            DetachExpiredLeafOutcome::Detached {
+                leaf_name: entry.leaf_name.clone(),
+            }
+        );
+        assert_eq!(
+            entry.drop,
+            Some(LeafDrop::Dropped {
+                leaf_name: entry.leaf_name.clone(),
+            })
+        );
+    }
+    berlin.close().await;
+    database.drop().await;
+}
+
+/// `TestCoverageAndWrites.test_heartbeats_route_through_the_parent_into_leaves`:
+/// a beat written to the partitioned parent is stored in the leaf of its hour.
+#[tokio::test]
+#[serial]
+async fn a_heartbeat_written_to_the_parent_lands_in_its_hour_leaf() {
+    let database = TestDatabase::create().await;
+    register_heartbeats(&database.pool).await;
+    let mut transaction = database.pool.begin().await.expect("begin coverage");
+    ensure_heartbeat_coverage(
+        &mut transaction,
+        &EnsureHeartbeatCoverage::new(2).expect("heartbeat coverage command"),
+    )
+    .await
+    .expect("heartbeat coverage");
+    transaction.commit().await.expect("commit coverage");
+    let task_id = Uuid::new_v4();
+    sqlx::query(&format!(
+        "INSERT INTO {HEARTBEATS_TABLE} (task_id, role, sent_at, sender_id, hostname, pid)
+         VALUES ($1, 'runner', statement_timestamp(), 'port-worker', 'port-host', 1)"
+    ))
+    .bind(task_id)
+    .execute(&database.pool)
+    .await
+    .expect("write a heartbeat through the parent");
+    let (stored_in, sent_at): (String, DateTime<Utc>) = sqlx::query_as(&format!(
+        "SELECT tableoid::regclass::text, sent_at FROM {HEARTBEATS_TABLE} WHERE task_id = $1"
+    ))
+    .bind(task_id)
+    .fetch_one(&database.pool)
+    .await
+    .expect("read the beat's leaf");
+    let hour = sent_at
+        .with_minute(0)
+        .and_then(|value| value.with_second(0))
+        .and_then(|value| value.with_nanosecond(0))
+        .expect("truncate to the hour");
+    assert_eq!(stored_in, hourly_leaf_name(hour).expect("hourly leaf name"));
+    database.drop().await;
+}
+
+/// `TestLeafBirth.test_forever_leaf_carries_the_ordering_index`.
+#[tokio::test]
+#[serial]
+async fn the_static_forever_leaf_carries_the_ordering_index() {
+    let database = TestDatabase::create().await;
+    let mut connection = database.pool.acquire().await.expect("acquire reader");
+    assert!(
+        read_leaf_ordering_index_exists(&mut connection, TASK_HISTORY_FOREVER_LEAF)
+            .await
+            .expect("probe the forever leaf")
+    );
+    drop(connection);
+    database.drop().await;
+}
+
+/// `TestLeafBirth.test_absent_relation_reports_no_index`.
+#[tokio::test]
+#[serial]
+async fn an_absent_relation_reports_no_ordering_index() {
+    let database = TestDatabase::create().await;
+    let mut connection = database.pool.acquire().await.expect("acquire reader");
+    assert!(!read_leaf_ordering_index_exists(
+        &mut connection,
+        "horsies_task_history_never_created"
+    )
+    .await
+    .expect("probe an absent relation"));
+    drop(connection);
+    database.drop().await;
+}
+
+/// `TestLeafRepair.test_repair_recreates_a_dropped_ordering_index`.
+#[tokio::test]
+#[serial]
+async fn leaf_repair_recreates_a_dropped_ordering_index() {
+    let database = TestDatabase::create().await;
+    let class_key = "standard_30d";
+    let parent = register_class(&database.pool, class_key, 30).await;
+    let leaf = leaf_ref(&parent, class_key, database_today(&database.pool).await);
+    assert!(matches!(
+        create_leaf(&database.pool, &leaf).await,
+        LeafCreation::Created { .. }
+    ));
+    sqlx::query(&format!(
+        "DROP INDEX {}",
+        leaf_enqueued_index_name(leaf.leaf_name())
+    ))
+    .execute(&database.pool)
+    .await
+    .expect("drop the ordering index");
+    let mut connection = database.pool.acquire().await.expect("acquire reader");
+    assert!(
+        !read_leaf_ordering_index_exists(&mut connection, leaf.leaf_name())
+            .await
+            .expect("probe the damaged leaf")
+    );
+    drop(connection);
+
+    let repaired = create_leaf(&database.pool, &leaf).await;
+    assert!(
+        matches!(repaired, LeafCreation::IndexRepaired { .. }),
+        "{repaired:?}"
+    );
+    let mut connection = database.pool.acquire().await.expect("acquire reader");
+    assert!(
+        read_leaf_ordering_index_exists(&mut connection, leaf.leaf_name())
+            .await
+            .expect("probe the repaired leaf")
+    );
+    drop(connection);
+    database.drop().await;
+}
