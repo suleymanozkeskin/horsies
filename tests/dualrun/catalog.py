@@ -102,12 +102,28 @@ TASK_OPTIONS: Final = StoredJson(
 )
 """Serialized task options; ``good_until`` is ranked like the good_until column."""
 
+_ERROR_DATA: Final = (Key(name='err'), Key(name='data'))
+
 RESULT_ENVELOPE: Final = StoredJson(
     storage=JsonStorage.UTF8_BYTES,
     format=FormatVersion(column='result_envelope_version', version=1),
-    paths=(),
+    paths=(
+        JsonPath(steps=(*_ERROR_DATA, Key(name='task_id')), rule=TASK_ID),
+        JsonPath(steps=(*_ERROR_DATA, Key(name='worker_id')), rule=WORKER_ID),
+        JsonPath(
+            steps=(*_ERROR_DATA, Key(name='started_at')),
+            rule=JsonTime(encoding=TimeEncoding.ISO_TEXT, rule=RUN_CLOCK),
+        ),
+        JsonPath(
+            steps=(*_ERROR_DATA, Key(name='detected_at')),
+            rule=JsonTime(encoding=TimeEncoding.ISO_TEXT, rule=RUN_CLOCK),
+        ),
+    ),
 )
-"""Result envelope version 1: the result as UTF-8 JSON."""
+"""Result envelope version 1: the result as UTF-8 JSON. The data of an error
+that the worker or the stale recovery writes names the task and the worker,
+and the stale recovery's also the start of the silent attempt and the time it
+was detected."""
 
 ATTEMPT_ARCHIVE: Final = StoredJson(
     storage=JsonStorage.UTF8_BYTES,
@@ -506,6 +522,15 @@ _PHASE2_QUARANTINE: Final = TableRules(
     identity=('task_id',),
 )
 
+_PHASE2_RESULT_DIGEST: Final = Ignored(
+    reason=(
+        'SHA-256 of the result payload of the history row of the same task, which is '
+        'in another table; a result that names its task or worker (a crash or a worker '
+        'failure) gives another digest in every run. The history row checks its own '
+        'result_digest against that payload'
+    ),
+)
+
 _PHASE2_PENDING: Final = TableRules(
     name='horsies_workflow_phase2_pending',
     columns=_columns(
@@ -517,7 +542,7 @@ _PHASE2_PENDING: Final = TableRules(
         ('history_class', EXACT),
         ('history_anchor', RUN_CLOCK),
         ('history_schema_version', EXACT),
-        ('result_digest', EXACT),
+        ('result_digest', _PHASE2_RESULT_DIGEST),
         ('quarantine_task_id', TASK_ID),
         ('created_at', RUN_CLOCK),
         ('attempt_count', EXACT),

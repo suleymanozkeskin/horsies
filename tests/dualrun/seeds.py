@@ -39,7 +39,8 @@ class TaskSeed:
 
     ``claimed_ago`` is required for CLAIMED and RUNNING and absent for PENDING.
     A CLAIMED row's lease ends ``lease`` after its claim; a RUNNING row starts
-    ``started_ago`` before now and carries the seed host and pid.
+    ``started_ago`` before now and carries the seed host and pid, and a
+    finalizing marker ``finalizing_ago`` before now when that is set.
     """
 
     task_name: str
@@ -54,6 +55,7 @@ class TaskSeed:
     max_retries: int = 0
     task_options: str | None = None
     good_until_in: timedelta | None = None
+    finalizing_ago: timedelta | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,7 +84,8 @@ _INSERT_TASK_SQL: Final[LiteralString] = """
         clock.at - interval '1 hour',
         clock.at - %(claimed_ago)s::interval, %(worker_id)s::text,
         CASE WHEN %(status)s::text = 'CLAIMED' THEN clock.at - %(claimed_ago)s::interval + %(lease)s::interval END,
-        clock.at - %(started_ago)s::interval, NULL, NULL,
+        clock.at - %(started_ago)s::interval, clock.at - %(finalizing_ago)s::interval,
+        CASE WHEN %(finalizing_ago)s::interval IS NOT NULL THEN %(worker_id)s::text END,
         %(pid)s, %(host)s, %(process)s, %(retry_count)s, %(max_retries)s, NULL,
         clock.at + %(good_until_in)s::interval,
         %(is_workflow_task)s, clock.at - interval '1 hour', TRUE, NULL, NULL
@@ -104,6 +107,7 @@ def _seed_parameters(seed: TaskSeed, is_workflow_task: bool) -> dict[str, object
         'worker_id': seed.worker_id,
         'lease': seed.lease,
         'started_ago': seed.started_ago,
+        'finalizing_ago': seed.finalizing_ago,
         'pid': SEED_PID if running else None,
         'host': SEED_HOST if running else None,
         'process': SEED_PROCESS if running else None,
@@ -121,6 +125,9 @@ def insert_task(connection: Connection, seed: TaskSeed) -> SeededTask:
 def _insert_task_row(
     connection: Connection, seed: TaskSeed, *, is_workflow_task: bool
 ) -> SeededTask:
+    assert seed.finalizing_ago is None or seed.status is SeedStatus.RUNNING, (
+        f'only a RUNNING seed carries a finalizing marker: {seed!r}'
+    )
     match seed.status, seed.claimed_ago, seed.worker_id, seed.started_ago:
         case SeedStatus.PENDING, None, None, None:
             pass
