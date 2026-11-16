@@ -123,6 +123,11 @@ CHILD_FINISH_FUNCTION_SQL: Final = _step_statement(
 )
 """The advance of the parent node of a terminal child workflow, one level."""
 
+RESUME_WORKFLOW_FUNCTION_SQL: Final = _step_statement(
+    'horsies_workflow_resume(CAST(:wf_id AS uuid))'
+)
+"""The resume of a PAUSED workflow tree, in the caller's transaction."""
+
 MAX_PARENT_ADVANCES: Final = MAX_SUBWORKFLOW_DEPTH + 1
 """The most parent advance levels of one drive: the levels of a tree, depth
 0 to ``MAX_SUBWORKFLOW_DEPTH``."""
@@ -175,6 +180,19 @@ class ChildFinishDisposition(Enum):
 
     PARENT_ABSENT = 'PARENT_ABSENT'
     """The parent workflow row is gone; nothing written."""
+
+
+class ResumeDisposition(Enum):
+    """The disposition of ``horsies_workflow_resume``."""
+
+    RESUMED = 'RESUMED'
+    """The workflow and its PAUSED descendants are RUNNING."""
+
+    NOT_PAUSED = 'NOT_PAUSED'
+    """The workflow exists and is not PAUSED (``detail``: its status); nothing written."""
+
+    NOT_FOUND = 'NOT_FOUND'
+    """No workflow has this id; nothing written."""
 
 
 @dataclass(frozen=True, slots=True)

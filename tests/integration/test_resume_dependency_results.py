@@ -1,6 +1,6 @@
 """Regression tests: resume must decode stored dependency results.
 
-``resume_workflow`` and ``cascade_resume_to_children`` previously called
+The resume (``resume_workflow`` and its cascade to paused children) called
 ``get_dependency_results`` without ``app``, so every COMPLETED dependency
 decoded to a ``RESULT_DESERIALIZATION_ERROR`` (stage='no_app') sentinel and
 resumed ``args_from`` consumers received error envelopes for genuinely
