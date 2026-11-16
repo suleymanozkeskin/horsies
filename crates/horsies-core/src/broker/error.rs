@@ -4,6 +4,10 @@
 /// timeout, not-found, cancelled) are represented via `TaskResult<T>`.
 use uuid::Uuid;
 
+use crate::broker::core_rows::RowDecodeError;
+use crate::broker::pools::PoolSettingsError;
+use crate::db::{StatementFailure, Transience};
+
 #[derive(Debug, thiserror::Error)]
 pub enum BrokerError {
     /// Database connection or query error.
@@ -102,8 +106,8 @@ pub enum BrokerError {
     #[error("schema install lock: {0}")]
     InstallLock(InstallLockFailure),
 
-    /// The shared LISTEN/NOTIFY listener was closed or its background task stopped.
-    #[error("shared listener closed")]
+    /// The broker's listener stopped while a wait used it.
+    #[error("the broker's listener stopped")]
     ListenerClosed,
 
     /// A terminalization operation violated its wire contract: an undecodable
@@ -121,6 +125,29 @@ pub enum BrokerError {
     /// takes. It is refused, never clamped.
     #[error("invalid claim argument: {0}")]
     InvalidClaimArgument(String),
+
+    /// A row of the claim, the start or the release breaks its function's
+    /// row contract (`broker::claims`). Not retryable: the same call meets
+    /// it again.
+    #[error("claim contract violation: {0}")]
+    ClaimContract(String),
+
+    /// A statement on a core pool failed with one of the statement layer's
+    /// three outcomes. Retryable when its cause may clear
+    /// ([`Transience::Transient`]); a closed pool and a statement-pooled URL
+    /// are not.
+    #[error("database error: {0}")]
+    Statement(#[from] StatementFailure),
+
+    /// The connection settings of a core pool were refused before any
+    /// connection opened. Not retryable.
+    #[error("connection settings refused: {0}")]
+    PoolSettings(#[from] PoolSettingsError),
+
+    /// A row of a core statement does not have the shape its reader
+    /// requires. Not retryable.
+    #[error("{0}")]
+    RowDecode(#[from] RowDecodeError),
 }
 
 impl BrokerError {
@@ -130,6 +157,9 @@ impl BrokerError {
             Self::Database(sqlx::Error::Database(error)) => {
                 error.code().is_some_and(|code| code.as_ref() == "55P03")
             }
+            Self::Statement(StatementFailure::StatementRefused { cause, .. }) => {
+                cause.server_error().code().code() == "55P03"
+            }
             _ => false,
         }
     }
@@ -137,12 +167,14 @@ impl BrokerError {
     /// Whether this error is transient and the operation can be retried.
     ///
     /// Retryable: `Database` when the driver error is retryable (see
-    /// [`is_retryable_sqlx_error`]), `ConnectionFailed`, `ListenerClosed`.
-    /// Every other variant is a refusal or a broken contract, which the same
-    /// call meets again.
+    /// [`is_retryable_sqlx_error`]), `Statement` when its cause is transient
+    /// (see [`is_retryable_statement_failure`]), `ConnectionFailed`,
+    /// `ListenerClosed`. Every other variant is a refusal or a broken
+    /// contract, which the same call meets again.
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Database(e) => is_retryable_sqlx_error(e),
+            Self::Statement(failure) => is_retryable_statement_failure(failure),
             Self::ConnectionFailed(_) | Self::ListenerClosed => true,
             Self::InstallLock(failure) => failure.is_retryable(),
             Self::Migration(_)
@@ -161,8 +193,25 @@ impl BrokerError {
             | Self::InvalidIdempotencyReservationWindow(_)
             | Self::TerminalizationContract(_)
             | Self::HistoryReadContract(_)
-            | Self::InvalidClaimArgument(_) => false,
+            | Self::InvalidClaimArgument(_)
+            | Self::ClaimContract(_)
+            | Self::PoolSettings(_)
+            | Self::RowDecode(_) => false,
         }
+    }
+}
+
+/// Whether a failed core statement can be retried: its cause may clear.
+///
+/// The rule is the statement layer's [`Transience`]: SQLSTATE classes 08,
+/// 40, 53, 55 and 57 ([`crate::db::TRANSIENT_SQLSTATE_CLASSES`], the same
+/// set as [`RETRYABLE_SQLSTATE_CLASSES`]) and lost connections are
+/// transient; a closed pool and a statement-pooled URL are not. For
+/// `OutcomeUnknown` the flag says nothing about whether a replay is safe.
+pub fn is_retryable_statement_failure(failure: &StatementFailure) -> bool {
+    match failure.transience() {
+        Transience::Transient => true,
+        Transience::Permanent => false,
     }
 }
 
@@ -339,6 +388,59 @@ mod tests {
     fn a_closed_pool_is_not_retryable() {
         assert!(!is_retryable_sqlx_error(&sqlx::Error::PoolClosed));
         assert!(!BrokerError::Database(sqlx::Error::PoolClosed).is_retryable());
+    }
+
+    fn not_sent(cause: crate::db::NotSentCause) -> BrokerError {
+        BrokerError::Statement(StatementFailure::NotSent {
+            statement: "test_statement",
+            cause,
+        })
+    }
+
+    /// The statement layer and the sqlx rule read the same SQLSTATE classes.
+    #[test]
+    fn the_statement_layer_retries_the_same_sqlstate_classes() {
+        assert_eq!(
+            RETRYABLE_SQLSTATE_CLASSES,
+            crate::db::TRANSIENT_SQLSTATE_CLASSES
+        );
+    }
+
+    #[test]
+    fn a_core_statement_that_may_clear_is_retryable() {
+        use crate::db::{CheckoutFailure, NotSentCause, PoolRole};
+        assert!(not_sent(NotSentCause::Checkout(CheckoutFailure::TimedOut {
+            role: PoolRole::Main,
+            waited: std::time::Duration::from_secs(30),
+        }))
+        .is_retryable());
+        assert!(not_sent(NotSentCause::ConnectionClosed).is_retryable());
+    }
+
+    /// A closed pool and a statement-pooled URL meet the same refusal again.
+    #[test]
+    fn a_closed_core_pool_and_a_statement_pooled_url_are_not_retryable() {
+        use crate::db::{CheckoutFailure, MaskedUrl, NotSentCause, PoolRole};
+        assert!(
+            !not_sent(NotSentCause::Checkout(CheckoutFailure::PoolClosed {
+                role: PoolRole::Main,
+            }))
+            .is_retryable()
+        );
+        assert!(!not_sent(NotSentCause::Checkout(
+            CheckoutFailure::StatementPooledUrl {
+                masked_url: MaskedUrl::for_tests("postgresql://horsies:***@pgbouncer:6432/app"),
+            }
+        ))
+        .is_retryable());
+    }
+
+    #[test]
+    fn a_row_of_the_wrong_shape_is_not_retryable() {
+        let error = BrokerError::RowDecode(RowDecodeError::NoRow {
+            statement: "test_statement",
+        });
+        assert!(!error.is_retryable());
     }
 
     #[test]

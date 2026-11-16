@@ -17,7 +17,8 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Connection, PgConnection, PgPool};
 use uuid::Uuid;
 
-use crate::broker::migrations::run_horsies_migrations;
+use crate::broker::client_family::ClientFamily;
+use crate::broker::migrations::install_schema;
 use crate::broker::terminalization::terminalize;
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
@@ -91,8 +92,10 @@ pub(super) struct IsolatedDatabase {
 }
 
 impl IsolatedDatabase {
-    /// Creates, migrates and covers a new database. Inactive databases that
-    /// earlier runs left behind are dropped first.
+    /// Creates, migrates and covers a new database, and records the core's
+    /// client family in it (a workflow start, pause, resume and cancel refuse
+    /// a database with no family row). Inactive databases that earlier runs
+    /// left behind are dropped first.
     pub(super) async fn create() -> Self {
         let shared_url = crate::broker::terminalization_matrix::migrated_database_url().await;
         let base = PgConnectOptions::from_str(&shared_url).expect("parse the test database URL");
@@ -109,9 +112,9 @@ impl IsolatedDatabase {
         unlock_setup(&mut admin).await;
         let options = base.database(&name);
         let pool = connect(&options).await;
-        run_horsies_migrations(&pool)
+        install_schema(&pool, ClientFamily::Rust)
             .await
-            .expect("migrate the isolated database");
+            .expect("install the schema of the isolated database");
         let coverage = ensure_partition_coverage_in_pool(
             &pool,
             COVERAGE_HISTORY_DAYS,
@@ -841,6 +844,26 @@ pub(super) async fn try_finish_task(
     outcome: &TaskResult<serde_json::Value>,
     registry: &WorkflowSpecRegistry,
 ) -> Result<(), WorkflowError> {
+    let result_json = finish_phase1(pool, task_id, outcome).await;
+    on_workflow_task_complete(
+        pool,
+        task_id,
+        &result_json,
+        outcome.is_ok(),
+        registry,
+        &PayloadPolicy::default(),
+        &RetentionConfig::default(),
+    )
+    .await
+}
+
+/// Phase 1 of [`finish_task`] alone: the task moves to history with
+/// `outcome` and phase 2 stays owed. Returns the stored result text.
+pub(super) async fn finish_phase1(
+    pool: &PgPool,
+    task_id: Uuid,
+    outcome: &TaskResult<serde_json::Value>,
+) -> String {
     hold_running(pool, task_id).await;
     let result_json = serde_json::to_string(outcome).expect("encode the task outcome");
     let fence = PriorLockedRead {
@@ -870,16 +893,7 @@ pub(super) async fn try_finish_task(
         ),
         "phase 1 of task {task_id}: {outcomes:?}"
     );
-    on_workflow_task_complete(
-        pool,
-        task_id,
-        &result_json,
-        outcome.is_ok(),
-        registry,
-        &PayloadPolicy::default(),
-        &RetentionConfig::default(),
-    )
-    .await
+    result_json
 }
 
 /// Finishes the task of node `task_index` of `workflow_id` (see [`finish_task`])
@@ -901,7 +915,7 @@ pub(super) async fn finish_node(
 
 /// A failure outcome with a user error code.
 pub(super) fn err(error_code: &str, message: &str) -> TaskResult<serde_json::Value> {
-    TaskResult::Err(TaskError::new(error_code, message))
+    TaskResult::Err(TaskError::new(error_code, message).expect("a user error code"))
 }
 
 /// A success outcome with `value`.
@@ -1023,7 +1037,7 @@ pub(super) fn error_of(result: &TaskResult<serde_json::Value>) -> &TaskError {
 
 /// The error code of a task error, as text.
 pub(super) fn code(error: &TaskError) -> Option<String> {
-    error.error_code.as_ref().map(ToString::to_string)
+    Some(error.error_code.to_string())
 }
 
 /// A stored workflow error (`horsies_workflows.error`).
@@ -1122,6 +1136,43 @@ impl WorkflowDoneListener {
             }
         }
         payloads
+    }
+}
+
+/// A connection that listens on several channels and keeps each
+/// notification as (channel, payload).
+pub(super) struct Notifications {
+    listener: sqlx::postgres::PgListener,
+}
+
+impl Notifications {
+    pub(super) async fn listen(pool: &PgPool, channels: &[&str]) -> Self {
+        let mut listener = sqlx::postgres::PgListener::connect_with(pool)
+            .await
+            .expect("connect the notification listener");
+        listener
+            .listen_all(channels.iter().copied())
+            .await
+            .unwrap_or_else(|error| panic!("LISTEN {channels:?}: {error}"));
+        Self { listener }
+    }
+
+    /// The (channel, payload) pairs that arrive within [`NOTIFICATION_WAIT`]
+    /// of the last one, at most [`NOTIFICATION_LIMIT`], sorted.
+    pub(super) async fn received(&mut self) -> Vec<(String, String)> {
+        let mut received = Vec::new();
+        while received.len() < NOTIFICATION_LIMIT {
+            match tokio::time::timeout(NOTIFICATION_WAIT, self.listener.recv()).await {
+                Ok(Ok(notification)) => received.push((
+                    notification.channel().to_owned(),
+                    notification.payload().to_owned(),
+                )),
+                Ok(Err(error)) => panic!("the notification listener failed: {error}"),
+                Err(_) => break,
+            }
+        }
+        received.sort();
+        received
     }
 }
 

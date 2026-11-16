@@ -6,10 +6,13 @@
 //! the core does not have yet is `#[ignore]` and names its issue.
 
 mod autocommit_outcomes;
+mod claim_start_release;
 mod failed_attempt_finish;
 mod failed_attempt_round_trips;
 mod finalize_status_guard;
-mod support;
+mod lifecycle_regressions;
+mod status_events;
+pub(crate) mod support;
 mod task_attempt_history;
 mod task_history_terminalization_cancellation;
 mod task_history_terminalization_expiry;
@@ -17,6 +20,9 @@ mod task_history_terminalization_failure;
 mod task_history_terminalization_move;
 mod task_history_terminalization_prototypes;
 mod task_history_terminalization_workflow_nodes;
+mod task_lock_order;
+mod task_row_plans;
 mod terminal_writer_characterization;
 mod terminalization_claim_fence;
 mod terminalization_functions;
+mod workflow_success_finish;
