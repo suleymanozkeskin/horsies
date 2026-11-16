@@ -9,6 +9,7 @@
 //!   the restart rules, the pool failure and the stop.
 //! - [`pool`] and [`isolated`]: the isolated children and their slots.
 //! - [`shared`] and the shared slot task: the shared children of one kind.
+//! - [`defects`]: slot defects, and the pool failure after repeated ones.
 //! - [`outcome`]: the hand-off of each end to the existing outcome writers.
 //! - [`shared_stop`] and [`seat_runs`]: the rules of shared children: the
 //!   stop report of each run, the verdict of each run at a kill, the
@@ -17,6 +18,7 @@
 pub mod board;
 mod booting;
 pub mod budgets;
+pub mod defects;
 pub mod dispatch;
 pub mod isolated;
 pub mod outcome;
@@ -50,6 +52,8 @@ mod shared_rules_tests;
 #[cfg(test)]
 mod shared_thread_tests;
 #[cfg(test)]
+mod slot_defect_tests;
+#[cfg(test)]
 mod stop_and_loss_tests;
 #[cfg(test)]
 mod tests;
@@ -60,6 +64,7 @@ pub use board::{ChildLayout, DownState, PoolBoard, PoolFailure, PoolHealth, Slot
 pub use budgets::{
     isolated_capacity, shared_capacity, BudgetCapacity, PoolService, SharedSlotService, SlotService,
 };
+pub use defects::{SlotDefect, SLOT_DEFECT_LIMIT};
 pub use dispatch::{
     AttemptEnd, Claimed, ClaimedTask, ExecutionClass, LoopKillCode, NotRunCause, RetryFacts,
     Settlement, TaskKind,

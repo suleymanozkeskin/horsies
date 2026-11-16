@@ -17,6 +17,10 @@
 //!   sent. A closed runner beat registry (the worker failed closed) refuses
 //!   the task before it is sent: it ends `NotDispatched`, and the child is
 //!   killed.
+//! - A slot defect (a run frame that cannot be encoded, a panic of the slot
+//!   task) kills the child; its task takes the crash path once the exit is
+//!   seen (what the body returned, after a return). Repeated defects fail
+//!   the pools ([`super::defects`]).
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -26,17 +30,23 @@ use tokio::time::Instant;
 
 use super::board::SlotPhase;
 use super::booting::{boot_child, lost_after_kill, BootSlot, Booted};
+use super::defects::{
+    count_defect, AfterDefect, CatchPanic, GenerationEnd, Served, SlotDefect, SlotDefects,
+    TasksFinished,
+};
 use super::dispatch::{AttemptEnd, NotRunCause};
 use super::pool::{Answer, ExitNotSeen, MemoryLimit, PoolShared, QueuedRun, TaskLimit};
 use super::route::IsolatedDeadline;
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::worker::executor::protocol::{
-    BodyEnd, ChildFrame, FailureDetail, ParentFrame, RssReading, RunEnd, TaskTimeoutMs,
+    BodyEnd, ChildFrame, FailureDetail, ParentFrame, ProcessId, RssReading, RunEnd, RunFrame,
+    TaskTimeoutMs,
 };
 use crate::worker::executor::supervisor::{
-    ChildChannel, ChildExit, ChildLost, ExitState, FrameWait, MailboxBound, CHILD_KILL_WAIT,
+    ChildChannel, ChildExit, ChildLost, ExitState, FrameWait, LossCause, MailboxBound, SendFailure,
+    CHILD_KILL_WAIT,
 };
-use crate::worker::runner_beats::{DispatchRunner, HeldChild, RegistryClosed};
+use crate::worker::runner_beats::{DispatchRunner, HeldChild, HeldDispatch, RegistryClosed};
 
 /// After a body returned with work left on its loop, the child reports how
 /// that work ended within this time, or it is killed: 1 s of grace, 0.3 s
@@ -46,12 +56,80 @@ pub const ISOLATED_LEFTOVER_BACKSTOP: Duration = Duration::from_millis(26_300);
 
 /// What the slot does after one task.
 enum AfterRun {
-    /// The child serves on; `rss` decides a recycle.
+    /// The task finished; the child serves on, and `rss` decides a
+    /// recycle.
     Serve { rss: RssReading },
-    /// The child stops after a clean end (left work was cancelled in it).
+    /// The task finished, and the child stops after a clean end (left work
+    /// was cancelled in it).
     Retire,
-    /// The child is lost or killed.
-    ChildGone,
+    /// The child is lost or killed. The task finished when its body
+    /// returned before.
+    ChildGone(TasksFinished),
+    /// A slot defect: the child is killed and the task answered.
+    Defect(SlotDefect),
+}
+
+/// Whether the body of the task returned with work left on its loop
+/// (Python executor design, section 8.5).
+enum IsolatedReturn {
+    NotSeen,
+    /// What the body returned: the end at every later end of the child
+    /// whose exit is seen.
+    Seen(AttemptEnd),
+}
+
+/// The answer of the task on the child, kept by the slot outside the code
+/// that runs the task, so that a defect in that code still answers it
+/// (Python `SlotHandle.finish`, `loss_outcome`).
+struct TaskAnswer {
+    answer: Option<Answer>,
+    returned: IsolatedReturn,
+}
+
+impl TaskAnswer {
+    fn new(answer: Answer) -> Self {
+        Self {
+            answer: Some(answer),
+            returned: IsolatedReturn::NotSeen,
+        }
+    }
+
+    fn child_took_it(&mut self, pid: ProcessId) {
+        if let Some(answer) = &mut self.answer {
+            answer.child_took_it(pid);
+        }
+    }
+
+    /// Answer the task. A task is answered once; a second answer is a
+    /// defect of the slot.
+    fn send(&mut self, end: AttemptEnd) {
+        match self.answer.take() {
+            Some(answer) => answer.send(end),
+            None => panic!("a task of an isolated slot was answered twice"),
+        }
+    }
+
+    /// The body returned `end` with work left on its loop. A second return
+    /// is a defect of the slot.
+    fn body_returned(&mut self, end: AttemptEnd) {
+        match self.returned {
+            IsolatedReturn::NotSeen => self.returned = IsolatedReturn::Seen(end),
+            IsolatedReturn::Seen(_) => panic!("the return of a task was noted twice"),
+        }
+    }
+
+    /// The answer, when it is still open, and the end of the task once the
+    /// exit of its child, lost by `lost`, is seen.
+    fn open_at_loss(&mut self, lost: &ChildLost) -> Option<(Answer, AttemptEnd)> {
+        let answer = self.answer.take()?;
+        let seen_end = match &self.returned {
+            IsolatedReturn::Seen(returned) => returned.clone(),
+            IsolatedReturn::NotSeen => AttemptEnd::Crashed {
+                reason: FailureDetail::cut(&lost.to_string()),
+            },
+        };
+        Some((answer, seen_end))
+    }
 }
 
 /// What came first for a task in flight.
@@ -61,20 +139,31 @@ enum FirstAnswer {
 }
 
 /// The slot task: boot a child, serve it, replace it, until the pools stop
-/// or fail. `index` is the slot's index on the board.
+/// or fail. `index` is the slot's index on the board. A defect costs the
+/// child and its task; [`SLOT_DEFECT_LIMIT`] defects with no finished task
+/// between them fail the pools.
+///
+/// [`SLOT_DEFECT_LIMIT`]: super::defects::SLOT_DEFECT_LIMIT
 pub(super) async fn run_slot(shared: Arc<PoolShared>, index: usize) {
+    let mut defects = SlotDefects::default();
     loop {
-        let boot = BootSlot {
-            board: &shared.board,
-            index,
-            spawner: &shared.spawner,
-            command: &shared.config.command,
-            init: &shared.config.init,
-            mailbox: MailboxBound::for_seats(NonZeroUsize::MIN),
+        let served = CatchPanic::new(boot_and_serve(&shared, index, &mut defects)).await;
+        let defect = match served {
+            Ok(Served::PoolEnded) => return,
+            Ok(Served::Generation(GenerationEnd::Ended)) => None,
+            Ok(Served::Generation(GenerationEnd::Defect(defect))) => Some(defect),
+            Err(payload) => {
+                // The child of the generation was dropped with it; its
+                // channel kills it on drop.
+                shared.board.set(index, SlotPhase::Retiring);
+                Some(SlotDefect::panicked(payload.as_ref()))
+            }
         };
-        match boot_child(&boot).await {
-            Booted::Child(channel) => serve_generation(&shared, index, channel).await,
-            Booted::PoolStopped | Booted::PoolFailed => return,
+        if let Some(defect) = defect {
+            match count_defect(&shared.board, index, &mut defects, defect) {
+                AfterDefect::BootAgain => {}
+                AfterDefect::PoolFailed => return,
+            }
         }
         match shared.board.not_serving() {
             true => return,
@@ -83,16 +172,58 @@ pub(super) async fn run_slot(shared: Arc<PoolShared>, index: usize) {
     }
 }
 
+/// Boot a child for the slot and serve it.
+async fn boot_and_serve(shared: &PoolShared, index: usize, defects: &mut SlotDefects) -> Served {
+    let boot = BootSlot {
+        board: &shared.board,
+        index,
+        spawner: &shared.spawner,
+        command: &shared.config.command,
+        init: &shared.config.init,
+        mailbox: MailboxBound::for_seats(NonZeroUsize::MIN),
+    };
+    match boot_child(&boot).await {
+        Booted::Child(channel) => {
+            Served::Generation(serve_generation(shared, index, channel, defects).await)
+        }
+        Booted::PoolStopped | Booted::PoolFailed => Served::PoolEnded,
+    }
+}
+
 /// Serve tasks on one child until it is lost, retires, or the pool stops.
-async fn serve_generation(shared: &PoolShared, index: usize, mut channel: ChildChannel) {
+/// A panic while a task runs is a defect: the child is killed and the task
+/// answered here.
+async fn serve_generation(
+    shared: &PoolShared,
+    index: usize,
+    mut channel: ChildChannel,
+    defects: &mut SlotDefects,
+) -> GenerationEnd {
     let mut tasks_done: u64 = 0;
     loop {
         let Some(run) = next_run(shared, &channel).await else {
             break;
         };
         tasks_done = tasks_done.saturating_add(1);
-        match run_one(shared, &mut channel, run).await {
+        let QueuedRun {
+            frame,
+            deadline,
+            answer,
+        } = run;
+        let mut answer = TaskAnswer::new(answer);
+        let ran =
+            CatchPanic::new(run_one(shared, &mut channel, frame, deadline, &mut answer)).await;
+        let after = match ran {
+            Ok(after) => after,
+            Err(payload) => {
+                let defect = SlotDefect::panicked(payload.as_ref());
+                end_at_defect(shared, &mut channel, &mut answer).await;
+                AfterRun::Defect(defect)
+            }
+        };
+        match after {
             AfterRun::Serve { rss } => {
+                defects.task_finished();
                 if let Some(reason) = recycle_reason(shared, tasks_done, rss) {
                     tracing::debug!(
                         slot = index,
@@ -103,11 +234,20 @@ async fn serve_generation(shared: &PoolShared, index: usize, mut channel: ChildC
                     break;
                 }
             }
-            AfterRun::Retire => break,
-            AfterRun::ChildGone => {
+            AfterRun::Retire => {
+                defects.task_finished();
+                break;
+            }
+            AfterRun::ChildGone(finished) => {
+                defects.note(finished);
                 shared.board.set(index, SlotPhase::Retiring);
                 let _ = channel.dispose_lost().await;
-                return;
+                return GenerationEnd::Ended;
+            }
+            AfterRun::Defect(defect) => {
+                shared.board.set(index, SlotPhase::Retiring);
+                let _ = channel.dispose_lost().await;
+                return GenerationEnd::Defect(defect);
             }
         }
     }
@@ -120,6 +260,7 @@ async fn serve_generation(shared: &PoolShared, index: usize, mut channel: ChildC
             let _ = channel.retire().await;
         }
     }
+    GenerationEnd::Ended
 }
 
 /// Why a child that served a task retires, if it does.
@@ -182,12 +323,13 @@ async fn first_answer(
 }
 
 /// Run one task on the child and answer it.
-async fn run_one(shared: &PoolShared, channel: &mut ChildChannel, run: QueuedRun) -> AfterRun {
-    let QueuedRun {
-        frame,
-        deadline,
-        mut answer,
-    } = run;
+async fn run_one(
+    shared: &PoolShared,
+    channel: &mut ChildChannel,
+    frame: RunFrame,
+    deadline: IsolatedDeadline,
+    answer: &mut TaskAnswer,
+) -> AfterRun {
     let task_id = frame.task_id;
     let runner = DispatchRunner::Child(HeldChild {
         id: channel.id(),
@@ -208,7 +350,7 @@ async fn run_one(shared: &PoolShared, channel: &mut ChildChannel, run: QueuedRun
             answer.send(AttemptEnd::NotDispatched(
                 NotRunCause::RunnerBeatsFailedClosed,
             ));
-            return AfterRun::ChildGone;
+            return AfterRun::ChildGone(TasksFinished::NoTask);
         }
     };
     answer.child_took_it(channel.pid());
@@ -226,12 +368,21 @@ async fn run_one(shared: &PoolShared, channel: &mut ChildChannel, run: QueuedRun
                 timeout.map(|timeout| Instant::now() + Duration::from_millis(timeout.get()));
             first_answer(shared, channel, until).await
         }
-        Err(failure) => {
+        Err(SendFailure::Encode(error)) => {
+            // Nothing reached the child: the frame failed in the slot's
+            // own path, which is a defect (Python `_serve_slot`).
+            tracing::error!(task_id = %task_id, error = %error, "the run frame could not be encoded");
+            drop(held);
+            let lost = defect_kill(channel).await;
+            answer.send(end_of_loss(shared, channel, lost).await);
+            return AfterRun::Defect(SlotDefect::frame_not_encoded(&error));
+        }
+        Err(failure @ (SendFailure::Write(_) | SendFailure::TimedOut)) => {
             tracing::warn!(task_id = %task_id, failure = %failure, "the run frame could not be sent");
             drop(held);
             let lost = lost_after_kill(channel).await;
             answer.send(end_of_loss(shared, channel, lost).await);
-            return AfterRun::ChildGone;
+            return AfterRun::ChildGone(TasksFinished::NoTask);
         }
     };
     match first {
@@ -257,18 +408,18 @@ async fn run_one(shared: &PoolShared, channel: &mut ChildChannel, run: QueuedRun
             drop(held);
             let lost = channel.discard_violating_child().await;
             answer.send(end_of_loss(shared, channel, lost).await);
-            AfterRun::ChildGone
+            AfterRun::ChildGone(TasksFinished::NoTask)
         }
         FirstAnswer::Wait(FrameWait::Lost(lost)) => {
             drop(held);
             answer.send(end_of_loss(shared, channel, lost).await);
-            AfterRun::ChildGone
+            AfterRun::ChildGone(TasksFinished::NoTask)
         }
         FirstAnswer::Wait(FrameWait::Expired) => {
             drop(held);
             let timed_out = timeout_end(timeout);
             answer.send(end_after_kill(shared, channel, timed_out).await);
-            AfterRun::ChildGone
+            AfterRun::ChildGone(TasksFinished::NoTask)
         }
         FirstAnswer::DrainDeadline => {
             drop(held);
@@ -276,7 +427,7 @@ async fn run_one(shared: &PoolShared, channel: &mut ChildChannel, run: QueuedRun
                 reason: FailureDetail::cut("the worker killed the child at the drain deadline"),
             };
             answer.send(end_after_kill(shared, channel, crashed).await);
-            AfterRun::ChildGone
+            AfterRun::ChildGone(TasksFinished::NoTask)
         }
     }
 }
@@ -312,10 +463,40 @@ async fn end_of_loss(shared: &PoolShared, channel: &ChildChannel, lost: ChildLos
     let crashed = AttemptEnd::Crashed {
         reason: FailureDetail::cut(&lost.to_string()),
     };
+    end_once_seen(shared, channel, lost, crashed).await
+}
+
+/// The end of a task whose child was lost by `lost`: `seen_end` when the
+/// exit was seen, else the rule of an exit not seen.
+async fn end_once_seen(
+    shared: &PoolShared,
+    channel: &ChildChannel,
+    lost: ChildLost,
+    seen_end: AttemptEnd,
+) -> AttemptEnd {
     match lost.exit {
-        ChildExit::Reaped(_) | ChildExit::ReapedElsewhere => crashed,
-        ChildExit::ExitUnknown => exit_not_seen(shared, channel, crashed).await,
+        ChildExit::Reaped(_) | ChildExit::ReapedElsewhere => seen_end,
+        ChildExit::ExitUnknown => exit_not_seen(shared, channel, seen_end).await,
     }
+}
+
+/// Kill the child of a slot that hit a defect, wait for its exit, and
+/// describe its end with the defect as its cause (Python `_clear_slot`).
+async fn defect_kill(channel: &mut ChildChannel) -> ChildLost {
+    let _ = channel.kill_for_caller().await;
+    let _ = channel.wait_exit(CHILD_KILL_WAIT).await;
+    channel.lost_for(LossCause::SlotDefect)
+}
+
+/// After a panic while a task ran on the child: kill the child, and answer
+/// the task when the panic left it open, as at a loss (Python
+/// `_clear_slot`, `SlotHandle.loss_outcome`).
+async fn end_at_defect(shared: &PoolShared, channel: &mut ChildChannel, answer: &mut TaskAnswer) {
+    let lost = defect_kill(channel).await;
+    let Some((open, seen_end)) = answer.open_at_loss(&lost) else {
+        return;
+    };
+    open.send(end_once_seen(shared, channel, lost, seen_end).await);
 }
 
 /// The exit of a killed child was not seen: leave the row to recovery, or
@@ -349,16 +530,18 @@ async fn exit_not_seen(
 
 /// After a return with work left: wait for the report of that work, bounded
 /// by [`ISOLATED_LEFTOVER_BACKSTOP`]. What the body returned is the end at
-/// every end of the child whose exit is seen.
+/// every end of the child whose exit is seen. The task finished: its body
+/// returned.
 async fn end_after_return(
     shared: &PoolShared,
     channel: &mut ChildChannel,
     task_id: uuid::Uuid,
     returned: BodyEnd,
-    held: crate::worker::runner_beats::HeldDispatch,
-    answer: Answer,
+    held: HeldDispatch,
+    answer: &mut TaskAnswer,
 ) -> AfterRun {
     let returned_end = AttemptEnd::Reported(RunEnd::from(returned));
+    answer.body_returned(returned_end.clone());
     let until = Some(Instant::now() + ISOLATED_LEFTOVER_BACKSTOP);
     match first_answer(shared, channel, until).await {
         FirstAnswer::Wait(FrameWait::Frame(ChildFrame::LeftWorkEnded(ended)))
@@ -379,32 +562,24 @@ async fn end_after_return(
             );
             drop(held);
             answer.send(end_after_kill(shared, channel, returned_end).await);
-            AfterRun::ChildGone
+            AfterRun::ChildGone(TasksFinished::AtLeastOne)
         }
         FirstAnswer::Wait(FrameWait::Expired) | FirstAnswer::DrainDeadline => {
             drop(held);
             answer.send(end_after_kill(shared, channel, returned_end).await);
-            AfterRun::ChildGone
+            AfterRun::ChildGone(TasksFinished::AtLeastOne)
         }
         FirstAnswer::Wait(FrameWait::Frame(other)) => {
             tracing::error!(task_id = %task_id, frame = ?other, "an isolated child sent a frame out of turn");
             drop(held);
             let lost = channel.discard_violating_child().await;
-            let end = match lost.exit {
-                ChildExit::Reaped(_) | ChildExit::ReapedElsewhere => returned_end,
-                ChildExit::ExitUnknown => exit_not_seen(shared, channel, returned_end).await,
-            };
-            answer.send(end);
-            AfterRun::ChildGone
+            answer.send(end_once_seen(shared, channel, lost, returned_end).await);
+            AfterRun::ChildGone(TasksFinished::AtLeastOne)
         }
         FirstAnswer::Wait(FrameWait::Lost(lost)) => {
             drop(held);
-            let end = match lost.exit {
-                ChildExit::Reaped(_) | ChildExit::ReapedElsewhere => returned_end,
-                ChildExit::ExitUnknown => exit_not_seen(shared, channel, returned_end).await,
-            };
-            answer.send(end);
-            AfterRun::ChildGone
+            answer.send(end_once_seen(shared, channel, lost, returned_end).await);
+            AfterRun::ChildGone(TasksFinished::AtLeastOne)
         }
     }
 }

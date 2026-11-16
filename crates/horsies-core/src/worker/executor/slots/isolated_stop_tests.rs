@@ -104,8 +104,9 @@ fn unsendable(number: u128) -> ClaimedTask {
 }
 
 /// Python `TestSlotDefects::test_a_defect_costs_only_its_task`: a run frame
-/// that cannot be sent kills its child; only its task takes the crash path,
-/// and the next task runs on a new child.
+/// that cannot be encoded is a slot defect: it kills its child, only its
+/// task takes the crash path with the defect as its cause, and the next
+/// task runs on a new child.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_frame_that_cannot_be_sent_costs_only_its_task() {
     let dir = TestDir::new();
@@ -128,7 +129,8 @@ async fn a_frame_that_cannot_be_sent_costs_only_its_task() {
     .await;
     let answer = answer_of(submit_isolated(&pool, &next, IsolatedDeadline::NoDeadline)).await;
 
-    let _ = crash_reason(defect);
+    let reason = crash_reason(defect);
+    assert!(reason.contains("the worker slot failed"), "{reason}");
     assert!(process_ended(first_child.as_pid_t()));
     assert_eq!(answer, reported(2));
     assert_eq!(tickets(&dir), 2);
@@ -138,9 +140,9 @@ async fn a_frame_that_cannot_be_sent_costs_only_its_task() {
 
 /// Python `TestSlotDefects::test_repeated_defects_fail_the_pool` and
 /// `::test_a_finished_task_clears_the_count`: two defects and a finished
-/// task leave the pool serving; three defects in a row fail it.
+/// task leave the pool serving; three defects in a row fail it, and the
+/// failure names the slot and the last defect.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "waits on #938"]
 async fn three_send_defects_in_a_row_fail_the_pool() {
     let finished = task(100, ExecutionClass::Isolated);
     let script = format!(
@@ -167,7 +169,7 @@ async fn three_send_defects_in_a_row_fail_the_pool() {
     .await;
     assert_eq!(answer, reported(1));
     assert_eq!(board.health(), PoolHealth::Serving);
-    for number in 3..=5 {
+    for number in 3..=4 {
         let _ = answer_of(submit_isolated(
             &pool,
             &unsendable(number),
@@ -175,8 +177,21 @@ async fn three_send_defects_in_a_row_fail_the_pool() {
         ))
         .await;
     }
+    assert_eq!(board.health(), PoolHealth::Serving);
+    let _ = answer_of(submit_isolated(
+        &pool,
+        &unsendable(5),
+        IsolatedDeadline::NoDeadline,
+    ))
+    .await;
 
-    let _ = failure_of(&board).await;
+    match failure_of(&board).await {
+        PoolFailure::SlotDefectsRepeated { slot, detail } => {
+            assert_eq!(slot, 0);
+            assert!(detail.as_str().contains("could not be encoded"), "{detail}");
+        }
+        other => panic!("expected repeated slot defects, got {other:?}"),
+    }
     stop_pool(pool, spawner).await;
 }
 

@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 use super::budgets::SlotService;
 use super::dispatch::ExecutionClass;
 use crate::worker::executor::protocol::ProcessId;
+use crate::worker::executor::supervisor::boot::BootFailureDetail;
 use crate::worker::executor::supervisor::{BootFailure, BootFailureCause, PoolAtFailure};
 
 /// A slot that is down after a boot failure that can clear.
@@ -67,6 +68,14 @@ pub enum PoolFailure {
     ChildHookFailed,
     /// The last counted boot attempt of a slot failed.
     BootAttemptsExhausted { attempts: u32, last: BootFailure },
+    /// Slot `slot` (its board index) hit [`SLOT_DEFECT_LIMIT`] defects with
+    /// no finished task between them; `detail` names the last one.
+    ///
+    /// [`SLOT_DEFECT_LIMIT`]: super::defects::SLOT_DEFECT_LIMIT
+    SlotDefectsRepeated {
+        slot: usize,
+        detail: BootFailureDetail,
+    },
 }
 
 /// The health of the pools.

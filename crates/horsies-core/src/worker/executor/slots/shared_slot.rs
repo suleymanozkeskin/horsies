@@ -16,6 +16,9 @@
 //! - At a loss whose exit was seen, each run gets its verdict. When the
 //!   exit is not seen, the end is not known (stale recovery on), or a task
 //!   waits for the exit and the runs then take the crash path (off).
+//! - A slot defect (a run frame that cannot be encoded, a panic of the slot
+//!   task) kills the child; every run of it then takes the crash path, as
+//!   at a loss. Repeated defects fail the pools ([`super::defects`]).
 
 use std::sync::Arc;
 
@@ -24,6 +27,9 @@ use tokio::time::Instant;
 
 use super::board::SlotPhase;
 use super::booting::{boot_child, BootSlot, Booted};
+use super::defects::{
+    count_defect, AfterDefect, CatchPanic, GenerationEnd, Served, SlotDefect, SlotDefects,
+};
 use super::dispatch::{AttemptEnd, NotRunCause};
 use super::pool::{Answer, ExitNotSeen};
 use super::seat_runs::{
@@ -36,7 +42,7 @@ use crate::worker::executor::protocol::{
     ChildFrame, FailureDetail, ParentFrame, RunRef, SharedResultFrame,
 };
 use crate::worker::executor::supervisor::{
-    ChildChannel, ChildExit, ChildLost, ExitState, FrameWait, LossCause, MailboxBound,
+    ChildChannel, ChildExit, ChildLost, ExitState, FrameWait, LossCause, MailboxBound, SendFailure,
     CHILD_KILL_WAIT,
 };
 use crate::worker::runner_beats::{DispatchRunner, HeldChild, HeldDispatch, RegistryClosed};
@@ -68,6 +74,8 @@ enum KillReason {
     PastDeadlines,
     RegistryClosed,
     SendFailed,
+    /// The slot hit a defect.
+    SlotDefect,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +91,8 @@ struct Generation {
     service: ChildService,
     kill: KillSent,
     tasks_done: u64,
+    /// The defect that ended this generation, when one did.
+    defect: Option<SlotDefect>,
 }
 
 /// What woke the slot.
@@ -107,23 +117,34 @@ enum Flow {
 }
 
 /// The slot task: boot a child, serve it, replace it, until the pools stop
-/// or fail. `local` is the slot's number in its pool.
+/// or fail. `local` is the slot's number in its pool. A defect costs the
+/// child and its runs; [`SLOT_DEFECT_LIMIT`] defects with no finished task
+/// between them fail the pools.
+///
+/// [`SLOT_DEFECT_LIMIT`]: super::defects::SLOT_DEFECT_LIMIT
 pub(super) async fn run_shared_slot(pool: Arc<SharedPoolShared>, local: usize) {
     let index = pool.first + local;
+    let mut defects = SlotDefects::default();
     loop {
-        let boot = BootSlot {
-            board: &pool.board,
-            index,
-            spawner: &pool.spawner,
-            command: &pool.config.command,
-            init: &pool.config.init,
-            mailbox: MailboxBound::for_seats(pool.seats),
+        let served = CatchPanic::new(boot_and_serve(&pool, local, &mut defects)).await;
+        let defect = match served {
+            Ok(Served::PoolEnded) => return,
+            Ok(Served::Generation(GenerationEnd::Ended)) => None,
+            Ok(Served::Generation(GenerationEnd::Defect(defect))) => Some(defect),
+            Err(payload) => {
+                // The child of the generation was dropped with it; its
+                // channel kills it on drop.
+                pool.board.set(index, SlotPhase::Retiring);
+                Some(SlotDefect::panicked(payload.as_ref()))
+            }
         };
-        match boot_child(&boot).await {
-            Booted::Child(channel) => serve_generation(&pool, local, channel).await,
-            Booted::PoolStopped | Booted::PoolFailed => return,
-        }
         pool.publish_load(local, Accepting::NotOpen, 0);
+        if let Some(defect) = defect {
+            match count_defect(&pool.board, index, &mut defects, defect) {
+                AfterDefect::BootAgain => {}
+                AfterDefect::PoolFailed => return,
+            }
+        }
         match pool.board.not_serving() {
             true => return,
             false => pool.board.set(index, SlotPhase::Booting),
@@ -131,52 +152,123 @@ pub(super) async fn run_shared_slot(pool: Arc<SharedPoolShared>, local: usize) {
     }
 }
 
+/// Boot a child for the slot and serve it.
+async fn boot_and_serve(
+    pool: &SharedPoolShared,
+    local: usize,
+    defects: &mut SlotDefects,
+) -> Served {
+    let boot = BootSlot {
+        board: &pool.board,
+        index: pool.first + local,
+        spawner: &pool.spawner,
+        command: &pool.config.command,
+        init: &pool.config.init,
+        mailbox: MailboxBound::for_seats(pool.seats),
+    };
+    match boot_child(&boot).await {
+        Booted::Child(channel) => {
+            Served::Generation(serve_generation(pool, local, channel, defects).await)
+        }
+        Booted::PoolStopped | Booted::PoolFailed => Served::PoolEnded,
+    }
+}
+
 /// Serve runs on one child until it is lost, killed, or closed and drained.
-async fn serve_generation(pool: &SharedPoolShared, local: usize, channel: ChildChannel) {
+/// A panic while the child serves is a defect: the child is killed, and
+/// every run of it ends as at a loss.
+async fn serve_generation(
+    pool: &SharedPoolShared,
+    local: usize,
+    channel: ChildChannel,
+    defects: &mut SlotDefects,
+) -> GenerationEnd {
     let mut generation = Generation {
         channel,
         runs: SeatRuns::new(pool.seats),
         service: ChildService::Open,
         kill: KillSent::NotSent,
         tasks_done: 0,
+        defect: None,
     };
+    let mut finished_seen: u64 = 0;
     let flow = loop {
-        pull_runs(pool, local, &mut generation).await;
-        publish(pool, local, &generation);
-        match after_change(pool, &mut generation) {
-            Flow::Continue => {}
-            ended => break ended,
+        let step = CatchPanic::new(serve_step(pool, local, &mut generation)).await;
+        if generation.tasks_done > finished_seen {
+            finished_seen = generation.tasks_done;
+            defects.task_finished();
         }
-        let flow = match next_event(pool, local, &mut generation).await {
-            SlotEvent::Frame(wait) => on_wait(pool, &mut generation, wait).await,
-            SlotEvent::Wake => Flow::Continue,
-            SlotEvent::PoolStopping => {
-                generation.service.close_for_pool_stop();
-                Flow::Continue
+        match step {
+            Ok(Flow::Continue) => {}
+            Ok(ended) => break ended,
+            Err(payload) => {
+                let defect = SlotDefect::panicked(payload.as_ref());
+                break Flow::Lost(kill_at_defect(&mut generation, defect).await);
             }
-            SlotEvent::DrainDeadline => {
-                tracing::warn!(
-                    pid = generation.channel.pid().get(),
-                    tasks = ?generation.runs.task_ids(),
-                    "killing a shared child that still runs tasks at the drain deadline",
-                );
-                send_kill(&mut generation, KillReason::DrainDeadline).await;
-                Flow::Continue
-            }
-        };
-        match flow {
-            Flow::Continue => {}
-            ended => break ended,
         }
     };
     pool.board.set(pool.first + local, SlotPhase::Retiring);
     pool.publish_load(local, Accepting::NotOpen, 0);
+    let defect = generation.defect.take();
     match flow {
         Flow::Retire => retire(generation).await,
         Flow::KillPastDeadlines(reason) => kill_past_deadlines(pool, generation, reason).await,
-        Flow::Lost(lost) => lose_child(pool, generation, lost).await,
+        Flow::Lost(lost) => {
+            // Every defect sets `defect` and kills the child: the runs end
+            // as at a loss by a defect, not by a kill of the worker.
+            let lost = match &defect {
+                Some(_) => ChildLost {
+                    cause: LossCause::SlotDefect,
+                    ..lost
+                },
+                None => lost,
+            };
+            lose_child(pool, generation, lost).await
+        }
         Flow::Continue => unreachable!("the serve loop ends only with an end of the generation"),
     }
+    match defect {
+        Some(defect) => GenerationEnd::Defect(defect),
+        None => GenerationEnd::Ended,
+    }
+}
+
+/// One step of a generation: take runs, decide its end, or act on the next
+/// event.
+async fn serve_step(pool: &SharedPoolShared, local: usize, generation: &mut Generation) -> Flow {
+    pull_runs(pool, local, generation).await;
+    publish(pool, local, generation);
+    match after_change(pool, generation) {
+        Flow::Continue => {}
+        ended => return ended,
+    }
+    match next_event(pool, local, generation).await {
+        SlotEvent::Frame(wait) => on_wait(pool, generation, wait).await,
+        SlotEvent::Wake => Flow::Continue,
+        SlotEvent::PoolStopping => {
+            generation.service.close_for_pool_stop();
+            Flow::Continue
+        }
+        SlotEvent::DrainDeadline => {
+            tracing::warn!(
+                pid = generation.channel.pid().get(),
+                tasks = ?generation.runs.task_ids(),
+                "killing a shared child that still runs tasks at the drain deadline",
+            );
+            send_kill(generation, KillReason::DrainDeadline).await;
+            Flow::Continue
+        }
+    }
+}
+
+/// After a panic while the child served: note the defect, kill the child,
+/// wait for its exit, and describe its end with the defect as its cause
+/// (Python `_clear_slot`).
+async fn kill_at_defect(generation: &mut Generation, defect: SlotDefect) -> ChildLost {
+    generation.defect = Some(defect);
+    send_kill(generation, KillReason::SlotDefect).await;
+    let _ = generation.channel.wait_exit(CHILD_KILL_WAIT).await;
+    generation.channel.lost_for(LossCause::SlotDefect)
 }
 
 /// Publish the slot's phase on the board and its load to placement.
@@ -337,9 +429,19 @@ async fn send_run(pool: &SharedPoolShared, generation: &mut Generation, queued: 
     let sent = generation.channel.send(&parent_frame).await;
     // The input is not kept once the frame is written.
     drop(parent_frame);
-    if let Err(failure) = sent {
-        tracing::warn!(task_id = %run.task_id, failure = %failure, "a shared run frame could not be sent");
-        send_kill(generation, KillReason::SendFailed).await;
+    match sent {
+        Ok(()) => {}
+        Err(SendFailure::Encode(error)) => {
+            // Nothing reached the child: the frame failed in the slot's own
+            // path, which is a defect (Python `_serve_slot`).
+            tracing::error!(task_id = %run.task_id, error = %error, "a shared run frame could not be encoded");
+            generation.defect = Some(SlotDefect::frame_not_encoded(&error));
+            send_kill(generation, KillReason::SlotDefect).await;
+        }
+        Err(failure @ (SendFailure::Write(_) | SendFailure::TimedOut)) => {
+            tracing::warn!(task_id = %run.task_id, failure = %failure, "a shared run frame could not be sent");
+            send_kill(generation, KillReason::SendFailed).await;
+        }
     }
 }
 
