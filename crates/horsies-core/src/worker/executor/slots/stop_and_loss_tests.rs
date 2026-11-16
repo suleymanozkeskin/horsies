@@ -128,6 +128,7 @@ fn unreachable_writer() -> OutcomeWriter {
         PayloadPolicy::default(),
         RetentionConfig::default(),
         successes,
+        OrphanSelfHeal::On,
     )
 }
 
@@ -233,6 +234,7 @@ async fn a_crash_whose_exit_was_seen_fails_the_row_with_worker_crashed() {
         PayloadPolicy::default(),
         RetentionConfig::default(),
         successes,
+        OrphanSelfHeal::On,
     );
     let claimed = ClaimedTask {
         task_id,

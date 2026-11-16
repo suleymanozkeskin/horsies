@@ -9,7 +9,7 @@
 //!   worker of the profile against the server's usable slots.
 
 use crate::broker::PostgresBroker;
-use crate::core::config::worker_profile::WorkerProfile;
+use crate::core::config::worker_profile::SelectedProfile;
 use crate::core::config::PostgresConfig;
 use crate::worker::connection_fit::{
     boot_connection_fit, boot_connection_log, log_boot_connection_fit, BootConnectionLog,
@@ -17,14 +17,6 @@ use crate::worker::connection_fit::{
 use crate::worker::memory_fit::{
     boot_memory_log, log_boot_memory_fit, read_boot_memory_fit, BootMemoryLog,
 };
-
-/// The profile that the worker runs, by its name in `worker_profiles`
-/// (Python `SelectedProfile`). The host resolves it from `--profile`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SelectedProfile {
-    pub name: String,
-    pub profile: WorkerProfile,
-}
 
 /// Read the memory fit of `selected` and log it. Reads two or three small
 /// files; never refuses. Returns the records it logged.

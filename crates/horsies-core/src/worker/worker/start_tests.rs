@@ -21,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{wait_for_claim_wake, ClaimWake, ClaimWakes, StartOutcome, Worker};
 use crate::broker::PostgresBroker;
+use crate::core::config::worker_profile::SelectedProfile;
 use crate::core::config::{AppConfig, WorkerResilienceConfig};
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::worker::children::ChildLaunch;
@@ -28,7 +29,6 @@ use crate::worker::claim_pass::RegisteredClasses;
 use crate::worker::config::WorkerConfig;
 use crate::worker::executor::protocol::{ChildLogLevel, ChildProgram, DatabaseUrl};
 use crate::worker::executor::slots::scripted::idle_child_of_any_kind;
-use crate::worker::profile_fit::SelectedProfile;
 
 /// The longest wait for an event a test expects.
 const WAIT: Duration = Duration::from_secs(30);

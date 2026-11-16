@@ -39,6 +39,7 @@ fn writer(broker: Arc<PostgresBroker>) -> OutcomeWriter {
         PayloadPolicy::default(),
         RetentionConfig::default(),
         successes,
+        OrphanSelfHeal::On,
     )
 }
 

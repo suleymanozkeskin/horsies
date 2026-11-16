@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use super::Worker;
 use crate::broker::PostgresBroker;
+use crate::core::config::worker_profile::SelectedProfile;
 use crate::core::config::AppConfig;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::worker::children::ChildLaunch;
@@ -14,7 +15,6 @@ use crate::worker::claim_pass::RegisteredClasses;
 use crate::worker::config::WorkerConfig;
 use crate::worker::executor::protocol::{ChildLogLevel, ChildProgram, DatabaseUrl};
 use crate::worker::executor::slots::scripted::idle_child_of_any_kind;
-use crate::worker::profile_fit::SelectedProfile;
 
 /// The bound of the wait for the first snapshot, which the worker writes at
 /// start.
