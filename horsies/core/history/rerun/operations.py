@@ -1,8 +1,11 @@
 """The rerun operation: one recorded request re-executed as a new one.
 
-Resolution goes through the staged detail function; a live source is a
-typed refusal (a live task is retried by its own lifecycle, never
-rerun), and an absence carries the detail read's reason. Eligibility
+Resolution is one call of ``horsies_rerun_source_read``
+(0006_history_functions.sql): the class check of the new request, the
+published detail reader and the absence reason in one snapshot. A live
+source is a typed refusal (a live task is retried by its own lifecycle,
+never rerun), and an absence carries the reason of
+``horsies_task_absence_reason``. Eligibility
 precedes input, mirroring the ratified ladder: workflow backing tasks
 and completed sources refuse before any envelope is touched. Input
 reconstruction reads the envelope that the move built, with the digest
@@ -25,6 +28,8 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from uuid import UUID
 
+from typing import Any, Final
+
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -35,7 +40,6 @@ from ..errors import HistoryContractError
 from ..periods import parse_retention_period, period_class_key
 from horsies.core.types.result import Err, Ok
 from ..identity.fingerprint import EnqueueCommandV1
-from ..names import RETENTION_CLASSES
 from ..identity.keys import (
     IDEMPOTENCY_SCOPE_VERSION,
     ScopedIdempotencyKey,
@@ -49,13 +53,14 @@ from ..identity.reservations import (
 )
 from ..identity.uuid7 import mint_task_id
 from ..names import LIVE_TASKS
+from ...utils.db import uuid_column_value
 from horsies.core.types.status import TaskStatus
+from ..archive.attempts import decode_attempt_snapshot
+from ..archive.versions import DecodedArchiveValue
 from ..reads.detail import (
-    HistoryTaskDetail,
-    LiveTaskLocation,
     TaskAbsenceReason,
-    TaskDetailAbsent,
-    read_task_detail,
+    absence_reason_of,
+    history_status,
 )
 from .input_envelope import (
     InputEnvelopeCorrupt,
@@ -193,6 +198,138 @@ class RerunKeyReplay:
     existing_task_id: UUID
 
 
+@dataclass(frozen=True, slots=True)
+class RerunClassUnregistered:
+    """The new request's retention class has no class row. ``rerun_task``
+    raises ``ValueError`` for it: a caller precondition."""
+
+    class_key: str
+
+
+@dataclass(frozen=True, slots=True)
+class RerunSource:
+    """The facts of a history source that the rerun decides on and copies.
+
+    The stored status is a ``TaskStatus`` member and the attempt snapshot
+    decoded; a source that fails either is ``RerunSourceCorrupt``.
+    """
+
+    task_id: UUID
+    task_name: str
+    queue_name: str
+    priority: int
+    max_retries: int
+    status: TaskStatus
+    is_workflow_task: bool
+    rerun_root_task_id: UUID | None
+    rerun_input_disposition: str
+    rerun_input_version: int | None
+    rerun_input_digest: bytes | None
+    rerun_input_inline: bytes | None
+
+
+type RerunSourceRead = (
+    RerunClassUnregistered
+    | RerunSourceLive
+    | RerunSourceAbsent
+    | RerunSourceCorrupt
+    | RerunSource
+)
+"""The answer of ``read_rerun_source``."""
+
+_RERUN_SOURCE_SQL: Final = text(
+    'SELECT * FROM horsies_rerun_source_read(CAST(:task_id AS uuid), :class_key)'
+)
+
+
+def _optional_bytes(value: Any) -> bytes | None:
+    return bytes(value) if value is not None else None
+
+
+def _history_source(task_id: UUID, row: Any) -> RerunSource | RerunSourceCorrupt:
+    """The history source of one rerun read row, or the corruption it carries."""
+    try:
+        status = history_status(task_id, row.status)
+    except HistoryContractError as exc:
+        return RerunSourceCorrupt(task_id=task_id, exception=exc)
+    decoded = decode_attempt_snapshot(
+        version=row.attempt_archive_version,
+        payload=bytes(row.attempt_snapshot),
+        digest=bytes(row.attempt_snapshot_digest),
+    )
+    match decoded:
+        case DecodedArchiveValue():
+            pass
+        case _:
+            return RerunSourceCorrupt(
+                task_id=task_id,
+                exception=HistoryContractError(
+                    f'attempt snapshot failed to decode: {decoded!r}'
+                ),
+            )
+    return RerunSource(
+        task_id=uuid_column_value(row.task_id, column='task_id'),
+        task_name=row.task_name,
+        queue_name=row.queue_name,
+        priority=row.priority,
+        max_retries=row.max_retries,
+        status=status,
+        is_workflow_task=row.is_workflow_task,
+        rerun_root_task_id=(
+            uuid_column_value(row.rerun_root_task_id, column='rerun_root_task_id')
+            if row.rerun_root_task_id is not None
+            else None
+        ),
+        rerun_input_disposition=row.rerun_input_disposition,
+        rerun_input_version=row.rerun_input_version,
+        rerun_input_digest=_optional_bytes(row.rerun_input_digest),
+        rerun_input_inline=_optional_bytes(row.rerun_input_inline),
+    )
+
+
+async def read_rerun_source(
+    connection: AsyncConnection,
+    source_task_id: UUID,
+    class_key: str,
+) -> RerunSourceRead:
+    """Read the source of a rerun and the class of the new request: one statement.
+
+    Calls ``horsies_rerun_source_read`` in the caller's transaction; the
+    detail reader's leaf probe keeps ACCESS SHARE on the source leaf until
+    the transaction ends. Outcomes: the class is unregistered (checked
+    first), the source is live, absent (with the reason of
+    ``horsies_task_absence_reason``), corrupt (a location, absence reason or
+    status outside its set, or an attempt snapshot that does not decode), or
+    a history source. A database error propagates. Writes nothing.
+    """
+    row = (
+        await connection.execute(
+            _RERUN_SOURCE_SQL,
+            {'task_id': source_task_id, 'class_key': class_key},
+        )
+    ).one()
+    if not row.class_registered:
+        return RerunClassUnregistered(class_key=class_key)
+    match row.location:
+        case 'LIVE':
+            return RerunSourceLive(task_id=source_task_id)
+        case 'ABSENT':
+            try:
+                reason = absence_reason_of(source_task_id, row.absence_reason)
+            except HistoryContractError as exc:
+                return RerunSourceCorrupt(task_id=source_task_id, exception=exc)
+            return RerunSourceAbsent(task_id=source_task_id, reason=reason)
+        case 'HISTORY':
+            return _history_source(source_task_id, row)
+        case other:
+            return RerunSourceCorrupt(
+                task_id=source_task_id,
+                exception=HistoryContractError(
+                    f'staged detail returned unknown location {other!r}'
+                ),
+            )
+
+
 type RerunOutcome = (
     RerunEnqueued
     | RerunSourceLive
@@ -212,75 +349,56 @@ async def rerun_task(
     policy: RerunEnqueuePolicy,
 ) -> RerunOutcome:
     """Execute one rerun inside the caller-owned transaction."""
-    registered = (
-        await connection.execute(
-            text(
-                f'SELECT EXISTS (SELECT 1 FROM {RETENTION_CLASSES} '
-                'WHERE class_key = :class_key)'
-            ),
-            {'class_key': policy.retention_class_key},
-        )
-    ).scalar_one()
-    if not registered:
-        # The policy's key routes the NEW request's eventual history row
-        # into a LIST partition; an unregistered key has none, so the
-        # failure would otherwise arrive at the rerun's completion as a
-        # partition-routing error. A caller precondition raises before
-        # any read or write.
-        raise ValueError(
-            f'retention class {policy.retention_class_key!r} is not '
-            'registered: the new request would have no history partition. '
-            'Add the period to the maintenance owner\'s queue_retention or '
-            'retention_periods, and rerun after its next pass'
-        )
-    try:
-        detail = await read_task_detail(
-            connection, task_id=command.source_task_id
-        )
-    except HistoryContractError as exc:
-        return RerunSourceCorrupt(
-            task_id=command.source_task_id, exception=exc,
-        )
-    match detail:
-        case LiveTaskLocation():
-            return RerunSourceLive(task_id=command.source_task_id)
-        case TaskDetailAbsent(reason=reason):
-            return RerunSourceAbsent(
-                task_id=command.source_task_id,
-                reason=reason,
+    read = await read_rerun_source(
+        connection, command.source_task_id, policy.retention_class_key
+    )
+    match read:
+        case RerunClassUnregistered():
+            # The policy's key routes the NEW request's eventual history row
+            # into a LIST partition; an unregistered key has none, so the
+            # failure would otherwise arrive at the rerun's completion as a
+            # partition-routing error. A caller precondition raises before
+            # any write.
+            raise ValueError(
+                f'retention class {policy.retention_class_key!r} is not '
+                'registered: the new request would have no history partition. '
+                'Add the period to the maintenance owner\'s queue_retention or '
+                'retention_periods, and rerun after its next pass'
             )
-        case HistoryTaskDetail():
-            pass
+        case RerunSourceLive() | RerunSourceAbsent() | RerunSourceCorrupt():
+            return read
+        case RerunSource():
+            source = read
 
-    if detail.is_workflow_task:
+    if source.is_workflow_task:
         return RerunNotEligible(
             task_id=command.source_task_id,
             reason=NotEligibleReason.WORKFLOW_TASK,
         )
-    if detail.status is TaskStatus.COMPLETED:
+    if source.status is TaskStatus.COMPLETED:
         return RerunNotEligible(
             task_id=command.source_task_id,
             reason=NotEligibleReason.COMPLETED_SOURCE,
         )
 
-    if detail.rerun_input_disposition != 'INLINE':
+    if source.rerun_input_disposition != 'INLINE':
         return RerunInputUnavailable(
             task_id=command.source_task_id,
-            disposition=detail.rerun_input_disposition,
+            disposition=source.rerun_input_disposition,
         )
     if (
-        detail.rerun_input_version is None
-        or detail.rerun_input_inline is None
-        or detail.rerun_input_digest is None
+        source.rerun_input_version is None
+        or source.rerun_input_inline is None
+        or source.rerun_input_digest is None
     ):
         return RerunInputCorrupt(
             task_id=command.source_task_id,
             detail='inline disposition with an incomplete envelope',
         )
     decoded = decode_input_envelope(
-        version=detail.rerun_input_version,
-        payload=detail.rerun_input_inline,
-        digest=detail.rerun_input_digest,
+        version=source.rerun_input_version,
+        payload=source.rerun_input_inline,
+        digest=source.rerun_input_digest,
     )
     match decoded:
         case ReconstructedInput():
@@ -312,13 +430,13 @@ async def rerun_task(
             pass
 
     new_task_id = mint_task_id()
-    root_task_id = detail.rerun_root_task_id or detail.task_id
+    root_task_id = source.rerun_root_task_id or source.task_id
     # The one fingerprint over the stored input: the args element is
     # always null and the kwargs element is the input text.
     fingerprint = EnqueueCommandV1(
-        task_name=detail.task_name,
-        queue_name=detail.queue_name,
-        priority=detail.priority,
+        task_name=source.task_name,
+        queue_name=source.queue_name,
+        priority=source.priority,
         args_json=None,
         kwargs_json=decoded.input_json,
         good_until=command.deadline,
@@ -326,13 +444,13 @@ async def rerun_task(
         task_options_json=options_json,
         retention_class_key=policy.retention_class_key,
         retain_rerun_input=policy.retain_rerun_input,
-        rerun_of_task_id=str(detail.task_id),
+        rerun_of_task_id=str(source.task_id),
         rerun_root_task_id=str(root_task_id),
     ).fingerprint
 
     if command.caller_key is not None:
         scoped = ScopedIdempotencyKey(
-            task_name=detail.task_name, key=command.caller_key
+            task_name=source.task_name, key=command.caller_key
         )
         claim = await claim_key_reservation(
             connection,
@@ -360,9 +478,9 @@ async def rerun_task(
         _INSERT_RERUN_SQL,
         {
             'id': str(new_task_id),
-            'task_name': detail.task_name,
-            'queue_name': detail.queue_name,
-            'priority': detail.priority,
+            'task_name': source.task_name,
+            'queue_name': source.queue_name,
+            'priority': source.priority,
             'input': decoded.input_json,
             'task_options': options_json,
             'execution': execution.value,
@@ -371,21 +489,21 @@ async def rerun_task(
             'fingerprint': fingerprint,
             'key_digest': (
                 ScopedIdempotencyKey(
-                    task_name=detail.task_name, key=command.caller_key
+                    task_name=source.task_name, key=command.caller_key
                 ).digest
                 if command.caller_key is not None
                 else None
             ),
-            'max_retries': detail.max_retries,
+            'max_retries': source.max_retries,
             'good_until': command.deadline,
             'retain': policy.retain_rerun_input,
-            'rerun_of': str(detail.task_id),
+            'rerun_of': str(source.task_id),
             'rerun_root': str(root_task_id),
         },
     )
     return RerunEnqueued(
         new_task_id=new_task_id,
-        source_task_id=detail.task_id,
+        source_task_id=source.task_id,
         rerun_root_task_id=root_task_id,
     )
 

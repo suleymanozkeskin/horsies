@@ -14,15 +14,18 @@ be stored out of band. The read raises `HistoryContractError` for it, as
 it does for an attempt snapshot that does not decode. A reader of
 `HistoryTaskDetail.status` gets a member.
 
-An absence is NOT_CLASSIFIED: the leaf catalog records no birth floor,
-so no read can place an id before or within retained history.
+An absence is classified by ``horsies_task_absence_reason``
+(0006_history_functions.sql), the rule of every reader: NOT_CLASSIFIED for
+an id that is not a UUIDv7, PREDATES_RETAINED_HISTORY for a birth before the
+latest upper anchor of a detached PERIOD leaf plus 5 s,
+WITHIN_RETAINED_HISTORY otherwise.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Final
 from uuid import UUID
 
 from sqlalchemy import text
@@ -40,6 +43,12 @@ from ..names import TASK_DETAIL_FUNCTION
 _STATUS_BY_VALUE: dict[str, TaskStatus] = {
     status.value: status for status in TaskStatus
 }
+_REASON_BY_VALUE: dict[str, TaskAbsenceReason] = {
+    reason.value: reason for reason in TaskAbsenceReason
+}
+_ABSENCE_REASON_SQL: Final = text(
+    'SELECT horsies_task_absence_reason(CAST(:task_id AS uuid))'
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,9 +99,8 @@ class HistoryTaskDetail:
 
 @dataclass(frozen=True, slots=True)
 class TaskDetailAbsent:
-    """No row anywhere. `reason` says what the read knows about the id;
-    `read_task_detail` gives NOT_CLASSIFIED, because no attached leaf
-    records a birth floor."""
+    """No row anywhere. `reason` says whether retention can explain the
+    absence (``horsies_task_absence_reason``)."""
 
     task_id: UUID
     reason: TaskAbsenceReason
@@ -157,7 +165,7 @@ async def read_task_state(
         )
     return HistoryTaskState(
         task_id=task_id,
-        status=_history_status(task_id, row.status),
+        status=history_status(task_id, row.status),
         is_workflow_task=row.is_workflow_task,
     )
 
@@ -169,11 +177,13 @@ async def read_task_detail(
 ) -> TaskDetailResult:
     """Resolve one task through the staged detail function.
 
+    An absent id costs a second statement, the absence reason.
+
     Raises:
         HistoryContractError: the staged function reports an unknown
-            location, or the history row does not decode: its status is
-            not a ``TaskStatus`` member, or its attempt snapshot does not
-            decode.
+            location, the history row does not decode (its status is not a
+            ``TaskStatus`` member, or its attempt snapshot does not decode),
+            or the absence reason is not a ``TaskAbsenceReason`` member.
     """
     row = (
         await connection.execute(
@@ -201,7 +211,7 @@ async def read_task_detail(
     return _decode_history_detail(row)
 
 
-def _history_status(task_id: UUID, value: str) -> TaskStatus:
+def history_status(task_id: UUID, value: str) -> TaskStatus:
     """The stored status of a history row as a ``TaskStatus`` member.
 
     Raises:
@@ -219,7 +229,7 @@ def _history_status(task_id: UUID, value: str) -> TaskStatus:
 
 def _decode_history_detail(row: Any) -> HistoryTaskDetail:
     task_id = uuid_column_value(row.task_id, column='task_id')
-    status = _history_status(task_id, row.status)
+    status = history_status(task_id, row.status)
     decoded = decode_attempt_snapshot(
         version=row.attempt_archive_version,
         payload=bytes(row.attempt_snapshot),
@@ -297,18 +307,37 @@ def _decode_history_detail(row: Any) -> HistoryTaskDetail:
     )
 
 
+def absence_reason_of(task_id: UUID, value: object) -> TaskAbsenceReason:
+    """The value of ``horsies_task_absence_reason`` as a ``TaskAbsenceReason``.
+
+    Raises:
+        HistoryContractError: the value is not a member.
+    """
+    match _REASON_BY_VALUE.get(value) if isinstance(value, str) else None:
+        case TaskAbsenceReason() as reason:
+            return reason
+        case None:
+            raise HistoryContractError(
+                f'absence reason of {task_id} is {value!r}, which is not a '
+                'task absence reason'
+            )
+
+
 async def _classify_absence(
     connection: AsyncConnection,
     task_id: UUID,
 ) -> TaskAbsenceReason:
-    """The absence reason of a task id with no row anywhere.
+    """The absence reason of a task id with no row anywhere: one statement,
+    ``horsies_task_absence_reason``. Writes nothing.
 
-    The leaf catalog records no birth floor, so no birth can be placed
-    before or within retained history: every absence is NOT_CLASSIFIED.
-    Reads nothing.
+    Raises:
+        HistoryContractError: the function returns a value that is not a
+            ``TaskAbsenceReason`` member.
     """
-    del connection, task_id
-    return TaskAbsenceReason.NOT_CLASSIFIED
+    value = (
+        await connection.execute(_ABSENCE_REASON_SQL, {'task_id': task_id})
+    ).scalar_one()
+    return absence_reason_of(task_id, value)
 
 
 async def staged_detail_published(connection: AsyncConnection) -> bool:

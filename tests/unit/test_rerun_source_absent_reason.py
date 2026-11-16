@@ -1,37 +1,53 @@
 """``RerunSourceAbsent.reason`` is the ``TaskAbsenceReason`` of the staged read.
 
 A source id that no table holds gives ``RerunSourceAbsent``. Its ``reason``
-is the same classification that ``get_task_detail`` reports.
+is the value of ``horsies_task_absence_reason`` in the row of
+``horsies_rerun_source_read``, the classification that ``get_task_detail``
+reports. A value outside ``TaskAbsenceReason`` is a corrupt source.
 """
 
 from __future__ import annotations
 
 from datetime import timedelta
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
+from uuid import UUID
 
 import pytest
 
-from horsies.core.history.reads.detail import TaskAbsenceReason, TaskDetailAbsent
-from horsies.core.history.rerun import operations
+from horsies.core.history.errors import HistoryContractError
+from horsies.core.history.reads.detail import TaskAbsenceReason
 from horsies.core.history.rerun.operations import (
     RerunEnqueuePolicy,
     RerunSourceAbsent,
+    RerunSourceCorrupt,
     RerunTask,
     rerun_task,
 )
 
 pytestmark = [pytest.mark.unit]
 
-SOURCE_ID = '0192f0a0-0000-7000-8000-000000000001'
+SOURCE_ID = UUID('0192f0a0-0000-7000-8000-000000000001')
 
 
-def _connection() -> Any:
-    registered = MagicMock()
-    registered.scalar_one.return_value = True
+def _connection(absence_reason: str) -> Any:
+    """A connection whose ``horsies_rerun_source_read`` row is an absent source."""
+    result = MagicMock()
+    result.one.return_value = SimpleNamespace(
+        class_registered=True, location='ABSENT', absence_reason=absence_reason,
+    )
     connection = AsyncMock()
-    connection.execute = AsyncMock(return_value=registered)
+    connection.execute = AsyncMock(return_value=result)
     return connection
+
+
+def _policy() -> RerunEnqueuePolicy:
+    return RerunEnqueuePolicy(
+        retention=timedelta(days=30),
+        retain_rerun_input=True,
+        reservation_window=timedelta(hours=24),
+    )
 
 
 @pytest.mark.asyncio
@@ -41,27 +57,30 @@ def _connection() -> Any:
     ids=lambda reason: reason.value,
 )
 async def test_the_reason_is_the_staged_classification(
-    monkeypatch: pytest.MonkeyPatch,
     reason: TaskAbsenceReason,
 ) -> None:
-    monkeypatch.setattr(
-        operations,
-        'read_task_detail',
-        AsyncMock(
-            return_value=TaskDetailAbsent(
-                task_id=SOURCE_ID, reason=reason,
-            ),
-        ),
-    )
-
     outcome = await rerun_task(
-        _connection(),
+        _connection(reason.value),
         RerunTask(source_task_id=SOURCE_ID, deadline=None),
-        RerunEnqueuePolicy(
-            retention=timedelta(days=30),
-            retain_rerun_input=True,
-            reservation_window=timedelta(hours=24),
-        ),
+        _policy(),
     )
 
     assert outcome == RerunSourceAbsent(task_id=SOURCE_ID, reason=reason)
+
+
+@pytest.mark.asyncio
+async def test_a_reason_outside_the_set_is_a_corrupt_source() -> None:
+    outcome = await rerun_task(
+        _connection('PURGED'),
+        RerunTask(source_task_id=SOURCE_ID, deadline=None),
+        _policy(),
+    )
+
+    match outcome:
+        case RerunSourceCorrupt(task_id=task_id, exception=HistoryContractError() as exc):
+            assert task_id == SOURCE_ID
+            assert str(exc) == (
+                f"absence reason of {SOURCE_ID} is 'PURGED', which is not a task absence reason"
+            )
+        case other:
+            pytest.fail(f'expected RerunSourceCorrupt, got {other!r}')
