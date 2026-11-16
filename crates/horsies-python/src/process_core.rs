@@ -12,9 +12,13 @@
 //!   run for a fork from C code. The inherited state is never dropped: it
 //!   lives in a static, and dropping a runtime waits for threads that do not
 //!   exist in the child.
-//! - A panic in a core background task stops the core in this process: every
-//!   later call, and every call in flight, ends with `CoreStopped` and the
-//!   subject and cause of the first panic.
+//! - A panic in a core background task follows the process panic rule
+//!   ([`PanicRule`]), set once by the entry point and fixed when the core
+//!   starts. Under `StopCore`, the default, the core stops in this process:
+//!   every later call, and every call in flight, ends with `CoreStopped` and
+//!   the subject and cause of the first panic. Under `AbortProcess`, the rule
+//!   of a worker process, the panic goes to stderr and to Python `logging`,
+//!   and the process aborts; its supervisor restarts it.
 //!
 //! The start runs while the caller is attached to Python, and `os.fork` also
 //! needs an attached thread, so a fork cannot happen in the middle of a start.
@@ -27,7 +31,7 @@ use std::sync::{Mutex, Once, OnceLock};
 use pyo3::prelude::*;
 use tokio::sync::watch;
 
-use crate::logging::{self, LogBridge};
+use crate::logging::{self, DrainOutcome, LogBridge, RecordLevel};
 
 /// Worker threads of the runtime of a producer process. In the bridge
 /// measurement, two workers gave the same single-call latency as eight, and an
@@ -40,6 +44,42 @@ pub const MAX_BLOCKING_THREADS: usize = 16;
 
 /// Name of the runtime worker threads.
 pub const RUNTIME_THREAD_NAME: &str = "horsies-core";
+
+/// How long an aborting worker process waits for the log forwarder to hand
+/// the records in the channel to Python `logging`. A full channel is 8,192
+/// records in batches of 256; at tens of microseconds per record, the
+/// forwarder empties it well inside this bound.
+pub const ABORT_LOG_DRAIN_BOUND: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// What a panic in a core background task does to this process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PanicRule {
+    /// Stop the core in this process; every later call raises `CoreStopped`.
+    /// The rule of a process that the core does not own, such as a producer
+    /// inside a web app. The default.
+    StopCore,
+    /// Write the panic to stderr and to Python `logging`, wait for the log
+    /// forwarder within [`ABORT_LOG_DRAIN_BOUND`], and abort the process; its
+    /// supervisor restarts it. The rule of a worker process.
+    AbortProcess,
+}
+
+impl PanicRule {
+    /// The text form at the Python boundary.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::StopCore => "STOP_CORE",
+            Self::AbortProcess => "ABORT_PROCESS",
+        }
+    }
+}
+
+/// The panic rule was set to another rule before, or fixed by the start of
+/// the core. `current` is the rule in force.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PanicRuleFixed {
+    pub current: PanicRule,
+}
 
 /// The first panic of a core background task: what failed, and why.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -87,6 +127,9 @@ pub struct Core {
 }
 
 static CORE: OnceLock<Core> = OnceLock::new();
+/// The process panic rule. Set once by the entry point; the start of the core
+/// fixes it, at `StopCore` when no entry point set it.
+static PANIC_RULE: OnceLock<PanicRule> = OnceLock::new();
 static START_LOCK: Mutex<()> = Mutex::new(());
 static PANIC_HOOK: Once = Once::new();
 
@@ -190,9 +233,75 @@ pub fn core_status() -> CoreStatus {
     }
 }
 
+/// Set the panic rule of this process. The entry point calls it before the
+/// first core call. Setting the rule in force again succeeds and changes
+/// nothing; another rule is refused once a rule is set or the core started.
+pub fn set_panic_rule(rule: PanicRule) -> Result<(), PanicRuleFixed> {
+    let current = *PANIC_RULE.get_or_init(|| rule);
+    match current == rule {
+        true => Ok(()),
+        false => Err(PanicRuleFixed { current }),
+    }
+}
+
+/// The panic rule in force: the rule set or fixed, else the default.
+pub fn panic_rule() -> PanicRule {
+    PANIC_RULE.get().copied().unwrap_or(PanicRule::StopCore)
+}
+
+/// Apply the process panic rule to a panic in a core background task. Under
+/// `AbortProcess` this does not return. The caller is not attached to Python.
+pub fn background_task_panicked(report: PanicReport) {
+    match panic_rule() {
+        PanicRule::StopCore => stop_after_background_panic(report),
+        PanicRule::AbortProcess => abort_after_background_panic(&report),
+    }
+}
+
+/// Write the report to stderr, push one ERROR record, wait for the forwarder
+/// within [`ABORT_LOG_DRAIN_BOUND`], and abort the process.
+fn abort_after_background_panic(report: &PanicReport) -> ! {
+    let pid = std::process::id();
+    let _write_failure_ignored = writeln!(
+        std::io::stderr(),
+        "horsies: panic in core background task {} in worker process {pid}: {}; the process \
+         aborts",
+        report.subject,
+        report.cause
+    );
+    if let Some(core) = CORE.get() {
+        flush_log_before_abort(core, report);
+    }
+    std::process::abort()
+}
+
+fn flush_log_before_abort(core: &Core, report: &PanicReport) {
+    core.log().push_bridge_record(
+        RecordLevel::Error,
+        format!(
+            "panic in core background task {}: {}; the worker process aborts",
+            report.subject, report.cause
+        ),
+    );
+    let unsent = match core.log().wait_for_drain(ABORT_LOG_DRAIN_BOUND) {
+        DrainOutcome::Drained => return,
+        DrainOutcome::ForwarderStopped { left } => {
+            format!("the log forwarder is not running; {left} log records")
+        }
+        DrainOutcome::BoundReached { left } => format!(
+            "{left} log records were still in the channel after {} ms and",
+            ABORT_LOG_DRAIN_BOUND.as_millis()
+        ),
+    };
+    let _write_failure_ignored = writeln!(
+        std::io::stderr(),
+        "horsies: {unsent} did not reach Python logging before the abort"
+    );
+}
+
 /// Stop the core of this process after a panic in a core background task.
 /// Before the core is set, the report goes to stderr only.
-pub fn stop_after_background_panic(report: PanicReport) {
+fn stop_after_background_panic(report: PanicReport) {
     match CORE.get() {
         Some(core) => core.stop(report),
         None => {
@@ -214,6 +323,9 @@ fn start_core() -> Result<&'static Core, CallRefusal> {
         return Ok(core);
     }
     install_panic_hook();
+    // Fix the panic rule: a rule set after this point could miss a panic of a
+    // task that this start runs.
+    let _rule_in_force = PANIC_RULE.get_or_init(|| PanicRule::StopCore);
     let (log, records) = LogBridge::new();
     let runtime = build_runtime(log.dispatch().clone()).map_err(CallRefusal::StartFailed)?;
     logging::start_forwarder(records, log.sink()).map_err(|error| {
@@ -302,7 +414,153 @@ pub fn take_panic_cause(payload: &(dyn std::any::Any + Send)) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::process::ExitStatusExt;
+
     use super::*;
+
+    /// The child test to run, set in the environment of a child process. The
+    /// panic rule and the core are per process, so the tests that set them
+    /// run in a child process of the test binary.
+    const CHILD_TEST_ENV: &str = "HORSIES_PROCESS_CORE_CHILD_TEST";
+
+    /// The abort signal number on Linux and macOS.
+    const SIGABRT: i32 = 6;
+
+    /// The panic message of the child tests.
+    const PLANNED_PANIC: &str = "planned background panic";
+
+    /// Python logging of the child: every record on stderr, one line each.
+    const LOGGING_TO_STDERR: &std::ffi::CStr = c"import logging, sys
+logging.basicConfig(stream=sys.stderr, level=logging.INFO, format='LOG %(name)s %(levelname)s %(message)s', force=True)
+";
+
+    fn in_child(test: &str) -> bool {
+        std::env::var(CHILD_TEST_ENV).is_ok_and(|name| name == test)
+    }
+
+    /// Run one test of this binary in a child process.
+    fn run_child(test: &str) -> std::process::Output {
+        let binary = std::env::current_exe().expect("the test binary has a path");
+        std::process::Command::new(binary)
+            .args([test, "--exact", "--nocapture", "--test-threads=1"])
+            .env(CHILD_TEST_ENV, test)
+            .output()
+            .expect("the child test process runs")
+    }
+
+    /// Start Python, send its logging to stderr, and start the core.
+    fn start_core_with_logging() {
+        Python::initialize();
+        Python::attach(|py| -> PyResult<()> {
+            py.run(LOGGING_TO_STDERR, None, None)?;
+            core_for_call(py)
+                .map(|_core| ())
+                .map_err(crate::errors::refusal_error)
+        })
+        .expect("the core starts");
+    }
+
+    /// Panic on a new thread and hand the panic to the rule, as the catch
+    /// site of a core background task does.
+    fn panic_in_background_task() {
+        let task = std::thread::Builder::new()
+            .name("rule-test-task".to_owned())
+            .spawn(|| {
+                let caught = std::panic::catch_unwind(|| panic!("{PLANNED_PANIC}"));
+                if let Err(payload) = caught {
+                    background_task_panicked(PanicReport {
+                        subject: "thread rule-test-task".to_owned(),
+                        cause: take_panic_cause(payload.as_ref()),
+                    });
+                }
+            })
+            .expect("the task thread starts");
+        let _joined = task.join();
+    }
+
+    #[test]
+    fn abort_rule_child() {
+        if !in_child("process_core::tests::abort_rule_child") {
+            return;
+        }
+        assert_eq!(set_panic_rule(PanicRule::AbortProcess), Ok(()));
+        assert_eq!(set_panic_rule(PanicRule::AbortProcess), Ok(()));
+        assert_eq!(
+            set_panic_rule(PanicRule::StopCore),
+            Err(PanicRuleFixed {
+                current: PanicRule::AbortProcess
+            })
+        );
+        start_core_with_logging();
+        panic_in_background_task();
+        // Under the abort rule the line above does not return; the parent
+        // test fails on a normal exit.
+    }
+
+    #[test]
+    fn a_worker_process_aborts_on_a_background_panic_after_its_log_record() {
+        let output = run_child("process_core::tests::abort_rule_child");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.signal(), Some(SIGABRT), "{stderr}");
+        assert!(
+            stderr.contains(
+                "horsies: panic in core background task thread rule-test-task in worker process"
+            ),
+            "{stderr}"
+        );
+        let last_record = stderr
+            .lines()
+            .rev()
+            .find(|line| line.starts_with("LOG "))
+            .unwrap_or_default();
+        assert!(
+            last_record.starts_with(&format!(
+                "LOG horsies.bridge ERROR panic in core background task thread rule-test-task: \
+                 {PLANNED_PANIC}"
+            )),
+            "{stderr}"
+        );
+        assert!(
+            last_record.ends_with("the worker process aborts"),
+            "{stderr}"
+        );
+    }
+
+    #[test]
+    fn stop_rule_child() {
+        if !in_child("process_core::tests::stop_rule_child") {
+            return;
+        }
+        start_core_with_logging();
+        assert_eq!(panic_rule(), PanicRule::StopCore);
+        assert_eq!(
+            set_panic_rule(PanicRule::AbortProcess),
+            Err(PanicRuleFixed {
+                current: PanicRule::StopCore
+            })
+        );
+        panic_in_background_task();
+        assert_eq!(core_status(), CoreStatus::Stopped);
+        match pure_call_refusal() {
+            Some(CallRefusal::Stopped(report)) => {
+                assert_eq!(report.subject, "thread rule-test-task");
+                assert!(report.cause.starts_with(PLANNED_PANIC), "{}", report.cause);
+            }
+            other => panic!("a stopped core refuses every call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_producer_process_stops_its_core_on_a_background_panic() {
+        let output = run_child("process_core::tests::stop_rule_child");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stdout}\n{stderr}");
+        assert!(
+            stdout.contains("test process_core::tests::stop_rule_child ... ok"),
+            "{stdout}"
+        );
+    }
 
     #[test]
     fn a_text_payload_is_the_cause_when_no_hook_ran() {

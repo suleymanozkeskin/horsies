@@ -10,7 +10,8 @@
 //!   asyncio future that the loop's completion queue sets (`bridge`). No
 //!   runtime thread takes the GIL.
 //! - A panic in an operation raises `PanicException` (a `BaseException`); a
-//!   panic in a core background task stops the core in this process.
+//!   panic in a core background task stops the core in this process, or
+//!   aborts a worker process (`set_panic_rule`).
 //! - A process forked without `exec` after the core started refuses every
 //!   core call with `ForkedAfterCoreStart`.
 //! - Core log events reach Python `logging` through a bounded channel and one
@@ -29,7 +30,9 @@ use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
 
-use crate::process_core::CoreStatus;
+use pyo3::exceptions::PyValueError;
+
+use crate::process_core::{CoreStatus, PanicRule};
 
 /// The allocator of musl targets (see `Cargo.toml`).
 #[cfg(target_env = "musl")]
@@ -89,6 +92,26 @@ fn mint_task_id() -> PyResult<MintOutcome> {
     })
 }
 
+/// Set what a panic in a core background task does in this process:
+/// `'STOP_CORE'` (the default: the core stops, every later call raises
+/// `CoreStopped`) or `'ABORT_PROCESS'` (a worker process: the panic is logged
+/// and the process aborts). The entry point calls it before the first core
+/// call. The rule in force again changes nothing; another rule raises
+/// `PanicRuleFixed` once a rule was set or the core started.
+#[pyfunction]
+fn set_panic_rule(rule: &str) -> PyResult<()> {
+    let rule = match rule {
+        "STOP_CORE" => PanicRule::StopCore,
+        "ABORT_PROCESS" => PanicRule::AbortProcess,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "rule must be 'STOP_CORE' or 'ABORT_PROCESS', not {other:?}"
+            )))
+        }
+    };
+    process_core::set_panic_rule(rule).map_err(errors::panic_rule_error)
+}
+
 /// Read the effective level of every `horsies` logger again, after a change
 /// of the logging configuration. Does nothing before the core started; the
 /// start reads the levels.
@@ -129,6 +152,7 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(core_state, module)?)?;
     module.add_function(wrap_pyfunction!(mint_task_id, module)?)?;
     module.add_function(wrap_pyfunction!(refresh_log_levels, module)?)?;
+    module.add_function(wrap_pyfunction!(set_panic_rule, module)?)?;
     errors::add_errors(module)?;
     Ok(())
 }

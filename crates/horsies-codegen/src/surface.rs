@@ -118,6 +118,9 @@ const RETENTION_PERIOD_PARAMETERS: &[StubParameter] = &[positional("days", "int"
 
 const CORE_HANDLE_PARAMETERS: &[StubParameter] = &[positional("manifest_json", "str")];
 
+const SET_PANIC_RULE_PARAMETERS: &[StubParameter] =
+    &[positional("rule", "Literal['STOP_CORE', 'ABORT_PROCESS']")];
+
 const ENQUEUE_REQUEST_PARAMETERS: &[StubParameter] = &[
     keyword("task_id", "uuid.UUID"),
     keyword("task_name", "str"),
@@ -253,6 +256,11 @@ const EXCEPTIONS: &[StubException] = &[
         name: "ManifestRefused",
         base: "CoreDefect",
         doc: "The core refused a manifest. args: (field_path, cause).",
+    },
+    StubException {
+        name: "PanicRuleFixed",
+        base: "CoreDefect",
+        doc: "The panic rule of this process was set to another rule before, or fixed when the core\nstarted. args: (current_rule,).",
     },
     StubException {
         name: "PanicException",
@@ -534,6 +542,12 @@ const FUNCTIONS: &[StubFunction] = &[
         parameters: &[],
         returns: TypeText::Plain("None"),
         doc: "Read the effective level of every horsies logger again.",
+    },
+    StubFunction {
+        name: "set_panic_rule",
+        parameters: SET_PANIC_RULE_PARAMETERS,
+        returns: TypeText::Plain("None"),
+        doc: "Set what a panic in a core background task does in this process, before the first\ncore call. Another rule than the one in force raises PanicRuleFixed.",
     },
 ];
 
