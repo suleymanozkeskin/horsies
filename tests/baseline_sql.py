@@ -52,3 +52,27 @@ def baseline_function(name: str) -> str:
     if name not in functions:
         pytest.fail(f'the baseline defines no function {name}')
     return functions[name]
+
+
+def baseline_type(name: str) -> str:
+    """The ``CREATE TYPE`` statement of one baseline composite type."""
+    match = re.search(
+        rf'^CREATE TYPE {re.escape(name)} AS \(.*?^\);$',
+        baseline_sql(),
+        re.DOTALL | re.MULTILINE,
+    )
+    if match is None:
+        pytest.fail(f'the baseline defines no type {name}')
+    return match.group(0)
+
+
+def baseline_table(name: str) -> str:
+    """The ``CREATE TABLE`` statement of one baseline table, partition key included."""
+    match = re.search(
+        rf'^CREATE TABLE {re.escape(name)} \(.*?^\)[^;]*;',
+        baseline_sql(),
+        re.DOTALL | re.MULTILINE,
+    )
+    if match is None:
+        pytest.fail(f'the baseline defines no table {name}')
+    return match.group(0)

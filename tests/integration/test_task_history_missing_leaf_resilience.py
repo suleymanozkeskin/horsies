@@ -32,9 +32,6 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from horsies.core.history.commands import CreateDailyHistoryLeaf, LeafBounds, LeafRef
 from horsies.core.history.errors import HistoryParentAbsent
-from horsies.core.history.heartbeats.partitioning import (
-    HEARTBEATS_PARTITIONED_DDL,
-)
 from horsies.core.history.identity.uuid7 import MonotonicUuid7Generator
 from horsies.core.history.maintenance.coverage import (
     CoverageEnsureFailed,
@@ -286,7 +283,6 @@ class TestMissingLeafBreaksAndHeals:
         create-ahead untouched.
         """
         async with history_schema.engine.begin() as connection:
-            await connection.execute(text(HEARTBEATS_PARTITIONED_DDL))
             parent = await register_class(connection, CLASS_KEY)
             now = await database_now(connection)
             gone = await _create_leaf(
@@ -332,7 +328,6 @@ class TestMissingLeafBreaksAndHeals:
         exists to remove. Pins the documented operator consequence.
         """
         async with history_schema.engine.begin() as connection:
-            await connection.execute(text(HEARTBEATS_PARTITIONED_DDL))
             await register_class(connection, CLASS_KEY)
             settled = await ensure_partition_coverage(
                 connection, history_horizon_days=2, heartbeat_horizon_hours=2
@@ -374,7 +369,6 @@ class TestMissingLeafBreaksAndHeals:
         class leaf, and proves current heartbeat writes remain covered.
         """
         async with history_schema.engine.begin() as connection:
-            await connection.execute(text(HEARTBEATS_PARTITIONED_DDL))
             parent = await register_class(connection, CLASS_KEY)
             settled = await ensure_partition_coverage(
                 connection,

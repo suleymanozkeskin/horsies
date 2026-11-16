@@ -11,13 +11,8 @@ import pytest
 
 from horsies.core.history.terminalization.move import (
     FINISH_WORKFLOW_SUCCESS_FUNCTION,
-    LOCK_RUNNING_TASK_FUNCTION,
     WORKFLOW_SUCCESS_OUTCOME_TYPE,
-    WORKFLOW_SUCCESS_OUTCOME_TYPE_DDL,
-    workflow_success_fragments,
-    workflow_success_program_ddl,
 )
-from horsies.core.history.terminalization.outcome import OUTCOME_TYPE_DDL
 from horsies.core.lifecycle.commands import CompleteLockedTask
 from horsies.core.lifecycle.fences import OwnedClaim, PriorLockedRead
 from horsies.core.lifecycle.operations import TerminalizationKind
@@ -39,7 +34,7 @@ from horsies.core.worker.workflow_success import (
     success_for,
     success_statement,
 )
-from tests.baseline_sql import baseline_sql
+from tests.baseline_sql import baseline_function, baseline_sql, baseline_type
 
 pytestmark = [pytest.mark.unit]
 
@@ -211,7 +206,9 @@ class TestCommand:
 
 
 _COLUMN = re.compile(r'^\s+(\w+) (\w[\w ]*?),?$', re.M)
-_BODY = workflow_success_fragments()[1]
+OUTCOME_TYPE_DDL = baseline_type('horsies_terminalization_outcome')
+WORKFLOW_SUCCESS_OUTCOME_TYPE_DDL = baseline_type(WORKFLOW_SUCCESS_OUTCOME_TYPE)
+_BODY = baseline_function(FINISH_WORKFLOW_SUCCESS_FUNCTION)
 
 
 class TestProgram:
@@ -269,16 +266,3 @@ class TestProgram:
 
         assert type_at < function_at
 
-    def test_the_upgrade_drops_the_retired_locking_read(self) -> None:
-        assert (
-            f'DROP FUNCTION IF EXISTS {LOCK_RUNNING_TASK_FUNCTION}'
-            '(uuid, text, timestamptz)'
-        ) in workflow_success_program_ddl()
-
-    def test_the_upgrade_drops_before_it_creates(self) -> None:
-        statements = workflow_success_program_ddl()
-
-        drops = [index for index, s in enumerate(statements) if s.startswith('DROP')]
-        creates = [index for index, s in enumerate(statements) if 'CREATE' in s]
-        assert max(drops) < min(creates)
-        assert len(creates) == 2

@@ -11,15 +11,11 @@ import pytest
 
 from horsies.core.history.terminalization.move import (
     FAILED_ATTEMPT_OUTCOME_TYPE,
-    FAILED_ATTEMPT_OUTCOME_TYPE_DDL,
     FINISH_FAILED_ATTEMPT_FUNCTION,
     LOCK_RUNNING_TASK_FUNCTION,
     RETRY_IN_SAME_CLASS,
     RETRY_ISOLATED,
-    failed_attempt_fragments,
-    failed_attempt_program_ddl,
 )
-from horsies.core.history.terminalization.outcome import OUTCOME_TYPE_DDL
 from horsies.core.lifecycle.fences import OwnedClaim
 from horsies.core.lifecycle.operations import TerminalizationKind
 from horsies.core.lifecycle.outcomes import (
@@ -56,9 +52,20 @@ from horsies.core.lifecycle.classify import (
     WorkerLevelFailure,
 )
 from horsies.core.worker.shared_stop import RetryPlacement
-from tests.baseline_sql import baseline_sql
+from tests.baseline_sql import baseline_function, baseline_sql, baseline_type
 
 pytestmark = [pytest.mark.unit]
+
+OUTCOME_TYPE_DDL = baseline_type('horsies_terminalization_outcome')
+FAILED_ATTEMPT_OUTCOME_TYPE_DDL = baseline_type(FAILED_ATTEMPT_OUTCOME_TYPE)
+
+
+def failed_attempt_fragments() -> list[str]:
+    """The baseline type and function of the failed attempt."""
+    return [
+        FAILED_ATTEMPT_OUTCOME_TYPE_DDL,
+        baseline_function(FINISH_FAILED_ATTEMPT_FUNCTION),
+    ]
 
 TASK_ID = '0b4d8a52-7d0e-4a0e-9d11-6b2f1f7c9e01'
 NOW = datetime(2026, 11, 11, 12, 0, tzinfo=timezone.utc)
@@ -406,10 +413,3 @@ class TestProgram:
         assert type_at < function_at
         assert f'CREATE FUNCTION {LOCK_RUNNING_TASK_FUNCTION}' not in sql
 
-    def test_the_upgrade_drops_before_it_creates(self) -> None:
-        statements = failed_attempt_program_ddl()
-
-        drops = [index for index, s in enumerate(statements) if s.startswith('DROP')]
-        creates = [index for index, s in enumerate(statements) if 'CREATE' in s]
-        assert max(drops) < min(creates)
-        assert len(creates) == 2
