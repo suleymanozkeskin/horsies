@@ -33,7 +33,7 @@ pub struct WorkflowTaskRow {
     pub task_index: i32,
     pub node_id: Option<String>,
     pub task_name: String,
-    /// The node's input as one JSON value (`null` when it sets no static input).
+    /// The node's input as one JSON value, as the client encoded it.
     pub input: String,
     pub queue_name: String,
     pub priority: i32,
