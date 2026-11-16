@@ -20,13 +20,12 @@ use super::support::*;
 use crate::broker::error::{is_retryable_sqlx_error, BrokerError};
 use crate::broker::postgres::PostgresBroker;
 use crate::broker::terminalization::terminalize;
-use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::lifecycle::{
     OwnedClaim, TerminalizationCommand, TerminalizationKind, TerminalizationOutcome,
 };
 use crate::core::registry::workflow::WorkflowSpecRegistry;
-use crate::worker::execution::{finalize_workflow_phase, FinalizeStage};
+use crate::worker::execution::{finalize_workflow_phase, FinalizeStage, PhaseTwoForm};
 
 const QUEUE: &str = "lifecycle_autocommit";
 const CHANNEL: &str = "task_queue_lifecycle_autocommit";
@@ -37,8 +36,6 @@ fn complete(task_id: Uuid, fence: OwnedClaim) -> TerminalizationCommand {
         task_id,
         fence,
         result_json: r#"{"ok": 1}"#.to_owned(),
-        notify_channel: CHANNEL.to_owned(),
-        notify_payload: format!("capacity:{task_id}"),
     }
 }
 
@@ -80,10 +77,7 @@ async fn a_replay_is_already_applied_and_writes_nothing() {
         matches!(first.as_slice(), [TerminalizationOutcome::Applied { .. }]),
         "{first:?}"
     );
-    assert_eq!(
-        wakes.payloads(&pool).await,
-        vec![format!("capacity:{task_id}")]
-    );
+    assert_eq!(wakes.payloads(&pool).await, vec!["capacity".to_owned()]);
 
     let replay = terminalize(&pool, &command).await.expect("replay");
 
@@ -238,15 +232,17 @@ async fn a_dead_connection_fails_phase_two_as_retryable() {
     let pid = pooled_backend_pid(&unpinged).await;
     terminate_backend(&pool, pid).await;
 
+    // The wake of a plain task runs on the broker's sqlx pool, the unpinged
+    // pool with the dead connection.
+    let broker = PostgresBroker::from_pool(unpinged.clone());
     let result = finalize_workflow_phase(
-        &unpinged,
+        &broker,
         &WorkflowSpecRegistry::new(),
         Uuid::new_v4(),
-        true,
         QUEUE,
         false,
         false,
-        &PayloadPolicy::default(),
+        PhaseTwoForm::NotKnown,
         &RetentionConfig::default(),
     )
     .await;
@@ -256,7 +252,7 @@ async fn a_dead_connection_fails_phase_two_as_retryable() {
             assert_eq!(error.stage, FinalizeStage::Phase2Workflow);
             assert!(error.retryable, "{error}");
         }
-        Ok(()) => panic!("the wake succeeded on a dead connection"),
+        Ok(_) => panic!("the wake succeeded on a dead connection"),
     }
     unpinged.close().await;
 }

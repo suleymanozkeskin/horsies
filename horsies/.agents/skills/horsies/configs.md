@@ -614,7 +614,7 @@ config = AppConfig(
 
 | Field | Type | Default | Range | Description |
 |---|---|---|---|---|
-| `name` | `str` | required | — | Unique queue name; non-empty, no leading or trailing whitespace, at most 100 characters (HRS-200) |
+| `name` | `str` | required | — | Unique queue name; non-empty, no leading or trailing whitespace, at most 52 bytes of UTF-8 text (HRS-200) |
 | `priority` | `int` | `1` | 1–100 | 1 = highest, 100 = lowest |
 | `max_concurrency` | `int \| None` | `5` | `>= 0` | Max simultaneous RUNNING tasks for this queue. `None` = uncapped (omitted from the worker's per-queue counting entirely); `0` = pause claiming; negative rejected |
 
@@ -627,8 +627,8 @@ against the already-serialized JSON string (no extra serialization pass).
 
 | Field | Type | Default | Range | Description |
 |---|---|---|---|---|
-| `warn_bytes` | `int \| None` | `1_048_576` (1 MiB) | >=1; None disables | Warn when a serialized payload exceeds this size; rate-limited to once per (task_name, kind) per process |
-| `reject_bytes` | `int \| None` | `None` (off) | >=1; None disables | Reject an enqueue whose serialized kwargs exceed this size before anything is written. A schedule over this size fails scheduler start and `horsies check` |
+| `warn_bytes` | `int \| None` | `1_048_576` (1 MiB) | >=1; None disables | Warn when a serialized payload exceeds this size in bytes of its UTF-8 text; rate-limited to once per (task_name, kind) per process |
+| `reject_bytes` | `int \| None` | `None` (off) | >=1; None disables | Reject an enqueue whose serialized kwargs exceed this size in bytes of their UTF-8 text before anything is written. A schedule over this size fails scheduler start and `horsies check` |
 
 Coverage: `.send()`/`.schedule()` kwargs warn and reject
 (`Err(PAYLOAD_TOO_LARGE)`); scheduled fires warn and reject (slot fails

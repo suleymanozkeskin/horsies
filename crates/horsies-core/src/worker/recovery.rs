@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::broker::listener::notify_task_queue;
+use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::recovery::RecoveryConfig;
 use crate::core::config::retention::RetentionConfig;
@@ -23,6 +24,7 @@ use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::{OperationalErrorCode, TaskError, TaskErrorKind, TaskResult};
 
+use crate::worker::class_coverage_log::{check_class_coverage, ClassCoverageLog};
 use crate::worker::retry::{admit_retry, read_stored_options, RetryAdmission};
 
 /// SQL: Phase 1 scan — find stale RUNNING task IDs (no row locks).
@@ -201,11 +203,11 @@ mod p7_maintenance_tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, task_id,
                 created_at, max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 0, 'root', 'p7_retention_task', 'null', 'default', 100, '{}', FALSE,
+                'NONE', $1, $2, 0, 'root', 'p7_retention_task', 'null', 'default', 100, '{}', FALSE,
                 'all', 'RUNNING', FALSE, $3, NOW(), 0, 'ISOLATED', 'standard_30d'
             )",
         )
@@ -346,6 +348,7 @@ mod p7_maintenance_tests {
         let mut orphan_state = OrphanSweepState::default();
 
         run_reaper_pass(
+            &PostgresBroker::from_pool(pool.clone()),
             &pool,
             &pool,
             &WorkflowSpecRegistry::new(),
@@ -445,6 +448,7 @@ mod p7_maintenance_tests {
         let mut orphan_state = OrphanSweepState::default();
 
         run_reaper_pass(
+            &PostgresBroker::from_pool(pool.clone()),
             &pool,
             &pool,
             &WorkflowSpecRegistry::new(),
@@ -507,6 +511,7 @@ mod p7_maintenance_tests {
         let mut orphan_state = OrphanSweepState::default();
 
         run_reaper_pass(
+            &PostgresBroker::from_pool(pool.clone()),
             &pool,
             &pool,
             &WorkflowSpecRegistry::new(),
@@ -633,10 +638,10 @@ mod p7_maintenance_tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, task_name, input, queue_name, priority,
+                 downstream_subworkflow, id, workflow_id, task_index, task_name, input, queue_name, priority,
                  dependencies, allow_failed_deps, join_type, max_retries, execution,
                  retention_class_key, status, is_subworkflow, created_at
-             ) VALUES ($1, $2, 0, 'p7 pass blocker', '{}', 'default', 100,
+             ) VALUES ('NONE', $1, $2, 0, 'p7 pass blocker', '{}', 'default', 100,
                        '{}', FALSE, 'all', 0, 'ISOLATED',
                        $3, 'RUNNING', FALSE, NOW())",
         )
@@ -697,6 +702,7 @@ mod p7_maintenance_tests {
         let mut next_partition_maintenance = tokio::time::Instant::now();
         let mut orphan_state = OrphanSweepState::default();
         run_reaper_pass(
+            &PostgresBroker::from_pool(pool.clone()),
             &pool,
             &pool,
             &WorkflowSpecRegistry::new(),
@@ -1013,6 +1019,7 @@ pub fn new_reaper_health() -> ReaperHealth {
 /// without a second check.
 #[allow(clippy::needless_pass_by_value)]
 pub fn spawn_reaper(
+    broker: Arc<PostgresBroker>,
     runtime_pool: PgPool,
     maintenance_pool: PgPool,
     registry: Arc<WorkflowSpecRegistry>,
@@ -1029,6 +1036,10 @@ pub fn spawn_reaper(
         let mut next_retention_cleanup = tokio::time::Instant::now();
         let mut next_partition_maintenance = tokio::time::Instant::now();
         let mut orphan_state = OrphanSweepState::default();
+        // The fleet check runs after each pass, from one check interval after
+        // the start on (Python `reaper.py:622-628, 747-750`).
+        let mut coverage_log =
+            ClassCoverageLog::for_reaper_start(tokio::time::Instant::now(), check_interval);
 
         tracing::info!(
             auto_requeue_claimed = config.auto_requeue_stale_claimed,
@@ -1050,6 +1061,7 @@ pub fn spawn_reaper(
                 }
                 GatePass::Ungated => {
                     run_reaper_pass(
+                        &broker,
                         &runtime_pool,
                         &maintenance_pool,
                         &registry,
@@ -1062,9 +1074,11 @@ pub fn spawn_reaper(
                         &mut orphan_state,
                     )
                     .await;
+                    check_class_coverage(&runtime_pool, &mut coverage_log).await;
                 }
                 GatePass::Held(tx) => {
                     run_reaper_pass(
+                        &broker,
                         &runtime_pool,
                         &maintenance_pool,
                         &registry,
@@ -1077,6 +1091,7 @@ pub fn spawn_reaper(
                         &mut orphan_state,
                     )
                     .await;
+                    check_class_coverage(&runtime_pool, &mut coverage_log).await;
                     release_gate(tx).await;
                 }
             }
@@ -1169,6 +1184,7 @@ async fn release_gate(tx: sqlx::Transaction<'static, sqlx::Postgres>) {
 /// audit, stale-RUNNING recovery, PENDING expiry, workflow recovery, then
 /// periodic retention cleanup and partition maintenance.
 async fn run_reaper_pass(
+    broker: &PostgresBroker,
     runtime_pool: &PgPool,
     maintenance_pool: &PgPool,
     registry: &WorkflowSpecRegistry,
@@ -1314,13 +1330,15 @@ async fn run_reaper_pass(
         }
     });
 
+    // Discovery reads the reserve pool; each record runs on the main core
+    // pool with the reserve.
     let phase2 = crate::workflow_engine::phase2_recovery::drive_phase2_recovery(
         runtime_pool,
+        broker,
         registry,
         config.crashed_worker_recovery_grace_ms,
         crate::workflow_engine::recovery::GLOBAL_SCAN_ROW_CAP,
         config.phase2_quarantine_after_attempts,
-        payload,
         retention,
     )
     .await;
@@ -2170,6 +2188,7 @@ mod tests {
         let pass = tokio::time::timeout(
             Duration::from_secs(30),
             run_reaper_pass(
+                &broker,
                 broker.reserve_pool(),
                 broker.reserve_maintenance_pool(),
                 &WorkflowSpecRegistry::new(),
@@ -2479,11 +2498,11 @@ mod tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
                 dependencies, allow_failed_deps, join_type, status, is_subworkflow, task_id,
                 created_at, max_retries, execution, retention_class_key
             ) VALUES (
-                $1, $2, 0, 'node_0', 'ret_task', 'null', 'default', 100, '{}', FALSE, 'all',
+                'NONE', $1, $2, 0, 'node_0', 'ret_task', 'null', 'default', 100, '{}', FALSE, 'all',
                 'ENQUEUED', FALSE, $3, NOW() - INTERVAL '2 hours', 0, 'ISOLATED',
                 'standard_30d'
             )",
@@ -2623,12 +2642,12 @@ mod tests {
             for i in 0..nodes {
                 sqlx::query(
                     "INSERT INTO horsies_workflow_tasks (
-                        id, workflow_id, task_index, node_id, task_name, input, queue_name,
+                        downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name,
                         priority, dependencies, allow_failed_deps, join_type, status,
                         is_subworkflow, created_at, max_retries, execution,
                         retention_class_key
                     ) VALUES (
-                        $1, $2, $3, 'node_' || $3, 'ret_budget_task', 'null', 'default', 100,
+                        'NONE', $1, $2, $3, 'node_' || $3, 'ret_budget_task', 'null', 'default', 100,
                         '{}', FALSE, 'all', 'COMPLETED', FALSE, NOW() - INTERVAL '2 hours', 0,
                         'ISOLATED', 'standard_30d'
                     )",
@@ -2998,6 +3017,9 @@ mod tests {
 
 #[cfg(test)]
 mod reaper_loop_tests;
+
+#[cfg(test)]
+mod class_coverage_loop_tests;
 
 #[cfg(test)]
 mod retention_ports;

@@ -735,7 +735,17 @@ impl ChildPreload {
 }
 
 /// Where the worker process runs.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    horsies_macros::ManifestSchema,
+)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ParentCpu {
     /// The worker process and its children run on the CPUs they inherit.
@@ -1327,6 +1337,123 @@ pub fn worker_profiles_claim_errors(
         .flat_map(|(name, profile)| profile_claim_errors(name, profile, prefetch_buffer))
         .collect()
 }
+
+/// The profile that a worker runs, by its name in the profile set (Python
+/// `SelectedProfile`, `horsies/core/cli.py:425-430`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectedProfile {
+    pub name: String,
+    pub profile: WorkerProfile,
+}
+
+/// The profile that a worker start asks for: the `--profile` value of
+/// `horsies worker`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, horsies_macros::ManifestSchema)]
+#[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
+pub enum ProfileRequest {
+    /// The profile of this name.
+    Named { name: String },
+    /// No profile was named. There is no default profile.
+    NotGiven,
+}
+
+/// Why no profile was selected (Python `ProfileNotGiven`, `ProfileUnknown`,
+/// and the profile refusals of AppConfig validation).
+#[derive(Debug, Clone)]
+pub enum ProfileSelectionRefused {
+    /// The profile set fails the checks of AppConfig validation: each
+    /// refusal, in the order AppConfig validation reports them.
+    InvalidProfiles { errors: Vec<HorsiesError> },
+    /// The start named no profile. `defined` is every profile name, sorted.
+    NotGiven { defined: Vec<String> },
+    /// The start named a profile that the set does not have.
+    Unknown {
+        requested: String,
+        defined: Vec<String>,
+    },
+}
+
+impl ProfileSelectionRefused {
+    /// The startup errors of the refusal, with Python's text
+    /// (`horsies/core/cli.py:467-518`, `_profile_selection_error`). Pure.
+    pub fn errors(&self) -> Vec<HorsiesError> {
+        match self {
+            Self::InvalidProfiles { errors } => errors.clone(),
+            Self::NotGiven { defined } => vec![HorsiesError::new("--profile is required")
+                .with_code(ErrorCode::CliInvalidArgs)
+                .with_note(
+                    "a worker takes its settings from a named profile in \
+                     AppConfig.worker_profiles; there is no default profile",
+                )
+                .with_note(defined_profiles_note(defined))
+                .with_help(profile_help(defined))],
+            Self::Unknown { requested, defined } => vec![HorsiesError::new(format!(
+                "unknown worker profile {}",
+                quoted_profile_name(requested)
+            ))
+            .with_code(ErrorCode::CliInvalidArgs)
+            .with_note(defined_profiles_note(defined))
+            .with_help(profile_help(defined))],
+        }
+    }
+}
+
+/// The note that names the defined profiles (Python `_defined_profiles_note`).
+fn defined_profiles_note(defined: &[String]) -> String {
+    match defined {
+        [] => "the app defines no worker profiles: AppConfig.worker_profiles is empty".to_owned(),
+        names => format!("defined profiles: {}", names.join(", ")),
+    }
+}
+
+/// The help of a selection refusal (Python `_profile_help`).
+fn profile_help(defined: &[String]) -> String {
+    match defined {
+        [] => "add a profile to the app config, for example:\n  \
+               AppConfig(..., worker_profiles={\n      \
+               'default': WorkerProfile(isolated=IsolatedChildren(count=4)),\n  \
+               })\nthen start the worker with: horsies worker <app> --profile default"
+            .to_owned(),
+        [first, ..] => format!("start the worker with: horsies worker <app> --profile {first}"),
+    }
+}
+
+/// Check every profile of `profiles` as AppConfig validation does (the
+/// shape refusals, then the claim refusals with `prefetch_buffer`), then
+/// pick the profile that `request` names (Python `select_worker_profile`,
+/// `horsies/core/cli.py:448-464`). Pure.
+///
+/// Errors: [`ProfileSelectionRefused`]: the refusals of the set, no
+/// request, or a name that the set does not have.
+pub fn select_worker_profile(
+    profiles: &BTreeMap<String, WorkerProfile>,
+    request: &ProfileRequest,
+    prefetch_buffer: u32,
+) -> Result<SelectedProfile, ProfileSelectionRefused> {
+    let mut errors = worker_profiles_shape_errors(profiles);
+    errors.extend(worker_profiles_claim_errors(profiles, prefetch_buffer));
+    match errors.is_empty() {
+        true => {}
+        false => return Err(ProfileSelectionRefused::InvalidProfiles { errors }),
+    }
+    let defined: Vec<String> = profiles.keys().cloned().collect();
+    match request {
+        ProfileRequest::NotGiven => Err(ProfileSelectionRefused::NotGiven { defined }),
+        ProfileRequest::Named { name } => match profiles.get(name) {
+            Some(profile) => Ok(SelectedProfile {
+                name: name.clone(),
+                profile: *profile,
+            }),
+            None => Err(ProfileSelectionRefused::Unknown {
+                requested: name.clone(),
+                defined,
+            }),
+        },
+    }
+}
+
+#[cfg(test)]
+mod start_log_tests;
 
 #[cfg(test)]
 mod tests {

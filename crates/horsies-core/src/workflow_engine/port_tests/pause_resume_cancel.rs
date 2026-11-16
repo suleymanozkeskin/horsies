@@ -814,11 +814,11 @@ async fn a_crashed_worker_fails_its_nodes_and_allow_failed_deps_nodes_run() {
     assert_eq!(failed, 2);
     let _summary = drive_phase2_recovery(
         &db.pool,
+        &crate::broker::PostgresBroker::from_pool(db.pool.clone()),
         &registry,
         0,
         100,
         3,
-        &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
     .await

@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.task_send_types import TaskSendResult
 from horsies.core.task_decorator import TaskHandle
@@ -162,6 +163,7 @@ async def test_multi_worker_distribution(broker: PostgresBroker) -> None:
                 queue_name='default',
                 task_id=str(uuid4()),
                 enqueue_sha='test-sha',
+                send_kind=SendKind.FIRST,
                 sent_at=datetime.now(timezone.utc),
                 kwargs_json=json.dumps({'duration_ms': task_duration_ms}),
             )).unwrap()
@@ -227,6 +229,7 @@ async def test_cluster_wide_cap(cluster_cap_broker: PostgresBroker) -> None:
                 queue_name='default',
                 task_id=str(uuid4()),
                 enqueue_sha='test-sha',
+                send_kind=SendKind.FIRST,
                 sent_at=datetime.now(timezone.utc),
                 kwargs_json=json.dumps({'duration_ms': task_duration_ms}),
             )).unwrap()
@@ -292,6 +295,7 @@ async def test_per_queue_concurrency_cap(custom_broker: PostgresBroker) -> None:
                 queue_name=queue_name,
                 task_id=str(uuid4()),
                 enqueue_sha='test-sha',
+                send_kind=SendKind.FIRST,
                 sent_at=datetime.now(timezone.utc),
                 kwargs_json=json.dumps({'duration_ms': task_duration_ms}),
             )).unwrap()
@@ -404,6 +408,7 @@ async def test_softcap_db_ledger_race_single_execution(
             queue_name='default',
             task_id=str(uuid4()),
             enqueue_sha='test-sha',
+            send_kind=SendKind.FIRST,
             sent_at=datetime.now(timezone.utc),
             kwargs_json=json.dumps({'duration_ms': blocker_duration_ms}),
         )).unwrap()
@@ -420,6 +425,7 @@ async def test_softcap_db_ledger_race_single_execution(
             queue_name='default',
             task_id=str(uuid4()),
             enqueue_sha='test-sha',
+            send_kind=SendKind.FIRST,
             sent_at=datetime.now(timezone.utc),
             kwargs_json=json.dumps({'token': token}),
         )).unwrap()
@@ -516,6 +522,7 @@ async def test_stale_running_marked_failed_on_crash(
             queue_name='default',
             task_id=str(uuid4()),
             enqueue_sha='test-sha',
+            send_kind=SendKind.FIRST,
             sent_at=datetime.now(timezone.utc),
             kwargs_json=json.dumps({'duration_ms': task_duration_ms}),
         )).unwrap()
@@ -580,6 +587,7 @@ async def test_stale_claimed_requeued_and_completed(
         queue_name='default',
         task_id=str(uuid4()),
         enqueue_sha='test-sha',
+        send_kind=SendKind.FIRST,
         sent_at=datetime.now(timezone.utc),
     )).unwrap()
 
@@ -653,6 +661,7 @@ async def test_cluster_cap_not_leaked_on_failure(
                 queue_name='default',
                 task_id=str(uuid4()),
                 enqueue_sha='test-sha',
+                send_kind=SendKind.FIRST,
                 sent_at=datetime.now(timezone.utc),
             )).unwrap()
             for _ in range(num_failing)
@@ -680,6 +689,7 @@ async def test_cluster_cap_not_leaked_on_failure(
                 queue_name='default',
                 task_id=str(uuid4()),
                 enqueue_sha='test-sha',
+                send_kind=SendKind.FIRST,
                 sent_at=datetime.now(timezone.utc),
                 kwargs_json=json.dumps({'duration_ms': task_duration_ms}),
             )).unwrap()
@@ -798,6 +808,7 @@ async def test_per_queue_caps_independent_across_queues(
                 queue_name='high',
                 task_id=str(uuid4()),
                 enqueue_sha='test-sha',
+                send_kind=SendKind.FIRST,
                 sent_at=datetime.now(timezone.utc),
                 kwargs_json=json.dumps({'duration_ms': task_duration_ms}),
             )).unwrap()
@@ -810,6 +821,7 @@ async def test_per_queue_caps_independent_across_queues(
                 queue_name='normal',
                 task_id=str(uuid4()),
                 enqueue_sha='test-sha',
+                send_kind=SendKind.FIRST,
                 sent_at=datetime.now(timezone.utc),
                 kwargs_json=json.dumps({'duration_ms': task_duration_ms}),
             )).unwrap()
@@ -882,6 +894,7 @@ async def test_queue_priority_ordering(custom_broker: PostgresBroker) -> None:
             queue_name='low',
             task_id=str(uuid4()),
             enqueue_sha='test-sha',
+            send_kind=SendKind.FIRST,
             sent_at=datetime.now(timezone.utc),
             kwargs_json=json.dumps({'duration_ms': task_duration_ms}),
         )).unwrap()
@@ -896,6 +909,7 @@ async def test_queue_priority_ordering(custom_broker: PostgresBroker) -> None:
             queue_name='high',
             task_id=str(uuid4()),
             enqueue_sha='test-sha',
+            send_kind=SendKind.FIRST,
             sent_at=datetime.now(timezone.utc),
             kwargs_json=json.dumps({'duration_ms': task_duration_ms}),
         )).unwrap()
@@ -972,6 +986,7 @@ async def test_single_worker_crash_remaining_continue(
                 queue_name='default',
                 task_id=str(uuid4()),
                 enqueue_sha='test-sha',
+                send_kind=SendKind.FIRST,
                 sent_at=datetime.now(timezone.utc),
                 kwargs_json=json.dumps({'duration_ms': task_duration_ms}),
             )).unwrap()
@@ -1057,6 +1072,7 @@ async def test_concurrent_enqueue_during_processing(
                 queue_name='default',
                 task_id=str(uuid4()),
                 enqueue_sha='test-sha',
+                send_kind=SendKind.FIRST,
                 sent_at=datetime.now(timezone.utc),
                 kwargs_json=json.dumps({'duration_ms': task_duration_ms}),
             )).unwrap()
@@ -1079,6 +1095,7 @@ async def test_concurrent_enqueue_during_processing(
                 queue_name='default',
                 task_id=str(uuid4()),
                 enqueue_sha='test-sha',
+                send_kind=SendKind.FIRST,
                 sent_at=datetime.now(timezone.utc),
                 kwargs_json=json.dumps({'duration_ms': task_duration_ms}),
             )).unwrap()
@@ -1190,6 +1207,7 @@ async def test_softcap_expired_claim_requeued(
                 queue_name='default',
                 task_id=str(uuid4()),
                 enqueue_sha='test-sha',
+                send_kind=SendKind.FIRST,
                 sent_at=datetime.now(timezone.utc),
                 kwargs_json=json.dumps({'token': token, 'duration_ms': 100}),
             )).unwrap()
@@ -1287,6 +1305,7 @@ async def test_softcap_owner_transition_after_worker_crash(
                     queue_name='default',
                     task_id=str(uuid4()),
                     enqueue_sha='test-sha',
+                    send_kind=SendKind.FIRST,
                     sent_at=datetime.now(timezone.utc),
                     kwargs_json=json.dumps({'duration_ms': blocker_duration_ms}),
                 )).unwrap()
@@ -1303,6 +1322,7 @@ async def test_softcap_owner_transition_after_worker_crash(
                     queue_name='default',
                     task_id=str(uuid4()),
                     enqueue_sha='test-sha',
+                    send_kind=SendKind.FIRST,
                     sent_at=datetime.now(timezone.utc),
                     kwargs_json=json.dumps({'token': token, 'duration_ms': 100}),
                 )).unwrap()
