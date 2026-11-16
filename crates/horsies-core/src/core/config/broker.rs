@@ -162,7 +162,7 @@ struct PostgresConfigWire {
     #[serde(default = "default_pool_timeout")]
     pool_timeout: u32,
     #[serde(default = "default_pool_recycle")]
-    pool_recycle: u32,
+    pool_recycle: crate::manifest::PoolRecycle,
     #[serde(default)]
     echo: bool,
 }
