@@ -605,12 +605,12 @@ def _require_payload(
 # The failed-attempt finish
 # ---------------------------------------------------------------------------
 #
-# ``horsies_finish_failed_attempt`` returns the ten shared columns and eight
-# more. A miss carries the shared classifier's row unchanged and the eight
+# ``horsies_finish_failed_attempt`` returns the ten shared columns and nine
+# more. A miss carries the shared classifier's row unchanged and the nine
 # columns NULL, so it decodes to the shared outcome types.
-# ``node_has_dependents`` is set only on the APPLIED row of a workflow task;
-# phase 2 here reads the nodes itself, so the decoder checks the column and
-# does not carry it.
+# The node facts ``node_has_dependents`` and ``downstream_subworkflow`` are
+# set only on the APPLIED row of a workflow task; the decoder carries them as
+# ``PhaseTwoStep``, the form of its phase-2 step.
 
 
 @dataclass(frozen=True, slots=True)
@@ -635,12 +635,32 @@ class CapacityWoken:
     """A plain task: the function sent its capacity wake. Nothing is owed."""
 
 
+class PhaseTwoStep(Enum):
+    """What the phase-2 step of a workflow task can do, from the node facts
+    that phase 1 reads after its move (``node_has_dependents``,
+    ``downstream_subworkflow``). The dependencies and the fact are fixed at
+    workflow start, so the answer holds for phase 2."""
+
+    NO_DEPENDENTS = 'NO_DEPENDENTS'
+    """No node lists this node as a dependency: the step finishes the node and
+    promotes nothing. One statement in autocommit."""
+
+    DEPENDENTS_WITHOUT_SUBWORKFLOW = 'DEPENDENTS_WITHOUT_SUBWORKFLOW'
+    """The node has dependents and no sub-workflow node is below it: the step
+    owes no child start. One statement in autocommit."""
+
+    SUBWORKFLOW_REACHABLE = 'SUBWORKFLOW_REACHABLE'
+    """A sub-workflow node is below the node: the step can owe a child start,
+    which commits with the step. A transaction."""
+
+
 @dataclass(frozen=True, slots=True)
 class PhaseTwoOwed:
     """A workflow task: phase 2 advances its node and sends its capacity wake."""
 
     task_name: str
     queue_name: str
+    step: PhaseTwoStep
 
 
 type AfterFailure = CapacityWoken | PhaseTwoOwed
@@ -691,7 +711,12 @@ _FAILED_ATTEMPT_COLUMNS: frozenset[str] = frozenset(
         'queue_name',
         'task_name',
         'node_has_dependents',
+        'downstream_subworkflow',
     }
+)
+
+_NODE_FACT_COLUMNS: frozenset[str] = frozenset(
+    {'node_has_dependents', 'downstream_subworkflow'}
 )
 
 
@@ -768,6 +793,7 @@ def _decode_claim_released(row: Mapping[str, Any]) -> ClaimReleased:
                 'is_workflow_task',
                 'task_name',
                 'node_has_dependents',
+                'downstream_subworkflow',
             }
         ),
     )
@@ -829,7 +855,6 @@ def _applied_failure(
 ) -> tuple[str, datetime, ObservedTaskState]:
     """The shared facts of an APPLIED failure row whose move wrote ``kind``."""
     _require_null_columns(row, frozenset({'retry_count'}))
-    _require_dependents_fact(row, is_workflow_task=row['is_workflow_task'] is True)
     match decode_outcome_row(shared):
         case Applied(
             task_id=task_id, terminal_at=terminal_at, kind=written, observed=observed
@@ -863,15 +888,64 @@ def _decode_retry_refusal(row: Mapping[str, Any]) -> RetryRefusal:
 def _decode_after_failure(row: Mapping[str, Any]) -> AfterFailure:
     match row['is_workflow_task']:
         case True:
-            return PhaseTwoOwed(
-                task_name=_require_str(row, 'task_name'),
-                queue_name=_require_str(row, 'queue_name'),
-            )
+            return _decode_phase_two_owed(row)
         case False:
+            _require_null_columns(row, _NODE_FACT_COLUMNS)
             return CapacityWoken()
         case unknown:
             raise OutcomeDecodeError(
                 f'is_workflow_task must be a boolean, got {type(unknown).__name__}'
+            )
+
+
+def _decode_phase_two_owed(row: Mapping[str, Any]) -> PhaseTwoOwed:
+    """The phase 2 owed by the APPLIED row of a workflow task."""
+    return PhaseTwoOwed(
+        task_name=_require_str(row, 'task_name'),
+        queue_name=_require_str(row, 'queue_name'),
+        step=_decode_phase_two_step(row),
+    )
+
+
+def _decode_phase_two_step(row: Mapping[str, Any]) -> PhaseTwoStep:
+    """The phase-2 step of an applied workflow task, from its node facts.
+
+    - ``node_has_dependents`` FALSE: ``NO_DEPENDENTS``. ``downstream_subworkflow``
+      is ``NONE``, or NULL when no node links the task (phase 2 then finds no
+      node to finish). ``REACHABLE`` is refused: a sub-workflow node below the
+      node would be a dependent of it.
+    - TRUE: ``NONE`` gives ``DEPENDENTS_WITHOUT_SUBWORKFLOW``, ``REACHABLE``
+      gives ``SUBWORKFLOW_REACHABLE``. NULL is refused: a node with dependents
+      is linked, and the start stores the fact on every node.
+    - A ``node_has_dependents`` that is not a boolean, or another text, is
+      refused.
+
+    Raises:
+        OutcomeDecodeError: the facts are outside these pairs.
+    """
+    has_dependents = row['node_has_dependents']
+    downstream = row['downstream_subworkflow']
+    match (has_dependents, downstream):
+        case (False, None | 'NONE'):
+            return PhaseTwoStep.NO_DEPENDENTS
+        case (True, 'NONE'):
+            return PhaseTwoStep.DEPENDENTS_WITHOUT_SUBWORKFLOW
+        case (True, 'REACHABLE'):
+            return PhaseTwoStep.SUBWORKFLOW_REACHABLE
+        case (False, 'REACHABLE'):
+            raise OutcomeDecodeError(
+                'node_has_dependents is FALSE and downstream_subworkflow is REACHABLE'
+            )
+        case (True, None):
+            raise OutcomeDecodeError(
+                'node_has_dependents is TRUE and downstream_subworkflow is NULL'
+            )
+        case (bool(), unknown):
+            raise OutcomeDecodeError(f'unknown downstream_subworkflow {unknown!r}')
+        case (unknown, _):
+            raise OutcomeDecodeError(
+                f'an applied workflow task needs node_has_dependents as a '
+                f'boolean, got {type(unknown).__name__}'
             )
 
 
@@ -892,6 +966,7 @@ def _decode_retry_scheduled(
                 'is_workflow_task',
                 'task_name',
                 'node_has_dependents',
+                'downstream_subworkflow',
             }
         ),
     )
@@ -919,6 +994,17 @@ def _decode_retry_scheduled(
 
 
 @dataclass(frozen=True, slots=True)
+class NothingOwed:
+    """A plain task after a stale failure: the statement sends no capacity wake
+    (as Python), and nothing is owed."""
+
+
+type AfterStaleFailure = NothingOwed | PhaseTwoOwed
+"""What is owed after the terminal failure of a stale RUNNING task. For a
+workflow task, phase 2: the move recorded it, and phase-2 recovery runs it."""
+
+
+@dataclass(frozen=True, slots=True)
 class StaleFailureApplied:
     """The FAILED attempt row and the move of the stale task committed."""
 
@@ -926,7 +1012,7 @@ class StaleFailureApplied:
     terminal_at: datetime
     observed: ObservedTaskState
     retry: RetryRefusal
-    is_workflow_task: bool
+    after: AfterStaleFailure
 
 
 type StaleAttemptOutcome = (
@@ -953,14 +1039,12 @@ def decode_stale_attempt_row(row: Mapping[str, Any]) -> StaleAttemptOutcome:
             task_id, terminal_at, observed = _applied_failure(
                 row, shared, TerminalizationKind.FAIL_STALE, 'stale-attempt'
             )
-            _ = _require_str(row, 'queue_name')
-            _ = _require_str(row, 'task_name')
             return StaleFailureApplied(
                 task_id=task_id,
                 terminal_at=terminal_at,
                 observed=observed,
                 retry=_decode_retry_refusal(row),
-                is_workflow_task=_require_bool(row, 'is_workflow_task'),
+                after=_decode_after_stale_failure(row),
             )
         case 'RETRY_SCHEDULED':
             return _decode_retry_scheduled(row, shared)
@@ -968,11 +1052,19 @@ def decode_stale_attempt_row(row: Mapping[str, Any]) -> StaleAttemptOutcome:
             return _decode_failure_refusal(row, shared)
 
 
-def _require_bool(source: Mapping[str, Any], key: str) -> bool:
-    value = source.get(key)
-    if not isinstance(value, bool):
-        raise OutcomeDecodeError(f'{key} must be a boolean, got {type(value).__name__}')
-    return value
+def _decode_after_stale_failure(row: Mapping[str, Any]) -> AfterStaleFailure:
+    match row['is_workflow_task']:
+        case True:
+            return _decode_phase_two_owed(row)
+        case False:
+            _ = _require_str(row, 'queue_name')
+            _ = _require_str(row, 'task_name')
+            _require_null_columns(row, _NODE_FACT_COLUMNS)
+            return NothingOwed()
+        case unknown:
+            raise OutcomeDecodeError(
+                f'is_workflow_task must be a boolean, got {type(unknown).__name__}'
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -980,10 +1072,11 @@ def _require_bool(source: Mapping[str, Any], key: str) -> bool:
 # ---------------------------------------------------------------------------
 #
 # ``horsies_finish_workflow_success`` returns the ten shared columns and
-# three more: the routing facts of phase 2 and ``node_has_dependents``. A miss
-# carries the shared classifier's row unchanged and the three columns NULL, so
-# it decodes to the shared outcome types. Phase 2 here reads the nodes itself,
-# so the decoder checks ``node_has_dependents`` and does not carry it.
+# four more: the routing facts of phase 2 and the node facts
+# (``node_has_dependents``, ``downstream_subworkflow``). A miss carries the
+# shared classifier's row unchanged and the four columns NULL, so it decodes to
+# the shared outcome types. The decoder carries the node facts as
+# ``PhaseTwoStep``.
 
 
 @dataclass(frozen=True, slots=True)
@@ -1002,7 +1095,7 @@ type WorkflowSuccessOutcome = (
 )
 
 _WORKFLOW_SUCCESS_COLUMNS: frozenset[str] = frozenset(
-    {'queue_name', 'task_name', 'node_has_dependents'}
+    {'queue_name', 'task_name', 'node_has_dependents', 'downstream_subworkflow'}
 )
 
 
@@ -1033,15 +1126,11 @@ def decode_workflow_success_row(row: Mapping[str, Any]) -> WorkflowSuccessOutcom
                     f'workflow-success APPLIED carries kind {kind.value}, '
                     f'not COMPLETE_LOCKED'
                 )
-            _require_dependents_fact(row, is_workflow_task=True)
             return SuccessApplied(
                 task_id=task_id,
                 terminal_at=terminal_at,
                 observed=observed,
-                phase_two=PhaseTwoOwed(
-                    task_name=_require_str(row, 'task_name'),
-                    queue_name=_require_str(row, 'queue_name'),
-                ),
+                phase_two=_decode_phase_two_owed(row),
             )
         case (
             AlreadyApplied()
@@ -1053,24 +1142,6 @@ def decode_workflow_success_row(row: Mapping[str, Any]) -> WorkflowSuccessOutcom
             return refused
         case _ as unreachable:
             assert_never(unreachable)
-
-
-def _require_dependents_fact(row: Mapping[str, Any], *, is_workflow_task: bool) -> None:
-    """``node_has_dependents`` is a boolean after the move of a workflow task
-    and NULL after the move of a plain task."""
-    value = row['node_has_dependents']
-    match is_workflow_task:
-        case True:
-            if not isinstance(value, bool):
-                raise OutcomeDecodeError(
-                    f'an applied workflow task needs node_has_dependents as a '
-                    f'boolean, got {type(value).__name__}'
-                )
-        case False:
-            if value is not None:
-                raise OutcomeDecodeError(
-                    'an applied plain task carries node_has_dependents'
-                )
 
 
 def _require_null_columns(row: Mapping[str, Any], columns: frozenset[str]) -> None:

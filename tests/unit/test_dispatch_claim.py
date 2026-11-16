@@ -82,6 +82,7 @@ def _released_row(**overrides: Any) -> dict[str, Any]:
         'queue_name': 'q1',
         'task_name': None,
         'node_has_dependents': None,
+        'downstream_subworkflow': None,
     }
     row.update(overrides)
     return row

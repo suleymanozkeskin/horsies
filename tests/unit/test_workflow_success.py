@@ -22,6 +22,7 @@ from horsies.core.lifecycle.outcomes import (
     ObservedTaskState,
     OutcomeDecodeError,
     PhaseTwoOwed,
+    PhaseTwoStep,
     SourceStateConflict,
     SuccessApplied,
     TaskAbsent,
@@ -58,6 +59,7 @@ def _row(**overrides: Any) -> dict[str, Any]:
         'queue_name': 'q1',
         'task_name': 'task_a',
         'node_has_dependents': True,
+        'downstream_subworkflow': 'NONE',
     }
     row.update(overrides)
     return row
@@ -71,6 +73,7 @@ def _miss_row(outcome: str, **overrides: Any) -> dict[str, Any]:
         queue_name=None,
         task_name=None,
         node_has_dependents=None,
+        downstream_subworkflow=None,
     )
     row.update(overrides)
     return row
@@ -87,8 +90,24 @@ class TestDecode:
             task_id=TASK_ID,
             terminal_at=NOW,
             observed=_OBSERVED,
-            phase_two=PhaseTwoOwed(task_name='task_a', queue_name='q1'),
+            phase_two=PhaseTwoOwed(
+                task_name='task_a',
+                queue_name='q1',
+                step=PhaseTwoStep.DEPENDENTS_WITHOUT_SUBWORKFLOW,
+            ),
         )
+
+    def test_a_reachable_subworkflow_owes_a_transaction_step(self) -> None:
+        decoded = decode_workflow_success_row(_row(downstream_subworkflow='REACHABLE'))
+
+        assert isinstance(decoded, SuccessApplied)
+        assert decoded.phase_two.step is PhaseTwoStep.SUBWORKFLOW_REACHABLE
+
+    def test_a_node_without_dependents_owes_a_finish_only(self) -> None:
+        decoded = decode_workflow_success_row(_row(node_has_dependents=False))
+
+        assert isinstance(decoded, SuccessApplied)
+        assert decoded.phase_two.step is PhaseTwoStep.NO_DEPENDENTS
 
     def test_a_replay_is_already_applied(self) -> None:
         row = _miss_row(
@@ -157,7 +176,10 @@ class TestDecodeFailsClosed:
             _row(task_name=None),
             _row(queue_name=None),
             _row(node_has_dependents=None),
+            _row(node_has_dependents=False, downstream_subworkflow='REACHABLE'),
+            _row(downstream_subworkflow=None),
             _miss_row('LOST_CLAIM', node_has_dependents=False),
+            _miss_row('LOST_CLAIM', downstream_subworkflow='NONE'),
             _miss_row('LOST_CLAIM', queue_name='q1'),
             _miss_row('LOST_CLAIM', task_name='task_a'),
             _row(outcome='RETRY_SCHEDULED'),
@@ -168,7 +190,10 @@ class TestDecodeFailsClosed:
             'applied_without_task_name',
             'applied_without_queue_name',
             'applied_without_the_dependents_fact',
+            'no_dependents_and_a_reachable_subworkflow',
+            'dependents_and_no_downstream_fact',
             'refusal_with_a_dependents_fact',
+            'refusal_with_a_downstream_fact',
             'refusal_with_queue_name',
             'refusal_with_task_name',
             'unknown_outcome',
