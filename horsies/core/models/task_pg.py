@@ -423,9 +423,11 @@ class ScheduleStateModel(Base):
         - schedule_name: Unique schedule identifier (from TaskSchedule.name)
         - last_run_at: When the schedule last executed successfully
         - next_run_at: When the schedule should run next (calculated by scheduler)
-        - last_task_id: Task ID of the most recently enqueued task
+        - last_task_id: Task ID of the most recently enqueued task (uuid column,
+          read and written as text)
         - run_count: Total number of times this schedule has executed
-        - config_hash: Hash of schedule configuration (pattern + timezone) for change detection
+        - config_hash: SHA-256 digest (32 bytes) of the schedule configuration
+          (pattern + timezone) for change detection
         - updated_at: Last state update timestamp
     """
 
@@ -435,12 +437,14 @@ class ScheduleStateModel(Base):
     last_run_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    next_run_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True, index=True
+    next_run_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
     )
-    last_task_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    last_task_id: Mapped[Optional[str]] = mapped_column(
+        Uuid(as_uuid=False), nullable=True
+    )
     run_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    config_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    config_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utc_now,
