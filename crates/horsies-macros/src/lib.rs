@@ -124,6 +124,10 @@ pub fn derive_workflow_input(item: TokenStream) -> TokenStream {
 /// ```
 ///
 /// Emits `impl horsies_core::catalog::CodeEnum for BrokerErrorCode`.
+///
+/// A lifecycle status marks its terminal variants with
+/// `#[code_catalog(terminal)]` and names their Python constant with
+/// `#[code_catalog(terminal_states = "...")]` on the enum.
 #[proc_macro_derive(CodeCatalog, attributes(code_catalog))]
 pub fn derive_code_catalog(item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as DeriveInput);

@@ -5,7 +5,8 @@
 the core catalog holds exactly the members of the Python catalog it
 replaces. This test pins both facts for each re-exported class: the public
 name is the generated class itself, and its members and values are the
-ones the public API had before the move.
+ones the public API had before the move. For the lifecycle statuses it
+also pins the terminal-state constants and `is_terminal`.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ import horsies._catalog.workflow_start
 from horsies.core.brokers import result_types
 from horsies.core.history.reads import detail
 from horsies.core.models import task_send_types
+from horsies.core.models.workflow import enums
 from horsies.core.types import status
 from horsies.core.workflows import start_types
 from horsies.monitoring import errors, task_actions
@@ -107,9 +109,24 @@ REEXPORTS: Final[tuple[tuple[type[enum.Enum], type[enum.Enum], tuple[str, ...]],
         ),
     ),
     (
+        status.TaskStatus,
+        horsies._catalog.status.TaskStatus,
+        ('PENDING', 'CLAIMED', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED'),
+    ),
+    (
         status.TaskAttemptOutcome,
         horsies._catalog.status.TaskAttemptOutcome,
         ('COMPLETED', 'FAILED', 'WORKER_FAILURE'),
+    ),
+    (
+        enums.WorkflowStatus,
+        horsies._catalog.status.WorkflowStatus,
+        ('PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'PAUSED', 'CANCELLED', 'EXPIRED'),
+    ),
+    (
+        enums.WorkflowTaskStatus,
+        horsies._catalog.status.WorkflowTaskStatus,
+        ('PENDING', 'READY', 'ENQUEUED', 'RUNNING', 'COMPLETED', 'FAILED', 'SKIPPED'),
     ),
     (
         detail.TaskAbsenceReason,
@@ -135,6 +152,72 @@ def test_public_path_is_the_generated_class_with_the_same_members(
     )
 
 
-def test_every_re_exported_code_is_a_str_enum() -> None:
+# The one re-exported class whose public base is `Enum` alone; every other
+# one is `str, Enum`.
+PLAIN_ENUM_CLASSES: Final[frozenset[type[enum.Enum]]] = frozenset({status.TaskStatus})
+
+
+def test_every_re_exported_class_keeps_its_public_base() -> None:
     for public, _generated, _members in REEXPORTS:
-        assert issubclass(public, str), public.__qualname__
+        expected = (
+            (enum.Enum,) if public in PLAIN_ENUM_CLASSES else (str, enum.Enum)
+        )
+        assert public.__bases__ == expected, public.__qualname__
+
+
+# (public constant, generated constant, status class, terminal member names).
+TERMINAL_STATES: Final[
+    tuple[tuple[frozenset[enum.Enum], frozenset[enum.Enum], type[enum.Enum], frozenset[str]], ...]
+] = (
+    (
+        status.TASK_TERMINAL_STATES,
+        horsies._catalog.status.TASK_TERMINAL_STATES,
+        status.TaskStatus,
+        frozenset({'COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED'}),
+    ),
+    (
+        enums.WORKFLOW_TERMINAL_STATES,
+        horsies._catalog.status.WORKFLOW_TERMINAL_STATES,
+        enums.WorkflowStatus,
+        frozenset({'COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED'}),
+    ),
+    (
+        enums.WORKFLOW_TASK_TERMINAL_STATES,
+        horsies._catalog.status.WORKFLOW_TASK_TERMINAL_STATES,
+        enums.WorkflowTaskStatus,
+        frozenset({'COMPLETED', 'FAILED', 'SKIPPED'}),
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ('public', 'generated', 'status_class', 'terminal_names'),
+    TERMINAL_STATES,
+    ids=[status_class.__qualname__ for _p, _g, status_class, _n in TERMINAL_STATES],
+)
+def test_public_terminal_states_are_the_generated_constant(
+    public: frozenset[enum.Enum],
+    generated: frozenset[enum.Enum],
+    status_class: type[enum.Enum],
+    terminal_names: frozenset[str],
+) -> None:
+    assert public is generated
+    assert type(public) is frozenset
+    assert public == frozenset(status_class[name] for name in terminal_names)
+
+
+@pytest.mark.parametrize(
+    ('public', 'status_class'),
+    [(public, status_class) for public, _g, status_class, _n in TERMINAL_STATES],
+    ids=[status_class.__qualname__ for _p, _g, status_class, _n in TERMINAL_STATES],
+)
+def test_is_terminal_holds_exactly_for_the_terminal_members(
+    public: frozenset[enum.Enum],
+    status_class: type[enum.Enum],
+) -> None:
+    for member in status_class:
+        assert getattr(member, 'is_terminal') is (member in public), member
+
+
+def test_workflow_task_terminal_values_are_the_terminal_member_values() -> None:
+    assert sorted(enums.WF_TASK_TERMINAL_VALUES) == ['COMPLETED', 'FAILED', 'SKIPPED']

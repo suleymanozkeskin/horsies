@@ -7,7 +7,8 @@
 //!
 //! Adding a code enum to the Python package: derive `CodeCatalog` on it, add
 //! it to [`CODE_CATALOGS`], and add a test below that pins its wire values
-//! to the enum's own text form.
+//! to the enum's own text form. A lifecycle status also marks its terminal
+//! variants, and a test pins them to the enum's own terminal rule.
 
 use crate::monitoring::{MonitoringQueryErrorCode, TaskActionErrorCode};
 use crate::{
@@ -34,6 +35,23 @@ pub struct CatalogMember {
     pub doc: &'static str,
 }
 
+/// The terminal members of a catalog, from the `#[code_catalog(terminal)]`
+/// variants of its enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalStates {
+    /// The catalog is not a lifecycle: no member is terminal, and the Python
+    /// class has no `is_terminal`.
+    NotALifecycle,
+    /// The catalog is a lifecycle status. The Python class gets the
+    /// `is_terminal` property and a module constant with these members.
+    Lifecycle {
+        /// The Python name of the `frozenset` constant.
+        constant: &'static str,
+        /// The wire values of the terminal members, in declaration order.
+        members: &'static [&'static str],
+    },
+}
+
 /// One closed code catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CodeCatalog {
@@ -45,6 +63,7 @@ pub struct CodeCatalog {
     pub doc: &'static str,
     /// The members in declaration order.
     pub members: &'static [CatalogMember],
+    pub terminal_states: TerminalStates,
 }
 
 /// A code enum whose catalog the derive recorded.
@@ -275,6 +294,66 @@ mod tests {
         ]);
     }
 
+    /// The constant and the terminal members of a lifecycle catalog.
+    fn lifecycle(catalog: CodeCatalog) -> (&'static str, &'static [&'static str]) {
+        match catalog.terminal_states {
+            TerminalStates::Lifecycle { constant, members } => (constant, members),
+            TerminalStates::NotALifecycle => {
+                panic!("{} records no terminal members", catalog.python_class)
+            }
+        }
+    }
+
+    /// The terminal members that the derive recorded are the variants for
+    /// which `is_terminal` holds, in declaration order.
+    fn assert_terminal_members_follow<E: CodeEnum>(is_terminal: impl Fn(&E) -> bool) {
+        let rule: Vec<&str> = E::VARIANTS
+            .iter()
+            .filter(|variant| is_terminal(variant))
+            .map(|variant| variant.wire_value())
+            .collect();
+        let (_constant, members) = lifecycle(E::CATALOG);
+        assert_eq!(members, rule.as_slice(), "{}", E::CATALOG.python_class);
+    }
+
+    #[test]
+    fn status_terminal_members_follow_the_core_rule() {
+        assert_terminal_members_follow::<TaskStatus>(|status| status.is_terminal());
+        assert_terminal_members_follow::<WorkflowStatus>(|status| status.is_terminal());
+        assert_terminal_members_follow::<WorkflowTaskStatus>(|status| status.is_terminal());
+    }
+
+    #[test]
+    fn status_terminal_members_equal_python_s() {
+        // horsies/core/types/status.py
+        let (constant, members) = lifecycle(<TaskStatus as CodeEnum>::CATALOG);
+        assert_eq!(constant, "TASK_TERMINAL_STATES");
+        assert_eq!(members, ["COMPLETED", "FAILED", "CANCELLED", "EXPIRED"]);
+        // horsies/core/models/workflow/enums.py
+        let (constant, members) = lifecycle(<WorkflowStatus as CodeEnum>::CATALOG);
+        assert_eq!(constant, "WORKFLOW_TERMINAL_STATES");
+        assert_eq!(members, ["COMPLETED", "FAILED", "CANCELLED", "EXPIRED"]);
+        let (constant, members) = lifecycle(<WorkflowTaskStatus as CodeEnum>::CATALOG);
+        assert_eq!(constant, "WORKFLOW_TASK_TERMINAL_STATES");
+        assert_eq!(members, ["COMPLETED", "FAILED", "SKIPPED"]);
+    }
+
+    #[test]
+    fn only_the_three_status_catalogs_are_lifecycles() {
+        let lifecycles: Vec<&str> = CODE_CATALOGS
+            .iter()
+            .filter(|catalog| match catalog.terminal_states {
+                TerminalStates::Lifecycle { .. } => true,
+                TerminalStates::NotALifecycle => false,
+            })
+            .map(|catalog| catalog.python_class)
+            .collect();
+        assert_eq!(
+            lifecycles,
+            ["TaskStatus", "WorkflowStatus", "WorkflowTaskStatus"]
+        );
+    }
+
     #[test]
     fn class_names_are_unique_and_values_are_unique_per_class() {
         let mut classes = HashSet::new();
@@ -315,6 +394,12 @@ mod tests {
             assert!(identifier(catalog.python_class), "{}", catalog.python_class);
             for member in catalog.members {
                 assert!(identifier(member.value), "{}", member.value);
+            }
+            match catalog.terminal_states {
+                TerminalStates::Lifecycle { constant, .. } => {
+                    assert!(identifier(constant), "{constant}");
+                }
+                TerminalStates::NotALifecycle => {}
             }
         }
     }

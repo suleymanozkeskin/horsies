@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from enum import Enum
 
-__all__ = ['TaskStatus', 'TaskAttemptOutcome', 'WorkflowStatus', 'WorkflowTaskStatus']
+__all__ = ['TaskStatus', 'TASK_TERMINAL_STATES', 'TaskAttemptOutcome', 'WorkflowStatus', 'WORKFLOW_TERMINAL_STATES', 'WorkflowTaskStatus', 'WORKFLOW_TASK_TERMINAL_STATES']
 
 
 class TaskStatus(Enum):
@@ -40,6 +40,21 @@ class TaskStatus(Enum):
 
     EXPIRED = 'EXPIRED'
     """good_until passed before execution started. Terminal."""
+
+    @property
+    def is_terminal(self) -> bool:
+        """Whether this status represents a final state (no further transitions)."""
+        return self in TASK_TERMINAL_STATES
+
+
+TASK_TERMINAL_STATES: frozenset[TaskStatus] = frozenset(
+    {
+        TaskStatus.COMPLETED,
+        TaskStatus.FAILED,
+        TaskStatus.CANCELLED,
+        TaskStatus.EXPIRED,
+    }
+)
 
 
 class TaskAttemptOutcome(str, Enum):
@@ -90,6 +105,21 @@ class WorkflowStatus(str, Enum):
     EXPIRED = 'EXPIRED'
     """A paused workflow exceeded `paused_workflow_auto_cancel_after`."""
 
+    @property
+    def is_terminal(self) -> bool:
+        """Whether this status represents a final state (no further transitions)."""
+        return self in WORKFLOW_TERMINAL_STATES
+
+
+WORKFLOW_TERMINAL_STATES: frozenset[WorkflowStatus] = frozenset(
+    {
+        WorkflowStatus.COMPLETED,
+        WorkflowStatus.FAILED,
+        WorkflowStatus.CANCELLED,
+        WorkflowStatus.EXPIRED,
+    }
+)
+
 
 class WorkflowTaskStatus(str, Enum):
     """Status of a single task/node within a workflow.
@@ -120,3 +150,17 @@ class WorkflowTaskStatus(str, Enum):
 
     SKIPPED = 'SKIPPED'
     """Skipped due to upstream failure, condition, or quorum impossible."""
+
+    @property
+    def is_terminal(self) -> bool:
+        """Whether this status represents a final state (no further transitions)."""
+        return self in WORKFLOW_TASK_TERMINAL_STATES
+
+
+WORKFLOW_TASK_TERMINAL_STATES: frozenset[WorkflowTaskStatus] = frozenset(
+    {
+        WorkflowTaskStatus.COMPLETED,
+        WorkflowTaskStatus.FAILED,
+        WorkflowTaskStatus.SKIPPED,
+    }
+)

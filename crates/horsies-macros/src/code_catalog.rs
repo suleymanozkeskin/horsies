@@ -11,10 +11,15 @@
 //! with `base` one of `str_enum` (`class X(str, Enum)`) and `enum`
 //! (`class X(Enum)`), and an optional `class = "..."` when the Python class
 //! name differs from the enum name.
+//!
+//! A lifecycle status names its terminal members: each terminal variant
+//! sets `#[code_catalog(terminal)]`, and the enum sets
+//! `terminal_states = "..."`, the Python name of the frozenset constant of
+//! those members. One without the other is refused.
 
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{Attribute, Data, DeriveInput, Expr, ExprLit, Fields, Lit, LitStr, Meta};
+use syn::{Attribute, Data, DataEnum, DeriveInput, Expr, ExprLit, Fields, Lit, LitStr, Meta};
 
 /// The Python base class of a generated enum.
 enum PythonBase {
@@ -27,6 +32,26 @@ struct ContainerSettings {
     module: String,
     class: Option<String>,
     base: PythonBase,
+    terminal_states: TerminalConstant,
+}
+
+/// The `terminal_states` key of the container.
+enum TerminalConstant {
+    NotNamed,
+    Named(String),
+}
+
+/// Whether a variant is a terminal state of its lifecycle.
+#[derive(Clone, Copy)]
+enum MemberRole {
+    Terminal,
+    NotTerminal,
+}
+
+/// The settings of one variant.
+struct VariantSettings {
+    value: Option<String>,
+    role: MemberRole,
 }
 
 pub fn derive_code_catalog(input: DeriveInput) -> syn::Result<TokenStream> {
@@ -52,24 +77,13 @@ pub fn derive_code_catalog(input: DeriveInput) -> syn::Result<TokenStream> {
     };
     let enum_doc = doc_text(&input.attrs);
 
-    let mut variants = Vec::with_capacity(data.variants.len());
-    let mut values = Vec::with_capacity(data.variants.len());
-    let mut docs = Vec::with_capacity(data.variants.len());
-    for variant in &data.variants {
-        if !matches!(variant.fields, Fields::Unit) {
-            return Err(syn::Error::new_spanned(
-                variant,
-                "CodeCatalog members must be unit variants",
-            ));
-        }
-        let value = match variant_value(&variant.attrs)? {
-            Some(value) => value,
-            None => screaming_snake_case(&variant.ident.to_string()),
-        };
-        variants.push(&variant.ident);
-        values.push(value);
-        docs.push(doc_text(&variant.attrs));
-    }
+    let Members {
+        variants,
+        values,
+        docs,
+        terminal_values,
+    } = read_members(data)?;
+    let terminal_states = terminal_states(settings.terminal_states, &terminal_values, ident)?;
 
     Ok(quote! {
         impl ::horsies_core::catalog::CodeEnum for #ident {
@@ -85,6 +99,7 @@ pub fn derive_code_catalog(input: DeriveInput) -> syn::Result<TokenStream> {
                             doc: #docs,
                         },)*
                     ],
+                    terminal_states: #terminal_states,
                 };
 
             const VARIANTS: &'static [Self] = &[#(Self::#variants,)*];
@@ -98,10 +113,78 @@ pub fn derive_code_catalog(input: DeriveInput) -> syn::Result<TokenStream> {
     })
 }
 
+/// The members of an enum, in declaration order.
+struct Members<'a> {
+    variants: Vec<&'a syn::Ident>,
+    values: Vec<String>,
+    docs: Vec<String>,
+    /// The values of the `#[code_catalog(terminal)]` variants.
+    terminal_values: Vec<String>,
+}
+
+fn read_members(data: &DataEnum) -> syn::Result<Members<'_>> {
+    let mut members = Members {
+        variants: Vec::with_capacity(data.variants.len()),
+        values: Vec::with_capacity(data.variants.len()),
+        docs: Vec::with_capacity(data.variants.len()),
+        terminal_values: Vec::new(),
+    };
+    for variant in &data.variants {
+        if !matches!(variant.fields, Fields::Unit) {
+            return Err(syn::Error::new_spanned(
+                variant,
+                "CodeCatalog members must be unit variants",
+            ));
+        }
+        let variant_settings = variant_settings(&variant.attrs)?;
+        let value = match variant_settings.value {
+            Some(value) => value,
+            None => screaming_snake_case(&variant.ident.to_string()),
+        };
+        match variant_settings.role {
+            MemberRole::Terminal => members.terminal_values.push(value.clone()),
+            MemberRole::NotTerminal => {}
+        }
+        members.variants.push(&variant.ident);
+        members.values.push(value);
+        members.docs.push(doc_text(&variant.attrs));
+    }
+    Ok(members)
+}
+
+/// The `terminal_states` field of the catalog. The constant and the terminal
+/// variants come together or not at all.
+fn terminal_states(
+    constant: TerminalConstant,
+    terminal_values: &[String],
+    ident: &syn::Ident,
+) -> syn::Result<TokenStream> {
+    match (constant, terminal_values.is_empty()) {
+        (TerminalConstant::NotNamed, true) => {
+            Ok(quote!(::horsies_core::catalog::TerminalStates::NotALifecycle))
+        }
+        (TerminalConstant::Named(constant), false) => Ok(quote!(
+            ::horsies_core::catalog::TerminalStates::Lifecycle {
+                constant: #constant,
+                members: &[#(#terminal_values,)*],
+            }
+        )),
+        (TerminalConstant::Named(_), true) => Err(syn::Error::new_spanned(
+            ident,
+            "terminal_states names a constant, but no variant has #[code_catalog(terminal)]",
+        )),
+        (TerminalConstant::NotNamed, false) => Err(syn::Error::new_spanned(
+            ident,
+            "a variant has #[code_catalog(terminal)]; the enum needs #[code_catalog(terminal_states = \"...\")]",
+        )),
+    }
+}
+
 fn container_settings(attrs: &[Attribute], ident: &syn::Ident) -> syn::Result<ContainerSettings> {
     let mut module: Option<String> = None;
     let mut class: Option<String> = None;
     let mut base: Option<PythonBase> = None;
+    let mut terminal_states = TerminalConstant::NotNamed;
     for attr in attrs
         .iter()
         .filter(|attr| attr.path().is_ident("code_catalog"))
@@ -116,6 +199,7 @@ fn container_settings(attrs: &[Attribute], ident: &syn::Ident) -> syn::Result<Co
             match key.as_str() {
                 "module" => module = Some(value.value()),
                 "class" => class = Some(value.value()),
+                "terminal_states" => terminal_states = TerminalConstant::Named(value.value()),
                 "base" => {
                     base = Some(match value.value().as_str() {
                         "str_enum" => PythonBase::StrEnum,
@@ -129,9 +213,9 @@ fn container_settings(attrs: &[Attribute], ident: &syn::Ident) -> syn::Result<Co
                     });
                 }
                 _ => {
-                    return Err(
-                        meta.error("unknown code_catalog key; the keys are module, class and base")
-                    )
+                    return Err(meta.error(
+                        "unknown code_catalog key; the keys are module, class, base and terminal_states",
+                    ))
                 }
             }
             Ok(())
@@ -142,6 +226,7 @@ fn container_settings(attrs: &[Attribute], ident: &syn::Ident) -> syn::Result<Co
             module,
             class,
             base,
+            terminal_states,
         }),
         (None, _) | (_, None) => Err(syn::Error::new_spanned(
             ident,
@@ -150,23 +235,36 @@ fn container_settings(attrs: &[Attribute], ident: &syn::Ident) -> syn::Result<Co
     }
 }
 
-/// The `value` of a variant's `#[code_catalog(value = "...")]`, if set.
-fn variant_value(attrs: &[Attribute]) -> syn::Result<Option<String>> {
+/// The settings of a variant's `#[code_catalog(...)]`: `value = "..."`, when
+/// set, and the `terminal` flag.
+fn variant_settings(attrs: &[Attribute]) -> syn::Result<VariantSettings> {
     let mut value: Option<String> = None;
+    let mut role = MemberRole::NotTerminal;
     for attr in attrs
         .iter()
         .filter(|attr| attr.path().is_ident("code_catalog"))
     {
-        attr.parse_nested_meta(|meta| match meta.path.is_ident("value") {
-            true => {
-                let literal: LitStr = meta.value()?.parse()?;
-                value = Some(literal.value());
-                Ok(())
+        attr.parse_nested_meta(|meta| {
+            let key = meta
+                .path
+                .get_ident()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            match key.as_str() {
+                "value" => {
+                    let literal: LitStr = meta.value()?.parse()?;
+                    value = Some(literal.value());
+                    Ok(())
+                }
+                "terminal" => {
+                    role = MemberRole::Terminal;
+                    Ok(())
+                }
+                _ => Err(meta.error("the code_catalog keys of a variant are value and terminal")),
             }
-            false => Err(meta.error("the only code_catalog key of a variant is value")),
         })?;
     }
-    Ok(value)
+    Ok(VariantSettings { value, role })
 }
 
 /// The `///` lines of an item, one leading space removed, joined by newlines.
@@ -206,7 +304,85 @@ pub(crate) fn screaming_snake_case(variant: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::screaming_snake_case;
+    use super::{derive_code_catalog, screaming_snake_case};
+
+    /// The derive output as text without spaces, or the error message.
+    fn derive_text(input: syn::DeriveInput) -> Result<String, String> {
+        derive_code_catalog(input)
+            .map(|tokens| tokens.to_string().replace(' ', ""))
+            .map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn terminal_variants_and_their_constant_give_a_lifecycle() {
+        let text = derive_text(syn::parse_quote! {
+            #[code_catalog(module = "status", base = "enum", terminal_states = "RUN_TERMINAL_STATES")]
+            enum RunStatus {
+                Pending,
+                #[code_catalog(terminal)]
+                Completed,
+                #[code_catalog(terminal, value = "GAVE_UP")]
+                Failed,
+            }
+        })
+        .expect("the derive accepts the enum");
+        assert!(text.contains(
+            "terminal_states:::horsies_core::catalog::TerminalStates::Lifecycle{constant:\"RUN_TERMINAL_STATES\",members:&[\"COMPLETED\",\"GAVE_UP\",],}"
+        ));
+    }
+
+    #[test]
+    fn an_enum_without_terminal_variants_is_not_a_lifecycle() {
+        let text = derive_text(syn::parse_quote! {
+            #[code_catalog(module = "broker", base = "str_enum")]
+            enum BrokerCode {
+                EnqueueFailed,
+            }
+        })
+        .expect("the derive accepts the enum");
+        assert!(
+            text.contains("terminal_states:::horsies_core::catalog::TerminalStates::NotALifecycle")
+        );
+    }
+
+    #[test]
+    fn a_terminal_variant_without_the_constant_is_refused() {
+        let error = derive_text(syn::parse_quote! {
+            #[code_catalog(module = "status", base = "enum")]
+            enum RunStatus {
+                Pending,
+                #[code_catalog(terminal)]
+                Completed,
+            }
+        })
+        .expect_err("the derive refuses the enum");
+        assert!(error.contains("terminal_states"), "{error}");
+    }
+
+    #[test]
+    fn a_constant_without_terminal_variants_is_refused() {
+        let error = derive_text(syn::parse_quote! {
+            #[code_catalog(module = "status", base = "enum", terminal_states = "RUN_TERMINAL_STATES")]
+            enum RunStatus {
+                Pending,
+            }
+        })
+        .expect_err("the derive refuses the enum");
+        assert!(error.contains("no variant has"), "{error}");
+    }
+
+    #[test]
+    fn an_unknown_variant_key_is_refused() {
+        let error = derive_text(syn::parse_quote! {
+            #[code_catalog(module = "status", base = "enum")]
+            enum RunStatus {
+                #[code_catalog(closing)]
+                Pending,
+            }
+        })
+        .expect_err("the derive refuses the enum");
+        assert!(error.contains("value and terminal"), "{error}");
+    }
 
     #[test]
     fn variant_names_follow_the_serde_rule() {
