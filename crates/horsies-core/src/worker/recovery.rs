@@ -24,6 +24,7 @@ use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::{OperationalErrorCode, TaskError, TaskErrorKind, TaskResult};
 
+use crate::worker::class_coverage_log::{check_class_coverage, ClassCoverageLog};
 use crate::worker::retry::{admit_retry, read_stored_options, RetryAdmission};
 
 /// SQL: Phase 1 scan — find stale RUNNING task IDs (no row locks).
@@ -385,6 +386,101 @@ mod p7_maintenance_tests {
             next_partition_maintenance > tokio::time::Instant::now(),
             "the periodic maintenance tick advances after contained failures",
         );
+    }
+
+    /// Python's order (`reaper.py:144-638`) requeues stale CLAIMED rows before
+    /// it expires PENDING rows, so a stale claim whose `good_until` has passed
+    /// is requeued and expired in one pass. Expiry first would leave it
+    /// PENDING after the pass.
+    #[tokio::test]
+    #[serial]
+    async fn a_stale_claim_past_its_deadline_is_requeued_then_expired_in_one_pass() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let coverage =
+            crate::core::history::maintenance::coverage::ensure_partition_coverage_in_pool(
+                &pool,
+                2,
+                2,
+                &[],
+                &crate::core::history::reads::publisher::StagedLoaderPublisher,
+            )
+            .await
+            .expect("partition coverage");
+        assert!(matches!(
+            coverage,
+            crate::core::history::maintenance::coverage::CoverageOutcome::Ensured(_)
+        ));
+        let task_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO horsies_tasks (
+                 id, task_name, queue_name, priority, input, task_options, execution,
+                 retention_class_key, sent_at, created_at,
+                 command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                 status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                 started_at, finalizing_at, finalizing_by_worker_id,
+                 worker_pid, worker_hostname, worker_process_name,
+                 retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                 updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
+             ) VALUES (
+                 $1, 'reaper_order', 'default', 100, '{}', NULL, 'ISOLATED',
+                 'forever', NOW() - interval '1 day', NOW() - interval '1 day',
+                 1, decode(repeat('00', 32), 'hex'), NULL,
+                 'CLAIMED', NOW() - interval '1 day', NOW() - interval '1 day',
+                 'gone-worker', NOW() + interval '1 hour',
+                 NULL, NULL, NULL,
+                 NULL, NULL, NULL,
+                 0, 0, NULL, NOW() - interval '1 minute', FALSE,
+                 NOW(), FALSE, NULL, NULL
+             )",
+        )
+        .bind(task_id)
+        .execute(&pool)
+        .await
+        .expect("seed a stale claim past its deadline");
+        let mut recovery = RecoveryConfig::default();
+        recovery.auto_requeue_stale_claimed = true;
+        recovery.auto_fail_stale_running = false;
+        recovery.auto_terminate_orphaned_workflow_tasks = false;
+        let retention = RetentionConfig::default();
+        let health = new_reaper_health();
+        let mut next_retention_cleanup = tokio::time::Instant::now() + Duration::from_secs(60);
+        let mut next_partition_maintenance = tokio::time::Instant::now() + Duration::from_secs(60);
+        let mut orphan_state = OrphanSweepState::default();
+
+        run_reaper_pass(
+            &PostgresBroker::from_pool(pool.clone()),
+            &pool,
+            &pool,
+            &WorkflowSpecRegistry::new(),
+            &recovery,
+            &PayloadPolicy::default(),
+            &retention,
+            &health,
+            &mut next_retention_cleanup,
+            &mut next_partition_maintenance,
+            &mut orphan_state,
+        )
+        .await;
+
+        let live: Option<String> =
+            sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
+                .bind(task_id)
+                .fetch_optional(&pool)
+                .await
+                .expect("read the live row");
+        assert_eq!(live, None, "the expired task leaves the live table");
+        let history: String =
+            sqlx::query_scalar("SELECT status FROM horsies_task_history WHERE task_id = $1")
+                .bind(task_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read the history row");
+        assert_eq!(history, "EXPIRED");
+        sqlx::query("DELETE FROM horsies_task_history WHERE task_id = $1")
+            .bind(task_id)
+            .execute(&pool)
+            .await
+            .expect("remove the history row");
     }
 
     #[tokio::test]
@@ -917,7 +1013,10 @@ pub fn new_reaper_health() -> ReaperHealth {
 /// Spawn the reaper loop for stale task recovery.
 ///
 /// Periodically checks for stale RUNNING and CLAIMED tasks, marking them
-/// as FAILED or requeuing them respectively.
+/// as FAILED or requeuing them respectively. The caller has checked the
+/// client family of the handle that owns both pools
+/// (`Worker::start_database`); the reaper's partition maintenance writes
+/// without a second check.
 #[allow(clippy::needless_pass_by_value)]
 pub fn spawn_reaper(
     broker: Arc<PostgresBroker>,
@@ -937,6 +1036,10 @@ pub fn spawn_reaper(
         let mut next_retention_cleanup = tokio::time::Instant::now();
         let mut next_partition_maintenance = tokio::time::Instant::now();
         let mut orphan_state = OrphanSweepState::default();
+        // The fleet check runs after each pass, from one check interval after
+        // the start on (Python `reaper.py:622-628, 747-750`).
+        let mut coverage_log =
+            ClassCoverageLog::for_reaper_start(tokio::time::Instant::now(), check_interval);
 
         tracing::info!(
             auto_requeue_claimed = config.auto_requeue_stale_claimed,
@@ -971,6 +1074,7 @@ pub fn spawn_reaper(
                         &mut orphan_state,
                     )
                     .await;
+                    check_class_coverage(&runtime_pool, &mut coverage_log).await;
                 }
                 GatePass::Held(tx) => {
                     run_reaper_pass(
@@ -987,6 +1091,7 @@ pub fn spawn_reaper(
                         &mut orphan_state,
                     )
                     .await;
+                    check_class_coverage(&runtime_pool, &mut coverage_log).await;
                     release_gate(tx).await;
                 }
             }
@@ -1692,31 +1797,6 @@ mod orphan_audit_schedule_tests {
         let interval = Duration::from_secs(60);
         assert!(state.schedule_if_due(now, interval));
         assert!(state.schedule_if_due(now + interval, interval));
-    }
-
-    /// The reaper pass runs Python's order (`reaper.py:144-638`): requeue
-    /// stale CLAIMED, orphan audit, stale RUNNING, expire PENDING, then
-    /// workflow recovery.
-    #[test]
-    fn reaper_pass_runs_the_steps_in_python_order() {
-        let source = include_str!("recovery.rs");
-        let pass = &source[source
-            .find(&["async fn ", "run_reaper_pass("].concat())
-            .expect("run_reaper_pass source")..];
-        let pass = &pass[..pass.find("\n}\n").expect("end of run_reaper_pass")];
-        let position = |call: &str| {
-            pass.find(call)
-                .unwrap_or_else(|| panic!("{call} not called in run_reaper_pass"))
-        };
-        let order = [
-            position("requeue_stale_claimed(runtime_pool"),
-            position("terminate_orphaned_workflow_tasks(runtime_pool"),
-            position("mark_stale_running_as_failed("),
-            position("expire_pending_tasks(runtime_pool)"),
-            position("recover_stuck_workflows_observed("),
-        ];
-        assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{order:?}");
-        assert!(!pass.contains(&["orphan_state", ".disabled"].concat()));
     }
 
     #[test]
@@ -2937,3 +3017,9 @@ mod tests {
 
 #[cfg(test)]
 mod reaper_loop_tests;
+
+#[cfg(test)]
+mod class_coverage_loop_tests;
+
+#[cfg(test)]
+mod retention_ports;

@@ -38,6 +38,7 @@ from horsies.core.worker.slots import (
     SlotHandle,
     TaskFinished,
 )
+from horsies.core.worker.dispatch_claim import DispatchClaim
 from horsies.core.worker.stored_timeout import TaskTimeout
 from horsies.core.worker.task_loop import (
     CANCEL_ROUND_INTERVAL_S,
@@ -57,6 +58,10 @@ TASK_ID = 'task-1'
 CHILD_PID = 4242
 # Bounds every wait in this file, so a wrong path fails instead of hanging.
 TEST_WAIT_S = 5.0
+CLAIM = DispatchClaim(
+    claimed_at=HANDLE_CLAIMED_AT, retry_count=0, max_retries=0, task_options=None,
+)
+"""The claim of the dispatch of the handle: its generation, and no retry facts."""
 RETURNED = SeatFinished(ok=True, result_json='{"ok":7}', failed_reason=None)
 LEFT = LoopHoldsTasks(count=1, names=('flush',))
 SEEN = ReturnSeen(returned=RETURNED, left=LEFT)
@@ -180,7 +185,7 @@ class TestDeadline:
         handle.note_return(SEEN)
 
         outcome = await asyncio.wait_for(
-            worker._handle_task_timeout(handle, TASK_ID, 1_000, HANDLE_CLAIMED_AT),
+            worker._handle_task_timeout(handle, TASK_ID, 1_000, CLAIM),
             TEST_WAIT_S,
         )
 
@@ -208,7 +213,7 @@ class TestDeadline:
                 handle,
                 TASK_ID,
                 TaskTimeout(ms=1),
-                HANDLE_CLAIMED_AT,
+                CLAIM,
             ),
         )
         await asyncio.sleep(0.05)
@@ -229,7 +234,7 @@ class TestDeadline:
                 handle,
                 TASK_ID,
                 1_000,
-                HANDLE_CLAIMED_AT,
+                CLAIM,
                 LostAfterReturn(RETURNED, _lost(KilledBySignal(9))),
             )
         cast(AsyncMock, worker._record_task_timeout).assert_not_awaited()
@@ -255,7 +260,7 @@ class TestFinalize:
             TASK_ID,
             timeout=TaskTimeout(ms=1_000),
             task_name='left_work_task',
-            claimed_at=HANDLE_CLAIMED_AT,
+            claim=CLAIM,
         )
 
         assert result == Ok(None)
@@ -268,7 +273,7 @@ class TestFinalize:
             finished_handle(LostAfterReturn(RETURNED, _lost(ExitUnknown()))),
             TASK_ID,
             task_name='left_work_task',
-            claimed_at=HANDLE_CLAIMED_AT,
+            claim=CLAIM,
         )
 
         assert result == Ok(None)
@@ -288,7 +293,7 @@ class TestFinalize:
                 handle,
                 TASK_ID,
                 task_name='left_work_task',
-                claimed_at=HANDLE_CLAIMED_AT,
+                claim=CLAIM,
             ),
         )
         await asyncio.sleep(0.05)
@@ -313,7 +318,7 @@ class TestFinalize:
                 queue_name='default',
                 is_workflow_task=False,
                 task_name='left_work_task',
-                claimed_at=HANDLE_CLAIMED_AT,
+                claim=CLAIM,
             ),
             TEST_WAIT_S,
         )

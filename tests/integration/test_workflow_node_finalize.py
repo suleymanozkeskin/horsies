@@ -42,6 +42,7 @@ from horsies.core.worker.workflow_success import (
     FinishWorkflowSuccess,
     finish_workflow_success,
 )
+from tests.dispatch_claim_support import claim_at
 from tests.integration.autocommit_support import (
     WORKER_ID,
     ProxiedWorker,
@@ -126,7 +127,9 @@ async def _run_node_a(session: AsyncSession, workflow_id: str) -> _RunningNode:
                 UPDATE horsies_tasks t
                 SET status = 'RUNNING',
                     claimed_by_worker_id = :worker, claimed_at = :claimed_at,
-                    started_at = NOW()
+                    claim_expires_at = NULL, started_at = NOW(),
+                    worker_pid = 4242, worker_hostname = 'host-1',
+                    worker_process_name = 'child-1'
                 FROM horsies_workflow_tasks wt
                 WHERE wt.workflow_id = :wf AND wt.task_index = 0
                   AND t.id = wt.task_id
@@ -167,7 +170,7 @@ async def _finalize(
         queue_name=node.queue_name,
         is_workflow_task=True,
         task_name=node.task_name,
-        claimed_at=node.claimed_at if claimed_at is None else claimed_at,
+        claim=claim_at(node.claimed_at if claimed_at is None else claimed_at),
     )
 
 

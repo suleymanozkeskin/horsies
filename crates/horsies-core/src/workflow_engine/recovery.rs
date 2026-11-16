@@ -1,7 +1,6 @@
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::history::enqueue::prepare_workflow_task_facts;
-use crate::core::task::retry_utils::parse_max_retries;
 use crate::core::{OperationalErrorCode, TaskError, WorkflowSpecRegistry};
 use sqlx::PgPool;
 use std::time::Instant;
@@ -9,7 +8,6 @@ use uuid::Uuid;
 
 use crate::workflow_engine::engine;
 use crate::workflow_engine::error::WorkflowError;
-use crate::workflow_engine::parse_good_until_from_options;
 use crate::workflow_engine::recovery_limit::{
     count_over_failure_limit, run_recovery_candidate, CandidateOutcome, CountFailures,
     FailureRecord, RecoveryCase, RecoveryFailurePolicy,
@@ -478,6 +476,7 @@ WHERE id = $1
 /// Re-enqueue a READY task into horsies_tasks.
 /// An engine-minted task row carries no command fingerprint, no idempotency
 /// key and no retained input (horsies_tasks_command_fingerprint_by_origin).
+/// `sent_at` is the start call time of the node's workflow ($11).
 const ENQUEUE_TASK_SQL: &str = "\
 INSERT INTO horsies_tasks (
     id, task_name, queue_name, priority, input, task_options, execution,
@@ -487,7 +486,8 @@ INSERT INTO horsies_tasks (
     is_workflow_task, updated_at,
     retain_rerun_input, rerun_of_task_id, rerun_root_task_id
 )
-VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), NULL, NULL, NULL,
+VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8,
+        (SELECT w.sent_at FROM horsies_workflows w WHERE w.id = $11::uuid), NOW(), NULL, NULL, NULL,
         'PENDING', NOW(), 0, $9, $10, TRUE, NOW(), FALSE, NULL, NULL)";
 
 /// Link workflow_task to a newly created horsies_task.
@@ -1542,7 +1542,11 @@ async fn enqueue_ready_task(
     let task_id = crate::core::history::identity::uuid7::mint_task_id().map_err(|error| {
         WorkflowError::Validation(format!("task identity mint failed: {error}"))
     })?;
-    let max_retries = parse_max_retries(row.task_options.as_deref());
+    let max_retries = crate::workflow_engine::node_max_retries(
+        row.task_index,
+        &row.task_name,
+        row.task_options.as_deref(),
+    )?;
 
     let merged_input = match merge_args_from_for_ready(
         pool,
@@ -1582,7 +1586,11 @@ async fn enqueue_ready_task(
     )
     .await?;
 
-    let good_until = parse_good_until_from_options(row.task_options.as_deref());
+    let good_until = crate::workflow_engine::node_good_until(
+        row.task_index,
+        &row.task_name,
+        row.task_options.as_deref(),
+    )?;
     let retention_class_key = retention.resolve_queue_class(&row.queue_name);
     let facts = prepare_workflow_task_facts(
         &merged_input,
@@ -1609,6 +1617,7 @@ async fn enqueue_ready_task(
         .bind(&facts.retention_class_key)
         .bind(max_retries)
         .bind(good_until)
+        .bind(row.workflow_id)
         .execute(&mut *tx)
         .await?;
 
@@ -3013,6 +3022,107 @@ mod cap_tests {
             .unwrap();
     }
 
+    /// Python `tests/integration/test_bounded_recovery.py::test_stale_page_owner_cannot_mutate_after_claim_takeover`:
+    /// the owner of an audit page whose claim expired and was taken over by
+    /// a later audit cannot fail the orphaned workflow of that page, and the
+    /// workflow stays RUNNING. The Python candidate answers `CLAIM_LOST`; the
+    /// core's fenced write answers `false`.
+    #[tokio::test]
+    #[serial]
+    async fn stale_page_owner_cannot_mutate_after_claim_takeover() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        for statement in [
+            "DELETE FROM horsies_workflow_tasks",
+            "DELETE FROM horsies_workflows",
+            "UPDATE horsies_recovery_scan_cursors
+             SET last_created_at = NULL, last_id = NULL,
+                 cycle_upper_created_at = NULL, cycle_upper_id = NULL,
+                 claim_token = NULL, claim_expires_at = NULL,
+                 completed_cycles = 0, last_scan_rows = 0,
+                 last_candidate_rows = 0, last_scan_at = NULL
+             WHERE scan_name = 'running_workflows'",
+        ] {
+            sqlx::query(statement)
+                .execute(&pool)
+                .await
+                .expect("reset the running-workflows scan");
+        }
+        let workflow_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO horsies_workflows (
+                 id, name, status, on_error, output_task_index,
+                 definition_key, depth, root_workflow_id,
+                 sent_at, created_at, started_at, updated_at
+             ) VALUES (
+                 $1, 'stale_owner_orphan', 'RUNNING', 'fail', NULL,
+                 NULL, 0, $1, NOW(), NOW(), NOW(), NOW()
+             )",
+        )
+        .bind(workflow_id)
+        .execute(&pool)
+        .await
+        .expect("seed the orphaned workflow");
+
+        let stale_token = Uuid::new_v4();
+        let first = sqlx::query_as::<_, GlobalWorkflowAuditRow>(GLOBAL_WORKFLOW_AUDIT_SQL)
+            .bind(200_i64)
+            .bind(stale_token)
+            .bind(60_000_i64)
+            .fetch_one(&pool)
+            .await
+            .expect("first audit page");
+        assert_eq!(first.orphan_ids, vec![workflow_id]);
+        assert_eq!(first.claim_token, Some(stale_token));
+
+        sqlx::query(
+            "UPDATE horsies_recovery_scan_cursors
+             SET claim_expires_at = statement_timestamp() - interval '1 second'
+             WHERE scan_name = 'running_workflows'
+               AND claim_token = $1",
+        )
+        .bind(stale_token)
+        .execute(&pool)
+        .await
+        .expect("expire the first claim");
+        let replacement_token = Uuid::new_v4();
+        let second = sqlx::query_as::<_, GlobalWorkflowAuditRow>(GLOBAL_WORKFLOW_AUDIT_SQL)
+            .bind(200_i64)
+            .bind(replacement_token)
+            .bind(60_000_i64)
+            .fetch_one(&pool)
+            .await
+            .expect("takeover audit page");
+        assert_eq!(second.orphan_ids, vec![workflow_id]);
+        assert_eq!(second.claim_token, Some(replacement_token));
+
+        let failed = fail_orphaned_workflow_with_claim(
+            &pool,
+            workflow_id,
+            "stale_owner_orphan",
+            stale_token,
+        )
+        .await
+        .expect("the fenced write answers");
+
+        assert!(!failed, "the stale page owner failed the workflow");
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
+                .bind(workflow_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read the workflow status");
+        assert_eq!(status, "RUNNING");
+
+        release_global_workflow_audit_claim(&pool, replacement_token)
+            .await
+            .expect("release the takeover claim");
+        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+            .bind(workflow_id)
+            .execute(&pool)
+            .await
+            .expect("clean up the workflow");
+    }
+
     #[tokio::test]
     #[serial]
     async fn busy_global_workflow_cursor_refuses_without_waiting() {
@@ -3188,6 +3298,103 @@ mod cap_tests {
             .ok();
     }
 
+    /// Recovery case 1 reads a READY node's stored options with the reader of a task row: a retry policy that
+    /// does not fit is refused before any statement, so no task row is inserted, and the refusal reaches the
+    /// candidate's failure bound (`run_recovery_candidate`). The test seeds no node: a reader that guesses a
+    /// limit (3 here) runs the insert, the LINK matches 0 rows, and the call answers `Ok(false)`.
+    #[tokio::test]
+    #[serial]
+    async fn a_ready_node_whose_retry_policy_does_not_fit_is_not_enqueued() {
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let task_name = "recovery_refused_retry_policy_node";
+        let row = ReadyTaskRow {
+            workflow_id: Uuid::new_v4(),
+            task_index: 3,
+            task_name: task_name.to_owned(),
+            input: "{}".to_owned(),
+            queue_name: "default".to_owned(),
+            priority: 17,
+            task_options: Some(r#"{"retry_policy": {"backoff_strategy": "fixed"}}"#.to_owned()),
+            args_from: None,
+            workflow_ctx_from: None,
+            dependencies: Vec::new(),
+        };
+
+        let outcome = enqueue_ready_task(
+            &pool,
+            &row,
+            &WorkflowSpecRegistry::new(),
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await;
+
+        match outcome {
+            Err(WorkflowError::Validation(message)) => assert!(
+                message.contains(&format!(
+                    "task_options of workflow node 3 ({task_name}) refused"
+                )),
+                "{message}"
+            ),
+            other => panic!("the recovery enqueue must refuse the node, got {other:?}"),
+        }
+        let task_rows: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE task_name = $1")
+                .bind(task_name)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(task_rows, 0);
+    }
+
+    /// Recovery case 1 reads a READY node's stored deadline before it writes: a `good_until` that is not
+    /// an RFC 3339 text is refused, not read as no deadline. The test seeds no node: a reader that drops the
+    /// deadline runs the insert, the LINK matches 0 rows, and the call answers `Ok(false)`.
+    #[tokio::test]
+    #[serial]
+    async fn a_ready_node_whose_deadline_does_not_read_is_not_enqueued() {
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let task_name = "recovery_refused_deadline_node";
+        let row = ReadyTaskRow {
+            workflow_id: Uuid::new_v4(),
+            task_index: 5,
+            task_name: task_name.to_owned(),
+            input: "{}".to_owned(),
+            queue_name: "default".to_owned(),
+            priority: 17,
+            task_options: Some(r#"{"good_until": 12345}"#.to_owned()),
+            args_from: None,
+            workflow_ctx_from: None,
+            dependencies: Vec::new(),
+        };
+
+        let outcome = enqueue_ready_task(
+            &pool,
+            &row,
+            &WorkflowSpecRegistry::new(),
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await;
+
+        match outcome {
+            Err(WorkflowError::Validation(message)) => assert!(
+                message.contains(&format!(
+                    "task_options of workflow node 5 ({task_name}) refused"
+                )),
+                "{message}"
+            ),
+            other => panic!("the recovery enqueue must refuse the node, got {other:?}"),
+        }
+        let task_rows: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE task_name = $1")
+                .bind(task_name)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(task_rows, 0);
+    }
+
     #[tokio::test]
     #[serial]
     async fn p6_workflow_enqueue_recovery_persists_never_eligible_facts() {
@@ -3200,7 +3407,8 @@ mod cap_tests {
                 sent_at, created_at, started_at, updated_at
              ) VALUES (
                 $1::uuid, 'p6_recovery_wf', 'RUNNING', 'fail', NULL,
-                'p6.recovery.v1', 0, $1::uuid, NOW(), NOW(), NOW(), NOW()
+                'p6.recovery.v1', 0, $1::uuid, timestamptz '2026-01-01 00:00:00+00',
+                NOW(), NOW(), NOW()
              )",
         )
         .bind(&workflow_id)
@@ -3274,6 +3482,18 @@ mod cap_tests {
         assert!(facts.1.is_none());
         assert!(facts.2.is_none());
         assert!(!facts.3);
+        // The task row stores the start call time of its workflow as `sent_at`.
+        let sent_at_is_the_start_call_time: bool = sqlx::query_scalar(
+            "SELECT t.sent_at = timestamptz '2026-01-01 00:00:00+00'
+             FROM horsies_tasks t
+             JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
+             WHERE wt.workflow_id = $1::uuid AND wt.task_index = 0",
+        )
+        .bind(&workflow_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read recovery task sent_at");
+        assert!(sent_at_is_the_start_call_time);
 
         sqlx::query(
             "DELETE FROM horsies_tasks WHERE id IN (

@@ -31,8 +31,6 @@ async fn completed_is_never_eligible_even_with_retained_input() {
             task_id,
             fence: owned_claim(),
             result_json: r#"{"ok": 1}"#.to_owned(),
-            notify_channel: "task_queue_default".to_owned(),
-            notify_payload: format!("capacity:{task_id}"),
         },
     )
     .await
@@ -109,8 +107,6 @@ async fn duplicate_identity_fails_closed() {
             task_id,
             fence: owned_claim(),
             result_json: r#"{"ok": 1}"#.to_owned(),
-            notify_channel: "task_queue_default".to_owned(),
-            notify_payload: format!("capacity:{task_id}"),
         },
     )
     .await;

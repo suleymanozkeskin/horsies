@@ -2,3 +2,6 @@
 
 pub mod consumption;
 pub mod quarantine;
+
+#[cfg(test)]
+mod ports;
