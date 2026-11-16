@@ -528,7 +528,6 @@ async fn a_plain_failure_replay_after_a_lost_reply_writes_nothing() {
 /// owes its phase 2 for the committed failure.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #700: the replay reads terminal_status, which the baseline phase-2 record does not have"]
 async fn a_workflow_failure_replay_after_a_lost_reply_owes_phase_two() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
     let queue = test_queue();
@@ -585,7 +584,6 @@ async fn a_workflow_failure_replay_after_a_lost_reply_owes_phase_two() {
 /// adds no attempt and leaves the committed record as it was.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #700: the replay reads terminal_status, which the baseline phase-2 record does not have"]
 async fn a_workflow_success_replay_owes_phase_two() {
     let pool = crate::broker::terminalization_matrix::migrated_pool().await;
     let queue = test_queue();
