@@ -31,9 +31,7 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::broker::claims::{count_queue_starts, ClaimedRow, QueueStartCheck, QueueStarts};
-use crate::broker::core_rows::StatementLog;
-use crate::broker::BrokerError;
-use crate::db::CorePool;
+use crate::broker::{BrokerError, PostgresBroker};
 
 #[cfg(test)]
 mod tests;
@@ -246,20 +244,21 @@ impl QueueCapHold {
 }
 
 /// The start check of one claim pass: when rows are held, one statement
-/// (`count_queue_starts`) on `pool`, then the held rows that their queue's
-/// count leaves room for. No statement when no row is held.
+/// (`count_queue_starts`) on the main core pool of `broker` (the pool of
+/// the claim pass), then the held rows that their queue's count leaves room
+/// for. No statement when no row is held.
 ///
-/// Errors: the [`BrokerError`] of the count. The held rows stay held, and
-/// nothing is admitted.
-pub(crate) async fn admit_held_rows(
-    pool: &CorePool,
-    log: StatementLog,
+/// Errors: the [`BrokerError`] of the core pools or of the count. The held
+/// rows stay held, and nothing is admitted.
+pub async fn admit_held_rows(
+    broker: &PostgresBroker,
     worker_id: &str,
     hold: &mut QueueCapHold,
 ) -> Result<Vec<AdmittedRow>, BrokerError> {
     let Some(check) = hold.check(worker_id) else {
         return Ok(Vec::new());
     };
-    let starts = count_queue_starts(pool, log, &check).await?;
+    let (open, _write) = broker.core_pools_for_write()?;
+    let starts = count_queue_starts(open.main(), broker.statement_log(), &check).await?;
     Ok(hold.admit(&starts))
 }

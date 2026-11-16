@@ -9,26 +9,34 @@
 //! row of a capped queue waits in the parent until its queue's count leaves
 //! room (`queue_cap_hold`).
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::task::Poll;
 use std::time::Duration;
 
 use chrono::Utc;
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, Notify};
-use tokio::task::JoinSet;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::broker::claims::{ClaimClasses, ClaimPassRequest, ClaimedRow};
-use crate::broker::{NotifyListener, PostgresBroker};
+use crate::broker::health::WORKER_PING_CHANNEL;
+use crate::broker::process_listener::{default_payload_capacity, fixed_channel};
+use crate::broker::PostgresBroker;
 use crate::core::config::app::AppConfig;
-use crate::core::config::worker_profile::TaskLimitSetting;
+use crate::core::config::worker_profile::{SelectedProfile, TaskLimitSetting};
 use crate::core::history::maintenance::coverage::{
     ensure_startup_coverage_in_pool, StartupCoverageOutcome,
 };
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
-use crate::db::Reserve;
+use crate::db::{
+    ChannelName, PayloadEvent, PayloadFilter, PayloadSubscription, Reserve, WakeEvent,
+    WakeSubscription,
+};
 use crate::worker::backoff::RetryBackoff;
 use crate::worker::children::{
     attempt_end, baseline_limits, exit_not_seen, pending_task_limit, plan_placement, ChildLaunch,
@@ -52,11 +60,9 @@ use crate::worker::finalize_batch::statement::WorkerPoolSuccessWrite;
 use crate::worker::finalize_batch::stop::drain_then_close;
 use crate::worker::finalize_batch::{FinalizeBatcher, FlusherBound};
 use crate::worker::heartbeat::spawn_claimer_heartbeat;
-use crate::worker::profile_fit::{
-    log_connection_fit_at_boot, log_memory_fit_at_boot, SelectedProfile,
-};
+use crate::worker::profile_fit::{log_connection_fit_at_boot, log_memory_fit_at_boot};
 use crate::worker::queue_cap_hold::{admit_held_rows, QueueCapHold, StartCheckCaps, StartCount};
-use crate::worker::recovery::{new_reaper_health, spawn_reaper};
+use crate::worker::recovery::{new_reaper_health, spawn_reaper, ReaperHealth};
 use crate::worker::retry::read_stored_options;
 use crate::worker::runner_beats::{
     launch_runner_beats, runner_beat_pool, BeatSender, FailClosedState, FailClosedStop,
@@ -253,23 +259,83 @@ enum ClaimWake {
     Cancelled,
     CapacityReleased,
     DatabaseNotification,
+    /// The listener reconnected: a notification may have been lost, so the
+    /// loop claims at once.
+    ListenerGap,
     ListenerClosed,
     PollElapsed,
+}
+
+impl ClaimWake {
+    fn from_listener(event: WakeEvent) -> ClaimWake {
+        match event {
+            WakeEvent::Notified => ClaimWake::DatabaseNotification,
+            WakeEvent::Gap => ClaimWake::ListenerGap,
+            WakeEvent::Stopped => ClaimWake::ListenerClosed,
+        }
+    }
+}
+
+/// One pending wait of [`ClaimWakes::next`].
+type QueueWait<'a> = Pin<Box<dyn Future<Output = WakeEvent> + Send + 'a>>;
+
+/// The claim wakes of a worker: one wake subscription per queue channel
+/// `task_queue_<queue>` on the broker's listener. A wake subscription holds
+/// at most one pending signal, so a burst of inserts on one queue wakes the
+/// claim loop once.
+struct ClaimWakes {
+    subscriptions: Vec<WakeSubscription>,
+}
+
+impl ClaimWakes {
+    /// The next event of any queue. Cancel-safe: a subscription's `recv`
+    /// keeps its signal when it is dropped before it returns. With no
+    /// subscription it never returns.
+    async fn next(&self) -> WakeEvent {
+        let mut waits: Vec<QueueWait<'_>> = self
+            .subscriptions
+            .iter()
+            .map(|subscription| Box::pin(subscription.recv()) as QueueWait<'_>)
+            .collect();
+        std::future::poll_fn(|context| {
+            for wait in waits.iter_mut() {
+                if let Poll::Ready(event) = wait.as_mut().poll(context) {
+                    return Poll::Ready(event);
+                }
+            }
+            Poll::Pending
+        })
+        .await
+    }
+
+    /// Takes at most `limit` signals that are already pending on the queues,
+    /// so one claim pass answers a burst on several queues (Python's
+    /// `coalesce_notifies`). Waits for nothing. A stop is not taken: a stopped
+    /// subscription reads `Stopped` again at the next wait.
+    async fn drain_pending(&self, limit: u32) {
+        let mut drained: u32 = 0;
+        for subscription in &self.subscriptions {
+            if drained >= limit {
+                return;
+            }
+            match tokio::time::timeout(Duration::ZERO, subscription.recv()).await {
+                Ok(WakeEvent::Notified | WakeEvent::Gap) => drained += 1,
+                Ok(WakeEvent::Stopped) | Err(_) => {}
+            }
+        }
+    }
 }
 
 async fn wait_for_claim_wake(
     cancel: &CancellationToken,
     capacity_released: &Notify,
-    notifications: &mut mpsc::Receiver<sqlx::postgres::PgNotification>,
+    claim_wakes: &ClaimWakes,
     poll_interval: Duration,
 ) -> ClaimWake {
     tokio::select! {
         _ = cancel.cancelled() => ClaimWake::Cancelled,
         _ = capacity_released.notified() => ClaimWake::CapacityReleased,
-        notification = notifications.recv() => match notification {
-            Some(_) => ClaimWake::DatabaseNotification,
-            None => ClaimWake::ListenerClosed,
-        },
+        event = claim_wakes.next() => ClaimWake::from_listener(event),
         _ = tokio::time::sleep(poll_interval) => ClaimWake::PollElapsed,
     }
 }
@@ -489,6 +555,76 @@ fn return_held_rows(
     }
 }
 
+/// What the ping responder needs to answer a ping.
+#[derive(Clone)]
+struct PingResponder {
+    pool: sqlx::PgPool,
+    worker_id: String,
+    hostname: String,
+    pid: i32,
+}
+
+/// Answers liveness pings from the worker's ping subscription until a stop
+/// request or until the listener stops. Each ping is answered in its own
+/// task, so a slow reply does not hold the next ping. Pings sent while the
+/// listener reconnected, or dropped by a full queue, are lost; their senders
+/// time out.
+fn spawn_ping_responder(
+    pings: PayloadSubscription,
+    responder: PingResponder,
+    cancel: CancellationToken,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let event = tokio::select! {
+                _ = cancel.cancelled() => return,
+                event = pings.recv() => event,
+            };
+            match event {
+                PayloadEvent::Payload(payload) => {
+                    let responder = responder.clone();
+                    let _reply = tokio::spawn(async move {
+                        if let Err(error) = handle_worker_ping(
+                            &responder.pool,
+                            &responder.worker_id,
+                            &responder.hostname,
+                            responder.pid,
+                            &payload,
+                        )
+                        .await
+                        {
+                            tracing::error!(error = %error, "ping responder error");
+                        }
+                    });
+                }
+                PayloadEvent::Gap | PayloadEvent::Overflowed => {
+                    tracing::debug!("pings may have been lost; their senders time out");
+                }
+                PayloadEvent::Stopped => {
+                    tracing::warn!("the listener stopped; the ping responder ends");
+                    return;
+                }
+            }
+        }
+    })
+}
+
+/// The listener subscriptions of a running worker.
+struct WorkerSubscriptions {
+    claim_wakes: ClaimWakes,
+    pings: PayloadSubscription,
+}
+
+/// The claim wake channel of a queue: `task_queue_<queue>`. A queue name
+/// whose channel passes PostgreSQL's 63-byte limit is a configuration error.
+fn queue_channel(queue: &str) -> Result<ChannelName, WorkerError> {
+    ChannelName::parse(&format!("task_queue_{queue}")).map_err(|refused| {
+        WorkerError::Config(format!(
+            "queue {queue:?} cannot be listened on: the channel task_queue_{queue}: {refused}"
+        ))
+    })
+}
+
 /// Task queue worker.
 ///
 /// Claims tasks from PostgreSQL with the budgets of its children, runs each
@@ -513,8 +649,11 @@ pub struct Worker {
 }
 
 impl Worker {
-    /// Create a worker that runs `profile`. `launch` names what every child
-    /// runs; `registered` the class of each task of the app.
+    /// Create a worker that runs `profile`, the profile that the worker
+    /// manifest selects ([`crate::worker_manifest::WorkerManifest::selected_profile`],
+    /// [`crate::core::config::worker_profile::select_worker_profile`]).
+    /// `launch` names what every child runs; `registered` the class of each
+    /// task of the app.
     ///
     /// Errors: [`WorkerError::Config`] for a worker config that does not
     /// validate, or a profile that starts no child (AppConfig validation
@@ -662,11 +801,16 @@ impl Worker {
         }
     }
 
-    /// Authorize the schema and ensure the partition coverage of the
-    /// current period: the database steps of the worker start. It does not
-    /// retry.
+    /// Authorize the schema, check the client family, and ensure the
+    /// partition coverage of the current period: the database steps of the
+    /// worker start. It does not retry.
     async fn start_database(&self) -> Result<(), WorkerError> {
         self.broker.ensure_schema_initialized().await?;
+        // The startup coverage and the reaper's partition maintenance are the
+        // worker's maintenance writes. The handle checks its client family
+        // once, before the first of them; a database of the other family or
+        // with no family row refuses the start, not retryable.
+        self.broker.ensure_client_family_for_write().await?;
         let declared_periods = self.app_config.retention.registrable_periods();
         let startup_coverage = ensure_startup_coverage_in_pool(
             self.broker.session_pool(),
@@ -728,6 +872,23 @@ impl Worker {
         }
     }
 
+    /// The reaper of this worker: the recovery steps and the cluster gate on
+    /// the runtime pool, partition maintenance on the session pool.
+    fn spawn_reaper_loop(&self, health: ReaperHealth) -> tokio::task::JoinHandle<()> {
+        // The reaper's gate and pass run on the worker reserve, which the
+        // runtime pool's users cannot exhaust.
+        spawn_reaper(
+            self.broker.reserve_pool().clone(),
+            self.broker.reserve_maintenance_pool().clone(),
+            Arc::clone(&self.workflow_registry),
+            self.app_config.recovery.clone(),
+            self.app_config.payload.clone(),
+            self.app_config.retention.clone(),
+            health,
+            self.cancel.clone(),
+        )
+    }
+
     /// Run the worker until it is stopped or a fatal error occurs (Python
     /// `run_forever`).
     ///
@@ -779,11 +940,15 @@ impl Worker {
     /// the broker: as many flushers as its batch connections leave after the
     /// claim pass, and a queue bound of the pending limit.
     ///
-    /// Errors: [`WorkerError::Config`] when the broker's main pool keeps no
-    /// reserve (a broker not built with `connect_worker_with`), or leaves no
+    /// Errors: [`WorkerError::Broker`] when the broker's core pools cannot
+    /// be built; [`WorkerError::Config`] when its main pool keeps no reserve
+    /// (a broker not built with `connect_worker_with`), or leaves no
     /// connection for a flusher.
     fn finalize_batcher(&self) -> Result<FinalizeBatcher<WorkerPoolSuccessWrite>, WorkerError> {
-        let sizing = self.broker.core_main_pool().sizing();
+        // The core handle gives its main pool with a write token only; the
+        // token ends with this function and no statement runs under it.
+        let (open, _write) = self.broker.core_pools_for_write()?;
+        let sizing = open.main().sizing();
         match sizing.reserve() {
             Reserve::KeepFree(_) => {}
             Reserve::NoReserve => {
@@ -921,13 +1086,7 @@ impl Worker {
                 ),
             }
         }
-        let admitted = admit_held_rows(
-            self.broker.core_main_pool(),
-            self.broker.statement_log(),
-            &self.worker_id,
-            hold,
-        )
-        .await?;
+        let admitted = admit_held_rows(&self.broker, &self.worker_id, hold).await?;
         for admitted in admitted {
             self.dispatch(
                 children,
@@ -980,7 +1139,7 @@ impl Worker {
         writer: &Arc<OutcomeWriter>,
         writes: &mut JoinSet<()>,
         hold: &mut QueueCapHold,
-        notifications: &mut mpsc::Receiver<sqlx::postgres::PgNotification>,
+        claim_wakes: &ClaimWakes,
     ) -> Option<WorkerError> {
         let steps = BrokerClaimSteps::new(Arc::clone(&self.broker), self.worker_id.clone());
         let mut claim_backoff = RetryBackoff::from_config(&self.app_config.resilience);
@@ -1032,28 +1191,22 @@ impl Worker {
             match wait_for_claim_wake(
                 &self.cancel,
                 &self.capacity_released,
-                notifications,
+                claim_wakes,
                 poll_interval,
             )
             .await
             {
                 ClaimWake::Cancelled => return None,
                 ClaimWake::ListenerClosed => {
-                    tracing::info!("listener channel closed, shutting down");
+                    tracing::info!("the listener stopped, shutting down");
                     return None;
                 }
                 ClaimWake::DatabaseNotification => {
-                    for _ in 0..self.worker_config.coalesce_notifies {
-                        match notifications.try_recv() {
-                            Ok(_) => {}
-                            Err(
-                                mpsc::error::TryRecvError::Empty
-                                | mpsc::error::TryRecvError::Disconnected,
-                            ) => break,
-                        }
-                    }
+                    claim_wakes
+                        .drain_pending(self.worker_config.coalesce_notifies)
+                        .await;
                 }
-                ClaimWake::CapacityReleased | ClaimWake::PollElapsed => {}
+                ClaimWake::ListenerGap | ClaimWake::CapacityReleased | ClaimWake::PollElapsed => {}
             }
         }
     }
@@ -1091,21 +1244,34 @@ impl Worker {
         );
         self.log_claim_settings(&children);
 
-        // Subscribe to queue notifications with resilience.
-        let listener = match self.connect_listener_with_resilience().await {
-            Ok(listener) => listener,
-            Err(error) => {
-                RunningChildren {
-                    children,
-                    spawner,
-                    live,
+        // Check the session URL, then subscribe the claim wakes and the pings
+        // on the broker's listener, with resilience.
+        let WorkerSubscriptions { claim_wakes, pings } =
+            match self.connect_listener_with_resilience().await {
+                Ok(subscriptions) => subscriptions,
+                Err(error) => {
+                    RunningChildren {
+                        children,
+                        spawner,
+                        live,
+                    }
+                    .stop_after_failed_start()
+                    .await;
+                    return Err(error);
                 }
-                .stop_after_failed_start()
-                .await;
-                return Err(error);
-            }
-        };
-        let mut notify_rx = self.spawn_listener(listener);
+            };
+
+        // Liveness pings are answered off the claim path.
+        let ping_responder = spawn_ping_responder(
+            pings,
+            PingResponder {
+                pool: self.broker.pool().clone(),
+                worker_id: self.worker_id.clone(),
+                hostname: self.hostname.clone(),
+                pid: std::process::id() as i32,
+            },
+            self.cancel.clone(),
+        );
 
         let writer = Arc::new(OutcomeWriter::new(
             Arc::clone(&self.broker),
@@ -1121,7 +1287,7 @@ impl Worker {
             ),
         ));
         let stops = ChildrenStopCell::default();
-        let services = match self.spawn_services(&children, &live, &stops) {
+        let services = match self.spawn_services(&children, &live, &stops, ping_responder) {
             Ok(services) => services,
             Err(error) => {
                 self.cancel.cancel();
@@ -1145,7 +1311,7 @@ impl Worker {
             &self.worker_config.queue_max_concurrency,
         ));
         let fatal_claim_error = self
-            .claim_loop(&children, &writer, &mut writes, &mut hold, &mut notify_rx)
+            .claim_loop(&children, &writer, &mut writes, &mut hold, &claim_wakes)
             .await;
 
         // Stop the claim loop and every service loop on every exit path,
@@ -1208,67 +1374,12 @@ impl Worker {
         Ok(())
     }
 
-    /// Fan out LISTEN/NOTIFY to a bounded channel of claim wakes, and serve
-    /// liveness pings off that path. Notifications are coalesceable wake-up
-    /// signals, so dropping overflow is safe. Ends at the stop.
-    fn spawn_listener(
-        &self,
-        mut listener: NotifyListener,
-    ) -> mpsc::Receiver<sqlx::postgres::PgNotification> {
-        let (notify_tx, notify_rx) = mpsc::channel(256);
-        let listener_cancel = self.cancel.clone();
-        let ping_pool = self.broker.pool().clone();
-        let ping_worker_id = self.worker_id.clone();
-        let ping_hostname = self.hostname.clone();
-        let ping_pid = std::process::id() as i32;
-        let _listener_task = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = listener_cancel.cancelled() => break,
-                    notification = listener.recv() => {
-                        match notification {
-                            Ok(notif) => {
-                                if notif.channel() == crate::broker::health::WORKER_PING_CHANNEL {
-                                    // Serve liveness pings off the lossy wake-up
-                                    // path; spawn so recv() keeps draining.
-                                    let pool = ping_pool.clone();
-                                    let worker_id = ping_worker_id.clone();
-                                    let hostname = ping_hostname.clone();
-                                    let payload = notif.payload().to_owned();
-                                    tokio::spawn(async move {
-                                        if let Err(e) = handle_worker_ping(
-                                            &pool, &worker_id, &hostname, ping_pid, &payload,
-                                        )
-                                        .await
-                                        {
-                                            tracing::error!(error = %e, "ping responder error");
-                                        }
-                                    });
-                                } else if notify_tx.try_send(notif).is_err() {
-                                    // Channel full or closed - ok to drop, worker will poll anyway.
-                                }
-                            }
-                            Err(e) => {
-                                // sqlx PgListener reconnects automatically on
-                                // network failures and re-subscribes to channels.
-                                // Pause briefly to avoid a tight spin if
-                                // reconnection keeps failing.
-                                tracing::error!(error = %e, "listener error, sqlx will attempt reconnect");
-                                tokio::time::sleep(Duration::from_millis(200)).await;
-                            }
-                        }
-                    }
-                }
-            }
-        });
-        notify_rx
-    }
-
     /// Start the service loops: the claimer heartbeat, the reaper, the
     /// worker snapshot, the runner heartbeats of the tasks that children
     /// hold, the watch of the pool failure and the new-kind baseline guard.
-    /// Each runs under a watchdog: one that ends with no stop request stops
-    /// the worker with `ServiceLoopDied` (C11-inverse).
+    /// Each of them and `ping_responder` runs under a watchdog: one that ends
+    /// with no stop request stops the worker with `ServiceLoopDied`
+    /// (C11-inverse).
     ///
     /// Errors: [`WorkerError::Config`] when the runner heartbeat watchdog
     /// thread does not start.
@@ -1277,6 +1388,7 @@ impl Worker {
         children: &WorkerChildren,
         live: &LiveDispatches,
         stops: &ChildrenStopCell,
+        ping_responder: JoinHandle<()>,
     ) -> Result<Services, WorkerError> {
         let claimer_interval =
             Duration::from_millis(self.app_config.recovery.claimer_heartbeat_interval_ms);
@@ -1291,16 +1403,7 @@ impl Worker {
             self.cancel.clone(),
         );
         let reaper_health = new_reaper_health();
-        let reaper = spawn_reaper(
-            self.broker.pool().clone(),
-            self.broker.session_pool().clone(),
-            Arc::clone(&self.workflow_registry),
-            self.app_config.recovery.clone(),
-            self.app_config.payload.clone(),
-            self.app_config.retention.clone(),
-            Arc::clone(&reaper_health),
-            self.cancel.clone(),
-        );
+        let reaper = self.spawn_reaper_loop(Arc::clone(&reaper_health));
         let state_loop = crate::worker::worker_state::spawn_worker_state_loop(
             self.broker.pool().clone(),
             self.worker_id.clone(),
@@ -1352,13 +1455,19 @@ impl Worker {
             self.cancel.clone(),
         ));
 
+        // Supervise the service loops (C11-inverse): a loop that dies without
+        // a shutdown request must not leave the worker claiming with lease
+        // renewal, stale-task recovery, or liveness advertising dead. The
+        // claim wakes need no watchdog: the claim loop reads them, and a
+        // stopped listener ends it.
         let (fatal_tx, fatal_rx) =
             mpsc::unbounded_channel::<crate::worker::supervision::ServiceExit>();
-        let watched: [(&'static str, tokio::task::JoinHandle<()>); 6] = [
+        let watched: [(&'static str, tokio::task::JoinHandle<()>); 7] = [
             ("claimer-heartbeat", claimer_hb),
             ("runner-heartbeat", runner_beats),
             ("reaper", reaper),
             ("worker-state", state_loop),
+            ("ping-responder", ping_responder),
             ("slot-failure-watch", pool_failure),
             ("new-kind-baseline-watch", new_kind_baselines),
         ];
@@ -1396,12 +1505,39 @@ impl Worker {
 
     // ----- listener setup with resilience -----
 
-    /// Attempt to connect the LISTEN/NOTIFY listener and subscribe to queues.
-    async fn try_connect_listener(&self) -> Result<NotifyListener, WorkerError> {
-        self.broker.ensure_listener_delivery_checked().await?;
-        let mut listener = NotifyListener::connect(self.broker.session_pool()).await?;
-        for queue in &self.worker_config.queues {
-            listener.listen(&format!("task_queue_{}", queue)).await?;
+    /// Check the pools and the session URL, then subscribe the claim wakes of
+    /// every queue and the ping channel on the broker's listener.
+    ///
+    /// The checks run at every worker boot, with or without PgBouncer mode
+    /// (Python `validate_worker_database_paths`): the pool checks
+    /// ([`PostgresBroker::check_worker_session`]), then the session check
+    /// ([`PostgresBroker::check_session_delivery`]). A statement-pooled URL
+    /// or a URL that does not keep session state is refused, not retryable; a
+    /// database that cannot be reached is retryable.
+    async fn try_connect_listener(&self) -> Result<WorkerSubscriptions, WorkerError> {
+        let channels = self
+            .worker_config
+            .queues
+            .iter()
+            .map(|queue| queue_channel(queue))
+            .collect::<Result<Vec<ChannelName>, WorkerError>>()?;
+        self.broker
+            .check_worker_session()
+            .await
+            .map_err(WorkerError::Broker)?;
+        self.broker
+            .check_session_delivery()
+            .await
+            .map_err(WorkerError::SessionCheck)?;
+        let listener = self.broker.listener();
+        let mut subscriptions = Vec::with_capacity(channels.len());
+        for channel in channels {
+            subscriptions.push(
+                listener
+                    .subscribe_wake(channel, PayloadFilter::AnyPayload)
+                    .await
+                    .map_err(WorkerError::Listener)?,
+            );
         }
         // The global task_new channel is deliberately NOT subscribed: the
         // per-queue channels cover every insert and capacity signal this worker
@@ -1410,14 +1546,22 @@ impl Worker {
         // external observers. Parity with horsies PR #101 cafc9200.
         // Subscribe to the shared liveness-ping channel BEFORE any background
         // loop is spawned, so a subscription failure cannot orphan running loops.
-        listener
-            .listen(crate::broker::health::WORKER_PING_CHANNEL)
-            .await?;
-        Ok(listener)
+        let pings = listener
+            .subscribe_payloads(
+                fixed_channel(WORKER_PING_CHANNEL),
+                default_payload_capacity(),
+            )
+            .await
+            .map_err(WorkerError::Listener)?;
+        Ok(WorkerSubscriptions {
+            claim_wakes: ClaimWakes { subscriptions },
+            pings,
+        })
     }
 
-    /// Connect the listener with exponential backoff on transient failures.
-    async fn connect_listener_with_resilience(&self) -> Result<NotifyListener, WorkerError> {
+    /// Run [`Worker::try_connect_listener`] with exponential backoff on
+    /// transient failures.
+    async fn connect_listener_with_resilience(&self) -> Result<WorkerSubscriptions, WorkerError> {
         let mut backoff = RetryBackoff::from_config(&self.app_config.resilience);
 
         loop {
@@ -1496,12 +1640,12 @@ fn reap_finished(writes: &mut JoinSet<()>) {
 mod tests {
     use super::*;
     use crate::worker::execution::{
-        execute_and_finalize, notify_worker_capacity, persist_terminal_state, run_phase2,
-        FinalizeStage,
+        capacity_wake, execute_and_finalize, persist_terminal_state, run_phase2, FinalizeStage,
     };
+    use crate::workflow_engine::phase2_recovery::send_phase2_wake;
 
     use crate::async_task_fn;
-    use crate::broker::{ClaimedTaskRow, NotifyListener, PostgresBroker};
+    use crate::broker::{ClaimedTaskRow, PostgresBroker};
     use crate::core::config::recovery::RecoveryConfig;
     use crate::core::history::maintenance::coverage::{
         ensure_startup_coverage, StartupCoverageOutcome,
@@ -1520,14 +1664,170 @@ mod tests {
     use std::sync::Arc;
     use uuid::Uuid;
 
+    /// Claim wakes with no queue subscription: the wake branch never fires.
+    fn no_claim_wakes() -> ClaimWakes {
+        ClaimWakes {
+            subscriptions: Vec::new(),
+        }
+    }
+
+    /// A worker on `broker` of one isolated child that boots, then exits at
+    /// the next frame it reads.
+    fn worker_of_one_idle_child(
+        broker: Arc<PostgresBroker>,
+        app_config: AppConfig,
+        worker_config: WorkerConfig,
+    ) -> Worker {
+        use crate::worker::executor::protocol::{ChildLogLevel, ChildProgram, DatabaseUrl};
+        let database_url = DatabaseUrl::new(app_config.broker.database_url.clone());
+        Worker::new(
+            broker,
+            Arc::new(WorkflowSpecRegistry::new()),
+            app_config,
+            worker_config,
+            SelectedProfile {
+                name: "default".to_owned(),
+                profile: serde_json::from_value(serde_json::json!({
+                    "isolated": {"kind": "isolated_children", "count": 1}
+                }))
+                .expect("a valid test profile"),
+            },
+            ChildLaunch {
+                command: crate::worker::executor::slots::scripted::idle_child_of_any_kind(),
+                program: ChildProgram::Rust,
+                log_level: ChildLogLevel::Info,
+                database_url,
+            },
+            RegisteredClasses::default(),
+        )
+        .expect("a valid test worker")
+    }
+
+    #[test]
+    fn a_claim_wake_follows_the_listener_event() {
+        assert_eq!(
+            ClaimWake::from_listener(WakeEvent::Notified),
+            ClaimWake::DatabaseNotification
+        );
+        assert_eq!(
+            ClaimWake::from_listener(WakeEvent::Gap),
+            ClaimWake::ListenerGap
+        );
+        assert_eq!(
+            ClaimWake::from_listener(WakeEvent::Stopped),
+            ClaimWake::ListenerClosed
+        );
+    }
+
+    /// `task_queue_` is 11 bytes, so a queue name of 52 bytes fits the
+    /// 63-byte channel limit and 53 bytes does not.
+    #[test]
+    fn a_queue_whose_channel_does_not_fit_is_a_config_error() {
+        assert!(queue_channel(&"q".repeat(52)).is_ok());
+        let refused = queue_channel(&"q".repeat(53)).expect_err("the channel is too long");
+        assert!(matches!(refused, WorkerError::Config(_)));
+        assert!(!refused.is_retryable());
+    }
+
+    /// A broker with no listener cannot carry claim wakes or pings: the
+    /// worker refuses to start, not retryable, before any database call.
+    #[tokio::test]
+    async fn a_worker_on_a_broker_without_a_listener_refuses_to_start() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://horsies@127.0.0.1:1/horsies")
+            .expect("a lazy pool opens no connection");
+        let worker = worker_of_one_idle_child(
+            Arc::new(PostgresBroker::from_pool(pool)),
+            AppConfig::for_database_url("postgresql://horsies@127.0.0.1:1/horsies"),
+            WorkerConfig::default(),
+        );
+
+        let Err(refused) = worker.try_connect_listener().await else {
+            panic!("a broker without a listener cannot serve a worker");
+        };
+
+        assert!(
+            matches!(
+                refused,
+                WorkerError::SessionCheck(crate::broker::SessionCheckFailure::Subscribe(
+                    crate::broker::ListenError::NoSessionUrl
+                ))
+            ),
+            "{refused}"
+        );
+        assert!(!refused.is_retryable());
+    }
+
+    /// The boot check passes on a direct URL, and the claim wakes and the
+    /// ping replies both travel over the broker's one listener.
+    #[tokio::test]
+    #[serial]
+    async fn a_booted_worker_wakes_on_its_queue_and_answers_pings() {
+        let broker = Arc::new(PostgresBroker::from_pool_and_session_url(
+            test_pool().await,
+            &crate::broker::terminalization_matrix::migrated_database_url().await,
+        ));
+        let worker = worker_of_one_idle_child(
+            Arc::clone(&broker),
+            AppConfig::for_database_url("postgresql://horsies@127.0.0.1:1/horsies"),
+            WorkerConfig {
+                queues: vec!["listener_boot_q".to_owned()],
+                ..WorkerConfig::default()
+            },
+        );
+        let WorkerSubscriptions { claim_wakes, pings } = worker
+            .try_connect_listener()
+            .await
+            .expect("the session check passes and the subscriptions start");
+
+        sqlx::query("SELECT pg_notify('task_queue_listener_boot_q', 'wake')")
+            .execute(broker.pool())
+            .await
+            .expect("notify the queue");
+        let wake = tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_claim_wake(
+                &worker.cancel,
+                &worker.capacity_released,
+                &claim_wakes,
+                Duration::from_secs(60),
+            ),
+        )
+        .await
+        .expect("the queue notification wakes the claim loop");
+        assert_eq!(wake, ClaimWake::DatabaseNotification);
+
+        let responder = spawn_ping_responder(
+            pings,
+            PingResponder {
+                pool: broker.pool().clone(),
+                worker_id: worker.worker_id().to_owned(),
+                hostname: "listener-boot-host".to_owned(),
+                pid: 1,
+            },
+            worker.cancel.clone(),
+        );
+        let pongs = broker
+            .ping_workers(Some(worker.worker_id()), Duration::from_secs(5), None)
+            .await
+            .expect("the ping runs");
+        assert_eq!(pongs.len(), 1, "{pongs:?}");
+        assert_eq!(pongs[0].worker_id, worker.worker_id());
+
+        worker.cancel.cancel();
+        responder
+            .await
+            .expect("the ping responder ends at the stop request");
+    }
+
     /// The end of an outcome write wakes the claim loop before its poll
     /// deadline (Python `_capacity_released`, set by each finalizer).
     #[tokio::test]
     async fn released_capacity_wakes_claim_wait_before_poll_deadline() {
         let released = Arc::new(Notify::new());
         let cancel = CancellationToken::new();
-        let (_sender, mut receiver) = mpsc::channel(1);
-        let wait = wait_for_claim_wake(&cancel, &released, &mut receiver, Duration::from_secs(60));
+        let claim_wakes = no_claim_wakes();
+        let wait = wait_for_claim_wake(&cancel, &released, &claim_wakes, Duration::from_secs(60));
         tokio::pin!(wait);
         assert!(wait.as_mut().now_or_never().is_none());
         released.notify_one();
@@ -1545,16 +1845,16 @@ mod tests {
         let released = Arc::new(Notify::new());
         released.notify_one();
         let cancel = CancellationToken::new();
-        let (_sender, mut receiver) = mpsc::channel(1);
+        let claim_wakes = no_claim_wakes();
         let wake = tokio::time::timeout(
             Duration::from_secs(1),
-            wait_for_claim_wake(&cancel, &released, &mut receiver, Duration::from_secs(60)),
+            wait_for_claim_wake(&cancel, &released, &claim_wakes, Duration::from_secs(60)),
         )
         .await
         .expect("release before waiting must not lose the wake");
         assert_eq!(wake, ClaimWake::CapacityReleased);
         assert!(
-            wait_for_claim_wake(&cancel, &released, &mut receiver, Duration::from_secs(60),)
+            wait_for_claim_wake(&cancel, &released, &claim_wakes, Duration::from_secs(60),)
                 .now_or_never()
                 .is_none(),
             "an idle worker must not keep waking"
@@ -1939,49 +2239,6 @@ mod tests {
         assert!(connections < claims);
     }
 
-    #[test]
-    fn startup_authorization_and_coverage_precede_runtime_side_effects() {
-        let source = include_str!("worker.rs");
-        let run = &source[source
-            .find("pub async fn run(&self)")
-            .expect("Worker::run source")
-            .to_owned()..];
-        let start = run
-            .find("self.start_database_with_resilience().await")
-            .expect("database start with retry");
-        let database = &source[source
-            .find("async fn start_database(&self)")
-            .expect("database start steps")..];
-        let schema = database
-            .find("ensure_schema_initialized().await")
-            .expect("schema authorization");
-        let coverage = database
-            .find("ensure_startup_coverage_in_pool(")
-            .expect("startup partition coverage");
-        let session_pool = database[coverage..]
-            .find("self.broker.session_pool()")
-            .map(|offset| coverage + offset)
-            .expect("startup coverage session pool");
-        let banner = run.find("print_banner(").expect("startup banner");
-        let listener = run
-            .find("connect_listener_with_resilience().await")
-            .expect("listener setup");
-        let heartbeats = run
-            .find("spawn_claimer_heartbeat")
-            .expect("heartbeat writer startup");
-        let claims = run.find("claim_for_dispatch(").expect("claim loop");
-        let reaper = run.find("spawn_reaper(").expect("reaper startup");
-        let reaper_call = &run[reaper..reaper + 500];
-        assert!(reaper_call.contains("self.broker.pool().clone()"));
-        assert!(reaper_call.contains("self.broker.session_pool().clone()"));
-        assert!(schema < coverage);
-        assert!(coverage < session_pool);
-        assert!(start < banner);
-        assert!(start < listener);
-        assert!(start < heartbeats);
-        assert!(start < claims);
-    }
-
     // -- the worker on the executor --
 
     /// A worker of one isolated child on a broker whose pool reaches no
@@ -2281,27 +2538,6 @@ mod tests {
 
         app_config.claim_lease_ms = Some(90_000);
         assert_eq!(effective_claim_lease_ms(&app_config), 90_000);
-    }
-
-    /// Every claim and every claimer beat use the effective lease: the claim
-    /// pass never sends `None`, and the heartbeat always renews.
-    #[test]
-    fn claims_and_renewals_always_carry_a_lease() {
-        let source = include_str!("worker.rs");
-        // Production code only: the test module quotes the searched text.
-        let production = &source[..source
-            .find(&["#[cfg(test)]", "\nmod tests {"].concat())
-            .expect("test module marker")];
-        let run = &production[production
-            .find("pub async fn run(&self)")
-            .expect("Worker::run source")..];
-        let heartbeat = &run[run
-            .find("spawn_claimer_heartbeat(")
-            .expect("claimer heartbeat startup")..];
-        let heartbeat_call = &heartbeat[..heartbeat.find(");").expect("end of the call")];
-        assert!(heartbeat_call.contains("effective_claim_lease_ms(&self.app_config),"));
-        assert!(production.contains("claim_lease_ms: claim_lease(&self.app_config),"));
-        assert!(!production.contains("claim_lease_ms: self.app_config.claim_lease_ms"));
     }
 
     #[test]
@@ -2904,9 +3140,13 @@ mod tests {
         assert_eq!(workflow_result, None);
     }
 
+    /// Python's start of a workflow task: a database error in the start
+    /// gives no run (`core/worker/child_runner.py`, OWNERSHIP_UNCONFIRMED),
+    /// and the claim is released at once with the fenced release. Before, a
+    /// failed node statement was treated as informational and user code ran.
     #[tokio::test]
     #[serial]
-    async fn finalize_prestart_workflow_update_failure_is_nonfatal_and_runs_user_code() {
+    async fn a_failed_workflow_node_check_runs_no_user_code_and_releases_the_claim() {
         let pool = test_pool().await;
         let broker = test_broker().await;
         clean(&pool).await;
@@ -2925,30 +3165,16 @@ mod tests {
             )
             .await;
 
-            // C4: the workflow_task RUNNING update is purely informational
-            // (set_running already committed the CLAIMED->RUNNING flip durably,
-            // and completion tolerates an ENQUEUED workflow_task). A transient
-            // failure of it must NOT fail the task closed — user code runs and
-            // the task completes normally.
             assert_eq!(
                 EXECUTION_COUNT.load(Ordering::SeqCst),
-                1,
-                "user code must still run when the informational workflow_task RUNNING update fails",
+                0,
+                "user code must not run when the workflow node check fails",
             );
-
             let (status, result, error_code) = fetch_task_state(&pool, &task_id).await;
-            assert_eq!(status, "COMPLETED");
+            assert_eq!(status, "PENDING", "the claim is released at once");
+            assert_eq!(result, None);
             assert_eq!(error_code, None);
-
-            let persisted: TaskResult<serde_json::Value> =
-                serde_json::from_str(result.as_deref().unwrap()).unwrap();
-            assert_eq!(
-                persisted.unwrap(),
-                serde_json::Value::String("counted".to_owned()),
-            );
-
-            let attempts = broker.get_task_attempts(task_id).await.unwrap();
-            assert_eq!(attempts.len(), 1);
+            assert!(broker.get_task_attempts(task_id).await.unwrap().is_empty());
         })
         .catch_unwind()
         .await;
@@ -2958,6 +3184,46 @@ mod tests {
         if let Err(panic) = result {
             resume_unwind(panic);
         }
+    }
+
+    /// Python `test_orphaned_workflow_task_repro.py::test_workflow_check_failed_disabled_leaves_orphan_claimed`:
+    /// a workflow task with no runnable node does not run; with orphan
+    /// self-heal off nothing is written and the row stays CLAIMED.
+    #[tokio::test]
+    #[serial]
+    async fn an_unlinked_workflow_task_with_self_heal_off_runs_nothing_and_stays_claimed() {
+        let pool = test_pool().await;
+        let broker = test_broker().await;
+        clean(&pool).await;
+
+        let task_id = Uuid::new_v4();
+        insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
+        sqlx::query("UPDATE horsies_tasks SET is_workflow_task = TRUE WHERE id = $1")
+            .bind(task_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        EXECUTION_COUNT.store(0, Ordering::SeqCst);
+
+        let outcome = crate::worker::execution::confirm_ownership_and_set_running(
+            &broker,
+            task_id,
+            "worker-1",
+            1,
+            "localhost",
+            true,
+            test_claim_generation(),
+            false,
+        )
+        .await;
+
+        assert!(matches!(
+            outcome,
+            crate::worker::execution::OwnershipOutcome::Aborted
+        ));
+        assert_eq!(EXECUTION_COUNT.load(Ordering::SeqCst), 0);
+        let (status, _, _) = fetch_task_state(&pool, &task_id).await;
+        assert_eq!(status, "CLAIMED");
     }
 
     #[tokio::test]
@@ -3216,7 +3482,7 @@ mod tests {
         let pool = test_pool().await;
         let broker = test_broker().await;
         clean(&pool).await;
-        let task_error_code = OperationalErrorCode::UnhandledError.to_string();
+        let task_error_code = OperationalErrorCode::UnhandledException.to_string();
 
         let task_id = Uuid::new_v4();
         insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
@@ -3376,16 +3642,20 @@ mod tests {
     /// listen on task_new (parity with horsies PR #101 cafc9200).
     #[tokio::test]
     #[serial]
-    async fn notify_worker_capacity_emits_queue_specific_signal_only() {
+    async fn capacity_wake_emits_queue_specific_signal_only() {
         let pool = test_pool().await;
         clean(&pool).await;
 
-        let mut listener = NotifyListener::connect(&pool).await.unwrap();
+        let mut listener = sqlx::postgres::PgListener::connect_with(&pool)
+            .await
+            .unwrap();
         listener.listen("task_new").await.unwrap();
         listener.listen("task_queue_high-priority").await.unwrap();
 
         let task_id = Uuid::new_v4();
-        notify_worker_capacity(&pool, "high-priority", task_id).await;
+        send_phase2_wake(&pool, &capacity_wake("high-priority", task_id))
+            .await
+            .expect("send the capacity wake");
 
         let first = tokio::time::timeout(Duration::from_secs(2), listener.recv())
             .await
@@ -3407,12 +3677,593 @@ mod tests {
         );
     }
 
+    /// A capacity wake that the database refuses is an error, never dropped
+    /// (#722): a closed pool answers `PoolClosed`.
     #[tokio::test]
     #[serial]
-    async fn notify_worker_capacity_swallow_pool_errors() {
+    async fn capacity_wake_on_a_closed_pool_is_an_error() {
         let pool = test_pool().await;
         pool.close().await;
-        notify_worker_capacity(&pool, "default", Uuid::new_v4()).await;
+        let sent = send_phase2_wake(&pool, &capacity_wake("default", Uuid::new_v4())).await;
+        assert!(matches!(sent, Err(sqlx::Error::PoolClosed)), "{sent:?}");
+    }
+
+    /// A database of its own, migrated without the install's family record,
+    /// for a worker start. Dropped with `FreshDatabase::drop`.
+    struct FreshDatabase {
+        admin: sqlx::PgConnection,
+        pool: PgPool,
+        name: String,
+        /// The shared test database URL, for the worker's config only: the
+        /// worker reaches this database through `pool`.
+        config_url: String,
+    }
+
+    impl FreshDatabase {
+        async fn create() -> Self {
+            use sqlx::Connection;
+            use std::str::FromStr;
+
+            let config_url = crate::broker::terminalization_matrix::migrated_database_url().await;
+            let base_options =
+                sqlx::postgres::PgConnectOptions::from_str(&config_url).expect("test database URL");
+            let mut admin =
+                sqlx::PgConnection::connect_with(&base_options.clone().database("postgres"))
+                    .await
+                    .expect("connect admin database");
+            let name = format!("core_worker_start_{}", Uuid::new_v4().simple());
+            sqlx::query(&format!("CREATE DATABASE \"{name}\""))
+                .execute(&mut admin)
+                .await
+                .expect("create start test database");
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(8)
+                .connect_with(base_options.database(&name))
+                .await
+                .expect("connect start test database");
+            crate::broker::migrations::run_horsies_migrations(&pool)
+                .await
+                .expect("migrate start test database");
+            Self {
+                admin,
+                pool,
+                name,
+                config_url,
+            }
+        }
+
+        async fn record_family(&self, family: &str) {
+            sqlx::query(
+                "INSERT INTO horsies_client_family (only_row, family, recorded_at)
+                 VALUES (TRUE, $1, NOW())",
+            )
+            .bind(family)
+            .execute(&self.pool)
+            .await
+            .expect("record a client family");
+        }
+
+        async fn drop(mut self) {
+            self.pool.close().await;
+            sqlx::query(&format!("DROP DATABASE \"{}\" WITH (FORCE)", self.name))
+                .execute(&mut self.admin)
+                .await
+                .expect("drop start test database");
+        }
+    }
+
+    /// A worker on `broker` that retries a failed start at most once.
+    fn start_test_worker(broker: PostgresBroker, config_url: String) -> Worker {
+        worker_with_config(broker, test_app_config(config_url))
+    }
+
+    fn worker_with_config(broker: PostgresBroker, app_config: AppConfig) -> Worker {
+        worker_of_one_idle_child(Arc::new(broker), app_config, WorkerConfig::default())
+    }
+
+    /// The app config of the start tests: no `claim_lease_ms`, one start
+    /// attempt.
+    fn test_app_config(config_url: String) -> AppConfig {
+        use crate::core::config::{PostgresConfig, QueueMode, WorkerResilienceConfig};
+
+        AppConfig {
+            payload: crate::core::config::payload::PayloadPolicy::default(),
+            queue_mode: QueueMode::Default,
+            custom_queues: None,
+            broker: PostgresConfig {
+                database_url: config_url,
+                session_database_url: None,
+                pgbouncer_transaction_mode: false,
+                pool_pre_ping: true,
+                worker_pool_pre_ping: false,
+                pool_size: 30,
+                max_overflow: 30,
+                retain_rerun_input_default: false,
+                pool_timeout: 30,
+                pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
+                echo: false,
+                tcp_keepalives: Default::default(),
+                tcp_user_timeout: Default::default(),
+            },
+            cluster_wide_cap: None,
+            prefetch_buffer: 0,
+            claim_lease_ms: None,
+            max_claim_renew_age_ms: 180_000,
+            recovery: RecoveryConfig::default(),
+            retention: crate::core::RetentionConfig::default(),
+            resilience: WorkerResilienceConfig {
+                db_retry_initial_ms: 100,
+                db_retry_max_ms: 100,
+                db_retry_max_attempts: 1,
+                notify_poll_interval_ms: 100,
+            },
+            schedule: None,
+            resend_on_transient_err: false,
+        }
+    }
+
+    /// One PENDING task on the default queue; a claim loop would take it.
+    async fn insert_pending_task(pool: &PgPool) -> Uuid {
+        let task_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO horsies_tasks (
+                 id, task_name, queue_name, priority, input, task_options, execution,
+                 retention_class_key, sent_at, created_at,
+                 command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                 status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                 started_at, finalizing_at, finalizing_by_worker_id,
+                 worker_pid, worker_hostname, worker_process_name,
+                 retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                 updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
+             ) VALUES (
+                 $1, 'start_test', 'default', 100, '{}', NULL, 'ISOLATED',
+                 'forever', NOW(), NOW(),
+                 1, decode(repeat('00', 32), 'hex'), NULL,
+                 'PENDING', NOW(), NULL, NULL, NULL,
+                 NULL, NULL, NULL,
+                 NULL, NULL, NULL,
+                 0, 0, NULL, NULL, FALSE,
+                 NOW(), FALSE, NULL, NULL
+             )",
+        )
+        .bind(task_id)
+        .execute(pool)
+        .await
+        .expect("insert a pending task");
+        task_id
+    }
+
+    /// What a started worker writes: catalog leaves and retention classes
+    /// (startup coverage), worker states (state loop), heartbeats (beat
+    /// writers), and the claim of the PENDING task (claim loop).
+    #[derive(Debug, PartialEq, Eq)]
+    struct StartFacts {
+        catalog_leaves: i64,
+        retention_classes: i64,
+        worker_states: i64,
+        heartbeats: i64,
+        pending_status: String,
+        pending_claimed_by: Option<String>,
+    }
+
+    async fn start_facts(pool: &PgPool, pending: Uuid) -> StartFacts {
+        use crate::core::history::names::{LEAF_CATALOG, RETENTION_CLASSES};
+
+        let (catalog_leaves, retention_classes, worker_states, heartbeats): (i64, i64, i64, i64) =
+            sqlx::query_as(&format!(
+                "SELECT (SELECT count(*) FROM {LEAF_CATALOG}),
+                        (SELECT count(*) FROM {RETENTION_CLASSES}),
+                        (SELECT count(*) FROM horsies_worker_states),
+                        (SELECT count(*) FROM horsies_heartbeats)"
+            ))
+            .fetch_one(pool)
+            .await
+            .expect("read start facts");
+        let (pending_status, pending_claimed_by): (String, Option<String>) =
+            sqlx::query_as("SELECT status, claimed_by_worker_id FROM horsies_tasks WHERE id = $1")
+                .bind(pending)
+                .fetch_one(pool)
+                .await
+                .expect("read the pending task");
+        StartFacts {
+            catalog_leaves,
+            retention_classes,
+            worker_states,
+            heartbeats,
+            pending_status,
+            pending_claimed_by,
+        }
+    }
+
+    /// Run the worker; its start must fail and `run` must return.
+    async fn refused_run(worker: &Worker) -> WorkerError {
+        tokio::time::timeout(Duration::from_secs(30), worker.run())
+            .await
+            .expect("a refused start returns from run")
+            .expect_err("the start must be refused")
+    }
+
+    /// With the install on, a database of the Python family fails the schema
+    /// step: no coverage, no runtime loop, no claim.
+    #[tokio::test]
+    #[serial]
+    async fn a_start_refused_at_the_schema_step_writes_nothing_later() {
+        use crate::broker::client_family::{ClientFamily, RecordedFamily};
+        use crate::broker::BrokerError;
+
+        let database = FreshDatabase::create().await;
+        database.record_family("PYTHON").await;
+        let pending = insert_pending_task(&database.pool).await;
+        let before = start_facts(&database.pool, pending).await;
+        let worker = start_test_worker(
+            PostgresBroker::from_pool(database.pool.clone()),
+            database.config_url.clone(),
+        );
+
+        let error = refused_run(&worker).await;
+
+        assert!(matches!(
+            error,
+            WorkerError::Broker(BrokerError::ClientFamilyMismatch {
+                stored: RecordedFamily::Recorded(ClientFamily::Python),
+                own: ClientFamily::Rust,
+            })
+        ));
+        assert_eq!(start_facts(&database.pool, pending).await, before);
+        drop(worker);
+        database.drop().await;
+    }
+
+    /// With the install off, a database with no family row and one of the
+    /// Python family fail the family step: no coverage, no runtime loop, no
+    /// claim. Both refusals are not retryable.
+    #[tokio::test]
+    #[serial]
+    async fn a_start_refused_at_the_family_step_writes_nothing_later() {
+        use crate::broker::client_family::{ClientFamily, RecordedFamily};
+        use crate::broker::BrokerError;
+
+        let database = FreshDatabase::create().await;
+        let pending = insert_pending_task(&database.pool).await;
+        let before = start_facts(&database.pool, pending).await;
+
+        let worker = start_test_worker(
+            PostgresBroker::from_pool_observe_only(database.pool.clone()),
+            database.config_url.clone(),
+        );
+        let not_recorded = refused_run(&worker).await;
+        assert!(matches!(
+            not_recorded,
+            WorkerError::Broker(BrokerError::ClientFamilyMismatch {
+                stored: RecordedFamily::NotRecorded,
+                own: ClientFamily::Rust,
+            })
+        ));
+        assert!(!not_recorded.is_retryable());
+        assert_eq!(start_facts(&database.pool, pending).await, before);
+        drop(worker);
+
+        database.record_family("PYTHON").await;
+        let worker = start_test_worker(
+            PostgresBroker::from_pool_observe_only(database.pool.clone()),
+            database.config_url.clone(),
+        );
+        let python = refused_run(&worker).await;
+        assert!(matches!(
+            python,
+            WorkerError::Broker(BrokerError::ClientFamilyMismatch {
+                stored: RecordedFamily::Recorded(ClientFamily::Python),
+                own: ClientFamily::Rust,
+            })
+        ));
+        assert!(!python.is_retryable());
+        assert_eq!(start_facts(&database.pool, pending).await, before);
+        drop(worker);
+        database.drop().await;
+    }
+
+    /// A startup coverage that finds the coverage gate held by another
+    /// session, with no current heartbeat leaf, refuses the start: no
+    /// coverage, no runtime loop, no claim.
+    #[tokio::test]
+    #[serial]
+    async fn a_start_refused_at_the_coverage_step_starts_no_runtime_loop() {
+        let database = FreshDatabase::create().await;
+        database.record_family("RUST").await;
+        let pending = insert_pending_task(&database.pool).await;
+        let mut holder = database.pool.begin().await.expect("begin gate holder");
+        let held: bool = sqlx::query_scalar(
+            "SELECT pg_try_advisory_xact_lock(
+                 hashtextextended('horsies:partition-coverage:v1', 1601)
+             )",
+        )
+        .fetch_one(holder.as_mut())
+        .await
+        .expect("hold the coverage gate");
+        assert!(held);
+        let before = start_facts(&database.pool, pending).await;
+        let worker = start_test_worker(
+            PostgresBroker::from_pool(database.pool.clone()),
+            database.config_url.clone(),
+        );
+
+        let error = refused_run(&worker).await;
+
+        assert!(
+            matches!(&error, WorkerError::Config(detail) if detail.contains("startup coverage refused")),
+            "{error:?}"
+        );
+        assert_eq!(start_facts(&database.pool, pending).await, before);
+        holder.rollback().await.expect("release the coverage gate");
+        drop(worker);
+        database.drop().await;
+    }
+
+    /// The startup coverage runs on the session pool: with the main pool
+    /// closed, the database start still completes.
+    #[tokio::test]
+    #[serial]
+    async fn startup_coverage_runs_on_the_session_pool() {
+        use crate::core::config::PostgresConfig;
+
+        let main_url = crate::broker::terminalization_matrix::migrated_database_url().await;
+        let separator = if main_url.contains('?') { '&' } else { '?' };
+        let session_url = format!("{main_url}{separator}application_name=start_session");
+        let broker = PostgresBroker::connect_with(&PostgresConfig {
+            database_url: main_url.clone(),
+            session_database_url: Some(session_url),
+            pgbouncer_transaction_mode: false,
+            pool_pre_ping: true,
+            worker_pool_pre_ping: false,
+            pool_size: 30,
+            max_overflow: 30,
+            retain_rerun_input_default: false,
+            pool_timeout: 30,
+            pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
+            echo: false,
+            tcp_keepalives: Default::default(),
+            tcp_user_timeout: Default::default(),
+        })
+        .await
+        .expect("connect broker with a separate session pool");
+        broker.pool().close().await;
+        let worker = start_test_worker(broker, main_url);
+
+        worker
+            .start_database()
+            .await
+            .expect("the database start uses only the session pool");
+    }
+
+    /// The URL of database `database` on the server of `url`.
+    fn database_url_for(url: &str, database: &str) -> String {
+        let (address, query) = match url.split_once('?') {
+            Some((address, query)) => (address, Some(query)),
+            None => (url, None),
+        };
+        let (server, _) = address
+            .rsplit_once('/')
+            .expect("a test database URL names its database after the last slash");
+        match query {
+            Some(query) => format!("{server}/{database}?{query}"),
+            None => format!("{server}/{database}"),
+        }
+    }
+
+    /// `url` with `application_name` set, so a trigger can tell its sessions.
+    fn with_application_name(url: &str, name: &str) -> String {
+        let separator = if url.contains('?') { '&' } else { '?' };
+        format!("{url}{separator}application_name={name}")
+    }
+
+    /// A CLAIMED task of `worker_id` on the default queue, claimed now, whose
+    /// lease ends in ten seconds.
+    async fn insert_task_claimed_by(pool: &PgPool, worker_id: &str) -> Uuid {
+        let task_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO horsies_tasks (
+                 id, task_name, queue_name, priority, input, task_options, execution,
+                 retention_class_key, sent_at, created_at,
+                 command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                 status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                 started_at, finalizing_at, finalizing_by_worker_id,
+                 worker_pid, worker_hostname, worker_process_name,
+                 retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                 updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
+             ) VALUES (
+                 $1, 'start_test', 'default', 100, '{}', NULL, 'ISOLATED',
+                 'forever', NOW(), NOW(),
+                 1, decode(repeat('00', 32), 'hex'), NULL,
+                 'CLAIMED', NOW(), NOW(), $2, NOW() + interval '10 seconds',
+                 NULL, NULL, NULL,
+                 NULL, NULL, NULL,
+                 0, 0, NULL, NULL, FALSE,
+                 NOW(), FALSE, NULL, NULL
+             )",
+        )
+        .bind(task_id)
+        .bind(worker_id)
+        .execute(pool)
+        .await
+        .expect("insert a claimed task");
+        task_id
+    }
+
+    /// With `claim_lease_ms` not set, the claim of a PENDING task and the
+    /// claimer's renewal of a held claim both write the default lease. A
+    /// trigger logs every lease written on a CLAIMED row.
+    #[tokio::test]
+    #[serial]
+    async fn claims_and_renewals_write_the_default_lease() {
+        let database = FreshDatabase::create().await;
+        database.record_family("RUST").await;
+        sqlx::raw_sql(
+            "CREATE TABLE test_claim_lease_log (task_id uuid NOT NULL, lease interval NOT NULL);
+             CREATE FUNCTION test_log_claim_lease() RETURNS trigger LANGUAGE plpgsql AS $body$
+             BEGIN
+                 IF NEW.status = 'CLAIMED' AND NEW.claim_expires_at IS NOT NULL THEN
+                     INSERT INTO test_claim_lease_log
+                     VALUES (NEW.id, NEW.claim_expires_at - now());
+                 END IF;
+                 RETURN NULL;
+             END
+             $body$;
+             CREATE TRIGGER test_log_claim_lease AFTER UPDATE ON horsies_tasks
+                 FOR EACH ROW EXECUTE FUNCTION test_log_claim_lease();",
+        )
+        .execute(&database.pool)
+        .await
+        .expect("install the lease log");
+        // The worker writes its plain successes on the worker pool and
+        // claims on the wakes of its listener: a broker of a worker.
+        let worker_url = database_url_for(&database.config_url, &database.name);
+        let broker =
+            PostgresBroker::connect_worker_with(&test_app_config(worker_url.clone()).broker)
+                .await
+                .expect("connect the broker of a worker");
+        let worker = start_test_worker(broker, worker_url);
+        let pending = insert_pending_task(&database.pool).await;
+        let held = insert_task_claimed_by(&database.pool, worker.worker_id()).await;
+        let cancel = worker.cancel_token();
+        let run = tokio::spawn(async move { worker.run().await });
+
+        let lease_seconds = |task_id: Uuid| {
+            let pool = database.pool.clone();
+            async move {
+                sqlx::query_scalar::<_, f64>(
+                    "SELECT EXTRACT(EPOCH FROM lease)::float8 FROM test_claim_lease_log
+                     WHERE task_id = $1",
+                )
+                .bind(task_id)
+                .fetch_all(&pool)
+                .await
+                .expect("read the lease log")
+            }
+        };
+        let (claimed, renewed) = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let claimed = lease_seconds(pending).await;
+                let renewed = lease_seconds(held).await;
+                if !claimed.is_empty() && !renewed.is_empty() {
+                    break (claimed, renewed);
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the worker claims the pending task and renews the held claim");
+        cancel.cancel();
+        let _stopped = tokio::time::timeout(Duration::from_secs(30), run)
+            .await
+            .expect("the worker stops after cancel")
+            .expect("run task join");
+
+        let default_seconds = f64::from(crate::core::defaults::DEFAULT_CLAIM_LEASE_MS) / 1000.0;
+        for lease in claimed.iter().chain(renewed.iter()) {
+            assert!(
+                (default_seconds - 5.0..=default_seconds + 1.0).contains(lease),
+                "lease {lease}s is not the default {default_seconds}s"
+            );
+        }
+        database.drop().await;
+    }
+
+    /// The reaper's recovery statements run on the runtime pool and its
+    /// partition maintenance on the session pool. Each pool has its own
+    /// `application_name`; statement triggers log which session wrote.
+    #[tokio::test]
+    #[serial]
+    async fn the_reaper_recovers_on_the_runtime_pool_and_maintains_on_the_session_pool() {
+        use crate::core::config::PostgresConfig;
+        use crate::core::history::names::LEAF_CATALOG;
+
+        let database = FreshDatabase::create().await;
+        sqlx::raw_sql(&format!(
+            "CREATE TABLE test_pool_writes (relation_name text NOT NULL, application_name text NOT NULL);
+             CREATE FUNCTION test_record_pool_write() RETURNS trigger LANGUAGE plpgsql AS $body$
+             BEGIN
+                 INSERT INTO test_pool_writes
+                 VALUES (TG_TABLE_NAME, current_setting('application_name'));
+                 RETURN NULL;
+             END
+             $body$;
+             CREATE TRIGGER test_task_writes AFTER UPDATE ON horsies_tasks
+                 FOR EACH STATEMENT EXECUTE FUNCTION test_record_pool_write();
+             CREATE TRIGGER test_catalog_writes AFTER INSERT ON {LEAF_CATALOG}
+                 FOR EACH STATEMENT EXECUTE FUNCTION test_record_pool_write();"
+        ))
+        .execute(&database.pool)
+        .await
+        .expect("install the pool write log");
+        let database_url = database_url_for(&database.config_url, &database.name);
+        let broker = PostgresBroker::connect_with(&PostgresConfig {
+            database_url: with_application_name(&database_url, "reaper_runtime"),
+            session_database_url: Some(with_application_name(&database_url, "reaper_session")),
+            pgbouncer_transaction_mode: false,
+            pool_pre_ping: true,
+            worker_pool_pre_ping: false,
+            pool_size: 30,
+            max_overflow: 30,
+            retain_rerun_input_default: false,
+            pool_timeout: 30,
+            pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
+            echo: false,
+            tcp_keepalives: Default::default(),
+            tcp_user_timeout: Default::default(),
+        })
+        .await
+        .expect("connect a broker with two pools");
+        let mut app_config = test_app_config(database.config_url.clone());
+        app_config.recovery.auto_requeue_stale_claimed = true;
+        let worker = worker_with_config(broker, app_config);
+        let health = new_reaper_health();
+
+        let reaper = worker.spawn_reaper_loop(Arc::clone(&health));
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while health.read().await.partition_coverage.is_none() {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the reaper completes a pass with partition maintenance");
+        worker.cancel_token().cancel();
+        tokio::time::timeout(Duration::from_secs(30), reaper)
+            .await
+            .expect("the reaper stops after cancel")
+            .expect("reaper join");
+
+        let writes: Vec<(String, String)> =
+            sqlx::query_as("SELECT relation_name, application_name FROM test_pool_writes")
+                .fetch_all(&database.pool)
+                .await
+                .expect("read the pool write log");
+        let sessions_of = |relation: &str| -> Vec<&str> {
+            writes
+                .iter()
+                .filter(|(name, _)| name == relation)
+                .map(|(_, application)| application.as_str())
+                .collect()
+        };
+        let task_writers = sessions_of("horsies_tasks");
+        let catalog_writers = sessions_of(LEAF_CATALOG);
+        assert!(
+            !task_writers.is_empty(),
+            "the requeue step updates horsies_tasks"
+        );
+        assert!(
+            task_writers.iter().all(|name| *name == "reaper_runtime"),
+            "{writes:?}"
+        );
+        assert!(
+            !catalog_writers.is_empty(),
+            "partition maintenance creates leaves"
+        );
+        assert!(
+            catalog_writers.iter().all(|name| *name == "reaper_session"),
+            "{writes:?}"
+        );
+        drop(worker);
+        database.drop().await;
     }
 }
 

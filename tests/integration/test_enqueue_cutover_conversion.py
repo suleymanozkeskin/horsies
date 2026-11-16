@@ -17,6 +17,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import text
 
+from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import (
     BrokerErrorCode,
@@ -64,6 +65,7 @@ async def enqueue(broker: PostgresBroker, send: Send) -> BrokerResult[str]:
     return await broker.enqueue_async(
         'cutover.enqueue',
         task_id=send.task_id,
+        send_kind=SendKind.FIRST,
         enqueue_sha=send.enqueue_sha,
         kwargs_json=send.kwargs_json,
         sent_at=send.sent_at,
@@ -164,6 +166,7 @@ async def enqueue_keyed(
     return await broker.enqueue_async(
         'cutover.enqueue',
         task_id=send.task_id,
+        send_kind=SendKind.FIRST,
         enqueue_sha=send.enqueue_sha,
         kwargs_json=send.kwargs_json,
         sent_at=send.sent_at,

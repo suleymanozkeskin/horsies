@@ -25,6 +25,7 @@ use super::support::*;
 use crate::broker::claims::{claim_pass, ClaimClasses, ClaimPassRequest};
 use crate::broker::core_rows::StatementLog;
 use crate::broker::pools::core_pool_for_test_pool;
+use crate::broker::PostgresBroker;
 use crate::core::task::Execution;
 use crate::worker::queue_cap_hold::{admit_held_rows, QueueCapHold, StartCheckCaps, StartedClaim};
 
@@ -177,24 +178,23 @@ impl SoftCapWorker {
     /// One pass: the claim, each row of an uncapped queue submitted, each
     /// row of the capped queue held, then the start check.
     async fn pass(&mut self, pool: &PgPool) {
-        let core = core_pool_for_test_pool(pool);
-        let claimed = claim_pass(&core, StatementLog::Off, &self.request)
-            .await
-            .expect("claim pass");
+        let claimed = claim_pass(
+            &core_pool_for_test_pool(pool),
+            StatementLog::Off,
+            &self.request,
+        )
+        .await
+        .expect("claim pass");
         for row in claimed.claimed {
             match self.hold.holds(&row.queue_name) {
                 true => self.hold.hold(row),
                 false => self.started.push(row.id),
             }
         }
-        let admitted = admit_held_rows(
-            &core,
-            StatementLog::Off,
-            &self.names.worker_id,
-            &mut self.hold,
-        )
-        .await
-        .expect("start check");
+        let broker = PostgresBroker::from_pool(pool.clone());
+        let admitted = admit_held_rows(&broker, &self.names.worker_id, &mut self.hold)
+            .await
+            .expect("start check");
         for admitted in admitted {
             self.started.push(admitted.row.id);
             let _earlier = self.writes.insert(admitted.row.id, admitted.started);
