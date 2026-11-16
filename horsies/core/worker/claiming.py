@@ -326,11 +326,14 @@ class ClaimMixin:
         fitting_rows = await self._return_rows_of_another_class(dispatchable_rows)
 
         for row in fitting_rows:
+            # The row's input is the task's keyword arguments as one JSON
+            # object text; the dispatch carries it as the kwargs text, and
+            # no positional arguments.
             await self._dispatch_one(
                 row['id'],
                 row['task_name'],
-                row['args'],
-                row['kwargs'],
+                None,
+                row['input'],
                 row.get('queue_name') or 'default',
                 bool(row.get('is_workflow_task', False)),
                 timeout=read_stored_timeout(row.get('task_options')),
@@ -723,7 +726,7 @@ class ClaimMixin:
     ) -> list[dict[str, Any]]:
         """Claim up to *limit* tasks and return dispatch-ready row dicts.
 
-        CLAIM_SQL RETURNING provides id/task_name/args/kwargs atomically,
+        CLAIM_SQL RETURNING provides id/task_name/input atomically,
         eliminating the previous claim-commit → separate-load gap.
 
         DB errors propagate to the claim pass (the caller owns the
