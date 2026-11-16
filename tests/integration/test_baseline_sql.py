@@ -136,6 +136,15 @@ EXPECTED_FUNCTIONS = frozenset(
         'horsies_workflow_task_input',
         'horsies_workflow_try_complete',
         'horsies_workflow_unbuildable_nodes',
+        # 0006_history_functions.sql.
+        'horsies_begin_leaf_detach',
+        'horsies_drop_detached_leaf',
+        'horsies_inspect_history_leaf',
+        'horsies_move_tasks_to_history',
+        'horsies_prune_candidates',
+        'horsies_record_leaf_detached',
+        'horsies_rerun_source_read',
+        'horsies_task_absence_reason',
         # 0007_scheduler_monitoring_functions.sql.
         'horsies_fire_schedule',
         'horsies_list_expired_tasks',
