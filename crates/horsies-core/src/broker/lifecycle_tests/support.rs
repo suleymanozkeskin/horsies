@@ -1,0 +1,746 @@
+//! Seeds and reads that the lifecycle ports share.
+//!
+//! Every seed names every column of its baseline table
+//! (`horsies/core/baseline/sql/0001_tables.sql`). The baseline has no column
+//! defaults, so a seed that leaves a column out does not insert.
+//!
+//! Times that a guard compares with the database clock (`started_at`,
+//! `finalizing_at`, `good_until`, heartbeat `sent_at`) are set relative to
+//! `NOW()` in SQL, as the Python tests do, so the worker clock never enters a
+//! comparison.
+
+use chrono::{DateTime, Duration, TimeZone, Timelike, Utc};
+use sqlx::{PgConnection, PgPool};
+use uuid::Uuid;
+
+use crate::core::history::archive::attempts::{decode_attempt_snapshot, encode_attempt_snapshot};
+use crate::core::history::heartbeats::partitioning::{
+    create_hourly_heartbeat_leaf, hourly_leaf_ref, CreateHourlyHeartbeatLeaf,
+};
+use crate::core::history::outcomes::LeafCreation;
+use crate::core::lifecycle::OwnedClaim;
+
+/// The worker that holds the seeded claims.
+pub(super) const WORKER: &str = "lifecycle-test-worker";
+
+/// A worker that is not this test's worker.
+pub(super) const OTHER_WORKER: &str = "someone-else";
+
+/// Bound of the wait for a lock: 100 polls of 10 ms.
+const LOCK_WAIT_POLLS: u32 = 100;
+const LOCK_WAIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// The claim generation of a seeded claim (Python's `GENERATION`).
+pub(super) fn generation() -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 8, 4, 9, 0, 0)
+        .single()
+        .expect("the test generation is a valid instant")
+}
+
+/// The fence of a claim that `WORKER` holds at `generation()`.
+pub(super) fn owned_claim() -> OwnedClaim {
+    OwnedClaim {
+        worker_id: WORKER.to_owned(),
+        claimed_at: generation(),
+    }
+}
+
+/// The shared migrated database of the terminalization matrix.
+pub(super) async fn pool() -> PgPool {
+    crate::broker::terminalization_matrix::migrated_pool().await
+}
+
+/// The live status of a seeded task row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LiveStatus {
+    Pending,
+    Claimed,
+    Running,
+}
+
+impl LiveStatus {
+    fn as_sql(self) -> &'static str {
+        match self {
+            Self::Pending => "PENDING",
+            Self::Claimed => "CLAIMED",
+            Self::Running => "RUNNING",
+        }
+    }
+}
+
+/// Who holds a seeded task row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Holder {
+    /// No claim: the claim fields are NULL.
+    Unclaimed,
+    /// A claim of `worker_id` at generation `claimed_at`.
+    Claim {
+        worker_id: String,
+        claimed_at: DateTime<Utc>,
+    },
+}
+
+impl Holder {
+    /// The claim of `WORKER` at `generation()`.
+    pub(super) fn this_worker() -> Self {
+        Self::Claim {
+            worker_id: WORKER.to_owned(),
+            claimed_at: generation(),
+        }
+    }
+
+    /// The claim of `OTHER_WORKER` at `generation()`.
+    pub(super) fn other_worker() -> Self {
+        Self::Claim {
+            worker_id: OTHER_WORKER.to_owned(),
+            claimed_at: generation(),
+        }
+    }
+
+    fn worker_id(&self) -> Option<&str> {
+        match self {
+            Self::Unclaimed => None,
+            Self::Claim { worker_id, .. } => Some(worker_id.as_str()),
+        }
+    }
+
+    fn claimed_at(&self) -> Option<DateTime<Utc>> {
+        match self {
+            Self::Unclaimed => None,
+            Self::Claim { claimed_at, .. } => Some(*claimed_at),
+        }
+    }
+}
+
+/// Where a seeded task comes from: a send, or a workflow node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Origin {
+    /// A sent task: it carries a command fingerprint.
+    Send,
+    /// A workflow task: no command fingerprint.
+    WorkflowNode,
+}
+
+/// One live task row. `started_at` is `NOW()` for a RUNNING row and NULL
+/// otherwise; `claim_expires_at` is five minutes ahead for a CLAIMED row and
+/// NULL otherwise; the worker fields are set for a RUNNING row only.
+#[derive(Debug, Clone)]
+pub(super) struct TaskSeed {
+    pub(super) id: Uuid,
+    pub(super) status: LiveStatus,
+    pub(super) holder: Holder,
+    pub(super) origin: Origin,
+    pub(super) queue_name: &'static str,
+    pub(super) task_options: Option<String>,
+    pub(super) retry_count: i32,
+    pub(super) max_retries: i32,
+    pub(super) retain_rerun_input: bool,
+}
+
+impl TaskSeed {
+    /// A RUNNING row that `WORKER` holds at `generation()`.
+    pub(super) fn running() -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            status: LiveStatus::Running,
+            holder: Holder::this_worker(),
+            origin: Origin::Send,
+            queue_name: "default",
+            task_options: None,
+            retry_count: 0,
+            max_retries: 0,
+            retain_rerun_input: false,
+        }
+    }
+
+    /// A CLAIMED row that `WORKER` holds at `generation()`.
+    pub(super) fn claimed() -> Self {
+        Self {
+            status: LiveStatus::Claimed,
+            ..Self::running()
+        }
+    }
+
+    /// A PENDING row with no claim.
+    pub(super) fn pending() -> Self {
+        Self {
+            status: LiveStatus::Pending,
+            holder: Holder::Unclaimed,
+            ..Self::running()
+        }
+    }
+}
+
+/// Insert one live task row with every baseline column named.
+pub(super) async fn seed_task(pool: &PgPool, seed: &TaskSeed) -> Uuid {
+    let (fingerprint_version, fingerprint): (Option<i16>, Option<Vec<u8>>) = match seed.origin {
+        Origin::Send => (Some(1), Some(vec![7_u8; 32])),
+        Origin::WorkflowNode => (None, None),
+    };
+    let is_workflow_task = match seed.origin {
+        Origin::Send => false,
+        Origin::WorkflowNode => true,
+    };
+    sqlx::query(
+        "INSERT INTO horsies_tasks (
+            id, task_name, queue_name, priority, input, task_options, execution,
+            retention_class_key, sent_at, created_at,
+            command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+            status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+            started_at, finalizing_at, finalizing_by_worker_id,
+            worker_pid, worker_hostname, worker_process_name,
+            retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+            updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
+        ) VALUES (
+            $1, 'lifecycle.test', $2, 100, '{}', $3, 'ISOLATED',
+            'forever', NOW(), NOW(),
+            $4, $5, NULL,
+            $6, NOW(), $7, $8,
+            CASE WHEN $6 = 'CLAIMED' THEN NOW() + interval '5 minutes' END,
+            CASE WHEN $6 = 'RUNNING' THEN NOW() END, NULL, NULL,
+            CASE WHEN $6 = 'RUNNING' THEN 4242 END,
+            CASE WHEN $6 = 'RUNNING' THEN 'lifecycle-host' END,
+            CASE WHEN $6 = 'RUNNING' THEN 'lifecycle-process' END,
+            $9, $10, NULL, NULL, $11,
+            NOW(), $12, NULL, NULL
+        )",
+    )
+    .bind(seed.id)
+    .bind(seed.queue_name)
+    .bind(seed.task_options.as_deref())
+    .bind(fingerprint_version)
+    .bind(fingerprint)
+    .bind(seed.status.as_sql())
+    .bind(seed.holder.claimed_at())
+    .bind(seed.holder.worker_id())
+    .bind(seed.retry_count)
+    .bind(seed.max_retries)
+    .bind(is_workflow_task)
+    .bind(seed.retain_rerun_input)
+    .execute(pool)
+    .await
+    .expect("seed live task row");
+    seed.id
+}
+
+/// A point in time relative to the database clock.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum Since {
+    /// The column is NULL.
+    Never,
+    /// `NOW()` minus this many seconds.
+    SecondsAgo(f64),
+}
+
+/// Set `started_at` (Python's `_age`, first half).
+pub(super) async fn set_started(pool: &PgPool, task_id: Uuid, since: Since) {
+    let seconds_ago: Option<f64> = match since {
+        Since::Never => None,
+        Since::SecondsAgo(seconds) => Some(seconds),
+    };
+    sqlx::query(
+        "UPDATE horsies_tasks
+         SET started_at = CASE WHEN $2::float8 IS NULL THEN NULL
+                               ELSE NOW() - make_interval(secs => $2::float8) END
+         WHERE id = $1",
+    )
+    .bind(task_id)
+    .bind(seconds_ago)
+    .execute(pool)
+    .await
+    .expect("set started_at");
+}
+
+/// Set the finalizing marker of `WORKER` (Python's `_age`, second half).
+pub(super) async fn set_finalizing(pool: &PgPool, task_id: Uuid, since: Since) {
+    let seconds_ago: Option<f64> = match since {
+        Since::Never => None,
+        Since::SecondsAgo(seconds) => Some(seconds),
+    };
+    sqlx::query(
+        "UPDATE horsies_tasks
+         SET finalizing_at = CASE WHEN $2::float8 IS NULL THEN NULL
+                                  ELSE NOW() - make_interval(secs => $2::float8) END,
+             finalizing_by_worker_id = CASE WHEN $2::float8 IS NULL THEN NULL ELSE $3 END
+         WHERE id = $1",
+    )
+    .bind(task_id)
+    .bind(seconds_ago)
+    .bind(WORKER)
+    .execute(pool)
+    .await
+    .expect("set finalizing marker");
+}
+
+/// The deadline of a seeded row (Python's `_deadline`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum Deadline {
+    /// `good_until` is NULL.
+    Absent,
+    /// `good_until` is this many seconds before `NOW()`.
+    PassedSecondsAgo(f64),
+    /// `good_until` is this many seconds after `NOW()`.
+    AheadSeconds(f64),
+}
+
+/// Set `good_until` relative to the database clock.
+pub(super) async fn set_deadline(pool: &PgPool, task_id: Uuid, deadline: Deadline) {
+    let offset_seconds: Option<f64> = match deadline {
+        Deadline::Absent => None,
+        Deadline::PassedSecondsAgo(seconds) => Some(-seconds),
+        Deadline::AheadSeconds(seconds) => Some(seconds),
+    };
+    sqlx::query(
+        "UPDATE horsies_tasks
+         SET good_until = CASE WHEN $2::float8 IS NULL THEN NULL
+                               ELSE NOW() + make_interval(secs => $2::float8) END
+         WHERE id = $1",
+    )
+    .bind(task_id)
+    .bind(offset_seconds)
+    .execute(pool)
+    .await
+    .expect("set good_until");
+}
+
+/// Leave the row where an automatic retry leaves it (Python's
+/// `_requeued_after_failed_attempt`): attempt 1 FAILED with `will_retry` and
+/// its reason, and `retry_count` 1. The live row stores no failed reason.
+pub(super) async fn record_failed_first_attempt(pool: &PgPool, task_id: Uuid, failed_reason: &str) {
+    sqlx::query(
+        "INSERT INTO horsies_task_attempts (
+            task_id, attempt, outcome, will_retry, started_at, finished_at,
+            error_code, error_message, failed_reason, worker_id,
+            worker_hostname, worker_pid, worker_process_name
+        ) VALUES (
+            $1, 1, 'FAILED', TRUE, NOW() - interval '2 minutes', NOW() - interval '1 minute',
+            'TASK_EXCEPTION', 'attempt one raised', $2, $3,
+            'lifecycle-host', 4242, 'lifecycle-process'
+        )",
+    )
+    .bind(task_id)
+    .bind(failed_reason)
+    .bind(WORKER)
+    .execute(pool)
+    .await
+    .expect("record attempt one");
+    sqlx::query("UPDATE horsies_tasks SET retry_count = 1 WHERE id = $1")
+        .bind(task_id)
+        .execute(pool)
+        .await
+        .expect("advance retry_count");
+}
+
+/// The `terminal_at` that a copied history row gets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TerminalStamp {
+    /// `NOW()` of the copying transaction.
+    Now,
+    /// NULL: the row the baseline refuses.
+    Missing,
+}
+
+/// Copy the live row into a history row with `status` and `kind`, and an
+/// empty version-1 attempt snapshot. The live row stays. Returns the
+/// database's answer, so a test can assert a refusal.
+pub(super) async fn copy_live_row_to_history(
+    connection: &mut PgConnection,
+    task_id: Uuid,
+    status: &str,
+    kind: Option<&str>,
+    stamp: TerminalStamp,
+) -> Result<u64, sqlx::Error> {
+    let snapshot = encode_attempt_snapshot(&[]).expect("encode the empty attempt snapshot");
+    let stamp_sql = match stamp {
+        TerminalStamp::Now => "NOW",
+        TerminalStamp::Missing => "MISSING",
+    };
+    let inserted = sqlx::query(
+        "INSERT INTO horsies_task_history (
+            task_id, task_name, queue_name, priority,
+            command_fingerprint_version, command_fingerprint,
+            retention_class_key, is_workflow_task, workflow_id,
+            rerun_of_task_id, rerun_root_task_id,
+            sent_at, created_at, enqueued_at, claimed_at, started_at, good_until,
+            terminal_at, status, terminalization_kind, retry_count, max_retries,
+            last_claimed_worker_id, last_worker_hostname, last_worker_pid,
+            last_worker_process_name, error_code, final_failed_reason,
+            result_envelope_version, result_payload, result_digest,
+            history_schema_version, attempt_archive_version, attempt_snapshot,
+            attempt_snapshot_digest, rerun_input_disposition, rerun_input_version,
+            rerun_input_digest, rerun_input_inline
+        )
+        SELECT id, task_name, queue_name, priority,
+               command_fingerprint_version, command_fingerprint,
+               retention_class_key, is_workflow_task, NULL,
+               rerun_of_task_id, rerun_root_task_id,
+               sent_at, created_at, enqueued_at, claimed_at, started_at, good_until,
+               CASE WHEN $7 = 'NOW' THEN NOW() END, $2, $3, retry_count, max_retries,
+               claimed_by_worker_id, worker_hostname, worker_pid,
+               worker_process_name, NULL, NULL,
+               1, NULL, NULL,
+               1, $4, $5,
+               $6, 'NEVER_ELIGIBLE', NULL,
+               NULL, NULL
+        FROM horsies_tasks WHERE id = $1",
+    )
+    .bind(task_id)
+    .bind(status)
+    .bind(kind)
+    .bind(snapshot.version)
+    .bind(snapshot.payload)
+    .bind(snapshot.digest.to_vec())
+    .bind(stamp_sql)
+    .execute(connection)
+    .await?;
+    Ok(inserted.rows_affected())
+}
+
+/// Put the task where another operation would have left it (Python's
+/// `_force_terminal`): a history row with `kind`, no live row and no live
+/// attempt rows.
+pub(super) async fn force_terminal(pool: &PgPool, task_id: Uuid, status: &str, kind: &str) {
+    let mut transaction = pool.begin().await.expect("begin force terminal");
+    let inserted = copy_live_row_to_history(
+        &mut *transaction,
+        task_id,
+        status,
+        Some(kind),
+        TerminalStamp::Now,
+    )
+    .await
+    .expect("insert forced history row");
+    assert_eq!(inserted, 1, "force_terminal needs a live row");
+    sqlx::query("DELETE FROM horsies_task_attempts WHERE task_id = $1")
+        .bind(task_id)
+        .execute(&mut *transaction)
+        .await
+        .expect("delete live attempts");
+    sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+        .bind(task_id)
+        .execute(&mut *transaction)
+        .await
+        .expect("delete live row");
+    transaction.commit().await.expect("commit force terminal");
+}
+
+/// The live row as JSON, or `None` when the row has left the live table.
+pub(super) async fn live_row(pool: &PgPool, task_id: Uuid) -> Option<serde_json::Value> {
+    sqlx::query_scalar("SELECT to_jsonb(t) FROM horsies_tasks t WHERE id = $1")
+        .bind(task_id)
+        .fetch_optional(pool)
+        .await
+        .expect("read live row")
+}
+
+/// The terminal facts of a history row.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub(super) struct HistoryImage {
+    pub(super) status: String,
+    pub(super) terminalization_kind: String,
+    pub(super) error_code: Option<String>,
+    pub(super) final_failed_reason: Option<String>,
+    pub(super) workflow_id: Option<Uuid>,
+    pub(super) last_claimed_worker_id: Option<String>,
+    pub(super) result_payload: Option<Vec<u8>>,
+    pub(super) rerun_input_disposition: String,
+}
+
+/// The history row of a task, or `None` when the task has not moved.
+pub(super) async fn history_row(pool: &PgPool, task_id: Uuid) -> Option<HistoryImage> {
+    sqlx::query_as(
+        "SELECT status::text AS status, terminalization_kind::text AS terminalization_kind,
+                error_code, final_failed_reason, workflow_id,
+                last_claimed_worker_id::text AS last_claimed_worker_id,
+                result_payload, rerun_input_disposition::text AS rerun_input_disposition
+         FROM horsies_task_history WHERE task_id = $1",
+    )
+    .bind(task_id)
+    .fetch_optional(pool)
+    .await
+    .expect("read history row")
+}
+
+/// One archived attempt: number, outcome and failed reason (Python's
+/// `read_attempt_history`).
+pub(super) type AttemptSummary = (i32, String, Option<String>);
+
+/// The attempts that the history row archived, in attempt order.
+pub(super) async fn archived_attempts(pool: &PgPool, task_id: Uuid) -> Vec<AttemptSummary> {
+    let (version, codec, content_type, payload, digest): (i16, String, String, Vec<u8>, Vec<u8>) =
+        sqlx::query_as(
+            "SELECT attempt_archive_version, attempt_snapshot_codec,
+                    attempt_snapshot_content_type, attempt_snapshot, attempt_snapshot_digest
+             FROM horsies_task_history WHERE task_id = $1",
+        )
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .expect("read the archived attempt snapshot");
+    decode_attempt_snapshot(version, &codec, &content_type, &payload, &digest)
+        .expect("decode the archived attempt snapshot")
+        .iter()
+        .map(|record| {
+            (
+                record.attempt(),
+                record.outcome().to_owned(),
+                record.failed_reason().map(str::to_owned),
+            )
+        })
+        .collect()
+}
+
+/// The attempt rows still in the live attempt table.
+pub(super) async fn live_attempts(pool: &PgPool, task_id: Uuid) -> Vec<AttemptSummary> {
+    sqlx::query_as(
+        "SELECT attempt, outcome::text, failed_reason FROM horsies_task_attempts
+         WHERE task_id = $1 ORDER BY attempt",
+    )
+    .bind(task_id)
+    .fetch_all(pool)
+    .await
+    .expect("read live attempts")
+}
+
+/// One workflow row with every baseline column named. A terminal status
+/// carries `completed_at`.
+pub(super) async fn seed_workflow(pool: &PgPool, workflow_id: Uuid, status: &str) {
+    sqlx::query(
+        "INSERT INTO horsies_workflows (
+            id, name, definition_key, status, on_error, output_task_index,
+            success_policy, result, error, parent_workflow_id, parent_task_index,
+            root_workflow_id, depth, sent_at, created_at, started_at, completed_at,
+            updated_at
+        ) VALUES (
+            $1, 'lifecycle_workflow', 'lifecycle.workflow.v1', $2, 'fail', NULL,
+            NULL, NULL, NULL, NULL, NULL,
+            $1, 0, NOW(), NOW(), NOW(),
+            CASE WHEN $2 IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED') THEN NOW() END,
+            NOW()
+        )",
+    )
+    .bind(workflow_id)
+    .bind(status)
+    .execute(pool)
+    .await
+    .expect("seed workflow row");
+}
+
+/// One task node of `workflow_id` with every baseline column named. The node
+/// takes the next free `task_index`. Returns the node row id.
+pub(super) async fn seed_node(
+    pool: &PgPool,
+    workflow_id: Uuid,
+    task_id: Option<Uuid>,
+    node_status: &str,
+) -> Uuid {
+    let node_row_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO horsies_workflow_tasks (
+            id, workflow_id, task_index, node_id, task_name, input, queue_name,
+            priority, dependencies, args_from, workflow_ctx_from, allow_failed_deps,
+            join_type, min_success, task_options, max_retries, execution, good_until,
+            retention_class_key, status, task_id, is_subworkflow, sub_workflow_id,
+            sub_workflow_name, sub_definition_key, sub_workflow_summary, result, error,
+            created_at, started_at, completed_at
+        ) VALUES (
+            $1, $2,
+            COALESCE((SELECT MAX(task_index) + 1 FROM horsies_workflow_tasks
+                      WHERE workflow_id = $2), 0),
+            'node_' || $1::text, 'lifecycle.test', '{}', 'default',
+            100, '{}', NULL, NULL, FALSE,
+            'all', NULL, NULL, 0, 'ISOLATED', NULL,
+            'forever', $3, $4, FALSE, NULL,
+            NULL, NULL, NULL, NULL, NULL,
+            NOW(), NULL, NULL
+        )",
+    )
+    .bind(node_row_id)
+    .bind(workflow_id)
+    .bind(node_status)
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .expect("seed workflow node");
+    node_row_id
+}
+
+/// The status of a workflow node row.
+pub(super) async fn node_status(pool: &PgPool, node_row_id: Uuid) -> String {
+    sqlx::query_scalar("SELECT status::text FROM horsies_workflow_tasks WHERE id = $1")
+        .bind(node_row_id)
+        .fetch_one(pool)
+        .await
+        .expect("read node status")
+}
+
+/// Whether a phase-2 record waits for the task.
+pub(super) async fn phase2_pending(pool: &PgPool, task_id: Uuid) -> bool {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM horsies_workflow_phase2_pending WHERE task_id = $1)",
+    )
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .expect("read phase-2 presence")
+}
+
+/// The role of a heartbeat sender.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BeatRole {
+    Runner,
+    Claimer,
+}
+
+impl BeatRole {
+    fn as_sql(self) -> &'static str {
+        match self {
+            Self::Runner => "runner",
+            Self::Claimer => "claimer",
+        }
+    }
+}
+
+/// Create the hourly heartbeat leaves of the previous, current and next hour.
+/// A beat whose hour has no leaf fails, and a beat a little in the past can
+/// fall in the previous hour.
+pub(super) async fn ensure_recent_heartbeat_leaves(pool: &PgPool) {
+    let mut transaction = pool.begin().await.expect("begin heartbeat leaves");
+    let now: DateTime<Utc> = sqlx::query_scalar("SELECT NOW()")
+        .fetch_one(&mut *transaction)
+        .await
+        .expect("database clock");
+    let hour = now
+        .with_minute(0)
+        .and_then(|value| value.with_second(0))
+        .and_then(|value| value.with_nanosecond(0))
+        .expect("truncate the database clock to its hour");
+    for offset in [-1_i64, 0, 1] {
+        let leaf = hourly_leaf_ref(hour + Duration::hours(offset)).expect("hourly leaf name");
+        let command = CreateHourlyHeartbeatLeaf::new(leaf).expect("hourly leaf command");
+        let outcome = create_hourly_heartbeat_leaf(&mut *transaction, &command)
+            .await
+            .expect("create hourly heartbeat leaf");
+        assert!(
+            matches!(
+                outcome,
+                LeafCreation::Created { .. }
+                    | LeafCreation::AlreadyConformant { .. }
+                    | LeafCreation::IndexRepaired { .. }
+            ),
+            "heartbeat leaf not usable: {outcome:?}"
+        );
+    }
+    transaction.commit().await.expect("commit heartbeat leaves");
+}
+
+/// Insert one heartbeat sent `seconds_ago` before the connection's `NOW()`.
+/// Call `ensure_recent_heartbeat_leaves` first.
+pub(super) async fn insert_beat(
+    connection: &mut PgConnection,
+    task_id: Uuid,
+    role: BeatRole,
+    seconds_ago: f64,
+) {
+    sqlx::query(
+        "INSERT INTO horsies_heartbeats (task_id, role, sent_at, sender_id, hostname, pid)
+         VALUES ($1, $2, NOW() - make_interval(secs => $3::float8), $4, 'lifecycle-host', 4242)",
+    )
+    .bind(task_id)
+    .bind(role.as_sql())
+    .bind(seconds_ago)
+    .bind(WORKER)
+    .execute(connection)
+    .await
+    .expect("insert heartbeat");
+}
+
+/// Insert one heartbeat in its own transaction.
+pub(super) async fn beat(pool: &PgPool, task_id: Uuid, role: BeatRole, seconds_ago: f64) {
+    ensure_recent_heartbeat_leaves(pool).await;
+    let mut connection = pool.acquire().await.expect("acquire for heartbeat");
+    insert_beat(&mut *connection, task_id, role, seconds_ago).await;
+}
+
+/// The constraint that a refusal must name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Constraint {
+    /// The refusal names no constraint (a NOT NULL refusal, a RAISE).
+    Unnamed,
+    /// The refusal names this constraint.
+    Named(&'static str),
+}
+
+/// Assert that the database refused a statement with `sqlstate`.
+pub(super) fn assert_refused<T: std::fmt::Debug>(
+    result: Result<T, sqlx::Error>,
+    sqlstate: &str,
+    constraint: Constraint,
+) {
+    match result {
+        Err(sqlx::Error::Database(error)) => {
+            assert_eq!(error.code().as_deref(), Some(sqlstate), "{error}");
+            match constraint {
+                Constraint::Unnamed => {}
+                Constraint::Named(name) => {
+                    assert_eq!(error.constraint(), Some(name), "{error}");
+                }
+            }
+        }
+        other => panic!("expected SQLSTATE {sqlstate}, got {other:?}"),
+    }
+}
+
+/// The backend pid of a connection.
+pub(super) async fn backend_pid(connection: &mut PgConnection) -> i32 {
+    sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(connection)
+        .await
+        .expect("read backend pid")
+}
+
+/// Whether `waiter_pid` waits on a lock that `holder_pid` holds, polled up to
+/// `LOCK_WAIT_POLLS` times.
+pub(super) async fn waits_on(pool: &PgPool, waiter_pid: i32, holder_pid: i32) -> bool {
+    for _ in 0..LOCK_WAIT_POLLS {
+        let blocked: bool = sqlx::query_scalar("SELECT $1 = ANY(pg_blocking_pids($2))")
+            .bind(holder_pid)
+            .bind(waiter_pid)
+            .fetch_one(pool)
+            .await
+            .expect("read blocking pids");
+        if blocked {
+            return true;
+        }
+        tokio::time::sleep(LOCK_WAIT_POLL_INTERVAL).await;
+    }
+    false
+}
+
+/// Delete every row that a test wrote for these tasks.
+pub(super) async fn cleanup_tasks(pool: &PgPool, task_ids: &[Uuid]) {
+    for statement in [
+        "DELETE FROM horsies_workflow_phase2_pending WHERE task_id = ANY($1)",
+        "DELETE FROM horsies_task_attempts WHERE task_id = ANY($1)",
+        "DELETE FROM horsies_heartbeats WHERE task_id = ANY($1)",
+        "DELETE FROM horsies_tasks WHERE id = ANY($1)",
+        "DELETE FROM horsies_task_history WHERE task_id = ANY($1)",
+        "DELETE FROM horsies_task_history_clock_exceptions WHERE task_id = ANY($1)",
+        "DELETE FROM horsies_key_reservations WHERE task_id = ANY($1)",
+    ] {
+        sqlx::query(statement)
+            .bind(task_ids)
+            .execute(pool)
+            .await
+            .expect("clean up task rows");
+    }
+}
+
+/// Delete workflows; their nodes and phase-2 records go with them.
+pub(super) async fn cleanup_workflows(pool: &PgPool, workflow_ids: &[Uuid]) {
+    sqlx::query("DELETE FROM horsies_workflows WHERE id = ANY($1)")
+        .bind(workflow_ids)
+        .execute(pool)
+        .await
+        .expect("clean up workflow rows");
+}
