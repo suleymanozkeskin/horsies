@@ -147,6 +147,18 @@ EXPECTED_FUNCTIONS = frozenset(
         'horsies_workflow_task_input',
         'horsies_workflow_try_complete',
         'horsies_workflow_unbuildable_nodes',
+        'horsies_workflow_tree_check',
+        'horsies_workflow_child_start',
+        'horsies_workflow_claimed_tasks_settle',
+        'horsies_workflow_task_stop_before_start',
+        'horsies_workflow_expire_paused',
+        'horsies_workflow_node_reevaluate',
+        'horsies_workflow_nodes_enqueue_ready',
+        'horsies_workflow_recovery_audit_page',
+        'horsies_workflow_audit_claim_renew',
+        'horsies_workflow_recover_completion',
+        'horsies_workflow_fail_orphaned',
+        'horsies_workflow_recovery_record_raise',
     }
 )
 
