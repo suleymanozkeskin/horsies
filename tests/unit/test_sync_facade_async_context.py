@@ -19,6 +19,7 @@ import threading
 from collections.abc import Callable, Generator
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
+from datetime import datetime, timezone
 
 import pytest
 from pydantic import SecretStr
@@ -109,7 +110,7 @@ BROKER_CALLS: dict[str, tuple[Callable[[PostgresBroker], Any], str]] = {
     ),
     'enqueue': (
         lambda broker: broker.enqueue(
-            'echo', task_id=TASK_ID, enqueue_sha='sha',
+            'echo', task_id=TASK_ID, enqueue_sha='sha', sent_at=datetime.now(timezone.utc),
         ),
         'enqueue_async',
     ),
@@ -513,7 +514,7 @@ def _workflow_handle(broker: PostgresBroker) -> WorkflowHandle[Any]:
 RUN_SYNC_SITES: dict[str, Callable[[Horsies, PostgresBroker], Any]] = {
     'broker.get_raw_result_record': lambda app, broker: broker.get_raw_result_record(TASK_ID, 0),
     'broker.enqueue': lambda app, broker: broker.enqueue(
-        'echo', task_id=TASK_ID, enqueue_sha='sha',
+        'echo', task_id=TASK_ID, enqueue_sha='sha', sent_at=datetime.now(timezone.utc),
     ),
     'broker.get_task_info': lambda app, broker: broker.get_task_info(TASK_ID),
     'broker.close': lambda app, broker: broker.close(),
@@ -663,7 +664,7 @@ ASYNC_TWINS: dict[str, tuple[Callable[[Horsies], Any], str]] = {
         'broker.get_raw_result_record_async(',
     ),
     'PostgresBroker.enqueue': (
-        lambda app: app.get_broker().enqueue('echo', task_id=TASK_ID, enqueue_sha='sha'),
+        lambda app: app.get_broker().enqueue('echo', task_id=TASK_ID, enqueue_sha='sha', sent_at=datetime.now(timezone.utc)),
         'broker.enqueue_async(',
     ),
     'PostgresBroker.get_task_info': (

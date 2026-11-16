@@ -34,7 +34,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.pgbouncer]
 
 @pytest.fixture
 def pgbouncer_urls() -> Generator[PgbouncerUrls, None, None]:
-    with isolated_pgbouncer_database("horsies_pgbouncer_contract") as urls:
+    with isolated_pgbouncer_database("pgbouncer_contract") as urls:
         yield urls
 
 

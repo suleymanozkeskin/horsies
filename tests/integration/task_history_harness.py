@@ -407,8 +407,8 @@ async def link_workflow_node(
                 task_options, max_retries, execution, good_until,
                 retention_class_key, status, task_id, is_subworkflow,
                 sub_workflow_id, sub_workflow_name, sub_definition_key,
-                sub_workflow_summary, result, error, created_at, started_at,
-                completed_at
+                sub_workflow_params, sub_workflow_summary, result, error,
+                created_at, started_at, completed_at
             ) VALUES (
                 CAST(:node_id AS uuid), CAST(:workflow_id AS uuid), :task_index,
                 :node_key, 'it.move', '{}',
@@ -417,8 +417,8 @@ async def link_workflow_node(
                 NULL, 0, 'ISOLATED', NULL,
                 'forever', :node_status, CAST(:task_id AS uuid), FALSE,
                 NULL, NULL, NULL,
-                NULL, NULL, NULL, now(), NULL,
-                NULL
+                NULL, NULL, NULL, NULL,
+                now(), NULL, NULL
             )
             """
         ),
