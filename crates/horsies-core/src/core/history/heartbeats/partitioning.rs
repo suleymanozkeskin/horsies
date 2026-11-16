@@ -290,10 +290,41 @@ pub async fn create_hourly_heartbeat_leaf(
                     leaf_name: leaf.leaf_name().to_owned(),
                 });
             }
+            // Read the state again under the relation lock.
+            let physical = read_leaf_physical_state(
+                connection,
+                leaf.leaf_name(),
+                HEARTBEATS_TABLE,
+                &index_name,
+                LeafPartitionBoundExpectation::Requested(leaf.bounds()),
+                LeafIndexKind::Heartbeat,
+            )
+            .await?;
+            if !physical.relation_exists
+                || physical.detach_pending != Some(false)
+                || !physical.partition_bound_matches_expected
+            {
+                return Ok(LeafCreation::CatalogConflict {
+                    leaf_name: leaf.leaf_name().to_owned(),
+                    kind: CatalogConflictKind::PhysicalNonconformant,
+                    detail: "the leaf changed before its index repair took the relation lock"
+                        .to_owned(),
+                });
+            }
+            if physical.id_index_conformant {
+                return Ok(LeafCreation::AlreadyConformant {
+                    leaf_name: leaf.leaf_name().to_owned(),
+                });
+            }
             match remove_attached_index_for_repair(connection, leaf.leaf_name(), &index_name)
                 .await?
             {
                 IndexRepairRemoval::Absent | IndexRepairRemoval::Removed => {}
+                IndexRepairRemoval::Busy => {
+                    return Ok(LeafCreation::Busy {
+                        leaf_name: leaf.leaf_name().to_owned(),
+                    });
+                }
                 IndexRepairRemoval::Foreign => {
                     return Ok(LeafCreation::CatalogConflict {
                         leaf_name: leaf.leaf_name().to_owned(),

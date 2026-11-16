@@ -1703,6 +1703,63 @@ async fn id_index_repair_refuses_a_name_reused_after_inspection() {
 
 #[tokio::test]
 #[serial]
+async fn index_repair_lock_wait_is_bounded_and_restores_the_timeout() {
+    let database = TestDatabase::create_with_connections(4).await;
+    let class_key = "standard_35d";
+    let parent = register_class(&database.pool, class_key, 35).await;
+    let mut clock = database.pool.acquire().await.expect("acquire clock");
+    let today = utc_day_start(database_now(&mut clock).await.expect("database now"));
+    drop(clock);
+    let leaf = leaf_ref(&parent, class_key, today);
+    assert!(matches!(
+        create_leaf(&database.pool, &leaf).await,
+        LeafCreation::Created { .. }
+    ));
+    let id_index_name = leaf_id_index_name(leaf.leaf_name());
+    sqlx::query("UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass($1)")
+        .bind(&id_index_name)
+        .execute(&database.pool)
+        .await
+        .expect("mark the task-ID index invalid");
+    // Another session holds the index relation lock: its uncommitted rename
+    // takes the lock that the repair's rename needs.
+    let mut blocker = database.pool.begin().await.expect("begin lock holder");
+    sqlx::query(&format!(
+        "ALTER INDEX {id_index_name} RENAME TO p3_lock_holder_idx"
+    ))
+    .execute(&mut *blocker)
+    .await
+    .expect("hold the index relation lock");
+
+    let mut repair = database.pool.begin().await.expect("begin repair");
+    let prior_timeout: String = sqlx::query_scalar("SHOW lock_timeout")
+        .fetch_one(&mut *repair)
+        .await
+        .expect("read prior lock timeout");
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        create_daily_leaf(
+            repair.as_mut(),
+            &CreateDailyHistoryLeaf::new(leaf.clone()).expect("repair command"),
+            &UnpublishedLoader,
+        ),
+    )
+    .await
+    .expect("the repair's lock wait is bounded")
+    .expect("classify the busy repair");
+    assert!(matches!(outcome, LeafCreation::Busy { .. }), "{outcome:?}");
+    let restored_timeout: String = sqlx::query_scalar("SHOW lock_timeout")
+        .fetch_one(&mut *repair)
+        .await
+        .expect("read restored lock timeout");
+    assert_eq!(restored_timeout, prior_timeout);
+    repair.rollback().await.expect("rollback repair");
+    blocker.rollback().await.expect("release the index lock");
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
 async fn pool_coverage_repairs_only_the_damaged_leaf_in_one_mutation_transaction() {
     let database = TestDatabase::create_with_connections(4).await;
     let setup = ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &UnpublishedLoader)
