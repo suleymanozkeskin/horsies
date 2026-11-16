@@ -240,10 +240,12 @@ def make_workflow(
     status: str = 'RUNNING',
     definition_key: str | None = 'tests.alpha.v1',
     parent_workflow_id: str | None = None,
+    parent_task_index: int | None = None,
     created_at: datetime | None = None,
     completed_at: datetime | None = None,
 ) -> WorkflowModel:
-    """Build a workflow run row."""
+    """Build a workflow run row; a child run names its parent node index."""
+    created = created_at or ago(120)
     return WorkflowModel(
         id=workflow_id or str(uuid.uuid4()),
         name=name,
@@ -251,8 +253,10 @@ def make_workflow(
         on_error='fail',
         definition_key=definition_key,
         parent_workflow_id=parent_workflow_id,
+        parent_task_index=parent_task_index,
         depth=0 if parent_workflow_id is None else 1,
-        created_at=created_at or ago(120),
+        sent_at=created,
+        created_at=created,
         completed_at=completed_at,
     )
 
@@ -273,13 +277,17 @@ def make_node(
     started_at: datetime | None = None,
     completed_at: datetime | None = None,
 ) -> WorkflowTaskModel:
-    """Build a workflow node row."""
+    """Build a workflow node row; a task node carries the task facts."""
     return WorkflowTaskModel(
         id=str(uuid.uuid4()),
         workflow_id=workflow_id,
         task_index=task_index,
         node_id=node_id,
         task_name=task_name,
+        input='{}',
+        max_retries=None if is_subworkflow else 0,
+        execution=None if is_subworkflow else 'ISOLATED',
+        retention_class_key=None if is_subworkflow else 'standard_30d',
         queue_name='default',
         priority=100,
         dependencies=dependencies if dependencies is not None else [],
@@ -2037,7 +2045,9 @@ class TestWorkflowNames:
         )
         await insert_rows(
             session,
-            make_workflow(name='child_flow', parent_workflow_id=root.id),
+            make_workflow(
+                name='child_flow', parent_workflow_id=root.id, parent_task_index=0,
+            ),
         )
 
         result = await list_workflow_names(broker)
@@ -2070,7 +2080,8 @@ class TestListWorkflowRuns:
         await insert_rows(
             session,
             make_workflow(
-                name='child_flow', parent_workflow_id=root.id, created_at=ago(10)
+                name='child_flow', parent_workflow_id=root.id,
+                parent_task_index=0, created_at=ago(10),
             ),
         )
 
@@ -2222,8 +2233,12 @@ class TestGetWorkflowRun:
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:
         run = make_workflow()
-        child = make_workflow(name='child_flow', parent_workflow_id=run.id)
-        empty_child = make_workflow(name='empty_child', parent_workflow_id=run.id)
+        child = make_workflow(
+            name='child_flow', parent_workflow_id=run.id, parent_task_index=0,
+        )
+        empty_child = make_workflow(
+            name='empty_child', parent_workflow_id=run.id, parent_task_index=1,
+        )
         await insert_rows(session, run)
         await insert_rows(session, child, empty_child)
         await insert_rows(
@@ -2259,7 +2274,9 @@ class TestGetWorkflowRun:
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:
         run = make_workflow()
-        child = make_workflow(name='child_flow', parent_workflow_id=run.id)
+        child = make_workflow(
+            name='child_flow', parent_workflow_id=run.id, parent_task_index=0,
+        )
         await insert_rows(session, run)
         await insert_rows(session, child)
         await insert_rows(session, make_node(workflow_id=child.id, task_index=0))
@@ -2401,7 +2418,9 @@ class TestGetWorkflowNode:
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:
         run = make_workflow()
-        child = make_workflow(name='child_flow', parent_workflow_id=run.id)
+        child = make_workflow(
+            name='child_flow', parent_workflow_id=run.id, parent_task_index=0,
+        )
         await insert_rows(session, run)
         await insert_rows(session, child)
         await insert_rows(

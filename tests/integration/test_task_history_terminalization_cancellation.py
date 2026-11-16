@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from hashlib import sha256
 from typing import Any
-from uuid import uuid4
 
 import pytest
 from sqlalchemy import text
@@ -23,7 +22,9 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from tests.integration.task_history_harness import (
     HistorySchema,
+    create_workflow,
     insert_live_task,
+    link_workflow_node,
     prepare_move_storage,
     terminalization_schema_fixture,
 )
@@ -80,21 +81,17 @@ async def link_node(
     workflow_id: str | None = None,
     task_index: int = 0,
 ) -> str:
-    node_workflow = workflow_id if workflow_id is not None else str(uuid4())
-    await connection.execute(
-        text(
-            'INSERT INTO horsies_workflow_tasks '
-            '(id, workflow_id, task_id, task_index, status) VALUES '
-            '(CAST(:node_id AS uuid), CAST(:workflow_id AS uuid), '
-            'CAST(:task_id AS uuid), :task_index, :status)'
-        ),
-        {
-            'node_id': str(uuid4()),
-            'workflow_id': node_workflow,
-            'task_id': task_id,
-            'task_index': task_index,
-            'status': status,
-        },
+    node_workflow = (
+        workflow_id
+        if workflow_id is not None
+        else await create_workflow(connection, status='RUNNING')
+    )
+    _ = await link_workflow_node(
+        connection,
+        task_id,
+        workflow_id=node_workflow,
+        node_status=status,
+        task_index=task_index,
     )
     return node_workflow
 

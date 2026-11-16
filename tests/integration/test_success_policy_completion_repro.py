@@ -49,8 +49,9 @@ async def test_success_policy_does_not_finalize_with_live_non_required_task(
                  'COMPLETED', NOW(),
                  0, 'ISOLATED', 'standard_30d'),
                 (:live_id, :workflow_id, 1, 'non_required', 'non_required_task',
-                 '[]', '{}', 'default', 100, '{}', FALSE, 'all', FALSE,
-                 'ENQUEUED', NOW())
+                 '{}', 'default', 100, '{}', FALSE, 'all', FALSE,
+                 'ENQUEUED', NOW(),
+                 0, 'ISOLATED', 'standard_30d')
         """),
         {
             'completed_id': str(uuid.uuid4()),

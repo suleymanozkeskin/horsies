@@ -57,8 +57,10 @@ from horsies.core.history.partitions.publication import UnpublishedLoader
 from tests.integration.task_history_harness import (
     INSERT_HISTORY_ROW_SQL,
     HistorySchema,
+    create_workflow,
     day_bounds,
     frozen_history_row,
+    link_workflow_node,
     register_class,
     terminalization_schema_fixture,
 )
@@ -148,21 +150,9 @@ async def _seed_pending_locator(
     pending table alone, by class and anchor range.
     """
     anchor = ref.bounds.lower + timedelta(hours=1)
-    node_row_id = str(uuid4())
-    workflow_id = str(uuid4())
-    await connection.execute(
-        text(
-            'INSERT INTO horsies_workflow_tasks '
-            '(id, workflow_id, task_id, task_index, node_id) VALUES '
-            '(CAST(:node_row_id AS uuid), CAST(:workflow_id AS uuid), '
-            'CAST(:task_id AS uuid), 0, :node_key)'
-        ),
-        {
-            'node_row_id': node_row_id,
-            'workflow_id': workflow_id,
-            'task_id': task_id,
-            'node_key': 'node-0',
-        },
+    workflow_id = await create_workflow(connection, status='RUNNING')
+    node_row_id = await link_workflow_node(
+        connection, task_id, workflow_id=workflow_id, node_status='RUNNING',
     )
     await connection.execute(
         text(

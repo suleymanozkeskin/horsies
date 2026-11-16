@@ -130,10 +130,10 @@ async def _block_leaf(broker: PostgresBroker, leaf: LeafRef) -> uuid.UUID:
         await connection.execute(
             text(
                 'INSERT INTO horsies_workflows '
-                '(id, name, status, on_error, depth, '
-                ' created_at, updated_at) '
-                "VALUES (:id, :name, :status, 'FAIL_FAST', 0, "
-                ' now(), now())'
+                '(id, name, status, on_error, depth, root_workflow_id, '
+                ' sent_at, created_at, updated_at) '
+                "VALUES (:id, :name, :status, 'fail', 0, :id, "
+                ' now(), now(), now())'
             ),
             {
                 'id': workflow_id,
@@ -144,11 +144,13 @@ async def _block_leaf(broker: PostgresBroker, leaf: LeafRef) -> uuid.UUID:
         await connection.execute(
             text(
                 'INSERT INTO horsies_workflow_tasks '
-                '(id, workflow_id, task_index, task_name, queue_name, '
+                '(id, workflow_id, task_index, task_name, input, queue_name, '
                 ' priority, dependencies, allow_failed_deps, join_type, '
-                ' status, is_subworkflow, created_at) '
-                "VALUES (:id, :workflow_id, 0, :task_name, 'default', "
-                " 100, ARRAY[]::int[], FALSE, 'ALL', :status, FALSE, now())"
+                ' status, is_subworkflow, created_at, '
+                ' max_retries, execution, retention_class_key) '
+                "VALUES (:id, :workflow_id, 0, :task_name, '{}', 'default', "
+                " 100, ARRAY[]::int[], FALSE, 'all', :status, FALSE, now(), "
+                " 0, 'ISOLATED', 'standard_30d')"
             ),
             {
                 'id': node_id,

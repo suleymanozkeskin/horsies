@@ -718,6 +718,7 @@ class TestWorkflowBoundRowsAreUntouched:
             status='RUNNING',
             on_error='fail',
             depth=0,
+            sent_at=datetime.now(UTC),
         )
         await persist(session, workflow)
         task = make_task(status=TaskStatus.FAILED, is_workflow_task=True)
@@ -729,6 +730,10 @@ class TestWorkflowBoundRowsAreUntouched:
                 workflow_id=workflow.id,
                 task_index=0,
                 task_name='action_task',
+                input='{}',
+                max_retries=0,
+                execution='ISOLATED',
+                retention_class_key='standard_30d',
                 queue_name='default',
                 priority=100,
                 dependencies=[],
