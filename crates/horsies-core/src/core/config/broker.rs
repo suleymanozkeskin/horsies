@@ -131,13 +131,6 @@ pub enum PostgresConfigError {
     InvalidSessionUrlScheme(String),
     #[error("pgbouncer_transaction_mode=true requires session_database_url for schema initialization, partition maintenance, and LISTEN/NOTIFY")]
     MissingSessionDatabaseUrl,
-    /// A SQLAlchemy driver suffix (`postgresql+psycopg://`): the core is the
-    /// driver, so the URL names no driver.
-    #[error(
-        "invalid {field} scheme '{scheme}': remove the driver suffix and use \
-         'postgresql://user:pass@host/db' (or 'postgres://')"
-    )]
-    DriverSuffixInUrl { field: &'static str, scheme: String },
     #[error(
         "session_database_url must not use the transaction-pool URL: partition maintenance \
          and LISTEN require PostgreSQL session affinity; use a direct or session-capable \
@@ -192,22 +185,6 @@ impl PostgresConfig {
 
     /// Validate the configuration.
     pub fn validate(&self) -> Result<(), PostgresConfigError> {
-        if let Some(scheme) = driver_suffixed_scheme(&self.database_url) {
-            return Err(PostgresConfigError::DriverSuffixInUrl {
-                field: "database_url",
-                scheme,
-            });
-        }
-        if let Some(scheme) = self
-            .session_database_url
-            .as_deref()
-            .and_then(driver_suffixed_scheme)
-        {
-            return Err(PostgresConfigError::DriverSuffixInUrl {
-                field: "session_database_url",
-                scheme,
-            });
-        }
         if !is_postgres_url(&self.database_url) {
             let scheme = self
                 .database_url
@@ -227,25 +204,16 @@ impl PostgresConfig {
                 ));
             }
         }
-        match (
-            self.pgbouncer_transaction_mode,
-            self.session_database_url.as_deref(),
-        ) {
-            (true, None) => Err(PostgresConfigError::MissingSessionDatabaseUrl),
-            (true, Some(session_url)) if session_url == self.database_url => {
-                Err(PostgresConfigError::SessionUrlIsTransactionPoolUrl)
-            }
-            (true, Some(_)) | (false, _) => Ok(()),
+        if self.pgbouncer_transaction_mode && self.session_database_url.is_none() {
+            return Err(PostgresConfigError::MissingSessionDatabaseUrl);
         }
+        if self.pgbouncer_transaction_mode
+            && self.session_database_url.as_deref() == Some(self.database_url.as_str())
+        {
+            return Err(PostgresConfigError::SessionUrlIsTransactionPoolUrl);
+        }
+        Ok(())
     }
-}
-
-/// The scheme of a `postgresql+<driver>://` or `postgres+<driver>://` URL,
-/// or `None` when the URL has no driver suffix.
-fn driver_suffixed_scheme(url: &str) -> Option<String> {
-    let (scheme, _) = url.split_once("://")?;
-    let suffixed = scheme.starts_with("postgresql+") || scheme.starts_with("postgres+");
-    suffixed.then(|| scheme.to_owned())
 }
 
 fn is_postgres_url(url: &str) -> bool {
@@ -380,32 +348,6 @@ mod tests {
         assert!(matches!(
             config.validate(),
             Err(PostgresConfigError::MissingSessionDatabaseUrl),
-        ));
-    }
-
-    /// The decided URL rule: only `postgresql://` and `postgres://`; the
-    /// SQLAlchemy driver form is refused with an error that names the fix.
-    #[test]
-    fn driver_suffixed_url_is_refused_with_the_fix() {
-        let config = PostgresConfig::from_url("postgresql+psycopg://user:pass@localhost/db");
-        let error = config.validate().expect_err("driver suffix refused");
-        assert!(matches!(
-            &error,
-            PostgresConfigError::DriverSuffixInUrl {
-                field: "database_url",
-                scheme,
-            } if scheme == "postgresql+psycopg"
-        ));
-        assert!(error.to_string().contains("remove the driver suffix"));
-
-        let mut session = PostgresConfig::from_url("postgresql://user:pass@pooler/db");
-        session.session_database_url = Some("postgres+psycopg://user:pass@direct/db".to_owned());
-        assert!(matches!(
-            session.validate(),
-            Err(PostgresConfigError::DriverSuffixInUrl {
-                field: "session_database_url",
-                ..
-            }),
         ));
     }
 
