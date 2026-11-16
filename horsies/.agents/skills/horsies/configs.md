@@ -200,6 +200,11 @@ HRS-218 and `claimed_per_worker`) = sum over budgets + `prefetch_buffer`; with
 isolated children only, the sum is `count`, and every class goes to the
 `ISOLATED` budget. `ClaimLimits` apply to the worker as a whole; soft cap mode
 lets each budget prefetch up to `prefetch_buffer`, within the worker total.
+In soft cap mode a claimed row of a capped queue starts only while the queue's
+RUNNING rows plus the rows that the worker started and that are not RUNNING yet
+are under `max_concurrency`, and a child that runs rows of its class has a free
+slot or seat at that moment (checked once per claim pass); the other rows wait,
+CLAIMED, and return to the queue when the worker stops.
 A claimed row of a shared class whose registered task here has another class
 (e.g. `SHARED_ASYNC` row, function now `def`) is written `ISOLATED`, returned to
 `PENDING` with the claim fence, and logged. `horsies_worker_states.class_capacity`
