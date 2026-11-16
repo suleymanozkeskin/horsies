@@ -3098,7 +3098,7 @@ fn history_result_row(detail: HistoryTaskDetail) -> Result<TaskResultRow, Broker
         .transpose()?;
     Ok(TaskResultRow {
         id: detail.task_id,
-        status: detail.status,
+        status: detail.status.to_string(),
         result,
         failed_reason: detail.final_failed_reason,
     })
@@ -3140,8 +3140,7 @@ fn history_task_info(
     include_failed_reason: bool,
     include_attempts: bool,
 ) -> BrokerResult<TaskInfo> {
-    let status = crate::broker::row::task::parse_task_status(&detail.status)
-        .map_err(task_info_history_error)?;
+    let status = detail.status;
     let result = match include_result {
         false => None,
         true => decode_history_result_value(&detail)
