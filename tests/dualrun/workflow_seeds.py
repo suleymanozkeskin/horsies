@@ -1,0 +1,268 @@
+"""Workflow trees for the workflow operation dual-runs.
+
+``start_tree`` writes one tree with ``horsies_workflow_start``: the top-level
+workflow first, then each child that a sub-workflow node of the tree starts
+at once. The start mints the node and task ids and enqueues the root nodes.
+The other helpers move one task, node or workflow into the state a test
+needs, with the columns that the claim, the start of a task and a terminal
+workflow write.
+
+Every helper raises ``psycopg.Error`` on a database error and
+``AssertionError`` when its row is not in the state it expects; the seed's
+transaction then rolls back (``tests/dualrun/operation.py``).
+"""
+
+from __future__ import annotations
+
+import uuid
+from collections.abc import Sequence
+from dataclasses import dataclass
+from enum import Enum
+from typing import Final, LiteralString
+
+from tests.dualrun.capture import Connection
+
+_TASK_OPTIONS: Final = '{"retry":"none"}'
+_QUEUE: Final = 'default'
+_PRIORITY: Final = 50
+_MAX_RETRIES: Final = 0
+_EXECUTION: Final = 'ISOLATED'
+_RETENTION: Final = 'forever'
+_HOST: Final = 'dualrun-host'
+_PID: Final = 4242
+_PROCESS: Final = 'dualrun-worker-process'
+
+
+class NodeKind(Enum):
+    """What a node runs."""
+
+    TASK = 'TASK'
+    SUBWORKFLOW = 'SUBWORKFLOW'
+
+
+class OnError(Enum):
+    """The failure policy of a workflow."""
+
+    FAIL = 'fail'
+    PAUSE = 'pause'
+
+
+@dataclass(frozen=True, slots=True)
+class NodeSeed:
+    """One node. ``name`` is the task name, or the child workflow name of a sub-workflow node."""
+
+    index: int
+    name: str
+    kind: NodeKind
+    dependencies: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class TopLevel:
+    """The workflow has no parent."""
+
+
+@dataclass(frozen=True, slots=True)
+class ChildOf:
+    """The workflow is the child of node ``parent_task_index`` of ``parent``."""
+
+    parent: uuid.UUID
+    parent_task_index: int
+    depth: int
+
+
+type Parent = TopLevel | ChildOf
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowSeed:
+    """One workflow row and its nodes."""
+
+    workflow_id: uuid.UUID
+    name: str
+    on_error: OnError
+    parent: Parent
+    nodes: tuple[NodeSeed, ...]
+
+
+def task_node(index: int, name: str, *dependencies: int) -> NodeSeed:
+    """A task node of ``name`` that waits for ``dependencies``."""
+    return NodeSeed(index=index, name=name, kind=NodeKind.TASK, dependencies=dependencies)
+
+
+def subworkflow_node(index: int, child_name: str, *dependencies: int) -> NodeSeed:
+    """A sub-workflow node whose child workflow is named ``child_name``."""
+    return NodeSeed(
+        index=index, name=child_name, kind=NodeKind.SUBWORKFLOW, dependencies=dependencies,
+    )
+
+
+_START_SQL: Final[LiteralString] = """
+    SELECT row_kind, disposition FROM horsies_workflow_start(
+        %(workflow_ids)s, %(names)s, %(definition_keys)s, %(on_errors)s,
+        %(output_task_indexes)s, %(success_policies)s, %(parent_workflow_ids)s,
+        %(parent_task_indexes)s, %(depths)s, now() - interval '1 second',
+        %(node_workflow_ids)s, %(node_task_indexes)s, %(node_ids)s, %(node_task_names)s,
+        %(node_inputs)s, %(node_queue_names)s, %(node_priorities)s, %(node_dependencies)s,
+        %(node_args_from)s, %(node_workflow_ctx_from)s, %(node_allow_failed_deps)s,
+        %(node_join_types)s, %(node_min_successes)s, %(node_task_options)s,
+        %(node_max_retries)s, %(node_executions)s,
+        CAST(%(node_good_untils)s AS timestamptz[]), %(node_retention_class_keys)s,
+        %(node_is_subworkflow)s, %(node_sub_workflow_names)s, %(node_sub_definition_keys)s,
+        %(node_sub_workflow_params)s,
+        CAST(%(failed_workflow_ids)s AS uuid[]), CAST(%(failed_task_indexes)s AS integer[]),
+        CAST(%(failed_results)s AS text[])
+    )
+"""
+
+
+def _parent_columns(parent: Parent) -> tuple[uuid.UUID | None, int | None, int]:
+    match parent:
+        case TopLevel():
+            return None, None, 0
+        case ChildOf(parent=parent_id, parent_task_index=index, depth=depth):
+            return parent_id, index, depth
+
+
+def _is_task(node: NodeSeed) -> bool:
+    match node.kind:
+        case NodeKind.TASK:
+            return True
+        case NodeKind.SUBWORKFLOW:
+            return False
+
+
+def _dependencies_text(node: NodeSeed) -> str:
+    return '[' + ','.join(str(index) for index in node.dependencies) + ']'
+
+
+def start_parameters(workflows: Sequence[WorkflowSeed]) -> dict[str, object]:
+    """The arrays of ``horsies_workflow_start`` for ``workflows`` (top-level row first). Pure."""
+    parents = [_parent_columns(workflow.parent) for workflow in workflows]
+    nodes = [(workflow, node) for workflow in workflows for node in workflow.nodes]
+    return {
+        'workflow_ids': [workflow.workflow_id for workflow in workflows],
+        'names': [workflow.name for workflow in workflows],
+        'definition_keys': [None for _ in workflows],
+        'on_errors': [workflow.on_error.value for workflow in workflows],
+        'output_task_indexes': [None for _ in workflows],
+        'success_policies': [None for _ in workflows],
+        'parent_workflow_ids': [parent for parent, _, _ in parents],
+        'parent_task_indexes': [index for _, index, _ in parents],
+        'depths': [depth for _, _, depth in parents],
+        'node_workflow_ids': [workflow.workflow_id for workflow, _ in nodes],
+        'node_task_indexes': [node.index for _, node in nodes],
+        'node_ids': [f'{workflow.name}.n{node.index}' for workflow, node in nodes],
+        'node_task_names': [node.name for _, node in nodes],
+        'node_inputs': ['{}' for _ in nodes],
+        'node_queue_names': [_QUEUE for _ in nodes],
+        'node_priorities': [_PRIORITY for _ in nodes],
+        'node_dependencies': [_dependencies_text(node) for _, node in nodes],
+        'node_args_from': [None for _ in nodes],
+        'node_workflow_ctx_from': [None for _ in nodes],
+        'node_allow_failed_deps': [False for _ in nodes],
+        'node_join_types': ['all' for _ in nodes],
+        'node_min_successes': [None for _ in nodes],
+        'node_task_options': [_TASK_OPTIONS if _is_task(node) else None for _, node in nodes],
+        'node_max_retries': [_MAX_RETRIES if _is_task(node) else None for _, node in nodes],
+        'node_executions': [_EXECUTION if _is_task(node) else None for _, node in nodes],
+        'node_good_untils': [None for _ in nodes],
+        'node_retention_class_keys': [_RETENTION if _is_task(node) else None for _, node in nodes],
+        'node_is_subworkflow': [not _is_task(node) for _, node in nodes],
+        'node_sub_workflow_names': [None if _is_task(node) else node.name for _, node in nodes],
+        'node_sub_definition_keys': [None for _ in nodes],
+        'node_sub_workflow_params': [None if _is_task(node) else 'NOT_GIVEN' for _, node in nodes],
+        'failed_workflow_ids': [],
+        'failed_task_indexes': [],
+        'failed_results': [],
+    }
+
+
+def start_tree(connection: Connection, workflows: Sequence[WorkflowSeed]) -> None:
+    """Start the tree of ``workflows`` in one statement; the outcome must be STARTED with no owed work."""
+    rows = connection.execute(_START_SQL, start_parameters(workflows)).fetchall()
+    kinds = sorted((str(row[0]), str(row[1])) for row in rows)
+    assert kinds == [('OUTCOME', 'STARTED')], f'the seeded start returned {kinds}'
+
+
+_NODE_TASK_SQL: Final[LiteralString] = """
+    SELECT task_id FROM horsies_workflow_tasks WHERE workflow_id = %(wf)s AND task_index = %(idx)s
+"""
+
+_CLAIM_SQL: Final[LiteralString] = """
+    UPDATE horsies_tasks
+    SET status = 'CLAIMED', claimed_at = now(), claimed_by_worker_id = %(worker)s,
+        claim_expires_at = now() + interval '1 minute', updated_at = now()
+    WHERE id = %(task)s AND status = 'PENDING'
+"""
+
+_RUN_TASK_SQL: Final[LiteralString] = """
+    UPDATE horsies_tasks
+    SET status = 'RUNNING', claimed_at = now(), claimed_by_worker_id = %(worker)s,
+        claim_expires_at = NULL, started_at = now(), worker_pid = %(pid)s,
+        worker_hostname = %(host)s, worker_process_name = %(process)s, updated_at = now()
+    WHERE id = %(task)s AND status = 'PENDING'
+"""
+
+_RUN_NODE_SQL: Final[LiteralString] = """
+    UPDATE horsies_workflow_tasks SET status = 'RUNNING', started_at = now()
+    WHERE workflow_id = %(wf)s AND task_index = %(idx)s AND status = 'ENQUEUED'
+"""
+
+_END_WORKFLOW_SQL: Final[LiteralString] = """
+    UPDATE horsies_workflows SET status = %(status)s, completed_at = now(), updated_at = now()
+    WHERE id = %(wf)s
+"""
+
+_PAUSE_WORKFLOW_SQL: Final[LiteralString] = """
+    UPDATE horsies_workflows SET status = 'PAUSED', updated_at = now()
+    WHERE id = %(wf)s AND status = 'RUNNING'
+"""
+
+
+def node_task_id(connection: Connection, workflow_id: uuid.UUID, index: int) -> uuid.UUID:
+    """The task of node ``index`` of ``workflow_id``; the node must have one."""
+    record = connection.execute(_NODE_TASK_SQL, {'wf': workflow_id, 'idx': index}).fetchone()
+    assert record is not None and record[0] is not None, (
+        f'node {index} of workflow {workflow_id} has no task'
+    )
+    task_id = record[0]
+    assert isinstance(task_id, uuid.UUID)
+    return task_id
+
+
+def claim_node_task(
+    connection: Connection, workflow_id: uuid.UUID, index: int, worker_id: str,
+) -> uuid.UUID:
+    """Claim the PENDING task of node ``index`` for ``worker_id``, with a live lease."""
+    task_id = node_task_id(connection, workflow_id, index)
+    cursor = connection.execute(_CLAIM_SQL, {'task': task_id, 'worker': worker_id})
+    assert cursor.rowcount == 1, f'the task of node {index} of {workflow_id} is not PENDING'
+    return task_id
+
+
+def run_node_task(
+    connection: Connection, workflow_id: uuid.UUID, index: int, worker_id: str,
+) -> uuid.UUID:
+    """Move the PENDING task of node ``index`` to RUNNING and its ENQUEUED node to RUNNING."""
+    task_id = node_task_id(connection, workflow_id, index)
+    task = connection.execute(
+        _RUN_TASK_SQL,
+        {'task': task_id, 'worker': worker_id, 'pid': _PID, 'host': _HOST, 'process': _PROCESS},
+    )
+    assert task.rowcount == 1, f'the task of node {index} of {workflow_id} is not PENDING'
+    node = connection.execute(_RUN_NODE_SQL, {'wf': workflow_id, 'idx': index})
+    assert node.rowcount == 1, f'node {index} of {workflow_id} is not ENQUEUED'
+    return task_id
+
+
+def end_workflow(connection: Connection, workflow_id: uuid.UUID, status: str) -> None:
+    """Set a terminal ``status`` with ``completed_at`` on one workflow row; its nodes stay."""
+    cursor = connection.execute(_END_WORKFLOW_SQL, {'wf': workflow_id, 'status': status})
+    assert cursor.rowcount == 1, f'workflow {workflow_id} is absent'
+
+
+def pause_workflow_row(connection: Connection, workflow_id: uuid.UUID) -> None:
+    """Set one RUNNING workflow row PAUSED; its descendants and tasks stay."""
+    cursor = connection.execute(_PAUSE_WORKFLOW_SQL, {'wf': workflow_id})
+    assert cursor.rowcount == 1, f'workflow {workflow_id} is not RUNNING'
