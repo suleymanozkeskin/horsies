@@ -2033,6 +2033,7 @@ def _stale_finish_row(task_id: str, outcome: str, **fields: Any) -> dict[str, An
         'queue_name': None,
         'task_name': None,
         'node_has_dependents': None,
+        'downstream_subworkflow': None,
         **fields,
     }
 

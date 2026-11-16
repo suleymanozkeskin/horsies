@@ -34,6 +34,7 @@ from horsies.core.lifecycle.outcomes import (
     LostClaim,
     ObservedForeignTerminalization,
     PhaseTwoOwed,
+    PhaseTwoStep,
     RetryNotRequested,
     RetryPastDeadline,
     RetryScheduled,
@@ -364,8 +365,12 @@ class TestTerminalFailure:
         outcome = await _finish(engine, _command(seeded))
 
         match outcome:
-            case FailureApplied(after=PhaseTwoOwed(task_name=name, queue_name=queue)):
+            case FailureApplied(
+                after=PhaseTwoOwed(task_name=name, queue_name=queue, step=step),
+            ):
                 assert (name, queue) == (TASK_NAME, QUEUE)
+                # The seeded node is the only node of its workflow.
+                assert step is PhaseTwoStep.NO_DEPENDENTS
             case other:
                 raise AssertionError(other)
         assert (await _history_row(engine, seeded.task_id)).status == 'FAILED'
