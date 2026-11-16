@@ -680,7 +680,7 @@ class TestTerminalWriterInventory:
         needs a row that can be changed, and there is none.
         """
         updates = _scan_runtime_history_updates() + [
-            (_BASELINE, window)
+            (f'{_BASELINE} {name}', window)
             for name, body in baseline_functions().items()
             for window in _scan_history_updates(body)
         ]
