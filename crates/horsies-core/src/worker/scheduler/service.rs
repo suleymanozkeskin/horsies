@@ -277,7 +277,7 @@ async fn run_scheduler(
     }
 
     check_schedules_at_start(&schedule_config, &prepared, Utc::now())?;
-    initialize_schedules(broker.pool(), &schedule_config.schedules, Utc::now()).await;
+    initialize_schedules(broker.pool(), &schedule_config.schedules).await;
 
     let lock_pool = scheduler_lock_pool(broker.pool());
     tracing::info!("scheduler started");
@@ -320,48 +320,99 @@ fn scheduler_lock_pool(runtime_pool: &sqlx::PgPool) -> sqlx::PgPool {
         .connect_lazy_with((*runtime_pool.connect_options()).clone())
 }
 
-/// Initialize schedule states in the database.
+/// Store the state row of each enabled schedule that is new or whose pattern
+/// or timezone changed, in two statements (Python `_initialize_schedules`,
+/// `horsies/core/scheduler/service.py`):
 ///
-/// For each enabled schedule, creates a state row if one doesn't exist, or
-/// moves `next_run_at` when the pattern or timezone changed (the run record is
-/// kept). Per-schedule isolation (Python `_initialize_schedules`): one
-/// schedule's failure is logged and the rest proceed; a schedule left without
-/// a row is recreated by the tick's existence heal.
-async fn initialize_schedules(pool: &sqlx::PgPool, schedules: &[TaskSchedule], now: DateTime<Utc>) {
+/// 1. One read of every row's name and digest, with the database time.
+/// 2. One write of the new and changed rows, each with its first run computed
+///    from that database time. A changed row keeps its run record.
+///
+/// Rows of names that are not in this config are kept and logged. A schedule
+/// whose pattern has no run after the database time is left out and logged.
+/// A database error of either statement is logged and start goes on: the
+/// tick's existence heal creates the missing rows.
+async fn initialize_schedules(pool: &sqlx::PgPool, schedules: &[TaskSchedule]) {
+    let read = match state::read_start_states(pool).await {
+        Ok(read) => read,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "failed to read schedule states at start; the existence heal creates missing rows",
+            );
+            return;
+        }
+    };
+
     // Schedule-state rows whose name is absent from this process's config are
     // left intact, not deleted: another scheduler (rolling deploy, shared DB)
     // may own them, and deleting would silently stop its schedule. Such rows are
-    // inert here — get_due_schedules only considers configured, enabled names.
+    // inert here — the due read only considers configured, enabled names.
     // Warn for visibility. Parity with horsies PR #101 e26a0f55.
     let configured_names: std::collections::HashSet<&str> =
         schedules.iter().map(|s| s.name.as_str()).collect();
-
-    match state::get_all_states(pool).await {
-        Ok(all_states) => {
-            for row in all_states {
-                if !configured_names.contains(row.schedule_name.as_str()) {
-                    tracing::warn!(
-                        schedule = %row.schedule_name,
-                        "schedule state present in DB but not in this config; \
-                         leaving intact (may belong to another scheduler)",
-                    );
-                }
-            }
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to fetch schedule states for inspection");
+    for row in &read.rows {
+        if !configured_names.contains(row.schedule_name.as_str()) {
+            tracing::warn!(
+                schedule = %row.schedule_name,
+                "schedule state present in DB but not in this config; \
+                 leaving intact (may belong to another scheduler)",
+            );
         }
     }
+    let stored: std::collections::HashMap<&str, &[u8]> = read
+        .rows
+        .iter()
+        .map(|row| (row.schedule_name.as_str(), row.config_hash.as_slice()))
+        .collect();
 
+    let writes = start_writes(schedules, &stored, read.database_now);
+    if writes.is_empty() {
+        return;
+    }
+    match state::store_start_states(pool, &writes).await {
+        Ok(written) => log_start_writes(&writes, &written, &stored),
+        Err(e) => tracing::error!(
+            error = %e,
+            "failed to store schedule states at start; the existence heal creates missing rows",
+        ),
+    }
+}
+
+/// The start write's rows: each enabled schedule whose stored digest is
+/// missing or differs, with its first run after `database_now`. A schedule
+/// whose pattern has no run after that time is left out and logged. Does no
+/// I/O.
+fn start_writes(
+    schedules: &[TaskSchedule],
+    stored: &std::collections::HashMap<&str, &[u8]>,
+    database_now: DateTime<Utc>,
+) -> Vec<state::ScheduleStateWrite> {
+    let mut writes: Vec<state::ScheduleStateWrite> = Vec::new();
     let mut failed: Vec<&str> = Vec::new();
     for schedule in schedules.iter().filter(|s| s.enabled) {
-        if let Err(e) = initialize_schedule(pool, schedule, now).await {
-            tracing::error!(
-                schedule = %schedule.name,
-                error = %e,
-                "failed to initialize schedule state",
-            );
-            failed.push(schedule.name.as_str());
+        let config_hash = compute_config_hash(schedule);
+        if stored
+            .get(schedule.name.as_str())
+            .is_some_and(|hash| *hash == config_hash.as_slice())
+        {
+            tracing::debug!(schedule = %schedule.name, "schedule state unchanged");
+            continue;
+        }
+        match next_run_at(&schedule.pattern, database_now, &schedule.timezone) {
+            Some(next) => writes.push(state::ScheduleStateWrite {
+                schedule_name: schedule.name.clone(),
+                next_run_at: next,
+                config_hash: config_hash.to_vec(),
+            }),
+            None => {
+                tracing::error!(
+                    schedule = %schedule.name,
+                    after = %database_now,
+                    "failed to initialize schedule state: the pattern has no run after the database time",
+                );
+                failed.push(schedule.name.as_str());
+            }
         }
     }
     if !failed.is_empty() {
@@ -371,127 +422,89 @@ async fn initialize_schedules(pool: &sqlx::PgPool, schedules: &[TaskSchedule], n
             failed.len(),
         );
     }
+    writes
 }
 
-/// Why one schedule's state row was not initialized.
-#[derive(Debug, thiserror::Error)]
-enum ScheduleInitError {
-    #[error("state read or write failed: {0}")]
-    Database(#[from] sqlx::Error),
-    #[error("the pattern has no run after {after}")]
-    NoNextSlot { after: DateTime<Utc> },
-}
-
-/// Create the state row of one schedule, or store its changed pattern or
-/// timezone. An unchanged schedule is not written.
-async fn initialize_schedule(
-    pool: &sqlx::PgPool,
-    schedule: &TaskSchedule,
-    now: DateTime<Utc>,
-) -> Result<(), ScheduleInitError> {
-    let config_hash = compute_config_hash(schedule);
-    let existing = state::get_state(pool, &schedule.name).await?;
-    if existing
-        .as_ref()
-        .is_some_and(|row| row.config_hash.as_slice() == config_hash.as_slice())
-    {
-        tracing::debug!(schedule = %schedule.name, "schedule state unchanged");
-        return Ok(());
-    }
-
-    let next = next_run_at(&schedule.pattern, now, &schedule.timezone)
-        .ok_or(ScheduleInitError::NoNextSlot { after: now })?;
-    match existing {
-        None => {
-            let _inserted =
-                state::insert_state_if_absent(pool, &schedule.name, next, &config_hash).await?;
-            tracing::info!(schedule = %schedule.name, next_run_at = %next, "schedule initialized");
-        }
-        Some(_) => {
-            let _written =
-                state::update_schedule_config(pool, &schedule.name, next, &config_hash).await?;
-            tracing::warn!(
-                schedule = %schedule.name,
-                next_run_at = %next,
+/// Log each row of the start write: created, moved to a changed pattern, or
+/// left to the row another scheduler wrote first.
+fn log_start_writes(
+    writes: &[state::ScheduleStateWrite],
+    written: &[String],
+    stored: &std::collections::HashMap<&str, &[u8]>,
+) {
+    for write in writes {
+        let was_written = written.contains(&write.schedule_name);
+        let was_stored = stored.contains_key(write.schedule_name.as_str());
+        match (was_written, was_stored) {
+            (true, false) => tracing::info!(
+                schedule = %write.schedule_name,
+                next_run_at = %write.next_run_at,
+                "schedule initialized",
+            ),
+            (true, true) => tracing::warn!(
+                schedule = %write.schedule_name,
+                next_run_at = %write.next_run_at,
                 "schedule pattern or timezone changed; next_run_at recalculated, run record kept",
-            );
+            ),
+            (false, _) => tracing::debug!(
+                schedule = %write.schedule_name,
+                "schedule state written by another scheduler first",
+            ),
         }
     }
-    Ok(())
 }
 
-/// Recreate state rows for enabled schedules that have none.
-///
-/// Diffs enabled schedule names against existing state-row names (one PK-column
-/// SELECT, no locks) and inserts the missing ones with `next_run_at` computed
-/// from `now`. Per-schedule isolated (a failure logs and is retried on the next
-/// check), idempotent, and race-safe via `insert_state_if_absent` (a concurrent
-/// winner's row is preserved). Parity with horsies PR #123.
+/// Create the state rows missing for enabled schedules, in one statement with
+/// no read before it (Python `_ensure_states_exist`): `INSERT ... ON CONFLICT
+/// DO NOTHING`. A row that exists is not written; a concurrent winner's row
+/// stands. Each missing row gets the first run after `database_now`, the
+/// database time of this tick's due read. Parity with horsies PR #123.
 ///
 /// Runs on a cadence, not every tick (parity with horsies PR #206): while
 /// healthy the caller re-checks roughly every [`EXISTENCE_CHECK_INTERVAL_S`]
 /// seconds; an unhealthy pass makes the caller re-check every tick until a
-/// fully healthy one. A missing row healed without error in the same pass
-/// counts as healthy.
+/// fully healthy one.
 ///
-/// Returns `true` when every enabled schedule had a state row or was
-/// re-initialized without error in this pass.
+/// Returns `true` when the first run of every enabled schedule was computed
+/// and the statement ran.
 async fn ensure_states_exist(
     pool: &sqlx::PgPool,
     schedules: &[TaskSchedule],
-    now: DateTime<Utc>,
+    database_now: DateTime<Utc>,
 ) -> bool {
-    let enabled: Vec<&TaskSchedule> = schedules.iter().filter(|s| s.enabled).collect();
-    if enabled.is_empty() {
-        return true;
-    }
-
-    let existing: std::collections::HashSet<String> = match state::get_existing_names(pool).await {
-        Ok(names) => names.into_iter().collect(),
-        Err(e) => {
-            // A failed existence read this tick is not a regression: the due
-            // query would fail the same way. Skip the heal; the unhealthy
-            // verdict makes the next tick re-check.
-            tracing::warn!(error = %e, "schedule self-heal: existence read failed, skipping tick");
-            return false;
-        }
-    };
-
+    let mut writes: Vec<state::ScheduleStateWrite> = Vec::new();
     let mut healthy = true;
-    for schedule in enabled {
-        if existing.contains(&schedule.name) {
-            continue;
-        }
-
-        let config_hash = compute_config_hash(schedule);
-        let Some(next) = next_run_at(&schedule.pattern, now, &schedule.timezone) else {
-            healthy = false;
-            tracing::error!(
-                schedule = %schedule.name,
-                after = %now,
-                "schedule self-heal: the pattern has no next run; row not created",
-            );
-            continue;
-        };
-
-        match state::insert_state_if_absent(pool, &schedule.name, next, &config_hash).await {
-            Ok(true) => tracing::info!(
-                schedule = %schedule.name,
-                next_run_at = %next,
-                "self-healed missing schedule state",
-            ),
-            Ok(false) => {} // lost the check-then-insert race; winner's row stands
-            Err(e) => {
+    for schedule in schedules.iter().filter(|s| s.enabled) {
+        match next_run_at(&schedule.pattern, database_now, &schedule.timezone) {
+            Some(next) => writes.push(state::ScheduleStateWrite {
+                schedule_name: schedule.name.clone(),
+                next_run_at: next,
+                config_hash: compute_config_hash(schedule).to_vec(),
+            }),
+            None => {
                 healthy = false;
                 tracing::error!(
                     schedule = %schedule.name,
-                    error = %e,
-                    "schedule self-heal insert failed, will retry next tick",
+                    after = %database_now,
+                    "schedule self-heal: the pattern has no next run; row not created",
                 );
             }
         }
     }
-    healthy
+
+    match state::heal_missing_states(pool, &writes).await {
+        Ok(healed) => {
+            for name in healed {
+                tracing::info!(schedule = %name, "self-healed missing schedule state");
+            }
+            healthy
+        }
+        Err(e) => {
+            // The unhealthy verdict makes the next tick run the heal again.
+            tracing::warn!(error = %e, "schedule self-heal failed, will retry next tick");
+            false
+        }
+    }
 }
 
 /// Check for due schedules and enqueue their tasks.
@@ -510,8 +523,6 @@ async fn check_and_enqueue(
     prepared: &PreparedSchedules,
     existence_cadence: &mut ExistenceCheckCadence,
 ) -> Result<(), sqlx::Error> {
-    let now = Utc::now();
-
     // Only query for enabled schedules — filter at the DB level.
     let enabled_names: Vec<String> = schedules
         .iter()
@@ -523,21 +534,25 @@ async fn check_and_enqueue(
         return Ok(());
     }
 
+    // The due read returns the database time with the due rows. That time is
+    // the tick's only clock: the heal and every slot of this tick are computed
+    // from it (Python `_check_and_run_schedules`).
+    let due_read = state::read_due_schedules(broker.pool(), &enabled_names).await?;
+    let now = due_read.database_now;
+
     // Self-heal: recreate state rows for enabled schedules missing one (init
     // failure or external delete) so they are not silently dormant until the
-    // next restart. Runs before the due query — recreated rows have a strictly
-    // future next_run_at and so are not due this tick. Gated to a ~60s cadence
-    // while healthy (parity with horsies PR #206); the due read below still
-    // runs every tick.
+    // next restart. A recreated row was not in the due read, and its
+    // next_run_at is after the read's database time. Gated to a ~60s cadence
+    // while healthy (parity with horsies PR #206); the due read above runs
+    // every tick.
     if existence_cadence.should_check() {
         let healthy = ensure_states_exist(broker.pool(), schedules, now).await;
         existence_cadence.record(healthy);
     }
     existence_cadence.tick();
 
-    let due = state::get_due_schedules_filtered(broker.pool(), &enabled_names, now).await?;
-
-    for row in due {
+    for row in due_read.due {
         // Defensive: skip any row that doesn't match a configured schedule.
         let Some(schedule) = schedules.iter().find(|s| s.name == row.schedule_name) else {
             tracing::warn!(schedule = %row.schedule_name, "due schedule not in config");
@@ -1958,6 +1973,36 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+    }
+
+    /// The start computes a new schedule's first run from the database time
+    /// of its read, and stores the schedule's digest (Python
+    /// `tests/integration/test_schedule_state_rows.py`,
+    /// `test_start_computes_the_first_run_from_the_database_time`).
+    #[tokio::test]
+    #[serial]
+    async fn initialize_schedules_computes_first_runs_from_the_database_time() {
+        let pool = test_pool().await;
+        let name = format!("qw728_start_{}", uuid::Uuid::new_v4());
+        let schedules = vec![interval_schedule_secs(&name, 60)];
+
+        let before: DateTime<Utc> = sqlx::query_scalar("SELECT statement_timestamp()")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        initialize_schedules(&pool, &schedules).await;
+        let after: DateTime<Utc> = sqlx::query_scalar("SELECT statement_timestamp()")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        let row = state::get_state(&pool, &name).await.unwrap().unwrap();
+        assert!(row.next_run_at > before);
+        assert!(row.next_run_at <= after + chrono::Duration::seconds(60));
+        assert_eq!(row.config_hash, compute_config_hash(&schedules[0]).to_vec());
+        assert_eq!(row.run_count, 0);
+
+        state::delete_state(&pool, &name).await.unwrap();
     }
 
     // --- Existence-check cadence (parity with horsies PR #206) ---

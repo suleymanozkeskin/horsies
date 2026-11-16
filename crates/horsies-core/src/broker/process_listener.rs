@@ -22,12 +22,13 @@ use std::time::Duration;
 
 use tokio::sync::OnceCell;
 
-use crate::broker::error::is_retryable_sqlx_error;
+use crate::broker::error::is_retryable_statement_failure;
+use crate::broker::pools::PoolSettingsError;
 
 use crate::db::{
     parse_connection_url, ChannelName, ConnectPlan, ConnectPlanError, ConnectionEnvironment,
     EnvironmentError, Listener, MaskedUrl, PayloadFilter, PayloadSubscription, QueueCapacity,
-    SocketSettings, SubscribeError, Transience, UrlError, WakeSubscription,
+    SocketSettings, StatementFailure, SubscribeError, Transience, UrlError, WakeSubscription,
     DEFAULT_PAYLOAD_QUEUE_CAPACITY,
 };
 
@@ -157,13 +158,25 @@ pub enum SessionCheckFailure {
         session_url: MaskedUrl,
         waited: Duration,
     },
+    /// The broker's core pools were closed and their settings were refused
+    /// when they opened again. Not retryable: the same settings are refused
+    /// again.
+    #[error("the session check could not open the core pools: {0}")]
+    PoolSettings(PoolSettingsError),
+    /// The `SELECT 1` on the session core pool failed. A session URL that does
+    /// not keep a transaction (PgBouncer statement pooling) is a permanent
+    /// failure, not retryable; a database that cannot be reached is retryable.
+    #[error("the session check's statement on the session pool failed: {0}")]
+    SessionPool(StatementFailure),
     /// The check could not subscribe on the broker's listener. Retryable when
     /// the refusal is transient (a database that cannot be reached).
     #[error("the session check could not subscribe: {0}")]
     Subscribe(ListenError),
-    /// The NOTIFY on the main pool failed. Retryable by the driver error.
+    /// The NOTIFY on the main core pool failed. A main URL that does not keep
+    /// a transaction is a permanent failure, not retryable; a database that
+    /// cannot be reached is retryable.
     #[error("the session check could not send its NOTIFY: {0}")]
-    Notify(sqlx::Error),
+    Notify(StatementFailure),
     /// The listener reconnected or stopped before the NOTIFY arrived, so the
     /// check proves nothing. Retryable.
     #[error("the listener {0} during the session check")]
@@ -174,9 +187,11 @@ impl SessionCheckFailure {
     /// Whether a later check can pass.
     pub fn is_retryable(&self) -> bool {
         match self {
-            SessionCheckFailure::NotCapable { .. } => false,
+            SessionCheckFailure::NotCapable { .. } | SessionCheckFailure::PoolSettings(_) => false,
+            SessionCheckFailure::SessionPool(failure) | SessionCheckFailure::Notify(failure) => {
+                is_retryable_statement_failure(failure)
+            }
             SessionCheckFailure::Subscribe(refused) => refused.is_retryable(),
-            SessionCheckFailure::Notify(error) => is_retryable_sqlx_error(error),
             SessionCheckFailure::Interrupted(_) => true,
         }
     }
@@ -624,8 +639,32 @@ mod tests {
         for interruption in [CheckInterruption::Reconnected, CheckInterruption::Stopped] {
             assert!(SessionCheckFailure::Interrupted(interruption).is_retryable());
         }
-        assert!(SessionCheckFailure::Notify(sqlx::Error::PoolTimedOut).is_retryable());
-        assert!(!SessionCheckFailure::Notify(sqlx::Error::PoolClosed).is_retryable());
+        let unreachable = |statement: &'static str| StatementFailure::NotSent {
+            statement,
+            cause: crate::db::NotSentCause::ConnectionClosed,
+        };
+        let statement_pooled = |statement: &'static str| StatementFailure::NotSent {
+            statement,
+            cause: crate::db::NotSentCause::Checkout(
+                crate::db::CheckoutFailure::StatementPooledUrl {
+                    masked_url: settings.masked_url().clone(),
+                },
+            ),
+        };
+        assert!(SessionCheckFailure::SessionPool(unreachable("session_check")).is_retryable());
+        assert!(
+            !SessionCheckFailure::SessionPool(statement_pooled("session_check")).is_retryable()
+        );
+        assert!(SessionCheckFailure::Notify(unreachable("session_check_notify")).is_retryable());
+        assert!(
+            !SessionCheckFailure::Notify(statement_pooled("session_check_notify")).is_retryable()
+        );
+        assert!(
+            !SessionCheckFailure::PoolSettings(PoolSettingsError::Environment(
+                EnvironmentError::NotUnicode { name: "PGPASSWORD" },
+            ))
+            .is_retryable()
+        );
         assert!(!SessionCheckFailure::Subscribe(ListenError::NoSessionUrl).is_retryable());
     }
 }

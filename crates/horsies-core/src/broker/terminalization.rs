@@ -27,8 +27,10 @@ use crate::core::lifecycle::{TerminalizationCommand, TerminalizationOutcome};
 use super::error::BrokerError;
 
 const COMPLETE_LOCKED_TASK_SQL: &str = "SELECT * FROM horsies_complete_locked_task($1, $2, $3)";
+/// The last argument (wake) is TRUE: the function sends the capacity wake of
+/// the locked row's queue (as Python).
 const COMPLETE_TASK_FUSED_SQL: &str =
-    "SELECT * FROM horsies_complete_task_fused($1, $2, $3::timestamptz, $4, $5, $6)";
+    "SELECT * FROM horsies_complete_task_fused($1, $2, $3::timestamptz, $4, TRUE)";
 const FAIL_LOCKED_TASK_SQL: &str = "SELECT * FROM horsies_fail_locked_task($1, $2, $3, $4, $5)";
 const FAIL_STALE_TASK_SQL: &str =
     "SELECT * FROM horsies_fail_stale_task($1, $2::integer, $3::integer, $4, $5, $6)";
@@ -82,16 +84,12 @@ fn fetch_query(
             task_id,
             fence,
             result_json,
-            notify_channel,
-            notify_payload,
         } => (
             sqlx::query(COMPLETE_TASK_FUSED_SQL)
                 .bind(task_id)
                 .bind(&fence.worker_id)
                 .bind(fence.claimed_at)
-                .bind(result_json)
-                .bind(notify_channel)
-                .bind(notify_payload),
+                .bind(result_json),
             Cardinality::ExactlyOne,
         ),
         TerminalizationCommand::FailLockedTask {
@@ -450,8 +448,8 @@ mod catalog_tests {
         ),
         (
             "horsies_complete_task_fused",
-            "p_task_id uuid, p_worker_id text, p_claimed_at timestamp with time zone, p_result text, p_notify_channel text, p_notify_payload text",
-            "SETOF horsies_terminalization_outcome",
+            "p_task_id uuid, p_worker_id text, p_claimed_at timestamp with time zone, p_result text, p_wake boolean",
+            "TABLE(task_id uuid, ordinality bigint, outcome text, terminal_at timestamp with time zone, terminalization_kind text, observed_status text, observed_worker_id text, observed_claimed_at timestamp with time zone, guard_kind text, observed_guard jsonb)",
             "plpgsql",
         ),
         (
@@ -617,7 +615,7 @@ mod catalog_tests {
         let pool = migrated_pool().await;
         let fused: String = sqlx::query_scalar(
             "SELECT pg_get_functiondef(
-                'horsies_complete_task_fused(uuid, text, timestamptz, text, text, text)'::regprocedure
+                'horsies_complete_task_fused(uuid, text, timestamptz, text, boolean)'::regprocedure
              )",
         )
         .fetch_one(&pool)
@@ -628,9 +626,9 @@ mod catalog_tests {
         // NULL arm goes (#697).
         for fragment in [
             "'COMPLETE_FUSED'",
-            "claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)",
+            "v_ctx.claimed_by_worker_id = p_worker_id",
             "ARRAY['COMPLETE_FUSED', 'COMPLETE_LOCKED']::text[]",
-            "pg_notify(p_notify_channel, p_notify_payload)",
+            "pg_notify('task_queue_' || v_ctx.queue_name, 'capacity')",
         ] {
             assert!(
                 fused.contains(fragment),

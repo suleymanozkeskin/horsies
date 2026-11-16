@@ -25,6 +25,7 @@ from horsies.core.models.tasks import Execution
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.claiming import ClaimMixin
 from horsies.core.worker.dispatch import DispatchMixin
+from horsies.core.worker.dispatch_claim import DispatchClaim
 from horsies.core.worker.runtime import _RequeueOutcome
 from tests.dualrun.capture import Connection
 from tests.dualrun.compare import render_diff
@@ -152,7 +153,16 @@ async def _candidate_requeue_async(
         probe = _DispatchProbe(sf, seed.worker_id)
         return tuple(
             [
-                await probe._requeue_claimed_task(each.task_id, 'dual-run', each.claimed_at)
+                await probe._requeue_claimed_task(
+                    each.task_id,
+                    'dual-run',
+                    DispatchClaim(
+                        claimed_at=each.claimed_at,
+                        retry_count=0,
+                        max_retries=0,
+                        task_options=None,
+                    ),
+                )
                 for each in seed.dispatches
             ]
         )

@@ -68,6 +68,10 @@ from horsies.monitoring.errors import (
 )
 from horsies.monitoring.models import (
     Breakdown,
+    BreakdownCounts,
+    BreakdownGroup,
+    BreakdownUnclaimedGroup,
+    BreakdownValueGroup,
     BudgetLoadInfo,
     ClassReportInfo,
     DownSlotInfo,
@@ -208,6 +212,10 @@ __all__ = [
     'span_s',
     # Response models
     'Breakdown',
+    'BreakdownCounts',
+    'BreakdownGroup',
+    'BreakdownUnclaimedGroup',
+    'BreakdownValueGroup',
     'BudgetLoadInfo',
     'ClassReportInfo',
     'DownSlotInfo',
