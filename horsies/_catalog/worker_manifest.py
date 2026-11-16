@@ -764,6 +764,9 @@ class WorkerClaimManifest:
 
 type Execution = Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']
 """How a worker runs a task. The column `execution` holds one of these values.
+The executor of the worker uses this type too (`ExecutionClass` there):
+the class of a row, the budget of a claim and the kind of a child are
+one set of values.
 
 The order is the order of Python's `Execution` members: `ISOLATED`,
 `SHARED_ASYNC`, `SHARED_THREAD`. Reports list classes in this order. It
