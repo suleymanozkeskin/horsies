@@ -8,6 +8,7 @@ use serde_json::value::RawValue;
 use super::error::{
     BuiltInTaskCode, OperationalErrorCode, StoredErrorRefused, TaskError, TaskErrorCode,
 };
+use crate::core::codec::user_value::{check_user_value, MAX_VALUE_JSON_DEPTH};
 use crate::core::codec::{JsonReadError, StrictJsonError};
 
 /// Outcome of a task or workflow result retrieval.
@@ -25,7 +26,7 @@ use crate::core::codec::{JsonReadError, StrictJsonError};
 /// `{"__h_task_result__": true, "ok": null, "err": {...}}`. A read refuses any other shape
 /// (`validate_task_result_envelope`, `core/codec/typed.py:1133-1180`): not an object, the marker missing or not
 /// `true`, a missing or an extra key, or both slots set. A non-null `err` slot is an error; otherwise the `ok`
-/// slot is the value, `null` included.
+/// slot is the value, `null` included, under the rules of a user value (no engine key, at most 200 levels).
 #[derive(Debug, Clone)]
 pub enum TaskResult<T> {
     Ok(T),
@@ -92,9 +93,14 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for TaskResult<T> {
             ));
         };
         match (ok_slot, err_slot) {
-            (ok_slot, serde_json::Value::Null) => T::deserialize(ok_slot)
-                .map(Self::Ok)
-                .map_err(D::Error::custom),
+            (ok_slot, serde_json::Value::Null) => {
+                // Python `decode_value` on the ok slot: the rules of a user value
+                // (`core/codec/typed.py:590-629`).
+                check_user_value(&ok_slot, MAX_VALUE_JSON_DEPTH).map_err(D::Error::custom)?;
+                T::deserialize(ok_slot)
+                    .map(Self::Ok)
+                    .map_err(D::Error::custom)
+            }
             (serde_json::Value::Null, err_slot) => TaskError::from_stored_value(err_slot)
                 .map(Self::Err)
                 .map_err(D::Error::custom),
@@ -457,6 +463,29 @@ mod tests {
                 "{text} must be refused"
             );
         }
+    }
+
+    /// Python `decode_value` on the ok slot: an engine key at any depth, or a value deeper than 200 levels,
+    /// does not read (`tests/unit/test_typed_codec.py:474-610`).
+    #[test]
+    fn an_ok_slot_follows_the_user_value_rules() {
+        for text in [
+            r#"{"__h_task_result__":true,"ok":{"__h_task_result__":true},"err":null}"#,
+            r#"{"__h_task_result__":true,"ok":[{"__builtin_task_code__":"X"}],"err":null}"#,
+            r#"{"__h_task_result__":true,"ok":{"a":{"__horsies_x":1}},"err":null}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<TaskResult<serde_json::Value>>(text).is_err(),
+                "{text} must be refused"
+            );
+        }
+        let depth = crate::core::codec::MAX_VALUE_JSON_DEPTH + 1;
+        let deep = format!(
+            r#"{{"__h_task_result__":true,"ok":{}{},"err":null}}"#,
+            "[".repeat(depth),
+            "]".repeat(depth)
+        );
+        assert!(serde_json::from_str::<TaskResult<serde_json::Value>>(&deep).is_err());
     }
 
     /// The core's strict reader reads the envelope: a repeated key is refused, and a value deeper than

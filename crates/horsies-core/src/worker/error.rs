@@ -34,6 +34,12 @@ pub enum WorkerError {
     #[error("worker start attempt did not finish within {bound:?}")]
     StartTimedOut { bound: std::time::Duration },
 
+    /// The runner heartbeats failed closed: no beat landed within half of
+    /// `running_stale_threshold_ms`. The watchdog killed every child that
+    /// held a task and stopped the worker (Python `RunnerHeartbeatLostError`).
+    #[error("runner heartbeats failed closed: {cause}; worker stopped")]
+    RunnerHeartbeatLost { cause: String },
+
     /// The session check of the worker boot did not pass. A session URL that
     /// does not keep session state is not retryable; a database that cannot
     /// be reached is.
@@ -59,6 +65,7 @@ impl WorkerError {
             Self::Config(_) => false,
             Self::ServiceLoopDied { .. } => false,
             Self::StartTimedOut { .. } => true,
+            Self::RunnerHeartbeatLost { .. } => false,
             Self::SessionCheck(failure) => failure.is_retryable(),
             Self::Listener(refused) => refused.is_retryable(),
         }

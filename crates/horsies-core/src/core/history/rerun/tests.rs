@@ -24,6 +24,8 @@ use crate::core::lifecycle::{
 };
 use crate::core::{OperationalErrorCode, TaskError, TaskResult, TaskStatus};
 
+mod ports;
+
 const WORKER: &str = "p8-rerun-worker";
 const SOURCE_CLASS: &str = "forever";
 const CURRENT_POLICY_CLASS: &str = "standard_14d";
