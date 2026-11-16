@@ -45,7 +45,8 @@ alone does not build.
    `horsies._core`.
 6. `package-move/sql-through-core.patch`: the core exports the baseline files (`BASELINE_SQL_FILE_TEXTS`),
    `horsies._core.baseline_sql_files()` returns them, and `load_baseline_migration()` reads them from there. The
-   SQL bytes do not change, so the migration 1000 checksum does not change.
+   patch adds the function to the `horsies-codegen` surface and to the committed `python/horsies/_core.pyi`, in
+   the text the generator renders. The SQL bytes do not change, so the migration 1000 checksum does not change.
 7. Checks (`move_rules.py check`, then a YAML parse). Any failure stops the script with a message.
 8. With `--commit`: the two commits.
 
@@ -82,8 +83,8 @@ the checks. Run steps 2 to 5 by hand on a fresh checkout, make the SQL change ag
 - The first build (`maturin develop` or `uv sync`) compiles `horsies-core` and `horsies-python`. Every `uv sync`
   and `uv run` after the move builds the extension, so a contributor needs the Rust toolchain of
   `rust-toolchain.toml`.
-- `horsies-codegen write python/horsies` writes `_core.pyi`. Until it exists, pyright cannot resolve
-  `horsies._core`.
+- The generator now takes the moved folder: `horsies-codegen check python/horsies`. Its first run confirms the
+  hand-written `baseline_sql_files` entry of `_core.pyi`.
 - CI still installs with `uv sync`, which now builds the extension in each Python job; the dev-wheel job of #682
   replaces that. `release.yml` still runs `uv build` on the runner, which gives one wheel linked against the
   runner's glibc; the release wheels come from the maturin-action build instead.
