@@ -18,9 +18,10 @@ use crate::core::config::PostgresConfig;
 use crate::core::TaskRegistry;
 use crate::manifest::PoolRecycle;
 use crate::worker::executor::protocol::{
-    decode_parent_frame, BootDetail, BootErrorName, BootFailedFrame, ChildExitCode, ChildFrame,
-    ChildKind, ChildPool, ChildProgram, FrameReader, InitFrame, ParentFrame, ParentFrameRefusal,
-    ProcessId, ReadyFrame, ReportedBootCause, ShortageErrno,
+    decode_parent_frame, BootDetail, BootErrorName, BootFailedFrame, ChildConnection,
+    ChildExitCode, ChildFrame, ChildKind, ChildPool, ChildProgram, FrameReader, InitFrame,
+    ParentFrame, ParentFrameRefusal, ProcessId, ReadyFrame, ReportedBootCause, ServerSessions,
+    ShortageErrno,
 };
 use crate::worker::executor::supervisor::{ChildCommand, MailboxBound};
 
@@ -239,20 +240,41 @@ fn runtime_threads(kind: ChildKind) -> usize {
     }
 }
 
-/// The broker config of a child: the URL of the init frame, a pool of up to
-/// `max_size` connections of the child kind with no overflow, `check` as the
-/// pre-ping, and Python's checkout wait and connection age of a child pool.
-/// `min_size` has no form in the config: the pools of the core open a
-/// connection at its first checkout. Pure.
-fn child_broker_config(database_url: &str, pool: ChildPool) -> PostgresConfig {
+/// The broker config of a child: the URL of the init frame with the
+/// connection settings of the parent's config, a pool of up to `max_size`
+/// connections of the child kind with no overflow, `check` as the pre-ping,
+/// and Python's checkout wait and connection age of a child pool. `min_size`
+/// has no form in the config: the pools of the core open a connection at its
+/// first checkout. Pure.
+///
+/// Python's child pool takes the same settings as psycopg connect kwargs
+/// (`horsies/core/worker/child_pool.py:124-133`, the `kwargs` of
+/// `PostgresConfig.pooled_connect_args`). In PgBouncer transaction mode the
+/// config also names the parent's session URL, which
+/// [`PostgresConfig::validate`] requires in that mode.
+fn child_broker_config(
+    database_url: &str,
+    connection: &ChildConnection,
+    pool: ChildPool,
+) -> PostgresConfig {
     let connections = u32::try_from(pool.max_size.get())
         .ok()
         .and_then(NonZeroU32::new)
         .expect("a child pool max_size is from 1 to MAX_CHILD_POOL_CONNECTIONS");
+    let (pgbouncer_transaction_mode, session_database_url) = match &connection.server_sessions {
+        ServerSessions::Kept => (false, None),
+        ServerSessions::PgBouncerTransactionMode {
+            session_database_url,
+        } => (true, Some(session_database_url.as_str().to_owned())),
+    };
     PostgresConfig {
+        session_database_url,
+        pgbouncer_transaction_mode,
         pool_pre_ping: pool.check,
         pool_timeout: CHILD_POOL_CHECKOUT_WAIT_SECONDS,
         pool_recycle: CHILD_POOL_MAX_AGE,
+        tcp_keepalives: connection.tcp_keepalives,
+        tcp_user_timeout: connection.tcp_user_timeout,
         ..PostgresConfig::from_url(database_url).with_exact_pool(connections)
     }
 }
@@ -261,7 +283,11 @@ fn child_broker_config(database_url: &str, pool: ChildPool) -> PostgresConfig {
 /// ([`PostgresBroker::connect_observe_only`]): the child applies no
 /// migration. Errors: the text of a refused config or of a failed connect.
 async fn connect(init: &InitFrame) -> Result<PostgresBroker, String> {
-    let config = child_broker_config(init.database_url.as_str(), pool_of(init.child_kind));
+    let config = child_broker_config(
+        init.database_url.as_str(),
+        &init.connection,
+        pool_of(init.child_kind),
+    );
     PostgresBroker::connect_observe_only(&config)
         .await
         .map_err(|error| error.to_string())
@@ -373,9 +399,15 @@ fn boot_and_serve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::worker::executor::protocol::{PoolMaxSize, PoolMinSize};
+    use crate::core::config::socket::{
+        KeepaliveProbes, KeepaliveSeconds, TcpKeepalivesConfig, TcpUserTimeoutConfig,
+        TcpUserTimeoutMs,
+    };
+    use crate::db::{Keepalives, SocketSettings, TcpUserTimeout};
+    use crate::worker::executor::protocol::{DatabaseUrl, PoolMaxSize, PoolMinSize};
 
     const URL: &str = "postgresql://user:secret@localhost:5432/db";
+    const SESSION_URL: &str = "postgresql://user:secret@direct:5432/db";
 
     fn child_pool(max_size: u64, check: bool) -> ChildPool {
         ChildPool {
@@ -389,7 +421,7 @@ mod tests {
     /// `CHILD_POOL_CONNECTION_WAIT_S` and `CHILD_POOL_MAX_LIFETIME_S`.
     #[test]
     fn the_child_pool_is_max_size_with_no_overflow() {
-        let config = child_broker_config(URL, child_pool(7, false));
+        let config = child_broker_config(URL, &ChildConnection::default(), child_pool(7, false));
         assert_eq!(config.database_url, URL);
         assert_eq!(config.session_database_url, None);
         assert_eq!(config.pool_size, 7);
@@ -402,8 +434,64 @@ mod tests {
 
     #[test]
     fn check_turns_on_the_pre_ping_of_the_child_pool() {
-        let config = child_broker_config(URL, child_pool(1, true));
+        let config = child_broker_config(URL, &ChildConnection::default(), child_pool(1, true));
         assert_eq!(config.pool_size, 1);
         assert!(config.pool_pre_ping);
+    }
+
+    /// Python `PostgresConfig.pooled_connect_args`: the TCP settings of the
+    /// parent reach each connection of the child.
+    #[test]
+    fn the_child_pool_takes_the_tcp_settings_of_the_parent() {
+        let connection = ChildConnection {
+            tcp_keepalives: TcpKeepalivesConfig::On {
+                idle_seconds: KeepaliveSeconds::try_from(45_u32).expect("in bounds"),
+                interval_seconds: KeepaliveSeconds::try_from(7_u32).expect("in bounds"),
+                probes: KeepaliveProbes::try_from(5_u32).expect("in bounds"),
+            },
+            tcp_user_timeout: TcpUserTimeoutConfig::After {
+                milliseconds: TcpUserTimeoutMs::try_from(1500_u32).expect("in bounds"),
+            },
+            server_sessions: ServerSessions::Kept,
+        };
+        let config = child_broker_config(URL, &connection, child_pool(2, false));
+        assert_eq!(
+            config.socket_settings(),
+            SocketSettings {
+                keepalives: Keepalives::On {
+                    idle: Duration::from_secs(45),
+                    interval: Duration::from_secs(7),
+                    probes: 5,
+                },
+                tcp_user_timeout: TcpUserTimeout::After(Duration::from_millis(1500)),
+            }
+        );
+        assert!(!config.pgbouncer_transaction_mode);
+        assert_eq!(config.session_database_url, None);
+    }
+
+    /// Python `prepare_threshold=None` under PgBouncer transaction mode: the
+    /// child's main pool sends unnamed statements, and its config names the
+    /// parent's session URL, so it validates.
+    #[test]
+    fn transaction_mode_reaches_the_child_with_the_session_url() {
+        let connection = ChildConnection {
+            tcp_keepalives: TcpKeepalivesConfig::Off,
+            tcp_user_timeout: TcpUserTimeoutConfig::SystemDefault,
+            server_sessions: ServerSessions::PgBouncerTransactionMode {
+                session_database_url: DatabaseUrl::new(SESSION_URL.to_owned()),
+            },
+        };
+        let config = child_broker_config(URL, &connection, child_pool(2, false));
+        assert!(config.pgbouncer_transaction_mode);
+        assert_eq!(config.session_database_url.as_deref(), Some(SESSION_URL));
+        assert_eq!(
+            config.socket_settings(),
+            SocketSettings {
+                keepalives: Keepalives::Off,
+                tcp_user_timeout: TcpUserTimeout::SystemDefault,
+            }
+        );
+        assert!(config.validate().is_ok());
     }
 }
