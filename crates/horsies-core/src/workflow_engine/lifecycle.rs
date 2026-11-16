@@ -146,6 +146,7 @@ WHERE workflow_id = $1 AND task_index = ANY($2)
 
 // An engine-minted task row carries no command fingerprint, no idempotency
 // key and no retained input (horsies_tasks_command_fingerprint_by_origin).
+// `sent_at` is the start call time of the node's workflow ($11).
 const ENQUEUE_TASK_SQL: &str = "\
 INSERT INTO horsies_tasks (
     id, task_name, queue_name, priority, input, task_options, execution,
@@ -155,7 +156,8 @@ INSERT INTO horsies_tasks (
     is_workflow_task, updated_at,
     retain_rerun_input, rerun_of_task_id, rerun_root_task_id
 )
-VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), NULL, NULL, NULL,
+VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8,
+        (SELECT w.sent_at FROM horsies_workflows w WHERE w.id = $11::uuid), NOW(), NULL, NULL, NULL,
         'PENDING', NOW(), 0, $9, $10, TRUE, NOW(), FALSE, NULL, NULL)";
 
 const LINK_ENQUEUED_TASK_SQL: &str = "\
@@ -1046,6 +1048,7 @@ async fn reevaluate_and_enqueue(
                 .bind(&facts.retention_class_key)
                 .bind(max_retries)
                 .bind(good_until)
+                .bind(workflow_id)
                 .execute(&mut *tx)
                 .await?;
 
@@ -1377,6 +1380,14 @@ mod resume_idempotency_tests {
         .execute(&pool)
         .await
         .expect("insert ready resume node");
+        sqlx::query(
+            "UPDATE horsies_workflows SET sent_at = timestamptz '2026-01-01 00:00:00+00'
+             WHERE id = $1::uuid",
+        )
+        .bind(&workflow_id)
+        .execute(&pool)
+        .await
+        .expect("set the start call time");
         let mut retention = RetentionConfig::default();
         retention
             .queue_retention
@@ -1407,6 +1418,18 @@ mod resume_idempotency_tests {
         assert!(facts.1.is_none());
         assert!(facts.2.is_none());
         assert!(!facts.3);
+        // The task row stores the start call time of its workflow as `sent_at`.
+        let sent_at_is_the_start_call_time: bool = sqlx::query_scalar(
+            "SELECT t.sent_at = timestamptz '2026-01-01 00:00:00+00'
+             FROM horsies_tasks t
+             JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
+             WHERE wt.workflow_id = $1::uuid AND wt.task_index = 0",
+        )
+        .bind(&workflow_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read resume task sent_at");
+        assert!(sent_at_is_the_start_call_time);
 
         sqlx::query(
             "DELETE FROM horsies_tasks WHERE id IN (
