@@ -50,7 +50,7 @@ class ReadAnswers[A]:
     candidate: A
 
 
-def _broker_url(database: DualRunDatabase) -> str:
+def _sqlalchemy_url(database: DualRunDatabase) -> str:
     return database.url.replace('postgresql://', 'postgresql+psycopg://', 1)
 
 
@@ -64,7 +64,7 @@ def _raw_snapshot(database: DualRunDatabase) -> RawSnapshot:
 
 
 async def _seed(database: DualRunDatabase, rows: Sequence[SeedRow]) -> None:
-    engine = create_async_engine(_broker_url(database))
+    engine = create_async_engine(_sqlalchemy_url(database))
     register_identity_text_reads(engine)
     try:
         async with AsyncSession(engine, expire_on_commit=False) as session:
@@ -89,7 +89,7 @@ async def _read_all[A](
 
 
 async def _install_and_seed(database: DualRunDatabase, rows: Sequence[SeedRow]) -> None:
-    broker = PostgresBroker(PostgresConfig(database_url=SecretStr(_broker_url(database))))
+    broker = PostgresBroker(PostgresConfig(database_url=SecretStr(database.url)))
     try:
         installed = await broker.ensure_schema_initialized()
         assert installed.is_ok(), installed
@@ -101,7 +101,7 @@ async def _install_and_seed(database: DualRunDatabase, rows: Sequence[SeedRow]) 
 async def _read_on[A](
     database: DualRunDatabase, pairs: Sequence[ReadPair[A]]
 ) -> tuple[ReadAnswers[A], ...]:
-    broker = PostgresBroker(PostgresConfig(database_url=SecretStr(_broker_url(database))))
+    broker = PostgresBroker(PostgresConfig(database_url=SecretStr(database.url)))
     try:
         return await _read_all(broker, pairs)
     finally:

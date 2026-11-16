@@ -66,7 +66,7 @@ def _options(auto_retry_for: list[str]) -> str:
         {
             'retry_policy': {
                 'max_retries': 3,
-                'intervals': [1],
+                'intervals': [1, 1, 1],
                 'backoff_strategy': 'fixed',
                 'jitter': False,
                 'auto_retry_for': auto_retry_for,
@@ -80,7 +80,7 @@ def _options(auto_retry_for: list[str]) -> str:
 
 def _worker(engine: AsyncEngine) -> Worker:
     cfg = WorkerConfig(
-        dsn='postgresql+psycopg://u:p@localhost/db',
+        dsn='postgresql://u:p@localhost/db',
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=['default'],
     )

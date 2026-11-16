@@ -23,7 +23,7 @@ from horsies import (
 app = Horsies(
     AppConfig(
         broker=PostgresConfig(
-            database_url=SecretStr('postgresql+psycopg://user:pass@localhost:5432/mydb'),
+            database_url=SecretStr('postgresql://user:pass@localhost:5432/mydb'),
         ),
     ),
 )

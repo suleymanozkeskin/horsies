@@ -47,8 +47,8 @@ from horsies.core.worker.child_runner import _discard_inherited_broker
 from horsies.core.worker.task_loop import TaskLoop
 from tests.broker_resources_support import fake_resources
 
-RUNTIME_URL = 'postgresql+psycopg://u:p@localhost:5432/db'
-SESSION_URL = 'postgresql+psycopg://u:p@localhost:6543/db'
+RUNTIME_URL = 'postgresql://u:p@localhost:5432/db'
+SESSION_URL = 'postgresql://u:p@localhost:6543/db'
 
 
 def _broker(

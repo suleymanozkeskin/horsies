@@ -25,7 +25,7 @@ from horsies.core.history.identity.fingerprint import COMMAND_FINGERPRINT_VERSIO
 
 pytestmark = [pytest.mark.unit]
 
-_URL: Final = 'postgresql+psycopg://u:p@localhost:5432/db'
+_URL: Final = 'postgresql://u:p@localhost:5432/db'
 
 def _options_text() -> str:
     """The options text that the task decorator stores for a task with 4 retries."""

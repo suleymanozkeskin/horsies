@@ -41,9 +41,8 @@ from horsies._catalog.manifest import (
     TcpUserTimeoutConfigSystemDefault,
 )
 from horsies.core.models.broker import SQLALCHEMY_NEVER_RECYCLE, PostgresConfig
-
-PSYCOPG_URL_SCHEME: Final = 'postgresql+psycopg://'
-"""The scheme that the `PostgresConfig` validators require."""
+from horsies.core.types.result import Err, Ok
+from horsies.core.utils.url import check_database_url_scheme
 
 CORE_URL_SCHEME: Final = 'postgresql://'
 """The scheme that the core's connection layer reads."""
@@ -113,19 +112,23 @@ def reservation_window_micros(window: timedelta) -> int:
 
 
 def core_database_url(url: str) -> str:
-    """`url` with the scheme that the core reads.
+    """`url` with the scheme that the core reads: `postgres://` becomes
+    `postgresql://`, and the rest is kept as it is.
 
-    The `PostgresConfig` validators admit only `postgresql+psycopg://`, so
-    another scheme here is a defect: it raises `AssertionError`, which names
-    the scheme and never the rest of the URL (it can hold a password).
+    The `PostgresConfig` validators admit only `postgresql://` and
+    `postgres://` (`check_database_url_scheme`), so another URL here is a
+    defect: it raises `AssertionError`, which names the refusal and never
+    the rest of the URL (it can hold a password).
     """
-    scheme_end = url.find('://')
-    scheme = url[: scheme_end + 3] if scheme_end >= 0 else '(none)'
-    assert url.startswith(PSYCOPG_URL_SCHEME), (
-        f'a validated database URL starts with {PSYCOPG_URL_SCHEME!r}, '
-        f'not with {scheme!r}'
-    )
-    return CORE_URL_SCHEME + url.removeprefix(PSYCOPG_URL_SCHEME)
+    match check_database_url_scheme(url):
+        case Ok():
+            _, _, rest = url.partition('://')
+            return CORE_URL_SCHEME + rest
+        case Err(refusal):
+            raise AssertionError(
+                f'a validated database URL has the scheme postgresql or '
+                f'postgres; got {refusal!r}'
+            )
 
 
 def _database_manifest(config: PostgresConfig) -> DatabaseManifest:
