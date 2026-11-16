@@ -52,7 +52,7 @@ connections for the same rate: set
 Producers hold their own engine pools of `pool_size + max_overflow`
 connections each (default 5 + 10): one in the resource set of each event loop
 that makes broker calls, one in the set of the sync runner loop for sync
-calls, and the sync send pool for sync sends without an idempotency key. A
+calls, and the sync send pool for sync sends. A
 producer that sends only with `send()` can open `15 + 15 = 30` at the
 defaults. Each set adds 2 listener connections when it waits for a result,
 and one more pool of `pool_size + max_overflow` when `session_database_url`
