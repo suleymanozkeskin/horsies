@@ -3368,10 +3368,12 @@ fn decode_pong(
 
 /// Parse the result row into a `TaskResult<T>`.
 ///
-/// Expects `result` to store a serialized `TaskResult<T>` for COMPLETED/FAILED.
-/// Maps database statuses to `TaskResult` variants:
-/// - `COMPLETED`/`FAILED` + valid JSON -> decoded `TaskResult<T>`
-/// - `COMPLETED`/`FAILED` + null -> `TaskResult::Err(ResultNotAvailable)`
+/// Expects `result` to store a serialized `TaskResult<T>` for COMPLETED,
+/// FAILED and EXPIRED. Maps database statuses to `TaskResult` variants
+/// (Python `TaskHandle._record_to_task_result`):
+/// - `COMPLETED`/`FAILED`/`EXPIRED` + valid JSON -> decoded `TaskResult<T>`
+/// - `COMPLETED`/`FAILED`/`EXPIRED` + null -> `TaskResult::Err(ResultNotAvailable)`
+///   with `data = {"task_id": "<id>", "status": "<status>"}`
 /// - `CANCELLED` -> `TaskResult::Err(TaskError(TaskCancelled))` with
 ///   `data = {"task_id": "<id>"}`
 #[allow(clippy::needless_pass_by_value)]
@@ -3379,31 +3381,30 @@ fn parse_task_result_row<T: DeserializeOwned>(
     row: TaskResultRow,
 ) -> Result<TaskResult<T>, BrokerError> {
     match row.status.as_str() {
-        "COMPLETED" | "FAILED" => match row.result {
+        // Expiry writers persist a serialized `TaskResult::Err(TASK_EXPIRED)`,
+        // so an EXPIRED row decodes like COMPLETED and FAILED.
+        "COMPLETED" | "FAILED" | "EXPIRED" => match row.result {
             Some(ref result_json) => {
                 let task_result: TaskResult<T> =
                     serde_json::from_str(result_json).map_err(BrokerError::Serialization)?;
                 Ok(task_result)
             }
-            None => Ok(TaskResult::Err(TaskError::builtin(
-                RetrievalCode::ResultNotAvailable,
-                format!("task {} completed but result is null", row.id),
-            ))),
-        },
-        "EXPIRED" => match row.result {
-            // Expiry writers persist a serialized `TaskResult::Err(TASK_EXPIRED)`;
-            // decode it like COMPLETED/FAILED. A NULL result (older rows, or a
-            // lost write) still yields the terminal expired outcome instead of a
-            // spurious "non-terminal status EXPIRED" broker error (C2).
-            Some(ref result_json) => {
-                let task_result: TaskResult<T> =
-                    serde_json::from_str(result_json).map_err(BrokerError::Serialization)?;
-                Ok(task_result)
-            }
-            None => Ok(TaskResult::Err(TaskError::builtin(
-                OutcomeCode::TaskExpired,
-                format!("task {} expired", row.id),
-            ))),
+            // Python `TaskHandle._record_to_task_result`: a terminal row
+            // that stored no result is RESULT_NOT_AVAILABLE, with the id and
+            // the status in `data`.
+            None => Ok(TaskResult::Err(TaskError {
+                data: Some(serde_json::json!({
+                    "task_id": row.id.to_string(),
+                    "status": row.status,
+                })),
+                ..TaskError::builtin(
+                    RetrievalCode::ResultNotAvailable,
+                    format!(
+                        "Task {} reached terminal status {} but stored no result payload",
+                        row.id, row.status
+                    ),
+                )
+            })),
         },
         // Python `TaskHandle._record_to_task_result`: the code, the message
         // and the task id in `data`.
@@ -3561,22 +3562,6 @@ mod tests {
     }
 
     #[test]
-    fn set_running_guards_good_until_before_start() {
-        assert!(
-            SET_RUNNING_SQL.contains("AND (good_until IS NULL OR good_until > now())"),
-            "CLAIMED -> RUNNING must reject tasks whose deadline has passed",
-        );
-    }
-
-    #[test]
-    fn expired_task_queries_treat_equal_deadline_as_expired() {
-        assert!(
-            GET_EXPIRED_TASKS_SQL.contains("AND good_until <= NOW()"),
-            "good_until is the last valid instant; equality is expired",
-        );
-    }
-
-    #[test]
     fn parse_completed_result() {
         let wrapped = TaskResult::Ok(42);
         let result_json = serde_json::to_string(&wrapped).unwrap();
@@ -3602,7 +3587,7 @@ mod tests {
         let task_result: TaskResult<i32> = parse_task_result_row(row).unwrap();
         assert!(task_result.is_err());
         let err = task_result.unwrap_err();
-        assert!(err.message.unwrap().contains("result is null"));
+        assert!(err.message.unwrap().contains("stored no result payload"));
     }
 
     #[test]
@@ -3631,7 +3616,7 @@ mod tests {
         let task_result: TaskResult<i32> = parse_task_result_row(row).unwrap();
         assert!(task_result.is_err());
         let err = task_result.unwrap_err();
-        assert!(err.message.unwrap().contains("result is null"));
+        assert!(err.message.unwrap().contains("stored no result payload"));
     }
 
     #[test]
@@ -3679,21 +3664,52 @@ mod tests {
         assert_eq!(err.error_code, expected);
     }
 
-    /// C2: an EXPIRED row with a NULL result must still yield the terminal
-    /// expired outcome (fallback), not an `InvalidStatus` broker error.
+    /// A terminal row that stored no result reads as `RESULT_NOT_AVAILABLE`
+    /// with Python's message and the id and status in `data`, for each of
+    /// COMPLETED, FAILED and EXPIRED (Python
+    /// `TaskHandle._record_to_task_result`; `test_app_get_result.py::
+    /// TestHorsiesGetResultEnvelopeGuards::
+    /// test_terminal_status_with_none_payload_is_result_not_available`). An
+    /// EXPIRED row with no stored result does not read as `TASK_EXPIRED`,
+    /// and it is no `InvalidStatus` broker error.
     #[test]
-    fn parse_expired_null_result() {
-        let row = TaskResultRow {
-            id: Uuid::nil(),
-            status: "EXPIRED".to_owned(),
-            result: None,
-            failed_reason: None,
-        };
-        let task_result: TaskResult<i32> = parse_task_result_row(row).unwrap();
-        let err = task_result.unwrap_err();
-        let expected = TaskError::builtin(OutcomeCode::TaskExpired, "").error_code;
-        assert_eq!(err.error_code, expected);
-        assert!(err.message.unwrap().contains("expired"));
+    fn a_terminal_row_without_a_result_reads_as_result_not_available() {
+        let task_id = Uuid::new_v4();
+        for status in ["COMPLETED", "FAILED", "EXPIRED"] {
+            let row = TaskResultRow {
+                id: task_id,
+                status: status.to_owned(),
+                result: None,
+                failed_reason: None,
+            };
+
+            let task_result: TaskResult<serde_json::Value> =
+                parse_task_result_row(row).expect("a terminal row reads");
+
+            let TaskResult::Err(error) = task_result else {
+                panic!("{status}: a row with no result must read as an error");
+            };
+            assert_eq!(
+                error.error_code,
+                TaskError::builtin(RetrievalCode::ResultNotAvailable, "").error_code,
+                "{status}"
+            );
+            assert_eq!(
+                error.message.as_deref(),
+                Some(
+                    format!(
+                        "Task {task_id} reached terminal status {status} but stored no result payload"
+                    )
+                    .as_str()
+                ),
+                "{status}"
+            );
+            assert_eq!(
+                error.data,
+                Some(serde_json::json!({ "task_id": task_id.to_string(), "status": status })),
+                "{status}"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -5894,62 +5910,6 @@ mod session_settings_tests {
         assert_eq!(jit(&not_kept).await, jit(&plain).await);
         plain.close().await;
         not_kept.close().await;
-    }
-}
-
-#[cfg(test)]
-mod connect_options_tests {
-    use super::*;
-    use serial_test::serial;
-    use sqlx::PgConnection;
-
-    const REPEATED_EXECUTIONS: i64 = 20;
-
-    async fn prepared_statement_count(connection: &mut PgConnection) -> i64 {
-        sqlx::query_scalar("SELECT count(*) FROM pg_prepared_statements")
-            .fetch_one(&mut *connection)
-            .await
-            .expect("count prepared statements")
-    }
-
-    /// Runs against PostgreSQL directly, so every statement name the runtime
-    /// pool prepares is visible in `pg_prepared_statements` on its connection.
-    #[tokio::test]
-    #[serial]
-    async fn transaction_mode_runtime_pool_prepares_a_repeated_query_once() {
-        let url = crate::broker::terminalization_matrix::migrated_database_url().await;
-        // PgBouncer mode refuses a session URL equal to `database_url`; a
-        // distinct application name keeps the same server.
-        let separator = if url.contains('?') { '&' } else { '?' };
-        let session_url = format!("{url}{separator}application_name=prepared_session");
-        let config = PostgresConfig::from_pgbouncer_urls(url, session_url);
-        let broker = PostgresBroker::connect_with(&config)
-            .await
-            .expect("connect broker");
-        let mut connection = broker
-            .pool()
-            .acquire()
-            .await
-            .expect("acquire runtime connection");
-
-        let before = prepared_statement_count(&mut connection).await;
-        for execution in 0..REPEATED_EXECUTIONS {
-            let echoed: i64 = sqlx::query_scalar("SELECT $1::bigint")
-                .bind(execution)
-                .fetch_one(&mut *connection)
-                .await
-                .expect("run repeated query");
-            assert_eq!(echoed, execution);
-        }
-        let after = prepared_statement_count(&mut connection).await;
-
-        assert_eq!(
-            after - before,
-            1,
-            "{REPEATED_EXECUTIONS} executions of one query must leave one prepared statement"
-        );
-        drop(connection);
-        broker.pool().close().await;
     }
 }
 

@@ -326,11 +326,16 @@ impl Worker {
         self.run().await
     }
 
-    /// Authorize the schema and ensure the partition coverage of the
-    /// current period: the database steps of the worker start. It does not
-    /// retry.
+    /// Authorize the schema, check the client family, and ensure the
+    /// partition coverage of the current period: the database steps of the
+    /// worker start. It does not retry.
     async fn start_database(&self) -> Result<(), WorkerError> {
         self.broker.ensure_schema_initialized().await?;
+        // The startup coverage and the reaper's partition maintenance are the
+        // worker's maintenance writes. The handle checks its client family
+        // once, before the first of them; a database of the other family or
+        // with no family row refuses the start, not retryable.
+        self.broker.ensure_client_family_for_write().await?;
         let declared_periods = self.app_config.retention.registrable_periods();
         let startup_coverage = ensure_startup_coverage_in_pool(
             self.broker.session_pool(),
@@ -1619,49 +1624,6 @@ mod tests {
         let _: fn(&Worker) -> &str = |w| w.worker_id();
     }
 
-    #[test]
-    fn startup_authorization_and_coverage_precede_runtime_side_effects() {
-        let source = include_str!("worker.rs");
-        let run = &source[source
-            .find("pub async fn run(&self)")
-            .expect("Worker::run source")
-            .to_owned()..];
-        let start = run
-            .find("self.start_database_with_resilience().await")
-            .expect("database start with retry");
-        let database = &source[source
-            .find("async fn start_database(&self)")
-            .expect("database start steps")..];
-        let schema = database
-            .find("ensure_schema_initialized().await")
-            .expect("schema authorization");
-        let coverage = database
-            .find("ensure_startup_coverage_in_pool(")
-            .expect("startup partition coverage");
-        let session_pool = database[coverage..]
-            .find("self.broker.session_pool()")
-            .map(|offset| coverage + offset)
-            .expect("startup coverage session pool");
-        let banner = run.find("print_banner(").expect("startup banner");
-        let listener = run
-            .find("connect_listener_with_resilience().await")
-            .expect("listener setup");
-        let heartbeats = run
-            .find("spawn_claimer_heartbeat")
-            .expect("heartbeat writer startup");
-        let claims = run.find("claim_batch(").expect("claim loop");
-        let reaper = run.find("spawn_reaper(").expect("reaper startup");
-        let reaper_call = &run[reaper..reaper + 500];
-        assert!(reaper_call.contains("self.broker.pool().clone()"));
-        assert!(reaper_call.contains("self.broker.session_pool().clone()"));
-        assert!(schema < coverage);
-        assert!(coverage < session_pool);
-        assert!(start < banner);
-        assert!(start < listener);
-        assert!(start < heartbeats);
-        assert!(start < claims);
-    }
-
     /// A start attempt that does not finish in time is retryable, as in
     /// Python, where `asyncio.TimeoutError` takes the retry path.
     #[test]
@@ -2853,6 +2815,345 @@ mod tests {
     /// listener has its own pool: closing only the main pool lets the loop start
     /// (background loops spawn), then makes every claim fail with `PoolClosed`,
     /// which is not retryable, so the loop breaks fatally at the first claim.
+    /// A database of its own, migrated without the install's family record,
+    /// for a worker start. Dropped with `FreshDatabase::drop`.
+    struct FreshDatabase {
+        admin: sqlx::PgConnection,
+        pool: PgPool,
+        name: String,
+        /// The shared test database URL, for the worker's config only: the
+        /// worker reaches this database through `pool`.
+        config_url: String,
+    }
+
+    impl FreshDatabase {
+        async fn create() -> Self {
+            use sqlx::Connection;
+            use std::str::FromStr;
+
+            let config_url = crate::broker::terminalization_matrix::migrated_database_url().await;
+            let base_options =
+                sqlx::postgres::PgConnectOptions::from_str(&config_url).expect("test database URL");
+            let mut admin =
+                sqlx::PgConnection::connect_with(&base_options.clone().database("postgres"))
+                    .await
+                    .expect("connect admin database");
+            let name = format!("core_worker_start_{}", Uuid::new_v4().simple());
+            sqlx::query(&format!("CREATE DATABASE \"{name}\""))
+                .execute(&mut admin)
+                .await
+                .expect("create start test database");
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(8)
+                .connect_with(base_options.database(&name))
+                .await
+                .expect("connect start test database");
+            crate::broker::migrations::run_horsies_migrations(&pool)
+                .await
+                .expect("migrate start test database");
+            Self {
+                admin,
+                pool,
+                name,
+                config_url,
+            }
+        }
+
+        async fn record_family(&self, family: &str) {
+            sqlx::query(
+                "INSERT INTO horsies_client_family (only_row, family, recorded_at)
+                 VALUES (TRUE, $1, NOW())",
+            )
+            .bind(family)
+            .execute(&self.pool)
+            .await
+            .expect("record a client family");
+        }
+
+        async fn drop(mut self) {
+            self.pool.close().await;
+            sqlx::query(&format!("DROP DATABASE \"{}\" WITH (FORCE)", self.name))
+                .execute(&mut self.admin)
+                .await
+                .expect("drop start test database");
+        }
+    }
+
+    /// A worker on `broker` that retries a failed start at most once.
+    fn start_test_worker(broker: PostgresBroker, config_url: String) -> Worker {
+        use crate::core::config::{PostgresConfig, QueueMode, WorkerResilienceConfig};
+
+        let app_config = AppConfig {
+            payload: crate::core::config::payload::PayloadPolicy::default(),
+            queue_mode: QueueMode::Default,
+            custom_queues: None,
+            broker: PostgresConfig {
+                database_url: config_url,
+                session_database_url: None,
+                pgbouncer_transaction_mode: false,
+                pool_pre_ping: true,
+                pool_size: 30,
+                max_overflow: 30,
+                retain_rerun_input_default: false,
+                pool_timeout: 30,
+                pool_recycle: 1800,
+                echo: false,
+            },
+            cluster_wide_cap: None,
+            prefetch_buffer: 0,
+            claim_lease_ms: None,
+            max_claim_renew_age_ms: 180_000,
+            recovery: RecoveryConfig::default(),
+            retention: crate::core::RetentionConfig::default(),
+            resilience: WorkerResilienceConfig {
+                db_retry_initial_ms: 100,
+                db_retry_max_ms: 100,
+                db_retry_max_attempts: 1,
+                notify_poll_interval_ms: 100,
+            },
+            schedule: None,
+            resend_on_transient_err: false,
+        };
+        Worker::new(
+            Arc::new(broker),
+            Arc::new(TaskRegistry::new()),
+            Arc::new(WorkflowSpecRegistry::new()),
+            app_config,
+            WorkerConfig::default(),
+        )
+        .expect("worker")
+    }
+
+    /// One PENDING task on the default queue; a claim loop would take it.
+    async fn insert_pending_task(pool: &PgPool) -> Uuid {
+        let task_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO horsies_tasks (
+                 id, task_name, queue_name, priority, input, task_options, execution,
+                 retention_class_key, sent_at, created_at,
+                 command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+                 status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+                 started_at, finalizing_at, finalizing_by_worker_id,
+                 worker_pid, worker_hostname, worker_process_name,
+                 retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+                 updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
+             ) VALUES (
+                 $1, 'start_test', 'default', 100, '{}', NULL, 'ISOLATED',
+                 'forever', NOW(), NOW(),
+                 1, decode(repeat('00', 32), 'hex'), NULL,
+                 'PENDING', NOW(), NULL, NULL, NULL,
+                 NULL, NULL, NULL,
+                 NULL, NULL, NULL,
+                 0, 0, NULL, NULL, FALSE,
+                 NOW(), FALSE, NULL, NULL
+             )",
+        )
+        .bind(task_id)
+        .execute(pool)
+        .await
+        .expect("insert a pending task");
+        task_id
+    }
+
+    /// What a started worker writes: catalog leaves and retention classes
+    /// (startup coverage), worker states (state loop), heartbeats (beat
+    /// writers), and the claim of the PENDING task (claim loop).
+    #[derive(Debug, PartialEq, Eq)]
+    struct StartFacts {
+        catalog_leaves: i64,
+        retention_classes: i64,
+        worker_states: i64,
+        heartbeats: i64,
+        pending_status: String,
+        pending_claimed_by: Option<String>,
+    }
+
+    async fn start_facts(pool: &PgPool, pending: Uuid) -> StartFacts {
+        use crate::core::history::names::{LEAF_CATALOG, RETENTION_CLASSES};
+
+        let (catalog_leaves, retention_classes, worker_states, heartbeats): (i64, i64, i64, i64) =
+            sqlx::query_as(&format!(
+                "SELECT (SELECT count(*) FROM {LEAF_CATALOG}),
+                        (SELECT count(*) FROM {RETENTION_CLASSES}),
+                        (SELECT count(*) FROM horsies_worker_states),
+                        (SELECT count(*) FROM horsies_heartbeats)"
+            ))
+            .fetch_one(pool)
+            .await
+            .expect("read start facts");
+        let (pending_status, pending_claimed_by): (String, Option<String>) =
+            sqlx::query_as("SELECT status, claimed_by_worker_id FROM horsies_tasks WHERE id = $1")
+                .bind(pending)
+                .fetch_one(pool)
+                .await
+                .expect("read the pending task");
+        StartFacts {
+            catalog_leaves,
+            retention_classes,
+            worker_states,
+            heartbeats,
+            pending_status,
+            pending_claimed_by,
+        }
+    }
+
+    /// Run the worker; its start must fail and `run` must return.
+    async fn refused_run(worker: &Worker) -> WorkerError {
+        tokio::time::timeout(Duration::from_secs(30), worker.run())
+            .await
+            .expect("a refused start returns from run")
+            .expect_err("the start must be refused")
+    }
+
+    /// With the install on, a database of the Python family fails the schema
+    /// step: no coverage, no runtime loop, no claim.
+    #[tokio::test]
+    #[serial]
+    async fn a_start_refused_at_the_schema_step_writes_nothing_later() {
+        use crate::broker::client_family::{ClientFamily, RecordedFamily};
+        use crate::broker::BrokerError;
+
+        let database = FreshDatabase::create().await;
+        database.record_family("PYTHON").await;
+        let pending = insert_pending_task(&database.pool).await;
+        let before = start_facts(&database.pool, pending).await;
+        let worker = start_test_worker(
+            PostgresBroker::from_pool(database.pool.clone()),
+            database.config_url.clone(),
+        );
+
+        let error = refused_run(&worker).await;
+
+        assert!(matches!(
+            error,
+            WorkerError::Broker(BrokerError::ClientFamilyMismatch {
+                stored: RecordedFamily::Recorded(ClientFamily::Python),
+                own: ClientFamily::Rust,
+            })
+        ));
+        assert_eq!(start_facts(&database.pool, pending).await, before);
+        drop(worker);
+        database.drop().await;
+    }
+
+    /// With the install off, a database with no family row and one of the
+    /// Python family fail the family step: no coverage, no runtime loop, no
+    /// claim. Both refusals are not retryable.
+    #[tokio::test]
+    #[serial]
+    async fn a_start_refused_at_the_family_step_writes_nothing_later() {
+        use crate::broker::client_family::{ClientFamily, RecordedFamily};
+        use crate::broker::BrokerError;
+
+        let database = FreshDatabase::create().await;
+        let pending = insert_pending_task(&database.pool).await;
+        let before = start_facts(&database.pool, pending).await;
+
+        let worker = start_test_worker(
+            PostgresBroker::from_pool_observe_only(database.pool.clone()),
+            database.config_url.clone(),
+        );
+        let not_recorded = refused_run(&worker).await;
+        assert!(matches!(
+            not_recorded,
+            WorkerError::Broker(BrokerError::ClientFamilyMismatch {
+                stored: RecordedFamily::NotRecorded,
+                own: ClientFamily::Rust,
+            })
+        ));
+        assert!(!not_recorded.is_retryable());
+        assert_eq!(start_facts(&database.pool, pending).await, before);
+        drop(worker);
+
+        database.record_family("PYTHON").await;
+        let worker = start_test_worker(
+            PostgresBroker::from_pool_observe_only(database.pool.clone()),
+            database.config_url.clone(),
+        );
+        let python = refused_run(&worker).await;
+        assert!(matches!(
+            python,
+            WorkerError::Broker(BrokerError::ClientFamilyMismatch {
+                stored: RecordedFamily::Recorded(ClientFamily::Python),
+                own: ClientFamily::Rust,
+            })
+        ));
+        assert!(!python.is_retryable());
+        assert_eq!(start_facts(&database.pool, pending).await, before);
+        drop(worker);
+        database.drop().await;
+    }
+
+    /// A startup coverage that finds the coverage gate held by another
+    /// session, with no current heartbeat leaf, refuses the start: no
+    /// coverage, no runtime loop, no claim.
+    #[tokio::test]
+    #[serial]
+    async fn a_start_refused_at_the_coverage_step_starts_no_runtime_loop() {
+        let database = FreshDatabase::create().await;
+        database.record_family("RUST").await;
+        let pending = insert_pending_task(&database.pool).await;
+        let mut holder = database.pool.begin().await.expect("begin gate holder");
+        let held: bool = sqlx::query_scalar(
+            "SELECT pg_try_advisory_xact_lock(
+                 hashtextextended('horsies:partition-coverage:v1', 1601)
+             )",
+        )
+        .fetch_one(holder.as_mut())
+        .await
+        .expect("hold the coverage gate");
+        assert!(held);
+        let before = start_facts(&database.pool, pending).await;
+        let worker = start_test_worker(
+            PostgresBroker::from_pool(database.pool.clone()),
+            database.config_url.clone(),
+        );
+
+        let error = refused_run(&worker).await;
+
+        assert!(
+            matches!(&error, WorkerError::Config(detail) if detail.contains("startup coverage refused")),
+            "{error:?}"
+        );
+        assert_eq!(start_facts(&database.pool, pending).await, before);
+        holder.rollback().await.expect("release the coverage gate");
+        drop(worker);
+        database.drop().await;
+    }
+
+    /// The startup coverage runs on the session pool: with the main pool
+    /// closed, the database start still completes.
+    #[tokio::test]
+    #[serial]
+    async fn startup_coverage_runs_on_the_session_pool() {
+        use crate::core::config::PostgresConfig;
+
+        let main_url = crate::broker::terminalization_matrix::migrated_database_url().await;
+        let separator = if main_url.contains('?') { '&' } else { '?' };
+        let session_url = format!("{main_url}{separator}application_name=start_session");
+        let broker = PostgresBroker::connect_with(&PostgresConfig {
+            database_url: main_url.clone(),
+            session_database_url: Some(session_url),
+            pgbouncer_transaction_mode: false,
+            pool_pre_ping: true,
+            pool_size: 30,
+            max_overflow: 30,
+            retain_rerun_input_default: false,
+            pool_timeout: 30,
+            pool_recycle: 1800,
+            echo: false,
+        })
+        .await
+        .expect("connect broker with a separate session pool");
+        broker.pool().close().await;
+        let worker = start_test_worker(broker, main_url);
+
+        worker
+            .start_database()
+            .await
+            .expect("the database start uses only the session pool");
+    }
+
     #[tokio::test]
     #[serial]
     async fn run_fires_cancel_on_fatal_claim_exit() {
@@ -2915,6 +3216,7 @@ mod tests {
                 db_retry_max_attempts: 1,
                 notify_poll_interval_ms: 100,
             },
+            worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
             resend_on_transient_err: false,
         };
@@ -3009,6 +3311,7 @@ mod tests {
                 notify_poll_interval_ms: 60_000,
                 ..WorkerResilienceConfig::default()
             },
+            worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
             resend_on_transient_err: false,
         };
@@ -3116,6 +3419,7 @@ mod tests {
             recovery: RecoveryConfig::default(),
             retention: crate::core::RetentionConfig::default(),
             resilience: WorkerResilienceConfig::default(),
+            worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
             resend_on_transient_err: false,
         };
