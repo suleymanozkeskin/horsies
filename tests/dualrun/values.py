@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum
@@ -11,6 +13,8 @@ from horsies.core.types.result import Err, Ok, Result
 from tests.dualrun.rules import IdFamily
 
 _MICROSECOND: Final = timedelta(microseconds=1)
+_OFFSET_SHIFT: Final = 10**9
+"""Added to a name offset so that its zero-padded text sorts in numeric order."""
 
 # ---- Clock values (timestamptz) ----
 
@@ -185,6 +189,124 @@ class IgnoredValue:
     """A value of an ignored column."""
 
 
+class CalendarUnit(Enum):
+    """The unit of the date or hour in a generated name."""
+
+    DAY = 'day'
+    HOUR = 'hour'
+
+
+@dataclass(frozen=True, slots=True)
+class DatedName:
+    """A generated name whose date or hour is replaced by an offset from the run start.
+
+    ``offset`` counts ``unit`` steps from the start of the day or hour that
+    holds the run window's start, in UTC.
+    """
+
+    prefix: str
+    unit: CalendarUnit
+    offset: int
+
+
+@dataclass(frozen=True, slots=True)
+class DigestMatches:
+    """A digest column equals SHA-256 of its source column."""
+
+
+@dataclass(frozen=True, slots=True)
+class DigestMismatch:
+    """A digest column differs from SHA-256 of its source column."""
+
+
+# ---- JSON documents ----
+
+
+@dataclass(frozen=True, slots=True)
+class JsonScalar:
+    """A JSON null, boolean, number or string, as canonical JSON text."""
+
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class JsonArray[L]:
+    """A JSON array."""
+
+    items: tuple[JsonNode[L], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class JsonObject[L]:
+    """A JSON object, members sorted by key."""
+
+    members: tuple[tuple[str, JsonNode[L]], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class JsonLeaf[L]:
+    """A value that a path rule normalized."""
+
+    value: L
+
+
+type JsonNode[L] = JsonScalar | JsonArray[L] | JsonObject[L] | JsonLeaf[L]
+
+
+def map_json[A, B](node: JsonNode[A], change: Callable[[A], B]) -> JsonNode[B]:
+    """The same tree with every path-rule leaf changed. Depth is bounded by the parser."""
+    match node:
+        case JsonScalar():
+            return node
+        case JsonArray(items=items):
+            return JsonArray(items=tuple(map_json(item, change) for item in items))
+        case JsonObject(members=members):
+            return JsonObject(
+                members=tuple((key, map_json(value, change)) for key, value in members),
+            )
+        case JsonLeaf(value=value):
+            return JsonLeaf(value=change(value))
+
+
+def json_leaves[L](node: JsonNode[L]) -> list[L]:
+    """Every path-rule leaf in document order (array order, sorted keys)."""
+    match node:
+        case JsonScalar():
+            return []
+        case JsonArray(items=items):
+            return [leaf for item in items for leaf in json_leaves(item)]
+        case JsonObject(members=members):
+            return [leaf for _, value in members for leaf in json_leaves(value)]
+        case JsonLeaf(value=value):
+            return [value]
+
+
+def render_json[L](node: JsonNode[L], render_leaf: Callable[[L], str]) -> str:
+    """Canonical text of a tree: compact, sorted keys, leaves as ``render_leaf`` gives them."""
+    match node:
+        case JsonScalar(text=text):
+            return text
+        case JsonArray(items=items):
+            return (
+                '[' + ','.join(render_json(item, render_leaf) for item in items) + ']'
+            )
+        case JsonObject(members=members):
+            parts = (
+                json.dumps(key) + ':' + render_json(value, render_leaf)
+                for key, value in members
+            )
+            return '{' + ','.join(parts) + '}'
+        case JsonLeaf(value=value):
+            return render_leaf(value)
+
+
+@dataclass(frozen=True, slots=True)
+class JsonDocument:
+    """A stored JSON value, parsed; path-rule leaves are normalized values."""
+
+    root: JsonNode[NormalizedValue]
+
+
 NormalizedValue = (
     NullValue
     | ExactValue
@@ -194,6 +316,10 @@ NormalizedValue = (
     | LiteralTime
     | OffsetFromAnchor
     | IgnoredValue
+    | DatedName
+    | DigestMatches
+    | DigestMismatch
+    | JsonDocument
 )
 
 
@@ -202,7 +328,14 @@ class UnlabelledId:
     """In an order key only: an opaque value that has no label yet when its table is ordered."""
 
 
-OrderKeyValue = NormalizedValue | UnlabelledId
+@dataclass(frozen=True, slots=True)
+class RenderedDocument:
+    """In an order key only: a JSON document as canonical text, ids not labelled yet shown as ``<new id>``."""
+
+    text: str
+
+
+OrderKeyValue = NormalizedValue | UnlabelledId | RenderedDocument
 
 
 def sort_token(value: OrderKeyValue) -> tuple[int, str]:
@@ -231,6 +364,16 @@ def sort_token(value: OrderKeyValue) -> tuple[int, str]:
             return (7, f'{offset // _MICROSECOND:+021d}')
         case IgnoredValue():
             return (8, '')
+        case DatedName(prefix=prefix, unit=unit, offset=offset):
+            return (9, f'{prefix}|{unit.value}|{offset + _OFFSET_SHIFT:012d}')
+        case DigestMatches():
+            return (10, '')
+        case DigestMismatch():
+            return (11, '')
+        case JsonDocument(root=root):
+            return (12, render_json(root, render_value))
+        case RenderedDocument(text=text):
+            return (12, text)
 
 
 def render_value(value: OrderKeyValue) -> str:
@@ -254,6 +397,16 @@ def render_value(value: OrderKeyValue) -> str:
             return f'<anchor {offset.total_seconds():+.6f}s>'
         case IgnoredValue():
             return '<ignored>'
+        case DatedName(prefix=prefix, unit=unit, offset=offset):
+            return f'{prefix}_<{unit.value}{offset:+d}>'
+        case DigestMatches():
+            return '<digest matches>'
+        case DigestMismatch():
+            return '<digest does not match>'
+        case JsonDocument(root=root):
+            return render_json(root, render_value)
+        case RenderedDocument(text=text):
+            return text
 
 
 @dataclass(frozen=True, slots=True)

@@ -18,25 +18,30 @@ import psycopg
 from psycopg import pq, sql
 
 from horsies.core.types.result import Err, Ok, Result
-from tests.dualrun.coverage import (
-    ColumnType,
-    CoverageGap,
-    DatabaseType,
-    SchemaColumn,
-    UnknownType,
-    check_coverage,
-    parse_column_type,
-)
-from tests.dualrun.normalize import (
-    NormalizedSnapshot,
+from tests.dualrun.cells import (
     RawRow,
     RawSnapshot,
     RawTable,
     UnanchoredTime,
+    UnreadableBytes,
+    UnreadableJson,
     UnreadableTime,
-    normalize_snapshot,
+    UnsupportedStoredFormat,
 )
-from tests.dualrun.rules import SnapshotCatalog
+from tests.dualrun.coverage import (
+    ColumnType,
+    CoverageGap,
+    DatabaseType,
+    DetachedLeaf,
+    SchemaColumn,
+    UnknownType,
+    check_coverage,
+    detached_leaf,
+    parse_column_type,
+    split_detached_leaves,
+)
+from tests.dualrun.normalize import NormalizedSnapshot, normalize_snapshot
+from tests.dualrun.rules import SnapshotCatalog, TableRules
 from tests.dualrun.values import RunWindow
 
 TABLE_ROW_LIMIT: Final = 10_000
@@ -44,6 +49,9 @@ TABLE_ROW_LIMIT: Final = 10_000
 
 SCHEMA_COLUMN_LIMIT: Final = 2_000
 """Most ``horsies_`` columns the schema read accepts; a schema with more fails the capture."""
+
+DETACHED_LEAF_LIMIT: Final = 1_000
+"""Most detached leaves the capture reads; the read stops there and the leaves past it fail the capture as unclassified tables."""
 
 CAPTURE_LOCK_TIMEOUT: Final = timedelta(seconds=5)
 """Longest wait for a table lock that an open transaction holds."""
@@ -99,6 +107,9 @@ CaptureError = (
     | TableRowLimitExceeded
     | UnreadableTime
     | UnanchoredTime
+    | UnreadableJson
+    | UnsupportedStoredFormat
+    | UnreadableBytes
 )
 
 
@@ -141,6 +152,16 @@ _SCHEMA_SQL: Final[LiteralString] = """
 
 _CLOCK_SQL: Final[LiteralString] = 'SELECT clock_timestamp()'
 
+_LEAF_CATALOG: Final = 'horsies_task_history_leaf_catalog'
+
+_DETACHED_SQL: Final[LiteralString] = """
+    SELECT leaf_name, class_key::text
+    FROM horsies_task_history_leaf_catalog
+    WHERE detached_at IS NOT NULL AND dropped_at IS NULL
+    ORDER BY leaf_name
+    LIMIT %(limit)s
+"""
+
 
 def _text(value: object, subject: str) -> str:
     match value:
@@ -179,28 +200,65 @@ def _cell_expression(column: str, column_type: ColumnType) -> sql.Composable:
             return sql.SQL('{}::text').format(sql.Identifier(column))
 
 
+def _table_read(
+    position: int,
+    rules: TableRules,
+    source: str,
+    types: dict[tuple[str, str], ColumnType],
+    row_limit: int,
+) -> sql.Composable:
+    cells = sql.SQL(', ').join(
+        _cell_expression(spec.name, types[(rules.name, spec.name)])
+        for spec in rules.columns
+    )
+    return sql.SQL(
+        '(SELECT {position}::integer, ARRAY[{cells}]::text[] FROM {source} LIMIT {limit})'
+    ).format(
+        position=sql.Literal(position),
+        cells=cells,
+        source=sql.Identifier(source),
+        limit=sql.Literal(row_limit + 1),
+    )
+
+
 def _rows_statement(
     catalog: SnapshotCatalog,
     types: dict[tuple[str, str], ColumnType],
+    detached: tuple[DetachedLeaf, ...],
     row_limit: int,
 ) -> sql.Composed:
-    parts: list[sql.Composable] = []
-    for position, table in enumerate(catalog.tables):
-        cells = sql.SQL(', ').join(
-            _cell_expression(spec.name, types[(table.name, spec.name)])
-            for spec in table.columns
-        )
+    """One statement for every catalog table, and for each detached leaf under its parent's position."""
+    positions = {table.name: position for position, table in enumerate(catalog.tables)}
+    parts = [
+        _table_read(position, table, table.name, types, row_limit)
+        for position, table in enumerate(catalog.tables)
+    ]
+    for leaf in detached:
+        position = positions[leaf.parent]
         parts.append(
-            sql.SQL(
-                '(SELECT {position}::integer, ARRAY[{cells}]::text[] FROM {table} LIMIT {limit})'
-            ).format(
-                position=sql.Literal(position),
-                cells=cells,
-                table=sql.Identifier(table.name),
-                limit=sql.Literal(row_limit + 1),
-            ),
+            _table_read(
+                position, catalog.tables[position], leaf.table, types, row_limit
+            )
         )
     return sql.SQL(' UNION ALL ').join(parts)
+
+
+def _detached_leaves(
+    connection: Connection, schema: tuple[SchemaColumn, ...]
+) -> tuple[DetachedLeaf, ...]:
+    """The leaf catalog's detached, not dropped leaves. Raises ``psycopg.Error`` on a database error."""
+    if not any(column.table == _LEAF_CATALOG for column in schema):
+        return ()
+    records = connection.execute(
+        _DETACHED_SQL, {'limit': DETACHED_LEAF_LIMIT}
+    ).fetchall()
+    return tuple(
+        detached_leaf(
+            _text(record[0], 'a detached leaf name'),
+            _text(record[1], 'a leaf class key'),
+        )
+        for record in records
+    )
 
 
 def _raw_row(cells: object, width: int) -> RawRow:
@@ -266,11 +324,16 @@ def _read_statements(
     if len(records) > SCHEMA_COLUMN_LIMIT:
         return Err(SchemaColumnLimitExceeded(limit=SCHEMA_COLUMN_LIMIT))
     schema = _schema_columns(records)
-    gaps = check_coverage(schema, catalog)
+    covered, detached, leaf_gaps = split_detached_leaves(
+        schema, _detached_leaves(connection, schema)
+    )
+    gaps = leaf_gaps + check_coverage(covered, catalog)
     if gaps:
         return Err(CatalogCoverageGap(gaps=gaps))
-    types = {(column.table, column.column): column.column_type for column in schema}
-    rows = connection.execute(_rows_statement(catalog, types, row_limit)).fetchall()
+    types = {(column.table, column.column): column.column_type for column in covered}
+    rows = connection.execute(
+        _rows_statement(catalog, types, detached, row_limit)
+    ).fetchall()
     return _raw_snapshot(catalog, rows, row_limit)
 
 
