@@ -9,12 +9,22 @@ use uuid::Uuid;
 use crate::broker::BrokerError;
 
 /// Categorized task send failure codes.
+///
+/// The members are Python's, in Python's order
+/// (`horsies/core/models/task_send_types.py`). `ASYNC_CONTEXT`,
+/// `EVENT_LOOP_LIMIT` and `LOOP_RUNNER_FAILED` are produced by the Python
+/// client only; [`TaskSendError`] has no variant for them.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, horsies_macros::CodeCatalog)]
 #[code_catalog(module = "task_send", base = "str_enum")]
 pub enum TaskSendErrorCode {
     /// Send called while suppression is active (worker/scheduler import phase,
     /// `check()`, or `HORSIES_SUPPRESS_SENDS=1`). Non-retryable.
     SendSuppressed,
+    /// A sync send or schedule (or a sync retry) was called from inside a
+    /// running event loop; the blocking enqueue would stall the loop, so
+    /// nothing was written. A sync retry from the same loop returns this code
+    /// again; the `*_async` forms complete the dispatch. Python client only.
+    AsyncContext,
     /// Programmer error (bad args, serialization failure, unresolved queue).
     ValidationFailed,
     /// Infrastructure error (schema init, DB transaction). Conditionally retryable.
@@ -31,17 +41,28 @@ pub enum TaskSendErrorCode {
     /// written. Non-retryable — shrink the payload (pass a reference to
     /// external storage) or raise the configured limit.
     PayloadTooLarge,
+    /// The broker already holds resource sets for its limit of open event
+    /// loops, and this send ran on a new one; nothing was written. The retry
+    /// methods refuse it. Python client only; removed before 0.8.0.
+    EventLoopLimit,
+    /// A sync send or schedule could not run the enqueue on the broker's sync
+    /// runner: the runner is stopped, its thread did not start, or scheduling
+    /// failed. Nothing was written. Python client only; removed before 0.8.0.
+    LoopRunnerFailed,
 }
 
 impl std::fmt::Display for TaskSendErrorCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::SendSuppressed => write!(f, "SEND_SUPPRESSED"),
+            Self::AsyncContext => write!(f, "ASYNC_CONTEXT"),
             Self::ValidationFailed => write!(f, "VALIDATION_FAILED"),
             Self::EnqueueFailed => write!(f, "ENQUEUE_FAILED"),
             Self::PayloadMismatch => write!(f, "PAYLOAD_MISMATCH"),
             Self::IdempotencyKeyConflict => write!(f, "IDEMPOTENCY_KEY_CONFLICT"),
             Self::PayloadTooLarge => write!(f, "PAYLOAD_TOO_LARGE"),
+            Self::EventLoopLimit => write!(f, "EVENT_LOOP_LIMIT"),
+            Self::LoopRunnerFailed => write!(f, "LOOP_RUNNER_FAILED"),
         }
     }
 }
@@ -69,8 +90,8 @@ pub struct TaskSendPayload {
 }
 
 /// Error from task send/schedule operations: one variant per
-/// [`TaskSendErrorCode`], each with only the facts of its state (Python
-/// `horsies/core/models/task_send_types.py:107-252`).
+/// [`TaskSendErrorCode`] that the core produces, each with only the facts of
+/// its state (Python `horsies/core/models/task_send_types.py:107-252`).
 #[derive(Debug, Clone)]
 pub enum TaskSendError {
     /// Sends are suppressed in this process. Nothing was serialized or
@@ -264,6 +285,7 @@ pub fn send_error_from_enqueue(
         | BrokerError::TerminalizationContract(_)
         | BrokerError::HistoryReadContract(_)
         | BrokerError::InvalidClaimArgument(_)
+        | BrokerError::ClaimContract(_)
         | BrokerError::Statement(_)
         | BrokerError::PoolSettings(_)
         | BrokerError::RowDecode(_) => TaskSendError::EnqueueFailed {

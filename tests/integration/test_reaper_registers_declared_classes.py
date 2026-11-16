@@ -65,7 +65,8 @@ async def _registered_duration(
         return (
             await connection.execute(
                 text(
-                    'SELECT duration FROM horsies_retention_classes '
+                    "SELECT make_interval(days => retention_days) "
+                    'FROM horsies_retention_classes '
                     'WHERE class_key = :key'
                 ),
                 {'key': key},

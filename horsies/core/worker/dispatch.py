@@ -111,6 +111,12 @@ from horsies.core.worker.slots import (
     TaskFinished,
     describe_exit,
 )
+from horsies.core.worker.release import (
+    HeldClaim,
+    ReleaseOutcome,
+    ReleasePlacement,
+    release_claims,
+)
 from horsies.core.worker.runner_heartbeat import (
     StaleRunningRecoveryOff,
     StaleRunningRecoveryOn,
@@ -257,19 +263,22 @@ class DispatchMixin:
         reason: str,
         claimed_at: datetime,
     ) -> _RequeueOutcome:
+        """Return a claimed row that no child started to the queue.
+
+        One ``horsies_release_claims`` statement in autocommit, fenced on
+        this worker and the dispatch's claim generation; the row keeps its
+        execution class. ``DB_ERROR``: a database error, logged here; the
+        row is unchanged, or the release committed and its reply was lost.
+        """
+        claim = HeldClaim(task_id=task_id, claimed_at=claimed_at)
         try:
             async with self.sf() as s:
-                res = await s.execute(
-                    UNCLAIM_CLAIMED_TASK_SQL,
-                    {
-                        'id': task_id,
-                        'wid': self.worker_instance_id,
-                        'claimed_at': claimed_at,
-                    },
+                (released,) = await release_claims(
+                    await autocommit_connection(s),
+                    worker_id=self.worker_instance_id,
+                    claims=(claim,),
+                    placement=ReleasePlacement.SAME_CLASS,
                 )
-                await s.commit()
-                rowcount = getattr(res, 'rowcount', 0) or 0
-                requeued = rowcount > 0
         except Exception as exc:
             logger.error(
                 'DB error while requeueing task %s (%s): %s',
@@ -279,20 +288,23 @@ class DispatchMixin:
             )
             return _RequeueOutcome.DB_ERROR
 
-        if requeued:
-            logger.warning(
-                'Requeued worker-owned in-flight task %s: %s',
-                task_id,
-                reason,
-            )
-            return _RequeueOutcome.REQUEUED
-        else:
-            logger.warning(
-                'Failed to requeue task %s (not owned or not requeueable): %s',
-                task_id,
-                reason,
-            )
-            return _RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED
+        match released.outcome:
+            case ReleaseOutcome.RELEASED:
+                logger.warning(
+                    'Requeued worker-owned in-flight task %s: %s',
+                    task_id,
+                    reason,
+                )
+                return _RequeueOutcome.REQUEUED
+            case ReleaseOutcome.NOT_HELD:
+                logger.warning(
+                    'Failed to requeue task %s (not owned or not requeueable): %s',
+                    task_id,
+                    reason,
+                )
+                return _RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED
+            case _ as unreachable:
+                assert_never(unreachable)
 
     async def _recover_worker_future_failure(
         self,

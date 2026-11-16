@@ -23,4 +23,6 @@ pub mod reads;
 pub mod rerun;
 
 #[cfg(test)]
+mod move_ports;
+#[cfg(test)]
 mod tests;

@@ -949,17 +949,21 @@ class TestClassMismatch:
         await session.commit()
         before = await _row_state(session, task_id)
 
-        await probe._return_row_as_isolated(
-            {
-                'id': task_id,
-                'task_name': 'now_def',
-                'queue_name': QUEUE,
-                'claimed_at': before[3].replace(year=2000),
-            },
-            RowClassMismatch(
-                row_class=Execution.SHARED_ASYNC,
-                registered_class=Execution.ISOLATED,
-            ),
+        await probe._return_rows_as_isolated(
+            [
+                (
+                    {
+                        'id': task_id,
+                        'task_name': 'now_def',
+                        'queue_name': QUEUE,
+                        'claimed_at': before[3].replace(year=2000),
+                    },
+                    RowClassMismatch(
+                        row_class=Execution.SHARED_ASYNC,
+                        registered_class=Execution.ISOLATED,
+                    ),
+                ),
+            ],
         )
 
         assert await _row_state(session, task_id) == before

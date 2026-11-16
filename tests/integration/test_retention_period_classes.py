@@ -19,14 +19,15 @@ import uuid
 from datetime import timedelta
 from typing import Any
 
+import psycopg
 import pytest
 from pydantic import SecretStr
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.brokers.result_types import BrokerErrorCode
 from horsies.core.history.ddl.classes import (
     ClassRegistered,
     register_finite_retention_class,
@@ -43,7 +44,7 @@ from horsies.core.models.queues import CustomQueueConfig, QueueMode
 from horsies.core.models.retention import RetentionConfig
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.workflow import TaskNode
-from horsies.core.types.result import Err, Ok, is_err, is_ok
+from horsies.core.types.result import Ok, is_err, is_ok
 from horsies.core.workflows.lifecycle import start_workflow_async
 from tests.broker_resources_support import current_resources
 from tests.integration.conftest import DB_URL
@@ -256,21 +257,16 @@ def _app_mapping(days: int) -> Horsies:
 
 
 @pytest.mark.parametrize(
-    ('registered', 'run_schema_migrations', 'refused'),
+    'registered',
     [
-        pytest.param(_LEGACY_DURATION, True, True, id='other-duration'),
-        pytest.param(_LEGACY_DURATION, False, True, id='read-only-other-duration'),
-        pytest.param(timedelta(days=_LEGACY_DAYS), True, False, id='same-duration'),
-        pytest.param(None, True, False, id='not-registered'),
+        pytest.param(timedelta(days=_LEGACY_DAYS), id='same-duration'),
+        pytest.param(None, id='not-registered'),
     ],
 )
-async def test_a_broker_refuses_a_period_key_held_with_another_duration(
+async def test_a_broker_starts_with_its_period_key_registered_or_absent(
     broker: PostgresBroker,
     registered: timedelta | None,
-    run_schema_migrations: bool,
-    refused: bool,
 ) -> None:
-    """A broker that runs no migrations still sends, so it checks too."""
     engine = current_resources(broker).engine
     await _forget(engine, _LEGACY_KEY)
     match registered:
@@ -282,25 +278,31 @@ async def test_a_broker_refuses_a_period_key_held_with_another_duration(
                     connection, class_key=_LEGACY_KEY, duration=duration,
                 )
             assert isinstance(registration, ClassRegistered), registration
-    starting = PostgresBroker(
-        PostgresConfig(database_url=SecretStr(DB_URL)),
-        run_schema_migrations=run_schema_migrations,
-    )
+    starting = PostgresBroker(PostgresConfig(database_url=SecretStr(DB_URL)))
     starting.app = _app_mapping(_LEGACY_DAYS)
     try:
         initialized = await starting.ensure_schema_initialized()
     finally:
         await starting.close_async()
         await _forget(engine, _LEGACY_KEY)
+    assert isinstance(initialized, Ok), initialized
 
-    match refused, initialized:
-        case False, Ok():
-            pass
-        case True, Err(err_value=failure):
-            assert failure.code is BrokerErrorCode.SCHEMA_INIT_FAILED, failure
-            assert not failure.retryable, failure
-            assert _LEGACY_KEY in failure.message, failure.message
-            assert '5 days' in failure.message, failure.message
-            assert f'{_LEGACY_DAYS} days' in failure.message, failure.message
-        case _:
-            pytest.fail(f'refused={refused}, but initialization gave {initialized!r}')
+
+async def test_the_database_refuses_a_period_key_held_with_another_duration(
+    broker: PostgresBroker,
+) -> None:
+    """standard_17d holds 17 days: CHECK horsies_retention_classes_kind_shape.
+
+    Before the baseline such a row could exist and the broker refused to
+    start on it; now it cannot be stored.
+    """
+    engine = current_resources(broker).engine
+    await _forget(engine, _LEGACY_KEY)
+    with pytest.raises(IntegrityError) as refused:
+        async with engine.begin() as connection:
+            await register_finite_retention_class(
+                connection, class_key=_LEGACY_KEY, duration=_LEGACY_DURATION,
+            )
+    orig = refused.value.orig
+    assert isinstance(orig, psycopg.errors.CheckViolation), orig
+    assert orig.diag.constraint_name == 'horsies_retention_classes_kind_shape'
