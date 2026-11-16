@@ -1,6 +1,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 pub mod backoff;
+mod class_coverage_log;
 pub mod cli;
 pub mod config;
 pub mod error;
