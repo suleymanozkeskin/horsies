@@ -4,7 +4,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::core::task::result::TaskResult;
-use crate::core::{OperationalErrorCode, OutcomeCode, TaskError};
+use crate::core::{OperationalErrorCode, OutcomeCode, TaskError, TaskErrorKind};
 
 use crate::workflow_engine::error::WorkflowError;
 
@@ -18,9 +18,9 @@ pub struct DepResult {
 ///
 /// The stored text must pass the core's strict JSON read rule. The merge
 /// re-encodes the object, so an integer that the parse would round is
-/// refused instead of changed. `{}` and `null` (no static input) are an empty
-/// object. Any other non-object input cannot take named members and is
-/// refused.
+/// refused instead of changed. Only an object takes named members: any other
+/// input, `null` included, is refused. The client gives a node with members an
+/// object input such as `{}`; the core does not read `null` as `{}`.
 pub(crate) fn input_object(
     input: &str,
 ) -> Result<serde_json::Map<String, serde_json::Value>, WorkflowError> {
@@ -39,7 +39,6 @@ pub(crate) fn input_object(
         e
     })?;
     match parsed {
-        serde_json::Value::Null => Ok(serde_json::Map::new()),
         serde_json::Value::Object(object) => Ok(object),
         _ => Err(WorkflowError::Validation(
             "a node input that takes args_from or workflow context members must be a JSON object"
@@ -178,10 +177,11 @@ fn wrap_dep_result(dep_idx: i32, dep: Option<&DepResult>) -> serde_json::Value {
 /// The entry of a SKIPPED dependency (Python `core/workflows/engine.py:2830-2835`).
 pub(crate) fn upstream_skipped_error(dep_idx: i32) -> TaskError {
     TaskError {
-        error_code: Some(OutcomeCode::UpstreamSkipped.into()),
-        message: Some("Upstream dependency was SKIPPED".to_owned()),
-        cause: None,
+        exception: None,
+        error_code: OutcomeCode::UpstreamSkipped.into(),
         data: Some(serde_json::json!({ "dependency_index": dep_idx })),
+        message: Some("Upstream dependency was SKIPPED".to_owned()),
+        kind: TaskErrorKind::Plain,
     }
 }
 
@@ -189,12 +189,13 @@ pub(crate) fn upstream_skipped_error(dep_idx: i32) -> TaskError {
 /// dependency.
 pub(crate) fn missing_result_error(dep_idx: i32, status: &str) -> TaskError {
     TaskError {
-        error_code: Some(OperationalErrorCode::ResultDeserializationError.into()),
+        exception: None,
+        error_code: OperationalErrorCode::ResultDeserializationError.into(),
+        data: Some(serde_json::json!({ "dependency_index": dep_idx, "status": status })),
         message: Some(format!(
             "Upstream dependency at index {dep_idx} is {status} with no stored result"
         )),
-        cause: None,
-        data: Some(serde_json::json!({ "dependency_index": dep_idx, "status": status })),
+        kind: TaskErrorKind::Plain,
     }
 }
 
@@ -205,9 +206,14 @@ fn task_result_to_value(
 ) -> serde_json::Value {
     serde_json::to_value(&wrapped).unwrap_or_else(|e| {
         tracing::warn!(dep_idx, error = %e, context, "dependency result wrapping failed");
+        // A decodable envelope with a code: no code-less fallback.
         serde_json::json!({
-            "__type": "err",
-            "value": {
+            "__h_task_result__": true,
+            "ok": null,
+            "err": {
+                "exception": null,
+                "error_code": {"__builtin_task_code__": "WORKER_SERIALIZATION_ERROR"},
+                "data": null,
                 "message": context,
             }
         })
@@ -262,11 +268,11 @@ mod tests {
         );
 
         let args_from = Some(json!({"answer": 0}));
-        let result = merge_args_from_sync("null", &args_from, &deps).unwrap();
+        let result = merge_args_from_sync("{}", &args_from, &deps).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let answer = &parsed["answer"];
-        assert_eq!(answer["__type"], "ok");
-        assert_eq!(answer["value"], 42);
+        assert_eq!(answer["__h_task_result__"], true);
+        assert_eq!(answer["ok"], 42);
     }
 
     #[test]
@@ -281,11 +287,11 @@ mod tests {
         );
 
         let args_from = Some(json!({"answer": 0}));
-        let result = merge_args_from_sync("null", &args_from, &deps).unwrap();
+        let result = merge_args_from_sync("{}", &args_from, &deps).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let answer = &parsed["answer"];
-        assert_eq!(answer["__type"], "err");
-        assert!(answer["value"]["message"]
+        assert!(answer["err"].is_object());
+        assert!(answer["err"]["message"]
             .as_str()
             .unwrap()
             .contains("no stored result"));
@@ -295,10 +301,10 @@ mod tests {
     fn merge_missing_dep_wraps_in_task_result_err() {
         let deps = HashMap::new(); // no deps
         let args_from = Some(json!({"answer": 0}));
-        let result = merge_args_from_sync("null", &args_from, &deps).unwrap();
+        let result = merge_args_from_sync("{}", &args_from, &deps).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let answer = &parsed["answer"];
-        assert_eq!(answer["__type"], "err");
+        assert!(answer["err"].is_object());
     }
 
     #[test]
@@ -318,8 +324,8 @@ mod tests {
         let result = merge_args_from_sync(r#"{"existing": true}"#, &args_from, &deps).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["existing"], true);
-        assert_eq!(parsed["dep_val"]["__type"], "ok");
-        assert_eq!(parsed["dep_val"]["value"], "hello");
+        assert_eq!(parsed["dep_val"]["__h_task_result__"], true);
+        assert_eq!(parsed["dep_val"]["ok"], "hello");
     }
 
     #[test]
@@ -339,14 +345,7 @@ mod tests {
         let TaskResult::Err(error) = answer else {
             panic!("a skipped dependency must give an error entry");
         };
-        assert_eq!(
-            error
-                .error_code
-                .as_ref()
-                .map(ToString::to_string)
-                .as_deref(),
-            Some("UPSTREAM_SKIPPED")
-        );
+        assert_eq!(error.error_code.to_string(), "UPSTREAM_SKIPPED");
         assert_eq!(
             error.message.as_deref(),
             Some("Upstream dependency was SKIPPED")
@@ -372,14 +371,7 @@ mod tests {
             let TaskResult::Err(error) = answer else {
                 panic!("a dependency with no result must give an error entry");
             };
-            assert_eq!(
-                error
-                    .error_code
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .as_deref(),
-                Some("RESULT_DESERIALIZATION_ERROR")
-            );
+            assert_eq!(error.error_code.to_string(), "RESULT_DESERIALIZATION_ERROR");
             assert_eq!(
                 error.data,
                 Some(json!({"dependency_index": 2, "status": status}))
@@ -398,9 +390,12 @@ mod tests {
 
     #[test]
     fn merge_into_a_non_object_input_is_refused() {
+        // `null` is not read as `{}`: only an object takes named members.
         let args_from = Some(json!({"dep_val": 0}));
-        let err = merge_args_from_sync("[1]", &args_from, &HashMap::new()).unwrap_err();
-        assert!(matches!(err, WorkflowError::Validation(_)));
+        for input in ["[1]", "null"] {
+            let err = merge_args_from_sync(input, &args_from, &HashMap::new()).unwrap_err();
+            assert!(matches!(err, WorkflowError::Validation(_)), "{input}");
+        }
     }
 
     #[test]
@@ -415,11 +410,11 @@ mod tests {
         );
 
         let args_from = Some(json!({"answer": 0}));
-        let result = merge_args_from_sync("null", &args_from, &deps).unwrap();
+        let result = merge_args_from_sync("{}", &args_from, &deps).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let answer = &parsed["answer"];
-        assert_eq!(answer["__type"], "err");
-        assert!(answer["value"]["message"]
+        assert!(answer["err"].is_object());
+        assert!(answer["err"]["message"]
             .as_str()
             .unwrap()
             .contains("failed to parse upstream task result"));

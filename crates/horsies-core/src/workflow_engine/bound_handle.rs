@@ -163,7 +163,7 @@ impl<T: DeserializeOwned> WorkflowHandle<T> {
     ///
     /// This is a wrap-strategy method.
     pub async fn cancel(&self) -> HandleResult<()> {
-        crate::workflow_engine::lifecycle::cancel_workflow(self.broker.pool(), self.workflow_id)
+        crate::workflow_engine::lifecycle::cancel_workflow(&self.broker, self.workflow_id)
             .await
             .map(|_| ())
     }
@@ -172,8 +172,7 @@ impl<T: DeserializeOwned> WorkflowHandle<T> {
     ///
     /// This is a wrap-strategy method.
     pub async fn pause(&self) -> HandleResult<bool> {
-        crate::workflow_engine::lifecycle::pause_workflow(self.broker.pool(), self.workflow_id)
-            .await
+        crate::workflow_engine::lifecycle::pause_workflow(&self.broker, self.workflow_id).await
     }
 
     /// Resume the workflow (PAUSED -> RUNNING).
@@ -181,7 +180,7 @@ impl<T: DeserializeOwned> WorkflowHandle<T> {
     /// This is a wrap-strategy method.
     pub async fn resume(&self) -> HandleResult<bool> {
         crate::workflow_engine::lifecycle::resume_workflow(
-            self.broker.pool(),
+            &self.broker,
             self.workflow_id,
             &self.registry,
             &self.payload,
@@ -250,9 +249,9 @@ mod tests {
             TaskResult::Err(err) => {
                 assert_eq!(
                     err.error_code,
-                    Some(TaskErrorCode::BuiltIn(BuiltInTaskCode::Retrieval(
+                    TaskErrorCode::BuiltIn(BuiltInTaskCode::Retrieval(
                         RetrievalCode::WorkflowNotFound,
-                    )))
+                    ))
                 );
             }
         }
@@ -279,9 +278,9 @@ mod tests {
             TaskResult::Err(err) => {
                 assert_eq!(
                     err.error_code,
-                    Some(TaskErrorCode::BuiltIn(BuiltInTaskCode::Operational(
+                    TaskErrorCode::BuiltIn(BuiltInTaskCode::Operational(
                         OperationalErrorCode::BrokerError,
-                    )))
+                    ))
                 );
             }
         }
@@ -342,9 +341,9 @@ mod shared_listener_tests {
             match result {
                 TaskResult::Err(err) => assert_eq!(
                     err.error_code,
-                    Some(TaskErrorCode::BuiltIn(BuiltInTaskCode::Retrieval(
+                    TaskErrorCode::BuiltIn(BuiltInTaskCode::Retrieval(
                         RetrievalCode::WaitTimeout,
-                    ))),
+                    )),
                     "each waiter must time out via the shared listener, not fail on pool exhaustion: {:?}",
                     err.error_code,
                 ),

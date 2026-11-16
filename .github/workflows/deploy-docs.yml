@@ -7,7 +7,7 @@ on:
       - 'website/**'
       - '.github/workflows/deploy-docs.yml'
   pull_request:
-    branches: [main]
+    branches: [main, 'program/**']
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -33,7 +33,11 @@ jobs:
         working-directory: website
         run: bun run glass:check
 
-      - name: Build site
+      - name: Link check tests
+        working-directory: website
+        run: bun run test
+
+      - name: Build site and check internal links and anchors
         working-directory: website
         run: bun run build
 
