@@ -3,8 +3,8 @@
 ``TaskActionError`` is a union with one frozen variant per
 ``TaskActionErrorCode`` member. A variant's repr hides the message and the
 cause. Every variant carries ``task_id``. The cancel tests run on a mocked
-session: the lock read, the history read and the cancel outcome are the
-seams.
+autocommit connection: the one ``horsies_cancel_task`` row is the seam, and
+the real outcome decoder reads it.
 """
 
 from __future__ import annotations
@@ -18,27 +18,9 @@ import pytest
 from sqlalchemy.exc import OperationalError
 
 from horsies.core.brokers.resources import EventLoopLimit
-from horsies.core.history.errors import HistoryContractError
-from horsies.core.history.reads.detail import (
-    HistoryTaskState,
-    LiveTaskLocation,
-    TaskStateAbsent,
-    TaskStateResult,
-)
-from horsies.core.lifecycle.operations import TerminalizationKind
-from horsies.core.lifecycle.outcomes import (
-    AlreadyApplied,
-    Applied,
-    LostClaim,
-    ObservedClaim,
-    ObservedTaskState,
-    OutcomeDecodeError,
-    SourceStateConflict,
-    TerminalizationOutcome,
-)
+from horsies.core.lifecycle.outcomes import OutcomeDecodeError
 from horsies.core.types.result import Ok, Result, is_err
 from horsies.core.types.status import TaskStatus
-from horsies.monitoring import task_actions as task_actions_module
 from horsies.monitoring.task_actions import (
     TaskActionDbOperationFailed,
     TaskActionError,
@@ -151,33 +133,43 @@ class TestVariantCatalog:
                 assert error.retryable is False
 
 
-def _history_state(*, status: TaskStatus, is_workflow_task: bool) -> HistoryTaskState:
-    return HistoryTaskState(
-        task_id=uuid.UUID(TASK_ID), status=status, is_workflow_task=is_workflow_task,
-    )
+def _row(
+    outcome: str,
+    *,
+    status: str | None = None,
+    guard: str | None = None,
+    kind: str | None = None,
+) -> dict[str, Any]:
+    """One row of ``horsies_cancel_task`` as the driver returns it."""
+    return {
+        'task_id': uuid.UUID(TASK_ID),
+        'ordinality': None,
+        'outcome': outcome,
+        'terminal_at': NOW if kind is not None else None,
+        'terminalization_kind': kind,
+        'observed_status': status,
+        'observed_worker_id': None,
+        'observed_claimed_at': None,
+        'guard_kind': guard,
+        'observed_guard': None,
+    }
 
 
-def _observed(status: TaskStatus | None) -> ObservedTaskState:
-    return ObservedTaskState(status=status, worker_id=None, claimed_at=None)
-
-
-def _locked_row(*, is_workflow_task: bool) -> MagicMock:
-    result = MagicMock()
-    result.first.return_value = (is_workflow_task,)
-    return result
-
-
-def _missed_row() -> MagicMock:
-    result = MagicMock()
-    result.first.return_value = None
-    return result
-
-
-def _broker_with_session(execute: AsyncMock) -> tuple[MagicMock, AsyncMock]:
+def _broker_with_rows(
+    rows: list[dict[str, Any]] | BaseException,
+) -> tuple[MagicMock, AsyncMock, AsyncMock]:
+    """A broker whose session's autocommit connection answers the cancel with ``rows``."""
+    connection = AsyncMock()
+    match rows:
+        case BaseException():
+            connection.execute = AsyncMock(side_effect=rows)
+        case list():
+            result = MagicMock()
+            result.mappings.return_value.all.return_value = rows
+            connection.execute = AsyncMock(return_value=result)
     session = AsyncMock()
-    session.execute = execute
     session.commit = AsyncMock()
-    session.connection = AsyncMock(return_value=MagicMock())
+    session.connection = AsyncMock(return_value=connection)
     session_ctx = AsyncMock()
     session_ctx.__aenter__ = AsyncMock(return_value=session)
     session_ctx.__aexit__ = AsyncMock(return_value=False)
@@ -185,214 +177,82 @@ def _broker_with_session(execute: AsyncMock) -> tuple[MagicMock, AsyncMock]:
     attach_resources(
         broker, fake_resources(session_factory=MagicMock(return_value=session_ctx)),
     )
-    return broker, session
+    return broker, session, connection
 
 
-def _patch_history(
-    monkeypatch: pytest.MonkeyPatch,
+async def _cancel(
+    rows: list[dict[str, Any]] | BaseException,
     *,
-    published: bool,
-    read: TaskStateResult | BaseException,
-) -> None:
-    monkeypatch.setattr(
-        task_actions_module,
-        'staged_detail_published',
-        AsyncMock(return_value=published),
-    )
-    match read:
-        case BaseException():
-            reader = AsyncMock(side_effect=read)
-        case _:
-            reader = AsyncMock(return_value=read)
-    monkeypatch.setattr(task_actions_module, 'read_task_state', reader)
+    include_running: bool = True,
+) -> tuple[Result[TaskCancelled, TaskActionError], AsyncMock, AsyncMock]:
+    broker, session, connection = _broker_with_rows(rows)
+    result = await cancel_task(broker, TASK_ID, include_running=include_running)
+    return result, session, connection
 
 
-def _patch_outcome(
-    monkeypatch: pytest.MonkeyPatch,
-    outcome: TerminalizationOutcome | BaseException,
-) -> None:
-    match outcome:
-        case BaseException():
-            apply = AsyncMock(side_effect=outcome)
-        case _:
-            apply = AsyncMock(return_value=outcome)
-    monkeypatch.setattr(task_actions_module, 'apply_async', apply)
-
-
-async def _cancel_missed(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    published: bool,
-    read: TaskStateResult | BaseException,
-) -> Result[TaskCancelled, TaskActionError]:
-    broker, _ = _broker_with_session(AsyncMock(return_value=_missed_row()))
-    _patch_history(monkeypatch, published=published, read=read)
-    return await cancel_task(broker, TASK_ID)
-
-
-class TestCancelLiveMiss:
-    """The lock read finds no live row; the history read decides."""
+class TestCancelOutcome:
+    """One ``horsies_cancel_task`` row decides the answer."""
 
     @pytest.mark.asyncio
-    async def test_a_database_without_the_history_read_is_not_found(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        result = await _cancel_missed(
-            monkeypatch, published=False, read=RuntimeError('not called'),
+    async def test_an_applied_cancel_reports_the_observed_status(self) -> None:
+        result, session, connection = await _cancel(
+            [_row('APPLIED', status='RUNNING', kind='CANCEL_ADMIN')],
         )
 
-        assert is_err(result)
-        assert result.err_value == TaskActionNotFound(
-            message=f'Task {TASK_ID} does not exist.', task_id=TASK_ID,
-        )
+        assert result == Ok(TaskCancelled(task_id=TASK_ID, was_status=TaskStatus.RUNNING))
+        assert connection.execute.await_args is not None
+        assert connection.execute.await_args.args[1] == {
+            'task_id': TASK_ID,
+            'include_running': True,
+        }
+        session.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_an_absent_task_is_not_found(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        result = await _cancel_missed(
-            monkeypatch,
-            published=True,
-            read=TaskStateAbsent(task_id=uuid.UUID(TASK_ID)),
+    async def test_the_running_choice_reaches_the_statement(self) -> None:
+        _, _, connection = await _cancel(
+            [_row('SOURCE_STATE_CONFLICT', status='RUNNING')],
+            include_running=False,
         )
 
-        assert is_err(result)
-        assert isinstance(result.err_value, TaskActionNotFound)
+        assert connection.execute.await_args is not None
+        assert connection.execute.await_args.args[1]['include_running'] is False
 
     @pytest.mark.asyncio
-    async def test_a_task_found_live_after_the_lock_read_is_not_found(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        result = await _cancel_missed(
-            monkeypatch, published=True, read=LiveTaskLocation(task_id=uuid.UUID(TASK_ID)),
-        )
-
-        assert is_err(result)
-        assert isinstance(result.err_value, TaskActionNotFound)
-
-    @pytest.mark.asyncio
-    async def test_a_terminal_history_task_is_not_cancellable_with_its_status(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        result = await _cancel_missed(
-            monkeypatch,
-            published=True,
-            read=_history_state(status=TaskStatus.COMPLETED, is_workflow_task=False),
+    async def test_a_live_status_outside_the_choice_is_not_cancellable(self) -> None:
+        result, _, _ = await _cancel(
+            [_row('SOURCE_STATE_CONFLICT', status='RUNNING')],
+            include_running=False,
         )
 
         assert is_err(result)
         assert result.err_value == TaskActionNotCancellable(
-            message=f'Task {TASK_ID} cannot be cancelled from status COMPLETED.',
+            message=f'Task {TASK_ID} cannot be cancelled from status RUNNING.',
             task_id=TASK_ID,
-            current_status=TaskStatus.COMPLETED,
+            current_status=TaskStatus.RUNNING,
         )
 
     @pytest.mark.asyncio
-    async def test_a_workflow_history_task_carries_its_status(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        result = await _cancel_missed(
-            monkeypatch,
-            published=True,
-            read=_history_state(status=TaskStatus.FAILED, is_workflow_task=True),
-        )
-
-        assert is_err(result)
-        error = result.err_value
-        assert isinstance(error, TaskActionWorkflowTask)
-        assert error.current_status is TaskStatus.FAILED
-
-    @pytest.mark.asyncio
-    async def test_a_history_row_that_does_not_decode_is_stored_data_invalid(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        cause = HistoryContractError(f'history row {TASK_ID} has status {CAUSE_MARKER!r}')
-
-        result = await _cancel_missed(monkeypatch, published=True, read=cause)
-
-        assert is_err(result)
-        error = result.err_value
-        assert isinstance(error, TaskActionStoredDataInvalid)
-        assert error.exception is cause
-        assert error.task_id == TASK_ID
-        assert CAUSE_MARKER in error.message
-
-
-async def _cancel_locked(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    is_workflow_task: bool,
-    outcome: TerminalizationOutcome | BaseException,
-) -> tuple[Result[TaskCancelled, TaskActionError], AsyncMock]:
-    broker, session = _broker_with_session(
-        AsyncMock(return_value=_locked_row(is_workflow_task=is_workflow_task)),
-    )
-    _patch_outcome(monkeypatch, outcome)
-    result = await cancel_task(broker, TASK_ID, include_running=True)
-    return result, session
-
-
-def _applied(status: TaskStatus | None) -> Applied:
-    return Applied(
-        task_id=TASK_ID,
-        ordinality=None,
-        terminal_at=NOW,
-        kind=TerminalizationKind.CANCEL_ADMIN,
-        observed=_observed(status),
-    )
-
-
-def _conflict(status: TaskStatus) -> SourceStateConflict:
-    return SourceStateConflict(
-        task_id=TASK_ID,
-        ordinality=None,
-        observed=_observed(status),
-        evidence=ObservedClaim(worker_id=None, claimed_at=None),
-    )
-
-
-class TestCancelLockedRow:
-    """The lock read finds the live row; the cancel outcome decides."""
-
-    @pytest.mark.asyncio
-    async def test_an_applied_cancel_commits_and_reports_the_observed_status(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        result, session = await _cancel_locked(
-            monkeypatch, is_workflow_task=False, outcome=_applied(TaskStatus.RUNNING),
-        )
-
-        assert result == Ok(TaskCancelled(task_id=TASK_ID, was_status=TaskStatus.RUNNING))
-        session.commit.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_a_conflict_is_not_cancellable_with_the_observed_status(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        result, session = await _cancel_locked(
-            monkeypatch, is_workflow_task=False, outcome=_conflict(TaskStatus.RUNNING),
+    async def test_a_finished_plain_task_is_not_cancellable_with_its_status(self) -> None:
+        result, _, _ = await _cancel(
+            [
+                _row(
+                    'SOURCE_STATE_CONFLICT',
+                    status='COMPLETED',
+                    guard='FOREIGN_TERMINALIZATION',
+                    kind='COMPLETE_FUSED',
+                ),
+            ],
         )
 
         assert is_err(result)
         error = result.err_value
         assert isinstance(error, TaskActionNotCancellable)
-        assert error.current_status is TaskStatus.RUNNING
-        session.commit.assert_not_awaited()
+        assert error.current_status is TaskStatus.COMPLETED
 
     @pytest.mark.asyncio
-    async def test_an_already_applied_cancel_is_not_cancellable(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        outcome = AlreadyApplied(
-            task_id=TASK_ID,
-            ordinality=None,
-            terminal_at=NOW,
-            kind=TerminalizationKind.CANCEL_ADMIN,
-            observed=_observed(TaskStatus.CANCELLED),
-        )
-
-        result, _ = await _cancel_locked(
-            monkeypatch, is_workflow_task=False, outcome=outcome,
+    async def test_an_earlier_cancel_is_not_cancellable(self) -> None:
+        result, _, _ = await _cancel(
+            [_row('ALREADY_APPLIED', status='CANCELLED', kind='CANCEL_ADMIN')],
         )
 
         assert is_err(result)
@@ -400,54 +260,60 @@ class TestCancelLockedRow:
         assert isinstance(error, TaskActionNotCancellable)
         assert error.current_status is TaskStatus.CANCELLED
 
+    @pytest.mark.parametrize(
+        ('status', 'kind'),
+        [('PENDING', None), ('FAILED', 'FAIL_RUNNING')],
+        ids=['live', 'finished'],
+    )
     @pytest.mark.asyncio
-    async def test_a_live_workflow_task_carries_its_status(
-        self, monkeypatch: pytest.MonkeyPatch,
+    async def test_a_workflow_task_carries_its_status(
+        self, status: str, kind: str | None,
     ) -> None:
-        result, _ = await _cancel_locked(
-            monkeypatch, is_workflow_task=True, outcome=_conflict(TaskStatus.PENDING),
+        result, _, _ = await _cancel(
+            [_row('SOURCE_STATE_CONFLICT', status=status, guard='WORKFLOW_TASK', kind=kind)],
         )
 
         assert is_err(result)
         error = result.err_value
         assert isinstance(error, TaskActionWorkflowTask)
-        assert error.current_status is TaskStatus.PENDING
+        assert error.current_status is TaskStatus(status)
 
     @pytest.mark.asyncio
-    async def test_an_outcome_row_that_does_not_decode_is_stored_data_invalid(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        cause = OutcomeDecodeError(f'observed_status is not a task status: {CAUSE_MARKER!r}')
+    async def test_an_absent_task_is_not_found(self) -> None:
+        result, _, _ = await _cancel([_row('TASK_ABSENT')])
 
-        result, session = await _cancel_locked(
-            monkeypatch, is_workflow_task=False, outcome=cause,
+        assert is_err(result)
+        assert result.err_value == TaskActionNotFound(
+            message=f'Task {TASK_ID} does not exist.', task_id=TASK_ID,
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_row_that_does_not_decode_is_stored_data_invalid(self) -> None:
+        result, _, _ = await _cancel(
+            [_row('SOURCE_STATE_CONFLICT', status=CAUSE_MARKER, guard='FOREIGN_TERMINALIZATION')],
         )
 
         assert is_err(result)
         error = result.err_value
         assert isinstance(error, TaskActionStoredDataInvalid)
-        assert error.exception is cause
-        session.commit.assert_not_awaited()
+        assert isinstance(error.exception, OutcomeDecodeError)
+        assert error.task_id == TASK_ID
+        assert CAUSE_MARKER in error.message
 
     @pytest.mark.asyncio
-    async def test_an_outcome_without_an_observed_status_is_a_defect(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
+    async def test_an_outcome_without_an_observed_status_is_a_defect(self) -> None:
         with pytest.raises(RuntimeError, match='no observed status'):
-            await _cancel_locked(
-                monkeypatch, is_workflow_task=False, outcome=_applied(None),
-            )
+            await _cancel([_row('APPLIED', kind='CANCEL_ADMIN')])
 
     @pytest.mark.asyncio
-    async def test_a_lost_claim_under_the_row_lock_is_a_defect(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        outcome = LostClaim(
-            task_id=TASK_ID, ordinality=None, observed=_observed(TaskStatus.CLAIMED),
-        )
+    async def test_a_lost_claim_is_a_defect(self) -> None:
+        with pytest.raises(RuntimeError, match='no claim fence'):
+            await _cancel([_row('LOST_CLAIM', status='CLAIMED')])
 
-        with pytest.raises(RuntimeError, match='caller-held row lock'):
-            await _cancel_locked(monkeypatch, is_workflow_task=False, outcome=outcome)
+    @pytest.mark.asyncio
+    async def test_a_row_count_other_than_one_is_a_defect(self) -> None:
+        with pytest.raises(AssertionError, match='returned 0 rows'):
+            await _cancel([])
 
 
 class TestCancelBoundaries:
@@ -461,42 +327,28 @@ class TestCancelBoundaries:
         assert isinstance(result.err_value, TaskActionNotFound)
         assert result.err_value.task_id == 'not-a-uuid'
 
+    @pytest.mark.parametrize(
+        'form',
+        [f'urn:uuid:{TASK_ID.upper()}', '{' + TASK_ID.replace('-', '') + '}'],
+        ids=['urn', 'braces'],
+    )
     @pytest.mark.asyncio
-    async def test_a_uuid_form_the_database_refuses_reaches_it_as_canonical_text(
-        self, monkeypatch: pytest.MonkeyPatch,
+    async def test_a_uuid_form_reaches_the_statement_as_canonical_text(
+        self, form: str,
     ) -> None:
-        execute = AsyncMock(return_value=_missed_row())
-        broker, _ = _broker_with_session(execute)
-        _patch_history(monkeypatch, published=False, read=RuntimeError('not called'))
+        broker, _, connection = _broker_with_rows([_row('TASK_ABSENT')])
 
-        result = await cancel_task(broker, f'urn:uuid:{TASK_ID.upper()}')
+        result = await cancel_task(broker, form)
 
         assert is_err(result)
-        assert isinstance(result.err_value, TaskActionNotFound)
         assert result.err_value.task_id == TASK_ID
-        assert execute.await_args is not None
-        assert execute.await_args.args[1] == {'id': TASK_ID}
-
-    @pytest.mark.asyncio
-    async def test_a_canonical_id_reaches_the_cancel_statement(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        broker, _ = _broker_with_session(
-            AsyncMock(return_value=_locked_row(is_workflow_task=False)),
-        )
-        apply = AsyncMock(return_value=_applied(TaskStatus.PENDING))
-        monkeypatch.setattr(task_actions_module, 'apply_async', apply)
-
-        result = await cancel_task(broker, '{' + TASK_ID.replace('-', '') + '}')
-
-        assert result == Ok(TaskCancelled(task_id=TASK_ID, was_status=TaskStatus.PENDING))
-        assert apply.await_args is not None
-        assert apply.await_args.args[1].task_id == TASK_ID
+        assert connection.execute.await_args is not None
+        assert connection.execute.await_args.args[1]['task_id'] == TASK_ID
 
     @pytest.mark.asyncio
     async def test_a_database_failure_keeps_the_cause(self) -> None:
         cause = OperationalError('SELECT 1', {}, Exception('connection lost'))
-        broker, _ = _broker_with_session(AsyncMock(side_effect=cause))
+        broker, _, _ = _broker_with_rows(cause)
         task_id = str(uuid.uuid4())
 
         result = await cancel_task(broker, task_id)

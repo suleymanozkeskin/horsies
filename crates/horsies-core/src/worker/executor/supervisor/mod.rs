@@ -18,8 +18,11 @@ pub mod channel;
 pub mod exit;
 mod exit_watch;
 pub mod socket;
+pub mod source;
 pub mod spawner;
 
+#[cfg(test)]
+mod child_io_tests;
 #[cfg(test)]
 mod tests;
 
@@ -30,11 +33,12 @@ pub use boot::{
 };
 pub use channel::{
     ChildChannel, ChildLost, FrameWait, LossCause, MailboxBound, PartialFrame, SendFailure,
-    CHILD_KILL_WAIT, CHILD_STOP_TIMEOUT,
+    WorkerKillMark, CHILD_KILL_WAIT, CHILD_STOP_TIMEOUT,
 };
 pub use exit::{ChildExit, ExitMeaning, ExitState, ReapedExit};
 pub use exit_watch::POLLED_EXIT_INTERVAL;
 pub use socket::{child_socket_pair, ChildSocketPair, SOCKET_BUFFER_BYTES};
+pub use source::{ChildSource, SpawnFuture};
 pub use spawner::{
     wait_for_exit, ChildCommand, ChildId, KillOutcome, SpawnError, SpawnedChild, Spawner,
     SpawnerHandle, SpawnerStartError, SpawnerStopReport,

@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 import pytest
 from sqlalchemy import text
 
+from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.history.ddl.classes import DEFAULT_RETENTION_CLASS_KEY
 from horsies.core.history.ddl.tables import FOREVER_CLASS_KEY
@@ -49,6 +50,7 @@ async def _sync_enqueue(
         'parity.task',
         task_id=task_id,
         enqueue_sha='c' * 64,
+        send_kind=SendKind.FIRST,
         sent_at=datetime.now(timezone.utc),
         args_json='[]',
         kwargs_json='{}',

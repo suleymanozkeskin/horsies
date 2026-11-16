@@ -291,9 +291,10 @@ async def autocommit_connection(session: AsyncSession) -> AsyncConnection:
     Contract: several statements without a transaction. Each statement on
     the connection commits when it ends: no BEGIN and no COMMIT round trip.
     Nothing makes two statements commit together, so a caller sends a
-    statement only when it is complete alone. The fence of a later statement
-    is the only link to an earlier one; the failed-attempt write is the
-    example: an unlocked read, then a fenced write.
+    statement only when it is complete alone. A later statement depends on
+    an earlier one only by what the earlier one answered; the stale RUNNING
+    recovery is the example: the finish of a stale attempt, then the wake of
+    the retry it scheduled.
 
     The session close sends nothing, and the pool gives the connection back
     to the next session in the engine's isolation level. The locks that a

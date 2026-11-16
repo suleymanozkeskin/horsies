@@ -16,18 +16,29 @@
 //!
 //! Building the pools connects to nothing: a connection opens at the first
 //! checkout.
+//!
+//! [`CoreHandle`] holds the pools between `Idle` and `Open`: an operation
+//! opens them when the handle is `Idle`, and [`CoreHandle::close`] returns the
+//! handle to `Idle` after the writes in flight end (bounded by
+//! [`CLOSE_WRITE_BOUND`]).
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+use tokio_util::task::{task_tracker::TaskTrackerToken, TaskTracker};
 
 use crate::core::PostgresConfig;
 use crate::db::{
     parse_connection_url, ConnectPlan, ConnectPlanError, ConnectionAge, ConnectionEnvironment,
-    CorePool, EnvironmentError, IdlePing, PoolPlan, PoolRole, PoolSizing, PoolSizingError, Reserve,
-    StatementProtocol, UrlError, DEFAULT_IDLE_PING_AFTER, DEFAULT_SOCKET_SETTINGS,
-    WORKER_RESERVED_CONNECTIONS,
+    CorePool, EnvironmentError, IdlePing, MaskedUrl, PoolPlan, PoolRole, PoolSizing,
+    PoolSizingError, Reserve, StatementProtocol, UrlError, DEFAULT_IDLE_PING_AFTER,
+    DEFAULT_SOCKET_SETTINGS, WORKER_RESERVED_CONNECTIONS,
 };
 use crate::manifest::PoolRecycle;
+
+/// The longest [`CoreHandle::close`] waits for the writes in flight
+/// (Python's `CLOSE_HANDOFF_TIMEOUT`).
+pub const CLOSE_WRITE_BOUND: Duration = Duration::from_secs(5);
 
 /// The process a broker's pools serve.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,12 +56,16 @@ pub(crate) enum SessionPool {
     /// work uses the main pool.
     SameAsMain,
     /// A pool of its own on `session_database_url`.
-    Separate(CorePool),
+    Separate {
+        pool: CorePool,
+        masked_url: MaskedUrl,
+    },
 }
 
 /// The core pools of one broker.
 pub(crate) struct BrokerPools {
     main: CorePool,
+    main_url: MaskedUrl,
     session: SessionPool,
 }
 
@@ -79,32 +94,21 @@ pub enum PoolSettingsError {
 }
 
 impl BrokerPools {
-    /// Builds the pools of `config` for `profile`.
+    /// Builds the pools of `config` for `profile` with an environment the
+    /// caller read.
     ///
-    /// Reads the process environment (`PGPASSWORD`, `HOME`, the set libpq
-    /// variables), then, per URL, the TLS files the URL names, `~/.pgpass`
-    /// when no password is given, and the process user name when the URL
-    /// names no user. Connects to nothing.
+    /// Reads, per URL, the TLS files the URL names, `~/.pgpass` when no
+    /// password is given, and the process user name when the URL names no
+    /// user. Connects to nothing.
     ///
     /// Errors: [`PoolSettingsError`]; nothing was built.
-    pub(crate) fn open(
-        config: &PostgresConfig,
-        profile: PoolProfile,
-    ) -> Result<BrokerPools, PoolSettingsError> {
-        let environment =
-            ConnectionEnvironment::capture().map_err(PoolSettingsError::Environment)?;
-        BrokerPools::open_with_environment(config, profile, &environment)
-    }
-
-    /// Builds the pools of `config` with an environment the caller read.
-    /// Reads the files [`BrokerPools::open`] names; connects to nothing.
     pub(crate) fn open_with_environment(
         config: &PostgresConfig,
         profile: PoolProfile,
         environment: &ConnectionEnvironment,
     ) -> Result<BrokerPools, PoolSettingsError> {
         let main_shape = main_pool_shape(profile);
-        let main = open_pool(
+        let (main, main_url) = open_pool(
             &config.database_url,
             pool_plan(
                 config,
@@ -121,27 +125,48 @@ impl BrokerPools {
         let session_url = config.effective_session_database_url();
         let session = match session_url == config.database_url {
             true => SessionPool::SameAsMain,
-            false => SessionPool::Separate(open_pool(
-                session_url,
-                pool_plan(
-                    config,
-                    PoolRole::Session,
-                    Reserve::NoReserve,
-                    StatementProtocol::PreparedPerConnection,
-                )
-                .map_err(|cause| PoolSettingsError::Sizing {
-                    role: PoolRole::Session,
-                    cause,
-                })?,
-                environment,
-            )?),
+            false => {
+                let (pool, masked_url) = open_pool(
+                    session_url,
+                    pool_plan(
+                        config,
+                        PoolRole::Session,
+                        Reserve::NoReserve,
+                        StatementProtocol::PreparedPerConnection,
+                    )
+                    .map_err(|cause| PoolSettingsError::Sizing {
+                        role: PoolRole::Session,
+                        cause,
+                    })?,
+                    environment,
+                )?;
+                SessionPool::Separate { pool, masked_url }
+            }
         };
-        Ok(BrokerPools { main, session })
+        Ok(BrokerPools {
+            main,
+            main_url,
+            session,
+        })
     }
 
     /// The pool on `database_url`.
     pub(crate) fn main(&self) -> &CorePool {
         &self.main
+    }
+
+    /// The pool for session work.
+    pub(crate) fn session(&self) -> &SessionPool {
+        &self.session
+    }
+
+    /// The session URL with its password masked (the main URL when both are
+    /// the same).
+    pub(crate) fn session_masked_url(&self) -> &MaskedUrl {
+        match &self.session {
+            SessionPool::SameAsMain => &self.main_url,
+            SessionPool::Separate { masked_url, .. } => masked_url,
+        }
     }
 
     /// Closes every pool: later checkouts fail with `PoolClosed`. Checked-out
@@ -150,8 +175,169 @@ impl BrokerPools {
         self.main.close();
         match &self.session {
             SessionPool::SameAsMain => {}
-            SessionPool::Separate(pool) => pool.close(),
+            SessionPool::Separate { pool, .. } => pool.close(),
         }
+    }
+}
+
+/// The pools of an open handle and the writes that run on them.
+pub(crate) struct OpenPools {
+    pools: BrokerPools,
+    writes: TaskTracker,
+}
+
+impl OpenPools {
+    pub(crate) fn pools(&self) -> &BrokerPools {
+        &self.pools
+    }
+
+    pub(crate) fn main(&self) -> &CorePool {
+        self.pools.main()
+    }
+}
+
+/// A write in flight on an open handle. [`CoreHandle::close`] waits for it,
+/// up to [`CLOSE_WRITE_BOUND`]. Dropping it ends the write.
+pub(crate) struct WriteInFlight {
+    _token: TaskTrackerToken,
+}
+
+/// The stage of a broker's core pools.
+enum HandleState {
+    /// No pools: none built yet, or closed. The next operation opens them.
+    Idle,
+    /// Pools built; operations run on them.
+    Open(Arc<OpenPools>),
+}
+
+/// The core pools of one broker and their stage.
+///
+/// The handle keeps what it needs to open the pools again after a close: the
+/// config, the profile and the environment read at construction.
+pub(crate) struct CoreHandle {
+    config: PostgresConfig,
+    profile: PoolProfile,
+    environment: ConnectionEnvironment,
+    state: Mutex<HandleState>,
+}
+
+/// What a close found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CloseOutcome {
+    /// The handle was `Idle`: nothing to close.
+    AlreadyIdle,
+    /// Every write in flight ended within the bound; the pools are closed.
+    Closed,
+    /// `unfinished` writes did not end within [`CLOSE_WRITE_BOUND`]; their
+    /// outcome is unknown. The pools are closed.
+    ClosedWithWritesUnfinished { unfinished: usize },
+}
+
+impl CoreHandle {
+    /// Builds the pools at once, so refused settings fail the constructor
+    /// before any connection. Reads what
+    /// [`BrokerPools::open_with_environment`] reads.
+    pub(crate) fn open_with_environment(
+        config: &PostgresConfig,
+        profile: PoolProfile,
+        environment: ConnectionEnvironment,
+    ) -> Result<CoreHandle, PoolSettingsError> {
+        let pools = BrokerPools::open_with_environment(config, profile, &environment)?;
+        Ok(CoreHandle {
+            config: config.clone(),
+            profile,
+            environment,
+            state: Mutex::new(HandleState::Open(Arc::new(OpenPools {
+                pools,
+                writes: TaskTracker::new(),
+            }))),
+        })
+    }
+
+    /// Builds the pools with the process environment.
+    pub(crate) fn open(
+        config: &PostgresConfig,
+        profile: PoolProfile,
+    ) -> Result<CoreHandle, PoolSettingsError> {
+        let environment =
+            ConnectionEnvironment::capture().map_err(PoolSettingsError::Environment)?;
+        CoreHandle::open_with_environment(config, profile, environment)
+    }
+
+    /// The open pools, for a read. An `Idle` handle builds its pools first
+    /// (no connection; the TLS files and `~/.pgpass` are read again).
+    ///
+    /// Errors: [`PoolSettingsError`] when the settings are refused at the
+    /// reopen; the handle stays `Idle`.
+    pub(crate) fn pools(&self) -> Result<Arc<OpenPools>, PoolSettingsError> {
+        let mut state = self.lock_state();
+        self.open_in(&mut *state)
+    }
+
+    /// The open pools for a write, and the token that keeps the write in
+    /// the close's wait. The token is taken under the state lock, so a close
+    /// that swaps the pools out after it waits for this write. Errors as
+    /// [`CoreHandle::pools`].
+    pub(crate) fn pools_for_write(
+        &self,
+    ) -> Result<(Arc<OpenPools>, WriteInFlight), PoolSettingsError> {
+        let mut state = self.lock_state();
+        let open = self.open_in(&mut *state)?;
+        let write = WriteInFlight {
+            _token: open.writes.token(),
+        };
+        Ok((open, write))
+    }
+
+    /// The pools of an `Open` state; an `Idle` state builds them and becomes
+    /// `Open`.
+    fn open_in(&self, state: &mut HandleState) -> Result<Arc<OpenPools>, PoolSettingsError> {
+        match state {
+            HandleState::Open(open) => Ok(Arc::clone(open)),
+            HandleState::Idle => {
+                let pools = BrokerPools::open_with_environment(
+                    &self.config,
+                    self.profile,
+                    &self.environment,
+                )?;
+                let open = Arc::new(OpenPools {
+                    pools,
+                    writes: TaskTracker::new(),
+                });
+                *state = HandleState::Open(Arc::clone(&open));
+                Ok(open)
+            }
+        }
+    }
+
+    /// Closes the open pools and returns the handle to `Idle`.
+    ///
+    /// No new operation takes the old pools: the next one opens new pools.
+    /// Writes in flight run to their end within [`CLOSE_WRITE_BOUND`]; then
+    /// the old pools close, so a read in flight that checks out again fails
+    /// with `PoolClosed`. Connections checked out at that moment end when
+    /// their guards drop.
+    pub(crate) async fn close(&self) -> CloseOutcome {
+        let previous = std::mem::replace(&mut *self.lock_state(), HandleState::Idle);
+        let open = match previous {
+            HandleState::Idle => return CloseOutcome::AlreadyIdle,
+            HandleState::Open(open) => open,
+        };
+        let _closed_now = open.writes.close();
+        let outcome = match tokio::time::timeout(CLOSE_WRITE_BOUND, open.writes.wait()).await {
+            Ok(()) => CloseOutcome::Closed,
+            Err(_elapsed) => CloseOutcome::ClosedWithWritesUnfinished {
+                unfinished: open.writes.len(),
+            },
+        };
+        open.pools.close();
+        outcome
+    }
+
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, HandleState> {
+        self.state
+            .lock()
+            .expect("the core handle state lock is held only for a state swap or a pool build")
     }
 }
 
@@ -219,18 +405,22 @@ fn connection_age(recycle: PoolRecycle) -> ConnectionAge {
     }
 }
 
-/// Parses one URL, loads its connection plan and builds the pool.
+/// Parses one URL, loads its connection plan and builds the pool. Returns
+/// the pool and its URL with the password masked.
 fn open_pool(
     url: &str,
     plan: PoolPlan,
     environment: &ConnectionEnvironment,
-) -> Result<CorePool, PoolSettingsError> {
+) -> Result<(CorePool, MaskedUrl), PoolSettingsError> {
     let role = plan.role;
     let settings = parse_connection_url(url, environment)
         .map_err(|cause| PoolSettingsError::Url { role, cause })?;
     let connect = ConnectPlan::load(&settings, environment, &DEFAULT_SOCKET_SETTINGS)
         .map_err(|cause| PoolSettingsError::Plan { role, cause })?;
-    Ok(CorePool::new(plan, Arc::new(connect)))
+    Ok((
+        CorePool::new(plan, Arc::new(connect)),
+        settings.masked_url().clone(),
+    ))
 }
 
 /// The URL of a test's sqlx connect options, in the form the statement
@@ -255,22 +445,22 @@ pub(crate) fn test_url_of(options: &sqlx::postgres::PgConnectOptions) -> String 
     url.to_string()
 }
 
-/// Core pools on the database of a test's sqlx pool, for brokers that tests
-/// build from such a pool. The environment is isolated: test URLs carry
-/// their password.
+/// The core handle on the database of a test's sqlx pool, for brokers that
+/// tests build from such a pool. The environment is isolated: test URLs
+/// carry their password.
 #[cfg(test)]
-pub(crate) fn pools_for_test_pool(pool: &sqlx::PgPool) -> BrokerPools {
-    BrokerPools::open_with_environment(
+pub(crate) fn handle_for_test_pool(pool: &sqlx::PgPool) -> CoreHandle {
+    CoreHandle::open_with_environment(
         &PostgresConfig::from_url(test_url_of(&pool.connect_options())),
         PoolProfile::Producer,
-        &ConnectionEnvironment::isolated(),
+        ConnectionEnvironment::isolated(),
     )
     .expect("the URL of a test pool is accepted by the statement layer")
 }
 
 /// A main core pool on the database of a test's sqlx pool, for the free
 /// lifecycle writers that tests call with a pool of their own. The same pool
-/// as the main pool of [`pools_for_test_pool`]; connects to nothing until
+/// as the main pool of [`handle_for_test_pool`]; connects to nothing until
 /// the first checkout.
 #[cfg(test)]
 pub(crate) fn core_pool_for_test_pool(pool: &sqlx::PgPool) -> CorePool {
@@ -282,6 +472,31 @@ pub(crate) fn core_pool_for_test_pool(pool: &sqlx::PgPool) -> CorePool {
         runtime_protocol(&config),
     )
     .expect("the size of a test pool is accepted by the statement layer");
+    let (core_pool, _masked_url) = open_pool(
+        &config.database_url,
+        plan,
+        &ConnectionEnvironment::isolated(),
+    )
+    .expect("the URL of a test pool is accepted by the statement layer");
+    core_pool
+}
+
+/// A worker profile core pool of `size` connections on the database of a
+/// test's sqlx pool: it keeps [`WORKER_RESERVED_CONNECTIONS`] free from batch
+/// checkouts, as the pool of a worker. Connects to nothing until the first
+/// checkout.
+#[cfg(test)]
+pub(crate) fn worker_core_pool_for_test_pool(pool: &sqlx::PgPool, size: u32) -> CorePool {
+    let mut config = PostgresConfig::from_url(test_url_of(&pool.connect_options()));
+    config.pool_size = size;
+    config.max_overflow = 0;
+    let plan = pool_plan(
+        &config,
+        PoolRole::WorkerProfile,
+        Reserve::KeepFree(WORKER_RESERVED_CONNECTIONS),
+        runtime_protocol(&config),
+    )
+    .expect("a test worker pool is larger than its reserve");
     open_pool(
         &config.database_url,
         plan,
@@ -312,17 +527,19 @@ pub(crate) fn unpinged_single_connection_core_pool(
         max_age: ConnectionAge::Unlimited,
         protocol: StatementProtocol::PreparedPerConnection,
     };
-    open_pool(
+    let (core_pool, _masked_url) = open_pool(
         &test_url_of(options),
         plan,
         &ConnectionEnvironment::isolated(),
     )
-    .expect("the URL of a test pool is accepted by the statement layer")
+    .expect("the URL of a test pool is accepted by the statement layer");
+    core_pool
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::{CheckoutClass, CheckoutFailure};
 
     fn config() -> PostgresConfig {
         let mut config =
@@ -483,9 +700,13 @@ mod tests {
         .expect("pools build without I/O");
         assert_eq!(pools.main().role(), PoolRole::WorkerProfile);
         assert!(matches!(
-            &pools.session,
-            SessionPool::Separate(pool) if pool.role() == PoolRole::Session
+            pools.session(),
+            SessionPool::Separate { pool, .. } if pool.role() == PoolRole::Session
         ));
+        assert_eq!(
+            pools.session_masked_url().as_str(),
+            "postgresql://horsies:***@direct.example:5432/app"
+        );
     }
 
     #[test]
@@ -505,5 +726,213 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    fn open_handle() -> CoreHandle {
+        CoreHandle::open_with_environment(
+            &config(),
+            PoolProfile::Producer,
+            ConnectionEnvironment::isolated(),
+        )
+        .expect("a handle builds without I/O")
+    }
+
+    /// Python's close contract: close, then the next operation opens again.
+    #[tokio::test]
+    async fn a_closed_handle_opens_new_pools_at_the_next_operation() {
+        let handle = open_handle();
+        let first = handle.pools().expect("open pools");
+
+        assert_eq!(handle.close().await, CloseOutcome::Closed);
+        assert!(matches!(
+            first.main().checkout(CheckoutClass::Batch).await,
+            Err(CheckoutFailure::PoolClosed { .. })
+        ));
+
+        let second = handle.pools().expect("pools open again");
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert_eq!(handle.close().await, CloseOutcome::Closed);
+        assert_eq!(handle.close().await, CloseOutcome::AlreadyIdle);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_close_waits_for_a_write_in_flight_up_to_the_bound() {
+        let handle = open_handle();
+        let (_open, write) = handle.pools_for_write().expect("open pools");
+
+        assert_eq!(
+            handle.close().await,
+            CloseOutcome::ClosedWithWritesUnfinished { unfinished: 1 }
+        );
+        drop(write);
+    }
+
+    #[tokio::test]
+    async fn a_close_after_the_writes_ended_does_not_wait() {
+        let handle = open_handle();
+        let (_open, write) = handle.pools_for_write().expect("open pools");
+        drop(write);
+
+        assert_eq!(handle.close().await, CloseOutcome::Closed);
+    }
+}
+
+#[cfg(test)]
+mod kept_session_tests {
+    //! The session setting of the core pools on the test server (Python
+    //! `tests/integration/test_broker_session_settings.py`): a connection that
+    //! keeps its session runs `jit = off`, sent once in autocommit when the
+    //! connection opens, so a rollback of a transaction on it keeps the
+    //! setting. In PgBouncer transaction mode the main pool sets nothing (a
+    //! session `SET` would reach other clients of the server connection), and
+    //! the session pool still runs `jit = off`.
+    //!
+    //! Each read also returns `pg_settings.source`: a `SET` on the connection
+    //! makes it `session`. So the tests hold on a server whose own setting is
+    //! `jit = off`, where the value alone could not tell the two apart.
+
+    use serial_test::serial;
+
+    use super::*;
+    use crate::broker::terminalization_matrix::migrated_database_url;
+    use crate::db::{
+        CheckoutClass, IsolationLevel, PooledConnection, RollbackOutcome, StatementBound,
+        TypedStatement,
+    };
+
+    /// The value of `jit` on the connection and where it comes from.
+    const JIT_SETTING: TypedStatement = TypedStatement::new(
+        "test_jit_setting",
+        "SELECT current_setting('jit') AS jit, \
+                (SELECT source FROM pg_settings WHERE name = 'jit') AS source",
+        &[],
+    );
+
+    /// A statement inside the transaction that the test rolls back.
+    const STATEMENT_IN_TRANSACTION: TypedStatement =
+        TypedStatement::new("test_statement_in_transaction", "SELECT 1", &[]);
+
+    /// `jit` as the connection runs it: its value and its `pg_settings.source`.
+    #[derive(Debug, PartialEq, Eq)]
+    struct JitSetting {
+        value: String,
+        source: String,
+    }
+
+    impl JitSetting {
+        fn set_off_on_the_session() -> JitSetting {
+            JitSetting {
+                value: "off".to_owned(),
+                source: "session".to_owned(),
+            }
+        }
+    }
+
+    async fn jit_setting(connection: &mut PooledConnection) -> JitSetting {
+        let rows = connection
+            .query(
+                &JIT_SETTING.bind().finish(),
+                StatementBound::ConnectionTimeouts,
+            )
+            .await
+            .expect("read the jit setting");
+        let [row] = rows.as_slice() else {
+            panic!("expected one row, got {}", rows.len());
+        };
+        JitSetting {
+            value: row.try_get("jit").expect("the jit column"),
+            source: row.try_get("source").expect("the source column"),
+        }
+    }
+
+    /// A config of the test database whose pools hold one connection each.
+    fn one_connection_config(database_url: &str) -> PostgresConfig {
+        let mut config = PostgresConfig::from_url(database_url);
+        config.pool_size = 1;
+        config.max_overflow = 0;
+        config
+    }
+
+    fn open_test_pools(config: &PostgresConfig) -> BrokerPools {
+        BrokerPools::open_with_environment(
+            config,
+            PoolProfile::Producer,
+            &ConnectionEnvironment::isolated(),
+        )
+        .expect("the pools of the test database build")
+    }
+
+    /// Python `test_broker_session_settings.py::test_setting_survives_a_rollback_of_the_first_transaction`.
+    /// The connection opens at the first checkout, runs the setting, then the
+    /// statement-pooling check; the transaction of the test rolls back after
+    /// both, and the setting stays.
+    #[tokio::test]
+    #[serial]
+    async fn a_kept_session_runs_without_jit_after_a_transaction_rolls_back() {
+        let url = migrated_database_url().await;
+        let pools = open_test_pools(&one_connection_config(&url));
+        let mut connection = pools
+            .main()
+            .checkout(CheckoutClass::Reserved)
+            .await
+            .expect("check out the only connection");
+
+        let mut transaction = connection
+            .begin(IsolationLevel::ServerDefault)
+            .await
+            .expect("begin");
+        transaction
+            .query(
+                &STATEMENT_IN_TRANSACTION.bind().finish(),
+                StatementBound::ConnectionTimeouts,
+            )
+            .await
+            .expect("the statement in the transaction");
+        let rollback = transaction.rollback().await;
+        let setting = jit_setting(&mut connection).await;
+        drop(connection);
+        pools.close();
+
+        assert!(
+            matches!(rollback, RollbackOutcome::RolledBack),
+            "{rollback:?}"
+        );
+        assert_eq!(setting, JitSetting::set_off_on_the_session());
+    }
+
+    /// Python `test_broker_session_settings.py::test_transaction_mode_runtime_pool_keeps_the_server_setting`.
+    /// The two URLs reach the same server directly and differ only in
+    /// `application_name`, so the session URL gets a pool of its own.
+    #[tokio::test]
+    #[serial]
+    async fn in_transaction_mode_only_the_session_pool_turns_jit_off() {
+        let url = migrated_database_url().await;
+        let separator = if url.contains('?') { '&' } else { '?' };
+        let mut config = one_connection_config(&url);
+        config.session_database_url =
+            Some(format!("{url}{separator}application_name=horsies_session"));
+        config.pgbouncer_transaction_mode = true;
+        let pools = open_test_pools(&config);
+        let SessionPool::Separate(session) = &pools.session else {
+            panic!("a distinct session URL gets a pool of its own");
+        };
+
+        let mut main_connection = pools
+            .main()
+            .checkout(CheckoutClass::Reserved)
+            .await
+            .expect("check out the main pool");
+        let main_setting = jit_setting(&mut main_connection).await;
+        let mut session_connection = session
+            .checkout(CheckoutClass::Reserved)
+            .await
+            .expect("check out the session pool");
+        let session_setting = jit_setting(&mut session_connection).await;
+        drop(main_connection);
+        drop(session_connection);
+        pools.close();
+
+        assert_ne!(main_setting.source, "session", "{main_setting:?}");
+        assert_eq!(session_setting, JitSetting::set_off_on_the_session());
     }
 }

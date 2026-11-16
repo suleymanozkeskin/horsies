@@ -10,6 +10,7 @@ from uuid import UUID
 import pytest
 from pydantic import AfterValidator
 
+from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.codec.json_io import SerializationError, dumps_json
 from horsies.core.codec.kwargs import encode_kwargs_read_back
 from horsies.core.codec.validation_errors import ValueValidationError
@@ -35,7 +36,15 @@ from horsies.core.models.schedule import (
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.workflow import WorkflowContext
+from horsies.core.scheduler.calculator import calculate_next_run
 from horsies.core.scheduler.service import ScheduleLockDatabase, Scheduler
+from horsies.core.scheduler.state import (
+    DueSchedule,
+    DueScheduleRead,
+    ScheduleStateWrite,
+    StartStateRead,
+    StoredConfigHash,
+)
 from horsies.core.scheduler.validation import (
     PreparedSchedule,
     _encode_schedule_kwargs,
@@ -64,6 +73,47 @@ def _not_expired(value: str) -> str:
 
 # A 32-byte config hash that no schedule of these tests produces.
 STALE_CONFIG_HASH = bytes(32)
+
+# A database time far from the host clock: a first run or a slot computed
+# from the host clock cannot equal one computed from this time.
+DATABASE_NOW = datetime(2020, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _start_read(*rows: tuple[str, bytes]) -> StartStateRead:
+    """The start read at DATABASE_NOW with these stored digests."""
+    return StartStateRead(
+        database_now=DATABASE_NOW,
+        rows=tuple(StoredConfigHash(name, digest) for name, digest in rows),
+    )
+
+
+def _due_read(*names: str) -> DueScheduleRead:
+    """The due read at DATABASE_NOW with these rows due."""
+    return DueScheduleRead(
+        database_now=DATABASE_NOW,
+        due=tuple(DueSchedule(name, DATABASE_NOW) for name in names),
+    )
+
+
+def _written_names(store: AsyncMock) -> list[str]:
+    """The schedule names of the one start write or heal call."""
+    assert store.await_args is not None, 'the write was not called'
+    writes: list[ScheduleStateWrite] = store.await_args.args[0]
+    return [write.schedule_name for write in writes]
+
+
+def _fail_on_call(failing_call: int) -> object:
+    """A calculate_next_run that raises on its ``failing_call``-th call."""
+    calls = 0
+
+    def _next_run(pattern: object, from_time: datetime, tz: str = 'UTC') -> datetime:
+        nonlocal calls
+        calls += 1
+        if calls == failing_call:
+            raise RuntimeError('simulated calculator failure')
+        return calculate_next_run(pattern, from_time, tz)  # type: ignore[arg-type]
+
+    return _next_run
 
 
 def _deadline_task(*, deadline: Annotated[str, AfterValidator(_not_expired)]) -> None:
@@ -997,23 +1047,44 @@ class TestInitializeSchedules:
         app = _make_app(schedule_config=config)
         scheduler = Scheduler(app)
 
-        foreign_state = MagicMock()
-        foreign_state.schedule_name = 'other_schedulers_row'
-        kept_state = MagicMock()
-        kept_state.schedule_name = 'kept'
-
         state_manager = MagicMock()
-        state_manager.get_all_states = AsyncMock(
-            return_value=[foreign_state, kept_state],
+        state_manager.read_start_states = AsyncMock(
+            return_value=_start_read(('other_schedulers_row', STALE_CONFIG_HASH)),
         )
-        state_manager.get_state = AsyncMock(return_value=None)
-        state_manager.initialize_state = AsyncMock()
-        state_manager.update_next_run = AsyncMock()
+        state_manager.store_start_states = AsyncMock(return_value=('kept',))
         scheduler.state_manager = state_manager
 
         await scheduler._initialize_schedules()
 
-        state_manager.get_all_states.assert_awaited_once()
+        state_manager.read_start_states.assert_awaited_once()
+        assert _written_names(state_manager.store_start_states) == ['kept']
+
+    @pytest.mark.asyncio
+    async def test_first_runs_come_from_the_database_time(self) -> None:
+        """A new schedule's first run is computed from the start read's
+        database time, not from the host clock."""
+        pattern = IntervalSchedule(seconds=10)
+        config = ScheduleConfig(
+            schedules=[TaskSchedule(name='s', task_name='my_task', pattern=pattern)],
+        )
+        app = _make_app(schedule_config=config)
+        scheduler = Scheduler(app)
+
+        state_manager = MagicMock()
+        state_manager.read_start_states = AsyncMock(return_value=_start_read())
+        state_manager.store_start_states = AsyncMock(return_value=('s',))
+        scheduler.state_manager = state_manager
+
+        await scheduler._initialize_schedules()
+
+        writes: list[ScheduleStateWrite] = state_manager.store_start_states.await_args.args[0]
+        assert writes == [
+            ScheduleStateWrite(
+                schedule_name='s',
+                next_run_at=calculate_next_run(pattern, DATABASE_NOW, 'UTC'),
+                config_hash=scheduler._compute_config_hash(config.schedules[0]),
+            ),
+        ]
 
     @pytest.mark.asyncio
     async def test_one_bad_schedule_does_not_block_others(self) -> None:
@@ -1041,28 +1112,39 @@ class TestInitializeSchedules:
         scheduler = Scheduler(app)
 
         state_manager = MagicMock()
-        state_manager.get_all_states = AsyncMock(return_value=[])
-        state_manager.get_state = AsyncMock(return_value=None)
-
-        call_count = 0
-
-        async def _init_side_effect(
-            name: str, next_run: datetime, config_hash: bytes, **kwargs: object,
-        ) -> None:
-            nonlocal call_count
-            call_count += 1
-            if name == 'bad':
-                raise RuntimeError('simulated calculator failure')
-
-        state_manager.initialize_state = AsyncMock(side_effect=_init_side_effect)
+        state_manager.read_start_states = AsyncMock(return_value=_start_read())
+        state_manager.store_start_states = AsyncMock(return_value=('good_first', 'good_last'))
         scheduler.state_manager = state_manager
 
         # Should not raise — bad schedule is isolated
+        with patch(
+            'horsies.core.scheduler.service.calculate_next_run',
+            side_effect=_fail_on_call(2),
+        ):
+            await scheduler._initialize_schedules()
+
+        assert _written_names(state_manager.store_start_states) == ['good_first', 'good_last']
+
+    @pytest.mark.asyncio
+    async def test_store_failure_is_logged_and_start_goes_on(self) -> None:
+        """A database error of the start write does not raise: the tick's
+        existence heal creates the missing rows."""
+        config = ScheduleConfig(
+            schedules=[
+                TaskSchedule(name='s', task_name='my_task', pattern=IntervalSchedule(seconds=5)),
+            ],
+        )
+        app = _make_app(schedule_config=config)
+        scheduler = Scheduler(app)
+
+        state_manager = MagicMock()
+        state_manager.read_start_states = AsyncMock(return_value=_start_read())
+        state_manager.store_start_states = AsyncMock(side_effect=RuntimeError('db error'))
+        scheduler.state_manager = state_manager
+
         await scheduler._initialize_schedules()
 
-        # Both good schedules initialized; bad one attempted but failed
-        assert call_count == 3
-        assert state_manager.initialize_state.await_count == 3
+        state_manager.store_start_states.assert_awaited_once()
 
 
 # =============================================================================
@@ -1630,8 +1712,9 @@ class TestInitializeSchedulesAdditionalPaths:
         with pytest.raises(RuntimeError, match='State manager not initialized'):
             await scheduler._initialize_schedules()
 
-    async def test_prune_exception_logs_warning_continues(self) -> None:
-        """get_all_states raises → logs warning, initialization still runs."""
+    async def test_start_read_failure_is_logged_and_writes_nothing(self) -> None:
+        """read_start_states raises → logged, no write; the tick's existence
+        heal creates the missing rows."""
         config = ScheduleConfig(
             schedules=[
                 TaskSchedule(
@@ -1645,19 +1728,17 @@ class TestInitializeSchedulesAdditionalPaths:
         scheduler = Scheduler(app)
 
         state_manager = MagicMock()
-        state_manager.get_all_states = AsyncMock(side_effect=RuntimeError('db error'))
-        state_manager.get_state = AsyncMock(return_value=None)
-        state_manager.initialize_state = AsyncMock()
+        state_manager.read_start_states = AsyncMock(side_effect=RuntimeError('db error'))
+        state_manager.store_start_states = AsyncMock()
         scheduler.state_manager = state_manager
 
         # Should not raise
         await scheduler._initialize_schedules()
 
-        # Schedule 's' should still initialize despite prune failure
-        state_manager.initialize_state.assert_awaited_once()
+        state_manager.store_start_states.assert_not_awaited()
 
     async def test_disabled_schedule_skipped_during_init(self) -> None:
-        """Disabled schedules are not passed to _initialize_single_schedule."""
+        """Disabled schedules get no state row."""
         config = ScheduleConfig(
             schedules=[
                 TaskSchedule(
@@ -1677,84 +1758,60 @@ class TestInitializeSchedulesAdditionalPaths:
         scheduler = Scheduler(app)
 
         state_manager = MagicMock()
-        state_manager.get_all_states = AsyncMock(return_value=[])
-        state_manager.get_state = AsyncMock(return_value=None)
-        state_manager.initialize_state = AsyncMock()
+        state_manager.read_start_states = AsyncMock(return_value=_start_read())
+        state_manager.store_start_states = AsyncMock(return_value=('enabled_one',))
         scheduler.state_manager = state_manager
 
         await scheduler._initialize_schedules()
 
-        # Only 'enabled_one' should be initialized
-        assert state_manager.initialize_state.await_count == 1
-        init_args = state_manager.initialize_state.await_args
-        assert init_args[0][0] == 'enabled_one'
-
-
-# =============================================================================
-# _initialize_single_schedule — additional paths
-# =============================================================================
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-class TestInitializeSingleScheduleAdditionalPaths:
-    """Additional tests for Scheduler._initialize_single_schedule."""
-
-    async def test_no_state_manager_raises_runtime_error(self) -> None:
-        """state_manager=None → RuntimeError."""
-        config = ScheduleConfig(
-            schedules=[
-                TaskSchedule(
-                    name='s',
-                    task_name='my_task',
-                    pattern=IntervalSchedule(seconds=5),
-                ),
-            ],
-        )
-        app = _make_app(schedule_config=config)
-        scheduler = Scheduler(app)
-        scheduler.state_manager = None
-
-        with pytest.raises(RuntimeError, match='State manager not initialized'):
-            await scheduler._initialize_single_schedule(
-                config.schedules[0],
-                _utc(2025, 6, 1, 12, 0, 0),
-            )
+        assert _written_names(state_manager.store_start_states) == ['enabled_one']
 
     async def test_config_hash_changed_recalculates_next_run(self) -> None:
-        """Existing state with stale hash → update_next_run called with new hash."""
+        """A stored digest that differs → the row is written with the new
+        digest and a next run from the database time."""
+        pattern = IntervalSchedule(seconds=10)
         config = ScheduleConfig(
-            schedules=[
-                TaskSchedule(
-                    name='s',
-                    task_name='my_task',
-                    pattern=IntervalSchedule(seconds=10),
-                ),
-            ],
+            schedules=[TaskSchedule(name='s', task_name='my_task', pattern=pattern)],
         )
         app = _make_app(schedule_config=config)
         scheduler = Scheduler(app)
 
-        # Existing state with old hash
-        old_state = MagicMock()
-        old_state.config_hash = STALE_CONFIG_HASH
-        old_state.next_run_at = _utc(2025, 6, 1, 11, 0, 0)
-
         state_manager = MagicMock()
-        state_manager.get_state = AsyncMock(return_value=old_state)
-        state_manager.update_next_run = AsyncMock()
+        state_manager.read_start_states = AsyncMock(
+            return_value=_start_read(('s', STALE_CONFIG_HASH)),
+        )
+        state_manager.store_start_states = AsyncMock(return_value=('s',))
         scheduler.state_manager = state_manager
 
-        now = _utc(2025, 6, 1, 12, 0, 0)
-        await scheduler._initialize_single_schedule(config.schedules[0], now)
+        await scheduler._initialize_schedules()
 
-        # Should have called update_next_run with new hash
-        state_manager.update_next_run.assert_awaited_once()
-        update_args = state_manager.update_next_run.await_args
-        assert update_args[0][0] == 's'  # schedule_name
-        # The new config_hash should differ from the stale one
-        new_hash = update_args[0][2]
-        assert new_hash != STALE_CONFIG_HASH
+        writes: list[ScheduleStateWrite] = state_manager.store_start_states.await_args.args[0]
+        assert len(writes) == 1
+        assert writes[0].config_hash != STALE_CONFIG_HASH
+        assert writes[0].config_hash == scheduler._compute_config_hash(config.schedules[0])
+        assert writes[0].next_run_at == calculate_next_run(pattern, DATABASE_NOW, 'UTC')
+
+    async def test_unchanged_digest_is_not_written(self) -> None:
+        """A stored digest that matches → no write."""
+        schedule = TaskSchedule(
+            name='s',
+            task_name='my_task',
+            pattern=IntervalSchedule(seconds=10),
+        )
+        config = ScheduleConfig(schedules=[schedule])
+        app = _make_app(schedule_config=config)
+        scheduler = Scheduler(app)
+
+        state_manager = MagicMock()
+        state_manager.read_start_states = AsyncMock(
+            return_value=_start_read(('s', scheduler._compute_config_hash(schedule))),
+        )
+        state_manager.store_start_states = AsyncMock()
+        scheduler.state_manager = state_manager
+
+        await scheduler._initialize_schedules()
+
+        state_manager.store_start_states.assert_not_awaited()
 
 
 # =============================================================================
@@ -1802,14 +1859,14 @@ class TestCheckAndRunSchedules:
         scheduler = Scheduler(app)
 
         state_manager = MagicMock()
-        state_manager.get_due_states = AsyncMock()
+        state_manager.read_due_schedules = AsyncMock()
         scheduler.state_manager = state_manager
         scheduler.broker = _make_broker_mock()
 
         await scheduler._check_and_run_schedules()
 
-        # get_due_states should not be called since no enabled schedules
-        state_manager.get_due_states.assert_not_awaited()
+        # The due read is not sent since no schedule is enabled
+        state_manager.read_due_schedules.assert_not_awaited()
 
     async def test_iterates_due_states_and_checks_each(self) -> None:
         """Two due states → _check_schedule called for each."""
@@ -1830,29 +1887,25 @@ class TestCheckAndRunSchedules:
         app = _make_app(schedule_config=config)
         scheduler = Scheduler(app)
 
-        due_a = MagicMock()
-        due_a.schedule_name = 'sched_a'
-        due_b = MagicMock()
-        due_b.schedule_name = 'sched_b'
-
         state_manager = MagicMock()
-        state_manager.get_existing_names = AsyncMock(
-            return_value={'sched_a', 'sched_b'},
+        state_manager.heal_missing_states = AsyncMock(return_value=())
+        state_manager.read_due_schedules = AsyncMock(
+            return_value=_due_read('sched_a', 'sched_b'),
         )
-        state_manager.get_due_states = AsyncMock(return_value=[due_a, due_b])
         scheduler.state_manager = state_manager
         scheduler.broker = _make_broker_mock()
 
-        checked: list[str] = []
+        checked: list[tuple[str, object]] = []
 
         async def _track_check(schedule: object, now: object) -> None:
-            checked.append(schedule.name)  # type: ignore[union-attr]
+            checked.append((schedule.name, now))  # type: ignore[union-attr]
 
         scheduler._check_schedule = AsyncMock(side_effect=_track_check)  # type: ignore[method-assign]
 
         await scheduler._check_and_run_schedules()
 
-        assert checked == ['sched_a', 'sched_b']
+        # Each due schedule is checked at the due read's database time.
+        assert checked == [('sched_a', DATABASE_NOW), ('sched_b', DATABASE_NOW)]
 
     async def test_check_schedule_error_does_not_block_others(self) -> None:
         """First _check_schedule raises → second still called."""
@@ -1873,16 +1926,11 @@ class TestCheckAndRunSchedules:
         app = _make_app(schedule_config=config)
         scheduler = Scheduler(app)
 
-        due_a = MagicMock()
-        due_a.schedule_name = 'sched_a'
-        due_b = MagicMock()
-        due_b.schedule_name = 'sched_b'
-
         state_manager = MagicMock()
-        state_manager.get_existing_names = AsyncMock(
-            return_value={'sched_a', 'sched_b'},
+        state_manager.heal_missing_states = AsyncMock(return_value=())
+        state_manager.read_due_schedules = AsyncMock(
+            return_value=_due_read('sched_a', 'sched_b'),
         )
-        state_manager.get_due_states = AsyncMock(return_value=[due_a, due_b])
         scheduler.state_manager = state_manager
         scheduler.broker = _make_broker_mock()
 
@@ -2852,7 +2900,7 @@ class TestEnqueueScheduledTask:
             app.config.payload,
             task_name='my_task',
             kind='kwargs',
-            encoded_len=len(dumps_json({'value': 5}).ok_value),
+            payload_text=dumps_json({'value': 5}).ok_value,
         )
 
     async def test_happy_path_calls_broker_with_correct_params(self) -> None:
@@ -2888,6 +2936,7 @@ class TestEnqueueScheduledTask:
         assert enqueue_kwargs['sent_at'] == slot
         assert enqueue_kwargs['task_name'] == 'my_task'
         assert enqueue_kwargs['task_id'] is not None
+        assert enqueue_kwargs['send_kind'] is SendKind.FIRST
 
     async def test_no_args_skips_serialization(self) -> None:
         """Schedule with no args/kwargs → args_json=None, kwargs_json=None."""
@@ -2924,45 +2973,6 @@ class TestEnqueueScheduledTask:
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-class TestInitializeSingleScheduleAlreadyInitialized:
-    """Cover the else branch when config hash matches (L234)."""
-
-    async def test_state_exists_hash_matches_no_update(self) -> None:
-        """Existing state with matching hash → no-op (debug log only)."""
-        schedule = TaskSchedule(
-            name='s',
-            task_name='my_task',
-            pattern=IntervalSchedule(seconds=10),
-        )
-        config = ScheduleConfig(schedules=[schedule])
-        app = _make_app(schedule_config=config)
-        scheduler = Scheduler(app)
-
-        # Compute the real hash to simulate matching state
-        real_hash = scheduler._compute_config_hash(schedule)
-
-        existing_state = MagicMock()
-        existing_state.config_hash = real_hash
-        existing_state.next_run_at = _utc(2025, 6, 1, 13, 0, 0)
-
-        state_manager = MagicMock()
-        state_manager.get_state = AsyncMock(return_value=existing_state)
-        state_manager.initialize_state = AsyncMock()
-        state_manager.update_next_run = AsyncMock()
-        scheduler.state_manager = state_manager
-
-        await scheduler._initialize_single_schedule(
-            schedule,
-            _utc(2025, 6, 1, 12, 0, 0),
-        )
-
-        # Neither initialize nor update should be called
-        state_manager.initialize_state.assert_not_awaited()
-        state_manager.update_next_run.assert_not_awaited()
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
 class TestCheckAndRunSchedulesOrphanDueState:
     """Cover the 'continue' when due state has no matching enabled schedule (L263)."""
 
@@ -2980,14 +2990,11 @@ class TestCheckAndRunSchedulesOrphanDueState:
         app = _make_app(schedule_config=config)
         scheduler = Scheduler(app)
 
-        orphan_state = MagicMock()
-        orphan_state.schedule_name = 'deleted_schedule'
-        real_state = MagicMock()
-        real_state.schedule_name = 'real'
-
         state_manager = MagicMock()
-        state_manager.get_existing_names = AsyncMock(return_value={'real'})
-        state_manager.get_due_states = AsyncMock(return_value=[orphan_state, real_state])
+        state_manager.heal_missing_states = AsyncMock(return_value=())
+        state_manager.read_due_schedules = AsyncMock(
+            return_value=_due_read('deleted_schedule', 'real'),
+        )
         scheduler.state_manager = state_manager
         scheduler.broker = _make_broker_mock()
 
@@ -3010,7 +3017,7 @@ class TestEnsureStatesExist:
     """Tick-loop self-heal: missing state rows are re-initialized.
 
     Regression for the startup-init liveness gap: a schedule whose row
-    creation failed at start() was invisible to get_due_states and stayed
+    creation failed at start() was invisible to the due read and stayed
     dormant until restart.
     """
 
@@ -3034,100 +3041,95 @@ class TestEnsureStatesExist:
         scheduler.broker = _make_broker_mock()
         return scheduler, state_manager
 
-    async def test_missing_row_reinitialized_on_tick(self) -> None:
-        """A schedule without a state row gets initialized by the tick."""
+    async def test_missing_row_created_by_the_tick(self) -> None:
+        """The heal sends one row per enabled schedule; the statement
+        creates the missing ones."""
         scheduler, state_manager = self._scheduler_with_mock_manager(
             ['healthy', 'dormant'],
         )
-        state_manager.get_existing_names = AsyncMock(return_value={'healthy'})
-        state_manager.get_due_states = AsyncMock(return_value=[])
-        inited: list[str] = []
-
-        async def _track_init(schedule: object, now: object) -> None:
-            inited.append(schedule.name)  # type: ignore[union-attr]
-
-        scheduler._initialize_single_schedule = AsyncMock(  # type: ignore[method-assign]
-            side_effect=_track_init,
-        )
+        state_manager.heal_missing_states = AsyncMock(return_value=('dormant',))
+        state_manager.read_due_schedules = AsyncMock(return_value=_due_read())
 
         await scheduler._check_and_run_schedules()
 
-        assert inited == ['dormant']
-        state_manager.get_due_states.assert_awaited_once()
+        assert _written_names(state_manager.heal_missing_states) == ['dormant', 'healthy']
+        state_manager.read_due_schedules.assert_awaited_once()
 
-    async def test_init_failure_logged_and_tick_proceeds(self) -> None:
-        """A failing re-init neither raises nor blocks the rest of the tick."""
+    async def test_first_runs_come_from_the_due_read_database_time(self) -> None:
+        """Each row of the heal gets the first run after the due read's
+        database time, not after the host clock."""
+        scheduler, state_manager = self._scheduler_with_mock_manager(['a'])
+        state_manager.heal_missing_states = AsyncMock(return_value=('a',))
+        state_manager.read_due_schedules = AsyncMock(return_value=_due_read())
+
+        await scheduler._check_and_run_schedules()
+
+        writes: list[ScheduleStateWrite] = state_manager.heal_missing_states.await_args.args[0]
+        schedule = scheduler.schedule_config.schedules[0]
+        assert writes == [
+            ScheduleStateWrite(
+                schedule_name='a',
+                next_run_at=calculate_next_run(schedule.pattern, DATABASE_NOW, 'UTC'),
+                config_hash=scheduler._compute_config_hash(schedule),
+            ),
+        ]
+
+    async def test_calculation_failure_logged_and_tick_proceeds(self) -> None:
+        """A schedule whose first run cannot be computed is left out; the
+        others are healed and the tick goes on to its due schedules."""
         scheduler, state_manager = self._scheduler_with_mock_manager(
             ['bad', 'also_missing'],
         )
-        state_manager.get_existing_names = AsyncMock(return_value=set())
-        state_manager.get_due_states = AsyncMock(return_value=[])
-        attempted: list[str] = []
+        state_manager.heal_missing_states = AsyncMock(return_value=('bad',))
+        state_manager.read_due_schedules = AsyncMock(return_value=_due_read())
 
-        async def _flaky_init(schedule: object, now: object) -> None:
-            attempted.append(schedule.name)  # type: ignore[union-attr]
-            if schedule.name == 'also_missing':  # type: ignore[union-attr]
-                raise RuntimeError('db error')
+        with patch(
+            'horsies.core.scheduler.service.calculate_next_run',
+            side_effect=_fail_on_call(1),
+        ):
+            await scheduler._check_and_run_schedules()
 
-        scheduler._initialize_single_schedule = AsyncMock(  # type: ignore[method-assign]
-            side_effect=_flaky_init,
-        )
+        # Sorted order: 'also_missing' failed, 'bad' was sent.
+        assert _written_names(state_manager.heal_missing_states) == ['bad']
+        assert scheduler._ticks_until_existence_check == 0
 
-        await scheduler._check_and_run_schedules()
-
-        # Both missing schedules attempted (sorted order), failure contained,
-        # and the tick still reached the due-states read.
-        assert attempted == ['also_missing', 'bad']
-        state_manager.get_due_states.assert_awaited_once()
-
-    async def test_no_missing_rows_no_init(self) -> None:
-        """All rows present: no initialization happens."""
-        scheduler, state_manager = self._scheduler_with_mock_manager(['a', 'b'])
-        state_manager.get_existing_names = AsyncMock(return_value={'a', 'b'})
-        state_manager.get_due_states = AsyncMock(return_value=[])
-        scheduler._initialize_single_schedule = AsyncMock()  # type: ignore[method-assign]
-
-        await scheduler._check_and_run_schedules()
-
-        scheduler._initialize_single_schedule.assert_not_awaited()
-
-    async def test_existence_read_failure_raises_to_tick_seam(self) -> None:
-        """A DB error on the existence read escapes to run_forever's
-        per-tick handler (the whole tick is retried next interval)."""
+    async def test_heal_failure_raises_to_tick_seam(self) -> None:
+        """A DB error of the heal escapes to run_forever's per-tick handler
+        (the whole tick is retried next interval). The due read ran first."""
         scheduler, state_manager = self._scheduler_with_mock_manager(['a'])
-        state_manager.get_existing_names = AsyncMock(
-            side_effect=RuntimeError('db down'),
-        )
-        state_manager.get_due_states = AsyncMock(return_value=[])
+        state_manager.heal_missing_states = AsyncMock(side_effect=RuntimeError('db down'))
+        state_manager.read_due_schedules = AsyncMock(return_value=_due_read('a'))
+        scheduler._check_schedule = AsyncMock()  # type: ignore[method-assign]
 
         with pytest.raises(RuntimeError, match='db down'):
             await scheduler._check_and_run_schedules()
 
-        state_manager.get_due_states.assert_not_awaited()
+        state_manager.read_due_schedules.assert_awaited_once()
+        scheduler._check_schedule.assert_not_awaited()
 
     async def test_healthy_check_skipped_until_interval_elapses(self) -> None:
-        """While healthy, only the first tick reads existence; subsequent
-        ticks inside the interval skip it. Due states are read every tick."""
+        """While healthy, only the first tick heals; subsequent ticks inside
+        the interval skip it. The due read runs every tick."""
         scheduler, state_manager = self._scheduler_with_mock_manager(['a'])
-        state_manager.get_existing_names = AsyncMock(return_value={'a'})
-        state_manager.get_due_states = AsyncMock(return_value=[])
+        state_manager.heal_missing_states = AsyncMock(return_value=())
+        state_manager.read_due_schedules = AsyncMock(return_value=_due_read())
 
         for _tick in range(5):
             await scheduler._check_and_run_schedules()
 
-        assert state_manager.get_existing_names.await_count == 1
-        assert state_manager.get_due_states.await_count == 5
+        assert state_manager.heal_missing_states.await_count == 1
+        assert state_manager.read_due_schedules.await_count == 5
 
     async def test_healthy_check_reruns_after_interval(self) -> None:
-        """The existence check runs again once the tick interval elapses."""
+        """The heal runs again once the tick interval elapses."""
         scheduler, state_manager = self._scheduler_with_mock_manager(['a'])
-        state_manager.get_existing_names = AsyncMock(return_value={'a'})
-        state_manager.get_due_states = AsyncMock(return_value=[])
+        state_manager.heal_missing_states = AsyncMock(return_value=())
+        state_manager.read_due_schedules = AsyncMock(return_value=_due_read())
 
         for _tick in range(scheduler._existence_check_interval_ticks + 1):
             await scheduler._check_and_run_schedules()
 
-        assert state_manager.get_existing_names.await_count == 2
+        assert state_manager.heal_missing_states.await_count == 2
 
     async def test_interval_ticks_derived_from_check_interval(self) -> None:
         """The tick count preserves the ~60 s wall-clock cadence across
@@ -3150,51 +3152,41 @@ class TestEnsureStatesExist:
             ), f'check_interval_seconds={seconds}'
 
     async def test_unhealthy_pass_rechecks_next_tick(self) -> None:
-        """A failed re-init keeps the check running every tick until a
-        fully healthy pass, then the interval cadence resumes."""
+        """A failed first-run calculation keeps the heal running every tick
+        until a fully healthy pass, then the interval cadence resumes."""
         scheduler, state_manager = self._scheduler_with_mock_manager(
             ['flaky', 'ok'],
         )
-        state_manager.get_existing_names = AsyncMock(
-            side_effect=[{'ok'}, {'ok'}, {'ok', 'flaky'}, {'ok', 'flaky'}],
-        )
-        state_manager.get_due_states = AsyncMock(return_value=[])
-        init_attempts = 0
+        state_manager.heal_missing_states = AsyncMock(return_value=())
+        state_manager.read_due_schedules = AsyncMock(return_value=_due_read())
 
-        async def _fail_once_then_succeed(schedule: object, now: object) -> None:
-            nonlocal init_attempts
-            init_attempts += 1
-            if init_attempts == 1:
-                raise RuntimeError('db error')
+        # Tick 1: one calculation fails -> unhealthy, heal again next tick.
+        # Tick 2: every calculation succeeds -> healthy, cadence resumes.
+        # Ticks 3-4: inside the interval -> no heal.
+        with patch(
+            'horsies.core.scheduler.service.calculate_next_run',
+            side_effect=_fail_on_call(1),
+        ):
+            for _tick in range(4):
+                await scheduler._check_and_run_schedules()
 
-        scheduler._initialize_single_schedule = AsyncMock(  # type: ignore[method-assign]
-            side_effect=_fail_once_then_succeed,
-        )
+        assert state_manager.heal_missing_states.await_count == 2
 
-        # Tick 1: missing + init fails -> unhealthy, recheck next tick.
-        # Tick 2: missing + init succeeds -> healthy, cadence resumes.
-        # Ticks 3-4: inside the interval -> no existence reads.
-        for _tick in range(4):
-            await scheduler._check_and_run_schedules()
-
-        assert state_manager.get_existing_names.await_count == 2
-        assert init_attempts == 2
-
-    async def test_existence_read_failure_rechecks_on_retried_tick(self) -> None:
-        """A raise on the existence read leaves the countdown armed: the
-        retried tick runs the check again instead of skipping it."""
+    async def test_heal_failure_reruns_on_retried_tick(self) -> None:
+        """A raise in the heal leaves the countdown armed: the retried tick
+        runs the heal again instead of skipping it."""
         scheduler, state_manager = self._scheduler_with_mock_manager(['a'])
-        state_manager.get_existing_names = AsyncMock(
-            side_effect=[RuntimeError('db down'), {'a'}],
+        state_manager.heal_missing_states = AsyncMock(
+            side_effect=[RuntimeError('db down'), ()],
         )
-        state_manager.get_due_states = AsyncMock(return_value=[])
+        state_manager.read_due_schedules = AsyncMock(return_value=_due_read())
 
         with pytest.raises(RuntimeError, match='db down'):
             await scheduler._check_and_run_schedules()
         await scheduler._check_and_run_schedules()
 
-        assert state_manager.get_existing_names.await_count == 2
-        state_manager.get_due_states.assert_awaited_once()
+        assert state_manager.heal_missing_states.await_count == 2
+        assert state_manager.read_due_schedules.await_count == 2
 
 
 @pytest.mark.unit

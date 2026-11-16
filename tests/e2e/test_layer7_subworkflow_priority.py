@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 import pytest
 from sqlalchemy import text
 
+from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.task_decorator import TaskHandle
@@ -101,6 +102,7 @@ async def test_subworkflow_child_binds_queue_priority_and_claim_order(
             queue_name='serial',
             task_id=str(uuid4()),
             enqueue_sha=f'pb-blocker-{uuid4().hex[:8]}',
+            send_kind=SendKind.FIRST,
             sent_at=datetime.now(timezone.utc),
             kwargs_json=dumps_json({'duration_ms': 6000}).unwrap(),
         )).unwrap()

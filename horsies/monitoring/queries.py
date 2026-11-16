@@ -10,8 +10,9 @@ states:
 * ``MonitoringQueryDbOperationFailed``: a ``SQLAlchemyError`` at the
   session boundary.
 * ``MonitoringQueryHistoryContractViolation``: a ``HistoryContractError``
-  from the history reads of ``list_tasks``, ``get_task_detail`` and
-  ``get_workflow_node``: stored history data that does not decode.
+  from the history reads of ``task_stats``, ``list_tasks``,
+  ``get_task_detail`` and ``get_workflow_node``: stored history data that
+  does not decode.
 
 Nothing else is caught. A row that does not exist is ``Ok(None)``, not an
 error. ``get_task_detail`` names it: ``Ok(TaskDetailNotFound)`` with the
@@ -38,9 +39,11 @@ multiplies the load.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
-from typing import Any, Literal, NamedTuple, assert_never
+from typing import Any, Final, Literal, NamedTuple, assert_never
+
+import psycopg
 
 from sqlalchemy import (
     ColumnElement,
@@ -48,6 +51,7 @@ from sqlalchemy import (
     Interval,
     Select,
     SQLColumnExpression,
+    TextClause,
     cast,
     false,
     func,
@@ -56,12 +60,13 @@ from sqlalchemy import (
     select,
     text,
 )
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.engine import RowMapping
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute, load_only
 
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.brokers.resources import EventLoopLimit
+from horsies.core.brokers.resources import BrokerResources, EventLoopLimit
 from horsies.core.models.task_pg import (
     ScheduleStateModel,
     TaskAttemptModel,
@@ -82,10 +87,8 @@ from horsies.core.history.errors import HistoryContractError
 from horsies.core.history.reads.aggregates import (
     HISTORY_NONEMPTY_PROBE_SQL,
     HistoryScope,
-    history_breakdown_statement,
     history_count_statement,
     history_estimate_statement,
-    history_scoped_status_counts_statement,
     plan_rows_from_explain,
 )
 from horsies.core.history.reads.detail import (
@@ -104,7 +107,7 @@ from horsies.core.history.reads.pages import (
 from horsies.core.models.workflow_pg import WorkflowModel, WorkflowTaskModel
 from horsies.core.types.result import Err, Ok
 from horsies.core.types.status import TaskStatus
-from horsies.core.utils.db import is_retryable_connection_error
+from horsies.core.utils.db import autocommit_connection, is_retryable_connection_error
 from horsies.monitoring.history_window import MonitoringWindow
 from horsies.monitoring.errors import (
     MonitoringQueryDbOperationFailed,
@@ -115,6 +118,10 @@ from horsies.monitoring.errors import (
 from horsies.monitoring.pages import BreakdownLimit, TaskPage, WorkflowRunsLimit
 from horsies.monitoring.models import (
     Breakdown,
+    BreakdownCounts,
+    BreakdownGroup,
+    BreakdownUnclaimedGroup,
+    BreakdownValueGroup,
     ErrorCategory,
     ErrorFacet,
     FacetValue,
@@ -195,13 +202,6 @@ _SORT_COLUMNS: dict[str, _SortKey] = {
     'exec_s': _SortKey(_LIVE_EXECUTION_SPAN, nullable=True),
 }
 
-# group_by value -> the model column it groups on.
-_GROUP_COLUMNS: dict[str, InstrumentedAttribute[Any]] = {
-    'worker': TaskModel.claimed_by_worker_id,
-    'task_name': TaskModel.task_name,
-    'queue': TaskModel.queue_name,
-}
-
 # Display order for the status overview cards. Stable rather than
 # count-ordered, so cards never reorder as counts shift between polls.
 _STATUS_ORDER: tuple[TaskStatus, ...] = (
@@ -214,15 +214,18 @@ _STATUS_ORDER: tuple[TaskStatus, ...] = (
     TaskStatus.EXPIRED,
 )
 
+# Every stored status text that is a task status.
+_STATUS_BY_VALUE: dict[str, TaskStatus] = {status.value: status for status in TaskStatus}
+
 # Statuses in which a task is still waiting to start, so its queue wait is an
 # open span that counts up.
 _QUEUEING_STATUSES: frozenset[TaskStatus] = frozenset(
     {TaskStatus.PENDING, TaskStatus.CLAIMED}
 )
 
-# Distinct values offered per filter dimension, and the shorter slice of error
-# codes offered in the dropdown. Neither is client-controllable.
-_FACET_VALUE_CAP = 50
+# The error codes offered in the dropdown after the category selection. The
+# facet function bounds each category to the same count. Not
+# client-controllable.
 _ERROR_FACET_CAP = 30
 
 # Built from horsies' own error-code enums so the mapping never drifts from
@@ -543,7 +546,7 @@ type _AttemptRow = tuple[
     str | None,
     str | None,
     str | None,
-    str | None,
+    str,
     datetime,
     datetime,
 ]
@@ -761,172 +764,215 @@ def _scope_conditions(
     return conditions
 
 
-# ``(facet, column)`` of each side. The live table has no error code, so the
-# live side has no ``error_code`` facet.
-_LIVE_FACET_COLUMNS: tuple[tuple[str, str], ...] = (
-    ('worker', 'claimed_by_worker_id'),
-    ('task_name', 'task_name'),
-    ('queue_name', 'queue_name'),
-)
-_HISTORY_FACET_COLUMNS: tuple[tuple[str, str], ...] = (
-    ('worker', 'last_claimed_worker_id'),
-    ('task_name', 'task_name'),
-    ('queue_name', 'queue_name'),
-    ('error_code', 'error_code'),
+# --------------------------------------------------------------------------- #
+# Monitoring functions
+# --------------------------------------------------------------------------- #
+# The built-in error-code taxonomy as the two parallel arrays the monitoring
+# functions take: code i belongs to category i. A code outside it is DOMAIN.
+_TAXONOMY_CODES: tuple[str, ...] = tuple(_CODE_TO_CATEGORY)
+_TAXONOMY_CATEGORIES: tuple[str, ...] = tuple(
+    category.value for category in _CODE_TO_CATEGORY.values()
 )
 
+# SQLSTATE data_corrupted: a monitoring function found a stored value that
+# breaks the history contract, for example a status that is not a task status.
+_DATA_CORRUPTED_SQLSTATE: Final = 'XX001'
 
-def _facet_side_sql(
-    facet_columns: tuple[tuple[str, str], ...],
-    conditions: list[str],
-    table: str,
-) -> str:
-    """One side of ``facets_statement``: a count per value of each facet column.
-
-    The inner group can run in parallel, and GROUPING SETS cannot, so the
-    sets read its small result, not the rows. ``GROUPING()`` sets a bit for
-    each column that is not in the row's set; the set of column ``i`` of
-    ``n`` has every bit but bit ``n - 1 - i``.
-    """
-    columns = ', '.join(column for _, column in facet_columns)
-    all_bits = (1 << len(facet_columns)) - 1
-    masks = [
-        all_bits - (1 << (len(facet_columns) - 1 - index))
-        for index in range(len(facet_columns))
-    ]
-    facet_arms = ' '.join(
-        f"WHEN {mask} THEN '{facet}'"
-        for mask, (facet, _) in zip(masks, facet_columns, strict=True)
+_TASK_STATS_SQL = text("""
+    SELECT row_position, status, task_count
+    FROM horsies_monitoring_task_stats(
+        CAST(:window_lower AS timestamptz), CAST(:window_upper AS timestamptz),
+        CAST(:task_names AS text[]), CAST(:queue_names AS text[]),
+        CAST(:worker_ids AS text[]), CAST(:error_codes AS text[]),
+        CAST(:error_categories AS text[]), CAST(:retried_only AS boolean),
+        CAST(:builtin_codes AS text[]), CAST(:builtin_categories AS text[])
     )
-    value_arms = ' '.join(
-        f'WHEN {mask} THEN {column}::text'
-        for mask, (_, column) in zip(masks, facet_columns, strict=True)
+    ORDER BY row_position
+""")
+
+_TASK_BREAKDOWN_SQL = text("""
+    SELECT row_kind, row_position, group_kind, group_value, group_count, total,
+           pending, claimed, running, completed, failed, cancelled, expired, retried
+    FROM horsies_monitoring_task_breakdown(
+        CAST(:window_lower AS timestamptz), CAST(:window_upper AS timestamptz),
+        CAST(:group_by AS text), CAST(:statuses AS text[]),
+        CAST(:task_names AS text[]), CAST(:queue_names AS text[]),
+        CAST(:worker_ids AS text[]), CAST(:error_codes AS text[]),
+        CAST(:error_categories AS text[]), CAST(:retried_only AS boolean),
+        CAST(:builtin_codes AS text[]), CAST(:builtin_categories AS text[]),
+        CAST(:group_limit AS integer)
     )
-    grouping_sets = ', '.join(f'({column})' for _, column in facet_columns)
-    return f"""
-        SELECT CASE GROUPING({columns}) {facet_arms} END AS facet,
-               CASE GROUPING({columns}) {value_arms} END AS facet_value,
-               sum(group_count) AS facet_count
-        FROM (
-            SELECT {columns}, count(*) AS group_count
-            FROM {table}
-            WHERE {' AND '.join(conditions) or 'TRUE'}
-            GROUP BY {columns}
-        ) AS side_groups
-        GROUP BY GROUPING SETS ({grouping_sets})
+    ORDER BY row_position
+""")
+
+# Rows come ordered by facet, then rank (the function's order).
+_TASK_FACETS_SQL = text("""
+    SELECT facet, facet_value, facet_count, category, category_total
+    FROM horsies_monitoring_task_facets(
+        CAST(:window_lower AS timestamptz), CAST(:window_upper AS timestamptz),
+        CAST(:statuses AS text[]), CAST(:retried_only AS boolean),
+        CAST(:builtin_codes AS text[]), CAST(:builtin_categories AS text[])
+    )
+""")
+
+
+async def _call_function(
+    resources: BrokerResources,
+    statement: TextClause,
+    parameters: Mapping[str, object],
+) -> Sequence[RowMapping]:
+    """Run one monitoring function statement in autocommit and return its rows.
+
+    One round trip: no BEGIN and no COMMIT. Every monitoring function reads
+    in the snapshot of its one statement and writes nothing.
+
+    Raises:
+        SQLAlchemyError: the connection checkout or the statement failed.
     """
+    async with resources.session_factory() as session:
+        connection = await autocommit_connection(session)
+        result = await connection.execute(statement, parameters)
+        return result.mappings().all()
 
 
-def facets_statement(
+def _column[T](row: RowMapping, name: str, kind: type[T]) -> T:
+    """The value of a result column that the function declares non-NULL.
+
+    A NULL or a value of another type breaks the function's result
+    contract: the assert crashes loud.
+    """
+    value: object = row[name]
+    assert isinstance(value, kind), (
+        f'column {name}: expected {kind.__name__}, got {value!r}'
+    )
+    return value
+
+
+def _data_corrupted(exc: SQLAlchemyError) -> HistoryContractError | None:
+    """The history contract error of a data_corrupted refusal, or None for any other error."""
+    match exc:
+        case DBAPIError(orig=psycopg.Error(sqlstate=sqlstate) as cause) if (
+            sqlstate == _DATA_CORRUPTED_SQLSTATE
+        ):
+            error = HistoryContractError(cause.diag.message_primary or str(cause))
+            error.__cause__ = exc
+            return error
+        case _:
+            return None
+
+
+def _function_err(
+    operation: str, exc: SQLAlchemyError,
+) -> Err[MonitoringQueryDbOperationFailed | MonitoringQueryHistoryContractViolation]:
+    """A data_corrupted refusal as a history contract violation; any other error as a database failure."""
+    match _data_corrupted(exc):
+        case HistoryContractError() as broken:
+            return _contract_err(operation, broken)
+        case None:
+            return _db_err(operation, exc)
+
+
+def _scope_parameters(
+    window: MonitoringWindow,
     *,
-    window: HistoryWindow,
     statuses: list[TaskStatus],
+    task_names: list[str],
+    queues: list[str],
+    workers: list[str],
+    error_codes: list[str],
+    error_categories: list[ErrorCategory],
     retried_only: bool,
-) -> tuple[str, dict[str, object]]:
-    """Every facet of ``task_facets`` in one scan of each side.
-
-    One ``GROUPING SETS`` per side counts its facet columns in one pass, and
-    the sides sum per facet. The rank runs here, after the sum, so that ties
-    follow the database collation. Error codes come from the history side
-    only: a live row has none.
-
-    An error code is a free string, so a window can hold as many codes as rows.
-    The category of each code and the exact total of each category come from
-    here, and only the top codes of each category are returned, so the result
-    stays bounded and any category selection can fill its list from it.
-
-    Returns:
-        The SQL and its parameters. Rows hold ``facet``, ``facet_value`` and
-        ``facet_count``, ordered by ``facet`` and overall rank. A row of the
-        ``error_code`` facet also holds ``category`` and ``category_total``.
-    """
-    parameters: dict[str, object] = {
+) -> dict[str, object]:
+    """The window, the filters and the code taxonomy, as function arguments."""
+    return {
         'window_lower': window.lower,
         'window_upper': window.upper,
-        'facet_limit': _FACET_VALUE_CAP,
-        'error_limit': _ERROR_FACET_CAP,
+        'statuses': [status.value for status in statuses],
+        'task_names': list(task_names),
+        'queue_names': list(queues),
+        'worker_ids': list(workers),
+        'error_codes': list(error_codes),
+        'error_categories': [category.value for category in error_categories],
+        'retried_only': retried_only,
+        'builtin_codes': list(_TAXONOMY_CODES),
+        'builtin_categories': list(_TAXONOMY_CATEGORIES),
     }
-    category_arms: list[str] = []
-    for category, codes in _CATEGORY_TO_CODES.items():
-        parameter = f'category_{category.value.lower()}_codes'
-        parameters[parameter] = list(codes)
-        category_arms.append(
-            f"WHEN facet_value = ANY(CAST(:{parameter} AS text[])) "
-            f"THEN '{category.value}'"
+
+
+def _status_counts(rows: Sequence[RowMapping]) -> list[StatusCount]:
+    """The seven status rows of ``horsies_monitoring_task_stats``, in their fixed order."""
+    counts = [
+        StatusCount(
+            status=_column(row, 'status', str),
+            count=_column(row, 'task_count', int),
         )
-    common: list[str] = []
-    if statuses:
-        common.append('status = ANY(CAST(:status_filter AS text[]))')
-        parameters['status_filter'] = [status.value for status in statuses]
-    if retried_only:
-        common.append('retry_count > 0')
-
-    live = _facet_side_sql(_LIVE_FACET_COLUMNS, common, 'horsies_tasks')
-    history = _facet_side_sql(
-        _HISTORY_FACET_COLUMNS,
-        [
-            'terminal_at >= :window_lower',
-            'terminal_at < :window_upper',
-            *common,
-        ],
-        'horsies_task_history',
-    )
-    sql = f"""
-        WITH lifecycle_facets AS (
-            {live}
-            UNION ALL
-            {history}
-        ), combined AS (
-            SELECT facet, facet_value, sum(facet_count) AS facet_count
-            FROM lifecycle_facets
-            WHERE facet_value IS NOT NULL
-              AND (facet <> 'error_code' OR facet_value <> '')
-            GROUP BY facet, facet_value
-        ), ranked AS (
-            SELECT facet, facet_value, facet_count,
-                   row_number() OVER (
-                       PARTITION BY facet
-                       ORDER BY facet_count DESC, facet_value
-                   ) AS facet_rank,
-                   CASE WHEN facet = 'error_code' THEN
-                       CASE {' '.join(category_arms)}
-                            ELSE '{ErrorCategory.DOMAIN.value}'
-                       END
-                   END AS category
-            FROM combined
-        ), scoped AS (
-            SELECT facet, facet_value, facet_count, facet_rank, category,
-                   row_number() OVER (
-                       PARTITION BY facet, category ORDER BY facet_rank
-                   ) AS category_rank,
-                   sum(facet_count) OVER (
-                       PARTITION BY facet, category
-                   ) AS category_total
-            FROM ranked
-        )
-        SELECT facet, facet_value, facet_count, category, category_total
-        FROM scoped
-        WHERE CASE facet
-                  WHEN 'error_code' THEN category_rank <= :error_limit
-                  ELSE facet_rank <= :facet_limit
-              END
-        ORDER BY facet, facet_rank
-    """
-    return sql, parameters
-
-
-def _facet_values(rows: Sequence[tuple[str | None, int]]) -> list[FacetValue]:
-    """Map facet rows to values.
-
-    The NULL group is excluded in SQL — either by an explicit predicate or by
-    the column being NOT NULL — so dropping it here only restates that to the
-    type checker.
-    """
-    return [
-        FacetValue(value=value, count=count)
-        for value, count in rows
-        if value is not None
+        for row in rows
     ]
+    assert [count.status for count in counts] == [
+        status.value for status in _STATUS_ORDER
+    ], f'the stats function answered statuses {[count.status for count in counts]}'
+    return counts
+
+
+def _breakdown_counts(row: RowMapping) -> BreakdownCounts:
+    """The counts of one breakdown function row."""
+    return BreakdownCounts(
+        total=_column(row, 'total', int),
+        pending=_column(row, 'pending', int),
+        claimed=_column(row, 'claimed', int),
+        running=_column(row, 'running', int),
+        completed=_column(row, 'completed', int),
+        failed=_column(row, 'failed', int),
+        cancelled=_column(row, 'cancelled', int),
+        expired=_column(row, 'expired', int),
+        retried=_column(row, 'retried', int),
+    )
+
+
+def _breakdown_group(row: RowMapping) -> BreakdownGroup:
+    """The group of one GROUP row: a stored value, or the unclaimed tasks."""
+    match _column(row, 'group_kind', str):
+        case 'VALUE':
+            return BreakdownValueGroup(value=_column(row, 'group_value', str))
+        case 'UNCLAIMED':
+            assert row['group_value'] is None, row['group_value']
+            return BreakdownUnclaimedGroup()
+        case other:
+            raise AssertionError(f'breakdown group kind {other!r} is not VALUE or UNCLAIMED')
+
+
+def _group_row(row: RowMapping) -> GroupRow:
+    """One GROUP row of ``horsies_monitoring_task_breakdown``."""
+    assert _column(row, 'row_kind', str) == 'GROUP', row['row_kind']
+    counts = _breakdown_counts(row)
+    return GroupRow(
+        group=_breakdown_group(row),
+        total=counts.total,
+        pending=counts.pending,
+        claimed=counts.claimed,
+        running=counts.running,
+        completed=counts.completed,
+        failed=counts.failed,
+        cancelled=counts.cancelled,
+        expired=counts.expired,
+        retried=counts.retried,
+    )
+
+
+def _breakdown(group_by: TaskGroupBy, rows: Sequence[RowMapping]) -> Breakdown:
+    """The TOTAL row, then the GROUP rows in final order."""
+    match rows:
+        case [total_row, *group_rows]:
+            pass
+        case _:
+            raise AssertionError('the breakdown function answered no TOTAL row')
+    assert _column(total_row, 'row_kind', str) == 'TOTAL', total_row['row_kind']
+    return Breakdown(
+        group_by=group_by,
+        groups=[_group_row(row) for row in group_rows],
+        total=_breakdown_counts(total_row),
+        group_count=_column(total_row, 'group_count', int),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -950,9 +996,15 @@ async def task_stats(
     moves finished rows there). Scoped by every filter except status,
     because the cards are the status selector. Always returns all
     seven statuses in a fixed order, including zeros, so cards never
-    appear, disappear, or reorder between polls.
+    appear, disappear, or reorder between polls. A history row in the
+    window whose status is not a task status answers
+    ``MonitoringQueryHistoryContractViolation`` and no count.
+
+    One statement (``horsies_monitoring_task_stats``), so both sides read
+    one snapshot: a task that moves to history during the read counts once.
     """
-    scope = _scope_conditions(
+    parameters = _scope_parameters(
+        window,
         statuses=[],
         task_names=task_names,
         queues=queues,
@@ -961,22 +1013,6 @@ async def task_stats(
         error_categories=error_categories,
         retried_only=retried_only,
     )
-    stmt = (
-        select(TaskModel.status, func.count()).where(*scope).group_by(TaskModel.status)
-    )
-    history_sql, history_params = history_scoped_status_counts_statement(
-        window.history,
-        _history_scope(
-            statuses=[],
-            task_names=task_names,
-            queues=queues,
-            workers=workers,
-            error_codes=error_codes,
-            error_categories=error_categories,
-            retried_only=retried_only,
-        ),
-    )
-
     match await broker.select_resources():
         case Err(loop_limit):
             return _loop_limit_err('task stats query', loop_limit)
@@ -984,25 +1020,10 @@ async def task_stats(
             pass
 
     try:
-        async with resources.session_factory() as session:
-            rows = (await session.execute(stmt)).tuples().all()
-            history_rows = (
-                await session.execute(text(history_sql), history_params)
-            ).all()
+        rows = await _call_function(resources, _TASK_STATS_SQL, parameters)
     except SQLAlchemyError as exc:
-        return _db_err('task stats query', exc)
-
-    counts = {status: count for status, count in rows}
-    merged: dict[TaskStatus, int] = dict(counts)
-    for row in history_rows:
-        status = TaskStatus(str(row.status))
-        merged[status] = merged.get(status, 0) + int(row.terminal_count)
-    return Ok(
-        [
-            StatusCount(status=status.value, count=merged.get(status, 0))
-            for status in _STATUS_ORDER
-        ]
-    )
+        return _function_err('task stats query', exc)
+    return Ok(_status_counts(rows))
 
 
 async def task_facets(
@@ -1025,25 +1046,33 @@ async def task_facets(
     It deliberately does not scope the totals: those totals are what the
     taxonomy strip offers as its own options, and a control that hid the
     families you have not picked could not express a second selection.
+
+    One statement (``horsies_monitoring_task_facets``): the values and their
+    counts, ranked after the two sides sum, with ties in the database
+    collation.
     """
+    parameters = _scope_parameters(
+        window,
+        statuses=statuses,
+        task_names=[],
+        queues=[],
+        workers=[],
+        error_codes=[],
+        error_categories=[],
+        retried_only=retried_only,
+    )
     match await broker.select_resources():
         case Err(loop_limit):
             return _loop_limit_err('task facets query', loop_limit)
         case Ok(resources):
             pass
 
-    sql, params = facets_statement(
-        window=window.history,
-        statuses=statuses,
-        retried_only=retried_only,
-    )
     try:
-        async with resources.session_factory() as session:
-            rows = (await session.execute(text(sql), params)).all()
+        rows = await _call_function(resources, _TASK_FACETS_SQL, parameters)
     except SQLAlchemyError as exc:
         return _db_err('task facets query', exc)
 
-    ranked: dict[str, list[tuple[str, int]]] = {
+    ranked: dict[str, list[FacetValue]] = {
         'worker': [],
         'task_name': [],
         'queue_name': [],
@@ -1052,21 +1081,24 @@ async def task_facets(
     category_totals: dict[str, int] = {}
     error_facets: list[ErrorFacet] = []
     for row in rows:
-        value, count = str(row.facet_value), int(row.facet_count)
-        if row.facet != 'error_code':
-            ranked[row.facet].append((value, count))
+        facet = _column(row, 'facet', str)
+        value = _column(row, 'facet_value', str)
+        count = _column(row, 'facet_count', int)
+        if facet != 'error_code':
+            ranked[facet].append(FacetValue(value=value, count=count))
             continue
-        category_totals[row.category] = int(row.category_total)
-        if (not selected or row.category in selected) and len(error_facets) < _ERROR_FACET_CAP:
+        category = _column(row, 'category', str)
+        category_totals[category] = _column(row, 'category_total', int)
+        if (not selected or category in selected) and len(error_facets) < _ERROR_FACET_CAP:
             error_facets.append(
-                ErrorFacet(value=value, count=count, category=row.category),
+                ErrorFacet(value=value, count=count, category=category),
             )
 
     return Ok(
         Facets(
-            workers=_facet_values(ranked['worker']),
-            task_names=_facet_values(ranked['task_name']),
-            queues=_facet_values(ranked['queue_name']),
+            workers=ranked['worker'],
+            task_names=ranked['task_name'],
+            queues=ranked['queue_name'],
             error_codes=error_facets,
             error_category_totals=category_totals,
         )
@@ -1087,15 +1119,20 @@ async def task_breakdown(
     retried_only: bool,
     limit: BreakdownLimit,
 ) -> MonitoringResult[Breakdown]:
-    """Per-group status pivot with a rollup TOTAL row.
+    """Per-group status pivot with the counts of every group.
 
-    Each group row carries per-status counts; the ``total`` row is the
-    GROUPING rollup over every matching task, independent of ``limit``.
-    Groups arrive count-descending and are capped to ``limit``, while
-    ``group_count`` reports the true number of distinct groups.
+    Each group row carries per-status counts; ``total`` sums every group,
+    independent of ``limit``. Groups arrive count-descending and are capped
+    to ``limit``, while ``group_count`` reports the true number of distinct
+    groups. For ``worker``, the tasks that no worker claimed are their own
+    group (``BreakdownUnclaimedGroup``), apart from a worker named
+    ``'unknown'``.
+
+    One statement (``horsies_monitoring_task_breakdown``), so both sides
+    read one snapshot; at most ``limit`` groups leave the database.
     """
-    column = _GROUP_COLUMNS[group_by]
-    scope = _scope_conditions(
+    parameters = _scope_parameters(
+        window,
         statuses=statuses,
         task_names=task_names,
         queues=queues,
@@ -1104,51 +1141,8 @@ async def task_breakdown(
         error_categories=error_categories,
         retried_only=retried_only,
     )
-
-    def _status_count(value: TaskStatus) -> ColumnElement[int]:
-        return func.count().filter(TaskModel.status == value)
-
-    rollup_flag = func.grouping(column).label('g')
-    group_key = func.coalesce(column, 'unknown').label('grp')
-    group_total = func.count().label('total')
-    stmt = (
-        select(
-            rollup_flag,
-            group_key,
-            group_total,
-            _status_count(TaskStatus.PENDING),
-            _status_count(TaskStatus.CLAIMED),
-            _status_count(TaskStatus.RUNNING),
-            _status_count(TaskStatus.COMPLETED),
-            _status_count(TaskStatus.FAILED),
-            _status_count(TaskStatus.CANCELLED),
-            _status_count(TaskStatus.EXPIRED),
-            func.count().filter(TaskModel.retry_count > 0),
-        )
-        .where(*scope)
-        .group_by(func.rollup(column))
-        .order_by(rollup_flag, group_total.desc())
-    )
-
-    history_group_column = {
-        'worker': 'last_claimed_worker_id',
-        'task_name': 'task_name',
-        'queue': 'queue_name',
-    }[group_by]
-    history_sql, history_params = history_breakdown_statement(
-        window.history,
-        _history_scope(
-            statuses=statuses,
-            task_names=task_names,
-            queues=queues,
-            workers=workers,
-            error_codes=error_codes,
-            error_categories=error_categories,
-            retried_only=retried_only,
-        ),
-        group_column=history_group_column,
-    )
-
+    parameters['group_by'] = group_by
+    parameters['group_limit'] = limit.value
     match await broker.select_resources():
         case Err(loop_limit):
             return _loop_limit_err('task breakdown query', loop_limit)
@@ -1156,101 +1150,10 @@ async def task_breakdown(
             pass
 
     try:
-        async with resources.session_factory() as session:
-            rows = (await session.execute(stmt)).tuples().all()
-            history_rows = (
-                await session.execute(text(history_sql), history_params)
-            ).all()
+        rows = await _call_function(resources, _TASK_BREAKDOWN_SQL, parameters)
     except SQLAlchemyError as exc:
         return _db_err('task breakdown query', exc)
-
-    groups: list[GroupRow] = []
-    total_row = GroupRow(
-        group='TOTAL',
-        total=0,
-        pending=0,
-        claimed=0,
-        running=0,
-        completed=0,
-        failed=0,
-        cancelled=0,
-        expired=0,
-        retried=0,
-    )
-    for row in rows:
-        (
-            is_rollup,
-            key,
-            total,
-            pending,
-            claimed,
-            running,
-            completed,
-            failed,
-            cancelled,
-            expired,
-            retried,
-        ) = row
-        built = GroupRow(
-            group='TOTAL' if is_rollup == 1 else key,
-            total=total,
-            pending=pending,
-            claimed=claimed,
-            running=running,
-            completed=completed,
-            failed=failed,
-            cancelled=cancelled,
-            expired=expired,
-            retried=retried,
-        )
-        if is_rollup == 1:
-            total_row = built
-        else:
-            groups.append(built)
-
-    merged: dict[str, GroupRow] = {row.group: row for row in groups}
-    total_extra = {'total': 0, 'completed': 0, 'failed': 0,
-                   'cancelled': 0, 'expired': 0, 'retried': 0}
-    for row in history_rows:
-        key = str(row.group_value)
-        status = str(row.status).lower()
-        count = int(row.status_count)
-        retried = int(row.retried_count)
-        base = merged.get(key)
-        if base is None:
-            base = GroupRow(
-                group=key, total=0, pending=0, claimed=0, running=0,
-                completed=0, failed=0, cancelled=0, expired=0, retried=0,
-            )
-        update = {
-            'total': base.total + count,
-            'retried': base.retried + retried,
-        }
-        if status in ('completed', 'failed', 'cancelled', 'expired'):
-            update[status] = getattr(base, status) + count
-            total_extra[status] += count
-        total_extra['total'] += count
-        total_extra['retried'] += retried
-        merged[key] = base.model_copy(update=update)
-    total_row = total_row.model_copy(update={
-        'total': total_row.total + total_extra['total'],
-        'completed': total_row.completed + total_extra['completed'],
-        'failed': total_row.failed + total_extra['failed'],
-        'cancelled': total_row.cancelled + total_extra['cancelled'],
-        'expired': total_row.expired + total_extra['expired'],
-        'retried': total_row.retried + total_extra['retried'],
-    })
-    ordered = sorted(
-        merged.values(), key=lambda row: (-row.total, row.group)
-    )
-    return Ok(
-        Breakdown(
-            group_by=group_by,
-            groups=ordered[:limit.value],
-            total=total_row,
-            group_count=len(ordered),
-        )
-    )
+    return Ok(_breakdown(group_by, rows))
 
 
 def list_rows_statement(

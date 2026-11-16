@@ -21,7 +21,7 @@ use crate::core::{
     AnyNode, HorsiesError, OnError, TaskResult, WorkflowSpec, WorkflowSpecRegistry,
     WorkflowStartErrorCode,
 };
-use crate::workflow_engine::engine::{fail_subworkflow_node, subworkflow_load_failed_error};
+use crate::workflow_engine::engine::{fail_node_at_enqueue, subworkflow_load_failed_error};
 
 fn after(index: usize, task_name: &str, dependencies: &[usize]) -> AnyNode {
     let mut node = task_node(index, task_name);
@@ -82,12 +82,13 @@ async fn a_load_failure_mark_does_not_overwrite_a_terminal_node() {
         sub.result = Some(stored.clone());
         seed_node(&pool, &sub).await;
 
-        fail_subworkflow_node(
+        fail_node_at_enqueue(
             &pool,
             workflow_id,
             0,
             subworkflow_load_failed_error(
                 "subworkflow_terminal_guard_workflow",
+                0,
                 Some("tests.unregistered_child.v1"),
             ),
             &WorkflowSpecRegistry::new(),
