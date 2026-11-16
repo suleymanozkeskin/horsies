@@ -16,6 +16,7 @@ two sides compare as values.
 from __future__ import annotations
 
 from typing import Final
+from uuid import UUID
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -33,6 +34,7 @@ from horsies.core.history.rerun.operations import (
     RerunSourceRead,
 )
 from horsies.core.types.status import TaskStatus
+from horsies.core.utils.db import uuid_column_value
 
 CLASS_REGISTERED_SQL: Final = text(
     'SELECT EXISTS (SELECT 1 FROM horsies_retention_classes WHERE class_key = :class_key)'
@@ -46,12 +48,12 @@ DETAIL_SQL: Final = text(
 _STATUS_BY_VALUE: Final = {status.value: status for status in TaskStatus}
 
 
-def _corrupt(task_id: str, message: str) -> RerunSourceCorrupt:
+def _corrupt(task_id: UUID, message: str) -> RerunSourceCorrupt:
     return RerunSourceCorrupt(task_id=task_id, exception=HistoryContractError(message))
 
 
 async def read_rerun_source_before(
-    connection: AsyncConnection, source_task_id: str, class_key: str
+    connection: AsyncConnection, source_task_id: UUID, class_key: str
 ) -> RerunSourceRead:
     """The two statements and the decode of the rerun source before the switch."""
     registered = (
@@ -95,7 +97,7 @@ async def read_rerun_source_before(
                 source_task_id, f'attempt snapshot failed to decode: {decoded!r}'
             )
     return RerunSource(
-        task_id=str(row.task_id),
+        task_id=uuid_column_value(row.task_id, column='task_id'),
         task_name=row.task_name,
         queue_name=row.queue_name,
         priority=row.priority,
@@ -103,7 +105,9 @@ async def read_rerun_source_before(
         status=status,
         is_workflow_task=row.is_workflow_task,
         rerun_root_task_id=(
-            str(row.rerun_root_task_id) if row.rerun_root_task_id is not None else None
+            uuid_column_value(row.rerun_root_task_id, column='rerun_root_task_id')
+            if row.rerun_root_task_id is not None
+            else None
         ),
         rerun_input_disposition=row.rerun_input_disposition,
         rerun_input_version=row.rerun_input_version,

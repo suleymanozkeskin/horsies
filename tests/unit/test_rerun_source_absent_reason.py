@@ -12,6 +12,7 @@ from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
+from uuid import UUID
 
 import pytest
 
@@ -27,7 +28,7 @@ from horsies.core.history.rerun.operations import (
 
 pytestmark = [pytest.mark.unit]
 
-SOURCE_ID = '0192f0a0-0000-7000-8000-000000000001'
+SOURCE_ID = UUID('0192f0a0-0000-7000-8000-000000000001')
 
 
 def _connection(absence_reason: str) -> Any:
