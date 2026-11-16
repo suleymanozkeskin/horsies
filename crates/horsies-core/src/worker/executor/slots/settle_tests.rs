@@ -570,6 +570,114 @@ async fn a_task_that_reached_no_child_goes_back_to_the_queue() {
     remove_task(&pool, task_id).await;
 }
 
+/// The number of attempt rows of a task.
+async fn attempt_count(pool: &PgPool, task_id: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM horsies_task_attempts WHERE task_id = $1")
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .expect("count the attempt rows")
+}
+
+/// A child killed before it set its row RUNNING (each unreported end:
+/// a crash, a loop kill, a timeout): the failed-attempt statement under the
+/// claimed-row rule `RELEASE` puts the CLAIMED row back in the queue in its
+/// class, with no attempt row (Python `_write_ended_attempt`, which sends
+/// the release as its own statement).
+#[tokio::test]
+#[serial]
+async fn an_unreported_end_of_a_row_still_claimed_puts_it_back_with_no_attempt_row() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let ends = [
+        AttemptEnd::Crashed {
+            reason: FailureDetail::cut("the child was lost"),
+        },
+        AttemptEnd::KilledForLoop {
+            code: LoopKillCode::TaskBlockedLoop,
+            retry: RetryPlacement::Isolated,
+            reason: FailureDetail::cut("app.py:7 in fetch"),
+        },
+        AttemptEnd::TimedOut {
+            timeout: timeout_ms(1_000),
+            retry: RetryPlacement::SameClass,
+        },
+    ];
+    for end in ends {
+        let queue = test_queue();
+        let (task_id, generation) = seed(
+            &pool,
+            &queue,
+            ExecutionClass::SharedAsync,
+            Held::Claimed,
+            Some(RETRY_ON_TIMEOUT),
+            2,
+        )
+        .await;
+        let claimed = claimed_row(
+            task_id,
+            &queue,
+            generation,
+            ExecutionClass::SharedAsync,
+            Some(RETRY_ON_TIMEOUT),
+            2,
+        );
+        let label = format!("{end:?}");
+
+        let settled = writer(pool.clone()).settle(&claimed, end).await;
+
+        assert_eq!(settled, Settlement::Written, "{label}");
+        let row = live_row(&pool, task_id).await.expect("the row stays live");
+        assert_eq!(row["status"], "PENDING", "{label}");
+        assert_eq!(row["execution"], "SHARED_ASYNC", "{label}");
+        assert_eq!(row["retry_count"], 0, "{label}");
+        assert_eq!(
+            row["claimed_by_worker_id"],
+            serde_json::Value::Null,
+            "{label}"
+        );
+        assert_eq!(attempt_count(&pool, task_id).await, 0, "{label}");
+        remove_task(&pool, task_id).await;
+    }
+}
+
+/// A task that reached no child, on a row that another claim generation
+/// holds now: the release leaves the row as it is.
+#[tokio::test]
+#[serial]
+async fn a_task_that_reached_no_child_leaves_a_row_of_another_claim_alone() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let queue = test_queue();
+    let (task_id, generation) = seed(
+        &pool,
+        &queue,
+        ExecutionClass::Isolated,
+        Held::Claimed,
+        None,
+        0,
+    )
+    .await;
+    let earlier_claim = claimed_row(
+        task_id,
+        &queue,
+        generation - chrono::Duration::seconds(5),
+        ExecutionClass::Isolated,
+        None,
+        0,
+    );
+    let before = live_row(&pool, task_id).await;
+
+    let settled = writer(pool.clone())
+        .settle(
+            &earlier_claim,
+            AttemptEnd::NotDispatched(NotRunCause::QueueFull),
+        )
+        .await;
+
+    assert_eq!(settled, Settlement::NotHeld);
+    assert_eq!(live_row(&pool, task_id).await, before);
+    remove_task(&pool, task_id).await;
+}
+
 // ---------------------------------------------------------------------------
 // The retries of a write
 // ---------------------------------------------------------------------------

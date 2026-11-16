@@ -20,8 +20,8 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use crate::broker::attempt_writes::{
-    finish_failed_attempt, finish_workflow_success, AttemptFailure, AttemptFailureKind,
-    FinishFailedAttempt, FinishWorkflowSuccess, RetryPlacement, RetryRequest,
+    finish_failed_attempt, finish_unreported_attempt, finish_workflow_success, AttemptFailure,
+    AttemptFailureKind, FinishFailedAttempt, FinishWorkflowSuccess, RetryPlacement, RetryRequest,
 };
 use crate::broker::listener::notify_task_queue;
 use crate::broker::terminalization::terminalize;
@@ -31,7 +31,7 @@ use crate::core::config::recovery::RecoveryConfig;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::lifecycle::{
     AfterFailure, AttemptWriteRefusal, FailedAttemptOutcome, OwnedClaim, TerminalizationCommand,
-    TerminalizationOutcome, WorkflowSuccessOutcome,
+    TerminalizationOutcome, UnreportedAttemptOutcome, WorkflowSuccessOutcome,
 };
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
@@ -861,6 +861,54 @@ pub(crate) async fn persist_failed_attempt(
     let outcome = finish_failed_attempt(broker.core_main_pool(), broker.statement_log(), command)
         .await
         .map_err(|error| phase1_error(command.task_id, "failed attempt", error))?;
+    after_failed_attempt(broker, command, is_workflow_task, outcome).await
+}
+
+/// What the write of an attempt whose child ended without a report did.
+pub(crate) enum UnreportedAttemptWrite {
+    /// The row was still CLAIMED by this claim generation: no child started
+    /// it, and the statement put it back in the queue with no attempt row.
+    ClaimReleased,
+    /// The row was not CLAIMED by this claim generation: the failed attempt
+    /// was written or refused, as [`persist_failed_attempt`] maps it.
+    Written(FinalizeOutcome),
+}
+
+/// Write the failed attempt of a child that ended without a report (a
+/// timeout, a loop kill or a crash) in one statement, with the claimed-row
+/// rule `RELEASE` (Python `_write_ended_attempt`,
+/// `horsies/core/worker/dispatch.py:357-423`, which sends the release and
+/// the failed attempt as two statements).
+///
+/// Errors: a phase-1 [`FinalizeError`], retryable when the database error
+/// is. After an unknown outcome a released row reads as not held when the
+/// write is sent again.
+pub(crate) async fn persist_unreported_attempt(
+    broker: &PostgresBroker,
+    command: &FinishFailedAttempt,
+    is_workflow_task: bool,
+) -> Result<UnreportedAttemptWrite, FinalizeError> {
+    let outcome =
+        finish_unreported_attempt(broker.core_main_pool(), broker.statement_log(), command)
+            .await
+            .map_err(|error| phase1_error(command.task_id, "unreported attempt", error))?;
+    match outcome {
+        UnreportedAttemptOutcome::Released(_) => Ok(UnreportedAttemptWrite::ClaimReleased),
+        UnreportedAttemptOutcome::Failed(failed) => {
+            after_failed_attempt(broker, command, is_workflow_task, failed)
+                .await
+                .map(UnreportedAttemptWrite::Written)
+        }
+    }
+}
+
+/// What a written or refused failed attempt owes.
+async fn after_failed_attempt(
+    broker: &PostgresBroker,
+    command: &FinishFailedAttempt,
+    is_workflow_task: bool,
+    outcome: FailedAttemptOutcome,
+) -> Result<FinalizeOutcome, FinalizeError> {
     match outcome {
         FailedAttemptOutcome::FailureApplied {
             after: AfterFailure::CapacityWoken,
