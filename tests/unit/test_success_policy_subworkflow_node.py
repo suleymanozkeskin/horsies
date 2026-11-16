@@ -285,8 +285,7 @@ class TestChildStartSerialization:
         parent_row = SimpleNamespace(
             id='wt-1',
             sub_workflow_name='child_wf',
-            task_args='[]',
-            task_kwargs=None,
+            input='{}',
             args_from=None,
             node_id='node-0',
             sub_definition_key='test.child.v1',
