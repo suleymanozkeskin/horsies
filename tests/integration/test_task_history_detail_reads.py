@@ -12,7 +12,7 @@ out-of-range leaf never appears in EXPLAIN output.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import text
@@ -205,7 +205,7 @@ class TestDetail:
             assert detail == LiveTaskLocation(task_id=task_id)
 
     @pytest.mark.asyncio
-    async def test_unknown_task_with_no_published_floor_is_unclassified(
+    async def test_unknown_uuidv7_task_with_no_detached_leaf_is_within_retained_history(
         self, terminalization_schema: HistorySchema
     ) -> None:
         async with terminalization_schema.engine.begin() as connection:
@@ -213,17 +213,21 @@ class TestDetail:
             ghost = v7_with_birth(datetime.now(UTC))
             detail = await read_task_detail(connection, task_id=ghost)
             assert detail == TaskDetailAbsent(
+                task_id=ghost, reason=TaskAbsenceReason.WITHIN_RETAINED_HISTORY
+            )
+
+    @pytest.mark.asyncio
+    async def test_unknown_task_that_is_not_uuidv7_is_unclassified(
+        self, terminalization_schema: HistorySchema
+    ) -> None:
+        async with terminalization_schema.engine.begin() as connection:
+            await prepare_move_storage(connection, CLASS_KEY)
+            ghost = str(uuid4())
+            detail = await read_task_detail(connection, task_id=ghost)
+            assert detail == TaskDetailAbsent(
                 task_id=ghost, reason=TaskAbsenceReason.NOT_CLASSIFIED
             )
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            'The baseline leaf catalog stores no birth floor, so every '
-            'absence reads NOT_CLASSIFIED. PREDATES_RETAINED_HISTORY returns '
-            'when the reason is derived from the record of detached leaves.'
-        ),
-    )
     @pytest.mark.asyncio
     async def test_purged_task_classifies_before_the_retained_floor(
         self, terminalization_schema: HistorySchema
