@@ -117,13 +117,13 @@ fn a_value_that_is_not_json_is_a_serialization_error() {
 
 #[test]
 fn a_task_error_becomes_the_error_envelope() {
-    let error = TaskError::builtin(OperationalErrorCode::TaskError, "boom");
+    let error = TaskError::builtin(OperationalErrorCode::TaskException, "boom");
     let envelope = envelope_of(result_end(TaskResult::Err(error)));
     assert!(
         envelope.starts_with(r#"{"__h_task_result__":true,"ok":null,"err":{"#),
         "{envelope}"
     );
-    assert!(envelope.contains("TASK_ERROR"), "{envelope}");
+    assert!(envelope.contains("TASK_EXCEPTION"), "{envelope}");
 }
 
 #[test]

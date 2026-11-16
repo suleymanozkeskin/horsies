@@ -75,6 +75,7 @@ baseline_sql_files!(
     "0002_indexes.sql",
     "0003_interim_functions.sql",
     "0005_workflow_functions.sql",
+    "0006_history_functions.sql",
     "0007_scheduler_monitoring_functions.sql",
 );
 
