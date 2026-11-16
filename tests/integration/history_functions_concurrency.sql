@@ -17,7 +17,6 @@ SET client_min_messages = notice;
 
 SELECT dblink_connect('a', current_setting('horsies_test.peer_connstr'));
 SELECT dblink_connect('b', current_setting('horsies_test.peer_connstr'));
-SELECT dblink_connect('c', current_setting('horsies_test.peer_connstr'));
 SELECT dblink_connect('maintenance', current_setting('horsies_test.peer_connstr'));
 SELECT dblink_connect('holder', current_setting('horsies_test.peer_connstr'));
 SELECT dblink_connect('listener', current_setting('horsies_test.peer_connstr'));
@@ -195,15 +194,12 @@ SELECT fixture_leaf('standard_1d', '2021-02-03 00:00:00+00');
 SELECT fixture_leaf('standard_1d', '2021-02-04 00:00:00+00');
 INSERT INTO fixture_ids VALUES
     ('leaf_row', horsies_uuidv7()), ('leaf_row_node', gen_random_uuid()),
-    ('leaf_id', horsies_uuidv7()), ('leaf_id_node', gen_random_uuid()),
     ('leaf_batch', horsies_uuidv7()), ('leaf_batch_node', gen_random_uuid()),
-    ('leaf_neighbour', horsies_uuidv7()), ('during_row', horsies_uuidv7()), ('during_id', horsies_uuidv7());
+    ('leaf_neighbour', horsies_uuidv7()), ('during_row', horsies_uuidv7());
 SELECT fixture_task((SELECT id FROM fixture_ids WHERE name = 'leaf_row'), 'RUNNING', 'standard_1d', TRUE);
-SELECT fixture_task((SELECT id FROM fixture_ids WHERE name = 'leaf_id'), 'RUNNING', 'standard_1d', TRUE);
 SELECT fixture_task((SELECT id FROM fixture_ids WHERE name = 'leaf_batch'), 'PENDING', 'standard_1d', TRUE);
 SELECT fixture_task((SELECT id FROM fixture_ids WHERE name = 'leaf_neighbour'), 'RUNNING', 'standard_1d', FALSE);
 SELECT fixture_task((SELECT id FROM fixture_ids WHERE name = 'during_row'), 'RUNNING', 'standard_1d', FALSE);
-SELECT fixture_task((SELECT id FROM fixture_ids WHERE name = 'during_id'), 'RUNNING', 'standard_1d', FALSE);
 INSERT INTO horsies_workflow_tasks (
     downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
     dependencies, args_from,
@@ -216,7 +212,7 @@ SELECT
     n.task_index, 'node_' || n.task_index, 'fixture.task', '{"x":1}', 'default', 50, '{}', NULL, NULL, FALSE, 'all',
     NULL, NULL, 3, 'ISOLATED', NULL, 'standard_1d', n.status, (SELECT id FROM fixture_ids WHERE name = n.task), FALSE,
     NULL, NULL, NULL, NULL, NULL, NULL, now(), now(), NULL
-FROM (VALUES ('leaf_row', 1, 'RUNNING'), ('leaf_id', 2, 'RUNNING'), ('leaf_batch', 3, 'ENQUEUED'))
+FROM (VALUES ('leaf_row', 1, 'RUNNING'), ('leaf_batch', 3, 'ENQUEUED'))
     AS n(task, task_index, status);
 
 -- The caller side of a single move at a given terminal time (the horsies_tasks overload).
@@ -228,11 +224,6 @@ BEGIN
     SELECT * INTO STRICT v_task FROM horsies_tasks WHERE id = p_id FOR UPDATE;
     PERFORM horsies_move_task_to_history(v_task, 'FAILED', 'FAIL_RUNNING', p_terminal_at, '{"e":1}', 'E', NULL);
 END
-$$;
-
--- The same move through the uuid overload, which takes the task advisory lock and the live row itself.
-CREATE FUNCTION fixture_move_id_at(p_id uuid, p_terminal_at timestamptz) RETURNS void LANGUAGE sql AS $$
-    SELECT horsies_move_task_to_history(p_id, 'FAILED', 'FAIL_RUNNING', p_terminal_at, '{"e":1}', 'E', NULL)
 $$;
 
 -- The caller side of a batch pending expiry: the live rows FOR UPDATE in id order, then the batch move.
@@ -407,7 +398,6 @@ SELECT fixture_check(
 
 -- A move takes the leaf lock of its row's leaf in shared mode before it reads history. Each case moves into its own
 -- leaf of 2021, which the 1-day retention makes DETACHABLE.
-SELECT set_config('fixture.pid_c', fixture_peer_pid('c')::text, false);
 SELECT set_config('fixture.pid_maintenance', fixture_peer_pid('maintenance')::text, false);
 
 -- A move that has not ended, before the detach starts (horsies_tasks overload, workflow task, deferred kind).
@@ -452,30 +442,6 @@ SELECT fixture_check(
     AND (SELECT place FROM dblink('a', $q$SELECT fixture_place('leaf_row')$q$) AS t(place text)) = 'history,pending'
 );
 
--- The same before the detach, through the uuid overload.
-SELECT dblink_exec('b', 'BEGIN');
-SELECT * FROM dblink('b', $q$
-    SELECT fixture_move_id_at((SELECT id FROM fixture_ids WHERE name = 'leaf_id'), '2021-02-02 10:00:00+00')
-$q$) AS t(done text);
-SELECT fixture_check(
-    'leaf lock, uuid overload: while the move has not ended, the detach of its leaf is BUSY',
-    fixture_advisory_mode(
-        current_setting('fixture.pid_b')::integer,
-        horsies_task_history_leaf_lock_key('standard_1d', '2021-02-02 10:00:00+00')
-    ) = 'ShareLock'
-    AND (SELECT outcome FROM dblink('maintenance', $q$
-        SELECT outcome FROM horsies_begin_leaf_detach('horsies_task_history_standard_1d_2021_02_02')
-    $q$) AS t(outcome text)) = 'BUSY'
-);
-SELECT dblink_exec('b', 'COMMIT');
-SELECT fixture_check(
-    'leaf lock, uuid overload: after the move commits, the leaf is PENDING_BLOCKED',
-    (SELECT outcome FROM dblink('maintenance', $q$
-        SELECT outcome FROM horsies_begin_leaf_detach('horsies_task_history_standard_1d_2021_02_02')
-    $q$) AS t(outcome text)) = 'PENDING_BLOCKED'
-    AND (SELECT place FROM dblink('a', $q$SELECT fixture_place('leaf_id')$q$) AS t(place text)) = 'history,pending'
-);
-
 -- The same before the detach, through the batch move (pending expiry of a workflow task).
 SELECT dblink_exec('b', 'BEGIN');
 SELECT * FROM dblink('b', $q$
@@ -503,8 +469,7 @@ SELECT fixture_check(
 );
 
 -- Moves while the detach runs. A reader of the class parent keeps the concurrent detach waiting in its second
--- transaction, with the maintenance session holding the leaf lock. Two moves (one per overload) then wait for that
--- lock. The long timeouts keep the case independent of the speed of the machine.
+-- transaction, with the maintenance session holding the leaf lock. A move then waits for that lock. The long timeouts keep the case independent of the speed of the machine.
 SELECT dblink_exec('holder', 'BEGIN');
 SELECT * FROM dblink('holder', 'SELECT count(*) FROM horsies_task_history_standard_1d') AS t(n bigint);
 SELECT fixture_check(
@@ -527,22 +492,11 @@ SELECT dblink_send_query('b', $q$
         '2021-02-04 10:00:00+00'
     ))
 $q$);
-SELECT dblink_send_query('c', $q$
-    SELECT fixture_sqlstate(format(
-        'SELECT fixture_move_id_at(%L, %L)', (SELECT id FROM fixture_ids WHERE name = 'during_id'),
-        '2021-02-04 10:00:00+00'
-    ))
-$q$);
 SELECT fixture_check(
-    'detach during moves: each move waits for the leaf lock that the detach holds',
+    'detach during moves: the move waits for the leaf lock that the detach holds',
     fixture_wait_for_lock_wait(current_setting('fixture.pid_b')::integer)
-    AND fixture_wait_for_lock_wait(current_setting('fixture.pid_c')::integer)
     AND fixture_waits_for_advisory(
         current_setting('fixture.pid_b')::integer,
-        horsies_task_history_leaf_lock_key('standard_1d', '2021-02-04 00:00:00+00')
-    )
-    AND fixture_waits_for_advisory(
-        current_setting('fixture.pid_c')::integer,
         horsies_task_history_leaf_lock_key('standard_1d', '2021-02-04 00:00:00+00')
     )
 );
@@ -555,16 +509,15 @@ SELECT fixture_check(
         $q$) AS t(key bigint))
     ) = 'ExclusiveLock'
     AND (SELECT locks FROM dblink('a', format(
-        'SELECT fixture_locks_history(%s) OR fixture_locks_history(%s)',
-        current_setting('fixture.pid_b'), current_setting('fixture.pid_c')
+        'SELECT fixture_locks_history(%s)', current_setting('fixture.pid_b')
     )) AS t(locks boolean)) = FALSE
 );
 SELECT dblink_exec('holder', 'ROLLBACK');
--- The detach completes while both moves still wait: it does not wait for them, so no deadlock can form.
+-- The detach completes while the move still waits: it does not wait for it, so no deadlock can form.
 SELECT * FROM dblink_get_result('maintenance') AS t(done text);
 SELECT * FROM dblink_get_result('maintenance') AS t(done text);
 SELECT fixture_check(
-    'detach during moves: the detach completes while the moves wait for its leaf lock',
+    'detach during moves: the detach completes while the move waits for its leaf lock',
     (SELECT detached FROM dblink('a', $q$
         SELECT NOT EXISTS (
             SELECT 1 FROM pg_inherits WHERE inhrelid = to_regclass('horsies_task_history_standard_1d_2021_02_04')
@@ -572,10 +525,6 @@ SELECT fixture_check(
     $q$) AS t(detached boolean))
     AND fixture_waits_for_advisory(
         current_setting('fixture.pid_b')::integer,
-        horsies_task_history_leaf_lock_key('standard_1d', '2021-02-04 00:00:00+00')
-    )
-    AND fixture_waits_for_advisory(
-        current_setting('fixture.pid_c')::integer,
         horsies_task_history_leaf_lock_key('standard_1d', '2021-02-04 00:00:00+00')
     )
 );
@@ -593,31 +542,23 @@ SELECT fixture_check(
     $q$) AS t(unlocked boolean))
 );
 SELECT fixture_check(
-    'detach during moves: the horsies_tasks overload then finds no leaf for its row: 23514',
+    'detach during moves: the move then finds no leaf for its row: 23514',
     (SELECT state FROM dblink_get_result('b') AS t(state text)) = '23514'
 );
 SELECT * FROM dblink_get_result('b') AS t(state text);
 SELECT fixture_check(
-    'detach during moves: the uuid overload then finds no leaf for its row: 23514',
-    (SELECT state FROM dblink_get_result('c') AS t(state text)) = '23514'
-);
-SELECT * FROM dblink_get_result('c') AS t(state text);
-SELECT fixture_check(
-    'detach during moves: both tasks stay live, with no history row',
-    (SELECT place FROM dblink('a', $q$SELECT fixture_place('during_row') || '/' || fixture_place('during_id')$q$)
-        AS t(place text)) = 'live/live'
+    'detach during moves: the task stays live, with no history row',
+    (SELECT place FROM dblink('a', $q$SELECT fixture_place('during_row')$q$) AS t(place text)) = 'live'
 );
 
 -- After the detach, before the drop: the leaf has no parent.
 SELECT fixture_check(
-    'after detach: a move into the detached leaf raises 23514 and the task stays live (both overloads)',
+    'after detach: a move into the detached leaf raises 23514 and the task stays live',
     (SELECT states FROM dblink('a', $q$
         SELECT fixture_sqlstate(format('SELECT fixture_move_at(%L, %L)',
                    (SELECT id FROM fixture_ids WHERE name = 'during_row'), '2021-02-04 10:00:00+00'))
-            || '/' || fixture_sqlstate(format('SELECT fixture_move_id_at(%L, %L)',
-                   (SELECT id FROM fixture_ids WHERE name = 'during_id'), '2021-02-04 10:00:00+00'))
-            || '/' || fixture_place('during_row') || '/' || fixture_place('during_id')
-    $q$) AS t(states text)) = '23514/23514/live/live'
+            || '/' || fixture_place('during_row')
+    $q$) AS t(states text)) = '23514/live'
 );
 
 -- After the drop.
@@ -628,24 +569,20 @@ SELECT fixture_check(
     $q$) AS t(outcome text)) = 'DROPPED'
 );
 SELECT fixture_check(
-    'after drop: a move into the dropped leaf raises 23514 and the task stays live (both overloads)',
+    'after drop: a move into the dropped leaf raises 23514 and the task stays live',
     (SELECT states FROM dblink('a', $q$
         SELECT fixture_sqlstate(format('SELECT fixture_move_at(%L, %L)',
                    (SELECT id FROM fixture_ids WHERE name = 'during_row'), '2021-02-04 10:00:00+00'))
-            || '/' || fixture_sqlstate(format('SELECT fixture_move_id_at(%L, %L)',
-                   (SELECT id FROM fixture_ids WHERE name = 'during_id'), '2021-02-04 10:00:00+00'))
-            || '/' || fixture_place('during_row') || '/' || fixture_place('during_id')
-    $q$) AS t(states text)) = '23514/23514/live/live'
+            || '/' || fixture_place('during_row')
+    $q$) AS t(states text)) = '23514/live'
 );
 SELECT fixture_check(
-    'after drop: a later move at the database clock succeeds (both overloads)',
+    'after drop: a later move at the database clock succeeds',
     (SELECT states FROM dblink('a', $q$
         SELECT fixture_sqlstate(format('SELECT fixture_move_at(%L, now())',
                    (SELECT id FROM fixture_ids WHERE name = 'during_row')))
-            || '/' || fixture_sqlstate(format('SELECT fixture_move_id_at(%L, now())',
-                   (SELECT id FROM fixture_ids WHERE name = 'during_id')))
-            || '/' || fixture_place('during_row') || '/' || fixture_place('during_id')
-    $q$) AS t(states text)) = 'OK/OK/history/history'
+            || '/' || fixture_place('during_row')
+    $q$) AS t(states text)) = 'OK/history'
 );
 
 ------------------------------------------------------------------------------------------------------------------------
@@ -804,7 +741,6 @@ SELECT fixture_check(
 
 SELECT dblink_disconnect('a');
 SELECT dblink_disconnect('b');
-SELECT dblink_disconnect('c');
 SELECT dblink_disconnect('maintenance');
 SELECT dblink_disconnect('holder');
 SELECT dblink_disconnect('listener');

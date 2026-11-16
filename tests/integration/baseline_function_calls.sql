@@ -224,9 +224,10 @@ SELECT fixture_node(
     '00000000-0000-7000-8000-0000000000b2', '00000000-0000-7000-8000-0000000000a1', 1, 'RUNNING',
     '00000000-0000-7000-8000-00000000000b'
 );
--- The uuid overload (0003); the horsies_tasks overload (0006) takes the same name.
+-- The single move (0006) takes the live row that its caller locked.
 SELECT horsies_move_task_to_history(
-    '00000000-0000-7000-8000-00000000000b'::uuid, 'COMPLETED', 'COMPLETE_LOCKED', now(), '{"ok":1}', NULL, NULL
+    (SELECT t FROM horsies_tasks AS t WHERE t.id = '00000000-0000-7000-8000-00000000000b' FOR UPDATE),
+    'COMPLETED', 'COMPLETE_LOCKED', now(), '{"ok":1}', NULL, NULL
 );
 SELECT expect_value(
     'phase2_consume history',

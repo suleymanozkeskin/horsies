@@ -31,7 +31,7 @@ _CONCURRENCY_SQL: Final = Path(__file__).with_name('history_functions_concurrenc
 PASSED_CASES: Final = 97
 """The checks of ``history_functions_cases.sql``. A check added to the file changes it."""
 
-PASSED_CONCURRENCY_CASES: Final = 47
+PASSED_CONCURRENCY_CASES: Final = 44
 """The checks of ``history_functions_concurrency.sql``. A check added to the file changes it."""
 
 _PASSED_PREFIX: Final = 'ok: '
