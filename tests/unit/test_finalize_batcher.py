@@ -80,8 +80,6 @@ def _command(task_id: str) -> CompleteTaskFused:
         task_id=task_id,
         fence=OwnedClaim(worker_id=WORKER, claimed_at=CLAIMED_AT),
         result_json='{"ok":null}',
-        notify_channel='task_queue_default',
-        notify_payload=f'capacity:{task_id}',
     )
 
 

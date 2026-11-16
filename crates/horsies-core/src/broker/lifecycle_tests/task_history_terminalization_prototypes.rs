@@ -26,7 +26,7 @@ use sqlx::Connection;
 use uuid::Uuid;
 
 use super::support::*;
-use crate::broker::attempt_writes::{finish_workflow_success, FinishWorkflowSuccess};
+use crate::broker::attempt_writes::FinishWorkflowSuccess;
 use crate::broker::error::BrokerError;
 use crate::broker::postgres::PostgresBroker;
 use crate::broker::terminalization::{terminalize, terminalize_in_tx};
@@ -569,7 +569,7 @@ async fn completion_equivalence_replays_from_history() {
         matches!(first.as_slice(), [TerminalizationOutcome::Applied { .. }]),
         "{first:?}"
     );
-    let replay = finish_workflow_success(&pool, &success(plain))
+    let replay = write_workflow_success(&pool, &success(plain))
         .await
         .expect("workflow success replay");
     assert!(
@@ -588,7 +588,7 @@ async fn completion_equivalence_replays_from_history() {
     // The workflow-success writer first, then fused.
     let workflow_task = seed_task(&pool, &running_workflow_task()).await;
     let workflow_id = link_workflow_task(&pool, workflow_task, "RUNNING", "RUNNING").await;
-    let applied = finish_workflow_success(&pool, &success(workflow_task))
+    let applied = write_workflow_success(&pool, &success(workflow_task))
         .await
         .expect("workflow success");
     assert!(
