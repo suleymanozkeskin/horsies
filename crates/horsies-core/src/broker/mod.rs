@@ -39,7 +39,8 @@ pub use listener::NotifyListener;
 pub use migrations::{expected_schema_version, run_horsies_migrations, MIGRATIONS_TABLE};
 pub use pools::{PoolProfile, PoolSettingsError};
 pub use postgres::{
-    ClaimPassParams, PostgresBroker, SchemaInitializationMode, UPSERT_TASK_ATTEMPT_SQL,
+    ClaimPassParams, PostgresBroker, SchemaInitializationMode, WorkflowStop,
+    WorkflowStopBeforeStart, UPSERT_TASK_ATTEMPT_SQL,
 };
 pub use result_types::{BrokerErrorCode, BrokerOperationError, BrokerResult, RawResultRecord};
 pub use row::heartbeat::HeartbeatRow;

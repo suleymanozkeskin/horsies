@@ -10,13 +10,18 @@ use uuid::Uuid;
 
 use super::host::{ChildApp, OrphanSelfHeal};
 use super::link::FrameWriter;
-use crate::broker::PostgresBroker;
+use crate::broker::claims::{
+    release_claims, start_attempt as start_statement, ReleaseBatch, ReleaseClaims, ReleaseOutcome,
+    ReleasePlacement, StartAttempt, StartMiss, StartOutcome,
+};
+use crate::broker::terminalization::terminalize;
+use crate::broker::{BrokerError, PostgresBroker, WorkflowStop, WorkflowStopBeforeStart};
+use crate::core::lifecycle::{OwnedClaim, TerminalizationCommand, TerminalizationOutcome};
 use crate::core::task::error::{OperationalErrorCode, TaskError};
 use crate::core::task::fn_trait::RegisteredTask;
 use crate::core::task::result::TaskResult;
 use crate::worker::execution::{
-    build_task_input, confirm_ownership_and_set_running, mark_task_finalizing, FinalizingMark,
-    OwnershipOutcome,
+    build_task_input, mark_task_finalizing, phase_retry_delay, FinalizingMark,
 };
 use crate::worker::executor::protocol::{
     FailureDetail, ResultEnvelopeText, RunEnd, StopReason, StoredOptionsRefusal, TaskInputText,
@@ -48,29 +53,244 @@ pub(super) enum Started {
     Stopped(StopReason),
 }
 
-/// The start write: CLAIMED to RUNNING under the fence, with the first
-/// runner beat and, for a workflow task, the node. A start that misses ran
-/// its miss path already; the run ends before any task code.
+/// Starts of one task while its workflow was resumed between a missed start
+/// and the abandon of its row (Python `_PRE_START_CONFIRM_ATTEMPTS`).
+const PRE_START_CONFIRM_ATTEMPTS: u32 = 2;
+
+/// Sends of the release of a claim after a database error of the start, the
+/// first included.
+const START_RELEASE_SENDS: u32 = 3;
+
+/// What the path of a missed start ended with.
+enum MissedStart {
+    /// The run ends before any task code, with this reason.
+    Stop(StopReason),
+    /// The workflow was resumed before the abandon: start the task again.
+    WorkflowResumed,
+}
+
+/// The start write (Python `_confirm_until_not_resumed`,
+/// `_confirm_ownership_and_set_running`): one `horsies_start_attempt`
+/// statement sets the row RUNNING under the claim fence with its first
+/// runner beat and, for a workflow task, its node. A miss runs the path of
+/// its reason (`after_missed_start`) and the run ends before any task code.
+/// A workflow resumed before the abandon starts the task again, at most
+/// [`PRE_START_CONFIRM_ATTEMPTS`] times; then the claim is left to its lease
+/// (`OWNERSHIP_UNCONFIRMED`).
 ///
-/// The core's start answers one "not started" for a lost claim and a
-/// stopped workflow; both owe nothing more, and they are reported as a lost
-/// claim until the start statement names each reason.
+/// A database error of the start or of its miss path releases the claim at
+/// once with the fenced release, and the run ends `OWNERSHIP_UNCONFIRMED`.
 pub(super) async fn start_attempt(context: &HostContext, facts: &RunFacts) -> Started {
-    let outcome = confirm_ownership_and_set_running(
-        &context.broker,
+    let command = StartAttempt {
+        task_id: facts.task_id,
+        fence: OwnedClaim {
+            worker_id: facts.worker_id.clone(),
+            claimed_at: facts.claimed_at,
+        },
+        worker_pid: context.pid,
+        worker_hostname: context.app.hostname.clone(),
+        worker_process_name: format!("worker-{}", context.pid),
+        beat_sender_id: format!("{}:{}", facts.worker_id, context.pid),
+    };
+    for _ in 0..PRE_START_CONFIRM_ATTEMPTS {
+        let outcome = start_statement(
+            context.broker.core_main_pool(),
+            context.broker.statement_log(),
+            &command,
+        )
+        .await;
+        let missed = match outcome {
+            Ok(StartOutcome::Started { .. }) => return Started::Running,
+            Ok(StartOutcome::Missed(miss)) => after_missed_start(context, facts, miss).await,
+            Err(error) => Err(error),
+        };
+        match missed {
+            Ok(MissedStart::Stop(reason)) => return Started::Stopped(reason),
+            Ok(MissedStart::WorkflowResumed) => continue,
+            Err(error) => {
+                tracing::error!(
+                    task_id = %facts.task_id,
+                    "Failed to transition task {} to RUNNING: {error}",
+                    facts.task_id,
+                );
+                release_after_start_error(context, facts).await;
+                return Started::Stopped(StopReason::OwnershipUnconfirmed);
+            }
+        }
+    }
+    tracing::warn!(
+        task_id = %facts.task_id,
+        "Task {} workflow was resumed on each of {PRE_START_CONFIRM_ATTEMPTS} start attempts; \
+         leaving the claim to its lease",
         facts.task_id,
-        &facts.worker_id,
-        context.pid,
-        &context.app.hostname,
-        facts.task_kind.is_workflow_task(),
-        facts.claimed_at,
-        matches!(context.app.orphan_self_heal, OrphanSelfHeal::On),
-    )
-    .await;
-    match outcome {
-        OwnershipOutcome::Running(_) => Started::Running,
-        OwnershipOutcome::ExpiredBeforeStart => Started::Stopped(StopReason::TaskExpired),
-        OwnershipOutcome::Aborted => Started::Stopped(StopReason::ClaimLost),
+    );
+    Started::Stopped(StopReason::OwnershipUnconfirmed)
+}
+
+/// The path of a start that missed, by its reason (Python
+/// `_after_missed_start`):
+///
+/// | Reason | Path | Stop |
+/// |---|---|---|
+/// | `DeadlinePassed` | the expiry of the owned claim | `TaskExpired`, or `ClaimLost` when the expiry is refused |
+/// | `NotHeld`, `LeaseExpired` | none | `ClaimLost` |
+/// | `WorkflowPaused` | abandon and node reset, one transaction | `WorkflowStopped`, or a new start after a resume |
+/// | `WorkflowCancelled` | cancel and node skip, one transaction | `WorkflowStopped` |
+/// | `NodeNotLinked` | the orphan cancel when the app turns it on | `NodeNotLinked` |
+///
+/// Errors: the [`BrokerError`] of a write of the path.
+async fn after_missed_start(
+    context: &HostContext,
+    facts: &RunFacts,
+    miss: StartMiss,
+) -> Result<MissedStart, BrokerError> {
+    match miss {
+        StartMiss::DeadlinePassed => {
+            match context
+                .broker
+                .expire_claimed_task_before_start(facts.task_id, &facts.worker_id)
+                .await?
+            {
+                Some(_stored) => {
+                    tracing::info!(
+                        task_id = %facts.task_id,
+                        "Task {} expired before actual execution start; marked EXPIRED.",
+                        facts.task_id,
+                    );
+                    Ok(MissedStart::Stop(StopReason::TaskExpired))
+                }
+                None => Ok(claim_lost(facts)),
+            }
+        }
+        StartMiss::NotHeld | StartMiss::LeaseExpired => Ok(claim_lost(facts)),
+        StartMiss::WorkflowPaused => stop_for_workflow(context, facts, WorkflowStop::Paused).await,
+        StartMiss::WorkflowCancelled => {
+            stop_for_workflow(context, facts, WorkflowStop::Cancelled).await
+        }
+        StartMiss::NodeNotLinked => {
+            cancel_orphan(context, facts).await?;
+            Ok(MissedStart::Stop(StopReason::NodeNotLinked))
+        }
+    }
+}
+
+/// The stop of a start whose claim is gone. Logs a warning (Python
+/// `_claim_lost`).
+fn claim_lost(facts: &RunFacts) -> MissedStart {
+    tracing::warn!(
+        task_id = %facts.task_id,
+        "Task {} ownership lost - claim was reclaimed or status changed. Aborting execution to \
+         prevent double-execution.",
+        facts.task_id,
+    );
+    MissedStart::Stop(StopReason::ClaimLost)
+}
+
+/// Stop a workflow task whose workflow stopped (Python
+/// `_handle_workflow_stop_before_start`).
+async fn stop_for_workflow(
+    context: &HostContext,
+    facts: &RunFacts,
+    stop: WorkflowStop,
+) -> Result<MissedStart, BrokerError> {
+    tracing::info!(
+        task_id = %facts.task_id,
+        stop = ?stop,
+        "Blocking task {} execution before start - its workflow stopped",
+        facts.task_id,
+    );
+    match context
+        .broker
+        .stop_workflow_task_before_start(facts.task_id, stop, &facts.worker_id, facts.claimed_at)
+        .await?
+    {
+        WorkflowStopBeforeStart::Stopped => Ok(MissedStart::Stop(StopReason::WorkflowStopped)),
+        WorkflowStopBeforeStart::Resumed => Ok(MissedStart::WorkflowResumed),
+    }
+}
+
+/// Cancel a claimed workflow task that no live node links, when the app's
+/// `auto_terminate_orphaned_workflow_tasks` is on. The cancel judges the
+/// link again under its own lock and refuses when a runnable link exists.
+async fn cancel_orphan(context: &HostContext, facts: &RunFacts) -> Result<(), BrokerError> {
+    match context.app.orphan_self_heal {
+        OrphanSelfHeal::Off => Ok(()),
+        OrphanSelfHeal::On => {
+            let outcomes = terminalize(
+                context.broker.pool(),
+                &TerminalizationCommand::CancelOwnedOrphan {
+                    task_id: facts.task_id,
+                    fence: OwnedClaim {
+                        worker_id: facts.worker_id.clone(),
+                        claimed_at: facts.claimed_at,
+                    },
+                },
+            )
+            .await?;
+            if let Some(TerminalizationOutcome::Applied { .. }) = outcomes.first() {
+                tracing::warn!(
+                    task_id = %facts.task_id,
+                    "workflow task orphaned (no runnable workflow_task linkage); cancelled \
+                     before start",
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Release the claim of a start that failed with a database error, at once,
+/// with the fenced release in its class (owner rule "Database error at the
+/// start"). A row the start set RUNNING before its reply was lost answers
+/// `NotHeld` and is left to stale recovery. An error that may clear sends the
+/// release again, at most [`START_RELEASE_SENDS`] sends in all; a release
+/// that fails leaves the row to its claim lease.
+async fn release_after_start_error(context: &HostContext, facts: &RunFacts) {
+    let batch = match ReleaseBatch::new(&[(facts.task_id, facts.claimed_at)]) {
+        Ok(batch) => batch,
+        Err(refused) => unreachable!("one claim is a valid release batch: {refused}"),
+    };
+    let command = ReleaseClaims {
+        worker_id: facts.worker_id.clone(),
+        batch,
+        placement: ReleasePlacement::SameClass,
+    };
+    for send in 1..=START_RELEASE_SENDS {
+        match release_claims(
+            context.broker.core_main_pool(),
+            context.broker.statement_log(),
+            &command,
+        )
+        .await
+        {
+            Ok(outcomes) => {
+                let released = matches!(outcomes.as_slice(), [(_, ReleaseOutcome::Released)]);
+                tracing::warn!(
+                    task_id = %facts.task_id,
+                    released,
+                    "the claim of a start that failed went back to the queue when held",
+                );
+                return;
+            }
+            Err(error) if error.is_retryable() && send < START_RELEASE_SENDS => {
+                tracing::warn!(
+                    task_id = %facts.task_id,
+                    send,
+                    error = %error,
+                    "the release after a failed start failed; sending it again",
+                );
+                tokio::time::sleep(std::time::Duration::from_secs_f64(phase_retry_delay(send)))
+                    .await;
+            }
+            Err(error) => {
+                tracing::error!(
+                    task_id = %facts.task_id,
+                    error = %error,
+                    "the release after a failed start failed; the claim lease returns the row",
+                );
+                return;
+            }
+        }
     }
 }
 
