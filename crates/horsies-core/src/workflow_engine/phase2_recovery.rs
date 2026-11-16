@@ -17,7 +17,7 @@ use crate::workflow_engine::engine::apply_phase2_progression_in_tx;
 use super::WorkflowError;
 
 const DISCOVER_PENDING_SQL: &str = "
-SELECT task_id, terminal_status
+SELECT task_id, terminalization_kind
 FROM horsies_workflow_phase2_pending
 WHERE created_at < NOW() - ($1::double precision / 1000.0) * INTERVAL '1 second'
   AND attempt_count < $2::integer
@@ -36,10 +36,12 @@ const COUNT_OVER_ATTEMPT_BOUND_SQL: &str = "
 SELECT count(*) FROM horsies_workflow_phase2_pending
 WHERE attempt_count >= $1::integer";
 
+/// One discovered phase-2 record. The record has no status column: the
+/// status follows from the kind (`terminal_status_of_pending_kind`).
 #[derive(Debug, FromRow)]
 struct PendingCandidate {
     task_id: Uuid,
-    terminal_status: String,
+    terminalization_kind: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
@@ -259,7 +261,16 @@ pub async fn drive_phase2_recovery(
     };
     for candidate in candidates {
         summary.considered += 1;
-        let node_status = match node_status_for_terminal_task(&candidate.terminal_status) {
+        let terminal_status = match terminal_status_of_pending_kind(&candidate.terminalization_kind)
+        {
+            Ok(status) => status,
+            Err(refusal) => {
+                summary.failed += 1;
+                tracing::error!(task_id = %candidate.task_id, %refusal, "phase-2 record refused");
+                continue;
+            }
+        };
+        let node_status = match node_status_for_terminal_task(&terminal_status.to_string()) {
             Ok(status) => status,
             Err(error) => {
                 summary.failed += 1;
@@ -1155,6 +1166,88 @@ mod tests {
         assert!(still_pending);
         transaction.rollback().await.unwrap();
         cleanup_case(&pool, state_workflow, state_task).await;
+    }
+
+    /// Discovery reads the record's kind (the baseline record has no status
+    /// column) and recovers a `FAIL_RUNNING` record with the FAILED node
+    /// status (Python `core/workflows/phase2_recovery.py`, discovery and
+    /// `terminal_status_of_pending_kind`).
+    #[tokio::test]
+    #[serial]
+    async fn recovery_reads_the_kind_of_a_failure_record_and_fails_its_node() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        sqlx::query("DELETE FROM horsies_workflow_phase2_pending")
+            .execute(&pool)
+            .await
+            .expect("clear pending rows before global recovery");
+        let workflow_id = Uuid::new_v4();
+        let task_id = Uuid::new_v4();
+        seed_workflow_task(&pool, workflow_id, task_id, false).await;
+        let failure = serde_json::to_string(&crate::core::TaskResult::<serde_json::Value>::Err(
+            crate::core::TaskError::new("NODE_FAILURE", "the node failed"),
+        ))
+        .expect("encode the failure result");
+        let outcomes = terminalize(
+            &pool,
+            &TerminalizationCommand::FailLockedTask {
+                task_id,
+                fence: PriorLockedRead {
+                    worker_id: "p7-worker".to_owned(),
+                },
+                result_json: failure,
+                error_code: Some("NODE_FAILURE".to_owned()),
+                failed_reason: Some("the node failed".to_owned()),
+            },
+        )
+        .await
+        .expect("fail the workflow task");
+        assert!(matches!(
+            outcomes.as_slice(),
+            [TerminalizationOutcome::Applied { .. }]
+        ));
+        let kind: String = sqlx::query_scalar(
+            "UPDATE horsies_workflow_phase2_pending
+             SET created_at = NOW() - INTERVAL '1 hour'
+             WHERE task_id = $1
+             RETURNING terminalization_kind",
+        )
+        .bind(task_id)
+        .fetch_one(&pool)
+        .await
+        .expect("age the phase-2 record");
+        assert_eq!(kind, "FAIL_RUNNING");
+
+        let summary = drive_phase2_recovery(
+            &pool,
+            &crate::core::WorkflowSpecRegistry::new(),
+            0,
+            1,
+            25,
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await
+        .expect("recovery pass");
+
+        let node_status: String =
+            sqlx::query_scalar("SELECT status FROM horsies_workflow_tasks WHERE task_id = $1")
+                .bind(task_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read the node");
+        let records: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM horsies_workflow_phase2_pending WHERE task_id = $1",
+        )
+        .bind(task_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count the phase-2 records");
+        cleanup_case(&pool, workflow_id, task_id).await;
+        assert_eq!(summary.considered, 1, "{summary:?}");
+        assert_eq!(summary.applied, 1, "{summary:?}");
+        assert_eq!(summary.failed, 0, "{summary:?}");
+        assert_eq!(node_status, "FAILED");
+        assert_eq!(records, 0);
     }
 
     #[tokio::test]

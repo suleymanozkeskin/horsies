@@ -1,0 +1,807 @@
+//! The serve loops of a Rust child, one per child kind.
+//!
+//! - Isolated: one task at a time; the parent holds the deadline. A body
+//!   that returns while work it started with `spawn_in_run` is alive sends
+//!   `body_returned`; the child waits 1 s for that work, aborts it in
+//!   rounds, writes the marker and sends `left_work_ended`, or sends
+//!   `left_work_stuck` for work that did not stop.
+//! - Shared async: up to `seats` async bodies at once on the child's
+//!   runtime. At the deadline the body is aborted and `deadline_fired` is
+//!   sent; when anything of the run (the body or its work) is alive after
+//!   the cancel grace, `second_cancel` is sent and everything of the run is
+//!   aborted in rounds, then `run_stuck` names what is alive 0.3 s later,
+//!   and the run keeps its seat until it ends or the parent kills the
+//!   child. A body that returns before its deadline with work alive waits
+//!   the cancel grace for it, then sends `leftover_cancel` and aborts it in
+//!   rounds, then `leftover_stuck`. A run that timed out or needed a cancel
+//!   writes no marker. A body that holds a runtime thread for 5 s in one
+//!   poll is reported with `loop_blocked`, and the parent kills the child.
+//! - Shared thread: up to `seats` blocking bodies at once, each on a seat
+//!   thread. A thread cannot be stopped: at the deadline `deadline_fired` is
+//!   sent and the body runs on; when it returns, its value is dropped and
+//!   the run ends timed out. One atomic gate decides between the return and
+//!   the deadline.
+//!
+//! Work that a body starts with plain `tokio::spawn` is not tracked; work
+//! started with `spawn_in_run` belongs to the run (`run_work`).
+
+use std::collections::HashMap;
+use std::future::Future;
+use std::io;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::task::{Context, Poll};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use tokio::sync::mpsc;
+use tokio::task::JoinError;
+
+use super::rss::read_rss;
+use super::run::{
+    kind_mismatch_end, mark_finalizing, prepare, refusal_end, result_end, run_blocking_body,
+    start_attempt, HostContext, Prepared, RunFacts, Started,
+};
+use super::run_work::{
+    left_report, stuck_report, Alive, RoundsEnd, RunScope, WorkWait, ISOLATED_LEFTOVER_GRACE,
+};
+use crate::core::task::error::{OperationalErrorCode, TaskError};
+use crate::core::task::fn_trait::{AsyncTaskFn, RawTaskResult, RegisteredTask};
+use crate::core::task::result::TaskResult;
+use crate::worker::execution::execute_task;
+use crate::worker::executor::protocol::{
+    BlockedWhere, BodyEnd, BodyReturnedFrame, CancelGraceMs, ChildFrame, DispatchNumber,
+    FailureDetail, IsolatedWork, LeftWorkEnd, LeftWorkEndedFrame, LeftWorkStuckFrame,
+    LeftoverCancelFrame, LeftoverStuckFrame, LoopBlockedFrame, LoopCulprit, NoLeftWork,
+    ParentFrame, ResultFrame, RunEnd, RunFrame, RunRef, RunStuckFrame, SeatEnd, SharedResultFrame,
+    SharedRunFrame, SharedWork, StoredOptionsRefusal, TaskInputText, TaskTimeoutMs,
+    LOOP_BLOCK_LIMIT,
+};
+
+/// How often the poll watch reads the polls in progress.
+const POLL_WATCH_INTERVAL: Duration = Duration::from_millis(250);
+const POLL_WATCH_THREAD_NAME: &str = "horsies-child-poll-watch";
+const SEAT_THREAD_NAME: &str = "horsies-child-seat";
+
+/// How a serve loop ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ServeEnd {
+    /// The stop frame came with no task in flight.
+    Stopped,
+    /// A frame that does not fit the child kind or its state.
+    BadParentFrame,
+    /// The control thread ended.
+    ParentGone,
+}
+
+// ---------------------------------------------------------------------------
+// Isolated
+// ---------------------------------------------------------------------------
+
+pub(super) async fn serve_isolated(
+    context: HostContext,
+    frames: &mut mpsc::Receiver<ParentFrame>,
+) -> ServeEnd {
+    loop {
+        match frames.recv().await {
+            None => return ServeEnd::ParentGone,
+            Some(ParentFrame::Stop) => return ServeEnd::Stopped,
+            Some(ParentFrame::Run(run)) => run_isolated(&context, run).await,
+            Some(ParentFrame::Init(_) | ParentFrame::SharedRun(_)) => {
+                return ServeEnd::BadParentFrame
+            }
+        }
+    }
+}
+
+/// Whether the marker of a run is written before its end is reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Marker {
+    /// The run ended without a cancel.
+    Write,
+    /// The run timed out or needed a cancel: its end goes out at once.
+    Skip,
+}
+
+/// What the body of a run returned: it ran, so it did not stop before
+/// running.
+fn body_end_of(end: &RunEnd) -> BodyEnd {
+    match end {
+        RunEnd::Result(envelope) => BodyEnd::Result(envelope.clone()),
+        RunEnd::WorkerFailure(detail) => BodyEnd::WorkerFailure(detail.clone()),
+        RunEnd::StoppedBeforeRunning(reason) => {
+            unreachable!("a body that ran ended as stopped before running ({reason:?})")
+        }
+    }
+}
+
+async fn send_isolated_result(context: &HostContext, task_id: uuid::Uuid, end: RunEnd) {
+    let frame = ChildFrame::Result(ResultFrame {
+        task_id,
+        end,
+        rss: read_rss(),
+        task_loop: NoLeftWork::NoTaskLoop,
+    });
+    context.writer.send(frame).await;
+}
+
+/// One run of an isolated child and its report (Python `_report_run`).
+async fn run_isolated(context: &HostContext, run: RunFrame) {
+    let RunFrame {
+        task_id,
+        task_name,
+        worker_id,
+        task_kind,
+        claimed_at,
+        work,
+        input,
+    } = run;
+    let facts = RunFacts {
+        task_id,
+        task_name,
+        worker_id,
+        task_kind,
+        claimed_at,
+    };
+    if let Started::Stopped(reason) = start_attempt(context, &facts).await {
+        send_isolated_result(context, task_id, RunEnd::StoppedBeforeRunning(reason)).await;
+        return;
+    }
+    let scope = RunScope::new();
+    let end = match work {
+        IsolatedWork::Refusal(refusal) => refusal_end(&refusal),
+        IsolatedWork::Run => match prepare(&context.app, &facts.task_name, &input) {
+            Prepared::Ended(end) => end,
+            Prepared::Body { task, input } => {
+                result_end(isolated_body(&scope, &facts.task_name, task, input).await)
+            }
+        },
+    };
+    match scope.alive() {
+        Alive::Nothing => {
+            scope.close();
+            mark_finalizing(context, &facts).await;
+            send_isolated_result(context, task_id, end).await;
+        }
+        Alive::Work { count, names } => {
+            let left = left_report(count, names);
+            end_left_work(context, &facts, &scope, &end, left).await;
+        }
+    }
+}
+
+/// The body of an isolated run. An async body runs inside the run, so the
+/// work it starts with `spawn_in_run` belongs to the run.
+async fn isolated_body(
+    scope: &RunScope,
+    task_name: &str,
+    task: RegisteredTask,
+    input: Vec<u8>,
+) -> RawTaskResult {
+    match task {
+        RegisteredTask::Async { task, .. } => {
+            let body = async move { task.execute(&input).await };
+            joined_result(scope.spawn_body(task_name, body).await)
+        }
+        blocking @ RegisteredTask::Blocking { .. } => execute_task(blocking, input, None).await,
+    }
+}
+
+/// The body returned with work alive (Python `_report_run`,
+/// `TaskLoop.end_left_work`): `body_returned` with what it returned, then
+/// up to 1 s for the work, then the cancel rounds. Work that ended gives
+/// the marker, then `left_work_ended`; work that did not stop gives
+/// `left_work_stuck` and no marker: the parent kills the child.
+async fn end_left_work(
+    context: &HostContext,
+    facts: &RunFacts,
+    scope: &RunScope,
+    end: &RunEnd,
+    left: crate::worker::executor::protocol::LoopHoldsTasks,
+) {
+    let task_id = facts.task_id;
+    let returned = body_end_of(end);
+    context
+        .writer
+        .send(ChildFrame::BodyReturned(BodyReturnedFrame {
+            task_id,
+            returned,
+            left,
+        }))
+        .await;
+    let ended = match scope.wait_done(ISOLATED_LEFTOVER_GRACE).await {
+        WorkWait::Done => LeftWorkEnd::InGrace,
+        WorkWait::StillAlive => {
+            scope.close();
+            match (scope.end_in_rounds().await, scope.alive()) {
+                (RoundsEnd::Ended, _) | (RoundsEnd::Stuck, Alive::Nothing) => {
+                    LeftWorkEnd::Cancelled
+                }
+                (RoundsEnd::Stuck, Alive::Work { count, names }) => {
+                    let still = left_report(count, names);
+                    context
+                        .writer
+                        .send(ChildFrame::LeftWorkStuck(LeftWorkStuckFrame {
+                            task_id,
+                            still,
+                        }))
+                        .await;
+                    return;
+                }
+            }
+        }
+    };
+    scope.close();
+    mark_finalizing(context, facts).await;
+    let frame = ChildFrame::LeftWorkEnded(LeftWorkEndedFrame {
+        task_id,
+        end: ended,
+        rss: read_rss(),
+    });
+    context.writer.send(frame).await;
+}
+
+fn facts_of(run: &SharedRunFrame) -> RunFacts {
+    RunFacts {
+        task_id: run.task_id,
+        task_name: run.task_name.clone(),
+        worker_id: run.worker_id.clone(),
+        task_kind: run.task_kind,
+        claimed_at: run.claimed_at,
+    }
+}
+
+fn run_ref_of(run: &SharedRunFrame) -> RunRef {
+    RunRef {
+        dispatch: run.dispatch,
+        task_id: run.task_id,
+    }
+}
+
+/// Count a run in flight; `false` when the parent sent more than `seats`.
+fn take_seat(in_flight: &AtomicUsize, seats: usize) -> bool {
+    in_flight
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |held| {
+            (held < seats).then_some(held + 1)
+        })
+        .is_ok()
+}
+
+/// The stop frame is valid only with no run in flight.
+fn stop_end(in_flight: &AtomicUsize) -> ServeEnd {
+    match in_flight.load(Ordering::Acquire) {
+        0 => ServeEnd::Stopped,
+        _ => ServeEnd::BadParentFrame,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared async
+// ---------------------------------------------------------------------------
+
+/// The work of a seat of a shared async child.
+enum AsyncSeatWork {
+    Task {
+        timeout: TaskTimeoutMs,
+        grace: CancelGraceMs,
+    },
+    Refusal(StoredOptionsRefusal),
+}
+
+pub(super) async fn serve_shared_async(
+    context: HostContext,
+    watch: PollWatch,
+    frames: &mut mpsc::Receiver<ParentFrame>,
+    seats: usize,
+) -> ServeEnd {
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    loop {
+        let run = match frames.recv().await {
+            None => return ServeEnd::ParentGone,
+            Some(ParentFrame::Stop) => return stop_end(&in_flight),
+            Some(ParentFrame::SharedRun(run)) => run,
+            Some(ParentFrame::Init(_) | ParentFrame::Run(_)) => return ServeEnd::BadParentFrame,
+        };
+        let work = match run.work.clone() {
+            SharedWork::AsyncTask {
+                timeout_ms,
+                cancel_grace_ms,
+            } => AsyncSeatWork::Task {
+                timeout: timeout_ms,
+                grace: cancel_grace_ms,
+            },
+            SharedWork::Refusal(refusal) => AsyncSeatWork::Refusal(refusal),
+            SharedWork::ThreadTask { .. } => return ServeEnd::BadParentFrame,
+        };
+        if !take_seat(&in_flight, seats) {
+            return ServeEnd::BadParentFrame;
+        }
+        tokio::spawn(async_seat(
+            context.clone(),
+            watch.clone(),
+            run,
+            work,
+            Arc::clone(&in_flight),
+        ));
+    }
+}
+
+async fn async_seat(
+    context: HostContext,
+    watch: PollWatch,
+    run: SharedRunFrame,
+    work: AsyncSeatWork,
+    in_flight: Arc<AtomicUsize>,
+) {
+    let run_ref = run_ref_of(&run);
+    let facts = facts_of(&run);
+    let end = match start_attempt(&context, &facts).await {
+        Started::Stopped(reason) => SeatEnd::Finished(RunEnd::StoppedBeforeRunning(reason)),
+        Started::Running => {
+            let (end, marker) = match work {
+                AsyncSeatWork::Refusal(refusal) => {
+                    (SeatEnd::Finished(refusal_end(&refusal)), Marker::Write)
+                }
+                AsyncSeatWork::Task { timeout, grace } => {
+                    async_body(
+                        &context, &watch, run_ref, &facts, &run.input, timeout, grace,
+                    )
+                    .await
+                }
+            };
+            match marker {
+                Marker::Write => mark_finalizing(&context, &facts).await,
+                Marker::Skip => {}
+            }
+            end
+        }
+    };
+    let frame = ChildFrame::SharedResult(SharedResultFrame {
+        run: run_ref,
+        end,
+        rss: read_rss(),
+    });
+    context.writer.send(frame).await;
+    in_flight.fetch_sub(1, Ordering::AcqRel);
+}
+
+fn joined_result(joined: Result<RawTaskResult, JoinError>) -> RawTaskResult {
+    match joined {
+        Ok(result) => result,
+        Err(error) => TaskResult::Err(TaskError::builtin(
+            OperationalErrorCode::UnhandledException,
+            format!("async task panicked: {error}"),
+        )),
+    }
+}
+
+async fn async_body(
+    context: &HostContext,
+    watch: &PollWatch,
+    run_ref: RunRef,
+    facts: &RunFacts,
+    input: &TaskInputText,
+    timeout: TaskTimeoutMs,
+    grace: CancelGraceMs,
+) -> (SeatEnd, Marker) {
+    let (task, input): (Arc<dyn AsyncTaskFn>, Vec<u8>) =
+        match prepare(&context.app, &facts.task_name, input) {
+            Prepared::Ended(end) => return (SeatEnd::Finished(end), Marker::Write),
+            Prepared::Body {
+                task: RegisteredTask::Async { task, .. },
+                input,
+            } => (task, input),
+            Prepared::Body {
+                task: RegisteredTask::Blocking { .. },
+                ..
+            } => {
+                return (
+                    SeatEnd::Finished(kind_mismatch_end(&facts.task_name, "shared async")),
+                    Marker::Write,
+                )
+            }
+        };
+    let scope = RunScope::new();
+    let poll_started = watch.register(run_ref, &facts.task_name);
+    let body = async move { task.execute(&input).await };
+    let mut handle = scope.spawn_body(
+        &facts.task_name,
+        Watched::new(body, poll_started, watch.epoch),
+    );
+    let deadline = tokio::time::sleep(Duration::from_millis(timeout.get()));
+    tokio::pin!(deadline);
+    let outcome = tokio::select! {
+        joined = &mut handle => {
+            let end = result_end(joined_result(joined));
+            after_return(context, run_ref, &scope, end, grace).await
+        }
+        () = &mut deadline => {
+            handle.abort();
+            context.writer.send(ChildFrame::DeadlineFired(run_ref)).await;
+            stop_after_deadline(context, run_ref, &scope, grace).await;
+            (SeatEnd::TimedOut, Marker::Skip)
+        }
+    };
+    scope.close();
+    watch.unregister(run_ref.dispatch);
+    outcome
+}
+
+/// The body returned before its deadline: the deadline no longer applies.
+/// Work it left gets the cancel grace, then `leftover_cancel` and the
+/// cancel rounds, then `leftover_stuck`; the run keeps its seat until that
+/// work ends or the parent kills the child. The end is what the body
+/// returned.
+async fn after_return(
+    context: &HostContext,
+    run_ref: RunRef,
+    scope: &RunScope,
+    end: RunEnd,
+    grace: CancelGraceMs,
+) -> (SeatEnd, Marker) {
+    if let Alive::Nothing = scope.alive() {
+        return (SeatEnd::Finished(end), Marker::Write);
+    }
+    let grace = Duration::from_millis(grace.get());
+    if scope.wait_done(grace).await == WorkWait::Done {
+        return (SeatEnd::Finished(end), Marker::Write);
+    }
+    let returned = body_end_of(&end);
+    context
+        .writer
+        .send(ChildFrame::LeftoverCancel(LeftoverCancelFrame {
+            run: run_ref,
+            returned: returned.clone(),
+        }))
+        .await;
+    scope.close();
+    if scope.end_in_rounds().await == RoundsEnd::Ended {
+        return (SeatEnd::Finished(end), Marker::Skip);
+    }
+    if let Alive::Work { count, names } = scope.alive() {
+        context
+            .writer
+            .send(ChildFrame::LeftoverStuck(LeftoverStuckFrame {
+                run: run_ref,
+                work: stuck_report(count, names),
+                returned,
+            }))
+            .await;
+        scope.wait_all_ended().await;
+    }
+    (SeatEnd::Finished(end), Marker::Skip)
+}
+
+/// After the deadline's abort of the body: when anything of the run is
+/// alive after the cancel grace, report the second cancel and abort it all
+/// in rounds; then report what is stuck, and wait for the end.
+async fn stop_after_deadline(
+    context: &HostContext,
+    run_ref: RunRef,
+    scope: &RunScope,
+    grace: CancelGraceMs,
+) {
+    let grace = Duration::from_millis(grace.get());
+    if scope.wait_done(grace).await == WorkWait::Done {
+        return;
+    }
+    context.writer.send(ChildFrame::SecondCancel(run_ref)).await;
+    scope.close();
+    if scope.end_in_rounds().await == RoundsEnd::Ended {
+        return;
+    }
+    if let Alive::Work { count, names } = scope.alive() {
+        context
+            .writer
+            .send(ChildFrame::RunStuck(RunStuckFrame {
+                run: run_ref,
+                work: stuck_report(count, names),
+            }))
+            .await;
+        // The run keeps its seat until all of it ends or the parent kills
+        // the child; the end is the timeout either way.
+        scope.wait_all_ended().await;
+    }
+}
+
+/// The poll of an async body, timed for the poll watch.
+struct Watched<F> {
+    inner: Pin<Box<F>>,
+    poll_started: Arc<AtomicU64>,
+    epoch: Instant,
+}
+
+impl<F> Watched<F> {
+    fn new(inner: F, poll_started: Arc<AtomicU64>, epoch: Instant) -> Self {
+        Self {
+            inner: Box::pin(inner),
+            poll_started,
+            epoch,
+        }
+    }
+}
+
+fn millis_since(epoch: Instant) -> u64 {
+    u64::try_from(epoch.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+impl<F: Future> Future for Watched<F> {
+    type Output = F::Output;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
+        // 0 means "no poll in progress", so a poll start is stored from 1.
+        let started = millis_since(self.epoch).saturating_add(1);
+        self.poll_started.store(started, Ordering::Release);
+        let polled = self.inner.as_mut().poll(cx);
+        self.poll_started.store(0, Ordering::Release);
+        polled
+    }
+}
+
+/// Whether a run's blocked poll was reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockReport {
+    NotReported,
+    Reported,
+}
+
+struct WatchedRun {
+    run: RunRef,
+    location: BlockedWhere,
+    poll_started: Arc<AtomicU64>,
+    report: BlockReport,
+}
+
+/// The poll watch of a shared async child: a thread of its own, so a body
+/// that holds every runtime thread cannot keep it from reporting.
+#[derive(Clone)]
+pub(super) struct PollWatch {
+    runs: Arc<Mutex<HashMap<DispatchNumber, WatchedRun>>>,
+    epoch: Instant,
+}
+
+fn lock_runs(
+    runs: &Mutex<HashMap<DispatchNumber, WatchedRun>>,
+) -> MutexGuard<'_, HashMap<DispatchNumber, WatchedRun>> {
+    // A poisoned lock means a panic while it was held; the map is valid.
+    runs.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl PollWatch {
+    /// A watch with no thread, for tests of the report rule.
+    #[cfg(test)]
+    pub(super) fn without_thread(epoch: Instant) -> Self {
+        Self {
+            runs: Arc::new(Mutex::new(HashMap::new())),
+            epoch,
+        }
+    }
+
+    /// Start the watch thread. Each pass reads every run once.
+    pub(super) fn start(writer: super::link::FrameWriter) -> io::Result<Self> {
+        let watch = Self {
+            runs: Arc::new(Mutex::new(HashMap::new())),
+            epoch: Instant::now(),
+        };
+        let thread_watch = watch.clone();
+        thread::Builder::new()
+            .name(POLL_WATCH_THREAD_NAME.to_owned())
+            .spawn(move || loop {
+                thread::sleep(POLL_WATCH_INTERVAL);
+                for frame in thread_watch.blocked_reports() {
+                    writer.send_blocking(frame);
+                }
+            })?;
+        Ok(watch)
+    }
+
+    pub(super) fn register(&self, run: RunRef, task_name: &str) -> Arc<AtomicU64> {
+        let poll_started = Arc::new(AtomicU64::new(0));
+        lock_runs(&self.runs).insert(
+            run.dispatch,
+            WatchedRun {
+                run,
+                location: BlockedWhere::cut(task_name),
+                poll_started: Arc::clone(&poll_started),
+                report: BlockReport::NotReported,
+            },
+        );
+        poll_started
+    }
+
+    fn unregister(&self, dispatch: DispatchNumber) {
+        let _removed = lock_runs(&self.runs).remove(&dispatch);
+    }
+
+    /// The `loop_blocked` frames of runs whose current poll passed the
+    /// limit, each reported once.
+    pub(super) fn blocked_reports(&self) -> Vec<ChildFrame> {
+        let now = millis_since(self.epoch).saturating_add(1);
+        let limit = u64::try_from(LOOP_BLOCK_LIMIT.as_millis()).unwrap_or(u64::MAX);
+        let mut runs = lock_runs(&self.runs);
+        let mut frames = Vec::new();
+        for watched in runs.values_mut() {
+            let started = watched.poll_started.load(Ordering::Acquire);
+            let blocked_ms = now.saturating_sub(started);
+            let blocked = started != 0 && blocked_ms >= limit;
+            if blocked && watched.report == BlockReport::NotReported {
+                watched.report = BlockReport::Reported;
+                frames.push(ChildFrame::LoopBlocked(LoopBlockedFrame {
+                    culprit: LoopCulprit::Run(watched.run),
+                    blocked_ms,
+                    location: watched.location.clone(),
+                }));
+            }
+        }
+        frames
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared thread
+// ---------------------------------------------------------------------------
+
+/// The work of a seat of a shared thread child.
+enum ThreadSeatWork {
+    Task { timeout: TaskTimeoutMs },
+    Refusal(StoredOptionsRefusal),
+}
+
+pub(super) async fn serve_shared_thread(
+    context: HostContext,
+    frames: &mut mpsc::Receiver<ParentFrame>,
+    seats: usize,
+) -> ServeEnd {
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    let runtime = tokio::runtime::Handle::current();
+    loop {
+        let run = match frames.recv().await {
+            None => return ServeEnd::ParentGone,
+            Some(ParentFrame::Stop) => return stop_end(&in_flight),
+            Some(ParentFrame::SharedRun(run)) => run,
+            Some(ParentFrame::Init(_) | ParentFrame::Run(_)) => return ServeEnd::BadParentFrame,
+        };
+        let work = match run.work.clone() {
+            SharedWork::ThreadTask { timeout_ms } => ThreadSeatWork::Task {
+                timeout: timeout_ms,
+            },
+            SharedWork::Refusal(refusal) => ThreadSeatWork::Refusal(refusal),
+            SharedWork::AsyncTask { .. } => return ServeEnd::BadParentFrame,
+        };
+        if !take_seat(&in_flight, seats) {
+            return ServeEnd::BadParentFrame;
+        }
+        let run_ref = run_ref_of(&run);
+        let seat_context = context.clone();
+        let seat_runtime = runtime.clone();
+        let seat_in_flight = Arc::clone(&in_flight);
+        let started = thread::Builder::new()
+            .name(SEAT_THREAD_NAME.to_owned())
+            .spawn(move || {
+                thread_seat(&seat_context, &seat_runtime, run, work);
+                seat_in_flight.fetch_sub(1, Ordering::AcqRel);
+            });
+        if let Err(error) = started {
+            // No start was written: the row is still CLAIMED.
+            let frame = ChildFrame::SharedResult(SharedResultFrame {
+                run: run_ref,
+                end: SeatEnd::Finished(RunEnd::WorkerFailure(FailureDetail::cut(&format!(
+                    "the OS refused a seat thread: {error}"
+                )))),
+                rss: read_rss(),
+            });
+            context.writer.send(frame).await;
+            in_flight.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
+fn thread_seat(
+    context: &HostContext,
+    runtime: &tokio::runtime::Handle,
+    run: SharedRunFrame,
+    work: ThreadSeatWork,
+) {
+    let run_ref = run_ref_of(&run);
+    let facts = facts_of(&run);
+    let end = match runtime.block_on(start_attempt(context, &facts)) {
+        Started::Stopped(reason) => SeatEnd::Finished(RunEnd::StoppedBeforeRunning(reason)),
+        Started::Running => {
+            let end = match work {
+                ThreadSeatWork::Refusal(refusal) => SeatEnd::Finished(refusal_end(&refusal)),
+                ThreadSeatWork::Task { timeout } => {
+                    thread_body(context, runtime, run_ref, &facts, &run.input, timeout)
+                }
+            };
+            runtime.block_on(mark_finalizing(context, &facts));
+            end
+        }
+    };
+    context
+        .writer
+        .send_blocking(ChildFrame::SharedResult(SharedResultFrame {
+            run: run_ref,
+            end,
+            rss: read_rss(),
+        }));
+}
+
+const GATE_OPEN: u8 = 0;
+const GATE_RETURNED: u8 = 1;
+const GATE_FIRED: u8 = 2;
+
+/// Which came first for a thread run: its return or its deadline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GateEnd {
+    Returned,
+    Fired,
+}
+
+/// One gate per run: exactly one of the return and the deadline wins.
+pub(super) struct DeadlineGate(AtomicU8);
+
+impl DeadlineGate {
+    pub(super) fn new() -> Self {
+        Self(AtomicU8::new(GATE_OPEN))
+    }
+
+    /// The deadline: `true` when it won.
+    pub(super) fn fire(&self) -> bool {
+        self.0
+            .compare_exchange(GATE_OPEN, GATE_FIRED, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    /// The return: which one won.
+    pub(super) fn finish(&self) -> GateEnd {
+        match self.0.compare_exchange(
+            GATE_OPEN,
+            GATE_RETURNED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => GateEnd::Returned,
+            Err(_) => GateEnd::Fired,
+        }
+    }
+}
+
+fn thread_body(
+    context: &HostContext,
+    runtime: &tokio::runtime::Handle,
+    run_ref: RunRef,
+    facts: &RunFacts,
+    input: &TaskInputText,
+    timeout: TaskTimeoutMs,
+) -> SeatEnd {
+    let (task, input) = match prepare(&context.app, &facts.task_name, input) {
+        Prepared::Ended(end) => return SeatEnd::Finished(end),
+        Prepared::Body {
+            task: RegisteredTask::Blocking { task, .. },
+            input,
+        } => (task, input),
+        Prepared::Body {
+            task: RegisteredTask::Async { .. },
+            ..
+        } => return SeatEnd::Finished(kind_mismatch_end(&facts.task_name, "shared thread")),
+    };
+    let gate = Arc::new(DeadlineGate::new());
+    let timer_gate = Arc::clone(&gate);
+    let writer = context.writer.clone();
+    let timer = runtime.spawn(async move {
+        tokio::time::sleep(Duration::from_millis(timeout.get())).await;
+        if timer_gate.fire() {
+            writer.send(ChildFrame::DeadlineFired(run_ref)).await;
+        }
+    });
+    let result = run_blocking_body(&task, &input);
+    match gate.finish() {
+        GateEnd::Returned => {
+            timer.abort();
+            SeatEnd::Finished(result_end(result))
+        }
+        // The deadline came first: what the body returned is dropped.
+        GateEnd::Fired => SeatEnd::TimedOut,
+    }
+}

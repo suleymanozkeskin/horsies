@@ -142,7 +142,7 @@ impl std::fmt::Display for FinalizeError {
 // ---------------------------------------------------------------------------
 
 /// Phase 1 finalize gets 3 retries (matches Python `_FINALIZE_PHASE1_MAX_RETRIES`).
-const PHASE1_MAX_RETRIES: u32 = 3;
+pub(crate) const PHASE1_MAX_RETRIES: u32 = 3;
 /// Phase 2 finalize gets 5 retries (matches Python `_FINALIZE_PHASE2_MAX_RETRIES`).
 const PHASE2_MAX_RETRIES: u32 = 5;
 /// Base delay for phase-level retry backoff.
@@ -546,7 +546,7 @@ pub(crate) async fn execute_task(
                     task_timeout_error(timeout.unwrap_or_default())
                 }
                 Err(join_err) => TaskResult::Err(TaskError::builtin(
-                    OperationalErrorCode::UnhandledError,
+                    OperationalErrorCode::UnhandledException,
                     format!("async task panicked: {}", join_err),
                 )),
             }
@@ -572,11 +572,11 @@ pub(crate) async fn execute_task(
             match join {
                 Ok(Ok(r)) => r,
                 Ok(Err(_panic)) => TaskResult::Err(TaskError::builtin(
-                    OperationalErrorCode::UnhandledError,
+                    OperationalErrorCode::UnhandledException,
                     "blocking task panicked".to_owned(),
                 )),
                 Err(join_err) => TaskResult::Err(TaskError::builtin(
-                    OperationalErrorCode::UnhandledError,
+                    OperationalErrorCode::UnhandledException,
                     format!("blocking task join error: {}", join_err),
                 )),
             }
@@ -715,7 +715,7 @@ fn retry_request_for(
 }
 
 /// Persist a success, or fail a result that is not valid JSON.
-async fn persist_ok_result(
+pub(crate) async fn persist_ok_result(
     broker: &PostgresBroker,
     task_id: Uuid,
     result_bytes: &[u8],
@@ -820,7 +820,7 @@ async fn persist_workflow_success(
 /// A result that is not valid JSON fails the task with
 /// `WORKER_SERIALIZATION_ERROR`, never retried, with the decode diagnosis as
 /// the attempt message (Python `ResultUndecodable`).
-async fn persist_undecodable_result(
+pub(crate) async fn persist_undecodable_result(
     broker: &PostgresBroker,
     task_id: Uuid,
     fence: OwnedClaim,
@@ -855,7 +855,7 @@ async fn persist_undecodable_result(
 /// wake in the statement; a workflow task's failure owes phase 2; a retry
 /// wakes the queue when it is due; a replay owes what the committed write
 /// owed; a refusal owes nothing.
-async fn persist_failed_attempt(
+pub(crate) async fn persist_failed_attempt(
     broker: &PostgresBroker,
     command: &FinishFailedAttempt,
     is_workflow_task: bool,
@@ -1230,7 +1230,7 @@ WHERE t.id = target.id
 
 /// Stamp the finalization handoff only for the current owner and claim
 /// generation. One statement in autocommit: its row lock ends with it.
-async fn mark_task_finalizing(
+pub(crate) async fn mark_task_finalizing(
     pool: &sqlx::PgPool,
     task_id: Uuid,
     worker_id: &str,
@@ -1578,7 +1578,7 @@ async fn retry_phase2(
 }
 
 /// Compute phase-level retry delay with exponential backoff.
-fn phase_retry_delay(attempt: u32) -> f64 {
+pub(crate) fn phase_retry_delay(attempt: u32) -> f64 {
     (PHASE_RETRY_BASE_DELAY_S * 2.0f64.powi(attempt as i32 - 1)).min(PHASE_RETRY_MAX_DELAY_S)
 }
 
