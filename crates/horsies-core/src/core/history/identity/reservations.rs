@@ -1,6 +1,6 @@
 //! Typed clients for the reservation program installed by migration 0034.
 
-use sqlx::{FromRow, PgConnection};
+use sqlx::{FromRow, PgConnection, PgPool};
 use uuid::Uuid;
 
 use crate::core::history::errors::HistoryError;
@@ -97,6 +97,44 @@ pub async fn cleanup_expired_reservations(
         .fetch_one(&mut *connection)
         .await?;
     deleted.ok_or_else(|| HistoryError::contract("reservation cleanup did not return a count"))
+}
+
+/// Cleanup statements one maintenance pass runs at most. Each statement
+/// deletes at most one batch and commits on its own.
+pub const RESERVATION_CLEANUP_BATCHES_PER_PASS: u32 = 20;
+
+/// What one bounded cleanup pass did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReservationCleanupPass {
+    /// The last batch was not full: no expired `TERMINAL` row was left.
+    Complete { deleted: u64 },
+    /// Every batch of the pass was full: expired rows may remain for the next
+    /// pass.
+    Truncated { deleted: u64 },
+}
+
+/// Delete expired `TERMINAL` reservations in batches of `batch_size`, at most
+/// `max_batches` statements, each in its own transaction.
+///
+/// A failed statement ends the pass with its error; the batches before it
+/// stay committed. Live and unexpired rows are never touched.
+pub async fn cleanup_expired_reservations_pass(
+    pool: &PgPool,
+    batch_size: i32,
+    max_batches: u32,
+) -> Result<ReservationCleanupPass, HistoryError> {
+    let mut connection = pool.acquire().await?;
+    let mut deleted = 0_u64;
+    for _ in 0..max_batches {
+        let batch = cleanup_expired_reservations(&mut connection, batch_size).await?;
+        let batch_deleted = u64::try_from(batch)
+            .map_err(|_| HistoryError::contract("reservation cleanup returned a negative count"))?;
+        deleted += batch_deleted;
+        if batch < batch_size {
+            return Ok(ReservationCleanupPass::Complete { deleted });
+        }
+    }
+    Ok(ReservationCleanupPass::Truncated { deleted })
 }
 
 fn decode_reservation_row(
@@ -221,5 +259,52 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn cleanup_pass_stops_at_its_batch_bound_and_reports_truncation() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        // Start from no expired row of other tests in the shared database.
+        cleanup_expired_reservations_pass(&pool, 10_000, 100)
+            .await
+            .expect("clear expired reservations");
+        let expired: Vec<Vec<u8>> = (0..3_u8).map(|index| vec![41 + index; 32]).collect();
+        for digest in &expired {
+            sqlx::query(
+                "INSERT INTO horsies_key_reservations (
+                    idempotency_key_digest, key_scope_version, fingerprint_version,
+                    command_fingerprint, task_id, disposition, reservation_window, expires_at
+                 ) VALUES ($1, 1, 1, $2, $3, 'TERMINAL', INTERVAL '1 hour',
+                           NOW() - INTERVAL '1 hour')",
+            )
+            .bind(digest)
+            .bind(vec![7_u8; 32])
+            .bind(Uuid::new_v4())
+            .execute(&pool)
+            .await
+            .expect("seed expired reservation");
+        }
+        assert_eq!(
+            cleanup_expired_reservations_pass(&pool, 1, 2)
+                .await
+                .unwrap(),
+            ReservationCleanupPass::Truncated { deleted: 2 }
+        );
+        assert_eq!(
+            cleanup_expired_reservations_pass(&pool, 2, 2)
+                .await
+                .unwrap(),
+            ReservationCleanupPass::Complete { deleted: 1 }
+        );
+        assert_eq!(
+            cleanup_expired_reservations_pass(&pool, 2, 2)
+                .await
+                .unwrap(),
+            ReservationCleanupPass::Complete { deleted: 0 }
+        );
+        assert!(cleanup_expired_reservations_pass(&pool, 0, 2)
+            .await
+            .is_err());
     }
 }
