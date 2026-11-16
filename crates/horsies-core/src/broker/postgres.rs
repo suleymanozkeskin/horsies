@@ -57,10 +57,12 @@ use crate::broker::task_lists::{
 use crate::broker::wait_limit::WaitLimit;
 use crate::db::{PayloadEvent, PayloadFilter, WakeEvent, WakeSubscription};
 
-use crate::broker::pools::{CloseOutcome, CoreHandle, PoolProfile, SessionPool};
+use crate::broker::pools::{
+    CloseOutcome, CoreHandle, OpenPools, PoolProfile, SessionPool, WriteInFlight,
+};
 use crate::db::{
     BoundStatement, CheckoutClass, IsolationLevel, ParameterType, Row, StatementBound,
-    Transaction as CoreTransaction, TypedStatement,
+    Transaction as CoreTransaction, TypedStatement, WORKER_RESERVED_CONNECTIONS,
 };
 
 /// Refuse a sent task input that breaks the rules of a user value (Python `.send()` refuses it as
@@ -896,6 +898,37 @@ fn pg_session_pool_options(config: &PostgresConfig) -> PgPoolOptions {
     with_session_settings(pooled_options(config), SessionSettings::Kept)
 }
 
+/// The runtime pool of a worker broker: the batch users get
+/// `pool_size + max_overflow - WORKER_RESERVED_CONNECTIONS` connections, as
+/// the worker profile pool's batch limit; the reserve has its own pool.
+fn pg_worker_runtime_pool_options(config: &PostgresConfig) -> PgPoolOptions {
+    let batch_limit = config
+        .pool_size
+        .saturating_add(config.max_overflow)
+        .saturating_sub(WORKER_RESERVED_CONNECTIONS.get());
+    pg_pool_options(config).max_connections(batch_limit)
+}
+
+/// The worker reserve on `database_url`: [`WORKER_RESERVED_CONNECTIONS`]
+/// connections with the runtime pool's settings.
+fn pg_reserve_pool_options(config: &PostgresConfig) -> PgPoolOptions {
+    pg_pool_options(config).max_connections(WORKER_RESERVED_CONNECTIONS.get())
+}
+
+/// The sqlx pools of the worker reserve: connections that the users of
+/// [`PostgresBroker::pool`] cannot take. The reaper takes its gate and runs
+/// its pass on them, so a pass runs while the runtime pool is exhausted
+/// (Python keeps the reaper's gate session and pass body in the parent
+/// pool's reserve of 2).
+struct ReservePools {
+    /// [`WORKER_RESERVED_CONNECTIONS`] connections on `database_url`,
+    /// opened at first use.
+    runtime: PgPool,
+    /// The reaper's partition maintenance: the session pool when the session
+    /// URL differs, else `runtime`.
+    maintenance: PgPool,
+}
+
 fn prepared_statement_tracking_failed(err: &sqlx::Error) -> bool {
     // String-sniff deliberately: PgBouncer prepared-statement tracking failures
     // do not have one stable SQLSTATE across "missing prepared statement",
@@ -984,6 +1017,7 @@ pub enum SchemaInitializationMode {
 pub struct PostgresBroker {
     core: CoreHandle,
     statement_log: StatementLog,
+    reserve: ReservePools,
     pool: PgPool,
     session_pool: PgPool,
     pgbouncer_transaction_mode: bool,
@@ -1049,9 +1083,16 @@ impl PostgresBroker {
         schema_initialization_mode: SchemaInitializationMode,
         listener: ProcessListener,
     ) -> Self {
+        let reserve_runtime = PgPoolOptions::new()
+            .max_connections(WORKER_RESERVED_CONNECTIONS.get())
+            .connect_lazy_with((*pool.connect_options()).clone());
         Self {
             core: crate::broker::pools::handle_for_test_pool(&pool),
             statement_log: StatementLog::Off,
+            reserve: ReservePools {
+                maintenance: reserve_runtime.clone(),
+                runtime: reserve_runtime,
+            },
             session_pool: pool.clone(),
             pool,
             pgbouncer_transaction_mode: false,
@@ -1145,7 +1186,13 @@ impl PostgresBroker {
         config.validate()?;
         let core = CoreHandle::open(config, profile)?;
         let connect_options = pg_connect_options(&config.database_url, config.echo)?;
-        let pool = pg_pool_options(config)
+        let runtime_options = match profile {
+            PoolProfile::Producer => pg_pool_options(config),
+            PoolProfile::Worker => pg_worker_runtime_pool_options(config),
+        };
+        let reserve_runtime =
+            pg_reserve_pool_options(config).connect_lazy_with(connect_options.clone());
+        let pool = runtime_options
             .connect_with(connect_options)
             .await
             .map_err(BrokerError::Database)?;
@@ -1160,10 +1207,18 @@ impl PostgresBroker {
                 .await
                 .map_err(BrokerError::Database)?
         };
+        let reserve = ReservePools {
+            maintenance: match config.effective_session_database_url() == config.database_url {
+                true => reserve_runtime.clone(),
+                false => session_pool.clone(),
+            },
+            runtime: reserve_runtime,
+        };
 
         Ok(Self {
             core,
             statement_log: StatementLog::from_echo(config.echo),
+            reserve,
             pool,
             session_pool,
             pgbouncer_transaction_mode: config.pgbouncer_transaction_mode,
@@ -1300,15 +1355,35 @@ impl PostgresBroker {
         &self.session_pool
     }
 
-    /// The core pool on `database_url`, for the lifecycle writers that run
-    /// on the statement layer ([`crate::broker::attempt_writes`]). In a
-    /// worker it is the worker profile pool.
-    pub(crate) fn core_main_pool(&self) -> &crate::db::CorePool {
-        self.core.main()
+    /// The sqlx pool of the worker reserve on `database_url`:
+    /// [`WORKER_RESERVED_CONNECTIONS`] connections, opened at first use,
+    /// that the users of [`PostgresBroker::pool`] cannot take. The reaper
+    /// takes its gate and runs its pass on it.
+    pub fn reserve_pool(&self) -> &PgPool {
+        &self.reserve.runtime
+    }
+
+    /// The pool of the reaper's partition maintenance: the session pool when
+    /// the session URL differs, else [`PostgresBroker::reserve_pool`].
+    pub fn reserve_maintenance_pool(&self) -> &PgPool {
+        &self.reserve.maintenance
+    }
+
+    /// The open core pools, for a lifecycle writer that runs on the main
+    /// core pool ([`crate::broker::attempt_writes`]), and the token of its
+    /// write: [`PostgresBroker::close`] waits for the write while the token
+    /// lives. In a worker the main core pool is the worker profile pool. An
+    /// `Idle` handle opens its pools first.
+    ///
+    /// Errors: [`BrokerError::PoolSettings`] when the pools cannot be built.
+    pub(crate) fn core_pools_for_write(
+        &self,
+    ) -> Result<(std::sync::Arc<OpenPools>, WriteInFlight), BrokerError> {
+        Ok(self.core.pools_for_write()?)
     }
 
     /// Whether this broker logs each core statement it runs, for the
-    /// lifecycle writers that run on [`PostgresBroker::core_main_pool`].
+    /// lifecycle writers that run on the main core pool.
     pub(crate) fn statement_log(&self) -> StatementLog {
         self.statement_log
     }
