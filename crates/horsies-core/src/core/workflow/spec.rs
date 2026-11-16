@@ -539,11 +539,8 @@ impl WorkflowSpecBuilder {
             let has_args_from = !task.args_from.is_empty();
             let has_ctx_from = task.workflow_ctx_from.is_some();
             let input_json = &task.input_json;
-            let checked = crate::core::codec::check_json_text(input_json)
-                .map_err(|e| e.to_string())
-                .and_then(|()| {
-                    serde_json::from_str::<serde_json::Value>(input_json).map_err(|e| e.to_string())
-                });
+            let checked = crate::core::codec::from_json_str::<serde_json::Value>(input_json)
+                .map_err(|e| e.to_string());
             match checked {
                 Ok(serde_json::Value::Object(map)) => {
                     // Reserved key must not be provided explicitly.

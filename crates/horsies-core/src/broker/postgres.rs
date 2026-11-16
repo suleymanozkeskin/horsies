@@ -63,6 +63,60 @@ use crate::db::{
     StatementFailure, Transaction as CoreTransaction, TypedStatement,
 };
 
+/// Refuse a sent task input that breaks the rules of a user value (Python `.send()` refuses it as
+/// `VALIDATION_FAILED`, `core/task_decorator.py:2378-2387`). An object input is Python's keyword input: no
+/// member name is an engine key, and each member value has no engine key at any depth and at most
+/// `MAX_VALUE_JSON_DEPTH` levels. Any other input except `null` is one value under the same rules. A text that
+/// is not strict JSON is refused.
+fn check_sent_input(input: &str) -> Result<(), BrokerError> {
+    let refused =
+        |cause: String| BrokerError::EnqueueContract(format!("task input refused: {cause}"));
+    let value: serde_json::Value =
+        crate::core::codec::from_json_str(input).map_err(|e| refused(e.to_string()))?;
+    let no_engine_members: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let checked = match &value {
+        serde_json::Value::Object(members) => {
+            crate::core::codec::user_value::check_task_input(&[], members, &no_engine_members)
+        }
+        serde_json::Value::Null => Ok(()),
+        other => crate::core::codec::user_value::check_task_input(
+            std::slice::from_ref(other),
+            &serde_json::Map::new(),
+            &no_engine_members,
+        ),
+    };
+    checked.map_err(|refusal| refused(refusal.to_string()))
+}
+
+#[cfg(test)]
+mod sent_input_tests {
+    use super::check_sent_input;
+    use crate::broker::BrokerError;
+
+    /// Python `.send()` refuses an engine key in the input as `VALIDATION_FAILED`
+    /// (`core/task_decorator.py:2378-2387`).
+    #[test]
+    fn a_sent_input_with_an_engine_key_is_refused() {
+        for input in [
+            r#"{"x": {"__h_task_result__": true}}"#,
+            r#"{"__h_workflow_ctx__": {}}"#,
+            r#"[{"a": [{"__builtin_task_code__": "X"}]}]"#,
+            r#"{"x": NaN}"#,
+        ] {
+            assert!(
+                matches!(
+                    check_sent_input(input),
+                    Err(BrokerError::EnqueueContract(_))
+                ),
+                "{input}"
+            );
+        }
+        assert!(check_sent_input(r#"{"x": {"y": [1, 2]}}"#).is_ok());
+        assert!(check_sent_input("[1]").is_ok());
+        assert!(check_sent_input("null").is_ok());
+    }
+}
+
 #[cfg(test)]
 fn test_uuid(value: &str) -> Uuid {
     Uuid::parse_str(value).expect("test identity must be UUID")
@@ -1346,9 +1400,11 @@ impl PostgresBroker {
     /// Enqueue a new task. Returns the task ID (UUIDv7 at the public send funnel).
     ///
     /// `input` is the encoded task input as one JSON value; it is stored as
-    /// written. Uses ON CONFLICT DO NOTHING; a taken task id is compared by the
-    /// version-1 command fingerprint and the stored `sent_at` (the exact-id
-    /// resend check).
+    /// written. The input follows the rules of a user value
+    /// (`check_sent_input`); a refusal is `EnqueueContract`, which the send maps
+    /// to `VALIDATION_FAILED`. Uses ON CONFLICT DO NOTHING; a taken task id is
+    /// compared by the version-1 command fingerprint and the stored `sent_at`
+    /// (the exact-id resend check).
     #[allow(clippy::too_many_arguments)]
     pub async fn enqueue(
         &self,
@@ -1379,6 +1435,7 @@ impl PostgresBroker {
                 "sent_at is in the future without enqueued_at or enqueue_delay_seconds; sent_at is a call-site timestamp".to_owned(),
             ));
         }
+        check_sent_input(input)?;
         let task_id = match predetermined_task_id {
             Some(task_id) => task_id,
             None => crate::core::history::identity::uuid7::mint_task_id().map_err(|error| {
@@ -3164,7 +3221,7 @@ fn decode_raw_result_object(
 ) -> BrokerResult<Option<serde_json::Map<String, serde_json::Value>>> {
     raw_result
         .map(|raw| {
-            serde_json::from_str(raw)
+            crate::core::codec::from_json_str::<serde_json::Value>(raw)
                 .map_err(|error| invalid_raw_result(format!("result JSON is invalid: {error}")))
                 .and_then(decode_raw_result_value)
         })
