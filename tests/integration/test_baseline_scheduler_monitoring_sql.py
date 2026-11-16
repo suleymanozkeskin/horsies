@@ -1,6 +1,9 @@
 """The scheduler and monitoring functions of the baseline, through their SQL cases.
 
-``baseline_scheduler_monitoring_cases.sql`` holds every case. This module
+Two files hold the cases: ``baseline_scheduler_monitoring_cases.sql`` (the
+scheduler, the stale and expired lists, the task detail, list and facets)
+and ``baseline_monitoring_reads_cases.sql`` (the status counts, the
+breakdown, the workflow and schedule reads). For each file this module
 builds the database that the file expects (a fresh database with the
 baseline, the published history readers of the forever leaf, the dblink
 extension for the two-session cases) and runs the file as one message. The
@@ -32,10 +35,11 @@ from tests.integration.isolated_database import isolated_test_database
 
 pytestmark = [pytest.mark.integration]
 
-_CASES_SQL: Final = Path(__file__).with_name('baseline_scheduler_monitoring_cases.sql')
-
-PASSED_CASES: Final = 76
-"""The number of cases in the file. A case added to the file changes it."""
+CASE_FILES: Final = {
+    'baseline_scheduler_monitoring_cases.sql': 76,
+    'baseline_monitoring_reads_cases.sql': 78,
+}
+"""Each case file with its number of cases. A case added to a file changes it."""
 
 _FOREVER_LEAF: Final = LookupLeaf(
     relation_name='horsies_task_history_forever_open',
@@ -85,8 +89,11 @@ async def prepared() -> AsyncGenerator[psycopg.AsyncConnection[tuple[object, ...
 
 
 @pytest.mark.asyncio(loop_scope='function')
+@pytest.mark.parametrize(('case_file', 'case_count'), sorted(CASE_FILES.items()))
 async def test_scheduler_and_monitoring_sql_cases_pass(
     prepared: psycopg.AsyncConnection[tuple[object, ...]],
+    case_file: str,
+    case_count: int,
 ) -> None:
     passed: list[str] = []
 
@@ -98,9 +105,10 @@ async def test_scheduler_and_monitoring_sql_cases_pass(
     prepared.add_notice_handler(_collect)
     # A failed case raises 'CASE FAILED <name>: ...', which fails this test
     # with the case name in the error.
-    await prepared.execute(_CASES_SQL.read_text(encoding='utf-8').encode('utf-8'))
+    cases_sql = Path(__file__).with_name(case_file).read_text(encoding='utf-8')
+    await prepared.execute(cases_sql.encode('utf-8'))
     cursor = await prepared.execute('SELECT last_value FROM test_passed_cases')
     row = await cursor.fetchone()
-    assert row == (PASSED_CASES,), passed
-    assert len(passed) == PASSED_CASES
-    assert len(set(passed)) == PASSED_CASES, 'two cases share a name'
+    assert row == (case_count,), passed
+    assert len(passed) == case_count
+    assert len(set(passed)) == case_count, 'two cases share a name'
