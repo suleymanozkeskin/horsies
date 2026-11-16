@@ -3,7 +3,8 @@
 The monitoring tool never executes DDL. Creating or migrating the schema
 belongs to the library and its workers; pointing this tool at a database must
 never change that database's structure. So instead of initializing anything,
-the app reads the stored schema version and adapts:
+the app reads the stored schema version from the ``horsies_migrations``
+bookkeeping and adapts:
 
 * the versions agree — full functionality;
 * they disagree — reads are still served, because most of them keep working
@@ -26,17 +27,13 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Awaitable, Callable
 
+from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
+from horsies.core.baseline.migration import BASELINE_VERSION
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.logging import get_logger
 from horsies.core.types.result import Err, Ok
-from horsies.core.schemas.migrations import (
-    READ_SCHEMA_VERSION_SQL,
-    SCHEMA_VERSION,
-    SCHEMA_VERSION_TABLE_EXISTS_SQL,
-)
-from horsies.core.history.cutover.state import cutover_complete
 
 logger = get_logger('web')
 
@@ -45,15 +42,22 @@ SCHEMA_TTL_SECONDS = 60.0
 SCHEMA_INCOMPATIBLE = 'SCHEMA_INCOMPATIBLE'
 SCHEMA_UNKNOWN = 'SCHEMA_UNKNOWN'
 
+EXPECTED_SCHEMA_VERSION = BASELINE_VERSION
+"""The schema version this build writes through."""
+
+_MIGRATIONS_TABLE_EXISTS_SQL = text(
+    "SELECT to_regclass('horsies_migrations') IS NOT NULL"
+)
+_READ_SCHEMA_VERSION_SQL = text(
+    'SELECT COALESCE(max(version), 0) FROM horsies_migrations WHERE success'
+)
+
 
 class SchemaState(str, Enum):
     """How the database's schema relates to the one this build expects."""
 
     MATCH = 'MATCH'
     MISMATCH = 'MISMATCH'
-    # Migration chain is current, but the separately operated offline
-    # cutover has not reached its durable completion marker.
-    CUTOVER_REQUIRED = 'CUTOVER_REQUIRED'
     # Only ever the result of a successful observation.
     ABSENT = 'ABSENT'
     # The probe has never succeeded, so there is nothing to report yet.
@@ -91,13 +95,6 @@ class SchemaIncompatible(Exception):
                     'unavailable. Start a horsies app or worker to '
                     'initialize it; the monitoring tool never modifies the '
                     'database schema.'
-                )
-            case SchemaState.CUTOVER_REQUIRED:
-                self.detail = (
-                    f'Database schema is v{status.version}, but the offline '
-                    'task-history cutover is incomplete. Run the documented '
-                    'cutover stages through tighten and validation before '
-                    'enabling actions.'
                 )
             case _:
                 self.detail = (
@@ -149,7 +146,7 @@ class SchemaProbe:
             return self._cached or SchemaStatus(
                 state=SchemaState.UNKNOWN,
                 version=None,
-                expected_version=SCHEMA_VERSION,
+                expected_version=EXPECTED_SCHEMA_VERSION,
             )
 
         self._cached = observed
@@ -172,21 +169,16 @@ class SchemaProbe:
         try:
             async with resources.session_factory() as session:
                 present = (
-                    await session.execute(SCHEMA_VERSION_TABLE_EXISTS_SQL)
+                    await session.execute(_MIGRATIONS_TABLE_EXISTS_SQL)
                 ).scalar()
                 if not bool(present):
                     return SchemaStatus(
                         state=SchemaState.ABSENT,
                         version=None,
-                        expected_version=SCHEMA_VERSION,
+                        expected_version=EXPECTED_SCHEMA_VERSION,
                     )
                 stored = int(
-                    (await session.execute(READ_SCHEMA_VERSION_SQL)).scalar_one() or 0
-                )
-                completed = (
-                    await cutover_complete(await session.connection())
-                    if stored == SCHEMA_VERSION
-                    else False
+                    (await session.execute(_READ_SCHEMA_VERSION_SQL)).scalar_one()
                 )
         except SQLAlchemyError as exc:
             logger.warning(f'Schema version probe failed: {exc}')
@@ -196,20 +188,16 @@ class SchemaProbe:
             return SchemaStatus(
                 state=SchemaState.ABSENT,
                 version=None,
-                expected_version=SCHEMA_VERSION,
+                expected_version=EXPECTED_SCHEMA_VERSION,
             )
         return SchemaStatus(
             state=(
-                SchemaState.MISMATCH
-                if stored != SCHEMA_VERSION
-                else (
-                    SchemaState.MATCH
-                    if completed
-                    else SchemaState.CUTOVER_REQUIRED
-                )
+                SchemaState.MATCH
+                if stored == EXPECTED_SCHEMA_VERSION
+                else SchemaState.MISMATCH
             ),
             version=stored,
-            expected_version=SCHEMA_VERSION,
+            expected_version=EXPECTED_SCHEMA_VERSION,
         )
 
 

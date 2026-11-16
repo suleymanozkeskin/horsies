@@ -6,12 +6,19 @@ from sqlalchemy import text
 
 from horsies.core.models.tasks import Execution
 from horsies.core.models.workflow import WORKFLOW_TERMINAL_STATES
-from horsies.core.schemas.indexes import (
-    WORKFLOW_TERMINAL_STATUS_SQL_LITERALS,
-)
 from horsies.core.types.status import TASK_TERMINAL_STATES, TaskStatus
 
 WORKFLOW_TERMINAL_VALUES: list[str] = [s.value for s in WORKFLOW_TERMINAL_STATES]
+
+# Terminal workflow statuses rendered as SQL literals, sorted for deterministic
+# statement text. The workflow retention DELETEs below use them so that the
+# planner can prove their status predicate implies the predicate of the
+# baseline index idx_horsies_workflows_retention; a bound array under a generic
+# plan cannot be proven. Editing the set is a schema change: the index
+# predicate must change with it.
+WORKFLOW_TERMINAL_STATUS_SQL_LITERALS: str = ', '.join(
+    sorted(f"'{s.value}'" for s in WORKFLOW_TERMINAL_STATES),
+)
 TASK_TERMINAL_VALUES: list[str] = [s.value for s in TASK_TERMINAL_STATES]
 
 # Complement of the terminal set, derived from the same enum so the two can

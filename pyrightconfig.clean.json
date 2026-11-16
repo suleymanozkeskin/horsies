@@ -78,7 +78,11 @@
     "tests/e2e/tasks/instance_left_work_marker.py",
     "horsies/core/baseline/migration.py",
     "tests/unit/test_baseline_migration.py",
-    "tests/integration/test_baseline_sql.py"
+    "tests/integration/test_baseline_sql.py",
+    "horsies/core/baseline/install.py",
+    "tests/unit/test_baseline_install.py",
+    "tests/integration/test_baseline_install.py",
+    "tests/session_database.py"
   ],
   "reportUnnecessaryTypeIgnoreComment": "error"
 }

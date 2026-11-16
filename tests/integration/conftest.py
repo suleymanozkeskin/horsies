@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Generator
 import pytest
@@ -18,6 +17,7 @@ from horsies.core.models.queues import QueueMode
 from horsies.core.models.schedule import ScheduleConfig  # noqa: F401 - needed for AppConfig.model_rebuild()
 from horsies.core.utils.db import register_identity_text_reads
 from tests.broker_resources_support import current_resources
+from tests.session_database import suite_database_url
 
 # Rebuild AppConfig to resolve forward references
 AppConfig.model_rebuild()
@@ -38,16 +38,9 @@ from horsies.core.workflows.engine import start_workflow_async
 from horsies.core.types.result import is_err
 
 
-def _database_url() -> str:
-    return (
-        os.environ.get('HORSIES_TEST_DATABASE_URL')
-        or os.environ.get('HORSES_E2E_DB_URL')
-        or f'postgresql+psycopg://postgres:{os.environ["DB_PASSWORD"]}@localhost:5432/horsies'
-    )
-
-
-# Database URL
-DB_URL = _database_url()
+# A fresh database for this session (tests/session_database.py): the install
+# refuses a database that holds another schema.
+DB_URL = suite_database_url()
 
 
 @pytest.fixture(scope='session')

@@ -64,7 +64,7 @@ from horsies.core.brokers.result_types import (
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.recovery import OrphanTaskAuditReport
 from horsies.core.errors import ConfigurationError, ErrorCode
-from horsies.core.models.task_pg import TaskModel, Base
+from horsies.core.models.task_pg import TaskModel
 from horsies.core.models.workflow_pg import (
     WorkflowModel as _WorkflowModel,
     WorkflowTaskModel as _WorkflowTaskModel,
@@ -116,17 +116,25 @@ from horsies.core.history.errors import HistoryContractError
 from horsies.core.history.periods import RetentionClassKey
 from horsies.core.history.ddl.classes import (
     DEFAULT_RETENTION_CLASS_KEY,
-    describe_period_key_collision,
-    find_period_key_collisions,
     resolve_retention_class_key,
 )
 from horsies.core.history.maintenance.database import (
     PartitionMaintenanceDatabase,
 )
-from horsies.core.history.cutover.state import (
-    CREATE_CUTOVER_STATE_TABLE_SQL,
-    MARK_CUTOVER_COMPLETE_SQL,
-    cutover_complete,
+from horsies.core.baseline.install import (
+    InstallBaseline,
+    RecordFamily,
+    RefuseInstall,
+    SchemaReady,
+    SchemaStatementFailed,
+    decide_install,
+    install_baseline,
+    read_database_state,
+    record_client_family,
+)
+from horsies.core.baseline.migration import (
+    BaselineMigration,
+    load_baseline_migration,
 )
 from horsies.core.defaults import PRE_PING_AFTER_IDLE_S
 from horsies.core.utils.db import (
@@ -473,149 +481,14 @@ def _dbapi_sqlstate(exc: BaseException) -> str | None:
     return None
 
 
-def _is_schema_deadlock(exc: BaseException) -> bool:
-    return _dbapi_sqlstate(exc) == _SCHEMA_INIT_DEADLOCK_SQLSTATE
-
-
-def _is_missing_schema_version_table(exc: BaseException) -> bool:
-    return _dbapi_sqlstate(exc) == _SCHEMA_VERSION_MISSING_SQLSTATE
-
-
-# ---- Schema DDL (triggers, indexes, migrations) ----
-from horsies.core.schemas.triggers import (
-    CREATE_TASK_NOTIFY_FUNCTION_SQL,
-    CREATE_TASK_NOTIFY_TRIGGER_SQL,
-    DROP_TASK_NOTIFY_UPDATE_TRIGGER_SQL,
-    CREATE_TASK_STATUS_NOTIFY_FUNCTION_SQL,
-    CREATE_TASK_STATUS_NOTIFY_TRIGGER_SQL,
-    CREATE_WORKER_STATE_NOTIFY_FUNCTION_SQL,
-    CREATE_WORKER_STATE_NOTIFY_TRIGGER_SQL,
-    CREATE_WORKFLOW_NOTIFY_FUNCTION_SQL,
-    CREATE_WORKFLOW_NOTIFY_TRIGGER_SQL,
-    CREATE_WORKFLOW_STATUS_NOTIFY_FUNCTION_SQL,
-    CREATE_WORKFLOW_STATUS_NOTIFY_TRIGGER_SQL,
-)
 from horsies.core.worker.sql import (
     UPSERT_TASK_ATTEMPT_SQL,
     SCHEDULE_STALE_TASK_RETRY_SQL,
 )
-from horsies.core.schemas.indexes import (
-    CREATE_HEARTBEATS_TASK_ROLE_SENT_INDEX_SQL,
-    CREATE_TASK_ATTEMPTS_ERROR_CODE_INDEX_SQL,
-    CREATE_TASK_ATTEMPTS_FINISHED_AT_INDEX_SQL,
-    CREATE_TASKS_CLAIM_EXPIRED_INDEX_SQL,
-    CREATE_HEARTBEATS_SENT_AT_INDEX_SQL,
-    CREATE_TASKS_ENQUEUED_AT_INDEX_SQL,
-    CREATE_TASKS_ERROR_CODE_INDEX_SQL,
-    CREATE_TASKS_TASK_NAME_INDEX_SQL,
-    CREATE_TASKS_WORKER_STATUS_INDEX_SQL,
-    CREATE_WORKER_STATES_SNAPSHOT_AT_INDEX_SQL,
-    CREATE_WORKER_STATES_WORKER_SNAPSHOT_INDEX_SQL,
-    CREATE_WORKFLOW_TASKS_WF_STATUS_IDX_INDEX_SQL,
-    CREATE_WORKFLOWS_RETENTION_INDEX_SQL,
-)
-from horsies.core.schemas.migrations import (
-    ANALYZE_EXPRESSION_INDEXED_TABLES_SQL,
-    ADD_TERMINAL_AT_CHECK_SQL,
-    ADD_TERMINALIZATION_KIND_CHECK_SQL,
-    ADD_TERMINALIZATION_KIND_COLUMN_SQL,
-    BACKFILL_TERMINAL_AT_SQL,
-    CREATE_CLAIM_CANDIDATES_FUNCTION_SQL,
-    CREATE_CLAIM_PLAN_FUNCTION_SQL,
-    CREATE_CLAIM_FUNCTION_SQL,
-    CREATE_CLAIM_IN_FLIGHT_FUNCTION_SQL,
-    CREATE_OUTCOME_TYPE_SQL,
-    CREATE_TERMINALIZATION_FUNCTIONS_SQL,
-    DROP_TASKS_RETENTION_STATISTICS_SQL,
-    CREATE_WORKFLOWS_RETENTION_STATISTICS_SQL,
-    DROP_PREVIOUS_CLAIM_FUNCTIONS_SQL,
-    DROP_TERMINALIZATION_FUNCTIONS_SQL,
-    VALIDATE_TERMINAL_AT_CHECK_SQL,
-    VALIDATE_TERMINALIZATION_KIND_CHECK_SQL,
-    CREATE_TASK_ATTEMPTS_TABLE_SQL,
-    CREATE_SCHEMA_VERSION_TABLE_SQL,
-    ADD_DEPTH_COLUMN_SQL,
-    ADD_ENQUEUE_SHA_COLUMN_SQL,
-    ADD_ENQUEUED_AT_COLUMN_SQL,
-    ADD_ERROR_CODE_COLUMN_SQL,
-    ADD_TASK_FINALIZING_COLUMNS_SQL,
-    ADD_TASK_TERMINAL_AT_COLUMN_SQL,
-    ADD_TASK_EXECUTION_COLUMN_SQL,
-    ADD_TASK_EXECUTION_CHECK_SQL,
-    VALIDATE_TASK_EXECUTION_CHECK_SQL,
-    ADD_TASK_IS_WORKFLOW_TASK_COLUMN_SQL,
-    ADD_TRANSITIONAL_CUTOVER_COLUMNS_SQL,
-    ADD_ATTEMPT_SNAPSHOT_COLUMNS_SQL,
-    ADD_RERUN_INPUT_COLUMNS_SQL,
-    CREATE_HISTORY_FOUNDATION_SQL,
-    CREATE_KEY_RESERVATIONS_TABLE_SQL,
-    CREATE_RESERVATION_PROGRAM_SQL,
-    CREATE_RESERVATION_REGISTRY_INDEXES_SQL,
-    DROP_RESERVATION_PROGRAM_SQL,
-    FRESH_IDENTITY_PREDICATE_SQL,
-    KEY_RESERVATIONS_TABLE_EXISTS_SQL,
-    RESERVATION_REGISTRY_INDEX_EXISTS_SQL,
-    TASK_HISTORY_PARENT_EXISTS_SQL,
-    ADD_IS_SUBWORKFLOW_COLUMN_SQL,
-    ADD_JOIN_TYPE_COLUMN_SQL,
-    ADD_MIN_SUCCESS_COLUMN_SQL,
-    ADD_NODE_ID_COLUMN_SQL,
-    ADD_PARENT_TASK_INDEX_COLUMN_SQL,
-    ADD_PARENT_WORKFLOW_ID_COLUMN_SQL,
-    ADD_ROOT_WORKFLOW_ID_COLUMN_SQL,
-    ADD_SUB_WORKFLOW_ID_COLUMN_SQL,
-    ADD_SUB_WORKFLOW_NAME_COLUMN_SQL,
-    ADD_SUB_WORKFLOW_SUMMARY_COLUMN_SQL,
-    ADD_SUB_DEFINITION_KEY_COLUMN_SQL,
-    ADD_SUCCESS_POLICY_COLUMN_SQL,
-    ADD_TASK_OPTIONS_COLUMN_SQL,
-    ADD_WORKFLOW_SENT_AT_COLUMN_SQL,
-    ADD_WORKER_STATES_CHILDREN_MEMORY_COLUMN_SQL,
-    ADD_WORKER_STATES_SLOTS_DOWN_COLUMN_SQL,
-    ADD_WORKER_STATES_CLASS_CAPACITY_COLUMN_SQL,
-    ADD_DEFINITION_KEY_COLUMN_SQL,
-    BACKFILL_TASK_IS_WORKFLOW_TASK_SQL,
-    BACKFILL_ENQUEUE_SHA_SQL,
-    BACKFILL_ENQUEUED_AT_SQL,
-    BACKFILL_WORKFLOW_SENT_AT_SQL,
-    DROP_SUB_WORKFLOW_RETRY_MODE_COLUMN_SQL,
-    DROP_SUB_WORKFLOW_MODULE_COLUMN_SQL,
-    DROP_SUB_WORKFLOW_QUALNAME_COLUMN_SQL,
-    DROP_WORKFLOW_DEF_MODULE_COLUMN_SQL,
-    DROP_WORKFLOW_DEF_QUALNAME_COLUMN_SQL,
-    SCHEMA_ADVISORY_LOCK_SQL,
-    SCHEMA_VERSION,
-    SCHEMA_VERSION_TABLE_EXISTS_SQL,
-    INSERT_SCHEMA_VERSION_SQL,
-    READ_SCHEMA_VERSION_SQL,
-    TASK_HISTORY_LEAVES_MISSING_ORDERING_INDEX_SQL,
-    SET_ENQUEUE_SHA_NOT_NULL_SQL,
-    SET_ENQUEUED_AT_DEFAULT_SQL,
-    SET_ENQUEUED_AT_NOT_NULL_SQL,
-    CREATE_TASKS_GOOD_UNTIL_PARTIAL_INDEX_SQL,
-    DROP_REDUNDANT_TASK_INDEXES_SQL,
-    SET_TASK_COLUMN_DEFAULTS_SQL,
-    SET_WORKFLOW_SENT_AT_DEFAULT_SQL,
-    SET_WORKFLOW_SENT_AT_NOT_NULL_SQL,
-    WIDEN_HEARTBEATS_ID_TO_BIGINT_SQL,
-    WIDEN_WORKER_STATES_ID_TO_BIGINT_SQL,
-)
-from horsies.core.schemas.recovery import (
-    CREATE_RECOVERY_SCAN_CURSORS_SQL,
-    CREATE_WORKFLOW_RECOVERY_FAILURES_SQL,
-    SEED_RECOVERY_SCAN_CURSORS_SQL,
-    VALIDATE_CLAIM_INDEXES_SQL,
-    VALIDATE_RECOVERY_INDEXES_SQL,
-    install_claim_indexes,
-    install_recovery_indexes,
-    remove_retired_indexes,
-)
 
 _SCHEMA_INIT_MAX_ATTEMPTS = 5
 _SCHEMA_INIT_DEADLOCK_SQLSTATE = '40P01'
-_SCHEMA_VERSION_MISSING_SQLSTATE = '42P01'
 _UNDEFINED_FUNCTION_SQLSTATE = '42883'
-_PRE_CONCURRENT_SCHEMA_VERSION = 35
 _SCHEMA_LOCK_POLL_INTERVAL_SECONDS = 0.025
 
 
@@ -1474,236 +1347,174 @@ class PostgresBroker:
         h = hashlib.sha256(b'horsies:schema:v1').digest()
         return int.from_bytes(h[:8], byteorder='big', signed=True)
 
-    def _legacy_schema_advisory_key_for_url(self, url: str) -> int:
-        basis = url.encode('utf-8', errors='ignore')
-        h = hashlib.sha256(b'horsies-schema:' + basis).digest()
-        return int.from_bytes(h[:8], byteorder='big', signed=True)
-
-    def _legacy_schema_advisory_key(self) -> int:
-        return self._legacy_schema_advisory_key_for_url(
-            self.config.database_url.get_secret_value()
-        )
-
-    def _legacy_schema_advisory_keys(self) -> tuple[int, ...]:
-        urls = {
-            self.config.database_url.get_secret_value(),
-            self.config.effective_session_database_url,
-        }
-        return tuple(
-            sorted(self._legacy_schema_advisory_key_for_url(url) for url in urls)
-        )
-
-    async def _create_triggers(self, conn: Any) -> None:
-        """
-        Set up PostgreSQL triggers for automatic task notifications.
-
-        Creates triggers that send NOTIFY messages on:
-        - INSERT: Sends task_new + task_queue_{queue_name} notifications
-        - UPDATE to terminal status (COMPLETED/FAILED/CANCELLED/EXPIRED): Sends task_done notification
-
-        This enables real-time task processing without polling.
-        """
-        # Create trigger function
-        await conn.execute(CREATE_TASK_NOTIFY_FUNCTION_SQL)
-
-        # Create trigger
-        await conn.execute(CREATE_TASK_NOTIFY_TRIGGER_SQL)
-
-        # Monitoring notification triggers: every insert and every status
-        # change but the start (RUNNING)
-        await conn.execute(CREATE_TASK_STATUS_NOTIFY_FUNCTION_SQL)
-        await conn.execute(CREATE_TASK_STATUS_NOTIFY_TRIGGER_SQL)
-        await conn.execute(CREATE_WORKER_STATE_NOTIFY_FUNCTION_SQL)
-        await conn.execute(CREATE_WORKER_STATE_NOTIFY_TRIGGER_SQL)
-
-    async def _create_workflow_schema(self, conn: Any) -> None:
-        """
-        Set up workflow-specific schema elements.
-
-        Creates:
-        - Trigger for workflow completion notifications
-        - Migration: adds task_options column if missing (for existing installs)
-        """
-        # Migration (v8): first-failed lookups inside the completion lock.
-        await conn.execute(CREATE_WORKFLOW_TASKS_WF_STATUS_IDX_INDEX_SQL)
-
-        # Migration: add task_options column for existing installs
-        await conn.execute(ADD_TASK_OPTIONS_COLUMN_SQL)
-
-        # Migration: add success_policy column for existing installs
-        await conn.execute(ADD_SUCCESS_POLICY_COLUMN_SQL)
-
-        # Migration: add join_type and min_success columns for existing installs
-        await conn.execute(ADD_JOIN_TYPE_COLUMN_SQL)
-        await conn.execute(ADD_MIN_SUCCESS_COLUMN_SQL)
-        await conn.execute(ADD_NODE_ID_COLUMN_SQL)
-
-        # Subworkflow support columns
-        await conn.execute(ADD_PARENT_WORKFLOW_ID_COLUMN_SQL)
-        await conn.execute(ADD_PARENT_TASK_INDEX_COLUMN_SQL)
-        await conn.execute(ADD_DEPTH_COLUMN_SQL)
-        await conn.execute(ADD_ROOT_WORKFLOW_ID_COLUMN_SQL)
-        await conn.execute(ADD_DEFINITION_KEY_COLUMN_SQL)
-        await conn.execute(DROP_WORKFLOW_DEF_MODULE_COLUMN_SQL)
-        await conn.execute(DROP_WORKFLOW_DEF_QUALNAME_COLUMN_SQL)
-
-        await conn.execute(ADD_IS_SUBWORKFLOW_COLUMN_SQL)
-        await conn.execute(ADD_SUB_WORKFLOW_ID_COLUMN_SQL)
-        await conn.execute(ADD_SUB_WORKFLOW_NAME_COLUMN_SQL)
-        await conn.execute(DROP_SUB_WORKFLOW_RETRY_MODE_COLUMN_SQL)
-        await conn.execute(ADD_SUB_WORKFLOW_SUMMARY_COLUMN_SQL)
-        await conn.execute(ADD_SUB_DEFINITION_KEY_COLUMN_SQL)
-        await conn.execute(DROP_SUB_WORKFLOW_MODULE_COLUMN_SQL)
-        await conn.execute(DROP_SUB_WORKFLOW_QUALNAME_COLUMN_SQL)
-
-        # Workflow notification trigger function
-        await conn.execute(CREATE_WORKFLOW_NOTIFY_FUNCTION_SQL)
-
-        # Create workflow trigger
-        await conn.execute(CREATE_WORKFLOW_NOTIFY_TRIGGER_SQL)
-
-        # TUI notification trigger (broader: fires on ANY workflow status change)
-        await conn.execute(CREATE_WORKFLOW_STATUS_NOTIFY_FUNCTION_SQL)
-        await conn.execute(CREATE_WORKFLOW_STATUS_NOTIFY_TRIGGER_SQL)
-
     async def _run_with_schema_engine(
         self, resources: BrokerResources, fn: Any,
     ) -> None:
         await fn(resources.session_async_engine())
 
-    async def _read_schema_version(self, conn: Any) -> int:
-        result = await conn.execute(READ_SCHEMA_VERSION_SQL)
-        version = result.scalar_one()
-        return int(version or 0)
-
-    async def _read_schema_version_if_exists(self, engine: AsyncEngine) -> int:
-        try:
-            async with engine.begin() as conn:
-                exists_result = await conn.execute(SCHEMA_VERSION_TABLE_EXISTS_SQL)
-                if not bool(exists_result.scalar()):
-                    return 0
-                return await self._read_schema_version(conn)
-        except DBAPIError as exc:
-            if _is_missing_schema_version_table(exc):
-                return 0
-            raise
-
     async def _maybe_run_schema_init(self, engine: AsyncEngine) -> None:
-        stored_version = await self._read_schema_version_if_exists(engine)
-        # Read-only consumers such as the monitoring service must be able to
-        # inspect an absent, old, incomplete-cutover, or future schema and
-        # report its status without mutating it. Compatibility enforcement is
-        # owned by their schema-status probe; fleet brokers enforce it below.
-        # The period-key check is read-only, and a broker that runs no
-        # migrations still sends, so every broker runs it.
+        """Install the baseline schema when this broker runs migrations.
+
+        A broker with migrations off runs no schema statement. Read-only
+        consumers such as the monitoring service inspect the schema with their
+        own probe and never change it.
+        """
+        del engine  # the install uses its own direct session connection
         if self.run_schema_migrations:
-            await self._run_fleet_schema_init(engine, stored_version)
-        await self._refuse_period_key_collisions(engine)
+            await self._run_fleet_schema_init()
 
-    async def _run_fleet_schema_init(
-        self, engine: AsyncEngine, stored_version: int,
-    ) -> None:
-        """Migrate the schema, and refuse a newer schema or an open cutover."""
-        if stored_version < SCHEMA_VERSION:
-            await self._run_schema_migrations_with_retry(engine)
-        elif stored_version > SCHEMA_VERSION:
-            raise RuntimeError(
-                f'database schema v{stored_version} is newer than this '
-                f'build supports (v{SCHEMA_VERSION})'
-            )
-        async with engine.connect() as conn:
-            if not await cutover_complete(conn):
-                raise RuntimeError(
-                    'schema migrations are current but the offline task-history '
-                    'cutover is incomplete; run the documented cutover stages '
-                    'through tighten and validation before starting this fleet'
-                )
-
-    async def _refuse_period_key_collisions(self, engine: AsyncEngine) -> None:
-        """Refuse a broker whose periods' keys hold another duration.
-
-        A class key is a function of its period, so this process stamps
-        ``standard_{n}d`` for a period of n days. A registry row written by a
-        named declaration before 0.6.1 can hold that key with another
-        duration; rows stamped into it would be deleted on that duration.
-        The query is read-only and covers only the keys this process
-        stamps. A broker with no app, or an app with no mapped or listed
-        period, opens no connection.
+    async def _run_fleet_schema_init(self) -> None:
+        """Install the baseline into an empty database, or check an installed one.
 
         Raises:
-            RuntimeError: a period's key is registered with another
-                duration. The text names each key and both durations.
+            RuntimeError: the database holds something other than an empty
+                schema or this build's baseline; the text names what it holds.
+                Nothing was changed.
+            psycopg.Error: a statement failed (after the deadlock retries).
         """
-        match self._app:
-            case None:
-                return
-            case app:
-                period_classes = app.config.retention.registrable_classes()
-        match period_classes:
-            case ():
-                return
-            case _:
-                pass
-        async with engine.connect() as conn:
-            collisions = await find_period_key_collisions(conn, period_classes)
-        match collisions:
-            case ():
-                return
-            case _:
+        match load_baseline_migration():
+            case Err(unreadable):
                 raise RuntimeError(
-                    '; '.join(
-                        describe_period_key_collision(collision)
-                        for collision in collisions
-                    )
+                    f'baseline schema file {unreadable.file_name} is unreadable: '
+                    f'{unreadable.cause}'
                 )
-
-    async def _run_schema_migrations_with_retry(self, engine: AsyncEngine) -> None:
+            case Ok(migration):
+                pass
         for attempt in range(1, _SCHEMA_INIT_MAX_ATTEMPTS + 1):
-            try:
-                await self._run_schema_upgrade(engine)
-                return
-            except Exception as exc:
-                if (
-                    not _is_schema_deadlock(exc)
-                    or attempt == _SCHEMA_INIT_MAX_ATTEMPTS
-                ):
-                    raise
-                backoff = 0.05 + random.uniform(0, 0.2) * (2 ** (attempt - 1))
-                self.logger.warning(
-                    'schema init hit deadlock; retrying attempt=%s backoff_s=%.3f',
-                    attempt,
-                    backoff,
-                )
-                await asyncio.sleep(backoff)
+            match await self._install_once(migration):
+                case Ok():
+                    return
+                case Err(failure):
+                    pass
+            match failure:
+                case RefuseInstall(cause=refusal):
+                    raise RuntimeError(refusal)
+                case SchemaStatementFailed(step=step, cause=cause):
+                    if (
+                        cause.sqlstate != _SCHEMA_INIT_DEADLOCK_SQLSTATE
+                        or attempt == _SCHEMA_INIT_MAX_ATTEMPTS
+                    ):
+                        cause.add_note(f'schema install step: {step}')
+                        raise cause
+                    backoff = 0.05 + random.uniform(0, 0.2) * (2 ** (attempt - 1))
+                    self.logger.warning(
+                        'schema init hit deadlock; retrying attempt=%s backoff_s=%.3f',
+                        attempt,
+                        backoff,
+                    )
+                    await asyncio.sleep(backoff)
 
-    @contextlib.asynccontextmanager
-    async def _schema_session_lock(self) -> AsyncGenerator[None]:
-        """Hold every schema lock on one direct physical connection."""
+    async def _install_once(
+        self, migration: BaselineMigration,
+    ) -> Result[None, RefuseInstall | SchemaStatementFailed]:
+        """One pass: read the state, and only when a write is due, lock and act.
+
+        A database that already holds this build's baseline and family gets
+        no lock and no write.
+        """
         connection = await psycopg.AsyncConnection.connect(
             to_psycopg_url(self.config.effective_session_database_url),
             autocommit=True,
         )
-        keys = (*self._legacy_schema_advisory_keys(), self._schema_advisory_key())
-        held: list[int] = []
+        try:
+            first = await read_database_state(connection, migration)
+        finally:
+            await connection.close()
+        match first:
+            case Err(failed):
+                return Err(failed)
+            case Ok(state):
+                pass
+        match decide_install(state):
+            case SchemaReady():
+                return Ok(None)
+            case RefuseInstall() as refused:
+                return Err(refused)
+            case InstallBaseline() | RecordFamily():
+                pass
+        async with self._schema_session_lock() as locked:
+            return await self._install_under_lock(locked, migration)
+
+    async def _install_under_lock(
+        self,
+        connection: psycopg.AsyncConnection[Any],
+        migration: BaselineMigration,
+    ) -> Result[None, RefuseInstall | SchemaStatementFailed]:
+        """Read the state again under the schema lock and do what it needs.
+
+        Another installer may have finished while this one waited for the
+        lock; the second read sees its work.
+        """
+        match await read_database_state(connection, migration):
+            case Err(failed):
+                return Err(failed)
+            case Ok(state):
+                pass
+        match decide_install(state):
+            case SchemaReady():
+                return Ok(None)
+            case RefuseInstall() as refused:
+                return Err(refused)
+            case InstallBaseline():
+                self.logger.info(
+                    'Installing the baseline schema (migration %s)', migration.version,
+                )
+                return await install_baseline(connection, migration)
+            case RecordFamily():
+                match await record_client_family(connection):
+                    case Err(failed):
+                        return Err(failed)
+                    case Ok():
+                        pass
+        # The family insert may have lost to another client's row: read again.
+        match await read_database_state(connection, migration):
+            case Err(failed):
+                return Err(failed)
+            case Ok(after):
+                pass
+        match decide_install(after):
+            case SchemaReady():
+                return Ok(None)
+            case RefuseInstall() as refused:
+                return Err(refused)
+            case InstallBaseline() | RecordFamily():
+                raise AssertionError(
+                    f'schema state after recording the client family: {after!r}'
+                )
+
+    @contextlib.asynccontextmanager
+    async def _schema_session_lock(
+        self,
+    ) -> AsyncGenerator[psycopg.AsyncConnection[Any]]:
+        """Hold the schema lock on one direct physical connection, and yield it.
+
+        The connection is in autocommit mode and holds the session advisory
+        lock until the context ends. The wait for the lock has no bound.
+        """
+        connection = await psycopg.AsyncConnection.connect(
+            to_psycopg_url(self.config.effective_session_database_url),
+            autocommit=True,
+        )
+        key = self._schema_advisory_key()
+        held = False
         body_error: BaseException | None = None
         try:
-            for key in keys:
-                await _acquire_session_advisory_lock(connection, key)
-                held.append(key)
-            yield
+            await _acquire_session_advisory_lock(connection, key)
+            held = True
+            yield connection
         except BaseException as exc:
             body_error = exc
             raise
         finally:
             unlock_failed = False
-            for key in reversed(held):
+            if held:
                 try:
                     cursor = await connection.execute(
                         'SELECT pg_advisory_unlock(%s)',
                         (key,),
                     )
                     row = await cursor.fetchone()
-                    unlock_failed = unlock_failed or row is None or not bool(row[0])
+                    unlock_failed = row is None or not bool(row[0])
                 except psycopg.Error:
                     unlock_failed = True
             await connection.close()
@@ -1712,564 +1523,6 @@ class PostgresBroker:
                 if body_error is None:
                     raise RuntimeError(message)
                 body_error.add_note(message)
-
-    async def _run_schema_upgrade(self, engine: AsyncEngine) -> None:
-        if not self.run_schema_migrations:
-            self.logger.info(
-                'Schema migrations are disabled on this broker; skipping DDL'
-            )
-            return
-        async with self._schema_session_lock():
-            await self._run_schema_migrations(
-                engine,
-                target_version=_PRE_CONCURRENT_SCHEMA_VERSION,
-                acquire_transaction_locks=False,
-                reapply_at_target=True,
-            )
-            if await self._read_schema_version_if_exists(engine) >= SCHEMA_VERSION:
-                return
-            # v54: the column comes before the concurrent index build that
-            # reads it.
-            await self._add_task_execution_column(engine)
-            await install_recovery_indexes(engine)
-            # v54: the class-keyed pending claim index.
-            # v55: the class-keyed expired claim index.
-            await install_claim_indexes(engine)
-            await self._activate_bounded_recovery(engine)
-            # After the version row commits, so a failed upgrade leaves the
-            # earlier claim function the indexes it reads:
-            # v43: drop the task retention indexes that no query reads.
-            # v45: drop the workflow-node indexes that the workflow-scoped
-            # indexes make redundant.
-            # v55: drop the claim indexes that have no class in their key.
-            # A removal that fails here leaves those indexes until the next
-            # schema upgrade, which runs it again.
-            await remove_retired_indexes(engine)
-
-    async def _add_task_execution_column(self, engine: AsyncEngine) -> None:
-        """Add horsies_tasks.execution and its value domain (v54), in one
-        transaction. Idempotent: the column is added only when absent, and the
-        CHECK only when its definition differs. The pass before this one stops
-        at v35 on a database past it, so v54 cannot live there.
-        """
-        async with engine.begin() as conn:
-            await conn.execute(ADD_TASK_EXECUTION_COLUMN_SQL)
-            await conn.execute(ADD_TASK_EXECUTION_CHECK_SQL)
-            await conn.execute(VALIDATE_TASK_EXECUTION_CHECK_SQL)
-
-    async def _activate_bounded_recovery(self, engine: AsyncEngine) -> None:
-        from horsies.core.history.terminalization.move import (
-            bounded_cancel_orphan_sweep_ddl,
-            completion_batch_replacement_ddl,
-            failed_attempt_program_ddl,
-            locking_read_replacement_ddl,
-            pause_abandon_replacement_ddl,
-            terminal_snapshot_replacement_ddl,
-            workflow_success_program_ddl,
-        )
-        from horsies.core.history.ddl.column_rules import (
-            DROP_SINGLE_COLUMN_CHECKS_DDL,
-        )
-        from horsies.core.history.terminalization.duplicate_guard import (
-            duplicate_guard_fragments,
-        )
-
-        from horsies.core.schemas.node_status import close_workflow_node_status_set
-        from horsies.core.schemas.non_runnable_lookup import (
-            NON_RUNNABLE_LOOKUP_DDL,
-        )
-
-        async with engine.begin() as conn:
-            await close_workflow_node_status_set(conn)
-            await conn.execute(VALIDATE_RECOVERY_INDEXES_SQL)
-            await conn.execute(VALIDATE_CLAIM_INDEXES_SQL)
-            # v55 on a database already past the v35 apply path: the claim
-            # pair before v55 has other signatures, so it is dropped by its
-            # exact argument types, and the current claim functions are
-            # installed.
-            for drop_claim_function in DROP_PREVIOUS_CLAIM_FUNCTIONS_SQL:
-                await conn.execute(drop_claim_function)
-            await conn.execute(CREATE_CLAIM_PLAN_FUNCTION_SQL)
-            await conn.execute(CREATE_CLAIM_CANDIDATES_FUNCTION_SQL)
-            # v61: the in-flight count that horsies_claim calls.
-            await conn.execute(CREATE_CLAIM_IN_FLIGHT_FUNCTION_SQL)
-            await conn.execute(CREATE_CLAIM_FUNCTION_SQL)
-            uuid_identity = bool(
-                (await conn.execute(FRESH_IDENTITY_PREDICATE_SQL)).scalar_one()
-            )
-            if uuid_identity:
-                await conn.execute(text(
-                    'DROP FUNCTION IF EXISTS '
-                    'horsies_cancel_orphaned_tasks(integer)'
-                ))
-                await conn.execute(text(bounded_cancel_orphan_sweep_ddl()))
-                await conn.execute(text(NON_RUNNABLE_LOOKUP_DDL))
-                # v41: the pause abandons re-check PAUSED under the
-                # workflow lock.
-                for statement in pause_abandon_replacement_ddl():
-                    await conn.execute(text(statement))
-                # v42: the moves encode each attempt snapshot once and hash
-                # the result once. v44: the same statements install the
-                # pending expiry whose outcomes follow ascending deadlines.
-                # v48: the duplicate guard prunes its probes by birth time;
-                # skewed ids go to the clock-skew exception table.
-                # v50: the batch moves hash the batch result once.
-                for statement in duplicate_guard_fragments():
-                    await conn.execute(text(statement))
-                for statement in terminal_snapshot_replacement_ddl():
-                    await conn.execute(text(statement))
-                # v56: the failed-attempt finish and the locking read of a
-                # RUNNING task, both with the advisory lock first.
-                for statement in failed_attempt_program_ddl():
-                    await conn.execute(text(statement))
-                # v46: the update trigger cannot send task_done here.
-                await conn.execute(text(DROP_TASK_NOTIFY_UPDATE_TRIGGER_SQL))
-                # v57: the batched plain-success completion.
-                for statement in completion_batch_replacement_ddl():
-                    await conn.execute(text(statement))
-                # v60: the completion and failure functions read their row by
-                # id alone and check the fence on the locked row.
-                for statement in locking_read_replacement_ddl():
-                    await conn.execute(text(statement))
-                # v58: the success of a workflow task in one statement,
-                # with the advisory lock first.
-                for statement in workflow_success_program_ddl():
-                    await conn.execute(text(statement))
-            # v59: the status update trigger skips the start (RUNNING). Both
-            # programs keep the trigger, so it is replaced on every database.
-            await conn.execute(CREATE_TASK_STATUS_NOTIFY_TRIGGER_SQL)
-            # v49: the writers hold the single-column history rules.
-            await conn.execute(text(DROP_SINGLE_COLUMN_CHECKS_DDL))
-            # v51: the task retention statistics have no reader.
-            await conn.execute(DROP_TASKS_RETENTION_STATISTICS_SQL)
-            # v52: the stored count of the workflow recovery limit.
-            await conn.execute(CREATE_WORKFLOW_RECOVERY_FAILURES_SQL)
-            # v53: the slots that a worker reports as down.
-            await conn.execute(ADD_WORKER_STATES_SLOTS_DOWN_COLUMN_SQL)
-            # v55: the capacity of each claim budget of a worker.
-            await conn.execute(ADD_WORKER_STATES_CLASS_CAPACITY_COLUMN_SQL)
-            await conn.execute(
-                INSERT_SCHEMA_VERSION_SQL,
-                {'version': SCHEMA_VERSION},
-            )
-
-    async def _run_schema_migrations(
-        self,
-        engine: AsyncEngine,
-        *,
-        target_version: int = _PRE_CONCURRENT_SCHEMA_VERSION,
-        acquire_transaction_locks: bool = True,
-        reapply_at_target: bool = False,
-    ) -> None:
-        if not self.run_schema_migrations:
-            self.logger.info(
-                'Schema migrations are disabled on this broker; skipping DDL'
-            )
-            return
-        async with engine.begin() as conn:
-            # Acquire every relevant legacy URL-derived key before the new
-            # constant key. Sorting keeps new-process lock ordering stable,
-            # while also protecting rolling deploys that change database_url
-            # from a direct URL to a pooled URL and move direct access to
-            # session_database_url.
-            if acquire_transaction_locks:
-                for key in self._legacy_schema_advisory_keys():
-                    await conn.execute(
-                        SCHEMA_ADVISORY_LOCK_SQL,
-                        {'key': key},
-                    )
-                await conn.execute(
-                    SCHEMA_ADVISORY_LOCK_SQL,
-                    {'key': self._schema_advisory_key()},
-                )
-
-            await conn.execute(CREATE_SCHEMA_VERSION_TABLE_SQL)
-            await conn.execute(CREATE_RECOVERY_SCAN_CURSORS_SQL)
-            await conn.execute(SEED_RECOVERY_SCAN_CURSORS_SQL)
-            stored_version = await self._read_schema_version(conn)
-            if stored_version > target_version or (
-                stored_version == target_version and not reapply_at_target
-            ):
-                return
-
-            await conn.run_sync(Base.metadata.create_all)
-            await conn.execute(CREATE_CUTOVER_STATE_TABLE_SQL)
-
-            # Migration: ensure NOT NULL columns have server-side DEFAULTs
-            # for existing tables created before server_default was added.
-            await conn.execute(SET_TASK_COLUMN_DEFAULTS_SQL)
-            await conn.execute(CREATE_HEARTBEATS_TASK_ROLE_SENT_INDEX_SQL)
-
-            # Migration: add enqueued_at column, backfill from sent_at,
-            # and enforce NOT NULL for existing databases.
-            await conn.execute(ADD_ENQUEUED_AT_COLUMN_SQL)
-            await conn.execute(BACKFILL_ENQUEUED_AT_SQL)
-            await conn.execute(SET_ENQUEUED_AT_NOT_NULL_SQL)
-            await conn.execute(SET_ENQUEUED_AT_DEFAULT_SQL)
-
-            # Migration: add enqueue_sha column, backfill NULLs, enforce NOT NULL.
-            await conn.execute(ADD_ENQUEUE_SHA_COLUMN_SQL)
-            await conn.execute(BACKFILL_ENQUEUE_SHA_SQL)
-            await conn.execute(SET_ENQUEUE_SHA_NOT_NULL_SQL)
-
-            # Migration: add error_code column for task failure observability.
-            await conn.execute(ADD_ERROR_CODE_COLUMN_SQL)
-            await conn.execute(ADD_TASK_IS_WORKFLOW_TASK_COLUMN_SQL)
-            await conn.execute(BACKFILL_TASK_IS_WORKFLOW_TASK_SQL)
-            await conn.execute(ADD_TASK_FINALIZING_COLUMNS_SQL)
-
-            # Migration (v17): canonical terminal_at. Catalog-only ALTER;
-            # the backfill of pre-existing terminal rows is separate.
-            await conn.execute(ADD_TASK_TERMINAL_AT_COLUMN_SQL)
-            await conn.execute(CREATE_TASKS_ERROR_CODE_INDEX_SQL)
-
-            # Migration (v3): claim-path indexes. The ordered claim indexes
-            # carry the execution class since v55 and are built
-            # concurrently (install_claim_indexes).
-            await conn.execute(CREATE_TASKS_CLAIM_EXPIRED_INDEX_SQL)
-            await conn.execute(CREATE_TASKS_WORKER_STATUS_INDEX_SQL)
-            await conn.execute(CREATE_WORKER_STATES_WORKER_SNAPSHOT_INDEX_SQL)
-
-            # Migration (v4): widen timeseries PKs to BIGINT.
-            await conn.execute(WIDEN_HEARTBEATS_ID_TO_BIGINT_SQL)
-            await conn.execute(WIDEN_WORKER_STATES_ID_TO_BIGINT_SQL)
-
-            # Migration (v9): executor-child memory in worker telemetry.
-            await conn.execute(ADD_WORKER_STATES_CHILDREN_MEMORY_COLUMN_SQL)
-
-            # Migration (v5): drop write-amplifying single-column indexes;
-            # partial replacement for good_until.
-            await conn.execute(DROP_REDUNDANT_TASK_INDEXES_SQL)
-            await conn.execute(CREATE_TASKS_GOOD_UNTIL_PARTIAL_INDEX_SQL)
-
-            # Migration: create horsies_task_attempts table and indexes.
-            await conn.execute(CREATE_TASK_ATTEMPTS_TABLE_SQL)
-            await conn.execute(CREATE_TASK_ATTEMPTS_ERROR_CODE_INDEX_SQL)
-            await conn.execute(CREATE_TASK_ATTEMPTS_FINISHED_AT_INDEX_SQL)
-
-            # Migration: add workflow sent_at column (immutable workflow start
-            # call-site timestamp), backfill existing rows, and enforce NOT NULL.
-            # Keep this in the advisory-locked schema transaction to avoid DDL
-            # lock races with concurrent workflow writes.
-            await conn.execute(ADD_WORKFLOW_SENT_AT_COLUMN_SQL)
-            await conn.execute(BACKFILL_WORKFLOW_SENT_AT_SQL)
-            await conn.execute(SET_WORKFLOW_SENT_AT_NOT_NULL_SQL)
-            await conn.execute(SET_WORKFLOW_SENT_AT_DEFAULT_SQL)
-
-            await self._create_triggers(conn)
-            await self._create_workflow_schema(conn)
-
-            # Migration (v10): single-statement claim function.
-            # Migration (v12): claimed_at added to the function's OUT columns
-            # (claim-generation fence, C10); the return-type change requires
-            # dropping the v10/v11 definition first.
-            # Migration (v39): candidate selection moved into its own helper.
-            # Migration (v55): per-class budgets; the earlier signatures go.
-            for drop_claim_function in DROP_PREVIOUS_CLAIM_FUNCTIONS_SQL:
-                await conn.execute(drop_claim_function)
-            await conn.execute(CREATE_CLAIM_PLAN_FUNCTION_SQL)
-            await conn.execute(CREATE_CLAIM_CANDIDATES_FUNCTION_SQL)
-            # v61: the in-flight count that horsies_claim calls.
-            await conn.execute(CREATE_CLAIM_IN_FLIGHT_FUNCTION_SQL)
-            await conn.execute(CREATE_CLAIM_FUNCTION_SQL)
-
-            # Migration (v18): terminal_at completeness. Backfill first, then
-            # constrain, in that order and in this transaction — the
-            # constraint's precondition has to be true at the moment it is
-            # enforced. This ships inside the v19 artifact rather than ahead of
-            # it: the apply path exits early once the stored version is at or
-            # above SCHEMA_VERSION, so a database that reached v19 without this
-            # would never run it afterwards.
-            await conn.execute(BACKFILL_TERMINAL_AT_SQL)
-            await conn.execute(ADD_TERMINAL_AT_CHECK_SQL)
-            await conn.execute(VALIDATE_TERMINAL_AT_CHECK_SQL)
-
-            # Migration (v19): terminalization kind, and the operations that
-            # write it. The column, the type and the constraint are installed
-            # only when absent; the functions are dropped and recreated on
-            # every apply, following the claim precedent, because a function
-            # body is program rather than state.
-            await conn.execute(ADD_TERMINALIZATION_KIND_COLUMN_SQL)
-            await conn.execute(ADD_TERMINALIZATION_KIND_CHECK_SQL)
-            await conn.execute(VALIDATE_TERMINALIZATION_KIND_CHECK_SQL)
-
-            # THE TWO-WORLDS FORK — one CATALOG-READ predicate, read
-            # once here: the identity column's actual birth shape,
-            # never the schema version, because a database at the
-            # current version is legitimately EITHER world. The fork's
-            # two arms are positionally split by dependency order — the
-            # varchar arm keeps the in-place program byte-for-byte at
-            # its historical position, while the fresh-world install
-            # runs AFTER the history-foundation block below, because
-            # the program it installs (transcode job state in
-            # particular) references state that block creates.
-            uuid_born = bool((await conn.execute(
-                FRESH_IDENTITY_PREDICATE_SQL
-            )).scalar_one())
-            if not uuid_born:
-                await conn.execute(CREATE_OUTCOME_TYPE_SQL)
-                for drop_function in DROP_TERMINALIZATION_FUNCTIONS_SQL:
-                    await conn.execute(drop_function)
-                for create_function in CREATE_TERMINALIZATION_FUNCTIONS_SQL:
-                    await conn.execute(create_function)
-
-            # Migration (v11): retention eligibility indexes. The task index
-            # is retired at v43.
-            await conn.execute(CREATE_WORKER_STATES_SNAPSHOT_AT_INDEX_SQL)
-
-            # Migration (v12): heartbeat retention eligibility index (the
-            # v11 pass covered tasks and worker_states, not heartbeats).
-            await conn.execute(CREATE_HEARTBEATS_SENT_AT_INDEX_SQL)
-
-            # Migration (v13): workflow retention eligibility index — both
-            # workflow retention deletes filter horsies_workflows on the
-            # indexed predicate; completes the v11/v12 retention-index set.
-            await conn.execute(CREATE_WORKFLOWS_RETENTION_INDEX_SQL)
-
-            # Migration (v14): whole-table expression statistics for the
-            # workflow retention predicate. Partial-index statistics are
-            # never used for whole-table selectivity, so without this
-            # object the planner costs the retention cutoff at default
-            # selectivity and may keep a full-table walk despite the v13
-            # index. ANALYZE populates it in this transaction. The task
-            # statistics of v14 are dropped at v51.
-            await conn.execute(CREATE_WORKFLOWS_RETENTION_STATISTICS_SQL)
-            await conn.execute(ANALYZE_EXPRESSION_INDEXED_TABLES_SQL)
-
-            # Migration (v16): monitoring read-path indexes — task list
-            # default sort and task-name facet.
-            await conn.execute(CREATE_TASKS_ENQUEUED_AT_INDEX_SQL)
-            await conn.execute(CREATE_TASKS_TASK_NAME_INDEX_SQL)
-
-            # Migration (v27): transitional live cutover columns —
-            # nullable, check-free, derived from the declared cutover
-            # fragment (the authoritative final shape the cutover
-            # migration later backfills and tightens to).
-            await conn.execute(ADD_TRANSITIONAL_CUTOVER_COLUMNS_SQL)
-
-            # Migration (v28): the keyed-enqueue reservation registry,
-            # verbatim from the frozen module. The registry maintenance
-            # indexes are deliberately absent — wave-gated conditional
-            # DDL, not an omission to repair; the claim rides the PK.
-            registry_exists = (
-                await conn.execute(KEY_RESERVATIONS_TABLE_EXISTS_SQL)
-            ).scalar_one()
-            if not registry_exists:
-                await conn.execute(CREATE_KEY_RESERVATIONS_TABLE_SQL)
-            for drop_statement in DROP_RESERVATION_PROGRAM_SQL:
-                await conn.execute(drop_statement)
-            for create_statement in CREATE_RESERVATION_PROGRAM_SQL:
-                await conn.execute(create_statement)
-
-            # Migration (v29): the task-history foundation at its final
-            # shape — the frozen program minus the v28-owned entries,
-            # then the two gated column families while the parent is
-            # empty (born final; the NOT NULL columns are addable only
-            # now). The parent carries NO leaves at emission: leaf
-            # creation is partition-manager runtime owned by the
-            # cutover, so an empty partitioned parent here is designed,
-            # not defective. Parent existence implies the whole block
-            # applied — it runs in this one transaction.
-            history_parent_exists = (
-                await conn.execute(TASK_HISTORY_PARENT_EXISTS_SQL)
-            ).scalar_one()
-            if not history_parent_exists:
-                for statement in CREATE_HISTORY_FOUNDATION_SQL:
-                    await conn.execute(statement)
-                for statement in ADD_ATTEMPT_SNAPSHOT_COLUMNS_SQL:
-                    await conn.execute(statement)
-                for statement in ADD_RERUN_INPUT_COLUMNS_SQL:
-                    await conn.execute(statement)
-
-            # Migration (v35): ``forever`` is a RANGE parent instead of one
-            # unbounded LIST leaf. The conversion retains pre-today rows in a
-            # bounded legacy leaf and moves only the current UTC day's rows.
-            # Subsequent monitoring windows can therefore prune old forever
-            # history without adding another terminalization-path index.
-            from horsies.core.history.partitions.forever import (
-                ensure_forever_range_partitioning,
-            )
-
-            await ensure_forever_range_partitioning(conn)
-
-            # Migration (v30): the registry maintenance indexes, closing
-            # v28's recorded deliberate absence on the already-deployed
-            # registry.
-            registry_index_exists = (
-                await conn.execute(RESERVATION_REGISTRY_INDEX_EXISTS_SQL)
-            ).scalar_one()
-            if not registry_index_exists:
-                for statement in CREATE_RESERVATION_REGISTRY_INDEXES_SQL:
-                    await conn.execute(statement)
-
-            # Migration (v31): EXPIRED joined the workflow terminal
-            # set, which changes the generated partial-index predicate
-            # of idx_horsies_workflows_retention. IF NOT EXISTS never
-            # rebuilds an existing index, so the migration drops and
-            # recreates explicitly — the class rule for any changed
-            # generated predicate; a fresh database gets the new
-            # predicate either way, only deployed ones are at risk.
-            await conn.execute(
-                text('DROP INDEX IF EXISTS idx_horsies_workflows_retention')
-            )
-            await conn.execute(CREATE_WORKFLOWS_RETENTION_INDEX_SQL)
-
-            # Migration (v34): the per-leaf enqueue-order index on task
-            # history. New leaves are born with it (foundation DDL,
-            # partition manager, transcode replacements); this walk
-            # covers leaves that already exist, from the live partition
-            # tree, creating the index only where the property — a
-            # non-partial single-key btree on enqueued_at — is absent.
-            from horsies.core.history.commands import is_safe_identifier
-            from horsies.core.history.errors import HistoryContractError
-            from horsies.core.history.partitions.catalog import (
-                leaf_enqueued_index_name,
-            )
-
-            leaves_missing_ordering_index = (
-                await conn.execute(
-                    TASK_HISTORY_LEAVES_MISSING_ORDERING_INDEX_SQL
-                )
-            ).all()
-            for leaf_row in leaves_missing_ordering_index:
-                leaf_name = str(leaf_row.leaf_name)
-                if not is_safe_identifier(leaf_name):
-                    raise HistoryContractError(
-                        'task-history leaf name is not a safe identifier: '
-                        f'{leaf_name!r}'
-                    )
-                await conn.execute(text(
-                    f'CREATE INDEX {leaf_enqueued_index_name(leaf_name)} '
-                    f'ON {leaf_name} (enqueued_at)'
-                ))
-
-            # The fresh-world arm of the two-worlds fork (predicate
-            # read above): a uuid-born install is BORN AT THE
-            # CUTOVER'S END STATE. It has no old fleet, so its
-            # programs' owner is the 0.5.0 fleet being installed —
-            # the terminalization program is the MOVE family (the
-            # same install list the cutover's program-replacement
-            # stage owns), the status domain is live-only from the
-            # first row, and the heartbeat shape is partitioned from
-            # birth. Positioned after the history foundation because
-            # the installed program references its state.
-            if uuid_born:
-                from horsies.core.history.cutover.program import (
-                    installation_fragments,
-                    teardown_statements,
-                )
-                from horsies.core.history.ddl.fragments import (
-                    cutover_fragments,
-                )
-                from horsies.core.history.heartbeats.partitioning import (
-                    HEARTBEATS_PARTITIONED_DDL,
-                )
-                from horsies.core.history.terminalization.live_cutover import (
-                    LIVE_STATUS_DOMAIN_DDL,
-                    tightening_cutover_ddl,
-                )
-
-                domain_present = (await conn.execute(text(
-                    """SELECT EXISTS (SELECT 1 FROM pg_constraint
-                    WHERE conrelid = 'horsies_tasks'::regclass
-                    AND conname = 'horsies_tasks_live_status_only')"""
-                ))).scalar_one()
-                if not domain_present:
-                    await conn.execute(text(LIVE_STATUS_DOMAIN_DDL))
-                for statement in teardown_statements():
-                    await conn.execute(text(statement))
-                for statement in installation_fragments(
-                    bounded_orphan=False
-                ):
-                    await conn.execute(text(statement))
-                heartbeats_flat = (await conn.execute(text(
-                    """SELECT relkind <> 'p' FROM pg_class
-                    WHERE oid = 'horsies_heartbeats'::regclass"""
-                ))).scalar_one()
-                if heartbeats_flat:
-                    await conn.execute(
-                        text('DROP TABLE horsies_heartbeats')
-                    )
-                    await conn.execute(text(HEARTBEATS_PARTITIONED_DDL))
-
-                # Migration (v32): the fourth part of the end state.
-                # v27 adds the cutover columns TRANSITIONALLY — nullable
-                # and unchecked — because an upgraded install's old
-                # writers would violate the declared shape before the
-                # backfill. A uuid-born install has no old writers and
-                # never runs the offline tighten, so without this it
-                # would wear the transitional shape permanently while
-                # this arm claims it is born at the end state. Same
-                # renderer the tighten stage uses: a fourth shape cannot
-                # drift into existence.
-                columns_tightened = (await conn.execute(text(
-                    """SELECT attnotnull FROM pg_attribute
-                    WHERE attrelid = 'horsies_tasks'::regclass
-                      AND attname = 'retention_class_key'"""
-                ))).scalar_one()
-                if not columns_tightened:
-                    for statement in tightening_cutover_ddl():
-                        await conn.execute(text(statement))
-
-                # The locator contract, which the tighten stage also
-                # applies: the composite key structurally pins a node's
-                # identity to its workflow while a phase-2 pending row
-                # exists. Without it the outbox has no referential tie
-                # to the node, so deleting a workflow leaves pending
-                # rows whose workflow is gone — unresolvable, retried
-                # every pass, and competing with real work for the
-                # bounded discovery.
-                # Migration (v33): guarded on the DELETE ACTION, not on
-                # the constraint's existence. A database born at v32
-                # carries this key without the cascade, and adding a
-                # constraint that is already there never rebuilds it —
-                # the class rule for any changed constraint definition.
-                locator_cascades = (await conn.execute(text(
-                    """SELECT EXISTS (SELECT 1 FROM pg_constraint
-                    WHERE conname =
-                        'horsies_workflow_phase2_pending_node_fkey'
-                      AND confdeltype = 'c')"""
-                ))).scalar_one()
-                if not locator_cascades:
-                    await conn.execute(text(
-                        'ALTER TABLE horsies_workflow_phase2_pending '
-                        'DROP CONSTRAINT IF EXISTS '
-                        'horsies_workflow_phase2_pending_node_fkey'
-                    ))
-                    await conn.execute(text(
-                        'ALTER TABLE horsies_workflow_tasks '
-                        'DROP CONSTRAINT IF EXISTS '
-                        'horsies_workflow_tasks_node_workflow_key'
-                    ))
-                    for statement in cutover_fragments():
-                        await conn.execute(text(statement))
-
-                # A native-uuid database is either fresh or already cut over,
-                # but identity alone is not enough to attest the frozen
-                # posture. Validate every structural invariant before writing
-                # the durable marker.
-                from horsies.core.history.cutover.validation import (
-                    CutoverInvalid,
-                    CutoverValidated,
-                    validate_cutover_structure,
-                )
-
-                match await validate_cutover_structure(conn):
-                    case CutoverValidated():
-                        await conn.execute(MARK_CUTOVER_COMPLETE_SQL)
-                    case CutoverInvalid(violations=violations):
-                        raise RuntimeError(
-                            'native-uuid schema failed cutover validation: '
-                            + '; '.join(violations)
-                        )
-
-            await conn.execute(
-                INSERT_SCHEMA_VERSION_SQL,
-                {'version': target_version},
-            )
-
-    async def _initialize_schema(self, engine: AsyncEngine) -> None:
-        await self._run_schema_migrations_with_retry(engine)
 
     async def _ensure_initialized(self, resources: BrokerResources) -> None:
         if self._initialized:
