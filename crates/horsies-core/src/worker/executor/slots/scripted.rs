@@ -671,7 +671,8 @@ pub(super) fn start_isolated_from(
     live: LiveDispatches,
 ) -> (IsolatedPool, Arc<PoolBoard>) {
     let board = Arc::new(PoolBoard::new(layout(slots, 0, 0)));
-    let source: Arc<dyn crate::worker::executor::supervisor::ChildSource> = Arc::clone(source);
+    let source: Arc<dyn crate::worker::executor::supervisor::ChildSource> =
+        Arc::<super::held_exits::HeldExits>::clone(source);
     let pool =
         IsolatedPool::start_from_source(config, Arc::clone(&board), spawner.handle(), source, live);
     (pool, board)
@@ -686,6 +687,7 @@ pub(super) fn start_shared_from(
     config: SharedPoolConfig,
     live: LiveDispatches,
 ) -> SharedPool {
-    let source: Arc<dyn crate::worker::executor::supervisor::ChildSource> = Arc::clone(source);
+    let source: Arc<dyn crate::worker::executor::supervisor::ChildSource> =
+        Arc::<super::held_exits::HeldExits>::clone(source);
     SharedPool::start_from_source(config, Arc::clone(board), spawner.handle(), source, live)
 }

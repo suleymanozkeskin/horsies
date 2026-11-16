@@ -497,12 +497,13 @@ pub(crate) fn worker_core_pool_for_test_pool(pool: &sqlx::PgPool, size: u32) -> 
         runtime_protocol(&config),
     )
     .expect("a test worker pool is larger than its reserve");
-    open_pool(
+    let (core_pool, _masked_url) = open_pool(
         &config.database_url,
         plan,
         &ConnectionEnvironment::isolated(),
     )
-    .expect("the URL of a test pool is accepted by the statement layer")
+    .expect("the URL of a test pool is accepted by the statement layer");
+    core_pool
 }
 
 /// The checkout wait of [`unpinged_single_connection_core_pool`].
@@ -913,7 +914,7 @@ mod kept_session_tests {
             Some(format!("{url}{separator}application_name=horsies_session"));
         config.pgbouncer_transaction_mode = true;
         let pools = open_test_pools(&config);
-        let SessionPool::Separate(session) = &pools.session else {
+        let SessionPool::Separate { pool: session, .. } = &pools.session else {
             panic!("a distinct session URL gets a pool of its own");
         };
 

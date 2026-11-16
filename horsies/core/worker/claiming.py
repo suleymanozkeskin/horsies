@@ -72,7 +72,7 @@ from horsies.core.worker.row_class import (
 from horsies.core.worker.stored_timeout import (
     NoTimeout,
     StoredTimeout,
-    read_stored_timeout,
+    read_claimed_options,
 )
 from horsies.core.worker.sql import (
     CLAIM_SQL,
@@ -424,7 +424,7 @@ class ClaimMixin:
             row['input'],
             row.get('queue_name') or 'default',
             bool(row.get('is_workflow_task', False)),
-            timeout=read_stored_timeout(row.get('task_options')),
+            timeout=read_claimed_options(row.get('task_options')),
             claim=dispatch_claim_of(row),
             execution=parse_row_class(str(row['id']), row['execution']),
         )
