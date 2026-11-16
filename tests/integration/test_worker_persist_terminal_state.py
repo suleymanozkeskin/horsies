@@ -940,15 +940,17 @@ async def test_locked_completion_miss_does_not_touch_a_newer_generation(
     summary = (
         await session.execute(
             text("""
-                SELECT status, result, terminalization_kind,
+                SELECT status, claimed_at,
                        (SELECT COUNT(*) FROM horsies_task_attempts a
-                        WHERE a.task_id = t.id) AS attempt_count
+                        WHERE a.task_id = t.id) AS attempt_count,
+                       (SELECT COUNT(*) FROM horsies_task_history h
+                        WHERE h.task_id = t.id) AS history_count
                 FROM horsies_tasks t WHERE t.id = :id
             """),
             {'id': task_id},
         )
     ).one()
     assert summary.status == 'RUNNING'
-    assert summary.result is None
-    assert summary.terminalization_kind is None
+    assert summary.claimed_at == current_generation
     assert summary.attempt_count == 0
+    assert summary.history_count == 0
