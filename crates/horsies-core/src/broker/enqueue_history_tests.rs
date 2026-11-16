@@ -134,39 +134,25 @@ async fn clear_enqueue_state(pool: &PgPool) {
 #[derive(Debug, sqlx::FromRow)]
 struct StoredFacts {
     task_id: Uuid,
+    input: String,
+    execution: String,
     rerun_of_task_id: Option<Uuid>,
     rerun_root_task_id: Option<Uuid>,
     command_fingerprint_version: Option<i16>,
     command_fingerprint_length: Option<i32>,
     retention_class_key: Option<String>,
-    input_digest_length: Option<i32>,
     idempotency_key_digest_length: Option<i32>,
     retain_rerun_input: Option<bool>,
-    disposition: Option<String>,
-    prepared_version: Option<i16>,
-    codec: Option<String>,
-    content_type: Option<String>,
-    prepared_digest_length: Option<i32>,
-    inline_length: Option<i32>,
-    reference: Option<String>,
 }
 
 async fn stored_facts(pool: &PgPool, task_id: Uuid) -> StoredFacts {
     sqlx::query_as(
-        "SELECT id AS task_id, rerun_of_task_id, rerun_root_task_id,
+        "SELECT id AS task_id, input, execution, rerun_of_task_id, rerun_root_task_id,
                 command_fingerprint_version,
                 octet_length(command_fingerprint) AS command_fingerprint_length,
                 retention_class_key,
-                octet_length(input_digest) AS input_digest_length,
                 octet_length(idempotency_key_digest) AS idempotency_key_digest_length,
-                retain_rerun_input,
-                prepared_rerun_input_disposition AS disposition,
-                prepared_rerun_input_version AS prepared_version,
-                prepared_rerun_input_codec AS codec,
-                prepared_rerun_input_content_type AS content_type,
-                octet_length(prepared_rerun_input_digest) AS prepared_digest_length,
-                octet_length(prepared_rerun_input_inline) AS inline_length,
-                prepared_rerun_input_reference AS reference
+                retain_rerun_input
          FROM horsies_tasks WHERE id = $1",
     )
     .bind(task_id)
@@ -175,26 +161,29 @@ async fn stored_facts(pool: &PgPool, task_id: Uuid) -> StoredFacts {
     .expect("read P6 enqueue facts")
 }
 
+/// The input of the keyed sends: `value` varies the command, `named` stays.
+fn keyed_input(value: &str) -> String {
+    format!("{{\"value\":{value},\"named\":true}}")
+}
+
 async fn enqueue_keyed(
     broker: &PostgresBroker,
     task_id: Uuid,
     sent_at: chrono::DateTime<Utc>,
-    args: &str,
+    value: &str,
     key: Option<&str>,
     class: Option<&str>,
 ) -> Result<Uuid, BrokerError> {
     broker
         .enqueue(
             "p6_direct",
-            Some(args),
-            Some("{\"named\":true}"),
+            &keyed_input(value),
             "default",
             50,
             Some(sent_at),
             None,
             None,
             Some("{}"),
-            "p6-stable-sha",
             Some(task_id),
             None,
             key,
@@ -226,21 +215,15 @@ async fn direct_enqueue_persists_v27_facts_and_key_outcomes() {
     assert_eq!(applied.get_version_num(), 7);
     let facts = stored_facts(&pool, applied).await;
     assert_eq!(facts.task_id, applied);
+    assert_eq!(facts.input, keyed_input("[1]"));
+    assert_eq!(facts.execution, "ISOLATED");
     assert!(facts.rerun_of_task_id.is_none());
     assert!(facts.rerun_root_task_id.is_none());
     assert_eq!(facts.command_fingerprint_version, Some(1));
     assert_eq!(facts.command_fingerprint_length, Some(32));
     assert_eq!(facts.retention_class_key.as_deref(), Some("audit_7d"));
-    assert_eq!(facts.input_digest_length, Some(32));
     assert_eq!(facts.idempotency_key_digest_length, Some(32));
     assert_eq!(facts.retain_rerun_input, Some(true));
-    assert_eq!(facts.disposition.as_deref(), Some("INLINE"));
-    assert_eq!(facts.prepared_version, Some(1));
-    assert_eq!(facts.codec.as_deref(), Some("json-utf8"));
-    assert_eq!(facts.content_type.as_deref(), Some("application/json"));
-    assert_eq!(facts.prepared_digest_length, Some(32));
-    assert!(facts.inline_length.is_some_and(|length| length > 0));
-    assert!(facts.reference.is_none());
     let reservation_window_seconds: i64 = sqlx::query_scalar(
         "SELECT EXTRACT(EPOCH FROM reservation_window)::bigint
          FROM horsies_key_reservations WHERE task_id = $1::uuid",
@@ -289,15 +272,13 @@ async fn direct_enqueue_persists_v27_facts_and_key_outcomes() {
     let forever = broker
         .enqueue(
             "p6_forever",
-            None,
-            None,
+            "null",
             "default",
             50,
             Some(sent_at),
             None,
             None,
             None,
-            "p6-forever-sha",
             Some(forever_id),
             None,
             None,
@@ -311,11 +292,8 @@ async fn direct_enqueue_persists_v27_facts_and_key_outcomes() {
         forever_facts.retention_class_key.as_deref(),
         Some("forever")
     );
-    assert_eq!(
-        forever_facts.disposition.as_deref(),
-        Some("DECLINED_BY_POLICY"),
-    );
-    assert!(forever_facts.inline_length.is_none());
+    assert_eq!(forever_facts.input, "null");
+    assert_eq!(forever_facts.retain_rerun_input, Some(false));
 }
 
 #[tokio::test]
@@ -334,15 +312,13 @@ async fn task_id_conflict_binds_applied_key_and_queue_classes_register() {
     broker
         .enqueue(
             "p6_bind",
-            Some("[1]"),
-            None,
+            "[1]",
             "bulk",
             50,
             Some(sent_at),
             None,
             None,
             None,
-            "p6-bind-sha",
             Some(task_id),
             None,
             None,
@@ -354,15 +330,13 @@ async fn task_id_conflict_binds_applied_key_and_queue_classes_register() {
     let rebound = broker
         .enqueue(
             "p6_bind",
-            Some("[1]"),
-            None,
+            "[1]",
             "bulk",
             50,
             Some(sent_at),
             None,
             None,
             None,
-            "p6-bind-sha",
             Some(task_id),
             None,
             Some("bind-key"),
@@ -396,15 +370,13 @@ async fn task_id_conflict_binds_applied_key_and_queue_classes_register() {
     let different_key = broker
         .enqueue(
             "p6_bind",
-            Some("[1]"),
-            None,
+            "[1]",
             "bulk",
             50,
             Some(sent_at),
             None,
             None,
             None,
-            "p6-bind-sha",
             Some(task_id),
             None,
             Some("different-bind-key"),
@@ -433,15 +405,13 @@ async fn task_id_conflict_binds_applied_key_and_queue_classes_register() {
     let mismatch = broker
         .enqueue(
             "p6_bind",
-            Some("[2]"),
-            None,
+            "[2]",
             "bulk",
             50,
             Some(sent_at),
             None,
             None,
             None,
-            "p6-bind-sha",
             Some(task_id),
             None,
             Some("rejected-bind-key"),
@@ -525,15 +495,13 @@ async fn broker_retain_default_is_inherited_and_explicit_false_wins() {
     let inherited = broker
         .enqueue(
             "p6_retain_default",
-            Some("[1]"),
-            None,
+            "[1]",
             "default",
             50,
             Some(sent_at),
             None,
             None,
             None,
-            "p6-retain-inherited",
             None,
             None,
             None,
@@ -545,15 +513,13 @@ async fn broker_retain_default_is_inherited_and_explicit_false_wins() {
     let declined = broker
         .enqueue(
             "p6_retain_default",
-            Some("[2]"),
-            None,
+            "[2]",
             "default",
             50,
             Some(sent_at),
             None,
             None,
             None,
-            "p6-retain-declined",
             None,
             None,
             None,
@@ -565,20 +531,21 @@ async fn broker_retain_default_is_inherited_and_explicit_false_wins() {
 
     let inherited_facts = stored_facts(&pool, inherited).await;
     assert_eq!(inherited_facts.retain_rerun_input, Some(true));
-    assert_eq!(inherited_facts.disposition.as_deref(), Some("INLINE"));
     let declined_facts = stored_facts(&pool, declined).await;
     assert_eq!(declined_facts.retain_rerun_input, Some(false));
-    assert_eq!(
-        declined_facts.disposition.as_deref(),
-        Some("DECLINED_BY_POLICY"),
-    );
 }
 
 #[test]
-fn every_workspace_task_insert_is_cutover_conformant_or_the_v26_fixture() {
-    // Gate rule: any change that adds, removes, or relocates a test task INSERT
-    // must rerun this inventory and update the exact classified count.
+fn every_core_task_insert_names_the_baseline_columns() {
+    // Gate rule: any change that adds, removes, or relocates a task INSERT in
+    // the core must rerun this inventory and update the exact count. The
+    // baseline schema has no column defaults, so every insert names these.
     const SOURCES: &[(&str, &str)] = &[
+        ("broker/migrations.rs", include_str!("migrations.rs")),
+        (
+            "broker/monitoring_schema_tests.rs",
+            include_str!("monitoring_schema_tests.rs"),
+        ),
         ("broker/postgres.rs", include_str!("postgres.rs")),
         (
             "broker/terminalization_matrix.rs",
@@ -589,8 +556,25 @@ fn every_workspace_task_insert_is_cutover_conformant_or_the_v26_fixture() {
             include_str!("../core/history/reads/tests.rs"),
         ),
         (
+            "core/history/rerun/tests.rs",
+            include_str!("../core/history/rerun/tests.rs"),
+        ),
+        (
+            "monitoring/action_tests.rs",
+            include_str!("../monitoring/action_tests.rs"),
+        ),
+        (
+            "monitoring/tests.rs",
+            include_str!("../monitoring/tests.rs"),
+        ),
+        ("web/tests.rs", include_str!("../web/tests.rs")),
+        (
             "worker/execution.rs",
             include_str!("../worker/execution.rs"),
+        ),
+        (
+            "worker/finalizing_tests.rs",
+            include_str!("../worker/finalizing_tests.rs"),
         ),
         ("worker/recovery.rs", include_str!("../worker/recovery.rs")),
         ("worker/worker.rs", include_str!("../worker/worker.rs")),
@@ -603,6 +587,10 @@ fn every_workspace_task_insert_is_cutover_conformant_or_the_v26_fixture() {
             include_str!("../workflow_engine/lifecycle.rs"),
         ),
         (
+            "workflow_engine/phase2_recovery.rs",
+            include_str!("../workflow_engine/phase2_recovery.rs"),
+        ),
+        (
             "workflow_engine/recovery.rs",
             include_str!("../workflow_engine/recovery.rs"),
         ),
@@ -610,37 +598,17 @@ fn every_workspace_task_insert_is_cutover_conformant_or_the_v26_fixture() {
             "workflow_engine/start.rs",
             include_str!("../workflow_engine/start.rs"),
         ),
-        (
-            "rust/tests/support/src/e2e/worker.rs",
-            include_str!("../../../../rust/tests/support/src/e2e/worker.rs"),
-        ),
-        (
-            "rust/tests/support/src/workflow_helpers.rs",
-            include_str!("../../../../rust/tests/support/src/workflow_helpers.rs"),
-        ),
-        (
-            "rust/tests/support/tests/smoke.rs",
-            include_str!("../../../../rust/tests/support/tests/smoke.rs"),
-        ),
-        (
-            "rust/tests/worker/tests/layer0_task_history_migrations.rs",
-            include_str!("../../../../rust/tests/worker/tests/layer0_task_history_migrations.rs"),
-        ),
-        (
-            "rust/tests/worker/tests/layer1_tasks.rs",
-            include_str!("../../../../rust/tests/worker/tests/layer1_tasks.rs"),
-        ),
     ];
     const REQUIRED: &[&str] = &[
+        "input",
+        "execution",
         "command_fingerprint_version",
         "command_fingerprint",
         "retention_class_key",
         "retain_rerun_input",
-        "prepared_rerun_input_disposition",
     ];
     let needle = ["INSERT INTO horsies_", "tasks"].concat();
     let mut insert_count = 0;
-    let mut transitional_v26_count = 0;
 
     for (path, source) in SOURCES {
         for suffix in source.split(&needle).skip(1) {
@@ -660,24 +628,14 @@ fn every_workspace_task_insert_is_cutover_conformant_or_the_v26_fixture() {
                 .copied()
                 .filter(|column| !columns.contains(column))
                 .collect();
-            if missing.is_empty() {
-                continue;
-            }
-            if *path == "rust/tests/worker/tests/layer0_task_history_migrations.rs"
-                && suffix.contains("'seeded-v26'")
-            {
-                transitional_v26_count += 1;
-                continue;
-            }
-            panic!("{path}: task insert omits cutover columns {missing:?}");
+            assert!(
+                missing.is_empty(),
+                "{path}: task insert omits baseline columns {missing:?}"
+            );
         }
     }
 
-    assert_eq!(insert_count, 31, "classify every workspace task insert");
-    assert_eq!(
-        transitional_v26_count, 1,
-        "only the populated-v26 migration fixture may omit post-v26 columns",
-    );
+    assert_eq!(insert_count, 38, "classify every core task insert");
 }
 
 #[test]

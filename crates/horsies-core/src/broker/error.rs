@@ -43,12 +43,16 @@ pub enum BrokerError {
     #[error("connection failed: {0}")]
     ConnectionFailed(String),
 
-    /// Enqueue conflict: same task_id but different payload (SHA mismatch).
-    #[error("payload mismatch for task_id {task_id}: existing row has different enqueue_sha")]
+    /// Enqueue conflict: same task_id but another command or another send call
+    /// (command fingerprint or `sent_at` differs).
+    #[error(
+        "payload mismatch for task_id {task_id}: existing row has a different command or sent_at"
+    )]
     PayloadMismatch { task_id: Uuid },
 
     /// Enqueue observed a conflict, but the conflicting row disappeared before
-    /// its `enqueue_sha` could be compared — payload identity cannot be proven.
+    /// its fingerprint and `sent_at` could be compared — payload identity cannot
+    /// be proven.
     #[error(
         "task_id {task_id} conflict detected but row disappeared before verification \
          for {task_name}; cannot verify payload identity"

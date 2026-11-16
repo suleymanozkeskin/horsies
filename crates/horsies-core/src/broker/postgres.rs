@@ -1,9 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Timelike, Utc};
 use serde::de::DeserializeOwned;
-use sha2::{Digest, Sha256};
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 use sqlx::{ConnectOptions, FromRow, Postgres, Transaction};
 use std::str::FromStr;
@@ -11,11 +10,8 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::core::history::archive::results::decode_result_envelope;
-use crate::core::history::enqueue::{
-    prepare_enqueue_facts, EnqueueInputEligibility, PreparedEnqueueFacts,
-};
+use crate::core::history::enqueue::prepare_enqueue_facts;
 use crate::core::history::errors::HistoryError;
-use crate::core::history::identity::fingerprint::COMMAND_FINGERPRINT_VERSION;
 use crate::core::history::identity::keys::{
     validate_reservation_window, IDEMPOTENCY_SCOPE_VERSION, IDEMPOTENCY_WINDOW_DEFAULT_HOURS,
 };
@@ -59,28 +55,35 @@ fn test_uuid(value: &str) -> Uuid {
 // SQL constants
 // ---------------------------------------------------------------------------
 
+// Every NOT NULL column is named: the baseline schema has no column defaults.
+// A first-run send has no rerun lineage and is not a workflow task.
 const ENQUEUE_SQL: &str = "\
 INSERT INTO horsies_tasks (
-    id, task_name, queue_name, priority, args, kwargs,
-    status, sent_at, enqueued_at, good_until, max_retries, task_options,
-    enqueue_sha, is_workflow_task, created_at, updated_at,
-    command_fingerprint_version, command_fingerprint, retention_class_key,
-    input_digest, rerun_of_task_id, rerun_root_task_id, idempotency_key_digest,
-    retain_rerun_input, prepared_rerun_input_disposition,
-    prepared_rerun_input_version, prepared_rerun_input_codec,
-    prepared_rerun_input_content_type, prepared_rerun_input_digest,
-    prepared_rerun_input_inline, prepared_rerun_input_reference
+    id, task_name, queue_name, priority, input, task_options, execution,
+    retention_class_key, sent_at, created_at,
+    command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+    status, enqueued_at, retry_count, max_retries, good_until,
+    is_workflow_task, updated_at,
+    retain_rerun_input, rerun_of_task_id, rerun_root_task_id
 )
-VALUES ($1, $2, $3, $4, $5, $6, 'PENDING', $7,
-        CASE WHEN $8::timestamptz IS NOT NULL THEN $8
-             WHEN $26::bigint IS NOT NULL
-             THEN NOW() + make_interval(secs => $26::double precision)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), $10, $11, $12, 'PENDING',
+        CASE WHEN $13::timestamptz IS NOT NULL THEN $13
+             WHEN $14::bigint IS NOT NULL
+             THEN NOW() + make_interval(secs => $14::double precision)
              ELSE NOW() END,
-        $9,
-        $10, $11, $12, FALSE, NOW(), NOW(), $13, $14, $15, $16, NULL, NULL,
-        $17, $18, $19, $20, $21, $22, $23, $24, $25)
+        0, $15, $16, FALSE, NOW(), $17, NULL, NULL)
 ON CONFLICT (id) DO NOTHING
 RETURNING id";
+
+// The exact-id resend check reads what the send compares: the command
+// fingerprint and the stored send call time.
+const READ_SEND_IDENTITY_SQL: &str = "\
+SELECT command_fingerprint_version, command_fingerprint, sent_at
+FROM horsies_tasks WHERE id = $1";
+
+const READ_SEND_IDENTITY_FOR_KEY_SQL: &str = "\
+SELECT command_fingerprint_version, command_fingerprint, sent_at, idempotency_key_digest
+FROM horsies_tasks WHERE id = $1 FOR UPDATE";
 
 // Eligibility split into two CTE arms — PENDING and expired-CLAIMED — each with
 // its own ORDER BY + FOR UPDATE SKIP LOCKED + LIMIT, merged and re-limited. The
@@ -136,7 +139,7 @@ SET status = 'CLAIMED',
     updated_at = now()
 FROM next
 WHERE t.id = next.id
-RETURNING t.id, t.task_name, t.args, t.kwargs, t.queue_name, t.is_workflow_task, t.task_options, t.claimed_at";
+RETURNING t.id, t.task_name, t.input, t.queue_name, t.is_workflow_task, t.task_options, t.claimed_at";
 
 // One server-side call performs advisory-lock acquisition + cap counts + the
 // windowed claim (see horsies_claim, migrations/0027_claim_function_v12.sql;
@@ -152,7 +155,7 @@ RETURNING t.id, t.task_name, t.args, t.kwargs, t.queue_name, t.is_workflow_task,
 // good_until) are gone from the function; the dispatch path reads them from
 // SET_RUNNING_SQL's RETURNING instead.
 const HORSIES_CLAIM_SQL: &str = "\
-SELECT id::uuid AS id, task_name, args, kwargs, queue_name, is_workflow_task, \
+SELECT id::uuid AS id, task_name, input, queue_name, is_workflow_task, \
        task_options, claimed_at \
 FROM horsies_claim($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)";
 
@@ -312,7 +315,7 @@ GROUP BY queue_name";
 /// more than that can be dispatched this pass (P7). `claimed_at` rides along so
 /// the buffered dispatch fences on the claim generation it acts for.
 const LOAD_BUFFERED_CLAIMED_SQL: &str = "\
-SELECT id, task_name, args, kwargs, queue_name, is_workflow_task, task_options, claimed_at \
+SELECT id, task_name, input, queue_name, is_workflow_task, task_options, claimed_at \
 FROM horsies_tasks \
 WHERE claimed_by_worker_id = $1 AND status = 'CLAIMED' \
 ORDER BY priority ASC, enqueued_at ASC, id ASC \
@@ -940,21 +943,21 @@ impl PostgresBroker {
 
     /// Enqueue a new task. Returns the task ID (UUIDv7 at the public send funnel).
     ///
-    /// Uses ON CONFLICT DO NOTHING with `enqueue_sha` verification for
-    /// idempotent enqueue — matching Python's `enqueue_async()` behaviour.
+    /// `input` is the encoded task input as one JSON value; it is stored as
+    /// written. Uses ON CONFLICT DO NOTHING; a taken task id is compared by the
+    /// version-1 command fingerprint and the stored `sent_at` (the exact-id
+    /// resend check).
     #[allow(clippy::too_many_arguments)]
     pub async fn enqueue(
         &self,
         task_name: &str,
-        args: Option<&str>,
-        kwargs: Option<&str>,
+        input: &str,
         queue_name: &str,
         priority: i32,
         sent_at: Option<DateTime<Utc>>,
         enqueued_at: Option<DateTime<Utc>>,
         good_until: Option<DateTime<Utc>>,
         task_options: Option<&str>,
-        enqueue_sha: &str,
         predetermined_task_id: Option<Uuid>,
         enqueue_delay_seconds: Option<i64>,
         idempotency_key: Option<&str>,
@@ -981,23 +984,26 @@ impl PostgresBroker {
             })?,
         };
         let max_retries = parse_max_retries(task_options);
-        let effective_sent_at = sent_at.unwrap_or_else(Utc::now);
+        let effective_sent_at = sent_at_at_stored_precision(sent_at.unwrap_or_else(Utc::now))?;
         let retain_rerun_input = retain_rerun_input.unwrap_or(self.retain_rerun_input_default);
         let facts = prepare_enqueue_facts(
             task_name,
             queue_name,
             priority,
-            args,
-            kwargs,
+            input,
             good_until,
             enqueue_delay_seconds,
             task_options,
             retention_class_key,
             retain_rerun_input,
             idempotency_key,
-            EnqueueInputEligibility::Ordinary,
         )
         .map_err(|error| BrokerError::EnqueueContract(error.to_string()))?;
+        let sent = SendIdentity {
+            fingerprint_version: Some(facts.command_fingerprint_version),
+            fingerprint: Some(facts.command_fingerprint.to_vec()),
+            sent_at: effective_sent_at,
+        };
         let mut transaction = self.pool.begin().await.map_err(BrokerError::Database)?;
         if let Some(key_digest) = facts.idempotency_key_digest {
             let claim = claim_key_reservation(
@@ -1038,38 +1044,24 @@ impl PostgresBroker {
             .bind(task_name)
             .bind(queue_name)
             .bind(priority)
-            .bind(args)
-            .bind(kwargs)
-            .bind(effective_sent_at)
-            .bind(enqueued_at)
-            .bind(good_until)
-            .bind(max_retries)
+            .bind(input)
             .bind(task_options)
-            .bind(enqueue_sha)
+            .bind(facts.execution.as_str())
+            .bind(&facts.retention_class_key)
+            .bind(effective_sent_at)
             .bind(facts.command_fingerprint_version)
             .bind(facts.command_fingerprint.as_slice())
-            .bind(&facts.retention_class_key)
-            .bind(facts.input_digest.as_slice())
             .bind(
                 facts
                     .idempotency_key_digest
                     .as_ref()
                     .map(<[u8; 32]>::as_slice),
             )
-            .bind(facts.retain_rerun_input)
-            .bind(facts.prepared_rerun_input_disposition.as_str())
-            .bind(facts.prepared_rerun_input_version)
-            .bind(facts.prepared_rerun_input_codec)
-            .bind(facts.prepared_rerun_input_content_type)
-            .bind(
-                facts
-                    .prepared_rerun_input_digest
-                    .as_ref()
-                    .map(<[u8; 32]>::as_slice),
-            )
-            .bind(facts.prepared_rerun_input_inline.as_deref())
-            .bind(facts.prepared_rerun_input_reference.as_deref())
+            .bind(enqueued_at)
             .bind(enqueue_delay_seconds)
+            .bind(max_retries)
+            .bind(good_until)
+            .bind(facts.retain_rerun_input)
             .fetch_optional(&mut *transaction)
             .await
             .map_err(BrokerError::Database)?;
@@ -1086,9 +1078,8 @@ impl PostgresBroker {
                     transaction,
                     task_id,
                     task_name,
-                    enqueue_sha,
+                    &sent,
                     &key_digest,
-                    &facts,
                 )
                 .await;
         }
@@ -1098,19 +1089,23 @@ impl PostgresBroker {
             .await
             .map_err(BrokerError::Database)?;
 
-        // Conflict: task_id already exists. Verify payload identity via stored SHA.
-        tracing::debug!(task_id = %task_id, task_name, "enqueue conflict — verifying enqueue_sha");
+        // Conflict: task_id already exists. Compare the fingerprint and sent_at.
+        tracing::debug!(task_id = %task_id, task_name, "enqueue conflict — comparing the send identity");
 
-        let stored_sha: Option<(String,)> =
-            sqlx::query_as("SELECT enqueue_sha FROM horsies_tasks WHERE id = $1")
+        let stored: Option<(Option<i16>, Option<Vec<u8>>, DateTime<Utc>)> =
+            sqlx::query_as(READ_SEND_IDENTITY_SQL)
                 .bind(task_id)
                 .fetch_optional(&self.pool)
                 .await
                 .map_err(BrokerError::Database)?;
 
         let outcome = classify_enqueue_conflict(
-            stored_sha.as_ref().map(|(s,)| s.as_str()),
-            enqueue_sha,
+            stored.map(|(fingerprint_version, fingerprint, sent_at)| SendIdentity {
+                fingerprint_version,
+                fingerprint,
+                sent_at,
+            }),
+            &sent,
             task_id,
             task_name,
         );
@@ -1127,27 +1122,21 @@ impl PostgresBroker {
         outcome
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn bind_key_after_task_id_conflict(
         &self,
         mut transaction: Transaction<'_, Postgres>,
         task_id: Uuid,
         task_name: &str,
-        enqueue_sha: &str,
+        sent: &SendIdentity,
         key_digest: &[u8; 32],
-        facts: &PreparedEnqueueFacts,
     ) -> Result<Uuid, BrokerError> {
-        let existing: Option<(String, Option<Vec<u8>>, Option<i16>, Option<Vec<u8>>)> =
-            sqlx::query_as(
-                "SELECT enqueue_sha, idempotency_key_digest,
-                        command_fingerprint_version, command_fingerprint
-                 FROM horsies_tasks WHERE id = $1 FOR UPDATE",
-            )
-            .bind(task_id)
-            .fetch_optional(&mut *transaction)
-            .await
-            .map_err(BrokerError::Database)?;
-        let Some((stored_sha, bound_digest, fingerprint_version, fingerprint)) = existing else {
+        let existing: Option<(Option<i16>, Option<Vec<u8>>, DateTime<Utc>, Option<Vec<u8>>)> =
+            sqlx::query_as(READ_SEND_IDENTITY_FOR_KEY_SQL)
+                .bind(task_id)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(BrokerError::Database)?;
+        let Some((fingerprint_version, fingerprint, sent_at, bound_digest)) = existing else {
             transaction
                 .rollback()
                 .await
@@ -1157,10 +1146,12 @@ impl PostgresBroker {
                 task_name: task_name.to_owned(),
             });
         };
-        if stored_sha != enqueue_sha
-            || fingerprint_version != Some(COMMAND_FINGERPRINT_VERSION)
-            || fingerprint.as_deref() != Some(facts.command_fingerprint.as_slice())
-        {
+        let stored = SendIdentity {
+            fingerprint_version,
+            fingerprint,
+            sent_at,
+        };
+        if &stored != sent {
             transaction
                 .rollback()
                 .await
@@ -1195,8 +1186,9 @@ impl PostgresBroker {
     /// Send a task using pre-resolved enqueue parameters.
     ///
     /// This is the high-level enqueue API. Use [`Horsies::resolve_enqueue()`]
-    /// to get a [`ResolvedEnqueue`], then pass it here along with serialized
-    /// args.
+    /// to get a [`ResolvedEnqueue`], then pass it here along with the encoded
+    /// input: one JSON value, as the task's input type encodes to (`null` for a
+    /// task without input).
     ///
     /// If `task_options` contains a `good_until` value, it is forwarded to the
     /// underlying `enqueue()` call so the broker can skip expired tasks.
@@ -1207,95 +1199,17 @@ impl PostgresBroker {
     ///
     /// ```ignore
     /// let resolved = app.resolve_enqueue("process_image", None, None)?;
-    /// let args = serde_json::to_string(&my_args)?;
-    /// let handle: TaskHandle<String> = broker.send_task(&resolved, Some(&args), None, None).await?;
+    /// let input = serde_json::to_string(&my_input)?;
+    /// let handle: TaskHandle<String> = broker.send_task(&resolved, &input, None).await?;
     /// ```
     pub async fn send_task<T>(
         self: &Arc<Self>,
         resolved: &ResolvedEnqueue,
-        args: Option<&str>,
-        kwargs: Option<&str>,
+        input: &str,
         task_options: Option<&TaskOptions>,
     ) -> TaskSendResult<TaskHandle<T>> {
-        let task_options_json = task_options
-            .map(serde_json::to_string)
-            .transpose()
-            .map_err(|e| TaskSendError {
-                code: TaskSendErrorCode::ValidationFailed,
-                message: format!("task_options serialization failed: {}", e),
-                retryable: false,
-                task_id: None,
-                payload: None,
-            })?;
-
-        let good_until = task_options.and_then(|opts| opts.good_until);
-        let sent_at = Utc::now();
-        let pre_task_id =
-            crate::core::history::identity::uuid7::mint_task_id().map_err(|error| {
-                TaskSendError {
-                    code: TaskSendErrorCode::ValidationFailed,
-                    message: format!("failed to mint task identity: {error}"),
-                    retryable: false,
-                    task_id: None,
-                    payload: None,
-                }
-            })?;
-
-        let enqueue_sha = compute_enqueue_sha(
-            &resolved.task_name,
-            &resolved.queue_name,
-            resolved.priority as i32,
-            args,
-            kwargs,
-            sent_at,
-            good_until,
-            None, // enqueue_delay_seconds
-            task_options_json.as_deref(),
-        );
-
-        let payload = TaskSendPayload {
-            task_name: resolved.task_name.clone(),
-            queue_name: resolved.queue_name.clone(),
-            priority: resolved.priority as i32,
-            args_json: args.map(|s| s.to_owned()),
-            kwargs_json: kwargs.map(|s| s.to_owned()),
-            sent_at,
-            good_until,
-            enqueue_delay_seconds: None,
-            task_options: task_options_json.clone(),
-            enqueue_sha: enqueue_sha.clone(),
-            idempotency_key: None,
-            retention_class_key: resolved.retention_class_key.clone(),
-        };
-
-        let task_id = self
-            .enqueue(
-                &resolved.task_name,
-                args,
-                kwargs,
-                &resolved.queue_name,
-                resolved.priority as i32,
-                Some(sent_at),
-                None, // enqueued_at — DB default NOW()
-                good_until,
-                task_options_json.as_deref(),
-                &enqueue_sha,
-                Some(pre_task_id),
-                None,
-                None,
-                resolved.retention_class_key.as_deref(),
-                None,
-            )
+        self.send_resolved(resolved, input, None, task_options)
             .await
-            .map_err(|e| TaskSendError {
-                code: task_send_error_code(&e),
-                message: format!("{}", e),
-                retryable: e.is_retryable(),
-                task_id: Some(pre_task_id.clone()),
-                payload: Some(payload.clone()),
-            })?;
-
-        Ok(TaskHandle::new(task_id, Arc::clone(self)))
     }
 
     /// Send a task with automatic retry on transient broker errors.
@@ -1306,15 +1220,14 @@ impl PostgresBroker {
     pub async fn send_task_with_retry<T>(
         self: &Arc<Self>,
         resolved: &ResolvedEnqueue,
-        args: Option<&str>,
-        kwargs: Option<&str>,
+        input: &str,
         task_options: Option<&TaskOptions>,
         resend_on_transient_err: bool,
     ) -> TaskSendResult<TaskHandle<T>> {
         if !resend_on_transient_err {
-            return self.send_task(resolved, args, kwargs, task_options).await;
+            return self.send_task(resolved, input, task_options).await;
         }
-        retry_send(|| self.send_task(resolved, args, kwargs, task_options)).await
+        retry_send(|| self.send_task(resolved, input, task_options)).await
     }
 
     /// Send a task with a delay (scheduled for future execution).
@@ -1330,15 +1243,49 @@ impl PostgresBroker {
     ///
     /// let resolved = app.resolve_enqueue("send_reminder", None, None)?;
     /// let handle: TaskHandle<()> = broker
-    ///     .schedule_task(&resolved, None, None, Duration::from_secs(3600), None)
+    ///     .schedule_task(&resolved, "null", Duration::from_secs(3600), None)
     ///     .await?;
     /// ```
     pub async fn schedule_task<T>(
         self: &Arc<Self>,
         resolved: &ResolvedEnqueue,
-        args: Option<&str>,
-        kwargs: Option<&str>,
+        input: &str,
         delay: Duration,
+        task_options: Option<&TaskOptions>,
+    ) -> TaskSendResult<TaskHandle<T>> {
+        let delay_secs = delay.as_secs() as i64;
+        self.send_resolved(resolved, input, Some(delay_secs), task_options)
+            .await
+    }
+
+    /// Schedule a task with automatic retry on transient broker errors.
+    ///
+    /// When `resend_on_transient_err` is `true`, retries up to 3 times with
+    /// exponential backoff (200ms, 400ms, 800ms) on retryable errors.
+    pub async fn schedule_task_with_retry<T>(
+        self: &Arc<Self>,
+        resolved: &ResolvedEnqueue,
+        input: &str,
+        delay: Duration,
+        task_options: Option<&TaskOptions>,
+        resend_on_transient_err: bool,
+    ) -> TaskSendResult<TaskHandle<T>> {
+        if !resend_on_transient_err {
+            return self
+                .schedule_task(resolved, input, delay, task_options)
+                .await;
+        }
+        retry_send(|| self.schedule_task(resolved, input, delay, task_options)).await
+    }
+
+    /// The shared body of [`send_task`](Self::send_task) and
+    /// [`schedule_task`](Self::schedule_task): one task id and one `sent_at`
+    /// for the call, kept in the payload for [`retry_send`](Self::retry_send).
+    async fn send_resolved<T>(
+        self: &Arc<Self>,
+        resolved: &ResolvedEnqueue,
+        input: &str,
+        enqueue_delay_seconds: Option<i64>,
         task_options: Option<&TaskOptions>,
     ) -> TaskSendResult<TaskHandle<T>> {
         let task_options_json = task_options
@@ -1353,8 +1300,13 @@ impl PostgresBroker {
             })?;
 
         let good_until = task_options.and_then(|opts| opts.good_until);
-        let sent_at = Utc::now();
-        let delay_secs = delay.as_secs() as i64;
+        let sent_at = sent_at_at_stored_precision(Utc::now()).map_err(|error| TaskSendError {
+            code: TaskSendErrorCode::ValidationFailed,
+            message: error.to_string(),
+            retryable: false,
+            task_id: None,
+            payload: None,
+        })?;
         let pre_task_id =
             crate::core::history::identity::uuid7::mint_task_id().map_err(|error| {
                 TaskSendError {
@@ -1366,29 +1318,15 @@ impl PostgresBroker {
                 }
             })?;
 
-        let enqueue_sha = compute_enqueue_sha(
-            &resolved.task_name,
-            &resolved.queue_name,
-            resolved.priority as i32,
-            args,
-            kwargs,
-            sent_at,
-            good_until,
-            Some(delay_secs),
-            task_options_json.as_deref(),
-        );
-
         let payload = TaskSendPayload {
             task_name: resolved.task_name.clone(),
             queue_name: resolved.queue_name.clone(),
             priority: resolved.priority as i32,
-            args_json: args.map(|s| s.to_owned()),
-            kwargs_json: kwargs.map(|s| s.to_owned()),
+            input_json: input.to_owned(),
             sent_at,
             good_until,
-            enqueue_delay_seconds: Some(delay_secs),
+            enqueue_delay_seconds,
             task_options: task_options_json.clone(),
-            enqueue_sha: enqueue_sha.clone(),
             idempotency_key: None,
             retention_class_key: resolved.retention_class_key.clone(),
         };
@@ -1396,17 +1334,15 @@ impl PostgresBroker {
         let task_id = self
             .enqueue(
                 &resolved.task_name,
-                args,
-                kwargs,
+                input,
                 &resolved.queue_name,
                 resolved.priority as i32,
                 Some(sent_at),
-                None,
+                None, // enqueued_at: NOW(), or NOW() plus the delay
                 good_until,
                 task_options_json.as_deref(),
-                &enqueue_sha,
                 Some(pre_task_id),
-                Some(delay_secs),
+                enqueue_delay_seconds,
                 None,
                 resolved.retention_class_key.as_deref(),
                 None,
@@ -1416,39 +1352,18 @@ impl PostgresBroker {
                 code: task_send_error_code(&e),
                 message: format!("{}", e),
                 retryable: e.is_retryable(),
-                task_id: Some(pre_task_id.clone()),
+                task_id: Some(pre_task_id),
                 payload: Some(payload.clone()),
             })?;
 
         Ok(TaskHandle::new(task_id, Arc::clone(self)))
     }
 
-    /// Schedule a task with automatic retry on transient broker errors.
-    ///
-    /// When `resend_on_transient_err` is `true`, retries up to 3 times with
-    /// exponential backoff (200ms, 400ms, 800ms) on retryable errors.
-    pub async fn schedule_task_with_retry<T>(
-        self: &Arc<Self>,
-        resolved: &ResolvedEnqueue,
-        args: Option<&str>,
-        kwargs: Option<&str>,
-        delay: Duration,
-        task_options: Option<&TaskOptions>,
-        resend_on_transient_err: bool,
-    ) -> TaskSendResult<TaskHandle<T>> {
-        if !resend_on_transient_err {
-            return self
-                .schedule_task(resolved, args, kwargs, delay, task_options)
-                .await;
-        }
-        retry_send(|| self.schedule_task(resolved, args, kwargs, delay, task_options)).await
-    }
-
     /// Replay a failed send from its stored payload.
     ///
     /// Only `TaskSendErrorCode::EnqueueFailed` errors are retryable.
-    /// The payload contains all pre-serialized fields including the
-    /// `enqueue_sha` for idempotent delivery.
+    /// The payload carries the input, `sent_at` and every other field of the
+    /// first call, so the exact-id resend check accepts the replay.
     ///
     /// Mirrors Python's `TaskFunction.retry_send(error)`.
     pub async fn retry_send<T>(
@@ -1459,15 +1374,13 @@ impl PostgresBroker {
         let task_id = self
             .enqueue(
                 &payload.task_name,
-                payload.args_json.as_deref(),
-                payload.kwargs_json.as_deref(),
+                &payload.input_json,
                 &payload.queue_name,
                 payload.priority,
                 Some(payload.sent_at),
                 None,
                 payload.good_until,
                 payload.task_options.as_deref(),
-                &payload.enqueue_sha,
                 original_task_id,
                 payload.enqueue_delay_seconds,
                 payload.idempotency_key.as_deref(),
@@ -3767,8 +3680,7 @@ mod tests {
                 priority: 0,
                 retention_class_key: Some("standard_30d".to_owned()),
             };
-            let _handle: TaskHandle<i32> =
-                broker.send_task(&resolved, None, None, None).await.unwrap();
+            let _handle: TaskHandle<i32> = broker.send_task(&resolved, "null", None).await.unwrap();
         }
     }
 
@@ -3785,7 +3697,7 @@ mod tests {
             };
             let delay = Duration::from_secs(60);
             let _handle: TaskHandle<String> = broker
-                .schedule_task(&resolved, None, None, delay, None)
+                .schedule_task(&resolved, "null", delay, None)
                 .await
                 .unwrap();
         }
@@ -3811,7 +3723,7 @@ mod tests {
                 timeout_ms: None,
             };
             let _handle: TaskHandle<()> = broker
-                .send_task(&resolved, Some("{}"), None, Some(&opts))
+                .send_task(&resolved, "{}", Some(&opts))
                 .await
                 .unwrap();
         }
@@ -3961,17 +3873,70 @@ mod tests {
 
     // Enqueue-conflict classification (parity with horsies PR #48).
 
+    fn send_identity(fingerprint: u8, sent_at: DateTime<Utc>) -> SendIdentity {
+        SendIdentity {
+            fingerprint_version: Some(1),
+            fingerprint: Some(vec![fingerprint; 32]),
+            sent_at,
+        }
+    }
+
     #[test]
-    fn enqueue_conflict_matching_sha_is_idempotent_ok() {
+    fn enqueue_conflict_matching_identity_is_idempotent_ok() {
         let task_id = Uuid::new_v4();
-        let out = classify_enqueue_conflict(Some("sha-1"), "sha-1", task_id, "my_task");
+        let sent_at = Utc::now();
+        let out = classify_enqueue_conflict(
+            Some(send_identity(1, sent_at)),
+            &send_identity(1, sent_at),
+            task_id,
+            "my_task",
+        );
         assert_eq!(out.unwrap(), task_id);
     }
 
     #[test]
-    fn enqueue_conflict_differing_sha_is_payload_mismatch() {
+    fn enqueue_conflict_differing_fingerprint_is_payload_mismatch() {
         let task_id = Uuid::new_v4();
-        let out = classify_enqueue_conflict(Some("other"), "sha-1", task_id, "my_task");
+        let sent_at = Utc::now();
+        let out = classify_enqueue_conflict(
+            Some(send_identity(2, sent_at)),
+            &send_identity(1, sent_at),
+            task_id,
+            "my_task",
+        );
+        assert!(matches!(
+            out,
+            Err(BrokerError::PayloadMismatch { task_id: actual }) if actual == task_id
+        ));
+    }
+
+    #[test]
+    fn enqueue_conflict_differing_sent_at_is_payload_mismatch() {
+        let task_id = Uuid::new_v4();
+        let sent_at = Utc::now();
+        let out = classify_enqueue_conflict(
+            Some(send_identity(1, sent_at - chrono::Duration::seconds(1))),
+            &send_identity(1, sent_at),
+            task_id,
+            "my_task",
+        );
+        assert!(matches!(
+            out,
+            Err(BrokerError::PayloadMismatch { task_id: actual }) if actual == task_id
+        ));
+    }
+
+    #[test]
+    fn enqueue_conflict_with_an_engine_minted_row_is_payload_mismatch() {
+        let task_id = Uuid::new_v4();
+        let sent_at = Utc::now();
+        let minted = SendIdentity {
+            fingerprint_version: None,
+            fingerprint: None,
+            sent_at,
+        };
+        let out =
+            classify_enqueue_conflict(Some(minted), &send_identity(1, sent_at), task_id, "my_task");
         assert!(matches!(
             out,
             Err(BrokerError::PayloadMismatch { task_id: actual }) if actual == task_id
@@ -3981,7 +3946,12 @@ mod tests {
     #[test]
     fn enqueue_conflict_missing_row_is_non_retryable_unverifiable() {
         // Row disappeared before verification: must NOT be treated as idempotent Ok.
-        let out = classify_enqueue_conflict(None, "sha-1", Uuid::new_v4(), "my_task");
+        let out = classify_enqueue_conflict(
+            None,
+            &send_identity(1, Utc::now()),
+            Uuid::new_v4(),
+            "my_task",
+        );
         match out {
             Err(err @ BrokerError::EnqueueConflictUnverifiable { .. }) => {
                 assert!(!err.is_retryable(), "must be non-retryable");
@@ -3993,67 +3963,62 @@ mod tests {
             other => panic!("expected EnqueueConflictUnverifiable, got: {other:?}"),
         }
     }
+
+    #[test]
+    fn sent_at_is_cut_to_whole_microseconds() {
+        let sent_at = DateTime::parse_from_rfc3339("2026-11-16T12:00:00.123456789Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let stored = sent_at_at_stored_precision(sent_at).unwrap();
+        assert_eq!(stored.nanosecond(), 123_456_000);
+        assert_eq!(sent_at_at_stored_precision(stored).unwrap(), stored);
+    }
 }
 
-/// Canonical UTC datetime string for fingerprint hashing.
-/// Matches Python's `_canon_dt()`: always UTC, microsecond precision.
-fn canon_dt(dt: DateTime<Utc>) -> String {
-    dt.format("%Y-%m-%dT%H:%M:%S%.6f+00:00").to_string()
+/// What the exact-id resend check compares: the version-1 command fingerprint
+/// and the send call time. A resend of one send call carries both unchanged; a
+/// different send with the same task id differs in at least one. A row that
+/// the workflow engine minted has no fingerprint, so a send never matches it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SendIdentity {
+    fingerprint_version: Option<i16>,
+    fingerprint: Option<Vec<u8>>,
+    sent_at: DateTime<Utc>,
+}
+
+/// `sent_at` at the precision that PostgreSQL stores (whole microseconds), so
+/// the stored value equals the value that a resend of the same call carries.
+fn sent_at_at_stored_precision(sent_at: DateTime<Utc>) -> Result<DateTime<Utc>, BrokerError> {
+    let nanos = sent_at.nanosecond();
+    sent_at
+        .with_nanosecond(nanos - nanos % 1_000)
+        .ok_or_else(|| {
+            BrokerError::EnqueueContract(format!("sent_at {sent_at} has no whole-microsecond form"))
+        })
 }
 
 /// Classify the outcome of an `INSERT ... ON CONFLICT DO NOTHING` enqueue
-/// conflict by comparing the stored `enqueue_sha` against the expected one.
+/// conflict by comparing the stored send identity against the sent one.
 ///
 /// - `None` (row gone before verification): cannot prove payload identity, so
 ///   fail non-retryably rather than assume the original send succeeded
 ///   (parity with horsies PR #48).
-/// - matching sha: idempotent success.
-/// - differing sha: same task_id, different payload — a programming error.
+/// - equal identity: idempotent success.
+/// - other identity: same task_id, different command or send call.
 fn classify_enqueue_conflict(
-    stored_sha: Option<&str>,
-    enqueue_sha: &str,
+    stored: Option<SendIdentity>,
+    sent: &SendIdentity,
     task_id: Uuid,
     task_name: &str,
 ) -> Result<Uuid, BrokerError> {
-    match stored_sha {
+    match stored {
         None => Err(BrokerError::EnqueueConflictUnverifiable {
             task_id,
             task_name: task_name.to_owned(),
         }),
-        Some(existing) if existing == enqueue_sha => Ok(task_id),
+        Some(existing) if &existing == sent => Ok(task_id),
         Some(_) => Err(BrokerError::PayloadMismatch { task_id }),
     }
-}
-
-/// Compute a SHA-256 hex digest for idempotent enqueue verification.
-///
-/// Covers all enqueue-identity fields, matching Python's `enqueue_fingerprint()`.
-/// Two sends with different priority, sent_at, or good_until produce different hashes.
-pub fn compute_enqueue_sha(
-    task_name: &str,
-    queue_name: &str,
-    priority: i32,
-    args: Option<&str>,
-    kwargs: Option<&str>,
-    sent_at: DateTime<Utc>,
-    good_until: Option<DateTime<Utc>>,
-    enqueue_delay_seconds: Option<i64>,
-    task_options: Option<&str>,
-) -> String {
-    let canonical = serde_json::to_string(&serde_json::json!([
-        task_name,
-        queue_name,
-        priority,
-        args,
-        kwargs,
-        canon_dt(sent_at),
-        good_until.map(canon_dt),
-        enqueue_delay_seconds,
-        task_options,
-    ]))
-    .expect("JSON serialization of fingerprint fields cannot fail");
-    let digest = Sha256::digest(canonical.as_bytes());
-    format!("{:x}", digest)
 }
 
 #[cfg(test)]
@@ -4088,18 +4053,17 @@ mod horsies_claim_tests {
         let expires = lease_offset_secs.map(|s| Utc::now() + chrono::Duration::seconds(s));
         sqlx::query(
             "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, args, kwargs,
-                status, sent_at, enqueued_at, max_retries,
-                enqueue_sha, claimed_by_worker_id, claim_expires_at,
+                id, task_name, queue_name, priority, input, execution,
+                status, sent_at, enqueued_at, retry_count, max_retries,
+                claimed_by_worker_id, claim_expires_at,
                 is_workflow_task, created_at, updated_at, command_fingerprint_version,
-                command_fingerprint, retention_class_key, retain_rerun_input,
-                prepared_rerun_input_disposition
+                command_fingerprint, retention_class_key, retain_rerun_input
             ) VALUES (
-                $1, 'pr160_task', $2, $3, '[]', '{}',
-                $4, NOW(), NOW(), 0,
-                $1::text, $5, $6,
+                $1, 'pr160_task', $2, $3, 'null', 'ISOLATED',
+                $4, NOW(), NOW(), 0, 0,
+                $5, $6,
                 FALSE, NOW(), NOW(), 1, decode(repeat('00', 32), 'hex'),
-                'standard_30d', FALSE, 'NEVER_ELIGIBLE'
+                'standard_30d', FALSE
             )",
         )
         .bind(id)
@@ -4160,7 +4124,7 @@ mod horsies_claim_tests {
         .expect("function must exist with the pinned signature");
         assert_eq!(
             result_shape,
-            "TABLE(id text, task_name character varying, args text, kwargs text, \
+            "TABLE(id text, task_name character varying, input text, \
              queue_name character varying, is_workflow_task boolean, task_options text, \
              claimed_at timestamp with time zone)",
             "OUT columns diverged from the Python v12 shape",
@@ -4580,22 +4544,19 @@ mod fused_finalize_tests {
     async fn seed(pool: &sqlx::PgPool, id: &str, status: &str, worker: Option<&str>, retry: i32) {
         sqlx::query(
             "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, args, kwargs,
+                id, task_name, queue_name, priority, input, execution,
                 status, sent_at, enqueued_at, started_at, max_retries, retry_count,
-                enqueue_sha, claimed_by_worker_id, claimed_at, worker_hostname,
+                claimed_by_worker_id, claimed_at, worker_hostname,
                 worker_pid, worker_process_name, is_workflow_task, created_at,
-                updated_at, terminal_at, command_fingerprint_version,
-                command_fingerprint, retention_class_key, retain_rerun_input,
-                prepared_rerun_input_disposition
+                updated_at, command_fingerprint_version,
+                command_fingerprint, retention_class_key, retain_rerun_input
             ) VALUES (
-                $1, 'fused_task', 'default', 100, '[]', '{}',
+                $1, 'fused_task', 'default', 100, 'null', 'ISOLATED',
                 $2, NOW(), NOW(), NOW(), 3, $4,
-                $1, $3, CASE WHEN $3 IS NOT NULL THEN NOW() END, 'host1',
+                $3, CASE WHEN $3 IS NOT NULL THEN NOW() END, 'host1',
                 123, 'worker-123', FALSE, NOW(),
                 NOW(),
-                CASE WHEN $2 IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
-                     THEN NOW() END,
-                1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
+                1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE
             )",
         )
         .bind(test_uuid(id))
@@ -4867,16 +4828,18 @@ mod set_running_heartbeat_tests {
     async fn seed_claimed(pool: &sqlx::PgPool, id: &str, worker: &str) {
         sqlx::query(
             "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, args, kwargs,
-                status, sent_at, enqueued_at, claimed, claimed_at, claimed_by_worker_id,
-                max_retries, enqueue_sha, is_workflow_task, created_at, updated_at,
+                id, task_name, queue_name, priority, input, execution,
+                status, sent_at, enqueued_at, claimed_at, claimed_by_worker_id,
+                claim_expires_at, retry_count, max_retries, is_workflow_task,
+                created_at, updated_at,
                 command_fingerprint_version, command_fingerprint, retention_class_key,
-                retain_rerun_input, prepared_rerun_input_disposition
+                retain_rerun_input
             ) VALUES (
-                $1, 'hb_task', 'default', 100, '[]', '{}',
-                'CLAIMED', NOW(), NOW(), TRUE, NOW(), $2,
-                3, $1, FALSE, NOW(), NOW(), 1, decode(repeat('00', 32), 'hex'),
-                'standard_30d', FALSE, 'NEVER_ELIGIBLE'
+                $1, 'hb_task', 'default', 100, 'null', 'ISOLATED',
+                'CLAIMED', NOW(), NOW(), NOW(), $2,
+                NOW() + interval '1 hour', 0, 3, FALSE,
+                NOW(), NOW(), 1, decode(repeat('00', 32), 'hex'),
+                'standard_30d', FALSE
             )",
         )
         .bind(test_uuid(id))
@@ -4995,18 +4958,18 @@ mod set_running_heartbeat_tests {
             .expect("truncate to microseconds");
         sqlx::query(
             "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, args, kwargs,
-                status, sent_at, enqueued_at, claimed, claimed_at, claimed_by_worker_id,
-                retry_count, max_retries, good_until,
-                enqueue_sha, is_workflow_task, created_at, updated_at,
+                id, task_name, queue_name, priority, input, execution,
+                status, sent_at, enqueued_at, claimed_at, claimed_by_worker_id,
+                claim_expires_at, retry_count, max_retries, good_until,
+                is_workflow_task, created_at, updated_at,
                 command_fingerprint_version, command_fingerprint, retention_class_key,
-                retain_rerun_input, prepared_rerun_input_disposition
+                retain_rerun_input
             ) VALUES (
-                $1, 'hb_task', 'default', 100, '[]', '{}',
-                'CLAIMED', NOW(), NOW(), TRUE, NOW(), 'w1',
-                2, 7, $2,
-                $1, FALSE, NOW(), NOW(), 1, decode(repeat('00', 32), 'hex'),
-                'standard_30d', FALSE, 'NEVER_ELIGIBLE'
+                $1, 'hb_task', 'default', 100, 'null', 'ISOLATED',
+                'CLAIMED', NOW(), NOW(), NOW(), 'w1',
+                NOW() + interval '1 hour', 2, 7, $2,
+                FALSE, NOW(), NOW(), 1, decode(repeat('00', 32), 'hex'),
+                'standard_30d', FALSE
             )",
         )
         .bind(test_uuid(&id))
@@ -5264,7 +5227,7 @@ mod filter_non_runnable_tests {
         for status in ["PAUSED", "CANCELLED", "RUNNING"] {
             let workflow_id = Uuid::new_v4();
             sqlx::query(
-                "INSERT INTO horsies_workflows(id,name,status) VALUES($1,'lookup_test',$2)",
+                "INSERT INTO horsies_workflows(id,name,status,on_error,depth,root_workflow_id,sent_at,created_at,updated_at) VALUES($1,'lookup_test',$2,'fail',0,$1,NOW(),NOW(),NOW())",
             )
             .bind(workflow_id)
             .bind(status)
@@ -5274,12 +5237,12 @@ mod filter_non_runnable_tests {
             for index in 0..2 {
                 let task_id = Uuid::new_v4();
                 ids.push(task_id);
-                sqlx::query("INSERT INTO horsies_workflow_tasks(id,workflow_id,task_index,node_id,task_name,task_args,task_kwargs,dependencies,status,task_id) VALUES($1,$2,$3,$4,'lookup_test','[]','{}','{}','ENQUEUED',$5)")
+                sqlx::query("INSERT INTO horsies_workflow_tasks(id,workflow_id,task_index,node_id,task_name,input,queue_name,priority,dependencies,allow_failed_deps,join_type,status,is_subworkflow,max_retries,execution,retention_class_key,task_id,created_at) VALUES($1,$2,$3,$4,'lookup_test','null','default',100,'{}',FALSE,'all','ENQUEUED',FALSE,0,'ISOLATED','forever',$5,NOW())")
                     .bind(Uuid::new_v4()).bind(workflow_id).bind(index)
                     .bind(format!("node_{index}")).bind(task_id)
                     .execute(&mut *tx).await.unwrap();
                 if index == 0 {
-                    sqlx::query("INSERT INTO horsies_tasks(id,task_name,queue_name,enqueue_sha,command_fingerprint_version,command_fingerprint,retention_class_key,retain_rerun_input,prepared_rerun_input_disposition) VALUES($1,'lookup_test','default','fixture',1,decode(repeat('00',32),'hex'),'forever',false,'DECLINED_BY_POLICY')")
+                    sqlx::query("INSERT INTO horsies_tasks(id,task_name,queue_name,priority,input,execution,status,sent_at,enqueued_at,retry_count,max_retries,is_workflow_task,created_at,updated_at,command_fingerprint_version,command_fingerprint,retention_class_key,retain_rerun_input) VALUES($1,'lookup_test','default',100,'null','ISOLATED','PENDING',NOW(),NOW(),0,0,FALSE,NOW(),NOW(),1,decode(repeat('00',32),'hex'),'forever',false)")
                         .bind(task_id).execute(&mut *tx).await.unwrap();
                 }
             }
@@ -5355,12 +5318,14 @@ mod filter_non_runnable_tests {
 
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
+                id, workflow_id, task_index, node_id, task_name, input,
                 queue_name, priority, dependencies, allow_failed_deps, join_type,
-                status, is_subworkflow, task_id, created_at
-            ) VALUES ($1, $2, 0, 'node_0', 'c15_task', '[]', '{}',
+                status, is_subworkflow, max_retries, execution, retention_class_key,
+                task_id, created_at
+            ) VALUES ($1, $2, 0, 'node_0', 'c15_task', 'null',
                       'default', 100, '{}', FALSE, 'all',
-                      'ENQUEUED', FALSE, $3, NOW())",
+                      'ENQUEUED', FALSE, 3, 'ISOLATED', 'standard_30d',
+                      $3, NOW())",
         )
         .bind(Uuid::new_v4())
         .bind(&wf_id)
@@ -5371,17 +5336,16 @@ mod filter_non_runnable_tests {
 
         sqlx::query(
             "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, args, kwargs, status,
-                sent_at, claimed_at, created_at, updated_at, claimed,
-                claimed_by_worker_id, retry_count, max_retries, is_workflow_task, enqueue_sha,
+                id, task_name, queue_name, priority, input, execution, status,
+                sent_at, enqueued_at, claimed_at, claim_expires_at, created_at, updated_at,
+                claimed_by_worker_id, retry_count, max_retries, is_workflow_task,
                 command_fingerprint_version, command_fingerprint, retention_class_key,
-                retain_rerun_input, prepared_rerun_input_disposition
-            ) VALUES ($1, 'c15_task', 'default', 100, '[]', '{}', 'CLAIMED',
-                      NOW(), NOW(), NOW(), NOW(), TRUE,
+                retain_rerun_input
+            ) VALUES ($1, 'c15_task', 'default', 100, 'null', 'ISOLATED', 'CLAIMED',
+                      NOW(), NOW(), NOW(), NOW() + interval '1 hour', NOW(), NOW(),
                       'w1', 0, 3, TRUE,
-                      '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
-                      1, decode(repeat('00', 32), 'hex'), 'standard_30d',
-                      FALSE, 'NEVER_ELIGIBLE')",
+                      NULL, NULL, 'standard_30d',
+                      FALSE)",
         )
         .bind(&task_id)
         .execute(&pool)
@@ -5468,18 +5432,18 @@ mod terminal_at_stamp_tests {
     ) {
         sqlx::query(
             "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, args, kwargs,
+                id, task_name, queue_name, priority, input, execution,
                 status, sent_at, enqueued_at, started_at, max_retries, retry_count,
-                enqueue_sha, claimed_by_worker_id, claimed, good_until,
+                claimed_by_worker_id, claim_expires_at, good_until,
                 is_workflow_task, created_at, updated_at, command_fingerprint_version,
-                command_fingerprint, retention_class_key, retain_rerun_input,
-                prepared_rerun_input_disposition
+                command_fingerprint, retention_class_key, retain_rerun_input
             ) VALUES (
-                $1, 'terminal_at_task', 'default', 100, '[]', '{}',
+                $1, 'terminal_at_task', 'default', 100, 'null', 'ISOLATED',
                 $2, NOW(), NOW(), NOW(), 3, 0,
-                $1, $3, $3 IS NOT NULL, NOW() + $4 * INTERVAL '1 second',
+                $3, CASE WHEN $2 = 'CLAIMED' THEN NOW() + INTERVAL '1 hour' END,
+                NOW() + $4 * INTERVAL '1 second',
                 FALSE, NOW(), NOW(), 1, decode(repeat('00', 32), 'hex'),
-                'standard_30d', FALSE, 'NEVER_ELIGIBLE'
+                'standard_30d', FALSE
             )",
         )
         .bind(test_uuid(id))

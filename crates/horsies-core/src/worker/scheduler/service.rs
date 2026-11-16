@@ -671,29 +671,18 @@ async fn enqueue_scheduled_task(
     app_config: &AppConfig,
     slot_time: DateTime<Utc>,
 ) -> Result<Uuid, Box<dyn std::error::Error + Send + Sync>> {
-    let args_json = if schedule.args == serde_json::Value::Null {
-        None
-    } else {
-        Some(serde_json::to_string(&schedule.args)?)
-    };
+    // The schedule's input is one JSON value; absent is `null`.
+    let input_json = serde_json::to_string(&schedule.input)?;
 
-    let kwargs_json = if schedule.kwargs == serde_json::Value::Null {
-        None
-    } else {
-        Some(serde_json::to_string(&schedule.kwargs)?)
-    };
-
-    // Schedule args/kwargs are static config, so a violation repeats on every
+    // Schedule input is static config, so a violation repeats on every
     // fire — the warn rate-limit collapses that to one line and the reject
     // surfaces per-slot through the schedule's normal enqueue-failure
     // logging. Parity with horsies PR #208.
-    let encoded_len =
-        args_json.as_deref().map_or(0, str::len) + kwargs_json.as_deref().map_or(0, str::len);
     if let Some(oversize) = crate::core::config::payload::enforce_payload_policy(
         &app_config.payload,
         &schedule.task_name,
         crate::core::config::payload::PayloadKind::Kwargs,
-        encoded_len,
+        input_json.len(),
     ) {
         return Err(format!(
             "payload for schedule '{}' is {} bytes, exceeding payload.reject_bytes={:?}; \
@@ -710,32 +699,20 @@ async fn enqueue_scheduled_task(
     // Deterministic task_id from schedule + slot (idempotent on retry).
     let task_id = schedule_slot_task_id(&schedule.name, slot_time);
 
-    // Deterministic fingerprint using slot_time as sent_at.
-    let enqueue_sha = crate::broker::compute_enqueue_sha(
-        &schedule.task_name,
-        queue,
-        priority,
-        args_json.as_deref(),
-        kwargs_json.as_deref(),
-        slot_time, // sent_at = logical slot time, not wall clock
-        None,      // good_until
-        None,      // enqueue_delay_seconds
-        None,      // task_options
-    );
-
+    // sent_at is the logical slot time, not wall clock: a second fire of the
+    // same slot carries the same command and sent_at, so the exact-id resend
+    // check accepts it.
     let result_id = broker
         .enqueue(
             &schedule.task_name,
-            args_json.as_deref(),
-            kwargs_json.as_deref(),
+            &input_json,
             queue,
             priority,
             Some(slot_time), // sent_at = slot time
             None,            // enqueued_at
             None,            // good_until
             None,            // task_options
-            &enqueue_sha,
-            Some(task_id), // predetermined deterministic task_id
+            Some(task_id),   // predetermined deterministic task_id
             None,
             None,
             retention_class_key.as_deref(),
@@ -853,8 +830,7 @@ mod tests {
                 hours: None,
                 days: None,
             }),
-            args: serde_json::Value::Null,
-            kwargs: serde_json::Value::Null,
+            input: serde_json::Value::Null,
             queue_name: None,
             enabled: true,
             timezone: "UTC".to_owned(),
@@ -878,8 +854,7 @@ mod tests {
                 hours: None,
                 days: None,
             }),
-            args: serde_json::Value::Null,
-            kwargs: serde_json::Value::Null,
+            input: serde_json::Value::Null,
             queue_name: None,
             enabled: true,
             timezone: "UTC".to_owned(),
@@ -896,8 +871,7 @@ mod tests {
                 hours: None,
                 days: None,
             }),
-            args: serde_json::Value::Null,
-            kwargs: serde_json::Value::Null,
+            input: serde_json::Value::Null,
             queue_name: None,
             enabled: true,
             timezone: "UTC".to_owned(),
@@ -926,8 +900,7 @@ mod tests {
                 hours: None,
                 days: None,
             }),
-            args: serde_json::Value::Null,
-            kwargs: serde_json::Value::Null,
+            input: serde_json::Value::Null,
             queue_name: None,
             enabled: true,
             timezone: "UTC".to_owned(),
@@ -980,8 +953,7 @@ mod tests {
                 hours: None,
                 days: None,
             }),
-            args: serde_json::Value::Null,
-            kwargs: serde_json::Value::Null,
+            input: serde_json::Value::Null,
             queue_name: None,
             enabled: true,
             timezone: "UTC".to_owned(),
@@ -1014,8 +986,7 @@ mod tests {
                 hours: None,
                 days: None,
             }),
-            args: serde_json::Value::Null,
-            kwargs: serde_json::Value::Null,
+            input: serde_json::Value::Null,
             queue_name: None,
             enabled: true,
             timezone: "UTC".to_owned(),
@@ -1045,8 +1016,7 @@ mod tests {
         let mut schedule = interval_schedule_secs("p6-scheduled-facts", 60);
         schedule.task_name = task_name.to_owned();
         schedule.queue_name = Some("bulk".to_owned());
-        schedule.args = serde_json::json!([1]);
-        schedule.kwargs = serde_json::json!({"named": true});
+        schedule.input = serde_json::json!({"value": 1, "named": true});
         let mut app_config = default_app_config();
         app_config
             .retention
@@ -1057,9 +1027,8 @@ mod tests {
         let task_id = enqueue_scheduled_task(&broker, &schedule, &app_config, slot)
             .await
             .expect("enqueue scheduled task");
-        let row: (String, String, String, i32, bool) = sqlx::query_as(
+        let row: (String, String, i32, bool) = sqlx::query_as(
             "SELECT id::text, retention_class_key,
-                    prepared_rerun_input_disposition,
                     octet_length(command_fingerprint), retain_rerun_input
              FROM horsies_tasks WHERE id = $1::uuid",
         )
@@ -1069,9 +1038,8 @@ mod tests {
         .unwrap();
         assert_eq!(row.0, task_id.to_string());
         assert_eq!(row.1, "q_bulk_36h");
-        assert_eq!(row.2, "DECLINED_BY_POLICY");
-        assert_eq!(row.3, 32);
-        assert!(!row.4);
+        assert_eq!(row.2, 32);
+        assert!(!row.3);
         assert_eq!(task_id.get_version_num(), 5);
     }
 
@@ -1091,8 +1059,7 @@ mod tests {
                 hours: None,
                 days: None,
             }),
-            args: serde_json::Value::Null,
-            kwargs: serde_json::Value::Null,
+            input: serde_json::Value::Null,
             queue_name: None,
             enabled: true,
             timezone: "UTC".to_owned(),

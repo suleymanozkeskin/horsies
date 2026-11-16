@@ -717,12 +717,10 @@ pub struct TaskSchedule {
     pub task_name: String,
     /// Schedule pattern defining when the task runs.
     pub pattern: SchedulePattern,
-    /// Task arguments (serialized).
+    /// The task input as one JSON value, stored as the task row's `input`.
+    /// Absent is `null` (a task without input).
     #[serde(default)]
-    pub args: serde_json::Value,
-    /// Task keyword arguments (serialized).
-    #[serde(default)]
-    pub kwargs: serde_json::Value,
+    pub input: serde_json::Value,
     /// Target queue name (None = default).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queue_name: Option<String>,
@@ -753,8 +751,7 @@ impl TaskSchedule {
             name: name.into(),
             task_name: task_name.into(),
             pattern,
-            args: serde_json::Value::Null,
-            kwargs: serde_json::Value::Null,
+            input: serde_json::Value::Null,
             queue_name: None,
             enabled: default_true(),
             timezone: default_timezone(),
@@ -763,13 +760,8 @@ impl TaskSchedule {
         }
     }
 
-    pub fn args(mut self, args: serde_json::Value) -> Self {
-        self.args = args;
-        self
-    }
-
-    pub fn kwargs(mut self, kwargs: serde_json::Value) -> Self {
-        self.kwargs = kwargs;
+    pub fn input(mut self, input: serde_json::Value) -> Self {
+        self.input = input;
         self
     }
 
@@ -1057,8 +1049,7 @@ mod tests {
                         hours: None,
                         days: None,
                     }),
-                    args: serde_json::Value::Null,
-                    kwargs: serde_json::Value::Null,
+                    input: serde_json::Value::Null,
                     queue_name: None,
                     enabled: true,
                     timezone: "UTC".to_owned(),
@@ -1074,8 +1065,7 @@ mod tests {
                         hours: None,
                         days: None,
                     }),
-                    args: serde_json::Value::Null,
-                    kwargs: serde_json::Value::Null,
+                    input: serde_json::Value::Null,
                     queue_name: None,
                     enabled: true,
                     timezone: "UTC".to_owned(),
@@ -1102,8 +1092,7 @@ mod tests {
                         hours: None,
                         days: None,
                     }),
-                    args: serde_json::Value::Null,
-                    kwargs: serde_json::Value::Null,
+                    input: serde_json::Value::Null,
                     queue_name: None,
                     enabled: true,
                     timezone: "UTC".to_owned(),
@@ -1119,8 +1108,7 @@ mod tests {
                         hours: None,
                         days: None,
                     }),
-                    args: serde_json::Value::Null,
-                    kwargs: serde_json::Value::Null,
+                    input: serde_json::Value::Null,
                     queue_name: None,
                     enabled: true,
                     timezone: "UTC".to_owned(),
@@ -1146,8 +1134,7 @@ mod tests {
                     days: vec![Weekday::Monday, Weekday::Monday],
                     time: NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
                 }),
-                args: serde_json::Value::Null,
-                kwargs: serde_json::Value::Null,
+                input: serde_json::Value::Null,
                 queue_name: None,
                 enabled: true,
                 timezone: "UTC".to_owned(),
@@ -1346,8 +1333,7 @@ mod tests {
                     minute: 60,
                     second: 0,
                 }),
-                args: serde_json::Value::Null,
-                kwargs: serde_json::Value::Null,
+                input: serde_json::Value::Null,
                 queue_name: None,
                 enabled: true,
                 timezone: "UTC".to_owned(),
@@ -1370,8 +1356,7 @@ mod tests {
                     day: 0,
                     time: NaiveTime::from_hms_opt(12, 0, 0).unwrap(),
                 }),
-                args: serde_json::Value::Null,
-                kwargs: serde_json::Value::Null,
+                input: serde_json::Value::Null,
                 queue_name: None,
                 enabled: true,
                 timezone: "UTC".to_owned(),
@@ -1393,8 +1378,7 @@ mod tests {
                 pattern: SchedulePattern::Daily(DailySchedule {
                     time: NaiveTime::from_hms_opt(12, 0, 0).unwrap(),
                 }),
-                args: serde_json::Value::Null,
-                kwargs: serde_json::Value::Null,
+                input: serde_json::Value::Null,
                 queue_name: None,
                 enabled: true,
                 timezone: "Not/A_Timezone".to_owned(),
@@ -1418,8 +1402,7 @@ mod tests {
                 pattern: SchedulePattern::Daily(DailySchedule {
                     time: NaiveTime::from_hms_opt(12, 0, 0).unwrap(),
                 }),
-                args: serde_json::Value::Null,
-                kwargs: serde_json::Value::Null,
+                input: serde_json::Value::Null,
                 queue_name: None,
                 enabled: true,
                 timezone: "America/New_York".to_owned(),
@@ -1450,8 +1433,7 @@ mod tests {
         assert!(!sched.catch_up_missed);
         assert_eq!(sched.max_catch_up_runs, 100);
         assert!(sched.queue_name.is_none());
-        assert_eq!(sched.args, serde_json::Value::default());
-        assert_eq!(sched.kwargs, serde_json::Value::default());
+        assert_eq!(sched.input, serde_json::Value::default());
     }
 
     #[test]
@@ -1471,8 +1453,7 @@ mod tests {
         assert!(!sched.catch_up_missed);
         assert_eq!(sched.max_catch_up_runs, 100);
         assert!(sched.queue_name.is_none());
-        assert_eq!(sched.args, serde_json::Value::Null);
-        assert_eq!(sched.kwargs, serde_json::Value::Null);
+        assert_eq!(sched.input, serde_json::Value::Null);
     }
 
     #[test]
@@ -1485,8 +1466,7 @@ mod tests {
                 second: 0,
             }),
         )
-        .args(serde_json::json!([1, 2]))
-        .kwargs(serde_json::json!({"key": "val"}))
+        .input(serde_json::json!({"key": "val"}))
         .queue("high")
         .enabled(false)
         .timezone("Europe/London")
@@ -1498,8 +1478,7 @@ mod tests {
         assert_eq!(sched.timezone, "Europe/London");
         assert!(sched.catch_up_missed);
         assert_eq!(sched.max_catch_up_runs, 50);
-        assert_eq!(sched.args, serde_json::json!([1, 2]));
-        assert_eq!(sched.kwargs, serde_json::json!({"key": "val"}));
+        assert_eq!(sched.input, serde_json::json!({"key": "val"}));
     }
 
     #[test]
@@ -1509,8 +1488,7 @@ mod tests {
                 "name": "full",
                 "task_name": "my_task",
                 "pattern": { "type": "hourly", "minute": 15 },
-                "args": [1, 2],
-                "kwargs": { "key": "val" },
+                "input": { "key": "val" },
                 "queue_name": "high",
                 "enabled": false,
                 "timezone": "Europe/London",
@@ -1525,8 +1503,7 @@ mod tests {
         assert!(sched.catch_up_missed);
         assert_eq!(sched.max_catch_up_runs, 50);
         assert_eq!(sched.queue_name.as_deref(), Some("high"));
-        assert_eq!(sched.args, serde_json::json!([1, 2]));
-        assert_eq!(sched.kwargs, serde_json::json!({"key": "val"}));
+        assert_eq!(sched.input, serde_json::json!({"key": "val"}));
     }
 
     #[test]
@@ -1540,8 +1517,7 @@ mod tests {
                 hours: None,
                 days: None,
             }),
-            args: serde_json::json!([1]),
-            kwargs: serde_json::json!({"k": "v"}),
+            input: serde_json::json!({"k": "v"}),
             queue_name: Some("q".to_owned()),
             enabled: true,
             timezone: "UTC".to_owned(),
@@ -2004,8 +1980,7 @@ mod tests {
                     month: vec![CronEnumTerm::Every],
                     day: DaySelector::EveryDay,
                 }),
-                args: serde_json::Value::Null,
-                kwargs: serde_json::Value::Null,
+                input: serde_json::Value::Null,
                 queue_name: None,
                 enabled: true,
                 timezone: "UTC".to_owned(),
