@@ -69,13 +69,8 @@ EXPECTED_FUNCTIONS = frozenset(
         'horsies_cancel_owned_node',
         'horsies_cancel_owned_nodes',
         'horsies_cancel_owned_orphan',
-        'horsies_claim',
-        'horsies_claim_candidates',
-        'horsies_claim_in_flight',
         'horsies_claim_plan',
         'horsies_complete_locked_task',
-        'horsies_complete_task_fused',
-        'horsies_complete_tasks_fused',
         'horsies_encode_rerun_input',
         'horsies_encode_task_attempts',
         'horsies_expire_owned_claim',
@@ -83,8 +78,6 @@ EXPECTED_FUNCTIONS = frozenset(
         'horsies_fail_locked_task',
         'horsies_fail_stale_task',
         'horsies_find_non_runnable_workflow_tasks',
-        'horsies_finish_failed_attempt',
-        'horsies_finish_workflow_success',
         'horsies_key_reservation_claim',
         'horsies_key_reservation_cleanup',
         'horsies_key_reservation_terminalize',
@@ -96,14 +89,87 @@ EXPECTED_FUNCTIONS = frozenset(
         'horsies_task_history_leaf_lock_key',
         'horsies_terminalization_miss',
         'horsies_uuid7_birth',
+        # 0004_lifecycle_functions.sql.
+        'horsies_cancel_task',
+        'horsies_claim',
+        'horsies_claim_candidates',
+        'horsies_claim_in_flight',
+        'horsies_complete_task_fused',
+        'horsies_complete_tasks_fused',
+        'horsies_enqueue_task',
+        'horsies_finish_failed_attempt',
+        'horsies_finish_stale_attempt',
+        'horsies_finish_workflow_success',
+        'horsies_insert_task_rows',
+        'horsies_node_has_dependents',
+        'horsies_release_claims',
+        'horsies_requeue_stale_claims',
+        'horsies_stale_running_scan',
+        'horsies_start_attempt',
+        # 0005_workflow_functions.sql.
+        'horsies_task_error_envelope',
+        'horsies_task_error_object',
+        'horsies_workflow_apply_recovery_limit',
+        'horsies_workflow_cancel',
+        'horsies_workflow_child_finish',
+        'horsies_workflow_child_node_result',
+        'horsies_workflow_child_start_rows',
+        'horsies_workflow_err_slot',
+        'horsies_workflow_explicit_output',
+        'horsies_workflow_fail_unbuildable',
+        'horsies_workflow_failure_error',
+        'horsies_workflow_json_or_null',
+        'horsies_workflow_move_descendants',
+        'horsies_workflow_node_apply',
+        'horsies_workflow_node_finish',
+        'horsies_workflow_node_tasks_insert',
+        'horsies_workflow_outcome_row',
+        'horsies_workflow_output_error_data',
+        'horsies_workflow_outputless_result',
+        'horsies_workflow_pause',
+        'horsies_workflow_phase2_record_raise',
+        'horsies_workflow_phase2_recover',
+        'horsies_workflow_phase2_source',
+        'horsies_workflow_progress',
+        'horsies_workflow_promote',
+        'horsies_workflow_promote_level',
+        'horsies_workflow_record_failure',
+        'horsies_workflow_require',
+        'horsies_workflow_result_kind',
+        'horsies_workflow_resume',
+        'horsies_workflow_source_value',
+        'horsies_workflow_start',
+        'horsies_workflow_start_check',
+        'horsies_workflow_start_nodes',
+        'horsies_workflow_start_progress',
+        'horsies_workflow_start_workflows',
+        'horsies_workflow_task_input',
+        'horsies_workflow_try_complete',
+        'horsies_workflow_unbuildable_nodes',
+        # 0006_history_functions.sql.
+        'horsies_begin_leaf_detach',
+        'horsies_drop_detached_leaf',
+        'horsies_inspect_history_leaf',
+        'horsies_move_tasks_to_history',
+        'horsies_prune_candidates',
+        'horsies_record_leaf_detached',
+        'horsies_rerun_source_read',
+        'horsies_task_absence_reason',
         # 0007_scheduler_monitoring_functions.sql.
         'horsies_fire_schedule',
         'horsies_list_expired_tasks',
         'horsies_list_stale_tasks',
         'horsies_monitoring_check_scope',
+        'horsies_monitoring_schedules',
+        'horsies_monitoring_task_breakdown',
         'horsies_monitoring_task_detail',
         'horsies_monitoring_task_facets',
         'horsies_monitoring_task_list',
+        'horsies_monitoring_task_stats',
+        'horsies_monitoring_workflow_names',
+        'horsies_monitoring_workflow_node',
+        'horsies_monitoring_workflow_run',
+        'horsies_monitoring_workflow_runs',
         'horsies_schedule_slot_task_id',
     }
 )
@@ -291,6 +357,66 @@ async def test_manifest_lower_bound_is_typed(
                 assert raised.value.diag.constraint_name == constraint
 
 
+_WORKFLOW_ROW_SQL: Final = """
+    INSERT INTO horsies_workflows (
+        id, name, status, on_error, depth, root_workflow_id, sent_at, created_at, updated_at
+    ) VALUES (
+        '0193e5c4-0000-7000-8000-000000000001', 'params_case', 'RUNNING', 'fail', 0,
+        '0193e5c4-0000-7000-8000-000000000001', now(), now(), now()
+    )
+"""
+
+_NODE_ROW_SQL: Final = """
+    INSERT INTO horsies_workflow_tasks (
+        id, workflow_id, task_index, node_id, task_name, input, queue_name, priority, dependencies,
+        allow_failed_deps, join_type, max_retries, execution, retention_class_key, status,
+        is_subworkflow, sub_workflow_params, created_at
+    ) VALUES (
+        '0193e5c4-0000-7000-8000-000000000002', '0193e5c4-0000-7000-8000-000000000001', 0, 'node_0',
+        'params.case', '{}', 'default', 100, '{}', FALSE, 'all', %(max_retries)s, %(execution)s,
+        %(retention_class_key)s, 'PENDING', %(is_subworkflow)s, %(sub_workflow_params)s, now()
+    )
+"""
+
+
+@pytest.mark.parametrize(
+    ('is_subworkflow', 'sub_workflow_params', 'violated'),
+    [
+        (False, None, None),
+        (True, 'NOT_GIVEN', None),
+        (True, 'GIVEN', None),
+        (True, None, 'horsies_workflow_tasks_sub_workflow_params_by_kind'),
+        (True, 'SOME', 'horsies_workflow_tasks_sub_workflow_params_by_kind'),
+        (False, 'NOT_GIVEN', 'horsies_workflow_tasks_sub_workflow_params_by_kind'),
+        (False, 'GIVEN', 'horsies_workflow_tasks_sub_workflow_params_by_kind'),
+    ],
+)
+@pytest.mark.asyncio(loop_scope='function')
+async def test_sub_workflow_params_are_set_exactly_on_sub_workflow_nodes(
+    installed: psycopg.AsyncConnection[tuple[object, ...]],
+    is_subworkflow: bool,
+    sub_workflow_params: str | None,
+    violated: str | None,
+) -> None:
+    # The task facts follow the node kind, so only the params CHECK decides.
+    params: dict[str, object] = {
+        'max_retries': None if is_subworkflow else 0,
+        'execution': None if is_subworkflow else 'ISOLATED',
+        'retention_class_key': None if is_subworkflow else 'forever',
+        'is_subworkflow': is_subworkflow,
+        'sub_workflow_params': sub_workflow_params,
+    }
+    async with installed.transaction(force_rollback=True):
+        await installed.execute(_WORKFLOW_ROW_SQL)
+        match violated:
+            case None:
+                await installed.execute(_NODE_ROW_SQL, params)
+            case constraint:
+                with pytest.raises(psycopg.errors.CheckViolation) as raised:
+                    await installed.execute(_NODE_ROW_SQL, params)
+                assert raised.value.diag.constraint_name == constraint
+
+
 @pytest.mark.asyncio(loop_scope='function')
 async def test_forever_leaf_starts_at_minvalue_with_an_open_catalog_bound(
     installed: psycopg.AsyncConnection[tuple[object, ...]],
@@ -309,3 +435,68 @@ async def test_forever_leaf_starts_at_minvalue_with_an_open_catalog_bound(
         'OPEN',
         True,
     )
+
+
+_TASK_ROW_SQL: Final = """
+    INSERT INTO horsies_tasks (
+        id, task_name, queue_name, priority, input, task_options, execution, retention_class_key,
+        sent_at, created_at, command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+        status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at, started_at,
+        finalizing_at, finalizing_by_worker_id, worker_pid, worker_hostname, worker_process_name,
+        retry_count, max_retries, next_retry_at, good_until, is_workflow_task, updated_at,
+        retain_rerun_input, rerun_of_task_id, rerun_root_task_id
+    ) VALUES (
+        %(id)s, 'notify.task', 'default', 100, '{}', NULL, 'ISOLATED', 'forever',
+        now(), now(), 1, sha256('x'::bytea), NULL,
+        CAST(%(status)s AS varchar), now(),
+        CASE WHEN CAST(%(status)s AS varchar) = 'PENDING' THEN NULL ELSE now() END,
+        CASE WHEN CAST(%(status)s AS varchar) = 'PENDING' THEN NULL ELSE 'w1' END,
+        CASE WHEN CAST(%(status)s AS varchar) = 'CLAIMED' THEN now() + interval '1 minute' END,
+        CASE WHEN CAST(%(status)s AS varchar) = 'RUNNING' THEN now() END,
+        NULL, NULL,
+        CASE WHEN CAST(%(status)s AS varchar) = 'RUNNING' THEN 1 END,
+        CASE WHEN CAST(%(status)s AS varchar) = 'RUNNING' THEN 'host' END,
+        CASE WHEN CAST(%(status)s AS varchar) = 'RUNNING' THEN 'proc' END,
+        0, 0, NULL, NULL, FALSE, now(), FALSE, NULL, NULL
+    )
+"""
+
+_INSERT_CHANNELS: Final = ('task_new', 'task_queue_default', 'horsies_task_status')
+_NOTIFY_WAIT_S: Final = 0.5
+_TASK_ID: Final = '00000000-0000-7000-8000-0000000000c1'
+
+
+@pytest.mark.parametrize(
+    ('status', 'expected'),
+    [
+        (
+            'PENDING',
+            [
+                ('task_new', _TASK_ID),
+                ('task_queue_default', 'new'),
+                ('horsies_task_status', _TASK_ID),
+            ],
+        ),
+        ('CLAIMED', [('horsies_task_status', _TASK_ID)]),
+        ('RUNNING', [('horsies_task_status', _TASK_ID)]),
+    ],
+)
+@pytest.mark.asyncio(loop_scope='function')
+async def test_a_task_insert_wakes_its_queue_only_when_pending(
+    installed: psycopg.AsyncConnection[tuple[object, ...]],
+    status: str,
+    expected: list[tuple[str, str]],
+) -> None:
+    """Every insert sends the status event; only a PENDING insert sends the
+    task_new and task_queue_<queue> wake."""
+    await installed.set_autocommit(True)
+    for channel in _INSERT_CHANNELS:
+        await installed.execute(f'LISTEN {channel}'.encode('utf-8'))
+    await installed.execute(_TASK_ROW_SQL, {'id': _TASK_ID, 'status': status})
+
+    received = [
+        (notify.channel, notify.payload)
+        async for notify in installed.notifies(timeout=_NOTIFY_WAIT_S)
+    ]
+
+    assert received == expected

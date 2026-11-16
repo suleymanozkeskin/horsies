@@ -1,5 +1,7 @@
-"""Plans of the child statements that write one task row, the start and the
-finalizing marker, under the statistics that a burst of sends leaves.
+"""Plan of the child statement that writes one task row, the finalizing
+marker, under the statistics that a burst of sends leaves. (The start is one
+``horsies_start_attempt`` call; the plans inside the function are recorded
+with the function.)
 
 The rows are inserted PENDING and analyzed, then claimed or started with no
 new ANALYZE: the statistics say that no row is CLAIMED or RUNNING. A prepared
@@ -25,11 +27,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies.core.worker.child_runner import (
     MARK_FINALIZING_SQL,
     mark_finalizing_params,
-    set_running_params,
-    set_running_sql,
 )
 from tests.integration.autocommit_support import QUEUE, TASK_NAME, WORKER_ID, psycopg_url
-from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.conftest import compute_test_command_fingerprint
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
 
@@ -50,25 +50,30 @@ async def probe(db_url: str) -> AsyncGenerator[psycopg.AsyncConnection[Any]]:
 async def _rows_with_drain_start_statistics(session: AsyncSession, status: str) -> str:
     """Insert ``ROWS`` PENDING tasks and ANALYZE them, then move every row to
     ``status``, owned by ``WORKER_ID``, with no new ANALYZE. Returns one id."""
-    sent_at, sha = compute_test_enqueue_sha(task_name=TASK_NAME, queue_name=QUEUE)
+    sent_at, fingerprint = compute_test_command_fingerprint(
+        task_name=TASK_NAME, queue_name=QUEUE,
+    )
     _ = await session.execute(
         text("""
             INSERT INTO horsies_tasks
-                (id, task_name, queue_name, priority, args, kwargs,
-                 status, sent_at, enqueued_at, created_at, updated_at,
-                 claimed, retry_count, max_retries,
-                 enqueue_sha, is_workflow_task, retention_class_key,
-                 command_fingerprint_version, command_fingerprint,
-                 retain_rerun_input, prepared_rerun_input_disposition)
-            SELECT g.id, :task_name, :queue, 100, '[]', '{}',
-                   'PENDING', :sent_at, NOW(), NOW(), NOW(),
-                   FALSE, 0, 0,
-                   :sha, FALSE, 'standard_30d',
-                   1, sha256(convert_to(CAST(g.id AS text), 'UTF8')),
-                   FALSE, 'DECLINED_BY_POLICY'
-            FROM (SELECT gen_random_uuid() AS id FROM generate_series(1, :rows)) AS g
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    enqueued_at, created_at, updated_at, retry_count, max_retries,
+                    is_workflow_task, retention_class_key, command_fingerprint_version,
+                    command_fingerprint, retain_rerun_input, execution
+                )
+                SELECT g.id, :task_name, :queue, 100, '{}', 'PENDING', :sent_at, NOW(),
+                    NOW(), NOW(), 0, 0, FALSE, 'standard_30d', 1, :command_fingerprint,
+                    FALSE, 'ISOLATED'
+                FROM (SELECT gen_random_uuid() AS id FROM generate_series(1, :rows)) AS g
         """),
-        {'task_name': TASK_NAME, 'queue': QUEUE, 'sent_at': sent_at, 'sha': sha, 'rows': ROWS},
+        {
+            'task_name': TASK_NAME,
+            'queue': QUEUE,
+            'sent_at': sent_at,
+            'command_fingerprint': fingerprint,
+            'rows': ROWS,
+        },
     )
     await session.commit()
     _ = await session.execute(text('ANALYZE horsies_tasks'))
@@ -77,14 +82,16 @@ async def _rows_with_drain_start_statistics(session: AsyncSession, status: str) 
         text("""
             UPDATE horsies_tasks
             SET status = :status,
-                claimed = :claimed,
+                claim_expires_at = CASE
+                    WHEN :leased THEN NOW() + INTERVAL '5 minutes'
+                END,
                 claimed_at = NOW(),
                 claimed_by_worker_id = :worker_id,
                 started_at = CASE WHEN :started THEN NOW() END
         """),
         {
             'status': status,
-            'claimed': status == 'CLAIMED',
+            'leased': status == 'CLAIMED',
             'started': status == 'RUNNING',
             'worker_id': WORKER_ID,
         },
@@ -136,22 +143,6 @@ async def _task_indexes_in(connection: psycopg.AsyncConnection[Any], plan: str) 
     )
     names = {str(row[0]) for row in await cursor.fetchall()}
     return {name for name in names if re.search(rf'\b{re.escape(name)}\b', plan)}
-
-
-async def test_the_start_reads_its_row_through_the_primary_key(
-    session: AsyncSession,
-    probe: psycopg.AsyncConnection[Any],
-    clean_workflow_tables: None,  # noqa: ARG001
-) -> None:
-    task_id = await _rows_with_drain_start_statistics(session, 'CLAIMED')
-
-    plan = await _generic_plan(
-        probe,
-        set_running_sql(False),
-        set_running_params(task_id, WORKER_ID, False, CLAIMED_AT),
-    )
-
-    assert await _task_indexes_in(probe, plan) == {PRIMARY_KEY}, plan
 
 
 async def test_the_finalizing_marker_reads_its_row_through_the_primary_key(

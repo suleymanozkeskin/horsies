@@ -7,16 +7,20 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::broker::PostgresBroker;
+use crate::core::app::{PreparedSchedules, ScheduleSendFacts};
 use crate::core::config::{AppConfig, ScheduleConfig, TaskSchedule};
 
 use super::calculator::{next_run_at, should_run_now};
 use super::state;
 
-/// Fixed namespace UUID for schedule-derived deterministic task IDs.
-/// Matches Python's `_SCHEDULE_NAMESPACE`. Never change this value.
-const SCHEDULE_NAMESPACE: Uuid = Uuid::from_bytes([
-    0x3c, 0x01, 0xf3, 0xf5, 0xaf, 0xd6, 0x43, 0x63, 0xb7, 0x26, 0xa5, 0xda, 0xb5, 0x1a, 0x81, 0xc7,
-]);
+/// The prefix of the hash input of a slot task id. It names the layout, so
+/// a later layout cannot give the same id. Equal to the prefix of the SQL
+/// function `horsies_schedule_slot_task_id`. Never change this value.
+const SLOT_ID_HASH_PREFIX: &[u8] = b"horsies.schedule_slot.v1";
+
+/// The end (exclusive) of the slot times that a slot task id can hold, in
+/// Unix microseconds: the UUIDv7 time field holds 48 bits of milliseconds.
+const SLOT_ID_END_MICROSECONDS: i64 = (1_i64 << 48) * 1_000;
 
 /// Wall-clock target between missing-row existence checks while every state
 /// row is present and initialized. The check guards rare conditions (startup
@@ -94,6 +98,13 @@ pub enum SchedulerStartError {
         schedule: String,
         after: DateTime<Utc>,
     },
+    /// An enabled schedule has no send facts: the host did not build the
+    /// prepared schedules with `Horsies::prepare_schedules` for this config.
+    #[error(
+        "schedule '{schedule}' has no prepared send facts; build them with \
+         Horsies::prepare_schedules from the same config"
+    )]
+    NotPrepared { schedule: String },
 }
 
 /// Why one slot was not enqueued.
@@ -123,6 +134,21 @@ enum ScheduleFireError {
         #[source]
         source: crate::broker::BrokerError,
     },
+    /// The slot time has no task id; slot not enqueued.
+    #[error("slot of schedule '{schedule}' has no task id: {source}")]
+    SlotOutsideIdRange {
+        schedule: String,
+        #[source]
+        source: SlotTimeOutsideIdRange,
+    },
+}
+
+/// A slot time that the UUIDv7 time field cannot hold: before the Unix
+/// epoch, or at or after 2^48 milliseconds (year 10889).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("slot time {slot_time} is outside the UUIDv7 time range")]
+struct SlotTimeOutsideIdRange {
+    slot_time: DateTime<Utc>,
 }
 
 /// What one slot's enqueue did, as the fire rules read it.
@@ -143,11 +169,14 @@ enum SlotOutcome {
 
 impl ScheduleFireError {
     /// True when the failure may clear on a later try: only a retryable
-    /// broker error. Payload and encoding refusals repeat on every try.
+    /// broker error. Payload, encoding and slot-time refusals repeat on
+    /// every try.
     fn is_retryable(&self) -> bool {
         match self {
             Self::Broker { source, .. } => source.is_retryable(),
-            Self::PayloadTooLarge { .. } | Self::InputEncoding { .. } => false,
+            Self::PayloadTooLarge { .. }
+            | Self::InputEncoding { .. }
+            | Self::SlotOutsideIdRange { .. } => false,
         }
     }
 }
@@ -170,15 +199,22 @@ impl SlotOutcome {
 }
 
 /// Checks that run before the scheduler writes anything: the schedule
-/// section is valid and every enabled pattern has a slot after `now`.
+/// section is valid, every enabled schedule has its prepared send facts, and
+/// every enabled pattern has a slot after `now`.
 fn check_schedules_at_start(
     schedule_config: &ScheduleConfig,
+    prepared: &PreparedSchedules,
     now: DateTime<Utc>,
 ) -> Result<(), SchedulerStartError> {
     schedule_config
         .validate()
         .map_err(SchedulerStartError::InvalidScheduleConfig)?;
     for schedule in schedule_config.schedules.iter().filter(|s| s.enabled) {
+        if !prepared.contains_key(&schedule.name) {
+            return Err(SchedulerStartError::NotPrepared {
+                schedule: schedule.name.clone(),
+            });
+        }
         if next_run_at(&schedule.pattern, now, &schedule.timezone).is_none() {
             return Err(SchedulerStartError::NoNextSlot {
                 schedule: schedule.name.clone(),
@@ -207,13 +243,23 @@ fn check_schedules_at_start(
 ///
 /// The `app_config` is used to resolve queue priorities when enqueueing
 /// scheduled tasks, matching Python's `effective_priority()` behaviour.
+/// `prepared` comes from `Horsies::prepare_schedules`, which checks the
+/// schedules against the task registry (task registered, queue, input type,
+/// input size) and resolves each fired slot's queue and task options.
 pub fn spawn_scheduler(
     broker: Arc<PostgresBroker>,
     schedule_config: ScheduleConfig,
     app_config: AppConfig,
+    prepared: PreparedSchedules,
     cancel: CancellationToken,
 ) -> JoinHandle<Result<(), SchedulerStartError>> {
-    tokio::spawn(run_scheduler(broker, schedule_config, app_config, cancel))
+    tokio::spawn(run_scheduler(
+        broker,
+        schedule_config,
+        app_config,
+        prepared,
+        cancel,
+    ))
 }
 
 /// The body of [`spawn_scheduler`]: start checks, state initialization, then
@@ -222,6 +268,7 @@ async fn run_scheduler(
     broker: Arc<PostgresBroker>,
     schedule_config: ScheduleConfig,
     app_config: AppConfig,
+    prepared: PreparedSchedules,
     cancel: CancellationToken,
 ) -> Result<(), SchedulerStartError> {
     if !schedule_config.enabled || schedule_config.schedules.is_empty() {
@@ -229,7 +276,7 @@ async fn run_scheduler(
         return Ok(());
     }
 
-    check_schedules_at_start(&schedule_config, Utc::now())?;
+    check_schedules_at_start(&schedule_config, &prepared, Utc::now())?;
     initialize_schedules(broker.pool(), &schedule_config.schedules, Utc::now()).await;
 
     let lock_pool = scheduler_lock_pool(broker.pool());
@@ -245,6 +292,7 @@ async fn run_scheduler(
             &schedule_config.schedules,
             schedule_config.check_interval_seconds,
             &app_config,
+            &prepared,
             &mut existence_cadence,
         )
         .await
@@ -459,6 +507,7 @@ async fn check_and_enqueue(
     schedules: &[TaskSchedule],
     check_interval_seconds: u32,
     app_config: &AppConfig,
+    prepared: &PreparedSchedules,
     existence_cadence: &mut ExistenceCheckCadence,
 ) -> Result<(), sqlx::Error> {
     let now = Utc::now();
@@ -507,8 +556,15 @@ async fn check_and_enqueue(
             }
         };
 
-        let schedule_result =
-            process_schedule(broker, schedule, now, check_interval_seconds, app_config).await;
+        let schedule_result = process_schedule(
+            broker,
+            schedule,
+            now,
+            check_interval_seconds,
+            app_config,
+            prepared,
+        )
+        .await;
 
         if let Err(e) = state::release_schedule_lock(lock_tx).await {
             tracing::error!(schedule = %schedule.name, error = %e, "failed to release schedule lock");
@@ -533,6 +589,7 @@ async fn process_schedule(
     now: chrono::DateTime<Utc>,
     _check_interval_seconds: u32,
     app_config: &AppConfig,
+    prepared: &PreparedSchedules,
 ) -> Result<(), sqlx::Error> {
     let Some(state_row) = state::get_state(broker.pool(), &schedule.name).await? else {
         tracing::warn!(
@@ -563,6 +620,15 @@ async fn process_schedule(
         return Ok(());
     }
 
+    // The start checks refuse a schedule without send facts, so a due
+    // enabled schedule always has them.
+    let facts = prepared.get(&schedule.name).unwrap_or_else(|| {
+        panic!(
+            "schedule '{}' has no prepared send facts after the start checks",
+            schedule.name
+        )
+    });
+
     // With catch_up_missed on, the due slots fire in order; with it off, or
     // when no slot is due under the cap, only the latest due slot fires
     // (Python `_check_schedule`).
@@ -576,8 +642,8 @@ async fn process_schedule(
         false => Vec::new(),
     };
     match due_runs.is_empty() {
-        false => fire_catch_up(broker, schedule, &due_runs, now, app_config).await,
-        true => fire_latest_slot(broker, schedule, &state_row, now, app_config).await,
+        false => fire_catch_up(broker, schedule, facts, &due_runs, now, app_config).await,
+        true => fire_latest_slot(broker, schedule, facts, &state_row, now, app_config).await,
     }
 }
 
@@ -588,6 +654,7 @@ async fn process_schedule(
 async fn fire_catch_up(
     broker: &Arc<PostgresBroker>,
     schedule: &TaskSchedule,
+    facts: &ScheduleSendFacts,
     due_runs: &[DateTime<Utc>],
     now: DateTime<Utc>,
     app_config: &AppConfig,
@@ -604,7 +671,7 @@ async fn fire_catch_up(
     let mut last_recorded: Option<Uuid> = None;
     let mut progress_slot: Option<DateTime<Utc>> = None;
     for (index, slot) in due_runs.iter().enumerate() {
-        let result = enqueue_scheduled_task(broker, schedule, app_config, *slot).await;
+        let result = enqueue_scheduled_task(broker, schedule, facts, app_config, *slot).await;
         let outcome = SlotOutcome::from_result(result);
         log_recorded_slot(schedule, *slot, &outcome);
         match outcome {
@@ -658,6 +725,7 @@ async fn fire_catch_up(
 async fn fire_latest_slot(
     broker: &Arc<PostgresBroker>,
     schedule: &TaskSchedule,
+    facts: &ScheduleSendFacts,
     state_row: &state::ScheduleStateRow,
     now: DateTime<Utc>,
     app_config: &AppConfig,
@@ -686,7 +754,7 @@ async fn fire_latest_slot(
         return state::advance_next_run(broker.pool(), &schedule.name, next).await;
     }
 
-    let result = enqueue_scheduled_task(broker, schedule, app_config, slot_time).await;
+    let result = enqueue_scheduled_task(broker, schedule, facts, app_config, slot_time).await;
     let outcome = SlotOutcome::from_result(result);
     log_recorded_slot(schedule, slot_time, &outcome);
     match outcome {
@@ -833,24 +901,55 @@ fn calculate_missed_runs(
     due_runs
 }
 
-/// Canonical UTC datetime string for fingerprint hashing.
-/// Matches Python's `_canon_dt()`.
-fn canon_dt(dt: DateTime<Utc>) -> String {
-    dt.format("%Y-%m-%dT%H:%M:%S%.6f+00:00").to_string()
+/// The task id of one schedule slot: a pure function of the schedule name
+/// and the slot time, with the UUIDv7 layout, so the birth of the id is the
+/// slot time and the history reads prune their probes by it.
+///
+/// - bytes 0-5: the slot time in Unix milliseconds, big endian;
+/// - 4 bits: version 7; 2 bits: variant `10`;
+/// - the other 74 bits: the first bits of SHA-256 of
+///   [`SLOT_ID_HASH_PREFIX`], one zero byte, the slot time in Unix
+///   microseconds as a big-endian `i64`, and the schedule name as UTF-8.
+///
+/// The layout and the bytes equal the SQL function
+/// `horsies_schedule_slot_task_id`. Two slots get one id only when they
+/// share the millisecond and all 74 hash bits.
+///
+/// Errors: `SlotTimeOutsideIdRange` for a slot time before the Unix epoch
+/// or at or after 2^48 milliseconds. Pure.
+fn schedule_slot_task_id(
+    schedule_name: &str,
+    slot_time: DateTime<Utc>,
+) -> Result<Uuid, SlotTimeOutsideIdRange> {
+    use sha2::{Digest, Sha256};
+
+    let slot_microseconds = slot_time.timestamp_micros();
+    if !(0..SLOT_ID_END_MICROSECONDS).contains(&slot_microseconds) {
+        return Err(SlotTimeOutsideIdRange { slot_time });
+    }
+    let digest = Sha256::new()
+        .chain_update(SLOT_ID_HASH_PREFIX)
+        .chain_update([0_u8])
+        .chain_update(slot_microseconds.to_be_bytes())
+        .chain_update(schedule_name.as_bytes())
+        .finalize();
+    let slot_milliseconds = (slot_microseconds / 1_000).to_be_bytes();
+    let mut bytes = [0_u8; 16];
+    bytes[..6].copy_from_slice(&slot_milliseconds[2..]);
+    bytes[6..].copy_from_slice(&digest[..10]);
+    bytes[6] = 0x70 | (bytes[6] & 0x0F);
+    bytes[8] = 0x80 | (bytes[8] & 0x3F);
+    Ok(Uuid::from_bytes(bytes))
 }
 
-/// Deterministic task_id for a schedule name + slot time.
-/// Same schedule + same slot -> same UUID5 -> idempotent on conflict.
-fn schedule_slot_task_id(schedule_name: &str, slot_time: DateTime<Utc>) -> Uuid {
-    Uuid::new_v5(
-        &SCHEDULE_NAMESPACE,
-        format!("{}:{}", schedule_name, canon_dt(slot_time)).as_bytes(),
-    )
-}
-
+/// Enqueue one slot of a schedule. The row stores the slot's input, the
+/// queue and the task's options text of `facts`, the queue's priority and
+/// retention, and the slot time as `sent_at` (Python
+/// `Scheduler._enqueue_scheduled_task`, #480).
 async fn enqueue_scheduled_task(
     broker: &Arc<PostgresBroker>,
     schedule: &TaskSchedule,
+    facts: &ScheduleSendFacts,
     app_config: &AppConfig,
     slot_time: DateTime<Utc>,
 ) -> Result<Uuid, ScheduleFireError> {
@@ -880,12 +979,17 @@ async fn enqueue_scheduled_task(
         });
     }
 
-    let queue = schedule.queue_name.as_deref().unwrap_or("default");
+    let queue = facts.queue_name.as_str();
     let priority = resolve_queue_priority(app_config, queue);
     let retention = app_config.retention.resolve_queue_retention(queue);
 
     // Deterministic task_id from schedule + slot (idempotent on retry).
-    let task_id = schedule_slot_task_id(&schedule.name, slot_time);
+    let task_id = schedule_slot_task_id(&schedule.name, slot_time).map_err(|source| {
+        ScheduleFireError::SlotOutsideIdRange {
+            schedule: schedule.name.clone(),
+            source,
+        }
+    })?;
 
     // sent_at is the logical slot time, not wall clock: a second fire of the
     // same slot carries the same command and sent_at, so the exact-id resend
@@ -899,8 +1003,8 @@ async fn enqueue_scheduled_task(
             Some(slot_time), // sent_at = slot time
             None,            // enqueued_at
             None,            // good_until
-            None,            // task_options
-            Some(task_id),   // predetermined deterministic task_id
+            facts.task_options.as_deref(),
+            Some(task_id), // predetermined deterministic task_id
             None,
             None,
             retention,
@@ -959,11 +1063,12 @@ mod tests {
                 session_database_url: None,
                 pgbouncer_transaction_mode: false,
                 pool_pre_ping: true,
+                worker_pool_pre_ping: false,
                 pool_size: 30,
                 max_overflow: 30,
                 retain_rerun_input_default: false,
                 pool_timeout: 30,
-                pool_recycle: 1800,
+                pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
                 echo: false,
             },
             cluster_wide_cap: None,
@@ -973,6 +1078,7 @@ mod tests {
             recovery: RecoveryConfig::default(),
             retention: crate::core::RetentionConfig::default(),
             resilience: WorkerResilienceConfig::default(),
+            worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
             resend_on_transient_err: false,
         }
@@ -1205,6 +1311,7 @@ mod tests {
             broker,
             ScheduleConfig::new(vec![schedule]),
             default_app_config(),
+            PreparedSchedules::new(),
             CancellationToken::new(),
         )
         .await
@@ -1219,7 +1326,13 @@ mod tests {
     #[test]
     fn start_checks_accept_valid_schedules() {
         let config = ScheduleConfig::new(vec![interval_schedule_secs("fine", 60)]);
-        assert!(check_schedules_at_start(&config, Utc::now()).is_ok());
+        assert!(
+            check_schedules_at_start(&config, &prepared_for(&config.schedules), Utc::now()).is_ok()
+        );
+        assert!(matches!(
+            check_schedules_at_start(&config, &PreparedSchedules::new(), Utc::now()),
+            Err(SchedulerStartError::NotPrepared { ref schedule }) if schedule == "fine"
+        ));
     }
 
     /// Python `test_scheduler_service.py::test_normal_run_permanent_failure_skips_slot`:
@@ -1240,9 +1353,16 @@ mod tests {
         let slot = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
         state::seed_state(&pool, &name, slot).await.unwrap();
         let now = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 30).unwrap();
-        process_schedule(&broker, &schedule, now, 1, &app_config)
-            .await
-            .unwrap();
+        process_schedule(
+            &broker,
+            &schedule,
+            now,
+            1,
+            &app_config,
+            &prepared_for(std::slice::from_ref(&schedule)),
+        )
+        .await
+        .unwrap();
 
         let row = state::get_state(&pool, &name).await.unwrap().unwrap();
         assert_eq!(
@@ -1281,9 +1401,16 @@ mod tests {
         state::seed_state(&pool, &name, first_slot).await.unwrap();
         // Three slots are due: 12:00, 12:01, 12:02.
         let now = Utc.with_ymd_and_hms(2025, 6, 1, 12, 2, 30).unwrap();
-        process_schedule(&broker, &schedule, now, 1, &app_config)
-            .await
-            .unwrap();
+        process_schedule(
+            &broker,
+            &schedule,
+            now,
+            1,
+            &app_config,
+            &prepared_for(std::slice::from_ref(&schedule)),
+        )
+        .await
+        .unwrap();
 
         let row = state::get_state(&pool, &name).await.unwrap().unwrap();
         assert_eq!(
@@ -1301,6 +1428,7 @@ mod tests {
         let first = schedule_slot_task_id("nightly-reindex", slot);
         let second = schedule_slot_task_id("nightly-reindex", slot);
 
+        assert!(first.is_ok());
         assert_eq!(first, second);
     }
 
@@ -1309,10 +1437,102 @@ mod tests {
         let first_slot = Utc.with_ymd_and_hms(2025, 3, 29, 12, 0, 0).unwrap();
         let second_slot = Utc.with_ymd_and_hms(2025, 3, 29, 12, 1, 0).unwrap();
 
-        let first = schedule_slot_task_id("nightly-reindex", first_slot);
-        let second = schedule_slot_task_id("nightly-reindex", second_slot);
+        let first = schedule_slot_task_id("nightly-reindex", first_slot).expect("slot id");
+        let second = schedule_slot_task_id("nightly-reindex", second_slot).expect("slot id");
 
         assert_ne!(first, second);
+    }
+
+    /// The slot id has the UUIDv7 layout: version 7, variant `10`, and the
+    /// slot time in milliseconds as its birth (decision: deterministic slot
+    /// id with the UUIDv7 layout).
+    #[test]
+    fn schedule_slot_task_id_has_the_uuid7_layout_of_its_slot_time() {
+        let slot = Utc.with_ymd_and_hms(2025, 3, 29, 12, 0, 0).unwrap()
+            + chrono::Duration::microseconds(123_456);
+
+        let id = schedule_slot_task_id("nightly-reindex", slot).expect("slot id");
+
+        assert_eq!(id.get_version_num(), 7);
+        assert_eq!(id.get_variant(), uuid::Variant::RFC4122);
+        assert_eq!(
+            crate::core::history::identity::uuid7::uuid7_birth_at(id),
+            DateTime::from_timestamp_millis(slot.timestamp_millis())
+        );
+        assert_ne!(
+            id,
+            schedule_slot_task_id("other-schedule", slot).expect("slot id")
+        );
+    }
+
+    /// The bytes equal those of the SQL function
+    /// `horsies_schedule_slot_task_id` (its pinned vector, and vectors
+    /// computed with Python `hashlib` from the same layout): a whole second,
+    /// a slot with microseconds inside one millisecond, a name that is not
+    /// ASCII, and the Unix epoch.
+    #[test]
+    fn schedule_slot_task_id_matches_the_sql_function_vectors() {
+        let slot = Utc.with_ymd_and_hms(2026, 11, 16, 10, 0, 0).unwrap();
+        let vectors = [
+            ("daily", slot, "01a1e3cc-9d00-7a2c-be43-740ce1fde7de"),
+            (
+                "daily",
+                slot + chrono::Duration::microseconds(123_456),
+                "01a1e3cc-9d7b-7ebb-a478-d6dd16388216",
+            ),
+            (
+                "n\u{e4}chtlich-\u{5e8f}",
+                slot,
+                "01a1e3cc-9d00-7f4b-ba15-2858ace729b9",
+            ),
+            (
+                "daily",
+                DateTime::<Utc>::UNIX_EPOCH,
+                "00000000-0000-7c74-b585-66f6ef335d1e",
+            ),
+        ];
+        for (name, slot_time, expected) in vectors {
+            assert_eq!(
+                schedule_slot_task_id(name, slot_time).expect("slot id"),
+                Uuid::parse_str(expected).expect("vector is a UUID"),
+                "{name} at {slot_time}"
+            );
+        }
+    }
+
+    /// A slot time before the Unix epoch, or at or after 2^48 ms, has no
+    /// slot id; the last microsecond below the bound has one.
+    #[test]
+    fn schedule_slot_task_id_refuses_a_slot_time_outside_the_uuid7_range() {
+        let end = DateTime::from_timestamp_millis(1_i64 << 48).expect("2^48 ms is a valid time");
+        let before_epoch = DateTime::<Utc>::UNIX_EPOCH - chrono::Duration::microseconds(1);
+
+        for slot_time in [before_epoch, end] {
+            assert_eq!(
+                schedule_slot_task_id("daily", slot_time),
+                Err(SlotTimeOutsideIdRange { slot_time }),
+                "{slot_time}"
+            );
+        }
+        let last = schedule_slot_task_id("daily", end - chrono::Duration::microseconds(1))
+            .expect("the last microsecond below 2^48 ms has a slot id");
+        assert_eq!(last.as_bytes()[..6], [0xff; 6]);
+    }
+
+    /// A slot time with no id is a permanent refusal: the schedule moves
+    /// past the slot and records no run.
+    #[test]
+    fn a_slot_time_outside_the_id_range_is_a_permanent_refusal() {
+        let slot_time = DateTime::<Utc>::UNIX_EPOCH - chrono::Duration::seconds(1);
+        let outcome = SlotOutcome::from_result(Err(ScheduleFireError::SlotOutsideIdRange {
+            schedule: "daily".to_owned(),
+            source: SlotTimeOutsideIdRange { slot_time },
+        }));
+
+        assert!(matches!(
+            outcome,
+            SlotOutcome::Permanent(ScheduleFireError::SlotOutsideIdRange { .. })
+        ));
     }
 
     #[test]
@@ -1397,9 +1617,10 @@ mod tests {
             .insert("bulk".to_owned(), Some(chrono::Duration::days(2)));
         let slot = Utc::now() - chrono::Duration::seconds(1);
 
-        let task_id = enqueue_scheduled_task(&broker, &schedule, &app_config, slot)
-            .await
-            .expect("enqueue scheduled task");
+        let task_id =
+            enqueue_scheduled_task(&broker, &schedule, &facts_for(&schedule), &app_config, slot)
+                .await
+                .expect("enqueue scheduled task");
         let row: (String, String, i32, bool) = sqlx::query_as(
             "SELECT id::text, retention_class_key,
                     octet_length(command_fingerprint), retain_rerun_input
@@ -1442,6 +1663,70 @@ mod tests {
         }
     }
 
+    /// Send facts of a schedule whose task declares no queue and no options.
+    fn facts_for(schedule: &TaskSchedule) -> ScheduleSendFacts {
+        ScheduleSendFacts {
+            queue_name: schedule
+                .queue_name
+                .clone()
+                .unwrap_or_else(|| "default".to_owned()),
+            task_options: None,
+        }
+    }
+
+    fn prepared_for(schedules: &[TaskSchedule]) -> PreparedSchedules {
+        schedules
+            .iter()
+            .map(|schedule| (schedule.name.clone(), facts_for(schedule)))
+            .collect()
+    }
+
+    /// Python `test_scheduler_task_options.py::test_a_scheduled_run_stores_the_timeout_and_retry_policy_of_its_task`:
+    /// a fired slot stores the task's options text and the retry limit it
+    /// sets, as a send of the task does (#480).
+    #[tokio::test]
+    #[serial]
+    async fn a_scheduled_run_stores_the_timeout_and_retry_policy_of_its_task() {
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+        let name = format!("fired_options_{}", Uuid::new_v4().simple());
+        let mut schedule = interval_schedule_secs(&name, 60);
+        schedule.task_name = name.clone();
+        let options = crate::core::TaskOptions {
+            task_name: name.clone(),
+            queue_name: None,
+            good_until: None,
+            auto_retry_for: None,
+            retry_policy: Some(crate::core::RetryPolicy::fixed(vec![60, 120], true).unwrap()),
+            timeout_ms: Some(5_000),
+        };
+        let facts = ScheduleSendFacts {
+            queue_name: "default".to_owned(),
+            task_options: options.serialize_retry_options(),
+        };
+        let slot = Utc::now() - chrono::Duration::seconds(1);
+
+        let task_id =
+            enqueue_scheduled_task(&broker, &schedule, &facts, &default_app_config(), slot)
+                .await
+                .expect("enqueue scheduled task");
+        let (stored, max_retries, queue): (Option<String>, i32, String) = sqlx::query_as(
+            "SELECT task_options, max_retries, queue_name FROM horsies_tasks WHERE id = $1",
+        )
+        .bind(task_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(stored, facts.task_options);
+        assert_eq!(max_retries, 2);
+        assert_eq!(queue, "default");
+        sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+            .bind(task_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     #[serial]
     async fn process_schedule_single_late_tick_anchors_to_slot() {
@@ -1473,9 +1758,16 @@ mod tests {
         state::seed_state(&pool, name, due_slot).await.unwrap();
 
         let now = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 3).unwrap();
-        process_schedule(&broker, &schedule, now, 1, &app_config)
-            .await
-            .unwrap();
+        process_schedule(
+            &broker,
+            &schedule,
+            now,
+            1,
+            &app_config,
+            &prepared_for(std::slice::from_ref(&schedule)),
+        )
+        .await
+        .unwrap();
 
         // next_run advances from the slot (12:00:05), not wall-clock (12:00:08).
         let state_row = state::get_state(&pool, name).await.unwrap().unwrap();
@@ -1538,9 +1830,16 @@ mod tests {
         state::seed_state(&pool, name, due_slot).await.unwrap();
 
         let now = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 17).unwrap();
-        process_schedule(&broker, &schedule, now, 1, &app_config)
-            .await
-            .unwrap();
+        process_schedule(
+            &broker,
+            &schedule,
+            now,
+            1,
+            &app_config,
+            &prepared_for(std::slice::from_ref(&schedule)),
+        )
+        .await
+        .unwrap();
 
         // next_run is strictly future (12:00:20), skipping the 05/10/15 backlog.
         let state_row = state::get_state(&pool, name).await.unwrap().unwrap();
@@ -1756,9 +2055,17 @@ mod tests {
                     sqlx::raw_sql("CREATE FUNCTION test_fail_schedule_state() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected state write failure'; END $$; CREATE TRIGGER test_fail_schedule_state BEFORE UPDATE ON horsies_schedule_state FOR EACH ROW EXECUTE FUNCTION test_fail_schedule_state();").execute(&admin).await.unwrap();
                     let mut cadence = ExistenceCheckCadence::new(1);
                     cadence.record(true);
-                    check_and_enqueue(&lock_pool, &broker, &schedules, 1, &config, &mut cadence)
-                        .await
-                        .unwrap();
+                    check_and_enqueue(
+                        &lock_pool,
+                        &broker,
+                        &schedules,
+                        1,
+                        &config,
+                        &prepared_for(&schedules),
+                        &mut cadence,
+                    )
+                    .await
+                    .unwrap();
                     assert_eq!(
                         state::get_state(&admin, &name)
                             .await
@@ -1789,9 +2096,17 @@ mod tests {
                     let task = tokio::spawn(async move {
                         let mut cadence = ExistenceCheckCadence::new(1);
                         cadence.record(true);
-                        check_and_enqueue(&pool, &broker, &schedules, 1, &config, &mut cadence)
-                            .await
-                            .unwrap();
+                        check_and_enqueue(
+                            &pool,
+                            &broker,
+                            &schedules,
+                            1,
+                            &config,
+                            &prepared_for(&schedules),
+                            &mut cadence,
+                        )
+                        .await
+                        .unwrap();
                     });
                     tokio::time::timeout(Duration::from_secs(5),async {
                         loop {
@@ -1830,6 +2145,7 @@ mod tests {
                         &schedules,
                         1,
                         &config,
+                        &prepared_for(&schedules),
                         &mut cadence
                     )
                     .await
@@ -1846,9 +2162,17 @@ mod tests {
                         calls.push(tokio::spawn(async move {
                             let mut cadence = ExistenceCheckCadence::new(1);
                             cadence.record(true);
-                            check_and_enqueue(&pool, &broker, &schedules, 1, &config, &mut cadence)
-                                .await
-                                .unwrap();
+                            check_and_enqueue(
+                                &pool,
+                                &broker,
+                                &schedules,
+                                1,
+                                &config,
+                                &prepared_for(&schedules),
+                                &mut cadence,
+                            )
+                            .await
+                            .unwrap();
                             pool.close().await;
                         }));
                     }
@@ -1860,12 +2184,28 @@ mod tests {
             }
             let mut cadence = ExistenceCheckCadence::new(1);
             cadence.record(true);
-            check_and_enqueue(&lock_pool, &broker, &schedules, 1, &config, &mut cadence)
-                .await
-                .unwrap();
-            check_and_enqueue(&lock_pool, &broker, &schedules, 1, &config, &mut cadence)
-                .await
-                .unwrap();
+            check_and_enqueue(
+                &lock_pool,
+                &broker,
+                &schedules,
+                1,
+                &config,
+                &prepared_for(&schedules),
+                &mut cadence,
+            )
+            .await
+            .unwrap();
+            check_and_enqueue(
+                &lock_pool,
+                &broker,
+                &schedules,
+                1,
+                &config,
+                &prepared_for(&schedules),
+                &mut cadence,
+            )
+            .await
+            .unwrap();
             assert_eq!(
                 state::get_state(&admin, &name)
                     .await
@@ -1919,6 +2259,7 @@ mod tests {
         let name = format!("scheduler_lifecycle_{}", uuid::Uuid::new_v4().simple());
         let mut schedule = interval_schedule_secs(&name, 60);
         schedule.task_name = name.clone();
+        let prepared = prepared_for(std::slice::from_ref(&schedule));
         let cancel = CancellationToken::new();
         let service = spawn_scheduler(
             broker,
@@ -1928,6 +2269,7 @@ mod tests {
                 check_interval_seconds: 1,
             },
             default_app_config(),
+            prepared,
             cancel.clone(),
         );
         tokio::time::timeout(Duration::from_secs(5), async {

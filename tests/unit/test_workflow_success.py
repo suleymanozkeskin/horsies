@@ -62,6 +62,7 @@ def _row(**overrides: Any) -> dict[str, Any]:
         'observed_guard': None,
         'queue_name': 'q1',
         'task_name': 'task_a',
+        'node_has_dependents': True,
     }
     row.update(overrides)
     return row
@@ -74,6 +75,7 @@ def _miss_row(outcome: str, **overrides: Any) -> dict[str, Any]:
         terminalization_kind=None,
         queue_name=None,
         task_name=None,
+        node_has_dependents=None,
     )
     row.update(overrides)
     return row
@@ -159,6 +161,8 @@ class TestDecodeFailsClosed:
             _row(terminalization_kind='FAIL_RUNNING'),
             _row(task_name=None),
             _row(queue_name=None),
+            _row(node_has_dependents=None),
+            _miss_row('LOST_CLAIM', node_has_dependents=False),
             _miss_row('LOST_CLAIM', queue_name='q1'),
             _miss_row('LOST_CLAIM', task_name='task_a'),
             _row(outcome='RETRY_SCHEDULED'),
@@ -168,6 +172,8 @@ class TestDecodeFailsClosed:
             'applied_failure_kind',
             'applied_without_task_name',
             'applied_without_queue_name',
+            'applied_without_the_dependents_fact',
+            'refusal_with_a_dependents_fact',
             'refusal_with_queue_name',
             'refusal_with_task_name',
             'unknown_outcome',

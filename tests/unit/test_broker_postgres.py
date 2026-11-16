@@ -20,7 +20,17 @@ import pytest
 
 from sqlalchemy.exc import OperationalError as SAOperationalError
 from sqlalchemy.exc import TimeoutError as SATimeoutError
-from horsies.core.brokers.postgres import SyncSendRoute
+from horsies.core.brokers.stale_running import (
+    FINISH_STALE_ATTEMPT_SQL,
+    STALE_RUNNING_SCAN_BATCH_SIZE,
+    STALE_RUNNING_SCAN_SQL,
+)
+from horsies.core.brokers.postgres import (
+    REQUEUE_STALE_CLAIMS_BATCH_SIZE,
+    REQUEUE_STALE_CLAIMS_MAX_BATCHES_PER_PASS,
+    REQUEUE_STALE_CLAIMS_SQL,
+    SyncSendRoute,
+)
 from horsies.core.brokers.resources import ListenerDisabled, ListenerEnabled
 from horsies.core.brokers.result_types import (
     BrokerEnqueueFailed,
@@ -45,7 +55,6 @@ from horsies.core.models.task_send_types import (
     TaskSendValidationFailed,
 )
 from horsies.core.task_decorator import create_task_wrapper
-from horsies.core.history.rerun.input_envelope import encode_input_envelope_v1
 from horsies.core.history.errors import HistoryContractError
 from horsies.core.history.archive.versions import archive_digest
 from horsies.core.history.reads.detail import HistoryTaskDetail
@@ -59,21 +68,14 @@ from horsies.core.models.tasks import (
     TaskInfo,
     TaskResult,
 )
-from horsies.core.lifecycle.commands import FailStaleTask
-from horsies.core.lifecycle.operations import TerminalizationKind
-from horsies.core.lifecycle.persistence import LOCK_TASK_SQL
-from horsies.core.lifecycle.outcomes import (
-    Applied,
-    ObservedStaleness,
-    ObservedTaskState,
-    SourceStateConflict,
-)
 from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.baseline.install import (
     BaselineCurrent,
     ClientFamily,
     EmptyDatabase,
     FamilyRecorded,
+    ReadersMissing,
+    ReadersPublished,
     SchemaNewer,
     SchemaStatementFailed,
 )
@@ -185,37 +187,20 @@ def _make_broker(database_url: str = 'postgresql+psycopg://u:p@localhost/db') ->
     return broker
 
 
-def _stale_applied(task_id: str, terminal_at: datetime) -> Applied:
-    return Applied(
-        task_id=task_id,
-        ordinality=None,
-        terminal_at=terminal_at,
-        kind=TerminalizationKind.FAIL_STALE,
-        observed=ObservedTaskState(
-            status=TaskStatus.RUNNING,
-            worker_id='worker-1',
-            claimed_at=None,
-        ),
-    )
-
-
 def _make_result_session(row: Any) -> AsyncMock:
     """Mock session for get_raw_result_record_async.
 
-    The broker polls a slim status/name SELECT first and, once a terminal
-    status is observed, fetches only the columns RawResultRecord consumes
-    (task_name, status, result) — never the full entity, whose args/kwargs
-    payload columns can be multi-MB. ``session.get`` is a tripwire: the
-    result path regressing to a full-entity load fails loudly here.
+    The broker polls a slim status/name SELECT of the live row; a live row
+    holds no result. ``session.get`` is a tripwire: the result path
+    regressing to a full-entity load fails loudly here.
     """
-    from horsies.core.brokers.postgres import GET_TASK_RESULT_RECORD_SQL
+    from horsies.core.brokers.postgres import GET_TASK_STATUS_NAME_SQL
 
     session = AsyncMock()
     session.__aenter__ = AsyncMock(return_value=session)
     session.__aexit__ = AsyncMock(return_value=None)
     if row is None:
         probe_row = None
-        record_row = None
     else:
         probe_row = MagicMock()
         status = row.status
@@ -223,24 +208,18 @@ def _make_result_session(row: Any) -> AsyncMock:
             status.value if isinstance(status, TaskStatus) else status
         )
         probe_row.task_name = row.task_name
-        record_row = MagicMock()
-        record_row.status = probe_row.status
-        record_row.task_name = row.task_name
-        record_row.result = row.result
 
     async def _execute(statement: Any, *args: Any, **kwargs: Any) -> Any:
+        assert statement is GET_TASK_STATUS_NAME_SQL, statement
         result = MagicMock()
-        if statement is GET_TASK_RESULT_RECORD_SQL:
-            result.fetchone = MagicMock(return_value=record_row)
-        else:
-            result.fetchone = MagicMock(return_value=probe_row)
+        result.fetchone = MagicMock(return_value=probe_row)
         return result
 
     session.execute = AsyncMock(side_effect=_execute)
     session.get = AsyncMock(
         side_effect=AssertionError(
             'result path must not full-entity load TaskModel; '
-            'use GET_TASK_RESULT_RECORD_SQL'
+            'use GET_TASK_STATUS_NAME_SQL'
         ),
     )
     # The history fallback probes for the staged detail function on
@@ -263,16 +242,11 @@ def _make_task_row(**overrides: Any) -> MagicMock:
         'queue_name': 'default',
         'priority': 100,
         'status': TaskStatus.PENDING,
-        'args': None,
-        'kwargs': None,
-        'result': None,
-        'failed_reason': None,
+        'input': '{}',
         'sent_at': datetime.now(timezone.utc),
         'enqueued_at': datetime.now(timezone.utc),
         'claimed_at': None,
         'started_at': None,
-        'completed_at': None,
-        'failed_at': None,
         'retry_count': 0,
         'max_retries': 0,
         'next_retry_at': None,
@@ -490,6 +464,10 @@ class TestPostgresBrokerPgBouncerWiring:
                 'horsies.core.brokers.postgres.install_baseline',
                 new=AsyncMock(return_value=Ok(None)),
             ),
+            patch(
+                'horsies.core.brokers.postgres.publish_history_readers',
+                new=AsyncMock(return_value=Ok(None)),
+            ),
         ):
             config = PostgresConfig(
                 database_url=database_url,
@@ -528,6 +506,10 @@ class TestPostgresBrokerPgBouncerWiring:
             ),
             patch(
                 'horsies.core.brokers.postgres.install_baseline',
+                new=AsyncMock(return_value=Ok(None)),
+            ),
+            patch(
+                'horsies.core.brokers.postgres.publish_history_readers',
                 new=AsyncMock(return_value=Ok(None)),
             ),
         ):
@@ -722,6 +704,7 @@ class TestEnqueueAsync:
             'default',
             task_id='test-task-id',
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
             args_json='[]',
             kwargs_json='{"key": "val"}',
         )
@@ -772,6 +755,7 @@ class TestEnqueueAsync:
             'my_task',
             task_id='test-task-id',
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
             task_options=task_options,
         )
 
@@ -795,6 +779,7 @@ class TestEnqueueAsync:
             'my_task',
             task_id='test-task-id',
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
             task_options='NOT_VALID_JSON{{',
         )
 
@@ -817,6 +802,7 @@ class TestEnqueueAsync:
             'my_task',
             task_id='test-task-id',
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
             task_options='{"x":1e9999}',
         )
 
@@ -840,6 +826,7 @@ class TestEnqueueAsync:
             'my_task',
             task_id='test-task-id',
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
             kwargs_json=r'{"x":"\ud800"}',
         )
 
@@ -864,6 +851,7 @@ class TestEnqueueAsync:
             'my_task',
             task_id='test-task-id',
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
             kwargs_json='{"x":' + '[' * 1_100 + ']' * 1_100 + '}',
         )
 
@@ -888,6 +876,7 @@ class TestEnqueueAsync:
             'my_task',
             task_id='test-task-id',
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
             kwargs_json='{"x":1e9999}',
         )
 
@@ -912,6 +901,7 @@ class TestEnqueueAsync:
             'my_task',
             task_id='test-task-id',
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
             enqueued_at=datetime.now(timezone.utc),
             enqueue_delay_seconds=30,
         )
@@ -936,6 +926,7 @@ class TestEnqueueAsync:
             'my_task',
             task_id='test-task-id',
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
             args_json='NOT_VALID_JSON{{',
         )
 
@@ -960,6 +951,7 @@ class TestEnqueueAsync:
             'my_task',
             task_id='test-task-id',
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
             good_until=expiry,
         )
 
@@ -978,6 +970,7 @@ class TestEnqueueAsync:
             'my_task',
             task_id='test-task-id',
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
             task_options=task_options,
         )
 
@@ -1002,6 +995,7 @@ class TestEnqueueAsync:
             'my_task',
             task_id='test-task-id',
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
             task_options=task_options,
         )
 
@@ -1092,8 +1086,9 @@ _CONFLICT_SENT_AT = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 def _conflict_send_fingerprint() -> bytes:
     """The command fingerprint that the broker computes for the sends of
-    TestEnqueueIdempotency: ``my_task`` on ``default``, no input, no options,
-    the default retention class, no retained input."""
+    TestEnqueueIdempotency: ``my_task`` on ``default``, no kwargs (stored
+    input ``{}``), no options, the default retention class, no retained
+    input."""
     from horsies.core.history.identity.fingerprint import EnqueueCommandV1
 
     return EnqueueCommandV1(
@@ -1101,7 +1096,7 @@ def _conflict_send_fingerprint() -> bytes:
         queue_name='default',
         priority=100,
         args_json=None,
-        kwargs_json=None,
+        kwargs_json='{}',
         good_until=None,
         enqueue_delay_seconds=None,
         task_options_json=None,
@@ -1254,6 +1249,7 @@ class TestEnqueueIdempotency:
             'my_task',
             task_id='dup-id',
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
         )
 
         assert is_err(result)
@@ -1287,6 +1283,7 @@ class TestEnqueueIdempotency:
             'my_task',
             task_id='dup-id',
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
         )
 
         assert is_err(result)
@@ -1379,16 +1376,19 @@ class TestGetRawResultRecordAsync:
         assert result.unwrap() is None
 
     @pytest.mark.asyncio
-    async def test_terminal_row_with_valid_envelope_returns_record(self) -> None:
-        """COMPLETED row with parseable envelope → Ok(RawResultRecord)."""
+    @pytest.mark.parametrize(
+        'status',
+        [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.EXPIRED],
+    )
+    async def test_live_row_with_a_terminal_status_returns_record_with_none_payload(
+        self, status: TaskStatus,
+    ) -> None:
+        """A live row holds no result: a terminal status read from it gives
+        Ok(RawResultRecord(raw_result=None)), and only the status probe runs."""
         from horsies.core.brokers.result_types import RawResultRecord
 
         broker = _make_broker()
-        row = _make_task_row(
-            status=TaskStatus.COMPLETED,
-            result='{"__h_task_result__":true,"ok":42,"err":null}',
-        )
-        session = _make_result_session(row)
+        session = _make_result_session(_make_task_row(status=status))
         _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         result = await broker.get_raw_result_record_async('task-123')
@@ -1398,12 +1398,9 @@ class TestGetRawResultRecordAsync:
         assert isinstance(record, RawResultRecord)
         assert record.task_id == 'task-123'
         assert record.task_name == 'my_task'
-        assert record.status == TaskStatus.COMPLETED
-        assert record.raw_result == {
-            '__h_task_result__': True,
-            'ok': 42,
-            'err': None,
-        }
+        assert record.status == status
+        assert record.raw_result is None
+        assert session.execute.await_count == 1
 
     @pytest.mark.asyncio
     async def test_cancelled_row_returns_record_with_none_payload(self) -> None:
@@ -1411,7 +1408,7 @@ class TestGetRawResultRecordAsync:
         from horsies.core.brokers.result_types import RawResultRecord
 
         broker = _make_broker()
-        row = _make_task_row(status=TaskStatus.CANCELLED, result=None)
+        row = _make_task_row(status=TaskStatus.CANCELLED)
         session = _make_result_session(row)
         _set_resources(broker, session_factory=MagicMock(return_value=session))
 
@@ -1437,7 +1434,7 @@ class TestGetRawResultRecordAsync:
         _listener_of(broker).listen = AsyncMock(
             side_effect=RuntimeError('listener down; force polling'),
         )
-        running_row = _make_task_row(status=TaskStatus.RUNNING, result=None)
+        running_row = _make_task_row(status=TaskStatus.RUNNING)
         session = _make_result_session(running_row)
         _set_resources(broker, session_factory=MagicMock(return_value=session))
 
@@ -1453,45 +1450,6 @@ class TestGetRawResultRecordAsync:
         assert isinstance(record, RawResultRecord)
         assert record.status == TaskStatus.RUNNING
         assert record.raw_result is None
-
-    @pytest.mark.asyncio
-    async def test_malformed_json_returns_invalid_json_payload(self) -> None:
-        """Result column with malformed JSON → Err(INVALID_JSON_PAYLOAD)."""
-        broker = _make_broker()
-        row = _make_task_row(
-            status=TaskStatus.COMPLETED,
-            result='{not valid json',
-        )
-        session = _make_result_session(row)
-        _set_resources(broker, session_factory=MagicMock(return_value=session))
-
-        result = await broker.get_raw_result_record_async('task-123')
-
-        assert is_err(result)
-        err = result.unwrap_err()
-        assert err.code == BrokerErrorCode.INVALID_JSON_PAYLOAD
-        assert err.retryable is False
-        assert 'task-123' in err.message
-
-    @pytest.mark.asyncio
-    async def test_non_object_envelope_returns_invalid_json_payload(self) -> None:
-        """Result column parses to a non-object JSON value → Err(INVALID_JSON_PAYLOAD).
-
-        Envelope grammar requires a JSON object at the top level; a bare
-        scalar (e.g. ``42``) is a contract violation distinct from a
-        parse failure.
-        """
-        broker = _make_broker()
-        row = _make_task_row(status=TaskStatus.COMPLETED, result='42')
-        session = _make_result_session(row)
-        _set_resources(broker, session_factory=MagicMock(return_value=session))
-
-        result = await broker.get_raw_result_record_async('task-123')
-
-        assert is_err(result)
-        err = result.unwrap_err()
-        assert err.code == BrokerErrorCode.INVALID_JSON_PAYLOAD
-        assert 'not a JSON object' in err.message
 
     @pytest.mark.asyncio
     async def test_cancelled_error_propagates(self) -> None:
@@ -1647,6 +1605,154 @@ class TestMonitoringQueries:
         assert is_ok(result)
         assert len(result.ok_value) == 1
         assert result.ok_value[0]['task_name'] == 'slow_task'
+
+    def _setup_session_with_ids(self, broker: Any, count: int) -> AsyncMock:
+        """Configure the session to return ``count`` rows of one ``id`` column."""
+        mock_result = MagicMock()
+        mock_result.keys.return_value = ['id']
+        mock_result.fetchall.return_value = [(f'task-{n}',) for n in range(count)]
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.execute = AsyncMock(return_value=mock_result)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
+        return session
+
+    @pytest.mark.asyncio
+    async def test_stale_list_reads_one_row_past_the_bound(self) -> None:
+        """The read asks for the bound plus one row, and passes the threshold."""
+        from horsies.core.brokers.postgres import TASK_LIST_ROW_BOUND
+
+        broker = _make_broker()
+        session = self._setup_session_with_ids(broker, 0)
+
+        result = await broker.get_stale_tasks(stale_threshold_minutes=7)
+
+        assert is_ok(result)
+        parameters = session.execute.await_args.args[1]
+        assert parameters == {
+            'stale_threshold': 7,
+            'row_limit': TASK_LIST_ROW_BOUND + 1,
+        }
+
+    @pytest.mark.asyncio
+    async def test_expired_list_reads_one_row_past_the_bound(self) -> None:
+        from horsies.core.brokers.postgres import TASK_LIST_ROW_BOUND
+
+        broker = _make_broker()
+        session = self._setup_session_with_ids(broker, 0)
+
+        result = await broker.get_expired_tasks()
+
+        assert is_ok(result)
+        parameters = session.execute.await_args.args[1]
+        assert parameters == {'row_limit': TASK_LIST_ROW_BOUND + 1}
+
+    @pytest.mark.asyncio
+    async def test_stale_list_at_the_bound_is_complete(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Exactly the bound of rows: every row comes back, no warning."""
+        from horsies.core.brokers.postgres import TASK_LIST_ROW_BOUND
+
+        broker = _make_broker()
+        self._setup_session_with_ids(broker, TASK_LIST_ROW_BOUND)
+
+        with caplog.at_level('WARNING'):
+            result = await broker.get_stale_tasks(stale_threshold_minutes=5)
+
+        assert is_ok(result)
+        assert len(result.ok_value) == TASK_LIST_ROW_BOUND
+        assert not [r for r in caplog.records if r.levelname == 'WARNING']
+
+    @pytest.mark.asyncio
+    async def test_stale_list_past_the_bound_is_cut_with_a_warning(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """One row past the bound: the first rows up to the bound, and a warning."""
+        from horsies.core.brokers.postgres import TASK_LIST_ROW_BOUND
+
+        broker = _make_broker()
+        self._setup_session_with_ids(broker, TASK_LIST_ROW_BOUND + 1)
+
+        with caplog.at_level('WARNING'):
+            result = await broker.get_stale_tasks(stale_threshold_minutes=5)
+
+        assert is_ok(result)
+        assert len(result.ok_value) == TASK_LIST_ROW_BOUND
+        assert result.ok_value[-1] == {'id': f'task-{TASK_LIST_ROW_BOUND - 1}'}
+        warnings = [r.getMessage() for r in caplog.records if r.levelname == 'WARNING']
+        assert warnings == [
+            f'get_stale_tasks returned the first {TASK_LIST_ROW_BOUND} rows; '
+            'more rows match',
+        ]
+
+    @pytest.mark.asyncio
+    async def test_expired_list_past_the_bound_is_cut_with_a_warning(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from horsies.core.brokers.postgres import TASK_LIST_ROW_BOUND
+
+        broker = _make_broker()
+        self._setup_session_with_ids(broker, TASK_LIST_ROW_BOUND + 1)
+
+        with caplog.at_level('WARNING'):
+            result = await broker.get_expired_tasks()
+
+        assert is_ok(result)
+        assert len(result.ok_value) == TASK_LIST_ROW_BOUND
+        warnings = [r.getMessage() for r in caplog.records if r.levelname == 'WARNING']
+        assert warnings == [
+            f'get_expired_tasks returned the first {TASK_LIST_ROW_BOUND} rows; '
+            'more rows match',
+        ]
+
+    @pytest.mark.asyncio
+    async def test_stale_threshold_bounds_are_accepted(self) -> None:
+        """0 and one year of minutes are both inside the rule."""
+        from horsies.core.brokers.postgres import MAX_STALE_THRESHOLD_MINUTES
+
+        assert MAX_STALE_THRESHOLD_MINUTES == 365 * 24 * 60
+        for minutes in (0, MAX_STALE_THRESHOLD_MINUTES):
+            broker = _make_broker()
+            session = self._setup_session_with_ids(broker, 0)
+
+            result = await broker.get_stale_tasks(stale_threshold_minutes=minutes)
+
+            assert is_ok(result), minutes
+            assert session.execute.await_args.args[1]['stale_threshold'] == minutes
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ('minutes', 'cause'),
+        [
+            (-1, 'stale_threshold_minutes is below 0'),
+            (525_601, 'stale_threshold_minutes is above 525600 (one year)'),
+            (10 ** 5000, 'stale_threshold_minutes is above 525600 (one year)'),
+            (True, 'stale_threshold_minutes is a bool, not an int'),
+            (2.5, 'stale_threshold_minutes is a float, not an int'),
+            ('5', 'stale_threshold_minutes is a str, not an int'),
+        ],
+        ids=['negative', 'above-one-year', 'huge-int', 'bool', 'float', 'str'],
+    )
+    async def test_stale_threshold_outside_the_rule_is_invalid_input(
+        self, minutes: object, cause: str,
+    ) -> None:
+        """A refused threshold is INVALID_INPUT before any database call."""
+        broker = _make_broker()
+        session = self._setup_session_with_ids(broker, 0)
+
+        result = await broker.get_stale_tasks(stale_threshold_minutes=cast(int, minutes))
+
+        assert is_err(result)
+        match result.err_value:
+            case BrokerInvalidInput(message=message, exception=NoCause()):
+                assert message == (
+                    f'{cause}; give whole minutes from 0 to 525600'
+                )
+            case other:
+                raise AssertionError(f'expected INVALID_INPUT, got {other!r}')
+        session.execute.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -2122,455 +2228,238 @@ class TestPingWorkers:
 # ---------------------------------------------------------------------------
 
 
-_LOCKED = MagicMock()
-"""The result of the task advisory lock, the first statement of each task."""
+_STALE_STARTED_AT = datetime(2025, 1, 1, tzinfo=timezone.utc)
+_STALE_DB_NOW = datetime(2025, 1, 1, 0, 10, tzinfo=timezone.utc)
+_CRASH_RETRY_OPTIONS = (
+    '{"retry_policy": {"max_retries": 2, "intervals": [60], '
+    '"backoff_strategy": "fixed", "jitter": false, '
+    '"auto_retry_for": ["WORKER_CRASHED"]}}'
+)
+
+
+def _scan_row(task_id: str, **fields: Any) -> dict[str, Any]:
+    """One row of horsies_stale_running_scan."""
+    return {
+        'task_id': task_id,
+        'retry_count': 0,
+        'max_retries': 0,
+        'task_options': None,
+        'good_until': None,
+        'claimed_by_worker_id': 'worker-1',
+        'worker_pid': 1234,
+        'worker_hostname': 'host-1',
+        'worker_process_name': 'proc-1',
+        'started_at': _STALE_STARTED_AT,
+        'db_now': _STALE_DB_NOW,
+        **fields,
+    }
+
+
+def _stale_finish_row(task_id: str, outcome: str, **fields: Any) -> dict[str, Any]:
+    """One row of horsies_finish_stale_attempt; ``fields`` set its columns."""
+    return {
+        'task_id': task_id,
+        'ordinality': None,
+        'outcome': outcome,
+        'terminal_at': None,
+        'terminalization_kind': None,
+        'observed_status': 'RUNNING',
+        'observed_worker_id': 'worker-1',
+        'observed_claimed_at': None,
+        'guard_kind': None,
+        'observed_guard': None,
+        'retry_disposition': None,
+        'retry_count': None,
+        'next_retry_at': None,
+        'good_until': None,
+        'is_workflow_task': None,
+        'queue_name': None,
+        'task_name': None,
+        'node_has_dependents': None,
+        **fields,
+    }
+
+
+def _stale_applied_row(task_id: str) -> dict[str, Any]:
+    return _stale_finish_row(
+        task_id,
+        'APPLIED',
+        terminal_at=_STALE_DB_NOW,
+        terminalization_kind='FAIL_STALE',
+        retry_disposition='NOT_REQUESTED',
+        is_workflow_task=False,
+        queue_name='default',
+        task_name='t',
+    )
+
+
+def _rows_result(rows: list[dict[str, Any]]) -> MagicMock:
+    result = MagicMock()
+    result.mappings.return_value.all.return_value = rows
+    return result
+
+
+def _stale_session(*results: MagicMock | Exception) -> AsyncMock:
+    """A session whose autocommit connection answers each statement in turn."""
+    session = AsyncMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=None)
+    session.connection = AsyncMock(return_value=session)
+    session.execute = AsyncMock(side_effect=list(results))
+    return session
 
 
 @pytest.mark.unit
 class TestMarkStaleTasksAsFailed:
-    """Tests for mark_stale_tasks_as_failed stale detection and cleanup."""
+    """mark_stale_tasks_as_failed: one scan, then one finish statement per candidate."""
 
     @pytest.mark.asyncio
-    async def test_fractional_second_thresholds_keep_millisecond_precision(
-        self,
-    ) -> None:
-        """The public millisecond contract is not restricted to whole seconds."""
+    async def test_the_scan_takes_the_thresholds_in_ms_and_the_batch_size(self) -> None:
         broker = _make_broker()
-        scan_result = MagicMock()
-        scan_result.fetchall.return_value = []
-        scan_session = AsyncMock()
-        scan_session.__aenter__ = AsyncMock(return_value=scan_session)
-        scan_session.__aexit__ = AsyncMock(return_value=None)
-        scan_session.execute = AsyncMock(return_value=scan_result)
-        _set_resources(broker, session_factory=MagicMock(return_value=scan_session))
+        scan = _stale_session(_rows_result([]))
+        _set_resources(broker, session_factory=MagicMock(return_value=scan))
 
         result = await broker.mark_stale_tasks_as_failed(
             stale_threshold_ms=1_500,
             finalizing_stale_threshold_ms=2_750,
         )
 
-        assert is_ok(result)
-        parameters = scan_session.execute.call_args.args[1]
-        assert parameters['stale_threshold'] == 1.5
-        assert parameters['finalizing_stale_threshold'] == 2.75
+        assert result == Ok(0)
+        scan.execute.assert_awaited_once_with(
+            STALE_RUNNING_SCAN_SQL,
+            {
+                'stale_after_ms': 1_500,
+                'finalizing_stale_after_ms': 2_750,
+                'batch_size': STALE_RUNNING_SCAN_BATCH_SIZE,
+            },
+        )
+        scan.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_no_stale_tasks_returns_zero(self) -> None:
-        """When no stale tasks found, should return 0 without commit."""
+    async def test_a_candidate_without_a_crash_retry_fails_in_one_statement(self) -> None:
         broker = _make_broker()
-        mock_result = MagicMock()
-        mock_result.fetchall.return_value = []
+        scan = _stale_session(_rows_result([_scan_row('task-1')]))
+        finish = _stale_session(_rows_result([_stale_applied_row('task-1')]))
+        _set_resources(broker, session_factory=MagicMock(side_effect=[scan, finish]))
 
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        session.execute = AsyncMock(return_value=mock_result)
-        _set_resources(broker, session_factory=MagicMock(return_value=session))
+        result = await broker.mark_stale_tasks_as_failed(stale_threshold_ms=300_000)
+
+        assert result == Ok(1)
+        statement, parameters = finish.execute.await_args.args
+        assert statement is FINISH_STALE_ATTEMPT_SQL
+        reason = 'Worker process crashed (no runner heartbeat for 300000ms = 300.0s)'
+        assert parameters['retry_kind'] == 'NONE'
+        assert parameters['expected_retry_count'] is None
+        assert parameters['error_code'] == 'WORKER_CRASHED'
+        assert parameters['failed_reason'] == reason
+        assert parameters['attempt_message'] == reason
+        assert '"WORKER_CRASHED"' in parameters['result']
+        assert '"detected_at":"2025-01-01T00:10:00+00:00"' in parameters['result']
+        finish.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_crash_retry_carries_the_scanned_count_and_wakes_its_queue(self) -> None:
+        broker = _make_broker()
+        scan = _stale_session(
+            _rows_result(
+                [_scan_row('task-1', max_retries=2, task_options=_CRASH_RETRY_OPTIONS)],
+            ),
+        )
+        scheduled = _stale_finish_row(
+            'task-1',
+            'RETRY_SCHEDULED',
+            retry_count=1,
+            next_retry_at=_STALE_DB_NOW,
+            queue_name='q1',
+        )
+        finish = _stale_session(_rows_result([scheduled]), MagicMock())
+        _set_resources(broker, session_factory=MagicMock(side_effect=[scan, finish]))
 
         result = await broker.mark_stale_tasks_as_failed()
 
-        assert is_ok(result)
-        assert result.ok_value == 0
-        session.commit.assert_not_awaited()
+        assert result == Ok(1)
+        (finish_call, wake_call) = finish.execute.await_args_list
+        assert finish_call.args[1]['retry_kind'] == 'RETRY'
+        assert finish_call.args[1]['expected_retry_count'] == 0
+        assert finish_call.args[1]['retry_delay_s'] == 60.0
+        assert wake_call.args[1] == {'ch': 'task_queue_q1', 'p': 'retry:task-1'}
 
-    @pytest.mark.asyncio
-    async def test_stale_tasks_marked_failed_and_committed(self) -> None:
-        """Found stale tasks (no retry policy) should be marked FAILED per-task."""
-        broker = _make_broker()
-        stale_started_at = datetime(2025, 1, 1, tzinfo=timezone.utc)
-        db_now = datetime(2025, 1, 1, 0, 10, tzinfo=timezone.utc)
-        # Phase 1 scan returns rows with .id for candidate collection
-        scan_rows = [
-            SimpleNamespace(id='task-1'),
-            SimpleNamespace(id='task-2'),
-        ]
-        scan_result = MagicMock()
-        scan_result.fetchall.return_value = scan_rows
-
-        scan_session = AsyncMock()
-        scan_session.__aenter__ = AsyncMock(return_value=scan_session)
-        scan_session.__aexit__ = AsyncMock(return_value=None)
-        scan_session.execute = AsyncMock(return_value=scan_result)
-
-        # Phase 2: each task locks fresh state, writes the attempt, then invokes
-        # the database-owned terminalization operation.
-        def _make_task_session(task_id: str, retry_count: int = 0) -> AsyncMock:
-            ctx_row = SimpleNamespace(
-                id=task_id,
-                worker_pid=1234,
-                worker_hostname='host-1',
-                claimed_by_worker_id='worker-1',
-                started_at=stale_started_at,
-                retry_count=retry_count,
-                worker_process_name='proc-1',
-                max_retries=0,
-                task_options=None,
-                good_until=None,
-                db_now=db_now,
-                queue_name='default',
-            )
-            ctx_result = MagicMock()
-            ctx_result.fetchone.return_value = ctx_row
-            ts = AsyncMock()
-            ts.__aenter__ = AsyncMock(return_value=ts)
-            ts.__aexit__ = AsyncMock(return_value=None)
-            ts.execute = AsyncMock(side_effect=[_LOCKED, ctx_result, MagicMock()])
-            return ts
-
-        task_sessions = [
-            _make_task_session('task-1'),
-            _make_task_session('task-2', retry_count=2),
-        ]
-        _set_resources(broker, session_factory=MagicMock(side_effect=[scan_session, *task_sessions]))
-
-        with patch(
-            'horsies.core.brokers.postgres.apply_async',
-            new=AsyncMock(side_effect=[
-                _stale_applied('task-1', db_now),
-                _stale_applied('task-2', db_now),
-            ]),
-        ):
-            result = await broker.mark_stale_tasks_as_failed(
-                stale_threshold_ms=300_000,
-            )
-
-        assert is_ok(result)
-        assert result.ok_value == 2
-        for ts in task_sessions:
-            ts.commit.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_update_includes_worker_crashed_error_code(self) -> None:
-        """Each update call should include WORKER_CRASHED in the result JSON."""
-        broker = _make_broker()
-        db_now = datetime(2025, 1, 1, 0, 10, tzinfo=timezone.utc)
-        scan_rows = [SimpleNamespace(id='task-1')]
-        scan_result = MagicMock()
-        scan_result.fetchall.return_value = scan_rows
-
-        scan_session = AsyncMock()
-        scan_session.__aenter__ = AsyncMock(return_value=scan_session)
-        scan_session.__aexit__ = AsyncMock(return_value=None)
-        scan_session.execute = AsyncMock(return_value=scan_result)
-
-        ctx_row = SimpleNamespace(
-            id='task-1',
-            worker_pid=100,
-            worker_hostname='host',
-            claimed_by_worker_id='w-1',
-            started_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
-            retry_count=0,
-            worker_process_name='proc-1',
-            max_retries=0,
-            task_options=None,
-            good_until=None,
-            db_now=db_now,
-            queue_name='default',
-        )
-        ctx_result = MagicMock()
-        ctx_result.fetchone.return_value = ctx_row
-
-        task_session = AsyncMock()
-        task_session.__aenter__ = AsyncMock(return_value=task_session)
-        task_session.__aexit__ = AsyncMock(return_value=None)
-        task_session.execute = AsyncMock(side_effect=[_LOCKED, ctx_result, MagicMock()])
-
-        _set_resources(broker, session_factory=MagicMock(side_effect=[scan_session, task_session]))
-
-        apply_mock = AsyncMock(return_value=_stale_applied('task-1', db_now))
-        with patch('horsies.core.brokers.postgres.apply_async', new=apply_mock):
-            await broker.mark_stale_tasks_as_failed()
-
-        # Per-task SQL: [0]=the task advisory lock, [1]=SELECT FOR UPDATE,
-        # [2]=UPSERT_ATTEMPT. The terminal transition itself crosses the
-        # typed operation boundary.
-        attempt_call = task_session.execute.call_args_list[2]
-        attempt_params = attempt_call[0][1]
-        assert attempt_params['task_id'] == 'task-1'
-        assert attempt_params['outcome'] == 'FAILED'
-        assert attempt_params['error_code'] == 'WORKER_CRASHED'
-        assert attempt_params['attempt'] == 1
-
-        assert apply_mock.await_args is not None
-        command = apply_mock.await_args.args[1]
-        assert isinstance(command, FailStaleTask)
-        assert command.task_id == 'task-1'
-        assert command.stale_after_ms == 300_000
-        assert command.finalizing_stale_after_ms == 300_000
-        assert 'WORKER_CRASHED' in command.result_json
-        assert 'Worker process crashed' in command.failed_reason
-
-    @pytest.mark.asyncio
-    async def test_terminalization_refusal_rolls_back_the_attempt(self) -> None:
-        """The attempt cannot commit without its corresponding transition."""
-        broker = _make_broker()
-        db_now = datetime(2025, 1, 1, 0, 10, tzinfo=timezone.utc)
-        scan_result = MagicMock()
-        scan_result.fetchall.return_value = [SimpleNamespace(id='task-raced')]
-        scan_session = AsyncMock()
-        scan_session.__aenter__ = AsyncMock(return_value=scan_session)
-        scan_session.__aexit__ = AsyncMock(return_value=None)
-        scan_session.execute = AsyncMock(return_value=scan_result)
-
-        ctx_row = SimpleNamespace(
-            id='task-raced',
-            worker_pid=100,
-            worker_hostname='host',
-            claimed_by_worker_id='w-1',
-            started_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
-            retry_count=0,
-            worker_process_name='proc-1',
-            max_retries=0,
-            task_options=None,
-            good_until=None,
-            db_now=db_now,
-            queue_name='default',
-        )
-        ctx_result = MagicMock()
-        ctx_result.fetchone.return_value = ctx_row
-        task_session = AsyncMock()
-        task_session.__aenter__ = AsyncMock(return_value=task_session)
-        task_session.__aexit__ = AsyncMock(return_value=None)
-        task_session.execute = AsyncMock(side_effect=[_LOCKED, ctx_result, MagicMock()])
-        _set_resources(broker, session_factory=MagicMock(
-            side_effect=[scan_session, task_session],
-        ))
-
-        refusal = SourceStateConflict(
-            task_id='task-raced',
-            ordinality=None,
-            observed=ObservedTaskState(
-                status=TaskStatus.RUNNING,
-                worker_id='w-1',
-                claimed_at=None,
+    @pytest.mark.parametrize(
+        ('guard', 'payload'),
+        [
+            (
+                'STALENESS',
+                {
+                    'last_heartbeat_at': None,
+                    'started_at': '2025-01-01T00:00:00+00:00',
+                    'finalizing_at': None,
+                    'stale_after_ms': 300000,
+                    'finalizing_stale_after_ms': 300000,
+                    'evaluated_at': '2025-01-01T00:10:00+00:00',
+                },
             ),
-            evidence=ObservedStaleness(
-                last_heartbeat_at=db_now,
-                started_at=ctx_row.started_at,
-                finalizing_at=None,
-                stale_after_ms=300_000,
-                finalizing_stale_after_ms=300_000,
-                evaluated_at=db_now,
-            ),
+            ('RETRY_COUNT', {'expected_retry_count': 0, 'retry_count': 1}),
+        ],
+        ids=['fresh-again', 'retry-count-changed'],
+    )
+    @pytest.mark.asyncio
+    async def test_a_refused_candidate_is_not_counted(
+        self, guard: str, payload: dict[str, Any],
+    ) -> None:
+        broker = _make_broker()
+        scan = _stale_session(_rows_result([_scan_row('task-1')]))
+        refused = _stale_finish_row(
+            'task-1', 'SOURCE_STATE_CONFLICT', guard_kind=guard, observed_guard=payload,
         )
-        with patch(
-            'horsies.core.brokers.postgres.apply_async',
-            new=AsyncMock(return_value=refusal),
-        ):
+        finish = _stale_session(_rows_result([refused]))
+        _set_resources(broker, session_factory=MagicMock(side_effect=[scan, finish]))
+
+        result = await broker.mark_stale_tasks_as_failed()
+
+        assert result == Ok(0)
+
+    @pytest.mark.asyncio
+    async def test_a_failed_candidate_is_skipped_and_the_next_one_counts(self) -> None:
+        broker = _make_broker()
+        scan = _stale_session(_rows_result([_scan_row('task-1'), _scan_row('task-2')]))
+        broken = _stale_session(SAOperationalError('stmt', {}, Exception('lost')))
+        finish = _stale_session(_rows_result([_stale_applied_row('task-2')]))
+        _set_resources(broker, session_factory=MagicMock(side_effect=[scan, broken, finish]))
+
+        result = await broker.mark_stale_tasks_as_failed()
+
+        assert result == Ok(1)
+
+    @pytest.mark.asyncio
+    async def test_a_failed_scan_is_cleanup_failed(self) -> None:
+        broker = _make_broker()
+        scan = _stale_session(SAOperationalError('stmt', {}, Exception('lost')))
+        _set_resources(broker, session_factory=MagicMock(return_value=scan))
+
+        result = await broker.mark_stale_tasks_as_failed()
+
+        assert is_err(result)
+        assert result.err_value.code is BrokerErrorCode.CLEANUP_FAILED
+
+    @pytest.mark.asyncio
+    async def test_a_full_scan_batch_warns_that_the_rest_waits(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        broker = _make_broker()
+        rows = [_scan_row(f'task-{index}') for index in range(STALE_RUNNING_SCAN_BATCH_SIZE)]
+        refused = [
+            _stale_session(_rows_result([_stale_finish_row(row['task_id'], 'TASK_ABSENT', observed_status=None, observed_worker_id=None)]))
+            for row in rows
+        ]
+        scan = _stale_session(_rows_result(rows))
+        _set_resources(broker, session_factory=MagicMock(side_effect=[scan, *refused]))
+
+        with caplog.at_level('WARNING'):
             result = await broker.mark_stale_tasks_as_failed()
 
-        assert is_ok(result)
-        assert result.ok_value == 0
-        task_session.rollback.assert_awaited_once()
-        task_session.commit.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_stale_task_with_retry_policy_schedules_retry(self) -> None:
-        """Stale task with WORKER_CRASHED in auto_retry_for should be retried."""
-        import json
-
-        broker = _make_broker()
-        db_now = datetime(2025, 1, 1, 0, 10, tzinfo=timezone.utc)
-        task_options_json = json.dumps(
-            {
-                'task_name': 'my_task',
-                'retry_policy': {
-                    'max_retries': 3,
-                    'intervals': [60, 300, 900],
-                    'backoff_strategy': 'fixed',
-                    'jitter': False,
-                    'auto_retry_for': ['WORKER_CRASHED'],
-                },
-            }
-        )
-        scan_rows = [SimpleNamespace(id='task-retry-1')]
-        scan_result = MagicMock()
-        scan_result.fetchall.return_value = scan_rows
-
-        scan_session = AsyncMock()
-        scan_session.__aenter__ = AsyncMock(return_value=scan_session)
-        scan_session.__aexit__ = AsyncMock(return_value=None)
-        scan_session.execute = AsyncMock(return_value=scan_result)
-
-        ctx_row = SimpleNamespace(
-            id='task-retry-1',
-            worker_pid=100,
-            worker_hostname='host',
-            claimed_by_worker_id='w-1',
-            started_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
-            retry_count=0,
-            worker_process_name='proc-1',
-            max_retries=3,
-            task_options=task_options_json,
-            good_until=None,
-            db_now=db_now,
-            queue_name='default',
-        )
-        ctx_result = MagicMock()
-        ctx_result.fetchone.return_value = ctx_row
-
-        # [0]=SELECT FOR UPDATE, [1]=UPSERT_ATTEMPT, [2]=SCHEDULE_STALE_TASK_RETRY
-        retry_result = MagicMock()
-        retry_result.fetchone.return_value = SimpleNamespace(id='task-retry-1')
-        task_session = AsyncMock()
-        task_session.__aenter__ = AsyncMock(return_value=task_session)
-        task_session.__aexit__ = AsyncMock(return_value=None)
-        task_session.execute = AsyncMock(
-            side_effect=[_LOCKED, ctx_result, MagicMock(), retry_result]
-        )
-
-        # notify session (best-effort pg_notify after retry commit)
-        notify_session = AsyncMock()
-        notify_session.__aenter__ = AsyncMock(return_value=notify_session)
-        notify_session.__aexit__ = AsyncMock(return_value=None)
-
-        _set_resources(broker, session_factory=MagicMock(
-            side_effect=[scan_session, task_session, notify_session]
-        ))
-
-        result = await broker.mark_stale_tasks_as_failed(stale_threshold_ms=300_000)
-
-        assert is_ok(result)
-        assert result.ok_value == 1
-        task_session.commit.assert_awaited_once()
-
-        # [1] = UPSERT_ATTEMPT with will_retry=True
-        attempt_call = task_session.execute.call_args_list[2]
-        attempt_params = attempt_call[0][1]
-        assert attempt_params['will_retry'] is True
-        assert attempt_params['error_code'] == 'WORKER_CRASHED'
-
-    @pytest.mark.asyncio
-    async def test_stale_task_retries_exhausted_marks_failed(self) -> None:
-        """Stale task with retry policy but retries exhausted should be marked FAILED."""
-        import json
-
-        broker = _make_broker()
-        db_now = datetime(2025, 1, 1, 0, 10, tzinfo=timezone.utc)
-        task_options_json = json.dumps(
-            {
-                'task_name': 'my_task',
-                'retry_policy': {
-                    'max_retries': 3,
-                    'intervals': [60, 300, 900],
-                    'backoff_strategy': 'fixed',
-                    'jitter': False,
-                    'auto_retry_for': ['WORKER_CRASHED'],
-                },
-            }
-        )
-        scan_rows = [SimpleNamespace(id='task-exhausted')]
-        scan_result = MagicMock()
-        scan_result.fetchall.return_value = scan_rows
-
-        scan_session = AsyncMock()
-        scan_session.__aenter__ = AsyncMock(return_value=scan_session)
-        scan_session.__aexit__ = AsyncMock(return_value=None)
-        scan_session.execute = AsyncMock(return_value=scan_result)
-
-        ctx_row = SimpleNamespace(
-            id='task-exhausted',
-            worker_pid=100,
-            worker_hostname='host',
-            claimed_by_worker_id='w-1',
-            started_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
-            retry_count=3,
-            worker_process_name='proc-1',
-            max_retries=3,
-            task_options=task_options_json,
-            good_until=None,
-            db_now=db_now,
-            queue_name='default',
-        )
-        ctx_result = MagicMock()
-        ctx_result.fetchone.return_value = ctx_row
-
-        task_session = AsyncMock()
-        task_session.__aenter__ = AsyncMock(return_value=task_session)
-        task_session.__aexit__ = AsyncMock(return_value=None)
-        task_session.execute = AsyncMock(side_effect=[_LOCKED, ctx_result, MagicMock()])
-
-        _set_resources(broker, session_factory=MagicMock(side_effect=[scan_session, task_session]))
-
-        with patch(
-            'horsies.core.brokers.postgres.apply_async',
-            new=AsyncMock(
-                return_value=_stale_applied('task-exhausted', db_now),
-            ),
-        ):
-            result = await broker.mark_stale_tasks_as_failed(
-                stale_threshold_ms=300_000,
-            )
-
-        assert is_ok(result)
-        assert result.ok_value == 1
-
-        # [1] = UPSERT_ATTEMPT with will_retry=False (exhausted)
-        attempt_call = task_session.execute.call_args_list[2]
-        attempt_params = attempt_call[0][1]
-        assert attempt_params['will_retry'] is False
-
-    @pytest.mark.asyncio
-    async def test_concurrent_finalize_skips_no_longer_running(self) -> None:
-        """If worker finalized between scan and per-task lock, reaper skips the task."""
-        broker = _make_broker()
-        scan_rows = [SimpleNamespace(id='task-raced')]
-        scan_result = MagicMock()
-        scan_result.fetchall.return_value = scan_rows
-
-        scan_session = AsyncMock()
-        scan_session.__aenter__ = AsyncMock(return_value=scan_session)
-        scan_session.__aexit__ = AsyncMock(return_value=None)
-        scan_session.execute = AsyncMock(return_value=scan_result)
-
-        # SELECT FOR UPDATE returns None — task is no longer RUNNING
-        ctx_result = MagicMock()
-        ctx_result.fetchone.return_value = None
-        task_session = AsyncMock()
-        task_session.__aenter__ = AsyncMock(return_value=task_session)
-        task_session.__aexit__ = AsyncMock(return_value=None)
-        task_session.execute = AsyncMock(return_value=ctx_result)
-
-        _set_resources(broker, session_factory=MagicMock(side_effect=[scan_session, task_session]))
-
-        result = await broker.mark_stale_tasks_as_failed(stale_threshold_ms=300_000)
-
-        assert is_ok(result)
-        assert result.ok_value == 0
-        task_session.commit.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_fresh_heartbeat_between_scan_and_phase2_skips_task(self) -> None:
-        """A candidate is skipped when phase 2 revalidation no longer sees it as stale."""
-        broker = _make_broker()
-        scan_rows = [SimpleNamespace(id='task-fresh')]
-        scan_result = MagicMock()
-        scan_result.fetchall.return_value = scan_rows
-
-        scan_session = AsyncMock()
-        scan_session.__aenter__ = AsyncMock(return_value=scan_session)
-        scan_session.__aexit__ = AsyncMock(return_value=None)
-        scan_session.execute = AsyncMock(return_value=scan_result)
-
-        ctx_result = MagicMock()
-        ctx_result.fetchone.return_value = None
-        task_session = AsyncMock()
-        task_session.__aenter__ = AsyncMock(return_value=task_session)
-        task_session.__aexit__ = AsyncMock(return_value=None)
-        task_session.execute = AsyncMock(return_value=ctx_result)
-
-        _set_resources(broker, session_factory=MagicMock(side_effect=[scan_session, task_session]))
-
-        result = await broker.mark_stale_tasks_as_failed(stale_threshold_ms=300_000)
-
-        assert is_ok(result)
-        assert result.ok_value == 0
-        lock_call, select_call = task_session.execute.call_args_list[:2]
-        assert lock_call[0] == (LOCK_TASK_SQL, {'task_id': 'task-fresh'})
-        select_params = select_call[0][1]
-        assert select_params['stale_threshold'] == 300.0
-        task_session.commit.assert_not_awaited()
-
+        assert result == Ok(0)
+        assert 'read a full scan batch' in caplog.text
 
 # ---------------------------------------------------------------------------
 # TestExpirePendingTasks
@@ -2861,62 +2750,84 @@ class TestTerminateOrphanedWorkflowTasks:
 
 @pytest.mark.unit
 class TestRequeueStaleClaimed:
-    """Tests for requeue_stale_claimed."""
+    """Tests for requeue_stale_claimed: bounded batches of horsies_requeue_stale_claims."""
 
-    @pytest.mark.asyncio
-    async def test_returns_rowcount(self) -> None:
-        """Should return rowcount from the update result."""
-        broker = _make_broker()
-        mock_result = MagicMock()
-        mock_result.rowcount = 5
-
+    @staticmethod
+    def _session(batches: list[int] | Exception) -> AsyncMock:
+        """A session whose autocommit connection returns one batch count per call."""
         session = AsyncMock()
         session.__aenter__ = AsyncMock(return_value=session)
         session.__aexit__ = AsyncMock(return_value=None)
-        session.execute = AsyncMock(return_value=mock_result)
+        session.connection = AsyncMock(return_value=session)
+        match batches:
+            case Exception():
+                session.execute = AsyncMock(side_effect=batches)
+            case list():
+                session.execute = AsyncMock(
+                    side_effect=[
+                        MagicMock(scalar_one=MagicMock(return_value=count))
+                        for count in batches
+                    ],
+                )
+        return session
+
+    @pytest.mark.asyncio
+    async def test_a_short_batch_ends_the_pass(self) -> None:
+        broker = _make_broker()
+        session = self._session([5])
         _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         result = await broker.requeue_stale_claimed(stale_threshold_ms=120_000)
 
-        assert is_ok(result)
-        assert result.ok_value == 5
-        session.commit.assert_awaited_once()
+        assert result == Ok(5)
+        session.execute.assert_awaited_once_with(
+            REQUEUE_STALE_CLAIMS_SQL,
+            {
+                'stale_after_ms': 120_000,
+                'batch_size': REQUEUE_STALE_CLAIMS_BATCH_SIZE,
+            },
+        )
+        session.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_returns_zero_when_no_rowcount(self) -> None:
-        """Should fall back to Ok(0) when rowcount attribute is missing."""
+    async def test_full_batches_repeat_until_a_short_one(self) -> None:
         broker = _make_broker()
-        mock_result = object()  # no rowcount attribute
+        full = REQUEUE_STALE_CLAIMS_BATCH_SIZE
+        session = self._session([full, full, 3])
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
 
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        session.execute = AsyncMock(return_value=mock_result)
+        result = await broker.requeue_stale_claimed(stale_threshold_ms=60_000)
+
+        assert result == Ok(2 * full + 3)
+        assert session.execute.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_the_pass_stops_at_the_batch_cap_with_a_warning(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        broker = _make_broker()
+        full = REQUEUE_STALE_CLAIMS_BATCH_SIZE
+        session = self._session([full] * REQUEUE_STALE_CLAIMS_MAX_BATCHES_PER_PASS)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
+
+        with caplog.at_level('WARNING'):
+            result = await broker.requeue_stale_claimed()
+
+        assert result == Ok(full * REQUEUE_STALE_CLAIMS_MAX_BATCHES_PER_PASS)
+        assert session.execute.await_count == REQUEUE_STALE_CLAIMS_MAX_BATCHES_PER_PASS
+        assert 'reached the per-pass batch cap' in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_a_database_error_is_cleanup_failed(self) -> None:
+        broker = _make_broker()
+        session = self._session(SAOperationalError('stmt', {}, Exception('lost')))
         _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         result = await broker.requeue_stale_claimed()
 
-        assert is_ok(result)
-        assert result.ok_value == 0
-
-    @pytest.mark.asyncio
-    async def test_threshold_converted_to_seconds(self) -> None:
-        """stale_threshold_ms should be converted to seconds for the SQL parameter."""
-        broker = _make_broker()
-        mock_result = MagicMock()
-        mock_result.rowcount = 0
-
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        session.execute = AsyncMock(return_value=mock_result)
-        _set_resources(broker, session_factory=MagicMock(return_value=session))
-
-        await broker.requeue_stale_claimed(stale_threshold_ms=60_000)
-
-        execute_args = session.execute.call_args[0]
-        params = execute_args[1]
-        assert params['stale_threshold'] == 60.0
+        assert is_err(result)
+        assert result.err_value.code is BrokerErrorCode.CLEANUP_FAILED
 
 
 # ---------------------------------------------------------------------------
@@ -2949,6 +2860,7 @@ class TestSyncFacades:
             'queue',
             task_id='test-task-id',
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
             kwargs_json='{"k": "v"}',
             priority=50,
         )
@@ -3483,6 +3395,7 @@ class TestEnqueueAsyncErrorPaths:
             'my_task',
             task_id='test-task-id',
             enqueue_sha='test-sha',
+            sent_at=datetime.now(timezone.utc),
         )
 
         assert is_err(result)
@@ -3537,7 +3450,21 @@ class TestBaselineInstall:
 
     @staticmethod
     def _current() -> Any:
-        return Ok(BaselineCurrent(family=FamilyRecorded(family=ClientFamily.PYTHON)))
+        return Ok(
+            BaselineCurrent(
+                family=FamilyRecorded(family=ClientFamily.PYTHON),
+                readers=ReadersPublished(),
+            )
+        )
+
+    @staticmethod
+    def _readers_missing() -> Any:
+        return Ok(
+            BaselineCurrent(
+                family=FamilyRecorded(family=ClientFamily.PYTHON),
+                readers=ReadersMissing(),
+            )
+        )
 
     @pytest.mark.asyncio
     async def test_current_database_takes_no_lock_and_writes_nothing(self) -> None:
@@ -3563,10 +3490,12 @@ class TestBaselineInstall:
         connection.close.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_empty_database_is_installed_under_the_lock(self) -> None:
+    async def test_empty_database_is_installed_and_published_under_the_lock(self) -> None:
         broker = _make_broker()
         connection = _schema_lock_connection()
+        engine = MagicMock()
         install = AsyncMock(return_value=Ok(None))
+        publish = AsyncMock(return_value=Ok(None))
         with (
             patch(
                 'horsies.core.brokers.postgres.psycopg.AsyncConnection.connect',
@@ -3577,14 +3506,85 @@ class TestBaselineInstall:
                 new=AsyncMock(side_effect=[Ok(EmptyDatabase()), Ok(EmptyDatabase())]),
             ) as read_state,
             patch('horsies.core.brokers.postgres.install_baseline', new=install),
+            patch('horsies.core.brokers.postgres.publish_history_readers', new=publish),
         ):
-            await broker._maybe_run_schema_init(MagicMock())
+            await broker._maybe_run_schema_init(engine)
 
         assert read_state.await_count == 2
         install.assert_awaited_once()
+        publish.assert_awaited_once_with(engine)
         statements = [call.args[0] for call in connection.execute.await_args_list]
         assert statements.count('SELECT pg_try_advisory_lock(%s)') == 1
         assert statements.count('SELECT pg_advisory_unlock(%s)') == 1
+
+    @pytest.mark.asyncio
+    async def test_missing_readers_are_published_without_a_second_migration(
+        self,
+    ) -> None:
+        broker = _make_broker()
+        engine = MagicMock()
+        install = AsyncMock(return_value=Ok(None))
+        publish = AsyncMock(return_value=Ok(None))
+        record_family = AsyncMock(return_value=Ok(None))
+        with (
+            patch(
+                'horsies.core.brokers.postgres.psycopg.AsyncConnection.connect',
+                new=AsyncMock(return_value=_schema_lock_connection()),
+            ),
+            patch(
+                'horsies.core.brokers.postgres.read_database_state',
+                new=AsyncMock(
+                    side_effect=[
+                        self._readers_missing(),
+                        self._readers_missing(),
+                        self._current(),
+                    ]
+                ),
+            ) as read_state,
+            patch('horsies.core.brokers.postgres.install_baseline', new=install),
+            patch('horsies.core.brokers.postgres.publish_history_readers', new=publish),
+            patch(
+                'horsies.core.brokers.postgres.record_client_family', new=record_family
+            ),
+        ):
+            await broker._maybe_run_schema_init(engine)
+
+        assert read_state.await_count == 3
+        install.assert_not_awaited()
+        publish.assert_awaited_once_with(engine)
+        record_family.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_failed_publication_raises_its_cause_with_the_step(self) -> None:
+        broker = _make_broker()
+        failure = SchemaStatementFailed(
+            step='publish the history readers',
+            cause=psycopg.errors.InsufficientPrivilege('permission denied'),
+        )
+        with (
+            patch(
+                'horsies.core.brokers.postgres.psycopg.AsyncConnection.connect',
+                new=AsyncMock(return_value=_schema_lock_connection()),
+            ),
+            patch(
+                'horsies.core.brokers.postgres.read_database_state',
+                new=AsyncMock(side_effect=[Ok(EmptyDatabase()), Ok(EmptyDatabase())]),
+            ),
+            patch(
+                'horsies.core.brokers.postgres.install_baseline',
+                new=AsyncMock(return_value=Ok(None)),
+            ),
+            patch(
+                'horsies.core.brokers.postgres.publish_history_readers',
+                new=AsyncMock(return_value=Err(failure)),
+            ),
+        ):
+            with pytest.raises(psycopg.errors.InsufficientPrivilege) as raised:
+                await broker._maybe_run_schema_init(MagicMock())
+
+        assert raised.value.__notes__ == [
+            'schema install step: publish the history readers',
+        ]
 
     @pytest.mark.asyncio
     async def test_install_finished_by_another_broker_while_waiting_is_not_repeated(
@@ -3658,6 +3658,10 @@ class TestBaselineInstall:
                 new=AsyncMock(return_value=Ok(EmptyDatabase())),
             ),
             patch('horsies.core.brokers.postgres.install_baseline', new=install),
+            patch(
+                'horsies.core.brokers.postgres.publish_history_readers',
+                new=AsyncMock(return_value=Ok(None)),
+            ),
             patch(
                 'horsies.core.brokers.postgres.random.uniform',
                 return_value=0,
@@ -3737,35 +3741,10 @@ class TestEnqueueInsertStatement:
     """
 
     @staticmethod
-    def _cutover_values(*, inline: bool) -> dict[str, Any]:
-        base: dict[str, Any] = {
-            'command_fingerprint_version': 1,
-            'command_fingerprint': b'\x01' * 32,
-            'retention_class_key': 'standard_30d',
-            'retain_rerun_input': inline,
-            'input_digest': b'\x02' * 32,
-        }
-        if not inline:
-            return {
-                **base,
-                'prepared_rerun_input_disposition': 'DECLINED_BY_POLICY',
-            }
-        return {
-            **base,
-            'prepared_rerun_input_disposition': 'INLINE',
-            'prepared_rerun_input_version': 1,
-            'prepared_rerun_input_codec': 'json',
-            'prepared_rerun_input_content_type': 'application/json',
-            'prepared_rerun_input_digest': b'\x02' * 32,
-            'prepared_rerun_input_inline': b'{}',
-        }
-
-    @staticmethod
     def _params(
         *,
         enqueued_at: datetime | None,
         enqueue_delay_seconds: int | None,
-        cutover_values: dict[str, Any],
     ) -> dict[str, Any]:
         from horsies.core.brokers.postgres import PostgresBroker
 
@@ -3774,8 +3753,7 @@ class TestEnqueueInsertStatement:
             task_name='parity_probe',
             queue_name='default',
             priority=100,
-            args_json='[]',
-            kwargs_json='{}',
+            stored_input='{}',
             call_site_sent_at=datetime.now(timezone.utc),
             enqueued_at=enqueued_at,
             enqueue_delay_seconds=enqueue_delay_seconds,
@@ -3783,9 +3761,10 @@ class TestEnqueueInsertStatement:
             max_retries=0,
             task_options=None,
             execution=Execution.SHARED_THREAD,
-            enqueue_sha='sha',
             scoped_key_digest=None,
-            cutover_values=cutover_values,
+            command_fingerprint=b'\x01' * 32,
+            retention_class_key='standard_30d',
+            retain_rerun_input=False,
         )
 
     @pytest.mark.parametrize(
@@ -3797,20 +3776,14 @@ class TestEnqueueInsertStatement:
         ],
         ids=['default_now', 'delay_interval', 'explicit_enqueued_at'],
     )
-    @pytest.mark.parametrize('inline', [False, True])
     def test_params_cover_exactly_the_statement_binds(
         self,
         enqueued_at: datetime | None,
         delay: int | None,
-        inline: bool,
     ) -> None:
         from horsies.core.brokers.postgres import ENQUEUE_INSERT_SQL
 
-        params = self._params(
-            enqueued_at=enqueued_at,
-            enqueue_delay_seconds=delay,
-            cutover_values=self._cutover_values(inline=inline),
-        )
+        params = self._params(enqueued_at=enqueued_at, enqueue_delay_seconds=delay)
         bind_names = set(
             ENQUEUE_INSERT_SQL._bindparams  # pyright: ignore[reportPrivateUsage]
         )
@@ -3818,52 +3791,27 @@ class TestEnqueueInsertStatement:
 
     def test_enqueued_at_variant_params(self) -> None:
         """The COALESCE inputs: explicit timestamp, delay interval, or neither."""
-        declined = self._cutover_values(inline=False)
-
-        default = self._params(
-            enqueued_at=None, enqueue_delay_seconds=None, cutover_values=declined
-        )
+        default = self._params(enqueued_at=None, enqueue_delay_seconds=None)
         assert default['enqueued_at'] is None
         assert default['enqueue_delay'] is None
 
-        delayed = self._params(
-            enqueued_at=None, enqueue_delay_seconds=30, cutover_values=declined
-        )
+        delayed = self._params(enqueued_at=None, enqueue_delay_seconds=30)
         assert delayed['enqueued_at'] is None
         assert delayed['enqueue_delay'] == timedelta(seconds=30)
 
         explicit_ts = datetime(2030, 1, 1, tzinfo=timezone.utc)
-        explicit = self._params(
-            enqueued_at=explicit_ts,
-            enqueue_delay_seconds=None,
-            cutover_values=declined,
-        )
+        explicit = self._params(enqueued_at=explicit_ts, enqueue_delay_seconds=None)
         assert explicit['enqueued_at'] == explicit_ts
         assert explicit['enqueue_delay'] is None
 
     def test_the_execution_class_binds_its_value(self) -> None:
-        params = self._params(
-            enqueued_at=None,
-            enqueue_delay_seconds=None,
-            cutover_values=self._cutover_values(inline=False),
-        )
+        params = self._params(enqueued_at=None, enqueue_delay_seconds=None)
         assert params['execution'] == 'SHARED_THREAD'
 
-    def test_declined_disposition_binds_null_inline_fields(self) -> None:
-        params = self._params(
-            enqueued_at=None,
-            enqueue_delay_seconds=None,
-            cutover_values=self._cutover_values(inline=False),
-        )
-        assert params['prepared_rerun_input_disposition'] == 'DECLINED_BY_POLICY'
-        for field in (
-            'prepared_rerun_input_version',
-            'prepared_rerun_input_codec',
-            'prepared_rerun_input_content_type',
-            'prepared_rerun_input_digest',
-            'prepared_rerun_input_inline',
-        ):
-            assert params[field] is None
+    def test_the_fingerprint_binds_version_one(self) -> None:
+        params = self._params(enqueued_at=None, enqueue_delay_seconds=None)
+        assert params['command_fingerprint_version'] == 1
+        assert params['command_fingerprint'] == b'\x01' * 32
 
 
 @pytest.mark.unit
@@ -3948,7 +3896,7 @@ class TestEnqueueInputRefusal:
         wiring = _DatabaseMustNotRun()
 
         result = await wiring.broker.enqueue_async(
-            'my_task', task_id='t', enqueue_sha='s', args_json=args_json,
+            'my_task', task_id='t', enqueue_sha='s', sent_at=datetime.now(timezone.utc), args_json=args_json,
         )
 
         assert is_err(result)
@@ -3962,7 +3910,7 @@ class TestEnqueueInputRefusal:
         wiring = _DatabaseMustNotRun()
 
         result = await wiring.broker.enqueue_async(
-            'my_task', task_id='t', enqueue_sha='s', kwargs_json=kwargs_json,
+            'my_task', task_id='t', enqueue_sha='s', sent_at=datetime.now(timezone.utc), kwargs_json=kwargs_json,
         )
 
         assert is_err(result)
@@ -3975,7 +3923,7 @@ class TestEnqueueInputRefusal:
         wiring = _DatabaseMustNotRun()
 
         result = await wiring.broker.enqueue_async(
-            'my_task', task_id='t', enqueue_sha='s', kwargs_json='"secret-value"',
+            'my_task', task_id='t', enqueue_sha='s', sent_at=datetime.now(timezone.utc), kwargs_json='"secret-value"',
         )
 
         assert is_err(result)
@@ -3998,7 +3946,11 @@ class TestEnqueueInputRefusal:
         self, overrides: dict[str, Any],
     ) -> None:
         wiring = _DatabaseMustNotRun()
-        values: dict[str, Any] = {'task_name': 'my_task', 'queue_name': 'default'}
+        values: dict[str, Any] = {
+            'task_name': 'my_task',
+            'queue_name': 'default',
+            'sent_at': datetime.now(timezone.utc),
+        }
         values.update(overrides)
 
         result = await wiring.broker.enqueue_async(
@@ -4026,7 +3978,7 @@ class TestEnqueueInputRefusal:
         wiring = _DatabaseMustNotRun()
 
         result = await wiring.broker.enqueue_async(
-            'my_task', task_id='t', enqueue_sha='s', idempotency_key=key,
+            'my_task', task_id='t', enqueue_sha='s', sent_at=datetime.now(timezone.utc), idempotency_key=key,
         )
 
         assert is_err(result)
@@ -4041,12 +3993,16 @@ class TestEnqueueInputRefusal:
     @pytest.mark.parametrize('field', ['sent_at', 'enqueued_at'])
     async def test_naive_instant_is_refused(self, field: str) -> None:
         wiring = _DatabaseMustNotRun()
+        instants: dict[str, datetime] = {
+            'sent_at': datetime.now(timezone.utc),
+            field: datetime(2020, 1, 1),
+        }
 
         result = await wiring.broker.enqueue_async(
             'my_task',
             task_id='t',
             enqueue_sha='s',
-            **{field: datetime(2020, 1, 1)},
+            **instants,
         )
 
         assert is_err(result)
@@ -4092,7 +4048,7 @@ class TestEnqueueInputRefusal:
         )
 
         result = await wiring.broker.enqueue_async(
-            'my_task', task_id='t', enqueue_sha='s', priority=0,
+            'my_task', task_id='t', enqueue_sha='s', sent_at=datetime.now(timezone.utc), priority=0,
         )
 
         assert is_err(result)
@@ -4105,7 +4061,7 @@ class TestEnqueueInputRefusal:
         wiring.broker._ensure_initialized = AsyncMock()
 
         result = await wiring.broker.enqueue_async(
-            'my_task', task_id='t', enqueue_sha='s', task_options='{bad',
+            'my_task', task_id='t', enqueue_sha='s', sent_at=datetime.now(timezone.utc), task_options='{bad',
         )
 
         assert is_err(result)
@@ -4117,17 +4073,23 @@ class TestEnqueueInputRefusal:
 class TestEnqueueAcceptedInput:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ('args_json', 'kwargs_json', 'expected'),
+        ('args_json', 'kwargs_json', 'expected_input'),
         [
-            (None, None, {}),
-            ('null', 'null', {}),
-            ('[]', '{}', {}),
-            ('[ ]', '{"a":1}', {'a': 1}),
+            (None, None, '{}'),
+            ('null', 'null', '{}'),
+            ('[]', '{}', '{}'),
+            ('[ ]', '{"a":1}', '{"a":1}'),
+            (None, '{ "z": 1, "a": 2 }', '{ "z": 1, "a": 2 }'),
         ],
     )
-    async def test_envelope_bytes_do_not_change(
-        self, args_json: str | None, kwargs_json: str | None, expected: dict[str, int],
+    async def test_the_row_stores_the_kwargs_text_as_its_input(
+        self, args_json: str | None, kwargs_json: str | None, expected_input: str,
     ) -> None:
+        """The input is the kwargs text exactly as sent; no kwargs store ``{}``.
+        The fingerprint covers the stored input in its kwargs element and
+        null in its args element."""
+        from horsies.core.history.identity.fingerprint import EnqueueCommandV1
+
         broker = _make_broker()
         engine, conn = _make_enqueue_engine()
         _set_resources(broker, engine=engine)
@@ -4136,6 +4098,7 @@ class TestEnqueueAcceptedInput:
             'my_task',
             task_id='t',
             enqueue_sha='s',
+            sent_at=datetime.now(timezone.utc),
             args_json=args_json,
             kwargs_json=kwargs_json,
             retain_rerun_input=True,
@@ -4143,11 +4106,21 @@ class TestEnqueueAcceptedInput:
 
         assert is_ok(result)
         params = conn.execute.await_args.args[1]
-        assert params['prepared_rerun_input_inline'] == encode_input_envelope_v1(
-            args=[], kwargs=expected, options=None,
-        )
-        assert params['args'] == args_json
-        assert params['kwargs'] == kwargs_json
+        assert params['input'] == expected_input
+        assert params['command_fingerprint'] == EnqueueCommandV1(
+            task_name='my_task',
+            queue_name='default',
+            priority=100,
+            args_json=None,
+            kwargs_json=expected_input,
+            good_until=None,
+            enqueue_delay_seconds=None,
+            task_options_json=None,
+            retention_class_key='standard_30d',
+            retain_rerun_input=True,
+            rerun_of_task_id=None,
+            rerun_root_task_id=None,
+        ).fingerprint
 
 
 @pytest.mark.unit
@@ -4172,7 +4145,7 @@ class TestEnqueueCatch:
         state = RuntimeError(message)
         broker._ensure_initialized = AsyncMock(side_effect=state)
 
-        result = await broker.enqueue_async('my_task', task_id='t', enqueue_sha='s')
+        result = await broker.enqueue_async('my_task', task_id='t', enqueue_sha='s', sent_at=datetime.now(timezone.utc))
 
         assert is_err(result)
         match result.err_value:
@@ -4207,7 +4180,7 @@ class TestEnqueueCatch:
         _set_resources(broker, engine=engine)
         conn.execute = AsyncMock(side_effect=error)
 
-        result = await broker.enqueue_async('my_task', task_id='t', enqueue_sha='s')
+        result = await broker.enqueue_async('my_task', task_id='t', enqueue_sha='s', sent_at=datetime.now(timezone.utc))
 
         assert is_err(result)
         match result.err_value:
@@ -4229,7 +4202,7 @@ class TestEnqueueCatch:
             AsyncMock(side_effect=refusal),
         ):
             result = await broker.enqueue_async(
-                'my_task', task_id='t', enqueue_sha='s', idempotency_key='key',
+                'my_task', task_id='t', enqueue_sha='s', sent_at=datetime.now(timezone.utc), idempotency_key='key',
             )
 
         assert is_err(result)
@@ -4247,7 +4220,7 @@ class TestEnqueueCatch:
         conn.execute = AsyncMock(side_effect=TypeError('defect'))
 
         with pytest.raises(TypeError, match='defect'):
-            await broker.enqueue_async('my_task', task_id='t', enqueue_sha='s')
+            await broker.enqueue_async('my_task', task_id='t', enqueue_sha='s', sent_at=datetime.now(timezone.utc))
 
     @pytest.mark.asyncio
     async def test_defect_in_the_keyed_write_crashes_loud(self) -> None:
@@ -4258,7 +4231,7 @@ class TestEnqueueCatch:
 
         with pytest.raises(TypeError, match='defect'):
             await broker.enqueue_async(
-                'my_task', task_id='t', enqueue_sha='s', idempotency_key='key',
+                'my_task', task_id='t', enqueue_sha='s', sent_at=datetime.now(timezone.utc), idempotency_key='key',
             )
 
     @pytest.mark.asyncio
@@ -4270,4 +4243,4 @@ class TestEnqueueCatch:
         _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         with pytest.raises(TypeError, match='defect'):
-            await broker.enqueue_async('my_task', task_id='dup', enqueue_sha='s')
+            await broker.enqueue_async('my_task', task_id='dup', enqueue_sha='s', sent_at=datetime.now(timezone.utc))

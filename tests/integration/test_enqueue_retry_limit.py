@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import uuid
 from typing import Any
+from datetime import datetime, timezone
 
 import pytest
 from pydantic import SecretStr
@@ -36,6 +37,7 @@ async def _enqueue(broker: PostgresBroker, task_options: str) -> BrokerResult[st
         'retry.limit.task',
         task_id=str(uuid.uuid4()),
         enqueue_sha='c' * 64,
+        sent_at=datetime.now(timezone.utc),
         args_json='[]',
         kwargs_json='{}',
         task_options=task_options,

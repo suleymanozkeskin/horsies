@@ -13,7 +13,7 @@ import functools
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Final, Literal
 from unittest.mock import MagicMock
 
@@ -40,12 +40,14 @@ from horsies.core.utils.db import PooledStatements
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.finalize_batch import FinalizeBatcher
 from horsies.core.worker.worker import Worker
-from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.conftest import compute_test_command_fingerprint
 from tests.integration.round_trip_proxy import RoundTripProxy, Turn
 
 QUEUE: Final = 'round_trip_queue'
 TASK_NAME: Final = 'round_trip_task'
 WORKER_ID: Final = 'round-trip-worker'
+CLAIM_LEASE: Final = timedelta(hours=1)
+"""The lease of a seeded CLAIMED row: live for the whole test."""
 
 WARM_RUNS: Final = 7
 """psycopg prepares a statement on its sixth use on a connection, with one
@@ -173,30 +175,39 @@ async def insert_task(
     is_workflow_task: bool = False,
 ) -> tuple[str, datetime]:
     """Insert a task of ``QUEUE`` that ``WORKER_ID`` owns (none when
-    PENDING), and commit. Returns its id and claim generation."""
+    PENDING), and commit. Returns its id and claim generation.
+
+    A CLAIMED row holds a live lease of ``CLAIM_LEASE``
+    (CHECK ``horsies_tasks_status_live``)."""
     task_id = str(uuid.uuid4())
     claimed_at = datetime.now(timezone.utc)
-    sent_at, sha = compute_test_enqueue_sha(task_name=TASK_NAME, queue_name=QUEUE)
+    sent_at, fingerprint = compute_test_command_fingerprint(
+        task_name=TASK_NAME, queue_name=QUEUE,
+    )
     owned = status != 'PENDING'
     _ = await session.execute(
         text("""
             INSERT INTO horsies_tasks
-                (id, task_name, queue_name, priority, args, kwargs,
-                 status, sent_at, enqueued_at, created_at, updated_at,
-                 claimed, retry_count, max_retries, started_at,
-                 claimed_at, claim_expires_at, claimed_by_worker_id,
-                 enqueue_sha, is_workflow_task, retention_class_key,
-                 command_fingerprint_version, command_fingerprint,
-                 retain_rerun_input, prepared_rerun_input_disposition)
-            VALUES
-                (:id, :task_name, :queue, 100, '[]', '{}',
-                 :status, :sent_at, NOW(), NOW(), NOW(),
-                 :claimed, 0, 0, CAST(:started_at AS timestamptz),
-                 CAST(:claimed_at AS timestamptz),
-                 CAST(:claim_expires_at AS timestamptz), :worker_id,
-                 :sha, :is_workflow_task, 'standard_30d',
-                 1, sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-                 FALSE, 'DECLINED_BY_POLICY')
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    enqueued_at, created_at, updated_at, retry_count, max_retries,
+                    started_at, claimed_at, claim_expires_at, claimed_by_worker_id,
+                    is_workflow_task, retention_class_key, command_fingerprint_version,
+                    command_fingerprint, retain_rerun_input, execution, worker_pid,
+                    worker_hostname, worker_process_name
+                ) VALUES (
+                    :id, :task_name, :queue, 100, '{}', :status, :sent_at, NOW(),
+                    NOW(), NOW(), 0, 0, CAST(:started_at AS timestamptz),
+                    CAST(:claimed_at AS timestamptz),
+                    CAST(:claim_expires_at AS timestamptz), :worker_id,
+                    :is_workflow_task, 'standard_30d',
+                    CASE WHEN CAST(:is_workflow_task AS boolean) THEN NULL ELSE 1 END,
+                    CASE WHEN CAST(:is_workflow_task AS boolean) THEN NULL ELSE :command_fingerprint END,
+                    FALSE, 'ISOLATED',
+                    CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 4242 END,
+                    CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 'host-1' END,
+                    CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 'child-1' END
+                )
         """),
         {
             'id': task_id,
@@ -204,12 +215,11 @@ async def insert_task(
             'queue': QUEUE,
             'status': status,
             'sent_at': sent_at,
-            'claimed': status == 'CLAIMED',
             'started_at': claimed_at if status == 'RUNNING' else None,
             'claimed_at': claimed_at if owned else None,
-            'claim_expires_at': None,
+            'claim_expires_at': claimed_at + CLAIM_LEASE if status == 'CLAIMED' else None,
             'worker_id': WORKER_ID if owned else None,
-            'sha': sha,
+            'command_fingerprint': fingerprint,
             'is_workflow_task': is_workflow_task,
         },
     )

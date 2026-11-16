@@ -65,8 +65,13 @@ pub enum ErrorCode {
     WorkflowSubworkflowAppMissing,
     WorkflowInvalidKwargKey,
     WorkflowMissingRequiredParams,
-    WorkflowArgsWithInjection,
+    /// A node's input object and its `args_from` name the same member.
+    WorkflowKwargsArgsFromOverlap,
     WorkflowOutputTypeMismatch,
+    /// A node's input is positional (not a JSON object) while the node takes
+    /// `args_from` or `workflow_ctx_from` members, which merge only into an
+    /// object.
+    WorkflowPositionalArgsNotSupported,
     WorkflowCheckCasesRequired,
     WorkflowCheckCaseInvalid,
     WorkflowCheckBuilderException,
@@ -85,11 +90,20 @@ pub enum ErrorCode {
     ConfigInvalidClusterCap,
     ConfigInvalidPrefetch,
     BrokerInvalidUrl,
+    /// A broker config names a pool field that 0.7.0 moved to the worker
+    /// profile.
+    ConfigInvalidBrokerPool,
     ConfigInvalidRecovery,
     ConfigInvalidSchedule,
     CliInvalidArgs,
     WorkerInvalidLocator,
     ConfigInvalidResilience,
+    /// A worker profile that AppConfig validation refuses.
+    ConfigInvalidWorkerProfile,
+    /// `check --live`: one worker of a profile needs more Postgres
+    /// connections than the server has usable slots, or the server limit
+    /// could not be read.
+    CheckWorkerConnections,
     BrokerInitFailed,
     CheckReservedCodeCollision,
     ConfigInvalidRetention,
@@ -124,8 +138,9 @@ impl ErrorCode {
             Self::WorkflowSubworkflowAppMissing => "HRS-018",
             Self::WorkflowInvalidKwargKey => "HRS-019",
             Self::WorkflowMissingRequiredParams => "HRS-020",
-            Self::WorkflowArgsWithInjection => "HRS-032",
+            Self::WorkflowKwargsArgsFromOverlap => "HRS-021",
             Self::WorkflowOutputTypeMismatch => "HRS-025",
+            Self::WorkflowPositionalArgsNotSupported => "HRS-026",
             Self::WorkflowCheckCasesRequired => "HRS-027",
             Self::WorkflowCheckCaseInvalid => "HRS-028",
             Self::WorkflowCheckBuilderException => "HRS-029",
@@ -139,11 +154,14 @@ impl ErrorCode {
             Self::ConfigInvalidClusterCap => "HRS-201",
             Self::ConfigInvalidPrefetch => "HRS-202",
             Self::BrokerInvalidUrl => "HRS-203",
+            Self::ConfigInvalidBrokerPool => "HRS-213",
             Self::ConfigInvalidRecovery => "HRS-204",
             Self::ConfigInvalidSchedule => "HRS-205",
             Self::CliInvalidArgs => "HRS-206",
             Self::WorkerInvalidLocator => "HRS-207",
             Self::ConfigInvalidResilience => "HRS-208",
+            Self::ConfigInvalidWorkerProfile => "HRS-218",
+            Self::CheckWorkerConnections => "HRS-219",
             Self::BrokerInitFailed => "HRS-211",
             Self::CheckReservedCodeCollision => "HRS-212",
             Self::ConfigInvalidRetention => "HRS-216",
@@ -178,11 +196,12 @@ impl ErrorCode {
             | Self::WorkflowUnresolvedPriority
             | Self::WorkflowNoDefinitionKey
             | Self::WorkflowDuplicateDefinitionKey
-            | Self::WorkflowArgsWithInjection
             | Self::WorkflowSubworkflowAppMissing
             | Self::WorkflowInvalidKwargKey
             | Self::WorkflowMissingRequiredParams
+            | Self::WorkflowKwargsArgsFromOverlap
             | Self::WorkflowOutputTypeMismatch
+            | Self::WorkflowPositionalArgsNotSupported
             | Self::WorkflowCheckCasesRequired
             | Self::WorkflowCheckCaseInvalid
             | Self::WorkflowCheckBuilderException
@@ -198,11 +217,14 @@ impl ErrorCode {
             | Self::ConfigInvalidClusterCap
             | Self::ConfigInvalidPrefetch
             | Self::BrokerInvalidUrl
+            | Self::ConfigInvalidBrokerPool
             | Self::ConfigInvalidRecovery
             | Self::ConfigInvalidSchedule
             | Self::CliInvalidArgs
             | Self::WorkerInvalidLocator
             | Self::ConfigInvalidResilience
+            | Self::ConfigInvalidWorkerProfile
+            | Self::CheckWorkerConnections
             | Self::BrokerInitFailed
             | Self::CheckReservedCodeCollision
             | Self::ConfigInvalidRetention => ErrorCategory::Config,
@@ -234,11 +256,12 @@ impl ErrorCode {
                 | Self::WorkflowUnresolvedPriority
                 | Self::WorkflowNoDefinitionKey
                 | Self::WorkflowDuplicateDefinitionKey
-                | Self::WorkflowArgsWithInjection
                 | Self::WorkflowSubworkflowAppMissing
                 | Self::WorkflowInvalidKwargKey
                 | Self::WorkflowMissingRequiredParams
+                | Self::WorkflowKwargsArgsFromOverlap
                 | Self::WorkflowOutputTypeMismatch
+                | Self::WorkflowPositionalArgsNotSupported
                 | Self::WorkflowCheckCasesRequired
                 | Self::WorkflowCheckCaseInvalid
                 | Self::WorkflowCheckBuilderException
@@ -266,11 +289,14 @@ impl ErrorCode {
                 | Self::ConfigInvalidClusterCap
                 | Self::ConfigInvalidPrefetch
                 | Self::BrokerInvalidUrl
+                | Self::ConfigInvalidBrokerPool
                 | Self::ConfigInvalidRecovery
                 | Self::ConfigInvalidSchedule
                 | Self::CliInvalidArgs
                 | Self::WorkerInvalidLocator
                 | Self::ConfigInvalidResilience
+                | Self::ConfigInvalidWorkerProfile
+                | Self::CheckWorkerConnections
                 | Self::BrokerInitFailed
                 | Self::CheckReservedCodeCollision
                 | Self::ConfigInvalidRetention
@@ -466,6 +492,12 @@ mod tests {
         assert!(ErrorCode::ConfigInvalidRetention.is_config_error());
         assert_eq!(ErrorCode::ConfigInvalidResilience.to_string(), "HRS-208");
         assert!(ErrorCode::ConfigInvalidResilience.is_config_error());
+        assert_eq!(ErrorCode::CheckWorkerConnections.to_string(), "HRS-219");
+        assert_eq!(
+            ErrorCode::CheckWorkerConnections.category(),
+            ErrorCategory::Config,
+        );
+        assert!(ErrorCode::CheckWorkerConnections.is_config_error());
     }
 
     #[test]
@@ -510,6 +542,29 @@ mod tests {
     }
 
     // --- ErrorCode category helper tests ---
+
+    /// Python `horsies/core/errors.py`: `HRS-021` is
+    /// `WORKFLOW_KWARGS_ARGS_FROM_OVERLAP` and `HRS-026` is
+    /// `WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED`; `HRS-032` is
+    /// `WORKFLOW_INVALID_ID`, which the core does not raise.
+    #[test]
+    fn the_input_codes_have_python_meanings() {
+        assert_eq!(
+            ErrorCode::WorkflowKwargsArgsFromOverlap.as_code_str(),
+            "HRS-021"
+        );
+        assert_eq!(
+            ErrorCode::WorkflowPositionalArgsNotSupported.as_code_str(),
+            "HRS-026"
+        );
+        for code in [
+            ErrorCode::WorkflowKwargsArgsFromOverlap,
+            ErrorCode::WorkflowPositionalArgsNotSupported,
+        ] {
+            assert_eq!(code.category(), ErrorCategory::Workflow, "{code}");
+            assert!(code.is_workflow_error(), "{code}");
+        }
+    }
 
     #[test]
     fn workflow_code_is_workflow_error_only() {
