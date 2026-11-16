@@ -307,6 +307,52 @@ class TestWorkflowHandleGet:
         assert result.is_err()
         assert result.unwrap_err().error_code is OutcomeCode.WORKFLOW_PAUSED
 
+    async def test_paused_expiry_sets_completed_at_on_the_skipped_nodes(
+        self,
+        clean_workflow_tables: None,
+        session: AsyncSession,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """The PENDING node that the expiry of a paused workflow skips gets completed_at."""
+        failing = make_failing_task(app, 'expiry_skip_completed_at_a')
+        waiting = make_simple_task(app, 'expiry_skip_completed_at_b')
+        node_a = TaskNode(fn=failing)
+        node_b = TaskNode(fn=waiting, kwargs={'value': 1}, waits_for=[node_a])
+        spec = make_workflow_spec(
+            broker=broker,
+            name='expiry_skip_completed_at',
+            tasks=[node_a, node_b],
+            on_error=OnError.PAUSE,
+        )
+        handle = await start_ok(spec, broker)
+        await _complete_task(
+            session,
+            broker,
+            handle.workflow_id,
+            0,
+            TaskResult(err=TaskError(error_code='FAIL', message='pause')),
+        )
+
+        expired = await expire_paused_workflows(
+            current_resources(broker).session_factory,
+            older_than=timedelta(0),
+            batch_size=1,
+        )
+
+        assert expired == 1
+        row = (
+            await session.execute(
+                text("""
+                    SELECT status, completed_at FROM horsies_workflow_tasks
+                    WHERE workflow_id = :wf_id AND task_index = 1
+                """),
+                {'wf_id': handle.workflow_id},
+            )
+        ).one()
+        assert row.status == 'SKIPPED'
+        assert row.completed_at is not None
+
     async def test_auto_expired_pause_returns_workflow_expired_error(
         self,
         clean_workflow_tables: None,
@@ -1072,6 +1118,40 @@ class TestWorkflowHandleCancel:
         assert is_ok(tasks_r)
         # B should be SKIPPED
         assert tasks_r.ok_value[1].status == WorkflowTaskStatus.SKIPPED
+
+    async def test_cancel_sets_completed_at_on_the_skipped_nodes(
+        self,
+        clean_workflow_tables: None,
+        session: AsyncSession,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """The PENDING node and the ENQUEUED node that the cancel skips get completed_at."""
+        task_a = make_simple_task(app, 'cancel_skip_completed_at_a')
+        task_b = make_simple_task(app, 'cancel_skip_completed_at_b')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        spec = make_workflow_spec(
+            broker=broker, name='cancel_skip_completed_at', tasks=[node_a, node_b],
+        )
+        handle = await start_ok(spec, broker)
+
+        cancel_r = await handle.cancel_async()
+        assert is_ok(cancel_r)
+
+        rows = (
+            await session.execute(
+                text("""
+                    SELECT task_index, status, completed_at FROM horsies_workflow_tasks
+                    WHERE workflow_id = :wf_id ORDER BY task_index
+                """),
+                {'wf_id': handle.workflow_id},
+            )
+        ).fetchall()
+        assert [(row.task_index, row.status) for row in rows] == [
+            (0, 'SKIPPED'), (1, 'SKIPPED'),
+        ]
+        assert all(row.completed_at is not None for row in rows), rows
 
     async def test_cancel_completed_is_noop(
         self,

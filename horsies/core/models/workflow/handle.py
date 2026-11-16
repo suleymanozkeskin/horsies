@@ -211,9 +211,10 @@ LOCK_WORKFLOW_TASKS_FOR_CANCEL_SQL = text("""
     FOR UPDATE
 """)
 
+# Every write of a terminal node status sets completed_at, SKIPPED included.
 SKIP_WORKFLOW_TASKS_ON_CANCEL_SQL = text("""
     UPDATE horsies_workflow_tasks
-    SET status = 'SKIPPED'
+    SET status = 'SKIPPED', completed_at = NOW()
     WHERE workflow_id = :wf_id AND status IN ('PENDING', 'READY')
 """)
 
