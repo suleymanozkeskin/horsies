@@ -13,11 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Final
 
 from horsies.core.history.archive.attempts import AttemptRecord
-from horsies.core.history.archive.versions import (
-    JSON_CONTENT_TYPE,
-    JSON_UTF8_CODEC,
-    archive_digest,
-)
+from horsies.core.history.archive.versions import archive_digest
 
 _ARCHIVE_VERSION: Final = 1
 _UTC_EPOCH: Final = datetime(1970, 1, 1, tzinfo=timezone.utc)
@@ -28,8 +24,6 @@ class StoredAttemptSnapshot:
     """An encoded snapshot with the envelope facts a history row stores."""
 
     version: int
-    codec: str
-    content_type: str
     payload: bytes
     digest: bytes
 
@@ -53,8 +47,6 @@ def encode_attempt_snapshot(
     ).encode()
     return StoredAttemptSnapshot(
         version=_ARCHIVE_VERSION,
-        codec=JSON_UTF8_CODEC,
-        content_type=JSON_CONTENT_TYPE,
         payload=payload,
         digest=archive_digest(payload),
     )
