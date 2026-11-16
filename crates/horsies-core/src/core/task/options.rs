@@ -338,13 +338,15 @@ mod tests {
 
     #[test]
     fn serialize_retry_options_with_both_fields() {
-        use super::super::error::TaskErrorCode;
+        use super::super::error::{TaskErrorCode, UserCode};
 
         let opts = TaskOptions {
             task_name: "my_task".to_owned(),
             queue_name: Some("high".to_owned()),
             good_until: None,
-            auto_retry_for: Some(vec![TaskErrorCode::User("STORAGE_ERROR".to_owned())]),
+            auto_retry_for: Some(vec![TaskErrorCode::User(
+                UserCode::parse("STORAGE_ERROR").unwrap(),
+            )]),
             retry_policy: Some(RetryPolicy::fixed(vec![60, 300, 900], true).unwrap()),
             timeout_ms: None,
         };

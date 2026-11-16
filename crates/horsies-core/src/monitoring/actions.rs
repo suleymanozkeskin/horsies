@@ -164,10 +164,10 @@ pub async fn cancel_task_action(
     task_action_outcome(cancel_task(broker, task_id, include_running).await)
 }
 
-pub async fn pause_workflow_action(pool: &PgPool, workflow_id: Uuid) -> ActionOutcome {
-    match crate::workflow_engine::lifecycle::pause_workflow(pool, workflow_id).await {
+pub async fn pause_workflow_action(broker: &PostgresBroker, workflow_id: Uuid) -> ActionOutcome {
+    match crate::workflow_engine::lifecycle::pause_workflow(broker, workflow_id).await {
         Ok(true) => succeeded("paused", None, None),
-        Ok(false) => match current_status(pool, workflow_id).await {
+        Ok(false) => match current_status(broker.pool(), workflow_id).await {
             Ok(status) => conflict(ActionConflictCode::StateConflict, Some(status.to_string())),
             Err(outcome) => outcome,
         },
@@ -195,14 +195,14 @@ fn resume_failure(error: HandleOperationError) -> ActionOutcome {
 }
 
 pub async fn resume_workflow_action(
-    pool: &PgPool,
+    broker: &PostgresBroker,
     workflow_id: Uuid,
     registry: &WorkflowSpecRegistry,
     payload: &PayloadPolicy,
     retention: &RetentionConfig,
 ) -> ActionOutcome {
     match crate::workflow_engine::lifecycle::resume_workflow(
-        pool,
+        broker,
         workflow_id,
         registry,
         payload,
@@ -211,7 +211,7 @@ pub async fn resume_workflow_action(
     .await
     {
         Ok(true) => succeeded("resumed", None, None),
-        Ok(false) => match current_status(pool, workflow_id).await {
+        Ok(false) => match current_status(broker.pool(), workflow_id).await {
             Ok(status) => conflict(ActionConflictCode::StateConflict, Some(status.to_string())),
             Err(outcome) => outcome,
         },
@@ -219,9 +219,9 @@ pub async fn resume_workflow_action(
     }
 }
 
-pub async fn cancel_workflow_action(pool: &PgPool, workflow_id: Uuid) -> ActionOutcome {
-    match crate::workflow_engine::lifecycle::cancel_workflow(pool, workflow_id).await {
-        Ok(_) => match current_status(pool, workflow_id).await {
+pub async fn cancel_workflow_action(broker: &PostgresBroker, workflow_id: Uuid) -> ActionOutcome {
+    match crate::workflow_engine::lifecycle::cancel_workflow(broker, workflow_id).await {
+        Ok(_) => match current_status(broker.pool(), workflow_id).await {
             Ok(WorkflowStatus::Cancelled) => succeeded("cancelled", None, None),
             Ok(status) => conflict(ActionConflictCode::StateConflict, Some(status.to_string())),
             Err(outcome) => outcome,

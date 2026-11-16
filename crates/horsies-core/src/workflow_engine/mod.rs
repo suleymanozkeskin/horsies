@@ -12,6 +12,9 @@ pub mod recovery;
 pub(crate) mod recovery_limit;
 pub mod start;
 
+#[cfg(test)]
+mod port_tests;
+
 pub use error::WorkflowError;
 
 /// The `max_retries` of a task node's row and of the task row minted from

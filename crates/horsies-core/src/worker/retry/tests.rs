@@ -38,6 +38,7 @@ fn no_options_and_empty_text_read_as_no_timeout_and_no_policy() {
             read_stored_options(text),
             StoredOptions::Readable {
                 timeout: StoredTimeout::NoTimeout,
+                cancel_grace: StoredCancelGrace::NotStored,
                 retry: StoredRetry::NoPolicy,
             }
         );
@@ -106,6 +107,7 @@ fn a_timeout_outside_its_rule_refuses_the_run() {
             options,
             StoredOptions::Readable {
                 timeout: StoredTimeout::Invalid(refusal),
+                cancel_grace: StoredCancelGrace::NotStored,
                 retry: StoredRetry::NoPolicy,
             },
             "{text}"
@@ -443,4 +445,66 @@ fn the_refusal_names_the_cause() {
     let refusal = stored_max_retries(Some(&options_with_policy(r#"{"max_retries": 5}"#)))
         .expect_err("a partial policy is refused");
     assert!(refusal.to_string().contains("retry_policy"), "{refusal}");
+}
+
+// --- stored cancel grace ---------------------------------------------------
+
+#[test]
+fn a_cancel_grace_inside_the_bounds_is_kept() {
+    for ms in [MIN_CANCEL_GRACE_MS, 1_000, MAX_CANCEL_GRACE_MS] {
+        let options = read_stored_options(Some(&format!(r#"{{"cancel_grace_ms": {ms}}}"#)));
+        assert_eq!(
+            options.cancel_grace(),
+            StoredCancelGrace::Grace(Duration::from_millis(ms))
+        );
+    }
+    assert_eq!(
+        read_stored_options(Some(r#"{"cancel_grace_ms": null}"#)).cancel_grace(),
+        StoredCancelGrace::NotStored
+    );
+}
+
+/// Python `shared_async_grace_error`: each refusal and its text.
+#[test]
+fn a_cancel_grace_outside_its_rule_is_refused_with_python_text() {
+    let cases = [
+        (
+            r#"{"cancel_grace_ms": 99}"#,
+            GraceRefusal::BelowMinimum,
+            "stored cancel_grace_ms is below 100 ms",
+        ),
+        (
+            r#"{"cancel_grace_ms": -5}"#,
+            GraceRefusal::BelowMinimum,
+            "stored cancel_grace_ms is below 100 ms",
+        ),
+        (
+            r#"{"cancel_grace_ms": 10001}"#,
+            GraceRefusal::AboveMaximum,
+            "stored cancel_grace_ms is above 10000 ms",
+        ),
+        (
+            r#"{"cancel_grace_ms": true}"#,
+            GraceRefusal::NotAnInteger { found: "bool" },
+            "stored cancel_grace_ms is a bool, not an int",
+        ),
+        (
+            r#"{"cancel_grace_ms": 500.5}"#,
+            GraceRefusal::NotAnInteger { found: "float" },
+            "stored cancel_grace_ms is a JSON float, not an int",
+        ),
+        (
+            r#"{"cancel_grace_ms": "500"}"#,
+            GraceRefusal::NotAnInteger { found: "str" },
+            "stored cancel_grace_ms is a JSON str, not an int",
+        ),
+    ];
+    for (text, refusal, message) in cases {
+        assert_eq!(
+            read_stored_options(Some(text)).cancel_grace(),
+            StoredCancelGrace::Invalid(refusal),
+            "{text}"
+        );
+        assert_eq!(grace_refusal_message(refusal), message, "{text}");
+    }
 }
