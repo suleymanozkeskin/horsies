@@ -9,7 +9,8 @@ use uuid::Uuid;
 use crate::broker::BrokerError;
 
 /// Categorized task send failure codes.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, horsies_macros::CodeCatalog)]
+#[code_catalog(module = "task_send", base = "str_enum")]
 pub enum TaskSendErrorCode {
     /// Send called while suppression is active (worker/scheduler import phase,
     /// `check()`, or `HORSIES_SUPPRESS_SENDS=1`). Non-retryable.
@@ -262,7 +263,11 @@ pub fn send_error_from_enqueue(
         | BrokerError::ClientFamilyMismatch { .. }
         | BrokerError::TerminalizationContract(_)
         | BrokerError::HistoryReadContract(_)
-        | BrokerError::InvalidClaimArgument(_) => TaskSendError::EnqueueFailed {
+        | BrokerError::InvalidClaimArgument(_)
+        | BrokerError::Statement(_)
+        | BrokerError::PoolSettings(_)
+        | BrokerError::RowDecode(_)
+        | BrokerError::SessionNotCapable { .. } => TaskSendError::EnqueueFailed {
             task_id,
             payload: Box::new(payload),
             message,
@@ -408,6 +413,29 @@ mod tests {
             .expect("an enqueue failure is accepted");
         assert_eq!(target.task_id, task_id);
         assert_eq!(target.payload.sent_at, sent_at);
+    }
+
+    /// A statement-pooled `database_url` is refused at the first checkout of
+    /// the core pool; the send reports it as `ENQUEUE_FAILED`, not retryable.
+    #[test]
+    fn a_statement_pooled_url_is_an_enqueue_failure_that_is_not_retryable() {
+        let error = send_error_from_enqueue(
+            Uuid::from_u128(1),
+            sample_payload(),
+            &BrokerError::Statement(crate::db::StatementFailure::NotSent {
+                statement: "enqueue",
+                cause: crate::db::NotSentCause::Checkout(
+                    crate::db::CheckoutFailure::StatementPooledUrl {
+                        masked_url: crate::db::MaskedUrl::for_tests(
+                            "postgresql://horsies:***@pgbouncer:6432/app",
+                        ),
+                    },
+                ),
+            }),
+        );
+
+        assert_eq!(error.code(), TaskSendErrorCode::EnqueueFailed);
+        assert!(!error.retryable());
     }
 
     #[test]

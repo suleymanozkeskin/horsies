@@ -11,7 +11,7 @@ use axum::Router;
 use http_body_util::BodyExt;
 use serial_test::serial;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{ConnectOptions, Connection, PgConnection, PgPool};
+use sqlx::{Connection, PgConnection, PgPool};
 use tokio::sync::Mutex;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -72,11 +72,16 @@ impl SequenceReader {
 
 #[async_trait]
 impl SchemaReader for SequenceReader {
-    async fn read(&self, _expected_version: i64) -> Result<SchemaStatus, sqlx::Error> {
+    async fn read(
+        &self,
+        _expected_version: i64,
+    ) -> Result<SchemaStatus, crate::broker::BrokerError> {
         self.reads.fetch_add(1, Ordering::Relaxed);
         match self.answers.lock().await.pop_front() {
             Some(ReaderAnswer::Status(status)) => Ok(status),
-            Some(ReaderAnswer::Failure) | None => Err(sqlx::Error::PoolClosed),
+            Some(ReaderAnswer::Failure) | None => Err(
+                crate::broker::BrokerError::ConnectionFailed("the test reader fails".to_owned()),
+            ),
         }
     }
 }
@@ -1122,7 +1127,7 @@ async fn observe_only_construction_runs_no_ddl_or_fleet_gate() {
             .await
             .unwrap();
     assert!(unlocked);
-    let url = options.to_url_lossy().to_string();
+    let url = crate::broker::pools::test_url_of(&options);
     let broker = Arc::new(
         PostgresBroker::connect_observe_only(&AppConfig::for_database_url(&url).broker)
             .await

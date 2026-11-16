@@ -1,0 +1,674 @@
+//! The broker's core pools: one [`CorePool`] per role, built from a
+//! [`PostgresConfig`].
+//!
+//! - The main URL (`database_url`) has one pool. A producer gets a
+//!   [`PoolRole::Main`] pool with no reserve. A worker gets a
+//!   [`PoolRole::WorkerProfile`] pool that keeps
+//!   [`WORKER_RESERVED_CONNECTIONS`] free from batch checkouts, for the reaper
+//!   and the per-task writes.
+//! - The session URL has its own [`PoolRole::Session`] pool when it differs
+//!   from the main URL; otherwise session work uses the main pool.
+//! - Every pool: `pool_size + max_overflow` connections, `pool_timeout` as the
+//!   checkout wait, `pool_recycle` as the connection age limit, and the 1 s
+//!   idle ping when `pool_pre_ping` is on. The main pool sends unnamed
+//!   statements only in PgBouncer transaction mode; the session pool always
+//!   keeps its session.
+//!
+//! Building the pools connects to nothing: a connection opens at the first
+//! checkout.
+//!
+//! [`CoreHandle`] holds the pools between `Idle` and `Open`: an operation
+//! opens them when the handle is `Idle`, and [`CoreHandle::close`] returns the
+//! handle to `Idle` after the writes in flight end (bounded by
+//! [`CLOSE_WRITE_BOUND`]).
+
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use tokio_util::task::{task_tracker::TaskTrackerToken, TaskTracker};
+
+use crate::core::PostgresConfig;
+use crate::db::{
+    parse_connection_url, ConnectPlan, ConnectPlanError, ConnectionAge, ConnectionEnvironment,
+    CorePool, EnvironmentError, IdlePing, MaskedUrl, PoolPlan, PoolRole, PoolSizing,
+    PoolSizingError, Reserve, StatementProtocol, UrlError, DEFAULT_IDLE_PING_AFTER,
+    DEFAULT_SOCKET_SETTINGS, WORKER_RESERVED_CONNECTIONS,
+};
+
+/// The longest [`CoreHandle::close`] waits for the writes in flight
+/// (Python's `CLOSE_HANDOFF_TIMEOUT`).
+pub const CLOSE_WRITE_BOUND: Duration = Duration::from_secs(5);
+
+/// The process a broker's pools serve.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PoolProfile {
+    /// A producer or a monitoring handle: the main URL pool keeps no reserve.
+    Producer,
+    /// A worker parent: the main URL pool is the worker profile pool, which
+    /// keeps [`WORKER_RESERVED_CONNECTIONS`] free from batch checkouts.
+    Worker,
+}
+
+/// The pool that session work (schema work, partition maintenance) uses.
+pub(crate) enum SessionPool {
+    /// `session_database_url` is absent or equal to `database_url`: session
+    /// work uses the main pool.
+    SameAsMain,
+    /// A pool of its own on `session_database_url`.
+    Separate {
+        pool: CorePool,
+        masked_url: MaskedUrl,
+    },
+}
+
+/// The core pools of one broker.
+pub(crate) struct BrokerPools {
+    main: CorePool,
+    main_url: MaskedUrl,
+    session: SessionPool,
+}
+
+/// The connection settings of a broker pool were refused before any
+/// connection opened. The same settings are refused again.
+#[derive(Debug, thiserror::Error)]
+pub enum PoolSettingsError {
+    /// `PGPASSWORD` could not be read.
+    #[error("reading the connection environment failed: {0}")]
+    Environment(EnvironmentError),
+    /// The statement layer refused the URL of a pool.
+    #[error("the URL of the {role} pool is refused: {cause}")]
+    Url { role: PoolRole, cause: UrlError },
+    /// A TLS file, `~/.pgpass` or the process user name could not be read.
+    #[error("the connection plan of the {role} pool could not be loaded: {cause}")]
+    Plan {
+        role: PoolRole,
+        cause: ConnectPlanError,
+    },
+    /// `pool_size + max_overflow` cannot carry the pool's role.
+    #[error("the size of the {role} pool is refused: {cause}")]
+    Sizing {
+        role: PoolRole,
+        cause: PoolSizingError,
+    },
+}
+
+impl BrokerPools {
+    /// Builds the pools of `config` for `profile` with an environment the
+    /// caller read.
+    ///
+    /// Reads, per URL, the TLS files the URL names, `~/.pgpass` when no
+    /// password is given, and the process user name when the URL names no
+    /// user. Connects to nothing.
+    ///
+    /// Errors: [`PoolSettingsError`]; nothing was built.
+    pub(crate) fn open_with_environment(
+        config: &PostgresConfig,
+        profile: PoolProfile,
+        environment: &ConnectionEnvironment,
+    ) -> Result<BrokerPools, PoolSettingsError> {
+        let main_shape = main_pool_shape(profile);
+        let (main, main_url) = open_pool(
+            &config.database_url,
+            pool_plan(
+                config,
+                main_shape.role,
+                main_shape.reserve,
+                runtime_protocol(config),
+            )
+            .map_err(|cause| PoolSettingsError::Sizing {
+                role: main_shape.role,
+                cause,
+            })?,
+            environment,
+        )?;
+        let session_url = config.effective_session_database_url();
+        let session = match session_url == config.database_url {
+            true => SessionPool::SameAsMain,
+            false => {
+                let (pool, masked_url) = open_pool(
+                    session_url,
+                    pool_plan(
+                        config,
+                        PoolRole::Session,
+                        Reserve::NoReserve,
+                        StatementProtocol::PreparedPerConnection,
+                    )
+                    .map_err(|cause| PoolSettingsError::Sizing {
+                        role: PoolRole::Session,
+                        cause,
+                    })?,
+                    environment,
+                )?;
+                SessionPool::Separate { pool, masked_url }
+            }
+        };
+        Ok(BrokerPools {
+            main,
+            main_url,
+            session,
+        })
+    }
+
+    /// The pool on `database_url`.
+    pub(crate) fn main(&self) -> &CorePool {
+        &self.main
+    }
+
+    /// The pool for session work.
+    pub(crate) fn session(&self) -> &SessionPool {
+        &self.session
+    }
+
+    /// The session URL with its password masked (the main URL when both are
+    /// the same).
+    pub(crate) fn session_masked_url(&self) -> &MaskedUrl {
+        match &self.session {
+            SessionPool::SameAsMain => &self.main_url,
+            SessionPool::Separate { masked_url, .. } => masked_url,
+        }
+    }
+
+    /// Closes every pool: later checkouts fail with `PoolClosed`. Checked-out
+    /// connections end when their guards drop.
+    pub(crate) fn close(&self) {
+        self.main.close();
+        match &self.session {
+            SessionPool::SameAsMain => {}
+            SessionPool::Separate { pool, .. } => pool.close(),
+        }
+    }
+}
+
+/// The pools of an open handle and the writes that run on them.
+pub(crate) struct OpenPools {
+    pools: BrokerPools,
+    writes: TaskTracker,
+}
+
+impl OpenPools {
+    pub(crate) fn pools(&self) -> &BrokerPools {
+        &self.pools
+    }
+
+    pub(crate) fn main(&self) -> &CorePool {
+        self.pools.main()
+    }
+}
+
+/// A write in flight on an open handle. [`CoreHandle::close`] waits for it,
+/// up to [`CLOSE_WRITE_BOUND`]. Dropping it ends the write.
+pub(crate) struct WriteInFlight {
+    _token: TaskTrackerToken,
+}
+
+/// The stage of a broker's core pools.
+enum HandleState {
+    /// No pools: none built yet, or closed. The next operation opens them.
+    Idle,
+    /// Pools built; operations run on them.
+    Open(Arc<OpenPools>),
+}
+
+/// The core pools of one broker and their stage.
+///
+/// The handle keeps what it needs to open the pools again after a close: the
+/// config, the profile and the environment read at construction.
+pub(crate) struct CoreHandle {
+    config: PostgresConfig,
+    profile: PoolProfile,
+    environment: ConnectionEnvironment,
+    state: Mutex<HandleState>,
+}
+
+/// What a close found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CloseOutcome {
+    /// The handle was `Idle`: nothing to close.
+    AlreadyIdle,
+    /// Every write in flight ended within the bound; the pools are closed.
+    Closed,
+    /// `unfinished` writes did not end within [`CLOSE_WRITE_BOUND`]; their
+    /// outcome is unknown. The pools are closed.
+    ClosedWithWritesUnfinished { unfinished: usize },
+}
+
+impl CoreHandle {
+    /// Builds the pools at once, so refused settings fail the constructor
+    /// before any connection. Reads what
+    /// [`BrokerPools::open_with_environment`] reads.
+    pub(crate) fn open_with_environment(
+        config: &PostgresConfig,
+        profile: PoolProfile,
+        environment: ConnectionEnvironment,
+    ) -> Result<CoreHandle, PoolSettingsError> {
+        let pools = BrokerPools::open_with_environment(config, profile, &environment)?;
+        Ok(CoreHandle {
+            config: config.clone(),
+            profile,
+            environment,
+            state: Mutex::new(HandleState::Open(Arc::new(OpenPools {
+                pools,
+                writes: TaskTracker::new(),
+            }))),
+        })
+    }
+
+    /// Builds the pools with the process environment.
+    pub(crate) fn open(
+        config: &PostgresConfig,
+        profile: PoolProfile,
+    ) -> Result<CoreHandle, PoolSettingsError> {
+        let environment =
+            ConnectionEnvironment::capture().map_err(PoolSettingsError::Environment)?;
+        CoreHandle::open_with_environment(config, profile, environment)
+    }
+
+    /// The open pools, for a read. An `Idle` handle builds its pools first
+    /// (no connection; the TLS files and `~/.pgpass` are read again).
+    ///
+    /// Errors: [`PoolSettingsError`] when the settings are refused at the
+    /// reopen; the handle stays `Idle`.
+    pub(crate) fn pools(&self) -> Result<Arc<OpenPools>, PoolSettingsError> {
+        let mut state = self.lock_state();
+        self.open_in(&mut *state)
+    }
+
+    /// The open pools for a write, and the token that keeps the write in
+    /// the close's wait. The token is taken under the state lock, so a close
+    /// that swaps the pools out after it waits for this write. Errors as
+    /// [`CoreHandle::pools`].
+    pub(crate) fn pools_for_write(
+        &self,
+    ) -> Result<(Arc<OpenPools>, WriteInFlight), PoolSettingsError> {
+        let mut state = self.lock_state();
+        let open = self.open_in(&mut *state)?;
+        let write = WriteInFlight {
+            _token: open.writes.token(),
+        };
+        Ok((open, write))
+    }
+
+    /// The pools of an `Open` state; an `Idle` state builds them and becomes
+    /// `Open`.
+    fn open_in(&self, state: &mut HandleState) -> Result<Arc<OpenPools>, PoolSettingsError> {
+        match state {
+            HandleState::Open(open) => Ok(Arc::clone(open)),
+            HandleState::Idle => {
+                let pools = BrokerPools::open_with_environment(
+                    &self.config,
+                    self.profile,
+                    &self.environment,
+                )?;
+                let open = Arc::new(OpenPools {
+                    pools,
+                    writes: TaskTracker::new(),
+                });
+                *state = HandleState::Open(Arc::clone(&open));
+                Ok(open)
+            }
+        }
+    }
+
+    /// Closes the open pools and returns the handle to `Idle`.
+    ///
+    /// No new operation takes the old pools: the next one opens new pools.
+    /// Writes in flight run to their end within [`CLOSE_WRITE_BOUND`]; then
+    /// the old pools close, so a read in flight that checks out again fails
+    /// with `PoolClosed`. Connections checked out at that moment end when
+    /// their guards drop.
+    pub(crate) async fn close(&self) -> CloseOutcome {
+        let previous = std::mem::replace(&mut *self.lock_state(), HandleState::Idle);
+        let open = match previous {
+            HandleState::Idle => return CloseOutcome::AlreadyIdle,
+            HandleState::Open(open) => open,
+        };
+        let _closed_now = open.writes.close();
+        let outcome = match tokio::time::timeout(CLOSE_WRITE_BOUND, open.writes.wait()).await {
+            Ok(()) => CloseOutcome::Closed,
+            Err(_elapsed) => CloseOutcome::ClosedWithWritesUnfinished {
+                unfinished: open.writes.len(),
+            },
+        };
+        open.pools.close();
+        outcome
+    }
+
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, HandleState> {
+        self.state
+            .lock()
+            .expect("the core handle state lock is held only for a state swap or a pool build")
+    }
+}
+
+/// The role and reserve of the main URL pool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MainPoolShape {
+    role: PoolRole,
+    reserve: Reserve,
+}
+
+fn main_pool_shape(profile: PoolProfile) -> MainPoolShape {
+    match profile {
+        PoolProfile::Producer => MainPoolShape {
+            role: PoolRole::Main,
+            reserve: Reserve::NoReserve,
+        },
+        PoolProfile::Worker => MainPoolShape {
+            role: PoolRole::WorkerProfile,
+            reserve: Reserve::KeepFree(WORKER_RESERVED_CONNECTIONS),
+        },
+    }
+}
+
+/// The statement protocol of the main URL: unnamed statements only behind
+/// PgBouncer transaction pooling.
+fn runtime_protocol(config: &PostgresConfig) -> StatementProtocol {
+    match config.pgbouncer_transaction_mode {
+        true => StatementProtocol::UnnamedOnly,
+        false => StatementProtocol::PreparedPerConnection,
+    }
+}
+
+/// The plan of one pool from the config's pool settings. Pure.
+///
+/// Errors: [`PoolSizingError`] when `pool_size + max_overflow` is zero, above
+/// PostgreSQL's limit, or not above the reserve.
+pub(crate) fn pool_plan(
+    config: &PostgresConfig,
+    role: PoolRole,
+    reserve: Reserve,
+    protocol: StatementProtocol,
+) -> Result<PoolPlan, PoolSizingError> {
+    let size = config.pool_size.saturating_add(config.max_overflow);
+    Ok(PoolPlan {
+        role,
+        sizing: PoolSizing::new(size, reserve)?,
+        checkout_wait: Duration::from_secs(u64::from(config.pool_timeout)),
+        idle_ping: match config.pool_pre_ping {
+            true => IdlePing::AfterIdle(DEFAULT_IDLE_PING_AFTER),
+            false => IdlePing::Off,
+        },
+        max_age: ConnectionAge::ReplaceAfter(Duration::from_secs(u64::from(config.pool_recycle))),
+        protocol,
+    })
+}
+
+/// Parses one URL, loads its connection plan and builds the pool. Returns
+/// the pool and its URL with the password masked.
+fn open_pool(
+    url: &str,
+    plan: PoolPlan,
+    environment: &ConnectionEnvironment,
+) -> Result<(CorePool, MaskedUrl), PoolSettingsError> {
+    let role = plan.role;
+    let settings = parse_connection_url(url, environment)
+        .map_err(|cause| PoolSettingsError::Url { role, cause })?;
+    let connect = ConnectPlan::load(&settings, environment, &DEFAULT_SOCKET_SETTINGS)
+        .map_err(|cause| PoolSettingsError::Plan { role, cause })?;
+    Ok((
+        CorePool::new(plan, Arc::new(connect)),
+        settings.masked_url().clone(),
+    ))
+}
+
+/// The URL of a test's sqlx connect options, in the form the statement
+/// layer reads: sqlx's own rendering (`ConnectOptions::to_url_lossy`)
+/// without its `statement-cache-capacity` parameter, which only sqlx reads.
+/// Test options set no option that the rendering drops (`application_name`,
+/// `options`).
+#[cfg(test)]
+pub(crate) fn test_url_of(options: &sqlx::postgres::PgConnectOptions) -> String {
+    use sqlx::ConnectOptions;
+
+    let mut url = options.to_url_lossy();
+    let kept: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(name, _)| *name != "statement-cache-capacity")
+        .map(|(name, value)| (name.into_owned(), value.into_owned()))
+        .collect();
+    url.set_query(None);
+    if !kept.is_empty() {
+        url.query_pairs_mut().extend_pairs(kept);
+    }
+    url.to_string()
+}
+
+/// The core handle on the database of a test's sqlx pool, for brokers that
+/// tests build from such a pool. The environment is isolated: test URLs
+/// carry their password.
+#[cfg(test)]
+pub(crate) fn handle_for_test_pool(pool: &sqlx::PgPool) -> CoreHandle {
+    CoreHandle::open_with_environment(
+        &PostgresConfig::from_url(test_url_of(&pool.connect_options())),
+        PoolProfile::Producer,
+        ConnectionEnvironment::isolated(),
+    )
+    .expect("the URL of a test pool is accepted by the statement layer")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{CheckoutClass, CheckoutFailure};
+
+    fn config() -> PostgresConfig {
+        let mut config =
+            PostgresConfig::from_url("postgresql://horsies:secret@db.example:5432/app");
+        config.pool_size = 5;
+        config.max_overflow = 3;
+        config.pool_timeout = 7;
+        config.pool_recycle = 1800;
+        config.pool_pre_ping = true;
+        config
+    }
+
+    #[test]
+    fn a_pool_takes_size_wait_age_and_ping_from_the_config() {
+        let plan = pool_plan(
+            &config(),
+            PoolRole::Main,
+            Reserve::NoReserve,
+            StatementProtocol::PreparedPerConnection,
+        )
+        .expect("valid plan");
+        assert_eq!(plan.role, PoolRole::Main);
+        assert_eq!(plan.sizing.size(), 8);
+        assert_eq!(plan.sizing.batch_limit(), 8);
+        assert_eq!(plan.checkout_wait, Duration::from_secs(7));
+        assert_eq!(
+            plan.max_age,
+            ConnectionAge::ReplaceAfter(Duration::from_secs(1800))
+        );
+        assert_eq!(plan.idle_ping, IdlePing::AfterIdle(DEFAULT_IDLE_PING_AFTER));
+        assert_eq!(plan.protocol, StatementProtocol::PreparedPerConnection);
+    }
+
+    #[test]
+    fn pre_ping_off_turns_the_idle_ping_off() {
+        let mut config = config();
+        config.pool_pre_ping = false;
+        let plan = pool_plan(
+            &config,
+            PoolRole::Main,
+            Reserve::NoReserve,
+            StatementProtocol::PreparedPerConnection,
+        )
+        .expect("valid plan");
+        assert_eq!(plan.idle_ping, IdlePing::Off);
+    }
+
+    #[test]
+    fn a_worker_main_pool_keeps_the_reserve() {
+        let shape = main_pool_shape(PoolProfile::Worker);
+        assert_eq!(shape.role, PoolRole::WorkerProfile);
+        assert_eq!(
+            shape.reserve,
+            Reserve::KeepFree(WORKER_RESERVED_CONNECTIONS)
+        );
+        let plan = pool_plan(
+            &config(),
+            shape.role,
+            shape.reserve,
+            StatementProtocol::PreparedPerConnection,
+        )
+        .expect("valid plan");
+        assert_eq!(plan.sizing.batch_limit(), 6);
+    }
+
+    #[test]
+    fn a_producer_main_pool_keeps_no_reserve() {
+        let shape = main_pool_shape(PoolProfile::Producer);
+        assert_eq!(shape.role, PoolRole::Main);
+        assert_eq!(shape.reserve, Reserve::NoReserve);
+    }
+
+    #[test]
+    fn a_worker_pool_that_cannot_keep_the_reserve_is_refused() {
+        let mut config = config();
+        config.pool_size = 2;
+        config.max_overflow = 0;
+        let shape = main_pool_shape(PoolProfile::Worker);
+        assert_eq!(
+            pool_plan(
+                &config,
+                shape.role,
+                shape.reserve,
+                StatementProtocol::PreparedPerConnection
+            )
+            .map(|plan| plan.sizing),
+            Err(PoolSizingError::ReserveNotBelowSize {
+                size: 2,
+                reserve: 2
+            }),
+        );
+    }
+
+    #[test]
+    fn a_zero_pool_is_refused() {
+        let mut config = config();
+        config.pool_size = 0;
+        config.max_overflow = 0;
+        assert_eq!(
+            pool_plan(
+                &config,
+                PoolRole::Main,
+                Reserve::NoReserve,
+                StatementProtocol::PreparedPerConnection
+            )
+            .map(|plan| plan.sizing),
+            Err(PoolSizingError::SizeZero),
+        );
+    }
+
+    #[test]
+    fn transaction_mode_sends_unnamed_statements_only() {
+        let mut config = config();
+        assert_eq!(
+            runtime_protocol(&config),
+            StatementProtocol::PreparedPerConnection
+        );
+        config.pgbouncer_transaction_mode = true;
+        assert_eq!(runtime_protocol(&config), StatementProtocol::UnnamedOnly);
+    }
+
+    #[test]
+    fn equal_urls_share_the_main_pool() {
+        let pools = BrokerPools::open_with_environment(
+            &config(),
+            PoolProfile::Producer,
+            &ConnectionEnvironment::isolated(),
+        )
+        .expect("pools build without I/O");
+        assert!(matches!(pools.session, SessionPool::SameAsMain));
+        assert_eq!(pools.main().role(), PoolRole::Main);
+    }
+
+    #[test]
+    fn a_distinct_session_url_gets_its_own_pool() {
+        let mut config = config();
+        config.session_database_url =
+            Some("postgresql://horsies:secret@direct.example:5432/app".to_owned());
+        let pools = BrokerPools::open_with_environment(
+            &config,
+            PoolProfile::Worker,
+            &ConnectionEnvironment::isolated(),
+        )
+        .expect("pools build without I/O");
+        assert_eq!(pools.main().role(), PoolRole::WorkerProfile);
+        assert!(matches!(
+            pools.session(),
+            SessionPool::Separate { pool, .. } if pool.role() == PoolRole::Session
+        ));
+        assert_eq!(
+            pools.session_masked_url().as_str(),
+            "postgresql://horsies:***@direct.example:5432/app"
+        );
+    }
+
+    #[test]
+    fn a_url_the_statement_layer_refuses_names_its_pool() {
+        let mut config = config();
+        config.session_database_url =
+            Some("postgresql://horsies@direct.example/app?keepalives=0".to_owned());
+        let refused = BrokerPools::open_with_environment(
+            &config,
+            PoolProfile::Producer,
+            &ConnectionEnvironment::isolated(),
+        );
+        assert!(matches!(
+            refused,
+            Err(PoolSettingsError::Url {
+                role: PoolRole::Session,
+                ..
+            })
+        ));
+    }
+
+    fn open_handle() -> CoreHandle {
+        CoreHandle::open_with_environment(
+            &config(),
+            PoolProfile::Producer,
+            ConnectionEnvironment::isolated(),
+        )
+        .expect("a handle builds without I/O")
+    }
+
+    /// Python's close contract: close, then the next operation opens again.
+    #[tokio::test]
+    async fn a_closed_handle_opens_new_pools_at_the_next_operation() {
+        let handle = open_handle();
+        let first = handle.pools().expect("open pools");
+
+        assert_eq!(handle.close().await, CloseOutcome::Closed);
+        assert!(matches!(
+            first.main().checkout(CheckoutClass::Batch).await,
+            Err(CheckoutFailure::PoolClosed { .. })
+        ));
+
+        let second = handle.pools().expect("pools open again");
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert_eq!(handle.close().await, CloseOutcome::Closed);
+        assert_eq!(handle.close().await, CloseOutcome::AlreadyIdle);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_close_waits_for_a_write_in_flight_up_to_the_bound() {
+        let handle = open_handle();
+        let (_open, write) = handle.pools_for_write().expect("open pools");
+
+        assert_eq!(
+            handle.close().await,
+            CloseOutcome::ClosedWithWritesUnfinished { unfinished: 1 }
+        );
+        drop(write);
+    }
+
+    #[tokio::test]
+    async fn a_close_after_the_writes_ended_does_not_wait() {
+        let handle = open_handle();
+        let (_open, write) = handle.pools_for_write().expect("open pools");
+        drop(write);
+
+        assert_eq!(handle.close().await, CloseOutcome::Closed);
+    }
+}

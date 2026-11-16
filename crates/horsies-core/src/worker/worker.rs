@@ -500,9 +500,11 @@ impl Worker {
         // Start the unified reaper (stale recovery, phase 2, retention,
         // paused expiry, and partition maintenance share one cluster gate).
         let reaper_health = new_reaper_health();
+        // The reaper's gate and pass run on the worker reserve, which the
+        // runtime pool's users cannot exhaust.
         let reaper = spawn_reaper(
-            self.broker.pool().clone(),
-            self.broker.session_pool().clone(),
+            self.broker.reserve_pool().clone(),
+            self.broker.reserve_maintenance_pool().clone(),
             Arc::clone(&self.workflow_registry),
             self.app_config.recovery.clone(),
             self.app_config.payload.clone(),
@@ -1652,8 +1654,8 @@ mod tests {
         let claims = run.find("claim_batch(").expect("claim loop");
         let reaper = run.find("spawn_reaper(").expect("reaper startup");
         let reaper_call = &run[reaper..reaper + 500];
-        assert!(reaper_call.contains("self.broker.pool().clone()"));
-        assert!(reaper_call.contains("self.broker.session_pool().clone()"));
+        assert!(reaper_call.contains("self.broker.reserve_pool().clone()"));
+        assert!(reaper_call.contains("self.broker.reserve_maintenance_pool().clone()"));
         assert!(schema < coverage);
         assert!(coverage < session_pool);
         assert!(start < banner);
