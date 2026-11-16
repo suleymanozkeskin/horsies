@@ -2397,11 +2397,11 @@ def create_task_wrapper(
                 app.config.payload,
                 task_name=task_name,
                 kind='kwargs',
-                encoded_len=len(kwargs_json),
+                payload_text=kwargs_json,
             )
             match check_payload_size(
                 app.config.payload,
-                encoded_len=len(kwargs_json),
+                payload_text=kwargs_json,
             ):
                 case PayloadWithinLimit():
                     pass

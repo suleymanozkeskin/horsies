@@ -710,7 +710,7 @@ class FinalizeMixin:
                 self._app.config.payload,
                 task_name=task_name,
                 kind='result',
-                encoded_len=len(result_json_str),
+                payload_text=result_json_str,
             )
 
         phase1_r = await self._persist_task_terminal_state(

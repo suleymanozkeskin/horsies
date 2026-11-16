@@ -2851,7 +2851,7 @@ class TestEnqueueScheduledTask:
             app.config.payload,
             task_name='my_task',
             kind='kwargs',
-            encoded_len=len(dumps_json({'value': 5}).ok_value),
+            payload_text=dumps_json({'value': 5}).ok_value,
         )
 
     async def test_happy_path_calls_broker_with_correct_params(self) -> None:

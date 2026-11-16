@@ -927,7 +927,7 @@ async def _build_enqueued_task_params(
             broker.app.config.payload,
             task_name=task_name,
             kind='kwargs',
-            encoded_len=len(kwargs_json),
+            payload_text=kwargs_json,
         )
 
     # Create actual task in tasks table
