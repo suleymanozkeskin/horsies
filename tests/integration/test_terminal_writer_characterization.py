@@ -75,7 +75,7 @@ from horsies.core.worker.child_runner import (
     _expire_claimed_task_before_start,
     _handle_workflow_stop_before_start,
 )
-from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.conftest import compute_test_command_fingerprint
 from tests.lifecycle_matrix import MATRIX, TerminalWriter
 
 pytestmark = [pytest.mark.integration]
@@ -113,37 +113,35 @@ async def _seed_task(
 ) -> TaskRow:
     """Insert one task row in a chosen lifecycle position."""
     task_id = str(uuid.uuid4())
-    sent_at, sha = compute_test_enqueue_sha(task_name='characterize')
+    sent_at, fingerprint = compute_test_command_fingerprint(task_name='characterize')
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
-                (id, task_name, queue_name, priority, args, kwargs,
-                 status, sent_at, enqueued_at, created_at, updated_at,
-                 claimed, retry_count, max_retries, claimed_at,
-                 claimed_by_worker_id, enqueue_sha, is_workflow_task,
-                 good_until, started_at, worker_hostname, worker_pid,
-                 worker_process_name,
-                 retention_class_key, command_fingerprint_version,
-                 command_fingerprint, retain_rerun_input,
-                 prepared_rerun_input_disposition)
-            VALUES
-                (:id, 'characterize', 'default', 100, '[]', '{}',
-                 :status, :sent_at, NOW(), NOW(), NOW(),
-                 :claimed, 0, 0, :claimed_at,
-                 :worker_id, :sha, :is_wf,
-                 :good_until, :started_at, 'host', 1, 'proc',
-                 'standard_30d', 1,
-                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-                 FALSE, 'DECLINED_BY_POLICY')
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    enqueued_at, created_at, updated_at, retry_count, max_retries,
+                    claimed_at, claimed_by_worker_id, is_workflow_task, good_until,
+                    started_at, worker_hostname, worker_pid, worker_process_name,
+                    retention_class_key, command_fingerprint_version,
+                    command_fingerprint, retain_rerun_input, execution,
+                    claim_expires_at
+                ) VALUES (
+                    :id, 'characterize', 'default', 100, '{}', :status, :sent_at,
+                    NOW(), NOW(), NOW(), 0, 0, :claimed_at, :worker_id, :is_wf,
+                    :good_until, :started_at, 'host', 1, 'proc', 'standard_30d',
+                    CASE WHEN CAST(:is_wf AS boolean) THEN NULL ELSE 1 END,
+                    CASE WHEN CAST(:is_wf AS boolean) THEN NULL ELSE :command_fingerprint END,
+                    FALSE, 'ISOLATED',
+                    CASE WHEN CAST(:status AS varchar) = 'CLAIMED' THEN NOW() + INTERVAL '5 minutes' END
+                )
         """),
         {
             'id': task_id,
             'status': status,
             'sent_at': sent_at,
-            'claimed': worker_id is not None,
             'claimed_at': claimed_at,
             'worker_id': worker_id,
-            'sha': sha,
+            'command_fingerprint': fingerprint,
             'is_wf': is_workflow_task,
             'good_until': good_until,
             'started_at': started_at,

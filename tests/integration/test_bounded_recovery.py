@@ -457,26 +457,22 @@ async def _seed_orphan_task_plan_fixture(
         await connection.execute(
             text('''
                 INSERT INTO horsies_tasks (
-                    id, task_name, queue_name, priority, status, sent_at,
-                    enqueued_at, claimed, is_workflow_task, retry_count,
-                    max_retries, enqueue_sha, command_fingerprint_version,
-                    command_fingerprint, retention_class_key, input_digest,
-                    retain_rerun_input, prepared_rerun_input_disposition,
-                    created_at, updated_at
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    enqueued_at, is_workflow_task, retry_count, max_retries,
+                    command_fingerprint_version, command_fingerprint,
+                    retention_class_key, retain_rerun_input, created_at, updated_at,
+                    execution
                 )
-                SELECT md5('orphan-plan-task-' || item::text)::uuid,
-                       'orphan_plan_task', 'default', 100, 'PENDING',
-                       TIMESTAMPTZ '2026-02-01 00:00:00+00'
+                SELECT md5('orphan-plan-task-' || item::text)::uuid, 'orphan_plan_task',
+                    'default', 100, '{}', 'PENDING',
+                    TIMESTAMPTZ '2026-02-01 00:00:00+00'
                            + item * interval '1 millisecond',
-                       TIMESTAMPTZ '2026-02-01 00:00:00+00'
+                    TIMESTAMPTZ '2026-02-01 00:00:00+00'
                            + item * interval '1 millisecond',
-                       FALSE, TRUE, 0, 0, repeat('0', 64), 1,
-                       decode(repeat('01', 32), 'hex'), 'standard_30d',
-                       decode(repeat('02', 32), 'hex'), FALSE,
-                       'DECLINED_BY_POLICY',
-                       TIMESTAMPTZ '2026-02-01 00:00:00+00'
+                    TRUE, 0, 0, NULL, NULL, 'standard_30d', FALSE,
+                    TIMESTAMPTZ '2026-02-01 00:00:00+00'
                            + item * interval '1 millisecond',
-                       NOW()
+                    NOW(), 'ISOLATED'
                 FROM generate_series(1, :rows) item
             '''),
             {'rows': rows},
@@ -527,26 +523,22 @@ async def _insert_new_orphan_task(
         await connection.execute(
             text('''
                 INSERT INTO horsies_tasks (
-                    id, task_name, queue_name, priority, status, sent_at,
-                    enqueued_at, claimed, is_workflow_task, retry_count,
-                    max_retries, enqueue_sha, command_fingerprint_version,
-                    command_fingerprint, retention_class_key, input_digest,
-                    retain_rerun_input, prepared_rerun_input_disposition,
-                    created_at, updated_at
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    enqueued_at, is_workflow_task, retry_count, max_retries,
+                    command_fingerprint_version, command_fingerprint,
+                    retention_class_key, retain_rerun_input, created_at, updated_at,
+                    execution
                 ) VALUES (
-                    md5('new-orphan-' || CAST(:item AS text))::uuid,
-                    'new_orphan', 'default', 100, 'PENDING',
+                    md5('new-orphan-' || CAST(:item AS text))::uuid, 'new_orphan',
+                    'default', 100, '{}', 'PENDING',
                     TIMESTAMPTZ '2026-03-01 00:00:00+00'
                         + :item * interval '1 second',
                     TIMESTAMPTZ '2026-03-01 00:00:00+00'
                         + :item * interval '1 second',
-                    FALSE, TRUE, 0, 0, repeat('0', 64), 1,
-                    decode(repeat('03', 32), 'hex'), 'standard_30d',
-                    decode(repeat('04', 32), 'hex'), FALSE,
-                    'DECLINED_BY_POLICY',
+                    TRUE, 0, 0, NULL, NULL, 'standard_30d', FALSE,
                     TIMESTAMPTZ '2026-03-01 00:00:00+00'
                         + :item * interval '1 second',
-                    NOW()
+                    NOW(), 'ISOLATED'
                 )
             '''),
             {'item': item},

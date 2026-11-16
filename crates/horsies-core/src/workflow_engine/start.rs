@@ -65,9 +65,11 @@ INSERT INTO horsies_tasks (
 VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), NULL, NULL, NULL,
         'PENDING', NOW(), 0, $9, $10, TRUE, NOW(), FALSE, NULL, NULL)";
 
+/// A node's `started_at` is its enqueue time (Python `ENQUEUE_WORKFLOW_TASK_SQL`,
+/// `core/workflows/sql.py:114-116`).
 const LINK_WORKFLOW_TASK_SQL: &str = "\
 UPDATE horsies_workflow_tasks
-SET task_id = $1::uuid, status = 'ENQUEUED'
+SET task_id = $1::uuid, status = 'ENQUEUED', started_at = NOW()
 WHERE workflow_id = $2::uuid AND task_index = $3";
 
 /// A linked parent node is RUNNING while its child runs, on every path (Python `LINK_SUB_WORKFLOW_SQL`,
@@ -740,8 +742,13 @@ fn insert_workflow_tasks<'a>(
                 .push_bind(p.node.sub_definition_key.clone())
                 .push_bind(p.task_id.clone())
                 .push_unseparated("::uuid");
-            // A regular task starts at its first RUNNING ownership handoff.
-            b.push("NULL");
+            // started_at: a fast root goes in ENQUEUED, so it holds its enqueue time; every other
+            // node has none until its enqueue (Python `INSERT_WORKFLOW_TASKS_BULK_SQL`,
+            // `core/workflows/sql.py:46-58`).
+            match p.fast_path {
+                true => b.push("NOW()"),
+                false => b.push("NULL"),
+            };
             b.push("NOW()"); // created_at
         });
         qb.build().execute(&mut **tx).await?;
@@ -1201,12 +1208,8 @@ mod tests {
         assert_eq!(child_workflow_depth(31, parent, 1).unwrap(), 32);
         let error = child_workflow_depth(32, parent, 4).unwrap_err();
         assert_eq!(
-            error
-                .error_code
-                .as_ref()
-                .map(ToString::to_string)
-                .as_deref(),
-            Some("SUBWORKFLOW_DEPTH_LIMIT_REACHED")
+            error.error_code.to_string(),
+            "SUBWORKFLOW_DEPTH_LIMIT_REACHED"
         );
         let message = error.message.unwrap();
         assert!(message.contains("depth 33"));
@@ -1247,6 +1250,74 @@ mod tests {
         let mut keyed = unkeyed;
         keyed.sub_definition_key = Some("tests.child.v1".to_owned());
         assert!(require_definition_key(&keyed_spec(Some("tests.keyed.v1"), vec![keyed])).is_ok());
+    }
+
+    /// A root node that the start enqueues holds its enqueue time as `started_at`: the fast root (bulk
+    /// insert) and a slow root (`LINK_WORKFLOW_TASK_SQL`). Both writes run in the start transaction, so the
+    /// time equals `enqueued_at` of the node's task row.
+    #[tokio::test]
+    #[serial]
+    async fn an_enqueued_root_node_holds_its_enqueue_time() {
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let mut fast = node_with(false, Some(17));
+        fast.task_name = "enqueue_time_fast_root".to_owned();
+        fast.node_id = Some("fast".to_owned());
+        let mut slow = node_with(false, Some(17));
+        slow.task_name = "enqueue_time_slow_root".to_owned();
+        slow.node_id = Some("slow".to_owned());
+        slow.index = 1;
+        // A root that names a context source takes the per-row slow path.
+        slow.workflow_ctx_from = Some(vec!["fast".to_owned()]);
+        slow.input_json = "{}".to_owned();
+        let spec = keyed_spec(Some("tests.enqueue_time.root.v1"), vec![fast, slow]);
+        let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+        let workflow_id = Uuid::new_v4();
+
+        let _: WorkflowHandle<serde_json::Value> = start_workflow(
+            &broker,
+            &spec,
+            Some(workflow_id),
+            &WorkflowSpecRegistry::new(),
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await
+        .expect("start workflow with a fast and a slow root");
+
+        let nodes: Vec<(i32, String, bool)> = sqlx::query_as(
+            "SELECT wt.task_index, wt.status,
+                    wt.started_at IS NOT NULL AND wt.started_at = t.enqueued_at
+             FROM horsies_workflow_tasks wt
+             JOIN horsies_tasks t ON t.id = wt.task_id
+             WHERE wt.workflow_id = $1
+             ORDER BY wt.task_index",
+        )
+        .bind(workflow_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            nodes,
+            vec![
+                (0, "ENQUEUED".to_owned(), true),
+                (1, "ENQUEUED".to_owned(), true),
+            ]
+        );
+
+        sqlx::query(
+            "DELETE FROM horsies_tasks WHERE id IN (
+                SELECT task_id FROM horsies_workflow_tasks WHERE workflow_id = $1
+             )",
+        )
+        .bind(workflow_id)
+        .execute(&pool)
+        .await
+        .ok();
+        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+            .bind(workflow_id)
+            .execute(&pool)
+            .await
+            .ok();
     }
 
     #[tokio::test]

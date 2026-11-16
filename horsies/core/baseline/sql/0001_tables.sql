@@ -816,14 +816,16 @@ $$;
 ------------------------------------------------------------------------------------------------------------------------
 
 -- One function for every task insert. Order as in v61, where the queue trigger fired before the status trigger:
--- task_new (id, for outside observers), task_queue_<queue> (constant payload 'new', one wake per kind),
--- horsies_task_status (id, for the web app).
+-- task_new (id, for outside observers) and task_queue_<queue> (constant payload 'new', one wake per kind) only for
+-- a PENDING row, as v61's WHEN (NEW.status = 'PENDING'); horsies_task_status (id, for the web app) for every row.
 CREATE FUNCTION horsies_notify_task_changes() RETURNS trigger
     LANGUAGE plpgsql
 AS $$
 BEGIN
-    PERFORM pg_notify('task_new', NEW.id::text);
-    PERFORM pg_notify('task_queue_' || NEW.queue_name, 'new');
+    IF NEW.status = 'PENDING' THEN
+        PERFORM pg_notify('task_new', NEW.id::text);
+        PERFORM pg_notify('task_queue_' || NEW.queue_name, 'new');
+    END IF;
     PERFORM pg_notify('horsies_task_status', NEW.id::text);
     RETURN NULL;
 END;
@@ -863,7 +865,7 @@ BEGIN
 END;
 $$;
 
--- No WHEN: every insert is PENDING (the enqueue and the workflow functions write PENDING).
+-- No WHEN: every insert sends the status event; the function sends the wake for a PENDING row only.
 CREATE TRIGGER horsies_tasks_insert_notify
     AFTER INSERT ON horsies_tasks
     FOR EACH ROW EXECUTE FUNCTION horsies_notify_task_changes();
