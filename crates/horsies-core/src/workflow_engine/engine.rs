@@ -95,9 +95,14 @@ FROM found";
 
 /// The node error lives in `result` only; the node `error` column has no writer (Python
 /// `MARK_WORKFLOW_TASK_FAILED_SQL`, `core/workflows/sql.py:253-259`).
+///
+/// Every caller fails a node at its enqueue step, so a node with no `started_at` takes its enqueue time:
+/// Python marks the node ENQUEUED (with `started_at`) before it fails it (`core/workflows/sql.py:114-116,
+/// 238-240, 449-470`; `core/workflows/engine.py:1030-1035`).
 const UPDATE_WORKFLOW_TASK_FAILED_SQL: &str = "\
 UPDATE horsies_workflow_tasks
-SET status = 'FAILED', result = $1, completed_at = NOW()
+SET status = 'FAILED', result = $1, completed_at = NOW(),
+    started_at = COALESCE(started_at, NOW())
 WHERE workflow_id = $2 AND task_index = $3
   AND status NOT IN ('COMPLETED', 'FAILED', 'SKIPPED')
 RETURNING id";
@@ -158,9 +163,11 @@ RETURNING task_index";
 /// Batched READY -> ENQUEUED CAS, guarded on the workflow still RUNNING (the same
 /// re-check the single-node LINK does). RETURNING the won set drives the bulk
 /// INSERT + LINK; a paused workflow returns zero rows so no task row is inserted.
+/// A node's `started_at` is its enqueue time (Python `PROMOTE_DEPENDENTS_BATCH_SQL`,
+/// `core/workflows/sql.py:449-470`).
 const ENQUEUE_WORKFLOW_TASKS_BATCH_SQL: &str = "\
 UPDATE horsies_workflow_tasks wt
-SET status = 'ENQUEUED'
+SET status = 'ENQUEUED', started_at = NOW()
 FROM horsies_workflows w
 WHERE wt.workflow_id = $1::uuid AND wt.task_index = ANY($2)
   AND wt.status = 'READY'
@@ -208,9 +215,11 @@ INSERT INTO horsies_tasks (
 VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), NULL, NULL, NULL,
         'PENDING', NOW(), 0, $9, $10, TRUE, NOW(), FALSE, NULL, NULL)";
 
+/// A node's `started_at` is its enqueue time (Python `ENQUEUE_WORKFLOW_TASK_SQL`,
+/// `core/workflows/sql.py:114-116`).
 const LINK_ENQUEUED_TASK_SQL: &str = "\
 UPDATE horsies_workflow_tasks wt
-SET task_id = $1::uuid, status = 'ENQUEUED'
+SET task_id = $1::uuid, status = 'ENQUEUED', started_at = NOW()
 FROM horsies_workflows w
 WHERE wt.workflow_id = $2::uuid AND wt.task_index = $3
   AND wt.status = 'READY'
@@ -3465,6 +3474,18 @@ mod p7_exact_error_tests {
                 OperationalErrorCode::SubworkflowLoadFailed,
             )),
         );
+        // A node that fails at its enqueue step holds its enqueue time, as Python's node does after its
+        // ENQUEUED write.
+        let (node_status, has_enqueue_time): (String, bool) = sqlx::query_as(
+            "SELECT status, started_at IS NOT NULL FROM horsies_workflow_tasks
+             WHERE workflow_id = $1 AND task_index = 1",
+        )
+        .bind(workflow_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(node_status, "FAILED");
+        assert!(has_enqueue_time);
     }
 
     #[tokio::test]
@@ -4954,6 +4975,78 @@ mod promotion_batch_tests {
         }
 
         cleanup(&pool, &wf_id).await;
+    }
+
+    /// A promoted node holds its enqueue time as `started_at` on the batched level (node 1 of the first
+    /// workflow), the per-node path (node 2, which reads the workflow context) and the phase-2 path (node 1
+    /// of the second workflow). The node write and the task insert share a transaction, so the time equals
+    /// `enqueued_at` of the task row.
+    #[tokio::test]
+    #[serial]
+    async fn a_promoted_node_holds_its_enqueue_time() {
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let registry = WorkflowSpecRegistry::new();
+        let level_wf = Uuid::new_v4().to_string();
+        let phase2_wf = Uuid::new_v4().to_string();
+        for wf_id in [&level_wf, &phase2_wf] {
+            insert_workflow(&pool, wf_id).await;
+            insert_node(&pool, wf_id, 0, vec![], "COMPLETED", "all", false).await;
+            insert_node(&pool, wf_id, 1, vec![0], "PENDING", "all", false).await;
+        }
+        insert_node(&pool, &level_wf, 2, vec![0], "PENDING", "all", false).await;
+        // A context member merges into an object input.
+        sqlx::query(
+            "UPDATE horsies_workflow_tasks SET workflow_ctx_from = ARRAY['node_0'], input = '{}'
+             WHERE workflow_id = $1::uuid AND task_index = 2",
+        )
+        .bind(test_uuid(&level_wf))
+        .execute(&pool)
+        .await
+        .expect("node 2 reads the workflow context");
+
+        process_dependents(
+            &pool,
+            test_uuid(&level_wf),
+            0,
+            &registry,
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await
+        .expect("process dependents");
+        let mut transaction = pool.begin().await.expect("phase-2 transaction");
+        promote_phase2_dependents_in_tx(
+            &mut transaction,
+            test_uuid(&phase2_wf),
+            0,
+            &registry,
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await
+        .expect("phase-2 promotion");
+        transaction.commit().await.expect("commit phase 2");
+
+        let nodes: Vec<(String, i32, String, bool)> = sqlx::query_as(
+            "SELECT wt.workflow_id::text, wt.task_index, wt.status,
+                    wt.started_at IS NOT NULL AND wt.started_at = t.enqueued_at
+             FROM horsies_workflow_tasks wt
+             JOIN horsies_tasks t ON t.id = wt.task_id
+             WHERE wt.workflow_id = ANY($1::uuid[])
+             ORDER BY 1, 2",
+        )
+        .bind(vec![test_uuid(&level_wf), test_uuid(&phase2_wf)])
+        .fetch_all(&pool)
+        .await
+        .expect("read the promoted nodes");
+        assert_eq!(nodes.len(), 3, "three promoted nodes: {nodes:?}");
+        for (workflow_id, task_index, status, holds_enqueue_time) in nodes {
+            assert_eq!(status, "ENQUEUED", "{workflow_id}:{task_index}");
+            assert!(holds_enqueue_time, "{workflow_id}:{task_index}");
+        }
+
+        cleanup(&pool, &level_wf).await;
+        cleanup(&pool, &phase2_wf).await;
     }
 
     /// allow_failed_deps: a failed dep still promotes the dependent (not skipped).

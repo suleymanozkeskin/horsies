@@ -160,7 +160,7 @@ VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), NULL, NULL, NULL,
 
 const LINK_ENQUEUED_TASK_SQL: &str = "\
 UPDATE horsies_workflow_tasks wt
-SET task_id = $1::uuid, status = 'ENQUEUED'
+SET task_id = $1::uuid, status = 'ENQUEUED', started_at = NOW()
 FROM horsies_workflows w
 WHERE wt.workflow_id = $2::uuid AND wt.task_index = $3
   AND wt.status = 'READY'
@@ -1395,6 +1395,18 @@ mod resume_idempotency_tests {
         .await
         .expect("resume enqueue path");
         assert_eq!(enqueued, 1);
+        // The node holds its enqueue time: the node write and the task insert share a transaction.
+        let node_holds_enqueue_time: bool = sqlx::query_scalar(
+            "SELECT wt.started_at IS NOT NULL AND wt.started_at = t.enqueued_at
+             FROM horsies_workflow_tasks wt
+             JOIN horsies_tasks t ON t.id = wt.task_id
+             WHERE wt.workflow_id = $1::uuid AND wt.task_index = 0",
+        )
+        .bind(&workflow_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read the resume node enqueue time");
+        assert!(node_holds_enqueue_time);
         let facts: (String, Option<i32>, Option<i16>, bool) = sqlx::query_as(
             "SELECT t.retention_class_key, octet_length(t.command_fingerprint),
                     t.command_fingerprint_version, t.retain_rerun_input
