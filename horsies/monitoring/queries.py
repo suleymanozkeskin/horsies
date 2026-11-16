@@ -1000,7 +1000,8 @@ def list_rows_statement(
 
     Separated from ``list_tasks`` so the plan tests EXPLAIN exactly the
     statement production executes — ordering form and projection included.
-    ``nulls_last`` wraps only nullable sort keys (see ``_SortKey``).
+    ``nulls_last`` wraps only nullable sort keys (see ``_SortKey``). Rows
+    of one sort value come by task id, ascending in both directions.
     """
     sort_key = _SORT_COLUMNS[sort_by]
     directed = (
@@ -1013,7 +1014,7 @@ def list_rows_statement(
         select(TaskModel)
         .options(load_only(*_SUMMARY_COLUMNS, raiseload=True))
         .where(*scope)
-        .order_by(ordering)
+        .order_by(ordering, TaskModel.id.asc())
         .limit(limit)
         .offset(offset)
     )
@@ -1077,6 +1078,12 @@ async def _estimated_history_total(
     return plan_rows_from_explain(payload)
 
 
+# The side rank of the merged task list: on one sort value a live row comes
+# before a history row, in both directions.
+_LIVE_RANK: Final = 0
+_HISTORY_RANK: Final = 1
+
+
 async def list_tasks(
     broker: PostgresBroker,
     *,
@@ -1099,6 +1106,10 @@ async def list_tasks(
     is exact; on the unfiltered view it is the planner's row estimate
     (an exact count would rescan the table on every poll for a number the
     UI only uses to size the pager).
+
+    Order: the sort value (NULL last in both directions), then a live row
+    before a history row, then the task id ascending. The order is total,
+    so a page does not reorder between polls.
     """
     scope = _scope_conditions(
         statuses=statuses,
@@ -1135,8 +1146,9 @@ async def list_tasks(
             limit=reach,
             offset=0,
             scope=history_scope,
-            order_by=history_sort_expression(
-                sort_by, descending=sort_dir == 'desc'
+            order_by=(
+                f'{history_sort_expression(sort_by, descending=sort_dir == "desc")}, '
+                'task_id ASC'
             ),
         )
     )
@@ -1186,11 +1198,15 @@ async def list_tasks(
     except HistoryContractError as exc:
         return _contract_err('task list estimate decode', exc)
 
-    summaries = [_task_summary(task) for task in tasks]
-    summaries.extend(_history_summary(row) for row in history_rows)
+    ranked = [(_LIVE_RANK, _task_summary(task)) for task in tasks]
+    ranked.extend((_HISTORY_RANK, _history_summary(row)) for row in history_rows)
+    # The tie order first, then a stable sort on the value: rows of one
+    # value keep LIVE before HISTORY and the task id ascending in both
+    # directions.
+    ranked.sort(key=lambda pair: (pair[0], pair[1].id))
     keyed = [
         (_summary_sort_value(summary, sort_by), summary)
-        for summary in summaries
+        for _, summary in ranked
     ]
     non_null = [pair for pair in keyed if pair[0] is not None]
     nulls = [summary for value, summary in keyed if value is None]

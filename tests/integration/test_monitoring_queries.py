@@ -1292,6 +1292,90 @@ class TestListTasks:
             'never_ran',
         ]
 
+    @pytest.mark.parametrize(
+        'sort_dir,expected_priorities',
+        [('asc', [50, 50, 50, 100, 100, 100]), ('desc', [100, 100, 100, 50, 50, 50])],
+    )
+    async def test_rows_of_one_side_and_one_sort_value_come_by_task_id(
+        self,
+        broker: PostgresBroker,
+        session: AsyncSession,
+        sort_dir: Any,
+        expected_priorities: list[int],
+    ) -> None:
+        """Each side's rows of one priority come by id, ascending in both directions.
+
+        The rows are written in descending id order, so a read in write
+        order would answer the ids descending.
+        """
+        live_ids = sorted((str(uuid.uuid4()) for _ in range(3)), reverse=True)
+        history_ids = sorted((str(uuid.uuid4()) for _ in range(3)), reverse=True)
+        await insert_rows(
+            session,
+            *[make_task(task_id=task_id, priority=100) for task_id in live_ids],
+            *[
+                make_task(task_id=task_id, priority=50, status=TaskStatus.COMPLETED)
+                for task_id in history_ids
+            ],
+        )
+
+        result = await list_tasks(
+            broker,
+            window=_test_window(),
+            statuses=[],
+            task_names=[],
+            queues=[],
+            workers=[],
+            error_codes=[],
+            error_categories=[],
+            retried_only=False,
+            sort_by='priority',
+            sort_dir=sort_dir,
+            page=TaskPage(offset=0, limit=50),
+        )
+
+        assert is_ok(result)
+        rows = result.ok_value.rows
+        assert [row.priority for row in rows] == expected_priorities
+        by_priority = {
+            priority: [row.id for row in rows if row.priority == priority]
+            for priority in (50, 100)
+        }
+        assert by_priority == {50: sorted(history_ids), 100: sorted(live_ids)}
+
+    @pytest.mark.parametrize('sort_dir', ['asc', 'desc'])
+    async def test_a_live_row_comes_before_a_history_row_of_one_sort_value(
+        self, broker: PostgresBroker, session: AsyncSession, sort_dir: Any
+    ) -> None:
+        """On one sort value the side decides before the id: the live row has the higher id."""
+        lower_id, higher_id = sorted(str(uuid.uuid4()) for _ in range(2))
+        await insert_rows(
+            session,
+            make_task(task_id=lower_id, task_name='same_name', status=TaskStatus.FAILED),
+            make_task(task_id=higher_id, task_name='same_name'),
+        )
+
+        result = await list_tasks(
+            broker,
+            window=_test_window(),
+            statuses=[],
+            task_names=[],
+            queues=[],
+            workers=[],
+            error_codes=[],
+            error_categories=[],
+            retried_only=False,
+            sort_by='task_name',
+            sort_dir=sort_dir,
+            page=TaskPage(offset=0, limit=50),
+        )
+
+        assert is_ok(result)
+        assert [(row.id, row.status) for row in result.ok_value.rows] == [
+            (higher_id, 'PENDING'),
+            (lower_id, 'FAILED'),
+        ]
+
     async def test_live_rows_sort_as_null_on_derived_spans(
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:

@@ -107,6 +107,20 @@ async def _explain(
     return plan
 
 
+def _plan_nodes(plan: str) -> list[str]:
+    """The node names of an EXPLAIN text plan, in plan order.
+
+    A node line is the first line, or a line whose text starts with ``->``;
+    the name ends before the cost in parentheses.
+    """
+    nodes: list[str] = []
+    for position, line in enumerate(plan.splitlines()):
+        stripped = line.strip()
+        if position == 0 or stripped.startswith('->'):
+            nodes.append(stripped.removeprefix('->').strip().split('  (', 1)[0])
+    return nodes
+
+
 def _compiled(statement: Any) -> str:
     """Render a SQLAlchemy statement with literal binds for EXPLAIN."""
     return str(
@@ -125,7 +139,9 @@ async def test_list_default_sort_plans_on_enqueued_at_index(
 
     The regression this pins: a ``nulls_last`` wrapper on the NOT NULL sort
     column changes the requested ordering away from what the btree provides
-    and silently degrades the list to a full-table sort.
+    and silently degrades the list to a full-table sort. The task id
+    tie-break is an incremental sort on the index order: it sorts only the
+    rows of one ``enqueued_at``, and no node sorts the whole table.
     """
     await _seed_tasks(session)
 
@@ -138,7 +154,8 @@ async def test_list_default_sort_plans_on_enqueued_at_index(
         )
         plan = await _explain(session, statement)
         assert 'idx_horsies_tasks_enqueued_at' in plan, (sort_dir, plan)
-        assert 'Sort' not in plan, (sort_dir, plan)
+        assert 'Sort' not in _plan_nodes(plan), (sort_dir, plan)
+        assert 'Presorted Key: enqueued_at' in plan, (sort_dir, plan)
 
 
 async def _nested_plans(session: AsyncSession, params: dict[str, object]) -> str:
