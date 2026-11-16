@@ -42,6 +42,9 @@ pub struct MetaResponse {
     pub schema_version: Option<i64>,
     pub expected_schema_version: i64,
     pub schema_compatible: bool,
+    /// The probe's verdict itself, so a client never derives it from the
+    /// version numbers (Python `horsies/web/app.py:64-99`).
+    pub schema_state: SchemaState,
     pub actions_disabled_reason: Option<String>,
 }
 
@@ -202,6 +205,7 @@ async fn read_meta(State(state): State<WebState>, request: Request) -> Response 
         schema_version: schema.version,
         expected_schema_version: schema.expected_version,
         schema_compatible: schema.compatible(),
+        schema_state: schema.state,
         actions_disabled_reason: disabled_reason,
     })
     .into_response()

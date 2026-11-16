@@ -140,23 +140,38 @@ OPEN_END_ANCHOR: Final = datetime(9999, 1, 1, tzinfo=timezone.utc)
 
 
 @dataclass(frozen=True, slots=True)
-class CreateOpenEndedHistoryLeaf:
-    """Create the open-ended `forever` leaf, or verify and repair it.
+class OpenLowerBound:
+    """The leaf starts at MINVALUE and has no lower anchor.
 
-    The leaf covers `[lower, OPEN_END_ANCHOR)`, so `forever` history needs
-    no new leaf per day. `lower` must be a UTC midnight.
+    The static forever leaf is the only such leaf. The catalog stores the
+    bound as ``lower_bound_kind = 'OPEN'`` with no anchor.
     """
 
-    lower: datetime
+
+@dataclass(frozen=True, slots=True)
+class AnchoredLowerBound:
+    """The leaf starts at an instant (``lower_bound_kind = 'AT'``)."""
+
+    anchor: datetime
 
     def __post_init__(self) -> None:
-        if self.lower.tzinfo is None:
-            raise ValueError('open-ended leaf lower bound must be timezone-aware')
-        utc_lower = self.lower.astimezone(timezone.utc)
-        if utc_lower != utc_lower.replace(hour=0, minute=0, second=0, microsecond=0):
-            raise ValueError('open-ended leaf lower bound must be a UTC midnight')
-        if utc_lower >= OPEN_END_ANCHOR:
-            raise ValueError('open-ended leaf lower bound must precede the open end')
+        if self.anchor.tzinfo is not timezone.utc:
+            raise ValueError('a lower anchor must be in UTC')
+
+
+type LowerBound = OpenLowerBound | AnchoredLowerBound
+"""The lower bound of a leaf in the catalog or the lookup manifest."""
+
+
+@dataclass(frozen=True, slots=True)
+class ForeverLeafRef:
+    """The static forever leaf: an open lower bound and the open end.
+
+    The baseline schema creates it; maintenance only verifies it.
+    """
+
+    leaf_name: str
+    class_key: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,7 +329,6 @@ class CollectPartitionHealth:
 type PartitionMaintenanceCommand = (
     InspectHistoryLeaf
     | CreateDailyHistoryLeaf
-    | CreateOpenEndedHistoryLeaf
     | EnsureLeafCoverage
     | DetachExpiredHistoryLeaf
     | DetachEmptyForeverLeaf

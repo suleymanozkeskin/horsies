@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 /// URLs so structured logs / panics never leak credentials. Parity with
 /// horsies PR #101 f368965c.
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PostgresConfig {
     /// PostgreSQL runtime connection URL.
     ///
@@ -130,6 +131,12 @@ pub enum PostgresConfigError {
     InvalidSessionUrlScheme(String),
     #[error("pgbouncer_transaction_mode=true requires session_database_url for schema initialization, partition maintenance, and LISTEN/NOTIFY")]
     MissingSessionDatabaseUrl,
+    #[error(
+        "session_database_url must not use the transaction-pool URL: partition maintenance \
+         and LISTEN require PostgreSQL session affinity; use a direct or session-capable \
+         URL for session_database_url"
+    )]
+    SessionUrlIsTransactionPoolUrl,
 }
 
 impl PostgresConfig {
@@ -199,6 +206,11 @@ impl PostgresConfig {
         }
         if self.pgbouncer_transaction_mode && self.session_database_url.is_none() {
             return Err(PostgresConfigError::MissingSessionDatabaseUrl);
+        }
+        if self.pgbouncer_transaction_mode
+            && self.session_database_url.as_deref() == Some(self.database_url.as_str())
+        {
+            return Err(PostgresConfigError::SessionUrlIsTransactionPoolUrl);
         }
         Ok(())
     }
@@ -337,6 +349,34 @@ mod tests {
             config.validate(),
             Err(PostgresConfigError::MissingSessionDatabaseUrl),
         ));
+    }
+
+    /// Python `PostgresConfig.validate_pgbouncer_configuration`: in PgBouncer
+    /// mode the session URL must differ from the transaction-pool URL.
+    #[test]
+    fn pgbouncer_session_url_must_differ_from_the_pool_url() {
+        let config = PostgresConfig::from_pgbouncer_urls(
+            "postgresql://user:pass@pooler/db",
+            "postgresql://user:pass@pooler/db",
+        );
+        assert!(matches!(
+            config.validate(),
+            Err(PostgresConfigError::SessionUrlIsTransactionPoolUrl),
+        ));
+
+        // Outside PgBouncer mode the two roles may share one URL.
+        let mut direct = PostgresConfig::from_url("postgresql://user:pass@direct/db");
+        direct.session_database_url = Some("postgresql://user:pass@direct/db".to_owned());
+        assert!(direct.validate().is_ok());
+    }
+
+    #[test]
+    fn unknown_key_is_refused() {
+        let error = serde_json::from_str::<PostgresConfig>(
+            r#"{"database_url": "postgresql://localhost/db", "pool_sizes": 3}"#,
+        )
+        .expect_err("an unknown key must be refused");
+        assert!(error.to_string().contains("unknown field"), "{error}");
     }
 
     #[test]

@@ -48,7 +48,7 @@ from tests.integration.task_history_harness import (
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
-CLASS_KEY = 'it_dup_guard'
+CLASS_KEY = 'standard_30d'
 WORKER = 'worker-dup-guard'
 
 terminalization_schema = terminalization_schema_fixture('task_history_it_dup_guard')

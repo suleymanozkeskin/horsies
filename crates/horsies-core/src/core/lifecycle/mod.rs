@@ -71,14 +71,15 @@ mod tests {
     }
 
     fn sample_commands() -> Vec<(&'static str, TerminalizationCommand)> {
+        let generation = chrono::DateTime::<chrono::Utc>::UNIX_EPOCH;
         let owned = OwnedClaim {
             worker_id: "w1".to_owned(),
-            claimed_at: None,
+            claimed_at: generation,
         };
         let prior = PriorLockedRead {
             worker_id: "w1".to_owned(),
         };
-        let batch = OwnedClaimBatch::new("w1".to_owned(), vec![(Uuid::nil(), None)]).unwrap();
+        let batch = OwnedClaimBatch::new("w1".to_owned(), vec![(Uuid::nil(), generation)]).unwrap();
         let bound = BatchSize::new(500).unwrap();
         vec![
             (
@@ -202,7 +203,10 @@ mod tests {
     fn duplicate_task_id_in_batch_rejected() {
         let result = OwnedClaimBatch::new(
             "w1".to_owned(),
-            vec![(Uuid::nil(), None), (Uuid::nil(), None)],
+            vec![
+                (Uuid::nil(), chrono::DateTime::<chrono::Utc>::UNIX_EPOCH),
+                (Uuid::nil(), chrono::DateTime::<chrono::Utc>::UNIX_EPOCH),
+            ],
         );
         assert_eq!(
             result.unwrap_err(),

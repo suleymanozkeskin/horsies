@@ -10,6 +10,10 @@ use uuid::Uuid;
 use crate::workflow_engine::engine;
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::parse_good_until_from_options;
+use crate::workflow_engine::recovery_limit::{
+    count_over_failure_limit, run_recovery_candidate, CandidateOutcome, CountFailures,
+    FailureRecord, RecoveryCase, RecoveryFailurePolicy,
+};
 use crate::workflow_engine::start::{materialize_child_spec, start_child_workflow_in_tx};
 
 // ---------------------------------------------------------------------------
@@ -39,6 +43,9 @@ pub struct RecoveryReport {
     /// Null when no workflows were scanned or no global audit result is available.
     /// Candidates count before processing; this is not the successful completion rate.
     pub completion_candidate_yield: Option<f64>,
+    /// RUNNING workflows whose stored recovery failure count is at or over the limit. Counted once per
+    /// global pass; 0 in a pass that does not count failures.
+    pub over_failure_limit: i64,
 }
 
 #[derive(Debug, Default, serde::Serialize)]
@@ -58,6 +65,25 @@ pub struct RecoveryCaseMetrics {
     pub duration_ms: u64,
     pub refusals: u32,
     pub errors: u32,
+    /// Candidate failures that moved the stored count of their workflow.
+    pub failures_counted: u32,
+    /// Candidate failures whose count reached the limit and stopped the workflow.
+    pub limit_reached: u32,
+}
+
+impl RecoveryCaseMetrics {
+    /// Notes one failed candidate and what the failure bound did with it.
+    fn note_failure(&mut self, record: FailureRecord) {
+        self.errors += 1;
+        match record {
+            FailureRecord::NotCounted => {}
+            FailureRecord::Counted => self.failures_counted += 1,
+            FailureRecord::LimitReached => {
+                self.failures_counted += 1;
+                self.limit_reached += 1;
+            }
+        }
+    }
 }
 
 impl RecoveryReport {
@@ -602,10 +628,15 @@ fn record_discovery_error(
 
 /// Global recovery pass with [`GLOBAL_SCAN_ROW_CAP`] as its per-query or
 /// per-audit-page row budget. Later cursor pages cover the remaining workflows.
+///
+/// `failure_limit` is `RecoveryConfig::workflow_recovery_failure_limit`: the reaper passes with a persistent
+/// candidate failure that a workflow may see before it fails closed. The pass makes one pass id, so a
+/// workflow counts at most once per pass.
 pub async fn recover_stuck_workflows(
     pool: &PgPool,
     registry: &WorkflowSpecRegistry,
     finalizing_grace_ms: u64,
+    failure_limit: u32,
     payload: &PayloadPolicy,
     retention: &RetentionConfig,
 ) -> Result<RecoveryReport, WorkflowError> {
@@ -614,16 +645,20 @@ pub async fn recover_stuck_workflows(
         registry,
         Some(GLOBAL_SCAN_ROW_CAP),
         finalizing_grace_ms,
+        RecoveryFailurePolicy::Count(CountFailures::new_pass(failure_limit)),
         payload,
         retention,
     )
     .await
 }
 
+/// The reaper's global pass. It counts persistent candidate failures toward `failure_limit` and keeps its
+/// partial report when it fails.
 pub(crate) async fn recover_stuck_workflows_observed(
     pool: &PgPool,
     registry: &WorkflowSpecRegistry,
     finalizing_grace_ms: u64,
+    failure_limit: u32,
     payload: &PayloadPolicy,
     retention: &RetentionConfig,
 ) -> Result<RecoveryReport, RecoveryPassFailure> {
@@ -633,6 +668,7 @@ pub(crate) async fn recover_stuck_workflows_observed(
         RecoveryScope::Global,
         Some(GLOBAL_SCAN_ROW_CAP),
         finalizing_grace_ms,
+        RecoveryFailurePolicy::Count(CountFailures::new_pass(failure_limit)),
         payload,
         retention,
     )
@@ -653,6 +689,7 @@ pub(crate) async fn recover_stuck_workflows_with_cap(
     registry: &WorkflowSpecRegistry,
     max_rows: Option<i64>,
     _finalizing_grace_ms: u64,
+    failure_policy: RecoveryFailurePolicy,
     payload: &PayloadPolicy,
     retention: &RetentionConfig,
 ) -> Result<RecoveryReport, WorkflowError> {
@@ -662,6 +699,7 @@ pub(crate) async fn recover_stuck_workflows_with_cap(
         RecoveryScope::Global,
         max_rows,
         _finalizing_grace_ms,
+        failure_policy,
         payload,
         retention,
     )
@@ -671,7 +709,8 @@ pub(crate) async fn recover_stuck_workflows_with_cap(
 
 /// Uncapped recovery restricted to one workflow tree (root plus descendants).
 /// Resume uses this path so a caller-facing operation never scans or mutates
-/// unrelated workflows.
+/// unrelated workflows. It logs candidate failures and counts none: the reaper's
+/// global pass counts the same candidates.
 pub(crate) async fn recover_stuck_workflow_tree(
     pool: &PgPool,
     registry: &WorkflowSpecRegistry,
@@ -690,6 +729,7 @@ pub(crate) async fn recover_stuck_workflow_tree(
         RecoveryScope::WorkflowTree(&workflow_ids),
         None,
         finalizing_grace_ms,
+        RecoveryFailurePolicy::LogOnly,
         payload,
         retention,
     )
@@ -703,6 +743,7 @@ async fn recover_stuck_workflows_in_scope(
     scope: RecoveryScope<'_>,
     max_rows: Option<i64>,
     _finalizing_grace_ms: u64,
+    failure_policy: RecoveryFailurePolicy,
     payload: &PayloadPolicy,
     retention: &RetentionConfig,
 ) -> Result<RecoveryReport, RecoveryPassFailure> {
@@ -714,6 +755,7 @@ async fn recover_stuck_workflows_in_scope(
         scope,
         max_rows,
         &mut report,
+        failure_policy,
         payload,
         retention,
     )
@@ -721,11 +763,28 @@ async fn recover_stuck_workflows_in_scope(
     {
         return Err(RecoveryPassFailure { report, error });
     }
-    if let Err(error) = recover_case1(pool, scope, max_rows, &mut report, retention).await {
+    if let Err(error) = recover_case1(
+        pool,
+        scope,
+        max_rows,
+        &mut report,
+        failure_policy,
+        retention,
+    )
+    .await
+    {
         return Err(RecoveryPassFailure { report, error });
     }
-    if let Err(error) =
-        recover_case1_5(pool, registry, scope, max_rows, &mut report, retention).await
+    if let Err(error) = recover_case1_5(
+        pool,
+        registry,
+        scope,
+        max_rows,
+        &mut report,
+        failure_policy,
+        retention,
+    )
+    .await
     {
         return Err(RecoveryPassFailure { report, error });
     }
@@ -735,6 +794,7 @@ async fn recover_stuck_workflows_in_scope(
         scope,
         max_rows,
         &mut report,
+        failure_policy,
         payload,
         retention,
     )
@@ -749,6 +809,7 @@ async fn recover_stuck_workflows_in_scope(
                 registry,
                 max_rows,
                 &mut report,
+                failure_policy,
                 payload,
                 retention,
             )
@@ -764,6 +825,7 @@ async fn recover_stuck_workflows_in_scope(
                 ids,
                 max_rows,
                 &mut report,
+                failure_policy,
                 payload,
                 retention,
             )
@@ -775,6 +837,21 @@ async fn recover_stuck_workflows_in_scope(
                 return Err(RecoveryPassFailure { report, error });
             }
         }
+    }
+    match failure_policy {
+        RecoveryFailurePolicy::Count(counting) => {
+            match count_over_failure_limit(pool, counting.limit).await {
+                Ok(count) => report.over_failure_limit = count,
+                Err(error) => {
+                    report.errors += 1;
+                    return Err(RecoveryPassFailure {
+                        report,
+                        error: error.into(),
+                    });
+                }
+            }
+        }
+        RecoveryFailurePolicy::LogOnly => {}
     }
 
     if report.total() > 0 {
@@ -804,6 +881,7 @@ async fn recover_case0(
     scope: RecoveryScope<'_>,
     max_rows: Option<i64>,
     report: &mut RecoveryReport,
+    failure_policy: RecoveryFailurePolicy,
     payload: &PayloadPolicy,
     retention: &RetentionConfig,
 ) -> Result<(), WorkflowError> {
@@ -837,17 +915,19 @@ async fn recover_case0(
     };
 
     for row in rows {
-        match engine::recover_pending_workflow_task(
+        let case = RecoveryCase::PendingTerminalDeps {
+            task_index: row.task_index,
+        };
+        let candidate = engine::recover_pending_workflow_task(
             pool,
             row.workflow_id,
             row.task_index,
             registry,
             payload,
             retention,
-        )
-        .await
-        {
-            Ok(true) => {
+        );
+        match run_recovery_candidate(pool, failure_policy, row.workflow_id, case, candidate).await {
+            CandidateOutcome::Finished(true) => {
                 report.case0_pending_reevaluated += 1;
                 tracing::debug!(
                     workflow_id = %row.workflow_id,
@@ -855,16 +935,10 @@ async fn recover_case0(
                     "recovery case 0: re-evaluated pending task",
                 );
             }
-            Ok(false) => metrics.refusals += 1,
-            Err(e) => {
-                tracing::error!(
-                    workflow_id = %row.workflow_id,
-                    task_index = row.task_index,
-                    error = %e,
-                    "recovery case 0: failed to re-evaluate pending task",
-                );
+            CandidateOutcome::Finished(false) => metrics.refusals += 1,
+            CandidateOutcome::Failed(record) => {
                 report.errors += 1;
-                metrics.errors += 1;
+                metrics.note_failure(record);
             }
         }
     }
@@ -879,6 +953,7 @@ async fn recover_case1(
     scope: RecoveryScope<'_>,
     max_rows: Option<i64>,
     report: &mut RecoveryReport,
+    failure_policy: RecoveryFailurePolicy,
     retention: &RetentionConfig,
 ) -> Result<(), WorkflowError> {
     let started = Instant::now();
@@ -911,8 +986,12 @@ async fn recover_case1(
     };
 
     for row in rows {
-        match enqueue_ready_task(pool, &row, retention).await {
-            Ok(true) => {
+        let case = RecoveryCase::ReadyNotEnqueued {
+            task_index: row.task_index,
+        };
+        let candidate = enqueue_ready_task(pool, &row, retention);
+        match run_recovery_candidate(pool, failure_policy, row.workflow_id, case, candidate).await {
+            CandidateOutcome::Finished(true) => {
                 report.case1_ready_enqueued += 1;
                 tracing::debug!(
                     workflow_id = %row.workflow_id,
@@ -920,20 +999,14 @@ async fn recover_case1(
                     "recovery case 1: re-enqueued ready task",
                 );
             }
-            Ok(false) => {
+            CandidateOutcome::Finished(false) => {
                 // LINK matched 0 rows; the inserted row was rolled back, so this
                 // node was not recovered and must not be counted.
                 metrics.refusals += 1;
             }
-            Err(e) => {
-                tracing::error!(
-                    workflow_id = %row.workflow_id,
-                    task_index = row.task_index,
-                    error = %e,
-                    "recovery case 1: failed to re-enqueue task",
-                );
+            CandidateOutcome::Failed(record) => {
                 report.errors += 1;
-                metrics.errors += 1;
+                metrics.note_failure(record);
             }
         }
     }
@@ -949,6 +1022,7 @@ async fn recover_case1_5(
     scope: RecoveryScope<'_>,
     max_rows: Option<i64>,
     report: &mut RecoveryReport,
+    failure_policy: RecoveryFailurePolicy,
     retention: &RetentionConfig,
 ) -> Result<(), WorkflowError> {
     let started = Instant::now();
@@ -981,8 +1055,12 @@ async fn recover_case1_5(
     };
 
     for row in rows {
-        match start_stuck_subworkflow(pool, registry, &row, retention).await {
-            Ok(()) => {
+        let case = RecoveryCase::ReadySubworkflowNotStarted {
+            task_index: row.task_index,
+        };
+        let candidate = start_stuck_subworkflow(pool, registry, &row, retention);
+        match run_recovery_candidate(pool, failure_policy, row.workflow_id, case, candidate).await {
+            CandidateOutcome::Finished(()) => {
                 report.case1_5_subworkflow_started += 1;
                 tracing::debug!(
                     workflow_id = %row.workflow_id,
@@ -990,15 +1068,9 @@ async fn recover_case1_5(
                     "recovery case 1.5: started sub-workflow",
                 );
             }
-            Err(e) => {
-                tracing::error!(
-                    workflow_id = %row.workflow_id,
-                    task_index = row.task_index,
-                    error = %e,
-                    "recovery case 1.5: failed to start sub-workflow",
-                );
+            CandidateOutcome::Failed(record) => {
                 report.errors += 1;
-                metrics.errors += 1;
+                metrics.note_failure(record);
             }
         }
     }
@@ -1014,6 +1086,7 @@ async fn recover_case1_6(
     scope: RecoveryScope<'_>,
     max_rows: Option<i64>,
     report: &mut RecoveryReport,
+    failure_policy: RecoveryFailurePolicy,
     payload: &PayloadPolicy,
     retention: &RetentionConfig,
 ) -> Result<(), WorkflowError> {
@@ -1047,7 +1120,10 @@ async fn recover_case1_6(
     };
 
     for row in rows {
-        match engine::on_subworkflow_complete(
+        let case = RecoveryCase::CompletedChildParentNotUpdated {
+            parent_task_index: row.task_index,
+        };
+        let candidate = engine::on_subworkflow_complete(
             pool,
             row.workflow_id,
             row.task_index,
@@ -1057,27 +1133,20 @@ async fn recover_case1_6(
             registry,
             payload,
             retention,
-        )
-        .await
-        {
-            Ok(()) => {
+        );
+        match run_recovery_candidate(pool, failure_policy, row.workflow_id, case, candidate).await {
+            CandidateOutcome::Finished(()) => {
                 report.case1_6_subworkflow_completed += 1;
                 tracing::debug!(
                     workflow_id = %row.workflow_id,
                     task_index = row.task_index,
+                    child_workflow_id = %row.sub_workflow_id,
                     "recovery case 1.6: triggered sub-workflow completion",
                 );
             }
-            Err(e) => {
-                tracing::error!(
-                    workflow_id = %row.workflow_id,
-                    task_index = row.task_index,
-                    child_workflow_id = %row.sub_workflow_id,
-                    error = %e,
-                    "recovery case 1.6: sub-workflow completion failed",
-                );
+            CandidateOutcome::Failed(record) => {
                 report.errors += 1;
-                metrics.errors += 1;
+                metrics.note_failure(record);
             }
         }
     }
@@ -1092,6 +1161,7 @@ async fn recover_global_workflow_end_states(
     registry: &WorkflowSpecRegistry,
     max_rows: Option<i64>,
     report: &mut RecoveryReport,
+    failure_policy: RecoveryFailurePolicy,
     payload: &PayloadPolicy,
     retention: &RetentionConfig,
 ) -> Result<(), WorkflowError> {
@@ -1164,36 +1234,38 @@ async fn recover_global_workflow_end_states(
             report.metrics.case2_3.refusals += 1;
             break;
         }
-        match engine::check_workflow_completion_with_recovery_claim(
+        let candidate = engine::check_workflow_completion_with_recovery_claim(
             pool,
             workflow_id,
             registry,
             payload,
             retention,
             claim_token.expect("candidate page has a claim token"),
+        );
+        match run_recovery_candidate(
+            pool,
+            failure_policy,
+            workflow_id,
+            RecoveryCase::TerminalWorkflowRunning,
+            candidate,
         )
         .await
         {
-            Ok(engine::RecoveryClaimOutcome::Held) => {
+            CandidateOutcome::Finished(engine::RecoveryClaimOutcome::Held) => {
                 report.case2_3_workflow_completed += 1;
                 tracing::debug!(
                     workflow_id = %workflow_id,
                     "recovery case 2+3: triggered workflow completion check",
                 );
             }
-            Ok(engine::RecoveryClaimOutcome::Lost) => {
+            CandidateOutcome::Finished(engine::RecoveryClaimOutcome::Lost) => {
                 owns_claim = false;
                 report.metrics.case2_3.refusals += 1;
                 break;
             }
-            Err(e) => {
-                tracing::error!(
-                    workflow_id = %workflow_id,
-                    error = %e,
-                    "recovery case 2+3: workflow completion check failed",
-                );
+            CandidateOutcome::Failed(record) => {
                 report.errors += 1;
-                report.metrics.case2_3.errors += 1;
+                report.metrics.case2_3.note_failure(record);
             }
         }
     }
@@ -1291,6 +1363,7 @@ async fn recover_tree_case2_3(
     workflow_ids: &[Uuid],
     max_rows: Option<i64>,
     report: &mut RecoveryReport,
+    failure_policy: RecoveryFailurePolicy,
     payload: &PayloadPolicy,
     retention: &RetentionConfig,
 ) -> Result<(), WorkflowError> {
@@ -1311,24 +1384,27 @@ async fn recover_tree_case2_3(
     report.metrics.case2_3.candidates_returned = report.metrics.case2_3.rows_selected;
 
     for row in rows {
-        match engine::check_workflow_completion(pool, row.workflow_id, registry, payload, retention)
-            .await
+        let candidate =
+            engine::check_workflow_completion(pool, row.workflow_id, registry, payload, retention);
+        match run_recovery_candidate(
+            pool,
+            failure_policy,
+            row.workflow_id,
+            RecoveryCase::TerminalWorkflowRunning,
+            candidate,
+        )
+        .await
         {
-            Ok(()) => {
+            CandidateOutcome::Finished(()) => {
                 report.case2_3_workflow_completed += 1;
                 tracing::debug!(
                     workflow_id = %row.workflow_id,
                     "recovery case 2+3: triggered workflow completion check",
                 );
             }
-            Err(e) => {
-                tracing::error!(
-                    workflow_id = %row.workflow_id,
-                    error = %e,
-                    "recovery case 2+3: workflow completion check failed",
-                );
+            CandidateOutcome::Failed(record) => {
                 report.errors += 1;
-                report.metrics.case2_3.errors += 1;
+                report.metrics.case2_3.note_failure(record);
             }
         }
     }
@@ -1776,6 +1852,32 @@ mod cap_tests {
         .unwrap()
     }
 
+    #[test]
+    fn the_report_publishes_the_failure_bound_fields() {
+        let mut report = RecoveryReport {
+            over_failure_limit: 2,
+            ..RecoveryReport::default()
+        };
+        report
+            .metrics
+            .case0
+            .note_failure(FailureRecord::LimitReached);
+        report.metrics.case1.note_failure(FailureRecord::Counted);
+        report
+            .metrics
+            .case1_5
+            .note_failure(FailureRecord::NotCounted);
+        let snapshot = serde_json::to_value(&report).unwrap();
+        assert_eq!(snapshot["over_failure_limit"], 2);
+        assert_eq!(snapshot["metrics"]["case0"]["errors"], 1);
+        assert_eq!(snapshot["metrics"]["case0"]["failures_counted"], 1);
+        assert_eq!(snapshot["metrics"]["case0"]["limit_reached"], 1);
+        assert_eq!(snapshot["metrics"]["case1"]["failures_counted"], 1);
+        assert_eq!(snapshot["metrics"]["case1"]["limit_reached"], 0);
+        assert_eq!(snapshot["metrics"]["case1_5"]["errors"], 1);
+        assert_eq!(snapshot["metrics"]["case1_5"]["failures_counted"], 0);
+    }
+
     #[tokio::test]
     async fn discovery_query_failure_is_typed() {
         let pool = sqlx::postgres::PgPoolOptions::new()
@@ -1786,6 +1888,7 @@ mod cap_tests {
             &pool,
             &WorkflowSpecRegistry::new(),
             0,
+            25,
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -1804,6 +1907,7 @@ mod cap_tests {
             &pool,
             &WorkflowSpecRegistry::new(),
             0,
+            25,
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -1831,6 +1935,7 @@ mod cap_tests {
             &WorkflowSpecRegistry::new(),
             Some(200),
             &mut report,
+            RecoveryFailurePolicy::LogOnly,
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -1855,6 +1960,7 @@ mod cap_tests {
             &WorkflowSpecRegistry::new(),
             Some(0),
             &mut report,
+            RecoveryFailurePolicy::LogOnly,
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -1989,6 +2095,7 @@ mod cap_tests {
             &registry,
             Some(2),
             0,
+            RecoveryFailurePolicy::LogOnly,
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -2003,6 +2110,7 @@ mod cap_tests {
             &registry,
             None,
             0,
+            RecoveryFailurePolicy::LogOnly,
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -2173,6 +2281,7 @@ mod cap_tests {
             &WorkflowSpecRegistry::new(),
             Some(200),
             &mut report,
+            RecoveryFailurePolicy::LogOnly,
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -2349,6 +2458,7 @@ mod cap_tests {
             &registry,
             Some(200),
             &mut first,
+            RecoveryFailurePolicy::LogOnly,
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -2362,6 +2472,7 @@ mod cap_tests {
             &registry,
             Some(200),
             &mut second,
+            RecoveryFailurePolicy::LogOnly,
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -2431,6 +2542,7 @@ mod cap_tests {
             &registry,
             Some(2),
             &mut first,
+            RecoveryFailurePolicy::LogOnly,
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -2462,6 +2574,7 @@ mod cap_tests {
             &registry,
             Some(2),
             &mut second,
+            RecoveryFailurePolicy::LogOnly,
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -2484,6 +2597,7 @@ mod cap_tests {
             &registry,
             Some(2),
             &mut third,
+            RecoveryFailurePolicy::LogOnly,
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -2590,6 +2704,7 @@ mod cap_tests {
             &WorkflowSpecRegistry::new(),
             Some(200),
             &mut report,
+            RecoveryFailurePolicy::LogOnly,
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -2612,6 +2727,7 @@ mod cap_tests {
             &WorkflowSpecRegistry::new(),
             Some(200),
             &mut report,
+            RecoveryFailurePolicy::LogOnly,
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -2764,6 +2880,7 @@ mod cap_tests {
             &WorkflowSpecRegistry::new(),
             Some(200),
             &mut second,
+            RecoveryFailurePolicy::LogOnly,
             &PayloadPolicy::default(),
             &RetentionConfig::default(),
         )
@@ -2818,6 +2935,7 @@ mod cap_tests {
                 &WorkflowSpecRegistry::new(),
                 Some(200),
                 &mut report,
+                RecoveryFailurePolicy::LogOnly,
                 &PayloadPolicy::default(),
                 &RetentionConfig::default(),
             ),

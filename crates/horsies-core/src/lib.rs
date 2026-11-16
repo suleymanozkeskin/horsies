@@ -63,7 +63,10 @@ pub use crate::broker::{
 
 // worker re-exports
 pub use crate::worker::{
-    cli::LogLevel, config::WorkerConfig, scheduler::service::spawn_scheduler, worker::Worker,
+    cli::LogLevel,
+    config::WorkerConfig,
+    scheduler::service::{spawn_scheduler, SchedulerStartError},
+    worker::Worker,
     WorkerError,
 };
 

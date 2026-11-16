@@ -181,6 +181,12 @@ CREATE INDEX horsies_workflow_phase2_quarantine_node_idx
 ------------------------------------------------------------------------------------------------------------------------
 
 -- Pruning candidates; the coverage probe's forever upper anchor.
+-- One leaf per class and upper anchor among leaves with an OPEN lower bound. The unique constraint on
+-- (class_key, lower_anchor, upper_anchor) treats NULL anchors as distinct, so it does not cover them.
+CREATE UNIQUE INDEX horsies_task_history_leaf_catalog_open_interval_unique
+    ON horsies_task_history_leaf_catalog USING btree (class_key, upper_anchor)
+    WHERE lower_bound_kind = 'OPEN';
+
 CREATE INDEX horsies_task_history_leaf_catalog_active
     ON horsies_task_history_leaf_catalog USING btree (class_key, upper_anchor)
     WHERE dropped_at IS NULL;

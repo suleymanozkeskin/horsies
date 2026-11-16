@@ -4,32 +4,27 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 /// A row from `horsies_schedule_state`.
+///
+/// The table's CHECK ties the run record together: `last_run_at` and
+/// `last_task_id` are both set exactly when `run_count` is above 0.
 #[derive(Debug, sqlx::FromRow)]
 pub struct ScheduleStateRow {
     pub schedule_name: String,
     pub last_run_at: Option<DateTime<Utc>>,
-    pub next_run_at: Option<DateTime<Utc>>,
+    pub next_run_at: DateTime<Utc>,
     pub last_task_id: Option<Uuid>,
     pub run_count: i32,
-    pub config_hash: Option<String>,
+    /// SHA-256 of the schedule's pattern and timezone (32 bytes).
+    pub config_hash: Vec<u8>,
 }
 
-const UPSERT_STATE_SQL: &str = "\
-INSERT INTO horsies_schedule_state (
-    schedule_name, last_run_at, next_run_at, last_task_id, run_count, config_hash,
-    updated_at
-) VALUES ($1, $2, $3, $4::uuid::text, $5, $6, NOW())
-ON CONFLICT (schedule_name) DO UPDATE SET
-    last_run_at = $2,
-    next_run_at = $3,
-    last_task_id = $4,
-    run_count = $5,
-    config_hash = $6,
-    updated_at = NOW()";
+/// The column list of every state read (tests check the reads against it).
+#[cfg(test)]
+const STATE_COLUMNS: &str =
+    "schedule_name, last_run_at, next_run_at, last_task_id, run_count, config_hash";
 
 const GET_STATE_SQL: &str = "\
-SELECT schedule_name, last_run_at, next_run_at,
-       last_task_id::uuid AS last_task_id, run_count, config_hash
+SELECT schedule_name, last_run_at, next_run_at, last_task_id, run_count, config_hash
 FROM horsies_schedule_state
 WHERE schedule_name = $1";
 
@@ -38,11 +33,9 @@ WHERE schedule_name = $1";
 /// This matches Python's `get_due_states(schedule_names, now)` which filters
 /// to only the provided schedule names at the database level.
 const GET_DUE_SCHEDULES_FILTERED_SQL: &str = "\
-SELECT schedule_name, last_run_at, next_run_at,
-       last_task_id::uuid AS last_task_id, run_count, config_hash
+SELECT schedule_name, last_run_at, next_run_at, last_task_id, run_count, config_hash
 FROM horsies_schedule_state
 WHERE schedule_name = ANY($2)
-  AND next_run_at IS NOT NULL
   AND next_run_at <= $1
 ORDER BY next_run_at ASC";
 
@@ -51,8 +44,7 @@ const DELETE_STATE_SQL: &str = "\
 DELETE FROM horsies_schedule_state WHERE schedule_name = $1";
 
 const GET_ALL_STATES_SQL: &str = "\
-SELECT schedule_name, last_run_at, next_run_at,
-       last_task_id::uuid AS last_task_id, run_count, config_hash
+SELECT schedule_name, last_run_at, next_run_at, last_task_id, run_count, config_hash
 FROM horsies_schedule_state
 ORDER BY schedule_name ASC";
 
@@ -61,15 +53,39 @@ ORDER BY schedule_name ASC";
 const GET_EXISTING_NAMES_SQL: &str = "\
 SELECT schedule_name FROM horsies_schedule_state";
 
-/// Insert a schedule-state row only if absent. Unlike `UPSERT_STATE_SQL`
-/// (`ON CONFLICT DO UPDATE`), a concurrent scheduler that lost the race leaves
-/// the winner's row — including its `next_run_at` — untouched.
+/// Insert the row of a schedule that has none: no run recorded yet. A
+/// concurrent scheduler that lost the race leaves the winner's row, including
+/// its `next_run_at`, untouched.
 const INSERT_STATE_IF_ABSENT_SQL: &str = "\
 INSERT INTO horsies_schedule_state (
     schedule_name, last_run_at, next_run_at, last_task_id, run_count, config_hash,
     updated_at
-) VALUES ($1, $2, $3, $4::uuid::text, $5, $6, NOW())
+) VALUES ($1, NULL, $2, NULL, 0, $3, statement_timestamp())
 ON CONFLICT (schedule_name) DO NOTHING";
+
+/// Move a schedule whose pattern or timezone changed to its new first slot.
+/// The run record (`run_count`, `last_run_at`, `last_task_id`) is kept
+/// (Python `update_next_run` with a hash). A row that already holds this hash
+/// is not written.
+const UPDATE_SCHEDULE_CONFIG_SQL: &str = "\
+UPDATE horsies_schedule_state
+SET next_run_at = $2, config_hash = $3, updated_at = statement_timestamp()
+WHERE schedule_name = $1 AND config_hash <> $3";
+
+/// Record a fired slot and move to the next one (Python `update_after_run`).
+const RECORD_RUN_SQL: &str = "\
+UPDATE horsies_schedule_state
+SET last_run_at = $2, next_run_at = $3, last_task_id = $4,
+    run_count = run_count + 1, updated_at = statement_timestamp()
+WHERE schedule_name = $1";
+
+/// Move to the next slot without recording a run (Python `update_next_run`
+/// without a hash): the scan cap of a deep backlog, or a slot skipped after a
+/// refusal that repeats.
+const ADVANCE_NEXT_RUN_SQL: &str = "\
+UPDATE horsies_schedule_state
+SET next_run_at = $2, updated_at = statement_timestamp()
+WHERE schedule_name = $1";
 
 /// Transaction-scoped per-schedule advisory lock. Auto-released on
 /// commit/rollback, so no explicit unlock round-trip exists — under PgBouncer
@@ -78,28 +94,6 @@ ON CONFLICT (schedule_name) DO NOTHING";
 /// with try-lock skip semantics instead of blocking.
 const TRY_ACQUIRE_LOCK_SQL: &str = "\
 SELECT pg_try_advisory_xact_lock($1)";
-
-/// Upsert a schedule state row.
-pub async fn upsert_state(
-    pool: &PgPool,
-    schedule_name: &str,
-    last_run_at: Option<DateTime<Utc>>,
-    next_run_at: Option<DateTime<Utc>>,
-    last_task_id: Option<Uuid>,
-    run_count: i32,
-    config_hash: Option<&str>,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(UPSERT_STATE_SQL)
-        .bind(schedule_name)
-        .bind(last_run_at)
-        .bind(next_run_at)
-        .bind(last_task_id)
-        .bind(run_count)
-        .bind(config_hash)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
 
 /// Get the state for a single schedule.
 pub async fn get_state(
@@ -158,7 +152,7 @@ pub async fn get_existing_names(pool: &PgPool) -> Result<Vec<String>, sqlx::Erro
         .await
 }
 
-/// Insert a schedule-state row only if it does not already exist.
+/// Insert the state row of a schedule that has none, with no run recorded.
 ///
 /// Returns `true` if a row was inserted, `false` if one already existed (the
 /// `ON CONFLICT DO NOTHING` no-op — the existing row, including its
@@ -166,22 +160,69 @@ pub async fn get_existing_names(pool: &PgPool) -> Result<Vec<String>, sqlx::Erro
 pub async fn insert_state_if_absent(
     pool: &PgPool,
     schedule_name: &str,
-    last_run_at: Option<DateTime<Utc>>,
-    next_run_at: Option<DateTime<Utc>>,
-    last_task_id: Option<Uuid>,
-    run_count: i32,
-    config_hash: Option<&str>,
+    next_run_at: DateTime<Utc>,
+    config_hash: &[u8],
 ) -> Result<bool, sqlx::Error> {
     let result = sqlx::query(INSERT_STATE_IF_ABSENT_SQL)
         .bind(schedule_name)
-        .bind(last_run_at)
         .bind(next_run_at)
-        .bind(last_task_id)
-        .bind(run_count)
         .bind(config_hash)
         .execute(pool)
         .await?;
     Ok(result.rows_affected() > 0)
+}
+
+/// Store a changed pattern or timezone: the new hash and the new first slot.
+/// The run record is kept.
+///
+/// Returns `true` if the row was written, `false` if the row is missing or
+/// already holds this hash.
+pub async fn update_schedule_config(
+    pool: &PgPool,
+    schedule_name: &str,
+    next_run_at: DateTime<Utc>,
+    config_hash: &[u8],
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(UPDATE_SCHEDULE_CONFIG_SQL)
+        .bind(schedule_name)
+        .bind(next_run_at)
+        .bind(config_hash)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Record a fired slot: `last_run_at`, `last_task_id`, `run_count + 1`, and
+/// the next slot. It does not read the row first.
+pub async fn record_run(
+    pool: &PgPool,
+    schedule_name: &str,
+    executed_at: DateTime<Utc>,
+    next_run_at: DateTime<Utc>,
+    task_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(RECORD_RUN_SQL)
+        .bind(schedule_name)
+        .bind(executed_at)
+        .bind(next_run_at)
+        .bind(task_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Move to the next slot without recording a run.
+pub async fn advance_next_run(
+    pool: &PgPool,
+    schedule_name: &str,
+    next_run_at: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(ADVANCE_NEXT_RUN_SQL)
+        .bind(schedule_name)
+        .bind(next_run_at)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 /// Try to acquire a per-schedule advisory lock.
@@ -219,17 +260,36 @@ fn schedule_lock_key(schedule_name: &str) -> i64 {
     i64::from_be_bytes(bytes)
 }
 
+/// Replace a schedule's state row with a fresh one due at `next_run_at`
+/// (tests only: seeds a known state).
+#[cfg(test)]
+pub(crate) async fn seed_state(
+    pool: &PgPool,
+    schedule_name: &str,
+    next_run_at: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    delete_state(pool, schedule_name).await?;
+    insert_state_if_absent(pool, schedule_name, next_run_at, &[0u8; 32]).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn sql_constants_have_placeholders() {
-        assert!(UPSERT_STATE_SQL.contains("$1"));
         assert!(GET_STATE_SQL.contains("$1"));
         assert!(GET_DUE_SCHEDULES_FILTERED_SQL.contains("$1"));
         assert!(GET_DUE_SCHEDULES_FILTERED_SQL.contains("$2"));
         assert!(DELETE_STATE_SQL.contains("$1"));
+        for sql in [
+            GET_STATE_SQL,
+            GET_DUE_SCHEDULES_FILTERED_SQL,
+            GET_ALL_STATES_SQL,
+        ] {
+            assert!(sql.contains(STATE_COLUMNS), "{sql}");
+        }
     }
 
     #[test]
@@ -267,6 +327,18 @@ mod tests {
         assert!(!INSERT_STATE_IF_ABSENT_SQL.contains("DO UPDATE"));
     }
 
+    /// Python `update_next_run` with a hash and `update_after_run`: a config
+    /// change keeps the run record; a run increments `run_count` in SQL.
+    #[test]
+    fn config_change_keeps_the_run_record_and_a_run_increments_in_sql() {
+        for kept in ["run_count", "last_run_at", "last_task_id"] {
+            assert!(!UPDATE_SCHEDULE_CONFIG_SQL.contains(kept), "{kept}");
+            assert!(!ADVANCE_NEXT_RUN_SQL.contains(kept), "{kept}");
+        }
+        assert!(UPDATE_SCHEDULE_CONFIG_SQL.contains("config_hash <> $3"));
+        assert!(RECORD_RUN_SQL.contains("run_count = run_count + 1"));
+    }
+
     #[tokio::test]
     #[serial_test::serial]
     async fn get_existing_names_returns_inserted_rows() {
@@ -277,7 +349,7 @@ mod tests {
         let pool = broker.pool().clone();
         let name = format!("qw_exist_{}", uuid::Uuid::new_v4());
 
-        upsert_state(&pool, &name, None, None, None, 0, None)
+        seed_state(&pool, &name, Utc::now())
             .await
             .expect("seed row");
 
@@ -299,25 +371,65 @@ mod tests {
         let first = Utc::now() + chrono::Duration::seconds(60);
 
         // Absent → inserts.
-        let inserted = insert_state_if_absent(&pool, &name, None, Some(first), None, 0, None)
+        let inserted = insert_state_if_absent(&pool, &name, first, &[1u8; 32])
             .await
             .expect("insert");
         assert!(inserted, "first insert must create the row");
 
         // Present → no-op, existing next_run_at preserved (not overwritten).
         let second = Utc::now() + chrono::Duration::seconds(999);
-        let inserted_again =
-            insert_state_if_absent(&pool, &name, None, Some(second), None, 0, None)
-                .await
-                .expect("insert again");
+        let inserted_again = insert_state_if_absent(&pool, &name, second, &[2u8; 32])
+            .await
+            .expect("insert again");
         assert!(!inserted_again, "second insert must be a no-op");
 
         let row = get_state(&pool, &name).await.expect("get").expect("exists");
-        let stored = row.next_run_at.expect("next_run_at set");
         assert_eq!(
-            stored.timestamp(),
+            row.next_run_at.timestamp(),
             first.timestamp(),
             "existing next_run_at must be preserved, not overwritten",
+        );
+        assert_eq!(row.config_hash, vec![1u8; 32]);
+        assert_eq!(row.run_count, 0);
+
+        delete_state(&pool, &name).await.expect("cleanup");
+    }
+
+    /// Python `test_scheduler_service.py::test_config_hash_changed_recalculates_next_run`:
+    /// a changed hash moves `next_run_at` and keeps `run_count`,
+    /// `last_run_at` and `last_task_id`.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn config_change_moves_next_run_and_keeps_the_run_record() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let name = format!("qw_config_change_{}", uuid::Uuid::new_v4());
+        let first_slot = Utc::now() - chrono::Duration::seconds(10);
+        seed_state(&pool, &name, first_slot).await.expect("seed");
+        let task_id = uuid::Uuid::new_v4();
+        let executed_at = Utc::now();
+        let after_run = executed_at + chrono::Duration::seconds(60);
+        record_run(&pool, &name, executed_at, after_run, task_id)
+            .await
+            .expect("record run");
+
+        let moved_to = executed_at + chrono::Duration::seconds(3_600);
+        let written = update_schedule_config(&pool, &name, moved_to, &[7u8; 32])
+            .await
+            .expect("config change");
+        assert!(written);
+        let again = update_schedule_config(&pool, &name, after_run, &[7u8; 32])
+            .await
+            .expect("same hash");
+        assert!(!again, "a row that holds the hash is not written");
+
+        let row = get_state(&pool, &name).await.expect("get").expect("exists");
+        assert_eq!(row.next_run_at.timestamp(), moved_to.timestamp());
+        assert_eq!(row.config_hash, vec![7u8; 32]);
+        assert_eq!(row.run_count, 1);
+        assert_eq!(row.last_task_id, Some(task_id));
+        assert_eq!(
+            row.last_run_at.map(|at| at.timestamp()),
+            Some(executed_at.timestamp())
         );
 
         delete_state(&pool, &name).await.expect("cleanup");
