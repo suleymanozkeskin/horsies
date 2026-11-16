@@ -728,7 +728,14 @@ async fn enqueue_phase2_dependent_in_tx(
     let task_id = crate::core::history::identity::uuid7::mint_task_id()
         .map_err(|error| WorkflowError::Validation(error.to_string()))?;
     let good_until =
-        crate::workflow_engine::parse_good_until_from_options(node.task_options.as_deref());
+        crate::workflow_engine::parse_good_until_from_options(node.task_options.as_deref())
+            .map_err(|error| {
+                crate::workflow_engine::stored_deadline_refused(
+                    workflow_id,
+                    node.task_index,
+                    &error,
+                )
+            })?;
     let facts = prepare_workflow_task_facts(
         &merged_input,
         node.task_options.as_deref(),
@@ -1712,7 +1719,14 @@ async fn build_enqueued_task_params(
 
     let max_retries = parse_max_retries(task.task_options.as_deref());
     let good_until =
-        crate::workflow_engine::parse_good_until_from_options(task.task_options.as_deref());
+        crate::workflow_engine::parse_good_until_from_options(task.task_options.as_deref())
+            .map_err(|error| {
+                crate::workflow_engine::stored_deadline_refused(
+                    workflow_id,
+                    task.task_index,
+                    &error,
+                )
+            })?;
     let retention_class_key = retention.resolve_queue_class(&task.queue_name);
     let facts = prepare_workflow_task_facts(
         &merged_input,

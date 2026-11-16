@@ -132,9 +132,15 @@ fn node_task_facts(
         retention.resolve_queue_class(queue).as_deref(),
     )
     .map_err(|error| WorkflowError::Validation(error.to_string()))?;
+    let good_until = parse_good_until_from_options(merged_task_options).map_err(|error| {
+        WorkflowError::Validation(format!(
+            "node {} (task '{}'): stored deadline refused: {error}",
+            node.index, node.task_name,
+        ))
+    })?;
     Ok(NodeTaskFacts {
         max_retries: parse_max_retries(merged_task_options),
-        good_until: parse_good_until_from_options(merged_task_options),
+        good_until,
         facts,
     })
 }

@@ -17,18 +17,78 @@ mod port_tests;
 
 pub use error::WorkflowError;
 
-/// Parse `good_until` from a serialized task_options JSON string.
+/// Why the `good_until` of a node's stored task options is refused.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum StoredDeadlineError {
+    /// The task options text is not one JSON object.
+    #[error("task_options is not a JSON object: {detail}")]
+    OptionsNotAnObject { detail: String },
+    /// `good_until` is a JSON value that is not a text (and not `null`).
+    #[error("good_until is not a text: {value}")]
+    NotAText { value: String },
+    /// `good_until` is a text that is not an RFC 3339 time.
+    #[error("good_until {text:?} is not an RFC 3339 time: {detail}")]
+    NotATime { text: String, detail: String },
+}
+
+/// The deadline in a node's stored task options (`task_options` JSON, key
+/// `good_until`).
 ///
-/// In the Python spec, `good_until` is stored inside the `task_options` JSON
-/// (not as a separate column on `horsies_workflow_tasks`).
+/// - No options, no `good_until` key, or `good_until: null`: `Ok(None)`.
+/// - An RFC 3339 text: `Ok(Some(deadline))`, in UTC.
+/// - Anything else: [`StoredDeadlineError`]. A deadline that does not parse
+///   is refused, never read as "no deadline": the node must not get a task
+///   without its deadline. Python passes the text to the database, whose
+///   timestamp parse refuses it, so the statement fails
+///   (`core/workflows/engine.py:792-795`,
+///   `core/workflows/lifecycle.py:193-194`).
+///
+/// Pure.
 pub(crate) fn parse_good_until_from_options(
     task_options: Option<&str>,
-) -> Option<chrono::DateTime<chrono::Utc>> {
-    task_options
-        .and_then(|opts| serde_json::from_str::<serde_json::Value>(opts).ok())
-        .and_then(|v| v.get("good_until")?.as_str().map(String::from))
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
-        .map(|dt| dt.with_timezone(&chrono::Utc))
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, StoredDeadlineError> {
+    let Some(text) = task_options else {
+        return Ok(None);
+    };
+    let options = match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(serde_json::Value::Object(options)) => options,
+        Ok(other) => {
+            return Err(StoredDeadlineError::OptionsNotAnObject {
+                detail: format!("got {other}"),
+            })
+        }
+        Err(error) => {
+            return Err(StoredDeadlineError::OptionsNotAnObject {
+                detail: error.to_string(),
+            })
+        }
+    };
+    match options.get("good_until") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(deadline)) => chrono::DateTime::parse_from_rfc3339(deadline)
+            .map(|deadline| Some(deadline.with_timezone(&chrono::Utc)))
+            .map_err(|error| StoredDeadlineError::NotATime {
+                text: deadline.clone(),
+                detail: error.to_string(),
+            }),
+        Some(other) => Err(StoredDeadlineError::NotAText {
+            value: other.to_string(),
+        }),
+    }
+}
+
+/// The error of a node whose stored deadline is refused at the mint of its
+/// task (promotion, resume, recovery): [`WorkflowError::Validation`], not
+/// retryable, naming the node. The statement that would mint the task does
+/// not run; the caller's transaction rolls back.
+pub(crate) fn stored_deadline_refused(
+    workflow_id: uuid::Uuid,
+    task_index: i32,
+    error: &StoredDeadlineError,
+) -> WorkflowError {
+    WorkflowError::Validation(format!(
+        "workflow {workflow_id} node {task_index}: stored deadline refused: {error}"
+    ))
 }
 
 /// Merge `good_until` from an `AnyNode` into its `task_options_json`.
@@ -69,28 +129,76 @@ mod tests {
 
     #[test]
     fn parse_good_until_none_options() {
-        assert!(parse_good_until_from_options(None).is_none());
+        assert_eq!(parse_good_until_from_options(None), Ok(None));
     }
 
     #[test]
     fn parse_good_until_empty_json() {
-        assert!(parse_good_until_from_options(Some("{}")).is_none());
+        assert_eq!(parse_good_until_from_options(Some("{}")), Ok(None));
     }
 
     #[test]
     fn parse_good_until_no_good_until_key() {
-        assert!(parse_good_until_from_options(Some(r#"{"retries": 3}"#)).is_none());
+        assert_eq!(
+            parse_good_until_from_options(Some(r#"{"retries": 3}"#)),
+            Ok(None)
+        );
+    }
+
+    /// Python reads `good_until: null` as no deadline (`options.get`).
+    #[test]
+    fn a_null_good_until_is_no_deadline() {
+        assert_eq!(
+            parse_good_until_from_options(Some(r#"{"good_until": null}"#)),
+            Ok(None)
+        );
     }
 
     #[test]
     fn parse_good_until_valid_rfc3339() {
         let opts = r#"{"good_until": "2025-06-15T12:00:00+00:00"}"#;
-        let result = parse_good_until_from_options(Some(opts));
-        assert!(result.is_some());
-        let dt = result.unwrap();
+        let dt = parse_good_until_from_options(Some(opts))
+            .unwrap()
+            .expect("a deadline");
         assert_eq!(dt.year(), 2025);
         assert_eq!(dt.month(), 6);
         assert_eq!(dt.day(), 15);
+    }
+
+    /// A text that is not an RFC 3339 time is refused, not read as no
+    /// deadline.
+    #[test]
+    fn a_good_until_text_that_is_not_a_time_is_refused() {
+        let opts = r#"{"good_until": "not-a-date"}"#;
+        assert!(matches!(
+            parse_good_until_from_options(Some(opts)),
+            Err(StoredDeadlineError::NotATime { ref text, .. }) if text == "not-a-date"
+        ));
+    }
+
+    /// A `good_until` that is not a text is refused.
+    #[test]
+    fn a_good_until_that_is_not_a_text_is_refused() {
+        assert_eq!(
+            parse_good_until_from_options(Some(r#"{"good_until": 12345}"#)),
+            Err(StoredDeadlineError::NotAText {
+                value: "12345".to_owned()
+            })
+        );
+    }
+
+    /// Options that are not one JSON object are refused.
+    #[test]
+    fn options_that_are_not_an_object_are_refused() {
+        for opts in ["not{json", "[]", "null"] {
+            assert!(
+                matches!(
+                    parse_good_until_from_options(Some(opts)),
+                    Err(StoredDeadlineError::OptionsNotAnObject { .. })
+                ),
+                "{opts}"
+            );
+        }
     }
 
     // -- merge_good_until_into_options --
@@ -131,6 +239,6 @@ mod tests {
         let deadline = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
         let merged = merge_good_until_into_options(Some(deadline), None).unwrap();
         let parsed = parse_good_until_from_options(Some(&merged));
-        assert_eq!(parsed, Some(deadline));
+        assert_eq!(parsed, Ok(Some(deadline)));
     }
 }

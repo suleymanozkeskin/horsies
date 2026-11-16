@@ -609,7 +609,6 @@ async fn a_dependent_whose_options_do_not_parse_pauses_and_its_sibling_stays_rea
 /// never gets a task without its deadline.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #1018"]
 async fn a_dependent_whose_stored_deadline_does_not_parse_gets_no_task() {
     let db = IsolatedDatabase::create().await;
     for stored_options in [r#"{"good_until":"not-a-date"}"#, r#"{"good_until":12345}"#] {
