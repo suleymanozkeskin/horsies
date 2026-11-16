@@ -44,7 +44,7 @@ from tests.integration.task_history_harness import (
 
 pytestmark = [pytest.mark.integration]
 
-CLASS_KEY = 'it_p2q'
+CLASS_KEY = 'standard_30d'
 WORKER = 'worker-p2q-1'
 FAILURE_RESULT = '{"error":{"code":"BOOM"}}'
 HORIZON = timedelta(days=7)

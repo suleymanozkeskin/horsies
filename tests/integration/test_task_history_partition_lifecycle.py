@@ -71,8 +71,10 @@ from horsies.core.history.phase2.quarantine import QuarantineRefused
 from tests.integration.task_history_harness import (
     INSERT_HISTORY_ROW_SQL,
     HistorySchema,
+    create_workflow,
     day_bounds,
     frozen_history_row,
+    link_workflow_node,
     register_class,
     task_history_schema_fixture,
 )
@@ -80,7 +82,7 @@ from tests.integration.task_history_harness import (
 pytestmark = [pytest.mark.integration]
 
 UTC = timezone.utc
-CLASS_KEY = 'it_lifecycle'
+CLASS_KEY = 'standard_30d'
 
 history_schema = task_history_schema_fixture('task_history_it_lifecycle')
 
@@ -120,8 +122,14 @@ async def seed_stale_locator(
     """One over-horizon pending locator on `ref`, with its node row and
     (optionally) the history row the locator names."""
     anchor = ref.bounds.lower + timedelta(hours=1)
-    node_row_id = str(uuid4())
-    workflow_id = str(uuid4())
+    workflow_id = await create_workflow(connection, status='RUNNING')
+    node_row_id = await link_workflow_node(
+        connection,
+        task_id,
+        workflow_id=workflow_id,
+        node_status='RUNNING',
+        node_key=node_key,
+    )
     if with_history_row:
         await connection.execute(
             text(INSERT_HISTORY_ROW_SQL),
@@ -131,33 +139,21 @@ async def seed_stale_locator(
         )
     await connection.execute(
         text(
-            'INSERT INTO horsies_workflow_tasks '
-            '(id, workflow_id, task_id, task_index, node_id) VALUES '
-            '(CAST(:node_row_id AS uuid), CAST(:workflow_id AS uuid), '
-            'CAST(:task_id AS uuid), 0, :node_key)'
-        ),
-        {
-            'node_row_id': node_row_id,
-            'workflow_id': workflow_id,
-            'task_id': task_id,
-            'node_key': node_key,
-        },
-    )
-    await connection.execute(
-        text(
             """
             INSERT INTO horsies_workflow_phase2_pending (
                 task_id, workflow_id, workflow_node_row_id,
-                terminal_status, terminal_at, terminalization_kind,
+                terminalization_kind,
                 recovery_source, history_class, history_anchor,
                 history_schema_version, result_digest,
-                phase2_generation, created_at, attempt_count
+                quarantine_task_id, created_at, attempt_count,
+                last_attempt_at, last_failure_class
             ) VALUES (
                 :task_id, :workflow_id, :node_row_id,
-                'COMPLETED', :anchor, 'COMPLETE_FUSED',
+                'COMPLETE_LOCKED',
                 'HISTORY', :class_key, :anchor,
-                1, :digest, :generation,
-                statement_timestamp() - interval '8 days', 0
+                1, :digest,
+                NULL, statement_timestamp() - interval '8 days', 0,
+                NULL, NULL
             )
             """
         ),
@@ -168,7 +164,6 @@ async def seed_stale_locator(
             'anchor': anchor,
             'class_key': CLASS_KEY,
             'digest': sha256(b'{}').digest(),
-            'generation': str(uuid4()),
         },
     )
 
@@ -361,31 +356,41 @@ class TestDetachAndDrop:
             parent = await register_class(connection, CLASS_KEY)
         ref = await make_expired_leaf(history_schema, parent)
         async with history_schema.engine.begin() as connection:
+            pending_task_id = str(uuid4())
+            workflow_id = await create_workflow(connection, status='RUNNING')
+            node_row_id = await link_workflow_node(
+                connection,
+                pending_task_id,
+                workflow_id=workflow_id,
+                node_status='RUNNING',
+            )
             await connection.execute(
                 text(
                     """
                     INSERT INTO horsies_workflow_phase2_pending (
                         task_id, workflow_id, workflow_node_row_id,
-                        terminal_status, terminal_at, terminalization_kind,
+                        terminalization_kind,
                         recovery_source, history_class, history_anchor,
                         history_schema_version, result_digest,
-                        phase2_generation, created_at, attempt_count
+                        quarantine_task_id, created_at, attempt_count,
+                        last_attempt_at, last_failure_class
                     ) VALUES (
                         :task_id, :workflow_id, :node_row_id,
-                        'COMPLETED', :anchor, 'COMPLETE_FUSED',
+                        'COMPLETE_LOCKED',
                         'HISTORY', :class_key, :anchor,
-                        1, :digest, :generation, statement_timestamp(), 0
+                        1, :digest,
+                        NULL, statement_timestamp(), 0,
+                        NULL, NULL
                     )
                     """
                 ),
                 {
-                    'task_id': str(uuid4()),
-                    'workflow_id': str(uuid4()),
-                    'node_row_id': str(uuid4()),
+                    'task_id': pending_task_id,
+                    'workflow_id': workflow_id,
+                    'node_row_id': node_row_id,
                     'anchor': ref.bounds.lower + timedelta(hours=1),
                     'class_key': CLASS_KEY,
                     'digest': sha256(b'result').digest(),
-                    'generation': str(uuid4()),
                 },
             )
         refused = await detach_expired_leaf(
@@ -1007,7 +1012,8 @@ class TestHealth:
             leaf = (
                 await connection.execute(
                     text(
-                        f'SELECT leaf_name, id_index_name FROM {LEAF_CATALOG} '
+                        "SELECT leaf_name, leaf_name || '_task_idx' AS id_index_name "
+                        f'FROM {LEAF_CATALOG} '
                         'WHERE class_key = :class_key '
                         'ORDER BY lower_anchor LIMIT 1'
                     ),
