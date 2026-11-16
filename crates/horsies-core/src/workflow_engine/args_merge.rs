@@ -4,7 +4,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::core::task::result::TaskResult;
-use crate::core::{OperationalErrorCode, OutcomeCode, TaskError};
+use crate::core::{OperationalErrorCode, OutcomeCode, TaskError, TaskErrorKind};
 
 use crate::workflow_engine::error::WorkflowError;
 
@@ -155,10 +155,11 @@ fn wrap_dep_result(dep_idx: i32, dep: Option<&DepResult>) -> serde_json::Value {
 /// The entry of a SKIPPED dependency (Python `core/workflows/engine.py:2830-2835`).
 pub(crate) fn upstream_skipped_error(dep_idx: i32) -> TaskError {
     TaskError {
-        error_code: Some(OutcomeCode::UpstreamSkipped.into()),
-        message: Some("Upstream dependency was SKIPPED".to_owned()),
-        cause: None,
+        exception: None,
+        error_code: OutcomeCode::UpstreamSkipped.into(),
         data: Some(serde_json::json!({ "dependency_index": dep_idx })),
+        message: Some("Upstream dependency was SKIPPED".to_owned()),
+        kind: TaskErrorKind::Plain,
     }
 }
 
@@ -166,12 +167,13 @@ pub(crate) fn upstream_skipped_error(dep_idx: i32) -> TaskError {
 /// dependency.
 pub(crate) fn missing_result_error(dep_idx: i32, status: &str) -> TaskError {
     TaskError {
-        error_code: Some(OperationalErrorCode::ResultDeserializationError.into()),
+        exception: None,
+        error_code: OperationalErrorCode::ResultDeserializationError.into(),
+        data: Some(serde_json::json!({ "dependency_index": dep_idx, "status": status })),
         message: Some(format!(
             "Upstream dependency at index {dep_idx} is {status} with no stored result"
         )),
-        cause: None,
-        data: Some(serde_json::json!({ "dependency_index": dep_idx, "status": status })),
+        kind: TaskErrorKind::Plain,
     }
 }
 
@@ -332,14 +334,7 @@ mod tests {
         let TaskResult::Err(error) = answer else {
             panic!("a skipped dependency must give an error entry");
         };
-        assert_eq!(
-            error
-                .error_code
-                .as_ref()
-                .map(ToString::to_string)
-                .as_deref(),
-            Some("UPSTREAM_SKIPPED")
-        );
+        assert_eq!(error.error_code.to_string(), "UPSTREAM_SKIPPED");
         assert_eq!(
             error.message.as_deref(),
             Some("Upstream dependency was SKIPPED")
@@ -367,14 +362,7 @@ mod tests {
             let TaskResult::Err(error) = answer else {
                 panic!("a dependency with no result must give an error entry");
             };
-            assert_eq!(
-                error
-                    .error_code
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .as_deref(),
-                Some("RESULT_DESERIALIZATION_ERROR")
-            );
+            assert_eq!(error.error_code.to_string(), "RESULT_DESERIALIZATION_ERROR");
             assert_eq!(
                 error.data,
                 Some(json!({"dependency_index": 2, "status": status}))

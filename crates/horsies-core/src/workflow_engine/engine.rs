@@ -11,8 +11,9 @@ use crate::core::history::enqueue::{
 use crate::core::task::retry_utils::parse_max_retries;
 use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
 use crate::core::{
-    JoinType, OperationalErrorCode, OutcomeCode, RetrievalCode, SubWorkflowSummary, SuccessPolicy,
-    TaskError, TaskResult, WorkflowSpecRegistry, WorkflowTaskStatus,
+    JoinType, OperationalErrorCode, OutcomeCode, RetrievalCode, SubWorkflowFailure,
+    SubWorkflowSummary, SuccessPolicy, TaskError, TaskErrorKind, TaskResult, WorkflowSpecRegistry,
+    WorkflowTaskStatus,
 };
 
 use crate::workflow_engine::start::{
@@ -1996,7 +1997,7 @@ pub(crate) async fn fail_subworkflow_node(
     payload: &PayloadPolicy,
     retention: &RetentionConfig,
 ) -> Result<(), WorkflowError> {
-    let error_code = error.error_code.as_ref().map(ToString::to_string);
+    let error_code = Some(error.error_code.to_string());
     let error_json = serde_json::to_string(&error)?;
     let result_json = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(error))?;
 
@@ -2347,12 +2348,13 @@ fn completed_child_node(
         }),
         ChildOutput::Unreadable { cause } => {
             let error = TaskError {
-                error_code: Some(OperationalErrorCode::ResultDeserializationError.into()),
+                error_code: OperationalErrorCode::ResultDeserializationError.into(),
                 message: Some(format!(
                     "Child workflow {child_workflow_id} is COMPLETED and its stored result does not parse: {cause}"
                 )),
-                cause: None,
+                exception: None,
                 data: Some(serde_json::json!({ "workflow_id": child_workflow_id.to_string() })),
+                kind: crate::core::TaskErrorKind::Plain,
             };
             Ok(ParentNodeOutcome::Failed {
                 result_json: serde_json::to_string(&TaskResult::<serde_json::Value>::Err(
@@ -2386,23 +2388,23 @@ fn failed_child_node(
     })
 }
 
-/// The `SUBWORKFLOW_FAILED` error of a parent node.
-///
-/// The child id and summary ride in `data`, where `TaskError::sub_workflow_details` reads them back at any
-/// error surface.
+/// The `SUBWORKFLOW_FAILED` error of a parent node: Python's `SubWorkflowError`
+/// (`core/workflows/engine.py:3238-3281`), with `sub_workflow_id` and `sub_workflow_summary` stored at the top
+/// level of the error object and `data` null.
 fn subworkflow_failed_error(
     child_workflow_id: Uuid,
     message: String,
     summary: &SubWorkflowSummary,
 ) -> TaskError {
     TaskError {
-        error_code: Some(OutcomeCode::SubworkflowFailed.into()),
+        exception: None,
+        error_code: OutcomeCode::SubworkflowFailed.into(),
+        data: None,
         message: Some(message),
-        cause: None,
-        data: Some(serde_json::json!({
-            "sub_workflow_id": child_workflow_id,
-            "sub_workflow_summary": summary,
-        })),
+        kind: TaskErrorKind::SubWorkflow(SubWorkflowFailure {
+            sub_workflow_id: child_workflow_id,
+            sub_workflow_summary: summary.clone(),
+        }),
     }
 }
 
@@ -3072,15 +3074,16 @@ fn output_error(
     row: &NodeResult,
 ) -> TaskError {
     TaskError {
-        error_code: Some(error_code),
+        error_code,
         message: Some(message),
-        cause: None,
+        exception: None,
         data: Some(serde_json::json!({
             "workflow_id": workflow_id.to_string(),
             "output_node_id": row.node_id,
             "output_task_index": row.task_index,
             "output_task_name": row.task_name,
         })),
+        kind: crate::core::TaskErrorKind::Plain,
     }
 }
 
@@ -3225,10 +3228,11 @@ async fn recovered_phase2_failure_error(
         ),
     };
     Ok(serde_json::to_string(&TaskError {
-        error_code: Some(error_code),
+        error_code,
         message: Some(message),
-        cause: None,
+        exception: None,
         data: Some(serde_json::json!({"task_status": status})),
+        kind: crate::core::TaskErrorKind::Plain,
     })?)
 }
 
@@ -3460,7 +3464,7 @@ mod p7_exact_error_tests {
     }
 
     async fn seed_prior_failure(pool: &PgPool, workflow_id: Uuid) {
-        let prior = TaskError::new("PRIOR_FAILURE", "prior node failed");
+        let prior = TaskError::new("PRIOR_FAILURE", "prior node failed").unwrap();
         let result = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(prior)).unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
@@ -3547,9 +3551,7 @@ mod p7_exact_error_tests {
         assert_eq!(status, "PAUSED");
         assert_eq!(
             error.error_code,
-            Some(TaskErrorCode::from(
-                OperationalErrorCode::SubworkflowLoadFailed,
-            )),
+            TaskErrorCode::from(OperationalErrorCode::SubworkflowLoadFailed,),
         );
     }
 
@@ -3619,9 +3621,7 @@ mod p7_exact_error_tests {
         // The depth check runs before the definition load, as in Python.
         assert_eq!(
             error.error_code,
-            Some(TaskErrorCode::from(
-                OperationalErrorCode::SubworkflowDepthLimitReached,
-            )),
+            TaskErrorCode::from(OperationalErrorCode::SubworkflowDepthLimitReached,),
         );
         let child_count: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM horsies_workflows WHERE parent_workflow_id = $1",
@@ -3690,14 +3690,13 @@ mod p7_exact_error_tests {
         assert_eq!(status, "PAUSED");
         assert_eq!(
             error.error_code,
-            Some(TaskErrorCode::from(OutcomeCode::SubworkflowFailed)),
+            TaskErrorCode::from(OutcomeCode::SubworkflowFailed),
         );
         assert_eq!(
             error
-                .data
-                .as_ref()
-                .and_then(|data| data.get("sub_workflow_id")),
-            Some(&serde_json::json!(child_id)),
+                .sub_workflow_details()
+                .map(|failure| failure.sub_workflow_id),
+            Some(child_id),
         );
     }
 
@@ -5307,7 +5306,7 @@ mod child_outcome_tests {
     }
 
     fn code(error: &TaskError) -> Option<String> {
-        error.error_code.as_ref().map(ToString::to_string)
+        Some(error.error_code.to_string())
     }
 
     #[test]
@@ -5339,10 +5338,9 @@ mod child_outcome_tests {
     #[test]
     fn a_completed_child_with_an_err_output_fails_the_node_with_that_error() {
         let child = Uuid::new_v4();
-        let text = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(TaskError::new(
-            "OUTPUT_FAILED",
-            "output node failed",
-        )))
+        let text = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(
+            TaskError::new("OUTPUT_FAILED", "output node failed").unwrap(),
+        ))
         .unwrap();
         let (summary, outcome) = terminal_child_outcome(
             child,
@@ -5410,7 +5408,7 @@ mod child_outcome_tests {
     fn a_failed_child_fails_the_node_with_subworkflow_failed() {
         let child = Uuid::new_v4();
         let child_error =
-            serde_json::to_string(&TaskError::new("BOOM", "task b exploded")).unwrap();
+            serde_json::to_string(&TaskError::new("BOOM", "task b exploded").unwrap()).unwrap();
         for status in ["FAILED", "CANCELLED", "EXPIRED"] {
             let (summary, outcome) = terminal_child_outcome(
                 child,
@@ -5444,6 +5442,18 @@ mod child_outcome_tests {
             let details = node_error.sub_workflow_details().unwrap();
             assert_eq!(details.sub_workflow_id, child);
             assert_eq!(details.sub_workflow_summary, summary);
+            // Row 35: both fields at the top level of the stored error, `data` null (Python
+            // `SubWorkflowError`, `core/workflows/engine.py:3238-3281`).
+            let stored_value: serde_json::Value = serde_json::from_str(&result_json).unwrap();
+            assert_eq!(
+                stored_value["err"]["sub_workflow_id"],
+                serde_json::json!(child.to_string())
+            );
+            assert_eq!(
+                stored_value["err"]["sub_workflow_summary"]["status"],
+                serde_json::json!(status)
+            );
+            assert_eq!(stored_value["err"]["data"], serde_json::Value::Null);
         }
     }
 
@@ -5527,14 +5537,7 @@ mod completion_rule_tests {
         let text =
             explicit_output_result(workflow_id, 2, Some(output_row("SKIPPED", None))).unwrap();
         let error = stored_error(&text);
-        assert_eq!(
-            error
-                .error_code
-                .as_ref()
-                .map(ToString::to_string)
-                .as_deref(),
-            Some("WORKFLOW_OUTPUT_SKIPPED")
-        );
+        assert_eq!(error.error_code.to_string(), "WORKFLOW_OUTPUT_SKIPPED");
         assert_eq!(
             error.data,
             Some(serde_json::json!({
@@ -5554,12 +5557,8 @@ mod completion_rule_tests {
                     explicit_output_result(Uuid::new_v4(), 2, Some(output_row(status, result)))
                         .unwrap();
                 assert_eq!(
-                    stored_error(&text)
-                        .error_code
-                        .as_ref()
-                        .map(ToString::to_string)
-                        .as_deref(),
-                    Some("RESULT_DESERIALIZATION_ERROR")
+                    stored_error(&text).error_code.to_string(),
+                    "RESULT_DESERIALIZATION_ERROR"
                 );
             }
         }
@@ -5590,7 +5589,8 @@ mod completion_rule_tests {
     async fn completion_with_a_stored_error_and_no_failed_node_keeps_that_error() {
         let pool = crate::broker::terminalization_matrix::migrated_pool().await;
         let workflow_id = Uuid::new_v4();
-        let first_error = serde_json::to_string(&TaskError::new("FIRST", "first failure")).unwrap();
+        let first_error =
+            serde_json::to_string(&TaskError::new("FIRST", "first failure").unwrap()).unwrap();
         sqlx::query(
             "INSERT INTO horsies_workflows (
                  id, name, status, on_error, error, definition_key, depth,

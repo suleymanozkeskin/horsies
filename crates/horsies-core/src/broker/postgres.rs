@@ -3247,7 +3247,7 @@ mod tests {
 
     #[test]
     fn parse_failed_with_task_error() {
-        let err = TaskError::new("VALIDATION", "bad input");
+        let err = TaskError::new("VALIDATION", "bad input").unwrap();
         let wrapped: TaskResult<i32> = TaskResult::Err(err);
         let err_json = serde_json::to_string(&wrapped).unwrap();
         let row = TaskResultRow {

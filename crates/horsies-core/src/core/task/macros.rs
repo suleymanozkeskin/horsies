@@ -98,20 +98,21 @@ where
                 }
             }
             Err(crate::core::task::TaskError {
-                error_code: Some(crate::core::task::TaskErrorCode::from(
+                exception: None,
+                error_code: crate::core::task::TaskErrorCode::from(
                     crate::core::task::ContractCode::ArgumentTypeMismatch,
-                )),
-                message: Some(format!(
-                    "task args do not match declared input type {}",
-                    std::any::type_name::<T>(),
-                )),
-                cause: None,
+                ),
                 // The error names the type and the cause, never the value (Python
                 // `core/task_decorator.py:1856-1914`).
                 data: Some(serde_json::json!({
                     "expected_type": std::any::type_name::<T>(),
                     "validation_error": e.to_string(),
                 })),
+                message: Some(format!(
+                    "task args do not match declared input type {}",
+                    std::any::type_name::<T>(),
+                )),
+                kind: crate::core::task::TaskErrorKind::Plain,
             })
         }
     }
@@ -122,10 +123,14 @@ where
 ///
 /// This mirrors Python's producer-side runtime return-contract validation
 /// (`encode_returned_result`, `core/codec/typed.py:862-882`): the value must
-/// not only serialize, it must deserialize back into the same declared `T`. A
-/// value that does not read back is `WORKER_SERIALIZATION_ERROR`, as in Python's
-/// child (`core/worker/child_runner.py:1819-1855`); the error names the type and
-/// the cause, never the value.
+/// not only serialize, it must deserialize back into the same declared `T`.
+/// The read-back applies the rules of a user value: at most
+/// `MAX_VALUE_JSON_DEPTH` (200) levels and no key that only the engine writes
+/// (`__h_*`, `__horsies_*`, `__builtin_task_code__`; Python
+/// `_scan_reserved_keys`, `core/codec/typed.py:286-295`). A value that does
+/// not read back is `WORKER_SERIALIZATION_ERROR`, as in Python's child
+/// (`core/worker/child_runner.py:1819-1855`); the error names the type and the
+/// cause, never the value.
 #[doc(hidden)]
 pub fn encode_validated_task_output<T>(value: &T) -> crate::core::task::result::TaskResult<Vec<u8>>
 where
@@ -146,20 +151,24 @@ where
         }
     };
 
-    if let Err(e) = crate::core::codec::from_json_bytes::<T>(&bytes) {
+    if let Err(e) = crate::core::codec::from_json_bytes_with::<T>(
+        &bytes,
+        crate::core::codec::TextRule::UserValue,
+    ) {
         return crate::core::task::result::TaskResult::Err(crate::core::task::TaskError {
-            error_code: Some(crate::core::task::TaskErrorCode::from(
+            exception: None,
+            error_code: crate::core::task::TaskErrorCode::from(
                 crate::core::task::OperationalErrorCode::WorkerSerializationError,
-            )),
-            message: Some(format!(
-                "task returned a value that does not read back as its declared output type {}",
-                std::any::type_name::<T>(),
-            )),
-            cause: None,
+            ),
             data: Some(serde_json::json!({
                 "expected_type": std::any::type_name::<T>(),
                 "validation_error": e.to_string(),
             })),
+            message: Some(format!(
+                "task returned a value that does not read back as its declared output type {}",
+                std::any::type_name::<T>(),
+            )),
+            kind: crate::core::task::TaskErrorKind::Plain,
         });
     }
 
@@ -426,9 +435,9 @@ mod tests {
         let err: TaskError = decode_task_input::<AddArgs>(&args).unwrap_err();
         assert_eq!(
             err.error_code,
-            Some(crate::core::task::TaskErrorCode::from(
+            crate::core::task::TaskErrorCode::from(
                 crate::core::task::OperationalErrorCode::WorkerSerializationError,
-            )),
+            ),
         );
     }
 
@@ -455,14 +464,46 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(
             err.error_code,
-            Some(crate::core::task::TaskErrorCode::from(
+            crate::core::task::TaskErrorCode::from(
                 crate::core::task::OperationalErrorCode::WorkerSerializationError,
-            )),
+            ),
         );
         let data = err.data.expect("expected mismatch diagnostics");
         assert_eq!(data["expected_type"], std::any::type_name::<BadRoundTrip>());
         // The stored error never holds the returned value.
         assert!(data.get("actual_value").is_none());
+    }
+
+    /// Python `encode_value` scans the result for reserved keys and decodes it
+    /// at `MAX_TYPED_JSON_DEPTH`: a value with an engine key, or deeper than 200
+    /// levels, is `WORKER_SERIALIZATION_ERROR`; 200 levels pass, past
+    /// serde_json's own limit of 128.
+    #[test]
+    fn encode_validated_output_applies_the_user_value_rules() {
+        let serialization_error = crate::core::task::TaskErrorCode::from(
+            crate::core::task::OperationalErrorCode::WorkerSerializationError,
+        );
+        for key in ["__h_task_result__", "__horsies_x", "__builtin_task_code__"] {
+            let value = serde_json::json!({ "outer": [{ key: 1 }] });
+            let err = super::encode_validated_task_output(&value).unwrap_err();
+            assert_eq!(err.error_code, serialization_error, "{key}");
+        }
+        let nested = |depth: usize| {
+            let mut value = serde_json::json!([1]);
+            for _ in 1..depth {
+                value = serde_json::Value::Array(vec![value]);
+            }
+            value
+        };
+        let at_bound = nested(crate::core::codec::MAX_VALUE_JSON_DEPTH);
+        assert!(super::encode_validated_task_output(&at_bound).is_ok());
+        let past_bound = nested(crate::core::codec::MAX_VALUE_JSON_DEPTH + 1);
+        let err = super::encode_validated_task_output(&past_bound).unwrap_err();
+        assert_eq!(err.error_code, serialization_error);
+        assert!(err.data.expect("diagnostics")["validation_error"]
+            .as_str()
+            .unwrap()
+            .contains("nested deeper than 200"));
     }
 
     #[test]
@@ -479,9 +520,9 @@ mod tests {
             let err = super::encode_validated_task_output(&Out { value: bad }).unwrap_err();
             assert_eq!(
                 err.error_code,
-                Some(crate::core::task::TaskErrorCode::from(
+                crate::core::task::TaskErrorCode::from(
                     crate::core::task::OperationalErrorCode::WorkerSerializationError,
-                )),
+                ),
             );
             assert!(err.message.expect("message").contains("non-finite"));
         }
@@ -557,9 +598,9 @@ mod tests {
                 let err = result.unwrap_err();
                 assert_eq!(
                     err.error_code,
-                    Some(crate::core::task::TaskErrorCode::from(
+                    crate::core::task::TaskErrorCode::from(
                         crate::core::task::ContractCode::ArgumentTypeMismatch,
-                    )),
+                    ),
                 );
                 let data = err.data.expect("expected mismatch diagnostics");
                 assert_eq!(data["expected_type"], std::any::type_name::<AddArgs>());
@@ -652,9 +693,9 @@ mod tests {
                 let err = f.validate_input(&args).unwrap_err();
                 assert_eq!(
                     err.error_code,
-                    Some(crate::core::task::TaskErrorCode::from(
+                    crate::core::task::TaskErrorCode::from(
                         crate::core::task::ContractCode::ArgumentTypeMismatch,
-                    )),
+                    ),
                 );
             }
             _ => panic!("expected blocking task"),

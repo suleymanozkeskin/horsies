@@ -1,5 +1,8 @@
+use serde::de::{DeserializeOwned, Error as _};
+use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::core::codec::user_value::{check_user_value, UserValueRefused, MAX_VALUE_JSON_DEPTH};
 use crate::core::workflow::summary::SubWorkflowSummary;
 
 // =============================================================================
@@ -126,12 +129,11 @@ pub enum OutcomeCode {
     /// A COMPLETED workflow has no output: its output node (or a terminal node of an outputless workflow) is
     /// SKIPPED.
     WorkflowOutputSkipped,
-    WorkflowStopped,
     SendSuppressed,
 }
 
 impl OutcomeCode {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 12] = [
         Self::TaskCancelled,
         Self::TaskExpired,
         Self::TaskTimeout,
@@ -143,7 +145,6 @@ impl OutcomeCode {
         Self::SubworkflowFailed,
         Self::WorkflowSuccessCaseNotMet,
         Self::WorkflowOutputSkipped,
-        Self::WorkflowStopped,
         Self::SendSuppressed,
     ];
 }
@@ -251,10 +252,12 @@ impl Serialize for BuiltInTaskCode {
     }
 }
 
-/// Deserializes from `{"__builtin_task_code__": "BROKER_ERROR"}`.
+/// Deserializes from `{"__builtin_task_code__": "BROKER_ERROR"}`, exactly that one key (Python
+/// `_scan_task_error_error_code`, `core/codec/typed.py:1253-1302`).
 impl<'de> Deserialize<'de> for BuiltInTaskCode {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct Tagged {
             __builtin_task_code__: String,
         }
@@ -291,20 +294,78 @@ impl From<OutcomeCode> for BuiltInTaskCode {
 }
 
 // =============================================================================
+// User codes
+// =============================================================================
+
+/// Code texts that are reserved and are not task codes. `WORKFLOW_STOPPED` names a run that stopped before the
+/// task body ran; a task cannot return it, so no finalize path can take a returned error for a stop.
+pub const RESERVED_NON_TASK_CODES: [&str; 1] = ["WORKFLOW_STOPPED"];
+
+/// An error code that task code chose.
+///
+/// Only [`UserCode::parse`] builds one, so a user code never has the name of a built-in code or of a reserved
+/// code (Python `TaskError._validate_error_code`, `core/models/tasks.py:278-311`). A built-in code is carried
+/// only by [`TaskErrorCode::BuiltIn`], so the `error_code` column, `auto_retry_for` and the monitoring
+/// families see one meaning for each code text.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UserCode(String);
+
+/// Why a text cannot be a user error code.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum UserCodeRefused {
+    /// The text is the name of a built-in code. Python: "is a reserved built-in error code"
+    /// (`core/models/tasks.py:304-311`).
+    #[error("'{0}' is a reserved built-in error code; pass the built-in code instead")]
+    BuiltInName(BuiltInTaskCode),
+    /// The text is a reserved name that is not a task code ([`RESERVED_NON_TASK_CODES`]).
+    #[error("'{0}' is a reserved error code name and is not a task code")]
+    ReservedName(&'static str),
+}
+
+impl UserCode {
+    /// Build a user code from its text. Refuses the name of a built-in code and a reserved name.
+    pub fn parse(text: impl Into<String>) -> Result<Self, UserCodeRefused> {
+        let text = text.into();
+        if let Some(builtin) = BuiltInTaskCode::parse(&text) {
+            return Err(UserCodeRefused::BuiltInName(builtin));
+        }
+        match RESERVED_NON_TASK_CODES
+            .into_iter()
+            .find(|reserved| *reserved == text)
+        {
+            Some(reserved) => Err(UserCodeRefused::ReservedName(reserved)),
+            None => Ok(Self(text)),
+        }
+    }
+
+    /// The code text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for UserCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+// =============================================================================
 // TaskErrorCode — either built-in or user-defined
 // =============================================================================
 
-/// Error code discriminator: either a built-in code (4 families) or a user-defined string.
+/// Error code discriminator: either a built-in code (4 families) or a user code.
 ///
-/// Serialization:
+/// Serialization (Python `TaskError._serialize_error_code`, `core/models/tasks.py:313-327`):
 /// - Built-in: `{"__builtin_task_code__": "BROKER_ERROR"}`
 /// - User: `"MY_CUSTOM_ERROR"`
 ///
-/// This tagged format ensures round-trip identity and matches Python's wire format.
+/// A read refuses `null`, a plain text that names a built-in or reserved code, an unknown built-in name, and a
+/// tag object with any other key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskErrorCode {
     BuiltIn(BuiltInTaskCode),
-    User(String),
+    User(UserCode),
 }
 
 impl std::fmt::Display for TaskErrorCode {
@@ -320,7 +381,7 @@ impl Serialize for TaskErrorCode {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
             Self::BuiltIn(code) => code.serialize(serializer),
-            Self::User(code) => serializer.serialize_str(code),
+            Self::User(code) => serializer.serialize_str(code.as_str()),
         }
     }
 }
@@ -328,16 +389,19 @@ impl Serialize for TaskErrorCode {
 impl<'de> Deserialize<'de> for TaskErrorCode {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = serde_json::Value::deserialize(deserializer)?;
-        match &value {
-            // Tagged dict → built-in code
-            serde_json::Value::Object(map) if map.contains_key("__builtin_task_code__") => {
-                let code: BuiltInTaskCode =
-                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
-                Ok(Self::BuiltIn(code))
+        match value {
+            serde_json::Value::String(text) => UserCode::parse(text)
+                .map(Self::User)
+                .map_err(D::Error::custom),
+            serde_json::Value::Object(tag) => {
+                serde_json::from_value::<BuiltInTaskCode>(serde_json::Value::Object(tag))
+                    .map(Self::BuiltIn)
+                    .map_err(D::Error::custom)
             }
-            // Plain string → user code
-            serde_json::Value::String(s) => Ok(Self::User(s.clone())),
-            _ => Err(serde::de::Error::custom(
+            serde_json::Value::Null => Err(D::Error::custom("error_code must not be null")),
+            serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::Array(_) => Err(D::Error::custom(
                 "error_code must be a string or {\"__builtin_task_code__\": \"...\"}",
             )),
         }
@@ -369,129 +433,416 @@ impl From<OutcomeCode> for TaskErrorCode {
         Self::BuiltIn(code.into())
     }
 }
-impl From<String> for TaskErrorCode {
-    fn from(code: String) -> Self {
+impl From<UserCode> for TaskErrorCode {
+    fn from(code: UserCode) -> Self {
         Self::User(code)
     }
 }
-impl From<&str> for TaskErrorCode {
-    fn from(code: &str) -> Self {
-        Self::User(code.to_owned())
-    }
+
+// =============================================================================
+// The exception record
+// =============================================================================
+
+/// The stored form of an exception: Python's `FlattenedException`, five text keys
+/// (`core/models/tasks.py:177-191`, written by `flatten_exception`, `core/codec/error_payload.py:96-118`).
+/// A read refuses a missing key and any other key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExceptionRecord {
+    /// The class name.
+    #[serde(rename = "type")]
+    pub type_name: String,
+    /// The module of the class.
+    pub module: String,
+    /// The text of the exception.
+    pub message: String,
+    /// The repr of the exception.
+    pub repr: String,
+    /// The printed traceback.
+    pub traceback: String,
 }
 
 // =============================================================================
 // TaskError
 // =============================================================================
 
-/// Error payload for a task result.
+/// The key of the replacement `data` of an error whose `data` cannot be stored (Python `reportable_error`,
+/// `core/codec/typed.py:927`).
+pub const DATA_REFUSED_KEY: &str = "data_refused";
+
+const EXCEPTION_KEY: &str = "exception";
+const ERROR_CODE_KEY: &str = "error_code";
+const DATA_KEY: &str = "data";
+const MESSAGE_KEY: &str = "message";
+const SUB_WORKFLOW_ID_KEY: &str = "sub_workflow_id";
+const SUB_WORKFLOW_SUMMARY_KEY: &str = "sub_workflow_summary";
+
+/// The deepest `data` that an error stores. Python reads the whole error object as one typed value of at most
+/// `MAX_TYPED_JSON_DEPTH` levels (`decode_task_error`, `core/codec/typed.py:632-680`), and the object is one of
+/// those levels.
+pub const ERROR_DATA_DEPTH_LIMIT: usize = MAX_VALUE_JSON_DEPTH - 1;
+
+/// The deepest `output` that the summary of a sub-workflow error stores: the error object and the summary
+/// object are two of the levels.
+pub const SUMMARY_OUTPUT_DEPTH_LIMIT: usize = MAX_VALUE_JSON_DEPTH - 2;
+
+/// Which class a stored error has (Python: `TaskError` or its subclass `SubWorkflowError`,
+/// `core/models/tasks.py:352-367`). The stored object of a sub-workflow error has the two fields of
+/// [`SubWorkflowFailure`] at its top level, next to the four keys of every error.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TaskErrorKind {
+    /// A plain `TaskError`.
+    Plain,
+    /// A failed child workflow (`SubWorkflowError`).
+    SubWorkflow(SubWorkflowFailure),
+}
+
+/// The child workflow of a sub-workflow error.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubWorkflowFailure {
+    /// ID of the failed child workflow.
+    pub sub_workflow_id: uuid::Uuid,
+    /// Summary of the child workflow's execution.
+    pub sub_workflow_summary: SubWorkflowSummary,
+}
+
+impl SubWorkflowFailure {
+    fn summary_without_output(&self) -> SubWorkflowSummary {
+        SubWorkflowSummary {
+            output: None,
+            ..self.sub_workflow_summary.clone()
+        }
+    }
+}
+
+/// Error payload for a task result (Python `TaskError`, `core/models/tasks.py:214-350`).
 ///
-/// Produced by:
-/// - Task functions returning an error result
-/// - Library runtime failures (execution, serialization, etc.)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Produced by task functions returning an error result, and by library runtime failures (execution,
+/// serialization, etc.).
+///
+/// Stored form (Python `encode_task_error`, `core/codec/typed.py:1053-1075`): an object with the four keys
+/// `exception`, `error_code`, `data` and `message` in this order, nulls kept, and for a sub-workflow error
+/// `sub_workflow_id` and `sub_workflow_summary` after them. When the `data` (or the output of the summary)
+/// breaks the rules of a user value (`crate::core::codec::user_value`), the error is stored with its code and
+/// message kept and `data` = `{"data_refused": "<cause>"}`; a refused summary output is stored as `null`
+/// (Python `reportable_error`, `core/codec/typed.py:885-934`). A read refuses an object with a missing or
+/// `null` code, an unknown key, an exception record of another shape, or a `data` that breaks the rules.
+#[derive(Debug, Clone, PartialEq)]
 pub struct TaskError {
-    /// Error code identifying the failure category.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error_code: Option<TaskErrorCode>,
+    /// The flattened exception, when the library recorded one.
+    pub exception: Option<ExceptionRecord>,
+
+    /// Error code identifying the failure category. Required: the retry rule and outcome routing read it.
+    pub error_code: TaskErrorCode,
+
+    /// Error data.
+    pub data: Option<serde_json::Value>,
 
     /// Human-readable error message.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 
-    /// Serialized error cause data (for cross-process error propagation).
-    /// Named `cause` in Rust (Python uses `exception` — Rust has no exceptions).
-    /// Carries structured metadata about the original error (e.g. type name,
-    /// traceback equivalent). Preserved for retry matching and diagnostics.
-    #[serde(rename = "exception", skip_serializing_if = "Option::is_none")]
-    pub cause: Option<serde_json::Value>,
+    /// The class of the error.
+    pub kind: TaskErrorKind,
+}
 
-    /// Arbitrary error data.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub data: Option<serde_json::Value>,
+/// Why a stored error object does not read as a [`TaskError`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum StoredErrorRefused {
+    /// The stored error is not a JSON object.
+    #[error("a stored task error must be a JSON object")]
+    NotAnObject,
+    /// The object has a key that the error class does not declare.
+    #[error("unexpected key {0:?} in a stored task error")]
+    UnknownKey(String),
+    /// A required key is missing.
+    #[error("a stored task error has no {0}")]
+    MissingField(&'static str),
+    /// A field does not read as its type.
+    #[error("field {field} of a stored task error does not parse: {cause}")]
+    FieldInvalid { field: &'static str, cause: String },
+    /// A field breaks the rules of a user value.
+    #[error("field {field} of a stored task error is refused: {refusal}")]
+    UserValue {
+        field: &'static str,
+        refusal: UserValueRefused,
+    },
 }
 
 impl TaskError {
     /// Create a TaskError with a built-in error code and message.
     pub fn builtin(code: impl Into<BuiltInTaskCode>, message: impl Into<String>) -> Self {
         Self {
-            error_code: Some(TaskErrorCode::BuiltIn(code.into())),
-            message: Some(message.into()),
-            cause: None,
+            exception: None,
+            error_code: TaskErrorCode::BuiltIn(code.into()),
             data: None,
+            message: Some(message.into()),
+            kind: TaskErrorKind::Plain,
         }
     }
 
     /// Create a TaskError with an application-defined error code and message.
-    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            error_code: Some(TaskErrorCode::User(code.into())),
-            message: Some(message.into()),
-            cause: None,
+    ///
+    /// Refuses a code text that names a built-in code or a reserved code (Python refuses it at construction,
+    /// `core/models/tasks.py:304-311`).
+    pub fn new(
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Result<Self, UserCodeRefused> {
+        Ok(Self {
+            exception: None,
+            error_code: TaskErrorCode::User(UserCode::parse(code)?),
             data: None,
+            message: Some(message.into()),
+            kind: TaskErrorKind::Plain,
+        })
+    }
+
+    /// The child workflow of a sub-workflow failure, or `None` for a plain error.
+    pub fn sub_workflow_details(&self) -> Option<&SubWorkflowFailure> {
+        match &self.kind {
+            TaskErrorKind::Plain => None,
+            TaskErrorKind::SubWorkflow(failure) => Some(failure),
         }
     }
 
-    /// Reconstruct a [`SubWorkflowError`] from a sub-workflow failure error.
-    ///
-    /// Sub-workflow failures are persisted as a `TaskError` with
-    /// `error_code == "SUBWORKFLOW_FAILED"` and the child workflow's
-    /// `sub_workflow_id` / `sub_workflow_summary` carried in `data`. This
-    /// recovers the typed details at any error surface (e.g.
-    /// `WorkflowHandle::get().err`), since `TaskResult<T>`'s err slot is the
-    /// concrete `TaskError` and cannot itself be a `SubWorkflowError`.
-    ///
-    /// Returns `None` for any error that is not a sub-workflow failure or whose
-    /// `data` does not carry the expected fields.
-    pub fn sub_workflow_details(&self) -> Option<SubWorkflowError> {
-        if self.error_code.as_ref().map(ToString::to_string).as_deref()
-            != Some("SUBWORKFLOW_FAILED")
-        {
-            return None;
+    /// Why this error is not stored as it is, or `None`. The `data` is checked first, then the output of the
+    /// sub-workflow summary. Pure.
+    pub fn storage_refusal(&self) -> Option<UserValueRefused> {
+        self.data_refusal()
+            .or_else(|| self.summary_output_refusal())
+    }
+
+    fn data_refusal(&self) -> Option<UserValueRefused> {
+        self.data
+            .as_ref()
+            .and_then(|data| check_user_value(data, ERROR_DATA_DEPTH_LIMIT).err())
+    }
+
+    fn summary_output_refusal(&self) -> Option<UserValueRefused> {
+        match &self.kind {
+            TaskErrorKind::Plain => None,
+            TaskErrorKind::SubWorkflow(failure) => failure
+                .sub_workflow_summary
+                .output
+                .as_ref()
+                .and_then(|output| check_user_value(output, SUMMARY_OUTPUT_DEPTH_LIMIT).err()),
         }
-        let data = self.data.as_ref()?;
-        let sub_workflow_id = uuid::Uuid::parse_str(data.get("sub_workflow_id")?.as_str()?).ok()?;
-        let sub_workflow_summary: SubWorkflowSummary =
-            serde_json::from_value(data.get("sub_workflow_summary")?.clone()).ok()?;
-        Some(SubWorkflowError {
-            task_error: self.clone(),
-            sub_workflow_id,
-            sub_workflow_summary,
+    }
+
+    /// Read a stored error object (Python `decode_task_error`, `core/codec/typed.py:1078-1130`).
+    ///
+    /// The object is a sub-workflow error when it has `sub_workflow_id`; then both sub-workflow fields are
+    /// required. `exception`, `data` and `message` may be missing or `null`.
+    pub fn from_stored_value(value: serde_json::Value) -> Result<Self, StoredErrorRefused> {
+        let serde_json::Value::Object(mut fields) = value else {
+            return Err(StoredErrorRefused::NotAnObject);
+        };
+        let is_sub_workflow = fields.contains_key(SUB_WORKFLOW_ID_KEY);
+        if let Some(key) = fields
+            .keys()
+            .find(|key| !is_stored_error_key(key, is_sub_workflow))
+        {
+            return Err(StoredErrorRefused::UnknownKey(key.clone()));
+        }
+        let error_code: TaskErrorCode = required_field(&mut fields, ERROR_CODE_KEY)?;
+        let exception: Option<ExceptionRecord> = optional_field(&mut fields, EXCEPTION_KEY)?;
+        let message: Option<String> = optional_field(&mut fields, MESSAGE_KEY)?;
+        let data: Option<serde_json::Value> = optional_field(&mut fields, DATA_KEY)?;
+        if let Some(data) = &data {
+            check_user_value(data, ERROR_DATA_DEPTH_LIMIT).map_err(|refusal| {
+                StoredErrorRefused::UserValue {
+                    field: DATA_KEY,
+                    refusal,
+                }
+            })?;
+        }
+        let kind = match is_sub_workflow {
+            false => TaskErrorKind::Plain,
+            true => TaskErrorKind::SubWorkflow(read_sub_workflow_failure(&mut fields)?),
+        };
+        Ok(Self {
+            exception,
+            error_code,
+            data,
+            message,
+            kind,
         })
+    }
+}
+
+fn is_stored_error_key(key: &str, is_sub_workflow: bool) -> bool {
+    match key {
+        EXCEPTION_KEY | ERROR_CODE_KEY | DATA_KEY | MESSAGE_KEY => true,
+        SUB_WORKFLOW_ID_KEY | SUB_WORKFLOW_SUMMARY_KEY => is_sub_workflow,
+        _ => false,
+    }
+}
+
+fn required_field<T: DeserializeOwned>(
+    fields: &mut serde_json::Map<String, serde_json::Value>,
+    field: &'static str,
+) -> Result<T, StoredErrorRefused> {
+    let value = fields
+        .remove(field)
+        .ok_or(StoredErrorRefused::MissingField(field))?;
+    serde_json::from_value(value).map_err(|error| StoredErrorRefused::FieldInvalid {
+        field,
+        cause: error.to_string(),
+    })
+}
+
+fn optional_field<T: DeserializeOwned>(
+    fields: &mut serde_json::Map<String, serde_json::Value>,
+    field: &'static str,
+) -> Result<Option<T>, StoredErrorRefused> {
+    match fields.remove(field) {
+        None => Ok(None),
+        Some(value) => serde_json::from_value::<Option<T>>(value).map_err(|error| {
+            StoredErrorRefused::FieldInvalid {
+                field,
+                cause: error.to_string(),
+            }
+        }),
+    }
+}
+
+fn read_sub_workflow_failure(
+    fields: &mut serde_json::Map<String, serde_json::Value>,
+) -> Result<SubWorkflowFailure, StoredErrorRefused> {
+    let sub_workflow_id: uuid::Uuid = required_field(fields, SUB_WORKFLOW_ID_KEY)?;
+    let sub_workflow_summary: SubWorkflowSummary =
+        required_field(fields, SUB_WORKFLOW_SUMMARY_KEY)?;
+    if let Some(output) = &sub_workflow_summary.output {
+        check_user_value(output, SUMMARY_OUTPUT_DEPTH_LIMIT).map_err(|refusal| {
+            StoredErrorRefused::UserValue {
+                field: SUB_WORKFLOW_SUMMARY_KEY,
+                refusal,
+            }
+        })?;
+    }
+    Ok(SubWorkflowFailure {
+        sub_workflow_id,
+        sub_workflow_summary,
+    })
+}
+
+/// The `data` slot of a stored error.
+enum StoredData<'a> {
+    /// The error's own `data`, or `null`.
+    Kept(Option<&'a serde_json::Value>),
+    /// `{"data_refused": <cause>}`.
+    Refused(&'static str),
+}
+
+impl Serialize for StoredData<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Kept(data) => data.serialize(serializer),
+            Self::Refused(cause) => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry(DATA_REFUSED_KEY, cause)?;
+                map.end()
+            }
+        }
+    }
+}
+
+/// Writes the stored form (see [`TaskError`]). Never fails over `data`: a refused `data` is replaced, so the
+/// code and the message are always stored.
+impl Serialize for TaskError {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let data = match self.storage_refusal() {
+            Some(refusal) => StoredData::Refused(refusal.stored_cause()),
+            None => StoredData::Kept(self.data.as_ref()),
+        };
+        let key_count = match &self.kind {
+            TaskErrorKind::Plain => 4,
+            TaskErrorKind::SubWorkflow(_) => 6,
+        };
+        let mut map = serializer.serialize_map(Some(key_count))?;
+        map.serialize_entry(EXCEPTION_KEY, &self.exception)?;
+        map.serialize_entry(ERROR_CODE_KEY, &self.error_code)?;
+        map.serialize_entry(DATA_KEY, &data)?;
+        map.serialize_entry(MESSAGE_KEY, &self.message)?;
+        if let TaskErrorKind::SubWorkflow(failure) = &self.kind {
+            map.serialize_entry(SUB_WORKFLOW_ID_KEY, &failure.sub_workflow_id)?;
+            match self.summary_output_refusal() {
+                None => {
+                    map.serialize_entry(SUB_WORKFLOW_SUMMARY_KEY, &failure.sub_workflow_summary)?
+                }
+                Some(_) => map
+                    .serialize_entry(SUB_WORKFLOW_SUMMARY_KEY, &failure.summary_without_output())?,
+            }
+        }
+        map.end()
+    }
+}
+
+/// Reads the stored form through [`TaskError::from_stored_value`]. The object is taken as raw text and read by
+/// the core's strict reader, so its depth bound is the core's, not the caller's deserializer's.
+impl<'de> Deserialize<'de> for TaskError {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = Box::<serde_json::value::RawValue>::deserialize(deserializer)?;
+        let value: serde_json::Value =
+            crate::core::codec::from_json_str(raw.get()).map_err(D::Error::custom)?;
+        Self::from_stored_value(value).map_err(D::Error::custom)
     }
 }
 
 impl std::fmt::Display for TaskError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match (&self.error_code, &self.message) {
-            (Some(code), Some(msg)) => write!(f, "[{}] {}", code, msg),
-            (Some(code), None) => write!(f, "[{}]", code),
-            (None, Some(msg)) => write!(f, "{}", msg),
-            (None, None) => write!(f, "TaskError"),
+        match &self.message {
+            Some(message) => write!(f, "[{}] {}", self.error_code, message),
+            None => write!(f, "[{}]", self.error_code),
         }
     }
 }
 
 impl std::error::Error for TaskError {}
 
-/// Error from a failed sub-workflow, extending TaskError with child workflow details.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubWorkflowError {
-    /// Base task error fields.
-    #[serde(flatten)]
-    pub task_error: TaskError,
-
-    /// ID of the failed child workflow.
-    pub sub_workflow_id: uuid::Uuid,
-
-    /// Summary of the child workflow's execution.
-    pub sub_workflow_summary: SubWorkflowSummary,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::task::result::TaskResult;
+    use serde_json::json;
+
+    fn user_code(text: &str) -> TaskErrorCode {
+        TaskErrorCode::User(UserCode::parse(text).unwrap())
+    }
+
+    fn failed_summary() -> SubWorkflowSummary {
+        SubWorkflowSummary {
+            status: "FAILED".to_owned(),
+            output: None,
+            total_tasks: 3,
+            completed_tasks: 1,
+            failed_tasks: 1,
+            skipped_tasks: 1,
+            error_summary: Some("child task 'b' failed".to_owned()),
+        }
+    }
+
+    fn sub_workflow_error(summary: SubWorkflowSummary) -> TaskError {
+        TaskError {
+            exception: None,
+            error_code: OutcomeCode::SubworkflowFailed.into(),
+            data: None,
+            message: Some("Subworkflow 00000000-0000-0000-0000-000000000000 failed".to_owned()),
+            kind: TaskErrorKind::SubWorkflow(SubWorkflowFailure {
+                sub_workflow_id: uuid::Uuid::nil(),
+                sub_workflow_summary: summary,
+            }),
+        }
+    }
+
+    /// A list with `depth` levels and a number inside.
+    fn nested_list(depth: usize) -> serde_json::Value {
+        let mut value = json!([1]);
+        for _ in 1..depth {
+            value = serde_json::Value::Array(vec![value]);
+        }
+        value
+    }
 
     #[test]
     fn builtin_code_tagged_serde() {
@@ -502,78 +853,338 @@ mod tests {
         assert_eq!(back, code);
     }
 
+    /// Python `_scan_task_error_error_code`: the tag object has exactly one key.
+    #[test]
+    fn a_built_in_tag_with_another_key_is_refused() {
+        for text in [
+            r#"{"__builtin_task_code__":"BROKER_ERROR","other":1}"#,
+            r#"{"__builtin_task_code__":"BROKER_ERROR","__h_x":1}"#,
+            r#"{"__builtin_task_code__":"NOT_A_CODE"}"#,
+            r#"{"code":"BROKER_ERROR"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<TaskErrorCode>(text).is_err(),
+                "{text}"
+            );
+        }
+    }
+
     #[test]
     fn task_error_code_builtin_serde() {
         let code = TaskErrorCode::BuiltIn(OperationalErrorCode::WorkerCrashed.into());
         let json = serde_json::to_string(&code).unwrap();
-        assert!(json.contains("__builtin_task_code__"));
-        assert!(json.contains("WORKER_CRASHED"));
+        assert_eq!(json, r#"{"__builtin_task_code__":"WORKER_CRASHED"}"#);
         let back: TaskErrorCode = serde_json::from_str(&json).unwrap();
         assert_eq!(back, code);
     }
 
     #[test]
     fn task_error_code_user_serde() {
-        let code = TaskErrorCode::User("MY_ERROR".to_owned());
+        let code = user_code("MY_ERROR");
         let json = serde_json::to_string(&code).unwrap();
         assert_eq!(json, "\"MY_ERROR\"");
         let back: TaskErrorCode = serde_json::from_str(&json).unwrap();
         assert_eq!(back, code);
     }
 
+    /// Python `tests/unit/test_error_code_families.py:200-216`: a user code with a built-in name is refused at
+    /// construction, also when the text is built at run time.
     #[test]
-    fn task_error_builtin_constructor() {
-        let err = TaskError::builtin(RetrievalCode::WaitTimeout, "timed out");
-        match &err.error_code {
-            Some(TaskErrorCode::BuiltIn(BuiltInTaskCode::Retrieval(
-                RetrievalCode::WaitTimeout,
-            ))) => {}
-            other => panic!("expected WaitTimeout, got {:?}", other),
+    fn a_user_code_with_a_built_in_name_is_refused() {
+        let dynamic = format!("{}_{}", "WORKFLOW", "PAUSED");
+        for text in [
+            "WORKFLOW_PAUSED",
+            "BROKER_ERROR",
+            "RETURN_TYPE_MISMATCH",
+            "RESULT_NOT_READY",
+            "TASK_TIMEOUT",
+            dynamic.as_str(),
+        ] {
+            let builtin = BuiltInTaskCode::parse(text).unwrap();
+            assert_eq!(
+                UserCode::parse(text),
+                Err(UserCodeRefused::BuiltInName(builtin.clone()))
+            );
+            assert_eq!(
+                TaskError::new(text, "m").unwrap_err(),
+                UserCodeRefused::BuiltInName(builtin)
+            );
+            assert!(UserCode::parse(text)
+                .unwrap_err()
+                .to_string()
+                .contains("reserved built-in error code"));
         }
     }
 
     #[test]
-    fn task_error_new_constructor() {
-        let err = TaskError::new("TOO_LARGE", "payload exceeds 10MB");
+    fn workflow_stopped_is_reserved_and_not_a_task_code() {
+        assert_eq!(BuiltInTaskCode::parse("WORKFLOW_STOPPED"), None);
+        assert_eq!(
+            UserCode::parse("WORKFLOW_STOPPED"),
+            Err(UserCodeRefused::ReservedName("WORKFLOW_STOPPED"))
+        );
+        assert!(serde_json::from_str::<TaskErrorCode>(r#""WORKFLOW_STOPPED""#).is_err());
+        assert!(serde_json::from_str::<TaskErrorCode>(
+            r#"{"__builtin_task_code__":"WORKFLOW_STOPPED"}"#
+        )
+        .is_err());
+    }
+
+    /// Python decode refuses a plain text with a built-in name and a null code.
+    #[test]
+    fn a_read_refuses_a_plain_built_in_name_and_null() {
+        assert!(serde_json::from_str::<TaskErrorCode>(r#""TASK_TIMEOUT""#).is_err());
+        assert!(serde_json::from_str::<TaskErrorCode>("null").is_err());
+        assert!(serde_json::from_str::<TaskErrorCode>("7").is_err());
+    }
+
+    #[test]
+    fn task_error_builtin_constructor() {
+        let err = TaskError::builtin(RetrievalCode::WaitTimeout, "timed out");
         assert_eq!(
             err.error_code,
-            Some(TaskErrorCode::User("TOO_LARGE".to_owned()))
+            TaskErrorCode::BuiltIn(BuiltInTaskCode::Retrieval(RetrievalCode::WaitTimeout))
+        );
+        assert_eq!(err.kind, TaskErrorKind::Plain);
+    }
+
+    #[test]
+    fn task_error_new_constructor() {
+        let err = TaskError::new("TOO_LARGE", "payload exceeds 10MB").unwrap();
+        assert_eq!(err.error_code, user_code("TOO_LARGE"));
+    }
+
+    /// Python stores all four keys, nulls kept, in the field order of the model
+    /// (`core/codec/typed.py:1053-1075`).
+    #[test]
+    fn the_stored_text_has_the_four_keys_with_nulls() {
+        let err = TaskError::new("RATE_LIMITED", "slow down").unwrap();
+        assert_eq!(
+            serde_json::to_string(&err).unwrap(),
+            r#"{"exception":null,"error_code":"RATE_LIMITED","data":null,"message":"slow down"}"#
+        );
+        let builtin = TaskError {
+            data: Some(json!({"elapsed_ms": 5000})),
+            message: None,
+            ..TaskError::builtin(RetrievalCode::WaitTimeout, "")
+        };
+        assert_eq!(
+            serde_json::to_string(&builtin).unwrap(),
+            r#"{"exception":null,"error_code":{"__builtin_task_code__":"WAIT_TIMEOUT"},"data":{"elapsed_ms":5000},"message":null}"#
         );
     }
 
     #[test]
     fn task_error_full_serde_round_trip() {
         let err = TaskError {
-            error_code: Some(TaskErrorCode::from(RetrievalCode::WaitTimeout)),
+            exception: Some(ExceptionRecord {
+                type_name: "ValueError".to_owned(),
+                module: "builtins".to_owned(),
+                message: "boom".to_owned(),
+                repr: "ValueError('boom')".to_owned(),
+                traceback: "Traceback (most recent call last):\n".to_owned(),
+            }),
+            error_code: RetrievalCode::WaitTimeout.into(),
+            data: Some(json!({"elapsed_ms": 5000})),
             message: Some("timeout".to_owned()),
-            cause: None,
-            data: Some(serde_json::json!({"elapsed_ms": 5000})),
+            kind: TaskErrorKind::Plain,
         };
         let json = serde_json::to_string(&err).unwrap();
+        assert!(json.starts_with(
+            r#"{"exception":{"type":"ValueError","module":"builtins","message":"boom","repr":"ValueError('boom')","traceback":"#
+        ));
         let back: TaskError = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.error_code, err.error_code);
-        assert_eq!(back.message, err.message);
-        assert_eq!(back.data, err.data);
+        assert_eq!(back, err);
+    }
+
+    /// Python's `exception`, `data` and `message` default to null; only `error_code` is required.
+    #[test]
+    fn a_read_takes_missing_optional_keys_as_null() {
+        let err: TaskError = serde_json::from_str(r#"{"error_code":"X"}"#).unwrap();
+        assert_eq!(err.error_code, user_code("X"));
+        assert_eq!(err.exception, None);
+        assert_eq!(err.data, None);
+        assert_eq!(err.message, None);
+        assert_eq!(err.kind, TaskErrorKind::Plain);
+    }
+
+    /// Python `TaskError` (`extra='forbid'`, required `error_code`) refuses these objects.
+    #[test]
+    fn a_read_refuses_a_missing_code_and_unknown_keys() {
+        for (text, refusal) in [
+            (r#"{}"#, StoredErrorRefused::MissingField(ERROR_CODE_KEY)),
+            (
+                r#"{"message":"m"}"#,
+                StoredErrorRefused::MissingField(ERROR_CODE_KEY),
+            ),
+            (
+                r#"{"error_code":"X","extra":1}"#,
+                StoredErrorRefused::UnknownKey("extra".to_owned()),
+            ),
+            (
+                r#"{"error_code":"X","sub_workflow_summary":null}"#,
+                StoredErrorRefused::UnknownKey(SUB_WORKFLOW_SUMMARY_KEY.to_owned()),
+            ),
+            (
+                r#"{"error_code":"X","sub_workflow_id":"00000000-0000-0000-0000-000000000000"}"#,
+                StoredErrorRefused::MissingField(SUB_WORKFLOW_SUMMARY_KEY),
+            ),
+        ] {
+            let value: serde_json::Value = serde_json::from_str(text).unwrap();
+            assert_eq!(TaskError::from_stored_value(value), Err(refusal), "{text}");
+        }
+        for text in [
+            r#"{"error_code":null}"#,
+            r#"[]"#,
+            r#"{"error_code":"X","exception":{"type":"E"}}"#,
+            r#"{"error_code":"X","exception":{"type":"E","module":"m","message":"t","repr":"r","traceback":"","extra":1}}"#,
+            r#"{"error_code":"X","exception":"text"}"#,
+            r#"{"error_code":"X","message":7}"#,
+        ] {
+            assert!(serde_json::from_str::<TaskError>(text).is_err(), "{text}");
+        }
+    }
+
+    /// Python `tests/unit/test_strict_codec.py:650-680`: a `data` that cannot be stored keeps the code and the
+    /// message; `data` becomes `{"data_refused": <cause>}`.
+    #[test]
+    fn a_refused_data_keeps_the_code_and_the_message() {
+        for (data, cause) in [
+            (json!({"__h_x": 1}), "StrictJsonError"),
+            (
+                json!({"a": [{"__builtin_task_code__": "X"}]}),
+                "StrictJsonError",
+            ),
+            (json!({"__horsies_workflow_ctx__": {}}), "StrictJsonError"),
+            (nested_list(MAX_VALUE_JSON_DEPTH), "ValueValidationError"),
+            (nested_list(250), "ValueValidationError"),
+        ] {
+            let err = TaskError {
+                data: Some(data),
+                ..TaskError::new("RATE_LIMITED", "m").unwrap()
+            };
+            let text = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(err)).unwrap();
+            let stored: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(stored["err"]["data"], json!({ DATA_REFUSED_KEY: cause }));
+            let read = serde_json::from_str::<TaskResult<serde_json::Value>>(&text)
+                .unwrap()
+                .unwrap_err();
+            assert_eq!(read.error_code, user_code("RATE_LIMITED"));
+            assert_eq!(read.message.as_deref(), Some("m"));
+        }
+    }
+
+    /// The error object is one of the `MAX_VALUE_JSON_DEPTH` levels, so `data` keeps 199.
+    #[test]
+    fn data_of_199_levels_is_kept() {
+        let data = nested_list(ERROR_DATA_DEPTH_LIMIT);
+        let err = TaskError {
+            data: Some(data.clone()),
+            ..TaskError::builtin(OperationalErrorCode::BrokerError, "m")
+        };
+        assert_eq!(err.storage_refusal(), None);
+        let back: TaskError = serde_json::from_str(&serde_json::to_string(&err).unwrap()).unwrap();
+        assert_eq!(back.data, Some(data));
+    }
+
+    #[test]
+    fn good_data_is_unchanged() {
+        for data in [
+            json!({"a": 1.5}),
+            json!("x"),
+            json!([1, "y", null]),
+            json!(5),
+        ] {
+            let err = TaskError {
+                data: Some(data.clone()),
+                ..TaskError::new("RATE_LIMITED", "m").unwrap()
+            };
+            let back: TaskError =
+                serde_json::from_str(&serde_json::to_string(&err).unwrap()).unwrap();
+            assert_eq!(back.data, Some(data));
+        }
+    }
+
+    /// Python decodes `data` with the reserved-key scan: a stored error with an engine key in `data` does not
+    /// read.
+    #[test]
+    fn a_read_refuses_data_with_an_engine_key() {
+        let text = r#"{"exception":null,"error_code":"X","data":{"__h_task_result__":true},"message":null}"#;
+        assert!(serde_json::from_str::<TaskError>(text).is_err());
+    }
+
+    /// Row 35 of the workflow ledger: `sub_workflow_id` and `sub_workflow_summary` are top-level fields of the
+    /// stored error, after the four keys (Python `SubWorkflowError`, `core/models/tasks.py:352-367`).
+    #[test]
+    fn a_sub_workflow_error_stores_its_fields_at_the_top_level() {
+        let err = sub_workflow_error(failed_summary());
+        let text = serde_json::to_string(&err).unwrap();
+        assert_eq!(
+            text,
+            concat!(
+                r#"{"exception":null,"error_code":{"__builtin_task_code__":"SUBWORKFLOW_FAILED"},"data":null,"#,
+                r#""message":"Subworkflow 00000000-0000-0000-0000-000000000000 failed","#,
+                r#""sub_workflow_id":"00000000-0000-0000-0000-000000000000","#,
+                r#""sub_workflow_summary":{"status":"FAILED","output":null,"total_tasks":3,"completed_tasks":1,"#,
+                r#""failed_tasks":1,"skipped_tasks":1,"error_summary":"child task 'b' failed"}}"#,
+            )
+        );
+        let back: TaskError = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, err);
+        let details = back.sub_workflow_details().expect("a sub-workflow error");
+        assert_eq!(details.sub_workflow_id, uuid::Uuid::nil());
+        assert_eq!(details.sub_workflow_summary.failed_tasks, 1);
+    }
+
+    #[test]
+    fn sub_workflow_details_survive_the_result_envelope() {
+        let err = sub_workflow_error(failed_summary());
+        let json = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(err)).unwrap();
+        let decoded: TaskResult<serde_json::Value> = serde_json::from_str(&json).unwrap();
+        let recovered = decoded.unwrap_err();
+        let details = recovered.sub_workflow_details().unwrap();
+        assert_eq!(details.sub_workflow_summary.completed_tasks, 1);
+    }
+
+    #[test]
+    fn sub_workflow_details_none_for_plain_error() {
+        let err = TaskError::new("SOME_OTHER_ERROR", "nope").unwrap();
+        assert!(err.sub_workflow_details().is_none());
+        let bare = TaskError::builtin(OutcomeCode::SubworkflowFailed, "no child");
+        assert!(bare.sub_workflow_details().is_none());
+    }
+
+    /// Python `_repaired_subworkflow_error`: a summary output that cannot be stored is stored as null, the class
+    /// and the code are kept, and `data` names the cause.
+    #[test]
+    fn a_refused_summary_output_is_stored_as_null() {
+        let summary = SubWorkflowSummary {
+            output: Some(json!({"__h_task_result__": true})),
+            ..failed_summary()
+        };
+        let err = sub_workflow_error(summary);
+        let stored: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&err).unwrap()).unwrap();
+        assert_eq!(
+            stored["sub_workflow_summary"]["output"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            stored["data"],
+            json!({ DATA_REFUSED_KEY: "StrictJsonError" })
+        );
+        let back = TaskError::from_stored_value(stored).unwrap();
+        assert_eq!(
+            back.error_code,
+            TaskErrorCode::from(OutcomeCode::SubworkflowFailed)
+        );
+        assert!(back.sub_workflow_details().is_some());
     }
 
     #[test]
     fn all_operational_codes_round_trip() {
-        let codes = [
-            OperationalErrorCode::UnhandledError,
-            OperationalErrorCode::TaskError,
-            OperationalErrorCode::WorkerCrashed,
-            OperationalErrorCode::BrokerError,
-            OperationalErrorCode::WorkerResolutionError,
-            OperationalErrorCode::WorkerSerializationError,
-            OperationalErrorCode::ResultDeserializationError,
-            OperationalErrorCode::WorkflowEnqueueFailed,
-            OperationalErrorCode::SubworkflowLoadFailed,
-            OperationalErrorCode::WorkflowRecoveryLimitReached,
-            OperationalErrorCode::SubworkflowDepthLimitReached,
-            OperationalErrorCode::WorkflowStartIncomplete,
-        ];
-        for code in codes {
-            let builtin = BuiltInTaskCode::Operational(code.clone());
+        for code in OperationalErrorCode::ALL {
+            let builtin = BuiltInTaskCode::Operational(code);
             let json = serde_json::to_string(&builtin).unwrap();
             let back: BuiltInTaskCode = serde_json::from_str(&json).unwrap();
             assert_eq!(back, builtin);
@@ -582,23 +1193,8 @@ mod tests {
 
     #[test]
     fn all_outcome_codes_round_trip() {
-        let codes = [
-            OutcomeCode::TaskCancelled,
-            OutcomeCode::TaskExpired,
-            OutcomeCode::TaskTimeout,
-            OutcomeCode::WorkflowPaused,
-            OutcomeCode::WorkflowFailed,
-            OutcomeCode::WorkflowCancelled,
-            OutcomeCode::WorkflowExpired,
-            OutcomeCode::UpstreamSkipped,
-            OutcomeCode::SubworkflowFailed,
-            OutcomeCode::WorkflowSuccessCaseNotMet,
-            OutcomeCode::WorkflowOutputSkipped,
-            OutcomeCode::WorkflowStopped,
-            OutcomeCode::SendSuppressed,
-        ];
-        for code in codes {
-            let builtin = BuiltInTaskCode::Outcome(code.clone());
+        for code in OutcomeCode::ALL {
+            let builtin = BuiltInTaskCode::Outcome(code);
             let json = serde_json::to_string(&builtin).unwrap();
             let back: BuiltInTaskCode = serde_json::from_str(&json).unwrap();
             assert_eq!(back, builtin);
@@ -633,135 +1229,20 @@ mod tests {
     }
 
     #[test]
-    fn display_codes() {
+    fn display_codes_and_errors() {
         assert_eq!(
             BuiltInTaskCode::Operational(OperationalErrorCode::BrokerError).to_string(),
             "BROKER_ERROR",
         );
+        assert_eq!(user_code("CUSTOM").to_string(), "CUSTOM");
         assert_eq!(
-            TaskErrorCode::User("CUSTOM".to_owned()).to_string(),
-            "CUSTOM",
+            TaskError::new("CUSTOM", "went wrong").unwrap().to_string(),
+            "[CUSTOM] went wrong"
         );
-    }
-
-    #[test]
-    fn sub_workflow_error_serde_round_trip() {
-        let err = SubWorkflowError {
-            task_error: TaskError {
-                error_code: Some(TaskErrorCode::from(OperationalErrorCode::UnhandledError)),
-                message: Some("child workflow failed".to_owned()),
-                cause: None,
-                data: None,
-            },
-            sub_workflow_id: uuid::Uuid::nil(),
-            sub_workflow_summary: SubWorkflowSummary {
-                status: "FAILED".to_owned(),
-                output: None,
-                total_tasks: 4,
-                completed_tasks: 2,
-                failed_tasks: 1,
-                skipped_tasks: 1,
-                error_summary: Some("task 'transform' exploded".to_owned()),
-            },
+        let no_message = TaskError {
+            message: None,
+            ..TaskError::builtin(OperationalErrorCode::BrokerError, "")
         };
-
-        let json = serde_json::to_string(&err).unwrap();
-        let back: SubWorkflowError = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.sub_workflow_id, uuid::Uuid::nil());
-    }
-
-    #[test]
-    fn sub_workflow_error_flattened_json_structure() {
-        let err = SubWorkflowError {
-            task_error: TaskError {
-                error_code: Some(TaskErrorCode::from(OperationalErrorCode::BrokerError)),
-                message: Some("connection lost".to_owned()),
-                cause: None,
-                data: None,
-            },
-            sub_workflow_id: uuid::Uuid::nil(),
-            sub_workflow_summary: SubWorkflowSummary {
-                status: "FAILED".to_owned(),
-                output: None,
-                total_tasks: 1,
-                completed_tasks: 0,
-                failed_tasks: 1,
-                skipped_tasks: 0,
-                error_summary: None,
-            },
-        };
-
-        let json_value = serde_json::to_value(&err).unwrap();
-        assert!(json_value.get("error_code").is_some());
-        assert!(json_value.get("message").is_some());
-        assert!(json_value.get("sub_workflow_id").is_some());
-        assert!(
-            json_value.get("task_error").is_none(),
-            "task_error should be flattened, not nested"
-        );
-    }
-
-    fn failed_summary() -> SubWorkflowSummary {
-        SubWorkflowSummary {
-            status: "FAILED".to_owned(),
-            output: None,
-            total_tasks: 3,
-            completed_tasks: 1,
-            failed_tasks: 1,
-            skipped_tasks: 1,
-            error_summary: Some("child task 'b' failed".to_owned()),
-        }
-    }
-
-    #[test]
-    fn sub_workflow_details_reconstructs_from_data() {
-        // Mirrors how the engine persists a sub-workflow failure: a TaskError
-        // with code SUBWORKFLOW_FAILED carrying the id/summary in `data`.
-        let summary = failed_summary();
-        let err = TaskError {
-            error_code: Some(TaskErrorCode::from(OutcomeCode::SubworkflowFailed)),
-            message: Some("child task 'b' failed".to_owned()),
-            cause: None,
-            data: Some(serde_json::json!({
-                "sub_workflow_id": uuid::Uuid::nil(),
-                "sub_workflow_summary": summary,
-            })),
-        };
-
-        let details = err.sub_workflow_details().expect("should reconstruct");
-        assert_eq!(details.sub_workflow_id, uuid::Uuid::nil());
-        assert_eq!(details.sub_workflow_summary.status, "FAILED");
-        assert_eq!(details.sub_workflow_summary.failed_tasks, 1);
-    }
-
-    #[test]
-    fn sub_workflow_details_survives_json_round_trip() {
-        let summary = failed_summary();
-        let err = TaskError {
-            error_code: Some(TaskErrorCode::from(OutcomeCode::SubworkflowFailed)),
-            message: Some("child failed".to_owned()),
-            cause: None,
-            data: Some(serde_json::json!({
-                "sub_workflow_id": uuid::Uuid::nil(),
-                "sub_workflow_summary": summary,
-            })),
-        };
-        // Decode through the err slot, as handle.get() does.
-        let json = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(err)).unwrap();
-        let decoded: TaskResult<serde_json::Value> = serde_json::from_str(&json).unwrap();
-        let recovered = decoded.unwrap_err().sub_workflow_details().unwrap();
-        assert_eq!(recovered.sub_workflow_id, uuid::Uuid::nil());
-        assert_eq!(recovered.sub_workflow_summary.completed_tasks, 1);
-    }
-
-    #[test]
-    fn sub_workflow_details_none_for_plain_error() {
-        // Wrong error code → not a sub-workflow failure.
-        let err = TaskError::new("SOME_OTHER_ERROR", "nope");
-        assert!(err.sub_workflow_details().is_none());
-
-        // Right code but no data payload.
-        let bare = TaskError::new("SUBWORKFLOW_FAILED", "missing data");
-        assert!(bare.sub_workflow_details().is_none());
+        assert_eq!(no_message.to_string(), "[BROKER_ERROR]");
     }
 }

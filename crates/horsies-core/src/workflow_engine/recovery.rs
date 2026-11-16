@@ -1505,16 +1505,17 @@ async fn fail_orphaned_workflow_with_claim(
 /// Python's message.
 fn orphaned_workflow_error(workflow_id: Uuid, name: &str) -> Result<String, serde_json::Error> {
     serde_json::to_string(&TaskError {
-        error_code: Some(OperationalErrorCode::WorkflowStartIncomplete.into()),
+        error_code: OperationalErrorCode::WorkflowStartIncomplete.into(),
         message: Some(format!(
             "Orphaned workflow '{name}': no workflow_tasks found. \
              Workflow task insertion did not complete."
         )),
-        cause: None,
+        exception: None,
         data: Some(serde_json::json!({
             "workflow_id": workflow_id.to_string(),
             "recovery": "case_4",
         })),
+        kind: crate::core::TaskErrorKind::Plain,
     })
 }
 
@@ -1926,14 +1927,7 @@ mod cap_tests {
         let workflow_id = Uuid::new_v4();
         let stored = orphaned_workflow_error(workflow_id, "orphan").unwrap();
         let error: TaskError = serde_json::from_str(&stored).unwrap();
-        assert_eq!(
-            error
-                .error_code
-                .as_ref()
-                .map(ToString::to_string)
-                .as_deref(),
-            Some("WORKFLOW_START_INCOMPLETE")
-        );
+        assert_eq!(error.error_code.to_string(), "WORKFLOW_START_INCOMPLETE");
         assert_eq!(
             error.message.as_deref(),
             Some(
@@ -1969,14 +1963,7 @@ mod cap_tests {
                 .unwrap();
         assert_eq!(status, "FAILED");
         let error: TaskError = serde_json::from_str(&error).unwrap();
-        assert_eq!(
-            error
-                .error_code
-                .as_ref()
-                .map(ToString::to_string)
-                .as_deref(),
-            Some("WORKFLOW_START_INCOMPLETE")
-        );
+        assert_eq!(error.error_code.to_string(), "WORKFLOW_START_INCOMPLETE");
     }
 
     #[tokio::test]

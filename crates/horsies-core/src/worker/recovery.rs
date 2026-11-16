@@ -21,7 +21,7 @@ use crate::core::history::maintenance::coverage::{
 use crate::core::history::maintenance::pruning::prune_expired_partitions;
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
-use crate::core::{OperationalErrorCode, TaskError, TaskResult};
+use crate::core::{OperationalErrorCode, TaskError, TaskErrorKind, TaskResult};
 
 use crate::worker::retry::{admit_retry, read_stored_options, RetryAdmission};
 
@@ -1535,9 +1535,10 @@ async fn process_single_stale_task(
         // capture (authoritative); the attempt row is written only for a
         // transition that applied, in the same transaction.
         let task_error = TaskError {
-            error_code: Some(OperationalErrorCode::WorkerCrashed.into()),
+            exception: None,
+            error_code: OperationalErrorCode::WorkerCrashed.into(),
             message: Some(failed_reason.clone()),
-            cause: None,
+            kind: TaskErrorKind::Plain,
             data: Some(serde_json::json!({
                 "stale_threshold_ms": threshold_ms,
                 "stale_threshold_seconds": threshold_secs,

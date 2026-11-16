@@ -1196,12 +1196,8 @@ mod tests {
         assert_eq!(child_workflow_depth(31, parent, 1).unwrap(), 32);
         let error = child_workflow_depth(32, parent, 4).unwrap_err();
         assert_eq!(
-            error
-                .error_code
-                .as_ref()
-                .map(ToString::to_string)
-                .as_deref(),
-            Some("SUBWORKFLOW_DEPTH_LIMIT_REACHED")
+            error.error_code.to_string(),
+            "SUBWORKFLOW_DEPTH_LIMIT_REACHED"
         );
         let message = error.message.unwrap();
         assert!(message.contains("depth 33"));

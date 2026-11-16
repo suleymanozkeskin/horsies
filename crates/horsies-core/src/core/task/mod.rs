@@ -8,8 +8,9 @@ pub mod retry_utils;
 pub mod send_types;
 
 pub use error::{
-    BuiltInTaskCode, ContractCode, OperationalErrorCode, OutcomeCode, RetrievalCode,
-    SubWorkflowError, TaskError, TaskErrorCode,
+    BuiltInTaskCode, ContractCode, ExceptionRecord, OperationalErrorCode, OutcomeCode,
+    RetrievalCode, StoredErrorRefused, SubWorkflowFailure, TaskError, TaskErrorCode, TaskErrorKind,
+    UserCode, UserCodeRefused,
 };
 pub use fn_trait::{AsyncTaskFn, BlockingTaskFn, RawTaskResult, RegisteredTask};
 pub use info::{TaskAttemptInfo, TaskInfo};

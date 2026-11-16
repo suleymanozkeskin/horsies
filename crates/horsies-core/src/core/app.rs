@@ -12,7 +12,6 @@ use crate::core::registry::task::TaskRegistry;
 use crate::core::registry::workflow::{
     RegisteredWorkflowDefinition, RegisteredWorkflowSpec, WorkflowSpecRegistry,
 };
-use crate::core::task::error::{BuiltInTaskCode, TaskErrorCode};
 use crate::core::workflow::spec::{WorkflowSpec, WorkflowSpecBuilder};
 
 /// Pre-resolved parameters for enqueueing a task.
@@ -1145,25 +1144,9 @@ impl Horsies {
                             .with_help("provide at least one retryable error code"),
                     );
                 }
-                Some(entries) => {
-                    for entry in entries {
-                        if let TaskErrorCode::User(code) = entry {
-                            if let Some(builtin) = BuiltInTaskCode::parse(code) {
-                                report.add(
-                                    HorsiesError::new(format!(
-                                        "auto_retry_for value '{}' collides with reserved built-in {}",
-                                        code, builtin,
-                                    ))
-                                    .with_code(ErrorCode::CheckReservedCodeCollision)
-                                    .with_note(format!("task '{}'", task_name))
-                                    .with_help(
-                                        "use TaskErrorCode::BuiltIn(...) for built-in retry codes, or rename the custom user code",
-                                    ),
-                                );
-                            }
-                        }
-                    }
-                }
+                // A user code never has the name of a built-in code: `UserCode::parse`
+                // refuses it, so no entry can collide with a built-in.
+                Some(_) => {}
                 None => {
                     if opts.retry_policy.is_some() {
                         report.add(
@@ -1663,7 +1646,9 @@ mod tests {
     use crate::core::config::{
         CustomQueueConfig, PostgresConfig, QueueMode, RecoveryConfig, WorkerResilienceConfig,
     };
-    use crate::core::task::error::OperationalErrorCode;
+    use crate::core::task::error::{
+        OperationalErrorCode, TaskErrorCode, UserCode, UserCodeRefused,
+    };
     use crate::core::task::fn_trait::{BlockingTaskFn, RawTaskResult, RegisteredTask, TaskMeta};
     use crate::core::task::options::{RetryPolicy, TaskOptions};
     use crate::core::workflow::node::TaskNode;
@@ -1985,7 +1970,9 @@ mod tests {
             task_name: "retryable_task".to_owned(),
             queue_name: Some("default".to_owned()),
             good_until: None,
-            auto_retry_for: Some(vec![TaskErrorCode::User("STORAGE_ERROR".to_owned())]),
+            auto_retry_for: Some(vec![TaskErrorCode::User(
+                UserCode::parse("STORAGE_ERROR").unwrap(),
+            )]),
             retry_policy: Some(RetryPolicy::fixed(vec![60, 300, 900], true).unwrap()),
             timeout_ms: None,
         };
@@ -2046,7 +2033,9 @@ mod tests {
             task_name: "retryable_task".to_owned(),
             queue_name: Some("default".to_owned()),
             good_until: None,
-            auto_retry_for: Some(vec![TaskErrorCode::User("STORAGE_ERROR".to_owned())]),
+            auto_retry_for: Some(vec![TaskErrorCode::User(
+                UserCode::parse("STORAGE_ERROR").unwrap(),
+            )]),
             retry_policy: Some(RetryPolicy::fixed(vec![60, 300, 900], true).unwrap()),
             timeout_ms: None,
         };
@@ -2669,26 +2658,13 @@ mod tests {
         assert!(err.to_string().contains("auto_retry_for must not be empty"));
     }
 
+    /// An `auto_retry_for` user code cannot have a built-in name: the user code
+    /// type refuses it before any option is built (Python
+    /// `core/models/tasks.py:304-311`).
     #[test]
-    fn check_rejects_built_in_collision_in_auto_retry_for_user_code() {
-        let mut app = Horsies::new(valid_config()).unwrap();
-        let opts = TaskOptions {
-            task_name: "collision_task".to_owned(),
-            queue_name: Some("default".to_owned()),
-            good_until: None,
-            auto_retry_for: Some(vec![TaskErrorCode::User(
-                OperationalErrorCode::BrokerError.to_string(),
-            )]),
-            retry_policy: Some(RetryPolicy::fixed(vec![60], true).unwrap()),
-            timeout_ms: None,
-        };
-
-        app.register("collision_task", registered_with_options(opts))
-            .unwrap();
-
-        let err = app.check().unwrap_err();
-        assert_eq!(err.code, Some(ErrorCode::CheckReservedCodeCollision));
-        assert!(err.to_string().contains("collides with reserved built-in"));
+    fn an_auto_retry_for_user_code_cannot_have_a_built_in_name() {
+        let refused = UserCode::parse(OperationalErrorCode::BrokerError.to_string());
+        assert!(matches!(refused, Err(UserCodeRefused::BuiltInName(_))));
     }
 
     #[test]
@@ -2875,7 +2851,9 @@ mod tests {
             task_name: "valid_retry_task".to_owned(),
             queue_name: Some("default".to_owned()),
             good_until: None,
-            auto_retry_for: Some(vec![TaskErrorCode::User("FETCH_ERROR".to_owned())]),
+            auto_retry_for: Some(vec![TaskErrorCode::User(
+                UserCode::parse("FETCH_ERROR").unwrap(),
+            )]),
             retry_policy: Some(RetryPolicy::fixed(vec![60, 300], true).unwrap()),
             timeout_ms: None,
         };
