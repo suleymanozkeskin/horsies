@@ -536,7 +536,7 @@ async def test_plain_worker_failure_wakes_the_queue_in_its_write(
     finally:
         await listener.close()
     assert is_ok(result)
-    assert payloads.count(f'capacity:{task_id}') == 1, payloads
+    assert payloads.count('capacity') == 1, payloads
     row = await _task_row(session, task_id)
     assert row['status'] == 'FAILED'
     assert row['error_code'] == OperationalErrorCode.BROKER_ERROR.value
