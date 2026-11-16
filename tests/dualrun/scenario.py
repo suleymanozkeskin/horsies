@@ -126,13 +126,15 @@ _NODE_SQL: Final[LiteralString] = """
         dependencies, args_from, workflow_ctx_from, allow_failed_deps, join_type, min_success,
         task_options, max_retries, execution, good_until, retention_class_key, status, task_id,
         is_subworkflow, sub_workflow_id, sub_workflow_name, sub_definition_key,
-        sub_workflow_summary, result, error, created_at, started_at, completed_at
+        sub_workflow_params, sub_workflow_summary, result, error, created_at, started_at,
+        completed_at
     ) VALUES (
         %(id)s, %(workflow_id)s, %(task_index)s, %(task_name)s, %(task_name)s, %(input)s,
         'default', 50, %(dependencies)s::integer[], %(args_from)s::jsonb, NULL, FALSE, 'all', NULL,
         NULL, 0, 'ISOLATED', %(good_until)s, 'forever', %(status)s, %(task_id)s,
         FALSE, NULL, NULL, NULL,
-        NULL, %(result)s, NULL, %(created_at)s, %(started_at)s, %(completed_at)s
+        NULL, NULL, %(result)s, NULL, %(created_at)s, %(started_at)s,
+        %(completed_at)s
     )
 """
 
