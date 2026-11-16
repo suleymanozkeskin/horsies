@@ -2,6 +2,12 @@ from collections.abc import Mapping
 from typing import Any, ClassVar, Final, cast
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
+from horsies._catalog.manifest import (
+    POOL_CONNECTIONS_MAX,
+    POOL_CONNECTIONS_MIN,
+    WHOLE_SECONDS_MAX,
+    WHOLE_SECONDS_MIN,
+)
 from horsies.core.defaults import DEFAULT_POOL_RECYCLE_S, DEFAULT_TCP_USER_TIMEOUT_MS
 from horsies.core.errors import (
     ConfigurationError,
@@ -98,11 +104,19 @@ class PostgresConfig(BaseModel):
     # at a high rate. A worker process sizes its own pool in its worker
     # profile (WorkerProfile.pool), and task code in a worker child opens
     # the task_send_pool of its child kind.
+    # The bounds are the core's (horsies._catalog.manifest), so a config
+    # that Pydantic accepts is one that the core accepts.
     pool_size: int = Field(
-        default=5, description='The size of the database connection pool'
+        default=5,
+        ge=POOL_CONNECTIONS_MIN,
+        le=POOL_CONNECTIONS_MAX,
+        description='The size of the database connection pool',
     )
     max_overflow: int = Field(
-        default=10, description='The maximum number of connections to allow in the pool'
+        default=10,
+        ge=POOL_CONNECTIONS_MIN,
+        le=POOL_CONNECTIONS_MAX,
+        description='The maximum number of connections to allow in the pool',
     )
     retain_rerun_input_default: bool = Field(
         default=False,
@@ -113,10 +127,15 @@ class PostgresConfig(BaseModel):
         ),
     )
     pool_timeout: int = Field(
-        default=30, description='The timeout for acquiring a connection from the pool'
+        default=30,
+        ge=WHOLE_SECONDS_MIN,
+        le=WHOLE_SECONDS_MAX,
+        description='The timeout for acquiring a connection from the pool',
     )
     pool_recycle: int = Field(
         default=DEFAULT_POOL_RECYCLE_S,
+        ge=WHOLE_SECONDS_MIN,
+        le=WHOLE_SECONDS_MAX,
         description='The number of seconds to recycle connections',
     )
     # TCP keepalives keep idle pooled sockets warm so a server-side or
