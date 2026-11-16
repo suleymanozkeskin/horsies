@@ -13,7 +13,6 @@
 
 use chrono::Duration;
 use serial_test::serial;
-use sqlx::postgres::PgListener;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -32,10 +31,6 @@ use crate::worker::execution::{finalize_workflow_phase, FinalizeStage, PhaseTwoF
 const QUEUE: &str = "lifecycle_autocommit";
 const CHANNEL: &str = "task_queue_lifecycle_autocommit";
 const CLAIM_QUEUE: &str = "lifecycle_dead_claim";
-/// Bound of the wait for the sentinel notification.
-const NOTIFY_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
-/// Bound of the notifications read before the sentinel.
-const NOTIFY_LIMIT: u32 = 100;
 
 fn complete(task_id: Uuid, fence: OwnedClaim) -> TerminalizationCommand {
     TerminalizationCommand::CompleteTaskFused {
@@ -52,38 +47,6 @@ fn running_in_queue() -> TaskSeed {
         queue_name: QUEUE,
         ..TaskSeed::running()
     }
-}
-
-async fn listen(pool: &PgPool) -> PgListener {
-    let mut listener = PgListener::connect_with(pool)
-        .await
-        .expect("connect the listener");
-    listener.listen(CHANNEL).await.expect("listen");
-    listener
-}
-
-/// Every payload on `CHANNEL` committed before a sentinel notification that
-/// this call commits. Postgres delivers notifications in commit order.
-async fn payloads_until_sentinel(listener: &mut PgListener, pool: &PgPool) -> Vec<String> {
-    let sentinel = format!("sentinel:{}", Uuid::new_v4());
-    sqlx::query("SELECT pg_notify($1, $2)")
-        .bind(CHANNEL)
-        .bind(&sentinel)
-        .execute(pool)
-        .await
-        .expect("send the sentinel");
-    let mut payloads = Vec::new();
-    for _ in 0..NOTIFY_LIMIT {
-        let notification = tokio::time::timeout(NOTIFY_WAIT, listener.recv())
-            .await
-            .expect("a notification within the wait")
-            .expect("receive a notification");
-        if notification.payload() == sentinel {
-            return payloads;
-        }
-        payloads.push(notification.payload().to_owned());
-    }
-    panic!("sentinel not seen; payloads {payloads:?}");
 }
 
 async fn history_rows(pool: &PgPool, task_id: Uuid) -> i64 {
@@ -108,7 +71,7 @@ fn assert_retryable(result: Result<Vec<TerminalizationOutcome>, BrokerError>) {
 #[serial]
 async fn a_replay_is_already_applied_and_writes_nothing() {
     let pool = pool().await;
-    let mut listener = listen(&pool).await;
+    let mut wakes = Wakes::listen(&pool, CHANNEL).await;
     let task_id = seed_task(&pool, &running_in_queue()).await;
     let command = complete(task_id, owned_claim());
 
@@ -118,7 +81,7 @@ async fn a_replay_is_already_applied_and_writes_nothing() {
         "{first:?}"
     );
     assert_eq!(
-        payloads_until_sentinel(&mut listener, &pool).await,
+        wakes.payloads(&pool).await,
         vec![format!("capacity:{task_id}")]
     );
 
@@ -136,9 +99,7 @@ async fn a_replay_is_already_applied_and_writes_nothing() {
     );
     assert_eq!(history_rows(&pool, task_id).await, 1);
     assert_eq!(archived_attempts(&pool, task_id).await.len(), 1);
-    assert!(payloads_until_sentinel(&mut listener, &pool)
-        .await
-        .is_empty());
+    assert!(wakes.payloads(&pool).await.is_empty());
     cleanup_tasks(&pool, &[task_id]).await;
 }
 
@@ -147,7 +108,7 @@ async fn a_replay_is_already_applied_and_writes_nothing() {
 #[serial]
 async fn a_lost_claim_generation_writes_nothing() {
     let pool = pool().await;
-    let mut listener = listen(&pool).await;
+    let mut wakes = Wakes::listen(&pool, CHANNEL).await;
     let task_id = seed_task(&pool, &running_in_queue()).await;
     let before = live_row(&pool, task_id).await;
 
@@ -174,9 +135,7 @@ async fn a_lost_claim_generation_writes_nothing() {
     assert_eq!(live_row(&pool, task_id).await, before);
     assert_eq!(history_rows(&pool, task_id).await, 0);
     assert!(live_attempts(&pool, task_id).await.is_empty());
-    assert!(payloads_until_sentinel(&mut listener, &pool)
-        .await
-        .is_empty());
+    assert!(wakes.payloads(&pool).await.is_empty());
     cleanup_tasks(&pool, &[task_id]).await;
 }
 
@@ -188,7 +147,7 @@ async fn a_lost_claim_generation_writes_nothing() {
 async fn a_lost_reply_is_retried_and_classified_on_the_replay() {
     let pool = pool().await;
     let upstream = database_options(&pool);
-    let proxy = ReplyDroppingProxy::start(&upstream).await;
+    let proxy = WireProxy::start(&upstream).await;
     let proxied = unpinged_single_connection_pool(proxy.options(&upstream)).await;
     // Prepare the statement on the proxied connection, so the completion is
     // one request with one reply.

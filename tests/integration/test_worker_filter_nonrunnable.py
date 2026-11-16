@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
-from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.conftest import compute_test_command_fingerprint
 
 pytestmark = [pytest.mark.integration]
 
@@ -50,30 +50,30 @@ async def _insert_claimed_task(
 ) -> str:
     """Insert a horsies_tasks row in CLAIMED state (post-claim)."""
     task_id = str(uuid.uuid4())
-    sent_at, sha = compute_test_enqueue_sha(task_name='filter_test')
+    sent_at, fingerprint = compute_test_command_fingerprint(task_name='filter_test')
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
-                (id, task_name, queue_name, priority, args, kwargs,
-                 status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, claimed_at, claimed_by_worker_id, enqueue_sha,
-                 retention_class_key, command_fingerprint_version,
-                 command_fingerprint, retain_rerun_input,
-                 prepared_rerun_input_disposition)
-            VALUES
-                (:id, 'filter_test', 'default', 100, '[]', '{}',
-                 'CLAIMED', :sent_at, NOW(), NOW(), TRUE, 0,
-                 0, :claimed_at, :claimed_by_worker_id, :enqueue_sha,
-                 'standard_30d', 1,
-                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-                 FALSE, 'DECLINED_BY_POLICY')
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    created_at, updated_at, retry_count, max_retries, claimed_at,
+                    claimed_by_worker_id, retention_class_key,
+                    command_fingerprint_version, command_fingerprint,
+                    retain_rerun_input, execution, enqueued_at, is_workflow_task,
+                    claim_expires_at
+                ) VALUES (
+                    :id, 'filter_test', 'default', 100, '{}', 'CLAIMED', :sent_at,
+                    NOW(), NOW(), 0, 0, :claimed_at, :claimed_by_worker_id,
+                    'standard_30d', 1, :command_fingerprint, FALSE, 'ISOLATED', NOW(),
+                    FALSE, NOW() + INTERVAL '5 minutes'
+                )
         """),
         {
             'id': task_id,
             'sent_at': sent_at,
             'claimed_at': CLAIMED_AT,
             'claimed_by_worker_id': claimed_by_worker_id,
-            'enqueue_sha': sha,
+            'command_fingerprint': fingerprint,
         },
     )
     return task_id
@@ -99,7 +99,7 @@ async def _link_task_to_workflow(
                 (id, name, status, on_error, depth, root_workflow_id,
                  sent_at, created_at, started_at, updated_at)
             VALUES
-                (:id, 'test_wf', :status, 'FAIL', 0, :id,
+                (:id, 'test_wf', :status, 'fail', 0, :id,
                  NOW(), NOW(), NOW(), NOW())
         """),
         {'id': wf_id, 'status': wf_status},
@@ -107,13 +107,15 @@ async def _link_task_to_workflow(
     await session.execute(
         text("""
             INSERT INTO horsies_workflow_tasks
-                (id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
+                (downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                  queue_name, priority, dependencies, allow_failed_deps, join_type,
-                 is_subworkflow, status, task_id, created_at)
+                 is_subworkflow, status, task_id, created_at,
+                 max_retries, execution, retention_class_key)
             VALUES
-                (:id, :wf_id, 0, 'node_0', 'filter_test', '[]', '{}',
+                ('NONE', :id, :wf_id, 0, 'node_0', 'filter_test', '{}',
                  'default', 100, '{}', FALSE, 'all',
-                 FALSE, :wt_status, :task_id, NOW())
+                 FALSE, :wt_status, :task_id, NOW(),
+                 0, 'ISOLATED', 'standard_30d')
         """),
         {'id': wt_id, 'wf_id': wf_id, 'task_id': task_id, 'wt_status': wt_status},
     )
@@ -172,8 +174,7 @@ def _make_rows(*task_ids: str) -> list[dict[str, Any]]:
         {
             'id': tid,
             'task_name': 'filter_test',
-            'args': '[]',
-            'kwargs': '{}',
+            'input': '{}',
             'claimed_at': CLAIMED_AT,
         }
         for tid in task_ids

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Uuid, String, Text, Integer, DateTime, ForeignKey, UniqueConstraint, text
+from sqlalchemy import Uuid, String, Text, Integer, DateTime, ForeignKey, UniqueConstraint
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -86,9 +86,7 @@ class WorkflowModel(Base):
     # -------------------------------------------------------------------------
 
     sent_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=text('NOW()'),
+        DateTime(timezone=True), nullable=False
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
@@ -113,7 +111,7 @@ class WorkflowTaskModel(Base):
     SQLAlchemy model for workflow task nodes.
 
     Represents a single task within a workflow DAG, including:
-    - Task specification (name, args, kwargs, queue, priority)
+    - Task specification (name, input, queue, priority)
     - Dependencies (array of task indices this task waits for)
     - Data flow configuration (args_from mapping, workflow_ctx_from)
     - Execution state and result
@@ -142,11 +140,8 @@ class WorkflowTaskModel(Base):
 
     # Task specification
     task_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    # Compat: new writes always store [] (kwargs-only contract).
-    # Column retained for read compatibility with pre-kwargs-only rows.
-    # Pending future column drop once all persisted rows have been migrated.
-    task_args: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    task_kwargs: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # The node's keyword arguments as one JSON object.
+    input: Mapped[str] = mapped_column(Text, nullable=False)
     queue_name: Mapped[str] = mapped_column(
         String(100), nullable=False, default='default'
     )
@@ -176,6 +171,18 @@ class WorkflowTaskModel(Base):
 
     # Task options (retry policy, auto_retry_for, etc.) - serialized JSON
     task_options: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Typed facts parsed from the task options at workflow start. Set on
+    # every TaskNode row and NULL on every SubWorkflowNode row
+    # (horsies_workflow_tasks_task_facts_by_kind).
+    max_retries: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    execution: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    good_until: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    retention_class_key: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True
+    )
 
     # Execution state
     status: Mapped[str] = mapped_column(
@@ -209,6 +216,18 @@ class WorkflowTaskModel(Base):
     sub_definition_key: Mapped[Optional[str]] = mapped_column(
         String(255), nullable=True
     )
+
+    # The client's choice for the node's params: 'GIVEN' or 'NOT_GIVEN' on a
+    # SubWorkflowNode row, NULL on a TaskNode row
+    # (horsies_workflow_tasks_sub_workflow_params_by_kind).
+    sub_workflow_params: Mapped[Optional[str]] = mapped_column(
+        String(9), nullable=True
+    )
+
+    # REACHABLE when a sub-workflow node is reachable below this node along
+    # the dependency edges, NONE otherwise; written at start from the static
+    # graph (horsies_workflow_tasks_downstream_subworkflow_known).
+    downstream_subworkflow: Mapped[str] = mapped_column(String(9), nullable=False)
 
     # Summary of subworkflow execution (serialized SubWorkflowSummary)
     sub_workflow_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

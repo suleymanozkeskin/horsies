@@ -272,12 +272,21 @@ CREATE TABLE horsies_workflow_tasks (
     execution text,
     good_until timestamp with time zone,
     retention_class_key character varying(64),
+    -- Typed fact of the static graph, written at workflow start: REACHABLE when a sub-workflow node is reachable
+    -- through the dependency edges below this node (the node is an ancestor of one), NONE otherwise. Phase 1
+    -- returns it, and phase 2 of a REACHABLE node runs in a transaction, because its promotion can owe a child
+    -- start that must commit with the step. Conservative: a REACHABLE node can still promote no sub-workflow node.
+    downstream_subworkflow character varying(9) NOT NULL,
     status character varying(9) NOT NULL,
     task_id uuid,
     is_subworkflow boolean NOT NULL,
     sub_workflow_id uuid,
     sub_workflow_name character varying(255),
     sub_definition_key character varying(255),
+    -- The client's choice for a sub-workflow node's params: GIVEN when the node definition carries params for
+    -- the child's build, NOT_GIVEN when it carries none. Set exactly on sub-workflow nodes; see
+    -- horsies_workflow_tasks_sub_workflow_params_by_kind.
+    sub_workflow_params character varying(9),
     sub_workflow_summary text,
     result text,
     error text,
@@ -307,6 +316,20 @@ CREATE TABLE horsies_workflow_tasks (
         )
     ),
     CONSTRAINT horsies_workflow_tasks_subworkflow_fields CHECK (NOT is_subworkflow OR task_id IS NULL),
+    CONSTRAINT horsies_workflow_tasks_downstream_subworkflow_known CHECK (
+        downstream_subworkflow IN ('NONE', 'REACHABLE')
+    ),
+    CONSTRAINT horsies_workflow_tasks_sub_workflow_params_by_kind CHECK (
+        (
+            is_subworkflow
+            AND sub_workflow_params IS NOT NULL
+            AND sub_workflow_params IN ('NOT_GIVEN', 'GIVEN')
+        )
+        OR (
+            NOT is_subworkflow
+            AND sub_workflow_params IS NULL
+        )
+    ),
     -- The bounds are those of horsies_tasks.
     CONSTRAINT horsies_workflow_tasks_task_facts_by_kind CHECK (
         (
@@ -801,14 +824,16 @@ $$;
 ------------------------------------------------------------------------------------------------------------------------
 
 -- One function for every task insert. Order as in v61, where the queue trigger fired before the status trigger:
--- task_new (id, for outside observers), task_queue_<queue> (constant payload 'new', one wake per kind),
--- horsies_task_status (id, for the web app).
+-- task_new (id, for outside observers) and task_queue_<queue> (constant payload 'new', one wake per kind) only for
+-- a PENDING row, as v61's WHEN (NEW.status = 'PENDING'); horsies_task_status (id, for the web app) for every row.
 CREATE FUNCTION horsies_notify_task_changes() RETURNS trigger
     LANGUAGE plpgsql
 AS $$
 BEGIN
-    PERFORM pg_notify('task_new', NEW.id::text);
-    PERFORM pg_notify('task_queue_' || NEW.queue_name, 'new');
+    IF NEW.status = 'PENDING' THEN
+        PERFORM pg_notify('task_new', NEW.id::text);
+        PERFORM pg_notify('task_queue_' || NEW.queue_name, 'new');
+    END IF;
     PERFORM pg_notify('horsies_task_status', NEW.id::text);
     RETURN NULL;
 END;
@@ -848,7 +873,7 @@ BEGIN
 END;
 $$;
 
--- No WHEN: every insert is PENDING (the enqueue and the workflow functions write PENDING).
+-- No WHEN: every insert sends the status event; the function sends the wake for a PENDING row only.
 CREATE TRIGGER horsies_tasks_insert_notify
     AFTER INSERT ON horsies_tasks
     FOR EACH ROW EXECUTE FUNCTION horsies_notify_task_changes();

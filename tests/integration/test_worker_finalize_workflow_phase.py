@@ -27,7 +27,7 @@ from horsies.core.worker.worker import (
     Worker,
     _FINALIZE_STAGE_PHASE2,
 )
-from tests.integration.conftest import DB_URL, compute_test_enqueue_sha
+from tests.integration.conftest import DB_URL, compute_test_command_fingerprint
 from tests.integration.history_seeding import force_terminal
 
 pytestmark = [pytest.mark.integration]
@@ -61,7 +61,7 @@ async def _insert_task(
     born running, then forced terminal into history.
     """
     task_id = str(uuid.uuid4())
-    sent_at, sha = compute_test_enqueue_sha(
+    sent_at, fingerprint = compute_test_command_fingerprint(
         task_name='wf_phase_test',
         queue_name=queue_name,
     )
@@ -69,26 +69,29 @@ async def _insert_task(
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
-                (id, task_name, queue_name, priority, args, kwargs,
-                 status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, started_at, enqueue_sha,
-                 retention_class_key, command_fingerprint_version,
-                 command_fingerprint, retain_rerun_input,
-                 prepared_rerun_input_disposition)
-            VALUES
-                (:id, 'wf_phase_test', :queue, 100, '[]', '{}',
-                 :status, :sent_at, NOW(), NOW(), FALSE, 0,
-                 0, NOW(), :enqueue_sha,
-                 'standard_30d', 1,
-                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-                 FALSE, 'DECLINED_BY_POLICY')
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    created_at, updated_at, retry_count, max_retries, started_at,
+                    retention_class_key, command_fingerprint_version,
+                    command_fingerprint, retain_rerun_input, execution, enqueued_at,
+                    is_workflow_task, claim_expires_at, worker_pid, worker_hostname,
+                    worker_process_name
+                ) VALUES (
+                    :id, 'wf_phase_test', :queue, 100, '{}', :status, :sent_at, NOW(),
+                    NOW(), 0, 0, NOW(), 'standard_30d', 1, :command_fingerprint, FALSE,
+                    'ISOLATED', NOW(), FALSE,
+                    CASE WHEN CAST(:status AS varchar) = 'CLAIMED' THEN NOW() + INTERVAL '5 minutes' END,
+                    CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 4242 END,
+                    CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 'host-1' END,
+                    CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 'child-1' END
+                )
         """),
         {
             'id': task_id,
             'queue': queue_name,
             'status': 'RUNNING' if is_terminal else status,
             'sent_at': sent_at,
-            'enqueue_sha': sha,
+            'command_fingerprint': fingerprint,
         },
     )
     if is_terminal:
@@ -111,7 +114,7 @@ async def _link_task_to_workflow(session: AsyncSession, task_id: str) -> str:
                 (id, name, status, on_error, depth, root_workflow_id,
                  sent_at, created_at, started_at, updated_at)
             VALUES
-                (:id, 'test_wf', 'RUNNING', 'FAIL', 0, :id,
+                (:id, 'test_wf', 'RUNNING', 'fail', 0, :id,
                  NOW(), NOW(), NOW(), NOW())
         """),
         {'id': wf_id},
@@ -119,15 +122,17 @@ async def _link_task_to_workflow(session: AsyncSession, task_id: str) -> str:
     await session.execute(
         text("""
             INSERT INTO horsies_workflow_tasks
-                (id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
+                (downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                  queue_name, priority, dependencies, args_from, workflow_ctx_from,
                  allow_failed_deps, join_type, min_success, task_options, status,
-                 is_subworkflow, task_id, created_at)
+                 is_subworkflow, task_id, created_at,
+                 max_retries, execution, retention_class_key)
             VALUES
-                (:id, :wf_id, 0, 'node_0', 'wf_phase_test', '[]', '{}',
+                ('NONE', :id, :wf_id, 0, 'node_0', 'wf_phase_test', '{}',
                  'default', 100, '{}', NULL, NULL,
                  FALSE, 'all', NULL, NULL, 'ENQUEUED',
-                 FALSE, :task_id, NOW())
+                 FALSE, :task_id, NOW(),
+                 0, 'ISOLATED', 'standard_30d')
         """),
         {'id': wt_id, 'wf_id': wf_id, 'task_id': task_id},
     )
@@ -221,7 +226,7 @@ async def _insert_running_node(session: AsyncSession) -> str:
             INSERT INTO horsies_workflows
                 (id, name, status, on_error, depth, root_workflow_id,
                  sent_at, created_at, started_at, updated_at)
-            VALUES (:wf, 'wf_phase_notify', 'RUNNING', 'FAIL', 0, :wf,
+            VALUES (:wf, 'wf_phase_notify', 'RUNNING', 'fail', 0, :wf,
                     NOW(), NOW(), NOW(), NOW())
         """),
         {'wf': workflow_id},
@@ -229,13 +234,15 @@ async def _insert_running_node(session: AsyncSession) -> str:
     await session.execute(
         text("""
             INSERT INTO horsies_workflow_tasks
-                (id, workflow_id, task_index, node_id, task_name, task_args,
-                 task_kwargs, queue_name, priority, dependencies,
+                (downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
+                 queue_name, priority, dependencies,
                  allow_failed_deps, join_type, is_subworkflow, status,
-                 task_id, created_at)
-            VALUES (:id, :wf, 0, 'node-0', 'wf_phase_test', '[]', '{}',
+                 task_id, created_at,
+                 max_retries, execution, retention_class_key)
+            VALUES ('NONE', :id, :wf, 0, 'node-0', 'wf_phase_test', '{}',
                     'default', 100, '{}', FALSE, 'all', FALSE, 'RUNNING',
-                    CAST(:task_id AS uuid), NOW())
+                    CAST(:task_id AS uuid), NOW(),
+                    0, 'ISOLATED', 'standard_30d')
         """),
         {'id': str(uuid.uuid4()), 'wf': workflow_id, 'task_id': task_id},
     )

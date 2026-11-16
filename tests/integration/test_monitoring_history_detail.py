@@ -110,13 +110,16 @@ class TestTaskDetailFromHistory:
                     _ = await session.execute(
                         text(
                             'INSERT INTO horsies_workflow_tasks '
-                            '(id, workflow_id, task_id, task_index, '
-                            'task_name, queue_name, priority, '
+                            '(downstream_subworkflow, id, workflow_id, task_id, task_index, '
+                            'task_name, input, queue_name, priority, '
                             'dependencies, allow_failed_deps, join_type, '
-                            'status, is_subworkflow, created_at) VALUES '
-                            "(:n, :w, :t, 0, 'legacy.task', 'default', "
+                            'status, is_subworkflow, created_at, '
+                            'max_retries, execution, retention_class_key) '
+                            'VALUES '
+                            "('NONE', :n, :w, :t, 0, 'legacy.task', '{}', 'default', "
                             "50, '{}', FALSE, 'all', 'COMPLETED', FALSE, "
-                            'statement_timestamp())'
+                            "statement_timestamp(), 0, 'ISOLATED', "
+                            "'standard_30d')"
                         ),
                         {
                             'n': str(uuid.uuid4()),

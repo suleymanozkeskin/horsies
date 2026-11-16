@@ -85,7 +85,7 @@ async def link_node(
         if workflow_id is not None
         else await create_workflow(connection, status='RUNNING')
     )
-    await link_workflow_node(
+    _ = await link_workflow_node(
         connection,
         task_id,
         workflow_id=node_workflow,

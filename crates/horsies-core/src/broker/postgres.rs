@@ -1752,7 +1752,7 @@ impl PostgresBroker {
         );
         let task_result = crate::core::TaskResult::<serde_json::Value>::Err(task_error);
         let result_json = serde_json::to_string(&task_result)
-            .unwrap_or_else(|_| r#"{"__type":"err","value":{"message":"expired"}}"#.to_owned());
+            .unwrap_or_else(|_| r#"{"__h_task_result__":true,"ok":null,"err":{"exception":null,"error_code":{"__builtin_task_code__":"TASK_EXPIRED"},"data":null,"message":"expired"}}"#.to_owned());
 
         let outcomes = crate::broker::terminalization::terminalize(
             &self.pool,
@@ -3722,7 +3722,7 @@ mod tests {
 
     #[test]
     fn parse_failed_with_task_error() {
-        let err = TaskError::new("VALIDATION", "bad input");
+        let err = TaskError::new("VALIDATION", "bad input").unwrap();
         let wrapped: TaskResult<i32> = TaskResult::Err(err);
         let err_json = serde_json::to_string(&wrapped).unwrap();
         let row = TaskResultRow {
@@ -3881,7 +3881,7 @@ mod tests {
         let row = TaskResultRow {
             id: Uuid::nil(),
             status: "CANCELLED".to_owned(),
-            result: Some(r#"{"__type":"ok","value":42}"#.to_owned()),
+            result: Some(r#"{"__h_task_result__":true,"ok":42,"err":null}"#.to_owned()),
             failed_reason: None,
         };
         let task_result: TaskResult<i32> = parse_task_result_row(row).unwrap();
@@ -5908,6 +5908,7 @@ mod session_settings_tests {
             session_database_url: None,
             pgbouncer_transaction_mode,
             pool_pre_ping: true,
+            worker_pool_pre_ping: false,
             pool_size: 2,
             max_overflow: 0,
             retain_rerun_input_default: false,

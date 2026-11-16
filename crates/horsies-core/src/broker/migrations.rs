@@ -8,12 +8,13 @@
 //! leaving `_sqlx_migrations` untouched for the host application.
 //!
 //! The embedded chain:
-//! - Version 1000 is the baseline schema: the package files of
-//!   `horsies/core/baseline/sql/` in name order (tables, indexes, interim
-//!   functions), concatenated with no separator, with one SHA-384 checksum
-//!   over the result. It creates [`MIGRATIONS_TABLE`] itself. The Python
-//!   package installs the same three files as its migration 1000 with the same
-//!   checksum rule, so both write the same bookkeeping row.
+//! - Version 1000 is the baseline schema: every package file of
+//!   `horsies/core/baseline/sql/`, in the order of Python's
+//!   `BASELINE_SQL_FILES` (`horsies/core/baseline/migration.py`), concatenated
+//!   with no separator, with one SHA-384 checksum over the UTF-8 bytes of the
+//!   result. It creates [`MIGRATIONS_TABLE`] itself. The Python package
+//!   installs the same files as its migration 1000 with the same checksum
+//!   rule, so both write the same bookkeeping row.
 //! - Version 1001 holds the claim functions of the copied Rust worker, which
 //!   have no counterpart in migration 1000. It goes when the worker claims
 //!   through the functions of migration 1000.
@@ -41,23 +42,42 @@ pub const MIGRATIONS_TABLE: &str = "horsies_migrations";
 /// Version of the baseline schema migration.
 pub const BASELINE_MIGRATION_VERSION: i64 = 1000;
 
-/// The baseline schema: the three package files in name order, as one
-/// migration. The files of `horsies/core/baseline/sql/` are the single source;
-/// the core includes them by relative path and keeps no copy.
-const BASELINE_SQL: &str = concat!(
-    include_str!("../../../../horsies/core/baseline/sql/0001_tables.sql"),
-    include_str!("../../../../horsies/core/baseline/sql/0002_indexes.sql"),
-    include_str!("../../../../horsies/core/baseline/sql/0003_interim_functions.sql"),
+/// Declares the baseline file list once. From one list of file names it
+/// builds `BASELINE_SQL_FILES` (the names) and `BASELINE_SQL` (the texts,
+/// concatenated with no separator), so the names and the migration text
+/// cannot differ. The files of `horsies/core/baseline/sql/` are the single
+/// source; the core includes them by relative path and keeps no copy.
+macro_rules! baseline_sql_files {
+    ($($file:literal),+ $(,)?) => {
+        /// The file names of migration 1000, in the order they run.
+        #[cfg(test)]
+        pub(crate) const BASELINE_SQL_FILES: &[&str] = &[$($file),+];
+
+        /// Migration 1000: the files of `BASELINE_SQL_FILES`, in that
+        /// order, concatenated with no separator.
+        const BASELINE_SQL: &str = concat!(
+            $(include_str!(concat!("../../../../horsies/core/baseline/sql/", $file))),+
+        );
+    };
+}
+
+// Python's `BASELINE_SQL_FILES` (`horsies/core/baseline/migration.py`), in
+// the same order. A file added to the folder or to Python's list without a
+// line here fails `baseline_file_list_is_python_s_list_and_the_whole_folder`
+// and Python's `tests/unit/test_baseline_migration.py`.
+baseline_sql_files!(
+    "0001_tables.sql",
+    "0002_indexes.sql",
+    "0003_interim_functions.sql",
+    "0004_lifecycle_functions.sql",
+    "0005_workflow_functions.sql",
+    "0007_scheduler_monitoring_functions.sql",
 );
 
 /// The tables file of the baseline.
 #[cfg(test)]
 pub(crate) const BASELINE_TABLES_SQL: &str =
     include_str!("../../../../horsies/core/baseline/sql/0001_tables.sql");
-/// The indexes file of the baseline.
-#[cfg(test)]
-pub(crate) const BASELINE_INDEXES_SQL: &str =
-    include_str!("../../../../horsies/core/baseline/sql/0002_indexes.sql");
 /// The interim functions file of the baseline.
 #[cfg(test)]
 pub(crate) const BASELINE_INTERIM_FUNCTIONS_SQL: &str =
@@ -539,19 +559,87 @@ mod tests {
         sqlx::Connection::close(waiter).await.unwrap();
     }
 
+    /// The package folder of the baseline SQL files.
+    fn baseline_sql_folder() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../horsies/core/baseline/sql")
+    }
+
+    /// Python's `BASELINE_SQL_FILES`, read from
+    /// `horsies/core/baseline/migration.py`: one quoted name per line between
+    /// the line that opens the tuple and the line that closes it.
+    fn python_baseline_sql_files() -> Vec<String> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../horsies/core/baseline/migration.py");
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        let mut lines = source
+            .lines()
+            .skip_while(|line| !line.starts_with("BASELINE_SQL_FILES: Final = ("));
+        assert!(
+            lines.next().is_some(),
+            "no BASELINE_SQL_FILES tuple in {}",
+            path.display()
+        );
+        lines
+            .take_while(|line| line.trim() != ")")
+            .map(|line| {
+                line.trim()
+                    .trim_end_matches(',')
+                    .trim_matches('\'')
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    /// The core's list is Python's list in Python's order, and it holds every
+    /// SQL file of the package folder. A file that one side adds fails here
+    /// and in Python's `tests/unit/test_baseline_migration.py`.
     #[test]
-    fn baseline_is_one_migration_built_from_its_three_files() {
+    fn baseline_file_list_is_python_s_list_and_the_whole_folder() {
+        let python = python_baseline_sql_files();
+        assert!(!python.is_empty(), "Python's list is empty");
+        assert_eq!(BASELINE_SQL_FILES, python.as_slice());
+
+        let mut folder: Vec<String> = std::fs::read_dir(baseline_sql_folder())
+            .expect("read the baseline SQL folder")
+            .map(|entry| {
+                entry
+                    .expect("baseline SQL folder entry")
+                    .file_name()
+                    .into_string()
+                    .expect("UTF-8 file name")
+            })
+            .filter(|name| name.ends_with(".sql"))
+            .collect();
+        folder.sort();
+        assert_eq!(BASELINE_SQL_FILES, folder.as_slice());
+    }
+
+    /// Migration 1000 is the listed files as they are on disk, concatenated
+    /// in list order, and its checksum is Python's rule
+    /// (`horsies/core/baseline/migration.py`, `baseline_checksum`): SHA-384
+    /// of the UTF-8 bytes of that text.
+    #[test]
+    fn baseline_is_one_migration_built_from_every_listed_file() {
+        use sha2::Sha384;
+
         let baseline = &embedded_migrations()[0];
         assert_eq!(baseline.version, BASELINE_MIGRATION_VERSION);
         assert_eq!(baseline.description.as_ref(), "baseline");
-        let tables = BASELINE_TABLES_SQL;
-        let indexes = BASELINE_INDEXES_SQL;
-        let functions = BASELINE_INTERIM_FUNCTIONS_SQL;
+        let on_disk: String = BASELINE_SQL_FILES
+            .iter()
+            .map(|name| {
+                let path = baseline_sql_folder().join(name);
+                std::fs::read_to_string(&path)
+                    .unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
+            })
+            .collect();
+        assert_eq!(baseline.sql.as_ref(), on_disk);
         assert_eq!(
-            baseline.sql.as_ref(),
-            format!("{tables}{indexes}{functions}")
+            baseline.checksum.as_ref(),
+            Sha384::digest(on_disk.as_bytes()).as_slice()
         );
-        assert!(tables.contains(&format!("CREATE TABLE {MIGRATIONS_TABLE} (")));
+        assert!(BASELINE_TABLES_SQL.contains(&format!("CREATE TABLE {MIGRATIONS_TABLE} (")));
         let versions: Vec<i64> = embedded_migrations().iter().map(|m| m.version).collect();
         let mut sorted = versions.clone();
         sorted.sort_unstable();

@@ -15,6 +15,9 @@ The schema is one migration, version 1000: the SQL files in
 | `0001_tables.sql` | Tables, constraints, seed rows, `horsies_uuidv7()`, the notification triggers |
 | `0002_indexes.sql` | The indexes that no constraint creates |
 | `0003_interim_functions.sql` | The SQL functions the client calls, and their composite types |
+| `0004_lifecycle_functions.sql` | The task lifecycle functions: enqueue, claim, start, attempt finish, stale recovery, requeue, release, cancel |
+| `0005_workflow_functions.sql` | The workflow engine functions: start, child start, phase 2, child completion, pause, resume, cancel, paused expiry, the claim-time check and the stop before start, recovery |
+| `0007_scheduler_monitoring_functions.sql` | The scheduler and monitoring functions: schedule fire, task list and facets, task detail, stale and expired task lists |
 
 The broker installs the schema at its first initialization (`ensure_schema_initialized`, or the first
 enqueue, result wait, task info read, workflow start or scheduler start):
@@ -113,7 +116,11 @@ sub-workflow (depth 0-32; a root has depth 0 and no parent).
 
 `horsies_workflow_tasks` holds one row per node: `input`, the dependencies and join (`all`, `any`, or `quorum`
 with `min_success`), status, the linked task id, the sub-workflow fields of a sub-workflow node, and the typed
-facts of a task node (`max_retries`, `execution`, `good_until`, `retention_class_key`).
+facts of a task node (`max_retries`, `execution`, `good_until`, `retention_class_key`). A sub-workflow node also
+stores `sub_workflow_params`: `GIVEN` when the node was given params for the child's `build_with`, `NOT_GIVEN`
+when it was given none; a task node stores NULL. Every node stores `downstream_subworkflow`, written at start from
+the dependency graph: `REACHABLE` when a sub-workflow node depends on it directly or through other nodes, `NONE`
+otherwise.
 
 ## Workflow progression outbox and quarantine
 

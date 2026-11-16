@@ -23,6 +23,7 @@ from typing import Callable
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
@@ -175,7 +176,8 @@ async def _requeued_after_failed_attempt(
 
     The retry path records attempt 1 as FAILED with will_retry and advances
     retry_count. The attempt row keeps its failed_reason; the terminal
-    writers must not carry it into the terminal record.
+    writers must not carry it into the terminal record. The live row
+    stores no failed reason.
     """
     await session.execute(
         text("""
@@ -291,6 +293,41 @@ def _fused(task_id: str, claimed_at: datetime = GENERATION) -> CompleteTaskFused
         notify_channel='task_queue_default',
         notify_payload=f'capacity:{task_id}',
     )
+
+
+class TestLiveStatusInvariant:
+    async def test_the_live_table_refuses_a_terminal_status(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """A terminal task leaves the live table; the live row cannot hold a
+        terminal status (CHECK horsies_tasks_status_live)."""
+        task_id = await _seed(
+            session,
+            status='PENDING',
+            worker_id=None,
+            claimed_at=None,
+        )
+
+        with pytest.raises(IntegrityError, match='horsies_tasks_status_live'):
+            await session.execute(
+                text("""
+                    UPDATE horsies_tasks
+                    SET status = 'CANCELLED'
+                    WHERE id = :id
+                """),
+                {'id': task_id},
+            )
+            await session.commit()
+        await session.rollback()
+
+        row = (
+            await session.execute(
+                text('SELECT status FROM horsies_tasks WHERE id = :id'),
+                {'id': task_id},
+            )
+        ).one()
+        assert row.status == 'PENDING'
 
 
 class TestAppliedTransitions:
@@ -1560,7 +1597,7 @@ async def _link_workflow_task(
     )
     await session.execute(
         text("""
-            INSERT INTO horsies_workflow_tasks (
+            INSERT INTO horsies_workflow_tasks (downstream_subworkflow,
                 id, workflow_id, task_index, node_id, task_name, input,
                 queue_name, priority, dependencies, args_from,
                 workflow_ctx_from, allow_failed_deps, join_type, min_success,
@@ -1570,7 +1607,7 @@ async def _link_workflow_task(
                 sub_workflow_summary, result, error, created_at, started_at,
                 completed_at
             )
-            VALUES (
+            VALUES ('NONE',
                 :id, :workflow_id, 0, 'node_0', 'terminalization.test', '{}',
                 'default', 100, '{}', NULL,
                 NULL, FALSE, 'all', NULL,

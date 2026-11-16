@@ -493,7 +493,7 @@ VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), NULL, NULL, NULL,
 /// Link workflow_task to a newly created horsies_task.
 const LINK_ENQUEUED_TASK_SQL: &str = "\
 UPDATE horsies_workflow_tasks wt
-SET task_id = $1::uuid, status = 'ENQUEUED'
+SET task_id = $1::uuid, status = 'ENQUEUED', started_at = NOW()
 FROM horsies_workflows w
 WHERE wt.workflow_id = $2::uuid AND wt.task_index = $3
   AND wt.status = 'READY'
@@ -1508,16 +1508,17 @@ async fn fail_orphaned_workflow_with_claim(
 /// Python's message.
 fn orphaned_workflow_error(workflow_id: Uuid, name: &str) -> Result<String, serde_json::Error> {
     serde_json::to_string(&TaskError {
-        error_code: Some(OperationalErrorCode::WorkflowStartIncomplete.into()),
+        error_code: OperationalErrorCode::WorkflowStartIncomplete.into(),
         message: Some(format!(
             "Orphaned workflow '{name}': no workflow_tasks found. \
              Workflow task insertion did not complete."
         )),
-        cause: None,
+        exception: None,
         data: Some(serde_json::json!({
             "workflow_id": workflow_id.to_string(),
             "recovery": "case_4",
         })),
+        kind: crate::core::TaskErrorKind::Plain,
     })
 }
 
@@ -1931,14 +1932,7 @@ mod cap_tests {
         let workflow_id = Uuid::new_v4();
         let stored = orphaned_workflow_error(workflow_id, "orphan").unwrap();
         let error: TaskError = serde_json::from_str(&stored).unwrap();
-        assert_eq!(
-            error
-                .error_code
-                .as_ref()
-                .map(ToString::to_string)
-                .as_deref(),
-            Some("WORKFLOW_START_INCOMPLETE")
-        );
+        assert_eq!(error.error_code.to_string(), "WORKFLOW_START_INCOMPLETE");
         assert_eq!(
             error.message.as_deref(),
             Some(
@@ -1974,14 +1968,7 @@ mod cap_tests {
                 .unwrap();
         assert_eq!(status, "FAILED");
         let error: TaskError = serde_json::from_str(&error).unwrap();
-        assert_eq!(
-            error
-                .error_code
-                .as_ref()
-                .map(ToString::to_string)
-                .as_deref(),
-            Some("WORKFLOW_START_INCOMPLETE")
-        );
+        assert_eq!(error.error_code.to_string(), "WORKFLOW_START_INCOMPLETE");
     }
 
     #[tokio::test]
@@ -3260,6 +3247,18 @@ mod cap_tests {
         )
         .await
         .expect("recovery enqueue path"));
+        // The node holds its enqueue time: the node write and the task insert share a transaction.
+        let node_holds_enqueue_time: bool = sqlx::query_scalar(
+            "SELECT wt.started_at IS NOT NULL AND wt.started_at = t.enqueued_at
+             FROM horsies_workflow_tasks wt
+             JOIN horsies_tasks t ON t.id = wt.task_id
+             WHERE wt.workflow_id = $1::uuid AND wt.task_index = 0",
+        )
+        .bind(&workflow_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read the recovery node enqueue time");
+        assert!(node_holds_enqueue_time);
         let facts: (String, Option<i32>, Option<i16>, bool) = sqlx::query_as(
             "SELECT t.retention_class_key, octet_length(t.command_fingerprint),
                     t.command_fingerprint_version, t.retain_rerun_input

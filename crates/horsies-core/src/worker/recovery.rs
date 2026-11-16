@@ -21,7 +21,7 @@ use crate::core::history::maintenance::coverage::{
 use crate::core::history::maintenance::pruning::{prune_expired_partitions, PruneReach};
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
-use crate::core::{OperationalErrorCode, TaskError, TaskResult};
+use crate::core::{OperationalErrorCode, TaskError, TaskErrorKind, TaskResult};
 
 use crate::worker::retry::{admit_retry, read_stored_options, RetryAdmission};
 
@@ -1542,9 +1542,10 @@ async fn process_single_stale_task(
         // capture (authoritative); the attempt row is written only for a
         // transition that applied, in the same transaction.
         let task_error = TaskError {
-            error_code: Some(OperationalErrorCode::WorkerCrashed.into()),
+            exception: None,
+            error_code: OperationalErrorCode::WorkerCrashed.into(),
             message: Some(failed_reason.clone()),
-            cause: None,
+            kind: TaskErrorKind::Plain,
             data: Some(serde_json::json!({
                 "stale_threshold_ms": threshold_ms,
                 "stale_threshold_seconds": threshold_secs,
@@ -1559,7 +1560,7 @@ async fn process_single_stale_task(
         let task_result: TaskResult<()> = TaskResult::Err(task_error);
         let result_json = serde_json::to_string(&task_result).unwrap_or_else(|e| {
             tracing::error!(task_id = %task_id, error = %e, "failed to serialize stale task result");
-            r#"{"__type":"err","value":{"message":"serialization failed"}}"#.to_owned()
+            r#"{"__h_task_result__":true,"ok":null,"err":{"exception":null,"error_code":{"__builtin_task_code__":"WORKER_SERIALIZATION_ERROR"},"data":null,"message":"serialization failed"}}"#.to_owned()
         });
 
         // Write the attempt before the move so the terminalization function
@@ -1851,7 +1852,7 @@ pub async fn expire_pending_tasks(pool: &PgPool) -> Result<u64, crate::broker::B
     );
     let task_result = TaskResult::<()>::Err(task_error);
     let result_json = serde_json::to_string(&task_result)
-        .unwrap_or_else(|_| r#"{"__type":"err","value":{"message":"expired"}}"#.to_owned());
+        .unwrap_or_else(|_| r#"{"__h_task_result__":true,"ok":null,"err":{"exception":null,"error_code":{"__builtin_task_code__":"TASK_EXPIRED"},"data":null,"message":"expired"}}"#.to_owned());
     let command = crate::core::lifecycle::TerminalizationCommand::ExpirePendingTasks {
         batch_size: crate::core::lifecycle::BatchSize::new(EXPIRE_BATCH_SIZE)
             .expect("EXPIRE_BATCH_SIZE is positive"),

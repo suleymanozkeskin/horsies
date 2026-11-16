@@ -1041,7 +1041,7 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
     assert_eq!(
         raw.raw_result,
         Some(
-            serde_json::json!({"__type": "ok", "value": {"value": 7}})
+            serde_json::json!({"__h_task_result__": true, "ok": {"value": 7}, "err": null})
                 .as_object()
                 .unwrap()
                 .clone()
@@ -1085,7 +1085,7 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .unwrap_err();
     assert_eq!(failed_error.error_code, expected_error.error_code);
     assert_eq!(failed_error.message, expected_error.message);
-    assert_eq!(failed_error.cause, None);
+    assert_eq!(failed_error.exception, None);
     assert_eq!(failed_error.data, None);
 
     let (expired, _) = seed_source(&pool, TerminalSource::Expired, false, None).await;
@@ -1103,7 +1103,7 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .unwrap_err();
     assert_eq!(expired_error.error_code, expected_error.error_code);
     assert_eq!(expired_error.message, expected_error.message);
-    assert_eq!(expired_error.cause, None);
+    assert_eq!(expired_error.exception, None);
     assert_eq!(expired_error.data, None);
 
     let (cancelled, _) = seed_source(&pool, TerminalSource::Cancelled, false, None).await;

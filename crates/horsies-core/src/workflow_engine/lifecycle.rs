@@ -150,7 +150,7 @@ VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), NULL, NULL, NULL,
 
 const LINK_ENQUEUED_TASK_SQL: &str = "\
 UPDATE horsies_workflow_tasks wt
-SET task_id = $1::uuid, status = 'ENQUEUED'
+SET task_id = $1::uuid, status = 'ENQUEUED', started_at = NOW()
 FROM horsies_workflows w
 WHERE wt.workflow_id = $2::uuid AND wt.task_index = $3
   AND wt.status = 'READY'
@@ -404,13 +404,14 @@ pub async fn expire_paused_workflows(
         format_python_timedelta(older_than)?,
     );
     let error_json = serde_json::to_string(&crate::core::TaskError {
-        error_code: Some(crate::core::OutcomeCode::WorkflowExpired.into()),
-        message: Some(error_text),
-        cause: None,
+        exception: None,
+        error_code: crate::core::OutcomeCode::WorkflowExpired.into(),
         data: Some(serde_json::json!({
             "policy": "paused_workflow_auto_cancel_after",
             "older_than_seconds": seconds,
         })),
+        message: Some(error_text),
+        kind: crate::core::TaskErrorKind::Plain,
     })?;
     let mut expired = 0_u64;
     for candidate in candidates {
@@ -1431,6 +1432,18 @@ mod resume_idempotency_tests {
         .await
         .expect("resume enqueue path");
         assert_eq!(enqueued, 1);
+        // The node holds its enqueue time: the node write and the task insert share a transaction.
+        let node_holds_enqueue_time: bool = sqlx::query_scalar(
+            "SELECT wt.started_at IS NOT NULL AND wt.started_at = t.enqueued_at
+             FROM horsies_workflow_tasks wt
+             JOIN horsies_tasks t ON t.id = wt.task_id
+             WHERE wt.workflow_id = $1::uuid AND wt.task_index = 0",
+        )
+        .bind(&workflow_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read the resume node enqueue time");
+        assert!(node_holds_enqueue_time);
         let facts: (String, Option<i32>, Option<i16>, bool) = sqlx::query_as(
             "SELECT t.retention_class_key, octet_length(t.command_fingerprint),
                     t.command_fingerprint_version, t.retain_rerun_input
@@ -1703,7 +1716,7 @@ mod p7_lifecycle_tests {
         assert_eq!(status, "EXPIRED");
         assert_eq!(node_status, "SKIPPED");
         let error: TaskError = serde_json::from_str(&error_json).unwrap();
-        assert_eq!(error.error_code, Some(OutcomeCode::WorkflowExpired.into()));
+        assert_eq!(error.error_code, OutcomeCode::WorkflowExpired.into());
         assert_eq!(
             error.message.as_deref(),
             Some("paused_workflow_auto_cancel_after elapsed: 1:00:00"),
