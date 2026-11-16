@@ -20,8 +20,11 @@ from horsies.core.brokers.stale_running import (
     read_stale_candidate,
 )
 from horsies.core.lifecycle.outcomes import (
+    NothingOwed,
     ObservedRetryCount,
     OutcomeDecodeError,
+    PhaseTwoOwed,
+    PhaseTwoStep,
     RetryNotRequested,
     RetryPastDeadline,
     RetryScheduled,
@@ -182,6 +185,7 @@ def _finish_row(**overrides: Any) -> dict[str, Any]:
         'queue_name': 'q1',
         'task_name': 'task_a',
         'node_has_dependents': None,
+        'downstream_subworkflow': None,
     }
     row.update(overrides)
     return row
@@ -193,7 +197,11 @@ class TestDecodeStaleAttemptRow:
 
         assert isinstance(outcome, StaleFailureApplied)
         assert outcome.retry == RetryNotRequested()
-        assert outcome.is_workflow_task is False
+        assert outcome.after == NothingOwed()
+
+    def test_a_failure_of_a_plain_task_with_a_node_fact_is_refused(self) -> None:
+        with pytest.raises(OutcomeDecodeError, match='does not set'):
+            decode_stale_attempt_row(_finish_row(downstream_subworkflow='NONE'))
 
     def test_a_failure_past_the_deadline(self) -> None:
         outcome = decode_stale_attempt_row(
@@ -209,12 +217,18 @@ class TestDecodeStaleAttemptRow:
             next_retry_at=DB_NOW + timedelta(seconds=5), good_until=DB_NOW,
         )
 
-    def test_a_failure_of_a_workflow_task_needs_the_dependents_fact(self) -> None:
+    def test_a_failure_of_a_workflow_task_owes_its_phase_two_step(self) -> None:
         outcome = decode_stale_attempt_row(
-            _finish_row(is_workflow_task=True, node_has_dependents=False),
+            _finish_row(
+                is_workflow_task=True,
+                node_has_dependents=True,
+                downstream_subworkflow='REACHABLE',
+            ),
         )
         assert isinstance(outcome, StaleFailureApplied)
-        assert outcome.is_workflow_task is True
+        assert outcome.after == PhaseTwoOwed(
+            task_name='task_a', queue_name='q1', step=PhaseTwoStep.SUBWORKFLOW_REACHABLE,
+        )
 
         with pytest.raises(OutcomeDecodeError, match='node_has_dependents'):
             decode_stale_attempt_row(_finish_row(is_workflow_task=True))

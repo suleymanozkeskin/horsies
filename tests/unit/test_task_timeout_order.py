@@ -30,6 +30,7 @@ from horsies.core.lifecycle.outcomes import (
     ObservedTaskState,
     OutcomeDecodeError,
     PhaseTwoOwed,
+    PhaseTwoStep,
     RetryNotRequested,
     RetryPastDeadline,
     RetryScheduled,
@@ -208,7 +209,11 @@ def _applied(*, workflow: bool = True) -> FailureApplied:
         observed=_observed(),
         retry=RetryNotRequested(),
         after=(
-            PhaseTwoOwed(task_name='timeout_task', queue_name='default')
+            PhaseTwoOwed(
+                task_name='timeout_task',
+                queue_name='default',
+                step=PhaseTwoStep.NO_DEPENDENTS,
+            )
             if workflow
             else CapacityWoken()
         ),
@@ -221,7 +226,9 @@ def _past_deadline() -> FailureApplied:
         terminal_at=_NOW,
         observed=_observed(),
         retry=RetryPastDeadline(next_retry_at=_NOW, good_until=_NOW),
-        after=PhaseTwoOwed(task_name='timeout_task', queue_name='default'),
+        after=PhaseTwoOwed(
+            task_name='timeout_task', queue_name='default', step=PhaseTwoStep.NO_DEPENDENTS,
+        ),
     )
 
 
