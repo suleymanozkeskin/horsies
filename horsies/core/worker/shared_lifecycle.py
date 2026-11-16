@@ -369,8 +369,8 @@ async def confirm_until_not_resumed(
                 assert_never(unreachable)
     logger.warning(
         f'Task {task_id} workflow was resumed on each of '
-        f'{_PRE_START_CONFIRM_ATTEMPTS} start attempts; leaving the claim '
-        f'to its lease'
+        f'{_PRE_START_CONFIRM_ATTEMPTS} start attempts; the worker releases '
+        f'the claim'
     )
     return (False, '', 'OWNERSHIP_UNCONFIRMED')
 

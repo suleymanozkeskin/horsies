@@ -21,7 +21,7 @@ use crate::core::{
     AnyNode, HorsiesError, OnError, TaskResult, WorkflowSpec, WorkflowSpecRegistry,
     WorkflowStartErrorCode,
 };
-use crate::workflow_engine::engine::{fail_subworkflow_node, subworkflow_load_failed_error};
+use crate::workflow_engine::engine::{fail_workflow_node, subworkflow_load_failed_error};
 
 fn after(index: usize, task_name: &str, dependencies: &[usize]) -> AnyNode {
     let mut node = task_node(index, task_name);
@@ -82,12 +82,13 @@ async fn a_load_failure_mark_does_not_overwrite_a_terminal_node() {
         sub.result = Some(stored.clone());
         seed_node(&pool, &sub).await;
 
-        fail_subworkflow_node(
+        let _step = fail_workflow_node(
             &pool,
             workflow_id,
             0,
             subworkflow_load_failed_error(
                 "subworkflow_terminal_guard_workflow",
+                0,
                 Some("tests.unregistered_child.v1"),
             ),
             &WorkflowSpecRegistry::new(),
@@ -246,7 +247,6 @@ async fn an_args_from_key_that_names_an_input_member_fails_the_node() {
 /// `test_enqueue_subworkflow_build_exception_marks_failed`
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #909"]
 async fn a_child_builder_failure_at_promotion_fails_the_node() {
     let db = IsolatedDatabase::create().await;
     let broken_key = "tests.port.broken_child_enqueue.v1";
@@ -291,6 +291,129 @@ async fn a_child_builder_failure_at_promotion_fails_the_node() {
     let error =
         super::support::stored_result_error(&failed.result.expect("the node stores its failure"));
     assert_eq!(code(&error).as_deref(), Some("WORKFLOW_ENQUEUE_FAILED"));
+    db.drop().await;
+}
+
+/// Stores `options` as the task options of node `task_index`: a node row whose stored data the promotion
+/// cannot read (the start refuses such options, so only a changed row holds them).
+async fn store_node_options(pool: &PgPool, workflow_id: Uuid, task_index: i32, options: &str) {
+    sqlx::query(
+        "UPDATE horsies_workflow_tasks SET task_options = $3
+         WHERE workflow_id = $1 AND task_index = $2",
+    )
+    .bind(workflow_id)
+    .bind(task_index)
+    .bind(options)
+    .execute(pool)
+    .await
+    .expect("store the node options");
+}
+
+/// Python `_build_enqueued_task_params` and `_fail_enqueued_task`
+/// (`horsies/core/workflows/engine.py:474-533, 746-790`): a task node whose stored retry policy does not read
+/// at promotion fails alone with `WORKER_SERIALIZATION_ERROR` (the node index and the workflow id in `data`),
+/// gets no task row, and its failure is applied: with `on_error = fail` and no other node left, the workflow
+/// fails. The node is not left READY, and the step that promoted it is not rolled back.
+#[tokio::test]
+#[serial]
+async fn a_task_node_that_cannot_be_prepared_at_promotion_fails_alone() {
+    let db = IsolatedDatabase::create().await;
+    let registry = WorkflowSpecRegistry::new();
+    let workflow_id = start(
+        &db.pool,
+        &spec(
+            "unprepared_task_node",
+            vec![
+                after(0, "unprepared_source", &[]),
+                after(1, "unprepared_dependent", &[0]),
+            ],
+        ),
+        &registry,
+    )
+    .await;
+    store_node_options(&db.pool, workflow_id, 1, r#"{"retry_policy": 5}"#).await;
+
+    let _source = finish_node(
+        &db.pool,
+        workflow_id,
+        0,
+        &ok(serde_json::json!(1)),
+        &registry,
+    )
+    .await;
+
+    assert_eq!(node_status(&db.pool, workflow_id, 0).await, "COMPLETED");
+    let dependent = node(&db.pool, workflow_id, 1).await;
+    assert_eq!(dependent.status, "FAILED");
+    assert_eq!(dependent.task_id, None);
+    let error = super::support::stored_result_error(
+        &dependent.result.expect("the node stores its failure"),
+    );
+    assert_eq!(code(&error).as_deref(), Some("WORKER_SERIALIZATION_ERROR"));
+    assert!(
+        error
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("unprepared_dependent")),
+        "{error:?}"
+    );
+    assert_eq!(
+        error.data,
+        Some(serde_json::json!({
+            "workflow_id": workflow_id.to_string(),
+            "task_index": 1,
+        }))
+    );
+    assert_eq!(workflow_status(&db.pool, workflow_id).await, "FAILED");
+    db.drop().await;
+}
+
+/// Python `_fail_enqueued_task` returns "stop" when `on_error = pause` paused the workflow, and the promotion
+/// promotes no other node (`horsies/core/workflows/engine.py:474-533`). The node that cannot be prepared
+/// fails; the workflow is PAUSED; its sibling of the same level holds no live task row and is not ENQUEUED.
+#[tokio::test]
+#[serial]
+async fn a_node_that_cannot_be_prepared_pauses_the_workflow_and_promotes_no_sibling() {
+    let db = IsolatedDatabase::create().await;
+    let registry = WorkflowSpecRegistry::new();
+    let mut paused_spec = spec(
+        "unprepared_task_node_pause",
+        vec![
+            after(0, "unprepared_pause_source", &[]),
+            after(1, "unprepared_pause_dependent", &[0]),
+            after(2, "unprepared_pause_sibling", &[0]),
+        ],
+    );
+    paused_spec.on_error = OnError::Pause;
+    let workflow_id = start(&db.pool, &paused_spec, &registry).await;
+    store_node_options(&db.pool, workflow_id, 1, r#"{"good_until": 12345}"#).await;
+
+    let _source = finish_node(
+        &db.pool,
+        workflow_id,
+        0,
+        &ok(serde_json::json!(1)),
+        &registry,
+    )
+    .await;
+
+    assert_eq!(workflow_status(&db.pool, workflow_id).await, "PAUSED");
+    let dependent = node(&db.pool, workflow_id, 1).await;
+    assert_eq!(dependent.status, "FAILED");
+    assert_eq!(dependent.task_id, None);
+    let sibling = node(&db.pool, workflow_id, 2).await;
+    assert!(
+        matches!(sibling.status.as_str(), "PENDING" | "READY"),
+        "{}",
+        sibling.status
+    );
+    let live_sibling_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM horsies_tasks WHERE task_name = 'unprepared_pause_sibling'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(live_sibling_rows, 0);
     db.drop().await;
 }
 

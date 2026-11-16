@@ -424,6 +424,7 @@ async fn channel(spawner: &Spawner, script: &str) -> ChildChannel {
         spawned,
         spawner.handle(),
         MailboxBound::for_seats(NonZeroUsize::MIN),
+        CHILD_KILL_WAIT,
     )
     .unwrap()
 }
@@ -545,5 +546,19 @@ async fn retire_sends_the_stop_frame_and_waits_for_the_exit() {
     // Reads the stop frame, then exits by itself.
     let obeys = channel(&spawner, r#"head -c 27 <&"$0" >/dev/null; exit 0"#).await;
     assert_eq!(obeys.retire().await, exited(0));
+    stop(spawner);
+}
+
+/// A channel dropped before its disposal (its slot task panicked or was
+/// aborted) kills its child, as Python's `_clear_slot` does.
+#[tokio::test]
+async fn a_dropped_channel_kills_its_child() {
+    let spawner = Spawner::start().unwrap();
+    let child = channel(&spawner, "exec sleep 60").await;
+    let mut exit = child.exit_watch();
+
+    drop(child);
+
+    assert_eq!(wait_for_exit(&mut exit, TEST_WAIT).await, killed());
     stop(spawner);
 }

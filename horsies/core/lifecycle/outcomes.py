@@ -722,6 +722,71 @@ def decode_failed_attempt_row(row: Mapping[str, Any]) -> FailedAttemptOutcome:
             return _decode_failure_refusal(row, shared)
 
 
+@dataclass(frozen=True, slots=True)
+class ClaimReleased:
+    """The row was CLAIMED by this worker at this claim generation: no task
+    code ran. It went back to PENDING with every claim and run field cleared
+    and no attempt row (the ``RELEASE`` rule)."""
+
+    task_id: str
+    queue_name: str
+    observed: ObservedTaskState
+
+
+def decode_ended_attempt_row(
+    row: Mapping[str, Any],
+) -> FailedAttemptOutcome | ClaimReleased:
+    """Decode the row of ``horsies_finish_failed_attempt`` called with the
+    ``RELEASE`` rule: ``RELEASED``, or any outcome of
+    ``decode_failed_attempt_row``.
+
+    Raises:
+        OutcomeDecodeError: the row does not satisfy the wire contract.
+    """
+    match row.get('outcome'):
+        case 'RELEASED':
+            return _decode_claim_released(row)
+        case _:
+            return decode_failed_attempt_row(row)
+
+
+def _decode_claim_released(row: Mapping[str, Any]) -> ClaimReleased:
+    shared = _failed_attempt_shared(row, 'ended-attempt')
+    _require_null_columns(
+        row,
+        frozenset(
+            {
+                'ordinality',
+                'terminal_at',
+                'terminalization_kind',
+                'guard_kind',
+                'observed_guard',
+                'retry_disposition',
+                'retry_count',
+                'next_retry_at',
+                'good_until',
+                'is_workflow_task',
+                'task_name',
+                'node_has_dependents',
+            }
+        ),
+    )
+    observed = ObservedTaskState(
+        status=_optional_status(shared, 'observed_status'),
+        worker_id=_optional_str(shared, 'observed_worker_id'),
+        claimed_at=_optional_datetime(shared, 'observed_claimed_at'),
+    )
+    if observed.status is not TaskStatus.CLAIMED:
+        raise OutcomeDecodeError(
+            f'RELEASED carries observed_status {observed.status!r}, not CLAIMED'
+        )
+    return ClaimReleased(
+        task_id=_require_identity_text(shared, 'task_id'),
+        queue_name=_require_str(row, 'queue_name'),
+        observed=observed,
+    )
+
+
 def _failed_attempt_shared(row: Mapping[str, Any], label: str) -> dict[str, Any]:
     """The ten shared columns, after the check of the whole row shape."""
     present = frozenset(row.keys())

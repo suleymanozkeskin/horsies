@@ -30,8 +30,8 @@ use crate::broker::stale_recovery::{
 };
 use crate::core::lifecycle::outcomes::GuardEvidence;
 use crate::core::lifecycle::{
-    AfterStaleFailure, AttemptWriteRefusal, ObservedTaskState, PhaseTwoOwed, RetryRefusal,
-    StaleAttemptOutcome,
+    AfterStaleFailure, AttemptWriteRefusal, ObservedTaskState, PhaseTwoOwed, PhaseTwoStep,
+    RetryRefusal, StaleAttemptOutcome,
 };
 use crate::core::types::status::TaskStatus;
 use crate::db::CorePool;
@@ -584,6 +584,7 @@ mod finish {
                 AfterStaleFailure::PhaseTwoOwed(PhaseTwoOwed {
                     task_name: "lifecycle.test".to_owned(),
                     queue_name: QUEUE.to_owned(),
+                    step: PhaseTwoStep::NoDependents,
                 })
             ),
             other => panic!("expected the stale failure, got {other:?}"),

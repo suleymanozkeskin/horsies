@@ -174,9 +174,10 @@ GET_WORKFLOW_TASKS_SQL = text("""
     ORDER BY wt.task_index
 """)
 
+# Every terminal workflow status sets completed_at, CANCELLED included.
 CANCEL_WORKFLOW_SQL = text("""
     UPDATE horsies_workflows
-    SET status = 'CANCELLED', updated_at = NOW()
+    SET status = 'CANCELLED', completed_at = NOW(), updated_at = NOW()
     WHERE id = :wf_id AND status IN ('PENDING', 'RUNNING', 'PAUSED')
 """)
 

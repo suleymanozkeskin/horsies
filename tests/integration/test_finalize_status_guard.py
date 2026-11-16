@@ -6,12 +6,12 @@ attempt that was re-claimed by another worker (row RUNNING again under a new
 owner).  Each test inserts a task in RUNNING state, simulates the competing
 transition, then fires the guarded statement and asserts it writes nothing.
 The failure and retry writes go through ``horsies_finish_failed_attempt``,
-whose fence is the one the locked read and the retry update carried.
+whose fence is the owner, the claim generation and the retry count of the
+request.
 """
 
 from __future__ import annotations
 
-import json
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -29,6 +29,7 @@ from horsies.core.lifecycle.commands import (
 from horsies.core.lifecycle.fences import OwnedClaim, PriorLockedRead
 from horsies.core.lifecycle.outcomes import (
     Applied,
+    ClaimReleased,
     FailedAttemptOutcome,
     LostClaim,
     RetryScheduled,
@@ -48,10 +49,10 @@ from horsies.core.worker.failed_attempt import (
     NoRetry,
     RetryAfter,
     RetryRequest,
+    finish_ended_attempt,
     finish_failed_attempt,
 )
 from horsies.core.worker.shared_stop import RetryPlacement
-from horsies.core.worker.sql import READ_IN_FLIGHT_ATTEMPT_SQL
 from horsies.core.worker.workflow_success import (
     FinishWorkflowSuccess,
     success_statement,
@@ -59,7 +60,6 @@ from horsies.core.worker.workflow_success import (
 from horsies.core.worker.worker import (
     _confirm_ownership_and_set_running,
     _initialize_worker_pool,
-    UNCLAIM_CLAIMED_TASK_SQL,
 )
 from tests.integration.conftest import compute_test_command_fingerprint
 from tests.integration.history_seeding import force_terminal
@@ -111,68 +111,6 @@ async def _insert_running_task(
             'command_fingerprint': fingerprint,
             'claimed_by_worker_id': claimed_by_worker_id,
             'claimed_at': claimed_at,
-        },
-    )
-    await session.flush()
-    return task_id
-
-
-async def _insert_running_task_with_retry(
-    session: AsyncSession,
-    *,
-    good_until: datetime,
-    retry_count: int = 0,
-    max_retries: int = 3,
-    intervals: list[int] | None = None,
-) -> str:
-    """Insert RUNNING task row with retry policy metadata."""
-    if intervals is None:
-        intervals = [1, 1, 1]
-
-    task_id = str(uuid.uuid4())
-    task_options = json.dumps({
-        'retry_policy': {
-            'max_retries': max_retries,
-            'intervals': intervals,
-            'backoff_strategy': 'fixed',
-            'jitter': False,
-            'auto_retry_for': ['TRANSIENT'],
-        },
-        'good_until': good_until.isoformat(),
-    })
-
-    sent_at, fingerprint = compute_test_command_fingerprint(
-        task_name='guard_test_retry',
-        good_until=good_until,
-        task_options=task_options,
-    )
-    await session.execute(
-        text("""
-            INSERT INTO horsies_tasks
-                (
-                    id, task_name, queue_name, priority, input, status, sent_at,
-                    created_at, updated_at, retry_count, max_retries, started_at,
-                    good_until, task_options, claimed_at, retention_class_key,
-                    command_fingerprint_version, command_fingerprint,
-                    retain_rerun_input, execution, enqueued_at, is_workflow_task,
-                    worker_pid, worker_hostname, worker_process_name
-                ) VALUES (
-                    :id, 'guard_test_retry', 'default', 100, '{}', 'RUNNING', :sent_at,
-                    NOW(), NOW(), :retry_count, :max_retries, NOW(), :good_until,
-                    :task_options, :claimed_at, 'standard_30d', 1,
-                    :command_fingerprint, FALSE, 'ISOLATED', NOW(), FALSE, 4242,
-                    'host-1', 'child-1'
-                )
-        """),
-        {
-            'id': task_id,
-            'sent_at': sent_at,
-            'command_fingerprint': fingerprint,
-            'retry_count': retry_count,
-            'max_retries': max_retries,
-            'good_until': good_until,
-            'task_options': task_options,
-            'claimed_at': CLAIMED_AT,
         },
     )
     await session.flush()
@@ -264,12 +202,12 @@ async def _link_workflow_node(session: AsyncSession, task_id: str) -> None:
     await session.execute(
         text("""
             INSERT INTO horsies_workflow_tasks
-                (id, workflow_id, task_index, node_id, task_name, input,
+                (downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                  queue_name, priority, dependencies,
                  allow_failed_deps, join_type, is_subworkflow, status,
                  task_id, created_at,
                  max_retries, execution, retention_class_key)
-            VALUES (:id, :wf, 0, 'node-0', 'guard_test', '{}',
+            VALUES ('NONE', :id, :wf, 0, 'node-0', 'guard_test', '{}',
                     'default', 100, '{}', FALSE, 'all', FALSE, 'RUNNING',
                     CAST(:task_id AS uuid), NOW(),
                     0, 'ISOLATED', 'standard_30d')
@@ -549,37 +487,6 @@ async def test_reaper_then_retry_race_sequence(
     assert await _get_task_status(session, task_id) == 'FAILED'
 
 
-@pytest.mark.asyncio(loop_scope='function')
-async def test_in_flight_read_returns_the_retry_facts(
-    session: AsyncSession,
-    clean_workflow_tables: None,  # noqa: ARG001
-) -> None:
-    """READ_IN_FLIGHT_ATTEMPT_SQL returns the status and the retry facts."""
-    good_until = datetime.now(timezone.utc) + timedelta(seconds=60)
-    task_id = await _insert_running_task_with_retry(
-        session, good_until=good_until, retry_count=1
-    )
-    await session.execute(
-        text(
-            'UPDATE horsies_tasks SET claimed_by_worker_id = :wid '
-            'WHERE id = CAST(:id AS uuid)'
-        ),
-        {'id': task_id, 'wid': OWNER_WORKER_ID},
-    )
-
-    row = (
-        await session.execute(
-            READ_IN_FLIGHT_ATTEMPT_SQL,
-            {'id': task_id, 'wid': OWNER_WORKER_ID, 'claimed_at': CLAIMED_AT},
-        )
-    ).one()
-
-    assert (row.status, row.retry_count, row.max_retries) == ('RUNNING', 1, 3)
-    assert json.loads(row.task_options)['retry_policy']['auto_retry_for'] == [
-        'TRANSIENT',
-    ]
-
-
 # ---------------------------------------------------------------------------
 # Ownership guards: a stale worker must not clobber a re-claimed attempt
 # ---------------------------------------------------------------------------
@@ -836,53 +743,47 @@ async def test_workflow_success_rejects_stale_claim_generation(
     assert isinstance(live, SuccessApplied)
 
 
+async def _end_attempt(
+    session: AsyncSession,
+    task_id: str,
+    *,
+    claimed_at: datetime,
+) -> FailedAttemptOutcome | ClaimReleased:
+    """The end of an attempt whose child left no result (the RELEASE rule),
+    in the session's open transaction."""
+    return await finish_ended_attempt(
+        await session.connection(),
+        FinishFailedAttempt(
+            task_id=task_id,
+            fence=OwnedClaim(worker_id=OWNER_WORKER_ID, claimed_at=claimed_at),
+            retry=NoRetry(),
+            result_json='{"err": {"error_code": "WORKER_CRASHED"}}',
+            error_code='WORKER_CRASHED',
+            failed_reason=None,
+            attempt=AttemptFailure(
+                kind=AttemptFailureKind.FAILED,
+                error_message='crashed',
+                failed_reason='crashed',
+            ),
+        ),
+    )
+
+
 @pytest.mark.asyncio(loop_scope='function')
-async def test_in_flight_read_rejects_stale_claim_generation(
+async def test_the_release_rule_rejects_stale_claim_generation(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """The in-flight read of the failure paths skips a row from a different
-    generation."""
-    task_id = await _insert_running_task(session, claimed_at=GEN_CURRENT)
-
-    stale_row = (
-        await session.execute(
-            READ_IN_FLIGHT_ATTEMPT_SQL,
-            {'id': task_id, 'wid': OWNER_WORKER_ID, 'claimed_at': GEN_STALE},
-        )
-    ).fetchone()
-    assert stale_row is None
-
-    live_row = (
-        await session.execute(
-            READ_IN_FLIGHT_ATTEMPT_SQL,
-            {'id': task_id, 'wid': OWNER_WORKER_ID, 'claimed_at': GEN_CURRENT},
-        )
-    ).fetchone()
-    assert live_row is not None
-
-
-@pytest.mark.asyncio(loop_scope='function')
-async def test_unclaim_rejects_stale_claim_generation(
-    session: AsyncSession,
-    clean_workflow_tables: None,  # noqa: ARG001
-) -> None:
-    """Standalone requeue cannot release a CLAIMED row it did not claim."""
+    """The end of an attempt cannot release a CLAIMED row of another claim."""
     task_id = await _insert_running_task(session, claimed_at=GEN_CURRENT)
     await _set_task_status(session, task_id, 'CLAIMED')
 
-    stale = await session.execute(
-        UNCLAIM_CLAIMED_TASK_SQL,
-        {'id': task_id, 'wid': OWNER_WORKER_ID, 'claimed_at': GEN_STALE},
-    )
-    assert (getattr(stale, 'rowcount', 0) or 0) == 0
+    stale = await _end_attempt(session, task_id, claimed_at=GEN_STALE)
+    assert isinstance(stale, LostClaim)
     assert await _get_task_status(session, task_id) == 'CLAIMED'
 
-    live = await session.execute(
-        UNCLAIM_CLAIMED_TASK_SQL,
-        {'id': task_id, 'wid': OWNER_WORKER_ID, 'claimed_at': GEN_CURRENT},
-    )
-    assert (getattr(live, 'rowcount', 0) or 0) == 1
+    live = await _end_attempt(session, task_id, claimed_at=GEN_CURRENT)
+    assert isinstance(live, ClaimReleased)
     assert await _get_task_status(session, task_id) == 'PENDING'
 
 

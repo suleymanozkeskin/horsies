@@ -226,8 +226,8 @@ def start_always_allowed() -> StartCheck:
 
 
 # One attempt plus one after a resume. A workflow paused and resumed again
-# between the two ends as OWNERSHIP_UNCONFIRMED; the claim lease then
-# returns the task to the queue.
+# between the two ends as OWNERSHIP_UNCONFIRMED; the worker then releases the
+# claim (ReleaseUnconfirmedClaim), and the task goes back to the queue.
 _PRE_START_CONFIRM_ATTEMPTS = 2
 
 
@@ -977,8 +977,8 @@ def _confirm_until_not_resumed(
 
     Returns None to start the task, or the wire tuple that stops it. A
     workflow resumed on every one of ``_PRE_START_CONFIRM_ATTEMPTS`` tries
-    returns OWNERSHIP_UNCONFIRMED; the task stays claimed until its lease
-    returns it to the queue. ``DeadlineBeforeStart``: ``start_check`` found
+    returns OWNERSHIP_UNCONFIRMED; the worker then releases the claim
+    (``ReleaseUnconfirmedClaim``). ``DeadlineBeforeStart``: ``start_check`` found
     the deadline of the run fired (``_confirm_ownership_and_set_running``).
     ``statements`` bounds the statements of each attempt.
     """
@@ -1000,8 +1000,8 @@ def _confirm_until_not_resumed(
                 assert_never(unreachable)
     logger.warning(
         f'Task {task_id} workflow was resumed on each of '
-        f'{_PRE_START_CONFIRM_ATTEMPTS} start attempts; leaving the claim '
-        f'to its lease'
+        f'{_PRE_START_CONFIRM_ATTEMPTS} start attempts; the worker releases '
+        f'the claim'
     )
     return (False, '', 'OWNERSHIP_UNCONFIRMED')
 

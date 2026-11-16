@@ -414,12 +414,13 @@ BEGIN
         '00000000-0000-7000-8000-000000000300', 32, now(), now(), now(), NULL, now());
     INSERT INTO horsies_workflow_tasks (id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
         dependencies, args_from, workflow_ctx_from, allow_failed_deps, join_type, min_success, task_options,
-        max_retries, execution, good_until, retention_class_key, status, task_id, is_subworkflow, sub_workflow_id,
-        sub_workflow_name, sub_definition_key, sub_workflow_params, sub_workflow_summary, result, error, created_at,
-        started_at, completed_at)
+        max_retries, execution, good_until, retention_class_key, downstream_subworkflow, status, task_id,
+        is_subworkflow, sub_workflow_id, sub_workflow_name, sub_definition_key, sub_workflow_params,
+        sub_workflow_summary, result, error, created_at, started_at, completed_at)
     VALUES (horsies_uuidv7(), v_wf, 0, 'n0', 'sub', '{}', 'default', 50, '{}', NULL, NULL, FALSE, 'all', NULL,
-        NULL, NULL, NULL, NULL, NULL, 'READY', NULL, TRUE, NULL, 'child.wf', 'child.key', 'NOT_GIVEN', NULL, NULL,
-        NULL, now(), NULL, NULL);
+        NULL, NULL, NULL, NULL, NULL, 'NONE', 'READY', NULL,
+        TRUE, NULL, 'child.wf', 'child.key', 'NOT_GIVEN',
+        NULL, NULL, NULL, now(), NULL, NULL);
     PERFORM wft_check((SELECT advance_child_workflow_id FROM horsies_workflow_resume(v_wf) WHERE row_kind = 'OUTCOME')
                       = v_wf, 'depth limit: the resume that ends a child names it for the parent advance');
     PERFORM wft_check((wft_node(v_wf, 0)).status = 'FAILED'
@@ -536,6 +537,150 @@ BEGIN
     PERFORM wft_check((wft_workflow(v_required)).status = 'FAILED'
                       AND ((wft_workflow(v_required)).error::json ->> 'error_code') = 'REQUIRED',
                       'policy: the first FAILED required node gives the error');
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000471';
+    v_form record;
+    v_reader text;
+    v_message text;
+BEGIN
+    -- A RUNNING workflow with no live node: the completion reads the stored policy. Each refused form raises XX001
+    -- with the cause of Python's read_stored_success_policy, in both readers, and writes nothing.
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[{"idx":0}]');
+    UPDATE horsies_workflow_tasks SET status = 'COMPLETED', result = wft_ok('1'), completed_at = now()
+    WHERE workflow_id = v_wf AND task_index = 0;
+    FOR v_form IN
+        SELECT f.policy::jsonb AS policy, f.cause
+        FROM (VALUES
+            ('[1, 2, 3]', 'the policy is a JSON array, not an object'),
+            ('"text"', 'the policy is a JSON string, not an object'),
+            ('7', 'the policy is a JSON number, not an object'),
+            ('true', 'the policy is a JSON boolean, not an object'),
+            ('{}', 'the policy has no cases'),
+            ('{"cases": "not a list"}', 'cases is a JSON string, not an array'),
+            ('{"cases": null}', 'cases is a JSON null, not an array'),
+            ('{"cases": [1]}', 'cases[0]: the case is a JSON number, not an object'),
+            ('{"cases": [{}]}', 'cases[0]: the case has no required_indices'),
+            ('{"cases": [{"required_indices": null}]}', 'cases[0]: required_indices: a JSON null, not an array'),
+            ('{"cases": [{"required_indices": [0]}, {"required_indices": [true]}]}',
+             'cases[1]: required_indices: item 0 is a JSON boolean, not an index'),
+            ('{"cases": [{"required_indices": [0, -1]}]}', 'cases[0]: required_indices: item 1 is below 0'),
+            ('{"cases": [{"required_indices": [1.0]}]}',
+             'cases[0]: required_indices: item 0 is a JSON number, not an index'),
+            ('{"cases": [{"required_indices": [-1.5]}]}',
+             'cases[0]: required_indices: item 0 is a JSON number, not an index'),
+            ('{"cases": [{"required_indices": ["0"]}]}',
+             'cases[0]: required_indices: item 0 is a JSON string, not an index'),
+            ('{"cases": [{"required_indices": [null]}]}',
+             'cases[0]: required_indices: item 0 is a JSON null, not an index'),
+            ('{"cases": [], "optional_indices": "x"}', 'optional_indices: a JSON string, not an array'),
+            ('{"cases": [{"required_indices": [0]}], "optional_indices": [0, 0.5]}',
+             'optional_indices: item 1 is a JSON number, not an index')
+        ) AS f(policy, cause)
+    LOOP
+        UPDATE horsies_workflows SET success_policy = v_form.policy WHERE id = v_wf;
+        FOREACH v_reader IN ARRAY ARRAY['try_complete', 'failure_error'] LOOP
+            v_message := NULL;
+            BEGIN
+                CASE v_reader
+                    WHEN 'try_complete' THEN PERFORM horsies_workflow_try_complete(v_wf);
+                    WHEN 'failure_error' THEN PERFORM horsies_workflow_failure_error(v_wf, v_form.policy);
+                END CASE;
+            EXCEPTION
+                WHEN data_corrupted THEN
+                    v_message := SQLERRM;
+            END;
+            PERFORM wft_check(
+                v_message = format('stored success_policy of workflow %s does not parse: %s', v_wf, v_form.cause),
+                format('unreadable policy: %s refuses %s with %L (raised %L)', v_reader, v_form.policy,
+                       v_form.cause, v_message)
+            );
+        END LOOP;
+    END LOOP;
+    PERFORM wft_check((wft_workflow(v_wf)).status = 'RUNNING' AND (wft_workflow(v_wf)).error IS NULL
+                      AND (wft_workflow(v_wf)).completed_at IS NULL,
+                      'unreadable policy: the workflow row is not written');
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000481';
+    v_form record;
+    v_row horsies_workflows;
+BEGIN
+    -- Node 0 COMPLETED, node 1 FAILED with the user code SECOND. Each accepted form reads as no policy or as its
+    -- cases; the completion writes the expected status and error code.
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[{"idx":0},{"idx":1}]');
+    UPDATE horsies_workflow_tasks SET status = 'COMPLETED', result = wft_ok('1'), completed_at = now()
+    WHERE workflow_id = v_wf AND task_index = 0;
+    UPDATE horsies_workflow_tasks SET status = 'FAILED', result = wft_err('SECOND'), completed_at = now()
+    WHERE workflow_id = v_wf AND task_index = 1;
+    FOR v_form IN
+        SELECT f.policy::jsonb AS policy, f.status, f.code, f.name
+        FROM (VALUES
+            ('null', 'FAILED', 'SECOND', 'JSON null is no policy: the first FAILED node gives the error'),
+            ('{"cases": [{"required_indices": [0]}], "optional_indices": null, "extra": 1}', 'COMPLETED', NULL,
+             'a null optional_indices and an unknown policy key are accepted'),
+            ('{"cases": [{"required_indices": [0], "extra": "x"}], "optional_indices": [1]}', 'COMPLETED', NULL,
+             'an unknown case key is accepted'),
+            ('{"cases": [{"required_indices": [0e0]}]}', 'COMPLETED', NULL,
+             'jsonb stores 0e0 as the index 0'),
+            ('{"cases": []}', 'FAILED', 'WORKFLOW_SUCCESS_CASE_NOT_MET', 'a policy with no case is not met'),
+            ('{"cases": [{"required_indices": []}]}', 'FAILED', 'WORKFLOW_SUCCESS_CASE_NOT_MET',
+             'a case with no required node is skipped'),
+            ('{"cases": [{"required_indices": [0, 3000000000]}]}', 'FAILED', 'WORKFLOW_SUCCESS_CASE_NOT_MET',
+             'an index above the integer range names no node'),
+            ('{"cases": [{"required_indices": [3000000000]}, {"required_indices": [0]}]}', 'COMPLETED', NULL,
+             'a case with an index above the integer range is not met; another case is'),
+            ('{"cases": [{"required_indices": [1, 0]}]}', 'FAILED', 'SECOND',
+             'the first FAILED required node gives the error')
+        ) AS f(policy, status, code, name)
+    LOOP
+        UPDATE horsies_workflows
+        SET status = 'RUNNING', success_policy = v_form.policy, result = NULL, error = NULL, completed_at = NULL
+        WHERE id = v_wf;
+        PERFORM wft_check(horsies_workflow_try_complete(v_wf) = v_form.status,
+                          'accepted policy: ' || v_form.name || ' (status)');
+        v_row := wft_workflow(v_wf);
+        PERFORM wft_check(
+            v_row.status = v_form.status
+            AND coalesce(v_row.error::json -> 'error_code' ->> '__builtin_task_code__',
+                         v_row.error::json ->> 'error_code') IS NOT DISTINCT FROM v_form.code,
+            'accepted policy: ' || v_form.name || ' (error)'
+        );
+    END LOOP;
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000491';
+    v_task uuid;
+    v_pass integer;
+    v_row record;
+    v_limit_error text := horsies_task_error_object('WORKFLOW_ENQUEUE_FAILED', 'limit', NULL);
+    v_limit_node text := horsies_task_error_envelope('WORKFLOW_ENQUEUE_FAILED', 'limit node', NULL, NULL, NULL);
+BEGIN
+    -- The phase-2 step of the last node reads a policy that does not parse: each pass raises and writes nothing,
+    -- the caller counts the raise, and the recovery limit fails the workflow closed.
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[{"idx":0}]', NULL, '{"cases":[{"required_indices":[0]}]}');
+    UPDATE horsies_workflows SET success_policy = '{"cases":[{"required_indices":["0"]}]}' WHERE id = v_wf;
+    v_task := wft_task_of(v_wf, 0);
+    PERFORM wft_phase1(v_task, wft_ok('1'));
+    FOR v_pass IN 1..3 LOOP
+        PERFORM wft_refused(format('SELECT * FROM horsies_workflow_node_finish(%L, TRUE, %L)', v_task, 'READ'),
+                            'XX001', 'unreadable policy: the phase-2 step raises (pass ' || v_pass || ')');
+        PERFORM wft_check((wft_node(v_wf, 0)).status = 'ENQUEUED' AND (wft_workflow(v_wf)).status = 'RUNNING'
+                          AND EXISTS (SELECT 1 FROM horsies_workflow_phase2_pending WHERE task_id = v_task),
+                          'unreadable policy: the raised step writes nothing (pass ' || v_pass || ')');
+        SELECT * INTO v_row FROM horsies_workflow_phase2_record_raise(v_task, 3, v_limit_error, v_limit_node);
+    END LOOP;
+    PERFORM wft_check(v_row.outcome = 'LIMIT_REACHED' AND v_row.limit_outcome = 'LIMIT_REACHED_FAILED',
+                      'unreadable policy: the third raise reaches the recovery limit');
+    PERFORM wft_check((wft_node(v_wf, 0)).status = 'FAILED' AND (wft_workflow(v_wf)).status = 'FAILED'
+                      AND (wft_workflow(v_wf)).error = v_limit_error,
+                      'unreadable policy: the recovery limit fails the workflow closed');
 END $$;
 
 DO $$
@@ -844,4 +989,1009 @@ BEGIN
     PERFORM wft_check(v_row.disposition = 'APPLIED' AND (wft_node(v_wf, 0)).result = wft_ok('1')
                       AND NOT EXISTS (SELECT 1 FROM horsies_workflow_phase2_quarantine WHERE task_id = v_task),
                       'phase-2 recovery: a quarantined record applies from the copy and deletes it');
+END $$;
+
+-- Downstream sub-workflow fact and the two phase-2 forms ------------------------------------------------------------
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000801';
+    v_child uuid := '00000000-0000-7000-8000-000000000802';
+BEGIN
+    -- Top level: 0 -> 1 -> 2 (sub); 0 -> 5; 3 -> 4; 6 (sub root with a child). Child: 0 -> 1 (sub).
+    PERFORM * FROM wft_start(
+        jsonb_build_array(
+            jsonb_build_object('id', v_wf, 'on_error', 'fail'),
+            jsonb_build_object('id', v_child, 'on_error', 'fail', 'parent', v_wf, 'parent_index', 6, 'depth', 1)),
+        jsonb_build_array(
+            jsonb_build_object('idx', 0), jsonb_build_object('idx', 1, 'deps', jsonb_build_array(0)),
+            jsonb_build_object('idx', 2, 'deps', jsonb_build_array(1), 'sub', true, 'params', 'GIVEN'),
+            jsonb_build_object('idx', 3), jsonb_build_object('idx', 4, 'deps', jsonb_build_array(3)),
+            jsonb_build_object('idx', 5, 'deps', jsonb_build_array(0)),
+            jsonb_build_object('idx', 6, 'sub', true),
+            jsonb_build_object('wf', v_child, 'idx', 0),
+            jsonb_build_object('wf', v_child, 'idx', 1, 'deps', jsonb_build_array(0), 'sub', true))
+    );
+    PERFORM wft_check(
+        (SELECT string_agg(task_index || '=' || downstream_subworkflow, ',' ORDER BY task_index)
+         FROM horsies_workflow_tasks WHERE workflow_id = v_wf)
+        = '0=REACHABLE,1=REACHABLE,2=NONE,3=NONE,4=NONE,5=NONE,6=NONE',
+        'start: downstream_subworkflow is REACHABLE exactly for the ancestors of a sub-workflow node'
+    );
+    PERFORM wft_check(
+        (SELECT string_agg(task_index || '=' || downstream_subworkflow, ',' ORDER BY task_index)
+         FROM horsies_workflow_tasks WHERE workflow_id = v_child) = '0=REACHABLE,1=NONE',
+        'start: a child workflow gets its own downstream_subworkflow facts'
+    );
+    PERFORM wft_check((wft_node(v_wf, 2)).sub_workflow_params = 'GIVEN'
+                      AND (wft_node(v_wf, 6)).sub_workflow_params = 'NOT_GIVEN'
+                      AND (wft_node(v_wf, 0)).sub_workflow_params IS NULL,
+                      'start: sub_workflow_params stored on sub-workflow nodes only');
+    PERFORM wft_refused($q$
+        SELECT * FROM horsies_workflow_start(
+            ARRAY['00000000-0000-7000-8000-000000000803'::uuid], ARRAY['wf'], ARRAY[NULL::text], ARRAY['fail'],
+            ARRAY[NULL::integer], ARRAY[NULL::text], ARRAY[NULL::uuid], ARRAY[NULL::integer], ARRAY[0], now(),
+            ARRAY['00000000-0000-7000-8000-000000000803'::uuid], ARRAY[0], ARRAY['n0'], ARRAY['s0'], ARRAY['{}'],
+            ARRAY['default'], ARRAY[50], ARRAY['[]'], ARRAY[NULL::text], ARRAY[NULL::text], ARRAY[FALSE],
+            ARRAY['all'], ARRAY[NULL::integer], ARRAY[NULL::text], ARRAY[NULL::integer], ARRAY[NULL::text],
+            ARRAY[NULL::timestamptz], ARRAY[NULL::text], ARRAY[TRUE], ARRAY['child.wf'], ARRAY['child.key'],
+            ARRAY[NULL::text], ARRAY[]::uuid[], ARRAY[]::integer[], ARRAY[]::text[])
+    $q$, '23514', 'start refuses a sub-workflow node with no params choice (table CHECK)');
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000811';
+    v_rows bigint;
+    v_child_starts bigint;
+BEGIN
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[
+        {"idx":0},{"idx":1,"deps":[0]},
+        {"idx":2},{"idx":3,"deps":[2],"sub":true,"params":"GIVEN"}
+    ]');
+    -- Node 0: downstream NONE, the one-statement form; it owes no child start.
+    PERFORM wft_phase1(wft_task_of(v_wf, 0), wft_ok('1'));
+    SELECT count(*), count(*) FILTER (WHERE row_kind = 'CHILD_START') INTO v_rows, v_child_starts
+    FROM horsies_workflow_node_finish(wft_task_of(v_wf, 0), TRUE, 'READ');
+    PERFORM wft_check(v_rows = 1 AND v_child_starts = 0 AND (wft_node(v_wf, 1)).status = 'ENQUEUED',
+                      'downstream NONE: one statement, task node promoted, no child start owed');
+    -- Node 2: downstream REACHABLE, the transaction form; it owes the child start of node 3.
+    PERFORM wft_phase1(wft_task_of(v_wf, 2), wft_ok('2'));
+    SELECT count(*) FILTER (WHERE row_kind = 'CHILD_START' AND task_index = 3 AND sub_workflow_params = 'GIVEN')
+    INTO v_child_starts
+    FROM horsies_workflow_node_finish(wft_task_of(v_wf, 2), TRUE, 'READ');
+    PERFORM wft_check(v_child_starts = 1, 'downstream REACHABLE: the step owes the child start, with its params');
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000821';
+    v_task uuid;
+BEGIN
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[{"idx":0},{"idx":1,"deps":[0],"sub":true}]');
+    v_task := wft_task_of(v_wf, 0);
+    PERFORM wft_phase1(v_task, wft_ok('1'));
+    UPDATE horsies_workflow_tasks SET downstream_subworkflow = 'NONE' WHERE workflow_id = v_wf AND task_index = 0;
+    PERFORM wft_refused(
+        format($q$SELECT * FROM horsies_workflow_node_finish(%L, TRUE, 'READ')$q$, v_task), 'XX001',
+        'node finish refuses a child start owed by a node whose fact says NONE');
+    PERFORM wft_check((wft_node(v_wf, 0)).status = 'ENQUEUED' AND (wft_node(v_wf, 1)).status = 'PENDING'
+                      AND EXISTS (SELECT 1 FROM horsies_workflow_phase2_pending WHERE task_id = v_task),
+                      'node finish refusal writes nothing');
+END $$;
+
+DO $$
+DECLARE
+    v_reach uuid := '00000000-0000-7000-8000-000000000831';
+    v_none uuid := '00000000-0000-7000-8000-000000000832';
+    v_leaf uuid := '00000000-0000-7000-8000-000000000833';
+    v_task uuid;
+    v_claimed timestamptz := now() - interval '1 second';
+    v_out record;
+BEGIN
+    PERFORM * FROM wft_start1(v_reach, 'fail', '[{"idx":0},{"idx":1,"deps":[0],"sub":true}]');
+    PERFORM * FROM wft_start1(v_none, 'fail', '[{"idx":0},{"idx":1,"deps":[0]}]');
+    PERFORM * FROM wft_start1(v_leaf, 'fail', '[{"idx":0}]');
+    v_task := wft_task_of(v_reach, 0);
+    UPDATE horsies_tasks SET status = 'RUNNING', claimed_at = v_claimed, claimed_by_worker_id = 'worker-1',
+        started_at = now(), worker_pid = 1, worker_hostname = 'host', worker_process_name = 'proc' WHERE id = v_task;
+    SELECT * INTO v_out FROM horsies_finish_workflow_success(v_task, 'worker-1', v_claimed, wft_ok('1'));
+    PERFORM wft_check(v_out.outcome = 'APPLIED' AND v_out.node_has_dependents
+                      AND v_out.downstream_subworkflow = 'REACHABLE',
+                      'phase 1 (success) returns downstream_subworkflow REACHABLE with node_has_dependents');
+    v_task := wft_task_of(v_none, 0);
+    UPDATE horsies_tasks SET status = 'RUNNING', claimed_at = v_claimed, claimed_by_worker_id = 'worker-1',
+        started_at = now(), worker_pid = 1, worker_hostname = 'host', worker_process_name = 'proc' WHERE id = v_task;
+    SELECT * INTO v_out FROM horsies_finish_failed_attempt(
+        v_task, 'worker-1', v_claimed, 'NONE', NULL, NULL, NULL, wft_err('USER'), 'USER', 'boom',
+        'FAILED', 'boom', 'boom', 'REFUSE', TRUE);
+    PERFORM wft_check(v_out.outcome = 'APPLIED' AND v_out.node_has_dependents
+                      AND v_out.downstream_subworkflow = 'NONE',
+                      'phase 1 (failure) returns downstream_subworkflow NONE for task-only dependents');
+    v_task := wft_task_of(v_leaf, 0);
+    UPDATE horsies_tasks SET status = 'RUNNING', claimed_at = v_claimed, claimed_by_worker_id = 'worker-1',
+        started_at = now(), worker_pid = 1, worker_hostname = 'host', worker_process_name = 'proc' WHERE id = v_task;
+    SELECT * INTO v_out FROM horsies_finish_workflow_success(v_task, 'worker-1', v_claimed, wft_ok('1'));
+    PERFORM wft_check(v_out.outcome = 'APPLIED' AND NOT v_out.node_has_dependents
+                      AND v_out.downstream_subworkflow = 'NONE', 'phase 1 of a leaf: no dependents, NONE');
+    SELECT * INTO v_out FROM horsies_finish_workflow_success(v_task, 'worker-1', v_claimed, wft_ok('1'));
+    PERFORM wft_check(v_out.outcome <> 'APPLIED' AND v_out.node_has_dependents IS NULL
+                      AND v_out.downstream_subworkflow IS NULL, 'phase 1 miss: both facts NULL');
+END $$;
+
+-- Task rows minted through horsies_insert_task_rows -----------------------------------------------------------------
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000901';
+    v_two horsies_tasks;
+    v_three horsies_tasks;
+BEGIN
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[{"idx":0},{"idx":2,"deps":[0]},{"idx":3,"deps":[0]}]');
+    PERFORM wft_finish(v_wf, 0, wft_ok('1'));
+    SELECT * INTO v_two FROM horsies_tasks WHERE id = wft_task_of(v_wf, 2);
+    SELECT * INTO v_three FROM horsies_tasks WHERE id = wft_task_of(v_wf, 3);
+    PERFORM wft_check(v_two.id < v_three.id, 'node task insert: ids are minted in index order');
+    PERFORM wft_check(
+        v_two.status = 'PENDING' AND v_two.is_workflow_task AND v_two.command_fingerprint IS NULL
+        AND v_two.command_fingerprint_version IS NULL AND v_two.idempotency_key_digest IS NULL
+        AND v_two.rerun_of_task_id IS NULL AND v_two.rerun_root_task_id IS NULL AND NOT v_two.retain_rerun_input
+        AND v_two.retry_count = 0 AND v_two.max_retries = 2 AND v_two.execution = 'SHARED_ASYNC'
+        AND v_two.retention_class_key = 'forever' AND v_two.sent_at = '2030-01-01 00:00:00+00'
+        AND v_two.enqueued_at = now() AND v_two.created_at = now() AND v_two.claimed_at IS NULL,
+        'node task insert: the helper writes the values of a workflow task row'
+    );
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000911';
+    v_task uuid;
+    v_tasks bigint;
+BEGIN
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[{"idx":0},{"idx":1,"deps":[0]}]');
+    v_task := wft_task_of(v_wf, 0);
+    PERFORM wft_phase1(v_task, wft_ok('1'));
+    v_tasks := (SELECT count(*) FROM horsies_tasks);
+    -- A conflict on a minted id cannot be timed from outside one statement; a stand-in helper answers
+    -- PAYLOAD_MISMATCH for one subtransaction, which rolls the stand-in back with everything else.
+    BEGIN
+        CREATE OR REPLACE FUNCTION horsies_insert_task_rows(
+            p_ids uuid[], p_task_names text[], p_queue_names text[], p_priorities integer[], p_inputs text[],
+            p_task_options text[], p_executions text[], p_retention_class_keys text[], p_retain_rerun_inputs boolean[],
+            p_max_retries integer[], p_good_untils timestamp with time zone[], p_sent_ats timestamp with time zone[],
+            p_enqueued_ats timestamp with time zone[], p_is_workflow_tasks boolean[],
+            p_fingerprint_versions smallint[], p_fingerprints bytea[], p_key_digests bytea[],
+            p_rerun_of_task_ids uuid[], p_rerun_root_task_ids uuid[], p_conflict_lock text
+        ) RETURNS TABLE(ordinality bigint, task_id uuid, outcome text) LANGUAGE sql AS $f$
+            SELECT u.position, u.id, 'PAYLOAD_MISMATCH'::text FROM unnest(p_ids) WITH ORDINALITY AS u(id, position)
+        $f$;
+        PERFORM * FROM horsies_workflow_node_finish(v_task, TRUE, 'READ');
+        RAISE EXCEPTION 'workflow function case failed: node task insert accepted a conflict (no error)';
+    EXCEPTION
+        WHEN unique_violation THEN
+            NULL;
+    END;
+    PERFORM wft_check((wft_node(v_wf, 1)).status = 'PENDING' AND (wft_node(v_wf, 1)).task_id IS NULL
+                      AND (wft_node(v_wf, 0)).status = 'ENQUEUED'
+                      AND EXISTS (SELECT 1 FROM horsies_workflow_phase2_pending WHERE task_id = v_task)
+                      AND (SELECT count(*) FROM horsies_tasks) = v_tasks,
+                      'node task insert: a conflict on a minted id fails the step (23505), nothing written');
+    PERFORM * FROM horsies_workflow_node_finish(v_task, TRUE, 'READ');
+    PERFORM wft_check((wft_node(v_wf, 1)).status = 'ENQUEUED' AND wft_task_of(v_wf, 1) IS NOT NULL,
+                      'node task insert: the same step applies once the helper inserts');
+END $$;
+
+-- Sub-workflow start: horsies_workflow_child_start -------------------------------------------------------------------
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000921';
+    v_child uuid := '00000000-0000-7000-8000-000000000922';
+    v_grandchild uuid := '00000000-0000-7000-8000-000000000923';
+    v_owed bigint;
+    v_row horsies_workflow_step_row;
+    v_started timestamptz;
+BEGIN
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[
+        {"idx":0},{"idx":1,"deps":[0],"sub":true,"params":"GIVEN","args_from":{"x":0}},{"idx":2,"deps":[1]}
+    ]');
+    PERFORM wft_phase1(wft_task_of(v_wf, 0), wft_ok('5'));
+    SELECT count(*) FILTER (WHERE row_kind = 'CHILD_START' AND task_index = 1) INTO v_owed
+    FROM horsies_workflow_node_finish(wft_task_of(v_wf, 0), FALSE, 'READ');
+    PERFORM wft_check(v_owed = 1, 'child start setup: the step owes the child start of node 1');
+    v_started := (wft_node(v_wf, 1)).started_at;
+    SELECT * INTO v_row FROM wft_child_start(v_wf, 1,
+        jsonb_build_array(
+            jsonb_build_object('id', v_child, 'name', 'child', 'on_error', 'fail', 'parent', v_wf,
+                               'parent_index', 1, 'depth', 1),
+            jsonb_build_object('id', v_grandchild, 'on_error', 'fail', 'parent', v_child, 'parent_index', 0,
+                               'depth', 2)),
+        jsonb_build_array(
+            jsonb_build_object('wf', v_child, 'idx', 0, 'sub', true),
+            jsonb_build_object('wf', v_child, 'idx', 1, 'input', '{"y":2}'),
+            jsonb_build_object('wf', v_child, 'idx', 2, 'deps', jsonb_build_array(1)),
+            jsonb_build_object('wf', v_grandchild, 'idx', 0))
+    ) WHERE row_kind = 'OUTCOME';
+    PERFORM wft_check(v_row.disposition = 'STARTED' AND v_row.workflow_id = v_wf AND v_row.workflow_status = 'RUNNING'
+                      AND v_row.advance_child_workflow_id IS NULL, 'child start TREE: STARTED');
+    PERFORM wft_check((wft_node(v_wf, 1)).status = 'RUNNING' AND (wft_node(v_wf, 1)).sub_workflow_id = v_child
+                      AND (wft_node(v_wf, 1)).started_at = v_started,
+                      'child start TREE: the node is RUNNING, linked, and keeps its enqueue time');
+    PERFORM wft_check((wft_workflow(v_child)).status = 'RUNNING' AND (wft_workflow(v_child)).parent_workflow_id = v_wf
+                      AND (wft_workflow(v_child)).parent_task_index = 1 AND (wft_workflow(v_child)).depth = 1
+                      AND (wft_workflow(v_child)).root_workflow_id = v_wf
+                      AND (wft_workflow(v_child)).sent_at = '2030-01-02 00:00:00+00'
+                      AND (wft_workflow(v_child)).name = 'child',
+                      'child start TREE: the child row with its parent pair, depth, root and call time');
+    PERFORM wft_check((wft_workflow(v_grandchild)).depth = 2 AND (wft_workflow(v_grandchild)).root_workflow_id = v_wf
+                      AND (wft_node(v_child, 0)).status = 'RUNNING'
+                      AND (wft_node(v_child, 0)).sub_workflow_id = v_grandchild,
+                      'child start TREE: a pre-built grandchild is inserted and linked under the child');
+    PERFORM wft_check((wft_node(v_child, 1)).status = 'ENQUEUED'
+                      AND (SELECT t.sent_at = '2030-01-02 00:00:00+00'
+                                  AND t.input = '{"y":2,"__h_workflow_meta__":{"workflow_id":"' || v_child
+                                                || '","task_index":1,"task_name":"t1"}}'
+                           FROM horsies_tasks t WHERE t.id = wft_task_of(v_child, 1))
+                      AND wft_task_of(v_grandchild, 0) IS NOT NULL AND (wft_node(v_child, 2)).status = 'PENDING',
+                      'child start TREE: the roots of the child tree get their task rows');
+    PERFORM wft_check((wft_node(v_child, 1)).downstream_subworkflow = 'NONE'
+                      AND (wft_node(v_child, 0)).sub_workflow_params = 'NOT_GIVEN',
+                      'child start TREE: the node facts of the child tree are written');
+    SELECT * INTO v_row FROM wft_child_start(v_wf, 1,
+        jsonb_build_array(jsonb_build_object('id', '00000000-0000-7000-8000-000000000924', 'on_error', 'fail',
+                                             'parent', v_wf, 'parent_index', 1, 'depth', 1)),
+        '[{"idx":0}]'
+    ) WHERE row_kind = 'OUTCOME';
+    PERFORM wft_check(v_row.disposition = 'STALE' AND v_row.detail = 'RUNNING'
+                      AND NOT EXISTS (SELECT 1 FROM horsies_workflows WHERE id = '00000000-0000-7000-8000-000000000924'),
+                      'child start: a node that has its child already is STALE, nothing written');
+    SELECT * INTO v_row FROM wft_child_fail(v_wf, 2, horsies_task_error_envelope('WORKFLOW_ENQUEUE_FAILED', 'x',
+                                                                                 NULL, NULL, NULL))
+    WHERE row_kind = 'OUTCOME';
+    PERFORM wft_check(v_row.disposition = 'STALE' AND (wft_node(v_wf, 2)).status = 'PENDING',
+                      'child start: a task node is STALE, nothing written');
+END $$;
+
+DO $$
+DECLARE
+    v_top uuid := '00000000-0000-7000-8000-000000000931';
+    v_parent uuid := '00000000-0000-7000-8000-000000000932';
+    v_child uuid := '00000000-0000-7000-8000-000000000933';
+    v_owed bigint;
+    v_row horsies_workflow_step_row;
+    v_error text := horsies_task_error_envelope('SUBWORKFLOW_DEPTH_LIMIT_REACHED', 'deep', NULL, NULL, NULL);
+BEGIN
+    -- The start of the top workflow pre-builds the parent and owes the child start of the parent's sub-workflow
+    -- root (no pre-built child, no failed record).
+    SELECT count(*) FILTER (WHERE row_kind = 'CHILD_START' AND workflow_id = v_parent AND task_index = 0) INTO v_owed
+    FROM wft_start(
+        jsonb_build_array(
+            jsonb_build_object('id', v_top, 'on_error', 'fail'),
+            jsonb_build_object('id', v_parent, 'on_error', 'fail', 'parent', v_top, 'parent_index', 0, 'depth', 1)),
+        jsonb_build_array(
+            jsonb_build_object('idx', 0, 'sub', true),
+            jsonb_build_object('wf', v_parent, 'idx', 0, 'sub', true))
+    );
+    PERFORM wft_check(v_owed = 1 AND (wft_node(v_parent, 0)).status = 'ENQUEUED',
+                      'child start setup: the start owes the child start of a sub-workflow root');
+    -- The child's only root fails (a failed record), so the child ends at once, the parent node fails, the parent
+    -- completes FAILED, and the outcome names the parent for the advance of its own parent node.
+    SELECT * INTO v_row FROM wft_child_start(v_parent, 0,
+        jsonb_build_array(jsonb_build_object('id', v_child, 'on_error', 'fail', 'parent', v_parent,
+                                             'parent_index', 0, 'depth', 2)),
+        jsonb_build_array(jsonb_build_object('wf', v_child, 'idx', 0, 'sub', true)),
+        jsonb_build_array(jsonb_build_object('wf', v_child, 'idx', 0, 'result', v_error))
+    ) WHERE row_kind = 'OUTCOME';
+    PERFORM wft_check((wft_workflow(v_child)).status = 'FAILED' AND (wft_node(v_child, 0)).result = v_error,
+                      'child start TREE: a child whose root failed ends at once');
+    PERFORM wft_check((wft_node(v_parent, 0)).status = 'FAILED' AND (wft_node(v_parent, 0)).sub_workflow_id = v_child
+                      AND ((wft_node(v_parent, 0)).result::json -> 'err' -> 'error_code' ->> '__builtin_task_code__')
+                          = 'SUBWORKFLOW_FAILED',
+                      'child start TREE: the child that ended advances the node in the same statement');
+    PERFORM wft_check(v_row.disposition = 'STARTED' AND v_row.workflow_status = 'FAILED'
+                      AND v_row.advance_child_workflow_id = v_parent AND (wft_node(v_top, 0)).status = 'RUNNING',
+                      'child start TREE: a parent that the call ended is named for its own parent advance');
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000941';
+    v_child uuid := '00000000-0000-7000-8000-000000000942';
+    v_rows bigint;
+    v_error text := horsies_task_error_envelope('WORKFLOW_ENQUEUE_FAILED', 'grandchild build failed', NULL, NULL, NULL);
+BEGIN
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[{"idx":0,"sub":true}]');
+    -- Child: root 0 (sub) fails; node 1 (sub, allow_failed_deps) depends on it and is promoted: a child start owed
+    -- in the child; root 2 is a task node. The child's on_error is fail.
+    SELECT count(*) FILTER (WHERE row_kind = 'CHILD_START' AND workflow_id = v_child AND task_index = 1) INTO v_rows
+    FROM wft_child_start(v_wf, 0,
+        jsonb_build_array(jsonb_build_object('id', v_child, 'on_error', 'fail', 'parent', v_wf, 'parent_index', 0,
+                                             'depth', 1)),
+        jsonb_build_array(
+            jsonb_build_object('wf', v_child, 'idx', 0, 'sub', true),
+            jsonb_build_object('wf', v_child, 'idx', 1, 'sub', true, 'deps', jsonb_build_array(0), 'allow', true),
+            jsonb_build_object('wf', v_child, 'idx', 2)),
+        jsonb_build_array(jsonb_build_object('wf', v_child, 'idx', 0, 'result', v_error))
+    );
+    PERFORM wft_check(v_rows = 1 AND (wft_node(v_child, 1)).status = 'ENQUEUED'
+                      AND (wft_workflow(v_child)).status = 'RUNNING' AND wft_task_of(v_child, 2) IS NOT NULL,
+                      'child start TREE: a child start owed inside the child tree is returned');
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000951';
+    v_child uuid := '00000000-0000-7000-8000-000000000952';
+    v_error text := horsies_task_error_envelope('WORKFLOW_ENQUEUE_FAILED', 'grandchild build failed', NULL, NULL, NULL);
+BEGIN
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[{"idx":0,"sub":true}]');
+    PERFORM * FROM wft_child_start(v_wf, 0,
+        jsonb_build_array(jsonb_build_object('id', v_child, 'on_error', 'pause', 'parent', v_wf, 'parent_index', 0,
+                                             'depth', 1)),
+        jsonb_build_array(
+            jsonb_build_object('wf', v_child, 'idx', 0, 'sub', true),
+            jsonb_build_object('wf', v_child, 'idx', 1)),
+        jsonb_build_array(jsonb_build_object('wf', v_child, 'idx', 0, 'result', v_error))
+    );
+    PERFORM wft_check((wft_workflow(v_child)).status = 'PAUSED' AND (wft_node(v_child, 1)).status = 'READY'
+                      AND (wft_node(v_child, 1)).task_id IS NULL AND (wft_node(v_wf, 0)).status = 'RUNNING'
+                      AND (wft_node(v_wf, 0)).sub_workflow_id = v_child,
+                      'child start TREE: a child paused by its own root keeps its other roots READY (the pause gate)');
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000961';
+    v_row horsies_workflow_step_row;
+    v_owed bigint;
+    v_error text := horsies_task_error_envelope('WORKFLOW_ENQUEUE_FAILED', 'build failed',
+                                                '{"workflow_id":"x","task_index":1}', NULL, NULL);
+BEGIN
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[
+        {"idx":0},{"idx":1,"deps":[0],"sub":true},{"idx":2,"deps":[1],"allow":true,"sub":true},{"idx":3,"deps":[1]}
+    ]');
+    PERFORM wft_phase1(wft_task_of(v_wf, 0), wft_ok('1'));
+    PERFORM * FROM horsies_workflow_node_finish(wft_task_of(v_wf, 0), FALSE, 'READ');
+    SELECT count(*) FILTER (WHERE row_kind = 'CHILD_START' AND task_index = 2) INTO v_owed
+    FROM wft_child_fail(v_wf, 1, v_error);
+    PERFORM wft_check((wft_node(v_wf, 1)).status = 'FAILED' AND (wft_node(v_wf, 1)).result = v_error
+                      AND (wft_node(v_wf, 1)).completed_at IS NOT NULL AND (wft_node(v_wf, 1)).sub_workflow_id IS NULL,
+                      'child start FAILURE: the node is FAILED with the envelope and no child');
+    PERFORM wft_check((wft_workflow(v_wf)).error = (v_error::json -> 'err')::text
+                      AND (wft_workflow(v_wf)).status = 'RUNNING',
+                      'child start FAILURE: on_error fail stores the node error and keeps going');
+    PERFORM wft_check(v_owed = 1 AND (wft_node(v_wf, 2)).status = 'ENQUEUED' AND (wft_node(v_wf, 3)).status = 'SKIPPED',
+                      'child start FAILURE: the dependents are judged, and a promoted sub-workflow node is owed');
+    SELECT * INTO v_row FROM wft_child_fail(v_wf, 1, v_error) WHERE row_kind = 'OUTCOME';
+    PERFORM wft_check(v_row.disposition = 'STALE' AND v_row.detail = 'FAILED',
+                      'child start FAILURE: a terminal node is STALE, its result kept');
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000971';
+    v_row horsies_workflow_step_row;
+    v_error text := horsies_task_error_envelope('WORKFLOW_ENQUEUE_FAILED', 'build failed', NULL, NULL, NULL);
+BEGIN
+    PERFORM * FROM wft_start1(v_wf, 'pause', '[
+        {"idx":0},{"idx":1,"deps":[0],"sub":true},{"idx":2,"deps":[0],"sub":true},{"idx":3,"deps":[0]}
+    ]');
+    PERFORM wft_phase1(wft_task_of(v_wf, 0), wft_ok('1'));
+    PERFORM * FROM horsies_workflow_node_finish(wft_task_of(v_wf, 0), FALSE, 'READ');
+    PERFORM wft_check((wft_node(v_wf, 1)).status = 'ENQUEUED' AND (wft_node(v_wf, 2)).status = 'ENQUEUED',
+                      'child start setup: two child starts owed');
+    SELECT * INTO v_row FROM wft_child_fail(v_wf, 1, v_error) WHERE row_kind = 'OUTCOME';
+    PERFORM wft_check(v_row.disposition = 'NODE_FAILED' AND v_row.workflow_status = 'PAUSED'
+                      AND (wft_workflow(v_wf)).error = (v_error::json -> 'err')::text,
+                      'child start FAILURE under on_error pause: the workflow is PAUSED');
+    SELECT * INTO v_row FROM wft_child_start(v_wf, 2,
+        jsonb_build_array(jsonb_build_object('id', '00000000-0000-7000-8000-000000000972', 'on_error', 'fail',
+                                             'parent', v_wf, 'parent_index', 2, 'depth', 1)),
+        '[{"wf":"00000000-0000-7000-8000-000000000972","idx":0}]'
+    ) WHERE row_kind = 'OUTCOME';
+    PERFORM wft_check(v_row.disposition = 'WORKFLOW_NOT_RUNNING' AND v_row.detail = 'PAUSED'
+                      AND (wft_node(v_wf, 2)).status = 'READY' AND (wft_node(v_wf, 2)).started_at IS NULL
+                      AND NOT EXISTS (SELECT 1 FROM horsies_workflows WHERE id = '00000000-0000-7000-8000-000000000972'),
+                      'child start in a paused workflow: the node goes back to READY with no child');
+    PERFORM wft_check((SELECT count(*) FROM horsies_workflow_resume(v_wf)
+                       WHERE row_kind = 'CHILD_START' AND task_index = 2) = 1,
+                      'child start in a paused workflow: the resume owes the child start again');
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000981';
+    v_error text := horsies_task_error_envelope('WORKFLOW_ENQUEUE_FAILED', 'build failed', NULL, NULL, NULL);
+BEGIN
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[{"idx":0,"sub":true}]');
+    PERFORM wft_refused(format($q$SELECT * FROM horsies_workflow_child_start(%L, 0, 'OTHER', NULL, NULL,
+        NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+        NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+        NULL, NULL, NULL, NULL, NULL, NULL, NULL)$q$, v_wf), '22023', 'child start refuses an unknown outcome kind');
+    PERFORM wft_refused(format($q$SELECT * FROM wft_child_fail(%L, 0, wft_ok('1'))$q$, v_wf), '22023',
+                        'child start refuses a FAILURE result that is not an error envelope');
+    PERFORM wft_refused(format($q$SELECT * FROM wft_child_fail(NULL, 0, %L)$q$, v_error), '22023',
+                        'child start refuses a NULL parent');
+    PERFORM wft_refused(format($q$SELECT * FROM horsies_workflow_child_start(%L, 0, 'FAILURE', %L, now(),
+        NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+        NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+        NULL, NULL, NULL, NULL, NULL, NULL, NULL)$q$, v_wf, v_error), '22023',
+        'child start refuses a FAILURE with the arguments of a TREE');
+    PERFORM wft_refused(format($q$SELECT * FROM horsies_workflow_child_start(%L, 0, 'TREE', %L, now(),
+        NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+        NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+        NULL, NULL, NULL, NULL, NULL, NULL, NULL)$q$, v_wf, v_error), '22023',
+        'child start refuses a TREE with a failure result');
+    PERFORM wft_refused(format($q$SELECT * FROM wft_child_start(%L, 0,
+        '[{"id":"00000000-0000-7000-8000-000000000982","on_error":"fail","parent":"%s","parent_index":1,"depth":1}]',
+        '[{"idx":0}]')$q$, v_wf, v_wf), '22023', 'child start refuses a child row with another parent pair');
+    PERFORM wft_refused(format($q$SELECT * FROM wft_child_start(%L, 0,
+        '[{"id":"00000000-0000-7000-8000-000000000982","on_error":"fail","parent":"%s","parent_index":0,"depth":2}]',
+        '[{"idx":0}]')$q$, v_wf, v_wf), '22023', 'child start refuses a child depth that is not the parent''s plus one');
+    PERFORM wft_refused(format($q$SELECT * FROM wft_child_start(%L, 0,
+        '[{"id":"%s","on_error":"fail","parent":"%s","parent_index":0,"depth":1}]',
+        '[{"idx":0}]')$q$, v_wf, v_wf, v_wf), '23505', 'child start refuses a child id that exists (a defect)');
+    PERFORM wft_check((wft_node(v_wf, 0)).status = 'ENQUEUED' AND (wft_node(v_wf, 0)).sub_workflow_id IS NULL
+                      AND NOT EXISTS (SELECT 1 FROM horsies_workflows WHERE id = '00000000-0000-7000-8000-000000000982'),
+                      'child start refusals write nothing');
+END $$;
+
+-- Claim-time workflow check: horsies_workflow_claimed_tasks_settle ---------------------------------------------------
+
+DO $$
+DECLARE
+    v_running uuid := '00000000-0000-7000-8000-000000000b01';
+    v_paused uuid := '00000000-0000-7000-8000-000000000b02';
+    v_cancelled uuid := '00000000-0000-7000-8000-000000000b03';
+    v_claimed timestamptz := now() - interval '1 second';
+    v_run_task uuid;
+    v_paused_task uuid;
+    v_paused_lost uuid;
+    v_cancelled_task uuid;
+    v_plain uuid := '00000000-0000-7000-8000-000000000b04';
+    v_result text;
+BEGIN
+    PERFORM * FROM wft_start1(v_running, 'fail', '[{"idx":0}]');
+    PERFORM * FROM wft_start1(v_paused, 'fail', '[{"idx":0},{"idx":1}]');
+    PERFORM * FROM wft_start1(v_cancelled, 'fail', '[{"idx":0},{"idx":1,"deps":[0]}]');
+    v_run_task := wft_task_of(v_running, 0);
+    v_paused_task := wft_task_of(v_paused, 0);
+    v_paused_lost := wft_task_of(v_paused, 1);
+    v_cancelled_task := wft_task_of(v_cancelled, 0);
+    UPDATE horsies_workflows SET status = 'PAUSED' WHERE id = v_paused;
+    UPDATE horsies_workflows SET status = 'CANCELLED', completed_at = now() WHERE id = v_cancelled;
+    PERFORM wft_claim(v_run_task, v_claimed);
+    PERFORM wft_claim(v_paused_task, v_claimed);
+    PERFORM wft_claim(v_paused_lost, v_claimed - interval '1 second');
+    PERFORM wft_claim(v_cancelled_task, v_claimed);
+
+    SELECT string_agg(s.disposition, ',' ORDER BY s.position) INTO v_result
+    FROM (SELECT r.*, row_number() OVER () AS position
+          FROM horsies_workflow_claimed_tasks_settle(
+              ARRAY[v_plain, v_run_task, v_paused_task, v_paused_lost, v_cancelled_task],
+              ARRAY[v_claimed, v_claimed, v_claimed, v_claimed, v_claimed], 'worker-1') AS r) AS s;
+    PERFORM wft_check(v_result = 'DISPATCH,DISPATCH,BLOCKED,BLOCKED,BLOCKED',
+                      'settle: one disposition per input, in input order (' || coalesce(v_result, 'NULL') || ')');
+    PERFORM wft_check((SELECT status FROM horsies_tasks WHERE id = v_run_task) = 'CLAIMED'
+                      AND (wft_node(v_running, 0)).status = 'ENQUEUED',
+                      'settle: a task of a RUNNING workflow is dispatched, nothing written');
+    PERFORM wft_check(wft_moved(v_paused_task) = 'CANCELLED:PAUSE_ABANDON_CLAIM_BATCH'
+                      AND (wft_node(v_paused, 0)).status = 'READY' AND (wft_node(v_paused, 0)).task_id IS NULL
+                      AND (wft_node(v_paused, 0)).started_at IS NULL,
+                      'settle: a claimed task of a PAUSED workflow is abandoned and its node goes back to READY');
+    PERFORM wft_check((SELECT status FROM horsies_tasks WHERE id = v_paused_lost) = 'CLAIMED'
+                      AND (wft_node(v_paused, 1)).status = 'ENQUEUED' AND wft_task_of(v_paused, 1) = v_paused_lost,
+                      'settle: a claim of another generation is blocked and not written');
+    PERFORM wft_check(wft_moved(v_cancelled_task) = 'CANCELLED:WORKFLOW_CANCEL_CLAIM_BATCH'
+                      AND (wft_node(v_cancelled, 0)).status = 'SKIPPED'
+                      AND (wft_node(v_cancelled, 0)).completed_at IS NOT NULL,
+                      'settle: a claimed task of a CANCELLED workflow is cancelled and its node SKIPPED');
+    SELECT string_agg(r.disposition, ',') INTO v_result
+    FROM horsies_workflow_claimed_tasks_settle(ARRAY[]::uuid[], ARRAY[]::timestamptz[], 'worker-1') AS r;
+    PERFORM wft_check(v_result IS NULL, 'settle: an empty batch returns no row');
+
+    PERFORM wft_refused($q$SELECT * FROM horsies_workflow_claimed_tasks_settle(
+        ARRAY[gen_random_uuid()], ARRAY[now(), now()], 'w')$q$, '22023', 'settle refuses arrays of different lengths');
+    PERFORM wft_refused($q$SELECT * FROM horsies_workflow_claimed_tasks_settle(
+        ARRAY[NULL::uuid], ARRAY[now()], 'w')$q$, '22023', 'settle refuses a NULL id');
+    PERFORM wft_refused($q$SELECT * FROM horsies_workflow_claimed_tasks_settle(
+        ARRAY['00000000-0000-7000-8000-000000000b09'::uuid, '00000000-0000-7000-8000-000000000b09'::uuid],
+        ARRAY[now(), now()], 'w')$q$, '22023', 'settle refuses a repeated id');
+    PERFORM wft_refused($q$SELECT * FROM horsies_workflow_claimed_tasks_settle(
+        ARRAY[gen_random_uuid()], ARRAY[now()], NULL)$q$, '22023', 'settle refuses a NULL worker');
+    PERFORM wft_refused($q$SELECT * FROM horsies_workflow_claimed_tasks_settle(
+        ARRAY(SELECT gen_random_uuid() FROM generate_series(1, 1001)),
+        ARRAY(SELECT now() FROM generate_series(1, 1001)), 'w')$q$, '22023', 'settle refuses more than 1000 ids');
+END $$;
+
+-- The stop before start: horsies_workflow_task_stop_before_start -----------------------------------------------------
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000b11';
+    v_claimed timestamptz := now() - interval '1 second';
+    v_task uuid;
+    v_row record;
+    v_expired text := horsies_task_error_envelope('WORKFLOW_ENQUEUE_FAILED', 'stands in for TASK_EXPIRED', NULL, NULL,
+                                                  NULL);
+BEGIN
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[{"idx":0},{"idx":1},{"idx":2},{"idx":3},{"idx":4,"deps":[0]}]');
+
+    -- Deadline passed: EXPIRED, phase 2 owed.
+    v_task := wft_task_of(v_wf, 0);
+    PERFORM wft_claim(v_task, v_claimed);
+    UPDATE horsies_tasks SET good_until = now() - interval '1 second' WHERE id = v_task;
+    SELECT * INTO v_row FROM horsies_workflow_task_stop_before_start(v_task, 'worker-1', v_claimed, v_expired, TRUE);
+    PERFORM wft_check(v_row.outcome = 'EXPIRED' AND v_row.move_outcome = 'APPLIED'
+                      AND wft_moved(v_task) = 'EXPIRED:EXPIRE_CLAIMED'
+                      AND EXISTS (SELECT 1 FROM horsies_workflow_phase2_pending WHERE task_id = v_task),
+                      'stop before start: a passed deadline expires the claim, phase 2 owed');
+
+    -- RUNNING workflow, startable claim, linked node: RESUMED.
+    v_task := wft_task_of(v_wf, 1);
+    PERFORM wft_claim(v_task, v_claimed);
+    SELECT * INTO v_row FROM horsies_workflow_task_stop_before_start(v_task, 'worker-1', v_claimed, v_expired, TRUE);
+    PERFORM wft_check(v_row.outcome = 'RESUMED' AND v_row.move_outcome IS NULL
+                      AND (SELECT status FROM horsies_tasks WHERE id = v_task) = 'CLAIMED',
+                      'stop before start: a startable claim in a RUNNING workflow is RESUMED, nothing written');
+
+    -- Another claim generation: NOT_HELD.
+    SELECT * INTO v_row FROM horsies_workflow_task_stop_before_start(v_task, 'worker-1', v_claimed - interval '1 hour',
+                                                                     v_expired, TRUE);
+    PERFORM wft_check(v_row.outcome = 'NOT_HELD' AND v_row.move_outcome = 'LOST_CLAIM'
+                      AND (SELECT status FROM horsies_tasks WHERE id = v_task) = 'CLAIMED',
+                      'stop before start: a claim of another generation is NOT_HELD, LOST_CLAIM');
+
+    -- Node not linked (a recovery limit failed it): the orphan, with and without self-heal.
+    v_task := wft_task_of(v_wf, 2);
+    PERFORM wft_claim(v_task, v_claimed);
+    UPDATE horsies_workflow_tasks SET status = 'FAILED', completed_at = now(), result = wft_err('LIMIT')
+    WHERE workflow_id = v_wf AND task_index = 2;
+    SELECT * INTO v_row FROM horsies_workflow_task_stop_before_start(v_task, 'worker-1', v_claimed, v_expired, FALSE);
+    PERFORM wft_check(v_row.outcome = 'NODE_NOT_LINKED' AND v_row.move_outcome IS NULL
+                      AND (SELECT status FROM horsies_tasks WHERE id = v_task) = 'CLAIMED',
+                      'stop before start: an unlinked claim with self-heal off is NODE_NOT_LINKED, nothing written');
+    SELECT * INTO v_row FROM horsies_workflow_task_stop_before_start(v_task, 'worker-1', v_claimed, v_expired, TRUE);
+    PERFORM wft_check(v_row.outcome = 'ORPHAN_CANCELLED' AND v_row.move_outcome = 'APPLIED'
+                      AND wft_moved(v_task) = 'CANCELLED:CANCEL_ORPHAN' AND (wft_node(v_wf, 2)).status = 'FAILED',
+                      'stop before start: an unlinked claim with self-heal on cancels the orphan');
+
+    -- Unknown task: NOT_HELD, TASK_ABSENT.
+    SELECT * INTO v_row FROM horsies_workflow_task_stop_before_start(
+        '00000000-0000-7000-8000-000000000bff', 'worker-1', v_claimed, v_expired, TRUE);
+    PERFORM wft_check(v_row.outcome = 'NOT_HELD' AND v_row.move_outcome = 'TASK_ABSENT',
+                      'stop before start: an unknown task is NOT_HELD, TASK_ABSENT');
+
+    -- PAUSED: the abandon.
+    v_task := wft_task_of(v_wf, 3);
+    PERFORM wft_claim(v_task, v_claimed);
+    UPDATE horsies_workflows SET status = 'PAUSED' WHERE id = v_wf;
+    SELECT * INTO v_row FROM horsies_workflow_task_stop_before_start(v_task, 'worker-1', v_claimed - interval '1 hour',
+                                                                     v_expired, TRUE);
+    PERFORM wft_check(v_row.outcome = 'ABANDONED' AND v_row.move_outcome = 'LOST_CLAIM'
+                      AND (SELECT status FROM horsies_tasks WHERE id = v_task) = 'CLAIMED'
+                      AND (wft_node(v_wf, 3)).status = 'ENQUEUED',
+                      'stop before start: PAUSED with another claim generation abandons nothing');
+    SELECT * INTO v_row FROM horsies_workflow_task_stop_before_start(v_task, 'worker-1', v_claimed, v_expired, TRUE);
+    PERFORM wft_check(v_row.outcome = 'ABANDONED' AND v_row.move_outcome = 'APPLIED'
+                      AND wft_moved(v_task) = 'CANCELLED:PAUSE_ABANDON_CLAIM'
+                      AND (wft_node(v_wf, 3)).status = 'READY' AND (wft_node(v_wf, 3)).task_id IS NULL
+                      AND (wft_node(v_wf, 3)).started_at IS NULL,
+                      'stop before start: PAUSED abandons the claim and the node goes back to READY');
+    PERFORM wft_refused(format($q$SELECT * FROM horsies_workflow_task_stop_before_start(%L, 'worker-1', now(), NULL,
+                               TRUE)$q$, v_task), '22023', 'stop before start refuses a NULL argument');
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000b21';
+    v_claimed timestamptz := now() - interval '1 second';
+    v_held uuid;
+    v_requeued uuid;
+    v_row record;
+BEGIN
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[{"idx":0},{"idx":1}]');
+    v_held := wft_task_of(v_wf, 0);
+    v_requeued := wft_task_of(v_wf, 1);
+    PERFORM wft_claim(v_held, v_claimed);
+    UPDATE horsies_workflows SET status = 'CANCELLED', completed_at = now() WHERE id = v_wf;
+    SELECT * INTO v_row FROM horsies_workflow_task_stop_before_start(v_held, 'worker-1', v_claimed, '{}', TRUE);
+    PERFORM wft_check(v_row.outcome = 'CANCELLED' AND v_row.move_outcome = 'APPLIED'
+                      AND wft_moved(v_held) = 'CANCELLED:WORKFLOW_CANCEL_CLAIM'
+                      AND (wft_node(v_wf, 0)).status = 'SKIPPED' AND (wft_node(v_wf, 0)).completed_at IS NOT NULL,
+                      'stop before start: CANCELLED cancels the claim and skips the node');
+    -- A row requeued to PENDING since the claim: the cancel's carve-out still cancels it.
+    SELECT * INTO v_row FROM horsies_workflow_task_stop_before_start(v_requeued, 'worker-1', v_claimed, '{}', TRUE);
+    PERFORM wft_check(v_row.outcome = 'CANCELLED' AND v_row.move_outcome = 'APPLIED'
+                      AND wft_moved(v_requeued) = 'CANCELLED:WORKFLOW_CANCEL_CLAIM'
+                      AND (wft_node(v_wf, 1)).status = 'SKIPPED',
+                      'stop before start: CANCELLED also cancels a row requeued to PENDING');
+END $$;
+
+-- Paused workflow expiry: horsies_workflow_expire_paused -------------------------------------------------------------
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000c01';
+    v_child uuid := '00000000-0000-7000-8000-000000000c02';
+    v_young uuid := '00000000-0000-7000-8000-000000000c03';
+    v_error text := horsies_task_error_object('WORKFLOW_ENQUEUE_FAILED', 'stands in for WORKFLOW_EXPIRED', NULL);
+    v_pending_task uuid;
+    v_running_task uuid;
+    v_row record;
+BEGIN
+    PERFORM * FROM wft_start(
+        jsonb_build_array(
+            jsonb_build_object('id', v_wf, 'on_error', 'fail'),
+            jsonb_build_object('id', v_child, 'on_error', 'fail', 'parent', v_wf, 'parent_index', 0, 'depth', 1)),
+        jsonb_build_array(
+            jsonb_build_object('idx', 0, 'sub', true), jsonb_build_object('idx', 1), jsonb_build_object('idx', 2),
+            jsonb_build_object('idx', 3, 'deps', jsonb_build_array(1)), jsonb_build_object('idx', 4, 'sub', true),
+            jsonb_build_object('wf', v_child, 'idx', 0))
+    );
+    v_pending_task := wft_task_of(v_wf, 1);
+    v_running_task := wft_task_of(v_wf, 2);
+    UPDATE horsies_tasks SET status = 'RUNNING', claimed_at = now(), claimed_by_worker_id = 'worker-1',
+        started_at = now() WHERE id = v_running_task;
+    UPDATE horsies_workflow_tasks SET status = 'RUNNING' WHERE workflow_id = v_wf AND task_index = 2;
+    PERFORM horsies_workflow_pause(v_wf);
+    UPDATE horsies_workflows SET updated_at = now() - interval '2 hours' WHERE id IN (v_wf, v_child);
+
+    SELECT * INTO v_row FROM horsies_workflow_expire_paused(v_wf, 3600000, v_error);
+    PERFORM wft_check(v_row.outcome = 'EXPIRED' AND v_row.expired_task_ids = ARRAY[v_pending_task],
+                      'expire paused: EXPIRED, the task behind an ENQUEUED node moved');
+    PERFORM wft_check((wft_workflow(v_wf)).status = 'EXPIRED' AND (wft_workflow(v_wf)).error = v_error
+                      AND (wft_workflow(v_wf)).completed_at IS NOT NULL,
+                      'expire paused: the workflow is EXPIRED with the error and completed_at');
+    PERFORM wft_check(wft_moved(v_pending_task) = 'CANCELLED:WORKFLOW_CANCEL_WORKFLOW'
+                      AND (wft_node(v_wf, 1)).status = 'SKIPPED' AND (wft_node(v_wf, 3)).status = 'SKIPPED'
+                      AND (wft_node(v_wf, 3)).completed_at IS NOT NULL AND (wft_node(v_wf, 4)).status = 'SKIPPED',
+                      'expire paused: unstarted nodes SKIPPED with completed_at, the moved task''s node too');
+    PERFORM wft_check((wft_node(v_wf, 2)).status = 'RUNNING'
+                      AND EXISTS (SELECT 1 FROM horsies_tasks WHERE id = v_running_task),
+                      'expire paused: a started task keeps its RUNNING node');
+    PERFORM wft_check((wft_workflow(v_child)).status = 'PAUSED', 'expire paused: no cascade to a paused child');
+    SELECT * INTO v_row FROM horsies_workflow_expire_paused(v_wf, 3600000, v_error);
+    PERFORM wft_check(v_row.outcome = 'NOT_EXPIRED' AND v_row.observed_status = 'EXPIRED',
+                      'expire paused: a terminal workflow is NOT_EXPIRED');
+
+    PERFORM * FROM wft_start1(v_young, 'fail', '[{"idx":0}]');
+    PERFORM horsies_workflow_pause(v_young);
+    SELECT * INTO v_row FROM horsies_workflow_expire_paused(v_young, 3600000, v_error);
+    PERFORM wft_check(v_row.outcome = 'NOT_EXPIRED' AND v_row.observed_status = 'PAUSED'
+                      AND (wft_workflow(v_young)).status = 'PAUSED' AND wft_task_of(v_young, 0) IS NOT NULL,
+                      'expire paused: a workflow paused for less than the age is NOT_EXPIRED, nothing written');
+    PERFORM horsies_workflow_resume(v_young);
+    SELECT * INTO v_row FROM horsies_workflow_expire_paused(v_young, 0, v_error);
+    PERFORM wft_check(v_row.outcome = 'NOT_EXPIRED' AND v_row.observed_status = 'RUNNING',
+                      'expire paused: a RUNNING workflow is NOT_EXPIRED');
+    SELECT * INTO v_row FROM horsies_workflow_expire_paused('00000000-0000-7000-8000-000000000cff', 0, v_error);
+    PERFORM wft_check(v_row.outcome = 'NOT_FOUND', 'expire paused: unknown id');
+    PERFORM wft_refused(format($q$SELECT * FROM horsies_workflow_expire_paused(%L, -1, '{}')$q$, v_young), '22023',
+                        'expire paused refuses a negative age');
+    PERFORM wft_refused(format($q$SELECT * FROM horsies_workflow_expire_paused(%L, 0, NULL)$q$, v_young), '22023',
+                        'expire paused refuses a NULL error');
+END $$;
+
+-- Recovery cases 0, 1 and 1.5 ---------------------------------------------------------------------------------------
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000c11';
+    v_child uuid := '00000000-0000-7000-8000-000000000c12';
+    v_row horsies_workflow_step_row;
+    v_owed bigint;
+BEGIN
+    -- Two dependencies went terminal and both steps missed the join: node 2 is PENDING with its dependencies terminal.
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[
+        {"idx":0},{"idx":1},{"idx":2,"deps":[0,1],"args_from":{"a":0}},{"idx":3,"deps":[0],"sub":true},
+        {"idx":4,"deps":[1],"join":"any"},{"idx":5,"deps":[4]}
+    ]');
+    UPDATE horsies_workflow_tasks SET status = 'COMPLETED', result = wft_ok('7'), completed_at = now(), task_id = NULL
+    WHERE workflow_id = v_wf AND task_index = 0;
+    UPDATE horsies_workflow_tasks SET status = 'FAILED', result = wft_err('USER'), completed_at = now(), task_id = NULL
+    WHERE workflow_id = v_wf AND task_index = 1;
+
+    SELECT * INTO v_row FROM horsies_workflow_node_reevaluate(v_wf, 2) WHERE row_kind = 'OUTCOME';
+    PERFORM wft_check(v_row.disposition = 'APPLIED' AND v_row.detail = 'SKIPPED' AND (wft_node(v_wf, 2)).status = 'SKIPPED',
+                      'case 0: join all with a FAILED dependency is SKIPPED');
+    SELECT count(*) FILTER (WHERE row_kind = 'CHILD_START' AND task_index = 3) INTO v_owed
+    FROM horsies_workflow_node_reevaluate(v_wf, 3);
+    PERFORM wft_check(v_owed = 1 AND (wft_node(v_wf, 3)).status = 'ENQUEUED',
+                      'case 0: a met sub-workflow node owes its child start');
+    SELECT * INTO v_row FROM horsies_workflow_node_reevaluate(v_wf, 4) WHERE row_kind = 'OUTCOME';
+    PERFORM wft_check(v_row.disposition = 'APPLIED' AND (wft_node(v_wf, 4)).status = 'SKIPPED'
+                      AND (wft_node(v_wf, 5)).status = 'SKIPPED',
+                      'case 0: an impossible join any is SKIPPED, with the skip cascade');
+    SELECT * INTO v_row FROM horsies_workflow_node_reevaluate(v_wf, 4) WHERE row_kind = 'OUTCOME';
+    PERFORM wft_check(v_row.disposition = 'STALE' AND v_row.detail = 'SKIPPED', 'case 0: a node not PENDING is STALE');
+    UPDATE horsies_workflows SET status = 'PAUSED' WHERE id = v_wf;
+    SELECT * INTO v_row FROM horsies_workflow_node_reevaluate(v_wf, 2) WHERE row_kind = 'OUTCOME';
+    PERFORM wft_check(v_row.disposition = 'NOT_RUNNING' AND v_row.detail = 'PAUSED', 'case 0: a PAUSED workflow');
+    SELECT * INTO v_row FROM horsies_workflow_node_reevaluate('00000000-0000-7000-8000-000000000cfe', 0)
+    WHERE row_kind = 'OUTCOME';
+    PERFORM wft_check(v_row.disposition = 'NOT_FOUND', 'case 0: unknown workflow');
+    PERFORM wft_refused($q$SELECT * FROM horsies_workflow_node_reevaluate(gen_random_uuid(), NULL)$q$, '22023',
+                        'case 0 refuses a NULL task index');
+
+    -- A child whose last PENDING node is skipped ends: the outcome names it for the parent advance.
+    PERFORM * FROM wft_start(
+        jsonb_build_array(
+            jsonb_build_object('id', '00000000-0000-7000-8000-000000000c13', 'on_error', 'fail'),
+            jsonb_build_object('id', v_child, 'on_error', 'fail', 'parent', '00000000-0000-7000-8000-000000000c13',
+                               'parent_index', 0, 'depth', 1)),
+        jsonb_build_array(
+            jsonb_build_object('idx', 0, 'sub', true),
+            jsonb_build_object('wf', v_child, 'idx', 0),
+            jsonb_build_object('wf', v_child, 'idx', 1, 'deps', jsonb_build_array(0))));
+    UPDATE horsies_workflow_tasks SET status = 'FAILED', result = wft_err('USER'), completed_at = now(), task_id = NULL
+    WHERE workflow_id = v_child AND task_index = 0;
+    SELECT * INTO v_row FROM horsies_workflow_node_reevaluate(v_child, 1) WHERE row_kind = 'OUTCOME';
+    PERFORM wft_check(v_row.disposition = 'APPLIED' AND v_row.workflow_status = 'FAILED'
+                      AND v_row.advance_child_workflow_id = v_child,
+                      'case 0: a step that ends a child names it for the parent advance');
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000c21';
+    v_row horsies_workflow_step_row;
+    v_owed bigint;
+    v_input text;
+BEGIN
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[
+        {"idx":0},{"idx":1,"deps":[0],"args_from":{"a":0}},{"idx":2,"deps":[0],"sub":true},{"idx":3}
+    ]');
+    -- A crash between READY and the task insert: nodes 1 and 2 are READY with no work.
+    UPDATE horsies_workflow_tasks SET status = 'COMPLETED', result = wft_ok('{"v":1}'), completed_at = now(),
+        task_id = NULL
+    WHERE workflow_id = v_wf AND task_index = 0;
+    UPDATE horsies_workflow_tasks SET status = 'READY' WHERE workflow_id = v_wf AND task_index IN (1, 2);
+
+    SELECT count(*) FILTER (WHERE row_kind = 'CHILD_START' AND task_index = 2),
+           max(detail) FILTER (WHERE row_kind = 'OUTCOME' AND disposition = 'APPLIED')
+    INTO v_owed, v_input
+    FROM horsies_workflow_nodes_enqueue_ready(v_wf, ARRAY[1, 2, 3]);
+    PERFORM wft_check(v_owed = 1 AND v_input = '[1,2]',
+                      'cases 1 and 1.5: the READY nodes with no work move; node 3 (ENQUEUED) is left alone');
+    SELECT input INTO v_input FROM horsies_tasks WHERE id = wft_task_of(v_wf, 1);
+    PERFORM wft_check((wft_node(v_wf, 1)).status = 'ENQUEUED' AND v_input::jsonb -> 'a' -> 'inner' = (wft_ok('{"v":1}'))::jsonb,
+                      'case 1: the task node gets its task row with the stored dependency result');
+    PERFORM wft_check((wft_node(v_wf, 2)).status = 'ENQUEUED' AND (wft_node(v_wf, 2)).sub_workflow_id IS NULL,
+                      'case 1.5: the sub-workflow node owes its child start');
+    SELECT * INTO v_row FROM horsies_workflow_nodes_enqueue_ready(v_wf, ARRAY[1]) WHERE row_kind = 'OUTCOME';
+    PERFORM wft_check(v_row.disposition = 'STALE', 'cases 1 and 1.5: a node with work is STALE');
+    PERFORM wft_refused(format($q$SELECT * FROM horsies_workflow_nodes_enqueue_ready(%L, ARRAY[]::integer[])$q$, v_wf),
+                        '22023', 'cases 1 and 1.5 refuse an empty index array');
+    PERFORM wft_refused(format($q$SELECT * FROM horsies_workflow_nodes_enqueue_ready(%L, ARRAY[1, 1])$q$, v_wf),
+                        '22023', 'cases 1 and 1.5 refuse a repeated index');
+    PERFORM wft_refused(format($q$SELECT * FROM horsies_workflow_nodes_enqueue_ready(%L, ARRAY[1, NULL])$q$, v_wf),
+                        '22023', 'cases 1 and 1.5 refuse a NULL index');
+    UPDATE horsies_workflows SET status = 'PAUSED' WHERE id = v_wf;
+    SELECT * INTO v_row FROM horsies_workflow_nodes_enqueue_ready(v_wf, ARRAY[1]) WHERE row_kind = 'OUTCOME';
+    PERFORM wft_check(v_row.disposition = 'NOT_RUNNING' AND v_row.detail = 'PAUSED', 'cases 1 and 1.5: a PAUSED workflow');
+    SELECT * INTO v_row FROM horsies_workflow_nodes_enqueue_ready('00000000-0000-7000-8000-000000000cfd', ARRAY[0])
+    WHERE row_kind = 'OUTCOME';
+    PERFORM wft_check(v_row.disposition = 'NOT_FOUND', 'cases 1 and 1.5: unknown workflow');
+END $$;
+
+-- Recovery cases 2/3 and 4: the audit page and its candidates ---------------------------------------------------------
+
+DO $$
+DECLARE
+    v_done uuid := '00000000-0000-7000-8000-000000000d01';
+    v_orphan uuid := '00000000-0000-7000-8000-000000000d02';
+    v_live uuid := '00000000-0000-7000-8000-000000000d03';
+    v_child uuid := '00000000-0000-7000-8000-000000000d05';
+    v_token uuid := '00000000-0000-7000-8000-000000000dee';
+    v_other uuid := '00000000-0000-7000-8000-000000000def';
+    v_error text := horsies_task_error_object('WORKFLOW_ENQUEUE_FAILED', 'stands in for WORKFLOW_START_INCOMPLETE',
+                                              NULL);
+    v_page record;
+    v_row record;
+BEGIN
+    -- Every RUNNING workflow of this transaction is on the page; the checks below name only these ones.
+    PERFORM * FROM wft_start1(v_done, 'fail', '[{"idx":0},{"idx":1}]');
+    UPDATE horsies_workflow_tasks SET status = 'COMPLETED', result = wft_ok('1'), completed_at = now()
+    WHERE workflow_id = v_done;
+    INSERT INTO horsies_workflows (id, name, definition_key, status, on_error, output_task_index, success_policy,
+        result, error, parent_workflow_id, parent_task_index, root_workflow_id, depth, sent_at, created_at,
+        started_at, completed_at, updated_at)
+    VALUES (v_orphan, 'orphan', NULL, 'RUNNING', 'fail', NULL, NULL, NULL, NULL, NULL, NULL, v_orphan, 0, now(),
+        now(), now(), NULL, now());
+    PERFORM * FROM wft_start1(v_live, 'fail', '[{"idx":0}]');
+    PERFORM * FROM wft_start(
+        jsonb_build_array(
+            jsonb_build_object('id', '00000000-0000-7000-8000-000000000d04', 'on_error', 'fail'),
+            jsonb_build_object('id', v_child, 'on_error', 'fail', 'parent', '00000000-0000-7000-8000-000000000d04',
+                               'parent_index', 0, 'depth', 1)),
+        jsonb_build_array(jsonb_build_object('idx', 0, 'sub', true), jsonb_build_object('wf', v_child, 'idx', 0)));
+    UPDATE horsies_workflow_tasks SET status = 'COMPLETED', result = wft_ok('2'), completed_at = now()
+    WHERE workflow_id = v_child;
+    UPDATE horsies_recovery_scan_cursors SET last_created_at = NULL, last_id = NULL, cycle_upper_created_at = NULL,
+        cycle_upper_id = NULL, claim_token = NULL, claim_expires_at = NULL
+    WHERE scan_name = 'running_workflows';
+
+    SELECT * INTO v_page FROM horsies_workflow_recovery_audit_page(1000, v_token, 300000);
+    PERFORM wft_check(v_page.outcome = 'PAGE' AND v_page.claim_token = v_token
+                      AND v_page.scanned_count = (SELECT count(*) FROM horsies_workflows WHERE status = 'RUNNING'),
+                      'audit page: one page holds every RUNNING workflow under the page size, claimed');
+    PERFORM wft_check(v_done = ANY(v_page.completion_ids) AND v_child = ANY(v_page.completion_ids)
+                      AND NOT v_live = ANY(v_page.completion_ids) AND NOT v_live = ANY(v_page.orphan_ids)
+                      AND v_page.orphan_ids @> ARRAY[v_orphan]
+                      AND v_page.orphan_names[array_position(v_page.orphan_ids, v_orphan)] = 'orphan',
+                      'audit page: completion candidates (nodes, none live) and orphans (no node) with their names');
+    PERFORM wft_check((SELECT c.claim_token = v_token AND c.claim_expires_at > now() AND c.last_id IS NULL
+                              AND c.completed_cycles = 1 AND c.last_scan_rows = v_page.scanned_count
+                       FROM horsies_recovery_scan_cursors c WHERE c.scan_name = 'running_workflows'),
+                      'audit page: a short page ends the cycle, and the claim is stored');
+    SELECT * INTO v_page FROM horsies_workflow_recovery_audit_page(1000, v_other, 300000);
+    PERFORM wft_check(v_page.outcome = 'CURSOR_HELD' AND v_page.scanned_count IS NULL,
+                      'audit page: a live claim holds the cursor for another reaper');
+
+    SELECT * INTO v_row FROM horsies_workflow_recover_completion(v_done, v_other, 300000);
+    PERFORM wft_check(v_row.outcome = 'AUDIT_CLAIM_LOST' AND (wft_workflow(v_done)).status = 'RUNNING',
+                      'recover completion: another token is AUDIT_CLAIM_LOST, nothing done');
+    SELECT * INTO v_row FROM horsies_workflow_recover_completion(v_done, v_token, 300000);
+    PERFORM wft_check(v_row.outcome = 'COMPLETED' AND v_row.workflow_status = 'COMPLETED'
+                      AND v_row.advance_child_workflow_id IS NULL
+                      AND ((wft_workflow(v_done)).result::json ->> '__h_outputless_terminals__') = 'true',
+                      'recover completion: an all-terminal workflow completes with its output');
+    SELECT * INTO v_row FROM horsies_workflow_recover_completion(v_child, v_token, 300000);
+    PERFORM wft_check(v_row.outcome = 'COMPLETED' AND v_row.advance_child_workflow_id = v_child,
+                      'recover completion: a child that completes is named for the parent advance');
+    SELECT * INTO v_row FROM horsies_workflow_recover_completion(v_live, v_token, 300000);
+    PERFORM wft_check(v_row.outcome = 'UNCHANGED' AND v_row.workflow_status = 'RUNNING',
+                      'recover completion: a workflow with a live node is UNCHANGED');
+    SELECT * INTO v_row FROM horsies_workflow_recover_completion('00000000-0000-7000-8000-000000000dff', v_token, 300000);
+    PERFORM wft_check(v_row.outcome = 'UNCHANGED' AND v_row.workflow_status IS NULL,
+                      'recover completion: a workflow that is gone is UNCHANGED with no status');
+
+    SELECT * INTO v_row FROM horsies_workflow_fail_orphaned(v_live, v_token, 300000, v_error);
+    PERFORM wft_check(v_row.outcome = 'UNCHANGED' AND v_row.workflow_status = 'RUNNING'
+                      AND (wft_workflow(v_live)).status = 'RUNNING',
+                      'fail orphaned: a workflow with a node is UNCHANGED');
+    SELECT * INTO v_row FROM horsies_workflow_fail_orphaned(v_orphan, v_token, 300000, v_error);
+    PERFORM wft_check(v_row.outcome = 'FAILED' AND (wft_workflow(v_orphan)).status = 'FAILED'
+                      AND (wft_workflow(v_orphan)).error = v_error AND (wft_workflow(v_orphan)).completed_at IS NOT NULL,
+                      'fail orphaned: a RUNNING workflow with no node is FAILED with the error');
+
+    UPDATE horsies_recovery_scan_cursors SET claim_expires_at = now() - interval '1 second'
+    WHERE scan_name = 'running_workflows';
+    SELECT * INTO v_row FROM horsies_workflow_fail_orphaned(v_live, v_token, 300000, v_error);
+    PERFORM wft_check(v_row.outcome = 'AUDIT_CLAIM_LOST', 'fail orphaned: an expired claim is AUDIT_CLAIM_LOST');
+    SELECT * INTO v_page FROM horsies_workflow_recovery_audit_page(1000, v_other, 300000);
+    PERFORM wft_check(v_page.outcome = 'PAGE', 'audit page: an expired claim frees the cursor');
+
+    PERFORM wft_refused($q$SELECT * FROM horsies_workflow_recovery_audit_page(0, gen_random_uuid(), 1000)$q$, '22023',
+                        'audit page refuses a page size of 0');
+    PERFORM wft_refused($q$SELECT * FROM horsies_workflow_recovery_audit_page(1001, gen_random_uuid(), 1000)$q$, '22023',
+                        'audit page refuses a page size over 1000');
+    PERFORM wft_refused($q$SELECT * FROM horsies_workflow_recovery_audit_page(10, NULL, 1000)$q$, '22023',
+                        'audit page refuses a NULL token');
+    PERFORM wft_refused($q$SELECT * FROM horsies_workflow_recover_completion(gen_random_uuid(), gen_random_uuid(), 0)$q$,
+                        '22023', 'recover completion refuses a time to live of 0');
+    PERFORM wft_refused($q$SELECT * FROM horsies_workflow_fail_orphaned(gen_random_uuid(), gen_random_uuid(), 1000,
+                        NULL)$q$, '22023', 'fail orphaned refuses a NULL error');
+END $$;
+
+-- Recovery failure bound: horsies_workflow_recovery_record_raise ----------------------------------------------------
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000d11';
+    v_live uuid := '00000000-0000-7000-8000-000000000d12';
+    v_done uuid := '00000000-0000-7000-8000-000000000d13';
+    v_pass1 uuid := '00000000-0000-7000-8000-000000000d91';
+    v_pass2 uuid := '00000000-0000-7000-8000-000000000d92';
+    v_pass3 uuid := '00000000-0000-7000-8000-000000000d93';
+    v_pass4 uuid := '00000000-0000-7000-8000-000000000d94';
+    v_row record;
+    v_failure horsies_workflow_recovery_failures;
+    v_result json;
+BEGIN
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[{"idx":0},{"idx":1,"deps":[0]},{"idx":2,"deps":[1]}]');
+    UPDATE horsies_workflow_tasks SET status = 'COMPLETED', result = wft_ok('1'), completed_at = now(), task_id = NULL
+    WHERE workflow_id = v_wf AND task_index = 0;
+    -- The task of node 0 left the node: the limit then finds no live node.
+
+    SELECT * INTO v_row FROM horsies_workflow_recovery_record_raise(v_wf, v_pass1, 'pending_terminal_deps', 1,
+                                                                    'KeyError', 'boom', 3);
+    SELECT * INTO v_failure FROM horsies_workflow_recovery_failures WHERE workflow_id = v_wf;
+    PERFORM wft_check(v_row.outcome = 'COUNTED' AND v_row.failed_passes = 1 AND v_failure.failed_passes = 1
+                      AND v_failure.last_pass_id = v_pass1 AND v_failure.last_case = 'pending_terminal_deps'
+                      AND v_failure.last_task_index = 1 AND v_failure.last_error_type = 'KeyError',
+                      'raise record: the first raise is COUNTED and stored');
+    SELECT * INTO v_row FROM horsies_workflow_recovery_record_raise(v_wf, v_pass1, 'pending_terminal_deps', 1,
+                                                                    'KeyError', 'boom', 3);
+    PERFORM wft_check(v_row.outcome = 'ALREADY_COUNTED' AND v_row.failed_passes IS NULL
+                      AND (SELECT failed_passes FROM horsies_workflow_recovery_failures WHERE workflow_id = v_wf) = 1,
+                      'raise record: a second raise in the same pass is ALREADY_COUNTED');
+    PERFORM horsies_workflow_recovery_record_raise(v_wf, v_pass2, 'pending_terminal_deps', 1, 'KeyError', 'boom', 3);
+    UPDATE horsies_workflows SET status = 'PAUSED' WHERE id = v_wf;
+    SELECT * INTO v_row FROM horsies_workflow_recovery_record_raise(v_wf, v_pass3, 'pending_terminal_deps', 1,
+                                                                    'KeyError', 'boom', 3);
+    PERFORM wft_check(v_row.outcome = 'REFUSED' AND v_row.failed_passes = 3
+                      AND (SELECT failed_passes FROM horsies_workflow_recovery_failures WHERE workflow_id = v_wf) = 3
+                      AND (wft_node(v_wf, 1)).status = 'PENDING' AND (wft_workflow(v_wf)).error IS NULL,
+                      'raise record: at the limit a workflow that is not RUNNING refuses, the count stays');
+    UPDATE horsies_workflows SET status = 'RUNNING' WHERE id = v_wf;
+    SELECT * INTO v_row FROM horsies_workflow_recovery_record_raise(v_wf, v_pass4, 'pending_terminal_deps', 1,
+                                                                    'KeyError', 'boom', 3);
+    PERFORM wft_check(v_row.outcome = 'LIMIT_REACHED_FAILED' AND v_row.failed_passes = 4,
+                      'raise record: over the limit with no live node, the workflow fails closed');
+    v_result := (wft_node(v_wf, 1)).result::json;
+    PERFORM wft_check(
+        (wft_node(v_wf, 1)).status = 'FAILED'
+        AND (v_result -> 'err' -> 'error_code' ->> '__builtin_task_code__') = 'WORKFLOW_RECOVERY_LIMIT_REACHED'
+        AND (v_result -> 'err' ->> 'message')
+            = 'Workflow recovery raised a persistent error in 4 passes. Last case: pending_terminal_deps. Last raise: '
+              || 'KeyError: boom'
+        AND (v_result -> 'err' -> 'data')::text
+            = '{"workflow_id":"' || v_wf || '","case":"pending_terminal_deps","task_index":1,"failed_passes":4,'
+              || '"exception_type":"KeyError"}',
+        'raise record: the node of the raise stores the limit error, which names the stored count'
+    );
+    PERFORM wft_check((wft_node(v_wf, 2)).status = 'SKIPPED' AND (wft_workflow(v_wf)).status = 'FAILED'
+                      AND (wft_workflow(v_wf)).error = (v_result -> 'err')::text,
+                      'raise record: PENDING nodes SKIPPED, the workflow FAILED with the limit error');
+
+    PERFORM * FROM wft_start1(v_live, 'fail', '[{"idx":0},{"idx":1}]');
+    PERFORM horsies_workflow_recovery_record_raise(v_live, v_pass1, 'terminal_workflow_running', NULL, 'E', '', 3);
+    PERFORM horsies_workflow_recovery_record_raise(v_live, v_pass2, 'terminal_workflow_running', NULL, 'E', '', 3);
+    SELECT * INTO v_row FROM horsies_workflow_recovery_record_raise(v_live, v_pass3, 'terminal_workflow_running', NULL,
+                                                                    'E', '', 3);
+    PERFORM wft_check(v_row.outcome = 'LIMIT_REACHED_LIVE_NODES' AND (wft_workflow(v_live)).status = 'RUNNING'
+                      AND ((wft_workflow(v_live)).error::json -> 'data' ->> 'task_index') IS NULL
+                      AND (wft_node(v_live, 0)).status = 'ENQUEUED',
+                      'raise record: with a live node the workflow keeps RUNNING with the error; no node is named');
+
+    -- A limit write that raises: the count stays. A stand-in limit function raises for one subtransaction.
+    PERFORM * FROM wft_start1(v_done, 'fail', '[{"idx":0}]');
+    BEGIN
+        CREATE OR REPLACE FUNCTION horsies_workflow_apply_recovery_limit(
+            p_workflow_id uuid, p_task_index integer, p_limit_error text, p_limit_node_result text
+        ) RETURNS text LANGUAGE plpgsql AS $f$
+        BEGIN
+            RAISE EXCEPTION 'limit write failed' USING ERRCODE = 'check_violation';
+        END;
+        $f$;
+        PERFORM horsies_workflow_recovery_record_raise(v_done, v_pass1, 'ready_not_enqueued', 0, 'E', 'x', 3);
+        PERFORM horsies_workflow_recovery_record_raise(v_done, v_pass2, 'ready_not_enqueued', 0, 'E', 'x', 3);
+        SELECT * INTO v_row FROM horsies_workflow_recovery_record_raise(v_done, v_pass3, 'ready_not_enqueued', 0, 'E',
+                                                                        'x', 3);
+        PERFORM wft_check(v_row.outcome = 'LIMIT_WRITE_FAILED' AND v_row.failed_passes = 3
+                          AND v_row.limit_write_error = '23514: limit write failed'
+                          AND (SELECT failed_passes FROM horsies_workflow_recovery_failures WHERE workflow_id = v_done) = 3
+                          AND (wft_workflow(v_done)).status = 'RUNNING',
+                          'raise record: a limit write that raises keeps the count and writes nothing else');
+        RAISE EXCEPTION USING ERRCODE = 'P0002', MESSAGE = 'unwind the stand-in';
+    EXCEPTION
+        WHEN no_data_found THEN
+            NULL;
+    END;
+
+    SELECT * INTO v_row FROM horsies_workflow_recovery_record_raise('00000000-0000-7000-8000-000000000dfe', v_pass1,
+                                                                    'terminal_workflow_running', NULL, 'E', '', 3);
+    PERFORM wft_check(v_row.outcome = 'WORKFLOW_ABSENT', 'raise record: an unknown workflow is WORKFLOW_ABSENT');
+    PERFORM wft_refused(format($q$SELECT * FROM horsies_workflow_recovery_record_raise(%L, %L, 'phase2_progression', 0,
+                               'E', '', 3)$q$, v_live, v_pass4), '22023', 'raise record refuses a case it does not count');
+    PERFORM wft_refused(format($q$SELECT * FROM horsies_workflow_recovery_record_raise(%L, %L, 'terminal_workflow_running',
+                               0, 'E', '', 3)$q$, v_live, v_pass4), '22023',
+                        'raise record refuses a node index on terminal_workflow_running');
+    PERFORM wft_refused(format($q$SELECT * FROM horsies_workflow_recovery_record_raise(%L, %L, 'ready_not_enqueued',
+                               NULL, 'E', '', 3)$q$, v_live, v_pass4), '22023',
+                        'raise record refuses a node case with no index');
+    PERFORM wft_refused(format($q$SELECT * FROM horsies_workflow_recovery_record_raise(%L, %L, 'ready_not_enqueued', 0,
+                               'E', '', 2)$q$, v_live, v_pass4), '22023', 'raise record refuses a limit under 3');
+    PERFORM wft_refused(format($q$SELECT * FROM horsies_workflow_recovery_record_raise(%L, %L, 'ready_not_enqueued', 0,
+                               '', '', 3)$q$, v_live, v_pass4), '22023', 'raise record refuses an empty error type');
+    PERFORM wft_refused(format($q$SELECT * FROM horsies_workflow_recovery_record_raise(%L, %L, 'ready_not_enqueued', 0,
+                               'E', repeat('x', 501), 3)$q$, v_live, v_pass4), '22023',
+                        'raise record refuses a detail over 500 characters');
+    PERFORM wft_refused(format($q$SELECT * FROM horsies_workflow_recovery_record_raise(%L, NULL, 'ready_not_enqueued', 0,
+                               'E', '', 3)$q$, v_live), '22023', 'raise record refuses a NULL pass id');
+    PERFORM wft_check((SELECT failed_passes FROM horsies_workflow_recovery_failures WHERE workflow_id = v_live) = 3,
+                      'raise record refusals write nothing');
 END $$;

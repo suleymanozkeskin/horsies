@@ -9,6 +9,7 @@ from uuid import uuid4
 import psycopg
 import pytest
 
+from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.types.result import is_ok
@@ -93,6 +94,7 @@ async def test_horsies_transaction_mode_disables_psycopg_prepared_statements(
             enqueue_r = await broker.enqueue_async(
                 task_name,
                 task_id=task_id,
+                send_kind=SendKind.FIRST,
                 enqueue_sha=enqueue_sha,
                 args_json="[]",
                 kwargs_json="{}",

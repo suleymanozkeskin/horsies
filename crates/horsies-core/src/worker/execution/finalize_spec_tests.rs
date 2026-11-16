@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 use super::{
     finalize_workflow_phase, persist_terminal_state, FinalizeError, FinalizeOutcome, FinalizeStage,
+    PhaseTwoForm,
 };
 use crate::broker::{ClaimedTaskRow, PostgresBroker, SetRunningRow};
 use crate::core::config::payload::PayloadPolicy;
@@ -173,10 +174,10 @@ async fn seed_workflow_for(pool: &PgPool, task_id: Uuid, queue: &str) -> Uuid {
     .expect("seed workflow");
     sqlx::query(
         "INSERT INTO horsies_workflow_tasks (
-             id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+             downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
              dependencies, allow_failed_deps, join_type, max_retries, execution,
              retention_class_key, status, task_id, is_subworkflow, created_at, started_at
-         ) VALUES ($1, $2, 0, 'only', $3, '{}', $4, 100,
+         ) VALUES ('NONE', $1, $2, 0, 'only', $3, '{}', $4, 100,
                    '{}', FALSE, 'all', 0, 'ISOLATED',
                    'forever', 'RUNNING', $5, FALSE, NOW(), NOW())",
     )
@@ -263,10 +264,10 @@ fn ok_result(text: &str) -> TaskResult<Vec<u8>> {
 fn describe(outcome: &Result<FinalizeOutcome, FinalizeError>) -> String {
     match outcome {
         Ok(FinalizeOutcome::Terminal {
-            is_success,
             capacity_notified,
+            phase_two,
         }) => format!(
-            "Terminal {{ is_success: {is_success}, capacity_notified: {capacity_notified} }}"
+            "Terminal {{ capacity_notified: {capacity_notified}, phase_two: {phase_two:?} }}"
         ),
         Ok(FinalizeOutcome::Retried) => "Retried".to_owned(),
         Ok(FinalizeOutcome::Finalized) => "Finalized".to_owned(),
@@ -572,17 +573,12 @@ async fn a_workflow_failure_replay_after_a_lost_reply_owes_phase_two() {
 
     for outcome in [&first, &replay] {
         assert!(
-            matches!(
-                outcome,
-                Ok(FinalizeOutcome::Terminal {
-                    is_success: false,
-                    ..
-                })
-            ),
+            matches!(outcome, Ok(FinalizeOutcome::Terminal { .. })),
             "{}",
             describe(outcome)
         );
     }
+    assert_eq!(committed["status"], "FAILED");
     assert_eq!(history_row(&pool, seeded.task_id).await, Some(committed));
     cleanup(&pool, &seeded).await;
 }
@@ -628,13 +624,7 @@ async fn a_workflow_success_replay_owes_phase_two() {
 
     for outcome in [&first, &replay] {
         assert!(
-            matches!(
-                outcome,
-                Ok(FinalizeOutcome::Terminal {
-                    is_success: true,
-                    ..
-                })
-            ),
+            matches!(outcome, Ok(FinalizeOutcome::Terminal { .. })),
             "{}",
             describe(outcome)
         );
@@ -856,7 +846,8 @@ async fn wakes_before_sentinel(
     panic!("sentinel wake not seen; payloads {payloads:?}");
 }
 
-/// Run phase 2 with no wake sent by phase 1.
+/// Run phase 2 with no wake sent by phase 1, in the form a phase-1 replay
+/// gives (`PhaseTwoForm::NotKnown`: the transaction form of the node finish).
 async fn phase_two(
     pool: &PgPool,
     task_id: Uuid,
@@ -864,17 +855,17 @@ async fn phase_two(
     is_workflow_task: bool,
 ) -> Result<(), FinalizeError> {
     finalize_workflow_phase(
-        pool,
+        &PostgresBroker::from_pool(pool.clone()),
         &WorkflowSpecRegistry::new(),
         task_id,
-        true,
         queue,
         is_workflow_task,
         false,
-        &PayloadPolicy::default(),
+        PhaseTwoForm::NotKnown,
         &RetentionConfig::default(),
     )
     .await
+    .map(|_parent_advances| ())
 }
 
 /// The status of the one node of `workflow_id`, and whether a phase-2
@@ -918,8 +909,8 @@ async fn phase_two_of_a_workflow_task_wakes_its_queue_once() {
         matches!(
             phase_one,
             Ok(FinalizeOutcome::Terminal {
-                is_success: true,
                 capacity_notified: false,
+                ..
             })
         ),
         "{}",
