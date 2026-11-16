@@ -39,6 +39,11 @@ pub enum BrokerError {
     #[error("invalid task status: {0}")]
     InvalidStatus(String),
 
+    /// A live task row's `execution` column holds a value outside
+    /// `ISOLATED`, `SHARED_ASYNC` and `SHARED_THREAD`.
+    #[error("invalid execution class: {0}")]
+    InvalidExecutionClass(String),
+
     /// A connection or delivery check failed in a way that can clear.
     #[error("connection failed: {0}")]
     ConnectionFailed(String),
@@ -130,6 +135,7 @@ impl BrokerError {
             | Self::InvalidConnectionSettings(_)
             | Self::Serialization(_)
             | Self::InvalidStatus(_)
+            | Self::InvalidExecutionClass(_)
             | Self::PayloadMismatch { .. }
             | Self::EnqueueConflictUnverifiable { .. }
             | Self::IdempotencyKeyConflict { .. }

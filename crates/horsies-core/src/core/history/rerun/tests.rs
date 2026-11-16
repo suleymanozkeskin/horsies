@@ -586,6 +586,10 @@ async fn eligibility_live_absence_and_purged_floor_are_typed_before_input() {
         .unwrap();
     assert_eq!(live_info.task_id, live);
     assert_eq!(live_info.status, TaskStatus::Pending);
+    assert_eq!(
+        live_info.execution,
+        crate::core::ExecutionClass::Live(crate::core::Execution::Isolated)
+    );
     let live_attempts = live_info.attempts.unwrap();
     assert_eq!(live_attempts.len(), 1);
     assert_eq!(
@@ -1049,6 +1053,10 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .unwrap()
         .unwrap();
     assert_eq!(info.status, TaskStatus::Completed);
+    assert_eq!(
+        info.execution,
+        crate::core::ExecutionClass::NotKeptInHistory
+    );
     let attempts = info.attempts.unwrap();
     assert_eq!(attempts.len(), 1);
     assert_eq!(attempts[0].task_id, completed);

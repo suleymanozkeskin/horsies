@@ -254,7 +254,8 @@ WHERE id = $1";
 const GET_TASK_INFO_SQL: &str = "\
 SELECT id, task_name, status, queue_name, priority, retry_count, max_retries,
        next_retry_at, sent_at, enqueued_at, claimed_at, started_at, completed_at, failed_at,
-       worker_hostname, worker_pid, worker_process_name, error_code, failed_reason, result
+       worker_hostname, worker_pid, worker_process_name, error_code, failed_reason, result,
+       execution
 FROM horsies_tasks
 WHERE id = $1";
 
@@ -267,7 +268,7 @@ const GET_TASK_INFO_MINIMAL_SQL: &str = "\
 SELECT id, task_name, status, queue_name, priority, retry_count, max_retries,
        next_retry_at, sent_at, enqueued_at, claimed_at, started_at, completed_at, failed_at,
        worker_hostname, worker_pid, worker_process_name, error_code,
-       NULL::TEXT AS failed_reason, NULL::TEXT AS result
+       NULL::TEXT AS failed_reason, NULL::TEXT AS result, execution
 FROM horsies_tasks
 WHERE id = $1";
 
@@ -276,7 +277,7 @@ const GET_TASK_INFO_RESULT_ONLY_SQL: &str = "\
 SELECT id, task_name, status, queue_name, priority, retry_count, max_retries,
        next_retry_at, sent_at, enqueued_at, claimed_at, started_at, completed_at, failed_at,
        worker_hostname, worker_pid, worker_process_name, error_code,
-       NULL::TEXT AS failed_reason, result
+       NULL::TEXT AS failed_reason, result, execution
 FROM horsies_tasks
 WHERE id = $1";
 
@@ -285,7 +286,7 @@ const GET_TASK_INFO_REASON_ONLY_SQL: &str = "\
 SELECT id, task_name, status, queue_name, priority, retry_count, max_retries,
        next_retry_at, sent_at, enqueued_at, claimed_at, started_at, completed_at, failed_at,
        worker_hostname, worker_pid, worker_process_name, error_code,
-       failed_reason, NULL::TEXT AS result
+       failed_reason, NULL::TEXT AS result, execution
 FROM horsies_tasks
 WHERE id = $1";
 
@@ -2931,6 +2932,8 @@ fn history_task_info(
             .flatten(),
         result,
         attempts,
+        // The history table has no `execution` column (Python reports `None`).
+        execution: crate::core::ExecutionClass::NotKeptInHistory,
     })
 }
 

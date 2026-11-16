@@ -25,8 +25,8 @@ pub use config::{
 pub use error::{ErrorCategory, ErrorCode, HorsiesError, ValidationReport};
 pub use registry::{RegisteredWorkflowSpec, SpecBuilderFn, TaskRegistry, WorkflowSpecRegistry};
 pub use task::{
-    AsyncTaskFn, BackoffStrategy, BlockingTaskFn, BuiltInTaskCode, ContractCode,
-    OperationalErrorCode, OutcomeCode, RegisteredTask, RetrievalCode, RetryPolicy,
+    AsyncTaskFn, BackoffStrategy, BlockingTaskFn, BuiltInTaskCode, ContractCode, Execution,
+    ExecutionClass, OperationalErrorCode, OutcomeCode, RegisteredTask, RetrievalCode, RetryPolicy,
     RetryPolicyError, SubWorkflowError, TaskAttemptInfo, TaskError, TaskErrorCode, TaskInfo,
     TaskOptions, TaskResult, TaskSendError, TaskSendErrorCode, TaskSendPayload, TaskSendResult,
 };
