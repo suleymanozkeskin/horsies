@@ -6,7 +6,16 @@ from unittest.mock import patch
 
 import pytest
 
-from horsies.core.utils.url import mask_database_url, to_psycopg_url
+from horsies.core.types.result import Err, Ok
+from horsies.core.utils.url import (
+    DatabaseUrlNamesDriver,
+    DatabaseUrlNotPostgres,
+    DatabaseUrlWithoutScheme,
+    check_database_url_scheme,
+    mask_database_url,
+    sqlalchemy_url,
+    to_psycopg_url,
+)
 
 
 @pytest.mark.unit
@@ -97,3 +106,51 @@ class TestToPsycopgUrl:
         url = 'postgresql+psycopg://u:p@h/db'
         with patch('horsies.core.utils.url.urlparse', side_effect=Exception('parse failed')):
             assert to_psycopg_url(url) == 'postgresql://u:p@h/db'
+
+
+@pytest.mark.unit
+class TestCheckDatabaseUrlScheme:
+    """One test per outcome of the database URL scheme check."""
+
+    @pytest.mark.parametrize(
+        'url',
+        ['postgresql://u:p@h/db', 'postgres://u:p@h/db'],
+    )
+    def test_postgres_schemes_are_accepted(self, url: str) -> None:
+        assert check_database_url_scheme(url) == Ok(url)
+
+    def test_scheme_with_a_driver_is_refused(self) -> None:
+        assert check_database_url_scheme('postgresql+psycopg://u:p@h/db') == Err(
+            DatabaseUrlNamesDriver(scheme='postgresql+psycopg'),
+        )
+
+    def test_scheme_of_another_database_is_refused(self) -> None:
+        assert check_database_url_scheme('mysql+pymysql://u:p@h/db') == Err(
+            DatabaseUrlNotPostgres(scheme='mysql+pymysql'),
+        )
+
+    @pytest.mark.parametrize('url', ['u:p@h/db', '://u:p@h/db', ''])
+    def test_url_without_a_scheme_is_refused(self, url: str) -> None:
+        assert check_database_url_scheme(url) == Err(DatabaseUrlWithoutScheme())
+
+
+@pytest.mark.unit
+class TestSqlalchemyUrl:
+    """The SQLAlchemy URL names the psycopg 3 driver and keeps the rest."""
+
+    @pytest.mark.parametrize(
+        'url',
+        [
+            'postgresql://u:p%40ss@h:5433/db?sslmode=require',
+            'postgres://u:p%40ss@h:5433/db?sslmode=require',
+        ],
+    )
+    def test_scheme_becomes_postgresql_psycopg(self, url: str) -> None:
+        assert sqlalchemy_url(url) == (
+            'postgresql+psycopg://u:p%40ss@h:5433/db?sslmode=require'
+        )
+
+    def test_refused_url_is_a_defect_of_the_caller(self) -> None:
+        with pytest.raises(AssertionError):
+            sqlalchemy_url('postgresql+psycopg://u:p@h/db')
+

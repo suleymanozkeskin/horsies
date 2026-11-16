@@ -32,7 +32,12 @@ from horsies.core.lifecycle.outcomes import (
     StaleAttemptOutcome,
     decode_stale_attempt_row,
 )
-from horsies.core.models.tasks import OperationalErrorCode, TaskError, TaskResult
+from horsies.core.models.tasks import (
+    OperationalErrorCode,
+    RetryPolicy,
+    TaskError,
+    TaskResult,
+)
 from horsies.core.types.result import Result
 from horsies.core.utils.retry import admitted_retry_policy, calculate_retry_delay
 
@@ -152,7 +157,7 @@ def crash_retry_request(candidate: StaleCandidate) -> CrashRetryRequest:
     match policy:
         case None:
             return NoCrashRetry()
-        case dict():
+        case RetryPolicy():
             return CrashRetry(
                 retry_count=candidate.retry_count,
                 delay_s=calculate_retry_delay(candidate.retry_count + 1, policy),

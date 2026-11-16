@@ -28,6 +28,7 @@ from tests.integration.test_task_history_schema_emission import (
     MakeDatabase,
     make_database,
 )
+from horsies.core.utils.url import sqlalchemy_url
 
 __all__ = ['make_database']
 
@@ -61,7 +62,7 @@ async def test_failed_enqueue_hides_the_task_arguments(
     app._broker = broker  # pyright: ignore[reportPrivateUsage]
     broker.app = app
     secret_task = _secret_task(app)
-    lock_engine = create_async_engine(url)
+    lock_engine = create_async_engine(sqlalchemy_url(url))
     try:
         initialized = await broker.ensure_schema_initialized()
         assert initialized.is_ok(), initialized

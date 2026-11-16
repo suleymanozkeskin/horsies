@@ -83,7 +83,7 @@ config = AppConfig(
         CustomQueueConfig(name="low", priority=100, max_concurrency=5),
     ],
     broker=PostgresConfig(
-        database_url=SecretStr("postgresql+psycopg://user:password@localhost:5432/shipping_db"),
+        database_url=SecretStr("postgresql://user:password@localhost:5432/shipping_db"),
     ),
     schedule=schedule_config,
 )

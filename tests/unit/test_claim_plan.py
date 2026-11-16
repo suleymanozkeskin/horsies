@@ -360,7 +360,7 @@ class TestRegisteredClasses:
         app = Horsies(
             AppConfig(
                 broker=PostgresConfig(
-                    database_url=SecretStr('postgresql+psycopg://u:p@localhost/db'),
+                    database_url=SecretStr('postgresql://u:p@localhost/db'),
                 ),
             ),
         )

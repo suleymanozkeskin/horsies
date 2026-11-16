@@ -26,14 +26,14 @@ use super::shared::{SharedPool, SharedPoolConfig};
 use crate::worker::executor::placement::ChildCpus;
 use crate::worker::executor::protocol::{
     encode_child_frame, encode_parent_frame, AsyncSeats, BlockedWhere, BodyEnd, BootDetail,
-    BootErrorName, BootFailedFrame, CancelGraceMs, ChildFrame, ChildKind, ChildLogLevel, ChildPool,
-    ChildProgram, DatabaseUrl, DispatchNumber, ExecutorThreads, InitFrame, IsolatedChild,
-    IsolatedWork, LeftoverCancelFrame, LeftoverName, LeftoverStuckFrame, LoopBlockedFrame,
-    LoopCulprit, NoLeftWork, ParentFrame, PoolMaxSize, PoolMinSize, ProcessId, ReadyFrame,
-    ReportedBootCause, ResultEnvelopeText, ResultFrame, RssReading, RunEnd, RunFrame, RunRef,
-    RunStuckFrame, SeatEnd, SharedAsyncChild, SharedResultFrame, SharedRunFrame, SharedThreadChild,
-    SharedWork, ShortageErrno, StuckWork, TaskInputText, TaskSendPool, TaskTimeoutMs, ThreadSeats,
-    HEADER_BYTES,
+    BootErrorName, BootFailedFrame, CancelGraceMs, ChildConnection, ChildFrame, ChildKind,
+    ChildLogLevel, ChildPool, ChildProgram, DatabaseUrl, DispatchNumber, ExecutorThreads,
+    InitFrame, IsolatedChild, IsolatedWork, LeftoverCancelFrame, LeftoverName, LeftoverStuckFrame,
+    LoopBlockedFrame, LoopCulprit, NoLeftWork, ParentFrame, PoolMaxSize, PoolMinSize, ProcessId,
+    ReadyFrame, ReportedBootCause, ResultEnvelopeText, ResultFrame, RssReading, RunEnd, RunFrame,
+    RunRef, RunStuckFrame, SeatEnd, SharedAsyncChild, SharedResultFrame, SharedRunFrame,
+    SharedThreadChild, SharedWork, ShortageErrno, StuckWork, TaskInputText, TaskSendPool,
+    TaskTimeoutMs, ThreadSeats, HEADER_BYTES,
 };
 use crate::worker::executor::supervisor::{ChildCommand, Spawner, CHILD_KILL_WAIT};
 use crate::worker::retry::read_stored_options;
@@ -114,6 +114,7 @@ fn init_of(child_kind: ChildKind) -> InitFrame {
         program: ChildProgram::Rust,
         log_level: ChildLogLevel::Info,
         database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
+        connection: ChildConnection::default(),
         process_name: "horsies-scripted-child".to_owned(),
         child_kind,
     }
@@ -671,7 +672,8 @@ pub(super) fn start_isolated_from(
     live: LiveDispatches,
 ) -> (IsolatedPool, Arc<PoolBoard>) {
     let board = Arc::new(PoolBoard::new(layout(slots, 0, 0)));
-    let source: Arc<dyn crate::worker::executor::supervisor::ChildSource> = Arc::clone(source);
+    let source: Arc<dyn crate::worker::executor::supervisor::ChildSource> =
+        Arc::<super::held_exits::HeldExits>::clone(source);
     let pool =
         IsolatedPool::start_from_source(config, Arc::clone(&board), spawner.handle(), source, live);
     (pool, board)
@@ -686,6 +688,7 @@ pub(super) fn start_shared_from(
     config: SharedPoolConfig,
     live: LiveDispatches,
 ) -> SharedPool {
-    let source: Arc<dyn crate::worker::executor::supervisor::ChildSource> = Arc::clone(source);
+    let source: Arc<dyn crate::worker::executor::supervisor::ChildSource> =
+        Arc::<super::held_exits::HeldExits>::clone(source);
     SharedPool::start_from_source(config, Arc::clone(board), spawner.handle(), source, live)
 }

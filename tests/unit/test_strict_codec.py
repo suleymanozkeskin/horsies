@@ -549,7 +549,7 @@ class TestEntryPoints:
         app = Horsies(
             AppConfig(
                 broker=PostgresConfig(
-                    database_url='postgresql+psycopg://user:password@localhost/unused',
+                    database_url='postgresql://user:password@localhost/unused',
                 ),
             ),
         )
@@ -1005,7 +1005,7 @@ class TestJsonInput:
 
         app = Horsies(
             AppConfig(
-                broker=PostgresConfig(database_url='postgresql+psycopg://u:p@localhost/x'),
+                broker=PostgresConfig(database_url='postgresql://u:p@localhost/x'),
             ),
         )
         _ = app.task(task_name='json_input_parameter')(pass_on)

@@ -27,7 +27,9 @@ use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::worker::children::ChildLaunch;
 use crate::worker::claim_pass::RegisteredClasses;
 use crate::worker::config::WorkerConfig;
-use crate::worker::executor::protocol::{ChildLogLevel, ChildProgram, DatabaseUrl};
+use crate::worker::executor::protocol::{
+    ChildConnection, ChildLogLevel, ChildProgram, DatabaseUrl,
+};
 use crate::worker::executor::slots::scripted::idle_child_of_any_kind;
 
 /// The longest wait for an event a test expects.
@@ -48,6 +50,8 @@ fn worker_on(broker: Arc<PostgresBroker>, resilience: WorkerResilienceConfig) ->
     let mut app_config = AppConfig::for_database_url("postgresql://horsies@127.0.0.1:1/horsies");
     app_config.resilience = resilience;
     let database_url = DatabaseUrl::new(app_config.broker.database_url.clone());
+    let connection = ChildConnection::of_config(&app_config.broker)
+        .expect("the config of the test database validates");
     Worker::new(
         broker,
         Arc::new(WorkflowSpecRegistry::new(
@@ -67,6 +71,7 @@ fn worker_on(broker: Arc<PostgresBroker>, resilience: WorkerResilienceConfig) ->
             program: ChildProgram::Rust,
             log_level: ChildLogLevel::Info,
             database_url,
+            connection,
         },
         RegisteredClasses::default(),
     )

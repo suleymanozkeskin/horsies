@@ -21,7 +21,8 @@ use crate::core::config::retention::RetentionConfig;
 use crate::core::registry::workflow::RegisteredWorkflowDefinition;
 use crate::core::workflow::node::TaskDefaults;
 use crate::core::{
-    HorsiesError, OnError, WorkflowSpec, WorkflowSpecRegistry, WorkflowStartErrorCode,
+    HorsiesError, OnError, SpecBuildError, WorkflowSpec, WorkflowSpecRegistry,
+    WorkflowStartErrorCode,
 };
 use crate::workflow_engine::lifecycle::resume_workflow;
 use crate::workflow_engine::recovery::recover_stuck_workflows;
@@ -602,7 +603,11 @@ fn broken_build_definition(key: &str) -> RegisteredWorkflowDefinition {
         name: "broken_build_wf".to_owned(),
         definition_key: key.to_owned(),
         declared_children: Vec::new(),
-        spec_builder: Arc::new(|_input| Err(HorsiesError::new("build_with refused"))),
+        spec_builder: Arc::new(|_input| {
+            Err(SpecBuildError::Failed(HorsiesError::new(
+                "build_with refused",
+            )))
+        }),
     }
 }
 

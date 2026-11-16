@@ -42,7 +42,7 @@ _POLICY = json.dumps(
     {
         'retry_policy': {
             'max_retries': 3,
-            'intervals': [5, 10],
+            'intervals': [5, 10, 20],
             'backoff_strategy': 'fixed',
             'jitter': False,
             'auto_retry_for': ['WORKER_CRASHED'],

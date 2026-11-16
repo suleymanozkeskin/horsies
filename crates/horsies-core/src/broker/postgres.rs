@@ -1176,6 +1176,26 @@ impl PostgresBroker {
             .await
     }
 
+    /// Connect the broker of a worker's child: no migration and no fleet
+    /// gate check, as [`Self::connect_observe_only`]; the main URL pool keeps
+    /// `kept_open` connections open and, with `check`, pings every pooled
+    /// connection at checkout ([`PoolProfile::Child`]).
+    ///
+    /// Must run inside a tokio runtime when `kept_open` keeps connections
+    /// open: the pool starts the task that opens them.
+    pub async fn connect_child(
+        config: &PostgresConfig,
+        kept_open: crate::db::KeptOpen,
+        check: bool,
+    ) -> Result<Self, BrokerError> {
+        Self::connect_with_profile(
+            config,
+            SchemaInitializationMode::ObserveOnly,
+            PoolProfile::Child { kept_open, check },
+        )
+        .await
+    }
+
     /// Connect a worker's broker: the main URL pool is the worker profile
     /// pool, which keeps [`crate::db::WORKER_RESERVED_CONNECTIONS`] free from
     /// batch checkouts for the reaper and the per-task writes.
@@ -1206,7 +1226,7 @@ impl PostgresBroker {
         let core = CoreHandle::open(config, profile)?;
         let connect_options = pg_connect_options(&config.database_url, config.echo)?;
         let runtime_options = match profile {
-            PoolProfile::Producer => pg_pool_options(config),
+            PoolProfile::Producer | PoolProfile::Child { .. } => pg_pool_options(config),
             PoolProfile::Worker => pg_worker_runtime_pool_options(config),
         };
         let reserve_runtime =
@@ -3520,10 +3540,8 @@ fn raw_result_from_history_detail(
         None | Some(TaskDetailResult::Absent { .. }) => Ok(RawResultProbe::Absent),
         Some(TaskDetailResult::Live { .. }) => Ok(RawResultProbe::Retry),
         Some(TaskDetailResult::History(detail)) => {
-            let status: crate::core::TaskStatus = detail
-                .status
-                .parse()
-                .map_err(|error| raw_result_operation_error(BrokerError::InvalidStatus(error)))?;
+            // Parsed at the history read (`HistoryTaskDetail.status`).
+            let status: crate::core::TaskStatus = detail.status;
             if !status.is_terminal() {
                 return Err(raw_result_operation_error(BrokerError::InvalidStatus(
                     format!("history task {task_id} has non-terminal status {status}"),
@@ -4319,7 +4337,7 @@ mod tests {
             error.data,
             Some(serde_json::json!({ "task_id": task_id.to_string() }))
         );
-        assert!(error.cause.is_none());
+        assert!(error.exception.is_none());
     }
 
     /// Completed task with a string result type.
@@ -4771,9 +4789,7 @@ mod horsies_claim_tests {
             .expect("claim");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, id);
-        let claimed_at = rows[0]
-            .claimed_at
-            .expect("claimed row must carry claimed_at");
+        let claimed_at = rows[0].claimed_at;
         let db_claimed_at: DateTime<Utc> =
             sqlx::query_scalar("SELECT claimed_at FROM horsies_tasks WHERE id = $1")
                 .bind(&id)
@@ -6267,14 +6283,14 @@ mod terminal_at_stamp_tests {
         let id = Uuid::new_v4().to_string();
         seed(&pool, &id, "PENDING", None, None).await;
 
-        let applied = broker
-            .cancel(
-                Uuid::parse_str(&id).unwrap(),
-                &[crate::core::types::status::TaskStatus::Pending],
-            )
-            .await
-            .expect("cancel");
-        assert!(applied);
+        let cancelled =
+            crate::monitoring::cancel_task(&broker, Uuid::parse_str(&id).unwrap(), false)
+                .await
+                .expect("cancel");
+        assert_eq!(
+            cancelled.was_status,
+            crate::core::types::status::TaskStatus::Pending
+        );
 
         let (status, terminal_at) = terminal_at_of(&pool, &id).await;
         assert_eq!(status, "CANCELLED");
@@ -7186,7 +7202,9 @@ mod enqueue_task_options_tests {
             task_name: "t".to_owned(),
             queue_name: None,
             good_until: None,
-            auto_retry_for: Some(vec![crate::core::TaskErrorCode::User("X".to_owned())]),
+            auto_retry_for: Some(vec![crate::core::TaskErrorCode::User(
+                crate::core::UserCode::parse("X").expect("X is a user code"),
+            )]),
             retry_policy: Some(crate::core::RetryPolicy::exponential(30, 4, true).unwrap()),
             timeout_ms: Some(1_000),
         };

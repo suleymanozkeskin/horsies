@@ -76,7 +76,7 @@ class TestConfigModelsForbidExtra:
             AppConfig(
                 broker=PostgresConfig(
                     database_url=SecretStr(
-                        'postgresql+psycopg://user:pass@localhost/db'
+                        'postgresql://user:pass@localhost/db'
                     ),
                 ),
                 recovery={

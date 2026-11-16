@@ -19,13 +19,14 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from horsies.core.baseline.migration import BaselineMigration, load_baseline_migration
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.history.reads.publisher import (
-    RENDERED_READER_SIGNATURES,
+    PUBLISHED_READER_SIGNATURES,
     StagedLoaderPublisher,
 )
 from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationFailed
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.types.result import Err, Ok
 from horsies.core.utils.url import to_psycopg_url
+from horsies.core.utils.url import sqlalchemy_url
 from tests.integration.conftest import DB_URL
 from tests.integration.isolated_database import isolated_test_database
 
@@ -99,7 +100,7 @@ _MISSING_READERS_SQL: Final[LiteralString] = """
 
 async def _missing_readers(connection: Connection) -> object:
     cursor = await connection.execute(
-        _MISSING_READERS_SQL, {'readers': list(RENDERED_READER_SIGNATURES)}
+        _MISSING_READERS_SQL, {'readers': list(PUBLISHED_READER_SIGNATURES)}
     )
     row = await cursor.fetchone()
     assert row is not None
@@ -108,7 +109,7 @@ async def _missing_readers(connection: Connection) -> object:
 
 async def _publication_is_current(url: str) -> bool:
     """The publisher's own check: the manifest equals the catalog and every reader is stamped."""
-    engine = create_async_engine(url)
+    engine = create_async_engine(sqlalchemy_url(url))
     try:
         async with engine.connect() as connection:
             return await StagedLoaderPublisher().is_current(connection)

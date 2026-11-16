@@ -42,7 +42,7 @@ from tests.baseline_sql import baseline_function
 CLAIMED_AT = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
 
 BROKER = PostgresConfig(
-    database_url='postgresql+psycopg://user:pass@localhost/db',
+    database_url='postgresql://user:pass@localhost/db',
     pool_size=5,
     max_overflow=5,
 )
@@ -87,7 +87,7 @@ class TestLeaseAlwaysBounded:
         from horsies.core.worker.worker import Worker, WorkerConfig
 
         cfg = WorkerConfig(
-            dsn='postgresql+psycopg://u:p@localhost/db',
+            dsn='postgresql://u:p@localhost/db',
             psycopg_dsn='postgresql://u:p@localhost/db',
             queues=['default'],
             claim_lease_ms=None,
@@ -108,7 +108,7 @@ class TestLeaseAlwaysBounded:
         from horsies.core.worker.worker import Worker, WorkerConfig
 
         cfg = WorkerConfig(
-            dsn='postgresql+psycopg://u:p@localhost/db',
+            dsn='postgresql://u:p@localhost/db',
             psycopg_dsn='postgresql://u:p@localhost/db',
             queues=['default'],
             prefetch_buffer=2,
@@ -475,9 +475,12 @@ class TestUnclaimSqlClearsLeaseExpiry:
         normalised = ' '.join(
             baseline_function('horsies_abandon_owned_nodes').split()
         )
-        assert "t.command_fingerprint, 'CANCELLED'," in normalised
-        assert "'TASK_CANCELLED'," in normalised
-        assert 'DELETE FROM horsies_tasks WHERE id = ANY(v_applied_ids)' in normalised
+        assert (
+            "horsies_move_tasks_to_history( v_applied_ids, 'CANCELLED', "
+            "'PAUSE_ABANDON_CLAIM_BATCH', v_terminal_at, NULL, 'TASK_CANCELLED',"
+        ) in normalised
+        stage = ' '.join(baseline_function('horsies_move_tasks_to_history').split())
+        assert 'DELETE FROM horsies_tasks AS t WHERE t.id = ANY(p_task_ids)' in stage
 
     def test_paused_task_cleanup_matches_only_current_worker_claims(self) -> None:
         """Paused workflow cleanup must only cancel rows owned by this worker."""

@@ -2,8 +2,8 @@
 --
 -- Preconditions, set up by the runner (test_baseline_scheduler_monitoring_sql.py):
 -- - a fresh database that holds the baseline migration;
--- - the published history readers rendered for the forever leaf (horsies_task_detail_staged and
---   horsies_task_provenance_staged);
+-- - the history readers published by horsies_publish_history_readers (on a fresh install they probe the forever
+--   leaf);
 -- - the dblink extension, and the setting horsies_test.peer_connstr: a libpq connection string to this database,
 --   which the two-session cases use for their second session.
 --
