@@ -40,7 +40,7 @@ BEGIN
         'start: root input is the static input with the workflow meta'
     );
     PERFORM wft_check((SELECT good_until FROM horsies_tasks WHERE id = wft_task_of(v_wf, 2)) = '2031-01-01T00:00:00Z',
-                      'start: good_until comes from the node');
+                      'start: good_until comes from the stored task options');
     PERFORM wft_check(horsies_uuid7_birth(v_task.id) IS NOT NULL, 'start: minted id is a UUIDv7');
 END $$;
 
@@ -366,6 +366,167 @@ BEGIN
     PERFORM wft_check((wft_node(v_wf, 2)).status = 'READY' AND (wft_node(v_wf, 3)).status = 'READY'
                       AND (wft_node(v_wf, 3)).task_id IS NULL AND (wft_node(v_wf, 3)).started_at IS NULL,
                       'build failure (pause): the other nodes of the step back to READY with no task');
+END $$;
+
+-- Stored task options of a promoted task node, read as Python's _build_enqueued_task_params reads them. The start
+-- writes readable options; these cases change the stored options of a PENDING node after the start.
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-0000000002a1';
+BEGIN
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[
+        {"idx":0},
+        {"idx":1,"deps":[0]},
+        {"idx":2,"deps":[0]},
+        {"idx":3,"deps":[0]},
+        {"idx":4,"deps":[0]},
+        {"idx":5,"deps":[0]},
+        {"idx":6,"deps":[1],"allow":true}
+    ]');
+    UPDATE horsies_workflow_tasks
+    SET task_options = CASE task_index
+        WHEN 1 THEN '{"retry_policy":'
+        WHEN 2 THEN '[1]'
+        WHEN 3 THEN '{"retry_policy": 5}'
+        WHEN 4 THEN '{"execution": "PARALLEL"}'
+    END
+    WHERE workflow_id = v_wf AND task_index BETWEEN 1 AND 4;
+    PERFORM wft_finish(v_wf, 0, wft_ok('1'));
+    PERFORM wft_check((wft_node(v_wf, 1)).status = 'FAILED' AND (wft_node(v_wf, 1)).task_id IS NULL
+                      AND (wft_node(v_wf, 1)).result = horsies_task_error_envelope(
+                          'WORKER_SERIALIZATION_ERROR', 'Corrupt task_options JSON for task 1',
+                          '{"workflow_id":"' || v_wf || '","task_index":1}', NULL, NULL),
+                      'stored options (fail): text that does not parse fails the node with Python''s error');
+    PERFORM wft_check((wft_node(v_wf, 2)).status = 'FAILED' AND (wft_node(v_wf, 2)).task_id IS NULL
+                      AND (wft_node(v_wf, 2)).result = horsies_task_error_envelope(
+                          'WORKER_SERIALIZATION_ERROR', 'Invalid task_options payload for task 2: expected object',
+                          '{"workflow_id":"' || v_wf || '","task_index":2}', NULL, NULL),
+                      'stored options (fail): options that are not an object fail the node');
+    PERFORM wft_check((wft_node(v_wf, 3)).status = 'FAILED' AND (wft_node(v_wf, 3)).task_id IS NULL
+                      AND (wft_node(v_wf, 3)).result = horsies_task_error_envelope(
+                          'WORKER_SERIALIZATION_ERROR',
+                          'Invalid retry_policy for task 3: retry_policy is not an object: int',
+                          '{"workflow_id":"' || v_wf || '","task_index":3}', NULL, NULL),
+                      'stored options (fail): a retry_policy that does not validate fails the node');
+    PERFORM wft_check((wft_node(v_wf, 4)).status = 'FAILED' AND (wft_node(v_wf, 4)).task_id IS NULL
+                      AND (wft_node(v_wf, 4)).result = horsies_task_error_envelope(
+                          'WORKER_SERIALIZATION_ERROR',
+                          'Invalid execution for task 4: execution is not one of ISOLATED, SHARED_ASYNC, SHARED_THREAD',
+                          '{"workflow_id":"' || v_wf || '","task_index":4}', NULL, NULL),
+                      'stored options (fail): an execution that does not validate fails the node');
+    PERFORM wft_check((wft_node(v_wf, 5)).status = 'ENQUEUED' AND wft_task_of(v_wf, 5) IS NOT NULL,
+                      'stored options (fail): a sibling with readable options gets its task');
+    PERFORM wft_check((wft_node(v_wf, 6)).status = 'ENQUEUED' AND wft_task_of(v_wf, 6) IS NOT NULL,
+                      'stored options (fail): the failed node is a source in the same step');
+    PERFORM wft_check((wft_workflow(v_wf)).status = 'RUNNING'
+                      AND (wft_workflow(v_wf)).error = horsies_workflow_err_slot((wft_node(v_wf, 1)).result),
+                      'stored options (fail): the workflow error is the error of the lowest failed node');
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-0000000002a2';
+    v_tasks bigint;
+BEGIN
+    PERFORM * FROM wft_start1(v_wf, 'pause', '[
+        {"idx":0},
+        {"idx":1,"deps":[0]},
+        {"idx":2,"deps":[0]},
+        {"idx":3,"deps":[0]}
+    ]');
+    UPDATE horsies_workflow_tasks SET task_options = '{"retry_policy": 5}'
+    WHERE workflow_id = v_wf AND task_index IN (2, 3);
+    v_tasks := (SELECT count(*) FROM horsies_tasks);
+    PERFORM wft_finish(v_wf, 0, wft_ok('1'));
+    PERFORM wft_check((wft_workflow(v_wf)).status = 'PAUSED'
+                      AND (wft_workflow(v_wf)).error = horsies_workflow_err_slot((wft_node(v_wf, 2)).result),
+                      'stored options (pause): the workflow pauses with the error of the lowest refused node');
+    PERFORM wft_check((wft_node(v_wf, 2)).status = 'FAILED'
+                      AND ((wft_node(v_wf, 2)).result::json -> 'err' ->> 'message')
+                          = 'Invalid retry_policy for task 2: retry_policy is not an object: int',
+                      'stored options (pause): only the lowest refused node FAILED');
+    PERFORM wft_check((wft_node(v_wf, 1)).status = 'READY' AND (wft_node(v_wf, 1)).task_id IS NULL
+                      AND (wft_node(v_wf, 3)).status = 'READY' AND (wft_node(v_wf, 3)).task_id IS NULL,
+                      'stored options (pause): the other nodes of the step back to READY with no task');
+    PERFORM wft_check((SELECT count(*) FROM horsies_tasks) = v_tasks - 1,
+                      'stored options (pause): no task row minted (the finished root task moved to history)');
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-0000000002a3';
+BEGIN
+    -- Python reads the stored options before the static input: a node with both refusals fails for its options.
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[
+        {"idx":0},
+        {"idx":1,"deps":[0],"args_from":{"k":0},"input":"{\"k\":1}"}
+    ]');
+    UPDATE horsies_workflow_tasks SET task_options = '{"execution": 3}' WHERE workflow_id = v_wf AND task_index = 1;
+    PERFORM wft_finish(v_wf, 0, wft_ok('1'));
+    PERFORM wft_check((wft_node(v_wf, 1)).status = 'FAILED'
+                      AND ((wft_node(v_wf, 1)).result::json -> 'err' -> 'error_code' ->> '__builtin_task_code__')
+                          = 'WORKER_SERIALIZATION_ERROR'
+                      AND ((wft_node(v_wf, 1)).result::json -> 'err' ->> 'message')
+                          = 'Invalid execution for task 1: execution is a JSON int, not a string',
+                      'stored options: options are refused before an args_from conflict');
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-0000000002a4';
+BEGIN
+    -- The minted task's good_until is the good_until member of the stored options, not the node column.
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[
+        {"idx":0},
+        {"idx":1,"deps":[0]},
+        {"idx":2,"deps":[0],"good_until":"2031-01-01T00:00:00Z"},
+        {"idx":3,"deps":[0]},
+        {"idx":4,"deps":[0]}
+    ]');
+    UPDATE horsies_workflow_tasks
+    SET task_options = CASE task_index
+        WHEN 1 THEN '{"good_until":"2032-02-02T00:00:00+00:00"}'
+        WHEN 2 THEN '{"good_until":null}'
+        WHEN 3 THEN NULL
+        WHEN 4 THEN ''
+    END
+    WHERE workflow_id = v_wf AND task_index BETWEEN 1 AND 4;
+    PERFORM wft_finish(v_wf, 0, wft_ok('1'));
+    PERFORM wft_check((SELECT good_until FROM horsies_tasks WHERE id = wft_task_of(v_wf, 1))
+                      = '2032-02-02T00:00:00Z' AND (wft_node(v_wf, 1)).good_until IS NULL,
+                      'stored deadline: the task takes the good_until of the stored options');
+    PERFORM wft_check(wft_task_of(v_wf, 2) IS NOT NULL
+                      AND (SELECT good_until FROM horsies_tasks WHERE id = wft_task_of(v_wf, 2)) IS NULL
+                      AND (wft_node(v_wf, 2)).good_until = '2031-01-01T00:00:00Z',
+                      'stored deadline: a null good_until gives no deadline whatever the node column holds');
+    PERFORM wft_check(wft_task_of(v_wf, 3) IS NOT NULL
+                      AND (SELECT good_until FROM horsies_tasks WHERE id = wft_task_of(v_wf, 3)) IS NULL
+                      AND wft_task_of(v_wf, 4) IS NOT NULL
+                      AND (SELECT good_until FROM horsies_tasks WHERE id = wft_task_of(v_wf, 4)) IS NULL,
+                      'stored deadline: no options and empty options give no deadline');
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-0000000002a5';
+    v_root_task uuid;
+BEGIN
+    -- A good_until that the database cannot read raises, as Python's insert of the text does: the step rolls back.
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[{"idx":0},{"idx":1,"deps":[0]},{"idx":2,"deps":[0]}]');
+    v_root_task := wft_task_of(v_wf, 0);
+    UPDATE horsies_workflow_tasks SET task_options = '{"good_until":"not-a-date"}'
+    WHERE workflow_id = v_wf AND task_index = 1;
+    PERFORM wft_refused(format('SELECT wft_finish(%L, 0, %L)', v_wf, wft_ok('1')), '22007',
+                        'stored deadline: a good_until text that does not parse raises 22007');
+    UPDATE horsies_workflow_tasks SET task_options = '{"good_until":12345}' WHERE workflow_id = v_wf AND task_index = 1;
+    PERFORM wft_refused(format('SELECT wft_finish(%L, 0, %L)', v_wf, wft_ok('1')), '22007',
+                        'stored deadline: a good_until number raises 22007');
+    PERFORM wft_check((wft_node(v_wf, 1)).status = 'PENDING' AND (wft_node(v_wf, 1)).task_id IS NULL
+                      AND (wft_node(v_wf, 2)).status = 'PENDING' AND (wft_node(v_wf, 2)).task_id IS NULL
+                      AND (wft_node(v_wf, 0)).status = 'ENQUEUED'
+                      AND EXISTS (SELECT 1 FROM horsies_tasks WHERE id = v_root_task),
+                      'stored deadline: the refused step wrote nothing');
 END $$;
 
 DO $$
