@@ -11,7 +11,7 @@ terminal time — the functions take time as data, so no test sleeps.
 from __future__ import annotations
 
 from hashlib import sha256
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import text
@@ -55,7 +55,7 @@ async def claim(
         reservation_window_seconds=HOUR_SECONDS,
         fingerprint_version=1,
         fingerprint=fingerprint,
-        task_id=task_id,
+        task_id=UUID(task_id),
     )
 
 
@@ -67,7 +67,7 @@ class TestClaimReplayConflict:
         task_id = str(uuid4())
         async with history_schema.engine.begin() as connection:
             assert await claim(connection, task_id=task_id) == (
-                ReservationApplied(task_id=task_id)
+                ReservationApplied(task_id=UUID(task_id))
             )
 
     @pytest.mark.asyncio
@@ -78,7 +78,7 @@ class TestClaimReplayConflict:
         async with history_schema.engine.begin() as connection:
             await claim(connection, task_id=original)
             outcome = await claim(connection, task_id=str(uuid4()))
-            assert outcome == ReservationReplay(task_id=original)
+            assert outcome == ReservationReplay(task_id=UUID(original))
 
     @pytest.mark.asyncio
     async def test_different_fingerprint_is_a_typed_conflict(
@@ -91,7 +91,7 @@ class TestClaimReplayConflict:
                 connection, task_id=str(uuid4()), fingerprint=OTHER_FINGERPRINT
             )
             assert outcome == ReservationConflict(
-                task_id=original, observed_fingerprint_version=1
+                task_id=UUID(original), observed_fingerprint_version=1
             )
 
     @pytest.mark.asyncio
@@ -107,7 +107,7 @@ class TestClaimReplayConflict:
                     reservation_window_seconds=31 * 86_400,
                     fingerprint_version=1,
                     fingerprint=FINGERPRINT,
-                    task_id=str(uuid4()),
+                    task_id=uuid4(),
                 )
 
 
@@ -140,7 +140,7 @@ class TestTerminalizationAndReuse:
                 connection, key_digest=KEY_DIGEST, task_id=original
             )
             outcome = await claim(connection, task_id=str(uuid4()))
-            assert outcome == ReservationReplay(task_id=original)
+            assert outcome == ReservationReplay(task_id=UUID(original))
 
     @pytest.mark.asyncio
     async def test_expired_terminal_reservation_is_reused(
@@ -163,7 +163,7 @@ class TestTerminalizationAndReuse:
                 task_id=replacement,
                 fingerprint=OTHER_FINGERPRINT,
             )
-            assert outcome == ReservationApplied(task_id=replacement)
+            assert outcome == ReservationApplied(task_id=UUID(replacement))
 
 
 class TestCleanup:
@@ -190,7 +190,7 @@ class TestCleanup:
                 reservation_window_seconds=HOUR_SECONDS,
                 fingerprint_version=1,
                 fingerprint=FINGERPRINT,
-                task_id=live,
+                task_id=UUID(live),
             )
             assert (
                 await cleanup_expired_reservations(connection, batch_size=10)

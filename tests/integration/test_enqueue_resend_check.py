@@ -9,7 +9,7 @@ task id with another ``sent_at`` is not the same send.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import text
@@ -31,10 +31,10 @@ KWARGS_JSON = '{"value":1}'
 async def send(
     broker: PostgresBroker,
     *,
-    task_id: str,
+    task_id: UUID,
     sent_at: datetime,
     idempotency_key: str | None = None,
-) -> BrokerResult[str]:
+) -> BrokerResult[UUID]:
     """Send ``TASK_NAME`` with ``KWARGS_JSON`` as the task decorator does."""
     return await broker.enqueue_async(
         TASK_NAME,
@@ -57,7 +57,7 @@ async def send(
     )
 
 
-async def stored_rows(broker: PostgresBroker, *task_ids: str) -> list[tuple[str, datetime]]:
+async def stored_rows(broker: PostgresBroker, *task_ids: UUID) -> list[tuple[UUID, datetime]]:
     """The ``(id, sent_at)`` of each live row among ``task_ids``."""
     async with current_resources(broker).session_factory() as session:
         rows = (
@@ -66,10 +66,10 @@ async def stored_rows(broker: PostgresBroker, *task_ids: str) -> list[tuple[str,
                     'SELECT CAST(id AS text) AS id, sent_at FROM horsies_tasks '
                     'WHERE id = ANY(CAST(:ids AS uuid[])) ORDER BY id'
                 ),
-                {'ids': list(task_ids)},
+                {'ids': [str(task_id) for task_id in task_ids]},
             )
         ).all()
-    return [(str(row.id), row.sent_at) for row in rows]
+    return [(UUID(row.id), row.sent_at) for row in rows]
 
 
 async def test_two_keyed_sends_of_one_command_at_different_times_return_one_task_id(
@@ -146,7 +146,7 @@ async def test_keyed_send_onto_a_task_id_with_another_sent_at_is_payload_mismatc
                     'idempotency_key_digest '
                     'FROM horsies_tasks WHERE id = CAST(:id AS uuid)'
                 ),
-                {'id': task_id},
+                {'id': str(task_id)},
             )
         ).one()
     assert reservations == 0

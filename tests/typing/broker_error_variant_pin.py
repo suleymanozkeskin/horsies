@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import assert_never
+from uuid import UUID
 
 from horsies import (
     BrokerAsyncContext,
@@ -56,6 +57,8 @@ from horsies.core.task_decorator import (
 )
 from horsies.core.types.result import Result
 from horsies.core.utils.loop_runner import LoopRunnerError
+
+TASK_ID = UUID('0198c0de-0000-7000-8000-000000000001')
 
 
 def operation_codes() -> None:
@@ -109,11 +112,11 @@ def owner_only_on_the_conflict(
 
 
 async def enqueue_async_returns_only_enqueue_errors(broker: PostgresBroker) -> None:
-    declared: Result[str, BrokerEnqueueError] = await broker.enqueue_async(
-        'report', task_id='task-1', enqueue_sha='sha', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc),
+    declared: Result[UUID, BrokerEnqueueError] = await broker.enqueue_async(
+        'report', task_id=TASK_ID, enqueue_sha='sha', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc),
     )
     _ = declared
-    match await broker.enqueue_async('report', task_id='task-1', enqueue_sha='sha', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc)):
+    match await broker.enqueue_async('report', task_id=TASK_ID, enqueue_sha='sha', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc)):
         case Ok():
             pass
         case Err(error):
@@ -125,11 +128,11 @@ async def enqueue_async_returns_only_enqueue_errors(broker: PostgresBroker) -> N
 
 
 def enqueue_returns_only_enqueue_and_sync_call_errors(broker: PostgresBroker) -> None:
-    declared: Result[str, BrokerEnqueueError | BrokerSyncCallError] = broker.enqueue(
-        'report', task_id='task-1', enqueue_sha='sha', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc),
+    declared: Result[UUID, BrokerEnqueueError | BrokerSyncCallError] = broker.enqueue(
+        'report', task_id=TASK_ID, enqueue_sha='sha', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc),
     )
     _ = declared
-    match broker.enqueue('report', task_id='task-1', enqueue_sha='sha', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc)):
+    match broker.enqueue('report', task_id=TASK_ID, enqueue_sha='sha', send_kind=SendKind.FIRST, sent_at=datetime.now(timezone.utc)):
         case Ok():
             pass
         case Err(error):
@@ -198,8 +201,8 @@ def enqueue_helpers_return_their_subsets(good_until: datetime) -> None:
         retain_rerun_input=True,
     )
     answered: Result[
-        str, BrokerEnqueueFailed | BrokerPayloadMismatch | BrokerIdempotencyKeyConflict
-    ] = enqueue_result(Inserted(), task_id='task-1', task_name='report')
+        UUID, BrokerEnqueueFailed | BrokerPayloadMismatch | BrokerIdempotencyKeyConflict
+    ] = enqueue_result(Inserted(), task_id=TASK_ID, task_name='report')
     async_context: Err[BrokerAsyncContext] = _async_context_err(
         'PostgresBroker.enqueue()', 'broker.enqueue_async(...)',
     )
@@ -227,5 +230,5 @@ def send_mapping_refuses_the_operation_error(
     operation_error: BrokerOperationFailed,
     payload: TaskSendPayload,
 ) -> None:
-    _ = _map_broker_err(enqueue_error, 'task-id', payload)
-    _ = _map_broker_err(operation_error, 'task-id', payload)  # pyright: ignore[reportArgumentType]
+    _ = _map_broker_err(enqueue_error, TASK_ID, payload)
+    _ = _map_broker_err(operation_error, TASK_ID, payload)  # pyright: ignore[reportArgumentType]

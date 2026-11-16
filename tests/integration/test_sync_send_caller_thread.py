@@ -124,7 +124,7 @@ def _bridged(broker: PostgresBroker, monkeypatch: pytest.MonkeyPatch) -> list[st
     return calls
 
 
-def _task_id(sent: TaskSendResult[TaskHandle[int]]) -> str:
+def _task_id(sent: TaskSendResult[TaskHandle[int]]) -> uuid.UUID:
     match sent:
         case Ok(handle):
             return handle.task_id
@@ -132,7 +132,7 @@ def _task_id(sent: TaskSendResult[TaskHandle[int]]) -> str:
             raise AssertionError(f'expected a sent task, got {sent!r}')
 
 
-def _rows(task_ids: list[str]) -> int:
+def _rows(task_ids: list[uuid.UUID]) -> int:
     with psycopg.connect(PLAIN_URL, autocommit=True) as connection:
         row = connection.execute(
             'SELECT count(*) FROM horsies_tasks WHERE id = ANY(%s::uuid[])',
@@ -264,9 +264,9 @@ def test_a_taken_task_id_is_answered_on_the_calling_thread(
     assert _rows([task_id]) == 1
 
 
-def _task_id_of(enqueued: object) -> str:
+def _task_id_of(enqueued: object) -> uuid.UUID:
     match enqueued:
-        case Ok(str() as task_id):
+        case Ok(uuid.UUID() as task_id):
             return task_id
         case _:
             raise AssertionError(f'expected an enqueued id, got {enqueued!r}')

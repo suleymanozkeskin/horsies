@@ -61,13 +61,12 @@ def make_generator(
 
 
 class TestUuid7Minting:
-    def test_mints_canonical_lowercase_version_7(self) -> None:
+    def test_mints_a_version_7_uuid(self) -> None:
         clock = SteppingClock(1_754_000_000_000)
         minted = make_generator(clock).mint()
-        assert minted == minted.lower()
-        parsed = UUID(minted)
-        assert parsed.version == 7
-        assert parsed.variant == 'specified in RFC 4122'
+        assert isinstance(minted, UUID)
+        assert minted.version == 7
+        assert minted.variant == 'specified in RFC 4122'
 
     def test_birth_decode_roundtrip(self) -> None:
         clock = SteppingClock(1_754_000_000_123)
@@ -89,17 +88,17 @@ class TestUuid7Minting:
     def test_new_millisecond_resets_the_counter(self) -> None:
         clock = SteppingClock(1_754_000_000_000)
         generator = make_generator(clock)
-        first = UUID(generator.mint())
-        second = UUID(generator.mint())
+        first = generator.mint()
+        second = generator.mint()
         clock.now_ms += 1
-        third = UUID(generator.mint())
+        third = generator.mint()
         def counter_of(value: UUID) -> int:
             return (value.int >> 64) & 0xFFF
 
         assert counter_of(first) == 0
         assert counter_of(second) == 1
         assert counter_of(third) == 0
-        assert str(second) < str(third)
+        assert second < third
 
     def test_counter_exhaustion_waits_for_the_clock(self) -> None:
         class AdvancingClock:
@@ -126,7 +125,7 @@ class TestUuid7Minting:
         assert clock.reads_after_exhaustion >= 3
         assert minted == sorted(minted)
         assert minted[-1] < overflow
-        assert (UUID(overflow).int >> 64) & 0xFFF == 0
+        assert (overflow.int >> 64) & 0xFFF == 0
 
     def test_clock_regression_is_absorbed_monotonically(self) -> None:
         clock = SteppingClock(1_754_000_000_500)
@@ -139,7 +138,7 @@ class TestUuid7Minting:
 
     def test_concurrent_minting_is_unique_and_locally_monotonic(self) -> None:
         generator = MonotonicUuid7Generator()
-        per_thread: dict[int, list[str]] = {}
+        per_thread: dict[int, list[UUID]] = {}
 
         def mint_many(thread_index: int) -> None:
             per_thread[thread_index] = [generator.mint() for _ in range(500)]
@@ -157,7 +156,9 @@ class TestUuid7Minting:
             assert sequence == sorted(sequence)
 
     def test_process_generator_mints_valid_ids(self) -> None:
-        assert UUID(mint_task_id()).version == 7
+        minted = mint_task_id()
+        assert isinstance(minted, UUID)
+        assert minted.version == 7
 
     def test_rejects_out_of_range_clock(self) -> None:
         clock = SteppingClock(1 << 48)
