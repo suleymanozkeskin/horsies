@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from horsies.core.baseline.migration import BaselineMigration, load_baseline_migration
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.history.reads.publisher import (
-    RENDERED_READER_SIGNATURES,
+    PUBLISHED_READER_SIGNATURES,
     StagedLoaderPublisher,
 )
 from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationFailed
@@ -100,7 +100,7 @@ _MISSING_READERS_SQL: Final[LiteralString] = """
 
 async def _missing_readers(connection: Connection) -> object:
     cursor = await connection.execute(
-        _MISSING_READERS_SQL, {'readers': list(RENDERED_READER_SIGNATURES)}
+        _MISSING_READERS_SQL, {'readers': list(PUBLISHED_READER_SIGNATURES)}
     )
     row = await cursor.fetchone()
     assert row is not None

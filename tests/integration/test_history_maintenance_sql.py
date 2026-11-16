@@ -19,6 +19,7 @@ import pytest
 import pytest_asyncio
 
 from horsies.core.baseline.migration import BaselineMigration, load_baseline_migration
+from horsies.core.lifecycle.operations import TerminalizationKind, equivalence_class_of
 from horsies.core.types.result import Err, Ok
 from horsies.core.utils.url import to_psycopg_url
 from tests.integration.conftest import DB_URL
@@ -103,3 +104,28 @@ async def test_history_maintenance_two_session_cases_pass(
     await installed.execute(_CONCURRENCY_SQL.read_text(encoding='utf-8').encode('utf-8'))
     assert len(passed) == PASSED_CONCURRENCY_CASES, passed
     assert len(set(passed)) == PASSED_CONCURRENCY_CASES, 'two cases share a name'
+
+
+_FAMILY_SQL: Final = 'SELECT horsies_terminalization_family(%s)'
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_the_miss_classes_of_the_database_are_the_equivalence_classes(
+    installed: psycopg.AsyncConnection[tuple[object, ...]],
+) -> None:
+    """Two kinds share a database class exactly when they share a class of
+    ``EQUIVALENCE_CLASSES``: the miss classifier answers ALREADY_APPLIED by
+    the database class, and the Python lifecycle by its own."""
+    families: dict[TerminalizationKind, str] = {}
+    for kind in TerminalizationKind:
+        cursor = await installed.execute(_FAMILY_SQL, (kind.value,))
+        match await cursor.fetchone():
+            case (str() as family,):
+                families[kind] = family
+            case other:
+                pytest.fail(f'{kind.value} has no database class: {other!r}')
+    for kind in TerminalizationKind:
+        same_family = frozenset(
+            other for other, family in families.items() if family == families[kind]
+        )
+        assert same_family == equivalence_class_of(kind), kind

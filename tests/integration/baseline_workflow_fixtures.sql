@@ -2,11 +2,12 @@
 -- baseline_workflow_functions.sql (one transaction, rolled back) and before the two-session cases of
 -- test_baseline_workflow_functions.py (committed in their own database).
 
--- The published provenance reader is rendered at run time; this stand-in answers "not found", so the move's
--- duplicate identity guard passes.
-CREATE FUNCTION horsies_task_provenance_staged(p_task_id uuid, p_include_live boolean DEFAULT TRUE)
-RETURNS horsies_task_provenance LANGUAGE sql AS $$
-    SELECT ROW(FALSE, NULL, NULL, NULL, NULL, NULL)::horsies_task_provenance
+-- The published provenance reader is rendered by horsies_publish_history_readers; this stand-in answers "not found"
+-- (no row), so the move's duplicate identity guard passes.
+CREATE FUNCTION horsies_task_provenance_staged(p_task_id uuid)
+RETURNS TABLE (task_id uuid, status text, terminal_at timestamptz, terminalization_kind text, is_workflow_task boolean)
+LANGUAGE sql AS $$
+    SELECT NULL::uuid, NULL::text, NULL::timestamptz, NULL::text, NULL::boolean WHERE FALSE
 $$;
 
 CREATE FUNCTION wft_check(p_condition boolean, p_case text) RETURNS void LANGUAGE plpgsql AS $$
@@ -199,14 +200,17 @@ $$;
 CREATE FUNCTION wft_phase1(p_task_id uuid, p_result text) RETURNS void LANGUAGE plpgsql AS $$
 DECLARE
     v_failed boolean := (p_result::json -> 'err')::text <> 'null';
+    v_task horsies_tasks;
 BEGIN
+    -- The move takes the row that the UPDATE returned.
     UPDATE horsies_tasks
     SET status = 'RUNNING', claimed_at = now(), claimed_by_worker_id = 'worker-1', started_at = now(),
         claim_expires_at = NULL, worker_pid = 1, worker_hostname = 'host', worker_process_name = 'proc'
-    WHERE id = p_task_id;
+    WHERE id = p_task_id
+    RETURNING * INTO v_task;
     PERFORM wft_check(FOUND, 'phase-1 fixture finds task ' || p_task_id);
     PERFORM horsies_move_task_to_history(
-        p_task_id,
+        v_task,
         CASE WHEN v_failed THEN 'FAILED' ELSE 'COMPLETED' END,
         CASE WHEN v_failed THEN 'FAIL_RUNNING' ELSE 'COMPLETE_LOCKED' END,
         now(), p_result,

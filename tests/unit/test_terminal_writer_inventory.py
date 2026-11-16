@@ -81,19 +81,12 @@ _InventoryKey = tuple[str, str, str]
 # the history insert, and the status it writes. The count catches an insert
 # being duplicated or removed within the same function.
 FROZEN_TERMINAL_WRITERS: dict[_InventoryKey, int] = {
-    # The single-row move, one insert in each of its two overloads: by task
-    # id, which every single-row terminal operation calls with its own status
-    # literal, and by locked row.
-    (_BASELINE, 'horsies_move_task_to_history', 'PARAM'): 2,
-    # The batch move of locked rows, by task ids.
+    # The single-row move of a locked row, which every single-row terminal
+    # operation calls with its own status literal.
+    (_BASELINE, 'horsies_move_task_to_history', 'PARAM'): 1,
+    # The batch move of locked rows, by task ids, which every batch terminal
+    # operation calls with its own status literal.
     (_BASELINE, 'horsies_move_tasks_to_history', 'PARAM'): 1,
-    # The batch moves: each inserts its history rows itself.
-    (_BASELINE, 'horsies_abandon_nodes_of_paused_workflows', 'CANCELLED'): 1,
-    (_BASELINE, 'horsies_abandon_owned_nodes', 'CANCELLED'): 1,
-    (_BASELINE, 'horsies_cancel_nodes_of_cancelled_workflow', 'CANCELLED'): 1,
-    (_BASELINE, 'horsies_cancel_orphaned_tasks', 'CANCELLED'): 1,
-    (_BASELINE, 'horsies_cancel_owned_nodes', 'CANCELLED'): 1,
-    (_BASELINE, 'horsies_expire_pending_tasks', 'EXPIRED'): 1,
 }
 
 

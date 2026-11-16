@@ -118,10 +118,10 @@ CREATE FUNCTION fixture_reader_versions() RETURNS text LANGUAGE sql AS $$
     JOIN pg_proc AS p ON p.oid = to_regprocedure(s.signature)
 $$;
 
-CREATE FUNCTION fixture_classify(p_id uuid, p_kind text, p_worker text, p_claimed_at timestamptz) RETURNS text
-LANGUAGE sql AS $$
+CREATE FUNCTION fixture_classify(p_id uuid, p_kind text, p_fence_kind text, p_worker text, p_claimed_at timestamptz)
+RETURNS text LANGUAGE sql AS $$
     SELECT m.outcome || COALESCE('/' || m.guard_kind, '')
-    FROM horsies_terminalization_miss(p_id, p_kind, p_worker, p_claimed_at) AS m
+    FROM horsies_terminalization_miss(p_id, p_kind, p_fence_kind, p_worker, p_claimed_at) AS m
 $$;
 
 ------------------------------------------------------------------------------------------------------------------------
@@ -239,13 +239,13 @@ SELECT fixture_check(
     AND pg_get_function_result(to_regprocedure('horsies_task_provenance_staged(uuid)'))
         = 'TABLE(task_id uuid, status text, terminal_at timestamp with time zone, terminalization_kind text, '
           'is_workflow_task boolean)'
-    AND to_regprocedure('horsies_task_provenance_staged(uuid, boolean)') IS NULL
+    AND (SELECT count(*) FROM pg_proc AS p WHERE p.proname = 'horsies_task_provenance_staged') = 1
     AND to_regprocedure('horsies_task_lookup_staged(uuid)') IS NULL
 );
 SELECT fixture_check(
-    'publication: the result reader returns the columns of the Python publisher''s result reader',
+    'publication: the result reader returns the location, the status, the stored result columns and the task name',
     pg_get_function_result(to_regprocedure('horsies_task_result_staged(uuid)'))
-        = 'TABLE(location text, status text, live_result text, failed_reason text, '
+        = 'TABLE(location text, status text, failed_reason text, '
           'result_envelope_version smallint, result_payload bytea, result_digest bytea, task_name text)'
 );
 SELECT fixture_check(
@@ -841,14 +841,13 @@ SELECT fixture_check(
 SELECT fixture_check(
     'result: LIVE with status and task name only; HISTORY with the stored result; no row when absent',
     (SELECT location || ':' || status || ':' || task_name || ':' ||
-            (live_result IS NULL AND failed_reason IS NULL AND result_envelope_version IS NULL
+            (failed_reason IS NULL AND result_envelope_version IS NULL
              AND result_payload IS NULL AND result_digest IS NULL)::text
      FROM horsies_task_result_staged((SELECT id FROM ids WHERE name = 'live'))) = 'LIVE:RUNNING:fixture.task:true'
     AND (SELECT location || ':' || status || ':' || failed_reason || ':' || result_envelope_version || ':'
                 || convert_from(result_payload, 'UTF8') || ':' || (result_digest = sha256(result_payload))::text
          FROM horsies_task_result_staged((SELECT id FROM ids WHERE name = 'moved')))
         = 'HISTORY:FAILED:reason:1:{"e":1}:true'
-    AND (SELECT live_result IS NULL FROM horsies_task_result_staged((SELECT id FROM ids WHERE name = 'moved')))
     AND NOT EXISTS (SELECT 1 FROM horsies_task_result_staged((SELECT id FROM ids WHERE name = 'unknown')))
 );
 SELECT fixture_check(
@@ -885,50 +884,58 @@ SELECT fixture_check(
 );
 SELECT fixture_check(
     'miss: no live row and no history row is TASK_ABSENT',
-    fixture_classify((SELECT id FROM ids WHERE name = 'unknown'), 'COMPLETE_FUSED', 'w1', NULL) = 'TASK_ABSENT'
+    fixture_classify((SELECT id FROM ids WHERE name = 'unknown'), 'COMPLETE_FUSED', 'OWNER', 'w1', NULL)
+        = 'TASK_ABSENT'
 );
 SELECT fixture_check(
     'miss: history holds a kind of the same class: ALREADY_APPLIED, with the stored facts',
-    fixture_classify((SELECT id FROM ids WHERE name = 'not_v7'), 'COMPLETE_LOCKED', 'w1', NULL) = 'ALREADY_APPLIED'
+    fixture_classify((SELECT id FROM ids WHERE name = 'not_v7'), 'COMPLETE_LOCKED', 'OWNER', 'w1', NULL)
+        = 'ALREADY_APPLIED'
     AND (SELECT terminalization_kind || ':' || observed_status || ':' || (terminal_at IS NOT NULL)::text
-         FROM horsies_terminalization_miss((SELECT id FROM ids WHERE name = 'not_v7'), 'COMPLETE_FUSED', 'w1', NULL))
+         FROM horsies_terminalization_miss((SELECT id FROM ids WHERE name = 'not_v7'), 'COMPLETE_FUSED', 'OWNER', 'w1',
+                                       NULL))
         = 'COMPLETE_FUSED:COMPLETED:true'
-    AND fixture_classify((SELECT id FROM ids WHERE name = 'workflow'), 'CANCEL_ORPHAN_SWEEP', NULL, NULL)
+    AND fixture_classify((SELECT id FROM ids WHERE name = 'workflow'), 'CANCEL_ORPHAN_SWEEP', 'NONE', NULL, NULL)
         = 'ALREADY_APPLIED'
 );
 SELECT fixture_check(
     'miss: history holds a kind of another class: SOURCE_STATE_CONFLICT FOREIGN_TERMINALIZATION',
-    fixture_classify((SELECT id FROM ids WHERE name = 'moved'), 'FAIL_STALE', 'w1', NULL)
+    fixture_classify((SELECT id FROM ids WHERE name = 'moved'), 'FAIL_STALE', 'OWNER', 'w1', NULL)
         = 'SOURCE_STATE_CONFLICT/FOREIGN_TERMINALIZATION'
-    AND fixture_classify((SELECT id FROM ids WHERE name = 'not_v7'), 'CANCEL_ADMIN', NULL, NULL)
+    AND fixture_classify((SELECT id FROM ids WHERE name = 'not_v7'), 'CANCEL_ADMIN', 'NONE', NULL, NULL)
         = 'SOURCE_STATE_CONFLICT/FOREIGN_TERMINALIZATION'
 );
 SELECT fixture_check(
     'miss: a live row claimed by another worker is LOST_CLAIM, with the observed claim',
-    fixture_classify((SELECT id FROM ids WHERE name = 'live'), 'COMPLETE_FUSED', 'w2', NULL) = 'LOST_CLAIM'
+    fixture_classify((SELECT id FROM ids WHERE name = 'live'), 'COMPLETE_FUSED', 'OWNER', 'w2', NULL) = 'LOST_CLAIM'
     AND (SELECT observed_worker_id || ':' || observed_status
-         FROM horsies_terminalization_miss((SELECT id FROM ids WHERE name = 'live'), 'COMPLETE_FUSED', 'w2', NULL))
+         FROM horsies_terminalization_miss((SELECT id FROM ids WHERE name = 'live'), 'COMPLETE_FUSED', 'OWNER', 'w2',
+                                       NULL))
         = 'w1:RUNNING'
 );
 SELECT fixture_check(
-    'miss: the same worker with another claimed_at is LOST_CLAIM',
-    fixture_classify((SELECT id FROM ids WHERE name = 'live'), 'COMPLETE_FUSED', 'w1', now() - interval '1 hour')
+    'miss: the same worker with another claimed_at is LOST_CLAIM (fence OWNER_AND_GENERATION)',
+    fixture_classify((SELECT id FROM ids WHERE name = 'live'), 'COMPLETE_FUSED', 'OWNER_AND_GENERATION', 'w1',
+                     now() - interval '1 hour')
         = 'LOST_CLAIM'
 );
 SELECT fixture_check(
-    'miss: the claim matches (or no fence): SOURCE_STATE_CONFLICT with the live state',
-    fixture_classify((SELECT id FROM ids WHERE name = 'live'), 'COMPLETE_FUSED', 'w1',
+    'miss: the fence holds (OWNER_AND_GENERATION, OWNER, NONE): SOURCE_STATE_CONFLICT with the live state',
+    fixture_classify((SELECT id FROM ids WHERE name = 'live'), 'COMPLETE_FUSED', 'OWNER_AND_GENERATION', 'w1',
                      (SELECT claimed_at FROM horsies_tasks WHERE id = (SELECT id FROM ids WHERE name = 'live')))
         = 'SOURCE_STATE_CONFLICT'
-    AND fixture_classify((SELECT id FROM ids WHERE name = 'live'), 'EXPIRE_PENDING', NULL, NULL)
+    AND fixture_classify((SELECT id FROM ids WHERE name = 'live'), 'COMPLETE_FUSED', 'OWNER', 'w1', NULL)
+        = 'SOURCE_STATE_CONFLICT'
+    AND fixture_classify((SELECT id FROM ids WHERE name = 'live'), 'EXPIRE_PENDING', 'NONE', NULL, NULL)
         = 'SOURCE_STATE_CONFLICT'
 );
 SELECT fixture_expect_error('miss: a NULL task id is refused',
-    'SELECT * FROM horsies_terminalization_miss(NULL, ''COMPLETE_FUSED'', NULL, NULL)', '22023');
+    'SELECT * FROM horsies_terminalization_miss(NULL, ''COMPLETE_FUSED'', ''NONE'', NULL, NULL)', '22023');
 SELECT fixture_expect_error('miss: a kind outside the 15 kinds is refused',
-    $sql$SELECT * FROM horsies_terminalization_miss(gen_random_uuid(), 'LEGACY_TERMINAL', NULL, NULL)$sql$, '22023');
+    $sql$SELECT * FROM horsies_terminalization_miss(gen_random_uuid(), 'LEGACY_TERMINAL', 'NONE', NULL, NULL)$sql$,
+    '22023');
 SELECT fixture_check(
-    'miss: the kind overload and the interim array overload are two functions',
-    to_regprocedure('horsies_terminalization_miss(uuid, text, text, timestamp with time zone)') IS NOT NULL
-    AND to_regprocedure('horsies_terminalization_miss(uuid, text[], text, text, timestamp with time zone)') IS NOT NULL
+    'miss: pg_proc holds one horsies_terminalization_miss, the overload that takes the kind and the fence kind',
+    (SELECT array_agg(p.oid::regprocedure::text) FROM pg_proc AS p WHERE p.proname = 'horsies_terminalization_miss')
+        = ARRAY['horsies_terminalization_miss(uuid,text,text,text,timestamp with time zone)']
 );
