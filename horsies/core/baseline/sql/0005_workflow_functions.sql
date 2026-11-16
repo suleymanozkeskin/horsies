@@ -2758,7 +2758,9 @@ BEGIN
         RETURN;
     END IF;
     SELECT o.outcome INTO v_move
-    FROM horsies_terminalization_miss(p_task_id, ARRAY[]::text[], p_worker_id, p_claimed_at) AS o;
+    FROM horsies_terminalization_miss(
+        p_task_id, ARRAY[]::text[], 'OWNER_AND_GENERATION', p_worker_id, p_claimed_at
+    ) AS o;
     RETURN QUERY SELECT 'NOT_HELD'::text, v_move;
 END;
 $$;
