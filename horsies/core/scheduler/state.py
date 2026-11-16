@@ -158,7 +158,7 @@ class ScheduleStateManager:
         self,
         schedule_name: str,
         next_run_at: datetime,
-        config_hash: Optional[str] = None,
+        config_hash: bytes,
         session: Optional[AsyncSession] = None,
     ) -> ScheduleStateModel:
         """
@@ -167,7 +167,8 @@ class ScheduleStateManager:
         Args:
             schedule_name: Unique schedule identifier
             next_run_at: Calculated next run time
-            config_hash: Hash of the schedule config for change detection
+            config_hash: SHA-256 digest (32 bytes) of the schedule config,
+                for change detection. The column is NOT NULL.
             session: Reuse this session (caller commits); None opens an
                 owned session that commits here
 
@@ -208,7 +209,7 @@ class ScheduleStateManager:
         session: AsyncSession,
         schedule_name: str,
         next_run_at: datetime,
-        config_hash: Optional[str],
+        config_hash: bytes,
         commit: bool,
     ) -> ScheduleStateModel:
         """Create the state row unless it exists; commit when owning the
@@ -333,7 +334,7 @@ class ScheduleStateManager:
         self,
         schedule_name: str,
         next_run_at: datetime,
-        config_hash: Optional[str] = None,
+        config_hash: Optional[bytes] = None,
         session: Optional[AsyncSession] = None,
     ) -> None:
         """
@@ -342,7 +343,8 @@ class ScheduleStateManager:
         Args:
             schedule_name: Unique schedule identifier
             next_run_at: New next run time (UTC)
-            config_hash: Optional new config hash
+            config_hash: New SHA-256 digest (32 bytes) of the schedule
+                config; None keeps the stored digest
             session: Reuse this session (caller commits); None opens an
                 owned session that commits here
 
@@ -380,7 +382,7 @@ class ScheduleStateManager:
         session: AsyncSession,
         schedule_name: str,
         next_run_at: datetime,
-        config_hash: Optional[str],
+        config_hash: Optional[bytes],
         commit: bool,
     ) -> None:
         """Run the next-run UPDATE; commit when this call owns the session.
