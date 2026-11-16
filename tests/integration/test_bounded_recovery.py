@@ -117,12 +117,14 @@ async def _seed_workflow_page_fixture(
             text('''
                 INSERT INTO horsies_workflows (
                     id, name, status, on_error, depth, root_workflow_id,
-                    created_at, updated_at
+                    sent_at, created_at, updated_at
                 )
                 SELECT md5('bounded-workflow-' || item::text)::uuid,
                        'bounded_' || item::text,
                        'RUNNING', 'fail', 0,
                        md5('bounded-workflow-' || item::text)::uuid,
+                       TIMESTAMPTZ '2026-01-01 00:00:00+00'
+                           + item * interval '1 millisecond',
                        TIMESTAMPTZ '2026-01-01 00:00:00+00'
                            + item * interval '1 millisecond',
                        NOW()
@@ -133,19 +135,21 @@ async def _seed_workflow_page_fixture(
         await connection.execute(
             text('''
                 INSERT INTO horsies_workflow_tasks (
-                    id, workflow_id, task_index, task_name, queue_name,
+                    id, workflow_id, task_index, task_name, input, queue_name,
                     priority, dependencies, allow_failed_deps, join_type,
-                    status, is_subworkflow, created_at
+                    status, is_subworkflow, created_at,
+                    max_retries, execution, retention_class_key
                 )
                 SELECT md5('bounded-node-' || item::text)::uuid,
                        md5('bounded-workflow-' || item::text)::uuid,
-                       0, 'bounded_node', 'default', 100, '{}'::integer[],
+                       0, 'bounded_node', '{}', 'default', 100, '{}'::integer[],
                        FALSE, 'all',
                        CASE WHEN :terminal_last AND item = :rows
                             THEN 'COMPLETED' ELSE 'RUNNING' END,
                        FALSE,
                        TIMESTAMPTZ '2026-01-01 00:00:00+00'
-                           + item * interval '1 millisecond'
+                           + item * interval '1 millisecond',
+                       0, 'ISOLATED', 'standard_30d'
                 FROM generate_series(1, :rows) item
             '''),
             {'rows': rows, 'terminal_last': terminal_last},
@@ -245,11 +249,11 @@ async def test_cycle_upper_bound_defers_a_new_workflow(
             text('''
                 INSERT INTO horsies_workflows (
                     id, name, status, on_error, depth, root_workflow_id,
-                    created_at, updated_at
+                    sent_at, created_at, updated_at
                 ) VALUES (
                     CAST(:id AS uuid), 'new_orphan', 'RUNNING', 'fail', 0,
                     CAST(:id AS uuid), TIMESTAMPTZ '2026-03-01 00:00:00+00',
-                    NOW()
+                    TIMESTAMPTZ '2026-03-01 00:00:00+00', NOW()
                 )
             '''),
             {'id': new_id},
@@ -296,10 +300,10 @@ async def test_candidate_share_lock_fences_an_expired_page_claim(
             text('''
                 INSERT INTO horsies_workflows (
                     id, name, status, on_error, depth, root_workflow_id,
-                    created_at, updated_at
+                    sent_at, created_at, updated_at
                 ) VALUES (
                     CAST(:id AS uuid), 'fenced_orphan', 'RUNNING', 'fail', 0,
-                    CAST(:id AS uuid), NOW(), NOW()
+                    CAST(:id AS uuid), NOW(), NOW(), NOW()
                 )
             '''),
             {'id': workflow_id},
@@ -380,10 +384,10 @@ async def test_stale_page_owner_cannot_mutate_after_claim_takeover(
             text('''
                 INSERT INTO horsies_workflows (
                     id, name, status, on_error, depth, root_workflow_id,
-                    created_at, updated_at
+                    sent_at, created_at, updated_at
                 ) VALUES (
                     CAST(:id AS uuid), 'stale_owner_orphan', 'RUNNING',
-                    'fail', 0, CAST(:id AS uuid), NOW(), NOW()
+                    'fail', 0, CAST(:id AS uuid), NOW(), NOW(), NOW()
                 )
             '''),
             {'id': workflow_id},
@@ -453,26 +457,22 @@ async def _seed_orphan_task_plan_fixture(
         await connection.execute(
             text('''
                 INSERT INTO horsies_tasks (
-                    id, task_name, queue_name, priority, status, sent_at,
-                    enqueued_at, claimed, is_workflow_task, retry_count,
-                    max_retries, enqueue_sha, command_fingerprint_version,
-                    command_fingerprint, retention_class_key, input_digest,
-                    retain_rerun_input, prepared_rerun_input_disposition,
-                    created_at, updated_at
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    enqueued_at, is_workflow_task, retry_count, max_retries,
+                    command_fingerprint_version, command_fingerprint,
+                    retention_class_key, retain_rerun_input, created_at, updated_at,
+                    execution
                 )
-                SELECT md5('orphan-plan-task-' || item::text)::uuid,
-                       'orphan_plan_task', 'default', 100, 'PENDING',
-                       TIMESTAMPTZ '2026-02-01 00:00:00+00'
+                SELECT md5('orphan-plan-task-' || item::text)::uuid, 'orphan_plan_task',
+                    'default', 100, '{}', 'PENDING',
+                    TIMESTAMPTZ '2026-02-01 00:00:00+00'
                            + item * interval '1 millisecond',
-                       TIMESTAMPTZ '2026-02-01 00:00:00+00'
+                    TIMESTAMPTZ '2026-02-01 00:00:00+00'
                            + item * interval '1 millisecond',
-                       FALSE, TRUE, 0, 0, repeat('0', 64), 1,
-                       decode(repeat('01', 32), 'hex'), 'standard_30d',
-                       decode(repeat('02', 32), 'hex'), FALSE,
-                       'DECLINED_BY_POLICY',
-                       TIMESTAMPTZ '2026-02-01 00:00:00+00'
+                    TRUE, 0, 0, NULL, NULL, 'standard_30d', FALSE,
+                    TIMESTAMPTZ '2026-02-01 00:00:00+00'
                            + item * interval '1 millisecond',
-                       NOW()
+                    NOW(), 'ISOLATED'
                 FROM generate_series(1, :rows) item
             '''),
             {'rows': rows},
@@ -480,28 +480,31 @@ async def _seed_orphan_task_plan_fixture(
         await connection.execute(text('''
             INSERT INTO horsies_workflows (
                 id, name, status, on_error, depth, root_workflow_id,
-                created_at, updated_at
+                sent_at, created_at, updated_at
             ) VALUES (
                 md5('orphan-plan-workflow')::uuid, 'orphan_plan',
                 'RUNNING', 'fail', 0, md5('orphan-plan-workflow')::uuid,
+                TIMESTAMPTZ '2026-02-01 00:00:00+00',
                 TIMESTAMPTZ '2026-02-01 00:00:00+00', NOW()
             )
         '''))
         await connection.execute(
             text('''
                 INSERT INTO horsies_workflow_tasks (
-                    id, workflow_id, task_index, task_name, queue_name,
+                    id, workflow_id, task_index, task_name, input, queue_name,
                     priority, dependencies, allow_failed_deps, join_type,
-                    status, task_id, is_subworkflow, created_at
+                    status, task_id, is_subworkflow, created_at,
+                    max_retries, execution, retention_class_key
                 )
                 SELECT md5('orphan-plan-node-' || item::text)::uuid,
                        md5('orphan-plan-workflow')::uuid,
-                       item, 'orphan_plan_task', 'default', 100,
+                       item, 'orphan_plan_task', '{}', 'default', 100,
                        '{}'::integer[], FALSE, 'all', 'RUNNING',
                        md5('orphan-plan-task-' || item::text)::uuid,
                        FALSE,
                        TIMESTAMPTZ '2026-02-01 00:00:00+00'
-                           + item * interval '1 millisecond'
+                           + item * interval '1 millisecond',
+                       0, 'ISOLATED', 'standard_30d'
                 FROM generate_series(1, :linked_rows) item
             '''),
             {'linked_rows': rows - 1},
@@ -520,26 +523,22 @@ async def _insert_new_orphan_task(
         await connection.execute(
             text('''
                 INSERT INTO horsies_tasks (
-                    id, task_name, queue_name, priority, status, sent_at,
-                    enqueued_at, claimed, is_workflow_task, retry_count,
-                    max_retries, enqueue_sha, command_fingerprint_version,
-                    command_fingerprint, retention_class_key, input_digest,
-                    retain_rerun_input, prepared_rerun_input_disposition,
-                    created_at, updated_at
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    enqueued_at, is_workflow_task, retry_count, max_retries,
+                    command_fingerprint_version, command_fingerprint,
+                    retention_class_key, retain_rerun_input, created_at, updated_at,
+                    execution
                 ) VALUES (
-                    md5('new-orphan-' || CAST(:item AS text))::uuid,
-                    'new_orphan', 'default', 100, 'PENDING',
+                    md5('new-orphan-' || CAST(:item AS text))::uuid, 'new_orphan',
+                    'default', 100, '{}', 'PENDING',
                     TIMESTAMPTZ '2026-03-01 00:00:00+00'
                         + :item * interval '1 second',
                     TIMESTAMPTZ '2026-03-01 00:00:00+00'
                         + :item * interval '1 second',
-                    FALSE, TRUE, 0, 0, repeat('0', 64), 1,
-                    decode(repeat('03', 32), 'hex'), 'standard_30d',
-                    decode(repeat('04', 32), 'hex'), FALSE,
-                    'DECLINED_BY_POLICY',
+                    TRUE, 0, 0, NULL, NULL, 'standard_30d', FALSE,
                     TIMESTAMPTZ '2026-03-01 00:00:00+00'
                         + :item * interval '1 second',
-                    NOW()
+                    NOW(), 'ISOLATED'
                 )
             '''),
             {'item': item},
@@ -789,14 +788,16 @@ async def test_generic_audit_uses_partial_node_index(
     async with engine.begin() as connection:
         await connection.execute(text('''
             INSERT INTO horsies_workflow_tasks (
-                id, workflow_id, task_index, task_name, status, queue_name,
+                id, workflow_id, task_index, task_name, input, status, queue_name,
                 priority, dependencies, allow_failed_deps, join_type,
-                is_subworkflow, created_at
+                is_subworkflow, created_at,
+                max_retries, execution, retention_class_key
             )
             SELECT md5('wide-partial-' || n)::uuid,
                    md5('bounded-workflow-200')::uuid, n,
-                   'partial_index', 'COMPLETED', 'default', 100, '{}'::integer[],
-                   FALSE, 'all', FALSE, NOW()
+                   'partial_index', '{}', 'COMPLETED', 'default', 100, '{}'::integer[],
+                   FALSE, 'all', FALSE, NOW(),
+                   0, 'ISOLATED', 'standard_30d'
             FROM generate_series(1, 1000) n
         '''))
         await connection.execute(

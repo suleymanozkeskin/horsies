@@ -170,7 +170,7 @@ class TestBulkChildStart:
             await session.execute(
                 text("""
                     SELECT wt.task_index, wt.status, wt.task_id, wt.started_at,
-                           t.status AS task_status, t.kwargs, t.enqueue_sha
+                           t.status AS task_status, t.input, t.command_fingerprint
                     FROM horsies_workflow_tasks wt
                     LEFT JOIN horsies_tasks t ON t.id = wt.task_id
                     WHERE wt.workflow_id = :wf ORDER BY wt.task_index
@@ -185,9 +185,9 @@ class TestBulkChildStart:
         assert root.task_id is not None
         assert root.started_at is not None
         assert root.task_status == 'PENDING'  # claimable
-        assert root.enqueue_sha
+        assert root.command_fingerprint is None  # workflow tasks carry none
         # dumps_json uses compact separators — assert the exact wire form.
-        assert f'"workflow_id":"{child_id}"' in root.kwargs
+        assert f'"workflow_id":"{child_id}"' in root.input
 
         for dep in rows[1:]:
             assert dep.status == 'PENDING'

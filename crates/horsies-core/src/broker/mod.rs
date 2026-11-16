@@ -8,6 +8,7 @@ pub mod class_coverage;
 mod class_coverage_read_tests;
 pub mod class_coverage_reads;
 pub mod client_family;
+pub mod core_rows;
 #[cfg(test)]
 pub(crate) mod enqueue_history_tests;
 pub mod error;
@@ -20,6 +21,7 @@ pub mod migrations;
 mod monitoring_schema_tests;
 #[cfg(test)]
 pub(crate) mod monitoring_test_database;
+pub mod pools;
 pub mod postgres;
 pub mod result_types;
 pub mod row;
@@ -40,13 +42,15 @@ pub use class_coverage::{
     StreamWait, WorkerClassLoad,
 };
 pub use class_coverage_reads::{LIVE_SNAPSHOT_ROW_LIMIT, PENDING_HEAD_LIMIT, PENDING_STREAM_LIMIT};
-pub use error::{is_retryable_sqlx_error, BrokerError};
+pub use core_rows::RowDecodeError;
+pub use error::{is_retryable_sqlx_error, is_retryable_statement_failure, BrokerError};
 pub use health::{
     DatabasePing, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
     WORKER_PING_CHANNEL,
 };
 pub use listener::NotifyListener;
 pub use migrations::{expected_schema_version, run_horsies_migrations, MIGRATIONS_TABLE};
+pub use pools::{PoolProfile, PoolSettingsError};
 pub use postgres::{
     ClaimPassParams, PostgresBroker, SchemaInitializationMode, UPSERT_TASK_ATTEMPT_SQL,
 };
