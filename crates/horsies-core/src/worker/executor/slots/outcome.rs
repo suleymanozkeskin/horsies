@@ -46,7 +46,7 @@ use crate::db::Transience;
 use crate::worker::execution::{
     persist_failed_attempt, persist_ok_result, persist_undecodable_result,
     persist_unreported_attempt, phase_retry_delay, run_phase2, FinalizeError, FinalizeOutcome,
-    FinalizeStage, Phase2Work, UnreportedAttemptWrite, PHASE1_MAX_RETRIES,
+    FinalizeStage, Phase2Work, PhaseTwoForm, UnreportedAttemptWrite, PHASE1_MAX_RETRIES,
 };
 use crate::worker::executor::protocol::{ResultEnvelopeText, RunEnd, StopReason, TaskTimeoutMs};
 use crate::worker::finalize_batch::statement::WorkerPoolSuccessWrite;
@@ -753,8 +753,10 @@ impl OutcomeWriter {
             PhaseOneOutcome::Finalize(FinalizeOutcome::Terminal {
                 is_success,
                 capacity_notified,
+                phase_two,
             }) => {
-                self.phase_two(task, is_success, capacity_notified).await;
+                self.phase_two(task, is_success, capacity_notified, phase_two)
+                    .await;
                 Settlement::Written
             }
             PhaseOneOutcome::Finalize(FinalizeOutcome::Retried | FinalizeOutcome::Finalized) => {
@@ -771,9 +773,15 @@ impl OutcomeWriter {
         }
     }
 
-    async fn phase_two(&self, task: &ClaimedTask, is_success: bool, capacity_notified: bool) {
+    async fn phase_two(
+        &self,
+        task: &ClaimedTask,
+        is_success: bool,
+        capacity_notified: bool,
+        phase_two: PhaseTwoForm,
+    ) {
         run_phase2(
-            self.broker.pool(),
+            &self.broker,
             &self.workflows,
             Phase2Work {
                 task_id: task.task_id,
@@ -781,6 +789,7 @@ impl OutcomeWriter {
                 queue_name: task.queue_name.clone(),
                 is_workflow_task: task.kind.is_workflow_task(),
                 capacity_notified,
+                phase_two,
             },
             &self.payload_policy,
             &self.retention,

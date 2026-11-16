@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 use super::{
     finalize_workflow_phase, persist_terminal_state, FinalizeError, FinalizeOutcome, FinalizeStage,
+    PhaseTwoForm,
 };
 use crate::broker::{ClaimedTaskRow, PostgresBroker, SetRunningRow};
 use crate::core::config::payload::PayloadPolicy;
@@ -265,8 +266,10 @@ fn describe(outcome: &Result<FinalizeOutcome, FinalizeError>) -> String {
         Ok(FinalizeOutcome::Terminal {
             is_success,
             capacity_notified,
+            phase_two,
         }) => format!(
-            "Terminal {{ is_success: {is_success}, capacity_notified: {capacity_notified} }}"
+            "Terminal {{ is_success: {is_success}, capacity_notified: {capacity_notified}, \
+             phase_two: {phase_two:?} }}"
         ),
         Ok(FinalizeOutcome::Retried) => "Retried".to_owned(),
         Ok(FinalizeOutcome::Finalized) => "Finalized".to_owned(),
@@ -856,7 +859,8 @@ async fn wakes_before_sentinel(
     panic!("sentinel wake not seen; payloads {payloads:?}");
 }
 
-/// Run phase 2 with no wake sent by phase 1.
+/// Run phase 2 with no wake sent by phase 1, in the form a phase-1 replay
+/// gives (`PhaseTwoForm::NotKnown`: the transaction form of the node finish).
 async fn phase_two(
     pool: &PgPool,
     task_id: Uuid,
@@ -864,17 +868,19 @@ async fn phase_two(
     is_workflow_task: bool,
 ) -> Result<(), FinalizeError> {
     finalize_workflow_phase(
-        pool,
+        &PostgresBroker::from_pool(pool.clone()),
         &WorkflowSpecRegistry::new(),
         task_id,
         true,
         queue,
         is_workflow_task,
         false,
+        PhaseTwoForm::NotKnown,
         &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
     .await
+    .map(|_parent_advance| ())
 }
 
 /// The status of the one node of `workflow_id`, and whether a phase-2
@@ -920,6 +926,7 @@ async fn phase_two_of_a_workflow_task_wakes_its_queue_once() {
             Ok(FinalizeOutcome::Terminal {
                 is_success: true,
                 capacity_notified: false,
+                ..
             })
         ),
         "{}",

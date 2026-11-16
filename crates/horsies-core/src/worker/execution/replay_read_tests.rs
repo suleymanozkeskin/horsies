@@ -10,7 +10,7 @@ use serial_test::serial;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::{replay_of_committed_write, FinalizeError, FinalizeOutcome};
+use super::{replay_of_committed_write, FinalizeError, FinalizeOutcome, PhaseTwoForm};
 
 /// The ids of one seeded workflow node and its task.
 struct SeededRecord {
@@ -92,8 +92,10 @@ fn describe(outcome: &Result<FinalizeOutcome, FinalizeError>) -> String {
         Ok(FinalizeOutcome::Terminal {
             is_success,
             capacity_notified,
+            phase_two,
         }) => format!(
-            "Terminal {{ is_success: {is_success}, capacity_notified: {capacity_notified} }}"
+            "Terminal {{ is_success: {is_success}, capacity_notified: {capacity_notified}, \
+             phase_two: {phase_two:?} }}"
         ),
         Ok(FinalizeOutcome::Retried) => "Retried".to_owned(),
         Ok(FinalizeOutcome::Finalized) => "Finalized".to_owned(),
@@ -118,6 +120,7 @@ async fn a_complete_locked_record_owes_a_successful_phase_two() {
             Ok(FinalizeOutcome::Terminal {
                 is_success: true,
                 capacity_notified: false,
+                phase_two: PhaseTwoForm::NotKnown,
             })
         ),
         "{}",
@@ -148,6 +151,7 @@ async fn failure_and_expiry_records_owe_a_failed_phase_two() {
                 Ok(FinalizeOutcome::Terminal {
                     is_success: false,
                     capacity_notified: false,
+                    phase_two: PhaseTwoForm::NotKnown,
                 })
             ),
             "{kind}: {}",
