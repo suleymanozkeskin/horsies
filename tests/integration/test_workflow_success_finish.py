@@ -135,7 +135,7 @@ async def _link_workflow_node(session: AsyncSession, task_id: str) -> None:
             INSERT INTO horsies_workflows
                 (id, name, status, on_error, depth, root_workflow_id,
                  sent_at, created_at, started_at, updated_at)
-            VALUES (:wf, 'workflow_success_wf', 'RUNNING', 'FAIL', 0, :wf,
+            VALUES (:wf, 'workflow_success_wf', 'RUNNING', 'fail', 0, :wf,
                     NOW(), NOW(), NOW(), NOW())
         """),
         {'wf': workflow_id},
@@ -143,13 +143,15 @@ async def _link_workflow_node(session: AsyncSession, task_id: str) -> None:
     await session.execute(
         text("""
             INSERT INTO horsies_workflow_tasks
-                (id, workflow_id, task_index, node_id, task_name, task_args,
-                 task_kwargs, queue_name, priority, dependencies,
+                (downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
+                 queue_name, priority, dependencies,
                  allow_failed_deps, join_type, is_subworkflow, status,
-                 task_id, created_at)
-            VALUES (:id, :wf, 0, 'node-0', :task_name, '[]', '{}', :queue,
+                 task_id, created_at,
+                 max_retries, execution, retention_class_key)
+            VALUES ('NONE', :id, :wf, 0, 'node-0', :task_name, '{}', :queue,
                     100, '{}', FALSE, 'all', FALSE, 'RUNNING',
-                    CAST(:task_id AS uuid), NOW())
+                    CAST(:task_id AS uuid), NOW(),
+                    0, 'ISOLATED', 'standard_30d')
         """),
         {
             'id': str(uuid.uuid4()),
@@ -345,29 +347,31 @@ class TestApplied:
             (3, 'COMPLETED', False),
         ]
 
-    async def test_a_null_generation_disables_the_generation_half_of_the_fence(
+    async def test_a_null_generation_is_refused(
         self,
         engine: AsyncEngine,
         seed: Any,
     ) -> None:
-        """The stored function keeps its contract: a NULL claimed_at
-        disables the generation half of its fence. The worker never sends
-        one (``OwnedClaim`` requires a claim time), so the statement runs
-        with NULL in its place."""
+        """The claim generation is required: a NULL claimed_at is refused
+        before any lock, and nothing is written. The worker never sends one
+        (``OwnedClaim`` requires a claim time), so the statement runs with
+        NULL in its place."""
         seeded = await seed()
         statement = success_statement(_command(seeded))
+        before = await _live_row(engine, seeded.task_id)
 
-        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
-            result = await session.execute(
-                statement.statement,
-                {**statement.parameters, 'claimed_at': None},
-            )
-            outcome = decode_workflow_success_row(
-                {str(key): value for key, value in result.mappings().one().items()},
-            )
-            await session.commit()
+        with pytest.raises(DBAPIError) as raised:
+            async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+                await session.execute(
+                    statement.statement,
+                    {**statement.parameters, 'claimed_at': None},
+                )
 
-        assert isinstance(outcome, SuccessApplied)
+        original = raised.value.orig
+        assert isinstance(original, psycopg.Error)
+        assert original.sqlstate == '22023'
+        assert await _live_row(engine, seeded.task_id) == before
+        assert await _attempts(engine, seeded.task_id) == ()
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -488,7 +492,8 @@ class TestNoWrite:
 
 _DIRECT_SQL: Final = """
     SELECT * FROM horsies_finish_workflow_success(
-        CAST(:id AS uuid), :worker, NULL, :result
+        CAST(:id AS uuid), :worker,
+        (SELECT claimed_at FROM horsies_tasks WHERE id = CAST(:id AS uuid)), :result
     )
 """
 

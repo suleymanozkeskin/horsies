@@ -175,7 +175,7 @@ class TestDispositionLadder:
                 connection,
                 task_id,
                 workflow_id=workflow_id,
-                node_status='PENDING',
+                node_status='RUNNING',
             )
             outcome = await fail_locked(connection, task_id)
             assert outcome.outcome == 'APPLIED'
@@ -233,13 +233,13 @@ class TestDeferredResultFence:
                 worker=WORKER,
                 is_workflow_task=True,
             )
-            await link_workflow_node(
+            _ = await link_workflow_node(
                 connection,
                 task_id,
                 workflow_id=await create_workflow(
                     connection, status='RUNNING'
                 ),
-                node_status='PENDING',
+                node_status='RUNNING',
             )
             with pytest.raises(
                 DBAPIError, match='requires a result payload'

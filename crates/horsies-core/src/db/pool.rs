@@ -15,6 +15,9 @@
 //! - A connection that a failure discarded runs nothing more; a dropped open
 //!   transaction discards its connection (the server rolls the transaction
 //!   back when the socket closes).
+//! - A connection of a pool that keeps its session
+//!   ([`StatementProtocol::PreparedPerConnection`]) runs
+//!   [`KEPT_SESSION_SETUP_SQL`] once when it opens.
 
 use std::fmt;
 use std::num::NonZeroU32;
@@ -36,8 +39,8 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 
 use super::connect::{open_connection, ConnectPlan, DriverConnection};
 use super::failure::{
-    error_scope, CancelRequestOutcome, CheckoutFailure, ConnectError, ErrorScope, NotSentCause,
-    RefusalCause, StatementFailure, UnknownOutcomeCause,
+    error_scope, CancelRequestOutcome, CheckoutFailure, ConnectError, ConnectFailure, ErrorScope,
+    NotSentCause, RefusalCause, StatementFailure, UnknownOutcomeCause,
 };
 use super::pooling_check::{run_pooling_check, PoolingCheckPassed};
 use super::statement::{
@@ -63,6 +66,15 @@ pub const DEFAULT_IDLE_PING_AFTER: Duration = Duration::from_secs(1);
 /// The bound of one idle ping. A ping that does not answer in time discards
 /// the connection.
 pub const IDLE_PING_BOUND: Duration = Duration::from_secs(5);
+
+/// The session setting of every connection that keeps its session (direct
+/// and PgBouncer session pooling). The core's statements are short;
+/// PostgreSQL's JIT compiles a statement when its cost estimate passes
+/// `jit_above_cost`, and the compile time then exceeds the run time by orders
+/// of magnitude (a 2 ms partition coverage probe took 0.7 s or more of JIT
+/// compile). A PgBouncer transaction-mode connection does not run it: its
+/// server sessions are shared, so a session `SET` would reach other clients.
+pub const KEPT_SESSION_SETUP_SQL: &str = "SET jit = off";
 
 const PING_SQL: &str = "SELECT 1";
 
@@ -228,6 +240,7 @@ pub(crate) struct CoreManager {
     plan: Arc<ConnectPlan>,
     idle_ping: IdlePing,
     max_age: ConnectionAge,
+    protocol: StatementProtocol,
 }
 
 impl Manager for CoreManager {
@@ -238,8 +251,11 @@ impl Manager for CoreManager {
         let (client, connection) = open_connection(&self.plan).await?;
         let driver = tokio::spawn(drive_connection(connection));
         let abort = driver.abort_handle();
+        // Dropping the wrapper on a failed setup aborts the driver task.
+        let client = ClientWrapper::new(client, driver);
+        set_up_session(&client, self.protocol, &self.plan).await?;
         Ok(CoreConnection {
-            client: ClientWrapper::new(client, driver),
+            client,
             driver: abort,
             state: ConnectionState::New,
         })
@@ -286,6 +302,41 @@ impl Manager for CoreManager {
                     }
                 }
             }
+        }
+    }
+}
+
+/// Runs [`KEPT_SESSION_SETUP_SQL`] on a new connection of a pool that keeps
+/// its session, within the plan's connection attempt bound. A pool in
+/// PgBouncer transaction mode runs nothing.
+///
+/// Errors: [`ConnectFailure::SessionSetupFailed`] when the statement fails,
+/// [`ConnectFailure::TimedOut`] when it does not end within the bound. The
+/// caller drops the connection on either.
+async fn set_up_session(
+    client: &ClientWrapper,
+    protocol: StatementProtocol,
+    plan: &ConnectPlan,
+) -> Result<(), ConnectError> {
+    match protocol {
+        StatementProtocol::UnnamedOnly => Ok(()),
+        StatementProtocol::PreparedPerConnection => {
+            let bound = plan.attempt_bound();
+            let cause =
+                match tokio::time::timeout(bound, client.batch_execute(KEPT_SESSION_SETUP_SQL))
+                    .await
+                {
+                    Ok(Ok(())) => return Ok(()),
+                    Ok(Err(error)) => ConnectFailure::SessionSetupFailed {
+                        statement: KEPT_SESSION_SETUP_SQL,
+                        error,
+                    },
+                    Err(_elapsed) => ConnectFailure::TimedOut { bound },
+                };
+            Err(ConnectError {
+                masked_url: plan.masked_url().clone(),
+                cause,
+            })
         }
     }
 }
@@ -339,6 +390,7 @@ impl CorePool {
             plan: Arc::clone(&connect),
             idle_ping: plan.idle_ping,
             max_age: plan.max_age,
+            protocol: plan.protocol,
         };
         let config = PoolConfig {
             max_size: usize::try_from(plan.sizing.size()).unwrap_or(usize::MAX),
@@ -374,6 +426,11 @@ impl CorePool {
 
     pub fn role(&self) -> PoolRole {
         self.plan.role
+    }
+
+    /// The size of the pool and its reserve.
+    pub fn sizing(&self) -> PoolSizing {
+        self.plan.sizing
     }
 
     /// Checks out a connection.

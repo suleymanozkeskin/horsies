@@ -39,7 +39,13 @@ from horsies.core.workflows.recovery_limit import (
     RecoveryCase,
 )
 
-from .conftest import make_simple_task, make_failing_task, make_workflow_spec, start_ok
+from .conftest import (
+    make_args_receiver_task,
+    make_failing_task,
+    make_simple_task,
+    make_workflow_spec,
+    start_ok,
+)
 from horsies.core.models.workflow import SuccessPolicy, SuccessCase
 from tests.integration.history_seeding import force_terminal
 from tests.integration.conftest import task_name_for
@@ -157,9 +163,9 @@ class TestWorkflowRecovery:
             text("""
                 INSERT INTO horsies_workflows
                     (id, name, status, on_error, depth, root_workflow_id,
-                     created_at, updated_at)
-                VALUES (:id, 'savepoint_probe', 'RUNNING', 'FAIL', 0, :id,
-                        NOW(), NOW())
+                     sent_at, created_at, updated_at)
+                VALUES (:id, 'savepoint_probe', 'RUNNING', 'fail', 0, :id,
+                        NOW(), NOW(), NOW())
             """),
             {'id': wf_id},
         )
@@ -1160,6 +1166,69 @@ class TestWorkflowRecovery:
         assert row is not None
         assert row[0] == 'ENQUEUED'
         assert row[1] is not None
+
+    async def test_recover_pending_dep_without_stored_result_injects_the_error(
+        self,
+        setup: tuple[AsyncSession, PostgresBroker, Horsies],
+    ) -> None:
+        """Case 0: a COMPLETED dependency with no stored result gives its
+        args_from consumer RESULT_DESERIALIZATION_ERROR naming the node. The
+        key used to be left out of the consumer's input."""
+        session, broker, app = setup
+        task_a = make_simple_task(app, 'recover_pend_nores_a')
+        task_b = make_args_receiver_task(app, 'recover_pend_nores_b')
+
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b = TaskNode(
+            fn=task_b, waits_for=[node_a], args_from={'input_result': node_a},
+        )
+        spec = make_workflow_spec(
+            broker=broker, name='recover_pend_nores', tasks=[node_a, node_b],
+        )
+
+        handle = await start_ok(spec, broker)
+
+        await session.execute(
+            text("""
+                UPDATE horsies_workflow_tasks
+                SET status = 'COMPLETED', result = NULL
+                WHERE workflow_id = :wf_id AND task_index = 0
+            """),
+            {'wf_id': handle.workflow_id},
+        )
+        await session.commit()
+
+        recovered = await recover_stuck_workflows(session, broker)
+        await session.commit()
+
+        assert recovered == 1
+        row = (
+            await session.execute(
+                text("""
+                    SELECT t.input FROM horsies_workflow_tasks wt
+                    JOIN horsies_tasks t ON t.id = wt.task_id
+                    WHERE wt.workflow_id = :wf_id AND wt.task_index = 1
+                """),
+                {'wf_id': handle.workflow_id},
+            )
+        ).fetchone()
+        assert row is not None
+        stored_input = loads_json(row[0]).unwrap()
+        assert isinstance(stored_input, dict)
+        envelope = stored_input['input_result']
+        assert isinstance(envelope, dict)
+        assert envelope['source_task_name'] == 'recover_pend_nores_a'
+        injected = decode_task_result(envelope['inner'], Any)
+        assert injected.is_err()
+        assert injected.err is not None
+        assert injected.err.error_code == (
+            OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        )
+        assert injected.err.message == (
+            f'Dependency node {node_a.node_id} (index 0, task recover_pend_nores_a) '
+            'is COMPLETED with no stored result'
+        )
+        assert injected.err.data == {'dependency_index': 0}
 
     async def test_recover_pending_deps_failed_skip(
         self,

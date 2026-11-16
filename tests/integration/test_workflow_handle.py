@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import psycopg
 import pytest
 from sqlalchemy import text
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from horsies.core.app import Horsies
@@ -43,6 +44,20 @@ from tests.broker_resources_support import current_resources, listener_of, repla
 # =============================================================================
 # Shared helpers
 # =============================================================================
+
+
+async def _workflow_completed_at(
+    session: AsyncSession,
+    workflow_id: str,
+) -> datetime | None:
+    """The stored completed_at of one workflow row, read in a new snapshot."""
+    await session.commit()
+    return (
+        await session.execute(
+            text('SELECT completed_at FROM horsies_workflows WHERE id = :id'),
+            {'id': workflow_id},
+        )
+    ).scalar_one()
 
 
 async def _complete_task(
@@ -748,16 +763,23 @@ class TestWorkflowHandleSubWorkflowFields:
         child_wf_id = str(uuid.uuid4())
         await session.execute(
             text("""
-                INSERT INTO horsies_workflows (id, name, status, on_error, depth, created_at, updated_at)
-                VALUES (:child_id, 'child_wf', 'RUNNING', 'fail', 1, NOW(), NOW())
+                INSERT INTO horsies_workflows
+                    (id, name, status, on_error, depth, parent_workflow_id,
+                     parent_task_index, root_workflow_id, sent_at, created_at,
+                     updated_at)
+                VALUES (:child_id, 'child_wf', 'RUNNING', 'fail', 1, :wf_id, 0,
+                        :wf_id, NOW(), NOW(), NOW())
             """),
-            {'child_id': child_wf_id},
+            {'child_id': child_wf_id, 'wf_id': handle.workflow_id},
         )
         # Simulate: engine linked a child workflow to this node
         await session.execute(
             text("""
                 UPDATE horsies_workflow_tasks
-                SET is_subworkflow = TRUE, sub_workflow_id = :child_id
+                SET is_subworkflow = TRUE, sub_workflow_id = :child_id,
+                    task_id = NULL, max_retries = NULL, execution = NULL,
+                    good_until = NULL, retention_class_key = NULL,
+                    sub_workflow_params = 'NOT_GIVEN'
                 WHERE workflow_id = :wf_id AND task_index = 0
             """),
             {'child_id': child_wf_id, 'wf_id': handle.workflow_id},
@@ -789,10 +811,14 @@ class TestWorkflowHandleSubWorkflowFields:
         child_wf_id = str(uuid.uuid4())
         await session.execute(
             text("""
-                INSERT INTO horsies_workflows (id, name, status, on_error, depth, created_at, updated_at)
-                VALUES (:child_id, 'child_wf', 'COMPLETED', 'fail', 1, NOW(), NOW())
+                INSERT INTO horsies_workflows
+                    (id, name, status, on_error, depth, parent_workflow_id,
+                     parent_task_index, root_workflow_id, sent_at, created_at,
+                     updated_at)
+                VALUES (:child_id, 'child_wf', 'COMPLETED', 'fail', 1, :wf_id, 0,
+                        :wf_id, NOW(), NOW(), NOW())
             """),
-            {'child_id': child_wf_id},
+            {'child_id': child_wf_id, 'wf_id': handle.workflow_id},
         )
         # Bare summary dict — the shape SubWorkflowSummary.to_json() now writes
         # (the legacy __dataclass__ envelope was retired).
@@ -807,7 +833,10 @@ class TestWorkflowHandleSubWorkflowFields:
                 UPDATE horsies_workflow_tasks
                 SET is_subworkflow = TRUE,
                     sub_workflow_id = :child_id,
-                    sub_workflow_summary = :summary
+                    sub_workflow_summary = :summary,
+                    task_id = NULL, max_retries = NULL, execution = NULL,
+                    good_until = NULL, retention_class_key = NULL,
+                    sub_workflow_params = 'NOT_GIVEN'
                 WHERE workflow_id = :wf_id AND task_index = 0
             """),
             {
@@ -851,17 +880,24 @@ class TestWorkflowHandleSubWorkflowFields:
         child_wf_id = str(uuid.uuid4())
         await session.execute(
             text("""
-                INSERT INTO horsies_workflows (id, name, status, on_error, depth, created_at, updated_at)
-                VALUES (:child_id, 'child_wf', 'FAILED', 'fail', 1, NOW(), NOW())
+                INSERT INTO horsies_workflows
+                    (id, name, status, on_error, depth, parent_workflow_id,
+                     parent_task_index, root_workflow_id, sent_at, created_at,
+                     updated_at)
+                VALUES (:child_id, 'child_wf', 'FAILED', 'fail', 1, :wf_id, 0,
+                        :wf_id, NOW(), NOW(), NOW())
             """),
-            {'child_id': child_wf_id},
+            {'child_id': child_wf_id, 'wf_id': handle.workflow_id},
         )
         await session.execute(
             text("""
                 UPDATE horsies_workflow_tasks
                 SET is_subworkflow = TRUE,
                     sub_workflow_id = :child_id,
-                    sub_workflow_summary = :summary
+                    sub_workflow_summary = :summary,
+                    task_id = NULL, max_retries = NULL, execution = NULL,
+                    good_until = NULL, retention_class_key = NULL,
+                    sub_workflow_params = 'NOT_GIVEN'
                 WHERE workflow_id = :wf_id AND task_index = 0
             """),
             {
@@ -904,17 +940,24 @@ class TestWorkflowHandleSubWorkflowFields:
         child_wf_id = str(uuid.uuid4())
         await session.execute(
             text("""
-                INSERT INTO horsies_workflows (id, name, status, on_error, depth, created_at, updated_at)
-                VALUES (:child_id, 'child_wf', 'COMPLETED', 'fail', 1, NOW(), NOW())
+                INSERT INTO horsies_workflows
+                    (id, name, status, on_error, depth, parent_workflow_id,
+                     parent_task_index, root_workflow_id, sent_at, created_at,
+                     updated_at)
+                VALUES (:child_id, 'child_wf', 'COMPLETED', 'fail', 1, :wf_id, 0,
+                        :wf_id, NOW(), NOW(), NOW())
             """),
-            {'child_id': child_wf_id},
+            {'child_id': child_wf_id, 'wf_id': handle.workflow_id},
         )
         await session.execute(
             text("""
                 UPDATE horsies_workflow_tasks
                 SET is_subworkflow = TRUE,
                     sub_workflow_id = :child_id,
-                    sub_workflow_summary = :summary
+                    sub_workflow_summary = :summary,
+                    task_id = NULL, max_retries = NULL, execution = NULL,
+                    good_until = NULL, retention_class_key = NULL,
+                    sub_workflow_params = 'NOT_GIVEN'
                 WHERE workflow_id = :wf_id AND task_index = 0
             """),
             {
@@ -968,6 +1011,29 @@ class TestWorkflowHandleCancel:
         status_r = await handle.status_async()
         assert is_ok(status_r)
         assert status_r.ok_value == WorkflowStatus.CANCELLED
+
+    async def test_cancel_sets_completed_at(
+        self,
+        clean_workflow_tables: None,
+        session: AsyncSession,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """cancel() sets completed_at, as every terminal workflow status does."""
+        task_a = make_simple_task(app, 'cancel_completed_at_a')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        spec = make_workflow_spec(
+            broker=broker, name='cancel_completed_at', tasks=[node_a],
+        )
+        handle = await start_ok(spec, broker)
+        assert await _workflow_completed_at(session, handle.workflow_id) is None
+
+        cancel_r = await handle.cancel_async()
+        assert is_ok(cancel_r)
+
+        completed_at = await _workflow_completed_at(session, handle.workflow_id)
+        assert completed_at is not None
+        assert completed_at <= datetime.now(timezone.utc)
 
     async def test_cancel_skips_pending(
         self,
@@ -1080,6 +1146,8 @@ class TestWorkflowHandleCancel:
         status_r = await handle.status_async()
         assert is_ok(status_r)
         assert status_r.ok_value == WorkflowStatus.CANCELLED
+        cancelled_at = await _workflow_completed_at(session, handle.workflow_id)
+        assert cancelled_at is not None
 
         # The still-running task finishes after the cancel.
         await _complete_task(
@@ -1099,7 +1167,9 @@ class TestWorkflowHandleCancel:
         assert row[0] == 'CANCELLED', (
             f'Late completion must not resurrect a cancelled workflow, got {row[0]}'
         )
-        assert row[1] is None, 'completed_at must stay NULL for CANCELLED'
+        assert row[1] == cancelled_at, (
+            'a late completion must not move the completed_at of the cancel'
+        )
         assert row[2] is None, 'workflow result must not be written after cancel'
 
     async def test_cancel_does_not_deadlock_against_completion_lock_order(
@@ -1167,6 +1237,54 @@ class TestWorkflowHandleCancel:
         assert is_ok(status_r)
         assert status_r.ok_value == WorkflowStatus.CANCELLED
 
+    async def test_cancel_sets_completed_at_on_descendants(
+        self,
+        clean_workflow_tables: None,
+        session: AsyncSession,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """The cascade sets completed_at on each child workflow it cancels."""
+        task_a = make_simple_task(app, 'descendant_cancel_completed_at_a')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        spec = make_workflow_spec(
+            broker=broker,
+            name='descendant_cancel_completed_at',
+            tasks=[node_a],
+        )
+        handle = await start_ok(spec, broker)
+
+        child_workflow_id = str(uuid.uuid4())
+        await session.execute(
+            text("""
+                INSERT INTO horsies_workflows
+                    (id, name, status, on_error, depth, parent_workflow_id,
+                     parent_task_index, root_workflow_id, sent_at, created_at,
+                     started_at, updated_at)
+                VALUES
+                    (:child_id, 'descendant_completed_at_child', 'RUNNING',
+                     'fail', 1, :parent_id, 0, :parent_id, NOW(), NOW(),
+                     NOW(), NOW())
+            """),
+            {
+                'child_id': child_workflow_id,
+                'parent_id': handle.workflow_id,
+            },
+        )
+        await session.commit()
+
+        cancel_r = await handle.cancel_async()
+        assert is_ok(cancel_r)
+
+        child_status = (
+            await session.execute(
+                text('SELECT status FROM horsies_workflows WHERE id = :id'),
+                {'id': child_workflow_id},
+            )
+        ).scalar_one()
+        assert child_status == 'CANCELLED'
+        assert await _workflow_completed_at(session, child_workflow_id) is not None
+
     async def test_descendant_cancel_uses_completion_lock_order(
         self,
         clean_workflow_tables: None,
@@ -1191,11 +1309,11 @@ class TestWorkflowHandleCancel:
             text("""
                 INSERT INTO horsies_workflows
                     (id, name, status, on_error, depth, parent_workflow_id,
-                     root_workflow_id, sent_at, created_at, started_at,
-                     updated_at)
+                     parent_task_index, root_workflow_id, sent_at, created_at,
+                     started_at, updated_at)
                 VALUES
-                    (:child_id, 'descendant_lock_child', 'RUNNING', 'FAIL', 1,
-                     :parent_id, :parent_id, NOW(), NOW(), NOW(), NOW())
+                    (:child_id, 'descendant_lock_child', 'RUNNING', 'fail', 1,
+                     :parent_id, 0, :parent_id, NOW(), NOW(), NOW(), NOW())
             """),
             {
                 'child_id': child_workflow_id,
@@ -1205,15 +1323,17 @@ class TestWorkflowHandleCancel:
         await session.execute(
             text("""
                 INSERT INTO horsies_workflow_tasks
-                    (id, workflow_id, task_index, node_id, task_name,
-                     task_args, task_kwargs, queue_name, priority,
+                    (downstream_subworkflow, id, workflow_id, task_index, node_id, task_name,
+                     input, queue_name, priority,
                      dependencies, allow_failed_deps, join_type,
-                     is_subworkflow, status, created_at)
+                     is_subworkflow, status, created_at,
+                     max_retries, execution, retention_class_key)
                 VALUES
-                    (:node_id, :child_id, 0, 'child_node',
-                     'descendant_cancel_lock_order_a', '[]', '{}',
+                    ('NONE', :node_id, :child_id, 0, 'child_node',
+                     'descendant_cancel_lock_order_a', '{}',
                      'default', 100, '{}', FALSE, 'all', FALSE,
-                     'PENDING', NOW())
+                     'PENDING', NOW(),
+                     0, 'ISOLATED', 'standard_30d')
             """),
             {'node_id': child_node_id, 'child_id': child_workflow_id},
         )
@@ -2083,74 +2203,39 @@ class TestResumeCommitSplit:
 @pytest.mark.integration
 @pytest.mark.asyncio(loop_scope='function')
 class TestUnknownStoredWorkflowStatus:
-    """horsies_workflows.status has no CHECK constraint; a value outside WorkflowStatus does not parse."""
+    """horsies_workflows.status takes only the WorkflowStatus values.
 
-    async def _workflow_with_status(
-        self, session: AsyncSession, broker: PostgresBroker, app: Horsies, name: str,
-    ) -> WorkflowHandle[Any]:
-        task_a = make_simple_task(app, f'{name}_a')
+    The CHECK horsies_workflows_status_known refuses any other value, so a
+    handle never reads one; no path writes the row outside the database.
+    """
+
+    async def test_the_database_refuses_an_unknown_status(
+        self,
+        clean_workflow_tables: None,
+        session: AsyncSession,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        task_a = make_simple_task(app, 'unknown_status_refused_a')
         spec = make_workflow_spec(
-            broker=broker, name=name, tasks=[TaskNode(fn=task_a, kwargs={'value': 1})],
+            broker=broker,
+            name='unknown_status_refused',
+            tasks=[TaskNode(fn=task_a, kwargs={'value': 1})],
         )
         handle = await start_ok(spec, broker)
-        await session.execute(
-            text("UPDATE horsies_workflows SET status = 'NOT_A_STATUS' WHERE id = :wf_id"),
-            {'wf_id': handle.workflow_id},
-        )
-        await session.commit()
-        return handle
 
-    async def test_status_returns_stored_data_invalid(
-        self,
-        clean_workflow_tables: None,
-        session: AsyncSession,
-        broker: PostgresBroker,
-        app: Horsies,
-    ) -> None:
-        handle = await self._workflow_with_status(session, broker, app, 'unknown_status_read')
+        with pytest.raises(IntegrityError) as raised:
+            await session.execute(
+                text("UPDATE horsies_workflows SET status = 'BOGUS' WHERE id = :wf_id"),
+                {'wf_id': handle.workflow_id},
+            )
+        await session.rollback()
 
+        assert isinstance(raised.value.orig, psycopg.errors.CheckViolation)
+        assert raised.value.orig.diag.constraint_name == 'horsies_workflows_status_known'
         status_r = await handle.status_async()
-
-        assert is_err(status_r)
-        err = status_r.err_value
-        assert isinstance(err, HandleStoredDataInvalid)
-        assert isinstance(err.exception, ValueError)
-        assert 'NOT_A_STATUS' in err.message
-
-    async def test_cancel_returns_stored_data_invalid_and_changes_nothing(
-        self,
-        clean_workflow_tables: None,
-        session: AsyncSession,
-        broker: PostgresBroker,
-        app: Horsies,
-    ) -> None:
-        handle = await self._workflow_with_status(session, broker, app, 'unknown_status_cancel')
-
-        cancel_r = await handle.cancel_async()
-
-        assert is_err(cancel_r)
-        assert isinstance(cancel_r.err_value, HandleStoredDataInvalid)
-        row = (await session.execute(
-            text('SELECT status FROM horsies_workflows WHERE id = :wf_id'),
-            {'wf_id': handle.workflow_id},
-        )).fetchone()
-        assert row is not None
-        assert row.status == 'NOT_A_STATUS'
-
-    async def test_get_folds_it_into_broker_error(
-        self,
-        clean_workflow_tables: None,
-        session: AsyncSession,
-        broker: PostgresBroker,
-        app: Horsies,
-    ) -> None:
-        handle = await self._workflow_with_status(session, broker, app, 'unknown_status_get')
-
-        result = await handle.get_async(timeout_ms=0)
-
-        assert result.is_err()
-        assert result.unwrap_err().error_code is OperationalErrorCode.BROKER_ERROR
-        assert 'NOT_A_STATUS' in (result.unwrap_err().message or '')
+        assert is_ok(status_r)
+        assert status_r.ok_value == WorkflowStatus.RUNNING
 
 
 @pytest.mark.integration

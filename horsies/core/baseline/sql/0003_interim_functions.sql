@@ -6,7 +6,10 @@
 --   columns; the history codec, content-type, prior-result and anchor columns; the clock-exception birth and
 --   record times; the phase-2 terminal status, generation, node identity and reason columns);
 -- - removed shims: the archive gate call, the REFERENCE rerun arm, the prior result of an administrative cancel;
--- - the move builds the rerun envelope from input and task_options (horsies_encode_rerun_input).
+-- - the move builds the rerun envelope from input and task_options (horsies_encode_rerun_input);
+-- - the owned-claim functions require the claim generation (22023 on NULL, or on a NULL element of a batch) and
+--   fence on it with no NULL arm; horsies_terminalization_miss takes the caller's fence as a closed kind (NONE,
+--   OWNER, OWNER_AND_GENERATION).
 -- The trigger functions are in 0001_tables.sql. The published history readers are rendered at run time.
 --
 -- Part of migration 1000: the install concatenates the files of this folder in name order and computes one
@@ -347,6 +350,10 @@ DECLARE
     v_workflow_id uuid;
     v_workflow_status text;
 BEGIN
+    IF p_claimed_at IS NULL THEN
+        RAISE EXCEPTION 'claim generation must be non-NULL'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
     -- The workflow row first, in the workflow-then-task lock order. The
     -- caller read PAUSED before this call; a resume that committed since
     -- then shows here, and its status update waits for this lock.
@@ -367,12 +374,12 @@ BEGIN
     WHERE t.id = p_task_id
       AND t.status = 'CLAIMED'
       AND t.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
-      AND (p_claimed_at IS NULL OR t.claimed_at = p_claimed_at)
+      AND t.claimed_at = p_claimed_at
     FOR UPDATE;
     IF NOT FOUND THEN
         RETURN QUERY SELECT * FROM horsies_terminalization_miss(
             p_task_id, ARRAY['PAUSE_ABANDON_CLAIM', 'PAUSE_ABANDON_CLAIM_BATCH', 'PAUSE_ABANDON_WORKFLOW']::text[],
-            p_worker_id, p_claimed_at
+            'OWNER_AND_GENERATION', p_worker_id, p_claimed_at
         );
         RETURN;
     END IF;
@@ -431,6 +438,10 @@ BEGIN
         RAISE EXCEPTION 'batch task ids must be non-NULL'
             USING ERRCODE = 'invalid_parameter_value';
     END IF;
+    IF array_position(p_claimed_ats, NULL) IS NOT NULL THEN
+        RAISE EXCEPTION 'batch claim generations must be non-NULL'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
     IF cardinality(p_ids) <> (
         SELECT COUNT(DISTINCT item.id)
         FROM unnest(p_ids) AS item(id)
@@ -465,10 +476,7 @@ BEGIN
     JOIN horsies_tasks t ON t.id = input.task_id
     WHERE t.status = 'CLAIMED'
       AND t.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
-      AND (
-          input.expected_claimed_at IS NULL
-          OR t.claimed_at = input.expected_claimed_at
-      )
+      AND t.claimed_at = input.expected_claimed_at
       AND NOT EXISTS (
           SELECT 1
           FROM horsies_workflow_tasks wt
@@ -485,10 +493,7 @@ BEGIN
     JOIN horsies_tasks t ON t.id = input.task_id
     WHERE t.status = 'CLAIMED'
       AND t.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
-      AND (
-          input.expected_claimed_at IS NULL
-          OR t.claimed_at = input.expected_claimed_at
-      )
+      AND t.claimed_at = input.expected_claimed_at
       AND NOT (t.id = ANY(v_applied_ids));
 
     RETURN QUERY
@@ -723,7 +728,7 @@ BEGIN
         AS input(task_id, expected_claimed_at, ordinality)
     CROSS JOIN LATERAL horsies_terminalization_miss(
         input.task_id, ARRAY['PAUSE_ABANDON_CLAIM', 'PAUSE_ABANDON_CLAIM_BATCH', 'PAUSE_ABANDON_WORKFLOW']::text[],
-        p_worker_id, input.expected_claimed_at
+        'OWNER_AND_GENERATION', p_worker_id, input.expected_claimed_at
     ) m
     WHERE NOT (input.task_id = ANY(v_applied_ids))
       AND NOT (input.task_id = ANY(v_refused_ids));
@@ -756,7 +761,7 @@ BEGIN
     IF NOT FOUND THEN
         RETURN QUERY SELECT * FROM horsies_terminalization_miss(
             p_task_id, ARRAY['CANCEL_ADMIN']::text[],
-            NULL::text, NULL::timestamptz
+            'NONE', NULL::text, NULL::timestamptz
         );
         RETURN;
     END IF;
@@ -1342,6 +1347,10 @@ DECLARE
     v_claimed_at timestamptz;
     v_terminal_at timestamptz;
 BEGIN
+    IF p_claimed_at IS NULL THEN
+        RAISE EXCEPTION 'claim generation must be non-NULL'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
     PERFORM pg_advisory_xact_lock(
         hashtextextended(p_task_id::text, 731)
     );
@@ -1356,7 +1365,7 @@ BEGIN
           (
               t.status = 'CLAIMED'
               AND t.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
-              AND (p_claimed_at IS NULL OR t.claimed_at = p_claimed_at)
+              AND t.claimed_at = p_claimed_at
           )
           OR (p_accepts_requeued_pending AND t.status = 'PENDING')
       )
@@ -1364,7 +1373,7 @@ BEGIN
     IF NOT FOUND THEN
         RETURN QUERY SELECT * FROM horsies_terminalization_miss(
             p_task_id, ARRAY['WORKFLOW_CANCEL_CLAIM', 'WORKFLOW_CANCEL_CLAIM_BATCH', 'WORKFLOW_CANCEL_WORKFLOW']::text[],
-            p_worker_id, p_claimed_at
+            'OWNER_AND_GENERATION', p_worker_id, p_claimed_at
         );
         RETURN;
     END IF;
@@ -1408,6 +1417,10 @@ BEGIN
         RAISE EXCEPTION 'batch task ids must be non-NULL'
             USING ERRCODE = 'invalid_parameter_value';
     END IF;
+    IF array_position(p_claimed_ats, NULL) IS NOT NULL THEN
+        RAISE EXCEPTION 'batch claim generations must be non-NULL'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
     IF cardinality(p_ids) <> (
         SELECT COUNT(DISTINCT item.id)
         FROM unnest(p_ids) AS item(id)
@@ -1431,10 +1444,7 @@ BEGIN
     JOIN horsies_tasks t ON t.id = input.task_id
     WHERE t.status = 'CLAIMED'
       AND t.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
-      AND (
-          input.expected_claimed_at IS NULL
-          OR t.claimed_at = input.expected_claimed_at
-      );
+      AND t.claimed_at = input.expected_claimed_at;
 
     IF cardinality(v_applied_ids) > 0 THEN
 
@@ -1645,7 +1655,7 @@ BEGIN
         AS input(task_id, expected_claimed_at, ordinality)
     CROSS JOIN LATERAL horsies_terminalization_miss(
         input.task_id, ARRAY['WORKFLOW_CANCEL_CLAIM', 'WORKFLOW_CANCEL_CLAIM_BATCH', 'WORKFLOW_CANCEL_WORKFLOW']::text[],
-        p_worker_id, input.expected_claimed_at
+        'OWNER_AND_GENERATION', p_worker_id, input.expected_claimed_at
     ) m
     WHERE NOT (input.task_id = ANY(v_applied_ids))
       AND NOT (input.task_id = ANY(v_refused_ids));
@@ -1663,6 +1673,10 @@ DECLARE
     v_node_status text;
     v_terminal_at timestamptz;
 BEGIN
+    IF p_claimed_at IS NULL THEN
+        RAISE EXCEPTION 'claim generation must be non-NULL'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
     PERFORM pg_advisory_xact_lock(
         hashtextextended(p_task_id::text, 731)
     );
@@ -1688,7 +1702,7 @@ BEGIN
     IF FOUND
        AND v_status = 'CLAIMED'
        AND v_worker = CAST(p_worker_id AS VARCHAR)
-       AND (p_claimed_at IS NULL OR v_claimed_at = p_claimed_at)
+       AND v_claimed_at = p_claimed_at
        AND v_is_workflow_task THEN
         IF v_node_status IS NULL THEN
             v_terminal_at := NOW();
@@ -1719,274 +1733,9 @@ BEGIN
 
     RETURN QUERY SELECT * FROM horsies_terminalization_miss(
         p_task_id, ARRAY['CANCEL_ORPHAN', 'CANCEL_ORPHAN_SWEEP']::text[],
-        p_worker_id, p_claimed_at
+        'OWNER_AND_GENERATION', p_worker_id, p_claimed_at
     );
 END
-$$;
-
-CREATE FUNCTION horsies_claim(p_worker_id text, p_queues jsonb, p_queue_priority jsonb, p_queue_max_concurrency jsonb, p_hard_cap_mode boolean, p_budgets jsonb, p_routes jsonb, p_prefetch_buffer integer, p_max_claim_per_worker integer, p_max_claim_batch integer, p_cluster_wide_cap integer, p_lease_ms bigint, p_lock_keys jsonb) RETURNS TABLE(row_kind text, id text, task_name character varying, input text, queue_name character varying, is_workflow_task boolean, task_options text, claimed_at timestamp with time zone, execution text, short_by integer)
-    LANGUAGE plpgsql
-    SET jit TO 'off'
-    AS $$
-#variable_conflict use_column
-DECLARE
-    v_key bigint;
-    v_capped text[];
-    v_my_claimed int;
-    v_my_in_flight int;
-    v_global_in_flight int;
-    v_queue_counts jsonb;
-    v_budget_counts jsonb;
-    v_capacity int;
-    v_extra int;
-    v_max_claimed int;
-    v_local_available int;
-    v_global_remaining int;
-    v_total int;
-    v_available jsonb;
-BEGIN
-    -- 0. The worker builds both maps from one claim plan, so a route to a
-    --    budget that p_budgets does not hold is a defect of the caller.
-    IF EXISTS (
-        SELECT 1
-        FROM jsonb_each_text(p_routes) AS r(row_class, budget_class)
-        WHERE NOT (p_budgets ? r.budget_class)
-    ) THEN
-        RAISE EXCEPTION
-            'horsies_claim: p_routes names a budget class that p_budgets does not hold'
-            USING ERRCODE = 'invalid_parameter_value';
-    END IF;
-
-    -- 1. Acquire advisory locks first, in deadlock-safe ascending order.
-    FOR v_key IN
-        SELECT elem::bigint AS k
-        FROM jsonb_array_elements_text(p_lock_keys) AS elem
-        ORDER BY 1
-    LOOP
-        PERFORM pg_advisory_xact_lock(v_key);
-    END LOOP;
-
-    SELECT COALESCE(array_agg(key), ARRAY[]::text[])
-    INTO v_capped
-    FROM jsonb_object_keys(p_queue_max_concurrency) AS key;
-
-    -- 2. Counts under the lock snapshot (horsies_claim_in_flight). Per-queue
-    --    counts: hard mode counts RUNNING+CLAIMED, soft counts RUNNING.
-    --    Per-budget counts: this worker's in-flight rows, by the budget that
-    --    their class routes to.
-    SELECT c.my_claimed, c.my_in_flight, c.global_in_flight, c.queue_counts,
-           c.budget_counts
-    INTO v_my_claimed, v_my_in_flight, v_global_in_flight, v_queue_counts,
-         v_budget_counts
-    FROM horsies_claim_in_flight(
-        p_worker_id, v_capped, p_hard_cap_mode, p_routes
-    ) AS c;
-
-    -- 3. Budget math. The capacity of the worker is the sum over budgets.
-    SELECT COALESCE(SUM(b.capacity::int), 0)
-    INTO v_capacity
-    FROM jsonb_each_text(p_budgets) AS b(budget_class, capacity);
-    v_extra := CASE WHEN p_hard_cap_mode THEN 0 ELSE p_prefetch_buffer END;
-    v_max_claimed := CASE
-        WHEN p_max_claim_per_worker > 0 THEN p_max_claim_per_worker
-        WHEN p_prefetch_buffer > 0 THEN v_capacity + p_prefetch_buffer
-        ELSE v_capacity END;
-    IF v_my_claimed >= v_max_claimed THEN
-        RETURN;
-    END IF;
-
-    -- A worker with no capacity in service gets no prefetch.
-    v_local_available := CASE
-        WHEN v_capacity = 0 THEN 0
-        ELSE GREATEST(0, v_capacity + v_extra - v_my_in_flight) END;
-
-    IF p_cluster_wide_cap IS NOT NULL THEN
-        v_global_remaining := GREATEST(0, p_cluster_wide_cap - v_global_in_flight);
-    ELSE
-        v_global_remaining := 2147483647;
-    END IF;
-
-    v_total := LEAST(
-        v_local_available, v_max_claimed - v_my_claimed, v_global_remaining);
-    IF v_total <= 0 THEN
-        RETURN;
-    END IF;
-
-    -- A budget with no capacity in service gets no prefetch.
-    SELECT COALESCE(jsonb_object_agg(
-               b.budget_class,
-               CASE WHEN b.capacity::int = 0 THEN 0
-                   ELSE GREATEST(0, b.capacity::int + v_extra
-                       - COALESCE((v_budget_counts ->> b.budget_class)::int, 0))
-                   END
-           ), '{}'::jsonb)
-    INTO v_available
-    FROM jsonb_each_text(p_budgets) AS b(budget_class, capacity);
-
-    -- 4. Candidate selection runs in horsies_claim_candidates, which reuses
-    --    one generic plan; the accounting above keeps parameter-specific
-    --    plans. Everything stays in this transaction.
-    RETURN QUERY
-    SELECT * FROM horsies_claim_candidates(
-        v_total, v_available, p_routes, p_queues, p_queue_priority,
-        p_queue_max_concurrency, v_queue_counts, p_max_claim_batch,
-        p_worker_id, p_lease_ms
-    );
-END;
-$$;
-
-CREATE FUNCTION horsies_claim_candidates(p_total integer, p_available jsonb, p_routes jsonb, p_queues jsonb, p_queue_priority jsonb, p_queue_max_concurrency jsonb, p_queue_counts jsonb, p_max_claim_batch integer, p_worker_id text, p_lease_ms bigint) RETURNS TABLE(row_kind text, id text, task_name character varying, input text, queue_name character varying, is_workflow_task boolean, task_options text, claimed_at timestamp with time zone, execution text, short_by integer)
-    LANGUAGE plpgsql
-    SET plan_cache_mode TO 'force_generic_plan'
-    SET jit TO 'off'
-    AS $$
-#variable_conflict use_column
-DECLARE
-    v_queue text[];
-    v_class text[];
-    v_arm text[];
-    v_take int[];
-    v_planned int;
-    v_taken int;
-BEGIN
-    SELECT COALESCE(array_agg(p.queue_name), ARRAY[]::text[]),
-           COALESCE(array_agg(p.row_class), ARRAY[]::text[]),
-           COALESCE(array_agg(p.arm), ARRAY[]::text[]),
-           COALESCE(array_agg(p.take), ARRAY[]::int[]),
-           COALESCE(sum(p.take), 0)::int
-    INTO v_queue, v_class, v_arm, v_take, v_planned
-    FROM horsies_claim_plan(
-        p_total, p_available, p_routes, p_queues, p_queue_priority,
-        p_queue_max_concurrency, p_queue_counts, p_max_claim_batch
-    ) AS p;
-    IF v_planned = 0 THEN
-        RETURN;
-    END IF;
-
-    RETURN QUERY
-    WITH planned AS (
-        SELECT p.queue_name, p.row_class, p.arm, p.take
-        FROM unnest(v_queue, v_class, v_arm, v_take)
-            AS p(queue_name, row_class, arm, take)
-    ),
-    -- FOR UPDATE is not allowed on UNION operands, so each arm locks in its
-    -- own CTE.
-    locked_pending AS (
-        SELECT l.id
-        FROM planned p
-        CROSS JOIN LATERAL (
-            SELECT t.id
-            FROM horsies_tasks t
-            WHERE t.queue_name = p.queue_name
-              AND t.execution = p.row_class
-              AND t.status = 'PENDING'
-              AND t.enqueued_at <= now()
-              AND (t.next_retry_at IS NULL OR t.next_retry_at <= now())
-              AND (t.good_until IS NULL OR t.good_until > now())
-            ORDER BY t.priority ASC, t.enqueued_at ASC, t.id ASC
-            FOR UPDATE SKIP LOCKED
-            LIMIT p.take
-        ) l
-        WHERE p.arm = 'PENDING'
-    ),
-    locked_expired AS (
-        SELECT l.id
-        FROM planned p
-        CROSS JOIN LATERAL (
-            SELECT t.id
-            FROM horsies_tasks t
-            WHERE t.queue_name = p.queue_name
-              AND t.execution = p.row_class
-              AND t.status = 'CLAIMED'
-              AND t.claim_expires_at IS NOT NULL
-              AND t.claim_expires_at < now()
-              AND t.enqueued_at <= now()
-              AND (t.next_retry_at IS NULL OR t.next_retry_at <= now())
-              AND (t.good_until IS NULL OR t.good_until > now())
-            ORDER BY t.priority ASC, t.enqueued_at ASC, t.id ASC
-            FOR UPDATE SKIP LOCKED
-            LIMIT p.take
-        ) l
-        WHERE p.arm = 'EXPIRED'
-    ),
-    -- Targets are looked up by id; the selected batch never drives a scan
-    -- of the live table.
-    updated AS (
-        UPDATE horsies_tasks t
-        SET status = 'CLAIMED',
-            claimed_at = now(),
-            claimed_by_worker_id = p_worker_id,
-            claim_expires_at = now() + p_lease_ms * INTERVAL '1 millisecond',
-            finalizing_at = NULL,
-            finalizing_by_worker_id = NULL,
-            updated_at = now()
-        WHERE t.id = ANY(ARRAY(
-            SELECT locked_pending.id FROM locked_pending
-            UNION ALL
-            SELECT locked_expired.id FROM locked_expired
-        ))
-        RETURNING t.id AS task_key, t.id::text AS id, t.task_name, t.input,
-                  t.queue_name, t.is_workflow_task, t.task_options,
-                  t.claimed_at, t.execution, t.priority, t.enqueued_at
-    )
-    SELECT 'CLAIMED'::text, u.id, u.task_name, u.input,
-           u.queue_name, u.is_workflow_task, u.task_options, u.claimed_at,
-           u.execution, NULL::integer
-    FROM updated u
-    ORDER BY COALESCE((p_queue_priority ->> u.queue_name)::int, 100) ASC,
-             u.priority ASC, u.enqueued_at ASC, u.task_key ASC;
-
-    GET DIAGNOSTICS v_taken = ROW_COUNT;
-    IF v_taken < v_planned THEN
-        RETURN QUERY
-        SELECT 'SHORT'::text, NULL::text, NULL::varchar, NULL::text,
-               NULL::varchar, NULL::boolean, NULL::text,
-               NULL::timestamptz, NULL::text, v_planned - v_taken;
-    END IF;
-END;
-$$;
-
-CREATE FUNCTION horsies_claim_in_flight(p_worker_id text, p_capped text[], p_hard_cap_mode boolean, p_routes jsonb) RETURNS TABLE(my_claimed bigint, my_in_flight bigint, global_in_flight bigint, queue_counts jsonb, budget_counts jsonb)
-    LANGUAGE plpgsql STABLE
-    SET jit TO 'off'
-    SET enable_bitmapscan TO 'off'
-    SET enable_seqscan TO 'off'
-    AS $$
-#variable_conflict use_column
-BEGIN
-    RETURN QUERY
-    WITH in_flight AS (
-        SELECT t.queue_name, t.status, t.claimed_by_worker_id, t.execution
-        FROM horsies_tasks t
-        WHERE t.status IN ('RUNNING', 'CLAIMED')
-          AND (t.status = 'RUNNING'
-               OR t.claim_expires_at IS NULL OR t.claim_expires_at > now())
-    )
-    SELECT
-        COUNT(*) FILTER (
-            WHERE f.claimed_by_worker_id = p_worker_id AND f.status = 'CLAIMED'),
-        COUNT(*) FILTER (WHERE f.claimed_by_worker_id = p_worker_id),
-        COUNT(*),
-        COALESCE((
-            SELECT jsonb_object_agg(g.queue_name, g.cnt) FROM (
-                SELECT q.queue_name, COUNT(*) AS cnt
-                FROM in_flight q
-                WHERE q.queue_name = ANY(p_capped)
-                  AND (p_hard_cap_mode OR q.status = 'RUNNING')
-                GROUP BY q.queue_name
-            ) g
-        ), '{}'::jsonb),
-        COALESCE((
-            SELECT jsonb_object_agg(g.budget_class, g.cnt) FROM (
-                SELECT p_routes ->> m.execution AS budget_class, COUNT(*) AS cnt
-                FROM in_flight m
-                WHERE m.claimed_by_worker_id = p_worker_id
-                  AND p_routes ? m.execution
-                GROUP BY 1
-            ) g
-        ), '{}'::jsonb)
-    FROM in_flight f;
-END;
 $$;
 
 CREATE FUNCTION horsies_claim_plan(p_total integer, p_available jsonb, p_routes jsonb, p_queues jsonb, p_queue_priority jsonb, p_queue_max_concurrency jsonb, p_queue_counts jsonb, p_max_claim_batch integer) RETURNS TABLE(queue_name text, row_class text, arm text, take integer)
@@ -2118,7 +1867,7 @@ BEGIN
     ) IS NOT TRUE THEN
         RETURN QUERY SELECT * FROM horsies_terminalization_miss(
             p_task_id, ARRAY['COMPLETE_FUSED', 'COMPLETE_LOCKED']::text[],
-            p_worker_id, NULL::timestamptz
+            'OWNER', p_worker_id, NULL::timestamptz
         );
         RETURN;
     END IF;
@@ -2133,130 +1882,6 @@ BEGIN
         v_terminal_at, 'COMPLETE_LOCKED'::text,
         'RUNNING'::text, CAST(p_worker_id AS VARCHAR), v_claimed_at,
         NULL::text, NULL::jsonb;
-END
-$$;
-
-CREATE FUNCTION horsies_complete_task_fused(p_task_id uuid, p_worker_id text, p_claimed_at timestamp with time zone, p_result text, p_notify_channel text, p_notify_payload text) RETURNS SETOF horsies_terminalization_outcome
-    LANGUAGE plpgsql
-    AS $$
-DECLARE
-    v_ctx record;
-    v_terminal_at timestamptz;
-BEGIN
-    PERFORM pg_advisory_xact_lock(
-        hashtextextended(p_task_id::text, 731)
-    );
-    -- Read the row by id alone, so that only the primary key serves the
-    -- read whatever the statistics say, and check the fence on the locked
-    -- row. A row that fails the fence stays locked: the miss classifier
-    -- locks it by id too.
-    SELECT id, status, retry_count, started_at, claimed_by_worker_id,
-           claimed_at, worker_hostname, worker_pid, worker_process_name,
-           clock_timestamp() AS db_now
-    INTO v_ctx
-    FROM horsies_tasks
-    WHERE id = p_task_id
-    FOR UPDATE;
-    IF NOT FOUND OR (
-        v_ctx.status = 'RUNNING'
-        AND v_ctx.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
-        AND (p_claimed_at IS NULL OR v_ctx.claimed_at = p_claimed_at)
-    ) IS NOT TRUE THEN
-        RETURN QUERY SELECT * FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['COMPLETE_FUSED', 'COMPLETE_LOCKED']::text[],
-            p_worker_id, p_claimed_at
-        );
-        RETURN;
-    END IF;
-
-    INSERT INTO horsies_task_attempts (
-        task_id, attempt, outcome, will_retry,
-        started_at, finished_at,
-        error_code, error_message, failed_reason,
-        worker_id, worker_hostname, worker_pid, worker_process_name
-    )
-    VALUES (
-        v_ctx.id, COALESCE(v_ctx.retry_count, 0) + 1, 'COMPLETED', FALSE,
-        COALESCE(v_ctx.started_at, v_ctx.db_now), v_ctx.db_now,
-        NULL, NULL, NULL,
-        v_ctx.claimed_by_worker_id, v_ctx.worker_hostname, v_ctx.worker_pid,
-        v_ctx.worker_process_name
-    )
-    ON CONFLICT (task_id, attempt) DO UPDATE SET
-        outcome = EXCLUDED.outcome,
-        will_retry = EXCLUDED.will_retry,
-        started_at = EXCLUDED.started_at,
-        finished_at = EXCLUDED.finished_at,
-        error_code = EXCLUDED.error_code,
-        error_message = EXCLUDED.error_message,
-        failed_reason = EXCLUDED.failed_reason,
-        worker_id = EXCLUDED.worker_id,
-        worker_hostname = EXCLUDED.worker_hostname,
-        worker_pid = EXCLUDED.worker_pid,
-        worker_process_name = EXCLUDED.worker_process_name;
-
-    v_terminal_at := NOW();
-    PERFORM horsies_move_task_to_history(
-        p_task_id, 'COMPLETED', 'COMPLETE_FUSED', v_terminal_at,
-        p_result, NULL, NULL
-    );
-    PERFORM pg_notify(p_notify_channel, p_notify_payload);
-    RETURN QUERY SELECT
-        p_task_id, NULL::bigint, 'APPLIED'::text,
-        v_terminal_at, 'COMPLETE_FUSED'::text,
-        'RUNNING'::text, v_ctx.claimed_by_worker_id, v_ctx.claimed_at,
-        NULL::text, NULL::jsonb;
-END
-$$;
-
-CREATE FUNCTION horsies_complete_tasks_fused(p_task_ids uuid[], p_worker_ids text[], p_claimed_ats timestamp with time zone[], p_results text[], p_notify_channels text[], p_notify_payloads text[]) RETURNS SETOF horsies_terminalization_outcome
-    LANGUAGE plpgsql
-    AS $$
-DECLARE
-    v_item record;
-    v_row horsies_terminalization_outcome;
-BEGIN
-    IF p_task_ids IS NULL OR p_worker_ids IS NULL OR p_claimed_ats IS NULL
-       OR p_results IS NULL OR p_notify_channels IS NULL
-       OR p_notify_payloads IS NULL THEN
-        RAISE EXCEPTION 'batch arrays must be non-NULL'
-            USING ERRCODE = 'invalid_parameter_value';
-    END IF;
-    IF cardinality(p_worker_ids) <> cardinality(p_task_ids)
-       OR cardinality(p_claimed_ats) <> cardinality(p_task_ids)
-       OR cardinality(p_results) <> cardinality(p_task_ids)
-       OR cardinality(p_notify_channels) <> cardinality(p_task_ids)
-       OR cardinality(p_notify_payloads) <> cardinality(p_task_ids) THEN
-        RAISE EXCEPTION 'batch array lengths differ'
-            USING ERRCODE = 'invalid_parameter_value';
-    END IF;
-    -- count(DISTINCT) skips NULL, so a NULL id fails this check too.
-    IF cardinality(p_task_ids) <> (
-        SELECT count(DISTINCT u.task_id) FROM unnest(p_task_ids) AS u(task_id)
-    ) THEN
-        RAISE EXCEPTION 'batch task ids must be distinct and non-NULL'
-            USING ERRCODE = 'invalid_parameter_value';
-    END IF;
-    FOR v_item IN
-        SELECT u.task_id, u.worker_id, u.claimed_at, u.result,
-               u.notify_channel, u.notify_payload, u.ordinality
-        FROM unnest(
-            p_task_ids, p_worker_ids, p_claimed_ats, p_results,
-            p_notify_channels, p_notify_payloads
-        ) WITH ORDINALITY AS u(
-            task_id, worker_id, claimed_at, result,
-            notify_channel, notify_payload, ordinality
-        )
-        ORDER BY u.task_id
-    LOOP
-        SELECT * INTO STRICT v_row
-        FROM horsies_complete_task_fused(
-            v_item.task_id, v_item.worker_id, v_item.claimed_at,
-            v_item.result, v_item.notify_channel, v_item.notify_payload
-        );
-        v_row.ordinality := v_item.ordinality;
-        RETURN NEXT v_row;
-    END LOOP;
 END
 $$;
 
@@ -2368,7 +1993,7 @@ BEGIN
 
     RETURN QUERY SELECT * FROM horsies_terminalization_miss(
         p_task_id, ARRAY['EXPIRE_CLAIMED', 'EXPIRE_PENDING']::text[],
-        p_worker_id, NULL::timestamptz
+        'OWNER', p_worker_id, NULL::timestamptz
     );
 END
 $$;
@@ -2652,7 +2277,7 @@ BEGIN
     ) IS NOT TRUE THEN
         RETURN QUERY SELECT * FROM horsies_terminalization_miss(
             p_task_id, ARRAY['FAIL_RUNNING']::text[],
-            p_worker_id, NULL::timestamptz
+            'OWNER', p_worker_id, NULL::timestamptz
         );
         RETURN;
     END IF;
@@ -2766,7 +2391,7 @@ BEGIN
 
     RETURN QUERY SELECT * FROM horsies_terminalization_miss(
         p_task_id, ARRAY['FAIL_STALE']::text[],
-        NULL::text, NULL::timestamptz
+        'NONE', NULL::text, NULL::timestamptz
     );
 END
 $$;
@@ -2797,262 +2422,6 @@ BEGIN
         SELECT 1 FROM horsies_workflows guard_workflow
         WHERE guard_workflow.status IN ('PAUSED', 'CANCELLED')
     );
-END
-$$;
-
-CREATE FUNCTION horsies_finish_failed_attempt(p_task_id uuid, p_worker_id text, p_claimed_at timestamp with time zone, p_expected_retry_count integer, p_retry_delay_s double precision, p_retry_placement text, p_result text, p_error_code text, p_failed_reason text, p_attempt_outcome text, p_attempt_error_message text, p_attempt_failed_reason text) RETURNS SETOF horsies_failed_attempt_outcome
-    LANGUAGE plpgsql
-    AS $$
-DECLARE
-    v_ctx record;
-    v_will_retry boolean := FALSE;
-    v_retry_disposition text;
-    v_next_retry_at timestamptz;
-    v_good_until timestamptz;
-    v_terminal_at timestamptz;
-    v_updated bigint;
-BEGIN
-    IF num_nulls(
-        p_expected_retry_count, p_retry_delay_s, p_retry_placement
-    ) NOT IN (0, 3) THEN
-        RAISE EXCEPTION
-            'a retry request needs the retry count, the delay and the placement'
-            USING ERRCODE = 'invalid_parameter_value';
-    END IF;
-    IF p_retry_delay_s IS NOT NULL AND NOT (
-        p_retry_delay_s >= 0
-        AND p_retry_delay_s < 'Infinity'::double precision
-    ) THEN
-        RAISE EXCEPTION 'retry delay % s is not a finite, non-negative value',
-            p_retry_delay_s
-            USING ERRCODE = 'invalid_parameter_value';
-    END IF;
-    IF p_retry_placement IS NOT NULL AND p_retry_placement NOT IN (
-        'same_class', 'isolated'
-    ) THEN
-        RAISE EXCEPTION 'unknown retry placement %', p_retry_placement
-            USING ERRCODE = 'invalid_parameter_value';
-    END IF;
-    IF p_attempt_outcome IS NULL OR p_attempt_outcome NOT IN ('FAILED', 'WORKER_FAILURE') THEN
-        RAISE EXCEPTION 'attempt outcome % is not a failure', p_attempt_outcome
-            USING ERRCODE = 'invalid_parameter_value';
-    END IF;
-    IF p_result IS NULL THEN
-        RAISE EXCEPTION 'a failed attempt needs a result payload'
-            USING ERRCODE = 'not_null_violation';
-    END IF;
-
-    PERFORM pg_advisory_xact_lock(
-        hashtextextended(p_task_id::text, 731)
-    );
-    -- Read the row by id alone, so that only the primary key serves the
-    -- read whatever the statistics say, and check the fence on the locked
-    -- row. A row that fails the fence stays locked: the miss classifier
-    -- locks it by id too.
-    SELECT id, status, retry_count, started_at, claimed_by_worker_id,
-           claimed_at, worker_hostname, worker_pid, worker_process_name,
-           good_until, is_workflow_task, queue_name, task_name,
-           clock_timestamp() AS db_now
-    INTO v_ctx
-    FROM horsies_tasks
-    WHERE id = p_task_id
-    FOR UPDATE;
-    IF NOT FOUND OR (
-        v_ctx.status = 'RUNNING'
-        AND v_ctx.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
-        AND (p_claimed_at IS NULL OR v_ctx.claimed_at = p_claimed_at)
-        AND (
-            p_expected_retry_count IS NULL
-            OR v_ctx.retry_count = p_expected_retry_count
-        )
-    ) IS NOT TRUE THEN
-        RETURN QUERY SELECT m.*,
-            NULL::text, NULL::integer, NULL::timestamptz, NULL::timestamptz,
-            NULL::boolean, NULL::text, NULL::text
-        FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['FAIL_RUNNING']::text[],
-            p_worker_id, p_claimed_at
-        ) AS m;
-        RETURN;
-    END IF;
-
-    IF p_expected_retry_count IS NULL THEN
-        v_retry_disposition := 'NOT_REQUESTED';
-    ELSE
-        v_next_retry_at := v_ctx.db_now + make_interval(secs => p_retry_delay_s);
-        IF v_ctx.good_until IS NULL OR v_next_retry_at < v_ctx.good_until THEN
-            v_will_retry := TRUE;
-        ELSE
-            v_retry_disposition := 'PAST_DEADLINE';
-            v_good_until := v_ctx.good_until;
-        END IF;
-    END IF;
-
-    INSERT INTO horsies_task_attempts (
-        task_id, attempt, outcome, will_retry,
-        started_at, finished_at,
-        error_code, error_message, failed_reason,
-        worker_id, worker_hostname, worker_pid, worker_process_name
-    )
-    VALUES (
-        v_ctx.id, v_ctx.retry_count + 1, p_attempt_outcome, v_will_retry,
-        COALESCE(v_ctx.started_at, v_ctx.db_now), v_ctx.db_now,
-        p_error_code, p_attempt_error_message, p_attempt_failed_reason,
-        v_ctx.claimed_by_worker_id, v_ctx.worker_hostname, v_ctx.worker_pid,
-        v_ctx.worker_process_name
-    )
-    ON CONFLICT (task_id, attempt) DO UPDATE SET
-        outcome = EXCLUDED.outcome,
-        will_retry = EXCLUDED.will_retry,
-        started_at = EXCLUDED.started_at,
-        finished_at = EXCLUDED.finished_at,
-        error_code = EXCLUDED.error_code,
-        error_message = EXCLUDED.error_message,
-        failed_reason = EXCLUDED.failed_reason,
-        worker_id = EXCLUDED.worker_id,
-        worker_hostname = EXCLUDED.worker_hostname,
-        worker_pid = EXCLUDED.worker_pid,
-        worker_process_name = EXCLUDED.worker_process_name;
-
-    IF v_will_retry THEN
-        UPDATE horsies_tasks
-        SET status = 'PENDING',
-            execution = CASE
-                WHEN p_retry_placement = 'isolated'
-                THEN 'ISOLATED'
-                ELSE execution
-            END,
-            retry_count = v_ctx.retry_count + 1,
-            next_retry_at = v_next_retry_at,
-            enqueued_at = v_next_retry_at,
-            claimed_at = NULL,
-            claimed_by_worker_id = NULL,
-            claim_expires_at = NULL,
-            started_at = NULL,
-            worker_pid = NULL,
-            worker_hostname = NULL,
-            worker_process_name = NULL,
-            finalizing_at = NULL,
-            finalizing_by_worker_id = NULL,
-            updated_at = now()
-        WHERE id = p_task_id;
-        GET DIAGNOSTICS v_updated = ROW_COUNT;
-        IF v_updated <> 1 THEN
-            RAISE EXCEPTION 'retry of task % updated % rows', p_task_id, v_updated;
-        END IF;
-        RETURN QUERY SELECT
-            p_task_id, NULL::bigint, 'RETRY_SCHEDULED'::text,
-            NULL::timestamptz, NULL::text,
-            'RUNNING'::text, v_ctx.claimed_by_worker_id, v_ctx.claimed_at,
-            NULL::text, NULL::jsonb,
-            NULL::text, v_ctx.retry_count + 1, v_next_retry_at,
-            NULL::timestamptz,
-            NULL::boolean, v_ctx.queue_name::text, NULL::text;
-        RETURN;
-    END IF;
-
-    v_terminal_at := NOW();
-    PERFORM horsies_move_task_to_history(
-        p_task_id, 'FAILED', 'FAIL_RUNNING', v_terminal_at,
-        p_result, p_error_code, p_failed_reason
-    );
-    IF NOT v_ctx.is_workflow_task THEN
-        PERFORM pg_notify(
-            'task_queue_' || v_ctx.queue_name, 'capacity:' || p_task_id::text
-        );
-    END IF;
-    RETURN QUERY SELECT
-        p_task_id, NULL::bigint, 'APPLIED'::text,
-        v_terminal_at, 'FAIL_RUNNING'::text,
-        'RUNNING'::text, v_ctx.claimed_by_worker_id, v_ctx.claimed_at,
-        NULL::text, NULL::jsonb,
-        v_retry_disposition, NULL::integer, v_next_retry_at, v_good_until,
-        v_ctx.is_workflow_task, v_ctx.queue_name::text, v_ctx.task_name::text;
-END
-$$;
-
-CREATE FUNCTION horsies_finish_workflow_success(p_task_id uuid, p_worker_id text, p_claimed_at timestamp with time zone, p_result text) RETURNS SETOF horsies_workflow_success_outcome
-    LANGUAGE plpgsql
-    AS $$
-DECLARE
-    v_ctx record;
-    v_terminal_at timestamptz;
-BEGIN
-    IF p_result IS NULL THEN
-        RAISE EXCEPTION 'a workflow task success needs a result payload'
-            USING ERRCODE = 'not_null_violation';
-    END IF;
-    PERFORM pg_advisory_xact_lock(
-        hashtextextended(p_task_id::text, 731)
-    );
-    -- Read the row by id alone, so that only the primary key serves the
-    -- read whatever the statistics say, and check the fence on the locked
-    -- row. A row that fails the fence stays locked: the miss classifier
-    -- locks it by id too.
-    SELECT id, status, retry_count, started_at, claimed_by_worker_id,
-           claimed_at, worker_hostname, worker_pid, worker_process_name,
-           is_workflow_task, queue_name, task_name,
-           clock_timestamp() AS db_now
-    INTO v_ctx
-    FROM horsies_tasks
-    WHERE id = p_task_id
-    FOR UPDATE;
-    IF NOT FOUND OR (
-        v_ctx.status = 'RUNNING'
-        AND v_ctx.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
-        AND (p_claimed_at IS NULL OR v_ctx.claimed_at = p_claimed_at)
-    ) IS NOT TRUE THEN
-        RETURN QUERY SELECT m.*, NULL::text, NULL::text
-        FROM horsies_terminalization_miss(
-            p_task_id, ARRAY['COMPLETE_FUSED', 'COMPLETE_LOCKED']::text[],
-            p_worker_id, p_claimed_at
-        ) AS m;
-        RETURN;
-    END IF;
-    IF NOT v_ctx.is_workflow_task THEN
-        RAISE EXCEPTION
-            'task % is not a workflow task; its success is horsies_complete_task_fused',
-            p_task_id
-            USING ERRCODE = 'invalid_parameter_value';
-    END IF;
-
-    INSERT INTO horsies_task_attempts (
-        task_id, attempt, outcome, will_retry,
-        started_at, finished_at,
-        error_code, error_message, failed_reason,
-        worker_id, worker_hostname, worker_pid, worker_process_name
-    )
-    VALUES (
-        v_ctx.id, v_ctx.retry_count + 1, 'COMPLETED', FALSE,
-        COALESCE(v_ctx.started_at, v_ctx.db_now), v_ctx.db_now,
-        NULL, NULL, NULL,
-        v_ctx.claimed_by_worker_id, v_ctx.worker_hostname, v_ctx.worker_pid,
-        v_ctx.worker_process_name
-    )
-    ON CONFLICT (task_id, attempt) DO UPDATE SET
-        outcome = EXCLUDED.outcome,
-        will_retry = EXCLUDED.will_retry,
-        started_at = EXCLUDED.started_at,
-        finished_at = EXCLUDED.finished_at,
-        error_code = EXCLUDED.error_code,
-        error_message = EXCLUDED.error_message,
-        failed_reason = EXCLUDED.failed_reason,
-        worker_id = EXCLUDED.worker_id,
-        worker_hostname = EXCLUDED.worker_hostname,
-        worker_pid = EXCLUDED.worker_pid,
-        worker_process_name = EXCLUDED.worker_process_name;
-
-    v_terminal_at := NOW();
-    PERFORM horsies_move_task_to_history(
-        p_task_id, 'COMPLETED', 'COMPLETE_LOCKED', v_terminal_at,
-        p_result, NULL, NULL
-    );
-    RETURN QUERY SELECT
-        p_task_id, NULL::bigint, 'APPLIED'::text,
-        v_terminal_at, 'COMPLETE_LOCKED'::text,
-        'RUNNING'::text, v_ctx.claimed_by_worker_id, v_ctx.claimed_at,
-        NULL::text, NULL::jsonb,
-        v_ctx.queue_name::text, v_ctx.task_name::text;
 END
 $$;
 
@@ -3852,13 +3221,41 @@ CREATE FUNCTION horsies_task_history_leaf_lock_key(p_class_key text, p_anchor ti
     )
 $$;
 
-CREATE FUNCTION horsies_terminalization_miss(p_task_id uuid, p_equivalent_kinds text[], p_worker_id text, p_claimed_at timestamp with time zone) RETURNS SETOF horsies_terminalization_outcome
+-- The miss classifier of every fenced terminal write. p_fence_kind names the caller's fence, a closed set:
+-- - NONE: the caller fences on no claim (worker and generation NULL);
+-- - OWNER: the caller fences on the worker only (generation NULL);
+-- - OWNER_AND_GENERATION: the caller fences on the worker and the claim generation (both required).
+-- Any other kind, or a worker or generation that does not fit the kind, is refused with 22023. A live row that the
+-- fence does not hold is LOST_CLAIM; a fence that holds is SOURCE_STATE_CONFLICT.
+CREATE FUNCTION horsies_terminalization_miss(p_task_id uuid, p_equivalent_kinds text[], p_fence_kind text, p_worker_id text, p_claimed_at timestamp with time zone) RETURNS SETOF horsies_terminalization_outcome
     LANGUAGE plpgsql
     AS $$
 DECLARE
     v_row horsies_tasks%ROWTYPE;
     v_provenance record;
+    v_held boolean;
 BEGIN
+    CASE p_fence_kind
+        WHEN 'NONE' THEN
+            IF num_nulls(p_worker_id, p_claimed_at) <> 2 THEN
+                RAISE EXCEPTION 'fence NONE takes no worker and no claim generation'
+                    USING ERRCODE = 'invalid_parameter_value';
+            END IF;
+        WHEN 'OWNER' THEN
+            IF p_worker_id IS NULL OR p_claimed_at IS NOT NULL THEN
+                RAISE EXCEPTION 'fence OWNER takes a worker and no claim generation'
+                    USING ERRCODE = 'invalid_parameter_value';
+            END IF;
+        WHEN 'OWNER_AND_GENERATION' THEN
+            IF num_nulls(p_worker_id, p_claimed_at) <> 0 THEN
+                RAISE EXCEPTION 'fence OWNER_AND_GENERATION takes a worker and a claim generation'
+                    USING ERRCODE = 'invalid_parameter_value';
+            END IF;
+        ELSE
+            RAISE EXCEPTION 'unknown fence kind'
+                USING ERRCODE = 'invalid_parameter_value';
+    END CASE;
+
     SELECT * INTO v_row
     FROM horsies_tasks
     WHERE id = p_task_id
@@ -3896,11 +3293,14 @@ BEGIN
         RETURN;
     END IF;
 
-    IF p_worker_id IS NOT NULL AND (
-        v_row.claimed_by_worker_id IS DISTINCT FROM CAST(p_worker_id AS VARCHAR)
-        OR (p_claimed_at IS NOT NULL
-            AND v_row.claimed_at IS DISTINCT FROM p_claimed_at)
-    ) THEN
+    v_held := CASE p_fence_kind
+        WHEN 'NONE' THEN TRUE
+        WHEN 'OWNER' THEN v_row.claimed_by_worker_id IS NOT DISTINCT FROM CAST(p_worker_id AS VARCHAR)
+        WHEN 'OWNER_AND_GENERATION' THEN
+            v_row.claimed_by_worker_id IS NOT DISTINCT FROM CAST(p_worker_id AS VARCHAR)
+            AND v_row.claimed_at IS NOT DISTINCT FROM p_claimed_at
+    END;
+    IF NOT v_held THEN
         RETURN QUERY SELECT
             p_task_id, NULL::bigint, 'LOST_CLAIM'::text,
             NULL::timestamptz, NULL::text,

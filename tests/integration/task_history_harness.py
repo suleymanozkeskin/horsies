@@ -400,16 +400,16 @@ async def link_workflow_node(
     await connection.execute(
         text(
             """
-            INSERT INTO horsies_workflow_tasks (
+            INSERT INTO horsies_workflow_tasks (downstream_subworkflow,
                 id, workflow_id, task_index, node_id, task_name, input,
                 queue_name, priority, dependencies, args_from,
                 workflow_ctx_from, allow_failed_deps, join_type, min_success,
                 task_options, max_retries, execution, good_until,
                 retention_class_key, status, task_id, is_subworkflow,
                 sub_workflow_id, sub_workflow_name, sub_definition_key,
-                sub_workflow_summary, result, error, created_at, started_at,
-                completed_at
-            ) VALUES (
+                sub_workflow_params, sub_workflow_summary, result, error,
+                created_at, started_at, completed_at
+            ) VALUES ('NONE',
                 CAST(:node_id AS uuid), CAST(:workflow_id AS uuid), :task_index,
                 :node_key, 'it.move', '{}',
                 'default', 50, '{}', NULL,
@@ -417,8 +417,8 @@ async def link_workflow_node(
                 NULL, 0, 'ISOLATED', NULL,
                 'forever', :node_status, CAST(:task_id AS uuid), FALSE,
                 NULL, NULL, NULL,
-                NULL, NULL, NULL, now(), NULL,
-                NULL
+                NULL, NULL, NULL, NULL,
+                now(), NULL, NULL
             )
             """
         ),

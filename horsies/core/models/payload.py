@@ -7,11 +7,9 @@ from pydantic import BaseModel, ConfigDict, Field
 class PayloadPolicy(BaseModel):
     """Size guardrail for serialized task payloads.
 
-    Checked against the length of the already-serialized JSON string at
-    the encode boundary — one integer comparison per enqueue/result, no
-    extra serialization pass. Length is in characters, which for JSON
-    wire payloads (ASCII-dominant) approximates UTF-8 bytes; the
-    guardrail does not require byte exactness.
+    Checked against the size of the already-serialized JSON text at the
+    encode boundary, in bytes of its UTF-8 text: a non-ASCII character
+    counts 2 to 4 bytes. No extra serialization pass.
 
     Fields:
     - warn_bytes: Log a structured warning when a payload exceeds this size,
@@ -29,7 +27,7 @@ class PayloadPolicy(BaseModel):
     warn_bytes: Annotated[Optional[int], Field(ge=1)] = Field(
         default=1_048_576,  # 1 MiB
         description=(
-            'Warn when a serialized payload exceeds this many bytes '
+            'Warn when the UTF-8 text of a serialized payload exceeds this many bytes '
             '(once per task_name and payload kind per process); '
             'None disables the warning'
         ),
@@ -39,7 +37,7 @@ class PayloadPolicy(BaseModel):
         default=None,
         description=(
             'Reject an enqueue whose serialized payload exceeds this many '
-            'bytes (typed PAYLOAD_TOO_LARGE error before any row is '
+            'bytes of UTF-8 text (typed PAYLOAD_TOO_LARGE error before any row is '
             'written); results are never rejected. None disables rejection'
         ),
     )

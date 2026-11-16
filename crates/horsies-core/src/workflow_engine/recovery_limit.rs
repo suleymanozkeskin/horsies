@@ -107,11 +107,16 @@ pub(crate) enum RecoveryCase {
     CompletedChildParentNotUpdated { parent_task_index: i32 },
     /// Cases 2 and 3: a RUNNING workflow whose nodes are all terminal.
     TerminalWorkflowRunning,
+    /// The progression of a phase-2 record (phase-2 recovery). Only the limit error of a raised record names
+    /// it: phase-2 recovery counts a raise on the record (`attempt_count`), never in
+    /// `horsies_workflow_recovery_failures`, whose CHECK names the five other values. Python:
+    /// `RecoveryCase.PHASE2_PROGRESSION`.
+    Phase2Progression { task_index: i32 },
 }
 
 impl RecoveryCase {
-    /// The value stored in `last_case`; the baseline CHECK `horsies_workflow_recovery_failures_case_known` names
-    /// the same five values.
+    /// The value stored in `last_case` (the baseline CHECK `horsies_workflow_recovery_failures_case_known` names
+    /// the five workflow recovery cases), and the case that a limit error names.
     pub(crate) fn stored_name(self) -> &'static str {
         match self {
             Self::PendingTerminalDeps { .. } => "pending_terminal_deps",
@@ -119,6 +124,7 @@ impl RecoveryCase {
             Self::ReadySubworkflowNotStarted { .. } => "ready_subworkflow_not_started",
             Self::CompletedChildParentNotUpdated { .. } => "completed_child_parent_not_updated",
             Self::TerminalWorkflowRunning => "terminal_workflow_running",
+            Self::Phase2Progression { .. } => "phase2_progression",
         }
     }
 
@@ -127,7 +133,8 @@ impl RecoveryCase {
         match self {
             Self::PendingTerminalDeps { task_index }
             | Self::ReadyNotEnqueued { task_index }
-            | Self::ReadySubworkflowNotStarted { task_index } => Some(task_index),
+            | Self::ReadySubworkflowNotStarted { task_index }
+            | Self::Phase2Progression { task_index } => Some(task_index),
             Self::CompletedChildParentNotUpdated { parent_task_index } => Some(parent_task_index),
             Self::TerminalWorkflowRunning => None,
         }
@@ -203,7 +210,8 @@ impl CandidateFailure {
                 | WorkflowError::WorkflowTimeout { .. }
                 | WorkflowError::WorkflowError(_)
                 | WorkflowError::InvalidStatus(_)
-                | WorkflowError::Validation(_),
+                | WorkflowError::Validation(_)
+                | WorkflowError::StepContract(_),
             )
             | Self::Panic(_) => FailureClass::Persistent,
         }
@@ -220,6 +228,7 @@ impl CandidateFailure {
             Self::Error(WorkflowError::WorkflowError(_)) => "WorkflowError",
             Self::Error(WorkflowError::InvalidStatus(_)) => "InvalidStatus",
             Self::Error(WorkflowError::Validation(_)) => "Validation",
+            Self::Error(WorkflowError::StepContract(_)) => "StepContract",
             Self::Panic(_) => PANIC_ERROR_TYPE,
         }
     }
@@ -305,14 +314,9 @@ pub(crate) async fn run_recovery_candidate<T, F>(
 where
     F: Future<Output = Result<T, WorkflowError>>,
 {
-    let failure = match (CatchPanic {
-        candidate: Box::pin(candidate),
-    })
-    .await
-    {
-        Ok(Ok(value)) => return CandidateOutcome::Finished(value),
-        Ok(Err(error)) => CandidateFailure::Error(error),
-        Err(payload) => CandidateFailure::Panic(panic_text(&*payload)),
+    let failure = match run_catching_panic(candidate).await {
+        Ok(value) => return CandidateOutcome::Finished(value),
+        Err(failure) => failure,
     };
     tracing::error!(
         case = case.stored_name(),
@@ -325,6 +329,26 @@ where
     CandidateOutcome::Failed(
         record_candidate_failure(pool, policy, workflow_id, case, &failure).await,
     )
+}
+
+/// Runs `candidate` and catches a panic inside its polls: the boundary of one recovery candidate. The
+/// candidate's open transaction rolls back when it is dropped during the unwind.
+///
+/// Returns the candidate's value, or its failure: its error ([`CandidateFailure::Error`]) or its panic
+/// ([`CandidateFailure::Panic`]). Logs nothing.
+pub(crate) async fn run_catching_panic<T, F>(candidate: F) -> Result<T, CandidateFailure>
+where
+    F: Future<Output = Result<T, WorkflowError>>,
+{
+    match (CatchPanic {
+        candidate: Box::pin(candidate),
+    })
+    .await
+    {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => Err(CandidateFailure::Error(error)),
+        Err(payload) => Err(CandidateFailure::Panic(panic_text(&*payload))),
+    }
 }
 
 /// Decides whether a failure counts, and counts it.
@@ -546,14 +570,14 @@ pub(crate) fn recovery_limit_error(
 ) -> TaskError {
     let error_type = stored_error_type(failure.error_type());
     TaskError {
-        error_code: Some(OperationalErrorCode::WorkflowRecoveryLimitReached.into()),
+        error_code: OperationalErrorCode::WorkflowRecoveryLimitReached.into(),
         message: Some(format!(
             "Workflow recovery raised a persistent error in {failed_passes} passes. \
              Last case: {}. Last raise: {error_type}: {}",
             case.stored_name(),
             failure.detail(),
         )),
-        cause: None,
+        exception: None,
         data: Some(serde_json::json!({
             "workflow_id": workflow_id.to_string(),
             "case": case.stored_name(),
@@ -561,6 +585,7 @@ pub(crate) fn recovery_limit_error(
             "failed_passes": failed_passes,
             "exception_type": error_type,
         })),
+        kind: crate::core::TaskErrorKind::Plain,
     }
 }
 
@@ -649,11 +674,11 @@ mod tests {
         };
         sqlx::query(
             "INSERT INTO horsies_workflow_tasks (
-                 id, workflow_id, task_index, node_id, task_name, input,
+                 downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                  queue_name, priority, dependencies, allow_failed_deps, join_type,
                  max_retries, execution, retention_class_key, status, task_id,
                  is_subworkflow, created_at
-             ) VALUES ($1, $2, $3, $4, 'recovery_limit_task', '{}', 'default', 100,
+             ) VALUES ('NONE', $1, $2, $3, $4, 'recovery_limit_task', '{}', 'default', 100,
                        '{}', FALSE, 'all', 0, 'ISOLATED', 'forever', $5, $6,
                        FALSE, NOW())",
         )
@@ -749,6 +774,11 @@ mod tests {
                 "terminal_workflow_running",
                 None,
             ),
+            (
+                RecoveryCase::Phase2Progression { task_index: 5 },
+                "phase2_progression",
+                Some(5),
+            ),
         ];
         for (case, name, task_index) in cases {
             assert_eq!(case.stored_name(), name);
@@ -807,12 +837,8 @@ mod tests {
             25,
         );
         assert_eq!(
-            error
-                .error_code
-                .as_ref()
-                .map(ToString::to_string)
-                .as_deref(),
-            Some("WORKFLOW_RECOVERY_LIMIT_REACHED")
+            error.error_code.to_string(),
+            "WORKFLOW_RECOVERY_LIMIT_REACHED"
         );
         let message = error.message.clone().unwrap();
         assert!(message.contains("25 passes"));
@@ -1012,12 +1038,8 @@ mod tests {
         assert_eq!(status, "FAILED");
         let error: TaskError = serde_json::from_str(&error.unwrap()).unwrap();
         assert_eq!(
-            error
-                .error_code
-                .as_ref()
-                .map(ToString::to_string)
-                .as_deref(),
-            Some("WORKFLOW_RECOVERY_LIMIT_REACHED")
+            error.error_code.to_string(),
+            "WORKFLOW_RECOVERY_LIMIT_REACHED"
         );
         let (node_status, node_result, node_done) = node_state(&pool, workflow_id, 0).await;
         assert_eq!(node_status, "FAILED");
@@ -1036,7 +1058,8 @@ mod tests {
     async fn the_limit_keeps_a_stored_first_error_and_leaves_a_live_node_to_finish() {
         let pool = crate::broker::terminalization_matrix::migrated_pool().await;
         let workflow_id = Uuid::new_v4();
-        let first_error = serde_json::to_string(&TaskError::new("FIRST", "first failure")).unwrap();
+        let first_error =
+            serde_json::to_string(&TaskError::new("FIRST", "first failure").unwrap()).unwrap();
         seed_workflow(&pool, workflow_id, "RUNNING", Some(&first_error)).await;
         seed_node(&pool, workflow_id, 0, "RUNNING").await;
         seed_node(&pool, workflow_id, 1, "PENDING").await;
