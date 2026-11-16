@@ -95,7 +95,7 @@ class TestBatchedStartShape:
                 text("""
                     SELECT wt.task_index, wt.status, wt.task_id, wt.started_at,
                            t.id AS real_task_id, t.status AS task_status,
-                           t.kwargs AS task_kwargs, t.enqueue_sha, t.max_retries
+                           t.input AS task_input, t.command_fingerprint, t.max_retries
                     FROM horsies_workflow_tasks wt
                     LEFT JOIN horsies_tasks t ON t.id = wt.task_id
                     WHERE wt.workflow_id = :wf
@@ -112,8 +112,8 @@ class TestBatchedStartShape:
             assert row['started_at'] is not None
             assert row['real_task_id'] == row['task_id']  # linked
             assert row['task_status'] == 'PENDING'  # claimable
-            assert row['enqueue_sha']
-            kwargs = json.loads(row['task_kwargs'])
+            assert row['command_fingerprint'] is None  # workflow tasks carry none
+            kwargs = json.loads(row['task_input'])
             meta = kwargs['__h_workflow_meta__']
             assert meta['workflow_id'] == wf_id
             assert meta['task_index'] == row['task_index']
