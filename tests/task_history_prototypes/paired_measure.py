@@ -413,7 +413,6 @@ def claim_source(
 RUNNING_SETUP_STATEMENT: Final = """
 UPDATE horsies_tasks
 SET status = 'RUNNING',
-    claimed = FALSE,
     claim_expires_at = NULL,
     started_at = NOW(),
     worker_pid = :worker_pid,
@@ -431,7 +430,6 @@ RETURNING id
 RUNNING_SETUP_COLUMNS: Final = frozenset(
     {
         'status',
-        'claimed',
         'claim_expires_at',
         'started_at',
         'worker_pid',
