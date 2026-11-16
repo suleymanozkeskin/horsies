@@ -1291,6 +1291,76 @@ fn duplicate_guard_renders_pruned_and_legacy_probes_without_fallback_or_live() {
     assert!(guard.contains("RETURN FALSE;"));
 }
 
+/// The stamp comment of every rendered reader, in signature order.
+async fn reader_stamps(connection: &mut PgConnection) -> Vec<Option<String>> {
+    let mut stamps = Vec::new();
+    for signature in super::publisher::rendered_reader_signatures() {
+        let stamp: Option<String> =
+            sqlx::query_scalar("SELECT obj_description(to_regprocedure($1), 'pg_proc')")
+                .bind(&signature)
+                .fetch_one(&mut *connection)
+                .await
+                .expect("read reader stamp");
+        stamps.push(stamp);
+    }
+    stamps
+}
+
+#[tokio::test]
+#[serial]
+async fn publication_stamps_every_rendered_reader_independent_of_the_time_zone() {
+    let database = TestDatabase::create().await;
+    let mut transaction = database.pool.begin().await.expect("begin stamp setup");
+    let coverage = ensure_partition_coverage(&mut transaction, 2, 2, &[], &StagedLoaderPublisher)
+        .await
+        .expect("publish the readers");
+    assert!(
+        matches!(coverage, CoverageOutcome::Ensured(_)),
+        "{coverage:?}"
+    );
+    let stamps = reader_stamps(&mut transaction).await;
+    let expected: String = sqlx::query_scalar(&format!(
+        "SELECT {}",
+        super::publisher::manifest_stamp_sql()
+    ))
+    .fetch_one(&mut *transaction)
+    .await
+    .expect("compute manifest stamp");
+    assert!(expected.starts_with("horsies:manifest:"));
+    assert_eq!(stamps, vec![Some(expected.clone()); 5]);
+    for timezone in ["Etc/GMT+12", "Etc/GMT-12"] {
+        sqlx::query("SELECT set_config('timezone', $1, true)")
+            .bind(timezone)
+            .execute(&mut *transaction)
+            .await
+            .expect("set session time zone");
+        let stamp: String = sqlx::query_scalar(&format!(
+            "SELECT {}",
+            super::publisher::manifest_stamp_sql()
+        ))
+        .fetch_one(&mut *transaction)
+        .await
+        .expect("compute manifest stamp");
+        assert_eq!(stamp, expected, "{timezone}");
+    }
+    assert!(!StagedLoaderPublisher
+        .needs_republication(&mut transaction)
+        .await
+        .expect("stamped readers are current"));
+    // A reader without the stamp of the published manifest needs a
+    // republication, whichever reader it is.
+    sqlx::query("COMMENT ON FUNCTION horsies_task_detail_staged(uuid) IS 'stale'")
+        .execute(&mut *transaction)
+        .await
+        .expect("stale detail stamp");
+    assert!(StagedLoaderPublisher
+        .needs_republication(&mut transaction)
+        .await
+        .expect("stale stamp probe"));
+    transaction.rollback().await.expect("rollback stamp setup");
+    database.drop().await;
+}
+
 async fn duplicate_guard(connection: &mut PgConnection, task_id: Uuid) -> bool {
     sqlx::query_scalar("SELECT horsies_task_history_duplicate_staged($1)")
         .bind(task_id)
@@ -1353,10 +1423,9 @@ async fn duplicate_guard_probes_the_pruned_set_and_replaces_the_first_version() 
     transaction.commit().await.expect("commit guard setup");
 
     let mut connection = database.pool.acquire().await.expect("acquire guard reads");
-    assert_eq!(
-        guard_marker(&mut connection).await.as_deref(),
-        Some("horsies:rendered")
-    );
+    assert!(guard_marker(&mut connection)
+        .await
+        .is_some_and(|stamp| stamp.starts_with("horsies:manifest:")));
     assert!(duplicate_guard(&mut connection, normal_id).await);
     assert!(duplicate_guard(&mut connection, legacy_id).await);
     assert!(!duplicate_guard(&mut connection, absent_id).await);
@@ -1401,10 +1470,9 @@ async fn duplicate_guard_probes_the_pruned_set_and_replaces_the_first_version() 
         .republish(&mut connection)
         .await
         .expect("replace the first version");
-    assert_eq!(
-        guard_marker(&mut connection).await.as_deref(),
-        Some("horsies:rendered")
-    );
+    assert!(guard_marker(&mut connection)
+        .await
+        .is_some_and(|stamp| stamp.starts_with("horsies:manifest:")));
     assert!(!duplicate_guard(&mut connection, clock_violation_id).await);
     drop(connection);
     database.drop().await;
