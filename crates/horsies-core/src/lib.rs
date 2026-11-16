@@ -26,6 +26,7 @@ pub mod monitoring;
 #[cfg(feature = "web")]
 pub mod web;
 pub(crate) mod worker;
+pub mod worker_manifest;
 pub(crate) mod workflow_engine;
 
 // ---------------------------------------------------------------------------
