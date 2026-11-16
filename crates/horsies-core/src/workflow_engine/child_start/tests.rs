@@ -447,6 +447,35 @@ fn the_builder_takes_the_merged_input_and_a_failing_builder_fails_the_node() {
     );
 }
 
+/// A step takes up to `MAX_WORKFLOW_NODES` child starts, those that its
+/// child starts owe included.
+#[test]
+fn a_step_takes_child_starts_up_to_the_node_bound() {
+    let start = owed(Uuid::new_v4(), 0, CHILD_KEY);
+    let mut owed_starts = OwedChildStarts::new(vec![start.clone(); MAX_WORKFLOW_NODES - 1]);
+    owed_starts.extend(vec![start]);
+    for _ in 0..MAX_WORKFLOW_NODES {
+        assert!(owed_starts.next().expect("within the bound").is_some());
+    }
+    assert!(matches!(owed_starts.next(), Ok(None)));
+}
+
+/// One child start past the bound fails the step closed with
+/// `TooManyChildStarts`.
+#[test]
+fn a_step_past_the_node_bound_fails_closed() {
+    let start = owed(Uuid::new_v4(), 0, CHILD_KEY);
+    let mut owed_starts = OwedChildStarts::new(vec![start.clone(); MAX_WORKFLOW_NODES]);
+    owed_starts.extend(vec![start]);
+    for _ in 0..MAX_WORKFLOW_NODES {
+        assert!(owed_starts.next().expect("within the bound").is_some());
+    }
+    assert!(matches!(
+        owed_starts.next(),
+        Err(StepContractError::TooManyChildStarts { bound }) if bound == MAX_WORKFLOW_NODES
+    ));
+}
+
 // ---------------------------------------------------------------------------
 // Each step commits the child with the step
 // ---------------------------------------------------------------------------

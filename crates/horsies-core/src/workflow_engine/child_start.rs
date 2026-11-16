@@ -17,7 +17,7 @@
 //!   `on_error` applies.
 //!
 //! A child start can owe further child starts; they run in the same
-//! transaction, at most [`MAX_CHILD_STARTS_PER_STEP`] per step.
+//! transaction, at most [`MAX_WORKFLOW_NODES`] per step.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -25,6 +25,7 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::broker::core_rows::{query_in, StatementLog};
+use crate::core::workflow::spec::MAX_WORKFLOW_NODES;
 use crate::db::{
     BoundStatement, ParameterBinder, ParameterType, Row, StatementFailure, Transaction,
     TypedStatement,
@@ -100,12 +101,6 @@ pub(crate) static CHILD_START: TypedStatement = TypedStatement::new(
         ParameterType::TextArray,
     ],
 );
-
-/// The most child starts that one step transaction runs: the child starts
-/// that the step owes and those that each child start owes in turn. A step
-/// that owes more fails closed ([`StepContractError::TooManyChildStarts`]):
-/// its transaction rolls back and nothing of it commits.
-pub(crate) const MAX_CHILD_STARTS_PER_STEP: usize = 10_000;
 
 /// The kind text of a child start whose child built.
 static TREE_KIND: &str = "TREE";
@@ -189,12 +184,12 @@ pub(crate) async fn run_child_starts(
     owed: Vec<OwedChildStart>,
     build: ChildBuild<'_>,
 ) -> Result<OwedParentAdvances, ChildStartsFailure> {
-    let mut pending: VecDeque<OwedChildStart> = VecDeque::from(owed);
+    let mut pending = OwedChildStarts::new(owed);
     let mut advances = OwedParentAdvances::default();
-    for _start in 0..MAX_CHILD_STARTS_PER_STEP {
-        let Some(owed_start) = pending.pop_front() else {
-            return Ok(advances);
-        };
+    while let Some(owed_start) = pending
+        .next()
+        .map_err(|exceeded| ChildStartsFailure::Refused(exceeded.into()))?
+    {
         let kind = child_start_kind(&owed_start, build).map_err(ChildStartsFailure::Refused)?;
         let rows = start_one_child(transaction, log, &owed_start, &kind)
             .await
@@ -205,14 +200,47 @@ pub(crate) async fn run_child_starts(
         advances.add(step.outcome.parent_advance);
         pending.extend(step.owed_child_starts);
     }
-    match pending.is_empty() {
-        true => Ok(advances),
-        false => Err(ChildStartsFailure::Refused(
-            StepContractError::TooManyChildStarts {
-                bound: MAX_CHILD_STARTS_PER_STEP,
+    Ok(advances)
+}
+
+/// The owed child starts of one step, in the order the rows named them, and
+/// the count of those taken. A step takes at most [`MAX_WORKFLOW_NODES`]
+/// child starts (the most nodes of one workflow spec).
+#[derive(Debug)]
+struct OwedChildStarts {
+    pending: VecDeque<OwedChildStart>,
+    taken: usize,
+}
+
+impl OwedChildStarts {
+    fn new(owed: Vec<OwedChildStart>) -> Self {
+        Self {
+            pending: VecDeque::from(owed),
+            taken: 0,
+        }
+    }
+
+    /// The next owed child start; `None` when none is owed. With
+    /// [`MAX_WORKFLOW_NODES`] taken and one more owed:
+    /// [`StepContractError::TooManyChildStarts`].
+    fn next(&mut self) -> Result<Option<OwedChildStart>, StepContractError> {
+        let Some(owed) = self.pending.pop_front() else {
+            return Ok(None);
+        };
+        match self.taken < MAX_WORKFLOW_NODES {
+            true => {
+                self.taken += 1;
+                Ok(Some(owed))
             }
-            .into(),
-        )),
+            false => Err(StepContractError::TooManyChildStarts {
+                bound: MAX_WORKFLOW_NODES,
+            }),
+        }
+    }
+
+    /// Adds the child starts that a child start owes in turn.
+    fn extend(&mut self, owed: Vec<OwedChildStart>) {
+        self.pending.extend(owed);
     }
 }
 
