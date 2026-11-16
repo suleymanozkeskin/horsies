@@ -38,10 +38,25 @@
 -- - XX001 data_corrupted: the duplicate identity guard finds the id in history or in the clock exceptions.
 -- - 23502 not_null_violation: a deferred kind on a workflow task with no result.
 -- - P0002 no_data_found: a deferred kind on a workflow task with no node row.
--- - 23514 check_violation: no history leaf takes the row (partition routing).
--- Lock order: task advisory lock and live row FOR UPDATE (both taken by the caller); the node row FOR UPDATE; the
--- history leaf (ROW EXCLUSIVE, by the insert); the clock exception row; the phase-2 pending row; the reservation
--- row (UPDATE); the attempt rows and the live row (DELETE).
+-- - 23514 check_violation: no history leaf takes the row (partition routing), also when retention detached the
+--   leaf of p_terminal_at, is detaching it, or dropped it.
+-- Retention: before its first read of history the move takes pg_advisory_xact_lock_shared on
+-- horsies_task_history_leaf_lock_key(retention_class_key, p_terminal_at), the key of the leaf that takes the row.
+-- Moves share it; leaf creation, the detach and the drop take it exclusively with a try-lock. So maintenance answers
+-- BUSY for a leaf while a move into it has not ended, and a move waits while maintenance holds its leaf; when it
+-- continues into a leaf that is detached, detaching or dropped it raises 23514. Without the lock, a detach that
+-- began while a move was writing would wait for the move's commit and then detach the leaf with the new row and the
+-- phase-2 pending row that points at it.
+-- Lock order: task advisory lock and live row FOR UPDATE (both taken by the caller); the leaf lock (shared); the
+-- node row FOR UPDATE; the history leaf (ROW EXCLUSIVE, by the insert); the clock exception row; the phase-2
+-- pending row; the reservation row (UPDATE); the attempt rows and the live row (DELETE). Maintenance takes the
+-- leaf lock first, never waits for it, and takes no task, node or pending row lock while it holds it. A move that
+-- waits for the leaf lock holds no lock on history when every move of its transaction passes the same p_terminal_at
+-- (the database clock), so DETACH ... CONCURRENTLY, which waits only for the lockers of the class parent, never
+-- waits for it. DETACH ... FINALIZE also waits for every older snapshot, so a move that waits for the leaf lock of a
+-- leaf in FINALIZE closes a cycle: PostgreSQL ends one of the two with 40P01, and nothing is written. Retention
+-- detaches only leaves older than the class retention, so a p_terminal_at from the database clock never waits for
+-- a detach or a FINALIZE.
 -- Indexes: ix_horsies_workflow_tasks_task_id (node probe); the leaf task_id indexes and
 -- horsies_task_history_clock_exceptions_pkey (guard, ON CONFLICT); horsies_task_attempts (task_id, attempt);
 -- horsies_key_reservations_pkey; horsies_tasks_pkey (delete).
@@ -147,6 +162,8 @@ BEGIN
     IF p_terminal_at IS NULL THEN
         RAISE EXCEPTION 'terminal timestamp is required to move task %', p_task.id;
     END IF;
+    -- The leaf lock of the row's leaf, shared, before the first read of history: see "Retention" above.
+    PERFORM pg_advisory_xact_lock_shared(horsies_task_history_leaf_lock_key(p_task.retention_class_key, p_terminal_at));
     IF horsies_task_history_duplicate_staged(p_task.id) THEN
         RAISE EXCEPTION 'task identity % exists in multiple locations', p_task.id
             USING ERRCODE = 'data_corrupted';
@@ -295,7 +312,8 @@ $$;
 -- - 23503 foreign_key_violation: EXPIRE_PENDING of a workflow task with no node row.
 -- - XX001 data_corrupted: the duplicate identity guard finds a listed id.
 -- - 23514 check_violation: no history leaf takes a row.
--- Lock order: the caller's row locks; then as the single move (history leaves, clock exception rows, pending
+-- Lock order: the caller's row locks; the shared leaf lock of each class of the batch at p_terminal_at, in key
+-- order (as the single move, Retention); then as the single move (history leaves, clock exception rows, pending
 -- rows, reservation rows, attempt and live row deletes). Node rows are read, not locked, as in Python.
 -- Indexes: horsies_tasks_pkey (id = ANY); ix_horsies_workflow_tasks_task_id; the leaf task_id indexes and
 -- horsies_task_history_clock_exceptions_pkey; horsies_task_attempts (task_id, attempt);
@@ -364,6 +382,16 @@ BEGIN
     IF p_terminal_at IS NULL THEN
         RAISE EXCEPTION 'terminal timestamp is required for a batch move';
     END IF;
+
+    -- The shared leaf lock of each class in the batch, in key order, before the first read of history (as the single
+    -- move).
+    PERFORM pg_advisory_xact_lock_shared(k.key)
+    FROM (
+        SELECT DISTINCT horsies_task_history_leaf_lock_key(t.retention_class_key, p_terminal_at) AS key
+        FROM horsies_tasks AS t
+        WHERE t.id = ANY(p_task_ids)
+    ) AS k
+    ORDER BY k.key;
 
     IF v_requires_deferred_phase2 THEN
         IF p_result IS NULL AND EXISTS (
@@ -898,7 +926,8 @@ $$;
 -- session-scoped advisory lock horsies_task_history_leaf_lock_key(class_key, lower_anchor) with a try-lock, and
 -- the leaf is inspected again under the lock. After the call the session holds the lock exactly when the outcome
 -- is DETACHABLE or DETACH_INTERRUPTED; every other outcome leaves no lock behind.
--- Outcomes: BUSY (another session holds the leaf lock), or a state of horsies_inspect_history_leaf.
+-- Outcomes: BUSY (another session holds the leaf lock: maintenance, or a move into the leaf that has not ended), or a
+-- state of horsies_inspect_history_leaf.
 -- The caller then runs, alone on the same connection in autocommit:
 -- - DETACHABLE: SET statement_timeout and SET lock_timeout = '2s' (one simple query); ALTER TABLE <parent_name>
 --   DETACH PARTITION <leaf> CONCURRENTLY (it cannot run in a function, a transaction block or a multi-statement
@@ -1022,7 +1051,8 @@ $$;
 -- detached_at when not yet set) commit together. The catalog keeps the row.
 -- Outcomes:
 -- - DROPPED: this call dropped the leaf.
--- - BUSY: another transaction holds the leaf lock, or a reader holds a lock on the relation.
+-- - BUSY: another transaction holds the leaf lock (maintenance, or a move into the leaf that has not ended), or a
+--   reader holds a lock on the relation.
 -- - REFERENCED_BY_MANIFEST: the published readers still probe the leaf; publish first.
 -- - a state of horsies_inspect_history_leaf other than DETACHED, unchanged (for example ALREADY_DROPPED,
 --   PENDING_BLOCKED, DETACHABLE).
