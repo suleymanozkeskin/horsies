@@ -9,15 +9,13 @@ on an empty baseline with one seeded workflow:
   sub-workflow root whose child build raises, a task dependent of that root
   (skipped), and a sub-workflow dependent that allows a failed dependency
   (its child start is owed in the start's transaction);
-- a tree under ``on_error`` pause: a task root and a sub-workflow root
-  whose child build raises;
+- a tree under ``on_error`` pause: a task root, a sub-workflow root whose
+  child build raises, and a later sub-workflow root whose child builds (the
+  pause leaves it READY with no child);
 - a spec with the id and the name of the seeded workflow, and a spec with
   its id and another name.
 
-The snapshots compare equal except for one pinned difference (#1114): the
-function fails a sub-workflow root whose child cannot be built from READY,
-so the node keeps ``started_at`` NULL; the session statements wrote it
-ENQUEUED, with ``started_at``, before they failed it.
+The snapshots compare equal.
 """
 
 from __future__ import annotations
@@ -54,11 +52,10 @@ from horsies.core.workflows.start_types import (
 )
 from tests.dualrun.capture import Connection
 from tests.dualrun.clients import open_broker
-from tests.dualrun.compare import ColumnDifference, DiffEntry, SnapshotDiff, render_diff
+from tests.dualrun.compare import render_diff
 from tests.dualrun.databases import DualRunDatabase
 from tests.dualrun.operation import OperationSide, dual_run
 from tests.dualrun.reference import workflow_start as reference
-from tests.dualrun.values import DuringRun, NullValue
 from tests.dualrun.workflow_seeds import (
     OnError as SeedOnError,
     TopLevel,
@@ -144,9 +141,10 @@ def _failing_tree() -> WorkflowSpec[Any]:
 def _pausing_tree() -> WorkflowSpec[Any]:
     root = TaskNode(fn=value_task, kwargs={'value': 5})
     broken = SubWorkflowNode(workflow_def=BrokenChild)
+    built_after_broken = SubWorkflowNode(workflow_def=BuiltChild)
     return APP.workflow(
         'dualrun.start.pause_tree',
-        [root, broken],
+        [root, broken, built_after_broken],
         on_error=OnError.PAUSE,
         definition_key='dualrun.start.pause_tree.v1',
     )
@@ -250,20 +248,6 @@ def _candidate(database: DualRunDatabase, seed: _Seed) -> tuple[reference.StartR
     return asyncio.run(_candidate_async(database, seed))
 
 
-def _failed_root_started_at(entry: DiffEntry) -> bool:
-    """The pinned difference of #1114: a failed sub-workflow root without ``started_at``."""
-    match entry:
-        case ColumnDifference(
-            table='horsies_workflow_tasks',
-            column='started_at',
-            reference=DuringRun(),
-            candidate=NullValue(),
-        ):
-            return True
-        case _:
-            return False
-
-
 def test_start_writes_what_the_session_statements_wrote(
     empty_database: MakeDatabase,
 ) -> None:
@@ -276,12 +260,7 @@ def test_start_writes_what_the_session_statements_wrote(
         )
     )
 
-    pinned = [entry for entry in run.diff.entries if _failed_root_started_at(entry)]
-    rest = SnapshotDiff(
-        entries=tuple(entry for entry in run.diff.entries if not _failed_root_started_at(entry)),
-    )
-    assert rest.entries == (), render_diff(rest)
-    assert len(pinned) == 2, 'the failed roots of the two trees'
+    assert run.diff.entries == (), render_diff(run.diff)
     assert run.reference.report == (
         reference.Started(),
         reference.Started(),

@@ -360,6 +360,8 @@ class DataProcessor(WorkflowDefinition[ProcessedData]):
 
 The `build_with()` of a `SubWorkflowNode` with no `waits_for` runs when its parent starts, before the start writes anything. It also runs when the start finds that a workflow with the given `workflow_id` exists already, and then the start writes nothing.
 
+If the parent has `on_error=OnError.PAUSE` and another `SubWorkflowNode` with no `waits_for` in the same parent cannot build its child, the start pauses the parent and does not write the child that `build_with()` built. The node stays `READY`, and `handle.resume()` runs `build_with()` again and starts the child.
+
 :::note[Queue and priority binding]
 A `build_with()` that returns a `WorkflowSpec(...)` directly does not run the
 queue/priority binding that `app.workflow()` applies. A `TaskNode` left without

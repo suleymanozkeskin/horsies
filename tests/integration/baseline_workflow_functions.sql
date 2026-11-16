@@ -189,6 +189,185 @@ BEGIN
                       'start, child that ends at once: parent dependent promoted in the same statement');
 END $$;
 
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000151';
+    v_child uuid := '00000000-0000-7000-8000-000000000152';
+    v_error text := horsies_task_error_envelope('WORKFLOW_ENQUEUE_FAILED', 'build failed', NULL, NULL, NULL);
+BEGIN
+    -- A failed record of the top workflow and one of a pre-built child.
+    PERFORM * FROM wft_start(
+        jsonb_build_array(
+            jsonb_build_object('id', v_wf, 'on_error', 'fail'),
+            jsonb_build_object('id', v_child, 'on_error', 'fail', 'parent', v_wf, 'parent_index', 1, 'depth', 1)),
+        jsonb_build_array(
+            jsonb_build_object('idx', 0, 'sub', true),
+            jsonb_build_object('idx', 1, 'sub', true),
+            jsonb_build_object('wf', v_child, 'idx', 0, 'sub', true),
+            jsonb_build_object('wf', v_child, 'idx', 1)),
+        jsonb_build_array(
+            jsonb_build_object('idx', 0, 'result', v_error),
+            jsonb_build_object('wf', v_child, 'idx', 0, 'result', v_error))
+    );
+    PERFORM wft_check((wft_node(v_wf, 0)).status = 'FAILED' AND (wft_node(v_wf, 0)).started_at IS NOT NULL
+                      AND (wft_node(v_wf, 0)).started_at = (wft_node(v_wf, 0)).completed_at,
+                      'start failed record: the node has started_at, as an ENQUEUED write before the failure');
+    PERFORM wft_check((wft_node(v_child, 0)).status = 'FAILED' AND (wft_node(v_child, 0)).started_at IS NOT NULL,
+                      'start failed record of a pre-built child: the node has started_at');
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000161';
+    v_child uuid := '00000000-0000-7000-8000-000000000162';
+    v_grandchild uuid := '00000000-0000-7000-8000-000000000163';
+    v_error text := horsies_task_error_envelope('WORKFLOW_ENQUEUE_FAILED', 'build failed', NULL, NULL, NULL);
+BEGIN
+    -- Three levels: the record at depth 2 ends the grandchild, whose advance ends the child, whose advance fails the
+    -- top node and ends the top workflow.
+    PERFORM * FROM wft_start(
+        jsonb_build_array(
+            jsonb_build_object('id', v_wf, 'on_error', 'fail'),
+            jsonb_build_object('id', v_child, 'on_error', 'fail', 'parent', v_wf, 'parent_index', 0, 'depth', 1),
+            jsonb_build_object('id', v_grandchild, 'on_error', 'fail', 'parent', v_child, 'parent_index', 0,
+                               'depth', 2)),
+        jsonb_build_array(
+            jsonb_build_object('idx', 0, 'sub', true),
+            jsonb_build_object('wf', v_child, 'idx', 0, 'sub', true),
+            jsonb_build_object('wf', v_grandchild, 'idx', 0, 'sub', true)),
+        jsonb_build_array(jsonb_build_object('wf', v_grandchild, 'idx', 0, 'result', v_error))
+    );
+    PERFORM wft_check((wft_workflow(v_grandchild)).status = 'FAILED' AND (wft_workflow(v_child)).status = 'FAILED',
+                      'start, parent advance: the grandchild and the child end');
+    PERFORM wft_check((wft_node(v_wf, 0)).status = 'FAILED'
+                      AND ((wft_node(v_wf, 0)).result::json -> 'err' ->> 'sub_workflow_id') = v_child::text,
+                      'start, parent advance: the advance of the ended child reaches the top node');
+    PERFORM wft_check((wft_workflow(v_wf)).status = 'FAILED' AND (wft_workflow(v_wf)).completed_at IS NOT NULL,
+                      'start, parent advance: the top workflow ends in the same statement');
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000171';
+    v_child uuid := '00000000-0000-7000-8000-000000000172';
+    v_error text := horsies_task_error_envelope('WORKFLOW_ENQUEUE_FAILED', 'build failed', NULL, NULL, NULL);
+BEGIN
+    -- on_error pause; a task root, and a sub-workflow root whose child (on_error fail) ends at once: its advance
+    -- pauses the top workflow before the promotion.
+    PERFORM * FROM wft_start(
+        jsonb_build_array(
+            jsonb_build_object('id', v_wf, 'on_error', 'pause'),
+            jsonb_build_object('id', v_child, 'on_error', 'fail', 'parent', v_wf, 'parent_index', 1, 'depth', 1)),
+        jsonb_build_array(
+            jsonb_build_object('idx', 0),
+            jsonb_build_object('idx', 1, 'sub', true),
+            jsonb_build_object('wf', v_child, 'idx', 0, 'sub', true)),
+        jsonb_build_array(jsonb_build_object('wf', v_child, 'idx', 0, 'result', v_error))
+    );
+    PERFORM wft_check((wft_workflow(v_child)).status = 'FAILED' AND (wft_node(v_wf, 1)).status = 'FAILED'
+                      AND (wft_workflow(v_wf)).status = 'PAUSED',
+                      'start, pause by an ended child: the child ends and the advance pauses the top workflow');
+    PERFORM wft_check((wft_node(v_wf, 0)).status = 'READY' AND (wft_node(v_wf, 0)).task_id IS NULL
+                      AND (wft_node(v_wf, 0)).started_at IS NULL,
+                      'start, pause by an ended child: the pause gate keeps the task root READY with no task row');
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000181';
+    v_child uuid := '00000000-0000-7000-8000-000000000182';
+    v_grandchild uuid := '00000000-0000-7000-8000-000000000183';
+    v_error text := horsies_task_error_envelope('WORKFLOW_ENQUEUE_FAILED', 'build failed', NULL, NULL, NULL);
+    v_row horsies_workflow_step_row;
+BEGIN
+    -- on_error pause; root 0 has a failed record, root 1 a pre-built child with a pre-built grandchild and a failed
+    -- record of its own, root 2 is a task.
+    SELECT * INTO v_row FROM wft_start(
+        jsonb_build_array(
+            jsonb_build_object('id', v_wf, 'on_error', 'pause'),
+            jsonb_build_object('id', v_child, 'on_error', 'fail', 'parent', v_wf, 'parent_index', 1, 'depth', 1),
+            jsonb_build_object('id', v_grandchild, 'on_error', 'fail', 'parent', v_child, 'parent_index', 0,
+                               'depth', 2)),
+        jsonb_build_array(
+            jsonb_build_object('idx', 0, 'sub', true),
+            jsonb_build_object('idx', 1, 'sub', true),
+            jsonb_build_object('idx', 2),
+            jsonb_build_object('wf', v_child, 'idx', 0, 'sub', true),
+            jsonb_build_object('wf', v_child, 'idx', 1, 'sub', true),
+            jsonb_build_object('wf', v_grandchild, 'idx', 0)),
+        jsonb_build_array(
+            jsonb_build_object('idx', 0, 'result', v_error),
+            jsonb_build_object('wf', v_child, 'idx', 1, 'result', v_error))
+    ) WHERE row_kind = 'OUTCOME';
+    PERFORM wft_check(v_row.disposition = 'STARTED' AND (wft_workflow(v_wf)).status = 'PAUSED',
+                      'start, pre-built child under a pause: STARTED, the failed record pauses the workflow');
+    PERFORM wft_check((wft_node(v_wf, 1)).status = 'READY' AND (wft_node(v_wf, 1)).sub_workflow_id IS NULL
+                      AND (wft_node(v_wf, 1)).started_at IS NULL,
+                      'start, pre-built child under a pause: the node stays READY with no child');
+    PERFORM wft_check(NOT EXISTS (SELECT 1 FROM horsies_workflows WHERE id IN (v_child, v_grandchild))
+                      AND NOT EXISTS (SELECT 1 FROM horsies_workflow_tasks
+                                      WHERE workflow_id IN (v_child, v_grandchild)),
+                      'start, pre-built child under a pause: the child and its subtree are not written');
+    PERFORM wft_check((wft_node(v_wf, 2)).status = 'READY' AND (wft_node(v_wf, 2)).task_id IS NULL,
+                      'start, pre-built child under a pause: the task root stays READY (the pause gate)');
+    PERFORM wft_check(EXISTS (SELECT 1 FROM horsies_workflow_resume(v_wf) AS r
+                              WHERE r.row_kind = 'CHILD_START' AND r.workflow_id = v_wf AND r.task_index = 1),
+                      'start, pre-built child under a pause: the resume owes the child start of the node');
+END $$;
+
+DO $$
+DECLARE
+    v_wf uuid := '00000000-0000-7000-8000-000000000191';
+    v_child uuid := '00000000-0000-7000-8000-000000000192';
+    v_grandchild uuid := '00000000-0000-7000-8000-000000000193';
+    v_error text := horsies_task_error_envelope('WORKFLOW_ENQUEUE_FAILED', 'build failed', NULL, NULL, NULL);
+BEGIN
+    -- A TREE child start: the child (on_error pause) has a failed record at root 0 and a pre-built grandchild at
+    -- root 1.
+    PERFORM * FROM wft_start1(v_wf, 'fail', '[{"idx":0},{"idx":1,"deps":[0],"sub":true}]');
+    PERFORM wft_finish(v_wf, 0, wft_ok('1'));
+    PERFORM * FROM wft_child_start(v_wf, 1,
+        jsonb_build_array(
+            jsonb_build_object('id', v_child, 'on_error', 'pause', 'parent', v_wf, 'parent_index', 1, 'depth', 1),
+            jsonb_build_object('id', v_grandchild, 'on_error', 'fail', 'parent', v_child, 'parent_index', 1,
+                               'depth', 2)),
+        jsonb_build_array(
+            jsonb_build_object('wf', v_child, 'idx', 0, 'sub', true),
+            jsonb_build_object('wf', v_child, 'idx', 1, 'sub', true),
+            jsonb_build_object('wf', v_grandchild, 'idx', 0)),
+        jsonb_build_array(jsonb_build_object('wf', v_child, 'idx', 0, 'result', v_error))
+    );
+    PERFORM wft_check((wft_workflow(v_child)).status = 'PAUSED',
+                      'child start TREE, pre-built grandchild under a pause: the failed record pauses the child');
+    PERFORM wft_check((wft_node(v_child, 1)).status = 'READY' AND (wft_node(v_child, 1)).sub_workflow_id IS NULL
+                      AND NOT EXISTS (SELECT 1 FROM horsies_workflows WHERE id = v_grandchild),
+                      'child start TREE, pre-built grandchild under a pause: the grandchild is not written');
+END $$;
+
+DO $$
+BEGIN
+    PERFORM wft_refused($q$
+        SELECT * FROM wft_start('[{"id":"00000000-0000-7000-8000-0000000001a1","on_error":"pause"},
+                                  {"id":"00000000-0000-7000-8000-0000000001a2","on_error":"fail",
+                                   "parent":"00000000-0000-7000-8000-0000000001a1","parent_index":1,"depth":1}]',
+                                '[{"idx":0,"sub":true},{"idx":1,"sub":true},
+                                  {"wf":"00000000-0000-7000-8000-0000000001a2","idx":0},
+                                  {"wf":"00000000-0000-7000-8000-0000000001a2","idx":1,"deps":[0]}]',
+                                '[{"idx":0,"result":"{}"},
+                                  {"wf":"00000000-0000-7000-8000-0000000001a2","idx":1,"result":"{}"}]')
+    $q$, '22023', 'start refuses a failed record that names no root, also in a child that a pause leaves unwritten');
+    PERFORM wft_refused($q$
+        SELECT * FROM wft_start('[{"id":"00000000-0000-7000-8000-0000000001a1","on_error":"fail"},
+                                  {"id":"00000000-0000-7000-8000-0000000001a2","on_error":"fail",
+                                   "parent":"00000000-0000-7000-8000-0000000001a1","parent_index":0,"depth":1},
+                                  {"id":"00000000-0000-7000-8000-0000000001a3","on_error":"fail",
+                                   "parent":"00000000-0000-7000-8000-0000000001a1","parent_index":0,"depth":1}]',
+                                '[{"idx":0,"sub":true}]')
+    $q$, '22023', 'start refuses two child rows that name one node');
+    PERFORM wft_check(NOT EXISTS (SELECT 1 FROM horsies_workflows WHERE id = '00000000-0000-7000-8000-0000000001a1'),
+                      'start refusals of the tree check write nothing');
+END $$;
+
 -- Phase 2: promotion, task minting, input splice ----------------------------------------------------------------------
 
 DO $$
