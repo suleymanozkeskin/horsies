@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from sqlalchemy import text
 
-from horsies.core.models.tasks import Execution
 from horsies.core.models.workflow import WORKFLOW_TERMINAL_STATES
 from horsies.core.types.status import TASK_TERMINAL_STATES, TaskStatus
 
@@ -243,32 +242,6 @@ GET_NONRUNNABLE_WORKFLOW_TASK_IDS_SQL = text("""
 UNCLAIM_CLAIMED_TASK_SQL = text("""
     UPDATE horsies_tasks
     SET status = 'PENDING',
-        claimed_at = NULL,
-        claimed_by_worker_id = NULL,
-        claim_expires_at = NULL,
-        started_at = NULL,
-        worker_pid = NULL,
-        worker_hostname = NULL,
-        worker_process_name = NULL,
-        finalizing_at = NULL,
-        finalizing_by_worker_id = NULL,
-        updated_at = NOW()
-    WHERE id = :id
-      AND status = 'CLAIMED'
-      AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
-      AND claimed_at = CAST(:claimed_at AS TIMESTAMPTZ)
-""")
-
-# A claimed row whose class does not fit the task that this worker
-# registered goes back to PENDING as ISOLATED, which any worker with
-# isolated children runs. Fenced to this worker's claim generation, which
-# the claim always returns, so a row that was claimed again is not touched.
-# The stored task options keep their class: the column is what the claim
-# reads.
-RETURN_CLAIMED_TASK_AS_ISOLATED_SQL = text(f"""
-    UPDATE horsies_tasks
-    SET execution = '{Execution.ISOLATED.value}',
-        status = 'PENDING',
         claimed_at = NULL,
         claimed_by_worker_id = NULL,
         claim_expires_at = NULL,
