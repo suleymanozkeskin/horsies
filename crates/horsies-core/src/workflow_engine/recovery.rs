@@ -14,7 +14,9 @@ use crate::workflow_engine::recovery_limit::{
     count_over_failure_limit, run_recovery_candidate, CandidateOutcome, CountFailures,
     FailureRecord, RecoveryCase, RecoveryFailurePolicy,
 };
-use crate::workflow_engine::start::{materialize_child_spec, start_child_workflow_in_tx};
+use crate::workflow_engine::start::{
+    child_workflow_depth, materialize_child_spec, start_child_workflow_in_tx,
+};
 
 // ---------------------------------------------------------------------------
 // Recovery report
@@ -782,6 +784,7 @@ async fn recover_stuck_workflows_in_scope(
         max_rows,
         &mut report,
         failure_policy,
+        payload,
         retention,
     )
     .await
@@ -1023,6 +1026,7 @@ async fn recover_case1_5(
     max_rows: Option<i64>,
     report: &mut RecoveryReport,
     failure_policy: RecoveryFailurePolicy,
+    payload: &PayloadPolicy,
     retention: &RetentionConfig,
 ) -> Result<(), WorkflowError> {
     let started = Instant::now();
@@ -1058,7 +1062,7 @@ async fn recover_case1_5(
         let case = RecoveryCase::ReadySubworkflowNotStarted {
             task_index: row.task_index,
         };
-        let candidate = start_stuck_subworkflow(pool, registry, &row, retention);
+        let candidate = start_stuck_subworkflow(pool, registry, &row, payload, retention);
         match run_recovery_candidate(pool, failure_policy, row.workflow_id, case, candidate).await {
             CandidateOutcome::Finished(()) => {
                 report.case1_5_subworkflow_started += 1;
@@ -1623,10 +1627,15 @@ async fn enqueue_ready_task(
 }
 
 /// Start a child workflow for a stuck READY sub-workflow task.
+///
+/// A child past the depth limit, or a child definition that is not registered under the node's key, fails
+/// the node (`SUBWORKFLOW_DEPTH_LIMIT_REACHED`, `SUBWORKFLOW_LOAD_FAILED`) and applies the parent's
+/// `on_error`, as Python's case 1.5 does through `enqueue_subworkflow_task`.
 async fn start_stuck_subworkflow(
     pool: &PgPool,
     registry: &WorkflowSpecRegistry,
     row: &ReadySubworkflowRow,
+    payload: &PayloadPolicy,
     retention: &RetentionConfig,
 ) -> Result<(), WorkflowError> {
     let spec_name = row
@@ -1635,15 +1644,45 @@ async fn start_stuck_subworkflow(
         .or(row.sub_workflow_name.as_deref())
         .unwrap_or(&row.task_name);
 
-    // Resolve by definition_key first, then fall back to name.
-    let registered = registry
-        .resolve_child_registration(spec_name, row.sub_definition_key.as_deref())
-        .ok_or_else(|| {
-            WorkflowError::Validation(format!(
-                "sub-workflow spec not found (definition_key={:?}, name='{}')",
-                row.sub_definition_key, spec_name,
-            ))
-        })?;
+    let depth_row: DepthRow = sqlx::query_as(GET_DEPTH_AND_ROOT_SQL)
+        .bind(&row.workflow_id)
+        .fetch_one(pool)
+        .await?;
+    let child_depth = match child_workflow_depth(
+        depth_row.depth.unwrap_or(0),
+        row.workflow_id,
+        row.task_index,
+    ) {
+        Ok(child_depth) => child_depth,
+        Err(error) => {
+            return engine::fail_subworkflow_node(
+                pool,
+                row.workflow_id,
+                row.task_index,
+                error,
+                registry,
+                payload,
+                retention,
+            )
+            .await;
+        }
+    };
+    let Some(registered) = row
+        .sub_definition_key
+        .as_deref()
+        .and_then(|key| registry.resolve_child_registration(key))
+    else {
+        return engine::fail_subworkflow_node(
+            pool,
+            row.workflow_id,
+            row.task_index,
+            engine::subworkflow_load_failed_error(spec_name, row.sub_definition_key.as_deref()),
+            registry,
+            payload,
+            retention,
+        )
+        .await;
+    };
 
     let merged_kwargs = merge_args_from_for_ready(
         pool,
@@ -1663,12 +1702,6 @@ async fn start_stuck_subworkflow(
         registry,
     )?;
 
-    let depth_row: DepthRow = sqlx::query_as(GET_DEPTH_AND_ROOT_SQL)
-        .bind(&row.workflow_id)
-        .fetch_one(pool)
-        .await?;
-
-    let parent_depth = depth_row.depth.unwrap_or(0);
     let root_wf_id = depth_row.root_workflow_id.unwrap_or(row.workflow_id);
 
     // Start child workflow + link in a single transaction.
@@ -1679,7 +1712,7 @@ async fn start_stuck_subworkflow(
         &child_spec,
         row.workflow_id,
         row.task_index,
-        parent_depth + 1,
+        child_depth,
         root_wf_id,
         registry,
         retention,

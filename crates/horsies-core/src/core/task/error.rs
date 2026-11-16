@@ -37,10 +37,12 @@ pub enum OperationalErrorCode {
     /// Workflow recovery failed with a persistent error in `workflow_recovery_failure_limit` reaper
     /// passes, so the workflow failed closed.
     WorkflowRecoveryLimitReached,
+    /// A child workflow would pass the depth limit (32), so it did not start and its sub-workflow node failed.
+    SubworkflowDepthLimitReached,
 }
 
 impl OperationalErrorCode {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::UnhandledError,
         Self::TaskError,
         Self::WorkerCrashed,
@@ -51,6 +53,7 @@ impl OperationalErrorCode {
         Self::WorkflowEnqueueFailed,
         Self::SubworkflowLoadFailed,
         Self::WorkflowRecoveryLimitReached,
+        Self::SubworkflowDepthLimitReached,
     ];
 }
 
@@ -554,6 +557,7 @@ mod tests {
             OperationalErrorCode::WorkflowEnqueueFailed,
             OperationalErrorCode::SubworkflowLoadFailed,
             OperationalErrorCode::WorkflowRecoveryLimitReached,
+            OperationalErrorCode::SubworkflowDepthLimitReached,
         ];
         for code in codes {
             let builtin = BuiltInTaskCode::Operational(code.clone());
