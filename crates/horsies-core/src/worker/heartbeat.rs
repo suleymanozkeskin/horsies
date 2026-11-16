@@ -113,70 +113,74 @@ pub fn spawn_runner_heartbeat(
 /// belong to a live worker. Matches Python's combined heartbeat + lease renewal.
 ///
 /// `claim_lease_ms`: lease duration used to compute new `claim_expires_at`.
-///     `None` means leases are not used and renewal is skipped.
+///     Every claim has a lease (Python `claiming.py:697-708`), so every beat
+///     renews.
 /// `max_claim_renew_age_ms`: safety cap — claims older than this are NOT renewed.
+///
+/// The first beat runs at start, then one per `interval` (Python
+/// `_claimer_heartbeat_loop`: beat, then wait).
 pub fn spawn_claimer_heartbeat(
     pool: PgPool,
     worker_id: String,
     hostname: String,
     pid: i32,
     interval: Duration,
-    claim_lease_ms: Option<u32>,
+    claim_lease_ms: u32,
     max_claim_renew_age_ms: u32,
     cancel: CancellationToken,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut consecutive_failures: u32 = 0;
         let mut escalated = false;
-        loop {
+        while !cancel.is_cancelled() {
+            let mut had_error = false;
+
+            if let Err(e) = send_claimer_heartbeat(&pool, &worker_id, &hostname, pid).await {
+                had_error = true;
+                tracing::warn!(
+                    error = %e,
+                    consecutive_failures = consecutive_failures + 1,
+                    max = MAX_CONSECUTIVE_HEARTBEAT_FAILURES,
+                    "claimer heartbeat failed",
+                );
+            }
+
+            // Renew the lease of every claim this worker holds.
+            if let Err(e) =
+                renew_claim_leases(&pool, &worker_id, claim_lease_ms, max_claim_renew_age_ms).await
+            {
+                had_error = true;
+                tracing::warn!(
+                    error = %e,
+                    consecutive_failures = consecutive_failures + 1,
+                    max = MAX_CONSECUTIVE_HEARTBEAT_FAILURES,
+                    "claim lease renewal failed",
+                );
+            }
+
+            if had_error {
+                consecutive_failures += 1;
+                if consecutive_failures >= MAX_CONSECUTIVE_HEARTBEAT_FAILURES && !escalated {
+                    escalated = true;
+                    tracing::error!(
+                        consecutive_failures,
+                        "claimer heartbeat degraded for too long; CLAIMED tasks may be requeued until DB connectivity recovers",
+                    );
+                }
+            } else {
+                if consecutive_failures > 0 {
+                    tracing::info!(
+                        previous_failures = consecutive_failures,
+                        "claimer heartbeat recovered",
+                    );
+                }
+                consecutive_failures = 0;
+                escalated = false;
+            }
+
             tokio::select! {
                 _ = cancel.cancelled() => break,
-                _ = tokio::time::sleep(interval) => {
-                    let mut had_error = false;
-
-                    if let Err(e) = send_claimer_heartbeat(&pool, &worker_id, &hostname, pid).await {
-                        had_error = true;
-                        tracing::warn!(
-                            error = %e,
-                            consecutive_failures = consecutive_failures + 1,
-                            max = MAX_CONSECUTIVE_HEARTBEAT_FAILURES,
-                            "claimer heartbeat failed",
-                        );
-                    }
-
-                    // Renew claim leases if configured.
-                    if let Some(lease_ms) = claim_lease_ms {
-                        if let Err(e) = renew_claim_leases(&pool, &worker_id, lease_ms, max_claim_renew_age_ms).await {
-                            had_error = true;
-                            tracing::warn!(
-                                error = %e,
-                                consecutive_failures = consecutive_failures + 1,
-                                max = MAX_CONSECUTIVE_HEARTBEAT_FAILURES,
-                                "claim lease renewal failed",
-                            );
-                        }
-                    }
-
-                    if had_error {
-                        consecutive_failures += 1;
-                        if consecutive_failures >= MAX_CONSECUTIVE_HEARTBEAT_FAILURES && !escalated {
-                            escalated = true;
-                            tracing::error!(
-                                consecutive_failures,
-                                "claimer heartbeat degraded for too long; CLAIMED tasks may be requeued until DB connectivity recovers",
-                            );
-                        }
-                    } else {
-                        if consecutive_failures > 0 {
-                            tracing::info!(
-                                previous_failures = consecutive_failures,
-                                "claimer heartbeat recovered",
-                            );
-                        }
-                        consecutive_failures = 0;
-                        escalated = false;
-                    }
-                }
+                _ = tokio::time::sleep(interval) => {}
             }
         }
     })

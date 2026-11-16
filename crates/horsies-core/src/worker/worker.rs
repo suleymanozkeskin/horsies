@@ -89,6 +89,16 @@ fn advisory_key_queue(queue: &str) -> i64 {
 /// stays in round-robin mode here and still services uncapped queues; Python
 /// switches to custom mode and drops them. Rust's cap accounting is keyed on
 /// `queue_max_concurrency` alone, so caps are enforced in both modes.
+/// The lease of every claim: `claim_lease_ms`, or [`DEFAULT_CLAIM_LEASE_MS`]
+/// when it is not set. Every claim is lease-bounded, in hard-cap and soft-cap
+/// mode alike, so a crashed worker's claims become reclaimable (Python
+/// `claiming.py:697-708`).
+fn effective_claim_lease_ms(app_config: &AppConfig) -> u32 {
+    app_config
+        .claim_lease_ms
+        .unwrap_or(crate::core::defaults::DEFAULT_CLAIM_LEASE_MS)
+}
+
 fn compute_ordered_queues(
     queues: &[String],
     queue_priorities: &std::collections::HashMap<String, i32>,
@@ -410,7 +420,7 @@ impl Worker {
             self.hostname.clone(),
             std::process::id() as i32,
             claimer_interval,
-            self.app_config.claim_lease_ms,
+            effective_claim_lease_ms(&self.app_config),
             self.app_config.max_claim_renew_age_ms,
             self.cancel.clone(),
         );
@@ -828,7 +838,7 @@ impl Worker {
             max_claim_per_worker: self.worker_config.max_claim_per_worker,
             max_claim_batch: self.worker_config.max_claim_batch,
             cluster_wide_cap: self.app_config.cluster_wide_cap,
-            claim_lease_ms: self.app_config.claim_lease_ms,
+            claim_lease_ms: Some(effective_claim_lease_ms(&self.app_config)),
         };
         let mut claimed_rows = self.broker.claim_batch(&params).await?;
 
@@ -1516,6 +1526,44 @@ mod tests {
         assert!(coverage < listener);
         assert!(coverage < heartbeats);
         assert!(coverage < claims);
+    }
+
+    /// Python `test_worker_helpers.py::test_hard_cap_returns_default_lease`:
+    /// with no `claim_lease_ms`, claims carry the 60 s default lease.
+    #[test]
+    fn hard_cap_returns_default_lease() {
+        let mut app_config = AppConfig::for_database_url("postgresql://unused/test");
+        assert_eq!(app_config.claim_lease_ms, None);
+        assert_eq!(
+            effective_claim_lease_ms(&app_config),
+            crate::core::defaults::DEFAULT_CLAIM_LEASE_MS,
+        );
+        assert_eq!(effective_claim_lease_ms(&app_config), 60_000);
+
+        app_config.claim_lease_ms = Some(90_000);
+        assert_eq!(effective_claim_lease_ms(&app_config), 90_000);
+    }
+
+    /// Every claim and every claimer beat use the effective lease: the claim
+    /// pass never sends `None`, and the heartbeat always renews.
+    #[test]
+    fn claims_and_renewals_always_carry_a_lease() {
+        let source = include_str!("worker.rs");
+        // Production code only: the test module quotes the searched text.
+        let production = &source[..source
+            .find(&["#[cfg(test)]", "\nmod tests {"].concat())
+            .expect("test module marker")];
+        let run = &production[production
+            .find("pub async fn run(&self)")
+            .expect("Worker::run source")..];
+        let heartbeat = &run[run
+            .find("spawn_claimer_heartbeat(")
+            .expect("claimer heartbeat startup")..];
+        let heartbeat_call = &heartbeat[..heartbeat.find(");").expect("end of the call")];
+        assert!(heartbeat_call.contains("effective_claim_lease_ms(&self.app_config),"));
+        assert!(production
+            .contains("claim_lease_ms: Some(effective_claim_lease_ms(&self.app_config)),"));
+        assert!(!production.contains("claim_lease_ms: self.app_config.claim_lease_ms"));
     }
 
     #[test]
