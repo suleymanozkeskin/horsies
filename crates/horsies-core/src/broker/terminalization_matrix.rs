@@ -19,7 +19,6 @@ use std::str::FromStr;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
-use crate::broker::migrations::run_horsies_migrations;
 use crate::broker::terminalization::terminalize;
 use crate::core::history::identity::reservations::{claim_key_reservation, ReservationClaim};
 use crate::core::history::maintenance::coverage::{ensure_partition_coverage, CoverageOutcome};
@@ -264,9 +263,12 @@ impl IsolatedTerminalizationTestDatabase {
     async fn create() -> Self {
         let database = Self::create_empty().await;
         let pool = &database.pool;
-        run_horsies_migrations(pool)
-            .await
-            .expect("migrate isolated terminalization database");
+        crate::broker::migrations::install_schema(
+            pool,
+            crate::broker::client_family::ClientFamily::Rust,
+        )
+        .await
+        .expect("migrate isolated terminalization database");
         let mut transaction = pool.begin().await.expect("coverage transaction");
         let coverage =
             ensure_partition_coverage(&mut transaction, 2, 2, &[], &StagedLoaderPublisher)
@@ -356,9 +358,12 @@ pub(crate) async fn migrated_pool() -> PgPool {
                     .await
                     .expect("unlock P5 database setup");
             assert!(unlocked, "P5 database setup lock was held");
-            run_horsies_migrations(&anchor)
-                .await
-                .expect("migrate P5 database");
+            crate::broker::migrations::install_schema(
+                &anchor,
+                crate::broker::client_family::ClientFamily::Rust,
+            )
+            .await
+            .expect("migrate P5 database");
             let mut transaction = anchor.begin().await.expect("coverage transaction");
             let coverage =
                 ensure_partition_coverage(&mut transaction, 2, 2, &[], &StagedLoaderPublisher)

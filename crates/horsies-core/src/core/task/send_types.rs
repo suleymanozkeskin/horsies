@@ -259,6 +259,7 @@ pub fn send_error_from_enqueue(
         | BrokerError::EnqueueConflictUnverifiable { .. }
         | BrokerError::ListenerClosed
         | BrokerError::InstallLock(_)
+        | BrokerError::ClientFamilyMismatch { .. }
         | BrokerError::TerminalizationContract(_)
         | BrokerError::HistoryReadContract(_)
         | BrokerError::InvalidClaimArgument(_) => TaskSendError::EnqueueFailed {
