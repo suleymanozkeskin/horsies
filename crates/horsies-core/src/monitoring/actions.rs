@@ -173,34 +173,22 @@ pub async fn pause_workflow_action(pool: &PgPool, workflow_id: Uuid) -> ActionOu
     }
 }
 
-async fn resume_failure(
-    pool: &PgPool,
-    workflow_id: Uuid,
-    error: HandleOperationError,
-) -> ActionOutcome {
-    if error.code == HandleErrorCode::WorkflowNotFound {
-        return workflow_not_found(workflow_id);
-    }
-    resolve_resume_failure(error, current_status(pool, workflow_id).await)
-}
-
-fn resolve_resume_failure(
-    error: HandleOperationError,
-    status: Result<WorkflowStatus, ActionOutcome>,
-) -> ActionOutcome {
-    match status {
-        Ok(WorkflowStatus::Running) => {
+/// The answer of a failed resume, from the error alone, as Python's resume
+/// route (`horsies/web/routes/actions.py:234-258`): `RESUME_RECOVERY_FAILED`
+/// means the resume committed and only its recovery pass failed, so the
+/// workflow was resumed and the answer says so with a warning. Every other
+/// error is answered as for the other workflow actions. No second status read
+/// guesses whether a failed resume committed.
+fn resume_failure(error: HandleOperationError) -> ActionOutcome {
+    match error.code {
+        HandleErrorCode::ResumeRecoveryFailed => {
             succeeded("resumed", None, Some(RESUME_RECOVERY_WARNING.to_owned()))
         }
-        Ok(
-            WorkflowStatus::Pending
-            | WorkflowStatus::Completed
-            | WorkflowStatus::Failed
-            | WorkflowStatus::Paused
-            | WorkflowStatus::Cancelled
-            | WorkflowStatus::Expired,
-        ) => detail(503, error.message),
-        Err(outcome) => outcome,
+        HandleErrorCode::WorkflowNotFound
+        | HandleErrorCode::DbOperationFailed
+        | HandleErrorCode::StoredDataInvalid
+        | HandleErrorCode::LoopRunnerFailed
+        | HandleErrorCode::InternalFailed => handle_failed(error),
     }
 }
 
@@ -225,7 +213,7 @@ pub async fn resume_workflow_action(
             Ok(status) => conflict(ActionConflictCode::StateConflict, Some(status.to_string())),
             Err(outcome) => outcome,
         },
-        Err(error) => resume_failure(pool, workflow_id, error).await,
+        Err(error) => resume_failure(error),
     }
 }
 
@@ -269,43 +257,40 @@ mod tests {
             500
         );
 
-        let outcome = resolve_resume_failure(
-            error(HandleErrorCode::DbOperationFailed),
-            Ok(WorkflowStatus::Running),
-        );
+        // Python `test_web_api.py::TestResumeCommittedThenFailed`: the resume
+        // committed and its recovery pass failed, so the workflow was resumed.
+        let outcome = resume_failure(error(HandleErrorCode::ResumeRecoveryFailed));
         assert_eq!(outcome.status_code(), 200);
         assert_eq!(
             serde_json::to_value(outcome.body()).unwrap(),
             serde_json::json!({
                 "outcome": "resumed",
                 "was_status": null,
-                "next_attempt_number": null,
                 "warning": "post_resume_recovery_failed",
             })
         );
 
-        for status in [
-            WorkflowStatus::Pending,
-            WorkflowStatus::Completed,
-            WorkflowStatus::Failed,
-            WorkflowStatus::Paused,
-            WorkflowStatus::Cancelled,
-            WorkflowStatus::Expired,
+        // Any other failure of a resume is not a resume, whatever another actor
+        // did to the workflow meanwhile.
+        for code in [
+            HandleErrorCode::DbOperationFailed,
+            HandleErrorCode::LoopRunnerFailed,
+            HandleErrorCode::InternalFailed,
         ] {
-            let outcome =
-                resolve_resume_failure(error(HandleErrorCode::DbOperationFailed), Ok(status));
+            let outcome = resume_failure(error(code));
             assert_eq!(outcome.status_code(), 503);
             assert_eq!(
                 serde_json::to_value(outcome.body()).unwrap(),
                 serde_json::json!({"detail": "recovery failed"})
             );
         }
-
-        let status_failure = detail(503, "status read failed");
-        let outcome = resolve_resume_failure(
-            error(HandleErrorCode::DbOperationFailed),
-            Err(status_failure.clone()),
+        assert_eq!(
+            resume_failure(error(HandleErrorCode::WorkflowNotFound)).status_code(),
+            404
         );
-        assert_eq!(outcome, status_failure);
+        assert_eq!(
+            resume_failure(error(HandleErrorCode::StoredDataInvalid)).status_code(),
+            500
+        );
     }
 }
