@@ -15,7 +15,9 @@ The schema is one migration, version 1000: the SQL files in
 | `0001_tables.sql` | Tables, constraints, seed rows, `horsies_uuidv7()`, the notification triggers |
 | `0002_indexes.sql` | The indexes that no constraint creates |
 | `0003_interim_functions.sql` | The SQL functions the client calls, and their composite types |
+| `0004_lifecycle_functions.sql` | The task lifecycle functions: enqueue, claim, start, attempt finish, stale recovery, requeue, release, cancel |
 | `0005_workflow_functions.sql` | The workflow engine functions: start, phase 2, child completion, pause, resume, cancel, phase-2 recovery |
+| `0006_history_functions.sql` | The history and retention functions: the move to history, the absence reason, the rerun source read, the prune candidates, the leaf detach and drop |
 | `0007_scheduler_monitoring_functions.sql` | The schedule fire and slot id functions, and the monitoring reads: task detail, list, facets, status counts and breakdown, stale and expired lists, workflow names, runs, run and node, schedules |
 
 The broker installs the schema at its first initialization (`ensure_schema_initialized`, or the first
