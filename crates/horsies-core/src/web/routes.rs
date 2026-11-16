@@ -204,6 +204,7 @@ async fn read_task_facets(
     State(state): State<WebState>,
     RawQuery(raw): RawQuery,
 ) -> Result<Json<crate::monitoring::Facets>, ApiError> {
+    let cache_key = raw.clone().unwrap_or_default();
     let values = QueryValues::parse(raw.as_deref());
     let params = TaskFacetsParams::from_values(&values)?;
     let window = params.window.resolve()?;
@@ -211,7 +212,9 @@ async fn read_task_facets(
         .with_statuses(parse_statuses(params.statuses)?)
         .with_error_categories(parse_error_categories(params.error_category)?)
         .retried_only(params.retried_only);
-    task_facets(&state.broker, &query)
+    state
+        .task_facets_cache
+        .get_or_try_init(cache_key, || task_facets(&state.broker, &query))
         .await
         .map(Json)
         .map_err(|error| query_failed("Task facets", error))
@@ -253,6 +256,7 @@ async fn read_task_breakdown(
     State(state): State<WebState>,
     RawQuery(raw): RawQuery,
 ) -> Result<Json<crate::monitoring::Breakdown>, ApiError> {
+    let cache_key = raw.clone().unwrap_or_default();
     let values = QueryValues::parse(raw.as_deref());
     let params = TaskBreakdownParams::from_values(&values)?;
     let window = params.window.resolve()?;
@@ -269,7 +273,9 @@ async fn read_task_breakdown(
         .with_filters(filters)
         .with_limit(params.limit)
         .map_err(|error| pagination_refused(error, &values, "limit", params.limit))?;
-    task_breakdown(&state.broker, &query)
+    state
+        .task_breakdown_cache
+        .get_or_try_init(cache_key, || task_breakdown(&state.broker, &query))
         .await
         .map(Json)
         .map_err(|error| query_failed("Task breakdown", error))

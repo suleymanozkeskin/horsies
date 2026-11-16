@@ -3106,8 +3106,7 @@ class PostgresBroker:
         A worker is live while its latest snapshot is at most
         ``WORKER_STATE_LIVE_WINDOW_S`` old. It serves a (queue, class) when
         the queue is one of its queues and one of its budgets serves the
-        class. A live worker whose snapshot has no ``class_capacity`` is left
-        out and named in ``ClassCoverage.not_recorded``. Reads only.
+        class. Reads only.
         ``Err(MONITORING_QUERY_FAILED)``: a database or network error, a live
         snapshot whose ``class_capacity`` is unreadable, or a read that
         reached its bound (``retryable`` is ``False`` for the last two).
@@ -3137,8 +3136,7 @@ class PostgresBroker:
         """Pending streams with the wait of their oldest due row and their
         coverage, and the budget load of each live worker.
 
-        A live worker whose snapshot has no ``class_capacity`` is left out
-        and named in ``ClassReport.not_recorded``. Reads only.
+        Reads only.
         ``Err(MONITORING_QUERY_FAILED)``: as ``get_class_coverage_async``, or
         a live worker holds rows of a class that its recorded budgets do not
         serve.
@@ -3939,8 +3937,6 @@ class PostgresBroker:
                 ))
             decoded = decode_result_envelope(
                 version=detail.result_envelope_version,
-                codec=detail.result_codec,
-                content_type=detail.result_content_type,
                 payload=detail.result_payload,
                 digest=detail.result_digest,
             )
@@ -4053,18 +4049,20 @@ class PostgresBroker:
                     'enqueued_at',
                     'claimed_at',
                     'started_at',
-                    'completed_at',
-                    'failed_at',
+                    # A live row stores no terminal times, error code,
+                    # result or failed reason: those live in history.
+                    'NULL::timestamptz AS completed_at',
+                    'NULL::timestamptz AS failed_at',
                     'worker_hostname',
                     'worker_pid',
                     'worker_process_name',
-                    'error_code',
+                    'NULL::text AS error_code',
                     'execution',
                 ]
                 if include_result:
-                    base_columns.append('result')
+                    base_columns.append('NULL::text AS result')
                 if include_failed_reason:
-                    base_columns.append('failed_reason')
+                    base_columns.append('NULL::text AS failed_reason')
 
                 query = text(
                     f"""

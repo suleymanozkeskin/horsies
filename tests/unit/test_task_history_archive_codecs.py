@@ -31,8 +31,6 @@ from horsies.core.history.archive.versions import (
     ArchiveDomain,
     CorruptArchiveValue,
     DecodedArchiveValue,
-    UnknownArchiveCodec,
-    UnknownArchiveContentType,
     UnknownArchiveVersion,
     archive_digest,
 )
@@ -84,8 +82,6 @@ def decode_stored(
 ) -> object:
     values: dict[str, object] = {
         'version': stored.version,
-        'codec': stored.codec,
-        'content_type': stored.content_type,
         'payload': stored.payload,
         'digest': stored.digest,
     }
@@ -96,8 +92,6 @@ def decode_stored(
 def decode_result(payload: bytes, **overrides: object) -> object:
     values: dict[str, object] = {
         'version': 1,
-        'codec': 'json-utf8',
-        'content_type': 'application/json',
         'payload': payload,
         'digest': archive_digest(payload),
     }
@@ -157,8 +151,6 @@ class TestAttemptEncoding:
         assert stored.payload == expected
         assert stored.digest == archive_digest(expected)
         assert stored.version == 1
-        assert stored.codec == 'json-utf8'
-        assert stored.content_type == 'application/json'
 
     def test_rejects_non_contiguous_sequence(self) -> None:
         attempts = (make_attempt(1, 3), make_attempt(3, 3))
@@ -181,18 +173,6 @@ class TestAttemptDecodeFailures:
         assert decode_stored(stored, version=2) == UnknownArchiveVersion(
             ArchiveDomain.ATTEMPTS, 2
         )
-
-    def test_unknown_codec(self) -> None:
-        stored = encode_attempt_snapshot(make_sequence(1))
-        assert decode_stored(stored, codec='cbor') == UnknownArchiveCodec(
-            ArchiveDomain.ATTEMPTS, 'cbor'
-        )
-
-    def test_unknown_content_type(self) -> None:
-        stored = encode_attempt_snapshot(make_sequence(1))
-        assert decode_stored(
-            stored, content_type='text/plain'
-        ) == UnknownArchiveContentType(ArchiveDomain.ATTEMPTS, 'text/plain')
 
     def test_digest_mismatch(self) -> None:
         stored = encode_attempt_snapshot(make_sequence(1))
@@ -225,8 +205,6 @@ class TestAttemptDecodeFailures:
     def test_malformed_payloads(self, payload: bytes, detail: str) -> None:
         result = decode_attempt_snapshot(
             version=1,
-            codec='json-utf8',
-            content_type='application/json',
             payload=payload,
             digest=archive_digest(payload),
         )
@@ -262,8 +240,6 @@ class TestAttemptDecodeFailures:
         payload = self._mutated_payload(index, value)
         result = decode_attempt_snapshot(
             version=1,
-            codec='json-utf8',
-            content_type='application/json',
             payload=payload,
             digest=archive_digest(payload),
         )
@@ -278,8 +254,6 @@ class TestAttemptDecodeFailures:
         ).encode()
         result = decode_attempt_snapshot(
             version=1,
-            codec='json-utf8',
-            content_type='application/json',
             payload=payload,
             digest=archive_digest(payload),
         )
@@ -328,9 +302,6 @@ class TestResultEnvelope:
         assert decode_result(b'{}', version=5) == UnknownArchiveVersion(
             ArchiveDomain.RESULT, 5
         )
-        assert decode_result(b'{}', codec='pickle') == UnknownArchiveCodec(
-            ArchiveDomain.RESULT, 'pickle'
-        )
 
 
 class TestAttemptSnapshotReadEntry:
@@ -342,8 +313,6 @@ class TestAttemptSnapshotReadEntry:
             task_id='4a5b6c7d-8e9f-4a0b-9c1d-2e3f4a5b6c7d',
             status='COMPLETED',
             attempt_archive_version=1,
-            attempt_snapshot_codec='json-utf8',
-            attempt_snapshot_content_type='application/json',
             attempt_snapshot=payload,
             attempt_snapshot_digest=archive_digest(payload),
         )
@@ -357,8 +326,6 @@ class TestDiscriminantSets:
     def test_decode_failure_union_membership(self) -> None:
         assert set(get_args(ArchiveDecodeFailure.__value__)) == {
             UnknownArchiveVersion,
-            UnknownArchiveCodec,
-            UnknownArchiveContentType,
             CorruptArchiveValue,
             ArchiveDigestMismatch,
         }
