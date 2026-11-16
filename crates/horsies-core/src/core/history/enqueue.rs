@@ -14,7 +14,7 @@ use super::identity::fingerprint::{
 };
 use super::identity::keys::{IdempotencyKeyError, ScopedIdempotencyKey};
 use super::rerun::input_envelope::validate_integer_domain;
-use crate::core::codec::{check_json_text, StrictJsonError};
+use crate::core::codec::{check_json_text, JsonReadError, StrictJsonError};
 use crate::core::task::execution::{stored_execution, Execution, InvalidExecution};
 
 /// Facts of a task row that a send, a schedule slot or a rerun writes.
@@ -174,23 +174,29 @@ fn check_input(input_json: &str) -> Result<(), EnqueuePreparationError> {
     })
 }
 
-fn parse_optional_object(
+/// The task options as a JSON object, read with the strict rule; `None`
+/// for no options or `null`. Refuses text that breaks the strict read rule,
+/// does not parse, holds an integer the parse would round, or is not an
+/// object.
+pub(crate) fn parse_optional_object(
     value: Option<&str>,
 ) -> Result<Option<Map<String, Value>>, EnqueuePreparationError> {
     let Some(value) = value else {
         return Ok(None);
     };
-    check_json_text(value).map_err(|source| EnqueuePreparationError::StrictJson {
-        field: "task_options",
-        source,
-    })?;
     // The options are parsed to read the execution class, so an integer that
-    // the parse would round is refused.
-    let parsed: Value =
-        serde_json::from_str(value).map_err(|source| EnqueuePreparationError::Json {
+    // the parse would round is refused. The core's strict reader gives the
+    // decode 300 levels of room (Python `core/codec/json_value.py:54-75`).
+    let parsed: Value = crate::core::codec::from_json_str(value).map_err(|error| match error {
+        JsonReadError::Refused(source) => EnqueuePreparationError::StrictJson {
             field: "task_options",
             source,
-        })?;
+        },
+        JsonReadError::Decode(source) => EnqueuePreparationError::Json {
+            field: "task_options",
+            source,
+        },
+    })?;
     validate_integer_domain(value).map_err(|detail| EnqueuePreparationError::NumberDomain {
         field: "task_options",
         detail,
