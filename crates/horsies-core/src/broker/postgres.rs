@@ -658,6 +658,13 @@ static NOTIFY_WORKER_PING: TypedStatement = TypedStatement::new(
     &[ParameterType::Text, ParameterType::Text],
 );
 
+/// The family row of the database, read before the first write of a handle.
+static READ_CLIENT_FAMILY: TypedStatement = TypedStatement::new(
+    "read_client_family",
+    crate::broker::client_family::READ_FAMILY_SQL,
+    &[],
+);
+
 /// Health check: `SELECT 1` to verify broker connectivity.
 const HEALTH_CHECK_SQL: &str = "SELECT 1";
 
@@ -1157,9 +1164,15 @@ impl PostgresBroker {
     pub async fn ensure_client_family_for_write(&self) -> Result<(), BrokerError> {
         self.client_family_admitted
             .get_or_try_init(|| async {
-                let recorded =
-                    crate::broker::client_family::read_recorded_family(&self.pool).await?;
-                crate::broker::client_family::admit_family(recorded, self.client_family)
+                let rows = self.query_main(&READ_CLIENT_FAMILY.bind().finish()).await?;
+                let stored: Option<String> = match rows.first() {
+                    Some(row) => Some(column(row, &READ_CLIENT_FAMILY, "family")?),
+                    None => None,
+                };
+                crate::broker::client_family::admit_family(
+                    crate::broker::client_family::recorded_family_from(stored),
+                    self.client_family,
+                )
             })
             .await?;
         Ok(())
