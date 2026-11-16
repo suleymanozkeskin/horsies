@@ -28,24 +28,19 @@ from horsies.core.worker.sql import (
 )
 from horsies.core.worker.worker import Worker
 from horsies.core.utils.db import PooledStatements
-from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.conftest import compute_test_command_fingerprint
 from tests.broker_resources_support import current_resources, listener_of
 
 
 INSERT_TEST_TASK_SQL = text("""
     INSERT INTO horsies_tasks (
-        id, task_name, queue_name, priority, args, kwargs,
-        status, sent_at, created_at, updated_at, claimed,
-        retry_count, max_retries, enqueue_sha,
-        retention_class_key, command_fingerprint_version,
-        command_fingerprint, retain_rerun_input,
-        prepared_rerun_input_disposition
+        id, task_name, queue_name, priority, input, status, sent_at, created_at,
+        updated_at, retry_count, max_retries, retention_class_key,
+        command_fingerprint_version, command_fingerprint, retain_rerun_input,
+        execution, enqueued_at, is_workflow_task
     ) VALUES (
-        :id, :task_name, :queue_name, 100, '[]', '{}',
-        'PENDING', :sent_at, NOW(), NOW(), FALSE, 0, 0, :enqueue_sha,
-        'standard_30d', 1,
-        sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-        FALSE, 'DECLINED_BY_POLICY'
+        :id, :task_name, :queue_name, 100, '{}', 'PENDING', :sent_at, NOW(), NOW(), 0,
+        0, 'standard_30d', 1, :command_fingerprint, FALSE, 'ISOLATED', NOW(), FALSE
     )
 """)
 
@@ -53,7 +48,7 @@ INSERT_TEST_TASK_SQL = text("""
 async def _seed_task(session: AsyncSession, queue_name: str = 'default') -> str:
     """Insert a minimal PENDING task row and return its id."""
     task_id = str(uuid.uuid4())
-    sent_at, sha = compute_test_enqueue_sha(
+    sent_at, fingerprint = compute_test_command_fingerprint(
         task_name='cap_test_task',
         queue_name=queue_name,
     )
@@ -62,7 +57,7 @@ async def _seed_task(session: AsyncSession, queue_name: str = 'default') -> str:
         'task_name': 'cap_test_task',
         'queue_name': queue_name,
         'sent_at': sent_at,
-        'enqueue_sha': sha,
+        'command_fingerprint': fingerprint,
     })
     await session.commit()
     return task_id
@@ -91,7 +86,6 @@ class TestExpiredClaimsExcludedFromCap:
             text("""
                 UPDATE horsies_tasks
                 SET status = 'CLAIMED',
-                    claimed = TRUE,
                     claimed_at = NOW() - INTERVAL '10 minutes',
                     claimed_by_worker_id = 'dead-worker',
                     claim_expires_at = NOW() - INTERVAL '5 minutes',
@@ -125,7 +119,6 @@ class TestExpiredClaimsExcludedFromCap:
             text("""
                 UPDATE horsies_tasks
                 SET status = 'CLAIMED',
-                    claimed = TRUE,
                     claimed_at = NOW() - INTERVAL '10 minutes',
                     claimed_by_worker_id = :wid,
                     claim_expires_at = NOW() - INTERVAL '5 minutes',
@@ -169,7 +162,6 @@ class TestExpiredClaimsExcludedFromCap:
             text("""
                 UPDATE horsies_tasks
                 SET status = 'CLAIMED',
-                    claimed = TRUE,
                     claimed_at = NOW(),
                     claimed_by_worker_id = 'active-worker',
                     claim_expires_at = NOW() + INTERVAL '5 minutes',
@@ -204,7 +196,6 @@ class TestExpiredClaimsExcludedFromCap:
             text("""
                 UPDATE horsies_tasks
                 SET status = 'CLAIMED',
-                    claimed = TRUE,
                     claimed_at = NOW() - INTERVAL '10 minutes',
                     claimed_by_worker_id = 'dead-worker',
                     claim_expires_at = NOW() - INTERVAL '5 minutes',
@@ -217,7 +208,6 @@ class TestExpiredClaimsExcludedFromCap:
             text("""
                 UPDATE horsies_tasks
                 SET status = 'CLAIMED',
-                    claimed = TRUE,
                     claimed_at = NOW(),
                     claimed_by_worker_id = 'live-worker-default',
                     claim_expires_at = NOW() + INTERVAL '5 minutes',
@@ -230,7 +220,6 @@ class TestExpiredClaimsExcludedFromCap:
             text("""
                 UPDATE horsies_tasks
                 SET status = 'CLAIMED',
-                    claimed = TRUE,
                     claimed_at = NOW(),
                     claimed_by_worker_id = 'live-worker-critical',
                     claim_expires_at = NOW() + INTERVAL '5 minutes',
@@ -305,7 +294,6 @@ class TestReclaimUnderCap:
             text("""
                 UPDATE horsies_tasks
                 SET status = 'CLAIMED',
-                    claimed = TRUE,
                     claimed_at = NOW() - INTERVAL '10 minutes',
                     claimed_by_worker_id = 'dead-worker',
                     claim_expires_at = NOW() - INTERVAL '5 minutes',
@@ -390,7 +378,6 @@ class TestReclaimUnderCap:
             text("""
                 UPDATE horsies_tasks
                 SET status = 'CLAIMED',
-                    claimed = TRUE,
                     claimed_at = NOW() - INTERVAL '10 minutes',
                     claimed_by_worker_id = 'dead-worker',
                     claim_expires_at = NOW() - INTERVAL '5 minutes',

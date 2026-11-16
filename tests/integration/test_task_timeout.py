@@ -32,7 +32,7 @@ from tests.fixtures.slots.handles import (
     task_finished_handle,
     unbound_handle,
 )
-from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.conftest import compute_test_command_fingerprint
 from tests.integration.history_seeding import read_attempts
 
 pytestmark = [pytest.mark.integration]
@@ -85,34 +85,38 @@ async def _insert_task(
 ) -> str:
     """A task of ``owner``; a workflow task gets its RUNNING node."""
     task_id = str(uuid.uuid4())
-    sent_at, sha = compute_test_enqueue_sha(
+    sent_at, fingerprint = compute_test_command_fingerprint(
         task_name='timeout_test',
         task_options=task_options,
     )
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
-                (id, task_name, queue_name, priority, args, kwargs, status,
-                 sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, started_at, enqueue_sha, claimed_by_worker_id,
-                 claimed_at, worker_pid, task_options, is_workflow_task,
-                 retention_class_key, command_fingerprint_version,
-                 command_fingerprint, retain_rerun_input,
-                 prepared_rerun_input_disposition)
-            VALUES
-                (:id, 'timeout_test', 'default', 100, '[]', '{}', :status,
-                 :sent_at, NOW(), NOW(), FALSE, :retry_count,
-                 :max_retries, NOW(), :sha, :owner,
-                 :claimed_at, :worker_pid, :task_options, :is_workflow_task,
-                 'standard_30d', 1,
-                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-                 FALSE, 'DECLINED_BY_POLICY')
+                (
+                    id, task_name, queue_name, priority, input, status, sent_at,
+                    created_at, updated_at, retry_count, max_retries, started_at,
+                    claimed_by_worker_id, claimed_at, worker_pid, task_options,
+                    is_workflow_task, retention_class_key, command_fingerprint_version,
+                    command_fingerprint, retain_rerun_input, execution, enqueued_at,
+                    claim_expires_at, worker_hostname, worker_process_name
+                ) VALUES (
+                    :id, 'timeout_test', 'default', 100, '{}', :status, :sent_at,
+                    NOW(), NOW(), :retry_count, :max_retries, NOW(), :owner,
+                    :claimed_at, :worker_pid, :task_options, :is_workflow_task,
+                    'standard_30d',
+                    CASE WHEN CAST(:is_workflow_task AS boolean) THEN NULL ELSE 1 END,
+                    CASE WHEN CAST(:is_workflow_task AS boolean) THEN NULL ELSE :command_fingerprint END,
+                    FALSE, 'ISOLATED', NOW(),
+                    CASE WHEN CAST(:status AS varchar) = 'CLAIMED' THEN NOW() + INTERVAL '5 minutes' END,
+                    CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 'host-1' END,
+                    CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 'child-1' END
+                )
         """),
         {
             'id': task_id,
             'status': status,
             'sent_at': sent_at,
-            'sha': sha,
+            'command_fingerprint': fingerprint,
             'owner': owner,
             'claimed_at': HANDLE_CLAIMED_AT,
             'retry_count': retry_count,
@@ -129,7 +133,7 @@ async def _insert_task(
                 INSERT INTO horsies_workflows
                     (id, name, status, on_error, depth, root_workflow_id,
                      sent_at, created_at, started_at, updated_at)
-                VALUES (:wf, 'timeout_wf', 'RUNNING', 'FAIL', 0, :wf,
+                VALUES (:wf, 'timeout_wf', 'RUNNING', 'fail', 0, :wf,
                         NOW(), NOW(), NOW(), NOW())
             """),
             {'wf': workflow_id},
@@ -138,12 +142,14 @@ async def _insert_task(
             text("""
                 INSERT INTO horsies_workflow_tasks
                     (id, workflow_id, task_index, node_id, task_name,
-                     task_args, task_kwargs, queue_name, priority,
+                     input, queue_name, priority,
                      dependencies, allow_failed_deps, join_type,
-                     is_subworkflow, status, task_id, created_at)
-                VALUES (:id, :wf, 0, 'node-0', 'timeout_test', '[]', '{}',
+                     is_subworkflow, status, task_id, created_at,
+                     max_retries, execution, retention_class_key)
+                VALUES (:id, :wf, 0, 'node-0', 'timeout_test', '{}',
                         'default', 100, '{}', FALSE, 'all', FALSE,
-                        'RUNNING', CAST(:task_id AS uuid), NOW())
+                        'RUNNING', CAST(:task_id AS uuid), NOW(),
+                        0, 'ISOLATED', 'standard_30d')
             """),
             {'id': str(uuid.uuid4()), 'wf': workflow_id, 'task_id': task_id},
         )

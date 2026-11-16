@@ -206,12 +206,13 @@ pub struct HorsiesError {
 | HRS-018 | `WorkflowSubworkflowAppMissing` | Subworkflow app/registry context missing |
 | HRS-019 | `WorkflowInvalidKwargKey` | Invalid kwarg key in injected workflow data |
 | HRS-020 | `WorkflowMissingRequiredParams` | Workflow input is missing required params |
+| HRS-021 | `WorkflowKwargsArgsFromOverlap` | A node's input object and its `args_from` name the same member |
 | HRS-025 | `WorkflowOutputTypeMismatch` | Workflow output type does not match declared type |
+| HRS-026 | `WorkflowPositionalArgsNotSupported` | A node's input is not a JSON object (positional input) while the node takes `args_from` or `workflow_ctx_from` members |
 | HRS-027 | `WorkflowCheckCasesRequired` | Workflow check builder requires cases |
 | HRS-028 | `WorkflowCheckCaseInvalid` | Invalid workflow check case |
 | HRS-029 | `WorkflowCheckBuilderException` | Workflow check builder raised an exception |
 | HRS-030 | `WorkflowCheckUndecoratedBuilder` | Workflow check builder was not decorated correctly |
-| HRS-032 | `WorkflowArgsWithInjection` | Workflow mixes whole args with injected params in an invalid way |
 
 ### Task Definition (HRS-100–HRS-199)
 

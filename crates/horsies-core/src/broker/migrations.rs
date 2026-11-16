@@ -8,18 +8,21 @@
 //! leaving `_sqlx_migrations` untouched for the host application.
 //!
 //! The embedded chain:
-//! - Version 1000 is the baseline schema: the package files of
-//!   `horsies/core/baseline/sql/` in name order (tables, indexes, interim
-//!   functions), concatenated with no separator, with one SHA-384 checksum
-//!   over the result. It creates [`MIGRATIONS_TABLE`] itself. The Python
-//!   package installs the same three files as its migration 1000 with the same
-//!   checksum rule, so both write the same bookkeeping row.
+//! - Version 1000 is the baseline schema: every package file of
+//!   `horsies/core/baseline/sql/`, in the order of Python's
+//!   `BASELINE_SQL_FILES` (`horsies/core/baseline/migration.py`), concatenated
+//!   with no separator, with one SHA-384 checksum over the UTF-8 bytes of the
+//!   result. It creates [`MIGRATIONS_TABLE`] itself. The Python package
+//!   installs the same files as its migration 1000 with the same checksum
+//!   rule, so both write the same bookkeeping row.
 //! - Version 1001 holds the claim functions of the copied Rust worker, which
 //!   have no counterpart in migration 1000. It goes when the worker claims
 //!   through the functions of migration 1000.
 //!
 //! Each migration runs in one transaction. The runner writes its bookkeeping
 //! row after the migration SQL, in the same transaction, and names every value.
+//! Migration 1000 also publishes the history readers in that transaction, so
+//! a database that holds the baseline holds its readers.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -34,6 +37,9 @@ use sqlx::{Acquire, Executor, PgConnection, PgPool};
 use tokio::time::{sleep, Instant};
 
 use crate::broker::error::{BrokerError, InstallLockFailure};
+use crate::core::history::errors::HistoryError;
+use crate::core::history::partitions::publication::LoaderPublication;
+use crate::core::history::reads::publisher::StagedLoaderPublisher;
 
 /// Name of the horsies-owned migrations bookkeeping table.
 pub const MIGRATIONS_TABLE: &str = "horsies_migrations";
@@ -41,23 +47,42 @@ pub const MIGRATIONS_TABLE: &str = "horsies_migrations";
 /// Version of the baseline schema migration.
 pub const BASELINE_MIGRATION_VERSION: i64 = 1000;
 
-/// The baseline schema: the three package files in name order, as one
-/// migration. The files of `horsies/core/baseline/sql/` are the single source;
-/// the core includes them by relative path and keeps no copy.
-const BASELINE_SQL: &str = concat!(
-    include_str!("../../../../horsies/core/baseline/sql/0001_tables.sql"),
-    include_str!("../../../../horsies/core/baseline/sql/0002_indexes.sql"),
-    include_str!("../../../../horsies/core/baseline/sql/0003_interim_functions.sql"),
+/// Declares the baseline file list once. From one list of file names it
+/// builds `BASELINE_SQL_FILES` (the names) and `BASELINE_SQL` (the texts,
+/// concatenated with no separator), so the names and the migration text
+/// cannot differ. The files of `horsies/core/baseline/sql/` are the single
+/// source; the core includes them by relative path and keeps no copy.
+macro_rules! baseline_sql_files {
+    ($($file:literal),+ $(,)?) => {
+        /// The file names of migration 1000, in the order they run.
+        #[cfg(test)]
+        pub(crate) const BASELINE_SQL_FILES: &[&str] = &[$($file),+];
+
+        /// Migration 1000: the files of `BASELINE_SQL_FILES`, in that
+        /// order, concatenated with no separator.
+        const BASELINE_SQL: &str = concat!(
+            $(include_str!(concat!("../../../../horsies/core/baseline/sql/", $file))),+
+        );
+    };
+}
+
+// Python's `BASELINE_SQL_FILES` (`horsies/core/baseline/migration.py`), in
+// the same order. A file added to the folder or to Python's list without a
+// line here fails `baseline_file_list_is_python_s_list_and_the_whole_folder`
+// and Python's `tests/unit/test_baseline_migration.py`.
+baseline_sql_files!(
+    "0001_tables.sql",
+    "0002_indexes.sql",
+    "0003_interim_functions.sql",
+    "0005_workflow_functions.sql",
+    "0006_history_functions.sql",
+    "0007_scheduler_monitoring_functions.sql",
 );
 
 /// The tables file of the baseline.
 #[cfg(test)]
 pub(crate) const BASELINE_TABLES_SQL: &str =
     include_str!("../../../../horsies/core/baseline/sql/0001_tables.sql");
-/// The indexes file of the baseline.
-#[cfg(test)]
-pub(crate) const BASELINE_INDEXES_SQL: &str =
-    include_str!("../../../../horsies/core/baseline/sql/0002_indexes.sql");
 /// The interim functions file of the baseline.
 #[cfg(test)]
 pub(crate) const BASELINE_INTERIM_FUNCTIONS_SQL: &str =
@@ -397,6 +422,12 @@ fn sqlx_error_sqlstate(err: &sqlx::Error) -> Option<String> {
 }
 
 /// Apply one migration and write its bookkeeping row in one transaction.
+///
+/// Migration 1000 also publishes the history readers from the leaf catalog
+/// it creates, before its bookkeeping row, in the same transaction (Python
+/// publishes them before its install returns: `publish_history_readers`,
+/// `horsies/core/baseline/install.py`). A failed publication rolls the
+/// migration back.
 async fn apply_migration(
     conn: &mut PgConnection,
     migration: &Migration,
@@ -406,6 +437,12 @@ async fn apply_migration(
     tx.execute(migration.sql.as_ref()).await.map_err(|error| {
         BrokerError::Migration(MigrateError::ExecuteMigration(error, migration.version))
     })?;
+    if migration.version == BASELINE_MIGRATION_VERSION {
+        let _published = StagedLoaderPublisher
+            .republish(&mut tx)
+            .await
+            .map_err(|error| reader_publication_error(error, migration.version))?;
+    }
     let execution_time_ns: i64 = start.elapsed().as_nanos().try_into().unwrap_or(i64::MAX);
     sqlx::query(&format!(
         "INSERT INTO {MIGRATIONS_TABLE} \
@@ -420,6 +457,24 @@ async fn apply_migration(
     .await?;
     tx.commit().await?;
     Ok(())
+}
+
+/// A failed reader publication inside a migration's transaction. A database
+/// error keeps the form of a failed migration statement, so a deadlock is
+/// retried as one; a broken history contract is not retryable.
+fn reader_publication_error(error: HistoryError, version: i64) -> BrokerError {
+    match error {
+        HistoryError::Database(error) => {
+            BrokerError::Migration(MigrateError::ExecuteMigration(error, version))
+        }
+        error @ (HistoryError::ArchiveDecode(_)
+        | HistoryError::Contract(_)
+        | HistoryError::LeafLockNotHeld
+        | HistoryError::LeafLockBusy { .. }
+        | HistoryError::HistoryParentAbsent(_)) => BrokerError::HistoryReadContract(format!(
+            "publishing the history readers in migration {version}: {error}"
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -539,19 +594,87 @@ mod tests {
         sqlx::Connection::close(waiter).await.unwrap();
     }
 
+    /// The package folder of the baseline SQL files.
+    fn baseline_sql_folder() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../horsies/core/baseline/sql")
+    }
+
+    /// Python's `BASELINE_SQL_FILES`, read from
+    /// `horsies/core/baseline/migration.py`: one quoted name per line between
+    /// the line that opens the tuple and the line that closes it.
+    fn python_baseline_sql_files() -> Vec<String> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../horsies/core/baseline/migration.py");
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        let mut lines = source
+            .lines()
+            .skip_while(|line| !line.starts_with("BASELINE_SQL_FILES: Final = ("));
+        assert!(
+            lines.next().is_some(),
+            "no BASELINE_SQL_FILES tuple in {}",
+            path.display()
+        );
+        lines
+            .take_while(|line| line.trim() != ")")
+            .map(|line| {
+                line.trim()
+                    .trim_end_matches(',')
+                    .trim_matches('\'')
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    /// The core's list is Python's list in Python's order, and it holds every
+    /// SQL file of the package folder. A file that one side adds fails here
+    /// and in Python's `tests/unit/test_baseline_migration.py`.
     #[test]
-    fn baseline_is_one_migration_built_from_its_three_files() {
+    fn baseline_file_list_is_python_s_list_and_the_whole_folder() {
+        let python = python_baseline_sql_files();
+        assert!(!python.is_empty(), "Python's list is empty");
+        assert_eq!(BASELINE_SQL_FILES, python.as_slice());
+
+        let mut folder: Vec<String> = std::fs::read_dir(baseline_sql_folder())
+            .expect("read the baseline SQL folder")
+            .map(|entry| {
+                entry
+                    .expect("baseline SQL folder entry")
+                    .file_name()
+                    .into_string()
+                    .expect("UTF-8 file name")
+            })
+            .filter(|name| name.ends_with(".sql"))
+            .collect();
+        folder.sort();
+        assert_eq!(BASELINE_SQL_FILES, folder.as_slice());
+    }
+
+    /// Migration 1000 is the listed files as they are on disk, concatenated
+    /// in list order, and its checksum is Python's rule
+    /// (`horsies/core/baseline/migration.py`, `baseline_checksum`): SHA-384
+    /// of the UTF-8 bytes of that text.
+    #[test]
+    fn baseline_is_one_migration_built_from_every_listed_file() {
+        use sha2::Sha384;
+
         let baseline = &embedded_migrations()[0];
         assert_eq!(baseline.version, BASELINE_MIGRATION_VERSION);
         assert_eq!(baseline.description.as_ref(), "baseline");
-        let tables = BASELINE_TABLES_SQL;
-        let indexes = BASELINE_INDEXES_SQL;
-        let functions = BASELINE_INTERIM_FUNCTIONS_SQL;
+        let on_disk: String = BASELINE_SQL_FILES
+            .iter()
+            .map(|name| {
+                let path = baseline_sql_folder().join(name);
+                std::fs::read_to_string(&path)
+                    .unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
+            })
+            .collect();
+        assert_eq!(baseline.sql.as_ref(), on_disk);
         assert_eq!(
-            baseline.sql.as_ref(),
-            format!("{tables}{indexes}{functions}")
+            baseline.checksum.as_ref(),
+            Sha384::digest(on_disk.as_bytes()).as_slice()
         );
-        assert!(tables.contains(&format!("CREATE TABLE {MIGRATIONS_TABLE} (")));
+        assert!(BASELINE_TABLES_SQL.contains(&format!("CREATE TABLE {MIGRATIONS_TABLE} (")));
         let versions: Vec<i64> = embedded_migrations().iter().map(|m| m.version).collect();
         let mut sorted = versions.clone();
         sorted.sort_unstable();
@@ -679,6 +802,56 @@ mod tests {
             }
             other => panic!("expected Dirty, got {other:?}"),
         }
+        database.drop().await;
+    }
+
+    /// Migration 1000 publishes the history readers: on a fresh database
+    /// every rendered reader exists and is current, and the detail reader
+    /// answers an unknown id with no row (Python
+    /// `tests/integration/test_baseline_install.py`,
+    /// `test_install_returns_with_the_history_readers_published`).
+    #[tokio::test]
+    #[serial]
+    async fn fresh_database_has_its_history_readers_after_migration() {
+        use crate::core::history::reads::publisher::rendered_reader_signatures;
+
+        let database = MigrationTestDatabase::create().await;
+        run_horsies_migrations(&database.pool).await.unwrap();
+
+        let signatures: Vec<String> = rendered_reader_signatures().to_vec();
+        let missing: Vec<String> = sqlx::query_scalar(
+            "SELECT reader.signature FROM unnest($1::text[]) AS reader(signature) \
+             WHERE to_regprocedure(reader.signature) IS NULL ORDER BY 1",
+        )
+        .bind(signatures)
+        .fetch_all(&database.pool)
+        .await
+        .unwrap();
+        assert!(missing.is_empty(), "missing readers: {missing:?}");
+
+        let mut connection = database.pool.acquire().await.unwrap();
+        assert!(!StagedLoaderPublisher
+            .needs_republication(&mut connection)
+            .await
+            .unwrap());
+        let manifest: Vec<String> = sqlx::query_scalar(
+            "SELECT leaf_name FROM horsies_task_lookup_manifest ORDER BY probe_position",
+        )
+        .fetch_all(&mut *connection)
+        .await
+        .unwrap();
+        assert_eq!(
+            manifest,
+            vec!["horsies_task_history_forever_open".to_owned()]
+        );
+        let detail_rows: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM horsies_task_detail_staged($1)")
+                .bind(Uuid::new_v4())
+                .fetch_one(&mut *connection)
+                .await
+                .unwrap();
+        assert_eq!(detail_rows, 0);
+        drop(connection);
         database.drop().await;
     }
 
