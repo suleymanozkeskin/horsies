@@ -99,6 +99,19 @@ fn effective_claim_lease_ms(app_config: &AppConfig) -> u32 {
         .unwrap_or(crate::core::defaults::DEFAULT_CLAIM_LEASE_MS)
 }
 
+/// Bound of one attempt of the database start steps (Python
+/// `_start_with_resilience_config`: `asyncio.wait_for(self.start(), 30.0)`).
+const START_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How the worker start ended without an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartOutcome {
+    /// The database steps completed; the worker goes on to listen and claim.
+    Started,
+    /// A stop was requested while a retry waited; the worker does not start.
+    StopRequested,
+}
+
 fn compute_ordered_queues(
     queues: &[String],
     queue_priorities: &std::collections::HashMap<String, i32>,
@@ -297,11 +310,10 @@ impl Worker {
         self.run().await
     }
 
-    /// Run the worker until cancelled or a fatal error occurs.
-    pub async fn run(&self) -> Result<(), WorkerError> {
-        // Fleet authorization and partition coverage precede every runtime
-        // surface: no LISTEN, heartbeat, or claim may race an incomplete
-        // cutover or a missing current-hour heartbeat leaf.
+    /// Authorize the schema and ensure the partition coverage of the
+    /// current period: the database steps of the worker start. It does not
+    /// retry.
+    async fn start_database(&self) -> Result<(), WorkerError> {
         self.broker.ensure_schema_initialized().await?;
         let declared_classes: Vec<DeclaredRetentionClass> = self
             .app_config
@@ -330,6 +342,59 @@ impl Worker {
                     "task-history startup coverage refused: {outcome:?}"
                 )));
             }
+        }
+        Ok(())
+    }
+
+    /// Run [`Worker::start_database`] with each attempt bounded at
+    /// [`START_ATTEMPT_TIMEOUT`]. A timed-out attempt and a retryable error
+    /// are retried with the resilience backoff; a refusal, or a retryable
+    /// error after the retry budget, is returned. A stop request during a
+    /// backoff wait ends the start without an error.
+    async fn start_database_with_resilience(&self) -> Result<StartOutcome, WorkerError> {
+        let mut backoff = RetryBackoff::from_config(&self.app_config.resilience);
+        loop {
+            let error =
+                match tokio::time::timeout(START_ATTEMPT_TIMEOUT, self.start_database()).await {
+                    Ok(Ok(())) => return Ok(StartOutcome::Started),
+                    Ok(Err(error)) if !error.is_retryable() => return Err(error),
+                    Ok(Err(error)) => error,
+                    Err(_elapsed) => WorkerError::StartTimedOut {
+                        bound: START_ATTEMPT_TIMEOUT,
+                    },
+                };
+            if !backoff.can_retry() {
+                tracing::error!(
+                    %error,
+                    attempts = backoff.attempts(),
+                    "worker start failed and its retries are exhausted",
+                );
+                return Err(error);
+            }
+            let delay = backoff.next_delay_seconds();
+            tracing::error!(
+                %error,
+                attempt = backoff.attempts(),
+                delay_s = format!("{:.1}", delay),
+                "worker start failed; retrying",
+            );
+            tokio::select! {
+                _ = self.cancel.cancelled() => return Ok(StartOutcome::StopRequested),
+                _ = tokio::time::sleep(Duration::from_secs_f64(delay)) => {}
+            }
+        }
+    }
+
+    /// Run the worker until cancelled or a fatal error occurs.
+    pub async fn run(&self) -> Result<(), WorkerError> {
+        // Fleet authorization and partition coverage precede every runtime
+        // surface: no LISTEN, heartbeat, or claim may race an incomplete
+        // install or a missing current-hour heartbeat leaf. A transient
+        // failure or a slow attempt is retried with backoff (Python
+        // `_start_with_resilience_config`).
+        match self.start_database_with_resilience().await? {
+            StartOutcome::Started => {}
+            StartOutcome::StopRequested => return Ok(()),
         }
 
         // Print the startup banner before any log lines.
@@ -1497,13 +1562,19 @@ mod tests {
             .find("pub async fn run(&self)")
             .expect("Worker::run source")
             .to_owned()..];
-        let schema = run
+        let start = run
+            .find("self.start_database_with_resilience().await")
+            .expect("database start with retry");
+        let database = &source[source
+            .find("async fn start_database(&self)")
+            .expect("database start steps")..];
+        let schema = database
             .find("ensure_schema_initialized().await")
             .expect("schema authorization");
-        let coverage = run
+        let coverage = database
             .find("ensure_startup_coverage_in_pool(")
             .expect("startup partition coverage");
-        let session_pool = run[coverage..]
+        let session_pool = database[coverage..]
             .find("self.broker.session_pool()")
             .map(|offset| coverage + offset)
             .expect("startup coverage session pool");
@@ -1521,11 +1592,22 @@ mod tests {
         assert!(reaper_call.contains("self.broker.session_pool().clone()"));
         assert!(schema < coverage);
         assert!(coverage < session_pool);
-        assert!(session_pool < banner);
-        assert!(coverage < banner);
-        assert!(coverage < listener);
-        assert!(coverage < heartbeats);
-        assert!(coverage < claims);
+        assert!(start < banner);
+        assert!(start < listener);
+        assert!(start < heartbeats);
+        assert!(start < claims);
+    }
+
+    /// A start attempt that does not finish in time is retryable, as in
+    /// Python, where `asyncio.TimeoutError` takes the retry path.
+    #[test]
+    fn a_timed_out_start_attempt_is_retryable() {
+        let error = WorkerError::StartTimedOut {
+            bound: START_ATTEMPT_TIMEOUT,
+        };
+        assert!(error.is_retryable());
+        assert_eq!(START_ATTEMPT_TIMEOUT, Duration::from_secs(30));
+        assert!(!WorkerError::Config("coverage refused".to_owned()).is_retryable());
     }
 
     /// Python `test_worker_helpers.py::test_hard_cap_returns_default_lease`:
