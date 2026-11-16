@@ -10,13 +10,15 @@
 //! The host speaks the same frames as the Python child and gives the same
 //! guarantees: the start write and the finalizing marker through the core,
 //! a result envelope only after the body stopped, the deadline reports of
-//! each seat kind, and the protocol's exit codes.
+//! each seat kind, the reports of work a body left ([`spawn_in_run`]), and
+//! the protocol's exit codes.
 
 mod args;
 mod host;
 mod link;
 mod rss;
 mod run;
+mod run_work;
 mod seats;
 
 #[cfg(test)]
@@ -24,3 +26,4 @@ mod tests;
 
 pub use args::{child_mode, ChildArgs, ChildArgsError, ChildMode, CHILD_MODE_ARGUMENT};
 pub use host::{child_command, run_child_host, ChildApp, ChildHostExit, OrphanSelfHeal};
+pub use run_work::{spawn_in_run, RunSpawnRefused, MAX_RUN_WORK};
