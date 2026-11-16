@@ -8,7 +8,7 @@
 //! | `Reported(result)`, a value | the fused success of a plain task, or the workflow success |
 //! | `Reported(result)`, a task error | the failed attempt, with the retry the policy admits for its code |
 //! | `Reported(result)` that does not read as the envelope | the failed attempt, `WORKER_SERIALIZATION_ERROR`, no retry |
-//! | `Reported(stopped before running)` | none; an expired workflow task replays phase 2 |
+//! | `Reported(stopped before running)` | none; an expired workflow task replays phase 2; an unconfirmed start releases the claim |
 //! | `Reported(worker failure)` | the failed attempt, `BROKER_ERROR`, no retry |
 //! | `TimedOut`, `KilledForLoop`, `Crashed` | the failed attempt with `TASK_TIMEOUT`, the loop code or `WORKER_CRASHED`, the retry the policy admits, at the placement of the end; a row that is still CLAIMED is released |
 //! | `EndUnknown` | none: stale recovery or the lease decides the row |
@@ -552,18 +552,30 @@ impl OutcomeWriter {
         }
     }
 
-    /// The child stopped before RUNNING and wrote what the case needs. An
-    /// expired workflow task replays phase 2 (Python `classify.py`).
+    /// The child stopped before RUNNING; no task code ran (Python
+    /// `classify.py`).
+    ///
+    /// - An expired workflow task replays phase 2.
+    /// - An unconfirmed start releases the claim at once with the fenced
+    ///   release (Python `ReleaseUnconfirmedClaim`): the row goes back to the
+    ///   queue with its class only while it is CLAIMED by this worker at this
+    ///   claim generation. A row outside the fence, such as a start that
+    ///   committed before its reply was lost, is left to recovery. A release
+    ///   that fails is logged, and the claim lease returns the row.
+    /// - Every other stop wrote what its case needs in the child.
     async fn after_stop(&self, task: &ClaimedTask, reason: StopReason) -> Settlement {
         match (reason, task.kind.is_workflow_task()) {
             (StopReason::TaskExpired, true) => {
                 self.phase_two(task, false, false).await;
                 Settlement::NothingOwed
             }
+            (StopReason::OwnershipUnconfirmed, _) => {
+                self.release(task, "the start of the attempt was not confirmed")
+                    .await
+            }
             (
                 StopReason::TaskExpired
                 | StopReason::ClaimLost
-                | StopReason::OwnershipUnconfirmed
                 | StopReason::WorkflowStopped
                 | StopReason::NodeNotLinked,
                 _,

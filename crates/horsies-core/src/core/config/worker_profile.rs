@@ -252,7 +252,7 @@ impl ResolvedPool {
 ///   by default: a write of the child is one statement in autocommit, so a
 ///   check doubles its round trips. With it off, a dead pooled connection
 ///   fails the write that takes it: the RUNNING update ends as
-///   `OWNERSHIP_UNCONFIRMED` and the claim lease returns the task.
+///   `OWNERSHIP_UNCONFIRMED` and the worker releases the claim at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IsolatedPool {

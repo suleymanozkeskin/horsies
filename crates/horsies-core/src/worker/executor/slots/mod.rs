@@ -30,6 +30,8 @@ pub mod shared_stop;
 #[cfg(test)]
 mod claim_plan_tests;
 #[cfg(test)]
+mod outcome_tests;
+#[cfg(test)]
 mod shared_pool_tests;
 #[cfg(test)]
 mod shared_rules_tests;
