@@ -300,6 +300,17 @@ impl<P> SeatRuns<P> {
         self.runs.values()
     }
 
+    /// What the slot keeps with each run, to change. The stop reports
+    /// change only through the frame rules.
+    pub fn attached_mut(&mut self) -> impl Iterator<Item = &mut P> {
+        self.runs.values_mut().map(|seat| &mut seat.attached)
+    }
+
+    /// What the slot keeps with run `dispatch`, to change.
+    pub fn attached_of(&mut self, dispatch: DispatchNumber) -> Option<&mut P> {
+        self.runs.get_mut(&dispatch).map(|seat| &mut seat.attached)
+    }
+
     /// Drop every run, and return them in dispatch order.
     pub fn drain(&mut self) -> Vec<SeatRun<P>> {
         std::mem::take(&mut self.runs).into_values().collect()
