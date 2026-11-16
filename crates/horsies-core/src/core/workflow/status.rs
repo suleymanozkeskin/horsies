@@ -8,7 +8,10 @@ use serde::{Deserialize, Serialize};
 ///                      → PAUSED (on task failure with on_error=PAUSE)
 ///                      → CANCELLED (user requested)
 ///                      → EXPIRED (paused past the configured lifetime)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_macros::CodeCatalog,
+)]
+#[code_catalog(module = "status", base = "str_enum")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum WorkflowStatus {
     /// Created but not yet started.
@@ -82,7 +85,10 @@ impl std::fmt::Display for WorkflowStatus {
 ///   PENDING → READY → ENQUEUED → RUNNING → COMPLETED
 ///                                         → FAILED
 ///                   → SKIPPED (deps failed and allow_failed_deps=False)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, horsies_macros::CodeCatalog,
+)]
+#[code_catalog(module = "status", base = "str_enum")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum WorkflowTaskStatus {
     /// Waiting for dependencies to become terminal.
