@@ -1515,6 +1515,7 @@ fn result_wire_row(location: &str) -> ResultWireRow {
         result_envelope_version: Some(1),
         result_payload: Some(b"1".to_vec()),
         result_digest: Some(vec![3; 32]),
+        task_name: Some("p4.history".to_owned()),
     }
 }
 
@@ -1532,6 +1533,7 @@ fn result_wire_decode_is_typed_and_fail_closed() {
         )
         .unwrap(),
         TaskResultRead::Live(LiveTaskResult {
+            task_name: "p4.history".to_owned(),
             status: "RUNNING".to_owned(),
             result: Some("{}".to_owned()),
             failed_reason: None,
@@ -1542,6 +1544,7 @@ fn result_wire_decode_is_typed_and_fail_closed() {
     else {
         panic!("history row did not decode as history");
     };
+    assert_eq!(stored.task_name, "p4.history");
     assert_eq!(
         stored.payload,
         HistoryResultPayload::Stored {
@@ -1573,6 +1576,14 @@ fn result_wire_decode_is_typed_and_fail_closed() {
         ResultWireRow {
             result_digest: None,
             ..result_wire_row("HISTORY")
+        },
+        ResultWireRow {
+            task_name: None,
+            ..result_wire_row("HISTORY")
+        },
+        ResultWireRow {
+            task_name: None,
+            ..result_wire_row("LIVE")
         },
     ] {
         assert!(matches!(
@@ -1632,6 +1643,7 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
             .await
             .expect("read live result"),
         TaskResultRead::Live(LiveTaskResult {
+            task_name: "p4.live".to_owned(),
             status: "PENDING".to_owned(),
             result: None,
             failed_reason: None,
@@ -1643,6 +1655,7 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
     else {
         panic!("retained task did not read as history");
     };
+    assert_eq!(failed.task_name, "p4.history");
     assert_eq!(failed.status, "FAILED");
     assert_eq!(failed.failed_reason.as_deref(), Some("failed"));
     assert_eq!(failed.envelope_version, 1);
@@ -1703,7 +1716,7 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
         "CREATE OR REPLACE FUNCTION horsies_task_result_staged(p_task_id uuid)
          RETURNS TABLE (location text, status text, live_result text, failed_reason text,
                         result_envelope_version smallint, result_payload bytea,
-                        result_digest bytea)
+                        result_digest bytea, task_name text)
          LANGUAGE plpgsql STABLE AS
          $$ BEGIN PERFORM core_p4_function_that_does_not_exist(); END $$",
     )
