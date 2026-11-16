@@ -8,6 +8,8 @@ pub mod error;
 pub mod execution;
 pub mod executor;
 pub mod heartbeat;
+pub mod memory_fit;
+pub mod profile_fit;
 pub mod recovery;
 pub mod retry;
 pub mod runner_beats;

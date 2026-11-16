@@ -23,6 +23,9 @@ use crate::worker::config::WorkerConfig;
 use crate::worker::error::WorkerError;
 use crate::worker::execution;
 use crate::worker::heartbeat::spawn_claimer_heartbeat;
+use crate::worker::profile_fit::{
+    log_connection_fit_at_boot, log_memory_fit_at_boot, SelectedProfile, WorkerProfileSelection,
+};
 use crate::worker::recovery::{new_reaper_health, spawn_reaper};
 use crate::worker::runner_beats::{
     launch_runner_beats, runner_beat_pool, BeatSender, LiveDispatches, StaleRunningRecovery,
@@ -261,6 +264,8 @@ pub struct Worker {
     /// Dispatches whose rows the runner-beat writer beats, with their claim
     /// generations.
     live_dispatches: LiveDispatches,
+    /// The profile the worker runs; its fit is logged at boot.
+    profile: WorkerProfileSelection,
 }
 
 impl Worker {
@@ -292,7 +297,17 @@ impl Worker {
             hostname,
             in_dispatch: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             live_dispatches: LiveDispatches::default(),
+            profile: WorkerProfileSelection::InProcess,
         })
+    }
+
+    /// Run this worker on `selected`, the profile that the host resolved
+    /// from `--profile`. At boot the worker logs the fit of the profile to
+    /// the machine and to the server (Python `horsies/core/cli.py:886`,
+    /// `:955`); the fit never stops the start.
+    pub fn with_profile(mut self, selected: SelectedProfile) -> Self {
+        self.profile = WorkerProfileSelection::Selected(selected);
+        self
     }
 
     /// Run the worker with automatic SIGINT/SIGTERM signal handling.
@@ -394,6 +409,14 @@ impl Worker {
 
     /// Run the worker until cancelled or a fatal error occurs.
     pub async fn run(&self) -> Result<(), WorkerError> {
+        // Machine facts of the profile: a warning, never a refusal (Python
+        // `_log_memory_fit`, before the schema step).
+        match &self.profile {
+            WorkerProfileSelection::InProcess => {}
+            WorkerProfileSelection::Selected(selected) => {
+                let _logged = log_memory_fit_at_boot(selected);
+            }
+        }
         // Fleet authorization and partition coverage precede every runtime
         // surface: no LISTEN, heartbeat, or claim may race an incomplete
         // install or a missing current-hour heartbeat leaf. A transient
@@ -402,6 +425,17 @@ impl Worker {
         match self.start_database_with_resilience().await? {
             StartOutcome::Started => {}
             StartOutcome::StopRequested => return Ok(()),
+        }
+
+        // Server facts of the profile, before any claim: a warning, never a
+        // refusal (Python `_log_connection_fit`).
+        match &self.profile {
+            WorkerProfileSelection::InProcess => {}
+            WorkerProfileSelection::Selected(selected) => {
+                let _logged =
+                    log_connection_fit_at_boot(selected, &self.app_config.broker, &self.broker)
+                        .await;
+            }
         }
 
         // Print the startup banner before any log lines.
@@ -1617,6 +1651,32 @@ mod tests {
         let _: fn(&Worker) = |w| w.request_stop();
         let _: fn(&Worker) -> CancellationToken = |w| w.cancel_token();
         let _: fn(&Worker) -> &str = |w| w.worker_id();
+    }
+
+    /// Python `horsies/core/cli.py:886` and `:955`: the memory fit of the
+    /// profile is logged before the database start, the connection fit after
+    /// it and before the banner and the claim loop; neither returns an error.
+    #[test]
+    fn the_profile_fit_is_logged_at_boot_before_any_claim() {
+        let source = include_str!("worker.rs");
+        let run = &source[source
+            .find("pub async fn run(&self)")
+            .expect("Worker::run source")..];
+        let memory = run
+            .find("log_memory_fit_at_boot(selected)")
+            .expect("memory fit at boot");
+        let start = run
+            .find("self.start_database_with_resilience().await")
+            .expect("database start with retry");
+        let connections = run
+            .find("log_connection_fit_at_boot(selected, &self.app_config.broker, &self.broker)")
+            .expect("connection fit at boot");
+        let banner = run.find("print_banner(").expect("startup banner");
+        let claims = run.find("claim_batch(").expect("claim loop");
+        assert!(memory < start);
+        assert!(start < connections);
+        assert!(connections < banner);
+        assert!(connections < claims);
     }
 
     #[test]
