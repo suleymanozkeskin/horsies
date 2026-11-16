@@ -166,7 +166,62 @@ jobs:
         working-directory: webui
         run: bun run build
 
+  # PRs into program/0.8.0 change the core and the Python package while the
+  # core is merged without compiling (it is built once the Python bridge
+  # exists). This job decides which Rust jobs those PRs need, and refuses any
+  # change to the frozen Rust client crate. Other events run every job.
+  scope:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      run_rust: ${{ steps.decide.outputs.run_rust }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Decide the Rust jobs and guard the frozen client
+        id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT_NAME" != "pull_request" ] || [ "$BASE_REF" != "program/0.8.0" ]; then
+            echo 'run_rust=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          base="$(git merge-base "$BASE_SHA" HEAD)"
+          if ! git diff --quiet "$base" HEAD -- crates/horsies/; then
+            echo '::error::This PR changes crates/horsies/, the frozen Rust client. It stays unchanged until it is rebuilt on the core.'
+            git diff --stat "$base" HEAD -- crates/horsies/
+            exit 1
+          fi
+          if git diff --quiet "$base" HEAD -- crates/horsies-macros/ rust/ Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml clippy.toml; then
+            echo 'run_rust=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'run_rust=true' >> "$GITHUB_OUTPUT"
+          fi
+
+  rust-fmt:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install the Rust toolchain
+        run: |
+          rustup toolchain install
+          rustc --version
+      - name: Check formatting of every crate, the core included
+        run: cargo fmt --all --check
+
   rust:
+    needs: scope
+    if: needs.scope.outputs.run_rust == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -228,6 +283,8 @@ jobs:
         run: cargo test -p horsies-core
 
   rust-showcase:
+    needs: scope
+    if: needs.scope.outputs.run_rust == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -283,6 +340,8 @@ jobs:
         run: cargo test -p acme-showcase --features web --all-targets
 
   rust-webui:
+    needs: scope
+    if: needs.scope.outputs.run_rust == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
