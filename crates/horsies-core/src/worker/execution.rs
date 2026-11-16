@@ -1186,7 +1186,7 @@ WHERE t.id = target.id
 
 /// Stamp the finalization handoff only for the current owner and claim
 /// generation. One statement in autocommit: its row lock ends with it.
-async fn mark_task_finalizing(
+pub(crate) async fn mark_task_finalizing(
     pool: &sqlx::PgPool,
     task_id: Uuid,
     worker_id: &str,

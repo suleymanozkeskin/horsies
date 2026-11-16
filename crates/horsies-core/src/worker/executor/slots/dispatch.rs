@@ -45,19 +45,9 @@ impl fmt::Display for ExecutionClass {
     }
 }
 
-/// Whether a task is a node of a workflow. A workflow task owes phase 2
-/// after its terminal write.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TaskKind {
-    Plain,
-    WorkflowTask,
-}
-
-impl TaskKind {
-    pub fn is_workflow_task(self) -> bool {
-        matches!(self, Self::WorkflowTask)
-    }
-}
+/// Whether a task is a node of a workflow: one type with the frames. A
+/// workflow task owes phase 2 after its terminal write.
+pub use crate::worker::executor::protocol::TaskKind;
 
 /// The retry facts of a claimed row. They cannot change inside one claim
 /// generation: only the two retry writers change `retry_count`, and both end
