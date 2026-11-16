@@ -131,6 +131,26 @@ pub(crate) struct StoredWorkerState {
     pub(crate) class_capacity: Value,
 }
 
+/// A row of the worker list statement: a stored worker state and
+/// `read_at`, the `statement_timestamp()` of that statement. Every row of
+/// one list read has the same `read_at`.
+#[derive(Debug, Clone, FromRow)]
+pub(crate) struct ListedWorkerStateRow {
+    #[sqlx(flatten)]
+    pub(crate) stored: StoredWorkerState,
+    pub(crate) read_at: DateTime<Utc>,
+}
+
+/// A worker's latest snapshot and the database clock of the list statement
+/// that read it. The web worker list measures the snapshot age, the
+/// staleness and the uptime from `read_at`, so the web host clock does not
+/// enter them.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ListedWorkerState {
+    pub(crate) snapshot: WorkerStateSnapshot,
+    pub(crate) read_at: DateTime<Utc>,
+}
+
 /// A JSON column of a worker state row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkerStateColumn {
@@ -271,6 +291,22 @@ pub(crate) fn read_worker_snapshot(
             message: format!("{operation} failed: {unreadable}"),
             retryable: false,
         })
+}
+
+/// The listed states of the worker list rows, for the read `operation`.
+/// Each keeps the `read_at` of its row. The first row that does not read
+/// fails the read, as in [`read_worker_snapshots`].
+pub(crate) fn read_listed_worker_states(
+    operation: &str,
+    rows: Vec<ListedWorkerStateRow>,
+) -> BrokerResult<Vec<ListedWorkerState>> {
+    rows.into_iter()
+        .map(|row| {
+            let read_at = row.read_at;
+            read_worker_snapshot(operation, row.stored)
+                .map(|snapshot| ListedWorkerState { snapshot, read_at })
+        })
+        .collect()
 }
 
 /// The exclusive bound of a stored count: it stays in the range of a
@@ -469,5 +505,39 @@ mod tests {
         assert!(failed
             .message
             .starts_with("list_worker_states failed: worker w1 snapshot at "));
+    }
+
+    /// Each listed state keeps the `read_at` of its row; an unreadable row
+    /// fails the list read as it fails the other worker state reads.
+    #[test]
+    fn listed_states_keep_the_read_time_of_their_rows() {
+        let read_at = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 11, 16, 12, 0, 30).unwrap();
+
+        let listed = read_listed_worker_states(
+            "list_worker_states",
+            vec![ListedWorkerStateRow {
+                stored: stored_row(),
+                read_at,
+            }],
+        )
+        .expect("a readable row");
+
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].read_at, read_at);
+        assert_eq!(listed[0].snapshot.worker_id, "w1");
+
+        let mut unreadable = stored_row();
+        unreadable.slots_down = serde_json::json!("down");
+        let failed = read_listed_worker_states(
+            "list_worker_states",
+            vec![ListedWorkerStateRow {
+                stored: unreadable,
+                read_at,
+            }],
+        )
+        .expect_err("an unreadable row");
+
+        assert_eq!(failed.code, BrokerErrorCode::MonitoringQueryFailed);
+        assert!(!failed.retryable);
     }
 }

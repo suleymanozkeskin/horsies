@@ -219,6 +219,13 @@ impl LiveDispatches {
             .unzip()
     }
 
+    /// The ids of the held tasks, in ticket order, for tests that check
+    /// what the beats cover.
+    #[cfg(test)]
+    pub(crate) fn held_task_ids(&self) -> Vec<Uuid> {
+        self.snapshot().0
+    }
+
     /// Refuse every later hold, and return and remove what is held, in
     /// ticket order. A second call returns nothing.
     fn close(&self) -> Vec<LiveDispatch> {
@@ -886,6 +893,9 @@ fn watch_and_log(late_after: Duration, coverage: &SharedCoverage, stop: &Receive
         }
     }
 }
+
+#[cfg(test)]
+mod fail_closed_tests;
 
 #[cfg(test)]
 mod tests {

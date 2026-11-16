@@ -18,7 +18,7 @@ use super::support::{
     workflow_status, IsolatedDatabase, LiveStatus, NodeSeed, ParentLink, WorkflowDoneListener,
     WorkflowSeed, PORT_QUEUE, WORKER,
 };
-use crate::broker::terminalization::terminalize;
+use crate::broker::terminalization::on_test_pool::terminalize;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::lifecycle::outcomes::{GuardEvidence, ObservedWorkflowState};
@@ -814,11 +814,11 @@ async fn a_crashed_worker_fails_its_nodes_and_allow_failed_deps_nodes_run() {
     assert_eq!(failed, 2);
     let _summary = drive_phase2_recovery(
         &db.pool,
+        &crate::broker::PostgresBroker::from_pool(db.pool.clone()),
         &registry,
         0,
         100,
         3,
-        &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
     .await

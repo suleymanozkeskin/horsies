@@ -81,7 +81,9 @@ outer = app.get_result("task-uuid-here", timeout_ms=5000)
 
 Find RUNNING tasks whose workers have not sent a heartbeat within the threshold. Indicates a crashed or unresponsive worker.
 
-**Returns:** `Ok(list[dict])` with keys: `id`, `worker_hostname`, `worker_pid`, `worker_process_name`, `last_heartbeat`, `started_at`, `task_name`.
+**Returns:** `Ok(list[dict])` with keys: `id`, `worker_hostname`, `worker_pid`, `worker_process_name`, `last_heartbeat`, `started_at`, `task_name`. Rows are ordered by `last_heartbeat` (rows with no heartbeat first), then by `id`. At most 10,000 rows (`TASK_LIST_ROW_BOUND`) come back; when more rows match, the first 10,000 come back and a warning is logged.
+
+**Errors:** `INVALID_INPUT` when `stale_threshold_minutes` is not an `int` from 0 to 525,600 (one year); nothing is read. `MONITORING_QUERY_FAILED` when the read fails.
 
 ```python
 result = await broker.get_stale_tasks(stale_threshold_minutes=5)
@@ -98,7 +100,7 @@ For per-worker load, configuration, and liveness, use the typed [Worker & Databa
 
 Find PENDING tasks that exceeded their `good_until` deadline before being picked up.
 
-**Returns:** `Ok(list[dict])` with keys: `id`, `task_name`, `queue_name`, `good_until`, `expired_for`.
+**Returns:** `Ok(list[dict])` with keys: `id`, `task_name`, `queue_name`, `priority`, `sent_at`, `enqueued_at`, `good_until`, `expired_for`. Rows are ordered by `good_until`, oldest first, then by `id`. At most 10,000 rows (`TASK_LIST_ROW_BOUND`) come back; when more rows match, the first 10,000 come back and a warning is logged.
 
 ```python
 result = await broker.get_expired_tasks()

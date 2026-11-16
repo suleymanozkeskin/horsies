@@ -20,6 +20,7 @@ use super::support::{
     task_node, try_finish_task, workflow_status, IsolatedDatabase, NodeSeed, Notifications,
     WorkflowSeed, PORT_QUEUE,
 };
+use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::workflow::node::JoinType;
@@ -189,7 +190,7 @@ async fn promoted_nodes_and_their_tasks_carry_the_transaction_time_and_each_inse
         .await
         .task_id
         .expect("the root has a task");
-    let result_json = finish_phase1(&db.pool, root_task, &ok(serde_json::json!(0))).await;
+    let _ = finish_phase1(&db.pool, root_task, &ok(serde_json::json!(0))).await;
     let queue_channel = format!("task_queue_{PORT_QUEUE}");
     let mut listener = Notifications::listen(
         &db.pool,
@@ -204,12 +205,9 @@ async fn promoted_nodes_and_their_tasks_carry_the_transaction_time_and_each_inse
     .await;
 
     on_workflow_task_complete(
-        &db.pool,
+        &PostgresBroker::from_pool(db.pool.clone()),
         root_task,
-        &result_json,
-        true,
         &WorkflowSpecRegistry::new(),
-        &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
     .await
