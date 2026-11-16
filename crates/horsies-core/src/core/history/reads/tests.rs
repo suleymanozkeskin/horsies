@@ -306,6 +306,15 @@ fn test_window() -> HistoryWindow {
 }
 
 #[test]
+fn history_window_is_increasing_and_at_most_thirty_days() {
+    let lower = timestamp("2026-08-01T00:00:00Z");
+    assert!(HistoryWindow::new(lower, lower + Duration::days(30)).is_ok());
+    assert!(HistoryWindow::new(lower, lower + Duration::days(30) + Duration::seconds(1)).is_err());
+    assert!(HistoryWindow::new(lower, lower).is_err());
+    assert!(HistoryWindow::new(lower + Duration::days(1), lower).is_err());
+}
+
+#[test]
 fn page_facet_and_aggregate_builders_pin_bounds_filters_columns_and_sorts() {
     assert_eq!(HISTORY_SUMMARY_COLUMNS.len(), 18);
     for envelope in ["result_payload", "attempt_snapshot", "rerun_input_inline"] {
