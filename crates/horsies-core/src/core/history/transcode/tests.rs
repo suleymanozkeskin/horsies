@@ -33,7 +33,7 @@ use crate::core::history::maintenance::coverage::{ensure_partition_coverage, Cov
 use crate::core::history::names::{LEAF_LOCK_KEY_FUNCTION, TASK_HISTORY_PARENT};
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
 
-const P10_DATABASE_PREFIX: &str = "horsies_p10_transcode_";
+const P10_DATABASE_PREFIX: &str = "core_p10_transcode_";
 
 fn test_db_url() -> String {
     if let Ok(url) = std::env::var("DATABASE_URL") {
@@ -67,14 +67,14 @@ impl P10Database {
         let mut admin = PgConnection::connect_with(&base_options.clone().database("postgres"))
             .await
             .unwrap();
-        sqlx::query("SELECT pg_advisory_lock(hashtext('horsies_p10_transcode_setup'))")
+        sqlx::query("SELECT pg_advisory_lock(hashtext('core_p10_transcode_setup'))")
             .execute(&mut admin)
             .await
             .unwrap();
         let stale: Vec<String> = sqlx::query_scalar(
             "SELECT d.datname FROM pg_database AS d
-             WHERE left(d.datname, length('horsies_p10_transcode_')) =
-                   'horsies_p10_transcode_'
+             WHERE left(d.datname, length('core_p10_transcode_')) =
+                   'core_p10_transcode_'
                AND NOT EXISTS (
                    SELECT 1 FROM pg_stat_activity AS a WHERE a.datname = d.datname
                )
@@ -107,12 +107,11 @@ impl P10Database {
             .connect_with(base_options.clone().database(&name))
             .await
             .unwrap();
-        let unlocked: bool = sqlx::query_scalar(
-            "SELECT pg_advisory_unlock(hashtext('horsies_p10_transcode_setup'))",
-        )
-        .fetch_one(&mut admin)
-        .await
-        .unwrap();
+        let unlocked: bool =
+            sqlx::query_scalar("SELECT pg_advisory_unlock(hashtext('core_p10_transcode_setup'))")
+                .fetch_one(&mut admin)
+                .await
+                .unwrap();
         assert!(unlocked);
         run_horsies_migrations(&pool).await.unwrap();
         let mut coverage = pool.begin().await.unwrap();

@@ -475,7 +475,7 @@ impl TestDatabase {
         let base = database_url();
         let base_options = PgConnectOptions::from_str(&base).expect("invalid test database URL");
         let admin_options = base_options.clone().database("postgres");
-        let database_name = format!("horsies_p4_{}", Uuid::new_v4().simple());
+        let database_name = format!("core_p4_{}", Uuid::new_v4().simple());
         let mut admin = PgConnection::connect_with(&admin_options)
             .await
             .expect("connect to postgres admin database");
@@ -536,7 +536,7 @@ fn database_url() -> String {
         .filter_map(|line| line.split_once('='))
         .find_map(|(key, value)| (key.trim() == "DB_PASSWORD").then(|| value.trim()))
         .expect("DB_PASSWORD in workspace .env");
-    format!("postgresql://postgres:{password}@localhost:5432/horsies-rust-port")
+    format!("postgresql://postgres:{password}@localhost:5432/horsies-core")
 }
 
 fn utc_day(value: DateTime<Utc>) -> DateTime<Utc> {
@@ -1704,7 +1704,7 @@ async fn result_reader_resolves_each_location_and_falls_back_while_unpublished()
                         result_envelope_version smallint, result_codec text,
                         result_content_type text, result_payload bytea, result_digest bytea)
          LANGUAGE plpgsql STABLE AS
-         $$ BEGIN PERFORM horsies_p4_function_that_does_not_exist(); END $$",
+         $$ BEGIN PERFORM core_p4_function_that_does_not_exist(); END $$",
     )
     .execute(&mut *connection)
     .await

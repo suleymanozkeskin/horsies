@@ -147,7 +147,7 @@ fn test_db_url() -> String {
                 .map(|(_, v)| v.trim().to_owned())
         })
         .unwrap_or_else(|| "W0rklane".to_owned());
-    format!("postgresql://postgres:{pw}@localhost:5432/horsies-rust-port")
+    format!("postgresql://postgres:{pw}@localhost:5432/horsies-core")
 }
 
 struct P5TestDatabase {
@@ -162,7 +162,7 @@ struct IsolatedTerminalizationTestDatabase {
     name: String,
 }
 
-const ISOLATED_TERMINALIZATION_DATABASE_PREFIX: &str = "horsies_term_iso_";
+const ISOLATED_TERMINALIZATION_DATABASE_PREFIX: &str = "core_term_iso_";
 
 enum IsolatedTerminalizationDatabaseDrop {
     InactiveOnly,
@@ -306,19 +306,19 @@ pub(crate) async fn migrated_pool() -> PgPool {
             let base_options =
                 PgConnectOptions::from_str(&test_db_url()).expect("invalid P5 database URL");
             let admin_options = base_options.clone().database("postgres");
-            let database_name = format!("horsies_p5_matrix_{}", Uuid::new_v4().simple());
+            let database_name = format!("core_p5_matrix_{}", Uuid::new_v4().simple());
             let mut admin = PgConnection::connect_with(&admin_options)
                 .await
                 .expect("connect to P5 admin database");
-            sqlx::query("SELECT pg_advisory_lock(hashtext('horsies_p5_matrix_setup'))")
+            sqlx::query("SELECT pg_advisory_lock(hashtext('core_p5_matrix_setup'))")
                 .execute(&mut admin)
                 .await
                 .expect("lock P5 database setup");
             let stale_databases: Vec<String> = sqlx::query_scalar(
                 "SELECT d.datname
                  FROM pg_database d
-                 WHERE left(d.datname, length('horsies_p5_matrix_')) =
-                       'horsies_p5_matrix_'
+                 WHERE left(d.datname, length('core_p5_matrix_')) =
+                       'core_p5_matrix_'
                    AND NOT EXISTS (
                        SELECT 1 FROM pg_stat_activity a
                        WHERE a.datname = d.datname
@@ -330,7 +330,7 @@ pub(crate) async fn migrated_pool() -> PgPool {
             .expect("list inactive P5 databases");
             for stale_database in stale_databases {
                 let suffix = stale_database
-                    .strip_prefix("horsies_p5_matrix_")
+                    .strip_prefix("core_p5_matrix_")
                     .expect("query enforces P5 database prefix");
                 assert!(
                     suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit()),
@@ -355,12 +355,11 @@ pub(crate) async fn migrated_pool() -> PgPool {
                 .connect_with(generated_options)
                 .await
                 .expect("connect P5 database");
-            let unlocked: bool = sqlx::query_scalar(
-                "SELECT pg_advisory_unlock(hashtext('horsies_p5_matrix_setup'))",
-            )
-            .fetch_one(&mut admin)
-            .await
-            .expect("unlock P5 database setup");
+            let unlocked: bool =
+                sqlx::query_scalar("SELECT pg_advisory_unlock(hashtext('core_p5_matrix_setup'))")
+                    .fetch_one(&mut admin)
+                    .await
+                    .expect("unlock P5 database setup");
             assert!(unlocked, "P5 database setup lock was held");
             run_horsies_migrations(&anchor)
                 .await

@@ -151,14 +151,14 @@ fn database_url() -> String {
         .filter_map(|line| line.split_once('='))
         .find_map(|(key, value)| (key.trim() == "DB_PASSWORD").then(|| value.trim()))
         .expect("DB_PASSWORD in workspace .env");
-    format!("postgresql://postgres:{password}@localhost:5432/horsies-rust-port")
+    format!("postgresql://postgres:{password}@localhost:5432/horsies-core")
 }
 
 #[tokio::test]
 async fn v35_catalog_has_only_move_program_terminal_writers_and_a_live_only_check() {
     let base_options = PgConnectOptions::from_str(&database_url()).expect("test database URL");
     let admin_options = base_options.clone().database("postgres");
-    let database_name = format!("horsies_p5_writer_{}", Uuid::new_v4().simple());
+    let database_name = format!("core_p5_writer_{}", Uuid::new_v4().simple());
     let mut admin = PgConnection::connect_with(&admin_options)
         .await
         .expect("connect admin database");

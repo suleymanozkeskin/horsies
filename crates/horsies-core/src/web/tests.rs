@@ -1068,14 +1068,14 @@ async fn observe_only_construction_runs_no_ddl_or_fleet_gate() {
     let base_options = PgConnectOptions::from_str(&base_url).unwrap();
     let admin_options = base_options.clone().database("postgres");
     let mut admin = PgConnection::connect_with(&admin_options).await.unwrap();
-    sqlx::query("SELECT pg_advisory_lock(hashtext('horsies_w4_noddl_setup'))")
+    sqlx::query("SELECT pg_advisory_lock(hashtext('core_w4_noddl_setup'))")
         .execute(&mut admin)
         .await
         .unwrap();
     let stale: Vec<String> = sqlx::query_scalar(
         "SELECT d.datname
          FROM pg_database d
-         WHERE left(d.datname, length('horsies_w4_noddl_')) = 'horsies_w4_noddl_'
+         WHERE left(d.datname, length('core_w4_noddl_')) = 'core_w4_noddl_'
            AND NOT EXISTS (
                SELECT 1 FROM pg_stat_activity a WHERE a.datname = d.datname
            )
@@ -1085,14 +1085,14 @@ async fn observe_only_construction_runs_no_ddl_or_fleet_gate() {
     .await
     .unwrap();
     for stale_name in stale {
-        let suffix = stale_name.strip_prefix("horsies_w4_noddl_").unwrap();
+        let suffix = stale_name.strip_prefix("core_w4_noddl_").unwrap();
         assert!(suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit()));
         sqlx::query(&format!("DROP DATABASE \"{stale_name}\""))
             .execute(&mut admin)
             .await
             .unwrap();
     }
-    let name = format!("horsies_w4_noddl_{}", Uuid::new_v4().simple());
+    let name = format!("core_w4_noddl_{}", Uuid::new_v4().simple());
     sqlx::query(&format!("CREATE DATABASE \"{name}\""))
         .execute(&mut admin)
         .await
@@ -1107,7 +1107,7 @@ async fn observe_only_construction_runs_no_ddl_or_fleet_gate() {
         .await
         .unwrap();
     let unlocked: bool =
-        sqlx::query_scalar("SELECT pg_advisory_unlock(hashtext('horsies_w4_noddl_setup'))")
+        sqlx::query_scalar("SELECT pg_advisory_unlock(hashtext('core_w4_noddl_setup'))")
             .fetch_one(&mut admin)
             .await
             .unwrap();
@@ -1137,7 +1137,7 @@ async fn observe_only_construction_runs_no_ddl_or_fleet_gate() {
     broker.session_pool().close().await;
     anchor.close().await;
     drop(broker);
-    let suffix = name.strip_prefix("horsies_w4_noddl_").unwrap();
+    let suffix = name.strip_prefix("core_w4_noddl_").unwrap();
     assert!(suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit()));
     sqlx::query(&format!("DROP DATABASE \"{name}\" WITH (FORCE)"))
         .execute(&mut admin)

@@ -694,7 +694,7 @@ mod recovery_index_migration_tests {
                     .map(|(_, value)| value.trim().to_owned())
             })
             .unwrap_or_else(|| "W0rklane".to_owned());
-        format!("postgresql://postgres:{password}@localhost:5432/horsies-rust-port")
+        format!("postgresql://postgres:{password}@localhost:5432/horsies-core")
     }
 
     struct MigrationTestDatabase {
@@ -709,7 +709,7 @@ mod recovery_index_migration_tests {
             let mut admin = PgConnection::connect_with(&base_options.clone().database("postgres"))
                 .await
                 .unwrap();
-            let name = format!("horsies_migration_retry_{}", Uuid::new_v4().simple());
+            let name = format!("core_migration_retry_{}", Uuid::new_v4().simple());
             sqlx::query(&format!("CREATE DATABASE \"{name}\""))
                 .execute(&mut admin)
                 .await

@@ -149,7 +149,7 @@ fn ladder_refuses_fewer_than_two_distinct_commit_points() {
     }
 }
 
-const P9_DATABASE_PREFIX: &str = "horsies_p9_cutover_";
+const P9_DATABASE_PREFIX: &str = "core_p9_cutover_";
 
 fn test_db_url() -> String {
     if let Ok(url) = std::env::var("DATABASE_URL") {
@@ -183,14 +183,14 @@ impl P9Database {
         let mut admin = PgConnection::connect_with(&base_options.clone().database("postgres"))
             .await
             .unwrap();
-        sqlx::query("SELECT pg_advisory_lock(hashtext('horsies_p9_cutover_setup'))")
+        sqlx::query("SELECT pg_advisory_lock(hashtext('core_p9_cutover_setup'))")
             .execute(&mut admin)
             .await
             .unwrap();
         let stale: Vec<String> = sqlx::query_scalar(
             "SELECT d.datname FROM pg_database AS d
-             WHERE left(d.datname, length('horsies_p9_cutover_')) =
-                   'horsies_p9_cutover_'
+             WHERE left(d.datname, length('core_p9_cutover_')) =
+                   'core_p9_cutover_'
                AND NOT EXISTS (
                    SELECT 1 FROM pg_stat_activity AS a WHERE a.datname = d.datname
                )
@@ -224,7 +224,7 @@ impl P9Database {
             .await
             .unwrap();
         let unlocked: bool =
-            sqlx::query_scalar("SELECT pg_advisory_unlock(hashtext('horsies_p9_cutover_setup'))")
+            sqlx::query_scalar("SELECT pg_advisory_unlock(hashtext('core_p9_cutover_setup'))")
                 .fetch_one(&mut admin)
                 .await
                 .unwrap();
