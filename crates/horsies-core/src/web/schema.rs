@@ -1,13 +1,37 @@
 //! Read-only schema compatibility probing for monitoring actions.
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock};
 
-use crate::broker::{expected_schema_version, PostgresBroker, MIGRATIONS_TABLE};
+use crate::broker::core_rows::{column, one_row};
+use crate::broker::{expected_schema_version, BrokerError, PostgresBroker, MIGRATIONS_TABLE};
+use crate::db::{ParameterType, TypedStatement};
+
+/// Whether the migration ledger (`$1`) and the 0.x Python bookkeeping table
+/// exist.
+static SCHEMA_TABLES: TypedStatement = TypedStatement::new(
+    "web_schema_tables",
+    "SELECT to_regclass($1) IS NOT NULL AS migrations_table,
+            to_regclass('horsies_schema_version') IS NOT NULL AS schema_version_table",
+    &[ParameterType::Text],
+);
+
+static STORED_VERSION_SQL: LazyLock<String> = LazyLock::new(|| {
+    format!("SELECT COALESCE(max(version), 0) AS version FROM {MIGRATIONS_TABLE} WHERE success")
+});
+
+/// The highest successful version of the migration ledger.
+static STORED_VERSION: LazyLock<TypedStatement> = LazyLock::new(|| {
+    TypedStatement::new(
+        "web_schema_stored_version",
+        STORED_VERSION_SQL.as_str(),
+        &[],
+    )
+});
 
 pub const SCHEMA_TTL: Duration = Duration::from_secs(60);
 pub const SCHEMA_INCOMPATIBLE: &str = "SCHEMA_INCOMPATIBLE";
@@ -85,7 +109,7 @@ impl SchemaIncompatible {
 
 #[async_trait]
 pub(crate) trait SchemaReader: Send + Sync {
-    async fn read(&self, expected_version: i64) -> Result<SchemaStatus, sqlx::Error>;
+    async fn read(&self, expected_version: i64) -> Result<SchemaStatus, BrokerError>;
 }
 
 struct BrokerSchemaReader {
@@ -94,13 +118,14 @@ struct BrokerSchemaReader {
 
 #[async_trait]
 impl SchemaReader for BrokerSchemaReader {
-    async fn read(&self, expected_version: i64) -> Result<SchemaStatus, sqlx::Error> {
-        let (migrations_table, schema_version_table): (bool, bool) = sqlx::query_as(
-            "SELECT to_regclass($1) IS NOT NULL, to_regclass('horsies_schema_version') IS NOT NULL",
-        )
-        .bind(MIGRATIONS_TABLE)
-        .fetch_one(self.broker.pool())
-        .await?;
+    async fn read(&self, expected_version: i64) -> Result<SchemaStatus, BrokerError> {
+        let rows = self
+            .broker
+            .query_main(&SCHEMA_TABLES.bind().value(&MIGRATIONS_TABLE).finish())
+            .await?;
+        let row = one_row(rows, &SCHEMA_TABLES)?;
+        let migrations_table: bool = column(&row, &SCHEMA_TABLES, "migrations_table")?;
+        let schema_version_table: bool = column(&row, &SCHEMA_TABLES, "schema_version_table")?;
         if !migrations_table {
             return Ok(classify_without_migrations(
                 schema_version_table,
@@ -108,11 +133,10 @@ impl SchemaReader for BrokerSchemaReader {
             ));
         }
 
-        let stored: i64 = sqlx::query_scalar(&format!(
-            "SELECT COALESCE(max(version), 0) FROM {MIGRATIONS_TABLE} WHERE success"
-        ))
-        .fetch_one(self.broker.pool())
-        .await?;
+        let statement: &TypedStatement = &STORED_VERSION;
+        let rows = self.broker.query_main(&statement.bind().finish()).await?;
+        let row = one_row(rows, statement)?;
+        let stored: i64 = column(&row, statement, "version")?;
         Ok(classify_stored_version(stored, expected_version))
     }
 }
