@@ -802,49 +802,22 @@ pub async fn task_stats(
         .collect())
 }
 
-#[derive(Debug, Clone, Copy)]
-enum CombinedFacet {
-    Worker,
-    TaskName,
-    Queue,
-    ErrorCode,
+/// One facet row of [`facets_statement`].
+#[derive(Debug, FromRow)]
+struct FacetRow {
+    facet: String,
+    facet_value: String,
+    facet_count: i64,
+    /// Set on `error_code` rows only.
+    category: Option<String>,
+    /// Set on `error_code` rows only: the count of every code of the
+    /// category, also codes past the cap.
+    category_total: Option<i64>,
 }
 
-impl CombinedFacet {
-    const fn live_column(self) -> &'static str {
-        match self {
-            Self::Worker => "claimed_by_worker_id",
-            Self::TaskName => "task_name",
-            Self::Queue => "queue_name",
-            Self::ErrorCode => "error_code",
-        }
-    }
-
-    const fn history_column(self) -> &'static str {
-        match self {
-            Self::Worker => "last_claimed_worker_id",
-            Self::TaskName => "task_name",
-            Self::Queue => "queue_name",
-            Self::ErrorCode => "error_code",
-        }
-    }
-}
-
-fn push_facet_scope(
-    builder: &mut QueryBuilder<'_, Postgres>,
-    window: Option<HistoryWindow>,
-    filters: &TaskFilters,
-    worker_column: &str,
-    error_categories: &[ErrorCategory],
-) {
-    builder.push(" WHERE TRUE");
-    if let Some(window) = window {
-        builder
-            .push(" AND terminal_at >= ")
-            .push_bind(window.lower())
-            .push(" AND terminal_at < ")
-            .push_bind(window.upper());
-    }
+/// The facet filters: only status and `retried_only` scope the facets, so
+/// a selection of one facet never empties the option lists of the others.
+fn push_facet_filters(builder: &mut QueryBuilder<'_, Postgres>, filters: &TaskFilters) {
     if !filters.statuses.is_empty() {
         builder
             .push(" AND status = ANY(")
@@ -860,171 +833,205 @@ fn push_facet_scope(
     if filters.retried_only {
         builder.push(" AND retry_count > 0");
     }
-    for (column, values) in [
-        ("task_name", &filters.task_names),
-        ("queue_name", &filters.queues),
-        (worker_column, &filters.workers),
-        ("error_code", &filters.error_codes),
+}
+
+/// Every facet of [`task_facets`] in one statement, as Python's
+/// `facets_statement` (`horsies/monitoring/queries.py:725-849`).
+///
+/// One `GROUPING SETS` per side counts the columns in one pass over the
+/// small result of an inner `GROUP BY`; the sides sum per facet before the
+/// rank, so ties follow the database collation. The live side has no
+/// `error_code` column, so it has no error-code set. Each code carries its
+/// category, and each category carries the total of all its codes; only the
+/// top [`ERROR_FACET_CAP`] codes of each category and the top
+/// [`FACET_VALUE_CAP`] values of the other facets come back, so the result
+/// stays bounded for any number of distinct codes. NULL and empty values are
+/// not facet values.
+fn facets_statement(query: &TaskFacetsQuery) -> QueryBuilder<'_, Postgres> {
+    let mut builder = QueryBuilder::new(
+        "WITH lifecycle_facets AS (
+            SELECT CASE GROUPING(claimed_by_worker_id, task_name, queue_name)
+                       WHEN 3 THEN 'worker'
+                       WHEN 5 THEN 'task_name'
+                       WHEN 6 THEN 'queue_name'
+                   END AS facet,
+                   CASE GROUPING(claimed_by_worker_id, task_name, queue_name)
+                       WHEN 3 THEN claimed_by_worker_id::text
+                       WHEN 5 THEN task_name::text
+                       WHEN 6 THEN queue_name::text
+                   END AS facet_value,
+                   sum(group_count)::bigint AS facet_count
+            FROM (
+                SELECT claimed_by_worker_id, task_name, queue_name, count(*) AS group_count
+                FROM horsies_tasks
+                WHERE TRUE",
+    );
+    push_facet_filters(&mut builder, &query.filters);
+    builder.push(
+        "
+                GROUP BY claimed_by_worker_id, task_name, queue_name
+            ) AS live_groups
+            GROUP BY GROUPING SETS ((claimed_by_worker_id), (task_name), (queue_name))
+            UNION ALL
+            SELECT CASE GROUPING(last_claimed_worker_id, task_name, queue_name, error_code)
+                       WHEN 7 THEN 'worker'
+                       WHEN 11 THEN 'task_name'
+                       WHEN 13 THEN 'queue_name'
+                       WHEN 14 THEN 'error_code'
+                   END AS facet,
+                   CASE GROUPING(last_claimed_worker_id, task_name, queue_name, error_code)
+                       WHEN 7 THEN last_claimed_worker_id::text
+                       WHEN 11 THEN task_name::text
+                       WHEN 13 THEN queue_name::text
+                       WHEN 14 THEN error_code::text
+                   END AS facet_value,
+                   sum(group_count)::bigint AS facet_count
+            FROM (
+                SELECT last_claimed_worker_id, task_name, queue_name, error_code,
+                       count(*) AS group_count
+                FROM horsies_task_history
+                WHERE terminal_at >= ",
+    );
+    builder
+        .push_bind(query.window.lower())
+        .push(" AND terminal_at < ")
+        .push_bind(query.window.upper());
+    push_facet_filters(&mut builder, &query.filters);
+    builder.push(
+        "
+                GROUP BY last_claimed_worker_id, task_name, queue_name, error_code
+            ) AS history_groups
+            GROUP BY GROUPING SETS (
+                (last_claimed_worker_id), (task_name), (queue_name), (error_code)
+            )
+        ), combined AS (
+            SELECT facet, facet_value, sum(facet_count)::bigint AS facet_count
+            FROM lifecycle_facets
+            WHERE facet_value IS NOT NULL
+              AND (facet <> 'error_code' OR facet_value <> '')
+            GROUP BY facet, facet_value
+        ), ranked AS (
+            SELECT facet, facet_value, facet_count,
+                   row_number() OVER (
+                       PARTITION BY facet
+                       ORDER BY facet_count DESC, facet_value
+                   ) AS facet_rank,
+                   CASE WHEN facet = 'error_code' THEN
+                       CASE",
+    );
+    for category in [
+        ErrorCategory::Operational,
+        ErrorCategory::Contract,
+        ErrorCategory::Retrieval,
+        ErrorCategory::Outcome,
     ] {
-        if !values.is_empty() {
-            builder
-                .push(" AND ")
-                .push(column)
-                .push(" = ANY(")
-                .push_bind(values.clone())
-                .push("::text[])");
+        builder
+            .push(" WHEN facet_value = ANY(")
+            .push_bind(codes_for_category(category))
+            .push("::text[]) THEN '")
+            .push(category.as_str())
+            .push("'");
+    }
+    builder
+        .push(" ELSE '")
+        .push(ErrorCategory::Domain.as_str())
+        .push(
+            "'
+                       END
+                   END AS category
+            FROM combined
+        ), scoped AS (
+            SELECT facet, facet_value, facet_count, facet_rank, category,
+                   row_number() OVER (
+                       PARTITION BY facet, category ORDER BY facet_rank
+                   ) AS category_rank,
+                   (sum(facet_count) OVER (PARTITION BY facet, category))::bigint
+                       AS category_total
+            FROM ranked
+        )
+        SELECT facet, facet_value, facet_count, category,
+               CASE WHEN facet = 'error_code' THEN category_total END AS category_total
+        FROM scoped
+        WHERE CASE facet
+                  WHEN 'error_code' THEN category_rank <= ",
+        )
+        .push_bind(ERROR_FACET_CAP)
+        .push(" ELSE facet_rank <= ")
+        .push_bind(FACET_VALUE_CAP)
+        .push(
+            " END
+        ORDER BY facet, facet_rank",
+        );
+    builder
+}
+
+/// Build [`Facets`] from the rows of [`facets_statement`], as Python's
+/// `task_facets` (`horsies/monitoring/queries.py:942-1007`): the code list
+/// follows the selected categories and holds at most [`ERROR_FACET_CAP`]
+/// codes; the category totals cover every category, selected or not.
+fn facets_from_rows(
+    rows: Vec<FacetRow>,
+    selected: &[ErrorCategory],
+) -> Result<Facets, HistoryError> {
+    let selected: Vec<&str> = selected.iter().map(|category| category.as_str()).collect();
+    let mut facets = Facets {
+        workers: Vec::new(),
+        task_names: Vec::new(),
+        queues: Vec::new(),
+        error_codes: Vec::new(),
+        error_category_totals: BTreeMap::new(),
+    };
+    for row in rows {
+        let value = FacetValue {
+            value: row.facet_value,
+            count: row.facet_count,
+        };
+        match row.facet.as_str() {
+            "worker" => facets.workers.push(value),
+            "task_name" => facets.task_names.push(value),
+            "queue_name" => facets.queues.push(value),
+            "error_code" => {
+                let (Some(category), Some(total)) = (row.category, row.category_total) else {
+                    return Err(HistoryError::contract(
+                        "an error-code facet row has no category or category total",
+                    ));
+                };
+                facets.error_category_totals.insert(category.clone(), total);
+                let wanted = selected.is_empty() || selected.contains(&category.as_str());
+                if wanted && (facets.error_codes.len() as i64) < ERROR_FACET_CAP {
+                    facets.error_codes.push(ErrorFacet {
+                        value: value.value,
+                        count: value.count,
+                        category,
+                    });
+                }
+            }
+            other => {
+                return Err(HistoryError::contract(format!(
+                    "the facets statement returned an unknown facet {other:?}"
+                )))
+            }
         }
     }
-    push_error_categories(builder, error_categories);
+    Ok(facets)
 }
 
-async fn combined_facet_rows(
-    connection: &mut PgConnection,
-    query: &TaskFacetsQuery,
-    facet: CombinedFacet,
-    limit: Option<i64>,
-    error_categories: &[ErrorCategory],
-) -> Result<Vec<(String, i64)>, sqlx::Error> {
-    let live_column = facet.live_column();
-    let history_column = facet.history_column();
-    let mut builder = QueryBuilder::<Postgres>::new("WITH live_facet AS (SELECT ");
-    builder
-        .push(live_column)
-        .push(" AS facet_value, count(*) AS facet_count FROM horsies_tasks");
-    push_facet_scope(
-        &mut builder,
-        None,
-        &query.filters,
-        "claimed_by_worker_id",
-        error_categories,
-    );
-    builder.push(" AND ").push(live_column).push(" IS NOT NULL");
-    if matches!(facet, CombinedFacet::ErrorCode) {
-        builder.push(" AND error_code <> ''");
-    }
-    builder
-        .push(" GROUP BY ")
-        .push(live_column)
-        .push("), history_facet AS (SELECT ");
-    builder
-        .push(history_column)
-        .push(" AS facet_value, count(*) AS facet_count FROM horsies_task_history");
-    push_facet_scope(
-        &mut builder,
-        Some(query.window),
-        &query.filters,
-        "last_claimed_worker_id",
-        error_categories,
-    );
-    builder
-        .push(" AND ")
-        .push(history_column)
-        .push(" IS NOT NULL");
-    if matches!(facet, CombinedFacet::ErrorCode) {
-        builder.push(" AND error_code <> ''");
-    }
-    builder.push(" GROUP BY ").push(history_column).push(
-        "), combined AS (
-             SELECT facet_value, sum(facet_count)::bigint AS facet_count
-             FROM (
-                 SELECT facet_value, facet_count FROM live_facet
-                 UNION ALL
-                 SELECT facet_value, facet_count FROM history_facet
-             ) AS lifecycle_facets
-             GROUP BY facet_value
-         )
-         SELECT facet_value, facet_count FROM combined
-         ORDER BY facet_count DESC, facet_value",
-    );
-    if let Some(limit) = limit {
-        builder.push(" LIMIT ").push_bind(limit);
-    }
-    builder.build_query_as().fetch_all(connection).await
-}
-
-fn facet_values(rows: Vec<(String, i64)>) -> Vec<FacetValue> {
-    rows.into_iter()
-        .map(|(value, count)| FacetValue { value, count })
-        .collect()
-}
-
+/// Distinct workers, task names, queues and error codes with counts, over
+/// the live table and the history window, in one statement in autocommit.
+/// Only status and `retried_only` scope them; `error_categories` narrows the
+/// returned code list but not the category totals.
 pub async fn task_facets(
     broker: &PostgresBroker,
     query: &TaskFacetsQuery,
 ) -> MonitoringResult<Facets> {
     let operation = "task facets query";
-    let mut connection = broker
-        .pool()
-        .acquire()
+    let rows: Vec<FacetRow> = facets_statement(query)
+        .build_query_as()
+        .fetch_all(broker.pool())
         .await
         .map_err(|error| MonitoringQueryError::database(operation, error))?;
-
-    let workers = combined_facet_rows(
-        &mut connection,
-        query,
-        CombinedFacet::Worker,
-        Some(FACET_VALUE_CAP),
-        &[],
-    )
-    .await
-    .map_err(|error| MonitoringQueryError::database(operation, error))?;
-    let task_names = combined_facet_rows(
-        &mut connection,
-        query,
-        CombinedFacet::TaskName,
-        Some(FACET_VALUE_CAP),
-        &[],
-    )
-    .await
-    .map_err(|error| MonitoringQueryError::database(operation, error))?;
-    let queues = combined_facet_rows(
-        &mut connection,
-        query,
-        CombinedFacet::Queue,
-        Some(FACET_VALUE_CAP),
-        &[],
-    )
-    .await
-    .map_err(|error| MonitoringQueryError::database(operation, error))?;
-    let error_rows = combined_facet_rows(
-        &mut connection,
-        query,
-        CombinedFacet::ErrorCode,
-        Some(ERROR_FACET_CAP),
-        &query.filters.error_categories,
-    )
-    .await
-    .map_err(|error| MonitoringQueryError::database(operation, error))?;
-    let uncapped_error_rows =
-        combined_facet_rows(&mut connection, query, CombinedFacet::ErrorCode, None, &[])
-            .await
-            .map_err(|error| MonitoringQueryError::database(operation, error))?;
-
-    let error_codes = error_rows
-        .into_iter()
-        .map(|(value, count)| ErrorFacet {
-            category: categorize_error_code(Some(&value))
-                .unwrap_or(ErrorCategory::Domain)
-                .as_str()
-                .to_owned(),
-            value,
-            count,
-        })
-        .collect();
-    let mut error_category_totals = BTreeMap::new();
-    for (value, count) in uncapped_error_rows {
-        let category = categorize_error_code(Some(&value)).unwrap_or(ErrorCategory::Domain);
-        *error_category_totals
-            .entry(category.as_str().to_owned())
-            .or_default() += count;
-    }
-    Ok(Facets {
-        workers: facet_values(workers),
-        task_names: facet_values(task_names),
-        queues: facet_values(queues),
-        error_codes,
-        error_category_totals,
-    })
+    facets_from_rows(rows, &query.filters.error_categories)
+        .map_err(|error| MonitoringQueryError::history(operation, error))
 }
 
 fn apply_group_count(
@@ -1522,9 +1529,33 @@ struct WorkflowNodeRow {
     task_id: Option<Uuid>,
     is_subworkflow: bool,
     sub_workflow_id: Option<Uuid>,
-    error: Option<String>,
+    /// The node's stored result; a failed node's error is in it.
+    result: Option<String>,
     started_at: Option<DateTime<Utc>>,
     completed_at: Option<DateTime<Utc>>,
+}
+
+/// The error text of a node: the message of the error that its stored
+/// `result` holds. The node `error` column has no writer (the result holds
+/// the error, and the baseline drops the column). No result, a result with a
+/// value, and an error with no message give `None`. A result that does not
+/// decode is a contract violation.
+fn node_error_from_result(
+    task_index: i32,
+    result: Option<&str>,
+) -> Result<Option<String>, HistoryError> {
+    let Some(text) = result else {
+        return Ok(None);
+    };
+    match serde_json::from_str::<crate::core::task::result::TaskResult<serde_json::Value>>(text) {
+        Ok(crate::core::task::result::TaskResult::Ok(_)) => Ok(None),
+        Ok(crate::core::task::result::TaskResult::Err(error)) => {
+            Ok(normalize_optional_text(error.message.as_deref()))
+        }
+        Err(cause) => Err(HistoryError::contract(format!(
+            "stored result of workflow node {task_index} does not decode: {cause}"
+        ))),
+    }
 }
 
 fn node_exec_s(row: &WorkflowNodeRow) -> Option<i64> {
@@ -1581,7 +1612,7 @@ async fn fetch_workflow_nodes(
     sqlx::query_as(
         "SELECT workflow_id, task_index, node_id, task_name, status,
                 dependencies, allow_failed_deps, task_id, is_subworkflow,
-                sub_workflow_id, error, started_at, completed_at
+                sub_workflow_id, result, started_at, completed_at
          FROM horsies_workflow_tasks
          WHERE workflow_id = $1
          ORDER BY task_index",
@@ -1700,7 +1731,7 @@ pub async fn get_workflow_node(
     let row: Option<WorkflowNodeRow> = sqlx::query_as(
         "SELECT workflow_id, task_index, node_id, task_name, status,
                 dependencies, allow_failed_deps, task_id, is_subworkflow,
-                sub_workflow_id, error, started_at, completed_at
+                sub_workflow_id, result, started_at, completed_at
          FROM horsies_workflow_tasks
          WHERE workflow_id = $1 AND task_index = $2",
     )
@@ -1745,7 +1776,8 @@ pub async fn get_workflow_node(
         task_name: row.task_name,
         node_status: row.status,
         is_subworkflow: row.is_subworkflow,
-        node_error: normalize_optional_text(row.error.as_deref()),
+        node_error: node_error_from_result(row.task_index, row.result.as_deref())
+            .map_err(|error| MonitoringQueryError::history(operation, error))?,
         leaf,
         attempts,
     }))
@@ -1762,4 +1794,173 @@ pub async fn list_schedules(broker: &PostgresBroker) -> MonitoringResult<Vec<Sch
     .fetch_all(broker.pool())
     .await
     .map_err(|error| MonitoringQueryError::database(operation, error))
+}
+
+#[cfg(test)]
+mod node_error_tests {
+    use super::*;
+    use crate::core::task::error::TaskError;
+    use crate::core::task::result::TaskResult;
+
+    fn stored(result: &TaskResult<serde_json::Value>) -> String {
+        serde_json::to_string(result).expect("encode a stored result")
+    }
+
+    #[test]
+    fn a_failed_node_shows_the_message_of_its_stored_error() {
+        let failed = stored(&TaskResult::Err(TaskError::builtin(
+            OutcomeCode::UpstreamSkipped,
+            "node blew up",
+        )));
+
+        assert_eq!(
+            node_error_from_result(0, Some(&failed)).expect("decodes"),
+            Some("node blew up".to_owned())
+        );
+    }
+
+    #[test]
+    fn no_result_a_value_and_a_blank_message_show_no_error() {
+        let value = stored(&TaskResult::Ok(serde_json::json!({"rows": 3})));
+        let blank = stored(&TaskResult::Err(TaskError::builtin(
+            OutcomeCode::UpstreamSkipped,
+            "  ",
+        )));
+
+        assert_eq!(node_error_from_result(0, None).expect("decodes"), None);
+        assert_eq!(
+            node_error_from_result(0, Some(&value)).expect("decodes"),
+            None
+        );
+        assert_eq!(
+            node_error_from_result(0, Some(&blank)).expect("decodes"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_stored_result_that_does_not_decode_is_a_contract_violation() {
+        assert!(matches!(
+            node_error_from_result(4, Some("not json")),
+            Err(HistoryError::Contract(_))
+        ));
+    }
+}
+
+#[cfg(test)]
+mod facet_tests {
+    use super::*;
+
+    fn row(facet: &str, value: &str, count: i64, category: Option<(&str, i64)>) -> FacetRow {
+        FacetRow {
+            facet: facet.to_owned(),
+            facet_value: value.to_owned(),
+            facet_count: count,
+            category: category.map(|(name, _)| name.to_owned()),
+            category_total: category.map(|(_, total)| total),
+        }
+    }
+
+    fn window() -> HistoryWindow {
+        let upper = Utc::now();
+        HistoryWindow::new(upper - chrono::Duration::hours(1), upper).expect("window")
+    }
+
+    /// Python `test_a_poll_runs_one_statement_for_both_sides`: one statement
+    /// reads the live table and the history window once each, and the live
+    /// side has no error-code set.
+    #[test]
+    fn one_statement_reads_each_side_once() {
+        let query = TaskFacetsQuery::new(window());
+        let builder = facets_statement(&query);
+        let sql = builder.sql();
+
+        assert_eq!(sql.matches("FROM horsies_tasks").count(), 1);
+        assert_eq!(sql.matches("FROM horsies_task_history").count(), 1);
+        assert_eq!(sql.matches("GROUPING SETS").count(), 2);
+        assert!(sql.contains("GROUPING(claimed_by_worker_id, task_name, queue_name)"));
+    }
+
+    #[test]
+    fn rows_fill_each_facet_in_rank_order() {
+        let facets = facets_from_rows(
+            vec![
+                row("queue_name", "default", 5, None),
+                row("task_name", "send", 4, None),
+                row("worker", "w1", 3, None),
+                row("worker", "w2", 1, None),
+            ],
+            &[],
+        )
+        .expect("rows decode");
+
+        assert_eq!(
+            facets.workers,
+            vec![
+                FacetValue {
+                    value: "w1".to_owned(),
+                    count: 3
+                },
+                FacetValue {
+                    value: "w2".to_owned(),
+                    count: 1
+                },
+            ]
+        );
+        assert_eq!(facets.task_names.len(), 1);
+        assert_eq!(facets.queues.len(), 1);
+    }
+
+    /// The code list follows the selected categories; the totals cover every
+    /// category (Python `task_facets`).
+    #[test]
+    fn the_code_list_follows_the_selection_and_the_totals_do_not() {
+        let rows = || {
+            vec![
+                row("error_code", "TASK_TIMEOUT", 7, Some(("OUTCOME", 9))),
+                row("error_code", "BILLING_DOWN", 4, Some(("DOMAIN", 4))),
+                row("error_code", "TASK_CANCELLED", 2, Some(("OUTCOME", 9))),
+            ]
+        };
+
+        let all = facets_from_rows(rows(), &[]).expect("rows decode");
+        assert_eq!(all.error_codes.len(), 3);
+
+        let domain = facets_from_rows(rows(), &[ErrorCategory::Domain]).expect("rows decode");
+        assert_eq!(
+            domain.error_codes,
+            vec![ErrorFacet {
+                value: "BILLING_DOWN".to_owned(),
+                count: 4,
+                category: "DOMAIN".to_owned(),
+            }]
+        );
+        assert_eq!(domain.error_category_totals.get("OUTCOME"), Some(&9));
+        assert_eq!(domain.error_category_totals.get("DOMAIN"), Some(&4));
+    }
+
+    #[test]
+    fn the_code_list_stops_at_its_cap() {
+        let rows = (0..ERROR_FACET_CAP + 5)
+            .map(|index| {
+                row(
+                    "error_code",
+                    &format!("CODE_{index}"),
+                    1,
+                    Some(("DOMAIN", 35)),
+                )
+            })
+            .collect();
+
+        let facets = facets_from_rows(rows, &[]).expect("rows decode");
+
+        assert_eq!(facets.error_codes.len() as i64, ERROR_FACET_CAP);
+        assert_eq!(facets.error_category_totals.get("DOMAIN"), Some(&35));
+    }
+
+    #[test]
+    fn a_row_the_statement_cannot_return_is_a_contract_violation() {
+        assert!(facets_from_rows(vec![row("status", "x", 1, None)], &[]).is_err());
+        assert!(facets_from_rows(vec![row("error_code", "X", 1, None)], &[]).is_err());
+    }
 }

@@ -22,7 +22,6 @@ from sqlalchemy.orm import DeclarativeBase
 
 from horsies.core.models.task_pg import (
     ScheduleStateModel,
-    TaskAttemptModel,
     TaskHeartbeatModel,
     TaskModel,
     WorkerStateModel,
@@ -34,7 +33,6 @@ from horsies.core.utils.time import utc_now
 _CASES: list[tuple[type[DeclarativeBase], str, tuple[str, ...]]] = [
     (TaskModel, 'created_at', ('default',)),
     (TaskModel, 'updated_at', ('default', 'onupdate')),
-    (TaskAttemptModel, 'created_at', ('default',)),
     (TaskHeartbeatModel, 'sent_at', ('default',)),
     (WorkerStateModel, 'snapshot_at', ('default',)),
     (ScheduleStateModel, 'updated_at', ('default', 'onupdate')),

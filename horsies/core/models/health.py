@@ -128,12 +128,7 @@ class SlotsDown:
     slots: tuple[DownSlot, ...]
 
 
-@dataclass(slots=True, frozen=True)
-class SlotHealthNotRecorded:
-    """The snapshot comes from a worker version that did not record slot health."""
-
-
-SlotHealth: TypeAlias = AllSlotsServing | SlotsDown | SlotHealthNotRecorded
+SlotHealth: TypeAlias = AllSlotsServing | SlotsDown
 
 # A stored count stays in the range of a Postgres bigint.
 _COUNT_LIMIT: Final = 2**63
@@ -167,14 +162,11 @@ def parse_slot_health(
 ) -> Result[SlotHealth, SlotHealthUnreadable]:
     """Build the slot health from a stored ``slots_down`` value.
 
-    ``None`` (SQL NULL) is ``SlotHealthNotRecorded``. An empty list is
-    ``AllSlotsServing``. Each entry must name a distinct slot below
-    ``processes``, a cause that can clear, a bounded detail, an aware
-    ``down_since`` and ``failed_boots`` of at least 1. Reads only.
+    An empty list is ``AllSlotsServing``. Each entry must name a distinct
+    slot below ``processes``, a cause that can clear, a bounded detail, an
+    aware ``down_since`` and ``failed_boots`` of at least 1. Reads only.
     """
     match value:
-        case None:
-            return Ok(SlotHealthNotRecorded())
         case list():
             entries = cast('list[object]', value)
         case _:
@@ -293,12 +285,7 @@ class ClassBudgets:
     budgets: tuple[ClassBudget, ...]
 
 
-@dataclass(slots=True, frozen=True)
-class ClassCapacityNotRecorded:
-    """The snapshot comes from a worker version that did not record its budgets."""
-
-
-ClassCapacity: TypeAlias = ClassBudgets | ClassCapacityNotRecorded
+ClassCapacity: TypeAlias = ClassBudgets
 
 
 @dataclass(slots=True, frozen=True)
@@ -313,15 +300,13 @@ def parse_class_capacity(
 ) -> Result[ClassCapacity, ClassCapacityUnreadable]:
     """Build the class capacity from a stored ``class_capacity`` value.
 
-    ``None`` (SQL NULL) is ``ClassCapacityNotRecorded``. Each key must be an
-    ``Execution`` value, and each entry an object with a ``capacity`` (a
-    whole number, 0 or more) and a ``serves`` list of distinct ``Execution``
-    values that holds the key. No class may be in the ``serves`` of two
-    budgets. Other keys of an entry are not read. Reads only.
+    Each key must be an ``Execution`` value, and each entry an object with a
+    ``capacity`` (a whole number, 0 or more) and a ``serves`` list of
+    distinct ``Execution`` values that holds the key. No class may be in the
+    ``serves`` of two budgets. Other keys of an entry are not read. Reads
+    only.
     """
     match value:
-        case None:
-            return Ok(ClassCapacityNotRecorded())
         case dict():
             entries = cast('dict[object, object]', value)
         case _:
@@ -417,6 +402,8 @@ class WorkerStateSnapshot:
 
     Mirrors ``WorkerStateModel``. Returned as the latest snapshot per worker
     (cluster-wide listing) or as a timeseries (single-worker history).
+    ``queue_priorities``, ``queue_max_concurrency`` and ``recovery_config``
+    are empty when the worker had none set.
     ``slot_health`` says whether any slot was down, and why.
     ``class_capacity`` holds the claim budget of each execution class that
     the worker runs children for: its capacity in service and the classes
@@ -432,9 +419,9 @@ class WorkerStateSnapshot:
     max_claim_per_worker: int
     cluster_wide_cap: int | None
     queues: list[str]
-    queue_priorities: dict[str, int] | None
-    queue_max_concurrency: dict[str, int] | None
-    recovery_config: dict[str, Any] | None
+    queue_priorities: dict[str, int]
+    queue_max_concurrency: dict[str, int]
+    recovery_config: dict[str, Any]
     tasks_running: int
     tasks_claimed: int
     memory_usage_mb: float | None

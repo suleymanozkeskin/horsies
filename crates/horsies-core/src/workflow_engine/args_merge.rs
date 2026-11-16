@@ -4,6 +4,7 @@ use serde::Serialize;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::core::codec::JsonReadError;
 use crate::core::task::result::TaskResult;
 use crate::core::{OperationalErrorCode, OutcomeCode, TaskError, TaskErrorKind};
 
@@ -37,36 +38,70 @@ struct ArgsFromEntry<'a> {
     inner: TaskResult<serde_json::Value>,
 }
 
-/// Merge args_from dependency results into kwargs JSON (synchronous variant).
+/// The object that injected members merge into: the node's stored input.
 ///
-/// For each (kwarg_name, dep_index) in args_from, the kwarg holds Python's `args_from` wrap around the
-/// dependency's result ([`dependency_result`]). A dependency index with no node row gets no kwarg (Python
-/// injects only the results that exist, `core/workflows/engine.py:841`); every node of a workflow has a row
+/// The stored text is read with the core's strict reader: 300 levels of room,
+/// so a user value of 200 levels inside its envelopes reads (Python
+/// `core/codec/json_value.py:54-75`). The merge re-encodes the object, so an
+/// integer that the parse would round is refused instead of changed. `{}` and
+/// `null` (no static input) are an empty object. Any other non-object input
+/// cannot take named members and is refused.
+pub(crate) fn input_object(
+    input: &str,
+) -> Result<serde_json::Map<String, serde_json::Value>, WorkflowError> {
+    let parsed: serde_json::Value =
+        crate::core::codec::from_json_str(input).map_err(|error| match error {
+            JsonReadError::Refused(refusal) => {
+                WorkflowError::Validation(format!("stored node input refused: {refusal}"))
+            }
+            JsonReadError::Decode(error) => {
+                tracing::error!(error = %error, "failed to parse a node input for a member merge");
+                WorkflowError::Serialization(error)
+            }
+        })?;
+    crate::core::history::rerun::input_envelope::validate_integer_domain(input).map_err(
+        |detail| {
+            WorkflowError::Validation(format!(
+                "stored node input holds a number that the merge would round: {detail}"
+            ))
+        },
+    )?;
+    match parsed {
+        serde_json::Value::Null => Ok(serde_json::Map::new()),
+        serde_json::Value::Object(object) => Ok(object),
+        _ => Err(WorkflowError::Validation(
+            "a node input that takes args_from or workflow context members must be a JSON object"
+                .to_owned(),
+        )),
+    }
+}
+
+/// Merge args_from dependency results into the node's input (synchronous variant).
+///
+/// With no args_from the input is returned unchanged. Otherwise, for each
+/// (field_name, dep_index) in args_from, the field holds Python's `args_from`
+/// wrap around the dependency's result ([`dependency_result`]). A dependency
+/// index with no node row gets no field (Python injects only the results that
+/// exist, `core/workflows/engine.py:841`); every node of a workflow has a row
 /// from its start, so this is logged as an error.
 pub fn merge_args_from_sync(
-    existing_kwargs: Option<&str>,
+    input: &str,
     args_from: &Option<serde_json::Value>,
     dep_results: &HashMap<i32, DepResult>,
-) -> Result<Option<String>, WorkflowError> {
+) -> Result<String, WorkflowError> {
     let args_from_map = match args_from {
         Some(v) => match v.as_object() {
             Some(obj) if !obj.is_empty() => obj,
-            _ => return Ok(existing_kwargs.map(String::from)),
+            _ => return Ok(input.to_owned()),
         },
-        None => return Ok(existing_kwargs.map(String::from)),
+        None => return Ok(input.to_owned()),
     };
 
-    let mut kwargs: serde_json::Map<String, serde_json::Value> = match existing_kwargs {
-        Some(json) => read_kwargs_object(json).map_err(|e| {
-            tracing::error!(error = %e, "failed to parse existing kwargs in sync merge");
-            e
-        })?,
-        None => serde_json::Map::new(),
-    };
+    let mut object = input_object(input)?;
 
-    insert_args_from_entries(&mut kwargs, args_from_map, dep_results)?;
+    insert_args_from_entries(&mut object, args_from_map, dep_results)?;
 
-    Ok(Some(serde_json::to_string(&kwargs)?))
+    Ok(serde_json::to_string(&object)?)
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -78,23 +113,23 @@ struct DepRow {
     result: Option<String>,
 }
 
-/// Merge args_from dependency results into kwargs JSON (async variant).
+/// Merge args_from dependency results into the node's input (async variant).
 ///
 /// Fetches dependency results from the database, then applies the same
 /// wrapping logic as the synchronous variant.
 pub async fn merge_args_from_async(
     pool: &PgPool,
     workflow_id: Uuid,
-    existing_kwargs: Option<&str>,
+    input: &str,
     args_from: &Option<serde_json::Value>,
     dep_indices: &[i32],
-) -> Result<Option<String>, WorkflowError> {
+) -> Result<String, WorkflowError> {
     let args_from_map = match args_from {
         Some(v) => match v.as_object() {
             Some(obj) if !obj.is_empty() => obj,
-            _ => return Ok(existing_kwargs.map(String::from)),
+            _ => return Ok(input.to_owned()),
         },
-        None => return Ok(existing_kwargs.map(String::from)),
+        None => return Ok(input.to_owned()),
     };
 
     let rows: Vec<DepRow> = sqlx::query_as(
@@ -122,26 +157,11 @@ pub async fn merge_args_from_async(
         })
         .collect();
 
-    let mut kwargs: serde_json::Map<String, serde_json::Value> = match existing_kwargs {
-        Some(json) => read_kwargs_object(json).map_err(|e| {
-            tracing::error!(error = %e, "failed to parse existing kwargs in async merge");
-            e
-        })?,
-        None => serde_json::Map::new(),
-    };
+    let mut object = input_object(input)?;
 
-    insert_args_from_entries(&mut kwargs, args_from_map, &dep_map)?;
+    insert_args_from_entries(&mut object, args_from_map, &dep_map)?;
 
-    Ok(Some(serde_json::to_string(&kwargs)?))
-}
-
-/// Read the stored kwargs object of a node with the core's strict reader: 300 levels of room, so a user value of
-/// 200 levels inside its envelopes reads (Python `core/codec/json_value.py:54-75`).
-pub(crate) fn read_kwargs_object(
-    json: &str,
-) -> Result<serde_json::Map<String, serde_json::Value>, WorkflowError> {
-    crate::core::codec::from_json_str(json)
-        .map_err(|error| WorkflowError::Serialization(serde::de::Error::custom(error)))
+    Ok(serde_json::to_string(&object)?)
 }
 
 /// Insert one `args_from` entry per kwarg of `args_from_map` into `kwargs`.
@@ -241,21 +261,22 @@ fn args_from_inner(
         })
 }
 
-/// The kwargs that a child workflow's spec builder reads: each `args_from` entry replaced by its `inner` result
-/// envelope. The builder runs in the engine, so it gets the result itself, not the wrap that crosses to a worker
-/// (Python `core/workflows/engine.py:1164-1173`).
-pub(crate) fn child_builder_kwargs(
-    kwargs_json: Option<&str>,
-) -> Result<Option<String>, WorkflowError> {
-    let Some(json) = kwargs_json else {
-        return Ok(None);
+/// The input that a child workflow's spec builder reads: each `args_from` entry of an object input replaced by
+/// its `inner` result envelope. The builder runs in the engine, so it gets the result itself, not the wrap that
+/// crosses to a worker (Python `core/workflows/engine.py:1164-1173`). An input with no entry is returned
+/// unchanged.
+pub(crate) fn child_builder_input(input: &str) -> Result<String, WorkflowError> {
+    let parsed: serde_json::Value = crate::core::codec::from_json_str(input).map_err(|error| {
+        WorkflowError::Validation(format!("stored node input refused: {error}"))
+    })?;
+    let serde_json::Value::Object(mut object) = parsed else {
+        return Ok(input.to_owned());
     };
-    let mut kwargs = read_kwargs_object(json)?;
-    let unwrapped = unwrap_args_from_entries(&mut kwargs)
+    let unwrapped = unwrap_args_from_entries(&mut object)
         .map_err(|refusal| WorkflowError::Validation(refusal.to_string()))?;
     match unwrapped.is_empty() {
-        true => Ok(Some(json.to_owned())),
-        false => Ok(Some(serde_json::to_string(&kwargs)?)),
+        true => Ok(input.to_owned()),
+        false => Ok(serde_json::to_string(&object)?),
     }
 }
 
@@ -345,16 +366,15 @@ mod tests {
 
     #[test]
     fn merge_no_args_from_returns_existing() {
-        let result = merge_args_from_sync(Some(r#"{"x": 1}"#), &None, &HashMap::new()).unwrap();
-        assert_eq!(result, Some(r#"{"x": 1}"#.to_owned()));
+        let result = merge_args_from_sync(r#"{"x": 1}"#, &None, &HashMap::new()).unwrap();
+        assert_eq!(result, r#"{"x": 1}"#);
     }
 
     #[test]
     fn merge_empty_args_from_returns_existing() {
         let args_from = Some(json!({}));
-        let result =
-            merge_args_from_sync(Some(r#"{"x": 1}"#), &args_from, &HashMap::new()).unwrap();
-        assert_eq!(result, Some(r#"{"x": 1}"#.to_owned()));
+        let result = merge_args_from_sync(r#"{"x": 1}"#, &args_from, &HashMap::new()).unwrap();
+        assert_eq!(result, r#"{"x": 1}"#);
     }
 
     /// Python `core/workflows/engine.py:891-896`: the kwarg holds the wrap with the source task name, the source
@@ -365,9 +385,7 @@ mod tests {
         let stored = serde_json::to_string(&TaskResult::Ok(serde_json::Value::from(42))).unwrap();
         deps.insert(0, dep("COMPLETED", Some(stored)));
 
-        let result = merge_args_from_sync(None, &Some(json!({"answer": 0})), &deps)
-            .unwrap()
-            .unwrap();
+        let result = merge_args_from_sync("null", &Some(json!({"answer": 0})), &deps).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(
             parsed,
@@ -394,9 +412,7 @@ mod tests {
                 result: Some(stored),
             },
         );
-        let result = merge_args_from_sync(None, &Some(json!({"child": 1})), &deps)
-            .unwrap()
-            .unwrap();
+        let result = merge_args_from_sync("null", &Some(json!({"child": 1})), &deps).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["child"]["source_task_name"], "__sub_workflow:child");
         assert_eq!(parsed["child"]["source_definition_key"], "app.child");
@@ -407,9 +423,7 @@ mod tests {
         let mut deps = HashMap::new();
         deps.insert(0, dep("FAILED", None));
 
-        let result = merge_args_from_sync(None, &Some(json!({"answer": 0})), &deps)
-            .unwrap()
-            .unwrap();
+        let result = merge_args_from_sync("null", &Some(json!({"answer": 0})), &deps).unwrap();
         let TaskResult::Err(error) = inner_of(&result, "answer") else {
             panic!("a dependency with no result must give an error entry");
         };
@@ -420,9 +434,8 @@ mod tests {
     /// gets no kwarg.
     #[test]
     fn a_dependency_with_no_row_gets_no_kwarg() {
-        let result = merge_args_from_sync(None, &Some(json!({"answer": 0})), &HashMap::new())
-            .unwrap()
-            .unwrap();
+        let result =
+            merge_args_from_sync("null", &Some(json!({"answer": 0})), &HashMap::new()).unwrap();
         assert_eq!(result, "{}");
     }
 
@@ -431,9 +444,7 @@ mod tests {
         for status in ["PENDING", "READY", "ENQUEUED", "RUNNING"] {
             let mut deps = HashMap::new();
             deps.insert(0, dep(status, None));
-            let result = merge_args_from_sync(None, &Some(json!({"answer": 0})), &deps)
-                .unwrap()
-                .unwrap();
+            let result = merge_args_from_sync("null", &Some(json!({"answer": 0})), &deps).unwrap();
             let TaskResult::Err(error) = inner_of(&result, "answer") else {
                 panic!("a {status} dependency must give an error entry");
             };
@@ -442,19 +453,14 @@ mod tests {
     }
 
     #[test]
-    fn merge_preserves_existing_kwargs() {
+    fn merge_preserves_existing_input_fields() {
         let mut deps = HashMap::new();
         let stored =
             serde_json::to_string(&TaskResult::Ok(serde_json::Value::from("hello"))).unwrap();
         deps.insert(0, dep("COMPLETED", Some(stored)));
 
-        let result = merge_args_from_sync(
-            Some(r#"{"existing": true}"#),
-            &Some(json!({"dep_val": 0})),
-            &deps,
-        )
-        .unwrap()
-        .unwrap();
+        let args_from = Some(json!({"dep_val": 0}));
+        let result = merge_args_from_sync(r#"{"existing": true}"#, &args_from, &deps).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["existing"], true);
         assert!(
@@ -472,9 +478,7 @@ mod tests {
                 Some(serde_json::to_string(&TaskResult::Ok(json!(1))).unwrap()),
             ),
         );
-        let result = merge_args_from_sync(None, &Some(json!({"answer": 3})), &deps)
-            .unwrap()
-            .unwrap();
+        let result = merge_args_from_sync("{}", &Some(json!({"answer": 3})), &deps).unwrap();
         let TaskResult::Err(error) = inner_of(&result, "answer") else {
             panic!("a skipped dependency must give an error entry");
         };
@@ -491,9 +495,7 @@ mod tests {
         for status in ["COMPLETED", "FAILED"] {
             let mut deps = HashMap::new();
             deps.insert(2, dep(status, None));
-            let result = merge_args_from_sync(None, &Some(json!({"answer": 2})), &deps)
-                .unwrap()
-                .unwrap();
+            let result = merge_args_from_sync("{}", &Some(json!({"answer": 2})), &deps).unwrap();
             let TaskResult::Err(error) = inner_of(&result, "answer") else {
                 panic!("a dependency with no result must give an error entry");
             };
@@ -513,18 +515,16 @@ mod tests {
         let stored = serde_json::to_string(&TaskResult::Ok(json!(3))).unwrap();
         deps.insert(0, dep("COMPLETED", Some(stored)));
         let merged =
-            merge_args_from_sync(Some(r#"{"x": 1}"#), &Some(json!({"answer": 0})), &deps).unwrap();
-        let builder_kwargs = child_builder_kwargs(merged.as_deref()).unwrap().unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&builder_kwargs).unwrap();
+            merge_args_from_sync(r#"{"x": 1}"#, &Some(json!({"answer": 0})), &deps).unwrap();
+        let builder_input = child_builder_input(&merged).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&builder_input).unwrap();
         assert_eq!(
             parsed,
             json!({"x": 1, "answer": {"__h_task_result__": true, "ok": 3, "err": null}})
         );
-        assert_eq!(child_builder_kwargs(None).unwrap(), None);
-        assert_eq!(
-            child_builder_kwargs(Some(r#"{"x":1}"#)).unwrap().as_deref(),
-            Some(r#"{"x":1}"#)
-        );
+        for unchanged in ["null", "{}", r#"{"x":1}"#, "[1]"] {
+            assert_eq!(child_builder_input(unchanged).unwrap(), unchanged);
+        }
     }
 
     #[test]
@@ -542,11 +542,19 @@ mod tests {
     }
 
     #[test]
-    fn merge_invalid_existing_kwargs_is_error() {
+    fn merge_invalid_existing_input_is_error() {
         let args_from = Some(json!({"dep_val": 0}));
-        let err = merge_args_from_sync(Some(r#"{"existing": true"#), &args_from, &HashMap::new())
-            .unwrap_err();
-        assert!(matches!(err, WorkflowError::Serialization(_)));
+        for input in [r#"{"existing": true"#, r#"{"a":1,"a":2}"#] {
+            let err = merge_args_from_sync(input, &args_from, &HashMap::new()).unwrap_err();
+            assert!(matches!(err, WorkflowError::Validation(_)), "{input}");
+        }
+    }
+
+    #[test]
+    fn merge_into_a_non_object_input_is_refused() {
+        let args_from = Some(json!({"dep_val": 0}));
+        let err = merge_args_from_sync("[1]", &args_from, &HashMap::new()).unwrap_err();
+        assert!(matches!(err, WorkflowError::Validation(_)));
     }
 
     #[test]
@@ -558,9 +566,7 @@ mod tests {
             let mut deps = HashMap::new();
             deps.insert(0, dep("COMPLETED", Some(stored.to_owned())));
 
-            let result = merge_args_from_sync(None, &Some(json!({"answer": 0})), &deps)
-                .unwrap()
-                .unwrap();
+            let result = merge_args_from_sync("null", &Some(json!({"answer": 0})), &deps).unwrap();
             let TaskResult::Err(error) = inner_of(&result, "answer") else {
                 panic!("a stored result that does not read must give an error entry");
             };

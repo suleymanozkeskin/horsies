@@ -232,19 +232,19 @@ async def _attempts(engine: AsyncEngine, task_id: str) -> tuple[AttemptRecord, .
         return await read_attempts(session, task_id)
 
 
-async def _pending_rows(engine: AsyncEngine, task_id: str) -> list[tuple[str, str]]:
+async def _pending_rows(engine: AsyncEngine, task_id: str) -> list[str]:
     async with engine.connect() as connection:
         rows = (
             await connection.execute(
                 text(
-                    'SELECT terminal_status, terminalization_kind '
+                    'SELECT terminalization_kind '
                     'FROM horsies_workflow_phase2_pending '
                     'WHERE task_id = CAST(:id AS uuid)'
                 ),
                 {'id': task_id},
             )
         ).all()
-    return [(str(row[0]), str(row[1])) for row in rows]
+    return [str(row[0]) for row in rows]
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -305,7 +305,7 @@ class TestApplied:
         )
         assert attempt.started_at <= attempt.finished_at
         assert await _pending_rows(engine, seeded.task_id) == [
-            ('COMPLETED', TerminalizationKind.COMPLETE_LOCKED.value),
+            TerminalizationKind.COMPLETE_LOCKED.value,
         ]
         assert await _payloads(wakes) == []
 
@@ -321,12 +321,14 @@ class TestApplied:
                 text("""
                     INSERT INTO horsies_task_attempts
                         (task_id, attempt, outcome, will_retry,
-                         started_at, finished_at, error_code)
+                         started_at, finished_at, error_code, worker_id,
+                         worker_hostname, worker_pid, worker_process_name)
                     SELECT CAST(:id AS uuid), n, 'FAILED', TRUE,
-                           NOW() - interval '1 minute', NOW(), 'FLAKY'
+                           NOW() - interval '1 minute', NOW(), 'FLAKY',
+                           :worker, 'host-1', 4242, 'child-1'
                     FROM generate_series(1, 2) AS n
                 """),
-                {'id': seeded.task_id},
+                {'id': seeded.task_id, 'worker': WORKER},
             )
 
         outcome = await _finish(engine, _command(seeded))

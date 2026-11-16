@@ -237,7 +237,7 @@ function WorkerFocus({
             className="rounded bg-muted px-1.5 py-0.5 font-mono text-10 text-muted-foreground"
           >
             {queue}
-            {worker.queue_max_concurrency?.[queue] === undefined
+            {worker.queue_max_concurrency[queue] === undefined
               ? ''
               : `·${worker.queue_max_concurrency[queue]}`}
           </span>
@@ -282,18 +282,12 @@ function WorkerFocus({
         )}
       </div>
 
-      {worker.slot_health !== 'all_serving' && (
+      {worker.slot_health === 'slots_down' && (
         <div className="flex flex-col gap-2 border-t border-border pt-3">
           <span className="text-11 font-medium text-muted-foreground">
             Down slots
           </span>
-          {worker.slot_health === 'slots_down' ? (
-            <DownSlotList slots={worker.down_slots} />
-          ) : (
-            <p className="text-xs text-muted-foreground">
-              This worker version does not record its slot health.
-            </p>
-          )}
+          <DownSlotList slots={worker.down_slots} />
         </div>
       )}
 

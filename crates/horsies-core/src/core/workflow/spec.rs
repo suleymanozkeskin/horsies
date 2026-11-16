@@ -511,36 +511,20 @@ impl WorkflowSpecBuilder {
                 }
             }
 
-            // args_json must not be used with args_from or workflow_ctx_from.
+            // A static input next to args_from or workflow_ctx_from must be a
+            // JSON object: the injected members merge into it.
             let has_args_from = !task.args_from.is_empty();
             let has_ctx_from = task.workflow_ctx_from.is_some();
-            if task.args_json.is_some() && (has_args_from || has_ctx_from) {
-                let mut err = HorsiesError::new(
-                    "positional args not allowed when using args_from or workflow_ctx_from",
-                )
-                .with_code(ErrorCode::WorkflowArgsWithInjection)
-                .with_help(
-                    "move static inputs into kwargs_json when using args_from/workflow_ctx_from",
-                );
-                if has_args_from {
-                    err = err.with_note("args_json is set alongside args_from");
-                }
-                if has_ctx_from {
-                    err = err.with_note("args_json is set alongside workflow_ctx_from");
-                }
-                report.add(err);
-            }
-
-            // Validate kwargs_json is a JSON object when present.
-            if let Some(ref kwargs_json) = task.kwargs_json {
-                let parsed = crate::core::codec::from_json_str::<serde_json::Value>(kwargs_json);
-                match parsed {
+            if let Some(ref input_json) = task.input_json {
+                let checked = crate::core::codec::from_json_str::<serde_json::Value>(input_json)
+                    .map_err(|e| e.to_string());
+                match checked {
                     Ok(serde_json::Value::Object(map)) => {
                         // Reserved key must not be provided explicitly.
                         if map.contains_key(WORKFLOW_CTX_KWARG) {
                             report.add(
                                 HorsiesError::new(format!(
-                                    "kwargs contains reserved key '{}'",
+                                    "input contains reserved key '{}'",
                                     WORKFLOW_CTX_KWARG
                                 ))
                                 .with_code(ErrorCode::WorkflowInvalidKwargKey)
@@ -548,7 +532,7 @@ impl WorkflowSpecBuilder {
                             );
                         }
 
-                        // Detect collisions between kwargs and args_from keys.
+                        // Detect collisions between input fields and args_from keys.
                         let mut collisions: Vec<String> = task
                             .args_from
                             .keys()
@@ -558,27 +542,38 @@ impl WorkflowSpecBuilder {
                         collisions.sort();
                         if !collisions.is_empty() {
                             report.add(
-                                HorsiesError::new("kwargs and args_from contain overlapping keys")
+                                HorsiesError::new("input and args_from contain overlapping keys")
                                     .with_code(ErrorCode::WorkflowInvalidKwargKey)
                                     .with_note(format!("overlapping keys: {:?}", collisions))
                                     .with_help(
-                                        "use distinct keys; args_from values override kwargs",
+                                        "use distinct keys; args_from values override input fields",
                                     ),
                             );
                         }
                     }
-                    Ok(_) => {
-                        report.add(
-                            HorsiesError::new("kwargs_json must be a JSON object")
-                                .with_code(ErrorCode::WorkflowInvalidKwargKey)
-                                .with_help("pass a JSON object string to .kwargs_json(...)"),
+                    Ok(_) if has_args_from || has_ctx_from => {
+                        let mut err = HorsiesError::new(
+                            "a non-object input is not allowed when using args_from or workflow_ctx_from",
+                        )
+                        .with_code(ErrorCode::WorkflowArgsWithInjection)
+                        .with_help(
+                            "use an object input when using args_from/workflow_ctx_from",
                         );
+                        if has_args_from {
+                            err = err.with_note("a non-object input is set alongside args_from");
+                        }
+                        if has_ctx_from {
+                            err = err
+                                .with_note("a non-object input is set alongside workflow_ctx_from");
+                        }
+                        report.add(err);
                     }
+                    Ok(_) => {}
                     Err(e) => {
                         report.add(
-                            HorsiesError::new(format!("kwargs_json is not valid JSON: {}", e))
+                            HorsiesError::new(format!("input_json is not valid JSON: {}", e))
                                 .with_code(ErrorCode::WorkflowInvalidKwargKey)
-                                .with_help("ensure kwargs_json is a valid JSON object string"),
+                                .with_help("ensure input_json is one valid JSON value"),
                         );
                     }
                 }
@@ -1055,7 +1050,7 @@ mod tests {
         let a = b.task(simple_node("a"));
         b.task(
             TaskNode::<()>::raw("b")
-                .args(r#"[1]"#)
+                .input_json(r#"[1]"#)
                 .raw_arg_from("input", a.into()),
         );
         let err = b.build().unwrap_err();
@@ -1068,7 +1063,7 @@ mod tests {
         let a = b.task(node_with_id("a", "step_a"));
         b.task(
             TaskNode::<()>::raw("b")
-                .args(r#"[1]"#)
+                .input_json(r#"[1]"#)
                 .waits_for(a)
                 .workflow_ctx_from([a]),
         );
@@ -1077,11 +1072,19 @@ mod tests {
     }
 
     #[test]
-    fn e019_kwargs_must_be_object() {
+    fn e019_input_must_be_one_json_value() {
         let mut b = WorkflowSpecBuilder::new("wf");
-        b.task(TaskNode::<()>::raw("a").kwargs("[1, 2, 3]"));
+        b.task(TaskNode::<()>::raw("a").input_json("[1, 2"));
         let err = b.build().unwrap_err();
         assert_eq!(err.code, Some(ErrorCode::WorkflowInvalidKwargKey));
+    }
+
+    #[test]
+    fn a_non_object_input_without_injected_members_is_accepted() {
+        let mut b = WorkflowSpecBuilder::new("wf");
+        b.task(TaskNode::<()>::raw("a").input_json("[1, 2, 3]"));
+        let spec = b.build().unwrap();
+        assert_eq!(spec.tasks[0].input_json.as_deref(), Some("[1, 2, 3]"));
     }
 
     #[test]
@@ -1090,7 +1093,7 @@ mod tests {
         let a = b.task(simple_node("a"));
         b.task(
             TaskNode::<()>::raw("b")
-                .kwargs(r#"{"data": 1}"#)
+                .input_json(r#"{"data": 1}"#)
                 .raw_arg_from("data", a.into()),
         );
         let err = b.build().unwrap_err();
@@ -1352,7 +1355,7 @@ mod tests {
     }
 
     #[test]
-    fn subworkflow_kwargs_json_preserved_after_build() {
+    fn subworkflow_input_json_preserved_after_build() {
         use crate::core::workflow::sub_workflow::SubWorkflowNode;
 
         let mut b = WorkflowSpecBuilder::new("wf");
@@ -1364,10 +1367,8 @@ mod tests {
         );
         let spec = b.build().unwrap();
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(
-                spec.tasks[0].kwargs_json.as_deref().unwrap()
-            )
-            .unwrap(),
+            serde_json::from_str::<serde_json::Value>(spec.tasks[0].input_json.as_deref().unwrap())
+                .unwrap(),
             serde_json::json!({"limit":10})
         );
     }
@@ -1389,10 +1390,8 @@ mod tests {
         let spec = b.build().unwrap();
         assert_eq!(spec.tasks[1].args_from.get("source"), Some(&0));
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(
-                spec.tasks[1].kwargs_json.as_deref().unwrap()
-            )
-            .unwrap(),
+            serde_json::from_str::<serde_json::Value>(spec.tasks[1].input_json.as_deref().unwrap())
+                .unwrap(),
             serde_json::json!({"limit":25})
         );
         assert_eq!(spec.tasks[1].dependencies, vec![0]);
@@ -1431,16 +1430,16 @@ mod tests {
     }
 
     #[test]
-    fn kwargs_json_preserved_after_build() {
+    fn input_json_preserved_after_build() {
         let mut b = WorkflowSpecBuilder::new("wf");
         b.task(
             TaskNode::<()>::raw("task_a")
-                .kwargs(r#"{"url":"https://example.com"}"#)
+                .input_json(r#"{"url":"https://example.com"}"#)
                 .node_id("a"),
         );
         let spec = b.build().unwrap();
         assert_eq!(
-            spec.tasks[0].kwargs_json.as_deref(),
+            spec.tasks[0].input_json.as_deref(),
             Some(r#"{"url":"https://example.com"}"#),
         );
     }

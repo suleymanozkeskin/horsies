@@ -40,6 +40,15 @@ def worker_env() -> dict[str, str]:
     return env
 
 
+def scheduler_env() -> dict[str, str]:
+    """The environment of a scheduler that these helpers start: the current
+    environment and the repo root on ``PYTHONPATH`` so absolute imports
+    work."""
+    env = os.environ.copy()
+    env['PYTHONPATH'] = REPO_ROOT
+    return env
+
+
 def _is_worker_command(cmdline: Sequence[str]) -> bool:
     return 'horsies worker' in ' '.join(cmdline)
 
@@ -398,12 +407,7 @@ def run_scheduler(
         '--loglevel=warning',
     ]
 
-    # Set PYTHONPATH to repo root so absolute imports work
-    env = os.environ.copy()
-    repo_root = os.path.dirname(
-        os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-    )
-    env['PYTHONPATH'] = repo_root
+    env = scheduler_env()
 
     log_handle, log_path = _worker_log()
     proc: subprocess.Popen[str] = subprocess.Popen(
