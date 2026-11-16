@@ -25,7 +25,7 @@ use crate::broker::health::WORKER_PING_CHANNEL;
 use crate::broker::process_listener::{default_payload_capacity, fixed_channel};
 use crate::broker::PostgresBroker;
 use crate::core::config::app::AppConfig;
-use crate::core::config::worker_profile::TaskLimitSetting;
+use crate::core::config::worker_profile::{SelectedProfile, TaskLimitSetting};
 use crate::core::history::maintenance::coverage::{
     ensure_startup_coverage_in_pool, StartupCoverageOutcome,
 };
@@ -57,9 +57,7 @@ use crate::worker::finalize_batch::statement::WorkerPoolSuccessWrite;
 use crate::worker::finalize_batch::stop::drain_then_close;
 use crate::worker::finalize_batch::{FinalizeBatcher, FlusherBound};
 use crate::worker::heartbeat::spawn_claimer_heartbeat;
-use crate::worker::profile_fit::{
-    log_connection_fit_at_boot, log_memory_fit_at_boot, SelectedProfile,
-};
+use crate::worker::profile_fit::{log_connection_fit_at_boot, log_memory_fit_at_boot};
 use crate::worker::recovery::{new_reaper_health, spawn_reaper, ReaperHealth};
 use crate::worker::retry::read_stored_options;
 use crate::worker::runner_beats::{
@@ -621,8 +619,11 @@ pub struct Worker {
 }
 
 impl Worker {
-    /// Create a worker that runs `profile`. `launch` names what every child
-    /// runs; `registered` the class of each task of the app.
+    /// Create a worker that runs `profile`, the profile that the worker
+    /// manifest selects ([`crate::worker_manifest::WorkerManifest::selected_profile`],
+    /// [`crate::core::config::worker_profile::select_worker_profile`]).
+    /// `launch` names what every child runs; `registered` the class of each
+    /// task of the app.
     ///
     /// Errors: [`WorkerError::Config`] for a worker config that does not
     /// validate, or a profile that starts no child (AppConfig validation
