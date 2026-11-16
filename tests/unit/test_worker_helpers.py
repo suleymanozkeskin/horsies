@@ -5930,6 +5930,7 @@ from horsies.core.lifecycle.outcomes import (
     LostClaim,
     ObservedTaskState,
     PhaseTwoOwed,
+    PhaseTwoStep,
     SuccessApplied,
 )
 from horsies.core.lifecycle.persistence import (
@@ -6152,7 +6153,9 @@ class TestPersistTerminalStateFusedPath:
                 status=TaskStatus.RUNNING, worker_id='w-1', claimed_at=claimed_at
             ),
             phase_two=PhaseTwoOwed(
-                task_name='persisted_task', queue_name='persisted_queue'
+                task_name='persisted_task',
+                queue_name='persisted_queue',
+                step=PhaseTwoStep.NO_DEPENDENTS,
             ),
         )
 

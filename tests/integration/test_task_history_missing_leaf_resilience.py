@@ -224,15 +224,6 @@ class TestMissingLeafBreaksAndHeals:
             assert await _probe_provenance(connection, task_id) is False
             assert await published_manifest_absent_leaves(connection) == ()
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            'The baseline leaf catalog stores no birth floor, so every '
-            'absence reads NOT_CLASSIFIED. WITHIN_RETAINED_HISTORY returns '
-            'when the reason is derived from the record of detached leaves '
-            '(#668).'
-        ),
-    )
     @pytest.mark.asyncio
     async def test_absence_explanation_survives_the_exclusion(
         self, history_schema: HistorySchema
