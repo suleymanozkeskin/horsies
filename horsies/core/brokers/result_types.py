@@ -176,9 +176,9 @@ class BrokerEnqueueFailed:
 
 @dataclass(slots=True, frozen=True)
 class BrokerPayloadMismatch:
-    """The task id exists with a different command or idempotency key. Nothing was written.
-
-    The message names which one differs. The same enqueue fails again.
+    """The task id holds a different command or ``sent_at``, or its live row a
+    different idempotency key. Nothing was written. The same enqueue fails
+    again.
     """
 
     code: ClassVar[BrokerErrorCode] = BrokerErrorCode.PAYLOAD_MISMATCH
