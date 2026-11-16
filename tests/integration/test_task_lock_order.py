@@ -575,34 +575,25 @@ async def _start_while_a_holder_takes_the_row(
     return row_lock_error, await asyncio.wait_for(started, START_END_S)
 
 
-async def _seed_reclaimed_workflow_task(session: AsyncSession) -> tuple[str, datetime]:
+async def _seed_expired_workflow_task(session: AsyncSession) -> tuple[str, datetime]:
     """A CLAIMED task of ``NODE_WORKER_ID`` with its node ENQUEUED in a RUNNING
-    workflow. Returns the task and a claim time ``OLDER_CLAIM`` before the
-    claim on the row: the claim of a child dispatched before the row was
-    claimed again. The workflow guard of the start passes and its fence
-    fails, so the start locks the row and returns no row."""
+    workflow, whose ``good_until`` has passed. Returns the task and a claim
+    time ``OLDER_CLAIM`` before the claim on the row: the claim of a child
+    dispatched before the row was claimed again. The start locks the row
+    and misses with DEADLINE_PASSED (this worker's claim, at any
+    generation), and its miss path is the expiry."""
     claimed_at = datetime.now(timezone.utc) - timedelta(seconds=1)
     task_id = await _seed_claimed_workflow_task(session, claimed_at)
     await _seed_running_workflow_with_node(session, task_id, 'ENQUEUED')
+    await session.execute(
+        text(
+            "UPDATE horsies_tasks SET good_until = now() - interval '1 second' "
+            'WHERE id = CAST(:id AS uuid)'
+        ),
+        {'id': task_id},
+    )
     await session.commit()
     return task_id, claimed_at - OLDER_CLAIM
-
-
-async def _task_and_node(engine: AsyncEngine, task_id: str) -> tuple[str, str]:
-    """The status of the live task row and the status of its node."""
-    async with engine.connect() as connection:
-        row = (
-            await connection.execute(
-                text("""
-                    SELECT t.status, wt.status
-                    FROM horsies_tasks t
-                    JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
-                    WHERE t.id = CAST(:id AS uuid)
-                """),
-                {'id': task_id},
-            )
-        ).one()
-    return str(row[0]), str(row[1])
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -613,11 +604,12 @@ async def test_the_row_lock_of_an_isolated_start_ends_before_its_miss_path(
     clean_workflow_tables: None,  # noqa: ARG001
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The start of a workflow task locks the row and returns no row. Its
-    miss path waits for the task advisory lock, and the holder of that lock
-    then locks the row: the holder gets the row at once and commits, and
-    the miss path ends the start with CLAIM_LOST."""
-    task_id, child_claimed_at = await _seed_reclaimed_workflow_task(session)
+    """The start of a workflow task locks the row and misses with
+    DEADLINE_PASSED; its row lock ends with its statement. Its miss path,
+    the expiry, waits for the task advisory lock, and the holder of that
+    lock then locks the row: the holder gets the row at once and commits,
+    and the expiry then ends the start with TASK_EXPIRED."""
+    task_id, child_claimed_at = await _seed_expired_workflow_task(session)
     _initialize_worker_pool(listener_of(broker).database_url)
 
     async def start() -> StartResult:
@@ -638,8 +630,8 @@ async def test_the_row_lock_of_an_isolated_start_ends_before_its_miss_path(
 
     assert row_lock_error is None
     assert _deadlocks(caplog) == []
-    assert started == (False, '', 'CLAIM_LOST')
-    assert await _task_and_node(engine, task_id) == ('CLAIMED', 'ENQUEUED')
+    assert started == (False, '', 'TASK_EXPIRED')
+    assert [status for status, _ in await _history(engine, task_id)] == ['EXPIRED']
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -652,7 +644,7 @@ async def test_the_row_lock_of_a_shared_async_start_ends_before_its_miss_path(
 ) -> None:
     """The same case as the isolated start, on the async pool of a shared
     async child."""
-    task_id, child_claimed_at = await _seed_reclaimed_workflow_task(session)
+    task_id, child_claimed_at = await _seed_expired_workflow_task(session)
 
     async def start() -> StartResult:
         return await confirm_until_not_resumed(
@@ -672,8 +664,8 @@ async def test_the_row_lock_of_a_shared_async_start_ends_before_its_miss_path(
 
     assert row_lock_error is None
     assert _deadlocks(caplog) == []
-    assert started == (False, '', 'CLAIM_LOST')
-    assert await _task_and_node(engine, task_id) == ('CLAIMED', 'ENQUEUED')
+    assert started == (False, '', 'TASK_EXPIRED')
+    assert [status for status, _ in await _history(engine, task_id)] == ['EXPIRED']
 
 
 async def _abandon_while_a_holder_locks_the_workflow(
