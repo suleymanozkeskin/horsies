@@ -276,6 +276,8 @@ impl TestDatabase {
     }
 }
 
+mod pruning_ports;
+
 #[derive(Clone)]
 struct StatementPause {
     pattern: Arc<str>,
