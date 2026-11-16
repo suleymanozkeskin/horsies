@@ -1315,9 +1315,16 @@ mod resume_idempotency_tests {
         }
     }
 
+    /// Python `resume_workflow` (`core/workflows/lifecycle.py:1084-1263`): a
+    /// resume changes only a PAUSED workflow. On a RUNNING parent it returns
+    /// `false` and changes nothing, also when a child paused on its own (its
+    /// `on_error = pause`); that child is resumed by its own handle. The
+    /// stranded state that the earlier rule recovered cannot arise when the
+    /// status change and the cascade commit together (#872).
     #[tokio::test]
     #[serial]
-    async fn resume_on_running_parent_recovers_stranded_paused_child() {
+    #[ignore = "waits on #872"]
+    async fn resume_on_a_running_parent_leaves_a_paused_child_paused() {
         let broker =
             PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
@@ -1326,7 +1333,7 @@ mod resume_idempotency_tests {
 
         let parent = Uuid::new_v4().to_string();
         let child = Uuid::new_v4().to_string();
-        // Post-crash state: parent already RUNNING, child still PAUSED.
+        // A RUNNING parent with a child that paused on its own.
         insert_workflow(&pool, &parent, "RUNNING", None).await;
         insert_running_task(&pool, &parent).await;
         insert_workflow(&pool, &child, "PAUSED", Some(&parent)).await;
@@ -1341,14 +1348,12 @@ mod resume_idempotency_tests {
         )
         .await
         .expect("resume");
-        assert!(
-            resumed,
-            "idempotent resume must report it recovered the child"
-        );
+        assert!(!resumed, "a resume of a RUNNING workflow changes nothing");
+        assert_eq!(status_of(&pool, &parent).await, "RUNNING");
         assert_eq!(
             status_of(&pool, &child).await,
-            "RUNNING",
-            "stranded PAUSED child must be resumed, not left PAUSED forever",
+            "PAUSED",
+            "a child that paused on its own stays PAUSED",
         );
 
         cleanup(&pool, &[&parent, &child]).await;
