@@ -95,6 +95,8 @@ pub enum NotRunCause {
     QueueFull,
     /// The task's route names a child kind this worker does not run.
     NoChildOfItsKind,
+    /// The runner heartbeats failed closed: no beat would cover the task.
+    RunnerBeatsFailedClosed,
 }
 
 impl fmt::Display for NotRunCause {
@@ -104,6 +106,7 @@ impl fmt::Display for NotRunCause {
             Self::PoolFailed => "no child could start",
             Self::QueueFull => "too many tasks wait for a slot",
             Self::NoChildOfItsKind => "this worker runs no child of the task's kind",
+            Self::RunnerBeatsFailedClosed => "the runner heartbeats of the worker failed closed",
         };
         f.write_str(text)
     }
@@ -167,6 +170,11 @@ pub enum Settlement {
     NotHeld,
     /// Nothing was written: stale recovery or the lease decides the row.
     LeftToRecovery,
-    /// Every retry of the write failed; the row waits for recovery.
+    /// Every retry of the write failed with an error a retry can clear; the
+    /// row waits for recovery.
     RetriesExhausted,
+    /// The write failed with an error that no retry can clear (the database
+    /// refused the statement, or the value did not encode); the row waits
+    /// for recovery.
+    WriteFailed,
 }

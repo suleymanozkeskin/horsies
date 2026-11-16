@@ -285,6 +285,7 @@ pub fn send_error_from_enqueue(
         | BrokerError::TerminalizationContract(_)
         | BrokerError::HistoryReadContract(_)
         | BrokerError::InvalidClaimArgument(_)
+        | BrokerError::ClaimContract(_)
         | BrokerError::Statement(_)
         | BrokerError::PoolSettings(_)
         | BrokerError::RowDecode(_) => TaskSendError::EnqueueFailed {
