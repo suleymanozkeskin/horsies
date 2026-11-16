@@ -959,6 +959,7 @@ mod tests {
                 session_database_url: None,
                 pgbouncer_transaction_mode: false,
                 pool_pre_ping: true,
+                worker_pool_pre_ping: false,
                 pool_size: 30,
                 max_overflow: 30,
                 retain_rerun_input_default: false,
@@ -1413,7 +1414,8 @@ mod tests {
         assert_eq!(row.1, "standard_2d");
         assert_eq!(row.2, 32);
         assert!(!row.3);
-        assert_eq!(task_id.get_version_num(), 5);
+        // The form of the slot id is pinned in
+        // `slot_fire_spec_tests::the_slot_task_id_has_the_uuid7_layout_of_its_slot_time`.
     }
 
     // ---- DB-backed: slot-anchored advancement (parity with horsies PR #46) ----
@@ -2004,3 +2006,6 @@ mod tests {
         runtime.close().await;
     }
 }
+
+#[cfg(test)]
+mod slot_fire_spec_tests;
