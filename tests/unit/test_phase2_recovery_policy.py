@@ -15,12 +15,14 @@ import pytest
 
 from horsies.core.codec import JsonValue, encode_task_result
 from horsies.core.codec.json_io import dumps_json
+from horsies.core.lifecycle.operations import TerminalizationKind
 from horsies.core.models.tasks import (
     OperationalErrorCode,
     TaskError,
     TaskResult,
 )
 from horsies.core.models.workflow import WorkflowStatus, WorkflowTaskStatus
+from horsies.core.types.result import Err, Ok
 from horsies.core.types.status import TASK_TERMINAL_STATES, TaskStatus
 from horsies.core.workflows.engine import (
     node_status_for_terminal_task,
@@ -29,7 +31,9 @@ from horsies.core.workflows.engine import (
 from horsies.core.workflows.phase2_recovery import (
     DISCOVER_PENDING_SQL,
     DURABLE_DISPOSITIONS,
+    PendingKindWithoutPhase2,
     _recovered_failure_result,
+    terminal_status_of_pending_kind,
 )
 
 pytestmark = [pytest.mark.unit]
@@ -93,6 +97,40 @@ class TestTerminalStatusMapping:
     def test_an_unknown_status_raises(self) -> None:
         with pytest.raises(ValueError):
             node_status_for_terminal_task('NOT_A_STATUS')
+
+
+PHASE2_KIND_STATUSES: dict[TerminalizationKind, TaskStatus] = {
+    TerminalizationKind.COMPLETE_LOCKED: TaskStatus.COMPLETED,
+    TerminalizationKind.FAIL_RUNNING: TaskStatus.FAILED,
+    TerminalizationKind.FAIL_STALE: TaskStatus.FAILED,
+    TerminalizationKind.EXPIRE_CLAIMED: TaskStatus.EXPIRED,
+    TerminalizationKind.EXPIRE_PENDING: TaskStatus.EXPIRED,
+}
+"""The five kinds of the pending table's CHECK, with the status the move
+pairs with each."""
+
+
+class TestPendingKindStatus:
+    @pytest.mark.parametrize(
+        ('kind', 'status'),
+        list(PHASE2_KIND_STATUSES.items()),
+        ids=[kind.value for kind in PHASE2_KIND_STATUSES],
+    )
+    def test_a_phase2_kind_names_its_terminal_status(
+        self, kind: TerminalizationKind, status: TaskStatus,
+    ) -> None:
+        assert terminal_status_of_pending_kind(kind.value) == Ok(status)
+
+    def test_every_other_kind_writes_no_pending_row(self) -> None:
+        others = set(TerminalizationKind) - set(PHASE2_KIND_STATUSES)
+        assert others
+        for kind in others:
+            assert terminal_status_of_pending_kind(kind.value) == Err(
+                PendingKindWithoutPhase2(kind=kind.value),
+            ), kind
+
+    def test_discovery_reads_the_kind(self) -> None:
+        assert 'SELECT task_id, terminalization_kind' in DISCOVER_PENDING_SQL.text
 
 
 class TestPauseGuard:

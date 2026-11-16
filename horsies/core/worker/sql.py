@@ -86,7 +86,6 @@ next AS (
 )
 UPDATE horsies_tasks t
 SET status = 'CLAIMED',
-    claimed = TRUE,
     claimed_at = now(),
     claimed_by_worker_id = :worker_id,
     claim_expires_at = now() + :claim_lease_ms * INTERVAL '1 millisecond',
@@ -95,7 +94,7 @@ SET status = 'CLAIMED',
     updated_at = now()
 FROM next
 WHERE t.id = next.id
-RETURNING t.id, t.task_name, t.args, t.kwargs, t.queue_name, t.is_workflow_task, t.task_options, t.claimed_at;
+RETURNING t.id, t.task_name, t.input, t.queue_name, t.is_workflow_task, t.task_options, t.claimed_at;
 """)
 
 
@@ -107,7 +106,7 @@ RETURNING t.id, t.task_name, t.args, t.kwargs, t.queue_name, t.is_workflow_task,
 # never across a client round trip. Replaces the per-pass lock loop + counts +
 # per-queue CLAIM_SQL loop.
 HORSIES_CLAIM_SQL = text("""
-    SELECT row_kind, id, task_name, args, kwargs, queue_name, is_workflow_task,
+    SELECT row_kind, id, task_name, input, queue_name, is_workflow_task,
            task_options, claimed_at, execution, short_by
     FROM horsies_claim(
         :p_worker_id,
@@ -244,7 +243,6 @@ GET_NONRUNNABLE_WORKFLOW_TASK_IDS_SQL = text("""
 UNCLAIM_CLAIMED_TASK_SQL = text("""
     UPDATE horsies_tasks
     SET status = 'PENDING',
-        claimed = FALSE,
         claimed_at = NULL,
         claimed_by_worker_id = NULL,
         claim_expires_at = NULL,
@@ -271,7 +269,6 @@ RETURN_CLAIMED_TASK_AS_ISOLATED_SQL = text(f"""
     UPDATE horsies_tasks
     SET execution = '{Execution.ISOLATED.value}',
         status = 'PENDING',
-        claimed = FALSE,
         claimed_at = NULL,
         claimed_by_worker_id = NULL,
         claim_expires_at = NULL,
@@ -326,7 +323,6 @@ SCHEDULE_STALE_TASK_RETRY_SQL = text("""
         retry_count = :retry_count,
         next_retry_at = :next_retry_at,
         enqueued_at = :next_retry_at,
-        claimed = FALSE,
         claimed_at = NULL,
         claimed_by_worker_id = NULL,
         claim_expires_at = NULL,
@@ -336,7 +332,6 @@ SCHEDULE_STALE_TASK_RETRY_SQL = text("""
         worker_process_name = NULL,
         finalizing_at = NULL,
         finalizing_by_worker_id = NULL,
-        error_code = NULL,
         updated_at = now()
     WHERE t.id = :id
       AND t.status = 'RUNNING'
@@ -488,22 +483,6 @@ DELETE_EXPIRED_WORKFLOWS_SQL = text(f"""
     )
     DELETE FROM horsies_workflows
     WHERE id IN (SELECT id FROM budgeted)
-""")
-
-# A row of the recovery limit count outlives its workflow: the table has no
-# foreign key, and a parent workflow's delete cascades to its children, so
-# DELETE_EXPIRED_WORKFLOWS_SQL cannot name every workflow that it removes.
-DELETE_ORPHANED_RECOVERY_FAILURES_SQL = text("""
-    DELETE FROM horsies_workflow_recovery_failures
-    WHERE workflow_id IN (
-        SELECT failure.workflow_id
-        FROM horsies_workflow_recovery_failures failure
-        WHERE NOT EXISTS (
-            SELECT 1 FROM horsies_workflows w
-            WHERE w.id = failure.workflow_id
-        )
-        LIMIT :batch_size
-    )
 """)
 
 UPSERT_TASK_ATTEMPT_SQL = text("""
