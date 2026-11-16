@@ -245,7 +245,7 @@ async def test_a_changed_config_digest_at_start_rewrites_the_digest_and_keeps_th
     try:
         schedule = scheduler.schedule_config.schedules[0]
         slot = await _database_now(session)
-        task_id = schedule_slot_task_id(schedule_name, slot)
+        task_id = str(schedule_slot_task_id(schedule_name, slot))
         await _record_run(
             session,
             schedule_name,
@@ -288,7 +288,7 @@ async def test_a_fired_slot_stores_its_task_id_and_counts_one_run(
         await scheduler.stop()
 
     row = await _state_row(session, schedule_name)
-    task_id = schedule_slot_task_id(schedule_name, slot)
+    task_id = str(schedule_slot_task_id(schedule_name, slot))
     assert (row.last_task_id, row.next_run_at, row.run_count, row.config_hash) == (
         task_id,
         slot + timedelta(seconds=SCHEDULE_INTERVAL_SECONDS),
@@ -370,7 +370,7 @@ async def test_a_due_slot_fires_and_records_its_run_at_the_database_time(
     row = await _state_row(session, schedule_name)
     # The latest slot due at the database time is the stored one, not a slot
     # a day later, and the run is recorded at the database time of the fire.
-    task_id = schedule_slot_task_id(schedule_name, slot)
+    task_id = str(schedule_slot_task_id(schedule_name, slot))
     assert row.last_task_id == task_id
     assert await _sent_at(session, task_id) == slot
     assert row.next_run_at == slot + timedelta(seconds=SCHEDULE_INTERVAL_SECONDS)
@@ -496,7 +496,7 @@ async def test_a_catch_up_whose_fire_fails_commits_nothing_and_the_next_tick_fir
     row = await _state_row(session, schedule_name)
     slots = [first + timedelta(seconds=SCHEDULE_INTERVAL_SECONDS * index) for index in range(3)]
     assert await _slot_task_count(session, task_name) == 3
-    assert (row.last_task_id, row.run_count) == (schedule_slot_task_id(schedule_name, slots[-1]), 1)
+    assert (row.last_task_id, row.run_count) == (str(schedule_slot_task_id(schedule_name, slots[-1])), 1)
     assert row.next_run_at == slots[-1] + timedelta(seconds=SCHEDULE_INTERVAL_SECONDS)
 
 
@@ -528,5 +528,5 @@ async def test_two_schedulers_that_fire_one_slot_write_one_task_and_one_run(
 
     row = await _state_row(session, schedule_name)
     assert await _slot_task_count(session, task_name) == 1
-    assert (row.last_task_id, row.run_count) == (schedule_slot_task_id(schedule_name, slot), 1)
+    assert (row.last_task_id, row.run_count) == (str(schedule_slot_task_id(schedule_name, slot)), 1)
     assert row.next_run_at == slot + timedelta(seconds=SCHEDULE_INTERVAL_SECONDS)
