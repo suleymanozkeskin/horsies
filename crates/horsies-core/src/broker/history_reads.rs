@@ -5,7 +5,7 @@
 //! (`task_result_sql`, `task_detail_sql`, `decode_result_row`,
 //! `history_detail_from_wire`); only how the statements run differs. Each
 //! read checks out one connection of the given pool with
-//! [`CheckoutClass::Batch`] (broker reads are never reserved work) and runs
+//! `CheckoutClass::Batch` (broker reads are never reserved work) and runs
 //! its statements on it one by one, in autocommit, as the sqlx reads did on
 //! one acquired connection.
 
@@ -13,7 +13,9 @@ use std::sync::LazyLock;
 
 use uuid::Uuid;
 
-use crate::broker::core_rows::{column, first_row, one_row, scalar, RowDecodeError, StatementLog};
+use crate::broker::core_rows::{
+    checkout_batch, column, first_row, one_row, query_on, scalar, RowDecodeError, StatementLog,
+};
 use crate::broker::error::BrokerError;
 use crate::core::history::errors::HistoryError;
 use crate::core::history::reads::detail::{
@@ -24,10 +26,7 @@ use crate::core::history::reads::result::{
     decode_result_row, task_result_function_signature, task_result_sql, ResultWireRow,
     TaskResultRead, FUNCTION_PUBLISHED_SQL, UNDEFINED_FUNCTION,
 };
-use crate::db::{
-    BoundStatement, CheckoutClass, CorePool, NotSentCause, ParameterType, PooledConnection, Row,
-    StatementBound, StatementFailure, TypedStatement,
-};
+use crate::db::{CorePool, ParameterType, PooledConnection, Row, StatementFailure, TypedStatement};
 
 static TASK_RESULT_SQL: LazyLock<String> = LazyLock::new(task_result_sql);
 
@@ -79,9 +78,9 @@ pub(crate) async fn read_task_result(
     log: StatementLog,
     task_id: Uuid,
 ) -> Result<TaskResultRead, BrokerError> {
-    let mut connection = checkout(pool, &TASK_RESULT).await?;
+    let mut connection = checkout_batch(pool, &TASK_RESULT).await?;
     let connection = &mut connection;
-    let read = run(
+    let read = query_on(
         connection,
         log,
         &TASK_RESULT.bind().value(&task_id).finish(),
@@ -117,12 +116,12 @@ pub(crate) async fn read_history_detail(
     log: StatementLog,
     task_id: Uuid,
 ) -> Result<Option<TaskDetailResult>, BrokerError> {
-    let mut connection = checkout(pool, &FUNCTION_PUBLISHED).await?;
+    let mut connection = checkout_batch(pool, &FUNCTION_PUBLISHED).await?;
     let connection = &mut connection;
     if !function_published(connection, log, &task_detail_function_signature()).await? {
         return Ok(None);
     }
-    let rows = run(
+    let rows = query_on(
         connection,
         log,
         &TASK_DETAIL.bind().value(&task_id).finish(),
@@ -150,7 +149,7 @@ async fn function_published(
     log: StatementLog,
     signature: &str,
 ) -> Result<bool, BrokerError> {
-    let rows = run(
+    let rows = query_on(
         connection,
         log,
         &FUNCTION_PUBLISHED.bind().value(&signature).finish(),
@@ -165,7 +164,7 @@ async fn absence_reason(
     log: StatementLog,
     task_id: Uuid,
 ) -> Result<TaskAbsenceReason, BrokerError> {
-    let rows = run(
+    let rows = query_on(
         connection,
         log,
         &TASK_ABSENCE_REASON.bind().value(&task_id).finish(),
@@ -174,33 +173,6 @@ async fn absence_reason(
     let row = one_row(rows, &TASK_ABSENCE_REASON)?;
     let reason: String = scalar(&row, &TASK_ABSENCE_REASON)?;
     TaskAbsenceReason::parse(&reason).map_err(history_contract)
-}
-
-/// Checks out a connection for a read whose first statement is `first`. A
-/// failed checkout is that statement's `NotSent`.
-async fn checkout(
-    pool: &CorePool,
-    first: &TypedStatement,
-) -> Result<PooledConnection, BrokerError> {
-    pool.checkout(CheckoutClass::Batch).await.map_err(|cause| {
-        BrokerError::Statement(StatementFailure::NotSent {
-            statement: first.name(),
-            cause: NotSentCause::Checkout(cause),
-        })
-    })
-}
-
-/// Runs one statement on the read's connection, bounded by the connection's
-/// own timeouts as the sqlx reads were.
-async fn run(
-    connection: &mut PooledConnection,
-    log: StatementLog,
-    statement: &BoundStatement<'_>,
-) -> Result<Vec<Row>, StatementFailure> {
-    log.log(statement.statement());
-    connection
-        .query(statement, StatementBound::ConnectionTimeouts)
-        .await
 }
 
 /// A refusal with SQLSTATE `42883` (`undefined_function`).
