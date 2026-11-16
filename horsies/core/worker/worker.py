@@ -80,6 +80,7 @@ from horsies.core.worker.runner_heartbeat import (
 )
 from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.worker.claim_plan import ClaimPlan, describe_claim_plan
+from horsies.core.worker.queue_cap_hold import QueueCapHold, start_check_caps
 from horsies.core.worker.row_class import registered_task_classes
 from horsies.core.worker.slots import (
     BootAttemptsExhausted,
@@ -336,6 +337,11 @@ class Worker(
         # before start), so the claim loop also waits on this local wake.
         # Releases coalesce: the loop clears it before each claim pass.
         self._capacity_released = asyncio.Event()
+        # Soft-cap mode: the claimed rows of each capped queue wait here until
+        # a claim pass finds room under the queue's cap (queue_cap_hold).
+        self._queue_cap_hold = QueueCapHold(
+            start_check_caps(cfg.prefetch_buffer, cfg.queue_max_concurrency),
+        )
         self._finalize_retry_attempts: dict[tuple[str, FinalizeStage], int] = {}
         # The CPUs of the worker process and of its children, planned at the
         # start of the slots from cfg.parent_cpu.
@@ -1135,6 +1141,10 @@ class Worker(
                     list(report.killed_task_ids),
                 )
             logger.info('Worker child processes stopped')
+
+        # Rows that waited for their queue cap never reached a child: return
+        # them to their queue.
+        await self._return_held_rows()
 
         # Finalizers persist task outcomes; with every outcome resolved they
         # only have DB writes left, so the drain timeout bounds DB work rather
