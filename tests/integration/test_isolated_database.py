@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from tests.integration.conftest import DB_URL
 from tests.integration.isolated_database import (
     _checked_database_name,
+    isolated_database_prefix,
     isolated_test_database,
 )
 
@@ -38,7 +39,7 @@ async def _database_exists(name: str) -> bool:
 
 
 async def test_isolated_setup_removes_an_inactive_generated_database() -> None:
-    stale_name = f'horsies_term_iso_{uuid.uuid4().hex}'
+    stale_name = f'{isolated_database_prefix()}{uuid.uuid4().hex}'
     admin = create_async_engine(
         make_url(DB_URL).set(database='postgres'),
         isolation_level='AUTOCOMMIT',
@@ -81,14 +82,15 @@ async def test_owned_isolated_drop_forces_a_remaining_session() -> None:
 
 
 async def test_generated_database_validation_is_exact() -> None:
-    valid = f'horsies_term_iso_{uuid.uuid4().hex}'
+    prefix = isolated_database_prefix()
+    valid = f'{prefix}{uuid.uuid4().hex}'
     assert _checked_database_name(valid) == valid
     for invalid in (
-        'horsies_term_iso_',
+        prefix,
         f'{valid}0',
-        f'horsies_term_iso_{uuid.uuid4().hex.upper()}',
-        'horsies_term_iso_../../postgres',
-        'horsies_term_isolated_' + uuid.uuid4().hex,
+        f'{prefix}{uuid.uuid4().hex.upper()}',
+        f'{prefix}../../postgres',
+        f'{prefix[:-1]}lated_' + uuid.uuid4().hex,
     ):
         with pytest.raises(RuntimeError, match='refuse to drop'):
             _checked_database_name(invalid)
