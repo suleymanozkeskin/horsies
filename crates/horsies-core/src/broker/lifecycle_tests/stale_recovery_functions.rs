@@ -1,10 +1,10 @@
-//! Port of the stale RUNNING cases of Python
+//! Port of the stale recovery cases of Python
 //! `tests/integration/baseline_lifecycle_functions.sql` ("Stale RUNNING
-//! recovery: horsies_stale_running_scan, horsies_finish_stale_attempt"),
-//! which `tests/integration/test_baseline_sql.py` runs: the same cases,
-//! through the core's statements on a core pool (`broker::stale_recovery`),
-//! and the reaper's pass that calls them
-//! (`worker::recovery::mark_stale_running_as_failed`).
+//! recovery: horsies_stale_running_scan, horsies_finish_stale_attempt" and
+//! "horsies_requeue_stale_claims"), which
+//! `tests/integration/test_baseline_sql.py` runs: the same cases, through
+//! the core's statements on a core pool (`broker::stale_recovery`), and the
+//! reaper's steps that call them (`worker::recovery`).
 //!
 //! The argument refusals of the SQL cases (a batch of 0 or above 10 000, a
 //! negative threshold, a retry slot that does not fit its kind, a NULL error
@@ -25,8 +25,8 @@ use super::support::*;
 use crate::broker::core_rows::StatementLog;
 use crate::broker::pools::{core_pool_for_test_pool, unpinged_single_connection_core_pool};
 use crate::broker::stale_recovery::{
-    finish_stale_attempt, scan_stale_running, FinishStaleAttempt, RecoveryBatch, StaleRetry,
-    StaleRunningThresholds, ThresholdMs,
+    finish_stale_attempt, requeue_stale_claims, scan_stale_running, FinishStaleAttempt,
+    RecoveryBatch, StaleRetry, StaleRunningThresholds, ThresholdMs,
 };
 use crate::core::lifecycle::outcomes::GuardEvidence;
 use crate::core::lifecycle::{
@@ -35,7 +35,9 @@ use crate::core::lifecycle::{
 };
 use crate::core::types::status::TaskStatus;
 use crate::db::CorePool;
-use crate::worker::recovery::{expire_pending_tasks, mark_stale_running_as_failed};
+use crate::worker::recovery::{
+    expire_pending_tasks, mark_stale_running_as_failed, requeue_stale_claimed,
+};
 
 const QUEUE: &str = "q_stale";
 const CHANNEL: &str = "task_queue_q_stale";
@@ -645,6 +647,111 @@ mod reaper_pass {
     }
 }
 
+mod requeue {
+    use super::*;
+
+    /// 5 minutes without a claimer beat (Python's 300000 ms).
+    fn claim_threshold() -> ThresholdMs {
+        ThresholdMs::from_millis(300_000).expect("5 minutes fits")
+    }
+
+    /// A CLAIMED row of `WORKER`, claimed at `generation()`, months before
+    /// the database clock, with no beat.
+    async fn stale_claim(pool: &PgPool, origin: Origin) -> Uuid {
+        seed_task(
+            pool,
+            &TaskSeed {
+                origin,
+                ..TaskSeed::claimed()
+            },
+        )
+        .await
+    }
+
+    /// Case `requeue: the batch bound`.
+    #[tokio::test]
+    #[serial]
+    async fn the_batch_bound() {
+        let pool = pool().await;
+        let core = core_pool_for_test_pool(&pool);
+        let task_ids = [
+            stale_claim(&pool, Origin::Send).await,
+            stale_claim(&pool, Origin::Send).await,
+            stale_claim(&pool, Origin::Send).await,
+        ];
+
+        let requeued = requeue_stale_claims(
+            &core,
+            StatementLog::Off,
+            claim_threshold(),
+            RecoveryBatch::new(2).expect("2 rows is a recovery batch"),
+        )
+        .await
+        .expect("requeue");
+
+        assert_eq!(requeued, 2);
+        core.close();
+        cleanup_tasks(&pool, &task_ids).await;
+    }
+
+    /// Cases `requeue: silent claims go back; a beaten claim, a fresh claim
+    /// and an orphan stay` and `requeue: a requeued row has every claim and
+    /// run field cleared`, through the reaper's step, which repeats the
+    /// batch until one is short.
+    #[tokio::test]
+    #[serial]
+    async fn silent_claims_go_back_a_beaten_claim_a_fresh_claim_and_an_orphan_stay() {
+        let pool = pool().await;
+        let core = core_pool_for_test_pool(&pool);
+        let silent = stale_claim(&pool, Origin::Send).await;
+        let beaten = stale_claim(&pool, Origin::Send).await;
+        let fresh = stale_claim(&pool, Origin::Send).await;
+        let orphan = stale_claim(&pool, Origin::WorkflowNode).await;
+        let linked = stale_claim(&pool, Origin::WorkflowNode).await;
+        let workflow_id = link_workflow_task(&pool, linked, "ENQUEUED", "RUNNING").await;
+        set_finalizing(&pool, silent, Since::SecondsAgo(0.0)).await;
+        beat(&pool, beaten, BeatRole::Claimer, 0.0).await;
+        sqlx::query("UPDATE horsies_tasks SET claimed_at = NOW() WHERE id = $1")
+            .bind(fresh)
+            .execute(&pool)
+            .await
+            .expect("claim the row again now");
+        beat(&pool, fresh, BeatRole::Claimer, 1_200.0).await;
+
+        let requeued = requeue_stale_claimed(&core, StatementLog::Off, claim_threshold())
+            .await
+            .expect("stale claim requeue");
+
+        // The shared test database can hold stale claims of other tests.
+        assert!(requeued >= 2, "requeued {requeued}");
+        let mut statuses = Vec::new();
+        for task_id in [silent, beaten, fresh, orphan, linked] {
+            statuses.push(status_of(&pool, task_id).await);
+        }
+        assert_eq!(
+            statuses,
+            ["PENDING", "CLAIMED", "CLAIMED", "CLAIMED", "PENDING"]
+        );
+        let row = live_row(&pool, silent).await.expect("the requeued row");
+        for cleared in [
+            "claimed_at",
+            "claimed_by_worker_id",
+            "claim_expires_at",
+            "started_at",
+            "worker_pid",
+            "worker_hostname",
+            "worker_process_name",
+            "finalizing_at",
+            "finalizing_by_worker_id",
+        ] {
+            assert!(row[cleared].is_null(), "a requeue clears {cleared}");
+        }
+        core.close();
+        cleanup_tasks(&pool, &[silent, beaten, fresh, orphan, linked]).await;
+        cleanup_workflows(&pool, &[workflow_id]).await;
+    }
+}
+
 mod round_trips {
     use super::*;
 
@@ -721,6 +828,31 @@ mod round_trips {
             cleanup_tasks(&pool, &[task_id]).await;
         }
         counted.pool.close();
+    }
+
+    /// A batch of the stale claim requeue is one statement.
+    #[tokio::test]
+    #[serial]
+    async fn a_stale_claim_requeue_batch_is_one_statement() {
+        let pool = pool().await;
+        let counted = counted_pool(&pool).await;
+        let threshold = ThresholdMs::from_millis(300_000).expect("5 minutes fits");
+        let batch = RecoveryBatch::new(500).expect("500 rows is a recovery batch");
+        let _warm_up = requeue_stale_claims(&counted.pool, StatementLog::Off, threshold, batch)
+            .await
+            .expect("warm up");
+        let task_id = seed_task(&pool, &TaskSeed::claimed()).await;
+
+        counted.proxy.reset_round_trips();
+        let requeued = requeue_stale_claims(&counted.pool, StatementLog::Off, threshold, batch)
+            .await
+            .expect("requeue");
+
+        assert_eq!(counted.proxy.round_trips(), 1);
+        assert_eq!(requeued, 1);
+        assert_eq!(status_of(&pool, task_id).await, "PENDING");
+        counted.pool.close();
+        cleanup_tasks(&pool, &[task_id]).await;
     }
 
     /// A batch of the reaper's pending expiry is one statement.

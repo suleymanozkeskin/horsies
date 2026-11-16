@@ -8,6 +8,8 @@
 //!   task advisory lock and the row lock: the crash retry that the caller
 //!   asks for, the terminal failure (`FAIL_STALE`), or a refusal that writes
 //!   nothing.
+//! - `horsies_requeue_stale_claims`: one bounded batch of CLAIMED rows whose
+//!   claimer stopped beating, back to PENDING.
 //!
 //! Each statement runs alone on its connection in autocommit and is checked
 //! out as reserved work ([`CheckoutClass::Reserved`]): the reaper's pass runs
@@ -15,12 +17,13 @@
 //! ([`BrokerError::Statement`]).
 //!
 //! Python reference: `mark_stale_tasks_as_failed`
-//! (`horsies/core/brokers/postgres.py:3129-3423`).
+//! (`horsies/core/brokers/postgres.py:3129-3423`) and `requeue_stale_claimed`
+//! (`:3505-3530`).
 
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use crate::broker::core_rows::{column, read_rows, RowDecodeError, StatementLog};
+use crate::broker::core_rows::{column, one_row, read_rows, RowDecodeError, StatementLog};
 use crate::core::lifecycle::{decode_stale_attempt_row, StaleAttemptOutcome};
 use crate::db::{
     BoundStatement, CheckoutClass, CorePool, ParameterType, Row, StatementBound, TypedStatement,
@@ -121,6 +124,14 @@ static FINISH_STALE_ATTEMPT: TypedStatement = TypedStatement::new(
         ParameterType::Text,
         ParameterType::Text,
     ],
+);
+
+/// `horsies_requeue_stale_claims`. Parameters in order: stale threshold
+/// (ms), batch size.
+static REQUEUE_STALE_CLAIMS: TypedStatement = TypedStatement::new(
+    "requeue_stale_claims",
+    "SELECT horsies_requeue_stale_claims($1, $2) AS requeued",
+    &[ParameterType::Int4, ParameterType::Int4],
 );
 
 /// The wake of a retried row's queue. Parameters: channel, payload.
@@ -309,6 +320,43 @@ pub(crate) async fn wake_retried_queue(
     let bound = RETRY_WAKE.bind().value(&channel).value(&payload).finish();
     let _rows: Vec<Row> = run_reserved(pool, log, &bound).await?;
     Ok(())
+}
+
+/// Requeue one bounded batch of stale CLAIMED rows: at most `batch` rows
+/// whose claim is older than `stale_after` and whose claimer sent no beat
+/// within it go back to PENDING with every claim and run field cleared. A
+/// workflow task whose node is not runnable stays (the orphan audit cancels
+/// it); a row that another transaction holds is skipped. Sends no queue
+/// wake (as Python).
+///
+/// One statement on `pool`, checked out as reserved work; it commits alone.
+/// Returns the number of rows requeued.
+///
+/// Errors: [`BrokerError::Statement`]; [`BrokerError::RowDecode`] when the
+/// statement returns no count; [`BrokerError::ClaimContract`] for a count
+/// outside 0 to `batch`.
+pub(crate) async fn requeue_stale_claims(
+    pool: &CorePool,
+    log: StatementLog,
+    stale_after: ThresholdMs,
+    batch: RecoveryBatch,
+) -> Result<u32, BrokerError> {
+    let statement = &REQUEUE_STALE_CLAIMS;
+    let (stale_after_ms, batch_size) = (stale_after.get(), batch.get());
+    let bound = statement
+        .bind()
+        .value(&stale_after_ms)
+        .value(&batch_size)
+        .finish();
+    let row = one_row(run_reserved(pool, log, &bound).await?, statement)?;
+    let requeued: i32 = column(&row, statement, "requeued")?;
+    match u32::try_from(requeued) {
+        Ok(count) if requeued <= batch_size => Ok(count),
+        Ok(_) | Err(_) => Err(BrokerError::ClaimContract(format!(
+            "{}: requeued {requeued} rows with a batch of {batch_size}",
+            statement.name(),
+        ))),
+    }
 }
 
 /// Run one bound statement alone on `pool` as reserved work.

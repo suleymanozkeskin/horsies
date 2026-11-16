@@ -8,9 +8,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::broker::core_rows::StatementLog;
 use crate::broker::stale_recovery::{
-    finish_stale_attempt, scan_stale_running, wake_retried_queue, FinishStaleAttempt,
-    RecoveryBatch, StaleCandidate, StaleRetry, StaleRunningThresholds, ThresholdMs,
-    ThresholdOutOfRange,
+    finish_stale_attempt, requeue_stale_claims, scan_stale_running, wake_retried_queue,
+    FinishStaleAttempt, RecoveryBatch, StaleCandidate, StaleRetry, StaleRunningThresholds,
+    ThresholdMs, ThresholdOutOfRange,
 };
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
@@ -617,60 +617,11 @@ mod p7_maintenance_tests {
     }
 }
 
-/// SQL: Requeue stale CLAIMED tasks back to PENDING, at most `$2` rows.
-///
-/// Python's `REQUEUE_STALE_CLAIMED_SQL` (`core/brokers/postgres.py`): a
-/// claimed row is stale when its newest claimer beat is older than the
-/// threshold, or when it has no claimer beat and was claimed longer ago. An
-/// orphaned workflow task (no node in a runnable status) is never requeued:
-/// a new dispatch can only fail its node check again; the orphan audit
-/// cancels it instead. The staleness predicate sits inside the locking
-/// subquery, so only stale rows are locked. The requeue clears the claim
-/// fields and the finalizing marker.
-const REQUEUE_STALE_CLAIMED_SQL: &str = "\
-WITH stale AS (
-    SELECT t2.id
-    FROM horsies_tasks t2
-    LEFT JOIN LATERAL (
-        SELECT h.sent_at AS last_heartbeat
-        FROM horsies_heartbeats h
-        WHERE h.task_id = t2.id AND h.role = 'claimer'
-        ORDER BY h.sent_at DESC
-        LIMIT 1
-    ) hb ON TRUE
-    WHERE t2.status = 'CLAIMED'
-      AND (
-        (hb.last_heartbeat IS NULL
-            AND t2.claimed_at IS NOT NULL
-            AND t2.claimed_at < NOW() - $1 * INTERVAL '1 second')
-        OR (hb.last_heartbeat IS NOT NULL
-            AND hb.last_heartbeat < NOW() - $1 * INTERVAL '1 second')
-      )
-      AND NOT (
-          t2.is_workflow_task
-          AND NOT EXISTS (
-              SELECT 1 FROM horsies_workflow_tasks wt
-              WHERE wt.task_id = t2.id
-                AND wt.status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')
-          )
-      )
-    ORDER BY t2.id
-    LIMIT $2
-    FOR UPDATE OF t2 SKIP LOCKED
-)
-UPDATE horsies_tasks AS t
-SET status = 'PENDING',
-    claimed_at = NULL,
-    claimed_by_worker_id = NULL,
-    claim_expires_at = NULL,
-    finalizing_at = NULL,
-    finalizing_by_worker_id = NULL,
-    updated_at = NOW()
-FROM stale
-WHERE t.id = stale.id";
-
 /// Rows per stale-CLAIMED requeue statement.
-const STALE_CLAIMED_REQUEUE_BATCH: i64 = 500;
+const STALE_CLAIMED_REQUEUE_BATCH: RecoveryBatch = match RecoveryBatch::new(500) {
+    Some(batch) => batch,
+    None => panic!("500 rows is a recovery batch"),
+};
 /// Statements per reaper pass; a pass that reaches it stops, and the next
 /// pass goes on.
 const STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS: u32 = 200;
@@ -974,16 +925,27 @@ async fn run_reaper_pass(
     // rows, then the workflow and maintenance steps. No step stops for the
     // life of the process: a step that keeps failing logs an error on every
     // pass and its health keeps reporting the failure.
+    // The stale CLAIMED requeue runs on the main core pool with the reserve.
     if config.auto_requeue_stale_claimed {
-        let threshold_secs = config.claimed_stale_threshold_ms as f64 / 1000.0;
-        match requeue_stale_claimed(runtime_pool, threshold_secs).await {
-            Ok(count) if count > 0 => {
-                tracing::info!(count, "reaper requeued stale CLAIMED tasks");
+        match ThresholdMs::from_millis(config.claimed_stale_threshold_ms) {
+            Ok(threshold) => match requeue_stale_claimed(
+                broker.core_main_pool(),
+                broker.statement_log(),
+                threshold,
+            )
+            .await
+            {
+                Ok(count) if count > 0 => {
+                    tracing::info!(count, "reaper requeued stale CLAIMED tasks");
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "reaper: failed to requeue stale claimed tasks");
+                }
+                _ => {}
+            },
+            Err(error) => {
+                tracing::error!(%error, "reaper: the stale CLAIMED threshold is out of range");
             }
-            Err(e) => {
-                tracing::error!(error = %e, "reaper: failed to requeue stale claimed tasks");
-            }
-            _ => {}
         }
     }
 
@@ -1437,10 +1399,11 @@ fn stale_running_thresholds(
     })
 }
 
-/// [`mark_stale_running_as_failed`] for tests that hold a sqlx pool: the pass
+/// The reaper's stale recovery steps for tests that hold a sqlx pool: each
 /// runs on a main core pool on the same database, built for the call and
 /// closed after it. The thresholds are in seconds and the scan limit is an
-/// `i64`, as the earlier form took them, so a test call site keeps its form.
+/// `i64`, as the earlier sqlx forms took them, so a test call site keeps its
+/// form.
 #[cfg(test)]
 pub(crate) mod on_test_pool {
     use super::{RecoveryBatch, StaleRunningThresholds, StatementLog, ThresholdMs};
@@ -1464,6 +1427,20 @@ pub(crate) mod on_test_pool {
             super::mark_stale_running_as_failed(&core, StatementLog::Off, thresholds, batch).await;
         core.close();
         recovered
+    }
+
+    /// [`super::requeue_stale_claimed`] on a core pool built from a test's
+    /// sqlx pool, with the threshold in seconds.
+    pub(crate) async fn requeue_stale_claimed(
+        pool: &sqlx::PgPool,
+        threshold_secs: f64,
+    ) -> Result<u64, crate::broker::BrokerError> {
+        let core = crate::broker::pools::core_pool_for_test_pool(pool);
+        let requeued =
+            super::requeue_stale_claimed(&core, StatementLog::Off, threshold_of(threshold_secs))
+                .await;
+        core.close();
+        requeued
     }
 
     fn threshold_of(seconds: f64) -> ThresholdMs {
@@ -1557,7 +1534,7 @@ mod orphan_audit_schedule_tests {
                 .unwrap_or_else(|| panic!("{call} not called in run_reaper_pass"))
         };
         let order = [
-            position("requeue_stale_claimed(runtime_pool"),
+            position("requeue_stale_claimed("),
             position("terminate_orphaned_workflow_tasks(runtime_pool"),
             position("mark_stale_running_as_failed("),
             position("expire_pending_tasks(broker.core_main_pool()"),
@@ -1775,21 +1752,28 @@ fn transitioned_count(
     Ok(outcomes.len() as u64)
 }
 
-/// Requeue stale CLAIMED tasks back to PENDING, in batches of
+/// Requeue stale CLAIMED tasks back to PENDING (Python
+/// `requeue_stale_claimed`, `core/brokers/postgres.py:3505-3530`):
+/// `horsies_requeue_stale_claims` in batches of
 /// [`STALE_CLAIMED_REQUEUE_BATCH`] rows until a batch is short, and at most
-/// [`STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS`] batches. Each batch commits
+/// [`STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS`] batches. Each batch is one
+/// statement alone on `pool`, checked out as reserved work, and commits
 /// alone. Returns the number of requeued rows.
-pub async fn requeue_stale_claimed(pool: &PgPool, threshold_secs: f64) -> Result<u64, sqlx::Error> {
+///
+/// Errors: the failed batch's [`crate::broker::BrokerError`]; the batches
+/// before it stay committed.
+pub async fn requeue_stale_claimed(
+    pool: &CorePool,
+    log: StatementLog,
+    stale_after: ThresholdMs,
+) -> Result<u64, crate::broker::BrokerError> {
+    let full_batch = STALE_CLAIMED_REQUEUE_BATCH.get().unsigned_abs();
     let mut total: u64 = 0;
     for _ in 0..STALE_CLAIMED_REQUEUE_MAX_BATCHES_PER_PASS {
-        let requeued = sqlx::query(REQUEUE_STALE_CLAIMED_SQL)
-            .bind(threshold_secs)
-            .bind(STALE_CLAIMED_REQUEUE_BATCH)
-            .execute(pool)
-            .await?
-            .rows_affected();
-        total += requeued;
-        match requeued < STALE_CLAIMED_REQUEUE_BATCH.unsigned_abs() {
+        let requeued =
+            requeue_stale_claims(pool, log, stale_after, STALE_CLAIMED_REQUEUE_BATCH).await?;
+        total += u64::from(requeued);
+        match requeued < full_batch {
             true => return Ok(total),
             false => continue,
         }
@@ -1925,7 +1909,7 @@ pub async fn run_retention_cleanup(pool: &PgPool, config: &RetentionConfig) {
 
 #[cfg(test)]
 mod tests {
-    use super::on_test_pool::mark_stale_running_as_failed;
+    use super::on_test_pool::{mark_stale_running_as_failed, requeue_stale_claimed};
     use super::*;
     use crate::core::history::maintenance::coverage::{
         ensure_startup_coverage, StartupCoverageOutcome,
