@@ -725,7 +725,8 @@ pub struct TaskSchedule {
     /// Schedule pattern defining when the task runs.
     pub pattern: SchedulePattern,
     /// The task input as one JSON value, stored as the task row's `input`.
-    /// Absent is `null` (a task without input).
+    /// Absent is `null` (a task without input). It replaced `args` and
+    /// `kwargs`; a config that names either is refused as an unknown key.
     #[serde(default)]
     pub input: serde_json::Value,
     /// Target queue name (None = default).
@@ -1522,6 +1523,28 @@ mod tests {
         assert!(sched.catch_up_missed);
         assert_eq!(sched.max_catch_up_runs, 50);
         assert_eq!(sched.input, serde_json::json!({"key": "val"}));
+    }
+
+    #[test]
+    fn removed_args_and_kwargs_keys_are_refused_by_name() {
+        // The one `input` value replaced `args` and `kwargs`. A config that
+        // still names either key fails closed when it is read, with the key
+        // named, as every unknown schedule key is.
+        for key in ["args", "kwargs"] {
+            let mut raw = serde_json::json!({
+                "name": "s",
+                "task_name": "t",
+                "pattern": { "type": "interval", "seconds": 30 },
+            });
+            raw[key] = serde_json::json!({"x": 1});
+            let refused = serde_json::from_value::<TaskSchedule>(raw).unwrap_err();
+            assert!(
+                refused
+                    .to_string()
+                    .contains(&format!("unknown field `{key}`")),
+                "{refused}"
+            );
+        }
     }
 
     #[test]
