@@ -4,9 +4,10 @@
 //! Python's failure and timeout writes are one read of the retry facts and
 //! one statement. The core reads no row before the statement (differences
 //! ledger, row 18), so each write is one statement. The count is taken
-//! through the counting proxy, after the statement is prepared on the
-//! connection, with no checkout ping (Python's `pre_ping_off` case; the
-//! ping rule of a reused connection belongs to the statement layer).
+//! through the counting proxy on a core pool of one connection, after the
+//! statement is prepared on the connection, with no checkout ping (Python's
+//! `pre_ping_off` case; the ping rule of a reused connection belongs to the
+//! statement layer).
 
 use serial_test::serial;
 use sqlx::PgPool;
@@ -17,6 +18,8 @@ use crate::broker::attempt_writes::{
     finish_failed_attempt, AttemptFailure, AttemptFailureKind, FinishFailedAttempt, RetryPlacement,
     RetryRequest,
 };
+use crate::broker::core_rows::StatementLog;
+use crate::broker::pools::unpinged_single_connection_core_pool;
 use crate::core::lifecycle::FailedAttemptOutcome;
 
 const QUEUE: &str = "lifecycle_round_trips";
@@ -70,14 +73,17 @@ fn retries() -> RetryRequest {
 async fn measure(pool: &PgPool, failure: Failure) -> (u32, FailedAttemptOutcome, Uuid) {
     let upstream = database_options(pool);
     let proxy = WireProxy::start(&upstream).await;
-    let proxied = unpinged_single_connection_pool(proxy.options(&upstream)).await;
-    // Prepare the statement on the proxied connection with a task that does
-    // not exist.
-    let _warm_up: FailedAttemptOutcome =
-        finish_failed_attempt(&proxied, &command(Uuid::new_v4(), failure))
-            .await
-            .expect("warm up");
-    wait_until_idle(&proxied).await;
+    let proxied = unpinged_single_connection_core_pool(&proxy.options(&upstream));
+    // Open the connection, run the pool's first-use check and prepare the
+    // statement on it, with a task that does not exist. The connection is
+    // back in the pool when the write returns.
+    let _warm_up: FailedAttemptOutcome = finish_failed_attempt(
+        &proxied,
+        StatementLog::Off,
+        &command(Uuid::new_v4(), failure),
+    )
+    .await
+    .expect("warm up");
     let task_id = seed_task(
         pool,
         &TaskSeed {
@@ -89,19 +95,17 @@ async fn measure(pool: &PgPool, failure: Failure) -> (u32, FailedAttemptOutcome,
     .await;
 
     proxy.reset_round_trips();
-    let outcome = finish_failed_attempt(&proxied, &command(task_id, failure))
+    let outcome = finish_failed_attempt(&proxied, StatementLog::Off, &command(task_id, failure))
         .await
         .expect("failed attempt");
-    wait_until_idle(&proxied).await;
     let round_trips = proxy.round_trips();
-    proxied.close().await;
+    proxied.close();
     (round_trips, outcome, task_id)
 }
 
 /// Python `test_a_worker_level_failure_is_one_statement`.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #756"]
 async fn a_worker_level_failure_is_one_statement() {
     let pool = pool().await;
     let (round_trips, outcome, task_id) = measure(&pool, Failure::WorkerLevel).await;
@@ -149,7 +153,6 @@ async fn assert_one_statement_per_task_error(error_code: &'static str) {
 /// core's design: no read before the statement.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #756"]
 async fn a_task_error_is_one_statement() {
     assert_one_statement_per_task_error("FLAKY").await;
 }
@@ -158,7 +161,6 @@ async fn a_task_error_is_one_statement() {
 /// design: no read before the statement.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #756"]
 async fn a_timeout_is_one_statement() {
     assert_one_statement_per_task_error("TASK_TIMEOUT").await;
 }

@@ -10,11 +10,10 @@ use uuid::Uuid;
 
 use crate::core::history::archive::results::decode_result_envelope;
 use crate::core::history::enqueue::prepare_enqueue_facts;
-use crate::core::history::errors::HistoryError;
 use crate::core::history::identity::keys::{
     validate_reservation_window, IDEMPOTENCY_SCOPE_VERSION, IDEMPOTENCY_WINDOW_DEFAULT_HOURS,
 };
-use crate::core::history::identity::reservations::{claim_key_reservation, ReservationClaim};
+use crate::core::history::identity::reservations::ReservationClaim;
 use crate::core::history::reads::detail::{HistoryTaskDetail, TaskDetailResult};
 use crate::core::history::reads::result::{
     HistoryResultPayload, HistoryTaskResult, TaskResultRead,
@@ -27,8 +26,9 @@ use crate::core::{
 };
 
 use crate::broker::core_rows::{
-    column, expired_task_row, one_row, read_rows, scalar, stale_task_row, stored_worker_state,
-    task_attempt_row, task_info_row, task_result_row, RowDecodeError, StatementLog,
+    checkout_batch, column, execute_in, expired_task_row, one_row, query_in, query_on, read_rows,
+    roll_back, scalar, stale_task_row, stored_worker_state, task_attempt_row, task_info_row,
+    task_result_row, RowDecodeError, StatementLog,
 };
 use crate::broker::error::{is_retryable_sqlx_error, BrokerError};
 use crate::broker::health::{
@@ -36,6 +36,7 @@ use crate::broker::health::{
     WorkerPongPayload, WorkerStateSnapshot, WORKER_PING_CHANNEL,
 };
 use crate::broker::history_reads::{read_history_detail, read_task_result};
+use crate::broker::key_reservation::{claim_key_reservation, KeyClaim};
 use crate::broker::result_types::{
     BrokerErrorCode, BrokerOperationError, BrokerResult, RawResultRecord,
 };
@@ -46,8 +47,9 @@ use crate::broker::row::task::{
 
 use crate::broker::client_family::ClientFamily;
 use crate::broker::process_listener::{
-    default_payload_capacity, fixed_channel, ListenError, ProcessListener, TASK_DONE_CHANNEL,
-    WORKER_PONG_CHANNEL_PREFIX,
+    default_payload_capacity, fixed_channel, CheckInterruption, ListenError, ProcessListener,
+    SessionCheckFailure, SESSION_CAPABILITY_TIMEOUT, SESSION_CHECK_CHANNEL_PREFIX,
+    TASK_DONE_CHANNEL, WORKER_PONG_CHANNEL_PREFIX,
 };
 use crate::broker::task_lists::{
     BoundedTaskList, StaleMinutes, TASK_LIST_BOUND, TASK_LIST_READ_LIMIT,
@@ -57,9 +59,63 @@ use crate::db::{PayloadEvent, PayloadFilter, WakeEvent, WakeSubscription};
 
 use crate::broker::pools::{BrokerPools, PoolProfile};
 use crate::db::{
-    BoundStatement, CheckoutClass, ParameterType, Row, StatementBound, StatementFailure,
-    TypedStatement,
+    BoundStatement, CheckoutClass, IsolationLevel, ParameterType, Row, StatementBound,
+    StatementFailure, Transaction as CoreTransaction, TypedStatement,
 };
+
+/// Refuse a sent task input that breaks the rules of a user value (Python `.send()` refuses it as
+/// `VALIDATION_FAILED`, `core/task_decorator.py:2378-2387`). An object input is Python's keyword input: no
+/// member name is an engine key, and each member value has no engine key at any depth and at most
+/// `MAX_VALUE_JSON_DEPTH` levels. Any other input except `null` is one value under the same rules. A text that
+/// is not strict JSON is refused.
+fn check_sent_input(input: &str) -> Result<(), BrokerError> {
+    let refused =
+        |cause: String| BrokerError::EnqueueContract(format!("task input refused: {cause}"));
+    let value: serde_json::Value =
+        crate::core::codec::from_json_str(input).map_err(|e| refused(e.to_string()))?;
+    let no_engine_members: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let checked = match &value {
+        serde_json::Value::Object(members) => {
+            crate::core::codec::user_value::check_task_input(&[], members, &no_engine_members)
+        }
+        serde_json::Value::Null => Ok(()),
+        other => crate::core::codec::user_value::check_task_input(
+            std::slice::from_ref(other),
+            &serde_json::Map::new(),
+            &no_engine_members,
+        ),
+    };
+    checked.map_err(|refusal| refused(refusal.to_string()))
+}
+
+#[cfg(test)]
+mod sent_input_tests {
+    use super::check_sent_input;
+    use crate::broker::BrokerError;
+
+    /// Python `.send()` refuses an engine key in the input as `VALIDATION_FAILED`
+    /// (`core/task_decorator.py:2378-2387`).
+    #[test]
+    fn a_sent_input_with_an_engine_key_is_refused() {
+        for input in [
+            r#"{"x": {"__h_task_result__": true}}"#,
+            r#"{"__h_workflow_ctx__": {}}"#,
+            r#"[{"a": [{"__builtin_task_code__": "X"}]}]"#,
+            r#"{"x": NaN}"#,
+        ] {
+            assert!(
+                matches!(
+                    check_sent_input(input),
+                    Err(BrokerError::EnqueueContract(_))
+                ),
+                "{input}"
+            );
+        }
+        assert!(check_sent_input(r#"{"x": {"y": [1, 2]}}"#).is_ok());
+        assert!(check_sent_input("[1]").is_ok());
+        assert!(check_sent_input("null").is_ok());
+    }
+}
 
 #[cfg(test)]
 fn test_uuid(value: &str) -> Uuid {
@@ -99,6 +155,53 @@ FROM horsies_tasks WHERE id = $1";
 const READ_SEND_IDENTITY_FOR_KEY_SQL: &str = "\
 SELECT command_fingerprint_version, command_fingerprint, sent_at, idempotency_key_digest
 FROM horsies_tasks WHERE id = $1 FOR UPDATE";
+
+/// The enqueue insert. Parameters in order: id, task name, queue name,
+/// priority, input, task options, execution, retention class key, sent at,
+/// fingerprint version, fingerprint, key digest, enqueued at, delay
+/// seconds, max retries, good until, retain rerun input.
+static ENQUEUE: TypedStatement = TypedStatement::new(
+    "enqueue",
+    ENQUEUE_SQL,
+    &[
+        ParameterType::Uuid,
+        ParameterType::Text,
+        ParameterType::Text,
+        ParameterType::Int4,
+        ParameterType::Text,
+        ParameterType::Text,
+        ParameterType::Text,
+        ParameterType::Text,
+        ParameterType::Timestamptz,
+        ParameterType::Int2,
+        ParameterType::Bytea,
+        ParameterType::Bytea,
+        ParameterType::Timestamptz,
+        ParameterType::Int8,
+        ParameterType::Int4,
+        ParameterType::Timestamptz,
+        ParameterType::Bool,
+    ],
+);
+
+static READ_SEND_IDENTITY: TypedStatement = TypedStatement::new(
+    "read_send_identity",
+    READ_SEND_IDENTITY_SQL,
+    &[ParameterType::Uuid],
+);
+
+static READ_SEND_IDENTITY_FOR_KEY: TypedStatement = TypedStatement::new(
+    "read_send_identity_for_key",
+    READ_SEND_IDENTITY_FOR_KEY_SQL,
+    &[ParameterType::Uuid],
+);
+
+/// Binds a key digest (`$1`) to a task (`$2`) that has none.
+static BIND_IDEMPOTENCY_KEY: TypedStatement = TypedStatement::new(
+    "bind_idempotency_key",
+    "UPDATE horsies_tasks SET idempotency_key_digest = $1 WHERE id = $2",
+    &[ParameterType::Bytea, ParameterType::Uuid],
+);
 
 // Eligibility split into two CTE arms — PENDING and expired-CLAIMED — each with
 // its own ORDER BY + FOR UPDATE SKIP LOCKED + LIMIT, merged and re-limited. The
@@ -790,12 +893,6 @@ fn pg_session_pool_options(config: &PostgresConfig) -> PgPoolOptions {
     with_session_settings(pooled_options(config), SessionSettings::Kept)
 }
 
-fn listener_probe_failed(err: sqlx::Error) -> BrokerError {
-    BrokerError::ConnectionFailed(format!(
-        "Postgres LISTEN delivery probe failed; session_database_url must be direct/session-capable and able to preserve LISTEN/NOTIFY session state: {err}",
-    ))
-}
-
 fn prepared_statement_tracking_failed(err: &sqlx::Error) -> bool {
     // String-sniff deliberately: PgBouncer prepared-statement tracking failures
     // do not have one stable SQLSTATE across "missing prepared statement",
@@ -890,7 +987,6 @@ pub struct PostgresBroker {
     retain_rerun_input_default: bool,
     idempotency_reservation_window_seconds: i64,
     listener: ProcessListener,
-    listener_delivery_checked: tokio::sync::OnceCell<()>,
     schema_initialized: tokio::sync::OnceCell<()>,
     schema_initialization_mode: SchemaInitializationMode,
     /// The client family of this handle. The constructors of this type serve
@@ -962,7 +1058,6 @@ impl PostgresBroker {
             )
             .num_seconds(),
             listener,
-            listener_delivery_checked: tokio::sync::OnceCell::new(),
             schema_initialized: tokio::sync::OnceCell::new(),
             schema_initialization_mode,
             client_family: ClientFamily::Rust,
@@ -1075,7 +1170,6 @@ impl PostgresBroker {
             )
             .num_seconds(),
             listener: ProcessListener::on_session_url(config.effective_session_database_url()),
-            listener_delivery_checked: tokio::sync::OnceCell::new(),
             schema_initialized: tokio::sync::OnceCell::new(),
             schema_initialization_mode,
             client_family: ClientFamily::Rust,
@@ -1203,6 +1297,19 @@ impl PostgresBroker {
         &self.session_pool
     }
 
+    /// The core pool on `database_url`, for the lifecycle writers that run
+    /// on the statement layer ([`crate::broker::attempt_writes`]). In a
+    /// worker it is the worker profile pool.
+    pub(crate) fn core_main_pool(&self) -> &crate::db::CorePool {
+        self.core.main()
+    }
+
+    /// Whether this broker logs each core statement it runs, for the
+    /// lifecycle writers that run on [`PostgresBroker::core_main_pool`].
+    pub(crate) fn statement_log(&self) -> StatementLog {
+        self.statement_log
+    }
+
     /// Runs one statement on the main core pool and reads every row.
     ///
     /// The checkout passes the reserve gate ([`CheckoutClass::Batch`]): the
@@ -1293,9 +1400,11 @@ impl PostgresBroker {
     /// Enqueue a new task. Returns the task ID (UUIDv7 at the public send funnel).
     ///
     /// `input` is the encoded task input as one JSON value; it is stored as
-    /// written. Uses ON CONFLICT DO NOTHING; a taken task id is compared by the
-    /// version-1 command fingerprint and the stored `sent_at` (the exact-id
-    /// resend check).
+    /// written. The input follows the rules of a user value
+    /// (`check_sent_input`); a refusal is `EnqueueContract`, which the send maps
+    /// to `VALIDATION_FAILED`. Uses ON CONFLICT DO NOTHING; a taken task id is
+    /// compared by the version-1 command fingerprint and the stored `sent_at`
+    /// (the exact-id resend check).
     #[allow(clippy::too_many_arguments)]
     pub async fn enqueue(
         &self,
@@ -1326,6 +1435,7 @@ impl PostgresBroker {
                 "sent_at is in the future without enqueued_at or enqueue_delay_seconds; sent_at is a call-site timestamp".to_owned(),
             ));
         }
+        check_sent_input(input)?;
         let task_id = match predetermined_task_id {
             Some(task_id) => task_id,
             None => crate::core::history::identity::uuid7::mint_task_id().map_err(|error| {
@@ -1355,33 +1465,30 @@ impl PostgresBroker {
             fingerprint: Some(facts.command_fingerprint.to_vec()),
             sent_at: effective_sent_at,
         };
-        let mut transaction = self.pool.begin().await.map_err(BrokerError::Database)?;
+        let mut connection = checkout_batch(self.core.main(), &ENQUEUE).await?;
+        let mut transaction = connection.begin(IsolationLevel::ServerDefault).await?;
         if let Some(key_digest) = facts.idempotency_key_digest {
             let claim = claim_key_reservation(
                 &mut transaction,
-                &key_digest,
-                IDEMPOTENCY_SCOPE_VERSION,
-                self.idempotency_reservation_window_seconds,
-                facts.command_fingerprint_version,
-                &facts.command_fingerprint,
-                task_id,
+                self.statement_log,
+                &KeyClaim {
+                    key_digest: &key_digest,
+                    key_scope_version: IDEMPOTENCY_SCOPE_VERSION,
+                    reservation_window_seconds: self.idempotency_reservation_window_seconds,
+                    fingerprint_version: facts.command_fingerprint_version,
+                    fingerprint: &facts.command_fingerprint,
+                    task_id,
+                },
             )
-            .await
-            .map_err(map_history_enqueue_error)?;
+            .await?;
             match claim {
                 ReservationClaim::Applied { .. } => {}
                 ReservationClaim::Replay { task_id } => {
-                    transaction
-                        .rollback()
-                        .await
-                        .map_err(BrokerError::Database)?;
+                    roll_back(transaction).await?;
                     return Ok(task_id);
                 }
                 ReservationClaim::Conflict { task_id, .. } => {
-                    transaction
-                        .rollback()
-                        .await
-                        .map_err(BrokerError::Database)?;
+                    roll_back(transaction).await?;
                     return Err(BrokerError::IdempotencyKeyConflict {
                         task_name: task_name.to_owned(),
                         task_id,
@@ -1390,35 +1497,40 @@ impl PostgresBroker {
             }
         }
 
-        let row: Option<(Uuid,)> = sqlx::query_as(ENQUEUE_SQL)
-            .bind(task_id)
-            .bind(task_name)
-            .bind(queue_name)
-            .bind(priority)
-            .bind(input)
-            .bind(task_options)
-            .bind(facts.execution.as_str())
-            .bind(&facts.retention_class_key)
-            .bind(effective_sent_at)
-            .bind(facts.command_fingerprint_version)
-            .bind(facts.command_fingerprint.as_slice())
-            .bind(
-                facts
-                    .idempotency_key_digest
-                    .as_ref()
-                    .map(<[u8; 32]>::as_slice),
-            )
-            .bind(enqueued_at)
-            .bind(enqueue_delay_seconds)
-            .bind(max_retries)
-            .bind(good_until)
-            .bind(facts.retain_rerun_input)
-            .fetch_optional(&mut *transaction)
-            .await
-            .map_err(BrokerError::Database)?;
+        let execution = facts.execution.as_str();
+        let fingerprint: &[u8] = facts.command_fingerprint.as_slice();
+        let bound_key_digest: Option<&[u8]> = facts
+            .idempotency_key_digest
+            .as_ref()
+            .map(<[u8; 32]>::as_slice);
+        let inserted = query_in(
+            &mut transaction,
+            self.statement_log,
+            &ENQUEUE
+                .bind()
+                .value(&task_id)
+                .value(&task_name)
+                .value(&queue_name)
+                .value(&priority)
+                .value(&input)
+                .value(&task_options)
+                .value(&execution)
+                .value(&facts.retention_class_key)
+                .value(&effective_sent_at)
+                .value(&facts.command_fingerprint_version)
+                .value(&fingerprint)
+                .value(&bound_key_digest)
+                .value(&enqueued_at)
+                .value(&enqueue_delay_seconds)
+                .value(&max_retries)
+                .value(&good_until)
+                .value(&facts.retain_rerun_input)
+                .finish(),
+        )
+        .await?;
 
-        if row.is_some() {
-            transaction.commit().await.map_err(BrokerError::Database)?;
+        if !inserted.is_empty() {
+            transaction.commit().await?;
             tracing::debug!(task_id = %task_id, task_name, queue = queue_name, "task enqueued");
             return Ok(task_id);
         }
@@ -1435,31 +1547,31 @@ impl PostgresBroker {
                 .await;
         }
 
-        transaction
-            .rollback()
-            .await
-            .map_err(BrokerError::Database)?;
+        roll_back(transaction).await?;
 
         // Conflict: task_id already exists. Compare the fingerprint and sent_at.
         tracing::debug!(task_id = %task_id, task_name, "enqueue conflict — comparing the send identity");
 
-        let stored: Option<(Option<i16>, Option<Vec<u8>>, DateTime<Utc>)> =
-            sqlx::query_as(READ_SEND_IDENTITY_SQL)
-                .bind(task_id)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(BrokerError::Database)?;
-
-        let outcome = classify_enqueue_conflict(
-            stored.map(|(fingerprint_version, fingerprint, sent_at)| SendIdentity {
-                fingerprint_version,
-                fingerprint,
-                sent_at,
+        let stored_rows = query_on(
+            &mut connection,
+            self.statement_log,
+            &READ_SEND_IDENTITY.bind().value(&task_id).finish(),
+        )
+        .await?;
+        let stored = match stored_rows.first() {
+            Some(row) => Some(SendIdentity {
+                fingerprint_version: column(
+                    row,
+                    &READ_SEND_IDENTITY,
+                    "command_fingerprint_version",
+                )?,
+                fingerprint: column(row, &READ_SEND_IDENTITY, "command_fingerprint")?,
+                sent_at: column(row, &READ_SEND_IDENTITY, "sent_at")?,
             }),
-            &sent,
-            task_id,
-            task_name,
-        );
+            None => None,
+        };
+
+        let outcome = classify_enqueue_conflict(stored, &sent, task_id, task_name);
         if matches!(
             outcome,
             Err(BrokerError::EnqueueConflictUnverifiable { .. })
@@ -1473,40 +1585,39 @@ impl PostgresBroker {
         outcome
     }
 
+    /// The keyed enqueue whose task id already exists: in the same
+    /// transaction, lock the row, compare its send identity, and bind the key
+    /// when the row has none.
     async fn bind_key_after_task_id_conflict(
         &self,
-        mut transaction: Transaction<'_, Postgres>,
+        mut transaction: CoreTransaction<'_>,
         task_id: Uuid,
         task_name: &str,
         sent: &SendIdentity,
         key_digest: &[u8; 32],
     ) -> Result<Uuid, BrokerError> {
-        let existing: Option<(Option<i16>, Option<Vec<u8>>, DateTime<Utc>, Option<Vec<u8>>)> =
-            sqlx::query_as(READ_SEND_IDENTITY_FOR_KEY_SQL)
-                .bind(task_id)
-                .fetch_optional(&mut *transaction)
-                .await
-                .map_err(BrokerError::Database)?;
-        let Some((fingerprint_version, fingerprint, sent_at, bound_digest)) = existing else {
-            transaction
-                .rollback()
-                .await
-                .map_err(BrokerError::Database)?;
+        let statement: &TypedStatement = &READ_SEND_IDENTITY_FOR_KEY;
+        let existing = query_in(
+            &mut transaction,
+            self.statement_log,
+            &statement.bind().value(&task_id).finish(),
+        )
+        .await?;
+        let Some(row) = existing.first() else {
+            roll_back(transaction).await?;
             return Err(BrokerError::EnqueueConflictUnverifiable {
                 task_id,
                 task_name: task_name.to_owned(),
             });
         };
         let stored = SendIdentity {
-            fingerprint_version,
-            fingerprint,
-            sent_at,
+            fingerprint_version: column(row, statement, "command_fingerprint_version")?,
+            fingerprint: column(row, statement, "command_fingerprint")?,
+            sent_at: column(row, statement, "sent_at")?,
         };
+        let bound_digest: Option<Vec<u8>> = column(row, statement, "idempotency_key_digest")?;
         if &stored != sent {
-            transaction
-                .rollback()
-                .await
-                .map_err(BrokerError::Database)?;
+            roll_back(transaction).await?;
             return Err(BrokerError::PayloadMismatch { task_id });
         }
         // The task id is bound to another key: the same command with a changed
@@ -1516,21 +1627,23 @@ impl PostgresBroker {
             .as_deref()
             .is_some_and(|digest| digest != key_digest.as_slice())
         {
-            transaction
-                .rollback()
-                .await
-                .map_err(BrokerError::Database)?;
+            roll_back(transaction).await?;
             return Err(BrokerError::PayloadMismatch { task_id });
         }
         if bound_digest.is_none() {
-            sqlx::query("UPDATE horsies_tasks SET idempotency_key_digest = $1 WHERE id = $2")
-                .bind(key_digest.as_slice())
-                .bind(task_id)
-                .execute(&mut *transaction)
-                .await
-                .map_err(BrokerError::Database)?;
+            let key: &[u8] = key_digest.as_slice();
+            let _bound = execute_in(
+                &mut transaction,
+                self.statement_log,
+                &BIND_IDEMPOTENCY_KEY
+                    .bind()
+                    .value(&key)
+                    .value(&task_id)
+                    .finish(),
+            )
+            .await?;
         }
-        transaction.commit().await.map_err(BrokerError::Database)?;
+        transaction.commit().await?;
         Ok(task_id)
     }
 
@@ -2478,9 +2591,9 @@ impl PostgresBroker {
     /// Returns `Ok(())` if the database is reachable, `Err(BrokerError)` otherwise.
     /// Mirrors Python's `HEALTH_CHECK_SQL` used by `horsies check --live`.
     ///
-    /// This intentionally does not probe LISTEN/NOTIFY. Workers call
-    /// `ensure_listener_delivery_checked()` once during startup when configured
-    /// for PgBouncer transaction pooling.
+    /// This does not check LISTEN/NOTIFY. Workers run
+    /// [`check_session_delivery`](Self::check_session_delivery) at every
+    /// boot.
     pub async fn health_check(&self) -> Result<(), BrokerError> {
         let rows = self.query_main(&HEALTH_CHECK.bind().finish()).await?;
         let _row = one_row(rows, &HEALTH_CHECK)?;
@@ -2630,70 +2743,52 @@ impl PostgresBroker {
         Ok(pongs)
     }
 
-    /// Verify LISTEN/NOTIFY delivery once per broker in PgBouncer mode.
+    /// The session check of a worker boot: the session URL keeps session
+    /// state when a LISTEN on it receives a NOTIFY. Runs at every worker boot,
+    /// with or without PgBouncer mode (Python `validate_worker_database_paths`,
+    /// `horsies/core/brokers/postgres.py:1436-1460`).
     ///
-    /// Reconnect loops may call this repeatedly; successful probes are cached so
-    /// transient listener reconnects do not open another direct connection.
-    pub async fn ensure_listener_delivery_checked(&self) -> Result<(), BrokerError> {
-        if !self.pgbouncer_transaction_mode {
-            return Ok(());
-        }
-        self.listener_delivery_checked
-            .get_or_try_init(|| async {
-                self.check_listener_delivery().await?;
-                Ok::<(), BrokerError>(())
-            })
-            .await?;
-        Ok(())
-    }
-
-    /// Verify that the session pool can actually receive LISTEN/NOTIFY.
+    /// Steps: subscribe a wake on `horsies_check_<32 hex>` on the broker's
+    /// listener, the connection that carries the claim wakes and the pings;
+    /// one autocommit `SELECT pg_notify($1, 'ok')` on the main pool; wait at
+    /// most [`SESSION_CAPABILITY_TIMEOUT`]. The subscription is dropped at the
+    /// end, and the listener UNLISTENs the channel.
     ///
-    /// PgBouncer transaction mode may accept `LISTEN` syntactically but drop
-    /// the session state when the transaction ends. A bounded delivery probe
-    /// catches that misconfiguration with a clear startup error.
-    pub async fn check_listener_delivery(&self) -> Result<(), BrokerError> {
-        let mut listener = sqlx::postgres::PgListener::connect_with(&self.session_pool)
+    /// Outcomes: `Ok` when the NOTIFY arrives; `NotCapable` (not retryable)
+    /// when it does not arrive in time; `Subscribe`, `Notify` and
+    /// `Interrupted` carry their retry rule (a database that cannot be
+    /// reached is retryable).
+    pub async fn check_session_delivery(&self) -> Result<(), SessionCheckFailure> {
+        let listener = self
+            .listener
+            .start()
             .await
-            .map_err(listener_probe_failed)?;
-        let channel = format!("horsies_probe_{}", Uuid::new_v4().simple());
-        let payload = Uuid::new_v4().to_string();
-
-        listener
-            .listen(&channel)
+            .map_err(SessionCheckFailure::Subscribe)?;
+        let channel = fixed_channel(&format!(
+            "{SESSION_CHECK_CHANNEL_PREFIX}{}",
+            Uuid::new_v4().simple()
+        ));
+        let delivery = listener
+            .subscribe_wake(channel.clone(), PayloadFilter::AnyPayload)
             .await
-            .map_err(listener_probe_failed)?;
-
-        sqlx::query("SELECT pg_notify($1, $2)")
-            .bind(&channel)
-            .bind(&payload)
+            .map_err(SessionCheckFailure::Subscribe)?;
+        sqlx::query("SELECT pg_notify($1, 'ok')")
+            .bind(channel.as_str())
             .execute(&self.pool)
             .await
-            .map_err(|err| {
-                if self.pgbouncer_transaction_mode && prepared_statement_tracking_failed(&err) {
-                    prepared_statement_tracking_error(err)
-                } else {
-                    listener_probe_failed(err)
-                }
-            })?;
-
-        let delivered = tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                let notification = listener.recv().await.map_err(listener_probe_failed)?;
-                if notification.channel() == channel && notification.payload() == payload {
-                    return Ok::<(), BrokerError>(());
-                }
-            }
-        })
-        .await;
-
-        let _ = listener.unlisten(&channel).await;
-
-        match delivered {
-            Ok(result) => result,
-            Err(_) => Err(BrokerError::ConnectionFailed(
-                "Postgres LISTEN delivery probe timed out; session_database_url appears to be transaction-pooled or otherwise unable to preserve LISTEN/NOTIFY session state".to_owned(),
+            .map_err(SessionCheckFailure::Notify)?;
+        match tokio::time::timeout(SESSION_CAPABILITY_TIMEOUT, delivery.recv()).await {
+            Ok(WakeEvent::Notified) => Ok(()),
+            Ok(WakeEvent::Gap) => Err(SessionCheckFailure::Interrupted(
+                CheckInterruption::Reconnected,
             )),
+            Ok(WakeEvent::Stopped) => {
+                Err(SessionCheckFailure::Interrupted(CheckInterruption::Stopped))
+            }
+            Err(_elapsed) => Err(SessionCheckFailure::NotCapable {
+                session_url: listener.masked_url().clone(),
+                waited: SESSION_CAPABILITY_TIMEOUT,
+            }),
         }
     }
 
@@ -3000,13 +3095,6 @@ fn idempotency_reservation_window_seconds(
     Ok(window.num_seconds())
 }
 
-fn map_history_enqueue_error(error: HistoryError) -> BrokerError {
-    match error {
-        HistoryError::Database(error) => BrokerError::Database(error),
-        other => BrokerError::EnqueueContract(other.to_string()),
-    }
-}
-
 /// The rerun error of a failed client-family check.
 ///
 /// # Panics
@@ -3133,7 +3221,7 @@ fn decode_raw_result_object(
 ) -> BrokerResult<Option<serde_json::Map<String, serde_json::Value>>> {
     raw_result
         .map(|raw| {
-            serde_json::from_str(raw)
+            crate::core::codec::from_json_str::<serde_json::Value>(raw)
                 .map_err(|error| invalid_raw_result(format!("result JSON is invalid: {error}")))
                 .and_then(decode_raw_result_value)
         })
