@@ -13,11 +13,15 @@ from typing import Final
 from tests.dualrun.rules import (
     AnchorReference,
     ColumnRule,
+    DigestOf,
     Exact,
+    FormatVersion,
+    GeneratedName,
     Ignored,
+    JsonStorage,
     NormalisedId,
-    RunWindowReference,
     SnapshotCatalog,
+    StoredJson,
     TimeOrderOnly,
     TimeWithin,
 )
@@ -127,13 +131,25 @@ class RuleTypeMismatch:
 
 
 @dataclass(frozen=True, slots=True)
-class AnchorTypeMismatch:
-    """An anchored time rule whose anchor column is not a timestamptz column."""
+class ReferencedTypeMismatch:
+    """A rule names another column of a type it cannot read.
+
+    An anchor must be timestamptz, a format version an integer, a digest
+    source bytea.
+    """
 
     table: str
     column: str
-    anchor: str
-    anchor_type: ColumnType
+    referenced: str
+    referenced_type: ColumnType
+
+
+@dataclass(frozen=True, slots=True)
+class DetachedLeafShapeMismatch:
+    """A detached leaf whose columns or column types differ from its former parent's."""
+
+    table: str
+    parent: str
 
 
 CoverageGap = (
@@ -141,7 +157,80 @@ CoverageGap = (
     | RuleWithoutColumn
     | UnsupportedColumnType
     | RuleTypeMismatch
-    | AnchorTypeMismatch
+    | ReferencedTypeMismatch
+    | DetachedLeafShapeMismatch
+)
+
+# ---- Detached leaves ----
+
+HISTORY_PARENT: Final = 'horsies_task_history'
+HEARTBEAT_PARENT: Final = 'horsies_heartbeats'
+HEARTBEAT_CLASS_KEY: Final = 'heartbeats'
+"""The leaf catalog class of heartbeat leaves; every other class holds history leaves."""
+
+
+@dataclass(frozen=True, slots=True)
+class DetachedLeaf:
+    """A table that the leaf catalog records as detached and not dropped.
+
+    It is a standalone table now, not a partition, so the schema lists it.
+    The capture reads it with the rules of ``parent`` and adds its rows to
+    the parent's rows, with the leaf's own name as ``tableoid``.
+    """
+
+    table: str
+    parent: str
+
+
+def detached_leaf(table: str, class_key: str) -> DetachedLeaf:
+    """The detached leaf ``table`` of the leaf catalog class ``class_key``."""
+    match class_key:
+        case key if key == HEARTBEAT_CLASS_KEY:
+            return DetachedLeaf(table=table, parent=HEARTBEAT_PARENT)
+        case _:
+            return DetachedLeaf(table=table, parent=HISTORY_PARENT)
+
+
+def split_detached_leaves(
+    schema: tuple[SchemaColumn, ...],
+    detached: tuple[DetachedLeaf, ...],
+) -> tuple[tuple[SchemaColumn, ...], tuple[DetachedLeaf, ...], tuple[CoverageGap, ...]]:
+    """Remove the detached leaves from the schema and check each against its parent.
+
+    Returns the schema without the detached leaves, the detached leaves that
+    the schema holds, and a gap for each leaf whose columns differ from its
+    parent's (``tableoid`` aside). A catalog row whose table is gone is not
+    a gap: the leaf catalog rows compare by their own rules.
+    """
+    present = {column.table for column in schema}
+    leaves = tuple(leaf for leaf in detached if leaf.table in present)
+    leaf_tables = {leaf.table for leaf in leaves}
+    gaps: list[CoverageGap] = []
+    for leaf in leaves:
+        leaf_columns = {
+            (column.column, column.column_type)
+            for column in schema
+            if column.table == leaf.table
+        }
+        parent_columns = {
+            (column.column, column.column_type)
+            for column in schema
+            if column.table == leaf.parent and column.column != 'tableoid'
+        }
+        if leaf_columns != parent_columns:
+            gaps.append(DetachedLeafShapeMismatch(table=leaf.table, parent=leaf.parent))
+    remaining = tuple(column for column in schema if column.table not in leaf_tables)
+    return remaining, leaves, tuple(gaps)
+
+
+_INTEGER_TYPES: Final = frozenset(
+    {DatabaseType.INT2, DatabaseType.INT4, DatabaseType.INT8}
+)
+_TEXT_JSON_TYPES: Final = frozenset(
+    {DatabaseType.TEXT, DatabaseType.VARCHAR, DatabaseType.JSONB}
+)
+_NAME_TYPES: Final = frozenset(
+    {DatabaseType.TEXT, DatabaseType.VARCHAR, DatabaseType.OID}
 )
 
 
@@ -154,36 +243,57 @@ def rule_fits_type(rule: ColumnRule, column_type: DatabaseType) -> bool:
             return column_type in _ID_TYPES
         case TimeOrderOnly() | TimeWithin():
             return column_type is DatabaseType.TIMESTAMPTZ
+        case StoredJson(storage=storage):
+            match storage:
+                case JsonStorage.TEXT:
+                    return column_type in _TEXT_JSON_TYPES
+                case JsonStorage.UTF8_BYTES:
+                    return column_type is DatabaseType.BYTEA
+        case GeneratedName():
+            return column_type in _NAME_TYPES
+        case DigestOf():
+            return column_type is DatabaseType.BYTEA
 
 
-def _anchor_gap(
+def _referenced_columns(rule: ColumnRule) -> list[tuple[str, frozenset[DatabaseType]]]:
+    """The other columns a rule reads, with the types it accepts for each."""
+    match rule:
+        case TimeWithin(reference=AnchorReference(column=anchor)):
+            return [(anchor, frozenset({DatabaseType.TIMESTAMPTZ}))]
+        case StoredJson(format=FormatVersion(column=version_column)):
+            return [(version_column, _INTEGER_TYPES)]
+        case DigestOf(column=source):
+            return [(source, frozenset({DatabaseType.BYTEA}))]
+        case _:
+            return []
+
+
+def _referenced_gaps(
     table: str,
     column: str,
     rule: ColumnRule,
     types: dict[tuple[str, str], ColumnType],
 ) -> list[CoverageGap]:
-    match rule:
-        case TimeWithin(reference=reference):
-            pass
-        case Exact() | NormalisedId() | TimeOrderOnly() | Ignored():
-            return []
-    match reference:
-        case RunWindowReference():
-            return []
-        case AnchorReference(column=anchor):
-            pass
-    anchor_type = types.get((table, anchor))
-    match anchor_type:
-        case DatabaseType.TIMESTAMPTZ | None:
-            # A missing anchor column is reported as RuleWithoutColumn or as a
-            # catalog defect, not twice.
-            return []
-        case _:
-            return [
-                AnchorTypeMismatch(
-                    table=table, column=column, anchor=anchor, anchor_type=anchor_type
+    gaps: list[CoverageGap] = []
+    for referenced, accepted in _referenced_columns(rule):
+        referenced_type = types.get((table, referenced))
+        match referenced_type:
+            case None:
+                # A missing column is reported as RuleWithoutColumn or as a
+                # catalog defect, not twice.
+                pass
+            case DatabaseType() if referenced_type in accepted:
+                pass
+            case _:
+                gaps.append(
+                    ReferencedTypeMismatch(
+                        table=table,
+                        column=column,
+                        referenced=referenced,
+                        referenced_type=referenced_type,
+                    ),
                 )
-            ]
+    return gaps
 
 
 def _type_gap(
@@ -223,5 +333,5 @@ def check_coverage(
                 gaps.append(RuleWithoutColumn(table=table, column=column))
             case column_type:
                 gaps.extend(_type_gap(table, column, rule, column_type))
-                gaps.extend(_anchor_gap(table, column, rule, types))
+                gaps.extend(_referenced_gaps(table, column, rule, types))
     return tuple(gaps)

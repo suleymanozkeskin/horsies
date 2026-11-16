@@ -140,10 +140,12 @@ class TestDetail:
                     'INSERT INTO horsies_task_attempts '
                     '(task_id, attempt, outcome, will_retry, started_at, '
                     'finished_at, error_code, error_message, failed_reason, '
-                    'worker_id) VALUES '
+                    'worker_id, worker_hostname, worker_pid, '
+                    'worker_process_name) VALUES '
                     "(CAST(:task_id AS uuid), 1, 'FAILED', TRUE, "
                     'statement_timestamp(), statement_timestamp(), '
-                    "'BOOM', 'exploded once', 'TASK_ERROR', :worker)"
+                    "'BOOM', 'exploded once', 'TASK_ERROR', :worker, "
+                    "'it-host', 4242, 'it-proc')"
                 ),
                 {'task_id': task_id, 'worker': WORKER},
             )

@@ -1529,9 +1529,33 @@ struct WorkflowNodeRow {
     task_id: Option<Uuid>,
     is_subworkflow: bool,
     sub_workflow_id: Option<Uuid>,
-    error: Option<String>,
+    /// The node's stored result; a failed node's error is in it.
+    result: Option<String>,
     started_at: Option<DateTime<Utc>>,
     completed_at: Option<DateTime<Utc>>,
+}
+
+/// The error text of a node: the message of the error that its stored
+/// `result` holds. The node `error` column has no writer (the result holds
+/// the error, and the baseline drops the column). No result, a result with a
+/// value, and an error with no message give `None`. A result that does not
+/// decode is a contract violation.
+fn node_error_from_result(
+    task_index: i32,
+    result: Option<&str>,
+) -> Result<Option<String>, HistoryError> {
+    let Some(text) = result else {
+        return Ok(None);
+    };
+    match serde_json::from_str::<crate::core::task::result::TaskResult<serde_json::Value>>(text) {
+        Ok(crate::core::task::result::TaskResult::Ok(_)) => Ok(None),
+        Ok(crate::core::task::result::TaskResult::Err(error)) => {
+            Ok(normalize_optional_text(error.message.as_deref()))
+        }
+        Err(cause) => Err(HistoryError::contract(format!(
+            "stored result of workflow node {task_index} does not decode: {cause}"
+        ))),
+    }
 }
 
 fn node_exec_s(row: &WorkflowNodeRow) -> Option<i64> {
@@ -1588,7 +1612,7 @@ async fn fetch_workflow_nodes(
     sqlx::query_as(
         "SELECT workflow_id, task_index, node_id, task_name, status,
                 dependencies, allow_failed_deps, task_id, is_subworkflow,
-                sub_workflow_id, error, started_at, completed_at
+                sub_workflow_id, result, started_at, completed_at
          FROM horsies_workflow_tasks
          WHERE workflow_id = $1
          ORDER BY task_index",
@@ -1707,7 +1731,7 @@ pub async fn get_workflow_node(
     let row: Option<WorkflowNodeRow> = sqlx::query_as(
         "SELECT workflow_id, task_index, node_id, task_name, status,
                 dependencies, allow_failed_deps, task_id, is_subworkflow,
-                sub_workflow_id, error, started_at, completed_at
+                sub_workflow_id, result, started_at, completed_at
          FROM horsies_workflow_tasks
          WHERE workflow_id = $1 AND task_index = $2",
     )
@@ -1752,7 +1776,8 @@ pub async fn get_workflow_node(
         task_name: row.task_name,
         node_status: row.status,
         is_subworkflow: row.is_subworkflow,
-        node_error: normalize_optional_text(row.error.as_deref()),
+        node_error: node_error_from_result(row.task_index, row.result.as_deref())
+            .map_err(|error| MonitoringQueryError::history(operation, error))?,
         leaf,
         attempts,
     }))
@@ -1769,6 +1794,57 @@ pub async fn list_schedules(broker: &PostgresBroker) -> MonitoringResult<Vec<Sch
     .fetch_all(broker.pool())
     .await
     .map_err(|error| MonitoringQueryError::database(operation, error))
+}
+
+#[cfg(test)]
+mod node_error_tests {
+    use super::*;
+    use crate::core::task::error::TaskError;
+    use crate::core::task::result::TaskResult;
+
+    fn stored(result: &TaskResult<serde_json::Value>) -> String {
+        serde_json::to_string(result).expect("encode a stored result")
+    }
+
+    #[test]
+    fn a_failed_node_shows_the_message_of_its_stored_error() {
+        let failed = stored(&TaskResult::Err(TaskError::builtin(
+            OutcomeCode::UpstreamSkipped,
+            "node blew up",
+        )));
+
+        assert_eq!(
+            node_error_from_result(0, Some(&failed)).expect("decodes"),
+            Some("node blew up".to_owned())
+        );
+    }
+
+    #[test]
+    fn no_result_a_value_and_a_blank_message_show_no_error() {
+        let value = stored(&TaskResult::Ok(serde_json::json!({"rows": 3})));
+        let blank = stored(&TaskResult::Err(TaskError::builtin(
+            OutcomeCode::UpstreamSkipped,
+            "  ",
+        )));
+
+        assert_eq!(node_error_from_result(0, None).expect("decodes"), None);
+        assert_eq!(
+            node_error_from_result(0, Some(&value)).expect("decodes"),
+            None
+        );
+        assert_eq!(
+            node_error_from_result(0, Some(&blank)).expect("decodes"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_stored_result_that_does_not_decode_is_a_contract_violation() {
+        assert!(matches!(
+            node_error_from_result(4, Some("not json")),
+            Err(HistoryError::Contract(_))
+        ));
+    }
 }
 
 #[cfg(test)]

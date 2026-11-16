@@ -233,7 +233,7 @@ WHERE workflow_id = $1
   AND status IN ('COMPLETED', 'FAILED', 'SKIPPED')";
 
 const GET_CTX_RESULTS_BY_NODE_ID_SQL: &str = "\
-SELECT node_id, status, result, sub_workflow_summary
+SELECT node_id, task_index, status, result, sub_workflow_summary
 FROM horsies_workflow_tasks
 WHERE workflow_id = $1
   AND node_id = ANY($2)
@@ -483,6 +483,7 @@ struct EdgeRow {
 #[derive(Debug, sqlx::FromRow)]
 struct CtxResultRow {
     node_id: Option<String>,
+    task_index: i32,
     status: String,
     result: Option<String>,
     sub_workflow_summary: Option<String>,
@@ -3351,18 +3352,17 @@ fn collect_ctx_maps(
         let Some(node_id) = row.node_id else { continue };
         let status = row.status.as_str();
 
-        let wrapped: TaskResult<serde_json::Value> = if status == "SKIPPED" {
-            TaskResult::Err(TaskError::builtin(
-                OutcomeCode::UpstreamSkipped,
-                format!("upstream node '{}' was skipped", node_id),
-            ))
-        } else if let Some(json) = row.result {
-            serde_json::from_str(&json)?
-        } else {
-            TaskResult::Err(TaskError::builtin(
-                RetrievalCode::ResultNotAvailable,
-                format!("no stored result for node '{}'", node_id),
-            ))
+        // Python: `_build_workflow_context_data` (`core/workflows/engine.py:2895-2916`), with the decided
+        // entry for a terminal node with no stored result.
+        let wrapped: TaskResult<serde_json::Value> = match (status, row.result) {
+            ("SKIPPED", _) => TaskResult::Err(
+                crate::workflow_engine::args_merge::upstream_skipped_error(row.task_index),
+            ),
+            (_, Some(json)) => serde_json::from_str(&json)?,
+            (_, None) => TaskResult::Err(crate::workflow_engine::args_merge::missing_result_error(
+                row.task_index,
+                status,
+            )),
         };
 
         results_by_id.insert(node_id.clone(), wrapped);

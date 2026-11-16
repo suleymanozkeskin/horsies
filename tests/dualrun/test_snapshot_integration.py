@@ -9,6 +9,7 @@ from typing import LiteralString, TypeVar
 
 import psycopg
 import pytest
+from psycopg import sql
 
 from horsies.core.types.result import Err, Ok, Result
 from tests.dualrun.capture import (
@@ -23,6 +24,7 @@ from tests.dualrun.catalog import BASELINE_CATALOG, RUN_CLOCK
 from tests.dualrun.compare import ColumnDifference, compare_snapshots, render_diff
 from tests.dualrun.coverage import (
     DatabaseType,
+    DetachedLeafShapeMismatch,
     RuleTypeMismatch,
     RuleWithoutColumn,
     UnclassifiedColumn,
@@ -36,6 +38,7 @@ from tests.dualrun.scenario import (
     ScenarioVariant,
     write_scenario,
 )
+from tests.dualrun.selfcheck import seed_history
 from tests.dualrun.values import Cell, ExactValue, IdLabel, make_run_window
 
 pytestmark = [pytest.mark.integration]
@@ -158,12 +161,9 @@ def test_history_row_is_read_through_its_parent_with_its_leaf(
     (history_row,) = history.rows
     (leaf_row,) = leaves.rows
     extract_node = nodes.rows[0]
-    assert history_row[history.rules.position('tableoid')] == IdLabel(
-        family=IdFamily.PARTITION_LEAF, ordinal=1
-    )
-    assert leaf_row[leaves.rules.position('leaf_name')] == IdLabel(
-        family=IdFamily.PARTITION_LEAF, ordinal=1
-    )
+    forever_leaf = ExactValue(text='horsies_task_history_forever_open')
+    assert history_row[history.rules.position('tableoid')] == forever_leaf
+    assert leaf_row[leaves.rules.position('leaf_name')] == forever_leaf
     assert (
         history_row[history.rules.position('task_id')]
         == extract_node[nodes.rules.position('task_id')]
@@ -277,4 +277,61 @@ def test_table_over_the_row_limit_fails_the_capture(
 
     assert outcome == Err(
         TableRowLimitExceeded(table='horsies_recovery_scan_cursors', limit=1)
+    )
+
+
+def _seeded_daily_leaf(make: MakeDatabase) -> tuple[DualRunDatabase, str]:
+    database = _installed(make)
+    _ok(seed_history(database), 'run the coverage pass')
+    with psycopg.connect(database.url, autocommit=True) as connection:
+        record = connection.execute(
+            'SELECT leaf_name FROM horsies_task_history_leaf_catalog '
+            "WHERE class_key = 'standard_30d' AND lower_bound_kind = 'AT' ORDER BY lower_anchor DESC LIMIT 1",
+        ).fetchone()
+        assert record is not None, 'the coverage pass made no daily leaf'
+        leaf = str(record[0])
+        _ = connection.execute(
+            sql.SQL(
+                'ALTER TABLE horsies_task_history_standard_30d DETACH PARTITION {}'
+            ).format(sql.Identifier(leaf)),
+        )
+    return database, leaf
+
+
+def test_detached_leaf_without_a_catalog_record_fails_the_capture(
+    empty_database: MakeDatabase,
+) -> None:
+    database, leaf = _seeded_daily_leaf(empty_database)
+    with psycopg.connect(database.url, autocommit=True) as connection:
+        outcome = read_raw_snapshot(connection, BASELINE_CATALOG)
+
+    match outcome:
+        case Err(CatalogCoverageGap(gaps=gaps)):
+            assert {gap for gap in gaps if isinstance(gap, UnclassifiedColumn)} >= {
+                UnclassifiedColumn(table=leaf, column='task_id'),
+            }
+        case _:
+            pytest.fail(f'the capture returned {outcome}, not a coverage gap')
+
+
+def test_detached_leaf_that_differs_from_its_parent_fails_the_capture(
+    empty_database: MakeDatabase,
+) -> None:
+    database, leaf = _seeded_daily_leaf(empty_database)
+    with psycopg.connect(database.url, autocommit=True) as connection:
+        _ = connection.execute(
+            'UPDATE horsies_task_history_leaf_catalog SET detached_at = now() WHERE leaf_name = %(leaf)s',
+            {'leaf': leaf},
+        )
+        _ = connection.execute(
+            sql.SQL('ALTER TABLE {} ADD COLUMN dualrun_probe integer').format(
+                sql.Identifier(leaf)
+            )
+        )
+        outcome = read_raw_snapshot(connection, BASELINE_CATALOG)
+
+    assert outcome == Err(
+        CatalogCoverageGap(
+            gaps=(DetachedLeafShapeMismatch(table=leaf, parent='horsies_task_history'),)
+        ),
     )

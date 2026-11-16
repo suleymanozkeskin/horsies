@@ -100,9 +100,9 @@ async def send_heartbeat(
     await connection.execute(
         text(
             'INSERT INTO horsies_heartbeats '
-            '(task_id, sender_id, role, sent_at) VALUES '
+            '(task_id, sender_id, role, sent_at, hostname, pid) VALUES '
             "(CAST(:task_id AS uuid), :sender, 'runner', "
-            'statement_timestamp() - :age)'
+            "statement_timestamp() - :age, 'it-host', 4242)"
         ),
         {'task_id': task_id, 'sender': WORKER, 'age': age},
     )

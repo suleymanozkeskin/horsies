@@ -9,9 +9,9 @@ use sqlx::{PgConnection, PgPool, Postgres};
 use uuid::Uuid;
 
 use crate::core::history::commands::{
-    is_safe_identifier, open_end_anchor, CreateDailyHistoryLeaf, CreateOpenEndedHistoryLeaf,
-    DetachExpiredHistoryLeaf, DropDetachedHistoryLeaf, EnsureLeafCoverage,
-    FinalizeInterruptedLeafDetach, InspectHistoryLeaf, LeafBounds, LeafRef,
+    is_safe_identifier, open_end_anchor, CreateDailyHistoryLeaf, DetachExpiredHistoryLeaf,
+    DropDetachedHistoryLeaf, EnsureLeafCoverage, FinalizeInterruptedLeafDetach, InspectHistoryLeaf,
+    LeafBounds, LeafRef,
 };
 use crate::core::history::ddl::classes::FOREVER_CLASS_KEY;
 use crate::core::history::ddl::runtime_names::{
@@ -20,8 +20,8 @@ use crate::core::history::ddl::runtime_names::{
 };
 use crate::core::history::errors::HistoryError;
 use crate::core::history::names::{
-    HEARTBEAT_CLASS_KEY, LEAF_CATALOG, TASK_HISTORY_FOREVER, TASK_HISTORY_FOREVER_LEAF,
-    WORKFLOW_PHASE2_PENDING,
+    CLOCK_EXCEPTIONS, HEARTBEAT_CLASS_KEY, LEAF_CATALOG, TASK_HISTORY_FOREVER,
+    TASK_HISTORY_FOREVER_LEAF, WORKFLOW_PHASE2_PENDING,
 };
 use crate::core::history::outcomes::{
     CatalogConflictKind, LeafAttachment, LeafCreation, LeafDrop, LeafInspection,
@@ -46,14 +46,12 @@ const LEAF_DDL_LOCK_TIMEOUT_MS: u64 = 2_000;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PlannedLeaf {
     Daily(CreateDailyHistoryLeaf),
-    OpenEnded(CreateOpenEndedHistoryLeaf),
 }
 
 impl PlannedLeaf {
     pub(crate) fn leaf(&self) -> &LeafRef {
         match self {
             Self::Daily(command) => command.leaf(),
-            Self::OpenEnded(command) => command.leaf(),
         }
     }
 }
@@ -66,9 +64,6 @@ pub(crate) async fn create_planned_leaf<P: LoaderPublication>(
 ) -> Result<LeafCreation, HistoryError> {
     match planned {
         PlannedLeaf::Daily(create) => create_daily_leaf(connection, create, publisher).await,
-        PlannedLeaf::OpenEnded(create) => {
-            create_open_ended_leaf(connection, create, publisher).await
-        }
     }
 }
 
@@ -381,7 +376,14 @@ pub(crate) enum IndexRepairRemoval {
     Absent,
     Removed,
     Foreign,
+    /// The index relation lock was not granted within
+    /// `INDEX_REPAIR_LOCK_TIMEOUT_MS`.
+    Busy,
 }
+
+/// Lock wait of the index rename and drop of a repair; a longer wait is
+/// `IndexRepairRemoval::Busy`.
+const INDEX_REPAIR_LOCK_TIMEOUT_MS: u64 = 2_000;
 
 pub(crate) async fn index_relation_state(
     connection: &mut PgConnection,
@@ -438,7 +440,31 @@ pub(crate) async fn remove_attached_index_for_repair(
         IndexRelationState::Foreign => return Ok(IndexRepairRemoval::Foreign),
         IndexRelationState::Attached => {}
     }
+    let prior_lock_timeout: String = sqlx::query_scalar("SELECT current_setting('lock_timeout')")
+        .fetch_one(&mut *connection)
+        .await?;
+    sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+        .bind(format!("{INDEX_REPAIR_LOCK_TIMEOUT_MS}ms"))
+        .execute(&mut *connection)
+        .await?;
+    let removal = claim_and_drop_index(connection, leaf_name, index_name).await;
+    let restored = sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+        .bind(&prior_lock_timeout)
+        .execute(&mut *connection)
+        .await;
+    let removal = removal?;
+    restored?;
+    Ok(removal)
+}
 
+/// Rename the index to a private name, which takes its relation lock, check
+/// its owner again under that lock, and drop it. A savepoint restores the name
+/// when the owner changed or the lock was not granted.
+async fn claim_and_drop_index(
+    connection: &mut PgConnection,
+    leaf_name: &str,
+    index_name: &str,
+) -> Result<IndexRepairRemoval, HistoryError> {
     let claim_name = format!("horsies_index_repair_{}", Uuid::new_v4().simple());
     sqlx::query("SAVEPOINT horsies_index_repair_claim")
         .execute(&mut *connection)
@@ -468,9 +494,17 @@ pub(crate) async fn remove_attached_index_for_repair(
                 .await?;
             Ok(IndexRepairRemoval::Removed)
         }
-        Ok(outcome @ (IndexRepairRemoval::Absent | IndexRepairRemoval::Foreign)) => {
+        Ok(
+            outcome @ (IndexRepairRemoval::Absent
+            | IndexRepairRemoval::Foreign
+            | IndexRepairRemoval::Busy),
+        ) => {
             rollback_index_repair_claim(connection).await?;
             Ok(outcome)
+        }
+        Err(HistoryError::Database(error)) if is_lock_not_available(&error) => {
+            rollback_index_repair_claim(connection).await?;
+            Ok(IndexRepairRemoval::Busy)
         }
         Err(error) => {
             rollback_index_repair_claim(connection).await?;
@@ -501,15 +535,6 @@ pub async fn create_daily_leaf<P: LoaderPublication>(
         }),
         None => create_leaf(connection, leaf, publisher).await,
     }
-}
-
-/// Creates or repairs the open-ended `forever` leaf.
-pub async fn create_open_ended_leaf<P: LoaderPublication>(
-    connection: &mut PgConnection,
-    command: &CreateOpenEndedHistoryLeaf,
-    publisher: &P,
-) -> Result<LeafCreation, HistoryError> {
-    create_leaf(connection, command.leaf(), publisher).await
 }
 
 async fn create_leaf<P: LoaderPublication>(
@@ -598,11 +623,44 @@ async fn create_leaf<P: LoaderPublication>(
                     leaf_name: leaf.leaf_name().to_owned(),
                 });
             }
+            // Read the state again under the relation lock: another session
+            // can have repaired, detached or replaced the leaf meanwhile.
+            let physical = read_leaf_physical_state(
+                connection,
+                leaf.leaf_name(),
+                &parent_name,
+                &id_index_name,
+                LeafPartitionBoundExpectation::Requested(leaf.bounds()),
+                LeafIndexKind::History,
+            )
+            .await?;
+            if !physical.relation_exists
+                || physical.detach_pending != Some(false)
+                || !physical.partition_bound_matches_expected
+            {
+                return Ok(LeafCreation::CatalogConflict {
+                    leaf_name: leaf.leaf_name().to_owned(),
+                    kind: CatalogConflictKind::PhysicalNonconformant,
+                    detail: "the leaf changed before its index repair took the relation lock"
+                        .to_owned(),
+                });
+            }
+            let ordering = read_leaf_ordering_index_exists(connection, leaf.leaf_name()).await?;
+            if physical.id_index_conformant && ordering {
+                return Ok(LeafCreation::AlreadyConformant {
+                    leaf_name: leaf.leaf_name().to_owned(),
+                });
+            }
             if !physical.id_index_conformant {
                 match remove_attached_index_for_repair(connection, leaf.leaf_name(), &id_index_name)
                     .await?
                 {
                     IndexRepairRemoval::Absent | IndexRepairRemoval::Removed => {}
+                    IndexRepairRemoval::Busy => {
+                        return Ok(LeafCreation::Busy {
+                            leaf_name: leaf.leaf_name().to_owned(),
+                        });
+                    }
                     IndexRepairRemoval::Foreign => {
                         return Ok(LeafCreation::CatalogConflict {
                             leaf_name: leaf.leaf_name().to_owned(),
@@ -625,6 +683,11 @@ async fn create_leaf<P: LoaderPublication>(
                     .await?
                 {
                     IndexRepairRemoval::Absent | IndexRepairRemoval::Removed => {}
+                    IndexRepairRemoval::Busy => {
+                        return Ok(LeafCreation::Busy {
+                            leaf_name: leaf.leaf_name().to_owned(),
+                        });
+                    }
                     IndexRepairRemoval::Foreign => {
                         return Ok(LeafCreation::CatalogConflict {
                             leaf_name: leaf.leaf_name().to_owned(),
@@ -1119,6 +1182,19 @@ pub async fn drop_detached_leaf<P: LoaderPublication>(
     sqlx::query(&format!("DROP TABLE {}", leaf.leaf_name()))
         .execute(&mut *connection)
         .await?;
+    // The exceptions of the rows the leaf held go with it. A heartbeat leaf
+    // holds no history row, so it has none.
+    if leaf.class_key() != HEARTBEAT_CLASS_KEY {
+        sqlx::query(&format!(
+            "DELETE FROM {CLOCK_EXCEPTIONS}
+             WHERE retention_class_key = $1 AND terminal_at >= $2 AND terminal_at < $3"
+        ))
+        .bind(leaf.class_key())
+        .bind(leaf.bounds().lower())
+        .bind(leaf.bounds().upper())
+        .execute(&mut *connection)
+        .await?;
+    }
     let sql = format!(
         "UPDATE {LEAF_CATALOG}
          SET detached_at = COALESCE(detached_at, statement_timestamp()),
