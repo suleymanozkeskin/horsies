@@ -12,11 +12,11 @@ use super::*;
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::worker::executor::placement::ChildCpus;
 use crate::worker::executor::protocol::{
-    encode_child_frame, encode_parent_frame, AsyncSeats, BlockedWhere, CancelGraceMs, ChildFrame,
-    ChildKind, ChildLogLevel, ChildPool, ChildProgram, DatabaseUrl, DispatchNumber,
-    ExecutorThreads, InitFrame, LeftoverName, LoopBlockedFrame, LoopCulprit, ParentFrame,
-    PoolMaxSize, PoolMinSize, ProcessId, ReadyFrame, ResultEnvelopeText, RssReading, RunEnd,
-    RunRef, RunStuckFrame, SeatEnd, SharedAsyncChild, SharedResultFrame, SharedRunFrame,
+    encode_child_frame, encode_parent_frame, AsyncSeats, BlockedWhere, CancelGraceMs,
+    ChildConnection, ChildFrame, ChildKind, ChildLogLevel, ChildPool, ChildProgram, DatabaseUrl,
+    DispatchNumber, ExecutorThreads, InitFrame, LeftoverName, LoopBlockedFrame, LoopCulprit,
+    ParentFrame, PoolMaxSize, PoolMinSize, ProcessId, ReadyFrame, ResultEnvelopeText, RssReading,
+    RunEnd, RunRef, RunStuckFrame, SeatEnd, SharedAsyncChild, SharedResultFrame, SharedRunFrame,
     SharedThreadChild, SharedWork, StuckWork, TaskInputText, TaskSendPool, TaskTimeoutMs,
     ThreadSeats,
 };
@@ -146,6 +146,7 @@ fn init_frame(kind: SharedChildKindOfTest) -> InitFrame {
         program: ChildProgram::Rust,
         log_level: ChildLogLevel::Info,
         database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
+        connection: ChildConnection::default(),
         process_name: "horsies-test-shared".to_owned(),
         child_kind,
     }

@@ -57,7 +57,7 @@ CLEAR_AGE = timedelta(days=40)
 def _reaper_worker(broker: PostgresBroker) -> Worker:
     """A Worker built only as far as `_run_reaper_pass` needs."""
     config = WorkerConfig(
-        dsn='postgresql+psycopg://unused:unused@localhost/unused',
+        dsn='postgresql://unused:unused@localhost/unused',
         psycopg_dsn='postgresql://unused:unused@localhost/unused',
         queues=['default'],
     )

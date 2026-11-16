@@ -3053,9 +3053,12 @@ BEGIN
         RETURN QUERY SELECT 'ORPHAN_CANCELLED'::text, v_move;
         RETURN;
     END IF;
+    -- The classifier takes one kind. EXPIRE_CLAIMED answers as an empty class would: a history row of the expire
+    -- family ended this call at the expiry above (ALREADY_APPLIED there), and the task advisory lock that the expiry
+    -- took keeps history unchanged until the transaction ends. Every other history row is FOREIGN_TERMINALIZATION.
     SELECT o.outcome INTO v_move
     FROM horsies_terminalization_miss(
-        p_task_id, ARRAY[]::text[], 'OWNER_AND_GENERATION', p_worker_id, p_claimed_at
+        p_task_id, 'EXPIRE_CLAIMED', 'OWNER_AND_GENERATION', p_worker_id, p_claimed_at
     ) AS o;
     RETURN QUERY SELECT 'NOT_HELD'::text, v_move;
 END;

@@ -68,7 +68,7 @@ def _make_app() -> Horsies:
     return Horsies(
         config=AppConfig(
             broker=PostgresConfig(
-                database_url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
+                database_url=SecretStr('postgresql://user:pass@localhost/db'),
             ),
         )
     )
@@ -226,7 +226,7 @@ class TestRunChildStartHooks:
         from horsies.core.worker.worker import Worker
 
         cfg = WorkerConfig(
-            dsn='postgresql+psycopg://u:p@localhost/db',
+            dsn='postgresql://u:p@localhost/db',
             psycopg_dsn='postgresql://u:p@localhost/db',
             queues=['default'],
         )

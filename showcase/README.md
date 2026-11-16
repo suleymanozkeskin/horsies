@@ -60,7 +60,7 @@ tables share it.
 3. `DATABASE_URL` in the environment, with the database name replaced by
    `acme_demo`;
 4. `DATABASE_URL` in the repository `.env`, same replacement;
-5. `postgresql+psycopg://postgres:postgres@localhost:5432/acme_demo`.
+5. `postgresql://postgres:postgres@localhost:5432/acme_demo`.
 
 Rules 3 and 4 only ever rewrite the database name — host, port, credentials,
 and query parameters carry over. The `seed` scenario creates the database if it

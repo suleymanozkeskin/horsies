@@ -36,6 +36,7 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.worker.child_pool import _cleanup_worker_pool
 from horsies.core.workflows.engine import start_workflow_async
 from horsies.core.types.result import is_err
+from horsies.core.utils.url import sqlalchemy_url
 
 
 # A fresh database for this session (tests/session_database.py): the install
@@ -52,7 +53,7 @@ def db_url() -> str:
 @pytest_asyncio.fixture(scope='session', loop_scope='session')
 async def engine(db_url: str) -> AsyncGenerator[AsyncEngine, None]:
     """SQLAlchemy async engine (session-scoped)."""
-    eng = create_async_engine(db_url, echo=False)
+    eng = create_async_engine(sqlalchemy_url(db_url), echo=False)
     register_identity_text_reads(eng)
     yield eng
     await eng.dispose()

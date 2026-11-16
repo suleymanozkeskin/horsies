@@ -1605,7 +1605,9 @@ mod tests {
         app_config: AppConfig,
         worker_config: WorkerConfig,
     ) -> Worker {
-        use crate::worker::executor::protocol::{ChildLogLevel, ChildProgram, DatabaseUrl};
+        use crate::worker::executor::protocol::{
+            ChildConnection, ChildLogLevel, ChildProgram, DatabaseUrl,
+        };
         let database_url = DatabaseUrl::new(app_config.broker.database_url.clone());
         Worker::new(
             broker,
@@ -1626,6 +1628,7 @@ mod tests {
                 program: ChildProgram::Rust,
                 log_level: ChildLogLevel::Info,
                 database_url,
+                connection: ChildConnection::default(),
             },
             RegisteredClasses::default(),
         )
@@ -2173,7 +2176,9 @@ mod tests {
     /// A worker of one isolated child on a broker whose pool reaches no
     /// server: any database work fails, so a test sees whether some ran.
     fn worker_of_one_child(command: crate::worker::executor::supervisor::ChildCommand) -> Worker {
-        use crate::worker::executor::protocol::{ChildLogLevel, ChildProgram, DatabaseUrl};
+        use crate::worker::executor::protocol::{
+            ChildConnection, ChildLogLevel, ChildProgram, DatabaseUrl,
+        };
         let url = "postgresql://horsies@127.0.0.1:1/horsies";
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
@@ -2199,6 +2204,7 @@ mod tests {
                 program: ChildProgram::Rust,
                 log_level: ChildLogLevel::Info,
                 database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
+                connection: ChildConnection::default(),
             },
             RegisteredClasses::default(),
         )
@@ -2208,7 +2214,9 @@ mod tests {
     /// Python `test_shared_dispatch.py::TestCapacityAndConfig::test_a_worker_with_no_child_is_refused`.
     #[test]
     fn a_worker_with_no_child_is_refused() {
-        use crate::worker::executor::protocol::{ChildLogLevel, ChildProgram, DatabaseUrl};
+        use crate::worker::executor::protocol::{
+            ChildConnection, ChildLogLevel, ChildProgram, DatabaseUrl,
+        };
         let url = "postgresql://horsies@127.0.0.1:1/horsies";
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy(url)
@@ -2229,6 +2237,7 @@ mod tests {
                 program: ChildProgram::Rust,
                 log_level: ChildLogLevel::Info,
                 database_url: DatabaseUrl::new("postgresql://u@h/db".to_owned()),
+                connection: ChildConnection::default(),
             },
             RegisteredClasses::default(),
         );
@@ -3907,6 +3916,7 @@ mod tests {
                 db_retry_max_attempts: 1,
                 notify_poll_interval_ms: 100,
             },
+            worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
             resend_on_transient_err: false,
         }

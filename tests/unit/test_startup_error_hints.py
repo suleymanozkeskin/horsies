@@ -204,7 +204,7 @@ def _new_app() -> Horsies:
         AppConfig(
             broker=PostgresConfig(
                 database_url=SecretStr(
-                    'postgresql+psycopg://user:password@localhost/unused',
+                    'postgresql://user:password@localhost/unused',
                 ),
             ),
         ),

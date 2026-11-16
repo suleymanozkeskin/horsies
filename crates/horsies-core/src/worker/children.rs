@@ -28,9 +28,9 @@ use crate::core::config::worker_profile::{
 };
 use crate::worker::executor::placement::{plan_own_core, CpuPlacement, PlacementRefused};
 use crate::worker::executor::protocol::{
-    AsyncSeats, ChildKind, ChildLogLevel, ChildPool, ChildProgram, DatabaseUrl, ExecutorThreads,
-    InitFrame, IsolatedChild, PoolMaxSize, PoolMinSize, SharedAsyncChild, SharedThreadChild,
-    TaskSendPool, ThreadSeats,
+    AsyncSeats, ChildConnection, ChildKind, ChildLogLevel, ChildPool, ChildProgram, DatabaseUrl,
+    ExecutorThreads, InitFrame, IsolatedChild, PoolMaxSize, PoolMinSize, SharedAsyncChild,
+    SharedThreadChild, TaskSendPool, ThreadSeats,
 };
 use crate::worker::executor::slots::{
     dispatch_route, AttemptEnd, BaselineLimits, ChildLayout, Claimed, DispatchRoute, DownState,
@@ -45,7 +45,8 @@ use crate::worker::runner_beats::{LiveDispatches, StaleRunningRecovery};
 pub const CHILD_PROCESS_NAME: &str = "horsies-child";
 
 /// What every child of the worker runs, from the host: the program to
-/// start, what it loads, its log level and its database URL.
+/// start, what it loads, its log level, its database URL and the connection
+/// settings of the app's config.
 #[derive(Debug, Clone)]
 pub struct ChildLaunch {
     /// The program of each child. The spawner appends the socket descriptor
@@ -56,6 +57,10 @@ pub struct ChildLaunch {
     pub log_level: ChildLogLevel,
     /// The URL that a child connects with.
     pub database_url: DatabaseUrl,
+    /// The settings of each connection of a child
+    /// ([`ChildConnection::of_config`] of the app's broker config; Python
+    /// `WorkerConfig.child_connect_kwargs`).
+    pub connection: ChildConnection,
 }
 
 /// The most tasks that may wait for a slot or a seat in one pool: twice the
@@ -191,6 +196,7 @@ fn init_frame(launch: &ChildLaunch, child_kind: ChildKind) -> InitFrame {
         program: launch.program.clone(),
         log_level: launch.log_level,
         database_url: launch.database_url.clone(),
+        connection: launch.connection.clone(),
         process_name: CHILD_PROCESS_NAME.to_owned(),
         child_kind,
     }

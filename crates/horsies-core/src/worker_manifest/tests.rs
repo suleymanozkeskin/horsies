@@ -65,7 +65,14 @@ fn manifest(profiles: Value, request: Value) -> Value {
             "worker_pool_pre_ping": false,
             "pool_timeout": 30,
             "pool_recycle": {"kind": "AFTER_SECONDS", "seconds": 1800},
-            "echo": false
+            "echo": false,
+            "tcp_keepalives": {
+                "kind": "ON",
+                "idle_seconds": 30,
+                "interval_seconds": 10,
+                "probes": 3
+            },
+            "tcp_user_timeout": {"kind": "AFTER", "milliseconds": 30000}
         },
         "send": {
             "retain_rerun_input_default": true,
@@ -399,6 +406,43 @@ fn the_worker_process_pool_is_the_resolved_pool_of_the_profile() {
         config.database_url,
         "postgresql://user:secret@localhost:5432/db"
     );
+    assert_eq!(config.socket_settings(), crate::db::DEFAULT_SOCKET_SETTINGS);
+}
+
+#[test]
+fn keepalives_off_and_the_system_timeout_reach_the_worker_process_config() {
+    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    document["database"]["tcp_keepalives"] = json!({"kind": "OFF"});
+    document["database"]["tcp_user_timeout"] = json!({"kind": "SYSTEM_DEFAULT"});
+    let manifest = parsed(&document);
+    let selected = manifest
+        .selected_profile()
+        .expect("batch is a valid profile");
+    let settings = manifest.worker_process_config(&selected).socket_settings();
+    assert_eq!(settings.keepalives, crate::db::Keepalives::Off);
+    assert_eq!(
+        settings.tcp_user_timeout,
+        crate::db::TcpUserTimeout::SystemDefault
+    );
+}
+
+/// Both socket settings are required, as in the producer manifest.
+#[test]
+fn a_missing_or_out_of_bound_socket_setting_is_refused() {
+    for field in ["tcp_keepalives", "tcp_user_timeout"] {
+        let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+        let removed = document["database"]
+            .as_object_mut()
+            .expect("the database section is an object")
+            .remove(field);
+        assert!(removed.is_some());
+        assert!(refused_path(&document).starts_with("database"), "{field}");
+    }
+    let mut document = manifest(json!({"batch": full_profile()}), named("batch"));
+    document["database"]["tcp_keepalives"]["probes"] = json!(0);
+    // An internally tagged enum reads its content after its tag, so the path
+    // ends at the enum.
+    assert!(refused_path(&document).starts_with("database.tcp_keepalives"));
 }
 
 #[test]
