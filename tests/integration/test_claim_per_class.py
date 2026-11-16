@@ -71,19 +71,24 @@ async def _seed(
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
-              (id, task_name, queue_name, priority, status, enqueued_at,
-               claimed, claimed_by_worker_id, is_workflow_task, enqueue_sha,
-               created_at, updated_at, retry_count, max_retries,
-               retention_class_key, command_fingerprint_version,
-               command_fingerprint, retain_rerun_input,
-               prepared_rerun_input_disposition, execution)
-            VALUES
-              (:id, :name, :q, :p, :status,
-               now() - (:age * interval '1 second'),
-               :claimed, :owner, false, :sha, now(), now(), 0, 0,
-               'standard_30d', 1,
-               sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
-               false, 'DECLINED_BY_POLICY', :execution)
+              (
+                  id, task_name, queue_name, priority, input, status, enqueued_at,
+                  claimed_by_worker_id, is_workflow_task, created_at, updated_at,
+                  retry_count, max_retries, retention_class_key,
+                  command_fingerprint_version, command_fingerprint, retain_rerun_input,
+                  execution, sent_at, claim_expires_at, worker_pid, worker_hostname,
+                  worker_process_name
+              ) VALUES (
+                  :id, :name, :q, :p, '{}', :status,
+                  now() - (:age * interval '1 second'), :owner, false, now(), now(), 0,
+                  0, 'standard_30d', 1,
+                  sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')), false,
+                  :execution, NOW(),
+                  CASE WHEN CAST(:status AS varchar) = 'CLAIMED' THEN NOW() + INTERVAL '5 minutes' END,
+                  CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 4242 END,
+                  CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 'host-1' END,
+                  CASE WHEN CAST(:status AS varchar) = 'RUNNING' THEN 'child-1' END
+              )
         """),
         {
             'id': task_id,
@@ -92,9 +97,7 @@ async def _seed(
             'p': priority,
             'status': status,
             'age': age_secs,
-            'claimed': owner is not None,
             'owner': owner,
-            'sha': '0' * 64,
             'execution': execution,
         },
     )
@@ -825,7 +828,7 @@ class TestShortTake:
             await other_claim.execute(
                 text("""
                     UPDATE horsies_tasks
-                    SET status = 'CLAIMED', claimed = TRUE,
+                    SET status = 'CLAIMED',
                         claimed_by_worker_id = 'other-worker',
                         claimed_at = now(),
                         claim_expires_at = now() + interval '1 hour'
