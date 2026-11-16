@@ -292,3 +292,136 @@ async fn a_timeout_of_a_row_this_claim_does_not_hold_changes_nothing() {
         remove_task(&pool, task_id).await;
     }
 }
+
+/// A RUNNING ISOLATED workflow task on `queue`, held by [`WORKER_ID`],
+/// linked to the RUNNING node of a RUNNING one-node workflow whose
+/// `on_error` is `fail`. Returns the task id, its claim generation and the
+/// workflow id.
+async fn seed_workflow_task(pool: &PgPool, queue: &str) -> (Uuid, DateTime<Utc>, Uuid) {
+    let task_id = Uuid::new_v4();
+    let statement = format!(
+        "INSERT INTO horsies_tasks ({SEED_COLUMNS}) VALUES (
+            $1, 'app.tasks.scripted', $2, 100, '{{}}', NULL, 'ISOLATED',
+            'forever', date_trunc('milliseconds', NOW()) - interval '31 minutes',
+            NOW() - interval '31 minutes',
+            NULL, NULL, NULL,
+            'RUNNING', NOW() - interval '31 minutes',
+            date_trunc('milliseconds', NOW()) - interval '30 minutes', $3, NULL,
+            NOW() - interval '30 minutes', NULL, NULL,
+            4242, 'slots-host', 'slots-process',
+            0, 0, NULL, NULL, TRUE,
+            NOW(), FALSE, NULL, NULL
+         ) RETURNING claimed_at"
+    );
+    let generation = sqlx::query_scalar(&statement)
+        .bind(task_id)
+        .bind(queue)
+        .bind(WORKER_ID)
+        .fetch_one(pool)
+        .await
+        .expect("seed a workflow task row");
+    let workflow_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO horsies_workflows (
+             id, name, definition_key, status, on_error, depth, root_workflow_id,
+             sent_at, created_at, started_at, updated_at
+         ) VALUES ($1, 'timeout_order_workflow', NULL, 'RUNNING', 'fail', 0, $1,
+                   NOW(), NOW(), NOW(), NOW())",
+    )
+    .bind(workflow_id)
+    .execute(pool)
+    .await
+    .expect("seed a workflow");
+    sqlx::query(
+        "INSERT INTO horsies_workflow_tasks (
+             id, workflow_id, task_index, node_id, task_name, input, queue_name, priority,
+             dependencies, allow_failed_deps, join_type, max_retries, execution,
+             retention_class_key, status, task_id, is_subworkflow, created_at, started_at
+         ) VALUES ($1, $2, 0, 'only', 'app.tasks.scripted', '{}', $3, 100,
+                   '{}', FALSE, 'all', 0, 'ISOLATED',
+                   'forever', 'RUNNING', $4, FALSE, NOW(), NOW())",
+    )
+    .bind(Uuid::new_v4())
+    .bind(workflow_id)
+    .bind(queue)
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .expect("seed a workflow node");
+    (task_id, generation, workflow_id)
+}
+
+async fn text_of(pool: &PgPool, statement: &str, id: Uuid) -> String {
+    sqlx::query_scalar(statement)
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .expect("read one text")
+}
+
+/// Python `test_task_timeout_order.py::TestTheKillComesFirst::test_a_workflow_task_fails_then_phase_2_runs_after_the_exit`
+/// (the write, on the database): the timeout of a workflow task fails its
+/// row with `TASK_TIMEOUT` and no retry, then phase 2 runs: it consumes the
+/// phase-2 record, fails the node, and fails the one-node workflow.
+#[tokio::test]
+#[serial]
+async fn a_timeout_of_a_workflow_task_fails_it_then_phase_two_runs() {
+    let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+    let queue = test_queue();
+    let (task_id, generation, workflow_id) = seed_workflow_task(&pool, &queue).await;
+    let task = ClaimedTask {
+        kind: TaskKind::WorkflowTask,
+        ..claimed(task_id, &queue, generation)
+    };
+
+    let settled = writer(pool.clone()).settle(&task, timed_out()).await;
+
+    assert_eq!(settled, Settlement::Written);
+    assert_eq!(live_row(&pool, task_id).await, None);
+    let history: serde_json::Value =
+        sqlx::query_scalar("SELECT to_jsonb(h) FROM horsies_task_history h WHERE task_id = $1")
+            .bind(task_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read the history row");
+    assert_eq!(history["status"], "FAILED");
+    assert_eq!(history["error_code"], "TASK_TIMEOUT");
+    assert_eq!(history["retry_count"], 0);
+    let pending_phase_two: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM horsies_workflow_phase2_pending WHERE task_id = $1",
+    )
+    .bind(task_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read the phase-2 records");
+    assert_eq!(pending_phase_two, 0, "phase 2 consumed its record");
+    assert_eq!(
+        text_of(
+            &pool,
+            "SELECT status::text FROM horsies_workflow_tasks WHERE task_id = $1",
+            task_id
+        )
+        .await,
+        "FAILED"
+    );
+    assert_eq!(
+        text_of(
+            &pool,
+            "SELECT status::text FROM horsies_workflows WHERE id = $1",
+            workflow_id
+        )
+        .await,
+        "FAILED"
+    );
+    sqlx::query("DELETE FROM horsies_workflow_phase2_pending WHERE task_id = $1")
+        .bind(task_id)
+        .execute(&pool)
+        .await
+        .expect("remove the phase-2 record");
+    remove_task(&pool, task_id).await;
+    sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+        .bind(workflow_id)
+        .execute(&pool)
+        .await
+        .expect("remove the workflow");
+}
