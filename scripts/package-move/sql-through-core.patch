@@ -1,5 +1,5 @@
 diff --git a/crates/horsies-codegen/src/surface.rs b/crates/horsies-codegen/src/surface.rs
-index 272798e0..e21925a9 100644
+index b3f7d445..f42a0ac1 100644
 --- a/crates/horsies-codegen/src/surface.rs
 +++ b/crates/horsies-codegen/src/surface.rs
 @@ -525,6 +525,12 @@ const CLASSES: [StubClass; 24] = {
@@ -16,7 +16,7 @@ index 272798e0..e21925a9 100644
          name: "core_state",
          parameters: &[],
 diff --git a/crates/horsies-core/src/broker/migrations.rs b/crates/horsies-core/src/broker/migrations.rs
-index 955d130d..3b5d97cd 100644
+index 93c9a697..0cd0ca72 100644
 --- a/crates/horsies-core/src/broker/migrations.rs
 +++ b/crates/horsies-core/src/broker/migrations.rs
 @@ -8,13 +8,13 @@
@@ -24,8 +24,8 @@ index 955d130d..3b5d97cd 100644
  //!
  //! The embedded chain:
 -//! - Version 1000 is the baseline schema: every package file of
--//!   `horsies/core/baseline/sql/`, in the order of Python's
--//!   `BASELINE_SQL_FILES` (`horsies/core/baseline/migration.py`), concatenated
+-//!   `crates/horsies-core/baseline/`, in the order of Python's
+-//!   `BASELINE_SQL_FILES` (`python/horsies/core/baseline/migration.py`), concatenated
 -//!   with no separator, with one SHA-384 checksum over the UTF-8 bytes of the
 -//!   result. It creates [`MIGRATIONS_TABLE`] itself. The Python package
 -//!   installs the same files as its migration 1000 with the same checksum
@@ -40,13 +40,13 @@ index 955d130d..3b5d97cd 100644
  //! - Version 1001 holds the claim functions of the copied Rust worker, which
  //!   have no counterpart in migration 1000. It goes when the worker claims
  //!   through the functions of migration 1000.
-@@ -43,28 +43,35 @@ pub const MIGRATIONS_TABLE: &str = "horsies_migrations";
+@@ -48,28 +48,35 @@ pub const MIGRATIONS_TABLE: &str = "horsies_migrations";
  pub const BASELINE_MIGRATION_VERSION: i64 = 1000;
  
  /// Declares the baseline file list once. From one list of file names it
 -/// builds `BASELINE_SQL_FILES` (the names) and `BASELINE_SQL` (the texts,
 -/// concatenated with no separator), so the names and the migration text
--/// cannot differ. The files of `horsies/core/baseline/sql/` are the single
+-/// cannot differ. The files of `crates/horsies-core/baseline/` are the single
 -/// source; the core includes them by relative path and keeps no copy.
 +/// builds `BASELINE_SQL_FILES` (the names), `BASELINE_SQL_FILE_TEXTS` (each
 +/// name with its text) and `BASELINE_SQL` (the texts, concatenated with no
@@ -75,7 +75,7 @@ index 955d130d..3b5d97cd 100644
      };
  }
  
--// Python's `BASELINE_SQL_FILES` (`horsies/core/baseline/migration.py`), in
+-// Python's `BASELINE_SQL_FILES` (`python/horsies/core/baseline/migration.py`), in
 -// the same order. A file added to the folder or to Python's list without a
 -// line here fails `baseline_file_list_is_python_s_list_and_the_whole_folder`
 -// and Python's `tests/unit/test_baseline_migration.py`.
@@ -85,7 +85,7 @@ index 955d130d..3b5d97cd 100644
  baseline_sql_files!(
      "0001_tables.sql",
      "0002_indexes.sql",
-@@ -76,11 +83,11 @@ baseline_sql_files!(
+@@ -82,11 +89,11 @@ baseline_sql_files!(
  /// The tables file of the baseline.
  #[cfg(test)]
  pub(crate) const BASELINE_TABLES_SQL: &str =
@@ -99,25 +99,7 @@ index 955d130d..3b5d97cd 100644
  
  /// Version, description and SQL of each embedded migration, in apply order.
  const MIGRATION_SOURCES: [(i64, &str, &str); 2] = [
-@@ -139,7 +146,7 @@ pub(crate) async fn successful_schema_version(pool: &PgPool) -> Result<Option<i6
- }
- 
- /// The name whose digest is the install lock key (Python
--/// `horsies/core/brokers/postgres.py:1346-1348`).
-+/// `python/horsies/core/brokers/postgres.py:1346-1348`).
- const INSTALL_LOCK_NAME: &str = "horsies:schema:v1";
- 
- /// The longest an installer waits for another installer's lock, then
-@@ -508,7 +515,7 @@ mod tests {
-     }
- 
-     /// Python's key: the first 8 bytes of SHA-256 of `horsies:schema:v1`,
--    /// big-endian, signed (`horsies/core/brokers/postgres.py:1346-1348`).
-+    /// big-endian, signed (`python/horsies/core/brokers/postgres.py:1346-1348`).
-     #[test]
-     fn the_install_lock_key_is_python_s() {
-         assert_eq!(install_lock_key(), 6_194_151_126_714_960_738);
-@@ -558,46 +565,17 @@ mod tests {
+@@ -594,46 +601,17 @@ mod tests {
          sqlx::Connection::close(waiter).await.unwrap();
      }
  
@@ -128,11 +110,11 @@ index 955d130d..3b5d97cd 100644
 -    }
 -
 -    /// Python's `BASELINE_SQL_FILES`, read from
--    /// `horsies/core/baseline/migration.py`: one quoted name per line between
+-    /// `python/horsies/core/baseline/migration.py`: one quoted name per line between
 -    /// the line that opens the tuple and the line that closes it.
 -    fn python_baseline_sql_files() -> Vec<String> {
 -        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
--            .join("../../horsies/core/baseline/migration.py");
+-            .join("../../python/horsies/core/baseline/migration.py");
 -        let source = std::fs::read_to_string(&path)
 -            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
 -        let mut lines = source
@@ -171,11 +153,11 @@ index 955d130d..3b5d97cd 100644
  
          let mut folder: Vec<String> = std::fs::read_dir(baseline_sql_folder())
              .expect("read the baseline SQL folder")
-@@ -616,8 +594,9 @@ mod tests {
+@@ -652,8 +630,9 @@ mod tests {
  
      /// Migration 1000 is the listed files as they are on disk, concatenated
      /// in list order, and its checksum is Python's rule
--    /// (`horsies/core/baseline/migration.py`, `baseline_checksum`): SHA-384
+-    /// (`python/horsies/core/baseline/migration.py`, `baseline_checksum`): SHA-384
 -    /// of the UTF-8 bytes of that text.
 +    /// (`python/horsies/core/baseline/migration.py`, `baseline_checksum`):
 +    /// SHA-384 of the UTF-8 bytes of that text. `BASELINE_SQL_FILE_TEXTS`,
@@ -183,7 +165,7 @@ index 955d130d..3b5d97cd 100644
      #[test]
      fn baseline_is_one_migration_built_from_every_listed_file() {
          use sha2::Sha384;
-@@ -634,6 +613,16 @@ mod tests {
+@@ -670,6 +649,16 @@ mod tests {
              })
              .collect();
          assert_eq!(baseline.sql.as_ref(), on_disk);
@@ -201,10 +183,10 @@ index 955d130d..3b5d97cd 100644
              baseline.checksum.as_ref(),
              Sha384::digest(on_disk.as_bytes()).as_slice()
 diff --git a/crates/horsies-core/src/lib.rs b/crates/horsies-core/src/lib.rs
-index 7d1ce321..00075573 100644
+index d3cf8e12..7bbd8c46 100644
 --- a/crates/horsies-core/src/lib.rs
 +++ b/crates/horsies-core/src/lib.rs
-@@ -68,6 +68,9 @@ pub use crate::broker::{
+@@ -71,6 +71,9 @@ pub use crate::broker::{
  };
  pub use crate::broker::{PoolProfile, PoolSettingsError, RowDecodeError};
  
@@ -249,7 +231,7 @@ index 8d584369..c1dd84f6 100644
 -"""The baseline schema: migration 1000, shipped as SQL files in this package."""
 +"""The baseline schema, migration 1000. Its SQL files are compiled into ``horsies._core``."""
 diff --git a/python/horsies/core/baseline/migration.py b/python/horsies/core/baseline/migration.py
-index 06523c5e..31441837 100644
+index 22d8c5d2..31441837 100644
 --- a/python/horsies/core/baseline/migration.py
 +++ b/python/horsies/core/baseline/migration.py
 @@ -1,22 +1,23 @@
@@ -285,7 +267,7 @@ index 06523c5e..31441837 100644
  
  BASELINE_VERSION: Final = 1000
  """Version of the baseline migration in ``horsies_migrations``."""
-@@ -24,18 +25,6 @@ BASELINE_VERSION: Final = 1000
+@@ -24,19 +25,6 @@ BASELINE_VERSION: Final = 1000
  BASELINE_DESCRIPTION: Final = 'baseline'
  """Description of the baseline migration in ``horsies_migrations``."""
  
@@ -294,6 +276,7 @@ index 06523c5e..31441837 100644
 -    '0002_indexes.sql',
 -    '0003_interim_functions.sql',
 -    '0005_workflow_functions.sql',
+-    '0006_history_functions.sql',
 -    '0007_scheduler_monitoring_functions.sql',
 -)
 -"""The SQL files of the migration, in the order they run."""
@@ -304,7 +287,7 @@ index 06523c5e..31441837 100644
  
  @dataclass(frozen=True, slots=True)
  class BaselineMigration:
-@@ -47,55 +36,17 @@ class BaselineMigration:
+@@ -48,55 +36,17 @@ class BaselineMigration:
      checksum: bytes
  
  
@@ -369,10 +352,10 @@ index 06523c5e..31441837 100644
 +        checksum=baseline_checksum(sql),
      )
 diff --git a/python/horsies/core/brokers/postgres.py b/python/horsies/core/brokers/postgres.py
-index f2b44808..643b8ead 100644
+index fa8db416..932cd0d4 100644
 --- a/python/horsies/core/brokers/postgres.py
 +++ b/python/horsies/core/brokers/postgres.py
-@@ -1445,14 +1445,7 @@ class PostgresBroker:
+@@ -1451,14 +1451,7 @@ class PostgresBroker:
                  Nothing was changed.
              psycopg.Error: a statement failed (after the deadlock retries).
          """
@@ -386,7 +369,7 @@ index f2b44808..643b8ead 100644
 -                pass
 +        migration = load_baseline_migration()
          for attempt in range(1, _SCHEMA_INIT_MAX_ATTEMPTS + 1):
-             match await self._install_once(migration):
+             match await self._install_once(migration, engine):
                  case Ok():
 diff --git a/tests/baseline_sql.py b/tests/baseline_sql.py
 index 03b1471f..ed9e57e8 100644
@@ -456,10 +439,10 @@ index b8602119..f9d40b7b 100644
      driver = raw.driver_connection
      assert driver is not None, 'the engine has a driver connection'
 diff --git a/tests/integration/test_baseline_install.py b/tests/integration/test_baseline_install.py
-index f03d5467..e3083cef 100644
+index 4030adf4..3166e228 100644
 --- a/tests/integration/test_baseline_install.py
 +++ b/tests/integration/test_baseline_install.py
-@@ -38,11 +38,7 @@ _OBJECT_COUNT_SQL: Final[LiteralString] = """
+@@ -43,11 +43,7 @@ _OBJECT_COUNT_SQL: Final[LiteralString] = """
  
  
  def _migration() -> BaselineMigration:
@@ -498,7 +481,7 @@ index fb287d9b..77661bc7 100644
  
  @pytest_asyncio.fixture
 diff --git a/tests/integration/test_baseline_sql.py b/tests/integration/test_baseline_sql.py
-index da033711..779a1be4 100644
+index 0ad22a26..68d84f93 100644
 --- a/tests/integration/test_baseline_sql.py
 +++ b/tests/integration/test_baseline_sql.py
 @@ -15,7 +15,6 @@ import pytest
@@ -509,7 +492,7 @@ index da033711..779a1be4 100644
  from horsies.core.utils.url import to_psycopg_url
  from tests.integration.conftest import DB_URL
  from tests.integration.isolated_database import isolated_test_database
-@@ -167,11 +166,7 @@ _FUNCTIONS_SQL: Final = """
+@@ -176,11 +175,7 @@ _FUNCTIONS_SQL: Final = """
  
  
  def _migration() -> BaselineMigration:
@@ -547,8 +530,33 @@ index 6157985f..29242282 100644
  
  
  @pytest_asyncio.fixture
+diff --git a/tests/integration/test_history_functions_sql.py b/tests/integration/test_history_functions_sql.py
+index 5b3c54ae..b75c4b56 100644
+--- a/tests/integration/test_history_functions_sql.py
++++ b/tests/integration/test_history_functions_sql.py
+@@ -18,7 +18,6 @@ import pytest
+ import pytest_asyncio
+ 
+ from horsies.core.baseline.migration import BaselineMigration, load_baseline_migration
+-from horsies.core.types.result import Err, Ok
+ from horsies.core.utils.url import to_psycopg_url
+ from tests.integration.conftest import DB_URL
+ from tests.integration.isolated_database import isolated_test_database
+@@ -38,11 +37,7 @@ _PASSED_PREFIX: Final = 'ok: '
+ 
+ 
+ def _migration() -> BaselineMigration:
+-    match load_baseline_migration():
+-        case Ok(loaded):
+-            return loaded
+-        case Err(unreadable):
+-            pytest.fail(f'baseline SQL unreadable: {unreadable}')
++    return load_baseline_migration()
+ 
+ 
+ @pytest_asyncio.fixture
 diff --git a/tests/unit/test_baseline_migration.py b/tests/unit/test_baseline_migration.py
-index cd0e914e..575b0a78 100644
+index 5037fd77..04e0ff58 100644
 --- a/tests/unit/test_baseline_migration.py
 +++ b/tests/unit/test_baseline_migration.py
 @@ -1,26 +1,19 @@
@@ -579,7 +587,7 @@ index cd0e914e..575b0a78 100644
 -from horsies.core.types.result import Err, Ok
  
  PINNED_CHECKSUM_HEX = (
-     '72c2761d95db86836edea2e9f8124a2cc6851694b42345fc'
+     'e9f2798e18a3b0eeadb35d792c340e89da8f4d349aaf6918'
 @@ -30,10 +23,6 @@ PINNED_CHECKSUM_HEX = (
  the edit then shows in this file's diff as well."""
  

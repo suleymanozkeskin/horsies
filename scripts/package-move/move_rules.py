@@ -96,11 +96,6 @@ KEPT_FILES: Final = (
     KeptFile('scripts/package-move/**', 'this tool'),
 )
 
-PATCH_OWNED: Final = (
-    # Relative include_str! paths: sql-through-core.patch sets them.
-    'crates/horsies-core/src/broker/migrations.rs',
-)
-
 KEPT_LINES: Final = (
     KeptLine('.github/workflows/release.yml', 'horsies/web/static', WHEEL_PATH),
     KeptLine('.github/workflows/release.yml', 'horsies/.agents/skills/horsies/', WHEEL_PATH),
@@ -341,7 +336,8 @@ REPEATED_EDITS: Final = (
 )
 
 # A cited path to the SQL folder that is not relative ("../") is moved to the
-# crate. Relative forms exist only in PATCH_OWNED files.
+# crate. The relative include_str! paths of the core are set by
+# sql-through-core.patch; the check fails on any one left.
 _SQL_CITATION: Final = re.compile(
     r'(?<![A-Za-z0-9_.@/-])' + re.escape(OLD_SQL_FOLDER) + r'(?=/|`|\'|"|\s|$)'
 )
@@ -363,7 +359,7 @@ def package_citation(top_folders: tuple[str, ...], top_files: tuple[str, ...]) -
     files = '|'.join(re.escape(name) for name in top_files)
     return re.compile(
         r'(?<![A-Za-z0-9_.@/-])((?:\.\./)*)horsies/'
-        r'(?!core/baseline/sql/)'
+        r'(?!core/baseline/sql(?![A-Za-z0-9_.-]))'
         rf'(?=(?:{folders})/|(?:{files})(?![A-Za-z0-9_.-]))'
     )
 
@@ -457,12 +453,12 @@ def rewrite_line(line: str, citation: re.Pattern[str]) -> str:
 
 
 def apply_path_rules(repo: Path) -> set[str]:
-    """Rewrite old-path citations in every tracked text file not kept or owned."""
+    """Rewrite old-path citations in every tracked text file that is not kept."""
     folders, files = package_top_level(repo)
     citation = package_citation(folders, files)
     changed: set[str] = set()
     for path in tracked_files(repo):
-        if is_kept_file(path) is not None or path in PATCH_OWNED:
+        if is_kept_file(path) is not None:
             continue
         file = repo / path
         if file.is_symlink() or not file.is_file():
