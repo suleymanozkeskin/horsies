@@ -2,13 +2,11 @@
 //! code (Python `core/worker/child_main.py`).
 
 use std::io;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::os::fd::{FromRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::time::Duration;
-
-use sqlx::postgres::PgPoolOptions;
 
 use super::args::{ChildArgs, CHILD_MODE_ARGUMENT};
 use super::link::{read_frame, start_control_thread, write_frame, FrameWriter, ReadEnd};
@@ -18,6 +16,7 @@ use super::seats::{serve_isolated, serve_shared_async, serve_shared_thread, Poll
 use crate::broker::PostgresBroker;
 use crate::core::config::PostgresConfig;
 use crate::core::TaskRegistry;
+use crate::manifest::PoolRecycle;
 use crate::worker::executor::protocol::{
     decode_parent_frame, BootDetail, BootErrorName, BootFailedFrame, ChildExitCode, ChildFrame,
     ChildKind, ChildPool, ChildProgram, FrameReader, InitFrame, ParentFrame, ParentFrameRefusal,
@@ -31,6 +30,12 @@ const INIT_FRAME_TIMEOUT: Duration = Duration::from_secs(30);
 /// marker writes and one async body at a time.
 const SMALL_RUNTIME_THREADS: usize = 2;
 const RUNTIME_THREAD_NAME: &str = "horsies-child-runtime";
+/// The checkout wait of the child's pool, in seconds (Python
+/// `CHILD_POOL_CONNECTION_WAIT_S`).
+const CHILD_POOL_CHECKOUT_WAIT_SECONDS: u32 = 30;
+/// The age at which the child's pool replaces a connection (Python
+/// `CHILD_POOL_MAX_LIFETIME_S`).
+const CHILD_POOL_MAX_AGE: PoolRecycle = PoolRecycle::after_seconds(300);
 
 /// What a worker binary gives its child mode: its tasks and the settings a
 /// child reads from the app.
@@ -234,22 +239,32 @@ fn runtime_threads(kind: ChildKind) -> usize {
     }
 }
 
-/// The child's connection pool: the URL's settings, at most the pool of the
-/// init frame. The child applies no migration.
+/// The broker config of a child: the URL of the init frame, a pool of up to
+/// `max_size` connections of the child kind with no overflow, `check` as the
+/// pre-ping, and Python's checkout wait and connection age of a child pool.
+/// `min_size` has no form in the config: the pools of the core open a
+/// connection at its first checkout. Pure.
+fn child_broker_config(database_url: &str, pool: ChildPool) -> PostgresConfig {
+    let connections = u32::try_from(pool.max_size.get())
+        .ok()
+        .and_then(NonZeroU32::new)
+        .expect("a child pool max_size is from 1 to MAX_CHILD_POOL_CONNECTIONS");
+    PostgresConfig {
+        pool_pre_ping: pool.check,
+        pool_timeout: CHILD_POOL_CHECKOUT_WAIT_SECONDS,
+        pool_recycle: CHILD_POOL_MAX_AGE,
+        ..PostgresConfig::from_url(database_url).with_exact_pool(connections)
+    }
+}
+
+/// The child's broker, on the connect path of the parent's broker
+/// ([`PostgresBroker::connect_observe_only`]): the child applies no
+/// migration. Errors: the text of a refused config or of a failed connect.
 async fn connect(init: &InitFrame) -> Result<PostgresBroker, String> {
-    let url = init.database_url.as_str();
-    PostgresConfig::from_url(url)
-        .validate()
-        .map_err(|error| error.to_string())?;
-    let pool = pool_of(init.child_kind);
-    let pg_pool = PgPoolOptions::new()
-        .min_connections(u32::try_from(pool.min_size.get()).unwrap_or(u32::MAX))
-        .max_connections(u32::try_from(pool.max_size.get()).unwrap_or(u32::MAX))
-        .test_before_acquire(pool.check)
-        .connect(url)
+    let config = child_broker_config(init.database_url.as_str(), pool_of(init.child_kind));
+    PostgresBroker::connect_observe_only(&config)
         .await
-        .map_err(|error| error.to_string())?;
-    Ok(PostgresBroker::from_pool_observe_only(pg_pool))
+        .map_err(|error| error.to_string())
 }
 
 /// What the serve loop of a child kind needs beyond the shared context.
@@ -352,5 +367,43 @@ fn boot_and_serve(
         ServeEnd::Stopped => ChildHostExit::Stopped,
         ServeEnd::BadParentFrame => ChildHostExit::BadParentFrame,
         ServeEnd::ParentGone => ChildHostExit::ParentGone,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::worker::executor::protocol::{PoolMaxSize, PoolMinSize};
+
+    const URL: &str = "postgresql://user:secret@localhost:5432/db";
+
+    fn child_pool(max_size: u64, check: bool) -> ChildPool {
+        ChildPool {
+            min_size: PoolMinSize::new(0).expect("0 is a pool min size"),
+            max_size: PoolMaxSize::new(max_size).expect("the test max size is inside its bounds"),
+            check,
+        }
+    }
+
+    /// Python `_initialize_worker_pool`: at most `max_size` connections,
+    /// `CHILD_POOL_CONNECTION_WAIT_S` and `CHILD_POOL_MAX_LIFETIME_S`.
+    #[test]
+    fn the_child_pool_is_max_size_with_no_overflow() {
+        let config = child_broker_config(URL, child_pool(7, false));
+        assert_eq!(config.database_url, URL);
+        assert_eq!(config.session_database_url, None);
+        assert_eq!(config.pool_size, 7);
+        assert_eq!(config.max_overflow, 0);
+        assert!(!config.pool_pre_ping);
+        assert_eq!(config.pool_timeout, 30);
+        assert_eq!(config.pool_recycle, PoolRecycle::after_seconds(300));
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn check_turns_on_the_pre_ping_of_the_child_pool() {
+        let config = child_broker_config(URL, child_pool(1, true));
+        assert_eq!(config.pool_size, 1);
+        assert!(config.pool_pre_ping);
     }
 }

@@ -52,7 +52,7 @@ _CRASH_RETRY_OPTIONS: Final = json.dumps(
     {
         'retry_policy': {
             'max_retries': 2,
-            'intervals': [60],
+            'intervals': [60, 60],
             'backoff_strategy': 'fixed',
             'jitter': False,
             'auto_retry_for': ['WORKER_CRASHED'],

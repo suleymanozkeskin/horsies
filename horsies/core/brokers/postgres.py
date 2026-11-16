@@ -3485,7 +3485,7 @@ class PostgresBroker:
         failed_at otherwise; claim state is structurally absent on a
         history record, while the claim's timestamp survives as
         provenance. Attempts decode from the record's snapshot — their
-        only home after the move.
+        only home after the move — and are listed newest first.
         """
         from horsies.core.history.reads.detail import (
             HistoryTaskDetail,
@@ -3554,6 +3554,8 @@ class PostgresBroker:
 
         attempts: list[TaskAttemptInfo] | None = None
         if include_attempts:
+            # The snapshot holds the attempts oldest first; TaskInfo lists
+            # them newest first, as the live read does (ORDER BY attempt DESC).
             attempts = [
                 TaskAttemptInfo(
                     task_id=task_id,
@@ -3570,7 +3572,7 @@ class PostgresBroker:
                     worker_pid=record.worker_pid,
                     worker_process_name=record.worker_process_name,
                 )
-                for record in detail.attempts
+                for record in reversed(detail.attempts)
             ]
 
         return Ok(
