@@ -186,6 +186,26 @@ EXPECTED_FUNCTIONS = frozenset(
         'horsies_monitoring_workflow_run',
         'horsies_monitoring_workflow_runs',
         'horsies_schedule_slot_task_id',
+        # 0008_history_maintenance_functions.sql. horsies_terminalization_miss
+        # gains an overload there; its name is listed above.
+        'horsies_coverage_probe',
+        'horsies_create_heartbeat_leaf',
+        'horsies_create_history_leaf',
+        'horsies_create_partition_leaf',
+        'horsies_heartbeat_leaf_name',
+        'horsies_history_absent_leaves',
+        'horsies_history_leaf_indexes',
+        'horsies_history_leaf_name',
+        'horsies_history_leaf_state',
+        'horsies_history_reader_manifest',
+        'horsies_history_reader_signatures',
+        'horsies_history_reader_stamp',
+        'horsies_history_readers_current',
+        'horsies_publish_history_readers',
+        'horsies_register_retention_classes',
+        'horsies_render_history_reader',
+        'horsies_retention_period_days',
+        'horsies_terminalization_family',
     }
 )
 

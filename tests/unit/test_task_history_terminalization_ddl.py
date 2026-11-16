@@ -99,12 +99,20 @@ def completion_batch_fragments() -> list[str]:
 def outcome_fragments() -> list[str]:
     return [
         baseline_type('horsies_terminalization_outcome'),
-        baseline_function('horsies_terminalization_miss'),
+        baseline_overload(
+            'horsies_terminalization_miss',
+            'p_task_id uuid',
+            'p_equivalent_kinds text[]',
+        ),
     ]
 
 
 OUTCOME_TYPE_DDL = baseline_type('horsies_terminalization_outcome')
-MISS_CLASSIFIER_DDL = baseline_function('horsies_terminalization_miss')
+MISS_CLASSIFIER_DDL = baseline_overload(
+    'horsies_terminalization_miss',
+    'p_task_id uuid',
+    'p_equivalent_kinds text[]',
+)
 ATTEMPT_ENCODER_DDL = baseline_function(ATTEMPT_ENCODER_FUNCTION)
 
 
