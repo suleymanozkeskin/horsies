@@ -1371,9 +1371,9 @@ impl Worker {
 mod tests {
     use super::*;
     use crate::worker::execution::{
-        execute_and_finalize, notify_worker_capacity, persist_terminal_state, run_phase2,
-        FinalizeStage,
+        capacity_wake, execute_and_finalize, persist_terminal_state, run_phase2, FinalizeStage,
     };
+    use crate::workflow_engine::phase2_recovery::send_phase2_wake;
 
     use crate::async_task_fn;
     use crate::broker::{ClaimedTaskRow, PostgresBroker};
@@ -3087,7 +3087,7 @@ mod tests {
     /// listen on task_new (parity with horsies PR #101 cafc9200).
     #[tokio::test]
     #[serial]
-    async fn notify_worker_capacity_emits_queue_specific_signal_only() {
+    async fn capacity_wake_emits_queue_specific_signal_only() {
         let pool = test_pool().await;
         clean(&pool).await;
 
@@ -3098,7 +3098,9 @@ mod tests {
         listener.listen("task_queue_high-priority").await.unwrap();
 
         let task_id = Uuid::new_v4();
-        notify_worker_capacity(&pool, "high-priority", task_id).await;
+        send_phase2_wake(&pool, &capacity_wake("high-priority", task_id))
+            .await
+            .expect("send the capacity wake");
 
         let first = tokio::time::timeout(Duration::from_secs(2), listener.recv())
             .await
@@ -3120,12 +3122,15 @@ mod tests {
         );
     }
 
+    /// A capacity wake that the database refuses is an error, never dropped
+    /// (#722): a closed pool answers `PoolClosed`.
     #[tokio::test]
     #[serial]
-    async fn notify_worker_capacity_swallow_pool_errors() {
+    async fn capacity_wake_on_a_closed_pool_is_an_error() {
         let pool = test_pool().await;
         pool.close().await;
-        notify_worker_capacity(&pool, "default", Uuid::new_v4()).await;
+        let sent = send_phase2_wake(&pool, &capacity_wake("default", Uuid::new_v4())).await;
+        assert!(matches!(sent, Err(sqlx::Error::PoolClosed)), "{sent:?}");
     }
 
     /// A database of its own, migrated without the install's family record,

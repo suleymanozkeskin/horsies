@@ -254,7 +254,6 @@ async fn a_dead_connection_fails_the_completion_and_the_retry_applies() {
 /// phase-2 error.
 #[tokio::test]
 #[serial]
-#[ignore = "waits on #722"]
 async fn a_dead_connection_fails_phase_two_as_retryable() {
     let pool = pool().await;
     let unpinged = unpinged_single_connection_pool(database_options(&pool)).await;
