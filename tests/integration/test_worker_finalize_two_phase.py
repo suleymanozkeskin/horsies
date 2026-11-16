@@ -37,7 +37,7 @@ def _test_app() -> Horsies:
     if _TEST_APP is None:
         cfg = AppConfig(
             broker=PostgresConfig(
-                database_url='postgresql+psycopg://u:p@localhost/db',
+                database_url='postgresql://u:p@localhost/db',
             )
         )
         _TEST_APP = Horsies(cfg)
@@ -136,7 +136,7 @@ async def test_finalize_phase2_failure_keeps_terminal_task_result_durable(
     task_id = await _insert_running_task(session)
 
     cfg = WorkerConfig(
-        dsn='postgresql+psycopg://u:p@localhost/db',
+        dsn='postgresql://u:p@localhost/db',
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=['default'],
     )
@@ -187,7 +187,7 @@ async def test_finalize_phase2_failure_keeps_terminal_task_result_durable(
 
 def _worker(engine: AsyncEngine) -> Worker:
     cfg = WorkerConfig(
-        dsn='postgresql+psycopg://u:p@localhost/db',
+        dsn='postgresql://u:p@localhost/db',
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=['default'],
     )

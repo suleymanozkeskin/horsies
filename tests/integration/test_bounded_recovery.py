@@ -31,6 +31,7 @@ from horsies.core.workflows.recovery import (
 from tests.integration.conftest import DB_URL
 from tests.integration.isolated_database import isolated_test_database
 from tests.broker_resources_support import current_resources
+from horsies.core.utils.url import sqlalchemy_url
 
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
@@ -50,7 +51,7 @@ async def bounded_recovery_database() -> AsyncIterator[
 
         async with current_resources(broker).engine.begin() as connection:
             await ensure_history_seedable(connection)
-        engine = create_async_engine(url)
+        engine = create_async_engine(sqlalchemy_url(url))
         try:
             yield broker, engine
         finally:

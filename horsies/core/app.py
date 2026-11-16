@@ -1346,7 +1346,7 @@ class Horsies:
         from horsies.core.brokers.session_capability import (
             probe_session_capability,
         )
-        from horsies.core.utils.url import to_psycopg_url
+        from horsies.core.utils.url import sqlalchemy_url, to_psycopg_url
 
         HEALTH_CHECK_SQL = text("""SELECT 1""")
         LISTENER_PROBE_TIMEOUT_SECONDS = 2.0
@@ -1363,7 +1363,9 @@ class Horsies:
                 engine_cfg = dict(base_engine_cfg)
                 if connect_args:
                     engine_cfg['connect_args'] = connect_args
-                health_engine = create_async_engine(database_url, **engine_cfg)
+                health_engine = create_async_engine(
+                    sqlalchemy_url(database_url), **engine_cfg
+                )
                 health_session_factory = async_sessionmaker(
                     health_engine, expire_on_commit=False
                 )
@@ -1439,13 +1441,16 @@ class Horsies:
 
         from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+        from horsies.core.utils.url import sqlalchemy_url
+
         async def _read_limit() -> (
             ServerConnectionLimit | ServerConnectionLimitUnreadable
         ):
             engine_cfg = dict(broker_config.sqlalchemy_engine_kwargs())
             engine_cfg['connect_args'] = broker_config.pooled_connect_args
             engine = create_async_engine(
-                broker_config.database_url.get_secret_value(), **engine_cfg
+                sqlalchemy_url(broker_config.database_url.get_secret_value()),
+                **engine_cfg,
             )
             try:
                 return await read_server_connection_limit(

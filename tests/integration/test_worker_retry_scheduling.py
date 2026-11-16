@@ -55,7 +55,7 @@ def _app() -> Horsies:
     app = Horsies(
         AppConfig(
             broker=PostgresConfig(
-                database_url=SecretStr('postgresql+psycopg://u:p@localhost/db'),
+                database_url=SecretStr('postgresql://u:p@localhost/db'),
             ),
         ),
     )
@@ -72,7 +72,7 @@ def _make_worker(engine: AsyncEngine) -> Worker:
     """A Worker wired to the test DB, whose delayed retry wake is recorded."""
     sf = async_sessionmaker(engine, expire_on_commit=False)
     cfg = WorkerConfig(
-        dsn='postgresql+psycopg://u:p@localhost/db',
+        dsn='postgresql://u:p@localhost/db',
         psycopg_dsn='postgresql://u:p@localhost/db',
         queues=['default'],
     )
@@ -154,12 +154,16 @@ def _make_task_options(
     backoff_strategy: str = 'fixed',
     jitter: bool = False,
 ) -> str:
-    """Build task_options JSON with retry policy."""
+    """Build task_options JSON with a retry policy that validates: one
+    interval per retry (the row's max_retries column decides when the
+    retries are spent)."""
+    resolved_intervals = intervals or [60]
     return json.dumps(
         {
             'retry_policy': {
+                'max_retries': len(resolved_intervals),
                 'auto_retry_for': auto_retry_for,
-                'intervals': intervals or [60],
+                'intervals': resolved_intervals,
                 'backoff_strategy': backoff_strategy,
                 'jitter': jitter,
             },

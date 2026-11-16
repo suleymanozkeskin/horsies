@@ -12,7 +12,7 @@ from pydantic import SecretStr
 from horsies import PostgresConfig
 
 broker = PostgresConfig(
-    database_url=SecretStr("postgresql+psycopg://user:password@localhost:5432/mydb"),
+    database_url=SecretStr("postgresql://user:password@localhost:5432/mydb"),
 )
 ```
 
@@ -42,12 +42,12 @@ The pools of a worker are not `PostgresConfig` fields. Each child kind has its o
 ## Connection URL Format
 
 ```
-postgresql+psycopg://user:password@host:port/database
+postgresql://user:password@host:port/database
 ```
 
 Components:
 
-- `postgresql+psycopg` - Driver (psycopg3)
+- `postgresql` - Scheme; `postgres` is accepted too. The URL names no driver: horsies opens the database with psycopg 3. A URL that names a driver, such as `postgresql+psycopg://`, is refused with `ConfigurationError` `HRS-203`, and the error names the fix
 - `user:password` - Credentials
 - `host:port` - Server location (default port: 5432)
 - `database` - Database name
@@ -78,7 +78,7 @@ In a [shared async child](/horsies/workers/shared-async-tasks/#the-timeout), tha
 
 ```python
 PostgresConfig(
-    database_url=SecretStr("postgresql+psycopg://postgres:postgres@localhost:5432/horsies_dev"),
+    database_url=SecretStr("postgresql://postgres:postgres@localhost:5432/horsies_dev"),
 )
 ```
 
@@ -86,7 +86,7 @@ PostgresConfig(
 
 ```python
 PostgresConfig(
-    database_url=SecretStr("postgresql+psycopg://app:secret@db.example.com:5432/production"),
+    database_url=SecretStr("postgresql://app:secret@db.example.com:5432/production"),
     pool_size=10,
     max_overflow=20,
     pool_timeout=30,

@@ -78,8 +78,8 @@ from horsies.core.worker_manifest import (
 
 pytestmark = [pytest.mark.unit]
 
-MAIN_URL: Final = 'postgresql+psycopg://user:secret@pooler:6432/app'
-SESSION_URL: Final = 'postgresql+psycopg://user:secret@direct:5432/app'
+MAIN_URL: Final = 'postgresql://user:secret@pooler:6432/app'
+SESSION_URL: Final = 'postgresql://user:secret@direct:5432/app'
 
 # WorkerProfile field -> the WorkerProfileManifest field it fills.
 PROFILE_FIELDS: Final[dict[str, str]] = {

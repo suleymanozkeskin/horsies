@@ -42,7 +42,7 @@ from tests.integration.conftest import DB_URL
 pytestmark = [pytest.mark.integration]
 
 TASK_NAME: Final = 'caller_thread_echo'
-PLAIN_URL: Final = DB_URL.replace('postgresql+psycopg://', 'postgresql://', 1)
+PLAIN_URL: Final = DB_URL
 SENDER_THREADS: Final = 8
 SENDS_PER_THREAD: Final = 25
 THREAD_JOIN_BOUND_S: Final = 60.0

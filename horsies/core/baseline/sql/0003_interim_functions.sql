@@ -2656,6 +2656,11 @@ BEGIN
     IF p_terminal_at IS NULL THEN
         RAISE EXCEPTION 'terminal timestamp is required';
     END IF;
+    -- The leaf lock of the row's leaf, shared, before the first read of history (lock order and effect: the
+    -- horsies_tasks overload in 0006_history_functions.sql).
+    PERFORM pg_advisory_xact_lock_shared(
+        horsies_task_history_leaf_lock_key(v_task.retention_class_key, p_terminal_at)
+    );
     IF horsies_task_history_duplicate_staged(p_task_id) THEN
         RAISE EXCEPTION 'task identity exists in multiple locations'
             USING ERRCODE = 'data_corrupted';
@@ -2882,6 +2887,7 @@ DECLARE
     v_payload bytea;
     v_digest bytea;
     v_version smallint;
+    v_envelope_version smallint;
     v_source_task uuid;
     v_cas_won boolean;
 BEGIN
@@ -2984,8 +2990,8 @@ BEGIN
         -- leaf; this read exists because the locator makes pruning
         -- possible.
         SELECT h.task_id, h.result_payload, h.result_digest,
-               h.history_schema_version
-        INTO v_source_task, v_payload, v_digest, v_version
+               h.history_schema_version, h.result_envelope_version
+        INTO v_source_task, v_payload, v_digest, v_version, v_envelope_version
         FROM horsies_task_history h
         WHERE h.retention_class_key = v_pending.history_class
           AND h.terminal_at = v_pending.history_anchor
@@ -2999,8 +3005,8 @@ BEGIN
         END IF;
     ELSE
         SELECT q.task_id, q.result_payload, q.result_digest,
-               q.history_schema_version
-        INTO v_source_task, v_payload, v_digest, v_version
+               q.history_schema_version, q.result_envelope_version
+        INTO v_source_task, v_payload, v_digest, v_version, v_envelope_version
         FROM horsies_workflow_phase2_quarantine q
         WHERE q.task_id = v_pending.quarantine_task_id;
         IF NOT FOUND THEN
@@ -3025,6 +3031,16 @@ BEGIN
                    v_node.id, v_node.task_index, v_wf.status, v_wf.depth,
                    v_wf.root_workflow_id, v_wf.on_error, v_node.status,
                    'source schema version disagrees with locator')
+            ::horsies_phase2_disposition;
+    END IF;
+    -- Result envelope version 1 is the only format this reader knows; the source keeps its row, and the recovery
+    -- pass records SOURCE_VERSION_CONFLICT as the failure class, as for an unknown history schema version.
+    IF v_envelope_version <> 1 THEN
+        RETURN ROW('SOURCE_VERSION_CONFLICT', v_pending.workflow_id,
+                   v_node.id, v_node.task_index, v_wf.status, v_wf.depth,
+                   v_wf.root_workflow_id, v_wf.on_error, v_node.status,
+                   format('source result envelope version %s is not known to this reader',
+                          v_envelope_version))
             ::horsies_phase2_disposition;
     END IF;
     IF v_digest IS DISTINCT FROM v_pending.result_digest
@@ -3138,7 +3154,7 @@ BEGIN
         -- it against the pending locator, so a projection defect is a
         -- refusal, not a corrupt quarantine row.
         SELECT q.task_id, q.result_payload, q.result_digest,
-               q.history_schema_version
+               q.history_schema_version, q.result_envelope_version
         INTO STRICT v_copy
         FROM horsies_workflow_phase2_quarantine q
         WHERE q.task_id = p_task_id;
@@ -3150,6 +3166,14 @@ BEGIN
               IS DISTINCT FROM v_pending.history_schema_version
         THEN
             RAISE EXCEPTION 'quarantine copy disagrees with locator'
+                USING ERRCODE = 'HQ001';
+        END IF;
+        -- Result envelope version 1 is the only format this reader knows: a copy of another version is refused
+        -- like a copy whose history schema version disagrees.
+        IF v_copy.result_envelope_version <> 1 THEN
+            RAISE EXCEPTION
+                'quarantine source result envelope version % is not known to this reader',
+                v_copy.result_envelope_version
                 USING ERRCODE = 'HQ001';
         END IF;
     EXCEPTION

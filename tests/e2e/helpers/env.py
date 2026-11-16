@@ -54,7 +54,7 @@ def e2e_database_url_in(environment: Mapping[str, str], *env_names: str) -> str:
             return value
     password = environment.get('DB_PASSWORD', '')
     return (
-        f'postgresql+psycopg://postgres:{password}@localhost:5432/horsies'
+        f'postgresql://postgres:{password}@localhost:5432/horsies'
     )
 
 
