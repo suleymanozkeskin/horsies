@@ -1145,7 +1145,8 @@ mod tests {
         let task_id = Uuid::new_v4();
         seed_workflow_task(&pool, workflow_id, task_id, false).await;
         let failure = serde_json::to_string(&crate::core::TaskResult::<serde_json::Value>::Err(
-            crate::core::TaskError::new("NODE_FAILURE", "the node failed"),
+            crate::core::TaskError::new("NODE_FAILURE", "the node failed")
+                .expect("a user error code"),
         ))
         .expect("encode the failure result");
         let outcomes = terminalize(

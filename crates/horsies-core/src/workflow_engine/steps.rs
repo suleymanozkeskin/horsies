@@ -70,8 +70,8 @@ macro_rules! step_row_select {
             "SELECT row_kind, disposition, workflow_id, workflow_name, ",
             "advance_child_workflow_id, detail, task_index, node_input, args_from, ",
             "sub_workflow_name, sub_definition_key, sub_workflow_params, parent_depth, ",
-            "source_task_index, source_status, source_task_name, source_definition_key, ",
-            "source_result FROM ",
+            "source_task_index, source_node_id, source_status, source_task_name, ",
+            "source_definition_key, source_result FROM ",
             $call
         )
     };
@@ -346,6 +346,10 @@ pub(crate) struct StepOutcome<D> {
 pub(crate) struct ChildStartSource {
     /// The index of the dependency node.
     pub(crate) task_index: i32,
+    /// The node id of the dependency node; `None` for a node stored without
+    /// one. The missing-result entry of a member names the node by it
+    /// ([`crate::workflow_engine::args_merge::missing_result_error`]).
+    pub(crate) node_id: Option<String>,
     /// Its status: `COMPLETED`, `FAILED` or `SKIPPED`.
     pub(crate) status: String,
     /// The task name of the dependency node.
@@ -974,6 +978,7 @@ pub(crate) fn step_rows<D: StepDisposition>(
                 column(row, statement, "task_index")?,
                 ChildStartSource {
                     task_index: column(row, statement, "source_task_index")?,
+                    node_id: column(row, statement, "source_node_id")?,
                     status: column(row, statement, "source_status")?,
                     task_name: column(row, statement, "source_task_name")?,
                     definition_key: column(row, statement, "source_definition_key")?,
