@@ -50,7 +50,7 @@ fn single(name: &str) -> WorkflowSpec {
 
 async fn resume(pool: &PgPool, workflow_id: Uuid, registry: &WorkflowSpecRegistry) -> bool {
     resume_workflow(
-        pool,
+        &broker(pool),
         workflow_id,
         registry,
         &PayloadPolicy::default(),
@@ -124,8 +124,8 @@ async fn a_descendant_cancel_locks_the_workflow_row_before_its_nodes() {
             .fetch_one(&mut *peer)
             .await
             .expect("the peer locks the child workflow row");
-    let cancel_pool = pool.clone();
-    let cancel = tokio::spawn(async move { cancel_workflow(&cancel_pool, parent).await });
+    let cancel_broker = broker(&pool);
+    let cancel = tokio::spawn(async move { cancel_workflow(&cancel_broker, parent).await });
     tokio::time::sleep(BLOCKED_WAIT).await;
     assert!(
         !cancel.is_finished(),
@@ -274,8 +274,8 @@ async fn a_claim_cannot_take_a_task_while_its_cancel_is_uncommitted() {
     )
     .await;
 
-    let cancel_pool = db.pool.clone();
-    let cancel = tokio::spawn(async move { cancel_workflow(&cancel_pool, workflow_id).await });
+    let cancel_broker = broker(&db.pool);
+    let cancel = tokio::spawn(async move { cancel_workflow(&cancel_broker, workflow_id).await });
     tokio::time::sleep(Duration::from_millis(100)).await;
     let claimed = broker(&db.pool)
         .claim_batch(&claim_pass(PORT_QUEUE))
@@ -421,7 +421,9 @@ async fn a_handle_pause_notifies_each_paused_workflow_once() {
     let (parent, child) = seed_parent_with_child(&db.pool, "fail").await;
     let mut listener = WorkflowDoneListener::listen(&db.pool).await;
 
-    let paused = pause_workflow(&db.pool, parent).await.expect("pause");
+    let paused = pause_workflow(&broker(&db.pool), parent)
+        .await
+        .expect("pause");
 
     assert!(paused);
     assert_eq!(
@@ -812,11 +814,11 @@ async fn a_crashed_worker_fails_its_nodes_and_allow_failed_deps_nodes_run() {
     assert_eq!(failed, 2);
     let _summary = drive_phase2_recovery(
         &db.pool,
+        &crate::broker::PostgresBroker::from_pool(db.pool.clone()),
         &registry,
         0,
         100,
         3,
-        &PayloadPolicy::default(),
         &RetentionConfig::default(),
     )
     .await

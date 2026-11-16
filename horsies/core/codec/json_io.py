@@ -19,6 +19,7 @@ from typing import Dict, List, Optional, Union
 from horsies.core.codec.json_value import (
     JSON_TEXT_TOO_DEEP,
     StrictJsonError,
+    _object_without_repeated_key,
     _parse_finite_float,
     _reject_deep_nesting,
     _reject_lone_surrogate,
@@ -105,8 +106,11 @@ def loads_json(s: Optional[str]) -> SerdeResult[Json]:
     non-finite floats past the producer-side strict fence. Routes through
     ``parse_float=_parse_finite_float`` for the same reason: a numeric literal
     such as ``1e9999`` never reaches ``parse_constant``, and ``float()`` would
-    turn it into ``inf``. ``_reject_lone_surrogate`` then refuses a string that
-    UTF-8 cannot encode, which ``dumps_json`` also refuses.
+    turn it into ``inf``. Routes through
+    ``object_pairs_hook=_object_without_repeated_key``: an object that repeats
+    a key is an Err, where ``json.loads`` keeps the last value.
+    ``_reject_lone_surrogate`` then refuses a string that UTF-8 cannot encode,
+    which ``dumps_json`` also refuses.
 
     A document nested deeper than ``MAX_JSON_DEPTH`` is an Err, so each walker
     that gets the parsed value stays inside the recursion limit. A text that
@@ -120,6 +124,7 @@ def loads_json(s: Optional[str]) -> SerdeResult[Json]:
             s,
             parse_constant=_reject_nonstandard_json_constant,
             parse_float=_parse_finite_float,
+            object_pairs_hook=_object_without_repeated_key,
         )
         _reject_lone_surrogate(s, parsed)
         _reject_deep_nesting(s, parsed)

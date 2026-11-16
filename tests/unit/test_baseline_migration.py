@@ -23,8 +23,8 @@ from horsies.core.baseline.migration import (
 from horsies.core.types.result import Err, Ok
 
 PINNED_CHECKSUM_HEX = (
-    '72c2761d95db86836edea2e9f8124a2cc6851694b42345fc'
-    '0d96fc5a75ca85085814954a8c5abbd1d833600a8bad6efd'
+    '12844f4be8bec914d3b3518d34bc7254fea543d885f5b748'
+    '617546f1739235d4c45b76de76db1c47cf1c788e4ee5aa9b'
 )
 """SHA-384 of the migration text. An edit of a baseline SQL file changes it;
 the edit then shows in this file's diff as well."""
@@ -77,8 +77,20 @@ def test_text_is_the_files_in_name_order() -> None:
     tables = loaded.sql.index('-- horsies baseline schema, part 1:')
     indexes = loaded.sql.index('-- horsies baseline schema, part 2:')
     functions = loaded.sql.index('-- horsies baseline schema, part 3:')
+    lifecycle_functions = loaded.sql.index('-- horsies baseline schema, part 4:')
     workflow_functions = loaded.sql.index('-- horsies baseline schema, part 5:')
-    assert tables == 0 < indexes < functions < workflow_functions
+    scheduler_monitoring_functions = loaded.sql.index(
+        '-- horsies baseline schema, part 7:'
+    )
+    assert (
+        tables
+        == 0
+        < indexes
+        < functions
+        < lifecycle_functions
+        < workflow_functions
+        < scheduler_monitoring_functions
+    )
 
 
 def _package_sql_files() -> tuple[str, ...]:

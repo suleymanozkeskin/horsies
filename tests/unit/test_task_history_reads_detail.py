@@ -4,7 +4,7 @@ The detail function must render from the same staged skeleton as the
 identity/provenance pair — same v7 discriminator, same birth-floor
 prune, same probe order — and the listing surfaces must never carry an
 envelope column. Every exclusion pin proves its presence half first:
-the excluded name is shown to exist in the frozen DDL, so an exclusion
+the excluded name is shown to exist in the baseline table, so an exclusion
 assertion can actually fail.
 """
 
@@ -15,11 +15,6 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from horsies.core.history.commands import AnchoredLowerBound
-from horsies.core.history.ddl.conditional import (
-    GatedFragment,
-    gated_fragment,
-)
-from horsies.core.history.ddl.tables import TASK_HISTORY_PARENT_DDL
 from horsies.core.history.reads.aggregates import (
     HistoryStatusAggregate,
     history_status_aggregate_statement,
@@ -42,6 +37,7 @@ from horsies.core.history.reads.pages import (
     history_sort_expression,
     history_scope_conditions,
 )
+from tests.baseline_sql import baseline_table
 
 pytestmark = [pytest.mark.unit]
 
@@ -106,16 +102,7 @@ class TestDetailRendersFromTheSharedSkeleton:
 
 class TestColumnDiscipline:
     def test_presence_half_the_envelope_columns_are_real(self) -> None:
-        frozen = TASK_HISTORY_PARENT_DDL
-        gated = '\n'.join(
-            fragment
-            for kind in (
-                GatedFragment.ATTEMPT_SNAPSHOT_COLUMNS,
-                GatedFragment.RERUN_INPUT_COLUMNS,
-            )
-            for fragment in gated_fragment(kind)
-        )
-        installed = frozen + gated
+        installed = baseline_table('horsies_task_history')
         for column in ENVELOPE_COLUMNS:
             assert column in installed, column
 

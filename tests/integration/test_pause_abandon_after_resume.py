@@ -87,12 +87,12 @@ async def _seed_paused_workflow_with_claimed_node(
     await session.execute(
         text("""
             INSERT INTO horsies_workflow_tasks
-                (id, workflow_id, task_index, node_id, task_name, input,
+                (downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
                  queue_name, priority, dependencies,
                  allow_failed_deps, join_type, is_subworkflow, status,
                  task_id, created_at,
                  max_retries, execution, retention_class_key)
-            VALUES (:id, :workflow_id, 0, 'node_0', 'abandon_after_resume',
+            VALUES ('NONE', :id, :workflow_id, 0, 'node_0', 'abandon_after_resume',
                     '{}', 'default', 100, '{}', FALSE, 'all', FALSE,
                     'ENQUEUED', :task_id, NOW(),
                     0, 'ISOLATED', 'standard_30d')
@@ -316,31 +316,28 @@ async def test_child_starts_a_task_resumed_before_its_abandon(
 
 
 @pytest.mark.asyncio(loop_scope='function')
-async def test_child_starts_a_task_resumed_before_its_status_read(
+async def test_child_starts_a_task_resumed_before_its_abandon(
     session: AsyncSession,
     broker: PostgresBroker,
     clean_workflow_tables: None,  # noqa: ARG001
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The transition misses on the paused guard; the resume commits before
-    the child reads the workflow status."""
+    """The start misses on the paused workflow; the resume commits before
+    the abandon judges the workflow under its lock, so the abandon refuses
+    and the next attempt starts the task."""
     claimed_at = datetime.now(timezone.utc) - timedelta(seconds=1)
     workflow_id, task_id = await _seed_paused_workflow_with_claimed_node(
         session,
         claimed_at,
     )
     _initialize_worker_pool(listener_of(broker).database_url)
-    real_status_read = child_runner._get_workflow_status_for_task
+    real_begin = child_runner._begin_workflow_stop
 
-    def _resume_then_read(cursor: Any, read_task_id: str) -> str | None:
+    def _resume_then_begin(cursor: Any) -> None:
         _set_workflow_running(workflow_id)
-        return real_status_read(cursor, read_task_id)
+        real_begin(cursor)
 
-    monkeypatch.setattr(
-        child_runner,
-        '_get_workflow_status_for_task',
-        _resume_then_read,
-    )
+    monkeypatch.setattr(child_runner, '_begin_workflow_stop', _resume_then_begin)
 
     result = child_runner._confirm_until_not_resumed(
         task_id,

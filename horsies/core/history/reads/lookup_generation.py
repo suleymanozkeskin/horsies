@@ -45,7 +45,6 @@ from ..names import (
     TASK_DETAIL_FUNCTION,
     TASK_HISTORY_PARENT,
     TASK_LOOKUP_FUNCTION,
-    TASK_LOOKUP_MANIFEST,
     TASK_LOOKUP_TYPE,
     TASK_PROVENANCE_FUNCTION,
     TASK_PROVENANCE_TYPE,
@@ -56,41 +55,6 @@ from ..partitions.catalog import LeafCatalogRow
 
 CLOCK_BOUND_SECONDS = 5
 """Clock-skew allowance used only to order likely UUIDv7 probes."""
-
-
-TASK_LOOKUP_TYPE_DDL = f"""
-CREATE TYPE {TASK_LOOKUP_TYPE} AS (
-    found boolean,
-    location text,
-    task_id uuid,
-    fingerprint_version smallint,
-    command_fingerprint bytea
-)
-"""
-
-TASK_PROVENANCE_TYPE_DDL = f"""
-CREATE TYPE {TASK_PROVENANCE_TYPE} AS (
-    found boolean,
-    location text,
-    task_id uuid,
-    status text,
-    terminal_at timestamptz,
-    terminalization_kind text
-)
-"""
-
-TASK_LOOKUP_MANIFEST_DDL = f"""
-CREATE TABLE {TASK_LOOKUP_MANIFEST} (
-    leaf_name text PRIMARY KEY,
-    probe_position integer NOT NULL UNIQUE,
-    lower_anchor timestamptz NOT NULL,
-    upper_anchor timestamptz NOT NULL,
-    min_birth_at timestamptz,
-    published_at timestamptz NOT NULL,
-    CHECK (probe_position >= 0),
-    CHECK (lower_anchor < upper_anchor)
-)
-"""
 
 
 @dataclass(frozen=True, slots=True)

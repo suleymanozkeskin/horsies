@@ -200,6 +200,135 @@ fn a_policy_outside_its_rule_refuses_the_run_and_cannot_retry() {
     }
 }
 
+/// Python `stored_retry_policy` validates `RetryPolicy` in strict mode: a key
+/// that the policy leaves out takes the field default, as at enqueue.
+#[test]
+fn a_key_the_policy_leaves_out_takes_the_field_default() {
+    let defaults = rule_of(r#"{"auto_retry_for": ["X"]}"#);
+    assert_eq!(defaults.max_retries, 3);
+    assert_eq!(defaults.intervals, vec![60, 300, 900]);
+    assert_eq!(defaults.backoff, Backoff::Fixed);
+    assert!(defaults.jitter);
+    assert_eq!(defaults.delay_cap, DelayCap::Uncapped);
+
+    let partial = rule_of(r#"{"max_retries": 1, "intervals": [5], "auto_retry_for": ["X"]}"#);
+    assert_eq!(partial.max_retries, 1);
+    assert_eq!(partial.intervals, vec![5]);
+    assert_eq!(partial.backoff, Backoff::Fixed);
+    assert!(partial.jitter);
+}
+
+/// A key that is present with `null` is not left out: strict mode refuses it.
+#[test]
+fn a_null_value_is_not_a_left_out_key() {
+    for key in ["max_retries", "intervals", "backoff_strategy", "jitter"] {
+        let policy = format!(r#"{{"{key}": null, "auto_retry_for": ["X"]}}"#);
+        assert!(
+            matches!(
+                retry_of(&options_with_policy(&policy)),
+                StoredRetry::Invalid { .. }
+            ),
+            "{policy}"
+        );
+    }
+    let no_cap = rule_of(
+        r#"{"max_retries": 1, "intervals": [5], "max_delay_seconds": null,
+            "auto_retry_for": ["X"]}"#,
+    );
+    assert_eq!(no_cap.delay_cap, DelayCap::Uncapped);
+}
+
+/// Python `validate_error_code_string`: each code is `^[A-Z][A-Z0-9_]*$`,
+/// and `WORKFLOW_STOPPED` is reserved (#1078).
+#[test]
+fn each_auto_retry_for_code_must_be_an_error_code_text() {
+    let policy = |code: &str| {
+        format!(
+            r#"{{"max_retries": 1, "intervals": [5], "auto_retry_for": ["X", {}]}}"#,
+            serde_json::Value::from(code)
+        )
+    };
+    for refused in [
+        "",
+        "x",
+        "lower_case",
+        "MyError",
+        "1ABC",
+        "A-B",
+        "AB ",
+        "WORKFLOW_STOPPED",
+    ] {
+        assert!(
+            matches!(
+                retry_of(&options_with_policy(&policy(refused))),
+                StoredRetry::Invalid { .. }
+            ),
+            "{refused:?} must be refused"
+        );
+    }
+    for accepted in ["A", "RATE_LIMITED", "E2E_42", "TASK_TIMEOUT", "MY_ERROR"] {
+        assert_eq!(
+            rule_of(&policy(accepted)).auto_retry_for,
+            vec!["X".to_owned(), accepted.to_owned()]
+        );
+    }
+}
+
+/// Python's `max_delay_seconds` is a `PositiveInt` with no upper bound.
+#[test]
+fn a_delay_cap_above_the_u32_range_reads() {
+    let rule = rule_of(
+        r#"{"max_retries": 1, "intervals": [5], "max_delay_seconds": 5000000000,
+            "auto_retry_for": ["X"]}"#,
+    );
+    assert_eq!(rule.delay_cap, DelayCap::AtMost(5_000_000_000));
+}
+
+/// Every refusal starts with Python's text, `stored retry_policy does not
+/// validate: `, and refuses the run with it; a policy that is not an object
+/// names its Python type, as Python does.
+#[test]
+fn every_refusal_starts_with_python_s_text() {
+    let not_objects = [
+        (r#""text""#, "str"),
+        ("[1, 2]", "list"),
+        ("5", "int"),
+        ("1.5", "float"),
+        ("true", "bool"),
+    ];
+    for (policy, python_type) in not_objects {
+        let options = read_stored_options(Some(&options_with_policy(policy)));
+        let expected = format!(
+            "stored retry_policy does not validate: retry_policy is not an object: {python_type}"
+        );
+        assert_eq!(
+            options.retry(),
+            &StoredRetry::Invalid {
+                reason: expected.clone()
+            }
+        );
+        assert_eq!(options.run_permit(), RunPermit::Refuse(expected));
+    }
+    for policy in [
+        r#"{"max_retries": 2, "intervals": [], "backoff_strategy": "fixed", "jitter": false,
+            "auto_retry_for": ["X"]}"#,
+        r#"{"max_retries": 2, "intervals": [5, 10], "backoff_strategy": "quadratic",
+            "jitter": false, "auto_retry_for": ["X"]}"#,
+        r#"{"max_retries": 3, "intervals": [5, 10], "backoff_strategy": "fixed",
+            "jitter": false, "auto_retry_for": ["X"]}"#,
+        r#"{"max_retries": 1, "intervals": [5], "auto_retry_for": ["x"]}"#,
+        r#"{"max_retries": 1, "intervals": [5], "auto_retry_for": ["X"], "extra": 1}"#,
+    ] {
+        match read_stored_options(Some(&options_with_policy(policy))).run_permit() {
+            RunPermit::Refuse(reason) => assert!(
+                reason.starts_with("stored retry_policy does not validate: "),
+                "{policy}: {reason}"
+            ),
+            other => panic!("{policy} must refuse the run, got {other:?}"),
+        }
+    }
+}
+
 /// Python reads only `retry_policy.auto_retry_for`: a top-level
 /// `auto_retry_for` key is not a policy.
 #[test]
@@ -344,6 +473,107 @@ fn the_delay_is_at_least_one_second() {
         let delay = jittered.delay_seconds(1);
         assert!((1.0..=1.25).contains(&delay), "{delay}");
     }
+}
+
+// --- stored retry limit ----------------------------------------------------
+//
+// Python `stored_max_retries` (`horsies/core/codec/task_options.py:80-103`);
+// `tests/unit/test_retry_utils.py::TestParseRetryPolicy` and
+// `tests/integration/test_enqueue_retry_limit.py`
+// (`test_valid_policies_store_their_limits`,
+// `test_a_malformed_policy_is_refused_without_a_row`).
+
+#[test]
+fn options_without_a_policy_store_zero_retries() {
+    for text in [
+        None,
+        Some(""),
+        Some("{}"),
+        Some(r#"{"queue": "default"}"#),
+        Some(r#"{"retry_policy": null, "timeout_ms": null}"#),
+    ] {
+        assert_eq!(stored_max_retries(text), Ok(0), "{text:?}");
+    }
+}
+
+#[test]
+fn a_policy_that_fits_the_rule_stores_its_limit() {
+    for (policy, limit) in [
+        (fixed_policy("[60]", 1, true), 1),
+        (fixed_policy("[60, 300, 900]", 3, false), 3),
+        (
+            r#"{"max_retries": 20, "intervals": [30], "backoff_strategy": "exponential",
+                "jitter": true, "auto_retry_for": ["X"]}"#
+                .to_owned(),
+            20,
+        ),
+    ] {
+        assert_eq!(
+            stored_max_retries(Some(&options_with_policy(&policy))),
+            Ok(limit),
+            "{policy}"
+        );
+    }
+}
+
+#[test]
+fn options_that_do_not_parse_or_are_not_an_object_are_refused() {
+    for text in ["not json", "{", "[]", "3", "\"x\"", "null"] {
+        assert!(
+            matches!(
+                stored_max_retries(Some(text)),
+                Err(RetryLimitRefused::UnreadableOptions { .. })
+            ),
+            "{text}"
+        );
+    }
+}
+
+/// Policies that a lenient reader would turn into a limit (3 for a policy
+/// without an integer `max_retries`, the stored number otherwise), and the
+/// other shapes that Python's `RetryPolicy` refuses.
+#[test]
+fn a_policy_that_does_not_fit_the_rule_is_refused_not_guessed() {
+    let exponential = |max_retries: &str| {
+        format!(
+            r#"{{"max_retries": {max_retries}, "intervals": [60], "backoff_strategy": "exponential",
+                "jitter": true, "auto_retry_for": ["X"]}}"#
+        )
+    };
+    let refused = [
+        r#"{"backoff_strategy": "exponential"}"#.to_owned(),
+        r#"{"max_retries": 5}"#.to_owned(),
+        exponential("\"5\""),
+        exponential("3.5"),
+        exponential("true"),
+        exponential("0"),
+        exponential("-1"),
+        exponential("21"),
+        r#"5"#.to_owned(),
+        r#"[3]"#.to_owned(),
+        r#"{"max_retries": 2, "intervals": [60, 60], "backoff_strategy": "fixed",
+            "jitter": true, "auto_retry_for": []}"#
+            .to_owned(),
+        r#"{"max_retries": 2, "intervals": [60, 60], "backoff_strategy": "fixed",
+            "jitter": true, "auto_retry_for": ["X"], "extra": 1}"#
+            .to_owned(),
+    ];
+    for policy in refused {
+        assert!(
+            matches!(
+                stored_max_retries(Some(&options_with_policy(&policy))),
+                Err(RetryLimitRefused::InvalidPolicy { .. })
+            ),
+            "{policy}"
+        );
+    }
+}
+
+#[test]
+fn the_refusal_names_the_cause() {
+    let refusal = stored_max_retries(Some(&options_with_policy(r#"{"max_retries": 5}"#)))
+        .expect_err("a partial policy is refused");
+    assert!(refusal.to_string().contains("retry_policy"), "{refusal}");
 }
 
 // --- stored cancel grace ---------------------------------------------------

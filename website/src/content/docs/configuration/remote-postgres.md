@@ -174,8 +174,10 @@ statement instead of a transparent reconnect:
   runs it again on a new connection, and a statement whose reply was lost
   is classified on that run, so it is not applied twice.
 - The claim loop retries a pass that failed with a connection error.
-- A RUNNING update of a child ends as `OWNERSHIP_UNCONFIRMED`: the task
-  stays `CLAIMED` until its claim lease returns it to the queue. A failed
+- A RUNNING update of a child ends as `OWNERSHIP_UNCONFIRMED`: no task
+  code runs, and the worker releases the claim at once, fenced on its claim
+  generation, so the task goes back to the queue. If that release also
+  fails, the claim lease returns the task. A failed
   finalizing marker is logged; the runner heartbeats of the worker cover
   the row until the worker reads the end of the task.
 

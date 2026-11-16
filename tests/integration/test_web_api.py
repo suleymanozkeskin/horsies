@@ -209,6 +209,7 @@ def make_task(
     is_workflow_task: bool = False,
     good_until: datetime | None = None,
     error_code: str | None = None,
+    worker_id: str | None = None,
 ) -> TaskRow:
     """Build a task row. A terminal row ends now."""
     return task_row(
@@ -228,7 +229,7 @@ def make_task(
         good_until=good_until,
         error_code=error_code,
         failed_reason=None,
-        worker_id=None,
+        worker_id=worker_id,
         worker_hostname=None,
         worker_pid=None,
         worker_process_name=None,
@@ -377,6 +378,23 @@ class TestTaskReads:
         assert [f['value'] for f in facets['task_names']] == ['alpha']
         assert breakdown['group_by'] == 'task_name'
         assert breakdown['total']['total'] == 1
+
+    async def test_breakdown_groups_carry_their_kind(
+        self, api: AsyncClient, session: AsyncSession
+    ) -> None:
+        await persist(
+            session,
+            make_task(worker_id='unknown', status=TaskStatus.RUNNING),
+            make_task(worker_id=None),
+        )
+
+        breakdown = (await api.get('/api/tasks/breakdown?group_by=worker')).json()
+
+        assert [row['group'] for row in breakdown['groups']] == [
+            {'kind': 'value', 'value': 'unknown'},
+            {'kind': 'unclaimed'},
+        ]
+        assert 'group' not in breakdown['total']
 
     async def test_detail_carries_the_leaf_and_attempts(
         self, api: AsyncClient, session: AsyncSession
