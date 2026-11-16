@@ -646,10 +646,50 @@ fn the_dependents_choice_names_the_function_values() {
     assert_eq!(Dependents::Read.as_sql(), "READ");
 }
 
+/// A drive of `count` advances, each owed once.
+fn drive_of(count: usize) -> (Vec<Uuid>, ParentAdvanceDrive) {
+    let ids: Vec<Uuid> = (0..count).map(|_| Uuid::new_v4()).collect();
+    let mut owed = OwedParentAdvances::default();
+    for child_workflow_id in &ids {
+        owed.add(ParentAdvance::Owed {
+            child_workflow_id: *child_workflow_id,
+        });
+    }
+    let drive = ParentAdvanceDrive::new(&owed);
+    (ids, drive)
+}
+
+/// A drive runs the levels of a tree: depth 0 to 32.
 #[test]
-fn a_drive_of_parent_advances_covers_a_chain_from_the_deepest_child() {
-    // Depth 0 to 32: a chain from the deepest child advances 32 parents.
-    assert!(MAX_PARENT_ADVANCES > crate::workflow_engine::start::MAX_SUBWORKFLOW_DEPTH as usize);
+fn a_drive_of_the_tree_depth_runs_every_level() {
+    assert_eq!(MAX_PARENT_ADVANCES, (MAX_SUBWORKFLOW_DEPTH + 1) as usize);
+    let (ids, mut drive) = drive_of(MAX_PARENT_ADVANCES);
+    for expected in &ids {
+        assert_eq!(drive.next().expect("within the bound"), Some(*expected));
+    }
+    assert_eq!(drive.next().expect("nothing owed"), None);
+}
+
+/// One advance past the bound fails closed with `ParentChainTooLong` at
+/// that advance.
+#[test]
+fn a_drive_past_the_tree_depth_fails_closed() {
+    let (ids, mut drive) = drive_of(MAX_PARENT_ADVANCES + 1);
+    for expected in &ids[..MAX_PARENT_ADVANCES] {
+        assert_eq!(drive.next().expect("within the bound"), Some(*expected));
+    }
+    let failure = drive.next().expect_err("past the bound");
+    assert_eq!(failure.failed_child_workflow_id, ids[MAX_PARENT_ADVANCES]);
+    assert!(failure.owed_after.is_empty());
+    assert!(
+        matches!(
+            failure.error,
+            WorkflowError::StepContract(StepContractError::ParentChainTooLong { bound })
+                if bound == MAX_PARENT_ADVANCES
+        ),
+        "{:?}",
+        failure.error
+    );
 }
 
 #[test]

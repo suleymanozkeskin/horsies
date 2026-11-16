@@ -35,6 +35,7 @@ use crate::db::{
 };
 use crate::workflow_engine::child_start::{run_child_starts, ChildStartsFailure};
 use crate::workflow_engine::error::WorkflowError;
+use crate::workflow_engine::start::MAX_SUBWORKFLOW_DEPTH;
 
 // ---------------------------------------------------------------------------
 // Statements
@@ -156,9 +157,8 @@ pub enum StepContractError {
     #[error("a drive of parent advances did not end within {bound} levels")]
     ParentChainTooLong { bound: usize },
     /// A step owed more than `bound` child starts, counting those that its
-    /// child starts owed in turn
-    /// ([`crate::workflow_engine::child_start::MAX_CHILD_STARTS_PER_STEP`]).
-    /// The step's transaction rolled back.
+    /// child starts owed in turn (`MAX_WORKFLOW_NODES`, the most nodes of one
+    /// workflow spec). The step's transaction rolled back.
     #[error("a step owed more than {bound} child starts; its transaction rolled back")]
     TooManyChildStarts { bound: usize },
 }
@@ -462,11 +462,70 @@ impl ParentAdvanceFailure {
 }
 
 /// The most parent advance levels that one drive of [`advance_parents`]
-/// runs. A chain from the deepest child of a tree (depth 32) has 32 levels;
-/// a drive has more than one chain when its child starts end further
-/// workflows. A drive that reaches the bound stops and leaves the rest to
+/// runs: the levels of a tree, depth 0 to [`MAX_SUBWORKFLOW_DEPTH`]. A drive
+/// that reaches the bound with an advance still owed fails closed
+/// ([`StepContractError::ParentChainTooLong`]) and leaves the rest to
 /// workflow recovery (case 1.6: a terminal child under a live parent node).
-pub(crate) const MAX_PARENT_ADVANCES: usize = 1024;
+pub(crate) const MAX_PARENT_ADVANCES: usize = MAX_SUBWORKFLOW_DEPTH as usize + 1;
+
+/// The parent advances of one drive of [`advance_parents`]: a stack whose
+/// next advance is the last element, and the count of levels run.
+#[derive(Debug)]
+struct ParentAdvanceDrive {
+    pending: Vec<Uuid>,
+    levels: usize,
+}
+
+impl ParentAdvanceDrive {
+    fn new(owed: &OwedParentAdvances) -> Self {
+        Self {
+            pending: owed.child_workflow_ids().iter().rev().copied().collect(),
+            levels: 0,
+        }
+    }
+
+    /// The next advance to run; `None` when none is owed. With
+    /// [`MAX_PARENT_ADVANCES`] levels run and one more owed:
+    /// [`StepContractError::ParentChainTooLong`] at that advance.
+    fn next(&mut self) -> Result<Option<Uuid>, ParentAdvanceFailure> {
+        let Some(child_workflow_id) = self.pending.pop() else {
+            return Ok(None);
+        };
+        match self.levels < MAX_PARENT_ADVANCES {
+            true => {
+                self.levels += 1;
+                Ok(Some(child_workflow_id))
+            }
+            false => Err(self.failure(
+                child_workflow_id,
+                StepContractError::ParentChainTooLong {
+                    bound: MAX_PARENT_ADVANCES,
+                }
+                .into(),
+            )),
+        }
+    }
+
+    /// Adds the advances that a level owes; they run before the rest.
+    fn push(&mut self, owed: &OwedParentAdvances) {
+        self.pending
+            .extend(owed.child_workflow_ids().iter().rev().copied());
+    }
+
+    /// The failure of the level at `failed_child_workflow_id`, with the
+    /// advances still owed after it.
+    fn failure(
+        &mut self,
+        failed_child_workflow_id: Uuid,
+        error: WorkflowError,
+    ) -> ParentAdvanceFailure {
+        ParentAdvanceFailure {
+            failed_child_workflow_id,
+            owed_after: owed_from_stack(std::mem::take(&mut self.pending)),
+            error,
+        }
+    }
+}
 
 /// What `horsies_workflow_pause` did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -635,7 +694,7 @@ pub(crate) async fn node_finish_in_transaction(
 ///
 /// The owed advances run in order; the advances that a level owes run
 /// before the next advance of the list. At most [`MAX_PARENT_ADVANCES`]
-/// levels run.
+/// levels run ([`ParentAdvanceDrive`]).
 ///
 /// Errors: [`ParentAdvanceFailure`] names the level that failed and the
 /// advances still owed after it; the levels before it committed. A drive
@@ -647,34 +706,14 @@ pub(crate) async fn advance_parents(
     owed: OwedParentAdvances,
     build: ChildBuild<'_>,
 ) -> Result<(), ParentAdvanceFailure> {
-    // A stack: the next advance to run is the last element.
-    let mut pending: Vec<Uuid> = owed.child_workflow_ids().iter().rev().copied().collect();
-    for _level in 0..MAX_PARENT_ADVANCES {
-        let Some(child_workflow_id) = pending.pop() else {
-            return Ok(());
-        };
+    let mut drive = ParentAdvanceDrive::new(&owed);
+    while let Some(child_workflow_id) = drive.next()? {
         match advance_parent(broker, class, child_workflow_id, build).await {
-            Ok(next) => pending.extend(next.child_workflow_ids().iter().rev()),
-            Err(error) => {
-                return Err(ParentAdvanceFailure {
-                    failed_child_workflow_id: child_workflow_id,
-                    owed_after: owed_from_stack(pending),
-                    error,
-                })
-            }
+            Ok(next) => drive.push(&next),
+            Err(error) => return Err(drive.failure(child_workflow_id, error)),
         }
     }
-    match pending.pop() {
-        None => Ok(()),
-        Some(child_workflow_id) => Err(ParentAdvanceFailure {
-            failed_child_workflow_id: child_workflow_id,
-            owed_after: owed_from_stack(pending),
-            error: StepContractError::ParentChainTooLong {
-                bound: MAX_PARENT_ADVANCES,
-            }
-            .into(),
-        }),
-    }
+    Ok(())
 }
 
 /// The advances of a stack whose next element is the last, in run order.
